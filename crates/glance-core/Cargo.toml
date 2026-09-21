@@ -1,0 +1,10 @@
+[package]
+name = "glance-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Session model and state machine for Glance"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

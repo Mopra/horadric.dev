@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/glance-core", "crates/glance-hooks", "crates/glance"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Mopra/glance"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

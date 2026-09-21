@@ -1,0 +1,14 @@
+[package]
+name = "glance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Every coding agent session as a tile on your desktop"
+
+[[bin]]
+name = "glance"
+path = "src/main.rs"
+
+[dependencies]
+glance-core = { path = "../glance-core" }
+glance-hooks = { path = "../glance-hooks" }
