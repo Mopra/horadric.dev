@@ -70,15 +70,14 @@ your settings untouched.
 ## Plan
 
 1. Hook receiver and state machine. Done.
-2. Cluster window: one frameless always-on-top window per project, tiles
-   inside it, no focus stealing when a tile lights up. Done.
-3. Terminal window: ConPTY on the Rust side, our own renderer on DirectWrite,
-   `alacritty_terminal` for the VT grid.
-4. Worktree per session, changed files with plus and minus counts, open in
-   VS Code.
+2. Cluster windows on Win32 and Direct2D. Done.
+3. Terminal window: ConPTY, the alacritty grid, our own glyph renderer.
+4. Worktree per session, changed files, open in VS Code.
 5. Inbox, installer, updater.
 
 Pure Rust, Win32 and Direct2D directly. No web view, no toolkit.
+[docs/PLAN.md](docs/PLAN.md) has the detail, the open questions and the
+known gaps.
 
 ## Not doing
 
