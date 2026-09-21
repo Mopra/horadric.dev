@@ -42,7 +42,10 @@ impl Registry {
         let session = self
             .sessions
             .entry(glance_id.to_string())
-            .or_insert_with(|| Session::new(glance_id, glance_id, event.cwd.clone()));
+            .or_insert_with(|| {
+                let name = event.name.clone().unwrap_or_else(|| glance_id.to_string());
+                Session::new(glance_id, name, event.cwd.clone())
+            });
         session.apply(event, now)
     }
 
@@ -98,6 +101,19 @@ mod tests {
         assert!(r.apply("g9", &e, SystemTime::now()));
         assert_eq!(r.get("g9").unwrap().name, "g9");
         assert_eq!(r.get("g9").unwrap().phase, Phase::Working);
+    }
+
+    #[test]
+    fn register_names_the_session_and_leaves_it_idle() {
+        let mut r = Registry::new();
+        let e = HookEvent::from_json(
+            br#"{"session_id":"","hook_event_name":"GlanceRegister","cwd":"C:/p","name":"day3"}"#,
+        )
+        .unwrap();
+        assert!(!r.apply("day3-123", &e, SystemTime::now()));
+        let s = r.get("day3-123").unwrap();
+        assert_eq!(s.name, "day3");
+        assert_eq!(s.phase, Phase::Idle);
     }
 
     #[test]

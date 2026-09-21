@@ -42,9 +42,17 @@ pub struct HookEvent {
     pub error_type: Option<String>,
     #[serde(default)]
     pub error_message: Option<String>,
+    /// Glance's own `Register` event only: the name the user gave the
+    /// session. Not part of any Claude Code payload.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 impl HookEvent {
+    /// The event `glance run` sends before Claude starts, so a session shows
+    /// up as idle instead of appearing on its first prompt.
+    pub const REGISTER: &'static str = "GlanceRegister";
+
     /// Parses a raw hook payload. Unknown fields are ignored.
     pub fn from_json(body: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice(body)

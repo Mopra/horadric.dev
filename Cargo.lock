@@ -9,6 +9,7 @@ dependencies = [
  "glance-core",
  "glance-hooks",
  "glance-ui",
+ "serde_json",
 ]
 
 [[package]]

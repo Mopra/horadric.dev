@@ -13,3 +13,4 @@ path = "src/main.rs"
 glance-core = { path = "../glance-core" }
 glance-hooks = { path = "../glance-hooks" }
 glance-ui = { path = "../glance-ui" }
+serde_json = { workspace = true }

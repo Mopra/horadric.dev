@@ -214,6 +214,7 @@ mod tests {
             user_prompt: None,
             error_type: None,
             error_message: None,
+            name: None,
         }
     }
 
