@@ -11,6 +11,7 @@ const USAGE: &str = "\
 glance: every coding agent session as a tile on your desktop
 
 Usage:
+  glance                       Show the tiles (the desktop app)
   glance serve                 Listen for Claude Code hook events and show a live table
   glance run [--name NAME] [--cwd DIR] [-- claude args...]
                                Start a `claude` tagged so `serve` can see it
@@ -28,7 +29,10 @@ fn main() -> ExitCode {
         Some("serve") => console::serve(),
         Some("run") => run::run(&args[1..]),
         Some("hooks") => hooks(args.get(1).map(String::as_str)),
-        Some("-h" | "--help" | "help") | None => {
+        None | Some("tiles") => {
+            glance_ui::app::run(glance_hooks::port()).map_err(|e| e.to_string())
+        }
+        Some("-h" | "--help" | "help") => {
             print!("{USAGE}");
             Ok(())
         }

@@ -35,16 +35,14 @@ impl Registry {
     /// Applies an event to the session with the given Glance id.
     ///
     /// Unknown ids are adopted: a `claude` started by hand inside a Glance
-    /// environment is still a session worth showing. Returns true when the
-    /// session's phase changed.
+    /// environment is still a session worth showing. The id doubles as the
+    /// name, since the project folder is already the cluster's title.
+    /// Returns true when the session's phase changed.
     pub fn apply(&mut self, glance_id: &str, event: &HookEvent, now: SystemTime) -> bool {
         let session = self
             .sessions
             .entry(glance_id.to_string())
-            .or_insert_with(|| {
-                let name = short_name(&event.cwd).unwrap_or_else(|| glance_id.to_string());
-                Session::new(glance_id, name, event.cwd.clone())
-            });
+            .or_insert_with(|| Session::new(glance_id, glance_id, event.cwd.clone()));
         session.apply(event, now)
     }
 
@@ -64,6 +62,15 @@ impl Registry {
         v
     }
 
+    /// Forgets sessions that ended more than `linger` ago. Returns how many.
+    pub fn prune_ended(&mut self, linger: std::time::Duration, now: SystemTime) -> usize {
+        let before = self.sessions.len();
+        self.sessions.retain(|_, s| {
+            s.phase != Phase::Ended || now.duration_since(s.since).unwrap_or_default() < linger
+        });
+        before - self.sessions.len()
+    }
+
     pub fn count_in(&self, phase: &Phase) -> usize {
         self.sessions.values().filter(|s| &s.phase == phase).count()
     }
@@ -77,29 +84,19 @@ impl Registry {
     }
 }
 
-/// Last path component, so `C:/Users/x/Github/glance` names itself `glance`.
-fn short_name(cwd: &str) -> Option<String> {
-    let trimmed = cwd.trim_end_matches(['/', '\\']);
-    trimmed
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn adopts_unknown_session_named_by_folder() {
+    fn adopts_unknown_session_named_by_id() {
         let mut r = Registry::new();
         let e = HookEvent::from_json(
             br#"{"session_id":"c","hook_event_name":"UserPromptSubmit","cwd":"C:\\dev\\glance"}"#,
         )
         .unwrap();
         assert!(r.apply("g9", &e, SystemTime::now()));
-        assert_eq!(r.get("g9").unwrap().name, "glance");
+        assert_eq!(r.get("g9").unwrap().name, "g9");
         assert_eq!(r.get("g9").unwrap().phase, Phase::Working);
     }
 

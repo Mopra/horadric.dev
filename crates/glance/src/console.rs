@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use glance_core::{Phase, Registry};
+use glance_core::{format_age, Phase, Registry};
 use glance_hooks::listener::{self, Tagged};
 
 pub fn serve() -> Result<(), String> {
@@ -94,7 +94,7 @@ fn draw(registry: &Registry, log: &[String], port: u16) -> Result<(), String> {
             "{mark} {:<22} {:<12} {:<10} {}\n",
             truncate(&sess.name, 22),
             sess.phase.label(),
-            age(sess.age()),
+            format_age(sess.age()),
             truncate(&sess.last_line, 60)
         ));
     }
@@ -115,18 +115,6 @@ fn draw(registry: &Registry, log: &[String], port: u16) -> Result<(), String> {
     out.flush().map_err(|e| e.to_string())
 }
 
-/// "40 s", "12 min", "2 h 05 min". No seconds past a minute: nobody reads them.
-pub fn age(d: Duration) -> String {
-    let s = d.as_secs();
-    if s < 60 {
-        format!("{s} s")
-    } else if s < 3600 {
-        format!("{} min", s / 60)
-    } else {
-        format!("{} h {:02} min", s / 3600, (s % 3600) / 60)
-    }
-}
-
 fn stamp(t: SystemTime) -> String {
     let s = t
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -142,17 +130,5 @@ fn truncate(s: &str, n: usize) -> String {
     } else {
         let cut: String = s.chars().take(n - 1).collect();
         format!("{cut}\u{2026}")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ages_read_like_a_human_wrote_them() {
-        assert_eq!(age(Duration::from_secs(40)), "40 s");
-        assert_eq!(age(Duration::from_secs(12 * 60 + 30)), "12 min");
-        assert_eq!(age(Duration::from_secs(2 * 3600 + 5 * 60)), "2 h 05 min");
     }
 }

@@ -180,6 +180,18 @@ impl Session {
     }
 }
 
+/// "40 s", "12 min", "2 h 05 min". No seconds past a minute: nobody reads them.
+pub fn format_age(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{s} s")
+    } else if s < 3600 {
+        format!("{} min", s / 60)
+    } else {
+        format!("{} h {:02} min", s / 3600, (s % 3600) / 60)
+    }
+}
+
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_string()
 }
@@ -291,6 +303,16 @@ mod tests {
         assert_eq!(
             s.phase,
             Phase::Waiting(WaitReason::Error("rate_limit".into()))
+        );
+    }
+
+    #[test]
+    fn ages_read_like_a_human_wrote_them() {
+        assert_eq!(format_age(Duration::from_secs(40)), "40 s");
+        assert_eq!(format_age(Duration::from_secs(12 * 60 + 30)), "12 min");
+        assert_eq!(
+            format_age(Duration::from_secs(2 * 3600 + 5 * 60)),
+            "2 h 05 min"
         );
     }
 

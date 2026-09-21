@@ -8,19 +8,26 @@ git worktree, and the tile shows you what it changed.
 Glance is a window manager for agent sessions that already exist. It never
 puts its own chat UI in front of the agent. The terminal is the UI.
 
-Status: early. Today Glance is a console tool that proves the state stream.
-The tiles come next.
+Status: early. The tiles exist and the state stream behind them is live.
+Click to expand into a terminal is next.
 
 ## What works now
 
+- `glance` opens one cluster window per project on the right edge of your
+  screen: frameless, rounded, always on top, never takes focus, not in the
+  taskbar or alt-tab. Drag it anywhere. Click the header to collapse it.
+- Each tile shows a session: state dot, name, an age line like
+  "needs permission 12 min", and the last line worth reading. Waiting tiles
+  light up amber.
 - `glance hooks install` adds Claude Code hooks to `~/.claude/settings.json`.
   They are `http` hooks: Claude Code posts each lifecycle event to Glance on
   localhost. No script runs, no process is spawned per event.
-- `glance serve` listens for those events and shows a live table: session,
-  state (working, waiting, done), how long it has been in that state, and the
-  last line worth reading.
-- `glance run` starts a `claude` tagged so `serve` can see it. A `claude`
-  started anywhere else is ignored.
+- `glance run --name fix-login` starts a `claude` tagged so Glance can see
+  it. A `claude` started anywhere else is ignored.
+- `glance serve` shows the same state as a table in the terminal.
+
+The whole app is one process. With two projects and four sessions on screen
+it uses about 45 MB and no CPU between events.
 
 ## How it knows
 
@@ -48,13 +55,13 @@ Rust stable on Windows.
 ```
 cargo build --release
 target\release\glance.exe hooks install
-target\release\glance.exe serve
+targeteleaseglance.exe
 ```
 
 In another terminal, inside a project:
 
 ```
-glance run
+glance run --name what-this-session-does
 ```
 
 `glance hooks uninstall` removes the hooks again and leaves everything else in
@@ -64,7 +71,7 @@ your settings untouched.
 
 1. Hook receiver and state machine. Done.
 2. Cluster window: one frameless always-on-top window per project, tiles
-   inside it, no focus stealing when a tile lights up.
+   inside it, no focus stealing when a tile lights up. Done.
 3. Terminal window: ConPTY on the Rust side, our own renderer on DirectWrite,
    `alacritty_terminal` for the VT grid.
 4. Worktree per session, changed files with plus and minus counts, open in

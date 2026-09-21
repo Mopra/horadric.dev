@@ -11,4 +11,4 @@ pub mod session;
 
 pub use event::HookEvent;
 pub use registry::Registry;
-pub use session::{Phase, Session, WaitReason};
+pub use session::{format_age, Phase, Session, WaitReason};
