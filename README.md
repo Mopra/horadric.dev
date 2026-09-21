@@ -55,8 +55,7 @@ Rust stable on Windows.
 ```
 cargo build --release
 target\release\glance.exe hooks install
-target
-eleaseglance.exe
+target\release\glance.exe
 ```
 
 In another terminal, inside a project:
