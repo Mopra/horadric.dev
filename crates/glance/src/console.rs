@@ -19,7 +19,7 @@ pub fn serve() -> Result<(), String> {
     // Bind on this thread so a port clash is reported before we clear the screen.
     let (ready_tx, ready_rx) = mpsc::channel::<io::Result<()>>();
     thread::spawn(move || {
-        let r = listener::serve(port, tx);
+        let r = listener::serve(port, tx, None);
         let _ = ready_tx.send(r);
     });
     if let Ok(Err(e)) = ready_rx.recv_timeout(Duration::from_millis(300)) {

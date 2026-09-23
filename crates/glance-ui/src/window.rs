@@ -34,15 +34,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
+use crate::app::{self, Input};
+use crate::glyphs::Font;
 use crate::layout::{self, ClusterLayout, Hit, Metrics};
 use crate::render::{Gpu, Scene, Target};
 
 const CLASS: PCWSTR = w!("GlanceCluster");
 const DRAG_THRESHOLD: i32 = 4;
 
-/// What the window shares with the app: GPU objects and the session store.
+/// What the windows share with the app: GPU objects, the terminal font and
+/// the session store.
 pub struct Shared {
     pub gpu: Gpu,
+    pub font: Font,
     pub metrics: Metrics,
     pub registry: Arc<Mutex<Registry>>,
 }
@@ -372,11 +376,7 @@ impl Cluster {
                 }
                 let drag = self.drag.borrow_mut().take();
                 match drag {
-                    Some(d) if d.moved => {
-                        // Pinning is recorded by the app on the next reconcile,
-                        // via `take_pinned`.
-                        self.set_pinned();
-                    }
+                    Some(d) if d.moved => app::push(Input::Pin(self.hwnd.0 as isize)),
                     Some(_) => self.click(lparam),
                     None => {}
                 }
@@ -386,41 +386,24 @@ impl Cluster {
         }
     }
 
-    fn set_pinned(&self) {
-        // `pinned` is plain data owned by the app through the Box; a click
-        // handler only has `&self`, so it goes through a cell.
-        PINNED.with(|p| p.borrow_mut().push(self.hwnd.0 as isize));
-    }
-
-    /// Drains the set of windows the user dragged since the last call.
-    pub fn take_pinned() -> Vec<isize> {
-        PINNED.with(|p| std::mem::take(&mut *p.borrow_mut()))
-    }
-
     fn click(&self, lparam: LPARAM) {
         let s = self.scale();
         let x = (lparam.0 & 0xffff) as i16 as f32 / s;
         let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32 / s;
         let hit = layout::hit(&self.layout.borrow(), x, y);
         match hit {
-            Hit::Header => TOGGLES.with(|t| t.borrow_mut().push(self.hwnd.0 as isize)),
+            Hit::New => app::push(Input::New(self.key.clone())),
+            Hit::Header => app::push(Input::Toggle(self.hwnd.0 as isize)),
             Hit::Tile(i) => {
-                let _ = i; // Expanding into a terminal comes in step 3.
+                // Tiles are laid out in registry order, the same order
+                // `sessions` returns.
+                if let Some(s) = self.sessions().get(i) {
+                    app::push(Input::Expand(s.id.clone()));
+                }
             }
             Hit::Nothing => {}
         }
     }
-
-    /// Drains header clicks since the last call. The app flips `collapsed`
-    /// and calls `fit`, since it owns the Box.
-    pub fn take_toggles() -> Vec<isize> {
-        TOGGLES.with(|t| std::mem::take(&mut *t.borrow_mut()))
-    }
-}
-
-thread_local! {
-    static PINNED: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
-    static TOGGLES: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The project a session belongs to. For now its working directory,

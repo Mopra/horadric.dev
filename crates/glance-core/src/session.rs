@@ -192,6 +192,17 @@ pub fn format_age(d: Duration) -> String {
     }
 }
 
+/// A session id that is unique enough and readable in a table:
+/// `<base>-<seconds into the UTC day>`. Callers that can see the registry add
+/// a suffix on the rare collision.
+pub fn session_id(base: &str, now: SystemTime) -> String {
+    let secs = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() % 86_400)
+        .unwrap_or(0);
+    format!("{base}-{secs}")
+}
+
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_string()
 }
@@ -203,18 +214,8 @@ mod tests {
     fn ev(name: &str) -> HookEvent {
         HookEvent {
             session_id: "c1".into(),
-            hook_event_name: name.into(),
             cwd: "C:/repo".into(),
-            agent_id: None,
-            source: None,
-            notification_type: None,
-            message: None,
-            tool_name: None,
-            last_assistant_message: None,
-            user_prompt: None,
-            error_type: None,
-            error_message: None,
-            name: None,
+            ..HookEvent::synthetic(name)
         }
     }
 
@@ -315,6 +316,12 @@ mod tests {
             format_age(Duration::from_secs(2 * 3600 + 5 * 60)),
             "2 h 05 min"
         );
+    }
+
+    #[test]
+    fn session_ids_count_seconds_into_the_day() {
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(3 * 86_400 + 75);
+        assert_eq!(session_id("fix-login", t), "fix-login-75");
     }
 
     #[test]

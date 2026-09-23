@@ -4,26 +4,34 @@ Where Glance is, what comes next, and what was decided along the way. Update
 this file when a step lands or a decision changes. It is the handover
 document: someone picking the project up cold should need nothing else.
 
-Last updated 2026-09-21, after step 2.
+Last updated 2026-09-24, after step 3.
 
 ## Shape of the thing
 
-Four crates, one binary.
+Five crates, one binary.
 
 | Crate | Owns | Platform |
 |---|---|---|
 | `glance-core` | Session, Phase, Registry, the state machine | any |
-| `glance-hooks` | The localhost listener and the settings installer | any |
-| `glance-ui` | Cluster windows, layout, drawing | Windows |
+| `glance-hooks` | The localhost listener, its client, the settings installer | any |
+| `glance-pty` | Child processes in ConPTY pseudo consoles | Windows |
+| `glance-ui` | Cluster and terminal windows, layout, drawing | Windows |
 | `glance` | The command line and the wiring | Windows |
 
-`glance-core` and the pure halves of `glance-ui` (`layout`, `theme`) have no
-I/O and are tested. Everything else is verified on screen.
+`glance-core` and the pure halves of `glance-ui` (`layout`, `theme`,
+`palette`, `keys`, `frame`) have no I/O and are tested. `glance-pty` has a
+test that runs `cmd.exe` in a real pseudo console. Everything else is
+verified on screen.
 
 Threads: the listener thread owns the socket, a feeder thread applies events
-to the registry and posts a thread message, the UI thread owns every window
-and never blocks. The registry is an `Arc<Mutex<Registry>>` shared between
-the feeder and the UI.
+to the registry, the UI thread owns every window and never blocks. Each
+console adds three: a reader that parses output into its grid, a waiter
+that notices the exit, and a writer that owns the input pipe so typing never
+blocks the UI. Everything off the UI thread reaches it as a message to one
+hidden message-only window, never a thread message: thread messages are
+dropped while Windows runs a modal loop, and dragging a terminal's edge is
+one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
+`Arc<Console>` with the terminal behind a mutex.
 
 ## Done
 
@@ -59,31 +67,68 @@ native rather than like an app window:
 Measured: one process, about 45 MB with two clusters and five tiles, no CPU
 between events.
 
-## Next
-
 ### Step 3: the terminal window
 
-The hard one. Clicking a tile expands it into a real terminal running the
-real `claude`, with permissions, slash commands and everything else intact.
+Clicking a tile expands it into a real terminal running the real `claude`.
+Verified end to end against Claude Code 2.1 with Haiku: the trust dialog,
+arrow keys, a prompt and its answer, resize, collapse and expand, `/exit`.
 
-- ConPTY through `portable-pty`, or the `windows` crate directly if the
-  dependency is not earning its place.
-- `alacritty_terminal` for VT parsing and the grid. Do not write a parser.
-- A second window class, `GlanceTerminal`. Unlike a cluster this one **does**
-  take focus, because you type into it. Normal window, resizable, in the
-  taskbar.
-- Our own glyph renderer on DirectWrite: one glyph run per row, a cached text
-  format, monospace metrics from the font.
-- Collapse destroys the renderer and the window. The PTY keeps running.
+- **Starting a session.** `glance new [--name] [--cwd] [-- claude args]`
+  posts to `/glance/new` on the running app, which starts the agent in a
+  console and opens its terminal. The `+` in a cluster header does the same
+  in that project. `glance run` is unchanged: a tagged `claude` in your own
+  terminal, whose tile can not expand because Glance does not own it.
+- **`/glance/new` is guarded.** A web page can reach localhost, so starting a
+  process needs an `X-Glance-Command: new` header, which a browser can not
+  send cross origin without a preflight we never answer, and any request
+  with an `Origin` header is refused.
+- **ConPTY on the `windows` crate directly**, in `glance-pty`, not
+  `portable-pty`. Five calls did not justify its crates. The traps, both
+  handled: the output pipe never reaches end of file on its own, so the
+  waiter closes the console after the exit; and a parent with redirected
+  stdio leaks those handles into the child unless `STARTF_USESTDHANDLES` is
+  set with invalid handles. Resize is `ResizePseudoConsole`, not
+  `SetConsoleScreenBufferSize`.
+- **`alacritty_terminal` 0.26** with default features off. Only `Term` and
+  the vte `Processor` are used, fed by our own reader thread; its event loop
+  and tty module are compiled but unused. A synchronized update the program
+  never ends is flushed when its 150 ms run out, from the paint path.
+- **Glyph runs with forced advances.** Every glyph in a run gets the cell
+  width as its advance, so text sits on the grid whatever the font says.
+  Cell sizes are snapped to device pixels or neighbouring backgrounds leave
+  seams. Characters the font lacks (Claude Code's `⏺`, `⎿`, `✻`), wide
+  characters and combining sequences are drawn one at a time with
+  DirectWrite fallback, pinned to their cells. Colour fonts only for wide
+  characters, so a one cell symbol keeps the colour the program gave it.
+  Cascadia Mono, falling back to Consolas, 14 DIPs.
+- **Keyboard.** Characters come from `WM_CHAR` after the layout has done its
+  work, so dead keys and AltGr on a Danish keyboard need nothing special.
+  Keys without characters come from `WM_KEYDOWN` in xterm encoding.
+  Shift+Enter sends Meta+Enter, Claude Code's newline. Ctrl+C copies when there is
+  a selection. Ctrl+V pastes text with bracketed paste and escape characters
+  stripped; with no text on the clipboard it is passed on so Claude Code can
+  paste an image. Alt+F4 still closes.
+- **Mouse.** Drag selects and copies on release, double click selects a
+  word, right click copies a selection or pastes. The wheel scrolls
+  history, or sends arrows to a full screen program.
+- **Lifetime.** Closing the window collapses: window and renderer go, the
+  console and its grid stay, and the window comes back where it was. A
+  clean exit closes the window; a failed one keeps it open so the error can
+  be read. An exit Claude Code could not report (a crash, a kill) becomes a
+  `SessionEnd` of our own.
+- **Environment.** The child gets `GLANCE_SESSION` and `COLORTERM`, and
+  loses the variables Claude Code sets to name a parent session. When Glance
+  was started from inside Claude Code those made the tile's agent believe it
+  was nested, and it stopped saving its transcript.
+- `GLANCE_AGENT` runs something other than `claude.exe` in a terminal.
+  `GLANCE_AGENT=cmd.exe` is how to test the terminal without spending
+  tokens.
 
-Watch out for: IME and dead keys (Danish keyboard), clipboard paste of
-multiple lines, resize mapping to `SetConsoleScreenBufferSize`, and scrollback
-memory across forty sessions.
+Measured: one process, 51 MB (debug build) with a cluster and one open
+terminal. History is 2000 rows per session, at about 24 bytes a cell: under
+6 MB per session when full at 120 columns, 230 MB for forty full ones.
 
-This step changes what `glance run` means. Today it spawns Claude with
-inherited stdio in whatever terminal you called it from. Once Glance owns
-PTYs, the normal way to start a session is from Glance itself, and `glance
-run` stays as the way to tag a session in your own terminal.
+## Next
 
 ### Step 4: worktrees and the git glance
 
@@ -113,23 +158,35 @@ run` stays as the way to tag a session in your own terminal.
 
 ## Not in any step yet, but needed before daily use
 
+- **Sessions die with Glance.** The consoles live in the Glance process, so
+  quitting or crashing it ends every agent in a terminal. Surviving that
+  needs the consoles in a separate process, which is a real decision.
+- **`claude.cmd` is not found.** Only `claude.exe` on `PATH` (the native
+  installer) is looked for. An npm install needs `cmd.exe /c` and its own
+  quoting rules.
+- **Terminal gaps.** The IME composition window is not placed at the cursor.
+  Mouse reporting to programs, the kitty keyboard protocol and cursor blink
+  are not implemented. The font and its size are fixed.
+- **Expanding from a synthetic click can open behind other windows.** Windows
+  only lets a process take the foreground after real input. A real click on
+  a tile is real input, so this only bites scripted tests.
+
 - **Cluster positions are not remembered.** Restart and everything goes back
   to the right edge. Needs a settings file, probably
   `%APPDATA%\Glance\state.json`.
 - **Only the primary monitor.** `arrange` reads `SPI_GETWORKAREA`, which
   ignores the other screens.
 - **No way to quit.** See the tray icon above.
-- **Clicking a tile does nothing.** It is wired to a hit test that discards
-  the result, waiting for step 3.
 - **No remote.** The repository exists on one disk. Push it somewhere.
 
 ## Open questions
 
 Carried from the concept, with what is known now.
 
-- **Does forty sessions hold up?** Five tiles cost 45 MB and no CPU. The
-  renderer is one process, so the ceiling is likely the PTYs and the
-  scrollback, not the tiles. Unknown until step 3.
+- **Does forty sessions hold up?** Five tiles cost 45 MB and no CPU. One
+  open terminal adds a few MB. History is bounded at 2000 rows a session, so
+  the worst case for the grids is about 230 MB. The other cost is forty
+  `claude` processes, which is not ours. Not yet tried with forty.
 - **Can a tile light up without stealing focus?** Yes, so far.
   `WS_EX_NOACTIVATE` plus `SWP_NOACTIVATE` holds through raising.
 - **How does a session get named?** `--name` today, folder name as the

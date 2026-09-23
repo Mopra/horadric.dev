@@ -1,0 +1,16 @@
+[package]
+name = "glance-pty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Child processes in Windows pseudo consoles, for Glance terminals"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }

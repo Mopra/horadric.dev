@@ -5,15 +5,30 @@
 //! view: the window manager fight is the whole project, so nothing sits
 //! between us and Win32.
 //!
-//! [`layout`] and [`theme`] are pure and tested. [`render`] and [`window`]
-//! are Windows only.
+//! An expanded session is a second kind of window, a real terminal: the
+//! agent runs in a ConPTY, `alacritty_terminal` keeps the grid, and the grid
+//! is drawn with DirectWrite glyph runs.
+//!
+//! [`layout`], [`theme`], [`palette`], [`keys`] and [`frame`] are pure and
+//! tested. The rest is Windows only and verified on screen.
 
+pub mod frame;
+pub mod keys;
 pub mod layout;
+pub mod palette;
 pub mod theme;
 
 #[cfg(windows)]
 pub mod app;
 #[cfg(windows)]
+mod clipboard;
+#[cfg(windows)]
+mod console;
+#[cfg(windows)]
+mod glyphs;
+#[cfg(windows)]
 mod render;
+#[cfg(windows)]
+mod terminal;
 #[cfg(windows)]
 mod window;

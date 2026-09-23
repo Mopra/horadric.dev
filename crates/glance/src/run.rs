@@ -1,20 +1,27 @@
-//! `glance run`: start a `claude` that the tiles can see.
+//! `glance run` and `glance new`: the two ways to start a session.
 //!
-//! This is the plain version: stdio is inherited, so the CLI runs in the
-//! terminal you called it from. The PTY and tile come later; the tagging is
-//! the same.
+//! `new` asks the running app to start `claude` in a terminal window of its
+//! own, which is the normal way. `run` starts it right here, in the terminal
+//! you called it from, tagged so its tile still shows up. Clicking that tile
+//! does nothing, since Glance does not own the terminal.
 
-use std::io::Write;
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
-use glance_core::HookEvent;
-use glance_hooks::{HOOK_PATH, SESSION_ENV, SESSION_HEADER};
+use glance_core::{session_id, HookEvent};
+use glance_hooks::listener::NewSession;
+use glance_hooks::{client, COMMAND_HEADER, HOOK_PATH, NEW_PATH, SESSION_ENV, SESSION_HEADER};
 use serde_json::json;
 
-pub fn run(args: &[String]) -> Result<(), String> {
+/// What both commands accept.
+struct Options {
+    name: Option<String>,
+    cwd: PathBuf,
+    passthrough: Vec<String>,
+}
+
+fn parse(args: &[String], command: &str) -> Result<Options, String> {
     let mut name: Option<String> = None;
     let mut cwd: Option<PathBuf> = None;
     let mut passthrough: Vec<String> = Vec::new();
@@ -34,7 +41,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 passthrough.extend_from_slice(&args[i + 1..]);
                 break;
             }
-            other => return Err(format!("unknown option `{other}` for run")),
+            other => return Err(format!("unknown option `{other}` for {command}")),
         }
     }
 
@@ -42,6 +49,44 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Some(c) => c,
         None => std::env::current_dir().map_err(|e| e.to_string())?,
     };
+    // The app may run in another directory, so it needs the full path.
+    let cwd = std::path::absolute(&cwd).map_err(|e| e.to_string())?;
+    Ok(Options {
+        name,
+        cwd,
+        passthrough,
+    })
+}
+
+/// `glance new`: ask the app for a session in a terminal of its own.
+pub fn new(args: &[String]) -> Result<(), String> {
+    let o = parse(args, "new")?;
+    let request = NewSession {
+        name: o.name,
+        cwd: o.cwd.to_string_lossy().to_string(),
+        args: o.passthrough,
+    };
+    let port = glance_hooks::port();
+    match client::post(
+        port,
+        NEW_PATH,
+        &[(COMMAND_HEADER, "new")],
+        &request.to_json(),
+    ) {
+        Ok(200) => Ok(()),
+        Ok(503) => Err("only `glance serve` is running, and it has no terminals".into()),
+        Ok(status) => Err(format!("the app answered {status}")),
+        Err(_) => Err("the tiles are not running, start `glance` first".into()),
+    }
+}
+
+/// `glance run`: start `claude` in this terminal, tagged.
+pub fn run(args: &[String]) -> Result<(), String> {
+    let Options {
+        name,
+        cwd,
+        passthrough,
+    } = parse(args, "run")?;
     let id = new_id(name.as_deref(), &cwd);
     let shown = name
         .clone()
@@ -70,12 +115,6 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
 /// Posts a `GlanceRegister` event to the listener. False when nothing listens.
 fn register(id: &str, name: &str, cwd: &Path) -> bool {
-    let port = glance_hooks::port();
-    let Ok(mut stream) =
-        TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(300))
-    else {
-        return false;
-    };
     let body = json!({
         "session_id": "",
         "hook_event_name": HookEvent::REGISTER,
@@ -83,23 +122,19 @@ fn register(id: &str, name: &str, cwd: &Path) -> bool {
         "name": name,
     })
     .to_string();
-    let req = format!(
-        "POST {HOOK_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\n{SESSION_HEADER}: {id}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream.write_all(req.as_bytes()).is_ok()
+    client::post(
+        glance_hooks::port(),
+        HOOK_PATH,
+        &[(SESSION_HEADER, id)],
+        &body,
+    )
+    .is_ok()
 }
 
-/// A session id that is unique enough and readable in a table:
-/// `<name>-<seconds mod a day>`.
 fn new_id(name: Option<&str>, cwd: &Path) -> String {
     let base = name
         .map(str::to_string)
         .or_else(|| cwd.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| "session".into());
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() % 86_400)
-        .unwrap_or(0);
-    format!("{base}-{secs}")
+    session_id(&base, SystemTime::now())
 }

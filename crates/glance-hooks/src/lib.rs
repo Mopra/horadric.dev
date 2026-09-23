@@ -10,6 +10,7 @@
 //! No script runs, no process is spawned per event. Connection refused when
 //! Glance is not running costs Claude Code a few microseconds.
 
+pub mod client;
 pub mod install;
 pub mod listener;
 
@@ -25,6 +26,15 @@ pub const DEFAULT_PORT: u16 = 43117;
 /// Path the hook posts to. The word `glance` in the URL is how the installer
 /// recognises its own entries when updating or removing them.
 pub const HOOK_PATH: &str = "/glance/hook";
+
+/// Path `glance new` posts to, asking the running app to start a session in
+/// a terminal of its own.
+pub const NEW_PATH: &str = "/glance/new";
+
+/// Header a command request must carry. A browser can not send a custom
+/// header to another origin without a preflight we never answer, so this is
+/// what stops a web page from starting processes through localhost.
+pub const COMMAND_HEADER: &str = "x-glance-command";
 
 /// Port to listen on and to write into the hook URL.
 pub fn port() -> u16 {

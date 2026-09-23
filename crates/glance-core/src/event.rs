@@ -6,7 +6,7 @@
 use serde::Deserialize;
 
 /// A hook event as received from Claude Code.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct HookEvent {
     /// Claude's own id for the session. Stable across the session's life.
     pub session_id: String,
@@ -52,6 +52,14 @@ impl HookEvent {
     /// The event `glance run` sends before Claude starts, so a session shows
     /// up as idle instead of appearing on its first prompt.
     pub const REGISTER: &'static str = "GlanceRegister";
+
+    /// An event Glance makes up itself, with every optional field empty.
+    pub fn synthetic(hook_event_name: &str) -> Self {
+        HookEvent {
+            hook_event_name: hook_event_name.to_string(),
+            ..Default::default()
+        }
+    }
 
     /// Parses a raw hook payload. Unknown fields are ignored.
     pub fn from_json(body: &[u8]) -> Result<Self, serde_json::Error> {

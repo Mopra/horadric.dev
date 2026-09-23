@@ -1,6 +1,7 @@
-//! Glance command line. For now this is the console face of the state
-//! stream: `serve` shows a live table, `run` starts a tagged `claude`,
-//! `hooks` manages the Claude Code settings entries.
+//! Glance command line. With no arguments it is the desktop app. `new` asks
+//! the running app for a session in a terminal of its own, `run` starts a
+//! tagged `claude` in the current terminal, `serve` shows the state stream as
+//! a table, `hooks` manages the Claude Code settings entries.
 
 mod console;
 mod run;
@@ -12,21 +13,26 @@ glance: every coding agent session as a tile on your desktop
 
 Usage:
   glance                       Show the tiles (the desktop app)
-  glance serve                 Listen for Claude Code hook events and show a live table
+  glance new [--name NAME] [--cwd DIR] [-- claude args...]
+                               Start a session in a Glance terminal
   glance run [--name NAME] [--cwd DIR] [-- claude args...]
-                               Start a `claude` tagged so `serve` can see it
+                               Start a tagged `claude` in this terminal instead
+  glance serve                 Listen for Claude Code hook events and show a live table
   glance hooks install         Add Glance hooks to ~/.claude/settings.json
   glance hooks uninstall       Remove them
   glance hooks status          Report whether they are installed
 
 Environment:
   GLANCE_PORT                  Port to listen on (default 43117)
+  GLANCE_AGENT                 Program a Glance terminal runs (default claude.exe)
+  GLANCE_DEBUG                 Log window positions and paint times
 ";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("serve") => console::serve(),
+        Some("new") => run::new(&args[1..]),
         Some("run") => run::run(&args[1..]),
         Some("hooks") => hooks(args.get(1).map(String::as_str)),
         None | Some("tiles") => {

@@ -22,7 +22,9 @@ Do not reopen these without asking. They were argued through and chosen.
   Forty tiles must not mean forty windows.
 - **State comes from hook events, never from parsing terminal output.**
 - **Dependencies are justified one at a time.** Today: `serde`, `serde_json`,
-  `windows`, `windows-numerics`. Adding one is a decision, not a reflex.
+  `windows`, `windows-numerics`, and `alacritty_terminal` for the terminal
+  grid (writing a VT parser is not the project). Adding one is a decision,
+  not a reflex.
 
 ## Conventions
 

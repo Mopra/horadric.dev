@@ -69,6 +69,9 @@ pub struct ClusterLayout {
     /// Full window size.
     pub size: (f32, f32),
     pub header: Rect,
+    /// The button at the right end of the header that starts a new session
+    /// in this project. Inside `header`, so it is hit tested first.
+    pub new: Rect,
     /// One rect per tile, in the order given. Empty when collapsed.
     pub tiles: Vec<Rect>,
 }
@@ -76,6 +79,12 @@ pub struct ClusterLayout {
 /// Lays out a cluster with `n` tiles.
 pub fn cluster(m: &Metrics, n: usize, collapsed: bool) -> ClusterLayout {
     let header = Rect::new(m.pad, m.pad, m.width - 2.0 * m.pad, m.header_h);
+    let new = Rect::new(
+        header.right() - m.header_h,
+        header.y,
+        m.header_h,
+        m.header_h,
+    );
     let mut tiles = Vec::new();
     let mut y = header.bottom() + m.gap;
     if !collapsed {
@@ -93,6 +102,7 @@ pub fn cluster(m: &Metrics, n: usize, collapsed: bool) -> ClusterLayout {
     ClusterLayout {
         size: (m.width, height),
         header,
+        new,
         tiles,
     }
 }
@@ -100,12 +110,16 @@ pub fn cluster(m: &Metrics, n: usize, collapsed: bool) -> ClusterLayout {
 /// Which part of the cluster a point is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
+    New,
     Header,
     Tile(usize),
     Nothing,
 }
 
 pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
+    if layout.new.contains(x, y) {
+        return Hit::New;
+    }
     if layout.header.contains(x, y) {
         return Hit::Header;
     }
@@ -167,6 +181,7 @@ mod tests {
         assert_eq!(l.size.1, l.tiles[2].bottom() + m.pad);
         assert_eq!(hit(&l, 20.0, l.tiles[2].y + 1.0), Hit::Tile(2));
         assert_eq!(hit(&l, 20.0, m.pad + 1.0), Hit::Header);
+        assert_eq!(hit(&l, m.width - m.pad - 2.0, m.pad + 1.0), Hit::New);
         assert_eq!(hit(&l, 1.0, 1.0), Hit::Nothing);
     }
 

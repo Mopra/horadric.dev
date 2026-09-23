@@ -23,8 +23,8 @@ use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-    DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TRIMMING,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows_numerics::Vector2;
@@ -37,10 +37,12 @@ const FONT: windows::core::PCWSTR = w!("Segoe UI Variable Text");
 /// Process wide Direct2D and DirectWrite objects.
 pub struct Gpu {
     pub d2d: ID2D1Factory,
+    pub dw: IDWriteFactory,
     pub title: IDWriteTextFormat,
     pub body: IDWriteTextFormat,
     pub small: IDWriteTextFormat,
     pub small_right: IDWriteTextFormat,
+    pub title_center: IDWriteTextFormat,
 }
 
 impl Gpu {
@@ -53,12 +55,16 @@ impl Gpu {
             let body = format(&dw, 13.0, false, false)?;
             let small = format(&dw, 11.5, false, false)?;
             let small_right = format(&dw, 11.5, false, true)?;
+            let title_center = format(&dw, 16.0, false, false)?;
+            title_center.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
             Ok(Gpu {
                 d2d,
+                dw,
                 title,
                 body,
                 small,
                 small_right,
+                title_center,
             })
         }
     }
@@ -115,42 +121,58 @@ pub struct Target {
     brush: ID2D1SolidColorBrush,
 }
 
+/// A render target for a window, at its DPI, drawing in DIPs.
+pub fn hwnd_target(
+    gpu: &Gpu,
+    hwnd: HWND,
+    width_px: u32,
+    height_px: u32,
+    dpi: u32,
+) -> Result<ID2D1HwndRenderTarget> {
+    unsafe {
+        let props = D2D1_RENDER_TARGET_PROPERTIES {
+            r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_IGNORE,
+            },
+            dpiX: 0.0,
+            dpiY: 0.0,
+            usage: D2D1_RENDER_TARGET_USAGE_NONE,
+            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+        };
+        let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
+            hwnd,
+            pixelSize: D2D_SIZE_U {
+                width: width_px.max(1),
+                height: height_px.max(1),
+            },
+            presentOptions: D2D1_PRESENT_OPTIONS_NONE,
+        };
+        let rt = gpu.d2d.CreateHwndRenderTarget(&props, &hwnd_props)?;
+        rt.SetDpi(dpi as f32, dpi as f32);
+        Ok(rt)
+    }
+}
+
+pub fn resize_target(rt: &ID2D1HwndRenderTarget, width_px: u32, height_px: u32) -> Result<()> {
+    unsafe {
+        rt.Resize(&D2D_SIZE_U {
+            width: width_px.max(1),
+            height: height_px.max(1),
+        })
+    }
+}
+
 impl Target {
     pub fn new(gpu: &Gpu, hwnd: HWND, width_px: u32, height_px: u32, dpi: u32) -> Result<Self> {
-        unsafe {
-            let props = D2D1_RENDER_TARGET_PROPERTIES {
-                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_IGNORE,
-                },
-                dpiX: 0.0,
-                dpiY: 0.0,
-                usage: D2D1_RENDER_TARGET_USAGE_NONE,
-                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-            };
-            let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
-                hwnd,
-                pixelSize: D2D_SIZE_U {
-                    width: width_px.max(1),
-                    height: height_px.max(1),
-                },
-                presentOptions: D2D1_PRESENT_OPTIONS_NONE,
-            };
-            let rt = gpu.d2d.CreateHwndRenderTarget(&props, &hwnd_props)?;
-            rt.SetDpi(dpi as f32, dpi as f32);
-            let brush = rt.CreateSolidColorBrush(&color(theme::TEXT), None)?;
-            Ok(Target { rt, brush })
-        }
+        let rt = hwnd_target(gpu, hwnd, width_px, height_px, dpi)?;
+        let brush = unsafe { rt.CreateSolidColorBrush(&color(theme::TEXT), None)? };
+        Ok(Target { rt, brush })
     }
 
     pub fn resize(&self, width_px: u32, height_px: u32) -> Result<()> {
-        unsafe {
-            self.rt.Resize(&D2D_SIZE_U {
-                width: width_px.max(1),
-                height: height_px.max(1),
-            })
-        }
+        resize_target(&self.rt, width_px, height_px)
     }
 
     pub fn set_dpi(&self, dpi: u32) {
@@ -217,7 +239,9 @@ impl Target {
         } else {
             theme::TEXT_DIM
         };
-        self.text(&gpu.small_right, c, &summary, h);
+        let summary_rect = Rect::new(h.x, h.y, layout.new.x - h.x - 2.0, h.h);
+        self.text(&gpu.small_right, c, &summary, summary_rect);
+        self.text(&gpu.title_center, theme::TEXT_DIM, "+", layout.new);
     }
 
     unsafe fn tile(&self, gpu: &Gpu, m: &Metrics, r: &Rect, s: &Session, now: SystemTime) {

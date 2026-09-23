@@ -8,8 +8,8 @@ git worktree, and the tile shows you what it changed.
 Glance is a window manager for agent sessions that already exist. It never
 puts its own chat UI in front of the agent. The terminal is the UI.
 
-Status: early. The tiles exist and the state stream behind them is live.
-Click to expand into a terminal is next.
+Status: early. The tiles, the state stream behind them and the terminals
+work. Worktrees are next.
 
 ## What works now
 
@@ -19,15 +19,22 @@ Click to expand into a terminal is next.
 - Each tile shows a session: state dot, name, an age line like
   "needs permission 12 min", and the last line worth reading. Waiting tiles
   light up amber.
+- `glance new --name fix-login` starts `claude` in a Glance terminal: a real
+  terminal window with the real CLI in it, permissions, slash commands and
+  all. The `+` in a cluster header starts one in that project. Click the
+  tile to bring the terminal forward, close the window to collapse it back
+  into the tile. The session keeps running either way.
 - `glance hooks install` adds Claude Code hooks to `~/.claude/settings.json`.
   They are `http` hooks: Claude Code posts each lifecycle event to Glance on
   localhost. No script runs, no process is spawned per event.
-- `glance run --name fix-login` starts a `claude` tagged so Glance can see
-  it. A `claude` started anywhere else is ignored.
+- `glance run --name fix-login` starts a tagged `claude` in the terminal you
+  are in instead. Its tile shows state but can not expand. A `claude`
+  started any other way is ignored.
 - `glance serve` shows the same state as a table in the terminal.
 
 The whole app is one process. With two projects and four sessions on screen
-it uses about 45 MB and no CPU between events.
+it uses about 45 MB and no CPU between events. The terminals are ConPTY,
+`alacritty_terminal` for the grid, and our own DirectWrite glyph renderer.
 
 ## How it knows
 
@@ -61,8 +68,11 @@ target\release\glance.exe
 In another terminal, inside a project:
 
 ```
-glance run --name what-this-session-does
+glance new --name what-this-session-does
 ```
+
+`GLANCE_AGENT=cmd.exe` runs a shell instead of `claude` in the terminals,
+which is the cheap way to try them.
 
 `glance hooks uninstall` removes the hooks again and leaves everything else in
 your settings untouched.
@@ -71,7 +81,7 @@ your settings untouched.
 
 1. Hook receiver and state machine. Done.
 2. Cluster windows on Win32 and Direct2D. Done.
-3. Terminal window: ConPTY, the alacritty grid, our own glyph renderer.
+3. Terminal window: ConPTY, the alacritty grid, our own glyph renderer. Done.
 4. Worktree per session, changed files, open in VS Code.
 5. Inbox, installer, updater.
 
