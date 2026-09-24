@@ -424,10 +424,12 @@ impl UsageWindow {
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
+                // Before letting go: releasing capture sends
+                // WM_CAPTURECHANGED at once, and that clears the press.
+                let pressed = self.pressed.get();
                 unsafe {
                     let _ = ReleaseCapture();
                 }
-                let pressed = self.pressed.get();
                 self.press(None);
                 let drag = self.drag.borrow_mut().take();
                 match drag {

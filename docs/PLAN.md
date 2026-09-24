@@ -386,9 +386,10 @@ piece of work, with less freedom and more structure.
   and an empty stage closes. `TerminalWindow::show` keeps the panes it
   already has, with their selection and scroll, and lays out again only
   when the set changed.
-- **Headers.** With more than one pane, each has a header: the phase dot,
-  the session name and what the agent says it is doing, with a line of the
-  phase's colour along its top. The one with the keyboard is underlined in
+- **Headers.** With more than one pane, each has a header: the session
+  name and what the agent says it is doing, with a line of the phase's
+  colour along its top. No dot before the name: every app has one, and
+  the line already says it. The one with the keyboard is underlined in
   the project's colour and the others step back. One pane alone has no
   header; the title bar says it all.
 - **Drag to swap.** Pressing a header gives the stage the mouse
@@ -631,8 +632,9 @@ typing `/usage`, and so a model can be picked once instead of per session.
   quoted first word as a string.
 - **What it shows.** One row per limit Claude Code sent, each with a bar,
   the percent and how long until it resets, blue, amber from 75 %, red
-  from 90 %. A limit whose reset has passed reads as empty. The header says
-  how long ago the numbers came. They are the account's, so the latest from
+  from 90 %. A limit whose reset has passed reads as empty. The header
+  carries only the name: an age there read as a timer counting for no
+  reason. The numbers are the account's, so the latest from
   any session wins, and they are saved, so the window is not empty after a
   restart. Before the first reply it says so.
 - **Settings.** Model, Effort and Permissions, each a menu with Default
@@ -707,7 +709,8 @@ be read as a session needing you.
   the tool and when it last did something (`Session::tool`,
   `Session::activity`, neither saved), and the tile draws the last ten
   minutes as a trace of twenty bars. How full the context is, from the
-  status line, is a ring round the icon; from 75 % the number shows as
+  status line, is a short bar under the icon, drawn like the
+  usage window's limits; from 75 % the number shows as
   well, amber then red, in the trace's place. The top line says only how
   long, except for waiting, where the verb decides what you do.
 - **Motion** (`motion.rs`, `anim.rs`, pure and tested). A new tile rises

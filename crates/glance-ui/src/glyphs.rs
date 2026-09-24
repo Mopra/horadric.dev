@@ -12,12 +12,10 @@ use std::mem::ManuallyDrop;
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use windows::core::{w, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{
     ID2D1HwndRenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED,
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
-    D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES,
+    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_DRAW_TEXT_OPTIONS_NONE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteFactory, IDWriteFontCollection, IDWriteFontFace, IDWriteTextFormat, DWRITE_FONT_METRICS,
@@ -436,12 +434,14 @@ impl GridTarget {
         };
         bar(bg, 0.0, HEADER_H);
         // The phase, as a line of light along the top, as on a tile's edge.
+        // It is the only mark of the phase here, so it is strong enough to
+        // read from across the room.
         if let (Some(c), false) = (h.phase, h.lifted) {
-            bar(c.with_alpha(0.035), 0.0, HEADER_H);
-            bar(c.with_alpha(0.45), 0.0, 1.0);
+            bar(c.with_alpha(0.05), 0.0, HEADER_H);
+            bar(c.with_alpha(0.75), 0.0, 2.0);
         }
         // The project's colour under the pane that has the keyboard: the
-        // same colour the stage's edge and the cluster's mark have.
+        // same colour the stage's edge and the cluster's wash have.
         if h.active && !h.lifted {
             bar(h.accent.with_alpha(0.55), HEADER_H - 1.0, HEADER_H);
         } else {
@@ -452,24 +452,7 @@ impl GridTarget {
             );
         }
 
-        // A dot in the phase's colour, lit from within, before the name.
-        let dot_x = 13.0;
-        let dot_y = HEADER_H / 2.0;
-        let dot_c = h.phase.unwrap_or(theme::IDLE);
-        if h.phase.is_some() {
-            self.glow(dot_x, dot_y, 9.0, dot_c, 0.45);
-        }
-        self.brush.SetColor(&render::color(dot_c));
-        self.rt.FillEllipse(
-            &D2D1_ELLIPSE {
-                point: Vector2 { X: dot_x, Y: dot_y },
-                radiusX: 3.5,
-                radiusY: 3.5,
-            },
-            &self.brush,
-        );
-
-        let left = 24.0;
+        let left = 10.0;
         let right = if h.close {
             width - HEADER_H
         } else {
@@ -539,49 +522,6 @@ impl GridTarget {
                 DWRITE_MEASURING_MODE_NATURAL,
             );
         }
-    }
-}
-
-impl GridTarget {
-    /// A soft round light, strongest at its centre.
-    unsafe fn glow(&self, x: f32, y: f32, radius: f32, c: Color, strength: f32) {
-        let stops = [
-            D2D1_GRADIENT_STOP {
-                position: 0.0,
-                color: render::color(c.with_alpha(strength)),
-            },
-            D2D1_GRADIENT_STOP {
-                position: 1.0,
-                color: render::color(c.with_alpha(0.0)),
-            },
-        ];
-        let Ok(collection) =
-            self.rt
-                .CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
-        else {
-            return;
-        };
-        let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
-            center: Vector2 { X: x, Y: y },
-            gradientOriginOffset: Vector2 { X: 0.0, Y: 0.0 },
-            radiusX: radius,
-            radiusY: radius,
-        };
-        let Ok(brush) = self.rt.CreateRadialGradientBrush(&props, None, &collection) else {
-            return;
-        };
-        // The grid draws aliased so cells meet without seams. A glow wants
-        // soft edges.
-        self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        self.rt.FillEllipse(
-            &D2D1_ELLIPSE {
-                point: Vector2 { X: x, Y: y },
-                radiusX: radius,
-                radiusY: radius,
-            },
-            &brush,
-        );
-        self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
     }
 }
 

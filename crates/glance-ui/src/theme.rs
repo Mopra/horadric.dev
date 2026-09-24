@@ -2,8 +2,8 @@
 //! bright text, and phase colours saturated enough to read at a glance.
 //!
 //! Colour has two jobs and they never share a place. A phase is light: the
-//! edge and the icon of a tile, the dot in a pane header. A project is an
-//! accent: the mark beside its name, the edge of the stage showing it. So a
+//! edge and the icon of a tile, the line along a pane header. A project is
+//! an accent: the wash down its cluster, the edge of the stage showing it. So a
 //! project's colour is never mistaken for a session needing you.
 
 use glance_core::{Phase, WaitReason};
@@ -146,7 +146,7 @@ pub fn icon(phase: &Phase, tool: Option<&str>) -> char {
         Phase::Done => '\u{E73E}',
         Phase::Paused => '\u{E769}',
         Phase::Ended => '\u{E7E8}',
-        Phase::Idle => '\u{EA3A}',
+        Phase::Idle => '\u{E708}',
     }
 }
 

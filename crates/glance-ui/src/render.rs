@@ -12,7 +12,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use glance_core::usage::format_until;
 use glance_core::{format_age, Limit, Phase, Session, Usage};
@@ -21,9 +21,6 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_GRADIENT_STOP,
     D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
-};
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN, D2D_SIZE_F,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1BitmapRenderTarget, ID2D1Factory, ID2D1GradientStopCollection,
@@ -36,10 +33,6 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_NONE, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
-};
-use windows::Win32::Graphics::Direct2D::{
-    D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_DASH_STYLE_SOLID,
-    D2D1_SWEEP_DIRECTION_CLOCKWISE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteRenderingParams,
@@ -71,6 +64,9 @@ const TEXT_CONTRAST: f32 = 2.0;
 
 /// Where the name and the lines under it start in a tile, after the icon.
 const TILE_TEXT_X: f32 = 46.0;
+/// A window's name from the left of its header, in line with the text in
+/// the boxes below it.
+const NAME_INSET: f32 = 10.0;
 /// The activity trace at the bottom right of a tile.
 const TRACE_BARS: usize = 20;
 const TRACE_BAR_W: f32 = 1.6;
@@ -511,16 +507,7 @@ impl Painter<'_> {
             let r = Rect::new(x, h.y + 3.0, h.right() + 4.0 - x, h.h - 6.0);
             self.fill_rounded(&r, 6.0, fill);
         }
-        // A cluster's mark, without a colour: it belongs to no project, and
-        // an accent here would read as one.
-        let cy = h.y + h.h / 2.0;
-        let gem_x = h.x + 5.0;
-        self.fill_rounded(
-            &Rect::new(gem_x - 4.0, cy - 4.0, 8.0, 8.0),
-            2.5,
-            theme::TEXT_DIM.with_alpha(0.6),
-        );
-        let name_x = h.x + 18.0;
+        let name_x = h.x + NAME_INSET;
         let name_w = self.measure(gpu, &gpu.display, "Claude");
         self.text(
             &gpu.display,
@@ -541,19 +528,6 @@ impl Painter<'_> {
                 Rect::new(name_x + name_w + 4.0, h.y + 1.0, 14.0, h.h),
             );
         }
-        let heard = match scene.usage {
-            Some(u) => format!(
-                "{} ago",
-                format_age(Duration::from_secs(scene.now.saturating_sub(u.at)))
-            ),
-            None => "no usage yet".to_string(),
-        };
-        self.text(
-            &gpu.small_right,
-            theme::TEXT_DIM,
-            &heard,
-            Rect::new(h.x, h.y, h.w - 4.0, h.h),
-        );
 
         if let Some(b) = l.limits_box {
             self.glass_pane(&b, m.tile_radius, 1.0);
@@ -637,9 +611,6 @@ impl Painter<'_> {
                     let breath = motion::breathe(look.phase_age, BREATH);
                     let strength = theme::edge_strength(phase) * (0.6 + 0.4 * breath);
                     self.glow_edge(&r, radius, c, strength * look.enter);
-                    let (ix, iy) = icon_centre(&r);
-                    let presence = theme::presence(phase) * look.enter;
-                    self.glow_dot(ix, iy, 20.0, c, (0.28 + 0.2 * breath) * presence);
                 }
                 _ => {}
             }
@@ -679,17 +650,8 @@ impl Painter<'_> {
             self.fill_rounded(&r, 6.0, fill);
         }
 
-        // The project's mark: a small gem in its colour, lit from within.
         let cy = h.y + h.h / 2.0;
-        let gem_x = h.x + 5.0;
-        self.glow_dot(gem_x, cy, 10.0, scene.accent, 0.35);
-        self.fill_rounded(
-            &Rect::new(gem_x - 4.0, cy - 4.0, 8.0, 8.0),
-            2.5,
-            scene.accent,
-        );
-
-        let name_x = h.x + 18.0;
+        let name_x = h.x + NAME_INSET;
         let name_w = self.measure(gpu, &gpu.display, name).min(h.w * 0.62);
         self.text(
             &gpu.display,
@@ -1043,26 +1005,9 @@ impl Painter<'_> {
             c
         };
         let (ix, iy) = icon_centre(r);
-        let halo = match phase {
-            // The light layer breathes it.
-            Phase::Waiting(_) if ambient => 0.0,
-            Phase::Waiting(_) => 0.4,
-            Phase::Working => 0.22,
-            Phase::Done => 0.16 + 0.3 * arrival,
-            _ => 0.0,
-        };
-        self.glow_dot(ix, iy, 20.0, c, halo * presence);
-        let disc = D2D1_ELLIPSE {
-            point: Vector2 { X: ix, Y: iy },
-            radiusX: 14.0,
-            radiusY: 14.0,
-        };
-        self.brush
-            .SetColor(&color(icon_c.with_alpha(0.09 * presence)));
-        self.rt.FillEllipse(&disc, self.brush);
-        // How full the context is, as a ring round the icon filling
-        // clockwise from the top. Only while the process that measured it
-        // runs.
+        // How full the context is, as a short bar under the icon, the way
+        // the usage window draws a limit. Only while the process that
+        // measured it runs.
         let context = s
             .status
             .as_ref()
@@ -1074,8 +1019,13 @@ impl Painter<'_> {
             } else {
                 theme::TEXT_DIM.with_alpha(0.7)
             };
-            self.ring(gpu, ix, iy, 16.0, 1.0, theme::TEXT_DIM.with_alpha(0.14));
-            self.arc(gpu, ix, iy, 16.0, c / 100.0, ink.fade(presence));
+            let track = Rect::new(ix - 10.0, iy + 14.0, 20.0, 2.0);
+            self.fill_rounded(&track, 1.0, theme::TEXT_DIM.with_alpha(0.14));
+            let fill = track.w * (c / 100.0).clamp(0.0, 1.0);
+            if fill > 0.0 {
+                let bar = Rect::new(track.x, track.y, fill.max(track.h), track.h);
+                self.fill_rounded(&bar, 1.0, ink.fade(presence));
+            }
         }
         self.icon(
             &gpu.icon,
@@ -1169,85 +1119,6 @@ impl Painter<'_> {
         if let Some(mark) = mark {
             self.browser_mark(&mark, scene.button(Hit::Browser(i)));
         }
-    }
-
-    /// A circle's outline.
-    unsafe fn ring(&self, _gpu: &Gpu, x: f32, y: f32, radius: f32, width: f32, c: Color) {
-        self.brush.SetColor(&color(c));
-        self.rt.DrawEllipse(
-            &D2D1_ELLIPSE {
-                point: Vector2 { X: x, Y: y },
-                radiusX: radius,
-                radiusY: radius,
-            },
-            self.brush,
-            width,
-            None,
-        );
-    }
-
-    /// `fraction` of a circle's outline, clockwise from the top.
-    unsafe fn arc(&self, gpu: &Gpu, x: f32, y: f32, radius: f32, fraction: f32, c: Color) {
-        let fraction = fraction.clamp(0.0, 1.0);
-        if fraction <= 0.0 {
-            return;
-        }
-        if fraction >= 0.999 {
-            self.ring(gpu, x, y, radius, 1.6, c);
-            return;
-        }
-        let Ok(path) = gpu.d2d.CreatePathGeometry() else {
-            return;
-        };
-        let Ok(sink) = path.Open() else {
-            return;
-        };
-        let angle = fraction * std::f32::consts::TAU;
-        sink.BeginFigure(
-            Vector2 {
-                X: x,
-                Y: y - radius,
-            },
-            D2D1_FIGURE_BEGIN_HOLLOW,
-        );
-        sink.AddArc(&D2D1_ARC_SEGMENT {
-            point: Vector2 {
-                X: x + radius * angle.sin(),
-                Y: y - radius * angle.cos(),
-            },
-            size: D2D_SIZE_F {
-                width: radius,
-                height: radius,
-            },
-            rotationAngle: 0.0,
-            sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
-            arcSize: if fraction > 0.5 {
-                D2D1_ARC_SIZE_LARGE
-            } else {
-                D2D1_ARC_SIZE_SMALL
-            },
-        });
-        sink.EndFigure(D2D1_FIGURE_END_OPEN);
-        if sink.Close().is_err() {
-            return;
-        }
-        let round = gpu
-            .d2d
-            .CreateStrokeStyle(
-                &D2D1_STROKE_STYLE_PROPERTIES {
-                    startCap: D2D1_CAP_STYLE_ROUND,
-                    endCap: D2D1_CAP_STYLE_ROUND,
-                    dashCap: D2D1_CAP_STYLE_ROUND,
-                    lineJoin: D2D1_LINE_JOIN_ROUND,
-                    miterLimit: 1.0,
-                    dashStyle: D2D1_DASH_STYLE_SOLID,
-                    dashOffset: 0.0,
-                },
-                None,
-            )
-            .ok();
-        self.brush.SetColor(&color(c));
-        self.rt.DrawGeometry(&path, self.brush, 1.6, round.as_ref());
     }
 
     /// Bars of how busy a session was over the last minutes, oldest on the

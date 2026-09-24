@@ -21,7 +21,7 @@ work. Worktrees are next.
   the other Glance windows, or hold Shift to place it freely. Click the header to
   collapse it. "Tidy up tiles" in the tray menu stacks them all back on the
   left edge.
-- Each tile shows a session: state dot, name, an age line like
+- Each tile shows a session: an icon for its state, name, an age line like
   "needs permission 12 min", and the last line worth reading. Waiting tiles
   light up amber.
 - A project in git gets a files tile at the bottom of its cluster: the file
