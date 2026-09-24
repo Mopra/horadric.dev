@@ -65,7 +65,7 @@ pub struct Header<'a> {
 
 /// Behind a pane's header: the terminal's own black, lifted a touch, so the
 /// header belongs to the pane rather than floating over it.
-const HEADER_BG: Color = Color::rgb(0x121217);
+const HEADER_BG: Color = Color::rgb(0x0E0E12);
 
 /// Cell geometry in DIPs, snapped so every cell edge is a whole device pixel.
 /// Without the snap, backgrounds of neighbouring cells leave hairline seams.
@@ -437,13 +437,13 @@ impl GridTarget {
         bar(bg, 0.0, HEADER_H);
         // The phase, as a line of light along the top, as on a tile's edge.
         if let (Some(c), false) = (h.phase, h.lifted) {
-            bar(c.with_alpha(0.08), 0.0, HEADER_H);
-            bar(c.with_alpha(0.85), 0.0, 2.0);
+            bar(c.with_alpha(0.035), 0.0, HEADER_H);
+            bar(c.with_alpha(0.45), 0.0, 1.0);
         }
         // The project's colour under the pane that has the keyboard: the
         // same colour the stage's edge and the cluster's mark have.
         if h.active && !h.lifted {
-            bar(h.accent, HEADER_H - 2.0, HEADER_H);
+            bar(h.accent.with_alpha(0.55), HEADER_H - 1.0, HEADER_H);
         } else {
             bar(
                 Color::rgb(0xFFFFFF).with_alpha(0.05),

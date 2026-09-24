@@ -619,16 +619,19 @@ place. A phase is light, on a tile's edge and in its icon. A project is an
 accent, on its mark and on the stage's edge. So a project's colour can never
 be read as a session needing you.
 
-- **Glass.** Clusters have acrylic behind them (`backdrop.rs`,
-  `DWMWA_SYSTEMBACKDROP_TYPE` with the frame extended over the client
-  area), the stage Mica. The cluster's render target is premultiplied, so
-  what it leaves clear shows the blurred desktop, under a dark tint that
-  keeps text readable on any wallpaper. Text there is greyscale: ClearType
-  needs to know the colour behind it. Tiles are faint panes of white with a
-  lit top edge. The stage's panes stay opaque, for ClearType in the
-  terminal; its gaps are painted black by the class brush, which DWM takes
-  as clear, so Mica shows between floating panes. A Windows without system
-  backdrops refuses the attribute and gets the old opaque windows.
+- **Deep dark, then glass.** The look is near black first. Clusters have
+  acrylic behind them (`backdrop.rs`, `DWMWA_SYSTEMBACKDROP_TYPE` with the
+  frame extended over the client area), under a tint of 92 %, so the
+  desktop is only a hint of depth. The cluster's render target is
+  premultiplied, so what it leaves clear shows the acrylic. Text there is
+  greyscale: ClearType needs to know the colour behind it. Tiles are a
+  breath of white (3 %) with a faint lit top edge. Every edge is soft light,
+  never a bright line: only a waiting tile's edge is plainly visible, since
+  it is the one thing meant to catch the eye. The stage had Mica at first
+  and it lifted the whole window toward grey, so it has none: its title bar
+  is the terminal's near black (`DWMWA_CAPTION_COLOR`), its gaps are black
+  and the panes float a shade lighter. A Windows without system backdrops
+  refuses the attribute and gets opaque clusters.
   `DwmExtendFrameIntoClientArea` is declared by hand: the windows crate has
   it behind `Win32_UI_Controls`, a large feature for one call.
 - **Phase as light.** A working tile has a light going round its edge, a
@@ -641,8 +644,9 @@ be read as a session needing you.
   picked by an FNV hash of the project key (`theme::accent`), so a project
   keeps its colour across runs. It marks the cluster's name, washes faintly
   down from its top edge, rings the cluster whose project is on the stage,
-  colours the stage window's border (`DWMWA_BORDER_COLOR`) and underlines
-  the pane with the keyboard.
+  tints the stage window's border (`DWMWA_BORDER_COLOR`, the accent sunk
+  two thirds into the dark) and underlines the pane with the keyboard. All
+  of them muted: an accent says which project, it does not outline one.
 - **A live tile.** The icon is the tool the turn is in (Segoe Fluent Icons,
   `theme::tool_icon`), or the phase when there is none. The session keeps
   the tool and when it last did something (`Session::tool`,
@@ -675,9 +679,10 @@ ms while a light goes round, 66 ms while only a breath does, none at rest.
 Tested on screen with a dev instance on its own port and state folder: the
 acrylic behind clusters with Chrome underneath, the orbit, the breath and
 the ring leaving a tile that starts waiting, the done flash, three `cmd.exe`
-panes on the stage with Mica in the gaps and the unfocused two dimmed, the
-lime border on the stage matching its cluster's mark, context rings at 38 %
-and 82 %.
+panes on the stage with the unfocused two dimmed, the stage's border
+matching its cluster's mark, context rings at 38 % and 82 %. After the first
+look proved too light and its borders too bright, the darker pass was
+checked the same way beside the installed build.
 
 Not done: the usage window still draws the old flat way (it was built
 alongside), the tray menu is still light, and the terminal font is still

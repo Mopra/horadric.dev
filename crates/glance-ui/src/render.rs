@@ -630,7 +630,7 @@ impl Painter<'_> {
             &Rect::new(0.0, 0.0, w, depth),
             (0.0, depth),
             &[
-                (0.0, scene.accent.with_alpha(0.16)),
+                (0.0, scene.accent.with_alpha(0.055)),
                 (1.0, scene.accent.with_alpha(0.0)),
             ],
         );
@@ -703,7 +703,7 @@ impl Painter<'_> {
             if chip.x < name_x + name_w + 20.0 {
                 break;
             }
-            self.fill_rounded(&chip, 9.0, c.with_alpha(0.14));
+            self.fill_rounded(&chip, 9.0, c.with_alpha(0.09));
             self.text(
                 &gpu.chip,
                 c,
@@ -851,9 +851,9 @@ impl Painter<'_> {
             return;
         }
         let edge = r.inset(0.5);
-        self.stroke_rounded(&edge, radius - 0.5, c.with_alpha(strength * 0.09), 9.0);
-        self.stroke_rounded(&edge, radius - 0.5, c.with_alpha(strength * 0.22), 4.0);
-        self.stroke_rounded(&edge, radius - 0.5, c.with_alpha(strength), 1.2);
+        self.stroke_rounded(&edge, radius - 0.5, c.with_alpha(strength * 0.12), 9.0);
+        self.stroke_rounded(&edge, radius - 0.5, c.with_alpha(strength * 0.25), 4.0);
+        self.stroke_rounded(&edge, radius - 0.5, c.with_alpha(strength * 0.7), 1.0);
     }
 
     /// A light travelling round a tile's edge, `t` of the way round, with a
@@ -905,8 +905,7 @@ impl Painter<'_> {
         let r = Rect::new(inset, inset, w - 2.0 * inset, h - 2.0 * inset);
         // Inside the corner DWM rounds the window to.
         let radius = m.window_radius - inset;
-        self.stroke_rounded(&r, radius, scene.accent.with_alpha(0.14), 5.0);
-        self.stroke_rounded(&r, radius, scene.accent.with_alpha(0.75), 1.2);
+        self.stroke_rounded(&r, radius, scene.accent.with_alpha(0.3), 1.0);
     }
 
     /// The `i`th tile, at `r` this frame, showing `s`.
@@ -961,7 +960,7 @@ impl Painter<'_> {
         let arrival = if ambient { look.arrival } else { 0.0 };
         match phase {
             Phase::Waiting(_) => {
-                self.fill_rounded(r, radius, c.with_alpha(0.1));
+                self.fill_rounded(r, radius, c.with_alpha(0.055));
                 if !ambient {
                     self.glow_edge(r, radius, c, theme::edge_strength(phase) * 0.85);
                 }
@@ -974,15 +973,15 @@ impl Painter<'_> {
                         r.w + 2.0 * spread,
                         r.h + 2.0 * spread,
                     );
-                    self.stroke_rounded(&ring, radius + spread, c.with_alpha(arrival * 0.8), 1.5);
+                    self.stroke_rounded(&ring, radius + spread, c.with_alpha(arrival * 0.45), 1.2);
                 }
             }
             Phase::Working => {
-                self.fill_rounded(r, radius, c.with_alpha(0.05));
+                self.fill_rounded(r, radius, c.with_alpha(0.025));
                 self.glow_edge(r, radius, c, theme::edge_strength(phase) * look.enter);
             }
             Phase::Done => {
-                self.fill_rounded(r, radius, c.with_alpha(0.03 + 0.22 * arrival));
+                self.fill_rounded(r, radius, c.with_alpha(0.14 * arrival));
                 let strength = theme::edge_strength(phase) + 0.6 * arrival;
                 self.glow_edge(r, radius, c, strength * look.enter);
             }
@@ -1022,7 +1021,7 @@ impl Painter<'_> {
             radiusY: 14.0,
         };
         self.brush
-            .SetColor(&color(icon_c.with_alpha(0.13 * presence)));
+            .SetColor(&color(icon_c.with_alpha(0.09 * presence)));
         self.rt.FillEllipse(&disc, self.brush);
         // How full the context is, as a ring round the icon filling
         // clockwise from the top. Only while the process that measured it

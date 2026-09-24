@@ -38,15 +38,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::app::{self, Input};
-use crate::backdrop::{self, Material};
+use crate::backdrop;
 use crate::console::Console;
 use crate::pane::{self, Pane, WM_PANE_FOCUS, WM_PANE_GRAB};
 use crate::window::Shared;
 use crate::{layout, palette, snapping, theme};
 
 pub(crate) const CLASS: PCWSTR = w!("GlanceTerminal");
-/// Between panes, and around them, in DIPs. Mica shows in the gaps, so the
-/// panes float on the window rather than being cut out of it.
+/// Between panes, and around them, in DIPs. The gaps are black and the
+/// panes a shade lighter, so they float on the window rather than being
+/// cut out of it.
 const PANE_GAP_DIP: f32 = 6.0;
 /// How far a header has to move before a press becomes a drag.
 const DRAG_THRESHOLD: i32 = 4;
@@ -161,10 +162,9 @@ impl TerminalWindow {
                 &dark as *const _ as *const c_void,
                 std::mem::size_of::<BOOL>() as u32,
             );
-            // Mica in the title bar and the gaps between panes. The gaps
-            // are painted black by the class brush, which DWM takes as
-            // clear once the frame reaches into the client area.
-            backdrop::apply(hwnd, Material::Mica);
+            // The title bar in the terminal's own near black, so the stage
+            // reads as one deep surface. Mica here lifted it toward grey.
+            backdrop::caption(hwnd, theme::WINDOW_BG);
 
             match place {
                 Place::Rect(r) => win.set_rect(r),
@@ -207,8 +207,10 @@ impl TerminalWindow {
         *self.project.borrow_mut() = key.to_string();
         *self.project_name.borrow_mut() = name.to_string();
         let accent = theme::accent(key);
-        // The window's edge in the project's colour, like its cluster's mark.
-        backdrop::border(self.hwnd, Some(accent));
+        // The window's edge in the project's colour, like its cluster's
+        // mark, sunk most of the way into the dark so it tints the edge
+        // rather than outlining the window.
+        backdrop::border(self.hwnd, Some(theme::WINDOW_BG.mix(accent, 0.35)));
         for p in self.panes.borrow().iter() {
             p.set_accent(accent);
             if switched {

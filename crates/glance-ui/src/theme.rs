@@ -55,14 +55,14 @@ impl Color {
 }
 
 pub const WINDOW_BG: Color = Color::rgb(0x0A0A0D);
-/// Laid over the acrylic behind a cluster: dark enough that text reads on
-/// any wallpaper, thin enough that the desktop still shows through.
-pub const GLASS_TINT: Color = Color::rgb(0x0B0B10).with_alpha(0.70);
-/// A tile on glass: a whisper of white, so it reads as a pane laid on top
-/// rather than a hole cut in the window.
-pub const GLASS_TILE: Color = Color::rgb(0xFFFFFF).with_alpha(0.05);
+/// Laid over the acrylic behind a cluster. Nearly opaque: the window is
+/// deep black first, and the desktop is only a hint of depth behind it.
+pub const GLASS_TINT: Color = Color::rgb(0x060609).with_alpha(0.92);
+/// A tile on glass: a breath of white, so it reads as a surface laid on top
+/// rather than a hole cut in the window, without lifting it toward grey.
+pub const GLASS_TILE: Color = Color::rgb(0xFFFFFF).with_alpha(0.028);
 /// The light catching a tile's top edge.
-pub const GLASS_EDGE: Color = Color::rgb(0xFFFFFF).with_alpha(0.11);
+pub const GLASS_EDGE: Color = Color::rgb(0xFFFFFF).with_alpha(0.06);
 pub const TILE_BG: Color = Color::rgb(0x16161B);
 /// A lifted tile surface: the focused pane, the outline of the add slot.
 pub const TILE_BG_STAGED: Color = Color::rgb(0x23232B);
@@ -72,8 +72,8 @@ pub const TEXT_DIM: Color = Color::rgb(0xA4A4B0);
 
 /// Behind a button under the cursor and one held down: white laid over
 /// whatever is there, as Windows 11 does it, so it works on any surface.
-pub const HOVER_FILL: Color = Color::rgb(0xFFFFFF).with_alpha(0.08);
-pub const PRESS_FILL: Color = Color::rgb(0xFFFFFF).with_alpha(0.04);
+pub const HOVER_FILL: Color = Color::rgb(0xFFFFFF).with_alpha(0.05);
+pub const PRESS_FILL: Color = Color::rgb(0xFFFFFF).with_alpha(0.025);
 
 pub const WORKING: Color = Color::rgb(0x3DB4FF);
 pub const WAITING: Color = Color::rgb(0xFFB224);
@@ -170,9 +170,9 @@ pub fn tool_icon(tool: &str) -> char {
 /// How strongly a tile's edge glows at rest, by phase. Zero is no edge.
 pub fn edge_strength(phase: &Phase) -> f32 {
     match phase {
-        Phase::Waiting(_) => 0.55,
-        Phase::Done => 0.30,
-        Phase::Working => 0.22,
+        Phase::Waiting(_) => 0.34,
+        Phase::Done => 0.10,
+        Phase::Working => 0.09,
         Phase::Idle | Phase::Ended | Phase::Paused => 0.0,
     }
 }

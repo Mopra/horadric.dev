@@ -1,5 +1,5 @@
-//! Windows 11 materials behind a window: acrylic for the clusters, Mica for
-//! the stage.
+//! Windows 11 materials behind a window, acrylic for the clusters, and the
+//! colours DWM draws a window's frame in.
 //!
 //! DWM draws the material and our pixels go over it, so whatever we leave
 //! transparent shows the blurred desktop. That needs the frame extended over
@@ -11,7 +11,7 @@ use std::ffi::c_void;
 use windows::core::{BOOL, HRESULT};
 use windows::Win32::Foundation::{COLORREF, HWND};
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMSBT_MAINWINDOW, DWMSBT_TRANSIENTWINDOW, DWMWA_BORDER_COLOR,
+    DwmSetWindowAttribute, DWMSBT_TRANSIENTWINDOW, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR,
     DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWM_SYSTEMBACKDROP_TYPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -24,8 +24,6 @@ use crate::theme::Color;
 pub enum Material {
     /// Blurred, for small windows that float over others: the clusters.
     Acrylic,
-    /// The wallpaper, faintly, for the window you work in: the stage.
-    Mica,
 }
 
 /// The windows crate only has `MARGINS` behind `Win32_UI_Controls`, a large
@@ -48,7 +46,6 @@ extern "system" {
 pub fn apply(hwnd: HWND, material: Material) -> bool {
     let kind: DWM_SYSTEMBACKDROP_TYPE = match material {
         Material::Acrylic => DWMSBT_TRANSIENTWINDOW,
-        Material::Mica => DWMSBT_MAINWINDOW,
     };
     unsafe {
         let dark = BOOL(1);
@@ -72,6 +69,13 @@ pub fn border(hwnd: HWND, c: Option<Color>) {
     let value = c.map_or(0xFFFF_FFFE, colorref);
     unsafe {
         let _ = set(hwnd, DWMWA_BORDER_COLOR.0, &COLORREF(value));
+    }
+}
+
+/// The title bar in `c`.
+pub fn caption(hwnd: HWND, c: Color) {
+    unsafe {
+        let _ = set(hwnd, DWMWA_CAPTION_COLOR.0, &COLORREF(colorref(c)));
     }
 }
 
