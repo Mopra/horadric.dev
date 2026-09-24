@@ -28,6 +28,10 @@ impl Registry {
         self.sessions.get(id)
     }
 
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut Session> {
+        self.sessions.get_mut(id)
+    }
+
     pub fn remove(&mut self, id: &str) -> Option<Session> {
         self.sessions.remove(id)
     }

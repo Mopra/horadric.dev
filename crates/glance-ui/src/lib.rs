@@ -17,9 +17,14 @@
 //! A file clicked in a files tile is shown on the stage too, read only, as a
 //! pane with no program behind it ([`viewer`], [`highlight`]).
 //!
+//! A project can also have plain terminals, a shell with no agent, for
+//! whatever else the work needs. They are sessions with a tile and a pane
+//! like the rest ([`shell`]).
+//!
 //! [`anim`], [`files`], [`layout`], [`theme`], [`palette`], [`paste`],
-//! [`keys`], [`frame`], [`icon`], [`inbox`], [`motion`], [`viewer`] and
-//! [`highlight`] are pure and tested, and so is the list logic in `recent`.
+//! [`keys`], [`frame`], [`icon`], [`inbox`], [`motion`], [`viewer`],
+//! [`highlight`] and [`shell`] are pure and tested, and so is the list logic
+//! in `recent`.
 //! The rest is Windows only and verified on screen.
 
 pub mod anim;
@@ -33,6 +38,7 @@ pub mod layout;
 pub mod motion;
 pub mod palette;
 pub mod paste;
+pub mod shell;
 pub mod theme;
 pub mod viewer;
 

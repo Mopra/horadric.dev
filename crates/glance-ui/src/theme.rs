@@ -131,6 +131,9 @@ pub fn accent(key: &str) -> Color {
     ACCENTS[hash as usize % ACCENTS.len()]
 }
 
+/// A plain terminal's tile, and the button that opens one.
+pub const SHELL_ICON: char = '\u{E756}';
+
 /// The Segoe Fluent Icons glyph for a session: the tool it is in while it
 /// works, otherwise what its phase is.
 pub fn icon(phase: &Phase, tool: Option<&str>) -> char {

@@ -9,6 +9,9 @@
 //! A pane can also show a file instead of a session (see
 //! [`Console::view`]). It is read only: keys scroll it, Ctrl+C copies, and
 //! Esc or the cross in its header closes it.
+//!
+//! Ctrl+Shift+T in any pane opens a plain terminal in the project on the
+//! stage.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -541,6 +544,7 @@ impl Pane {
                 CharAction::Copy | CharAction::CopyOrInterrupt => {
                     self.copy();
                 }
+                CharAction::NewShell => app::push(Input::Shell(None)),
                 _ => {}
             }
             return;
@@ -556,6 +560,7 @@ impl Pane {
                     self.send(vec![0x03]);
                 }
             }
+            CharAction::NewShell => app::push(Input::Shell(None)),
         }
     }
 

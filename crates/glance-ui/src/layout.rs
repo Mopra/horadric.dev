@@ -43,6 +43,8 @@ pub struct Metrics {
     pub header_h: f32,
     pub tile_h: f32,
     pub add_h: f32,
+    /// The button beside the bottom plus that opens a plain terminal.
+    pub shell_w: f32,
     pub gap: f32,
     pub radius: f32,
     /// The corner Windows 11 rounds a window to.
@@ -76,6 +78,7 @@ impl Default for Metrics {
             header_h: 30.0,
             tile_h: 58.0,
             add_h: 26.0,
+            shell_w: 44.0,
             gap: 6.0,
             radius: 12.0,
             window_radius: 8.0,
@@ -108,9 +111,12 @@ pub struct ClusterLayout {
     /// The browser button on each tile, in the same order, where its
     /// session has a browser open. See [`mark`].
     pub marks: Vec<Option<Rect>>,
-    /// The full width button below the last tile that starts another
-    /// session in this project at once. None when collapsed.
+    /// The wide button below the last tile that starts another session in
+    /// this project at once. None when collapsed.
     pub add: Option<Rect>,
+    /// The small button at its right that opens a plain terminal in the
+    /// project. None when collapsed.
+    pub shell: Option<Rect>,
     /// The files tile, below everything else. None when the project is not
     /// in git or the cluster is collapsed.
     pub files: Option<FilesLayout>,
@@ -157,6 +163,7 @@ pub fn cluster(m: &Metrics, n: usize, collapsed: bool, files: Option<f32>) -> Cl
     let full = m.width - 2.0 * m.pad;
     let mut tiles = Vec::new();
     let mut add = None;
+    let mut shell = None;
     let mut files_layout = None;
     let mut y = header.bottom() + m.gap;
     if !collapsed {
@@ -164,7 +171,9 @@ pub fn cluster(m: &Metrics, n: usize, collapsed: bool, files: Option<f32>) -> Cl
             tiles.push(Rect::new(m.pad, y, full, m.tile_h));
             y += m.tile_h + m.gap;
         }
-        add = Some(Rect::new(m.pad, y, full, m.add_h));
+        let wide = full - m.shell_w - m.gap;
+        add = Some(Rect::new(m.pad, y, wide, m.add_h));
+        shell = Some(Rect::new(m.pad + wide + m.gap, y, m.shell_w, m.add_h));
         y += m.add_h + m.gap;
         if let Some(body) = files {
             let body = body.max(0.0);
@@ -210,6 +219,7 @@ pub fn cluster(m: &Metrics, n: usize, collapsed: bool, files: Option<f32>) -> Cl
         marks: vec![None; tiles.len()],
         tiles,
         add,
+        shell,
         files: files_layout,
     }
 }
@@ -264,6 +274,8 @@ pub enum Hit {
     /// The browser button on a tile.
     Browser(usize),
     Add,
+    /// The terminal button beside the bottom plus.
+    Shell,
     FilesHeader,
     /// The bottom edge of the files tile, which resizes it.
     FilesGrip,
@@ -278,7 +290,7 @@ impl Hit {
     pub fn lights(self) -> bool {
         matches!(
             self,
-            Hit::New | Hit::Header | Hit::Tile(_) | Hit::Browser(_) | Hit::Add
+            Hit::New | Hit::Header | Hit::Tile(_) | Hit::Browser(_) | Hit::Add | Hit::Shell
         )
     }
 }
@@ -323,6 +335,9 @@ pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
     }
     if layout.add.is_some_and(|a| a.contains(x, y)) {
         return Hit::Add;
+    }
+    if layout.shell.is_some_and(|a| a.contains(x, y)) {
+        return Hit::Shell;
     }
     if let Some(f) = &layout.files {
         if f.header.contains(x, y) {
@@ -724,6 +739,7 @@ mod tests {
         let l = cluster(&m, 5, true, Some(100.0));
         assert!(l.tiles.is_empty());
         assert!(l.add.is_none());
+        assert!(l.shell.is_none());
         assert_eq!(l.size.1, m.pad + m.header_h + m.pad);
         assert!(l.files.is_none());
     }
@@ -801,11 +817,17 @@ mod tests {
         assert_eq!(l.tiles.len(), 3);
         assert_eq!(l.tiles[1].y - l.tiles[0].bottom(), m.gap);
         let add = l.add.unwrap();
+        let shell = l.shell.unwrap();
         assert_eq!(add.y - l.tiles[2].bottom(), m.gap);
-        assert_eq!(add.w, l.tiles[2].w);
+        // Side by side, together as wide as a tile.
+        assert_eq!(shell.y, add.y);
+        assert_eq!(shell.x - add.right(), m.gap);
+        assert_eq!(shell.right(), l.tiles[2].right());
+        assert_eq!(add.x, l.tiles[2].x);
         assert_eq!(l.size.1, add.bottom() + m.pad);
         assert_eq!(hit(&l, 20.0, l.tiles[2].y + 1.0), Hit::Tile(2));
         assert_eq!(hit(&l, 20.0, add.y + 1.0), Hit::Add);
+        assert_eq!(hit(&l, shell.x + 2.0, shell.y + 1.0), Hit::Shell);
         assert_eq!(hit(&l, 20.0, m.pad + 1.0), Hit::Header);
         assert_eq!(hit(&l, m.width - m.pad - 2.0, m.pad + 1.0), Hit::New);
         assert_eq!(hit(&l, 1.0, 1.0), Hit::Nothing);
@@ -828,7 +850,7 @@ mod tests {
 
     #[test]
     fn the_header_its_plus_tiles_and_the_bottom_plus_light_up() {
-        for h in [Hit::New, Hit::Header, Hit::Tile(3), Hit::Add] {
+        for h in [Hit::New, Hit::Header, Hit::Tile(3), Hit::Add, Hit::Shell] {
             assert!(h.lights(), "{h:?}");
         }
         for h in [Hit::FilesHeader, Hit::FilesGrip, Hit::File(0), Hit::Nothing] {

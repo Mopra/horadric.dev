@@ -46,6 +46,12 @@ work. Worktrees are next.
   remembered. "Fit terminal beside tiles" in the tray menu fills the space
   right of the clusters. The terminal snaps like clusters do, when moved and
   when an edge is dragged to resize, and Shift again places it freely.
+- Plain terminals for everything that is not the agent: a dev server, a
+  log, a deploy. The small button beside a cluster's bottom `+`, Ctrl+Shift+T
+  in any pane, or "New terminal" in the project menu opens PowerShell in the
+  project, as a pane on the stage and a tile in the cluster. The tile shows
+  what the terminal's title says and how busy its output is. `exit` closes
+  it. `GLANCE_SHELL` picks another shell.
 - Ctrl+Alt+Space, from anywhere, shows the session that has waited on you
   longest. Press it again to move on to the next one.
 - A Claude window at the top of the stack shows how much of your five hour,

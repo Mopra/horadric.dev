@@ -93,6 +93,9 @@ pub struct SavedSession {
     /// exactly these; an ordinary start leaves every session paused.
     #[serde(default)]
     pub running: bool,
+    /// A plain shell. It has no conversation, so it starts afresh.
+    #[serde(default)]
+    pub shell: bool,
 }
 
 impl SavedSession {
@@ -107,6 +110,7 @@ impl SavedSession {
             prompted: s.prompted,
             last_line: s.last_line.clone(),
             running,
+            shell: s.shell,
         }
     }
 
@@ -117,6 +121,7 @@ impl SavedSession {
         s.claude_session_id = self.claude_session_id.clone();
         s.prompted = self.prompted;
         s.last_line = self.last_line.clone();
+        s.shell = self.shell;
         s.phase = Phase::Paused;
         s.since = now;
         s
@@ -195,6 +200,7 @@ mod tests {
             prompted,
             last_line: String::new(),
             running: true,
+            shell: false,
         }
     }
 
@@ -296,6 +302,23 @@ mod tests {
         let old = br#"{"version": 1, "sessions": [{"id": "a", "name": "a", "cwd": "C:/p"}]}"#;
         let s = SavedState::from_json(old);
         assert!(!s.sessions[0].running);
+        assert!(!s.sessions[0].shell);
         assert_eq!(s.on_stage, None);
+    }
+
+    #[test]
+    fn a_shell_comes_back_a_shell() {
+        let mut s = saved(&[], false);
+        s.shell = true;
+        let back = SavedState::from_json(
+            SavedState {
+                sessions: vec![s],
+                ..Default::default()
+            }
+            .to_json()
+            .as_bytes(),
+        );
+        assert!(back.sessions[0].shell);
+        assert!(back.sessions[0].to_session(SystemTime::now()).shell);
     }
 }

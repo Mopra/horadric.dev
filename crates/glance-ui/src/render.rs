@@ -492,7 +492,10 @@ impl Painter<'_> {
             self.tile(gpu, m, scene, i, &r, s, &look);
         }
         if let Some(add) = &scene.layout.add {
-            self.add(gpu, m, add, scene.button(Hit::Add));
+            self.add(gpu, m, add, scene.button(Hit::Add), '\u{E710}');
+        }
+        if let Some(shell) = &scene.layout.shell {
+            self.add(gpu, m, shell, scene.button(Hit::Shell), theme::SHELL_ICON);
         }
         if let (Some(l), Some(f)) = (&scene.layout.files, &scene.files) {
             self.files(gpu, m, l, f);
@@ -1043,7 +1046,10 @@ impl Painter<'_> {
         self.icon(
             &gpu.icon,
             icon_c.fade(presence),
-            theme::icon(phase, s.tool.as_deref()),
+            match phase {
+                Phase::Idle if s.shell => theme::SHELL_ICON,
+                _ => theme::icon(phase, s.tool.as_deref()),
+            },
             Rect::new(ix - 14.0, iy - 14.0, 28.0, 28.0),
         );
 
@@ -1260,9 +1266,10 @@ impl Painter<'_> {
         );
     }
 
-    /// Another session in this project: an empty slot where the next tile
-    /// would go, a dashed outline so it never reads as a session.
-    unsafe fn add(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Button) {
+    /// Another session in this project, or a plain terminal: an empty slot
+    /// where the next tile would go, a dashed outline so it never reads as
+    /// a session.
+    unsafe fn add(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Button, glyph: char) {
         let (fill, ink) = theme::button_look(b);
         if let Some(fill) = fill {
             self.fill_rounded(r, m.tile_radius, fill);
@@ -1294,7 +1301,7 @@ impl Painter<'_> {
             1.2,
             style.ok().as_ref(),
         );
-        self.icon(&gpu.icon_small, ink, '\u{E710}', *r);
+        self.icon(&gpu.icon_small, ink, glyph, *r);
     }
 
     /// The project's files as VS Code's explorer shows them: folders with a

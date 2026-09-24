@@ -76,7 +76,7 @@ use crate::terminal::{self, Place, TerminalWindow};
 use crate::tray::{self, Choice, Item, Tray};
 use crate::usage::{self, UsageWindow};
 use crate::window::{self, project_key, project_name, Cluster, Shared};
-use crate::{autostart, browsers, inbox, picker, recent, snapping, store};
+use crate::{autostart, browsers, inbox, picker, recent, shell, snapping, store};
 
 /// A hook event changed the registry. `wparam` is 1 when a phase changed.
 const WM_GLANCE_EVENT: u32 = WM_APP + 1;
@@ -137,6 +137,10 @@ pub(crate) enum Input {
     /// Bottom plus clicked: another session in the project with this key,
     /// no questions asked.
     Add(String),
+    /// A plain terminal in the project with this key, from the button
+    /// beside the bottom plus, or in the project on the stage, from
+    /// Ctrl+Shift+T in a pane.
+    Shell(Option<String>),
     /// Terminal closed: collapse the terminal window with this handle.
     Close(isize),
     /// A pane was dragged onto another: swap these two sessions.
@@ -566,17 +570,11 @@ fn tray_menu(hwnd: HWND) {
             }
         }
         Some(Choice::Quit) => {
-            let live = with_app(|app| app.live_count()).unwrap_or(0);
-            let ok = live == 0
-                || picker::confirm(
-                    hwnd,
-                    &format!(
-                        "Quit Glance?\n\n{live} running session{} will stop. {} back as paused \
-                         tiles the next time Glance starts, and resume where they left off.",
-                        if live == 1 { "" } else { "s" },
-                        if live == 1 { "It comes" } else { "They come" },
-                    ),
-                );
+            let (agents, shells) = with_app(|app| app.live_counts()).unwrap_or((0, 0));
+            let ok = match quit_question(agents, shells) {
+                Some(q) => picker::confirm(hwnd, &q),
+                None => true,
+            };
             if ok {
                 with_app(App::freeze);
                 unsafe { PostQuitMessage(0) };
@@ -584,6 +582,32 @@ fn tray_menu(hwnd: HWND) {
         }
         None => {}
     }
+}
+
+/// What to ask before quitting with `agents` sessions and `shells` plain
+/// terminals running. Nothing when none is.
+fn quit_question(agents: usize, shells: usize) -> Option<String> {
+    let sessions = match agents {
+        0 => None,
+        1 => Some(
+            "The running session will stop. It comes back as a paused tile the next time \
+             Glance starts, and resumes where it left off."
+                .to_string(),
+        ),
+        n => Some(format!(
+            "{n} running sessions will stop. They come back as paused tiles the next time \
+             Glance starts, and resume where they left off."
+        )),
+    };
+    let terminals = match shells {
+        0 => None,
+        1 => Some("The open terminal will close, and whatever runs in it.".to_string()),
+        n => Some(format!(
+            "{n} open terminals will close, and whatever runs in them."
+        )),
+    };
+    let said: Vec<String> = sessions.into_iter().chain(terminals).collect();
+    (!said.is_empty()).then(|| format!("Quit Glance?\n\n{}", said.join(" ")))
 }
 
 /// What a tile's menu can offer for its session.
@@ -599,21 +623,31 @@ enum TileKind {
 fn tile_menu(hwnd: HWND, id: &str) {
     const OPEN: usize = 1;
     const END: usize = 2;
-    let Some(kind) = with_app(|app| app.tile_kind(id)).flatten() else {
+    let Some((kind, shell)) = with_app(|app| app.tile_kind(id)).flatten() else {
         return;
     };
-    let items = match kind {
-        TileKind::Live => vec![
+    let items = match (kind, shell) {
+        (TileKind::Live, false) => vec![
             Item::action(OPEN, "Show terminal"),
             Item::Separator,
             Item::action(END, "End session"),
         ],
-        TileKind::Paused => vec![
+        (TileKind::Live, true) => vec![
+            Item::action(OPEN, "Show terminal"),
+            Item::Separator,
+            Item::action(END, "Close terminal"),
+        ],
+        (TileKind::Paused, false) => vec![
             Item::action(OPEN, "Resume"),
             Item::Separator,
             Item::action(END, "End session"),
         ],
-        TileKind::Elsewhere => vec![Item::action(END, "Remove tile")],
+        (TileKind::Paused, true) => vec![
+            Item::action(OPEN, "Open again"),
+            Item::Separator,
+            Item::action(END, "Remove terminal"),
+        ],
+        (TileKind::Elsewhere, _) => vec![Item::action(END, "Remove tile")],
     };
     match tray::popup(hwnd, &items) {
         Some(OPEN) => {
@@ -679,10 +713,13 @@ fn project_menu(hwnd: HWND, key: &str) {
     const START_BATCH: usize = 2;
     const START_OVER: usize = 3;
     const END_ALL: usize = 4;
+    const SHELL: usize = 5;
     let items = [
         Item::action(ADD, "New session"),
         Item::action(START_BATCH, format!("Start {BATCH} sessions")),
         Item::action(START_OVER, format!("Start over with {BATCH} sessions")),
+        Item::Separator,
+        Item::action(SHELL, "New terminal\tCtrl+Shift+T"),
         Item::Separator,
         Item::action(END_ALL, "End all sessions"),
     ];
@@ -696,6 +733,7 @@ fn project_menu(hwnd: HWND, key: &str) {
         Some(START_BATCH) => app.add_sessions(key, BATCH),
         Some(START_OVER) => app.start_over(key, BATCH),
         Some(END_ALL) => app.end_all(Some(key)),
+        Some(SHELL) => app.open_shell(key),
         _ => {}
     });
 }
@@ -870,11 +908,11 @@ impl App {
         self.stage.as_deref().filter(|s| s.shows(serial))
     }
 
-    fn live_count(&self) -> usize {
-        self.consoles
-            .values()
-            .filter(|c| c.exit_code().is_none())
-            .count()
+    /// Running agents and running plain terminals.
+    fn live_counts(&self) -> (usize, usize) {
+        let live = self.consoles.values().filter(|c| c.exit_code().is_none());
+        let shells = live.clone().filter(|c| c.shell).count();
+        (live.count() - shells, shells)
     }
 
     /// Sessions in a Glance terminal that are in the middle of a turn.
@@ -937,8 +975,9 @@ impl App {
         }
     }
 
-    fn tile_kind(&self, id: &str) -> Option<TileKind> {
-        self.shared.registry.lock().ok()?.get(id)?;
+    /// What a tile's menu offers, and whether it is a plain terminal.
+    fn tile_kind(&self, id: &str) -> Option<(TileKind, bool)> {
+        let shell = self.shared.registry.lock().ok()?.get(id)?.shell;
         let kind = if self.paused.contains_key(id) {
             TileKind::Paused
         } else if self
@@ -950,16 +989,29 @@ impl App {
         } else {
             TileKind::Elsewhere
         };
-        Some(kind)
+        Some((kind, shell))
     }
 
     fn output(&mut self, serial: usize) {
         let Some(console) = self.console_by_serial(serial) else {
             return;
         };
-        if console.take_dirty() {
-            if let Some(t) = self.stage_showing(serial) {
-                t.refresh(serial);
+        if !console.take_dirty() {
+            return;
+        }
+        if let Some(t) = self.stage_showing(serial) {
+            t.refresh(serial);
+        }
+        // No hook reports on a shell, so its tile tells what it runs from
+        // the terminal's title and how busy it is from its output. The
+        // tiles redraw on the next tick.
+        if console.shell {
+            let title = console.title();
+            if let Ok(mut r) = self.shared.registry.lock() {
+                if let Some(s) = r.get_mut(&console.id) {
+                    s.touch(SystemTime::now());
+                    s.last_line = title.unwrap_or_default();
+                }
             }
         }
     }
@@ -974,6 +1026,13 @@ impl App {
         let Some(console) = self.console_by_serial(serial).cloned() else {
             return;
         };
+        // A shell has nothing to resume, and `exit` means done with it
+        // whatever code the last command left behind.
+        if console.shell {
+            self.forget(&console.id);
+            self.reconcile(false);
+            return;
+        }
         if console.exit_code() == Some(0) {
             if let Ok(mut r) = self.shared.registry.lock() {
                 if r.get(&console.id).is_some() {
@@ -1019,7 +1078,7 @@ impl App {
         let base = name.clone().unwrap_or_else(|| folder.clone());
         let id = self.unique_id(&base);
         let shown = name.unwrap_or(folder);
-        self.launch(&id, &shown, cwd, args, false)?;
+        self.launch(&id, &shown, cwd, args, false, false)?;
         // A new session is where the eye already is: against the tiles, not
         // wherever the stage was left.
         if let Some(key) = self.project_of(&id) {
@@ -1047,7 +1106,7 @@ impl App {
         let cwd = PathBuf::from(&saved.cwd);
         let result = if cwd.is_dir() {
             let args = saved.launch_args();
-            self.launch(id, &saved.name, cwd, args, show)
+            self.launch(id, &saved.name, cwd, args, saved.shell, show)
         } else {
             Err(format!("{} no longer exists", cwd.display()))
         };
@@ -1057,14 +1116,40 @@ impl App {
         result
     }
 
+    /// Opens a plain terminal in the project with this key, on the stage
+    /// beside its sessions, with the keyboard.
+    fn open_shell(&mut self, key: &str) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        let n = self
+            .shared
+            .registry
+            .lock()
+            .map(|r| r.all().filter(|s| s.shell && project_key(s) == key).count())
+            .unwrap_or(0);
+        let id = self.unique_id("terminal");
+        if let Err(e) = self.launch(&id, &shell::name(n), dir, Vec::new(), true, false) {
+            eprintln!("glance: cannot open a terminal: {e}");
+            return;
+        }
+        if self.fill_stage(key, false) {
+            if let Some(stage) = &self.stage {
+                stage.focus_session(&id);
+            }
+        }
+    }
+
     /// Registers a session, starts its console and, with `show`, opens its
-    /// terminal.
+    /// terminal. With `shell`, the console runs a plain shell instead of
+    /// the agent.
     fn launch(
         &mut self,
         id: &str,
         name: &str,
         cwd: PathBuf,
         args: Vec<String>,
+        shell: bool,
         show: bool,
     ) -> Result<(), String> {
         // One agent per session, whatever path led here. A second would be
@@ -1076,8 +1161,11 @@ impl App {
         {
             return Err(format!("{id} is already running"));
         }
-        let program =
-            console::agent_program().ok_or("claude.exe not found on PATH (or set GLANCE_AGENT)")?;
+        let program = if shell {
+            console::shell_program().ok_or("no shell found (set GLANCE_SHELL)")?
+        } else {
+            console::agent_program().ok_or("claude.exe not found on PATH (or set GLANCE_AGENT)")?
+        };
         recent::remember(&mut self.recent, &cwd.to_string_lossy());
 
         let register = HookEvent {
@@ -1092,6 +1180,9 @@ impl App {
             .map(|mut r| {
                 let known = r.get(id).is_some();
                 r.apply(id, &register, SystemTime::now());
+                if let Some(s) = r.get_mut(id) {
+                    s.shell = shell;
+                }
                 known
             })
             .unwrap_or(false);
@@ -1107,6 +1198,7 @@ impl App {
                 args,
                 extra,
                 cwd,
+                shell,
             },
             self.notify,
         )
@@ -1199,12 +1291,14 @@ impl App {
     }
 
     /// Replaces the project's sessions with `n` new ones. The new ones
-    /// start first, so the cluster never empties and keeps its place.
+    /// start first, so the cluster never empties and keeps its place. Its
+    /// plain terminals stay: a dev server has nothing to do with starting
+    /// over.
     fn start_over(&mut self, key: &str, n: usize) {
         let old: Vec<String> = match self.shared.registry.lock() {
             Ok(r) => r
                 .all()
-                .filter(|s| project_key(s) == key)
+                .filter(|s| !s.shell && project_key(s) == key)
                 .map(|s| s.id.clone())
                 .collect(),
             Err(_) => return,
@@ -1985,6 +2079,12 @@ impl App {
                         }
                     }
                 }
+                Input::Shell(key) => {
+                    let key = key.or_else(|| self.stage.as_ref().map(|s| s.project()));
+                    if let Some(key) = key {
+                        self.open_shell(&key);
+                    }
+                }
                 Input::Close(hwnd) => {
                     if self
                         .stage
@@ -2157,6 +2257,30 @@ mod tests {
         assert_eq!(
             end_question(Some("app"), 3, 2).as_deref(),
             Some("End all 3 running sessions in app? 2 of them are in the middle of a turn.")
+        );
+    }
+
+    #[test]
+    fn quitting_says_what_stops_and_what_comes_back() {
+        assert_eq!(quit_question(0, 0), None);
+        assert_eq!(
+            quit_question(2, 0).as_deref(),
+            Some(
+                "Quit Glance?\n\n2 running sessions will stop. They come back as paused tiles \
+                 the next time Glance starts, and resume where they left off."
+            )
+        );
+        assert_eq!(
+            quit_question(0, 1).as_deref(),
+            Some("Quit Glance?\n\nThe open terminal will close, and whatever runs in it.")
+        );
+        assert_eq!(
+            quit_question(1, 3).as_deref(),
+            Some(
+                "Quit Glance?\n\nThe running session will stop. It comes back as a paused tile \
+                 the next time Glance starts, and resumes where it left off. 3 open terminals \
+                 will close, and whatever runs in them."
+            )
         );
     }
 }

@@ -758,7 +758,9 @@ impl Cluster {
                             app::push(Input::TileMenu(s.id.clone()));
                         }
                     }
-                    Hit::Header | Hit::Add => app::push(Input::ProjectMenu(self.key.clone())),
+                    Hit::Header | Hit::Add | Hit::Shell => {
+                        app::push(Input::ProjectMenu(self.key.clone()))
+                    }
                     _ => {}
                 }
                 Some(LRESULT(0))
@@ -890,6 +892,7 @@ impl Cluster {
         match self.hit(lparam) {
             Hit::New => app::push(Input::New(self.key.clone())),
             Hit::Add => app::push(Input::Add(self.key.clone())),
+            Hit::Shell => app::push(Input::Shell(Some(self.key.clone()))),
             Hit::Header => app::push(Input::Toggle(self.hwnd.0 as isize)),
             Hit::FilesHeader => {
                 let collapsed = !self.files_collapsed();

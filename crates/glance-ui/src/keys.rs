@@ -108,6 +108,9 @@ pub enum CharAction {
     CopyOrInterrupt,
     /// Ctrl+Shift+C: always copy, never interrupt.
     Copy,
+    /// Ctrl+Shift+T: a new plain terminal in the project, as a new tab is
+    /// in Windows Terminal. Plain Ctrl+T still reaches the program.
+    NewShell,
 }
 
 /// Maps a `WM_CHAR` (or `WM_SYSCHAR` when `mods.alt`) to its bytes.
@@ -117,6 +120,7 @@ pub fn char_action(c: char, mods: Mods) -> CharAction {
         '\u{16}' => return CharAction::Paste,
         '\u{3}' if mods.shift => return CharAction::Copy,
         '\u{3}' => return CharAction::CopyOrInterrupt,
+        '\u{14}' if mods.shift && mods.ctrl => return CharAction::NewShell,
         // Meta+Enter is the newline Claude Code understands everywhere.
         '\r' if mods.shift => out.extend_from_slice(b"\x1b\r"),
         '\t' if mods.shift => out.extend_from_slice(b"\x1b[Z"),
@@ -217,6 +221,8 @@ mod tests {
             ..CTRL
         };
         assert_eq!(char_action('\u{3}', ctrl_shift), CharAction::Copy);
+        assert_eq!(char_action('\u{14}', ctrl_shift), CharAction::NewShell);
+        assert_eq!(char_action('\u{14}', CTRL), CharAction::Send(vec![0x14]));
     }
 
     #[test]

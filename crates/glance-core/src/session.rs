@@ -87,6 +87,10 @@ pub struct Session {
     #[serde(default)]
     pub prompted: bool,
     pub cwd: String,
+    /// A plain shell rather than an agent: no hooks, so its phase stays
+    /// put, and what the tile says comes from the terminal's title.
+    #[serde(default)]
+    pub shell: bool,
     pub phase: Phase,
     /// When the current phase began. The tile's age line counts from here.
     pub since: SystemTime,
@@ -123,6 +127,7 @@ impl Session {
             claude_session_id: None,
             prompted: false,
             cwd: cwd.into(),
+            shell: false,
             phase: Phase::Idle,
             since: now,
             last_line: String::new(),
@@ -271,13 +276,30 @@ impl Session {
             event.hook_event_name.as_str(),
             "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure"
         ) {
-            let oldest = now.checked_sub(ACTIVITY_SPAN).unwrap_or(now);
-            self.activity.retain(|t| *t >= oldest);
-            if self.activity.len() >= ACTIVITY_MAX {
-                self.activity.remove(0);
-            }
-            self.activity.push(now);
+            self.record(now);
         }
+    }
+
+    /// A shell printed something. Its tile's trace is its output, since no
+    /// hook ever says what it does. At most once a second, or a chatty dev
+    /// server would push out everything older.
+    pub fn touch(&mut self, now: SystemTime) {
+        let recent = self.activity.last().is_some_and(|t| {
+            now.duration_since(*t)
+                .is_ok_and(|d| d < Duration::from_secs(1))
+        });
+        if !recent {
+            self.record(now);
+        }
+    }
+
+    fn record(&mut self, now: SystemTime) {
+        let oldest = now.checked_sub(ACTIVITY_SPAN).unwrap_or(now);
+        self.activity.retain(|t| *t >= oldest);
+        if self.activity.len() >= ACTIVITY_MAX {
+            self.activity.remove(0);
+        }
+        self.activity.push(now);
     }
 
     /// How much the agent did in each of `buckets` equal slices of the last
@@ -618,6 +640,18 @@ mod tests {
             t0 + ACTIVITY_SPAN + Duration::from_secs(1),
         );
         assert_eq!(s.activity.len(), 1);
+    }
+
+    #[test]
+    fn a_shell_counts_its_output_at_most_once_a_second() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut s = Session::new("g1", "Terminal", "C:/repo");
+        s.touch(t0);
+        s.touch(t0 + Duration::from_millis(400));
+        assert_eq!(s.activity.len(), 1);
+        s.touch(t0 + Duration::from_secs(1));
+        assert_eq!(s.activity.len(), 2);
+        assert_eq!(s.phase, Phase::Idle);
     }
 
     #[test]

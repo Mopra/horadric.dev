@@ -30,7 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::app::{WM_GLANCE_EXIT, WM_GLANCE_OUTPUT};
 use crate::viewer::{self, Cell, Row, Span};
-use crate::{clipboard, highlight, palette};
+use crate::{clipboard, highlight, palette, shell};
 
 /// History per session. Rows are allocated as output scrolls into them, at
 /// about 24 bytes a cell, so 2000 rows of 120 columns is under 6 MB even when
@@ -104,6 +104,8 @@ pub struct Console {
     /// What the agent was started with, kept so a restart can start it the
     /// same way.
     pub args: Vec<String>,
+    /// A plain shell, not an agent.
+    pub shell: bool,
 }
 
 /// The file a view shows, and how it is laid out in the grid now.
@@ -130,6 +132,9 @@ pub struct Launch {
     /// should take as they are then, not as they were.
     pub extra: Vec<String>,
     pub cwd: PathBuf,
+    /// A plain shell. It is not tagged as a session, so a `claude` typed
+    /// into it is nobody's and stays off the tiles, as outside Glance.
+    pub shell: bool,
 }
 
 /// The agent binary: `GLANCE_AGENT` when set, which is also how a plain
@@ -144,6 +149,16 @@ pub fn agent_program() -> Option<PathBuf> {
     find_program(bare, &path, &[".exe"], Path::is_file)
 }
 
+/// The shell a plain terminal runs, see [`shell::program`].
+pub fn shell_program() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let chosen = std::env::var("GLANCE_SHELL").ok();
+    let comspec = std::env::var("COMSPEC").ok();
+    shell::program(chosen.as_deref(), comspec.as_deref(), |name| {
+        find_program(name, &path, &[".exe"], Path::is_file)
+    })
+}
+
 impl Console {
     /// Starts the agent and the threads that read its output and wait for it.
     /// `notify` is the window that hears about output and exit.
@@ -156,12 +171,22 @@ impl Console {
             program: launch.program,
             args: launch.extra.iter().chain(&launch.args).cloned().collect(),
             cwd: launch.cwd,
-            env_set: vec![
-                (SESSION_ENV.into(), launch.id.clone()),
-                (OWNER_ENV.into(), glance_hooks::port().to_string()),
-                ("COLORTERM".into(), "truecolor".into()),
-            ],
-            env_remove: PARENT_SESSION_ENV.to_vec(),
+            env_set: if launch.shell {
+                vec![("COLORTERM".into(), "truecolor".into())]
+            } else {
+                vec![
+                    (SESSION_ENV.into(), launch.id.clone()),
+                    (OWNER_ENV.into(), glance_hooks::port().to_string()),
+                    ("COLORTERM".into(), "truecolor".into()),
+                ]
+            },
+            // A Glance started from inside a session would hand its own tag
+            // down, and a `claude` in the shell would report as that session.
+            env_remove: if launch.shell {
+                [&PARENT_SESSION_ENV[..], &[SESSION_ENV, OWNER_ENV]].concat()
+            } else {
+                PARENT_SESSION_ENV.to_vec()
+            },
             cols: size.cols,
             rows: size.rows,
         };
@@ -191,6 +216,7 @@ impl Console {
             exit: Mutex::new(None),
             title,
             args: launch.args,
+            shell: launch.shell,
         });
 
         let notify = notify.0 as isize;
@@ -265,6 +291,7 @@ impl Console {
             exit: Mutex::new(None),
             title,
             args: Vec::new(),
+            shell: false,
         });
         console.load(notify.0 as isize);
         console
@@ -456,9 +483,11 @@ impl Console {
         self.exit.lock().ok().and_then(|e| *e)
     }
 
-    /// The title the program set with OSC 0 or 2, if any.
+    /// The title the program set with OSC 0 or 2, if it says more than
+    /// the name of the executable.
     pub fn title(&self) -> Option<String> {
-        self.title.lock().ok().and_then(|t| t.clone())
+        let raw = self.title.lock().ok()?.clone()?;
+        shell::title(&raw)
     }
 
     /// Applies a synchronized update the program never finished, once its
