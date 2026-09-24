@@ -50,6 +50,7 @@ use horadric_core::{
     Session, Setting, Usage,
 };
 use horadric_hooks::listener::{self, Command, Reload, Tagged};
+use horadric_hooks::transcript::{self, Past};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL};
@@ -61,6 +62,7 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VK_SPACE,
 };
+use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage,
     RegisterClassW, RegisterWindowMessageW, SetTimer, SystemParametersInfoW, TranslateMessage, MSG,
@@ -70,13 +72,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::console::{self, Console, Launch};
 use crate::glyphs::Font;
+use crate::keys::{self, FontStep};
 use crate::layout::{self, Metrics};
 use crate::render::Gpu;
+use crate::start::{self, StartWindow};
 use crate::terminal::{self, Place, TerminalWindow};
 use crate::tray::{self, Choice, Item, Tray};
 use crate::usage::{self, UsageWindow};
 use crate::window::{self, project_key, project_name, Cluster, Shared};
-use crate::{autostart, browsers, inbox, picker, recent, shell, snapping, store};
+use crate::{
+    ask, autostart, browsers, history, inbox, picker, recent, shell, snapping, store, watch,
+};
 
 /// A hook event changed the registry. `wparam` is 1 when a phase changed.
 const WM_HORADRIC_EVENT: u32 = WM_APP + 1;
@@ -102,6 +108,8 @@ const WM_HORADRIC_WINDOW_SHOWN: u32 = WM_APP + 10;
 const WM_HORADRIC_WINDOW_GONE: u32 = WM_APP + 11;
 /// Show the menu for the setting the app's `setting_menu_for` names.
 const WM_HORADRIC_SETTING_MENU: u32 = WM_APP + 12;
+/// Show the menu for the recent project the app's `recent_menu_for` names.
+const WM_HORADRIC_RECENT_MENU: u32 = WM_APP + 13;
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
 /// Runs a console program without giving it a console window.
@@ -145,6 +153,9 @@ pub(crate) enum Input {
     Close(isize),
     /// A pane was dragged onto another: swap these two sessions.
     Swap(String, String),
+    /// A tile was dragged to a new place in the cluster of the project with
+    /// this key: its sessions, as the tiles now stand.
+    Reorder(String, Vec<String>),
     /// A tile's browser button clicked: bring up this session's browsers.
     Browser(String),
     /// A file in a files tile clicked: show it on the stage beside the
@@ -153,6 +164,9 @@ pub(crate) enum Input {
     View(String, PathBuf, String),
     /// A file view's cross or Esc: close the view with this serial.
     CloseView(usize),
+    /// Ctrl and plus, minus, zero or the wheel in a pane: the terminal font
+    /// for every pane.
+    Font(FontStep),
     /// Files of the project with this key changed on disk.
     FilesChanged(String),
     /// A cluster changed size by itself, its files tile growing or
@@ -161,6 +175,15 @@ pub(crate) enum Input {
     Arrange,
     /// A setting in the usage window clicked: offer its values.
     SettingMenu(Setting),
+    /// The start window's tile clicked: pick a folder for the first
+    /// project.
+    Pick,
+    /// A recent project clicked in the start window, or a folder dropped on
+    /// it: start a session in this folder.
+    StartIn(PathBuf),
+    /// A recent project right clicked in the start window: offer a new
+    /// session or an old conversation in this folder.
+    RecentMenu(PathBuf),
 }
 
 thread_local! {
@@ -210,6 +233,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     }
     window::register_class()?;
     usage::register_class()?;
+    start::register_class()?;
     terminal::register_class()?;
     let notify = create_app_window()?;
     let notify_id = notify.0 as isize;
@@ -291,12 +315,13 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     let on_stage = saved.on_stage.clone().filter(|_| reload);
 
     let gpu = Gpu::new()?;
-    let font = Font::new(&gpu.dw)?;
+    let font = Font::new(&gpu.dw, saved.font_size.unwrap_or(keys::FONT_DEFAULT))?;
     let shared = Rc::new(Shared {
         gpu,
         font,
         metrics: Metrics::default(),
         registry,
+        orders: RefCell::new(saved.grids.clone().into_iter().collect()),
         staged: RefCell::new(HashSet::new()),
         browsing: RefCell::new(HashSet::new()),
         usage,
@@ -329,6 +354,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         let mut app = App {
             shared,
             usage_window,
+            start_window: None,
             status_settings,
             setting_menu_for: None,
             clusters: Vec::new(),
@@ -336,7 +362,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             views: HashMap::new(),
             stage: None,
             stage_rect: saved.stage.filter(|r| on_screen(r[0], r[1])),
-            grids: saved.grids.clone().into_iter().collect(),
             hotkey,
             next_serial: 1,
             requests,
@@ -354,13 +379,17 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 .collect(),
             recent: saved.recent.clone(),
             autostart_offered,
+            quiet: saved.quiet,
             last_saved: Some(saved),
             frozen: false,
             pick_from: None,
             menu_for: None,
             project_menu_for: None,
+            recent_menu_for: None,
             reload: None,
             browsers: HashMap::new(),
+            waiting: HashSet::new(),
+            alert_for: None,
         };
         app.reconcile(false);
         app.carry_on(&carry, on_stage.as_deref());
@@ -393,6 +422,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             }
             if let Some(u) = &app.usage_window {
                 u.destroy();
+            }
+            if let Some(s) = &app.start_window {
+                s.destroy();
             }
             for c in app.consoles.values() {
                 c.kill();
@@ -479,6 +511,8 @@ unsafe extern "system" fn app_proc(
             let mouse = lparam.0 as u32;
             if mouse == WM_LBUTTONUP || mouse == WM_RBUTTONUP {
                 tray_menu(hwnd);
+            } else if mouse == NIN_BALLOONUSERCLICK {
+                with_app(App::open_alert);
             }
             return LRESULT(0);
         }
@@ -490,6 +524,12 @@ unsafe extern "system" fn app_proc(
         WM_HORADRIC_TILE_MENU => {
             if let Some(id) = with_app(|app| app.menu_for.take()).flatten() {
                 tile_menu(hwnd, &id);
+            }
+            return LRESULT(0);
+        }
+        WM_HORADRIC_RECENT_MENU => {
+            if let Some(dir) = with_app(|app| app.recent_menu_for.take()).flatten() {
+                recent_menu(hwnd, dir);
             }
             return LRESULT(0);
         }
@@ -536,15 +576,38 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 fn tray_menu(hwnd: HWND) {
-    let (recent, hotkey) = with_app(|app| (app.recent.clone(), app.hotkey)).unwrap_or_default();
+    let (recent, hotkey, notify) =
+        with_app(|app| (app.recent.clone(), app.hotkey, !app.quiet)).unwrap_or_default();
     let projects: Vec<String> = recent
         .into_iter()
         .filter(|p| Path::new(p).is_dir())
         .collect();
     let autostart = (!horadric_hooks::dev()).then(autostart::is_enabled);
-    match tray::menu(hwnd, &projects, autostart, hotkey) {
+    let past: Vec<Vec<Past>> = projects
+        .iter()
+        .map(|p| with_app(|app| app.history(Path::new(p))).unwrap_or_default())
+        .collect();
+    let lines = past
+        .iter()
+        .enumerate()
+        .map(|(i, p)| history_items(p, tray::HISTORY + i * history::SPAN))
+        .collect();
+    match tray::menu(hwnd, &projects, lines, autostart, hotkey, notify) {
+        Some(Choice::ToggleNotify) => {
+            with_app(|app| {
+                app.quiet = !app.quiet;
+                app.save();
+            });
+        }
         Some(Choice::New) => pick_and_start(hwnd, projects.first().map(PathBuf::from)),
         Some(Choice::Recent(path)) => start_logged(PathBuf::from(path)),
+        Some(Choice::History(id)) => {
+            if let Some((i, pick)) = history::pick_nested(id, tray::HISTORY) {
+                if let (Some(dir), Some(past)) = (projects.get(i), past.get(i)) {
+                    with_app(|app| app.reopen(Path::new(dir), past, pick));
+                }
+            }
+        }
         Some(Choice::Tidy) => {
             with_app(App::tidy);
         }
@@ -623,31 +686,37 @@ enum TileKind {
 fn tile_menu(hwnd: HWND, id: &str) {
     const OPEN: usize = 1;
     const END: usize = 2;
+    const RENAME: usize = 3;
     let Some((kind, shell)) = with_app(|app| app.tile_kind(id)).flatten() else {
         return;
     };
+    let rename = Item::action(RENAME, "Rename\u{2026}");
     let items = match (kind, shell) {
         (TileKind::Live, false) => vec![
             Item::action(OPEN, "Show terminal"),
+            rename,
             Item::Separator,
             Item::action(END, "End session"),
         ],
         (TileKind::Live, true) => vec![
             Item::action(OPEN, "Show terminal"),
+            rename,
             Item::Separator,
             Item::action(END, "Close terminal"),
         ],
         (TileKind::Paused, false) => vec![
             Item::action(OPEN, "Resume"),
+            rename,
             Item::Separator,
             Item::action(END, "End session"),
         ],
         (TileKind::Paused, true) => vec![
             Item::action(OPEN, "Open again"),
+            rename,
             Item::Separator,
             Item::action(END, "Remove terminal"),
         ],
-        (TileKind::Elsewhere, _) => vec![Item::action(END, "Remove tile")],
+        (TileKind::Elsewhere, _) => vec![rename, Item::action(END, "Remove tile")],
     };
     match tray::popup(hwnd, &items) {
         Some(OPEN) => {
@@ -656,7 +725,20 @@ fn tile_menu(hwnd: HWND, id: &str) {
         Some(END) => {
             with_app(|app| app.end(id));
         }
+        Some(RENAME) => rename_session(hwnd, id),
         _ => {}
+    }
+}
+
+/// Asks for a session's new name. An empty one gives the naming back to
+/// Claude's own title.
+fn rename_session(hwnd: HWND, id: &str) {
+    let Some(label) = with_app(|app| app.label_of(id)).flatten() else {
+        return;
+    };
+    let prompt = "Name it. Leave it empty and Claude names it again.";
+    if let Some(name) = ask::text(hwnd, "Rename session", prompt, &label) {
+        with_app(|app| app.rename(id, &name));
     }
 }
 
@@ -708,18 +790,38 @@ fn setting_menu(hwnd: HWND, setting: Setting) {
 /// once, few enough to keep an eye on.
 const BATCH: usize = 4;
 
+/// How many past conversations the History menu lists. The last line
+/// opens Claude Code's own picker for the rest.
+const HISTORY: usize = 10;
+
 fn project_menu(hwnd: HWND, key: &str) {
     const ADD: usize = 1;
     const START_BATCH: usize = 2;
     const START_OVER: usize = 3;
     const END_ALL: usize = 4;
     const SHELL: usize = 5;
+    const CODE: usize = 7;
+    const EXPLORE: usize = 8;
+    const PAST: usize = 100;
+    let dir = with_app(|app| app.project_dir(key)).flatten();
+    let past = match &dir {
+        Some(d) => with_app(|app| app.history(d)).unwrap_or_default(),
+        None => Vec::new(),
+    };
     let items = [
         Item::action(ADD, "New session"),
+        Item::Submenu("History".into(), history_items(&past, PAST)),
         Item::action(START_BATCH, format!("Start {BATCH} sessions")),
         Item::action(START_OVER, format!("Start over with {BATCH} sessions")),
         Item::Separator,
         Item::action(SHELL, "New terminal\tCtrl+Shift+T"),
+        Item::Separator,
+        if watch::vs_code().is_some() {
+            Item::action(CODE, "Open in VS Code")
+        } else {
+            Item::Disabled("Open in VS Code".into())
+        },
+        Item::action(EXPLORE, "Open in Explorer"),
         Item::Separator,
         Item::action(END_ALL, "End all sessions"),
     ];
@@ -734,8 +836,62 @@ fn project_menu(hwnd: HWND, key: &str) {
         Some(START_OVER) => app.start_over(key, BATCH),
         Some(END_ALL) => app.end_all(Some(key)),
         Some(SHELL) => app.open_shell(key),
+        Some(CODE) => {
+            if let Some(dir) = app.project_dir(key) {
+                watch::open_in_code(&dir);
+            }
+        }
+        Some(EXPLORE) => {
+            if let Some(dir) = app.project_dir(key) {
+                watch::explore(&dir);
+            }
+        }
+        Some(i) => {
+            if let (Some(pick), Some(dir)) = (history::pick(i, PAST), &dir) {
+                app.reopen(dir, &past, pick);
+            }
+        }
         _ => {}
     });
+}
+
+/// The lines of a History menu: each past conversation, `first` on, then
+/// Claude Code's own picker for the rest.
+fn history_items(past: &[Past], first: usize) -> Vec<Item> {
+    let now = SystemTime::now();
+    let mut items: Vec<Item> = past
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let ago = now.duration_since(p.modified).unwrap_or_default();
+            Item::action(first + i, history::label(&p.title.text, ago))
+        })
+        .collect();
+    if items.is_empty() {
+        items.push(Item::Disabled("No earlier conversations".into()));
+    }
+    items.push(Item::Separator);
+    items.push(Item::action(history::all(first), "All conversations..."));
+    items
+}
+
+/// A recent project right clicked in the start window, which has no
+/// cluster and so no project menu: a new session, or an old one back.
+fn recent_menu(hwnd: HWND, dir: PathBuf) {
+    const ADD: usize = 1;
+    const PAST: usize = 100;
+    let past = with_app(|app| app.history(&dir)).unwrap_or_default();
+    let mut items = vec![Item::action(ADD, "New session"), Item::Separator];
+    items.extend(history_items(&past, PAST));
+    match tray::popup(hwnd, &items) {
+        Some(ADD) => start_logged(dir),
+        Some(i) => {
+            if let Some(pick) = history::pick(i, PAST) {
+                with_app(|app| app.reopen(&dir, &past, pick));
+            }
+        }
+        None => {}
+    }
 }
 
 /// Asks before ending running sessions. Paused ones cost nothing to lose:
@@ -788,6 +944,8 @@ struct App {
     shared: Rc<Shared>,
     /// The account's usage and the defaults for new sessions.
     usage_window: Option<Box<UsageWindow>>,
+    /// Stands where the first project will go while none is open.
+    start_window: Option<Box<StartWindow>>,
     /// The settings file that gives a session `horadric status` as its status
     /// line. None when it could not be written, and then sessions go without.
     status_settings: Option<PathBuf>,
@@ -808,9 +966,6 @@ struct App {
     stage: Option<Box<TerminalWindow>>,
     /// Where the stage was when it last closed.
     stage_rect: Option<[i32; 4]>,
-    /// Each project's sessions in the order the stage shows them, by
-    /// project key. Paused ones keep their place.
-    grids: HashMap<String, Vec<String>>,
     /// The next waiting session's shortcut, as the tray menu shows it.
     hotkey: Option<&'static str>,
     next_serial: usize,
@@ -836,10 +991,20 @@ struct App {
     menu_for: Option<String>,
     /// The project whose menu is about to show.
     project_menu_for: Option<String>,
+    /// The recent project whose menu is about to show.
+    recent_menu_for: Option<PathBuf>,
     /// A new build to hand over to, once no session is mid turn.
     reload: Option<Reload>,
     /// Browser windows sessions opened, by window handle.
     browsers: HashMap<isize, Browser>,
+    /// The sessions waiting on you as last seen, so only one that starts
+    /// waiting is announced.
+    waiting: HashSet<String>,
+    /// The session the last notification was about, which a click on it
+    /// shows. None when it was about several.
+    alert_for: Option<String>,
+    /// No notifications, from the tray menu.
+    quiet: bool,
 }
 
 /// A browser window a session opened.
@@ -1064,13 +1229,14 @@ impl App {
         self.reconcile(true);
     }
 
-    /// Starts an agent in a new session and opens its terminal.
+    /// Starts an agent in a new session and opens its terminal. Returns the
+    /// session's id.
     fn start(
         &mut self,
         name: Option<String>,
         cwd: PathBuf,
         args: Vec<String>,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         if !cwd.is_dir() {
             return Err(format!("{} is not a directory", cwd.display()));
         }
@@ -1088,7 +1254,52 @@ impl App {
                 }
             }
         }
-        Ok(())
+        Ok(id)
+    }
+
+    /// The past conversations held in `dir` that no tile holds, newest
+    /// first. Claude Code keeps every one, ended or not, so this is the way
+    /// back to a session closed for good.
+    fn history(&self, dir: &Path) -> Vec<Past> {
+        let open: Vec<String> = match self.shared.registry.lock() {
+            Ok(r) => r
+                .all()
+                .filter_map(|s| s.claude_session_id.clone())
+                .collect(),
+            Err(_) => return Vec::new(),
+        };
+        transcript::history(&dir.to_string_lossy(), &open, HISTORY)
+    }
+
+    /// Carries on a past conversation from `past`, the History menu's list
+    /// for `dir`, in a new tile. Or the tile opens Claude Code's own picker
+    /// of every conversation in the folder.
+    fn reopen(&mut self, dir: &Path, past: &[Past], pick: history::Pick) {
+        let past = match pick {
+            history::Pick::Past(i) => match past.get(i) {
+                Some(p) => Some(p),
+                None => return,
+            },
+            history::Pick::All => None,
+        };
+        let mut args = vec!["--resume".to_string()];
+        args.extend(past.map(|p| p.id.clone()));
+        let id = match self.start(None, dir.to_path_buf(), args) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("horadric: cannot resume a conversation: {e}");
+                return;
+            }
+        };
+        // Known before any hook says so. A pause before the next prompt
+        // would otherwise resume nothing and start afresh.
+        if let (Some(p), Ok(mut r)) = (past, self.shared.registry.lock()) {
+            if let Some(s) = r.get_mut(&id) {
+                s.claude_session_id = Some(p.id.clone());
+                s.prompted = true;
+                s.title = Some(p.title.clone());
+            }
+        }
     }
 
     /// Resumes a paused session in the same tile, with its conversation.
@@ -1344,7 +1555,7 @@ impl App {
             }
             keep
         });
-        for order in self.grids.values_mut() {
+        for order in self.shared.orders.borrow_mut().values_mut() {
             order.retain(|s| s != id);
         }
         if let Ok(mut r) = self.shared.registry.lock() {
@@ -1429,7 +1640,14 @@ impl App {
         // New ones join in the order they started.
         live.sort();
         let live: Vec<String> = live.into_iter().map(|(_, id)| id).collect();
-        let mut ids = layout::grid_order(self.grids.entry(key.to_string()).or_default(), &live);
+        let mut ids = layout::grid_order(
+            self.shared
+                .orders
+                .borrow_mut()
+                .entry(key.to_string())
+                .or_default(),
+            &live,
+        );
         // A file view comes last and is never saved in the order.
         if let Some(view) = self.views.get(key) {
             ids.push(view.id.clone());
@@ -1608,12 +1826,12 @@ impl App {
         }
     }
 
-    /// Swaps two sessions' places in the stage's grid.
+    /// Swaps two sessions' places in the stage's grid, and so their tiles'.
     fn swap(&mut self, a: &str, b: &str) {
         let Some(key) = self.stage.as_ref().map(|s| s.project()) else {
             return;
         };
-        if let Some(order) = self.grids.get_mut(&key) {
+        if let Some(order) = self.shared.orders.borrow_mut().get_mut(&key) {
             let i = order.iter().position(|s| s == a);
             let j = order.iter().position(|s| s == b);
             if let (Some(i), Some(j)) = (i, j) {
@@ -1621,6 +1839,138 @@ impl App {
             }
         }
         self.sync_stage();
+        self.fit_cluster(&key);
+    }
+
+    /// A tile was dragged to a new place: the project's order becomes its
+    /// tiles' as they now stand, and the stage's grid follows.
+    fn reorder(&mut self, key: &str, shown: &[String]) {
+        {
+            let mut orders = self.shared.orders.borrow_mut();
+            let order = orders.entry(key.to_string()).or_default();
+            *order = layout::reordered(order, shown);
+        }
+        self.fit_cluster(key);
+        self.sync_stage();
+    }
+
+    fn fit_cluster(&self, key: &str) {
+        for c in self.clusters.iter().filter(|c| c.key == key) {
+            c.fit();
+        }
+    }
+
+    /// Gives every session a place in its project's order, new ones after
+    /// the rest in the order they started, so a tile and its pane take the
+    /// same place from the first.
+    fn order_sessions(&self) {
+        let Ok(r) = self.shared.registry.lock() else {
+            return;
+        };
+        let mut all: Vec<_> = r.all().collect();
+        all.sort_by(|a, b| (a.created, &a.id).cmp(&(b.created, &b.id)));
+        let mut orders = self.shared.orders.borrow_mut();
+        for s in all {
+            let order = orders.entry(project_key(s)).or_default();
+            if !order.contains(&s.id) {
+                order.push(s.id.clone());
+            }
+        }
+    }
+
+    /// Says when a session starts waiting on you, unless you are looking at
+    /// it: the stage in front with that session in it. The tiles light up
+    /// too, but an editor may be covering them.
+    fn announce(&mut self) {
+        let Ok(r) = self.shared.registry.lock() else {
+            return;
+        };
+        let now: HashSet<String> = r.waiting().iter().map(|s| s.id.clone()).collect();
+        let seen = self.stage.as_ref().filter(|s| s.is_foreground());
+        let new: Vec<&Session> = r
+            .waiting()
+            .into_iter()
+            .filter(|s| !self.waiting.contains(&s.id))
+            .filter(|s| {
+                let serial = self.consoles.get(&s.id).map(|c| c.serial);
+                !seen.is_some_and(|stage| serial.is_some_and(|n| stage.shows(n)))
+            })
+            .collect();
+        let alert = (!self.quiet)
+            .then(|| {
+                let waiting: Vec<inbox::Waiting> = new
+                    .iter()
+                    .map(|s| inbox::Waiting {
+                        name: s.label(),
+                        phase: &s.phase,
+                        line: &s.last_line,
+                    })
+                    .collect();
+                inbox::alert(&waiting)
+            })
+            .flatten();
+        let about = match new.as_slice() {
+            [one] => Some(one.id.clone()),
+            _ => None,
+        };
+        drop(r);
+        self.waiting = now;
+        if let Some(a) = alert {
+            self.alert_for = about;
+            self.tray.notify(&a.title, &a.text);
+        }
+    }
+
+    /// The notification was clicked: show the session it was about, or,
+    /// for several, the one that has waited longest.
+    fn open_alert(&mut self) {
+        match self.alert_for.take() {
+            Some(id)
+                if self
+                    .shared
+                    .registry
+                    .lock()
+                    .is_ok_and(|r| r.get(&id).is_some()) =>
+            {
+                self.reveal(&id, false)
+            }
+            _ => self.next_waiting(),
+        }
+    }
+
+    /// A step of the terminal font, for every pane at once.
+    fn set_font(&mut self, step: FontStep) {
+        let font = &self.shared.font;
+        let size = keys::font_size(font.size(), step);
+        if size == font.size() {
+            return;
+        }
+        if let Err(e) = font.set_size(size) {
+            eprintln!("horadric: cannot size the terminal font: {e}");
+            return;
+        }
+        if let Some(stage) = &self.stage {
+            stage.refont();
+        }
+        self.save();
+    }
+
+    /// What a session's tile calls it now.
+    fn label_of(&self, id: &str) -> Option<String> {
+        let r = self.shared.registry.lock().ok()?;
+        r.get(id).map(|s| s.label().to_string())
+    }
+
+    /// Names a session from its tile's menu. Its tile, pane and the stage's
+    /// title follow.
+    fn rename(&mut self, id: &str, name: &str) {
+        if let Ok(mut r) = self.shared.registry.lock() {
+            if let Some(s) = r.get_mut(id) {
+                s.rename(Some(name));
+            }
+        }
+        self.reconcile(false);
+        self.save();
     }
 
     /// A session's name, what its pane's header says.
@@ -1886,7 +2236,9 @@ impl App {
                 .and_then(|s| s.active())
                 .filter(|id| !id.starts_with(VIEW)),
             grids: self
-                .grids
+                .shared
+                .orders
+                .borrow()
                 .iter()
                 .map(|(key, order)| {
                     let kept: Vec<String> = order
@@ -1910,6 +2262,8 @@ impl App {
                     collapsed: u.collapsed.get(),
                 }
             }),
+            font_size: Some(self.shared.font.size()).filter(|&s| s != keys::FONT_DEFAULT),
+            quiet: self.quiet,
             ..Default::default()
         }
     }
@@ -1989,9 +2343,11 @@ impl App {
             }
         }
 
+        self.order_sessions();
         for c in &self.clusters {
             c.fit();
         }
+        self.sync_start();
         // A status line can bring the first limits, which adds rows.
         if let Some(u) = &self.usage_window {
             u.fit();
@@ -2035,6 +2391,7 @@ impl App {
             (t, w) => format!("{app}: {t} sessions, {w} waiting"),
         };
         self.tray.set_tip(&tip);
+        self.announce();
     }
 
     /// Clicks and drags collected by the window procedures.
@@ -2096,19 +2453,61 @@ impl App {
                     }
                 }
                 Input::Swap(a, b) => self.swap(&a, &b),
+                Input::Reorder(key, shown) => self.reorder(&key, &shown),
                 Input::Browser(id) => self.show_browsers(&id),
                 Input::View(key, dir, rel) => self.open_view(&key, &dir, &rel),
                 Input::CloseView(serial) => self.close_view(serial),
+                Input::Font(step) => self.set_font(step),
                 Input::FilesChanged(key) => self.files_changed(&key),
                 Input::Arrange => relayout = true,
                 Input::SettingMenu(s) => {
                     self.setting_menu_for = Some(s);
                     post(self.notify.0 as isize, WM_HORADRIC_SETTING_MENU, 0);
                 }
+                Input::Pick => {
+                    // A new project most likely sits beside the last one.
+                    self.pick_from = self
+                        .recent
+                        .iter()
+                        .map(PathBuf::from)
+                        .find(|p| p.is_dir())
+                        .map(|d| d.parent().map(Path::to_path_buf).unwrap_or(d));
+                    post(self.notify.0 as isize, WM_HORADRIC_PICK, 0);
+                }
+                Input::RecentMenu(dir) => {
+                    self.recent_menu_for = Some(dir);
+                    post(self.notify.0 as isize, WM_HORADRIC_RECENT_MENU, 0);
+                }
+                Input::StartIn(dir) => {
+                    if let Err(e) = self.start(None, dir, Vec::new()) {
+                        eprintln!("horadric: cannot start session: {e}");
+                    }
+                }
             }
         }
         if relayout {
             self.arrange();
+        }
+    }
+
+    /// Shows the start window while no project is open, and only then.
+    fn sync_start(&mut self) {
+        if !self.clusters.is_empty() {
+            if let Some(s) = self.start_window.take() {
+                s.destroy();
+            }
+            return;
+        }
+        match &self.start_window {
+            Some(s) => {
+                s.set_recent(&self.recent);
+            }
+            None => {
+                match StartWindow::create(Rc::clone(&self.shared), &self.recent, -10_000, -10_000) {
+                    Ok(s) => self.start_window = Some(s),
+                    Err(e) => eprintln!("horadric: cannot create the start window: {e}"),
+                }
+            }
         }
     }
 
@@ -2127,6 +2526,9 @@ impl App {
     fn raise(&mut self) {
         if let Some(u) = &self.usage_window {
             u.raise();
+        }
+        if let Some(s) = &self.start_window {
+            s.raise();
         }
         for c in &self.clusters {
             c.raise();
@@ -2153,8 +2555,11 @@ impl App {
             .map(|c| c.as_ref())
             .filter(|c| !c.pinned)
             .collect();
+        // It stands in for the first cluster, so it goes where that would.
+        let start = self.start_window.as_deref();
         let Some(dpi) = usage
             .map(UsageWindow::dpi)
+            .or_else(|| start.map(StartWindow::dpi))
             .or_else(|| free.first().map(|c| c.dpi()))
         else {
             return;
@@ -2165,7 +2570,21 @@ impl App {
         let heights: Vec<i32> = usage
             .map(|u| u.size_px().1)
             .into_iter()
+            .chain(start.map(|s| s.size_px().1))
             .chain(free.iter().map(|c| c.size_px().1))
+            .collect();
+        let pinned_usage = self
+            .usage_window
+            .iter()
+            .filter(|u| u.pinned.get())
+            .map(|u| (u.position(), u.size_px()));
+        let pinned: Vec<[i32; 4]> = self
+            .clusters
+            .iter()
+            .filter(|c| c.pinned)
+            .map(|c| (c.position(), c.size_px()))
+            .chain(pinned_usage)
+            .map(|((x, y), (w, h))| [x, y, x + w, y + h])
             .collect();
         let mut positions = layout::stack(
             &heights,
@@ -2173,6 +2592,7 @@ impl App {
             (MARGIN_DIP as f32 * scale) as i32,
             (GAP_DIP as f32 * scale) as i32,
             work,
+            &pinned,
         )
         .into_iter();
         if let Some(u) = usage {
@@ -2180,6 +2600,14 @@ impl App {
                 if u.position() != (x, y) {
                     u.move_to(x, y);
                     u.invalidate();
+                }
+            }
+        }
+        if let Some(s) = start {
+            if let Some((x, y)) = positions.next() {
+                if s.position() != (x, y) {
+                    s.move_to(x, y);
+                    s.invalidate();
                 }
             }
         }

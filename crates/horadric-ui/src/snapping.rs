@@ -63,6 +63,7 @@ pub fn others(except: HWND) -> Vec<Edges> {
     for class in [
         crate::window::CLASS,
         crate::usage::CLASS,
+        crate::start::CLASS,
         crate::terminal::CLASS,
     ] {
         let mut after = None;

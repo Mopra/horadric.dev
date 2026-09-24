@@ -11,7 +11,11 @@
 //! Esc or the cross in its header closes it.
 //!
 //! Ctrl+Shift+T in any pane opens a plain terminal in the project on the
-//! stage.
+//! stage. A few more chords belong to the stage, not the program
+//! ([`keys::chord`]): zoom, moving to the next pane, the font size, and
+//! Ctrl+Shift+F, which opens a search bar over the pane. While it is open
+//! the keyboard types into it: Enter finds the next match up the history,
+//! Shift+Enter the next one down, Esc closes it.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -19,9 +23,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use alacritty_terminal::grid::Scroll;
-use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
+use alacritty_terminal::term::search::{Match, RegexSearch};
 use alacritty_terminal::term::TermMode;
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -30,31 +35,33 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, VIRTUAL_KEY, VK_CONTROL, VK_DELETE, VK_DOWN,
-    VK_END, VK_F1, VK_F12, VK_F4, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR,
+    VK_END, VK_F1, VK_F12, VK_F3, VK_F4, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR,
     VK_RIGHT, VK_SHIFT, VK_UP,
 };
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetParent,
-    GetWindowLongPtrW, KillTimer, LoadCursorW, RegisterClassW, SendMessageW, SetCursor, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, CREATESTRUCTW, CS_DBLCLKS, GWLP_USERDATA, HTCLIENT, IDC_ARROW,
-    IDC_IBEAM, SWP_NOACTIVATE, SWP_NOZORDER, WINDOW_EX_STYLE, WM_CHAR, WM_DPICHANGED_AFTERPARENT,
+    GetWindowLongPtrW, KillTimer, LoadCursorW, PeekMessageW, RegisterClassW, SendMessageW,
+    SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW, CS_DBLCLKS,
+    GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_IBEAM, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOZORDER,
+    SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_CHAR, WM_DEADCHAR, WM_DPICHANGED_AFTERPARENT,
     WM_DROPFILES, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_USER, WNDCLASSW,
-    WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_TIMER,
+    WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 
 use crate::app::{self, Input};
 use crate::clipboard;
 use crate::console::{Console, GridSize};
-use crate::frame;
-use crate::glyphs::{CellSize, GridTarget, Header, HEADER_H, PAD};
-use crate::keys::{self, CharAction, Key, Mods};
+use crate::glyphs::{self, CellSize, FindBar, GridTarget, Header, HEADER_H, PAD};
+use crate::keys::{self, CharAction, Chord, FontStep, Key, Mods};
+use crate::layout::Dir;
 use crate::motion::{self, REVEAL, SPOTLIGHT};
 use crate::paste::{self, Source};
 use crate::theme::{self, Color};
 use crate::window::Shared;
+use crate::{find, frame};
 
 const CLASS: PCWSTR = w!("HoradricPane");
 const SYNC_TIMER: usize = 1;
@@ -70,6 +77,24 @@ pub const WM_PANE_FOCUS: u32 = WM_USER + 1;
 /// Sent to the stage when a pane's header is pressed, which may start a
 /// drag. `wparam` is its serial.
 pub const WM_PANE_GRAB: u32 = WM_USER + 2;
+/// Sent to the stage to zoom a pane in or out: its zoom button, a double
+/// click on its header, or Ctrl+Shift+Enter. `wparam` is its serial.
+pub const WM_PANE_ZOOM: u32 = WM_USER + 3;
+/// Sent to the stage to move the keyboard to the next pane. `wparam` is
+/// the serial of the pane it leaves, `lparam` the [`Dir`] as a number.
+pub const WM_PANE_MOVE: u32 = WM_USER + 4;
+
+/// Directions as they travel in a message.
+pub const DIRS: [Dir; 4] = [Dir::Left, Dir::Right, Dir::Up, Dir::Down];
+
+/// A search of the pane's history, while its bar is open.
+struct Search {
+    query: String,
+    /// None while the query is empty or can not be searched for.
+    regex: Option<RegexSearch>,
+    /// The match shown, which is also the selection.
+    found: Option<Match>,
+}
 
 pub struct Pane {
     pub hwnd: HWND,
@@ -101,6 +126,10 @@ pub struct Pane {
     /// The frame before, for how far a fade has got.
     last_frame: Cell<Option<Instant>>,
     animating: Cell<bool>,
+    /// The header's zoom button, when the stage shows more than one pane,
+    /// and whether this one is zoomed.
+    zoom: Cell<Option<bool>>,
+    search: RefCell<Option<Search>>,
 }
 
 pub fn register_class() -> Result<()> {
@@ -149,6 +178,8 @@ impl Pane {
             shown: Cell::new(None),
             last_frame: Cell::new(None),
             animating: Cell::new(false),
+            zoom: Cell::new(None),
+            search: RefCell::new(None),
         });
         unsafe {
             let instance = GetModuleHandleW(None)?;
@@ -295,6 +326,28 @@ impl Pane {
         }
     }
 
+    /// Shows the header's zoom button, or not, and which way it points.
+    pub fn set_zoom(&self, zoom: Option<bool>) {
+        if self.zoom.replace(zoom) != zoom {
+            self.invalidate();
+        }
+    }
+
+    /// Hidden while another pane is zoomed. It keeps its size, so the
+    /// program behind it is not told of a resize it would redraw for.
+    pub fn set_visible(&self, on: bool) {
+        unsafe {
+            let _ = ShowWindow(self.hwnd, if on { SW_SHOWNA } else { SW_HIDE });
+        }
+    }
+
+    /// The font changed size: the grid takes the rows and columns that fit
+    /// now.
+    pub fn refont(&self) {
+        self.fit_grid();
+        self.invalidate();
+    }
+
     pub fn focus(&self) {
         unsafe {
             let _ = SetFocus(Some(self.hwnd));
@@ -409,6 +462,12 @@ impl Pane {
             active: self.focused.get(),
             lifted: self.lifted.get(),
             close: self.console.is_view(),
+            zoom: self.zoom.get(),
+        });
+        let search = self.search.borrow();
+        let find = search.as_ref().map(|s| FindBar {
+            query: &s.query,
+            status: find::status(&s.query, s.found.is_some()),
         });
         let veil = self.veil();
         let font = &self.shared.font;
@@ -424,6 +483,7 @@ impl Pane {
                 &cell,
                 &frame,
                 header.as_ref(),
+                find.as_ref(),
                 self.drop_target.get(),
                 veil,
             )
@@ -538,6 +598,10 @@ impl Pane {
             char::from_u32(unit as u32)
         };
         let Some(c) = c else { return };
+        if self.search.borrow().is_some() {
+            self.search_char(c, mods);
+            return;
+        }
         if self.console.is_view() {
             match keys::char_action(c, mods) {
                 _ if c as u32 == 0x1b => self.close(),
@@ -566,6 +630,16 @@ impl Pane {
 
     /// Keys that make no character. Returns false to let Windows have it.
     fn on_key(&self, vk: u16, mods: Mods) -> bool {
+        if let Some(chord) = keys::chord(vk, mods) {
+            self.drop_char();
+            match chord {
+                Chord::Zoom => self.tell_stage(WM_PANE_ZOOM),
+                Chord::Focus(dir) => self.move_focus(dir),
+                Chord::Font(step) => app::push(Input::Font(step)),
+                Chord::Find => self.open_search(),
+            }
+            return true;
+        }
         let vk = VIRTUAL_KEY(vk);
         // Alt+F4 closes the stage. Windows passes it up from a child.
         if mods.alt && vk == VK_F4 {
@@ -581,6 +655,16 @@ impl Pane {
                 s.term.scroll_display(scroll);
             }
             self.invalidate();
+            return true;
+        }
+        // The search bar has the keyboard. Nothing reaches the program.
+        if self.search.borrow().is_some() {
+            match vk {
+                VK_F3 if mods.shift => self.find_next(Direction::Right),
+                VK_F3 | VK_UP => self.find_next(Direction::Left),
+                VK_DOWN => self.find_next(Direction::Right),
+                _ => {}
+            }
             return true;
         }
         if vk == VK_INSERT && mods.shift {
@@ -635,6 +719,164 @@ impl Pane {
         app::push(Input::CloseView(self.serial()));
     }
 
+    /// A chord was handled on its key press. The character Windows made of
+    /// the same press is already queued and must not reach the program.
+    fn drop_char(&self) {
+        let mut msg = MSG::default();
+        unsafe {
+            let _ = PeekMessageW(&mut msg, Some(self.hwnd), WM_CHAR, WM_DEADCHAR, PM_REMOVE);
+            let _ = PeekMessageW(
+                &mut msg,
+                Some(self.hwnd),
+                WM_SYSCHAR,
+                WM_SYSDEADCHAR,
+                PM_REMOVE,
+            );
+        }
+    }
+
+    fn move_focus(&self, dir: Dir) {
+        let Some(i) = DIRS.iter().position(|d| *d == dir) else {
+            return;
+        };
+        unsafe {
+            if let Ok(parent) = GetParent(self.hwnd) {
+                SendMessageW(
+                    parent,
+                    WM_PANE_MOVE,
+                    Some(WPARAM(self.serial())),
+                    Some(LPARAM(i as isize)),
+                );
+            }
+        }
+    }
+
+    fn open_search(&self) {
+        let mut search = self.search.borrow_mut();
+        if search.is_none() {
+            *search = Some(Search {
+                query: String::new(),
+                regex: None,
+                found: None,
+            });
+        }
+        drop(search);
+        self.invalidate();
+    }
+
+    fn close_search(&self) {
+        self.search.borrow_mut().take();
+        self.invalidate();
+    }
+
+    /// Typing while the search bar is open edits the query.
+    fn search_char(&self, c: char, mods: Mods) {
+        match c {
+            '\u{1b}' => return self.close_search(),
+            '\r' if mods.shift => return self.find_next(Direction::Right),
+            '\r' => return self.find_next(Direction::Left),
+            '\u{3}' => {
+                self.copy_found();
+                return;
+            }
+            _ => {}
+        }
+        let Some(query) = self.search.borrow().as_ref().map(|s| s.query.clone()) else {
+            return;
+        };
+        let query = match c {
+            // Backspace, and Ctrl+Backspace for the whole query.
+            '\u{8}' => {
+                let mut q = query;
+                q.pop();
+                q
+            }
+            '\u{7f}' => String::new(),
+            '\u{16}' => {
+                let pasted = clipboard::get_text().unwrap_or_default();
+                query + pasted.lines().next().unwrap_or("")
+            }
+            c if c.is_control() => return,
+            c => query + &c.to_string(),
+        };
+        self.search_for(query);
+    }
+
+    /// A new query. It looks up the history from the match shown, so
+    /// typing more of a word stays on the same line.
+    fn search_for(&self, query: String) {
+        let regex = if query.is_empty() {
+            None
+        } else {
+            RegexSearch::new(&find::pattern(&query)).ok()
+        };
+        let from = self
+            .search
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.found.as_ref().map(|m| *m.start()));
+        if let Some(s) = self.search.borrow_mut().as_mut() {
+            s.query = query;
+            s.regex = regex;
+            s.found = None;
+        }
+        self.search_from(from, Direction::Left);
+    }
+
+    /// The next match from the one shown, up the history (`Left`) or down
+    /// it (`Right`), wrapping round at either end.
+    fn find_next(&self, direction: Direction) {
+        let found = self
+            .search
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.found.as_ref().map(|m| *m.start()));
+        let from = found.and_then(|start| {
+            let s = self.console.screen.lock().ok()?;
+            Some(match direction {
+                Direction::Left => start.sub(&s.term, Boundary::None, 1),
+                Direction::Right => start.add(&s.term, Boundary::None, 1),
+            })
+        });
+        self.search_from(from, direction);
+    }
+
+    /// Looks for the query from `from`, or from the bottom of the screen,
+    /// and selects what it finds, scrolled into view.
+    fn search_from(&self, from: Option<Point>, direction: Direction) {
+        {
+            let mut search = self.search.borrow_mut();
+            let Some(search) = search.as_mut() else {
+                return;
+            };
+            let Ok(mut s) = self.console.screen.lock() else {
+                return;
+            };
+            let found = search.regex.as_mut().and_then(|regex| {
+                let bottom =
+                    Point::new(Line(s.term.screen_lines() as i32 - 1), s.term.last_column());
+                s.term
+                    .search_next(regex, from.unwrap_or(bottom), direction, Side::Left, None)
+            });
+            s.term.selection = found.as_ref().map(|m| {
+                let mut sel = Selection::new(SelectionType::Simple, *m.start(), Side::Left);
+                sel.update(*m.end(), Side::Right);
+                sel
+            });
+            if let Some(m) = &found {
+                s.term.scroll_to_point(*m.start());
+            }
+            search.found = found;
+        }
+        self.invalidate();
+    }
+
+    fn copy_found(&self) {
+        if let Some(t) = self.console.selection_text().filter(|t| !t.is_empty()) {
+            clipboard::set_text(&t);
+        }
+    }
+
     /// A client point in DIPs.
     fn dip(&self, lparam: LPARAM) -> (f32, f32) {
         let scale = self.dpi_now() as f32 / 96.0;
@@ -647,21 +889,48 @@ impl Pane {
         self.header.get() && self.dip(lparam).1 < HEADER_H
     }
 
-    /// On the cross that closes a file view, a square at the header's end.
-    fn on_close(&self, lparam: LPARAM) -> bool {
-        if !self.console.is_view() || !self.in_header(lparam) {
-            return false;
-        }
+    /// Where the header's buttons start: the zoom button's, then the
+    /// cross's that closes a file view.
+    fn buttons(&self) -> (Option<f32>, Option<f32>) {
         let mut r = RECT::default();
         unsafe {
             let _ = GetClientRect(self.hwnd, &mut r);
         }
         let width = r.right as f32 * 96.0 / self.dpi_now() as f32;
-        self.dip(lparam).0 >= width - HEADER_H
+        glyphs::header_buttons(width, self.zoom.get().is_some(), self.console.is_view())
+    }
+
+    fn on_button(&self, lparam: LPARAM, at: Option<f32>) -> bool {
+        let x = self.dip(lparam).0;
+        self.in_header(lparam) && at.is_some_and(|a| x >= a && x < a + HEADER_H)
+    }
+
+    fn on_close(&self, lparam: LPARAM) -> bool {
+        self.on_button(lparam, self.buttons().1)
+    }
+
+    fn on_zoom(&self, lparam: LPARAM) -> bool {
+        self.on_button(lparam, self.buttons().0)
     }
 
     /// The cell under a client point, and which half of it.
     fn cell_at(&self, lparam: LPARAM) -> (Point, Side) {
+        let (col, row, side) = self.screen_cell(lparam);
+        let offset = self
+            .console
+            .screen
+            .lock()
+            .map(|s| s.term.grid().display_offset())
+            .unwrap_or(0);
+        (
+            Point::new(Line(row as i32 - offset as i32), Column(col)),
+            side,
+        )
+    }
+
+    /// The column and row on screen under a client point, whatever the
+    /// scrollback shows, and which half of the cell.
+    fn screen_cell(&self, lparam: LPARAM) -> (usize, usize, Side) {
         let (x, y) = self.dip(lparam);
         let cell = self.cell();
         let size = self.console.size();
@@ -673,16 +942,7 @@ impl Pane {
             Side::Right
         };
         let row = (((y - self.top() - PAD) / cell.h).max(0.0) as usize).min(size.rows as usize - 1);
-        let offset = self
-            .console
-            .screen
-            .lock()
-            .map(|s| s.term.grid().display_offset())
-            .unwrap_or(0);
-        (
-            Point::new(Line(row as i32 - offset as i32), Column(col)),
-            side,
-        )
+        (col, row, side)
     }
 
     fn start_selection(&self, lparam: LPARAM, ty: SelectionType) {
@@ -697,16 +957,45 @@ impl Pane {
         self.invalidate();
     }
 
-    fn on_wheel(&self, wparam: WPARAM) {
+    fn on_wheel(&self, wparam: WPARAM, lparam: LPARAM) {
         let delta = ((wparam.0 >> 16) & 0xffff) as i16 as i32 + self.wheel.get();
         let notches = delta / 120;
         self.wheel.set(delta % 120);
         if notches == 0 {
             return;
         }
+        // Ctrl and the wheel sizes the font, as in a browser.
+        if Self::mods().ctrl {
+            let step = if notches > 0 {
+                FontStep::Bigger
+            } else {
+                FontStep::Smaller
+            };
+            for _ in 0..notches.unsigned_abs() {
+                app::push(Input::Font(step));
+            }
+            return;
+        }
         let lines = notches * WHEEL_LINES;
         let mode = self.mode();
-        if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
+        if mode.intersects(TermMode::MOUSE_MODE) {
+            // A program that asked for the mouse scrolls itself, by its own
+            // measure: Claude Code's full screen mode does. Arrow keys there
+            // would walk its prompt history instead.
+            let mut p = POINT {
+                x: (lparam.0 & 0xffff) as i16 as i32,
+                y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
+            };
+            unsafe {
+                let _ = ScreenToClient(self.hwnd, &mut p);
+            }
+            let at = LPARAM(((p.y as u16 as isize) << 16) | p.x as u16 as isize);
+            let (col, row, _) = self.screen_cell(at);
+            let sgr = mode.contains(TermMode::SGR_MOUSE);
+            let one = keys::wheel_bytes(lines > 0, col, row, Self::mods(), sgr);
+            self.console
+                .write(one.repeat(notches.unsigned_abs() as usize));
+        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
             // Full screen programs scroll themselves. Give them arrow keys.
             let key = if lines > 0 { Key::Up } else { Key::Down };
             let one = keys::key_bytes(key, Mods::NONE, mode.contains(TermMode::APP_CURSOR));
@@ -840,8 +1129,15 @@ impl Pane {
                 self.focus();
                 if self.on_close(lparam) {
                     self.close();
+                } else if self.on_zoom(lparam) {
+                    self.tell_stage(WM_PANE_ZOOM);
                 } else if self.in_header(lparam) {
-                    self.tell_stage(WM_PANE_GRAB);
+                    // A double click zooms, as on a title bar.
+                    if msg == WM_LBUTTONDBLCLK && self.zoom.get().is_some() {
+                        self.tell_stage(WM_PANE_ZOOM);
+                    } else {
+                        self.tell_stage(WM_PANE_GRAB);
+                    }
                 } else if msg == WM_LBUTTONDOWN {
                     self.start_selection(lparam, SelectionType::Simple);
                 } else {
@@ -892,7 +1188,7 @@ impl Pane {
                 Some(LRESULT(0))
             }
             WM_MOUSEWHEEL => {
-                self.on_wheel(wparam);
+                self.on_wheel(wparam, lparam);
                 Some(LRESULT(0))
             }
             WM_DROPFILES => {

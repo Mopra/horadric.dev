@@ -5,7 +5,7 @@
 //! font's own advances say. Characters the font lacks go through DirectWrite
 //! font fallback one at a time, each pinned to its own cell.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 
@@ -33,9 +33,6 @@ use crate::theme::{self, Color};
 /// Cascadia ships with Windows 11. Consolas is on every Windows since Vista.
 const FAMILIES: [PCWSTR; 2] = [w!("Cascadia Mono"), w!("Consolas")];
 
-/// Font size in DIPs. 15 DIPs is 11.25 points at 100 % scaling.
-pub const FONT_SIZE: f32 = 15.0;
-
 /// Space between the grid and the window edge, in DIPs.
 pub const PAD: f32 = 6.0;
 
@@ -59,11 +56,34 @@ pub struct Header<'a> {
     pub lifted: bool,
     /// Ends in a cross that closes it, a square [`HEADER_H`] wide.
     pub close: bool,
+    /// Has the button that zooms it, a square left of the cross, and
+    /// whether it is zoomed now.
+    pub zoom: Option<bool>,
 }
 
-/// Behind a pane's header: the terminal's own black, lifted a touch, so the
-/// header belongs to the pane rather than floating over it.
-const HEADER_BG: Color = Color::rgb(0x0E0E12);
+/// Where a header's buttons start, from its left, in a pane `width` DIPs
+/// wide: the zoom button's, then the cross's.
+pub fn header_buttons(width: f32, zoom: bool, close: bool) -> (Option<f32>, Option<f32>) {
+    let close_at = close.then_some(width - HEADER_H);
+    let zoom_at = zoom.then_some(close_at.unwrap_or(width) - HEADER_H);
+    (zoom_at, close_at)
+}
+
+/// The search bar over a pane's top right corner, while it is open.
+pub struct FindBar<'a> {
+    pub query: &'a str,
+    /// After the query, dimmer: "No match", or a hint while it is empty.
+    pub status: &'a str,
+}
+
+/// The search bar's size in DIPs, and its distance from the edges.
+const FIND_W: f32 = 320.0;
+const FIND_H: f32 = 30.0;
+const FIND_INSET: f32 = 8.0;
+
+/// Behind a pane's header: the clay of a tile, so the header reads as the
+/// label on the dark well under it.
+const HEADER_BG: Color = theme::SURFACE;
 
 /// Cell geometry in DIPs, snapped so every cell edge is a whole device pixel.
 /// Without the snap, backgrounds of neighbouring cells leave hairline seams.
@@ -81,16 +101,50 @@ pub struct CellSize {
 pub struct Font {
     /// Regular, bold, italic, bold italic: indexed by the frame's style bits.
     faces: [IDWriteFontFace; 4],
-    formats: [IDWriteTextFormat; 4],
+    /// For the characters drawn one at a time. They carry the size, so a
+    /// new size makes new ones.
+    formats: RefCell<[IDWriteTextFormat; 4]>,
+    family: PCWSTR,
+    dw: IDWriteFactory,
     metrics: DWRITE_FONT_METRICS,
     /// Advance of `0` in design units. Monospace, so every glyph's.
     advance: u32,
-    size: f32,
+    /// In DIPs, the same for every pane.
+    size: Cell<f32>,
     cache: RefCell<HashMap<(char, u8), u16>>,
 }
 
+const VARIANTS: [(DWRITE_FONT_WEIGHT, DWRITE_FONT_STYLE); 4] = [
+    (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL),
+    (DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL),
+    (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_ITALIC),
+    (DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_ITALIC),
+];
+
+fn formats(dw: &IDWriteFactory, family: PCWSTR, size: f32) -> Result<[IDWriteTextFormat; 4]> {
+    let format = |(weight, style): (DWRITE_FONT_WEIGHT, DWRITE_FONT_STYLE)| unsafe {
+        let f = dw.CreateTextFormat(
+            family,
+            None,
+            weight,
+            style,
+            DWRITE_FONT_STRETCH_NORMAL,
+            size,
+            w!("en-us"),
+        )?;
+        f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        Ok::<_, windows::core::Error>(f)
+    };
+    Ok([
+        format(VARIANTS[0])?,
+        format(VARIANTS[1])?,
+        format(VARIANTS[2])?,
+        format(VARIANTS[3])?,
+    ])
+}
+
 impl Font {
-    pub fn new(dw: &IDWriteFactory) -> Result<Font> {
+    pub fn new(dw: &IDWriteFactory, size: f32) -> Result<Font> {
         unsafe {
             let mut collection: Option<IDWriteFontCollection> = None;
             dw.GetSystemFontCollection(&mut collection, false)?;
@@ -108,41 +162,16 @@ impl Font {
             }
             let family = collection.GetFontFamily(family_index)?;
 
-            let variants: [(DWRITE_FONT_WEIGHT, DWRITE_FONT_STYLE); 4] = [
-                (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL),
-                (DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL),
-                (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_ITALIC),
-                (DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_ITALIC),
-            ];
             let face = |(weight, style): (DWRITE_FONT_WEIGHT, DWRITE_FONT_STYLE)| {
                 family
                     .GetFirstMatchingFont(weight, DWRITE_FONT_STRETCH_NORMAL, style)?
                     .CreateFontFace()
             };
-            let format = |(weight, style): (DWRITE_FONT_WEIGHT, DWRITE_FONT_STYLE)| {
-                let f = dw.CreateTextFormat(
-                    family_name,
-                    None,
-                    weight,
-                    style,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    FONT_SIZE,
-                    w!("en-us"),
-                )?;
-                f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-                Ok::<_, windows::core::Error>(f)
-            };
             let faces = [
-                face(variants[0])?,
-                face(variants[1])?,
-                face(variants[2])?,
-                face(variants[3])?,
-            ];
-            let formats = [
-                format(variants[0])?,
-                format(variants[1])?,
-                format(variants[2])?,
-                format(variants[3])?,
+                face(VARIANTS[0])?,
+                face(VARIANTS[1])?,
+                face(VARIANTS[2])?,
+                face(VARIANTS[3])?,
             ];
 
             let mut metrics = DWRITE_FONT_METRICS::default();
@@ -153,20 +182,33 @@ impl Font {
 
             Ok(Font {
                 faces,
-                formats,
+                formats: RefCell::new(formats(dw, family_name, size)?),
+                family: family_name,
+                dw: dw.clone(),
                 metrics,
                 advance: gm.advanceWidth.max(1),
-                size: FONT_SIZE,
+                size: Cell::new(size),
                 cache: RefCell::new(HashMap::new()),
             })
         }
+    }
+
+    pub fn size(&self) -> f32 {
+        self.size.get()
+    }
+
+    /// Changes the size for every pane. They have to fit their grids again.
+    pub fn set_size(&self, size: f32) -> Result<()> {
+        *self.formats.borrow_mut() = formats(&self.dw, self.family, size)?;
+        self.size.set(size);
+        Ok(())
     }
 
     /// Cell geometry at a DPI.
     pub fn cell(&self, dpi: u32) -> CellSize {
         let scale = dpi.max(96) as f32 / 96.0;
         let m = &self.metrics;
-        let k = self.size / m.designUnitsPerEm as f32;
+        let k = self.size.get() / m.designUnitsPerEm as f32;
         let snap_round = |dip: f32| (dip * scale).round().max(1.0) / scale;
         let snap_up = |dip: f32| (dip * scale).ceil().max(1.0) / scale;
 
@@ -232,10 +274,11 @@ impl GridTarget {
         unsafe { self.rt.SetDpi(dpi as f32, dpi as f32) }
     }
 
-    /// Draws a frame, below `header` when there is one. With `drop`, the
-    /// pane is where a dragged one would land. `veil` from 0 to 1 lays the
-    /// background over everything: a pane without the keyboard steps back,
-    /// a pane just shown fades in. `Err` means the target must be recreated.
+    /// Draws a frame, below `header` when there is one, and the search bar
+    /// over it when open. With `drop`, the pane is where a dragged one
+    /// would land. `veil` from 0 to 1 lays the background over everything:
+    /// a pane without the keyboard steps back, a pane just shown fades in.
+    /// `Err` means the target must be recreated.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
@@ -244,6 +287,7 @@ impl GridTarget {
         cell: &CellSize,
         frame: &Frame,
         header: Option<&Header>,
+        find: Option<&FindBar>,
         drop: bool,
         veil: f32,
     ) -> Result<()> {
@@ -272,7 +316,7 @@ impl GridTarget {
                 advances.resize(r.glyphs.len(), cell.w);
                 let run = DWRITE_GLYPH_RUN {
                     fontFace: ManuallyDrop::new(Some(font.faces[r.style as usize & 3].clone())),
-                    fontEmSize: font.size,
+                    fontEmSize: font.size.get(),
                     glyphCount: r.glyphs.len() as u32,
                     glyphIndices: r.glyphs.as_ptr(),
                     glyphAdvances: advances.as_ptr(),
@@ -294,9 +338,10 @@ impl GridTarget {
                 ManuallyDrop::drop(&mut run.fontFace);
             }
 
+            let formats = font.formats.borrow();
             for l in &frame.loose {
                 let wide: Vec<u16> = l.text.encode_utf16().collect();
-                let fmt = &font.formats[l.style as usize & 3];
+                let fmt = &formats[l.style as usize & 3];
                 // Colour glyphs only for wide characters, which is where
                 // emoji presentation lives. A one cell symbol such as Claude
                 // Code's bullet has to keep the colour the program gave it.
@@ -371,6 +416,9 @@ impl GridTarget {
             if let Some(h) = header {
                 self.header(gpu, h);
             }
+            if let Some(f) = find {
+                self.find_bar(gpu, f, top);
+            }
             if veil > 0.0 {
                 let size = self.rt.GetSize();
                 let bg = frame.background;
@@ -378,10 +426,13 @@ impl GridTarget {
                     a: veil.min(1.0),
                     ..color(bg)
                 });
+                // The header stays clay: a dark veil over it would read as
+                // dirt, and its dimmer name already says it is not in use.
+                let top = if header.is_some() { HEADER_H } else { 0.0 };
                 self.rt.FillRectangle(
                     &D2D_RECT_F {
                         left: 0.0,
-                        top: 0.0,
+                        top,
                         right: size.width,
                         bottom: size.height,
                     },
@@ -437,43 +488,43 @@ impl GridTarget {
         // It is the only mark of the phase here, so it is strong enough to
         // read from across the room.
         if let (Some(c), false) = (h.phase, h.lifted) {
-            bar(c.with_alpha(0.05), 0.0, HEADER_H);
-            bar(c.with_alpha(0.75), 0.0, 2.0);
+            bar(c.with_alpha(0.1), 0.0, HEADER_H);
+            bar(c.with_alpha(0.85), 0.0, 2.0);
         }
         // The project's colour under the pane that has the keyboard: the
         // same colour the stage's edge and the cluster's wash have.
         if h.active && !h.lifted {
-            bar(h.accent.with_alpha(0.55), HEADER_H - 1.0, HEADER_H);
+            bar(h.accent.with_alpha(0.8), HEADER_H - 2.0, HEADER_H);
         } else {
-            bar(
-                Color::rgb(0xFFFFFF).with_alpha(0.05),
-                HEADER_H - 1.0,
-                HEADER_H,
-            );
+            bar(theme::RIM_SHADE, HEADER_H - 1.0, HEADER_H);
         }
 
         let left = 10.0;
-        let right = if h.close {
-            width - HEADER_H
-        } else {
-            width - 8.0
-        };
-        if h.close {
-            let cross: Vec<u16> = "\u{E711}".encode_utf16().collect();
+        let (zoom_at, close_at) = header_buttons(width, h.zoom.is_some(), h.close);
+        let right = zoom_at.or(close_at).unwrap_or(width - 8.0);
+        let button = |glyph: &str, at: f32| {
+            let glyph: Vec<u16> = glyph.encode_utf16().collect();
             self.brush.SetColor(&render::color(theme::TEXT_DIM));
             self.rt.DrawText(
-                &cross,
+                &glyph,
                 &gpu.icon_small,
                 &D2D_RECT_F {
-                    left: right,
+                    left: at,
                     top: 0.0,
-                    right: width,
+                    right: at + HEADER_H,
                     bottom: HEADER_H,
                 },
                 &self.brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
+        };
+        if let Some(at) = close_at {
+            button("\u{E711}", at);
+        }
+        // Full screen to zoom in, back to window to zoom out.
+        if let (Some(at), Some(zoomed)) = (zoom_at, h.zoom) {
+            button(if zoomed { "\u{E73F}" } else { "\u{E740}" }, at);
         }
         let name: Vec<u16> = h.name.encode_utf16().collect();
         let name_w = gpu
@@ -523,6 +574,81 @@ impl GridTarget {
             );
         }
     }
+
+    /// The search bar, in the top right corner below the header at `top`:
+    /// a magnifier, the query with a caret after it, and what was found.
+    unsafe fn find_bar(&self, gpu: &Gpu, f: &FindBar, top: f32) {
+        let width = self.rt.GetSize().width;
+        let bar = D2D_RECT_F {
+            left: (width - FIND_INSET - FIND_W).max(FIND_INSET),
+            top: top + FIND_INSET,
+            right: width - FIND_INSET,
+            bottom: top + FIND_INSET + FIND_H,
+        };
+        self.brush
+            .SetColor(&render::color(HEADER_BG.mix(theme::WORKING, 0.12)));
+        self.rt.FillRectangle(&bar, &self.brush);
+        self.brush
+            .SetColor(&render::color(theme::WORKING.with_alpha(0.6)));
+        let edge = D2D_RECT_F {
+            left: bar.left + 0.5,
+            top: bar.top + 0.5,
+            right: bar.right - 0.5,
+            bottom: bar.bottom - 0.5,
+        };
+        self.rt.DrawRectangle(&edge, &self.brush, 1.0, None);
+
+        let text = |s: &str, format: &IDWriteTextFormat, color: Color, left: f32, right: f32| {
+            let wide: Vec<u16> = s.encode_utf16().collect();
+            self.brush.SetColor(&render::color(color));
+            self.rt.DrawText(
+                &wide,
+                format,
+                &D2D_RECT_F {
+                    left,
+                    top: bar.top,
+                    right: right.max(left),
+                    bottom: bar.bottom,
+                },
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        };
+        text(
+            "\u{E721}",
+            &gpu.icon_small,
+            theme::TEXT_DIM,
+            bar.left,
+            bar.left + FIND_H,
+        );
+        let left = bar.left + FIND_H;
+        let right = bar.right - 10.0;
+        text(f.status, &gpu.small_right, theme::TEXT_DIM, left, right);
+        text(f.query, &gpu.body, theme::TEXT, left, right);
+        // The caret after the query, where the next character goes.
+        let wide: Vec<u16> = f.query.encode_utf16().collect();
+        let query_w = gpu
+            .dw
+            .CreateTextLayout(&wide, &gpu.body, (right - left).max(0.0), FIND_H)
+            .and_then(|l| {
+                let mut m = Default::default();
+                l.GetMetrics(&mut m)
+                    .map(|_| m.widthIncludingTrailingWhitespace)
+            })
+            .unwrap_or(0.0);
+        let x = (left + query_w + 1.0).min(right);
+        self.brush.SetColor(&render::color(theme::TEXT));
+        self.rt.FillRectangle(
+            &D2D_RECT_F {
+                left: x,
+                top: bar.top + 7.0,
+                right: x + 1.5,
+                bottom: bar.bottom - 7.0,
+            },
+            &self.brush,
+        );
+    }
 }
 
 // Styles index the face arrays directly.
@@ -534,5 +660,27 @@ fn color(c: Rgb) -> D2D1_COLOR_F {
         g: c.g as f32 / 255.0,
         b: c.b as f32 / 255.0,
         a: 1.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_buttons_sit_at_the_end_zoom_first() {
+        assert_eq!(header_buttons(400.0, false, false), (None, None));
+        assert_eq!(
+            header_buttons(400.0, false, true),
+            (None, Some(400.0 - HEADER_H))
+        );
+        assert_eq!(
+            header_buttons(400.0, true, false),
+            (Some(400.0 - HEADER_H), None)
+        );
+        assert_eq!(
+            header_buttons(400.0, true, true),
+            (Some(400.0 - 2.0 * HEADER_H), Some(400.0 - HEADER_H))
+        );
     }
 }

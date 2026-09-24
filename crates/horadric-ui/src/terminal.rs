@@ -7,6 +7,11 @@
 //! keyboard. With more than one pane, dragging a pane's header onto another
 //! swaps the two.
 //!
+//! Zoomed, the pane with the keyboard fills the stage alone and the rest
+//! wait hidden, keeping their size. Moving the keyboard to another pane
+//! (Ctrl+Alt+arrow, or a tile) zooms that one instead, so zoom reads as
+//! looking at one pane at a time. Switching project ends it.
+//!
 //! Unlike a cluster, this window takes focus, because you type into it. It
 //! is a normal window: resizable, in the taskbar and in alt-tab. Closing it
 //! only collapses the sessions back into their tiles; the agents keep
@@ -40,15 +45,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::app::{self, Input};
 use crate::backdrop;
 use crate::console::Console;
-use crate::pane::{self, Pane, WM_PANE_FOCUS, WM_PANE_GRAB};
+use crate::pane::{self, Pane, DIRS, WM_PANE_FOCUS, WM_PANE_GRAB, WM_PANE_MOVE, WM_PANE_ZOOM};
 use crate::window::Shared;
-use crate::{layout, palette, snapping, theme};
+use crate::{layout, snapping, theme};
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricTerminal");
-/// Between panes, and around them, in DIPs. The gaps are black and the
-/// panes a shade lighter, so they float on the window rather than being
-/// cut out of it.
-const PANE_GAP_DIP: f32 = 6.0;
+/// Between panes, and around them, in DIPs. The gaps are the clusters'
+/// clay, and the dark panes sit in it like wells.
+const PANE_GAP_DIP: f32 = 10.0;
 /// How far a header has to move before a press becomes a drag.
 const DRAG_THRESHOLD: i32 = 4;
 
@@ -78,8 +82,14 @@ pub struct TerminalWindow {
     /// a raw pointer to it, so it must not move.
     #[allow(clippy::vec_box)]
     panes: RefCell<Vec<Box<Pane>>>,
-    /// Where each pane is, in client pixels, in the same order.
+    /// Where each pane is, in client pixels, in the same order. Zoomed,
+    /// only the one shown has a place.
     rects: RefCell<Vec<[i32; 4]>>,
+    /// Where each pane is in the grid, zoomed or not: what the keyboard
+    /// moves across.
+    grid: RefCell<Vec<[i32; 4]>>,
+    /// Only the pane with the keyboard is shown.
+    zoomed: Cell<bool>,
     /// The session that has, or last had, the keyboard.
     active: RefCell<Option<String>>,
     title: RefCell<String>,
@@ -96,7 +106,8 @@ pub fn register_class() -> Result<()> {
     pane::register_class()?;
     unsafe {
         let instance = GetModuleHandleW(None)?;
-        let bg = palette::GUTTER;
+        let bg = theme::WINDOW_BG;
+        let byte = |v: f32| (v * 255.0).round() as u32;
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
@@ -104,7 +115,7 @@ pub fn register_class() -> Result<()> {
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             // Only the gaps between panes show it.
             hbrBackground: CreateSolidBrush(COLORREF(
-                bg.r as u32 | (bg.g as u32) << 8 | (bg.b as u32) << 16,
+                byte(bg.r) | byte(bg.g) << 8 | byte(bg.b) << 16,
             )),
             // The icon the build script put in the executable, so a terminal
             // shows as Horadric on the taskbar. Resource 1 is the app icon.
@@ -131,6 +142,8 @@ impl TerminalWindow {
             project_name: RefCell::new(String::new()),
             panes: RefCell::new(Vec::new()),
             rects: RefCell::new(Vec::new()),
+            grid: RefCell::new(Vec::new()),
+            zoomed: Cell::new(false),
             active: RefCell::new(None),
             title: RefCell::new(String::new()),
             drag: Cell::new(None),
@@ -162,9 +175,9 @@ impl TerminalWindow {
                 &dark as *const _ as *const c_void,
                 std::mem::size_of::<BOOL>() as u32,
             );
-            // The title bar in the terminal's own near black, so the stage
-            // reads as one deep surface. Mica here lifted it toward grey.
-            backdrop::caption(hwnd, theme::WINDOW_BG);
+            // The title bar in the clay, so the stage and its gaps read as
+            // one surface the panes are sunk into.
+            backdrop::caption(hwnd, theme::WINDOW_BG, theme::TEXT);
 
             match place {
                 Place::Rect(r) => win.set_rect(r),
@@ -204,11 +217,15 @@ impl TerminalWindow {
             p.destroy();
         }
         let switched = *self.project.borrow() != key;
+        // A new project's panes are a new set, laid out below.
+        if switched {
+            self.zoomed.set(false);
+        }
         *self.project.borrow_mut() = key.to_string();
         *self.project_name.borrow_mut() = name.to_string();
         let accent = theme::accent(key);
         // The window's edge in the project's colour, like its cluster's
-        // mark, sunk most of the way into the dark so it tints the edge
+        // mark, sunk most of the way into the clay so it tints the edge
         // rather than outlining the window.
         backdrop::border(self.hwnd, Some(theme::WINDOW_BG.mix(accent, 0.35)));
         for p in self.panes.borrow().iter() {
@@ -246,7 +263,8 @@ impl TerminalWindow {
         }
     }
 
-    /// Puts each pane in its place in the grid.
+    /// Puts each pane in its place in the grid, or, zoomed, the one with
+    /// the keyboard over all of it.
     fn layout(&self) {
         let mut r = RECT::default();
         unsafe {
@@ -255,13 +273,85 @@ impl TerminalWindow {
         let panes = self.panes.borrow();
         let gap = (PANE_GAP_DIP * self.dpi() as f32 / 96.0).round() as i32;
         let area = (gap, 0, r.right - gap, r.bottom - gap);
-        let rects = layout::grid(panes.len(), area, gap);
-        let header = panes.len() > 1;
-        for (p, rect) in panes.iter().zip(&rects) {
-            p.set_header(header);
-            p.set_rect(*rect);
+        let grid = layout::grid(panes.len(), area, gap);
+        let many = panes.len() > 1;
+        let zoomed = many && self.zoomed.get();
+        let active = self.active.borrow().clone();
+        let mut rects = Vec::with_capacity(panes.len());
+        for (p, cell) in panes.iter().zip(&grid) {
+            let shown = !zoomed || Some(p.session()) == active.as_deref();
+            p.set_header(many);
+            p.set_zoom(many.then_some(zoomed));
+            if shown {
+                let rect = if zoomed {
+                    [area.0, area.1, area.2, area.3]
+                } else {
+                    *cell
+                };
+                p.set_rect(rect);
+                rects.push(rect);
+            } else {
+                // Out of reach of a drop, which finds panes by place.
+                rects.push([0; 4]);
+            }
+            p.set_visible(shown);
         }
         *self.rects.borrow_mut() = rects;
+        *self.grid.borrow_mut() = grid;
+    }
+
+    /// Zooms the pane with this serial in, giving it the keyboard, or the
+    /// grid back.
+    fn toggle_zoom(&self, serial: usize) {
+        let id = self
+            .panes
+            .borrow()
+            .iter()
+            .find(|p| p.serial() == serial)
+            .map(|p| p.session().to_string());
+        let Some(id) = id else { return };
+        *self.active.borrow_mut() = Some(id);
+        self.zoomed.set(!self.zoomed.get());
+        self.layout();
+        self.focus_active();
+        self.spotlight();
+        self.refresh_title();
+    }
+
+    /// Moves the keyboard from the pane with this serial to the one beside
+    /// it in the grid. Zoomed, that one is shown instead.
+    fn move_focus(&self, serial: usize, dir: layout::Dir) {
+        let next = {
+            let panes = self.panes.borrow();
+            let Some(from) = panes.iter().position(|p| p.serial() == serial) else {
+                return;
+            };
+            layout::neighbour(&self.grid.borrow(), from, dir)
+                .and_then(|i| panes.get(i))
+                .map(|p| p.session().to_string())
+        };
+        if let Some(id) = next {
+            self.set_active(id);
+            self.focus_active();
+        }
+    }
+
+    /// Another session has the keyboard now. Zoomed, the stage shows it.
+    fn set_active(&self, id: String) {
+        let changed = self.active.borrow().as_deref() != Some(id.as_str());
+        *self.active.borrow_mut() = Some(id);
+        if changed && self.zoomed.get() {
+            self.layout();
+        }
+        self.spotlight();
+        self.refresh_title();
+    }
+
+    /// The font changed size: every pane fits its grid again.
+    pub fn refont(&self) {
+        for p in self.panes.borrow().iter() {
+            p.refont();
+        }
     }
 
     fn pane_has_focus(&self) -> bool {
@@ -284,11 +374,9 @@ impl TerminalWindow {
 
     /// Brings the stage forward with the keyboard in this session's pane.
     pub fn focus_session(&self, id: &str) {
-        *self.active.borrow_mut() = Some(id.to_string());
+        self.set_active(id.to_string());
         self.bring_to_front();
         self.focus_active();
-        self.spotlight();
-        self.refresh_title();
     }
 
     /// The project key of the sessions shown.
@@ -655,21 +743,33 @@ impl TerminalWindow {
                 Some(LRESULT(0))
             }
             WM_PANE_FOCUS => {
-                let panes = self.panes.borrow();
-                if let Some(p) = panes.iter().find(|p| p.serial() == wparam.0) {
-                    *self.active.borrow_mut() = Some(p.session().to_string());
+                let id = self
+                    .panes
+                    .borrow()
+                    .iter()
+                    .find(|p| p.serial() == wparam.0)
+                    .map(|p| p.session().to_string());
+                if let Some(id) = id {
+                    self.set_active(id);
                 }
                 // Headers show which pane has the keyboard.
-                for p in panes.iter() {
+                for p in self.panes.borrow().iter() {
                     p.invalidate();
                 }
-                drop(panes);
-                self.spotlight();
-                self.refresh_title();
                 Some(LRESULT(0))
             }
             WM_PANE_GRAB => {
                 self.start_drag(wparam.0);
+                Some(LRESULT(0))
+            }
+            WM_PANE_ZOOM => {
+                self.toggle_zoom(wparam.0);
+                Some(LRESULT(0))
+            }
+            WM_PANE_MOVE => {
+                if let Some(&dir) = DIRS.get(lparam.0 as usize) {
+                    self.move_focus(wparam.0, dir);
+                }
                 Some(LRESULT(0))
             }
             WM_MOUSEMOVE => {

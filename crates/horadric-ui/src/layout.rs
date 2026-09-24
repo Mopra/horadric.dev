@@ -73,16 +73,18 @@ pub struct Metrics {
 impl Default for Metrics {
     fn default() -> Self {
         Metrics {
-            width: 280.0,
-            pad: 10.0,
+            // Clay needs room: a raised tile casts its shadow into the gap
+            // below it and the padding round it.
+            width: 288.0,
+            pad: 14.0,
             header_h: 30.0,
             tile_h: 58.0,
-            add_h: 26.0,
-            shell_w: 44.0,
-            gap: 6.0,
+            add_h: 28.0,
+            shell_w: 48.0,
+            gap: 10.0,
             radius: 12.0,
             window_radius: 8.0,
-            tile_radius: 8.0,
+            tile_radius: 14.0,
             files_header_h: 26.0,
             file_row_h: 20.0,
             file_rows: 14,
@@ -424,30 +426,115 @@ pub fn usage_hit(l: &UsageLayout, x: f32, y: f32) -> UsageHit {
     }
 }
 
+/// The geometry of the start window, the ghost cluster that stands where
+/// the first project will go while none is open: a tile that picks a
+/// folder, then the recent projects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StartLayout {
+    pub size: (f32, f32),
+    pub header: Rect,
+    /// The ghost tile, which opens the folder picker.
+    pub open: Rect,
+    /// The tile around the recent projects, its label and rows. None when
+    /// there is none.
+    pub recent_box: Option<Rect>,
+    pub recent_label: Option<Rect>,
+    /// One row per recent project, each starting a session there.
+    pub recent: Vec<Rect>,
+}
+
+/// Lays out the start window with `recent` recent projects.
+pub fn start(m: &Metrics, recent: usize) -> StartLayout {
+    let header = Rect::new(m.pad, m.pad, m.width - 2.0 * m.pad, m.header_h);
+    let full = m.width - 2.0 * m.pad;
+    let open = Rect::new(m.pad, header.bottom() + m.gap, full, m.tile_h);
+    let mut l = StartLayout {
+        size: (m.width, open.bottom() + m.pad),
+        header,
+        open,
+        recent_box: None,
+        recent_label: None,
+        recent: Vec::new(),
+    };
+    if recent == 0 {
+        return l;
+    }
+    let top = open.bottom() + m.gap;
+    let label = Rect::new(m.pad, top, full, m.files_header_h);
+    let mut y = label.bottom();
+    for _ in 0..recent {
+        l.recent.push(Rect::new(m.pad, y, full, m.setting_row_h));
+        y += m.setting_row_h;
+    }
+    // Keeps the last row off the tile's rounded corner.
+    y += 4.0;
+    l.recent_box = Some(Rect::new(m.pad, top, full, y - top));
+    l.recent_label = Some(label);
+    l.size.1 = y + m.pad;
+    l
+}
+
+/// Which part of the start window a point is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartHit {
+    Open,
+    Recent(usize),
+    Nothing,
+}
+
+pub fn start_hit(l: &StartLayout, x: f32, y: f32) -> StartHit {
+    if l.open.contains(x, y) {
+        return StartHit::Open;
+    }
+    match l.recent.iter().position(|r| r.contains(x, y)) {
+        Some(i) => StartHit::Recent(i),
+        None => StartHit::Nothing,
+    }
+}
+
 /// Stacks cluster windows down the left edge of a work area.
 ///
 /// `heights` are window heights in physical pixels, `work` is the monitor
 /// work area as (left, top, right, bottom). Returns the top left corner for
 /// each window. When the column overflows, a new column starts to the right.
+/// `taken` are windows the user put somewhere, as (left, top, right,
+/// bottom): the stack goes around them, or a new tile lands on a pinned one.
 pub fn stack(
     heights: &[i32],
     width: i32,
     margin: i32,
     gap: i32,
     work: (i32, i32, i32, i32),
+    taken: &[[i32; 4]],
 ) -> Vec<(i32, i32)> {
     let (left, top, right, bottom) = work;
+    let last_x = right - margin - width;
     let mut out = Vec::with_capacity(heights.len());
     let mut x = left + margin;
     let mut y = top + margin;
     for &h in heights {
-        if y + h > bottom - margin && y != top + margin {
-            x += width + gap;
-            y = top + margin;
+        loop {
+            if y + h > bottom - margin && y != top + margin {
+                // Past the last column there is nowhere left to go around.
+                if x >= last_x {
+                    x += width + gap;
+                    y = top + margin;
+                    break;
+                }
+                x += width + gap;
+                y = top + margin;
+            }
+            // Never leave the screen to the right. Overlap is better than lost.
+            let cx = x.min(last_x);
+            let hit = taken.iter().find(|r| {
+                cx < r[2] + gap && cx + width + gap > r[0] && y < r[3] + gap && y + h + gap > r[1]
+            });
+            match hit {
+                Some(r) => y = r[3] + gap,
+                None => break,
+            }
         }
-        // Never leave the screen to the right. Overlap is better than lost.
-        let x = x.min(right - margin - width);
-        out.push((x, y));
+        out.push((x.min(last_x), y));
         y += h + gap;
     }
     out
@@ -604,6 +691,31 @@ pub fn grid_order(order: &mut Vec<String>, live: &[String]) -> Vec<String> {
     order.iter().filter(|s| live.contains(s)).cloned().collect()
 }
 
+/// Where a session's tile goes in its cluster: its place in the project's
+/// order, the same one the stage's grid follows. One not in it yet goes
+/// last.
+pub fn rank(order: &[String], id: &str) -> usize {
+    order.iter().position(|s| s == id).unwrap_or(usize::MAX)
+}
+
+/// The order after a tile was dragged: `shown`, the tiles as they now
+/// stand, then whatever `order` remembers that has no tile right now.
+pub fn reordered(order: &[String], shown: &[String]) -> Vec<String> {
+    let mut v = shown.to_vec();
+    v.extend(order.iter().filter(|s| !shown.contains(s)).cloned());
+    v
+}
+
+/// The place a dragged tile takes with its top at `top`: that of the tile
+/// whose top is nearest.
+pub fn tile_slot(tiles: &[Rect], top: f32) -> usize {
+    tiles
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| (a.y - top).abs().total_cmp(&(b.y - top).abs()))
+        .map_or(0, |(i, _)| i)
+}
+
 /// The space beside the tiles for the stage: the work area inset by the
 /// margin, less the box around `tiles` and the gap after it, on whichever
 /// side of them has more room. Tiles outside the work area do not count.
@@ -685,6 +797,38 @@ pub fn slot_at(rects: &[[i32; 4]], x: i32, y: i32) -> Option<usize> {
         .position(|&[l, t, r, b]| x >= l && x < r && y >= t && y < b)
 }
 
+/// A way to move the keyboard from one pane to the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// The pane beside `rects[from]` in a direction: the nearest one wholly
+/// past its edge, and of those the one most in line with it. None at the
+/// edge of the grid.
+pub fn neighbour(rects: &[[i32; 4]], from: usize, dir: Dir) -> Option<usize> {
+    let [fl, ft, fr, fb] = *rects.get(from)?;
+    let centre = |a: i32, b: i32| (a + b) / 2;
+    rects
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| i != from)
+        .filter_map(|(i, &[l, t, r, b])| {
+            let (ahead, off) = match dir {
+                Dir::Left => (fl - r, centre(t, b) - centre(ft, fb)),
+                Dir::Right => (l - fr, centre(t, b) - centre(ft, fb)),
+                Dir::Up => (ft - b, centre(l, r) - centre(fl, fr)),
+                Dir::Down => (t - fb, centre(l, r) - centre(fl, fr)),
+            };
+            (ahead >= 0).then_some((ahead, off.abs(), i))
+        })
+        .min()
+        .map(|(_, _, i)| i)
+}
+
 /// The line closest to `v` if it is within `reach`, else `v` itself.
 fn nearest(v: i32, lines: &[i32], reach: i32) -> i32 {
     lines
@@ -731,6 +875,34 @@ mod tests {
         let folded = usage(&m, 2, 3, true);
         assert!(folded.limits.is_empty() && folded.settings.is_empty());
         assert_eq!(folded.size.1, folded.header.bottom() + m.pad);
+    }
+
+    #[test]
+    fn start_window_has_the_ghost_tile_then_the_recent_projects() {
+        let m = Metrics::default();
+        let l = start(&m, 3);
+        assert_eq!(l.open.y, l.header.bottom() + m.gap);
+        assert_eq!(l.open.h, m.tile_h);
+        let b = l.recent_box.unwrap();
+        assert_eq!(b.y, l.open.bottom() + m.gap);
+        assert_eq!(l.recent.len(), 3);
+        assert!(l.recent[0].y >= l.recent_label.unwrap().bottom());
+        assert!(l.recent.iter().all(|r| r.bottom() <= b.bottom()));
+        assert_eq!(l.size.1, b.bottom() + m.pad);
+        let o = l.open;
+        assert_eq!(start_hit(&l, o.x + 5.0, o.y + 5.0), StartHit::Open);
+        let r = l.recent[2];
+        assert_eq!(start_hit(&l, r.x + 5.0, r.y + 5.0), StartHit::Recent(2));
+        let h = l.header;
+        assert_eq!(start_hit(&l, h.x + 5.0, h.y + 5.0), StartHit::Nothing);
+    }
+
+    #[test]
+    fn start_window_without_recent_projects_is_the_ghost_tile() {
+        let m = Metrics::default();
+        let l = start(&m, 0);
+        assert!(l.recent.is_empty() && l.recent_box.is_none());
+        assert_eq!(l.size.1, l.open.bottom() + m.pad);
     }
 
     #[test]
@@ -929,7 +1101,7 @@ mod tests {
 
     #[test]
     fn stack_goes_down_then_right() {
-        let pos = stack(&[100, 100, 100], 280, 12, 12, (0, 0, 1920, 250));
+        let pos = stack(&[100, 100, 100], 280, 12, 12, (0, 0, 1920, 250), &[]);
         assert_eq!(pos[0], (12, 12));
         assert_eq!(pos[1], (12, 124));
         // Third does not fit below, new column.
@@ -938,8 +1110,43 @@ mod tests {
 
     #[test]
     fn stack_never_leaves_the_screen_to_the_right() {
-        let pos = stack(&[100, 100, 100], 280, 12, 12, (0, 0, 600, 130));
+        let pos = stack(&[100, 100, 100], 280, 12, 12, (0, 0, 600, 130), &[]);
         assert_eq!(pos[2], (600 - 12 - 280, 12));
+    }
+
+    #[test]
+    fn stack_goes_below_a_pinned_window_in_its_place() {
+        let pinned = [12, 12, 292, 212];
+        let pos = stack(&[100, 100], 280, 12, 12, (0, 0, 1920, 1080), &[pinned]);
+        assert_eq!(pos, vec![(12, 224), (12, 336)]);
+    }
+
+    #[test]
+    fn stack_goes_around_a_pinned_window_in_the_middle() {
+        let pinned = [12, 150, 292, 250];
+        let pos = stack(&[100, 100], 280, 12, 12, (0, 0, 1920, 1080), &[pinned]);
+        assert_eq!(pos, vec![(12, 12), (12, 262)]);
+    }
+
+    #[test]
+    fn stack_ignores_a_pinned_window_elsewhere() {
+        let pinned = [900, 12, 1180, 212];
+        let pos = stack(&[100], 280, 12, 12, (0, 0, 1920, 1080), &[pinned]);
+        assert_eq!(pos, vec![(12, 12)]);
+    }
+
+    #[test]
+    fn stack_starts_a_column_when_a_pinned_window_fills_this_one() {
+        let pinned = [12, 12, 292, 1068];
+        let pos = stack(&[100], 280, 12, 12, (0, 0, 1920, 1080), &[pinned]);
+        assert_eq!(pos, vec![(304, 12)]);
+    }
+
+    #[test]
+    fn stack_overlaps_a_pinned_window_rather_than_leave_the_screen() {
+        let pinned = [8, 12, 288, 118];
+        let pos = stack(&[100], 280, 12, 12, (0, 0, 300, 130), &[pinned]);
+        assert_eq!(pos, vec![(8, 12)]);
     }
 
     const SPACING: Spacing = Spacing {
@@ -1202,6 +1409,35 @@ mod tests {
     }
 
     #[test]
+    fn tiles_follow_the_order_and_new_ones_go_last() {
+        let order = ["b".to_string(), "a".to_string()];
+        let mut ids = vec!["a", "b", "c"];
+        ids.sort_by_key(|id| rank(&order, id));
+        assert_eq!(ids, ["b", "a", "c"]);
+    }
+
+    #[test]
+    fn reordered_puts_the_tiles_first_and_keeps_the_rest() {
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            reordered(&v(&["a", "gone", "b"]), &v(&["b", "c", "a"])),
+            v(&["b", "c", "a", "gone"])
+        );
+    }
+
+    #[test]
+    fn tile_slot_takes_the_nearest_place() {
+        let tiles: Vec<Rect> = (0..3)
+            .map(|i| Rect::new(0.0, 40.0 + 60.0 * i as f32, 280.0, 54.0))
+            .collect();
+        assert_eq!(tile_slot(&tiles, 40.0), 0);
+        assert_eq!(tile_slot(&tiles, 75.0), 1);
+        assert_eq!(tile_slot(&tiles, 400.0), 2);
+        assert_eq!(tile_slot(&tiles, -50.0), 0);
+        assert_eq!(tile_slot(&[], 10.0), 0);
+    }
+
+    #[test]
     fn slot_at_finds_the_rect_under_the_point() {
         let rects = grid(2, (0, 0, 1010, 800), 10);
         assert_eq!(slot_at(&rects, 10, 10), Some(0));
@@ -1209,5 +1445,24 @@ mod tests {
         // In the gap between them, or outside.
         assert_eq!(slot_at(&rects, 505, 10), None);
         assert_eq!(slot_at(&rects, 10, 800), None);
+    }
+
+    #[test]
+    fn neighbour_follows_the_grid() {
+        // Two above one wide.
+        let rects = grid(3, (0, 0, 1010, 810), 10);
+        assert_eq!(neighbour(&rects, 0, Dir::Right), Some(1));
+        assert_eq!(neighbour(&rects, 1, Dir::Left), Some(0));
+        assert_eq!(neighbour(&rects, 0, Dir::Down), Some(2));
+        assert_eq!(neighbour(&rects, 1, Dir::Down), Some(2));
+        // From the wide one, both are as near; the first wins.
+        assert_eq!(neighbour(&rects, 2, Dir::Up), Some(0));
+        assert_eq!(neighbour(&rects, 0, Dir::Left), None);
+        assert_eq!(neighbour(&rects, 2, Dir::Down), None);
+        // Two by two: straight across, not diagonal.
+        let rects = grid(4, (0, 0, 1010, 810), 10);
+        assert_eq!(neighbour(&rects, 3, Dir::Up), Some(1));
+        assert_eq!(neighbour(&rects, 3, Dir::Left), Some(2));
+        assert_eq!(neighbour(&[], 0, Dir::Up), None);
     }
 }

@@ -5,13 +5,16 @@
 //! one window's render target and brushes. Drawing happens in DIPs; Direct2D
 //! applies the DPI.
 //!
-//! A cluster is glass: acrylic from DWM behind, a dark tint over it, and
-//! tiles as faint panes of light laid on top. A session's phase is light
-//! too, in its tile's edge and icon: a working tile has a light going round
-//! it, a waiting one breathes, a finished one flashes once and settles.
+//! A cluster is dark clay: a slab with tiles moulded out of it, lit from
+//! the top left. Direct2D's hwnd targets have no blur, so every soft shadow
+//! is a stack of shapes each a little bigger and fainter (`Painter::cast`,
+//! `Painter::hollow`). A session's phase is how far its tile stands off the
+//! slab and what tints it: a waiting tile puffs up and glows, a working one
+//! has a light going round it, an ended one sinks in.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::mem::ManuallyDrop;
 use std::time::SystemTime;
 
 use horadric_core::usage::format_until;
@@ -19,20 +22,22 @@ use horadric_core::{format_age, Limit, Phase, Session, Usage};
 use windows::core::{w, Interface, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_GRADIENT_STOP,
-    D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+    D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1BitmapRenderTarget, ID2D1Factory, ID2D1GradientStopCollection,
-    ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1RadialGradientBrush, ID2D1RenderTarget,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-    D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_ROUND, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
-    D2D1_DASH_STYLE_CUSTOM, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
+    D2D1CreateFactory, ID2D1BitmapRenderTarget, ID2D1Factory, ID2D1Geometry,
+    ID2D1GradientStopCollection, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush,
+    ID2D1RadialGradientBrush, ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+    D2D1_CAP_STYLE_FLAT, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_CUSTOM,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAMMA_2_2,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
-    D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_NONE, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_NONE,
+    D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
+    D2D1_STROKE_STYLE_PROPERTIES,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteRenderingParams,
@@ -44,12 +49,13 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::anim::Look;
 use crate::files::{Row, Tree};
 use crate::layout::{
-    self, Button, ClusterLayout, FilesLayout, Hit, Metrics, Rect, UsageHit, UsageLayout,
+    self, Button, ClusterLayout, FilesLayout, Hit, Metrics, Rect, StartHit, StartLayout, UsageHit,
+    UsageLayout,
 };
 use crate::motion::{self, BREATH, ORBIT};
 use crate::theme::{self, Color};
@@ -72,6 +78,9 @@ const TRACE_BARS: usize = 20;
 const TRACE_BAR_W: f32 = 1.6;
 const TRACE_GAP: f32 = 0.8;
 const TRACE_H: f32 = 11.0;
+
+/// How many shapes make one soft edge. Fewer shows as bands.
+const BLUR_STEPS: usize = 8;
 
 /// Process wide Direct2D and DirectWrite objects.
 pub struct Gpu {
@@ -199,6 +208,8 @@ pub struct Scene<'a> {
     pub sessions: &'a [&'a Session],
     /// How each tile draws this frame, in the same order.
     pub looks: &'a [Look],
+    /// The tile being carried to a new place, drawn over the others.
+    pub held: Option<usize>,
     /// This project is the one the stage shows.
     pub on_stage: bool,
     /// The project's colour.
@@ -250,12 +261,25 @@ impl UsageScene<'_> {
     }
 }
 
+/// Everything one frame of the start window needs.
+pub struct StartScene<'a> {
+    pub layout: &'a StartLayout,
+    /// Each recent project's folder name and where it is.
+    pub recent: &'a [(String, String)],
+    pub hot: StartHit,
+    pub pressed: Option<StartHit>,
+}
+
+impl StartScene<'_> {
+    fn button(&self, which: StartHit) -> Button {
+        layout::button(which, self.hot, self.pressed)
+    }
+}
+
 /// A window's render target. Recreated when Direct2D asks for it.
 pub struct Target {
     rt: ID2D1HwndRenderTarget,
     brush: ID2D1SolidColorBrush,
-    /// DWM draws a material behind, so what is left clear shows it.
-    glass: bool,
     /// What holds still, kept between frames, and the size it was made at.
     layer: RefCell<Option<(ID2D1BitmapRenderTarget, D2D_SIZE_U)>>,
     gradients: Gradients,
@@ -296,30 +320,12 @@ pub fn hwnd_target(
     height_px: u32,
     dpi: u32,
 ) -> Result<ID2D1HwndRenderTarget> {
-    target_with_alpha(gpu, hwnd, width_px, height_px, dpi, false)
-}
-
-/// With `alpha`, what is drawn keeps its transparency, for a window with a
-/// material behind it. Text is then greyscale: ClearType needs to know the
-/// colour under it, and only DWM does.
-fn target_with_alpha(
-    gpu: &Gpu,
-    hwnd: HWND,
-    width_px: u32,
-    height_px: u32,
-    dpi: u32,
-    alpha: bool,
-) -> Result<ID2D1HwndRenderTarget> {
     unsafe {
         let props = D2D1_RENDER_TARGET_PROPERTIES {
             r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
             pixelFormat: D2D1_PIXEL_FORMAT {
                 format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: if alpha {
-                    D2D1_ALPHA_MODE_PREMULTIPLIED
-                } else {
-                    D2D1_ALPHA_MODE_IGNORE
-                },
+                alphaMode: D2D1_ALPHA_MODE_IGNORE,
             },
             dpiX: 0.0,
             dpiY: 0.0,
@@ -337,9 +343,6 @@ fn target_with_alpha(
         let rt = gpu.d2d.CreateHwndRenderTarget(&props, &hwnd_props)?;
         rt.SetDpi(dpi as f32, dpi as f32);
         rt.SetTextRenderingParams(&gpu.text_params);
-        if alpha {
-            rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-        }
         Ok(rt)
     }
 }
@@ -354,22 +357,12 @@ pub fn resize_target(rt: &ID2D1HwndRenderTarget, width_px: u32, height_px: u32) 
 }
 
 impl Target {
-    /// With `glass`, for a window with a material behind it: what is left
-    /// clear shows it.
-    pub fn with_glass(
-        gpu: &Gpu,
-        hwnd: HWND,
-        width_px: u32,
-        height_px: u32,
-        dpi: u32,
-        glass: bool,
-    ) -> Result<Self> {
-        let rt = target_with_alpha(gpu, hwnd, width_px, height_px, dpi, glass)?;
+    pub fn new(gpu: &Gpu, hwnd: HWND, width_px: u32, height_px: u32, dpi: u32) -> Result<Self> {
+        let rt = hwnd_target(gpu, hwnd, width_px, height_px, dpi)?;
         let brush = unsafe { rt.CreateSolidColorBrush(&color(theme::TEXT), None)? };
         Ok(Target {
             rt,
             brush,
-            glass,
             layer: RefCell::new(None),
             gradients: Gradients::default(),
         })
@@ -405,9 +398,6 @@ impl Target {
                     )?,
                 };
                 bitmap.SetTextRenderingParams(&gpu.text_params);
-                if self.glass {
-                    bitmap.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-                }
                 bitmap.BeginDraw();
                 self.painter(&bitmap).still(gpu, m, scene);
                 bitmap.EndDraw(None, None)?;
@@ -415,7 +405,6 @@ impl Target {
             }
 
             self.rt.BeginDraw();
-            self.rt.Clear(Some(&color(Color::rgb(0).with_alpha(0.0))));
             if let Some((bitmap, _)) = layer.as_ref() {
                 let still = bitmap.GetBitmap()?;
                 self.rt.DrawBitmap(
@@ -442,11 +431,19 @@ impl Target {
         }
     }
 
+    /// Draws the start window. `Err` means the target must be recreated.
+    pub fn draw_start(&self, gpu: &Gpu, m: &Metrics, scene: &StartScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.painter(&self.rt).start(gpu, m, scene);
+            self.rt.EndDraw(None, None)
+        }
+    }
+
     fn painter<'a>(&'a self, rt: &'a ID2D1RenderTarget) -> Painter<'a> {
         Painter {
             rt,
             brush: &self.brush,
-            glass: self.glass,
             gradients: &self.gradients,
         }
     }
@@ -456,28 +453,30 @@ impl Target {
 struct Painter<'a> {
     rt: &'a ID2D1RenderTarget,
     brush: &'a ID2D1SolidColorBrush,
-    glass: bool,
     gradients: &'a Gradients,
 }
 
 impl Painter<'_> {
     /// Everything that holds still between frames.
     unsafe fn still(&self, gpu: &Gpu, m: &Metrics, scene: &Scene) {
-        if self.glass {
-            self.rt.Clear(Some(&color(theme::GLASS_TINT)));
-        } else {
-            self.rt.Clear(Some(&color(theme::WINDOW_BG)));
-        }
+        self.slab(gpu, m, scene.layout.size);
         self.wash(scene);
         if scene.on_stage {
             self.frame(m, scene);
-        } else if self.glass {
-            self.glass_edge(m, scene.layout.size);
         }
 
         self.header(gpu, scene);
         for (i, (r, s, look)) in tiles(scene).enumerate() {
-            self.tile(gpu, m, scene, i, &r, s, &look);
+            if scene.held != Some(i) {
+                self.tile(gpu, m, scene, i, &r, s, &look);
+            }
+        }
+        if let Some(i) = scene.held {
+            if let Some((r, s, look)) = tiles(scene).nth(i) {
+                self.tile(gpu, m, scene, i, &r, s, &look);
+                // Blue, as a pane is while it is dragged.
+                self.stroke_rounded(&r, m.tile_radius, theme::WORKING.with_alpha(0.7), 1.5);
+            }
         }
         if let Some(add) = &scene.layout.add {
             self.add(gpu, m, add, scene.button(Hit::Add), '\u{E710}');
@@ -490,16 +489,11 @@ impl Painter<'_> {
         }
     }
 
-    /// The usage window, dressed like a cluster: the same glass, header and
+    /// The usage window, dressed like a cluster: the same clay, header and
     /// tiles, so it reads as one more of them.
     unsafe fn usage(&self, gpu: &Gpu, m: &Metrics, scene: &UsageScene) {
         let l = scene.layout;
-        if self.glass {
-            self.rt.Clear(Some(&color(theme::GLASS_TINT)));
-            self.glass_edge(m, l.size);
-        } else {
-            self.rt.Clear(Some(&color(theme::WINDOW_BG)));
-        }
+        self.slab(gpu, m, l.size);
         let h = l.header;
         let header_button = scene.button(UsageHit::Header);
         if let (Some(fill), _) = theme::button_look(header_button) {
@@ -530,7 +524,7 @@ impl Painter<'_> {
         }
 
         if let Some(b) = l.limits_box {
-            self.glass_pane(&b, m.tile_radius, 1.0);
+            self.panel(gpu, &b, m.tile_radius);
             let limits = scene.usage.map(|u| u.limits.named()).unwrap_or_default();
             if limits.is_empty() {
                 if let Some(r) = l.limits.first() {
@@ -549,11 +543,11 @@ impl Painter<'_> {
         }
 
         if let Some(b) = l.settings_box {
-            self.glass_pane(&b, m.tile_radius, 1.0);
+            self.panel(gpu, &b, m.tile_radius);
         }
         for (i, (r, (label, value))) in l.settings.iter().zip(&scene.settings).enumerate() {
             if let (Some(fill), _) = theme::button_look(scene.button(UsageHit::Setting(i))) {
-                self.fill_rounded(&r.inset(3.0), 6.0, fill);
+                self.fill_rounded(&r.inset(3.0), 8.0, fill);
             }
             let inner = Rect::new(r.x + 10.0, r.y, r.w - 20.0, r.h);
             self.text(&gpu.small, theme::TEXT_DIM, label, inner);
@@ -575,6 +569,83 @@ impl Painter<'_> {
         }
     }
 
+    /// The start window: a cluster with no project yet. Its tile is drawn
+    /// as the hollow a tile will fill, pressed in like the bottom plus.
+    unsafe fn start(&self, gpu: &Gpu, m: &Metrics, scene: &StartScene) {
+        let l = scene.layout;
+        self.slab(gpu, m, l.size);
+        let h = l.header;
+        self.text(
+            &gpu.display,
+            theme::TEXT_DIM,
+            "No project open",
+            Rect::new(h.x + NAME_INSET, h.y, h.w - NAME_INSET, h.h),
+        );
+
+        let r = l.open;
+        let b = scene.button(StartHit::Open);
+        let (_, ink) = theme::button_look(b);
+        self.slot(gpu, m, &r, b);
+        let (ix, iy) = icon_centre(&r);
+        self.icon(
+            &gpu.icon,
+            ink,
+            '\u{E8F4}',
+            Rect::new(ix - 14.0, iy - 14.0, 28.0, 28.0),
+        );
+        let left = r.x + TILE_TEXT_X;
+        let width = r.right() - 10.0 - left;
+        let row_h = r.h / 2.0;
+        self.text(
+            &gpu.name,
+            theme::TEXT,
+            "Open a project",
+            Rect::new(left, r.y + 5.0, width, row_h - 3.0),
+        );
+        self.text(
+            &gpu.small,
+            theme::TEXT_DIM,
+            "Pick a folder, or drop one here",
+            Rect::new(left, r.y + row_h - 1.0, width, row_h - 5.0),
+        );
+
+        let (Some(b), Some(label)) = (l.recent_box, l.recent_label) else {
+            return;
+        };
+        self.panel(gpu, &b, m.tile_radius);
+        let pad = 10.0;
+        self.text_spaced(
+            gpu,
+            &gpu.chip,
+            theme::TEXT_DIM,
+            "RECENT",
+            1.2,
+            Rect::new(label.x + pad, label.y, label.w - 2.0 * pad, label.h),
+        );
+        for (i, (r, (name, place))) in l.recent.iter().zip(scene.recent).enumerate() {
+            if let (Some(fill), _) = theme::button_look(scene.button(StartHit::Recent(i))) {
+                self.fill_rounded(&r.inset(3.0), 8.0, fill);
+            }
+            let inner = Rect::new(r.x + pad, r.y, r.w - 2.0 * pad, r.h);
+            let name_w = self.measure(gpu, &gpu.small, name).min(inner.w * 0.6);
+            self.text(
+                &gpu.small,
+                theme::TEXT,
+                name,
+                Rect::new(inner.x, inner.y, name_w + 1.0, inner.h),
+            );
+            // Where it is only tells two projects of the same name apart,
+            // so it gets the room the name leaves.
+            let place_x = inner.x + name_w + 12.0;
+            self.text(
+                &gpu.small_right,
+                theme::TEXT_DIM.with_alpha(0.7),
+                place,
+                Rect::new(place_x, inner.y, inner.right() - place_x, inner.h),
+            );
+        }
+    }
+
     /// One limit: its name and how much is used over a bar of it, and when
     /// it starts over.
     unsafe fn limit(&self, gpu: &Gpu, r: &Rect, name: &str, limit: &Limit, now: u64) {
@@ -587,7 +658,7 @@ impl Painter<'_> {
         };
         self.text(&gpu.small_right, theme::TEXT_DIM, &numbers, inner);
         let track = Rect::new(inner.x, inner.bottom() + 5.0, inner.w, 4.0);
-        self.fill_rounded(&track, 2.0, theme::GLASS_TILE.with_alpha(0.07));
+        self.fill_rounded(&track, 2.0, theme::WELL);
         let fill = track.w * (used / 100.0).clamp(0.0, 1.0);
         if fill > 0.0 {
             let bar = Rect::new(track.x, track.y, fill.max(track.h), track.h);
@@ -609,8 +680,7 @@ impl Painter<'_> {
                 }
                 Phase::Waiting(_) => {
                     let breath = motion::breathe(look.phase_age, BREATH);
-                    let strength = theme::edge_strength(phase) * (0.6 + 0.4 * breath);
-                    self.glow_edge(&r, radius, c, strength * look.enter);
+                    self.halo(&r, radius, c, (0.5 + 0.5 * breath) * look.enter);
                 }
                 _ => {}
             }
@@ -626,7 +696,7 @@ impl Painter<'_> {
             &Rect::new(0.0, 0.0, w, depth),
             (0.0, depth),
             &[
-                (0.0, scene.accent.with_alpha(0.055)),
+                (0.0, scene.accent.with_alpha(0.07)),
                 (1.0, scene.accent.with_alpha(0.0)),
             ],
         );
@@ -690,7 +760,7 @@ impl Painter<'_> {
             if chip.x < name_x + name_w + 20.0 {
                 break;
             }
-            self.fill_rounded(&chip, 9.0, c.with_alpha(0.09));
+            self.clay(gpu, &chip, 9.0, theme::SURFACE.mix(c, 0.14), 0.45, 1.0);
             self.text(
                 &gpu.chip,
                 c,
@@ -702,36 +772,148 @@ impl Painter<'_> {
 
         let (fill, ink) = theme::button_look(scene.button(Hit::New));
         if let Some(fill) = fill {
-            self.fill_rounded(&layout.new.inset(3.0), 6.0, fill);
+            self.fill_rounded(&layout.new.inset(3.0), 8.0, fill);
         }
         self.icon(&gpu.icon_small, ink, '\u{E710}', layout.new);
     }
 
-    /// A pane of glass, a breath of white with light catching its top
-    /// edge: every tile, the files tile, the usage window's boxes.
-    /// `opacity` fades it in.
-    unsafe fn glass_pane(&self, r: &Rect, radius: f32, opacity: f32) {
-        self.fill_rounded(r, radius, theme::GLASS_TILE.fade(opacity));
-        if let Some(edge) = self.linear(
-            r.x,
-            r.y,
-            r.x,
-            r.bottom(),
-            &[
-                (0.0, theme::GLASS_EDGE),
-                (1.0, theme::GLASS_EDGE.fade(0.25)),
-            ],
-        ) {
-            edge.SetOpacity(opacity);
-            self.rt
-                .DrawRoundedRectangle(&rounded(&r.inset(0.5), radius - 0.5), &edge, 1.0, None);
+    /// The window itself, moulded: its clay, with the light catching the
+    /// top left of it and the far edges in shade.
+    unsafe fn slab(&self, gpu: &Gpu, m: &Metrics, (w, h): (f32, f32)) {
+        self.rt.Clear(Some(&color(theme::WINDOW_BG)));
+        let r = Rect::new(0.0, 0.0, w, h);
+        self.inner(
+            gpu,
+            &r,
+            m.window_radius,
+            (3.0, 10.0),
+            theme::SLAB_LIGHT,
+            theme::SLAB_SHADE,
+            1.0,
+        );
+    }
+
+    /// A panel of clay holding rows: the files tile, the usage window's
+    /// boxes. Raised a little less than a tile, since it is a place, not a
+    /// thing to click.
+    unsafe fn panel(&self, gpu: &Gpu, r: &Rect, radius: f32) {
+        self.clay(gpu, r, radius, theme::SURFACE, 0.7, 1.0);
+    }
+
+    /// `r` moulded out of `fill`, standing `depth` off the window, lit from
+    /// the top left. One is a resting tile. Below zero it is pressed into
+    /// the window instead. `opacity` fades the whole of it in.
+    unsafe fn clay(&self, gpu: &Gpu, r: &Rect, radius: f32, fill: Color, depth: f32, opacity: f32) {
+        let opacity = opacity.clamp(0.0, 1.0);
+        if opacity <= 0.0 {
+            return;
+        }
+        let d = depth.abs().min(2.5);
+        if depth > 0.0 {
+            // The shadow it casts, down and to the right, softer and further
+            // the higher it stands.
+            let shadow = theme::CAST.fade(opacity);
+            self.cast(r, radius, (1.5 * d, 4.0 * d), 4.0 + 10.0 * d, shadow);
+            // Where it meets the window, a tight dark line, so it sits on
+            // the slab rather than floating over it.
+            self.cast(r, radius, (0.0, 1.0), 2.0, shadow.fade(0.6));
+        } else if depth < 0.0 {
+            // A hollow's lower lip catches the light.
+            self.cast(r, radius, (0.0, 1.0), 1.0, theme::LIP.fade(opacity));
+        }
+        self.fill_rounded(r, radius, fill.fade(opacity));
+        if d <= 0.0 {
+            return;
+        }
+        let spread = (1.5 + 2.0 * d.min(1.5), 5.0 + 4.0 * d);
+        let (near, far) = if depth > 0.0 {
+            (theme::RIM_LIGHT, theme::RIM_SHADE)
+        } else {
+            (theme::HOLLOW_SHADE, theme::HOLLOW_LIGHT)
+        };
+        self.inner(gpu, r, radius, spread, near, far, opacity);
+    }
+
+    /// `r`'s shadow, moved by `(dx, dy)` and blurred `blur` wide: the same
+    /// shape again and again, each a little bigger and fainter, which adds
+    /// up to a soft edge.
+    unsafe fn cast(&self, r: &Rect, radius: f32, (dx, dy): (f32, f32), blur: f32, c: Color) {
+        for s in blur_steps(blur) {
+            let e = Rect::new(r.x + dx, r.y + dy, r.w, r.h).inset(-s);
+            if e.w > 0.0 && e.h > 0.0 {
+                self.fill_rounded(&e, radius + s, c.fade(1.0 / BLUR_STEPS as f32));
+            }
         }
     }
 
-    /// The edge glass needs to end at, as Windows' own flyouts have.
-    unsafe fn glass_edge(&self, m: &Metrics, (w, h): (f32, f32)) {
-        let r = Rect::new(0.5, 0.5, w - 1.0, h - 1.0);
-        self.stroke_rounded(&r, m.window_radius - 0.5, theme::GLASS_EDGE.fade(0.8), 1.0);
+    /// Light and shade inside `r`, along its edges: `near` on the top left
+    /// rim, `far` on the bottom right, each `offset` deep and `blur` soft.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn inner(
+        &self,
+        gpu: &Gpu,
+        r: &Rect,
+        radius: f32,
+        (offset, blur): (f32, f32),
+        near: Color,
+        far: Color,
+        opacity: f32,
+    ) {
+        let Ok(mask) = gpu.d2d.CreateRoundedRectangleGeometry(&rounded(r, radius)) else {
+            return;
+        };
+        let Ok(layer) = self.rt.CreateLayer(None) else {
+            return;
+        };
+        let params = D2D1_LAYER_PARAMETERS {
+            contentBounds: rect(r),
+            geometricMask: ManuallyDrop::new(mask.cast::<ID2D1Geometry>().ok()),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: Matrix3x2::identity(),
+            opacity,
+            opacityBrush: ManuallyDrop::new(None),
+            layerOptions: D2D1_LAYER_OPTIONS_NONE,
+        };
+        self.rt.PushLayer(&params, &layer);
+        self.hollow(r, radius, (offset, offset), blur, near);
+        self.hollow(r, radius, (-offset, -offset), blur, far);
+        self.rt.PopLayer();
+        drop(ManuallyDrop::into_inner(params.geometricMask));
+    }
+
+    /// Everything outside `r` moved by `(dx, dy)`, blurred: inside a clip
+    /// to `r` itself, that is the rim the moved copy leaves uncovered. The
+    /// outside of a rounded rectangle is a stroke on a bigger one, as wide
+    /// as it has to reach.
+    unsafe fn hollow(&self, r: &Rect, radius: f32, (dx, dy): (f32, f32), blur: f32, c: Color) {
+        let reach = 2.0 * (dx.abs().max(dy.abs()) + blur + 2.0);
+        for s in blur_steps(blur) {
+            let e = Rect::new(r.x + dx, r.y + dy, r.w, r.h).inset(-s - reach / 2.0);
+            let corner = (radius + s).max(0.0) + reach / 2.0;
+            self.stroke_rounded(&e, corner, c.fade(1.0 / BLUR_STEPS as f32), reach);
+        }
+    }
+
+    /// A waiting tile's light: its colour spilling out from under it and a
+    /// line round its edge. All of it outside the tile or on its rim, so it
+    /// can be laid over the kept layer every frame.
+    unsafe fn halo(&self, r: &Rect, radius: f32, c: Color, strength: f32) {
+        if strength <= 0.0 {
+            return;
+        }
+        let rings = 5;
+        for i in 0..rings {
+            let s = 1.0 + i as f32 * 2.0;
+            let k = 1.0 - i as f32 / rings as f32;
+            let a = strength * 0.2 * k * k;
+            self.stroke_rounded(&r.inset(-s), radius + s, c.with_alpha(a), 2.0);
+        }
+        self.stroke_rounded(
+            &r.inset(0.75),
+            radius - 0.75,
+            c.with_alpha(strength * 0.75),
+            1.5,
+        );
     }
 
     unsafe fn fill_rounded(&self, r: &Rect, radius: f32, c: Color) {
@@ -859,17 +1041,6 @@ impl Painter<'_> {
         self.rt.FillEllipse(&e, &brush);
     }
 
-    /// A tile's edge lit in `c`: a crisp line with light spilling off it.
-    unsafe fn glow_edge(&self, r: &Rect, radius: f32, c: Color, strength: f32) {
-        if strength <= 0.0 {
-            return;
-        }
-        let edge = r.inset(0.5);
-        self.stroke_rounded(&edge, radius - 0.5, c.with_alpha(strength * 0.12), 9.0);
-        self.stroke_rounded(&edge, radius - 0.5, c.with_alpha(strength * 0.25), 4.0);
-        self.stroke_rounded(&edge, radius - 0.5, c.with_alpha(strength * 0.7), 1.0);
-    }
-
     /// A light travelling round a tile's edge, `t` of the way round, with a
     /// tail that fades behind it.
     unsafe fn comet(&self, gpu: &Gpu, r: &Rect, radius: f32, c: Color, t: f32, strength: f32) {
@@ -919,7 +1090,7 @@ impl Painter<'_> {
         let r = Rect::new(inset, inset, w - 2.0 * inset, h - 2.0 * inset);
         // Inside the corner DWM rounds the window to.
         let radius = m.window_radius - inset;
-        self.stroke_rounded(&r, radius, scene.accent.with_alpha(0.3), 1.0);
+        self.stroke_rounded(&r, radius, scene.accent.with_alpha(0.55), 1.5);
     }
 
     /// The `i`th tile, at `r` this frame, showing `s`.
@@ -951,17 +1122,26 @@ impl Painter<'_> {
         let radius = m.tile_radius;
         let ambient = scene.ambient;
 
-        self.glass_pane(r, radius, look.enter);
+        // The phase, as how far the tile stands off the slab and the tint of
+        // its clay. The cursor lifts it a little more and a press pushes it
+        // down, so the text keeps its colours: dimming a session's name on a
+        // press would look like the session changed.
+        let lift = match b {
+            Button::Pressed => 0.25 - theme::depth(phase).max(0.0),
+            _ => 0.5 * look.hover,
+        };
+        let held = if scene.held == Some(i) { 1.0 } else { 0.0 };
+        let depth = theme::depth(phase) + lift + held;
+        self.clay(gpu, r, radius, theme::phase_fill(phase), depth, look.enter);
 
-        // The phase, as light. Waiting needs you, so it is the one that
-        // moves most: it breathes. Working has light going round it. A
+        // And as light. Waiting needs you, so it is the one that moves
+        // most: it glows and breathes. Working has light going round it. A
         // finished turn flashes once.
         let arrival = if ambient { look.arrival } else { 0.0 };
         match phase {
             Phase::Waiting(_) => {
-                self.fill_rounded(r, radius, c.with_alpha(0.055));
                 if !ambient {
-                    self.glow_edge(r, radius, c, theme::edge_strength(phase) * 0.85);
+                    self.halo(r, radius, c, 0.85);
                 }
                 if arrival > 0.0 {
                     // A ring leaving the tile the moment it starts waiting.
@@ -975,27 +1155,16 @@ impl Painter<'_> {
                     self.stroke_rounded(&ring, radius + spread, c.with_alpha(arrival * 0.45), 1.2);
                 }
             }
-            Phase::Working => {
-                self.fill_rounded(r, radius, c.with_alpha(0.025));
-                self.glow_edge(r, radius, c, theme::edge_strength(phase) * look.enter);
-            }
-            Phase::Done => {
-                self.fill_rounded(r, radius, c.with_alpha(0.14 * arrival));
-                let strength = theme::edge_strength(phase) + 0.6 * arrival;
-                self.glow_edge(r, radius, c, strength * look.enter);
+            Phase::Working | Phase::Done => {
+                if arrival > 0.0 {
+                    self.fill_rounded(r, radius, c.with_alpha(0.16 * arrival * look.enter));
+                }
+                let strength = 3.0 * theme::edge_strength(phase) + 0.6 * arrival;
+                let edge = r.inset(0.75);
+                let a = strength * look.enter;
+                self.stroke_rounded(&edge, radius - 0.75, c.with_alpha(a), 1.2);
             }
             Phase::Idle | Phase::Ended | Phase::Paused => {}
-        }
-        // Over the phase colour rather than instead of it, so a waiting
-        // tile still reads as waiting under the cursor. The text keeps its
-        // colours: dimming a session's name on a press would look like the
-        // session changed.
-        let hover = match b {
-            Button::Pressed => 0.4,
-            _ => look.hover,
-        };
-        if hover > 0.0 {
-            self.fill_rounded(r, radius, theme::HOVER_FILL.fade(hover));
         }
 
         // The icon: what the agent is doing, in the phase's light.
@@ -1172,48 +1341,30 @@ impl Painter<'_> {
     }
 
     /// Another session in this project, or a plain terminal: an empty slot
-    /// where the next tile would go, a dashed outline so it never reads as
-    /// a session.
+    /// where the next tile would go, pressed in so it never reads as a
+    /// session.
     unsafe fn add(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Button, glyph: char) {
-        let (fill, ink) = theme::button_look(b);
-        if let Some(fill) = fill {
-            self.fill_rounded(r, m.tile_radius, fill);
-        }
-        let edge = r.inset(0.75);
-        let radius = m.tile_radius - 0.75;
-        let length = motion::perimeter(edge.w, edge.h, radius);
-        // Whole dashes all the way round, so no seam where the outline meets
-        // itself.
-        let count = (length / 7.0).round().max(1.0);
-        let unit = length / count / 1.2;
-        let style = gpu.d2d.CreateStrokeStyle(
-            &D2D1_STROKE_STYLE_PROPERTIES {
-                startCap: D2D1_CAP_STYLE_ROUND,
-                endCap: D2D1_CAP_STYLE_ROUND,
-                dashCap: D2D1_CAP_STYLE_ROUND,
-                lineJoin: D2D1_LINE_JOIN_ROUND,
-                miterLimit: 1.0,
-                dashStyle: D2D1_DASH_STYLE_CUSTOM,
-                dashOffset: 0.0,
-            },
-            Some(&[unit * 0.35, unit * 0.65]),
-        );
-        let outline = theme::TEXT_DIM.with_alpha(if b == Button::Idle { 0.28 } else { 0.45 });
-        self.brush.SetColor(&color(outline));
-        self.rt.DrawRoundedRectangle(
-            &rounded(&edge, radius),
-            self.brush,
-            1.2,
-            style.ok().as_ref(),
-        );
+        let (_, ink) = theme::button_look(b);
+        self.slot(gpu, m, r, b);
         self.icon(&gpu.icon_small, ink, glyph, *r);
+    }
+
+    /// A hollow pressed into the slab, where something is yet to go. The
+    /// cursor raises it into a tile, as if offering one.
+    unsafe fn slot(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Button) {
+        let (fill, depth) = match b {
+            Button::Idle => (theme::WELL, -0.5),
+            Button::Hover => (theme::SURFACE, 0.6),
+            Button::Pressed => (theme::WELL, -0.8),
+        };
+        self.clay(gpu, r, m.tile_radius, fill, depth, 1.0);
     }
 
     /// The project's files as VS Code's explorer shows them: folders with a
     /// chevron, names in the colour of their change, the change letter at the
     /// right edge, a dot on a folder holding one.
     unsafe fn files(&self, gpu: &Gpu, m: &Metrics, l: &FilesLayout, f: &FilesScene) {
-        self.glass_pane(&l.rect, m.tile_radius, 1.0);
+        self.panel(gpu, &l.rect, m.tile_radius);
 
         let pad = 10.0;
         let h = l.header;
@@ -1463,6 +1614,13 @@ unsafe fn dash(
         .ok()
 }
 
+/// How far each of the shapes that make a `blur` wide soft edge grows past
+/// the sharp one, evenly from `-blur / 2` to `blur / 2`, so the edge's
+/// middle stays where the sharp edge was.
+fn blur_steps(blur: f32) -> impl Iterator<Item = f32> {
+    (0..BLUR_STEPS).map(move |i| blur * ((i as f32 + 0.5) / BLUR_STEPS as f32 - 0.5))
+}
+
 fn whole(s: &str) -> DWRITE_TEXT_RANGE {
     DWRITE_TEXT_RANGE {
         startPosition: 0,
@@ -1493,5 +1651,20 @@ fn rect(r: &Rect) -> D2D_RECT_F {
         top: r.y,
         right: r.right(),
         bottom: r.bottom(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_soft_edge_spreads_evenly_about_the_sharp_one() {
+        let steps: Vec<f32> = blur_steps(8.0).collect();
+        assert_eq!(steps.len(), BLUR_STEPS);
+        assert!((steps.iter().sum::<f32>()).abs() < 1e-4);
+        assert!(steps.windows(2).all(|w| w[1] > w[0]));
+        assert!(steps[0] > -4.0 && steps[BLUR_STEPS - 1] < 4.0);
+        assert!(blur_steps(0.0).all(|s| s == 0.0));
     }
 }

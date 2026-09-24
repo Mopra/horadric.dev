@@ -1,10 +1,13 @@
-//! Colours and icons. Dark only for now: near black with a faint cool cast,
-//! bright text, and phase colours saturated enough to read at a glance.
+//! Colours and icons. Dark clay: deep plum slate surfaces that look
+//! moulded, lit from the top left, so everything is either puffed up off
+//! the window or pressed into it. Bright text, and phase colours saturated
+//! enough to glow against the dark.
 //!
-//! Colour has two jobs and they never share a place. A phase is light: the
-//! edge and the icon of a tile, the line along a pane header. A project is
-//! an accent: the wash down its cluster, the edge of the stage showing it. So a
-//! project's colour is never mistaken for a session needing you.
+//! Colour has two jobs and they never share a place. A phase is a tint and
+//! a light: the fill and the edge of a tile, its icon, the line along a pane
+//! header. A project is an accent: the wash down its cluster, the edge of
+//! the stage showing it. So a project's colour is never mistaken for a
+//! session needing you.
 
 use horadric_core::{Phase, WaitReason};
 
@@ -54,32 +57,42 @@ impl Color {
     }
 }
 
-pub const WINDOW_BG: Color = Color::rgb(0x0A0A0D);
-/// Laid over the acrylic behind a cluster. Nearly opaque: the window is
-/// deep black first, and the desktop is only a hint of depth behind it.
-pub const GLASS_TINT: Color = Color::rgb(0x060609).with_alpha(0.92);
-/// A tile on glass: a breath of white, so it reads as a surface laid on top
-/// rather than a hole cut in the window, without lifting it toward grey.
-pub const GLASS_TILE: Color = Color::rgb(0xFFFFFF).with_alpha(0.028);
-/// The light catching a tile's top edge.
-pub const GLASS_EDGE: Color = Color::rgb(0xFFFFFF).with_alpha(0.06);
-pub const TILE_BG: Color = Color::rgb(0x16161B);
-/// A lifted tile surface: the focused pane, the outline of the add slot.
-pub const TILE_BG_STAGED: Color = Color::rgb(0x23232B);
-pub const STAGED_EDGE: Color = Color::rgb(0xC4C4D0);
-pub const TEXT: Color = Color::rgb(0xF5F5F7);
-pub const TEXT_DIM: Color = Color::rgb(0xA4A4B0);
+/// The clay every window is moulded from: a deep plum slate.
+pub const WINDOW_BG: Color = Color::rgb(0x1C1A27);
+/// A surface puffed up off the window: a tile, a panel. A shade lighter
+/// than the window, so it catches more of the light.
+pub const SURFACE: Color = Color::rgb(0x282536);
+/// A surface pressed into the window: an empty slot, an ended session.
+pub const WELL: Color = Color::rgb(0x16141F);
+pub const TEXT: Color = Color::rgb(0xF2F0F8);
+pub const TEXT_DIM: Color = Color::rgb(0xA6A1B8);
+
+/// The shadow anything raised casts on the window.
+pub const CAST: Color = Color::rgb(0x000000).with_alpha(0.55);
+/// The light catching the top left rim of anything raised, and the shade
+/// on its far rim. On dark clay the light has to stay faint, or it reads
+/// as a white edge rather than a curve.
+pub const RIM_LIGHT: Color = Color::rgb(0xFFFFFF).with_alpha(0.09);
+pub const RIM_SHADE: Color = Color::rgb(0x000000).with_alpha(0.35);
+/// Inside a hollow: shade under its top left lip, light on the far side.
+pub const HOLLOW_SHADE: Color = Color::rgb(0x000000).with_alpha(0.5);
+pub const HOLLOW_LIGHT: Color = Color::rgb(0xFFFFFF).with_alpha(0.04);
+/// A hollow's lower lip, catching the light on the window around it.
+pub const LIP: Color = Color::rgb(0xFFFFFF).with_alpha(0.06);
+/// The window's own rim.
+pub const SLAB_LIGHT: Color = Color::rgb(0xFFFFFF).with_alpha(0.06);
+pub const SLAB_SHADE: Color = Color::rgb(0x000000).with_alpha(0.3);
 
 /// Behind a button under the cursor and one held down: white laid over
 /// whatever is there, as Windows 11 does it, so it works on any surface.
-pub const HOVER_FILL: Color = Color::rgb(0xFFFFFF).with_alpha(0.05);
+pub const HOVER_FILL: Color = Color::rgb(0xFFFFFF).with_alpha(0.06);
 pub const PRESS_FILL: Color = Color::rgb(0xFFFFFF).with_alpha(0.025);
 
 pub const WORKING: Color = Color::rgb(0x3DB4FF);
 pub const WAITING: Color = Color::rgb(0xFFB224);
 pub const ERROR: Color = Color::rgb(0xFF5D66);
 pub const DONE: Color = Color::rgb(0x3DD68C);
-pub const IDLE: Color = Color::rgb(0x5C5C68);
+pub const IDLE: Color = Color::rgb(0x6E6882);
 
 /// Git change colours, VS Code's dark theme ones, so a file looks the same
 /// in the tile as in the editor.
@@ -180,6 +193,18 @@ pub fn edge_strength(phase: &Phase) -> f32 {
     }
 }
 
+/// How far a tile stands off the window, by phase. One is a resting
+/// pillow. Waiting needs you, so it puffs up furthest. A session that can
+/// no longer act sinks into the clay, below zero.
+pub fn depth(phase: &Phase) -> f32 {
+    match phase {
+        Phase::Waiting(_) => 1.4,
+        Phase::Working | Phase::Done => 1.0,
+        Phase::Idle => 0.8,
+        Phase::Paused | Phase::Ended => -0.6,
+    }
+}
+
 /// A session that cannot act on its own right now fades back, so the ones
 /// that can, or that need you, come forward.
 pub fn presence(phase: &Phase) -> f32 {
@@ -201,17 +226,18 @@ pub fn phase_color(phase: &Phase) -> Color {
     }
 }
 
-/// A session's bar, tile or pane header, tinted by its phase over `base`.
-/// Waiting is the strongest because it needs you. A session doing nothing
-/// keeps the plain bar, so colour always means something.
-pub fn phase_fill(phase: &Phase, base: Color) -> Color {
+/// A tile's clay, tinted by its phase. Waiting is the strongest because it
+/// needs you. A session doing nothing keeps the plain surface, so colour
+/// always means something, and one that has stopped is the pressed well.
+pub fn phase_fill(phase: &Phase) -> Color {
     let strength = match phase {
-        Phase::Waiting(_) => 0.26,
-        Phase::Working => 0.18,
-        Phase::Done => 0.14,
-        Phase::Idle | Phase::Ended | Phase::Paused => return base,
+        Phase::Waiting(_) => 0.2,
+        Phase::Working => 0.1,
+        Phase::Done => 0.12,
+        Phase::Idle => return SURFACE,
+        Phase::Ended | Phase::Paused => return WELL,
     };
-    base.mix(phase_color(phase), strength)
+    SURFACE.mix(phase_color(phase), strength)
 }
 
 /// How much of a limit or a context window is used, in percent, as a
@@ -274,9 +300,20 @@ mod tests {
     }
 
     #[test]
-    fn a_quiet_session_keeps_the_plain_bar() {
-        for p in [Phase::Idle, Phase::Ended, Phase::Paused] {
-            assert_eq!(phase_fill(&p, TILE_BG), TILE_BG);
+    fn a_quiet_session_keeps_the_plain_clay_and_a_stopped_one_sinks() {
+        assert_eq!(phase_fill(&Phase::Idle), SURFACE);
+        for p in [Phase::Ended, Phase::Paused] {
+            assert_eq!(phase_fill(&p), WELL);
+            assert!(depth(&p) < 0.0);
+        }
+    }
+
+    #[test]
+    fn waiting_puffs_up_furthest() {
+        let waiting = depth(&Phase::Waiting(WaitReason::Input));
+        for p in [Phase::Working, Phase::Done, Phase::Idle] {
+            assert!(waiting > depth(&p));
+            assert!(depth(&p) > 0.0);
         }
     }
 
@@ -346,9 +383,9 @@ mod tests {
 
     #[test]
     fn waiting_is_tinted_hardest() {
-        let dist = |c: Color| (c.r - TILE_BG.r).abs() + (c.g - TILE_BG.g).abs();
-        let waiting = phase_fill(&Phase::Waiting(WaitReason::Input), TILE_BG);
-        let working = phase_fill(&Phase::Working, TILE_BG);
+        let dist = |c: Color| (c.r - SURFACE.r).abs() + (c.b - SURFACE.b).abs();
+        let waiting = phase_fill(&Phase::Waiting(WaitReason::Input));
+        let working = phase_fill(&Phase::Working);
         assert!(dist(waiting) > dist(working));
         assert!(waiting.r > waiting.b, "amber, not blue");
     }

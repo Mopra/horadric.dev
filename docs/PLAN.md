@@ -5,8 +5,8 @@ this file when a step lands or a decision changes. It is the handover
 document: someone picking the project up cold should need nothing else.
 
 Last updated 2026-09-24, after step 3, the launchers, persistence, install,
-the stage, reload, the project grid, browser windows, the look and plain
-terminals.
+the stage, reload, the project grid, browser windows, the look, plain
+terminals and a pass of quality of life.
 
 ## Shape of the thing
 
@@ -147,8 +147,9 @@ arrow keys, a prompt and its answer, resize, collapse and expand, `/exit`.
   tokens.
 
 Measured: one process, 51 MB (debug build) with a cluster and one open
-terminal. History is 2000 rows per session, at about 24 bytes a cell: under
-6 MB per session when full at 120 columns, 230 MB for forty full ones.
+terminal. History is 10,000 rows per session (see Quality of life), at
+about 24 bytes a cell: under 30 MB per session when full at 120 columns,
+1.1 GB for forty full ones.
 
 ### Launchers
 
@@ -177,6 +178,20 @@ new project, so three ways in that need no terminal:
   a console. `horadricw` starts the app when it is not running (hidden, no
   console window) and then asks it for the session. With no folder it only
   starts the app.
+
+- **The start window** (`start.rs`). With no project open the desktop
+  used to show only the usage window and a tray icon, and nothing said how
+  to begin. Now a ghost cluster stands where the first cluster will go,
+  below the usage window: "No project open", a dashed tile "Open a
+  project" that opens the folder picker (beside the most recent project),
+  and up to five recent projects that start a session with one click. A
+  folder dropped on it from Explorer opens as the project, and a dropped
+  file opens its folder. It exists only while there are no clusters, so it
+  is gone the moment the first one appears. Tested on screen with a dev
+  instance: the empty and the recent versions drawn, and a click on a
+  recent project started one `cmd.exe`, replaced the ghost with its
+  cluster and opened the stage. The picker and a drop not yet tried by
+  hand.
 
 Two Win32 details that decided the shape. The app's hidden window is now a
 top level tool window, not message-only, because only top level windows
@@ -220,6 +235,48 @@ resumes one with `claude --resume <id>`, and every hook carries the id.
   already has a live console, whatever path led there.
 - A second Horadric refuses to start when the port answers. Autostart plus a
   manual start would otherwise show every saved session twice.
+
+### History
+
+A session ended for good (`/exit`, End session, Start over) used to be
+gone from Horadric, with no way back to its conversation. Asked for so a
+closed session can be picked up where it was left.
+
+- **Claude Code already keeps them.** Every conversation is a transcript in
+  `~/.claude/projects/<folder>/<id>.jsonl` (under `CLAUDE_CONFIG_DIR` when
+  set), the folder being the working directory with every character that
+  is not a letter or digit made a hyphen. The drive letter comes in both
+  cases, so both folders are read. Horadric keeps no history of its own:
+  this one also has the conversations started outside Horadric.
+- **History in the project menu** (right click a header or the bottom `+`)
+  lists the newest ten, by the title Claude Code gave them and how long ago
+  each was touched (`history::label`). Conversations a tile holds, live or
+  paused, are left out, and so are ones with no title, since Claude Code
+  writes one after the first prompt. Only the last 256 KB of each file is
+  read and at most 40 files are looked at, since the menu is opening on
+  the UI thread (`transcript::history`).
+- **A click** starts `claude --resume <id>` as a new tile in the project,
+  with the title and id set at once, so a pause before its next prompt
+  still resumes that conversation. "All conversations..." at the bottom
+  starts `claude --resume` with no id, and Claude Code's own picker lists
+  the rest in the pane.
+- **A project with no tiles left** has no cluster and so no project menu.
+  Two more ways in: History in the tray menu, with a submenu for each
+  recent project, and a right click on a recent project in the start
+  window, which offers New session and that project's History. Menu ids
+  are spans of `history::SPAN` per list (`history::pick`,
+  `history::pick_nested`), so one tray menu holds every project's.
+- `tray::Item::Submenu` is new for it.
+
+Tested on screen with a dev instance and `cmd.exe`: the project menu's
+submenu listed this project's ten newest conversations with titles and
+ages, and a click opened a pane titled with the conversation, its process
+given `--resume` and the id. With no project open, a right click on the
+start window's recent project and a pick from it replaced the start window
+with the project's cluster and the resumed tile. The tray's History showed
+the project's submenu without the conversation just resumed, and a pick
+there started the right one. A dev instance lists the installed one's live
+sessions too, since its registry does not hold them.
 
 ### Install
 
@@ -401,6 +458,24 @@ piece of work, with less freedom and more structure.
   session keeps its place, so a restart puts each back where it was as it
   resumes (`layout::grid_order`). A reload brought a swapped grid back
   swapped.
+- **Tiles and panes share one order.** It lives in `Shared::orders`, so
+  the cluster sorts its tiles by it (`layout::rank`) and the stage lays
+  out its panes by it. Every session gets a place as the registry
+  changes, new ones last in the order they started, so a tile and its
+  pane agree from the first. A pane swap moves the two tiles too.
+- **Drag a tile to move it.** In a cluster of more than one tile, pressing
+  a tile and moving past 4 pixels lifts it: it follows the cursor up and
+  down, solid and outlined blue, and the others slide out of its way.
+  Letting go puts it in the place it is over (`layout::tile_slot`) and
+  the stage's grid follows (`Input::Reorder`). A lone tile still drags its
+  window, and the header drags any cluster. Asked for so the tiles read
+  in the same order as the panes, and either can be arranged.
+
+Tested on screen with a dev instance and three `cmd.exe` sessions: tiles
+and panes started in the same order; dragging the bottom tile to the top
+moved its pane to the first place; the order came back after a restart
+with every session paused; a plain click on a tile still resumed it; a
+pane swap swapped the two tiles.
 - **Pop out is gone**, with `popped` and `placement` in `state.json`. An
   older file still reads; those fields are ignored.
 - The tray's "Arrange terminals" became "Fit terminal beside tiles".
@@ -742,9 +817,67 @@ matching its cluster's mark, context rings at 38 % and 82 %. After the first
 look proved too light and its borders too bright, the darker pass was
 checked the same way beside the installed build.
 
-Not done: the tray menu is still light, and the terminal font is still
-fixed. Panes are square: a child window can only be rounded with a window
-region, whose corners are jagged.
+Not done: the tray menu is still light. Panes are square: a child window
+can only be rounded with a window region, whose corners are jagged.
+
+### Quality of life
+
+Seven things found by reading the app for what daily use would miss first.
+
+- **A notification when a session needs you.** The tiles are not topmost,
+  so an amber tile under an editor went unseen. When a session starts
+  waiting (`Phase::Waiting`, never idle after a finished turn), the tray
+  icon sends a notification: "fix-login needs permission" over the tool it
+  asks about (`inbox::alert`). Several at once are one, "3 sessions need
+  you". Nothing is sent for a session you are looking at, the stage in
+  front with it on it. A click shows that session, or for several the one
+  that waited longest (`NIN_BALLOONUSERCLICK`). "Notify when a session
+  needs you" in the tray menu switches it off, saved as `quiet`. It is a
+  `Shell_NotifyIcon` balloon, which Windows 11 shows as a toast and keeps
+  in the notification centre, so Do not disturb holds it back by itself.
+- **Zoom a pane.** Its header has a button at the end, and a double click
+  on the header or Ctrl+Shift+Enter does the same: the pane fills the stage
+  alone, the rest hidden at their size so their programs are not told of a
+  resize. Zoom follows the keyboard: a tile click or Ctrl+Alt+arrow shows
+  that pane instead, so zoomed reads as one pane at a time. Switching
+  project ends it.
+- **The keyboard between panes.** Ctrl+Alt+arrow moves it to the pane in
+  that direction (`layout::neighbour`, the nearest one past the edge, most
+  in line). Ctrl+Alt, not Alt, because Alt+arrow is word movement in a
+  shell. The stage chords are one pure table (`keys::chord`), and a chord's
+  own `WM_CHAR` is taken off the queue so it never reaches the program.
+- **Font size.** Ctrl and plus or minus, Ctrl+0 for the default, or Ctrl and
+  the wheel, one DIP a step from 9 to 32 (`keys::font_size`). One size for
+  every pane, saved as `font_size`. The `Font` makes new text formats for
+  the size; the glyph cache keeps, since glyph indices do not depend on it.
+- **Rename a session.** "Rename..." in a tile's menu asks in a plain Win32
+  dialog built from a template in memory (`ask.rs`), so no resource file
+  ships. The name beats Claude's title (`Session::renamed`, saved) until a
+  newer `/rename`, and an empty one gives the naming back to Claude.
+- **Search the history, and more of it.** Ctrl+Shift+F opens a bar over the
+  pane's top right corner. Typing searches up from the bottom, literally
+  (`find::pattern` escapes what a regex would read), ignoring case unless
+  the query has a capital; the match is selected and scrolled into view, so
+  Ctrl+C copies it. Enter or Up goes further up, Shift+Enter or Down comes
+  back down, Esc closes it. It is `alacritty_terminal`'s own regex search,
+  and works in a file view too. History went from 2000 rows to 10,000, what
+  Windows Terminal keeps: 2000 was gone in an afternoon of Claude Code.
+- **Open the project** in VS Code or in Explorer, from the project menu.
+  VS Code is found as for the files tile; without it the line is greyed.
+
+Tested on screen with a dev instance on its own port and `APPDATA`, running
+`cmd.exe`: the zoom button zoomed and unzoomed, a double click on a header
+unzoomed, moving right while zoomed showed the next pane, Ctrl+Alt+Left and
+Ctrl+Shift+Enter did the same from the keyboard, Ctrl+Shift+F then "needle"
+selected the last match and Enter the one above with nothing reaching the
+shell, Ctrl+= twice made the font 17 and saved it, and Rename through the
+tile menu renamed the tile, the stage's title and `state.json`. The keys
+were sent to the dev instance's thread with its key state set through
+`AttachThreadInput`, not as real input, so nothing reached another window.
+The notification was accepted by Windows (logged with `HORADRIC_DEBUG`) but
+not seen, since Do not disturb was on; how it looks and a click on it are
+not tested yet. The rename dialog opened behind other windows, as anything
+opened from a synthetic click does.
 
 ## Next
 
@@ -786,14 +919,10 @@ region, whose corners are jagged.
   quoting rules.
 - **Terminal gaps.** The IME composition window is not placed at the cursor.
   Mouse reporting to programs, the kitty keyboard protocol and cursor blink
-  are not implemented. The font and its size are fixed.
+  are not implemented. The font family is fixed.
 - **Expanding from a synthetic click can open behind other windows.** Windows
   only lets a process take the foreground after real input. A real click on
   a tile is real input, so this only bites scripted tests.
-
-- **Cluster positions are not remembered.** Restart and everything goes back
-  to the left edge. Needs a settings file, probably
-  `%APPDATA%\Horadric\state.json`.
 - **Only the primary monitor.** `arrange` reads `SPI_GETWORKAREA`, which
   ignores the other screens. Snapping already uses the monitor under the
   cursor.
@@ -811,8 +940,9 @@ region, whose corners are jagged.
 Carried from the concept, with what is known now.
 
 - **Does forty sessions hold up?** Five tiles cost 45 MB and no CPU. One
-  open terminal adds a few MB. History is bounded at 2000 rows a session, so
-  the worst case for the grids is about 230 MB. The other cost is forty
+  open terminal adds a few MB. History is bounded at 10,000 rows a session,
+  so the worst case for the grids is about 1.1 GB, reached only if all forty
+  fill theirs. The other cost is forty
   `claude` processes, which is not ours. Not yet tried with forty.
 - **Can a tile light up without stealing focus?** Yes, so far.
   `WS_EX_NOACTIVATE` plus `SWP_NOACTIVATE` holds through raising.

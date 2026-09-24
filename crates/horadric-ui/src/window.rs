@@ -10,7 +10,7 @@
 //! the system move loop would activate the window.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -47,7 +47,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::anim::{self, TileIn};
 use crate::app::{self, Input, MARGIN_DIP};
-use crate::backdrop::{self, Material};
+use crate::backdrop;
 use crate::files::{Change, Expansion, Row, Tree};
 use crate::glyphs::Font;
 use crate::layout::{self, ClusterLayout, Hit, Metrics};
@@ -68,13 +68,17 @@ const WHEEL_ROWS: i32 = 3;
 const ANIM_TIMER: usize = 7;
 
 /// What the windows share with the app: GPU objects, the terminal font,
-/// the session store, which sessions are on the stage and which have a
-/// browser open, the account's usage and the defaults for new sessions.
+/// the session store, the order of each project's sessions, which are on
+/// the stage and which have a browser open, the account's usage and the
+/// defaults for new sessions.
 pub struct Shared {
     pub gpu: Gpu,
     pub font: Font,
     pub metrics: Metrics,
     pub registry: Arc<Mutex<Registry>>,
+    /// Each project's sessions in the order its tiles and the stage's grid
+    /// both show them, by project key. Paused ones keep their place.
+    pub orders: RefCell<HashMap<String, Vec<String>>>,
     pub staged: RefCell<HashSet<String>>,
     pub browsing: RefCell<HashSet<String>>,
     /// Written by the feeder thread as status lines arrive.
@@ -98,6 +102,7 @@ pub struct Cluster {
     shared: Rc<Shared>,
     target: RefCell<Option<Target>>,
     drag: RefCell<Option<Drag>>,
+    lift: RefCell<Option<Lift>>,
     resize: RefCell<Option<Resize>>,
     layout: RefCell<ClusterLayout>,
     /// What the cursor is over, for the buttons to light up.
@@ -107,8 +112,6 @@ pub struct Cluster {
     pressed: Cell<Option<Hit>>,
     /// A WM_MOUSELEAVE has been asked for and not yet sent.
     tracking: Cell<bool>,
-    /// Acrylic is behind the window, so it draws with transparency.
-    glass: Cell<bool>,
     /// Where each tile has got to on its way somewhere.
     tiles: RefCell<anim::Tiles>,
     /// The frame interval the animation timer runs at, if it runs.
@@ -164,6 +167,20 @@ struct Drag {
     moved: bool,
     /// The other windows, read once: they cannot move during this drag.
     others: Vec<snapping::Edges>,
+}
+
+/// A tile pressed, and once past the drag threshold carried, to a new
+/// place among the others.
+struct Lift {
+    id: String,
+    /// Where the button went down and the tile's top then, in DIPs.
+    start_y: f32,
+    start_top: f32,
+    /// Its top now, following the cursor.
+    top: f32,
+    /// The place it takes if let go now.
+    slot: usize,
+    moved: bool,
 }
 
 /// The files tile's bottom edge being dragged.
@@ -229,12 +246,12 @@ impl Cluster {
             shared,
             target: RefCell::new(None),
             drag: RefCell::new(None),
+            lift: RefCell::new(None),
             resize: RefCell::new(None),
             layout: RefCell::new(initial),
             hot: Cell::new(Hit::Nothing),
             pressed: Cell::new(None),
             tracking: Cell::new(false),
-            glass: Cell::new(false),
             tiles: RefCell::new(anim::Tiles::default()),
             frames: Cell::new(None),
             dirty: Cell::new(true),
@@ -271,9 +288,8 @@ impl Cluster {
                 &pref as *const _ as *const c_void,
                 std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
             );
-            // Hide the 1px system border, the glass draws its own edge.
+            // No 1px system border: the clay has its own edge.
             backdrop::border(hwnd, None);
-            cluster.glass.set(backdrop::apply(hwnd, Material::Acrylic));
 
             cluster.fit();
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -352,8 +368,11 @@ impl Cluster {
         }
     }
 
+    /// The project's sessions in the order the tiles show them, a tile
+    /// being carried already in the place it would take.
     fn sessions(&self) -> Vec<Session> {
-        self.shared
+        let mut v: Vec<Session> = self
+            .shared
             .registry
             .lock()
             .map(|r| {
@@ -362,7 +381,17 @@ impl Cluster {
                     .cloned()
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(order) = self.shared.orders.borrow().get(&self.key) {
+            v.sort_by_key(|s| layout::rank(order, &s.id));
+        }
+        if let Some(l) = self.lift.borrow().as_ref().filter(|l| l.moved) {
+            if let Some(i) = v.iter().position(|s| s.id == l.id) {
+                let s = v.remove(i);
+                v.insert(l.slot.min(v.len()), s);
+            }
+        }
+        v
     }
 
     pub fn files_collapsed(&self) -> bool {
@@ -469,14 +498,7 @@ impl Cluster {
         let dpi = self.dpi();
         let mut slot = self.target.borrow_mut();
         if slot.is_none() {
-            match Target::with_glass(
-                &self.shared.gpu,
-                self.hwnd,
-                w as u32,
-                h as u32,
-                dpi,
-                self.glass.get(),
-            ) {
+            match Target::new(&self.shared.gpu, self.hwnd, w as u32, h as u32, dpi) {
                 Ok(t) => *slot = Some(t),
                 Err(e) => {
                     eprintln!("horadric: render target for {}: {e}", self.name);
@@ -497,15 +519,22 @@ impl Cluster {
         let files = self.files.borrow();
         let hot = self.hot.get();
         let pressed = self.pressed.get();
+        let lift = self.lift.borrow();
+        let carried = lift.as_ref().filter(|l| l.moved);
+        let held = carried.and_then(|l| refs.iter().position(|s| s.id == l.id));
         let inputs: Vec<TileIn> = refs
             .iter()
             .zip(&layout.tiles)
             .enumerate()
-            .map(|(i, (s, r))| TileIn {
-                id: &s.id,
-                phase: &s.phase,
-                y: r.y,
-                hot: pressed.is_none() && hot == Hit::Tile(i),
+            .map(|(i, (s, r))| {
+                let is_held = held == Some(i);
+                TileIn {
+                    id: &s.id,
+                    phase: &s.phase,
+                    y: carried.filter(|_| is_held).map_or(r.y, |l| l.top),
+                    hot: is_held || (pressed.is_none() && hot == Hit::Tile(i)),
+                    held: is_held,
+                }
             })
             .collect();
         let looks = self.tiles.borrow_mut().step(Instant::now(), &inputs);
@@ -521,6 +550,7 @@ impl Cluster {
             collapsed: self.collapsed,
             sessions: &refs,
             looks: &looks,
+            held,
             on_stage,
             accent: theme::accent(&self.key),
             ambient,
@@ -685,6 +715,11 @@ impl Cluster {
                     self.start_resize(cursor.y);
                     return Some(LRESULT(0));
                 }
+                if let Hit::Tile(i) = hit {
+                    if self.start_lift(i, lparam) {
+                        return Some(LRESULT(0));
+                    }
+                }
                 let (x, y) = self.position();
                 *self.drag.borrow_mut() = Some(Drag {
                     start_cursor: cursor,
@@ -699,6 +734,10 @@ impl Cluster {
                 self.hover(self.hit(lparam));
                 if self.resize.borrow().is_some() {
                     self.resizing();
+                    return Some(LRESULT(0));
+                }
+                if self.lift.borrow().is_some() {
+                    self.carry(lparam);
                     return Some(LRESULT(0));
                 }
                 let mut drag = self.drag.borrow_mut();
@@ -722,8 +761,16 @@ impl Cluster {
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
+                // Taken first: letting go of the capture below sends
+                // WM_CAPTURECHANGED, which drops a lift it still finds.
+                let lift = self.lift.borrow_mut().take();
                 unsafe {
                     let _ = ReleaseCapture();
+                }
+                if let Some(l) = lift {
+                    self.press(None);
+                    self.put_down(l, lparam);
+                    return Some(LRESULT(0));
                 }
                 self.press(None);
                 if self.resize.borrow_mut().take().is_some() {
@@ -746,6 +793,10 @@ impl Cluster {
             // up comes, so nothing else would let go of the button.
             WM_CAPTURECHANGED => {
                 self.press(None);
+                // The tile goes back where it was.
+                if self.lift.borrow_mut().take().is_some_and(|l| l.moved) {
+                    self.fit();
+                }
                 None
             }
             WM_RBUTTONUP => {
@@ -826,6 +877,80 @@ impl Cluster {
         if self.pressed.replace(pressed) != pressed {
             self.invalidate();
         }
+    }
+
+    /// Picks up the `i`th tile, to be carried to a new place. Only where
+    /// there is more than one: a lone tile drags its window instead.
+    fn start_lift(&self, i: usize, lparam: LPARAM) -> bool {
+        let sessions = self.sessions();
+        let top = self.layout.borrow().tiles.get(i).map(|r| r.y);
+        let (Some(s), Some(top), true) = (sessions.get(i), top, sessions.len() > 1) else {
+            return false;
+        };
+        *self.lift.borrow_mut() = Some(Lift {
+            id: s.id.clone(),
+            start_y: self.client_y(lparam),
+            start_top: top,
+            top,
+            slot: i,
+            moved: false,
+        });
+        true
+    }
+
+    /// Moves the carried tile with the cursor, and the others out of its
+    /// way once it is over another's place.
+    fn carry(&self, lparam: LPARAM) {
+        let y = self.client_y(lparam);
+        let scale = self.scale();
+        let refit = {
+            let layout = self.layout.borrow();
+            let mut lift = self.lift.borrow_mut();
+            let Some(l) = lift.as_mut() else {
+                return;
+            };
+            let dy = y - l.start_y;
+            if !l.moved && (dy * scale).abs() <= DRAG_THRESHOLD as f32 {
+                return;
+            }
+            let (Some(first), Some(last)) = (layout.tiles.first(), layout.tiles.last()) else {
+                return;
+            };
+            let was = l.moved;
+            l.moved = true;
+            l.top = (l.start_top + dy).clamp(first.y, last.y);
+            let slot = layout::tile_slot(&layout.tiles, l.top);
+            let refit = !was || slot != l.slot;
+            l.slot = slot;
+            refit
+        };
+        self.press(None);
+        // The browser buttons and the hit test follow the new order.
+        if refit {
+            self.fit();
+        } else {
+            self.invalidate();
+        }
+    }
+
+    /// Lets go of a tile: in its new place if it was carried, otherwise it
+    /// was a click.
+    fn put_down(&self, lift: Lift, lparam: LPARAM) {
+        if !lift.moved {
+            self.click(lparam);
+            return;
+        }
+        let mut shown: Vec<String> = self.sessions().into_iter().map(|s| s.id).collect();
+        if let Some(i) = shown.iter().position(|id| *id == lift.id) {
+            let id = shown.remove(i);
+            shown.insert(lift.slot.min(shown.len()), id);
+        }
+        app::push(Input::Reorder(self.key.clone(), shown));
+    }
+
+    /// A mouse message's client y, in DIPs.
+    fn client_y(&self, lparam: LPARAM) -> f32 {
+        ((lparam.0 >> 16) & 0xffff) as i16 as f32 / self.scale()
     }
 
     fn start_resize(&self, cursor_y: i32) {

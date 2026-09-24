@@ -52,8 +52,18 @@ work. Worktrees are next.
   project, as a pane on the stage and a tile in the cluster. The tile shows
   what the terminal's title says and how busy its output is. `exit` closes
   it. `HORADRIC_SHELL` picks another shell.
+- Zoom a pane with the button at the end of its header, a double click on
+  the header, or Ctrl+Shift+Enter: it fills the stage alone until you zoom
+  out. Ctrl+Alt and an arrow moves the keyboard to the pane beside it. Ctrl
+  and plus, minus or the wheel sizes the font, Ctrl+0 puts it back.
+- Ctrl+Shift+F searches a pane's history, which keeps 10,000 lines. Enter
+  finds the next match up, Shift+Enter the next one down, Esc closes it.
+- Right click a tile to rename its session, or a project's header to open
+  its folder in VS Code or Explorer.
 - Ctrl+Alt+Space, from anywhere, shows the session that has waited on you
-  longest. Press it again to move on to the next one.
+  longest. Press it again to move on to the next one. When a session starts
+  waiting and you are not looking at it, Windows shows a notification; a
+  click on it shows the session. The tray menu can switch that off.
 - A Claude window at the top of the stack shows how much of your five hour,
   weekly and spend limits is used and when each resets, and picks the
   model, effort and permission mode for every session Horadric starts or

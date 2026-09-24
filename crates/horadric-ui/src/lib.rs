@@ -13,6 +13,8 @@
 //!
 //! One more window belongs to no project: the usage window, with the
 //! account's Claude limits and the defaults for new sessions ([`usage`]).
+//! Another stands in for the first project while none is open, so an empty
+//! desktop says how to begin (`start`).
 //!
 //! A file clicked in a files tile is shown on the stage too, read only, as a
 //! pane with no program behind it ([`viewer`], [`highlight`]).
@@ -21,16 +23,18 @@
 //! whatever else the work needs. They are sessions with a tile and a pane
 //! like the rest ([`shell`]).
 //!
-//! [`anim`], [`files`], [`layout`], [`theme`], [`palette`], [`paste`],
+//! [`anim`], [`files`], [`find`], [`layout`], [`theme`], [`palette`], [`paste`],
 //! [`keys`], [`frame`], [`icon`], [`inbox`], [`motion`], [`viewer`],
-//! [`highlight`] and [`shell`] are pure and tested, and so is the list logic
-//! in `recent`.
+//! [`highlight`], [`history`] and [`shell`] are pure and tested, and so is
+//! the list logic in `recent`.
 //! The rest is Windows only and verified on screen.
 
 pub mod anim;
 pub mod files;
+pub mod find;
 pub mod frame;
 pub mod highlight;
+pub mod history;
 pub mod icon;
 pub mod inbox;
 pub mod keys;
@@ -44,6 +48,8 @@ pub mod viewer;
 
 #[cfg(windows)]
 pub mod app;
+#[cfg(windows)]
+mod ask;
 #[cfg(windows)]
 pub mod autostart;
 #[cfg(windows)]
@@ -66,6 +72,8 @@ mod recent;
 mod render;
 #[cfg(windows)]
 mod snapping;
+#[cfg(windows)]
+mod start;
 #[cfg(windows)]
 mod store;
 #[cfg(windows)]

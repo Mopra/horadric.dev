@@ -13,14 +13,14 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_USER, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
-    GetSystemMetrics, PostMessageW, SetForegroundWindow, TrackPopupMenu, HICON, ICONINFO,
-    MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, SM_CXSMICON, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    WM_NULL,
+    GetSystemMetrics, PostMessageW, SetForegroundWindow, TrackPopupMenu, HICON, HMENU, ICONINFO,
+    MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, SM_CXSMICON, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, WM_NULL,
 };
 
 use crate::{icon, recent};
@@ -40,6 +40,9 @@ pub enum Choice {
     New,
     /// Start a session in this recent project.
     Recent(String),
+    /// A line of the History menu, by its id, which `history::pick_nested`
+    /// reads from [`HISTORY`].
+    History(usize),
     /// Put every cluster back in the auto layout.
     Tidy,
     /// Bring every cluster in front of the other windows.
@@ -49,6 +52,8 @@ pub enum Choice {
     /// Fill the space beside the clusters with the terminal.
     Arrange,
     ToggleAutostart,
+    /// Say, or stop saying, when a session starts waiting.
+    ToggleNotify,
     /// End every session in every project, after asking.
     EndAll,
     Quit,
@@ -82,6 +87,28 @@ impl Tray {
         self.tip = tip.to_string();
         unsafe {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &self.data());
+        }
+    }
+
+    /// A notification from the icon, which Windows 11 shows as a toast and
+    /// keeps in the notification centre. A click on it comes back as a
+    /// `NIN_BALLOONUSERCLICK` callback. Do not disturb holds it back.
+    pub fn notify(&self, title: &str, text: &str) {
+        let mut d = NOTIFYICONDATAW {
+            uFlags: NIF_INFO,
+            dwInfoFlags: NIIF_USER,
+            hBalloonIcon: self.icon,
+            ..self.data()
+        };
+        for (slot, unit) in d.szInfoTitle.iter_mut().zip(title.encode_utf16().take(63)) {
+            *slot = unit;
+        }
+        for (slot, unit) in d.szInfo.iter_mut().zip(text.encode_utf16().take(255)) {
+            *slot = unit;
+        }
+        let shown = unsafe { Shell_NotifyIconW(NIM_MODIFY, &d) }.as_bool();
+        if !shown || std::env::var_os("HORADRIC_DEBUG").is_some() {
+            eprintln!("horadric: notification \"{title}\" accepted={shown}");
         }
     }
 
@@ -120,6 +147,8 @@ pub enum Item {
     },
     Disabled(String),
     Separator,
+    /// A line that opens more lines beside it.
+    Submenu(String, Vec<Item>),
 }
 
 impl Item {
@@ -139,25 +168,7 @@ pub fn popup(hwnd: HWND, items: &[Item]) -> Option<usize> {
     DARK.call_once(dark_menus);
     unsafe {
         let menu = CreatePopupMenu().ok()?;
-        for item in items {
-            let _ = match item {
-                Item::Action { id, label, checked } => {
-                    let flags = if *checked {
-                        MF_STRING | MF_CHECKED
-                    } else {
-                        MF_STRING
-                    };
-                    AppendMenuW(menu, flags, *id, &HSTRING::from(label.as_str()))
-                }
-                Item::Disabled(label) => AppendMenuW(
-                    menu,
-                    MF_STRING | MF_GRAYED,
-                    0,
-                    &HSTRING::from(label.as_str()),
-                ),
-                Item::Separator => AppendMenuW(menu, MF_SEPARATOR, 0, None),
-            };
-        }
+        fill(menu, items);
 
         let mut at = POINT::default();
         let _ = GetCursorPos(&mut at);
@@ -178,6 +189,41 @@ pub fn popup(hwnd: HWND, items: &[Item]) -> Option<usize> {
         let _ = PostMessageW(Some(hwnd), WM_NULL, Default::default(), Default::default());
         let _ = DestroyMenu(menu);
         (picked != 0).then_some(picked)
+    }
+}
+
+unsafe fn fill(menu: HMENU, items: &[Item]) {
+    for item in items {
+        let _ = match item {
+            Item::Action { id, label, checked } => {
+                let flags = if *checked {
+                    MF_STRING | MF_CHECKED
+                } else {
+                    MF_STRING
+                };
+                AppendMenuW(menu, flags, *id, &HSTRING::from(label.as_str()))
+            }
+            Item::Disabled(label) => AppendMenuW(
+                menu,
+                MF_STRING | MF_GRAYED,
+                0,
+                &HSTRING::from(label.as_str()),
+            ),
+            Item::Separator => AppendMenuW(menu, MF_SEPARATOR, 0, None),
+            // Destroying the menu destroys the ones attached to it.
+            Item::Submenu(label, items) => match CreatePopupMenu() {
+                Ok(sub) => {
+                    fill(sub, items);
+                    AppendMenuW(
+                        menu,
+                        MF_STRING | MF_POPUP,
+                        sub.0 as usize,
+                        &HSTRING::from(label.as_str()),
+                    )
+                }
+                Err(e) => Err(e),
+            },
+        };
     }
 }
 
@@ -206,13 +252,20 @@ fn dark_menus() {
     }
 }
 
+/// Where the History menu's ids start, one span of them per recent project.
+pub const HISTORY: usize = 1000;
+
 /// The tray menu. `autostart` is None when the switch is not offered,
-/// `hotkey` is the shortcut for the next waiting session, if it has one.
+/// `hotkey` is the shortcut for the next waiting session, if it has one,
+/// and `notify` whether a session that starts waiting says so. `history`
+/// holds a History menu for each of `recent_projects`, in order.
 pub fn menu(
     hwnd: HWND,
     recent_projects: &[String],
+    history: Vec<Vec<Item>>,
     autostart: Option<bool>,
     hotkey: Option<&str>,
+    notify: bool,
 ) -> Option<Choice> {
     const NEW: usize = 1;
     const QUIT: usize = 2;
@@ -222,16 +275,29 @@ pub fn menu(
     const ARRANGE: usize = 6;
     const RAISE: usize = 7;
     const END_ALL: usize = 8;
+    const NOTIFY: usize = 9;
     const RECENT: usize = 100;
     let mut items = vec![Item::action(NEW, "New session\u{2026}"), Item::Separator];
     if recent_projects.is_empty() {
         items.push(Item::Disabled("No recent projects".into()));
     }
-    for (i, path) in recent_projects.iter().enumerate() {
+    // A tab right aligns the rest; an ampersand would underline.
+    let label = |path: &str| {
         let (name, place) = recent::label(path);
-        // A tab right aligns the rest; an ampersand would underline.
-        let text = format!("{}\t{}", name.replace('&', "&&"), place.replace('&', "&&"));
-        items.push(Item::action(RECENT + i, text));
+        format!("{}\t{}", name.replace('&', "&&"), place.replace('&', "&&"))
+    };
+    for (i, path) in recent_projects.iter().enumerate() {
+        items.push(Item::action(RECENT + i, label(path)));
+    }
+    // The way back to a project with no tiles left, whose menu went with
+    // its cluster.
+    let past: Vec<Item> = recent_projects
+        .iter()
+        .zip(history)
+        .map(|(path, lines)| Item::Submenu(label(path), lines))
+        .collect();
+    if !past.is_empty() {
+        items.push(Item::Submenu("History".into(), past));
     }
     items.push(Item::Separator);
     let next = match hotkey {
@@ -242,6 +308,11 @@ pub fn menu(
     items.push(Item::action(RAISE, "Bring tiles to front"));
     items.push(Item::action(ARRANGE, "Fit terminal beside tiles"));
     items.push(Item::action(TIDY, "Tidy up tiles"));
+    items.push(Item::Action {
+        id: NOTIFY,
+        label: "Notify when a session needs you".into(),
+        checked: notify,
+    });
     if let Some(checked) = autostart {
         items.push(Item::Action {
             id: AUTOSTART,
@@ -257,11 +328,13 @@ pub fn menu(
         NEW => Some(Choice::New),
         QUIT => Some(Choice::Quit),
         AUTOSTART => Some(Choice::ToggleAutostart),
+        NOTIFY => Some(Choice::ToggleNotify),
         TIDY => Some(Choice::Tidy),
         NEXT => Some(Choice::NextWaiting),
         ARRANGE => Some(Choice::Arrange),
         RAISE => Some(Choice::Raise),
         END_ALL => Some(Choice::EndAll),
+        i if i >= HISTORY => Some(Choice::History(i)),
         i if i >= RECENT => recent_projects
             .get(i - RECENT)
             .map(|p| Choice::Recent(p.clone())),

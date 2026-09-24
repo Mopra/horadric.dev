@@ -213,9 +213,42 @@ pub fn open(root: &Path, rel: &str) {
     }
 }
 
+/// Opens the project folder in VS Code, in the window that already has it
+/// or a new one. False when there is no VS Code to open it with.
+pub fn open_in_code(root: &Path) -> bool {
+    let Some(code) = vs_code() else {
+        return false;
+    };
+    let spawned = Command::new(code)
+        .arg(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if let Err(e) = &spawned {
+        eprintln!("horadric: cannot start VS Code: {e}");
+    }
+    spawned.is_ok()
+}
+
+/// Opens the project folder in Explorer.
+pub fn explore(root: &Path) {
+    let wide: Vec<u16> = root.as_os_str().encode_wide().chain([0]).collect();
+    unsafe {
+        ShellExecuteW(
+            None,
+            w!("explore"),
+            PCWSTR(wide.as_ptr()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
 /// `Code.exe` beside the `bin\code.cmd` on `PATH`. The executable itself,
 /// not the script, so no console flashes and no `cmd.exe` quoting applies.
-fn vs_code() -> Option<PathBuf> {
+pub fn vs_code() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).find_map(|dir| {
         if !dir.join("code.cmd").is_file() {

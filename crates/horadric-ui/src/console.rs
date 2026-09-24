@@ -32,10 +32,12 @@ use crate::app::{WM_HORADRIC_EXIT, WM_HORADRIC_OUTPUT};
 use crate::viewer::{self, Cell, Row, Span};
 use crate::{clipboard, highlight, palette, shell};
 
-/// History per session. Rows are allocated as output scrolls into them, at
-/// about 24 bytes a cell, so 2000 rows of 120 columns is under 6 MB even when
-/// full. Forty full sessions would be 230 MB, which is the number to watch.
-const SCROLLBACK: usize = 2000;
+/// History per session, as much as Windows Terminal keeps. 2000 rows was
+/// gone in an afternoon of Claude Code output. Rows are allocated as output
+/// scrolls into them, at about 24 bytes a cell, so 10,000 rows of 120
+/// columns is under 30 MB even when full. Forty full sessions would be
+/// 1.1 GB, which is the number to watch.
+const SCROLLBACK: usize = 10_000;
 
 /// Set by Claude Code for the processes it starts, naming that session.
 /// When Horadric itself was started from inside Claude Code they leak into

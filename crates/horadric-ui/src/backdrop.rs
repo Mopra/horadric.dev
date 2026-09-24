@@ -1,67 +1,19 @@
-//! Windows 11 materials behind a window, acrylic for the clusters, and the
-//! colours DWM draws a window's frame in.
-//!
-//! DWM draws the material and our pixels go over it, so whatever we leave
-//! transparent shows the blurred desktop. That needs the frame extended over
-//! the whole client area, which makes DWM honour the alpha we draw with.
-//! Older builds refuse the attribute, and then the window stays opaque.
+//! What DWM draws around a window: the colours of its frame and title bar,
+//! and whether Windows wants things to move. The clay windows draw every
+//! pixel themselves, so no material goes behind them.
 
 use std::ffi::c_void;
 
-use windows::core::{BOOL, HRESULT};
+use windows::core::BOOL;
 use windows::Win32::Foundation::{COLORREF, HWND};
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMSBT_TRANSIENTWINDOW, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR,
-    DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWM_SYSTEMBACKDROP_TYPE,
+    DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
 use crate::theme::Color;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Material {
-    /// Blurred, for small windows that float over others: the clusters.
-    Acrylic,
-}
-
-/// The windows crate only has `MARGINS` behind `Win32_UI_Controls`, a large
-/// feature to turn on for one struct and one call.
-#[repr(C)]
-struct Margins {
-    left: i32,
-    right: i32,
-    top: i32,
-    bottom: i32,
-}
-
-#[link(name = "dwmapi", kind = "raw-dylib")]
-extern "system" {
-    fn DwmExtendFrameIntoClientArea(hwnd: HWND, margins: *const Margins) -> HRESULT;
-}
-
-/// Puts `material` behind the window in dark mode. False when this Windows
-/// has no system backdrops, in which case the window must draw opaque.
-pub fn apply(hwnd: HWND, material: Material) -> bool {
-    let kind: DWM_SYSTEMBACKDROP_TYPE = match material {
-        Material::Acrylic => DWMSBT_TRANSIENTWINDOW,
-    };
-    unsafe {
-        let dark = BOOL(1);
-        let _ = set(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE.0, &dark);
-        if set(hwnd, DWMWA_SYSTEMBACKDROP_TYPE.0, &kind).is_err() {
-            return false;
-        }
-        let all = Margins {
-            left: -1,
-            right: -1,
-            top: -1,
-            bottom: -1,
-        };
-        DwmExtendFrameIntoClientArea(hwnd, &all).is_ok()
-    }
-}
 
 /// The one pixel edge Windows 11 draws around a window, in `c`, or none.
 pub fn border(hwnd: HWND, c: Option<Color>) {
@@ -72,10 +24,11 @@ pub fn border(hwnd: HWND, c: Option<Color>) {
     }
 }
 
-/// The title bar in `c`.
-pub fn caption(hwnd: HWND, c: Color) {
+/// The title bar in `c`, its title in `text`.
+pub fn caption(hwnd: HWND, c: Color, text: Color) {
     unsafe {
         let _ = set(hwnd, DWMWA_CAPTION_COLOR.0, &COLORREF(colorref(c)));
+        let _ = set(hwnd, DWMWA_TEXT_COLOR.0, &COLORREF(colorref(text)));
     }
 }
 

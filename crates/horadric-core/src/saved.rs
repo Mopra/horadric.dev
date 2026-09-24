@@ -53,6 +53,12 @@ pub struct SavedState {
     /// Where the usage window was.
     #[serde(default)]
     pub usage_window: Option<SavedPanel>,
+    /// The terminal's font size in DIPs, once changed from the default.
+    #[serde(default)]
+    pub font_size: Option<f32>,
+    /// No notification when a session starts waiting on you.
+    #[serde(default)]
+    pub quiet: bool,
 }
 
 impl SavedState {
@@ -79,6 +85,9 @@ pub struct SavedSession {
     pub name: String,
     #[serde(default)]
     pub title: Option<Title>,
+    /// Named in Horadric, see [`Session::renamed`].
+    #[serde(default)]
+    pub renamed: bool,
     pub cwd: String,
     /// What the session was started with, `--model` and friends.
     #[serde(default)]
@@ -104,6 +113,7 @@ impl SavedSession {
             id: s.id.clone(),
             name: s.name.clone(),
             title: s.title.clone(),
+            renamed: s.renamed,
             cwd: s.cwd.clone(),
             args,
             claude_session_id: s.claude_session_id.clone(),
@@ -118,6 +128,7 @@ impl SavedSession {
     pub fn to_session(&self, now: SystemTime) -> Session {
         let mut s = Session::new(&self.id, &self.name, &self.cwd);
         s.title = self.title.clone();
+        s.renamed = self.renamed;
         s.claude_session_id = self.claude_session_id.clone();
         s.prompted = self.prompted;
         s.last_line = self.last_line.clone();
@@ -194,6 +205,7 @@ mod tests {
                 text: "Fix the login".into(),
                 custom: false,
             }),
+            renamed: true,
             cwd: "C:/app".into(),
             args: args.iter().map(|s| s.to_string()).collect(),
             claude_session_id: Some("abc".into()),
@@ -260,6 +272,8 @@ mod tests {
                 y: 6,
                 collapsed: true,
             }),
+            font_size: Some(17.0),
+            quiet: true,
             ..Default::default()
         };
         let back = SavedState::from_json(state.to_json().as_bytes());
@@ -272,10 +286,13 @@ mod tests {
         assert_eq!(back.defaults, state.defaults);
         assert_eq!(back.usage, state.usage);
         assert_eq!(back.usage_window, state.usage_window);
+        assert_eq!(back.font_size, state.font_size);
+        assert!(back.quiet);
         let tile = back.sessions[0].to_session(SystemTime::now());
         assert_eq!(tile.phase, Phase::Paused);
         assert!(tile.prompted);
         assert_eq!(tile.title, state.sessions[0].title);
+        assert!(tile.renamed);
     }
 
     #[test]

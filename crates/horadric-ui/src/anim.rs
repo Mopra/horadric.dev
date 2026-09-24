@@ -23,6 +23,8 @@ pub struct TileIn<'a> {
     /// Where the layout puts its top, in DIPs.
     pub y: f32,
     pub hot: bool,
+    /// Being dragged: it is where the cursor holds it, with no slide.
+    pub held: bool,
 }
 
 /// How one tile draws this frame.
@@ -101,7 +103,11 @@ impl Tiles {
                 }
                 // A tile born this frame starts where it was put.
                 let dt = if fresh { Duration::ZERO } else { dt };
-                s.y = motion::approach(s.y, t.y, dt, SLIDE);
+                s.y = if t.held {
+                    t.y
+                } else {
+                    motion::approach(s.y, t.y, dt, SLIDE)
+                };
                 s.hover = motion::fade(s.hover, if t.hot { 1.0 } else { 0.0 }, dt, HOVER);
                 let since = now.duration_since(s.changed);
                 Look {
@@ -149,7 +155,13 @@ mod tests {
     use horadric_core::WaitReason;
 
     fn tile<'a>(id: &'a str, phase: &'a Phase, y: f32, hot: bool) -> TileIn<'a> {
-        TileIn { id, phase, y, hot }
+        TileIn {
+            id,
+            phase,
+            y,
+            hot,
+            held: false,
+        }
     }
 
     fn ms(n: u64) -> Duration {
@@ -217,6 +229,18 @@ mod tests {
         t.step(now, &[tile("b", &Phase::Idle, 104.0, false)]);
         let l = t.step(now + SLIDE, &[tile("b", &Phase::Idle, 40.0, false)]);
         assert!((l[0].y - 72.0).abs() < 1e-3, "half way after one half life");
+    }
+
+    #[test]
+    fn a_held_tile_stays_under_the_cursor() {
+        let mut t = Tiles::default();
+        let now = Instant::now();
+        t.step(now, &[tile("b", &Phase::Idle, 104.0, false)]);
+        let held = TileIn {
+            held: true,
+            ..tile("b", &Phase::Idle, 51.0, false)
+        };
+        assert_eq!(t.step(now + ms(5), &[held])[0].y, 51.0);
     }
 
     #[test]

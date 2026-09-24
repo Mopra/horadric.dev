@@ -1,72 +1,65 @@
-//! The usage window: how much of the account's Claude limits is used, and
-//! the model, effort and permission mode every session Horadric starts gets.
+//! The start window: a ghost cluster where the first project will go,
+//! shown only while no project is open. Without it a fresh start is an
+//! empty desktop with a tray icon, and nothing says how to begin.
 //!
-//! It belongs to no project, so it is a window of its own rather than a tile
-//! in a cluster, and it sits at the top of the stack the clusters make. It
-//! behaves like a cluster: it never takes the focus, it drags and snaps the
-//! same way, and its header folds it. A setting opens a menu, which the app
-//! runs, since it owns the defaults.
+//! Its tile opens the folder picker, a recent project starts a session
+//! there, and a folder dropped from Explorer opens as the project. The app
+//! does the starting, so each is queued as input. The window is gone the
+//! moment the first cluster appears.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::SystemTime;
 
-use horadric_core::Setting;
 use windows::core::{w, Result, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     DWM_WINDOW_CORNER_PREFERENCE,
 };
-use windows::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient, ValidateRect};
+use windows::Win32::Graphics::Gdi::{InvalidateRect, ValidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
-    LoadCursorW, RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW,
-    CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, GetWindowRect, LoadCursorW,
+    RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW,
+    CS_VREDRAW, GWLP_USERDATA, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_CAPTURECHANGED,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-    WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SIZE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_POPUP,
+    WM_DPICHANGED, WM_DROPFILES, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SIZE, WNDCLASSW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::app::{self, Input};
 use crate::backdrop;
-use crate::layout::{self, UsageHit, UsageLayout};
-use crate::render::{Target, UsageScene};
-use crate::snapping;
+use crate::clipboard;
+use crate::layout::{self, StartHit, StartLayout};
+use crate::recent;
+use crate::render::{StartScene, Target};
 use crate::window::Shared;
 
-pub(crate) const CLASS: PCWSTR = w!("HoradricUsage");
-const DRAG_THRESHOLD: i32 = 4;
+pub(crate) const CLASS: PCWSTR = w!("HoradricStart");
 /// The windows crate files this under `Win32_UI_Controls`.
 const WM_MOUSELEAVE: u32 = 0x02A3;
+/// More than this and the window outgrows the cluster it stands in for.
+/// The tray menu has the rest.
+const MAX_RECENT: usize = 5;
 
-pub struct UsageWindow {
+pub struct StartWindow {
     pub hwnd: HWND,
-    pub collapsed: Cell<bool>,
-    /// Once the user has dragged it, auto layout leaves it alone.
-    pub pinned: Cell<bool>,
     shared: Rc<Shared>,
+    /// The recent projects shown, as full paths.
+    recent: RefCell<Vec<String>>,
     target: RefCell<Option<Target>>,
-    layout: RefCell<UsageLayout>,
-    drag: RefCell<Option<Drag>>,
-    hot: Cell<UsageHit>,
-    pressed: Cell<Option<UsageHit>>,
+    layout: RefCell<StartLayout>,
+    hot: Cell<StartHit>,
+    pressed: Cell<Option<StartHit>>,
     tracking: Cell<bool>,
-}
-
-struct Drag {
-    start_cursor: POINT,
-    start_window: POINT,
-    moved: bool,
-    /// The other windows, read once: they cannot move during this drag.
-    others: Vec<snapping::Edges>,
 }
 
 pub fn register_class() -> Result<()> {
@@ -84,20 +77,19 @@ pub fn register_class() -> Result<()> {
     }
 }
 
-impl UsageWindow {
+impl StartWindow {
     /// Creates the window at `(x, y)` in physical pixels and shows it
     /// without activating it.
-    pub fn create(shared: Rc<Shared>, collapsed: bool, x: i32, y: i32) -> Result<Box<Self>> {
-        let initial = layout::usage(&shared.metrics, 0, Setting::ALL.len(), collapsed);
-        let mut win = Box::new(UsageWindow {
+    pub fn create(shared: Rc<Shared>, recent: &[String], x: i32, y: i32) -> Result<Box<Self>> {
+        let recent = shown(recent);
+        let initial = layout::start(&shared.metrics, recent.len());
+        let mut win = Box::new(StartWindow {
             hwnd: HWND::default(),
-            collapsed: Cell::new(collapsed),
-            pinned: Cell::new(false),
             shared,
+            recent: RefCell::new(recent),
             target: RefCell::new(None),
             layout: RefCell::new(initial),
-            drag: RefCell::new(None),
-            hot: Cell::new(UsageHit::Nothing),
+            hot: Cell::new(StartHit::Nothing),
             pressed: Cell::new(None),
             tracking: Cell::new(false),
         });
@@ -105,7 +97,7 @@ impl UsageWindow {
             let hwnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 CLASS,
-                w!("Horadric usage"),
+                w!("Horadric"),
                 WS_POPUP,
                 x,
                 y,
@@ -114,7 +106,7 @@ impl UsageWindow {
                 None,
                 None,
                 Some(GetModuleHandleW(None)?.into()),
-                Some(&*win as *const UsageWindow as *const c_void),
+                Some(&*win as *const StartWindow as *const c_void),
             )?;
             win.hwnd = hwnd;
             let pref: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
@@ -124,8 +116,8 @@ impl UsageWindow {
                 &pref as *const _ as *const c_void,
                 std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
             );
-            // The clay has its own edge.
             backdrop::border(hwnd, None);
+            DragAcceptFiles(hwnd, true);
             win.fit();
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
@@ -197,27 +189,20 @@ impl UsageWindow {
         }
     }
 
-    fn limits(&self) -> usize {
-        self.shared
-            .usage
-            .lock()
-            .ok()
-            .and_then(|u| u.as_ref().map(|u| u.limits.named().len()))
-            .unwrap_or(0)
+    /// Shows these recent projects instead. True when the size changed, so
+    /// the stack needs arranging again.
+    pub fn set_recent(&self, recent: &[String]) -> bool {
+        let recent = shown(recent);
+        if *self.recent.borrow() == recent {
+            return false;
+        }
+        *self.recent.borrow_mut() = recent;
+        self.fit()
     }
 
-    /// Lays out again for the limits known now and resizes to fit. True
-    /// when the size changed, so the stack needs arranging again.
-    pub fn fit(&self) -> bool {
-        let l = layout::usage(
-            &self.shared.metrics,
-            self.limits(),
-            Setting::ALL.len(),
-            self.collapsed.get(),
-        );
-        *self.layout.borrow_mut() = l;
-        // Folding moves the rows out from under a cursor that has not moved.
-        self.refresh_hover();
+    /// Lays out again and resizes to fit. True when the size changed.
+    fn fit(&self) -> bool {
+        *self.layout.borrow_mut() = layout::start(&self.shared.metrics, self.recent.borrow().len());
         let (w, h) = self.size_px();
         let mut r = RECT::default();
         unsafe {
@@ -243,57 +228,51 @@ impl UsageWindow {
 
     fn paint(&self) {
         let (w, h) = self.size_px();
-        let dpi = self.dpi();
         let mut slot = self.target.borrow_mut();
         if slot.is_none() {
-            match Target::new(&self.shared.gpu, self.hwnd, w as u32, h as u32, dpi) {
+            match Target::new(&self.shared.gpu, self.hwnd, w as u32, h as u32, self.dpi()) {
                 Ok(t) => *slot = Some(t),
                 Err(e) => {
-                    eprintln!("horadric: render target for the usage window: {e}");
+                    eprintln!("horadric: render target for the start window: {e}");
                     return;
                 }
             }
         }
-        let usage = self.shared.usage.lock().ok().and_then(|u| u.clone());
-        let defaults = self.shared.defaults.borrow();
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+        let labels: Vec<(String, String)> = self
+            .recent
+            .borrow()
+            .iter()
+            .map(|p| recent::label(p))
+            .collect();
         let layout = self.layout.borrow();
-        let scene = UsageScene {
+        let scene = StartScene {
             layout: &layout,
-            collapsed: self.collapsed.get(),
-            usage: usage.as_ref(),
-            now,
-            settings: Setting::ALL
-                .iter()
-                .map(|&s| (s.label(), s.name_of(defaults.get(s))))
-                .collect(),
+            recent: &labels,
             hot: self.hot.get(),
             pressed: self.pressed.get(),
         };
         let result = slot
             .as_ref()
-            .map(|t| t.draw_usage(&self.shared.gpu, &self.shared.metrics, &scene));
+            .map(|t| t.draw_start(&self.shared.gpu, &self.shared.metrics, &scene));
         if let Some(Err(_)) = result {
             *slot = None;
         }
     }
 
-    fn hit(&self, lparam: LPARAM) -> UsageHit {
+    fn hit(&self, lparam: LPARAM) -> StartHit {
         let s = self.scale();
         let x = (lparam.0 & 0xffff) as i16 as f32 / s;
         let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32 / s;
-        layout::usage_hit(&self.layout.borrow(), x, y)
+        layout::start_hit(&self.layout.borrow(), x, y)
     }
 
-    fn hover(&self, hot: UsageHit) {
+    fn hover(&self, hot: StartHit) {
         if self.hot.replace(hot) != hot {
             self.invalidate();
         }
     }
 
-    fn press(&self, pressed: Option<UsageHit>) {
+    fn press(&self, pressed: Option<StartHit>) {
         if self.pressed.replace(pressed) != pressed {
             self.invalidate();
         }
@@ -314,19 +293,32 @@ impl UsageWindow {
         }
     }
 
-    fn click(&self, hit: UsageHit) {
+    fn click(&self, hit: StartHit) {
         match hit {
-            UsageHit::Header => {
-                self.collapsed.set(!self.collapsed.get());
-                self.fit();
-                app::push(Input::Arrange);
-            }
-            UsageHit::Setting(i) => {
-                if let Some(&s) = Setting::ALL.get(i) {
-                    app::push(Input::SettingMenu(s));
+            StartHit::Open => app::push(Input::Pick),
+            StartHit::Recent(i) => {
+                if let Some(p) = self.recent.borrow().get(i) {
+                    app::push(Input::StartIn(PathBuf::from(p)));
                 }
             }
-            UsageHit::Nothing => {}
+            StartHit::Nothing => {}
+        }
+    }
+
+    /// A dropped folder is the project. A dropped file means the folder it
+    /// is in, which is what someone dragging from inside a project meant.
+    fn on_drop(&self, hdrop: HDROP) {
+        let paths = clipboard::drop_paths(hdrop);
+        unsafe { DragFinish(hdrop) };
+        let dir = paths.first().map(PathBuf::from).and_then(|p| {
+            if p.is_dir() {
+                Some(p)
+            } else {
+                p.parent().map(Path::to_path_buf)
+            }
+        });
+        if let Some(dir) = dir {
+            app::push(Input::StartIn(dir));
         }
     }
 
@@ -371,45 +363,15 @@ impl UsageWindow {
             }
             WM_LBUTTONDOWN => {
                 self.raise();
-                let mut cursor = POINT::default();
                 unsafe {
-                    let _ = GetCursorPos(&mut cursor);
                     SetCapture(self.hwnd);
                 }
                 self.press(Some(self.hit(lparam)));
-                let (x, y) = self.position();
-                *self.drag.borrow_mut() = Some(Drag {
-                    start_cursor: cursor,
-                    start_window: POINT { x, y },
-                    moved: false,
-                    others: snapping::others(self.hwnd),
-                });
                 Some(LRESULT(0))
             }
             WM_MOUSEMOVE => {
                 self.track();
                 self.hover(self.hit(lparam));
-                let mut drag = self.drag.borrow_mut();
-                if let Some(d) = drag.as_mut() {
-                    let mut cursor = POINT::default();
-                    unsafe {
-                        let _ = GetCursorPos(&mut cursor);
-                    }
-                    let dx = cursor.x - d.start_cursor.x;
-                    let dy = cursor.y - d.start_cursor.y;
-                    if d.moved || dx.abs() > DRAG_THRESHOLD || dy.abs() > DRAG_THRESHOLD {
-                        d.moved = true;
-                        self.press(None);
-                        let pos = (d.start_window.x + dx, d.start_window.y + dy);
-                        let (x, y) = match snapping::frame(self.dpi()) {
-                            Some((work, spacing)) => {
-                                layout::snap(pos, self.size_px(), work, &d.others, spacing)
-                            }
-                            None => pos,
-                        };
-                        self.move_to(x, y);
-                    }
-                }
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
@@ -420,45 +382,48 @@ impl UsageWindow {
                     let _ = ReleaseCapture();
                 }
                 self.press(None);
-                let drag = self.drag.borrow_mut().take();
-                match drag {
-                    Some(d) if d.moved => {
-                        self.pinned.set(true);
-                        app::push(Input::Arrange);
+                let hit = self.hit(lparam);
+                // Only where the press began, as a button does.
+                if pressed == Some(hit) {
+                    self.click(hit);
+                }
+                Some(LRESULT(0))
+            }
+            WM_RBUTTONUP => {
+                if let StartHit::Recent(i) = self.hit(lparam) {
+                    if let Some(p) = self.recent.borrow().get(i) {
+                        app::push(Input::RecentMenu(PathBuf::from(p)));
                     }
-                    // Only where the press began, as a button does.
-                    Some(_) if pressed == Some(self.hit(lparam)) => self.click(self.hit(lparam)),
-                    _ => {}
                 }
                 Some(LRESULT(0))
             }
             WM_MOUSELEAVE => {
                 self.tracking.set(false);
-                self.hover(UsageHit::Nothing);
+                self.hover(StartHit::Nothing);
                 Some(LRESULT(0))
             }
             WM_CAPTURECHANGED => {
                 self.press(None);
                 None
             }
+            WM_DROPFILES => {
+                self.on_drop(HDROP(wparam.0 as *mut c_void));
+                Some(LRESULT(0))
+            }
             _ => None,
         }
     }
+}
 
-    /// Notes what the cursor is over now, when it is over the window.
-    fn refresh_hover(&self) {
-        if !self.tracking.get() {
-            return;
-        }
-        let mut p = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut p);
-            let _ = ScreenToClient(self.hwnd, &mut p);
-        }
-        let s = self.scale();
-        let hit = layout::usage_hit(&self.layout.borrow(), p.x as f32 / s, p.y as f32 / s);
-        self.hover(hit);
-    }
+/// The recent projects worth a row: ones still on disk, at most
+/// [`MAX_RECENT`].
+fn shown(recent: &[String]) -> Vec<String> {
+    recent
+        .iter()
+        .filter(|p| Path::new(p).is_dir())
+        .take(MAX_RECENT)
+        .cloned()
+        .collect()
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -467,7 +432,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
-    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const UsageWindow;
+    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const StartWindow;
     if ptr.is_null() {
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }

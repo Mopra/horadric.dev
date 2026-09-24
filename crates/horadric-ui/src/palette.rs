@@ -17,13 +17,12 @@ const fn rgb(hex: u32) -> Rgb {
     }
 }
 
-/// Matches the cluster window, so a terminal reads as part of the same app.
+/// Near black: a terminal is a dark well sunk into the clay, which is what
+/// every agent's own colours are made for.
 pub const BACKGROUND: Rgb = rgb(0x0A0A0D);
 pub const FOREGROUND: Rgb = rgb(0xE6E6EB);
 pub const CURSOR: Rgb = rgb(0xF5F5F7);
 pub const SELECTION: Rgb = rgb(0x1E3A5C);
-/// Between the panes of the stage, darker than any of them.
-pub const GUTTER: Rgb = rgb(0x000000);
 
 const ANSI: [Rgb; 16] = [
     rgb(0x23232B),

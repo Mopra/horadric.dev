@@ -79,6 +79,10 @@ pub struct Session {
     /// What Claude Code calls the conversation, once it has said.
     #[serde(default)]
     pub title: Option<Title>,
+    /// The human named it in Horadric, so `name` beats Claude's title until
+    /// a `/rename` says otherwise.
+    #[serde(default)]
+    pub renamed: bool,
     /// Claude's own session id, from the latest hook that carried one. It
     /// changes on `/clear`, and it is what `claude --resume` takes.
     pub claude_session_id: Option<String>,
@@ -124,6 +128,7 @@ impl Session {
             id: id.into(),
             name: name.into(),
             title: None,
+            renamed: false,
             claude_session_id: None,
             prompted: false,
             cwd: cwd.into(),
@@ -143,13 +148,27 @@ impl Session {
         self.since.elapsed().unwrap_or_default()
     }
 
-    /// What a tile calls the session. A `/rename` always wins. Claude's own
-    /// title beats the folder name, which the cluster already shows, but
-    /// not a name the human gave with `--name`.
+    /// What a tile calls the session. The latest name the human gave wins,
+    /// in Horadric or with `/rename`. Claude's own title beats the folder
+    /// name, which the cluster already shows, but not a name the human gave
+    /// with `--name`.
     pub fn label(&self) -> &str {
         match &self.title {
+            _ if self.renamed => &self.name,
             Some(t) if t.custom || self.name_is_default() => &t.text,
             _ => &self.name,
+        }
+    }
+
+    /// Names the session from Horadric. None, or only blanks, gives the
+    /// naming back to Claude's title.
+    pub fn rename(&mut self, name: Option<&str>) {
+        match name.map(str::trim).filter(|n| !n.is_empty()) {
+            Some(n) => {
+                self.name = n.to_string();
+                self.renamed = true;
+            }
+            None => self.renamed = false,
         }
     }
 
@@ -170,7 +189,10 @@ impl Session {
         if !event.session_id.is_empty() {
             self.claude_session_id = Some(event.session_id.clone());
         }
-        if !event.cwd.is_empty() {
+        // An event's cwd follows the agent's shell, so a `cd` into a subfolder
+        // would move the tile to a cluster of its own. The project is where
+        // the session started.
+        if self.cwd.is_empty() && !event.cwd.is_empty() {
             self.cwd = event.cwd.clone();
         }
         // Subagents run inside a turn that is already Working. Their events
@@ -248,6 +270,10 @@ impl Session {
             _ => None,
         };
         if let Some(t) = &event.title {
+            // A `/rename` newer than a name given in Horadric wins.
+            if t.custom && self.title.as_ref() != Some(t) {
+                self.renamed = false;
+            }
             self.title = Some(t.clone());
         }
 
@@ -424,6 +450,19 @@ mod tests {
     }
 
     #[test]
+    fn a_cd_does_not_move_the_session() {
+        let mut s = Session::new("g1", "x", "C:/repo");
+        let mut e = ev("PreToolUse");
+        e.cwd = "C:/repo/crates/ui/src".into();
+        s.apply(&e, now());
+        assert_eq!(s.cwd, "C:/repo");
+        // A session registered without a folder takes the first one it hears.
+        let mut s = Session::new("g2", "x", "");
+        s.apply(&e, now());
+        assert_eq!(s.cwd, "C:/repo/crates/ui/src");
+    }
+
+    #[test]
     fn permission_lights_up_and_clears() {
         let mut s = Session::new("g1", "x", "");
         s.apply(&ev("UserPromptSubmit"), now());
@@ -571,6 +610,23 @@ mod tests {
         assert_eq!(s.label(), "fix-login");
         s.apply(&titled("Login bug", true), now());
         assert_eq!(s.label(), "Login bug");
+    }
+
+    #[test]
+    fn a_name_given_in_horadric_wins_until_the_next_rename() {
+        let mut s = Session::new("g1", "repo", "C:/repo");
+        s.apply(&titled("Old name", true), now());
+        s.rename(Some("  Login fix "));
+        assert_eq!(s.label(), "Login fix");
+        // The same `/rename` heard again is not a new one.
+        s.apply(&titled("Old name", true), now());
+        s.apply(&titled("Made up", false), now());
+        assert_eq!(s.label(), "Login fix");
+        s.apply(&titled("Newer", true), now());
+        assert_eq!(s.label(), "Newer");
+        s.rename(Some("Mine"));
+        s.rename(Some("   "));
+        assert_eq!(s.label(), "Newer");
     }
 
     #[test]
