@@ -12,10 +12,12 @@ use std::mem::ManuallyDrop;
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use windows::core::{w, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{
     ID2D1HwndRenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED,
-    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
+    D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES,
 };
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteFactory, IDWriteFontCollection, IDWriteFontFace, IDWriteTextFormat, DWRITE_FONT_METRICS,
@@ -27,16 +29,43 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows_numerics::Vector2;
 
 use crate::frame::{Decoration, Frame, BOLD, ITALIC};
-use crate::render::{hwnd_target, Gpu};
+use crate::render::{self, hwnd_target, Gpu};
+use crate::theme::{self, Color};
 
 /// Cascadia ships with Windows 11. Consolas is on every Windows since Vista.
 const FAMILIES: [PCWSTR; 2] = [w!("Cascadia Mono"), w!("Consolas")];
 
-/// Font size in DIPs. 14 DIPs is 10.5 points at 100 % scaling.
-pub const FONT_SIZE: f32 = 14.0;
+/// Font size in DIPs. 15 DIPs is 11.25 points at 100 % scaling.
+pub const FONT_SIZE: f32 = 15.0;
 
 /// Space between the grid and the window edge, in DIPs.
 pub const PAD: f32 = 6.0;
+
+/// Height of a pane's header, in DIPs.
+pub const HEADER_H: f32 = 26.0;
+
+/// The strip above a pane's grid when the stage shows more than one: which
+/// session it is, and the handle it is dragged by.
+pub struct Header<'a> {
+    pub name: &'a str,
+    /// What the agent says it is doing, dimmer, after the name.
+    pub detail: &'a str,
+    /// The session's phase, as the colour of its dot and of the line along
+    /// the top. None for a session doing nothing, which gets neither.
+    pub phase: Option<Color>,
+    /// The project's colour, under the header of the pane with the keyboard.
+    pub accent: Color,
+    /// Has the keyboard.
+    pub active: bool,
+    /// Being dragged to another place in the grid.
+    pub lifted: bool,
+    /// Ends in a cross that closes it, a square [`HEADER_H`] wide.
+    pub close: bool,
+}
+
+/// Behind a pane's header: the terminal's own black, lifted a touch, so the
+/// header belongs to the pane rather than floating over it.
+const HEADER_BG: Color = Color::rgb(0x121217);
 
 /// Cell geometry in DIPs, snapped so every cell edge is a whole device pixel.
 /// Without the snap, backgrounds of neighbouring cells leave hairline seams.
@@ -205,10 +234,24 @@ impl GridTarget {
         unsafe { self.rt.SetDpi(dpi as f32, dpi as f32) }
     }
 
-    /// Draws a frame. `Err` means the target must be recreated.
-    pub fn draw(&self, font: &Font, cell: &CellSize, frame: &Frame) -> Result<()> {
+    /// Draws a frame, below `header` when there is one. With `drop`, the
+    /// pane is where a dragged one would land. `veil` from 0 to 1 lays the
+    /// background over everything: a pane without the keyboard steps back,
+    /// a pane just shown fades in. `Err` means the target must be recreated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(
+        &self,
+        gpu: &Gpu,
+        font: &Font,
+        cell: &CellSize,
+        frame: &Frame,
+        header: Option<&Header>,
+        drop: bool,
+        veil: f32,
+    ) -> Result<()> {
+        let top = if header.is_some() { HEADER_H } else { 0.0 };
         let x = |col: usize| PAD + col as f32 * cell.w;
-        let y = |row: usize| PAD + row as f32 * cell.h;
+        let y = |row: usize| top + PAD + row as f32 * cell.h;
         let rect = |row: usize, col: usize, cells: usize| D2D_RECT_F {
             left: x(col),
             top: y(row),
@@ -327,8 +370,218 @@ impl GridTarget {
                 }
             }
 
+            if let Some(h) = header {
+                self.header(gpu, h);
+            }
+            if veil > 0.0 {
+                let size = self.rt.GetSize();
+                let bg = frame.background;
+                self.brush.SetColor(&D2D1_COLOR_F {
+                    a: veil.min(1.0),
+                    ..color(bg)
+                });
+                self.rt.FillRectangle(
+                    &D2D_RECT_F {
+                        left: 0.0,
+                        top: 0.0,
+                        right: size.width,
+                        bottom: size.height,
+                    },
+                    &self.brush,
+                );
+            }
+            if drop {
+                let size = self.rt.GetSize();
+                let all = D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: size.width,
+                    bottom: size.height,
+                };
+                self.brush
+                    .SetColor(&render::color(theme::WORKING.with_alpha(0.12)));
+                self.rt.FillRectangle(&all, &self.brush);
+                let inset = D2D_RECT_F {
+                    left: 1.0,
+                    top: 1.0,
+                    right: size.width - 1.0,
+                    bottom: size.height - 1.0,
+                };
+                self.brush.SetColor(&render::color(theme::WORKING));
+                self.rt.DrawRectangle(&inset, &self.brush, 2.0, None);
+            }
+
             self.rt.EndDraw(None, None)
         }
+    }
+
+    unsafe fn header(&self, gpu: &Gpu, h: &Header) {
+        let width = self.rt.GetSize().width;
+        let bar = |c: Color, top: f32, bottom: f32| {
+            self.brush.SetColor(&render::color(c));
+            self.rt.FillRectangle(
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top,
+                    right: width,
+                    bottom,
+                },
+                &self.brush,
+            );
+        };
+        let bg = if h.lifted {
+            HEADER_BG.mix(theme::WORKING, 0.35)
+        } else {
+            HEADER_BG
+        };
+        bar(bg, 0.0, HEADER_H);
+        // The phase, as a line of light along the top, as on a tile's edge.
+        if let (Some(c), false) = (h.phase, h.lifted) {
+            bar(c.with_alpha(0.08), 0.0, HEADER_H);
+            bar(c.with_alpha(0.85), 0.0, 2.0);
+        }
+        // The project's colour under the pane that has the keyboard: the
+        // same colour the stage's edge and the cluster's mark have.
+        if h.active && !h.lifted {
+            bar(h.accent, HEADER_H - 2.0, HEADER_H);
+        } else {
+            bar(
+                Color::rgb(0xFFFFFF).with_alpha(0.05),
+                HEADER_H - 1.0,
+                HEADER_H,
+            );
+        }
+
+        // A dot in the phase's colour, lit from within, before the name.
+        let dot_x = 13.0;
+        let dot_y = HEADER_H / 2.0;
+        let dot_c = h.phase.unwrap_or(theme::IDLE);
+        if h.phase.is_some() {
+            self.glow(dot_x, dot_y, 9.0, dot_c, 0.45);
+        }
+        self.brush.SetColor(&render::color(dot_c));
+        self.rt.FillEllipse(
+            &D2D1_ELLIPSE {
+                point: Vector2 { X: dot_x, Y: dot_y },
+                radiusX: 3.5,
+                radiusY: 3.5,
+            },
+            &self.brush,
+        );
+
+        let left = 24.0;
+        let right = if h.close {
+            width - HEADER_H
+        } else {
+            width - 8.0
+        };
+        if h.close {
+            let cross: Vec<u16> = "\u{E711}".encode_utf16().collect();
+            self.brush.SetColor(&render::color(theme::TEXT_DIM));
+            self.rt.DrawText(
+                &cross,
+                &gpu.icon_small,
+                &D2D_RECT_F {
+                    left: right,
+                    top: 0.0,
+                    right: width,
+                    bottom: HEADER_H,
+                },
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+        let name: Vec<u16> = h.name.encode_utf16().collect();
+        let name_w = gpu
+            .dw
+            .CreateTextLayout(&name, &gpu.title, (right - left).max(0.0), HEADER_H)
+            .and_then(|l| {
+                let mut m = Default::default();
+                l.GetMetrics(&mut m)
+                    .map(|_| m.widthIncludingTrailingWhitespace)
+            })
+            .unwrap_or(right - left);
+        let text = if h.active {
+            theme::TEXT
+        } else {
+            theme::TEXT_DIM
+        };
+        self.brush.SetColor(&render::color(text));
+        self.rt.DrawText(
+            &name,
+            &gpu.title,
+            &D2D_RECT_F {
+                left,
+                top: 0.0,
+                right,
+                bottom: HEADER_H,
+            },
+            &self.brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+        let detail_left = left + name_w + 10.0;
+        if !h.detail.is_empty() && detail_left < right {
+            let detail: Vec<u16> = h.detail.encode_utf16().collect();
+            self.brush.SetColor(&render::color(theme::TEXT_DIM));
+            self.rt.DrawText(
+                &detail,
+                &gpu.small,
+                &D2D_RECT_F {
+                    left: detail_left,
+                    top: 0.0,
+                    right,
+                    bottom: HEADER_H,
+                },
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+}
+
+impl GridTarget {
+    /// A soft round light, strongest at its centre.
+    unsafe fn glow(&self, x: f32, y: f32, radius: f32, c: Color, strength: f32) {
+        let stops = [
+            D2D1_GRADIENT_STOP {
+                position: 0.0,
+                color: render::color(c.with_alpha(strength)),
+            },
+            D2D1_GRADIENT_STOP {
+                position: 1.0,
+                color: render::color(c.with_alpha(0.0)),
+            },
+        ];
+        let Ok(collection) =
+            self.rt
+                .CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
+        else {
+            return;
+        };
+        let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
+            center: Vector2 { X: x, Y: y },
+            gradientOriginOffset: Vector2 { X: 0.0, Y: 0.0 },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        let Ok(brush) = self.rt.CreateRadialGradientBrush(&props, None, &collection) else {
+            return;
+        };
+        // The grid draws aliased so cells meet without seams. A glow wants
+        // soft edges.
+        self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        self.rt.FillEllipse(
+            &D2D1_ELLIPSE {
+                point: Vector2 { X: x, Y: y },
+                radiusX: radius,
+                radiusY: radius,
+            },
+            &brush,
+        );
+        self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
     }
 }
 

@@ -5,6 +5,8 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use crate::event::HookEvent;
+use crate::title::Title;
+use crate::usage::Status;
 
 /// Why a session is waiting on the human.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,7 +21,7 @@ pub enum WaitReason {
     Error(String),
 }
 
-/// The three states a tile shows, plus the two bookends.
+/// The three states a tile shows, plus the bookends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Phase {
     /// Session started, no prompt sent yet.
@@ -32,6 +34,9 @@ pub enum Phase {
     Done,
     /// The CLI exited.
     Ended,
+    /// Brought back from disk after Glance restarted, or left behind by a
+    /// crash. No process runs; clicking the tile resumes the conversation.
+    Paused,
 }
 
 impl Phase {
@@ -46,11 +51,19 @@ impl Phase {
             Phase::Waiting(WaitReason::Error(_)) => "error",
             Phase::Done => "done",
             Phase::Ended => "ended",
+            Phase::Paused => "paused",
         }
     }
 
     pub fn is_waiting(&self) -> bool {
         matches!(self, Phase::Waiting(_))
+    }
+
+    /// Claude is in the middle of a turn, so stopping it now would cut the
+    /// turn short. A session waiting on you is not: it resumes to the same
+    /// question.
+    pub fn mid_turn(&self) -> bool {
+        matches!(self, Phase::Working)
     }
 }
 
@@ -60,10 +73,19 @@ pub struct Session {
     /// Glance's id. Set by Glance when it spawns the CLI and carried back in
     /// every hook via the environment.
     pub id: String,
-    /// A name a human can recognise at tile size.
+    /// A name a human can recognise at tile size: the one given with
+    /// `--name`, or the folder's. What a tile shows is [`Session::label`].
     pub name: String,
-    /// Claude's own session id, once the first hook arrives.
+    /// What Claude Code calls the conversation, once it has said.
+    #[serde(default)]
+    pub title: Option<Title>,
+    /// Claude's own session id, from the latest hook that carried one. It
+    /// changes on `/clear`, and it is what `claude --resume` takes.
     pub claude_session_id: Option<String>,
+    /// True once a prompt was sent. Before that Claude has written no
+    /// transcript, and there is nothing to resume.
+    #[serde(default)]
+    pub prompted: bool,
     pub cwd: String,
     pub phase: Phase,
     /// When the current phase began. The tile's age line counts from here.
@@ -71,7 +93,25 @@ pub struct Session {
     /// The last thing worth showing: a tool name, a question, a final message.
     pub last_line: String,
     pub created: SystemTime,
+    /// What the status line last heard: the model and how full the
+    /// context is. Gone with the process, so never saved.
+    #[serde(skip)]
+    pub status: Option<Status>,
+    /// The tool the turn is in, from the last tool event, until the turn
+    /// ends. Only for the tile's icon, so it is not saved.
+    #[serde(skip)]
+    pub tool: Option<String>,
+    /// When the agent last did something, newest last, going back at most
+    /// [`ACTIVITY_SPAN`]. The tile draws it as a trace of the last minutes.
+    #[serde(skip)]
+    pub activity: Vec<SystemTime>,
 }
+
+/// How far back a session remembers what it did.
+pub const ACTIVITY_SPAN: Duration = Duration::from_secs(10 * 60);
+/// A busy agent fires a few hooks a second. More than this in the span says
+/// nothing more at tile size.
+const ACTIVITY_MAX: usize = 512;
 
 impl Session {
     pub fn new(id: impl Into<String>, name: impl Into<String>, cwd: impl Into<String>) -> Self {
@@ -79,12 +119,17 @@ impl Session {
         Session {
             id: id.into(),
             name: name.into(),
+            title: None,
             claude_session_id: None,
+            prompted: false,
             cwd: cwd.into(),
             phase: Phase::Idle,
             since: now,
             last_line: String::new(),
             created: now,
+            status: None,
+            tool: None,
+            activity: Vec::new(),
         }
     }
 
@@ -93,9 +138,31 @@ impl Session {
         self.since.elapsed().unwrap_or_default()
     }
 
+    /// What a tile calls the session. A `/rename` always wins. Claude's own
+    /// title beats the folder name, which the cluster already shows, but
+    /// not a name the human gave with `--name`.
+    pub fn label(&self) -> &str {
+        match &self.title {
+            Some(t) if t.custom || self.name_is_default() => &t.text,
+            _ => &self.name,
+        }
+    }
+
+    /// Named after its folder, or after its id when adopted.
+    fn name_is_default(&self) -> bool {
+        let folder = self
+            .cwd
+            .trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next();
+        self.name == self.id || folder.is_some_and(|f| f.eq_ignore_ascii_case(&self.name))
+    }
+
     /// Applies a hook event. Returns true when the phase changed.
     pub fn apply(&mut self, event: &HookEvent, now: SystemTime) -> bool {
-        if self.claude_session_id.is_none() {
+        // Glance's own events carry no id. Keeping the latest real one
+        // follows the session through `/clear`.
+        if !event.session_id.is_empty() {
             self.claude_session_id = Some(event.session_id.clone());
         }
         if !event.cwd.is_empty() {
@@ -103,17 +170,33 @@ impl Session {
         }
         // Subagents run inside a turn that is already Working. Their events
         // carry no new information about whether the human is needed.
+        // A subagent's tools are still the agent at work.
+        self.note(event, now);
         if event.is_subagent() {
             return false;
         }
 
         let next = match event.hook_event_name.as_str() {
+            HookEvent::REGISTER => Some(Phase::Idle),
+            HookEvent::PAUSE => {
+                self.status = None;
+                Some(Phase::Paused)
+            }
+            HookEvent::STATUS => {
+                self.status = event.status.clone();
+                None
+            }
             "SessionStart" => match event.source.as_deref() {
                 // Compaction happens mid turn. Nothing changed for the human.
                 Some("compact") => None,
+                Some("clear") => {
+                    self.title = None;
+                    Some(Phase::Idle)
+                }
                 _ => Some(Phase::Idle),
             },
             "UserPromptSubmit" => {
+                self.prompted = true;
                 if let Some(p) = &event.user_prompt {
                     self.last_line = first_line(p);
                 }
@@ -145,9 +228,23 @@ impl Session {
                 }
                 Some(Phase::Waiting(WaitReason::Error(kind)))
             }
-            "SessionEnd" => Some(Phase::Ended),
+            "SessionEnd" => match event.reason.as_deref() {
+                // `/clear` and `/resume` end one conversation and start the
+                // next in the same process. The `SessionStart` that follows
+                // never reaches an http hook, so nothing would revive the
+                // tile before it is pruned.
+                Some("clear" | "resume") => {
+                    // The next conversation has a title of its own, or none yet.
+                    self.title = None;
+                    Some(Phase::Idle)
+                }
+                _ => Some(Phase::Ended),
+            },
             _ => None,
         };
+        if let Some(t) = &event.title {
+            self.title = Some(t.clone());
+        }
 
         match next {
             Some(phase) if phase != self.phase => {
@@ -157,6 +254,56 @@ impl Session {
             }
             _ => false,
         }
+    }
+
+    /// Keeps the tool the turn is in and when the agent last did something.
+    fn note(&mut self, event: &HookEvent, now: SystemTime) {
+        match event.hook_event_name.as_str() {
+            "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PermissionRequest" => {
+                if let Some(t) = &event.tool_name {
+                    self.tool = Some(t.clone());
+                }
+            }
+            "UserPromptSubmit" | "Stop" | "StopFailure" | "SessionEnd" => self.tool = None,
+            _ => {}
+        }
+        if matches!(
+            event.hook_event_name.as_str(),
+            "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure"
+        ) {
+            let oldest = now.checked_sub(ACTIVITY_SPAN).unwrap_or(now);
+            self.activity.retain(|t| *t >= oldest);
+            if self.activity.len() >= ACTIVITY_MAX {
+                self.activity.remove(0);
+            }
+            self.activity.push(now);
+        }
+    }
+
+    /// How much the agent did in each of `buckets` equal slices of the last
+    /// [`ACTIVITY_SPAN`], oldest first, from 0 for nothing to 1 for the
+    /// busiest slice. Square rooted, so one hook still shows beside forty.
+    pub fn activity(&self, now: SystemTime, buckets: usize) -> Vec<f32> {
+        let mut counts = vec![0u32; buckets];
+        if buckets == 0 {
+            return Vec::new();
+        }
+        let span = ACTIVITY_SPAN.as_secs_f32();
+        for t in &self.activity {
+            let Ok(ago) = now.duration_since(*t) else {
+                // A hook stamped a hair after `now` is the newest slice.
+                counts[buckets - 1] += 1;
+                continue;
+            };
+            let ago = ago.as_secs_f32();
+            if ago >= span {
+                continue;
+            }
+            let i = buckets - 1 - ((ago / span * buckets as f32) as usize).min(buckets - 1);
+            counts[i] += 1;
+        }
+        let max = counts.iter().copied().max().unwrap_or(0).max(1) as f32;
+        counts.iter().map(|&c| (c as f32 / max).sqrt()).collect()
     }
 
     fn apply_notification(&mut self, event: &HookEvent) -> Option<Phase> {
@@ -210,6 +357,20 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_working_is_mid_turn() {
+        assert!(Phase::Working.mid_turn());
+        for p in [
+            Phase::Idle,
+            Phase::Waiting(WaitReason::Permission),
+            Phase::Done,
+            Phase::Ended,
+            Phase::Paused,
+        ] {
+            assert!(!p.mid_turn(), "{p:?}");
+        }
+    }
 
     fn ev(name: &str) -> HookEvent {
         HookEvent {
@@ -296,6 +457,28 @@ mod tests {
     }
 
     #[test]
+    fn clear_and_resume_do_not_end_the_session() {
+        for reason in ["clear", "resume"] {
+            let mut s = Session::new("g1", "x", "");
+            s.apply(&ev("UserPromptSubmit"), now());
+            s.apply(&ev("Stop"), now());
+            let mut end = ev("SessionEnd");
+            end.reason = Some(reason.into());
+            s.apply(&end, now());
+            assert_eq!(s.phase, Phase::Idle, "{reason}");
+        }
+    }
+
+    #[test]
+    fn exit_ends_the_session() {
+        let mut s = Session::new("g1", "x", "");
+        let mut end = ev("SessionEnd");
+        end.reason = Some("prompt_input_exit".into());
+        assert!(s.apply(&end, now()));
+        assert_eq!(s.phase, Phase::Ended);
+    }
+
+    #[test]
     fn failure_waits_with_reason() {
         let mut s = Session::new("g1", "x", "");
         s.apply(&ev("UserPromptSubmit"), now());
@@ -306,6 +489,135 @@ mod tests {
             s.phase,
             Phase::Waiting(WaitReason::Error("rate_limit".into()))
         );
+    }
+
+    #[test]
+    fn claude_id_follows_the_latest_real_one() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&HookEvent::synthetic(HookEvent::REGISTER), now());
+        assert_eq!(s.claude_session_id, None);
+        s.apply(&ev("SessionStart"), now());
+        assert_eq!(s.claude_session_id.as_deref(), Some("c1"));
+        let mut cleared = ev("SessionStart");
+        cleared.session_id = "c2".into();
+        cleared.source = Some("clear".into());
+        s.apply(&cleared, now());
+        assert_eq!(s.claude_session_id.as_deref(), Some("c2"));
+        assert!(!s.prompted);
+        s.apply(&ev("UserPromptSubmit"), now());
+        assert!(s.prompted);
+    }
+
+    #[test]
+    fn pause_and_register_bracket_a_restart() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        assert!(s.apply(&HookEvent::synthetic(HookEvent::PAUSE), now()));
+        assert_eq!(s.phase, Phase::Paused);
+        assert!(s.apply(&HookEvent::synthetic(HookEvent::REGISTER), now()));
+        assert_eq!(s.phase, Phase::Idle);
+    }
+
+    fn titled(text: &str, custom: bool) -> HookEvent {
+        HookEvent {
+            title: Some(Title {
+                text: text.into(),
+                custom,
+            }),
+            ..ev("Stop")
+        }
+    }
+
+    #[test]
+    fn claudes_title_replaces_the_folder_name() {
+        let mut s = Session::new("glance.ai-1", "glance.ai", "");
+        let mut e = titled("Tile naming", false);
+        e.cwd = "C:\\dev\\Glance.ai\\".into();
+        assert_eq!(s.label(), "glance.ai");
+        s.apply(&e, now());
+        assert_eq!(s.label(), "Tile naming");
+        // An adopted session is named by its id, which says nothing either.
+        let mut s = Session::new("g9", "g9", "C:/elsewhere");
+        s.apply(&titled("Tile naming", false), now());
+        assert_eq!(s.label(), "Tile naming");
+    }
+
+    #[test]
+    fn a_given_name_stays_unless_renamed() {
+        let mut s = Session::new("fix-login-1", "fix-login", "C:/repo");
+        s.apply(&titled("Login redirect loop", false), now());
+        assert_eq!(s.label(), "fix-login");
+        s.apply(&titled("Login bug", true), now());
+        assert_eq!(s.label(), "Login bug");
+    }
+
+    #[test]
+    fn clear_forgets_the_title() {
+        let mut s = Session::new("g1", "repo", "C:/repo");
+        s.apply(&titled("Old work", false), now());
+        let mut end = ev("SessionEnd");
+        end.reason = Some("clear".into());
+        s.apply(&end, now());
+        assert_eq!(s.label(), "repo");
+        s.apply(&titled("Old work", false), now());
+        let mut start = ev("SessionStart");
+        start.source = Some("clear".into());
+        s.apply(&start, now());
+        assert_eq!(s.label(), "repo");
+    }
+
+    #[test]
+    fn the_tool_is_kept_until_the_turn_ends() {
+        let mut s = Session::new("g1", "repo", "C:/repo");
+        s.apply(&ev("UserPromptSubmit"), now());
+        assert_eq!(s.tool, None);
+        let mut t = ev("PreToolUse");
+        t.tool_name = Some("Grep".into());
+        s.apply(&t, now());
+        assert_eq!(s.tool.as_deref(), Some("Grep"));
+        s.apply(&ev("Notification"), now());
+        assert_eq!(s.tool.as_deref(), Some("Grep"));
+        s.apply(&ev("Stop"), now());
+        assert_eq!(s.tool, None);
+    }
+
+    #[test]
+    fn activity_fills_the_slices_it_happened_in() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut s = Session::new("g1", "repo", "C:/repo");
+        // Four hooks nine minutes ago, one a minute ago.
+        for _ in 0..4 {
+            s.apply(&ev("PreToolUse"), t0);
+        }
+        let later = t0 + Duration::from_secs(8 * 60);
+        s.apply(&ev("PostToolUse"), later);
+        let now = t0 + Duration::from_secs(9 * 60);
+        let a = s.activity(now, 10);
+        assert_eq!(a.len(), 10);
+        assert_eq!(a[0], 1.0, "nine minutes ago is the oldest slice");
+        assert_eq!(a[8], 0.5, "one of four, square rooted");
+        assert_eq!(a[9], 0.0);
+        assert!(a[1..8].iter().all(|&v| v == 0.0));
+        // Past the span it is forgotten, and a quiet session is all zero.
+        let much_later = t0 + ACTIVITY_SPAN + Duration::from_secs(9 * 60);
+        assert!(s.activity(much_later, 10).iter().all(|&v| v == 0.0));
+        assert!(Session::new("x", "x", "x")
+            .activity(now, 4)
+            .iter()
+            .all(|&v| v == 0.0));
+        assert!(s.activity(now, 0).is_empty());
+    }
+
+    #[test]
+    fn activity_forgets_what_is_older_than_the_span() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut s = Session::new("g1", "repo", "C:/repo");
+        s.apply(&ev("PreToolUse"), t0);
+        s.apply(
+            &ev("PreToolUse"),
+            t0 + ACTIVITY_SPAN + Duration::from_secs(1),
+        );
+        assert_eq!(s.activity.len(), 1);
     }
 
     #[test]

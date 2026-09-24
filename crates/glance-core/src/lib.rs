@@ -7,8 +7,14 @@
 
 pub mod event;
 pub mod registry;
+pub mod saved;
 pub mod session;
+pub mod title;
+pub mod usage;
 
 pub use event::HookEvent;
 pub use registry::Registry;
+pub use saved::{SavedCluster, SavedPanel, SavedSession, SavedState};
 pub use session::{format_age, session_id, Phase, Session, WaitReason};
+pub use title::Title;
+pub use usage::{Defaults, Limit, Limits, Setting, Status, Usage};

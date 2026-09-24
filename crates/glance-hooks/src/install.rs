@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use crate::{hook_url, HOOK_PATH, SESSION_ENV};
+use crate::{hook_url, HOOK_PATH, OWNER_ENV, SESSION_ENV};
 
 /// Hook events Glance needs. Everything that moves a session between
 /// working, waiting and done.
@@ -40,8 +40,11 @@ fn handler(port: u16) -> Value {
     json!({
         "type": "http",
         "url": hook_url(port),
-        "headers": { "X-Glance-Session": format!("${SESSION_ENV}") },
-        "allowedEnvVars": [SESSION_ENV],
+        "headers": {
+            "X-Glance-Session": format!("${SESSION_ENV}"),
+            "X-Glance-Port": format!("${OWNER_ENV}")
+        },
+        "allowedEnvVars": [SESSION_ENV, OWNER_ENV],
         "timeout": 5
     })
 }
@@ -216,5 +219,12 @@ mod tests {
         assert_eq!(h["type"], "http");
         assert_eq!(h["headers"]["X-Glance-Session"], "$GLANCE_SESSION");
         assert_eq!(h["allowedEnvVars"][0], "GLANCE_SESSION");
+    }
+
+    #[test]
+    fn handler_carries_owner_port_header() {
+        let h = handler(43117);
+        assert_eq!(h["headers"]["X-Glance-Port"], "$GLANCE_OWNER_PORT");
+        assert_eq!(h["allowedEnvVars"][1], "GLANCE_OWNER_PORT");
     }
 }

@@ -92,7 +92,7 @@ fn draw(registry: &Registry, log: &[String], port: u16) -> Result<(), String> {
         };
         s.push_str(&format!(
             "{mark} {:<22} {:<12} {:<10} {}\n",
-            truncate(&sess.name, 22),
+            truncate(sess.label(), 22),
             sess.phase.label(),
             format_age(sess.age()),
             truncate(&sess.last_line, 60)

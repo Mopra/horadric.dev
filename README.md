@@ -13,17 +13,47 @@ work. Worktrees are next.
 
 ## What works now
 
-- `glance` opens one cluster window per project on the right edge of your
-  screen: frameless, rounded, always on top, never takes focus, not in the
-  taskbar or alt-tab. Drag it anywhere. Click the header to collapse it.
+- `glance` opens one cluster window per project on the left edge of your
+  screen: frameless, rounded, never takes focus, not in the taskbar or
+  alt-tab. It stacks like a normal window: other windows can cover it, a
+  click brings it forward, and "Bring tiles to front" in the tray menu
+  brings them all back. Drag it anywhere: it snaps to the screen edges and to
+  the other Glance windows, or hold Shift to place it freely. Click the header to
+  collapse it. "Tidy up tiles" in the tray menu stacks them all back on the
+  left edge.
 - Each tile shows a session: state dot, name, an age line like
   "needs permission 12 min", and the last line worth reading. Waiting tiles
   light up amber.
-- `glance new --name fix-login` starts `claude` in a Glance terminal: a real
-  terminal window with the real CLI in it, permissions, slash commands and
-  all. The `+` in a cluster header starts one in that project. Click the
-  tile to bring the terminal forward, close the window to collapse it back
-  into the tile. The session keeps running either way.
+- A project in git gets a files tile at the bottom of its cluster: the file
+  tree as VS Code's explorer shows it, changed files coloured with their
+  letter (M, A, U, D), folders marked when something inside changed. It
+  updates as files change, without polling. Click a folder to open it, a
+  file to open it in VS Code, the header to fold it.
+- A tray icon starts sessions: "New session..." asks for a folder, and your
+  recent projects are one click away. It also quits Glance.
+- `glance explorer install` adds "Open in Glance" to folders in Explorer,
+  which starts Glance too if it is not running.
+- A session runs `claude` in a Glance terminal: a real terminal with the
+  real CLI in it, permissions, slash commands and all. The sessions share one
+  terminal window, the stage, which shows one project at a time: every
+  session of that project is a pane in a grid. One fills the window, two
+  sit side by side, four are two by two. Click a tile and the stage switches
+  to its project with that session typing; click it again or close the
+  window to collapse it. Other projects keep running unseen, and the tiles
+  on stage are lit. The `+` in a cluster header starts another, and
+  `glance new --name fix-login` does it from a script.
+- Drag a pane by its header onto another to swap the two. The order is
+  remembered. "Fit terminal beside tiles" in the tray menu fills the space
+  right of the clusters. The terminal snaps like clusters do, when moved and
+  when an edge is dragged to resize, and Shift again places it freely.
+- Ctrl+Alt+Space, from anywhere, shows the session that has waited on you
+  longest. Press it again to move on to the next one.
+- A Claude window at the top of the stack shows how much of your five hour,
+  weekly and spend limits is used and when each resets, and picks the
+  model, effort and permission mode for every session Glance starts or
+  resumes. Each tile shows how full its session's context is. The numbers
+  come from Claude Code's status line, which Glance sets for its own
+  sessions only.
 - `glance hooks install` adds Claude Code hooks to `~/.claude/settings.json`.
   They are `http` hooks: Claude Code posts each lifecycle event to Glance on
   localhost. No script runs, no process is spawned per event.
@@ -61,21 +91,32 @@ Rust stable on Windows.
 
 ```
 cargo build --release
-target\release\glance.exe hooks install
-target\release\glance.exe
+target\release\glance.exe install
 ```
 
-In another terminal, inside a project:
+That installs Glance for your user, no admin rights: it is in the Start
+menu (search "Glance"), `glance` works in any new terminal, "Open in Glance"
+is on folders in Explorer (under "Show more options" on Windows 11), it
+starts with Windows, and the Claude Code hooks are in place. Glance lives in
+the tray; Windows may hide a new icon behind the `^` by the clock.
 
-```
-glance new --name what-this-session-does
-```
+Sessions survive a quit or a restart: they come back as paused tiles, and a
+click resumes the conversation.
 
 `GLANCE_AGENT=cmd.exe` runs a shell instead of `claude` in the terminals,
 which is the cheap way to try them.
 
-`glance hooks uninstall` removes the hooks again and leaves everything else in
-your settings untouched.
+`GLANCE_DEV=1` runs a build beside the installed Glance without touching
+it: its own port and saved state, no autostart, a red tray icon. That is how
+Glance is developed from a session inside Glance.
+
+`target\release\glance.exe reload` updates a running Glance to a new build
+without the quit: once no session is mid turn it hands over, and the
+sessions that were running resume by themselves. A build that fails to
+start is rolled back.
+
+`glance uninstall` takes it all back out. The hooks it removes are only
+Glance's; everything else in your Claude Code settings stays as it was.
 
 ## Plan
 

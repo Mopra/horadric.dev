@@ -1,5 +1,7 @@
-//! A minimal HTTP/1.1 server for two purposes: accept `POST /glance/hook`
-//! from Claude Code, and `POST /glance/new` from `glance new`.
+//! A minimal HTTP/1.1 server for four purposes: accept `POST /glance/hook`
+//! from Claude Code, `POST /glance/status` from its status line,
+//! `POST /glance/new` from `glance new`, and `POST /glance/reload` from
+//! `glance reload`.
 //!
 //! Hand rolled on `std::net` because the whole protocol we need is a request
 //! line, a handful of headers, a `Content-Length` body and a fixed reply. A
@@ -11,10 +13,13 @@ use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
 
-use glance_core::HookEvent;
+use glance_core::{HookEvent, Status};
 use serde_json::{json, Value};
 
-use crate::{COMMAND_HEADER, HOOK_PATH, NEW_PATH, SESSION_HEADER};
+use crate::{
+    client, transcript, COMMAND_HEADER, HOOK_PATH, NEW_PATH, OWNER_HEADER, RELOAD_PATH,
+    SESSION_HEADER, STATUS_PATH,
+};
 
 /// A hook event together with the Glance session id from the header.
 #[derive(Debug, Clone)]
@@ -53,36 +58,85 @@ impl NewSession {
     }
 }
 
+/// A request to swap the running app for a new build and carry on with the
+/// same sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reload {
+    /// The `glance.exe` to reload into. `glancew.exe` sits beside it.
+    pub exe: String,
+    /// Skip waiting for sessions to finish their turn.
+    pub now: bool,
+}
+
+impl Reload {
+    pub fn to_json(&self) -> String {
+        json!({ "exe": self.exe, "now": self.now }).to_string()
+    }
+
+    pub fn from_json(body: &[u8]) -> Option<Self> {
+        let v: Value = serde_json::from_slice(body).ok()?;
+        Some(Reload {
+            exe: v.get("exe")?.as_str()?.to_string(),
+            now: v.get("now").and_then(Value::as_bool).unwrap_or(false),
+        })
+    }
+}
+
+/// What the command line can ask the running app for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    New(NewSession),
+    Reload(Reload),
+}
+
 /// Starts listening on 127.0.0.1 and forwards every tagged event on `tx`,
-/// and every new session request on `new` when there is one.
+/// and every command on `commands` when there is an app to take them.
 ///
 /// Runs on its own thread and never returns unless the socket fails. Requests
 /// without a session header are answered 200 and dropped: that is a `claude`
 /// running outside Glance, and it must never be slowed down or shown an error.
-pub fn serve(port: u16, tx: Sender<Tagged>, new: Option<Sender<NewSession>>) -> io::Result<()> {
-    let listener = TcpListener::bind(("127.0.0.1", port))?;
+/// Events owned by a Glance on another port are passed on to it.
+pub fn serve(port: u16, tx: Sender<Tagged>, commands: Option<Sender<Command>>) -> io::Result<()> {
+    let listener = bind(port)?;
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(s) => s,
             Err(_) => continue,
         };
         let tx = tx.clone();
-        let new = new.clone();
+        let commands = commands.clone();
         thread::spawn(move || {
             // Claude Code waits for the hook to finish. A slow reply is a
             // slow agent, so every path here answers fast and gives up fast.
             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-            let _ = handle(stream, &tx, new.as_ref());
+            let _ = handle(stream, port, &tx, commands.as_ref());
         });
     }
     Ok(())
 }
 
+/// Binds, retrying for a few seconds. After a reload the Glance before
+/// held the port until a moment ago.
+fn bind(port: u16) -> io::Result<TcpListener> {
+    let mut tries = 0;
+    loop {
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(l) => return Ok(l),
+            Err(e) if tries >= 50 => return Err(e),
+            Err(_) => {
+                tries += 1;
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
 fn handle(
     mut stream: TcpStream,
+    port: u16,
     tx: &Sender<Tagged>,
-    new: Option<&Sender<NewSession>>,
+    commands: Option<&Sender<Command>>,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
 
@@ -94,6 +148,7 @@ fn handle(
 
     let mut content_length = 0usize;
     let mut glance_id = String::new();
+    let mut owner = None;
     let mut command = String::new();
     let mut from_browser = false;
     loop {
@@ -111,6 +166,7 @@ fn handle(
             match name.as_str() {
                 "content-length" => content_length = value.parse().unwrap_or(0),
                 n if n == SESSION_HEADER => glance_id = value.to_string(),
+                n if n == OWNER_HEADER => owner = value.parse::<u16>().ok(),
                 n if n == COMMAND_HEADER => command = value.to_string(),
                 "origin" => from_browser = true,
                 _ => {}
@@ -118,7 +174,7 @@ fn handle(
         }
     }
 
-    if method != "POST" || (path != HOOK_PATH && path != NEW_PATH) {
+    if method != "POST" || ![HOOK_PATH, STATUS_PATH, NEW_PATH, RELOAD_PATH].contains(&path) {
         return respond(&mut stream, "404 Not Found");
     }
     // A megabyte is far more than any hook payload. Anything bigger is not
@@ -130,18 +186,38 @@ fn handle(
     let mut body = vec![0u8; content_length];
     reader.read_exact(&mut body)?;
 
-    if path == NEW_PATH {
+    if path == STATUS_PATH {
+        // Like a hook: answered at once, dropped without a session. Always
+        // posted straight to the owner, so there is nothing to pass on.
+        respond(&mut stream, "200 OK")?;
+        if let (false, Some(status)) = (glance_id.is_empty(), Status::from_json(&body)) {
+            let event = HookEvent {
+                status: Some(status),
+                ..HookEvent::synthetic(HookEvent::STATUS)
+            };
+            let _ = tx.send(Tagged { glance_id, event });
+        }
+        return Ok(());
+    }
+
+    if path != HOOK_PATH {
         // Starting a process is the one thing a web page must never reach.
-        if from_browser || command != "new" {
+        let wanted = if path == NEW_PATH { "new" } else { "reload" };
+        if from_browser || command != wanted {
             return respond(&mut stream, "403 Forbidden");
         }
-        let Some(new) = new else {
+        let Some(commands) = commands else {
             return respond(&mut stream, "503 Service Unavailable");
         };
-        let Some(request) = NewSession::from_json(&body) else {
+        let request = if path == NEW_PATH {
+            NewSession::from_json(&body).map(Command::New)
+        } else {
+            Reload::from_json(&body).map(Command::Reload)
+        };
+        let Some(request) = request else {
             return respond(&mut stream, "400 Bad Request");
         };
-        let _ = new.send(request);
+        let _ = commands.send(request);
         return respond(&mut stream, "200 OK");
     }
 
@@ -151,7 +227,18 @@ fn handle(
     if glance_id.is_empty() {
         return Ok(());
     }
-    if let Ok(event) = HookEvent::from_json(&body) {
+    if let Some(owner) = owner.filter(|&o| o != port) {
+        // Without the owner header the other Glance keeps it, so this can
+        // not bounce back. Nobody listening there means the event is lost,
+        // which is what it would be without the hop.
+        let body = String::from_utf8_lossy(&body);
+        let _ = client::post(owner, HOOK_PATH, &[(SESSION_HEADER, &glance_id)], &body);
+        return Ok(());
+    }
+    if let Ok(mut event) = HookEvent::from_json(&body) {
+        if event.may_retitle() {
+            event.title = transcript::title(&event.transcript_path);
+        }
         let _ = tx.send(Tagged { glance_id, event });
     }
     Ok(())
@@ -215,6 +302,55 @@ mod tests {
     }
 
     #[test]
+    fn event_owned_elsewhere_is_passed_on() {
+        let (host, host_rx) = start();
+        let (dev, dev_rx) = start();
+        let reply = post(
+            host,
+            &format!("X-Glance-Session: tile-9\r\nX-Glance-Port: {dev}\r\n"),
+            r#"{"session_id":"c","hook_event_name":"Stop"}"#,
+        );
+        assert!(reply.starts_with("HTTP/1.1 200"));
+        let got = dev_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(got.glance_id, "tile-9");
+        assert_eq!(got.event.hook_event_name, "Stop");
+        assert!(host_rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn event_owned_here_or_by_nobody_stays() {
+        let (port, rx) = start();
+        for owner in [format!("{port}"), String::new(), "junk".into()] {
+            post(
+                port,
+                &format!("X-Glance-Session: tile-1\r\nX-Glance-Port: {owner}\r\n"),
+                r#"{"session_id":"c","hook_event_name":"Stop"}"#,
+            );
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(2)).unwrap().glance_id,
+                "tile-1"
+            );
+        }
+    }
+
+    #[test]
+    fn status_is_forwarded_as_an_event() {
+        let (port, rx) = start();
+        let body = r#"{"model":{"display_name":"Haiku"},"rate_limits":{"five_hour":{"used_percentage":9}}}"#;
+        let reply = post_to(port, STATUS_PATH, "X-Glance-Session: tile-3\r\n", body);
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        let got = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(got.glance_id, "tile-3");
+        assert_eq!(got.event.hook_event_name, HookEvent::STATUS);
+        let status = got.event.status.unwrap();
+        assert_eq!(status.model.as_deref(), Some("Haiku"));
+        assert_eq!(status.limits.five_hour.map(|l| l.used), Some(9.0));
+        // Untagged, it is a status line outside Glance.
+        post_to(port, STATUS_PATH, "", body);
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
     fn untagged_post_is_accepted_and_dropped() {
         let (port, rx) = start();
         let reply = post(port, "", r#"{"session_id":"c","hook_event_name":"Stop"}"#);
@@ -222,7 +358,7 @@ mod tests {
         assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
     }
 
-    fn start_with_new() -> (u16, mpsc::Receiver<NewSession>) {
+    fn start_with_new() -> (u16, mpsc::Receiver<Command>) {
         let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
@@ -239,9 +375,13 @@ mod tests {
     }
 
     fn post_new(port: u16, headers: &str, body: &str) -> String {
+        post_to(port, NEW_PATH, headers, body)
+    }
+
+    fn post_to(port: u16, path: &str, headers: &str, body: &str) -> String {
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let req = format!(
-            "POST {NEW_PATH} HTTP/1.1\r\nHost: x\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+            "POST {path} HTTP/1.1\r\nHost: x\r\n{headers}Content-Length: {}\r\n\r\n{body}",
             body.len()
         );
         s.write_all(req.as_bytes()).unwrap();
@@ -260,7 +400,52 @@ mod tests {
         };
         let reply = post_new(port, "X-Glance-Command: new\r\n", &want.to_json());
         assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
-        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), want);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Command::New(want)
+        );
+    }
+
+    #[test]
+    fn reload_request_is_forwarded() {
+        let (port, rx) = start_with_new();
+        let want = Reload {
+            exe: "C:/dev/glance/target/release/glance.exe".into(),
+            now: true,
+        };
+        let reply = post_to(
+            port,
+            RELOAD_PATH,
+            "X-Glance-Command: reload\r\n",
+            &want.to_json(),
+        );
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Command::Reload(want)
+        );
+    }
+
+    #[test]
+    fn reload_needs_its_own_header_and_no_origin() {
+        let (port, rx) = start_with_new();
+        let body = r#"{"exe":"C:/x/glance.exe"}"#;
+        for headers in [
+            "",
+            "X-Glance-Command: new\r\n",
+            "X-Glance-Command: reload\r\nOrigin: https://example.com\r\n",
+        ] {
+            let reply = post_to(port, RELOAD_PATH, headers, body);
+            assert!(reply.starts_with("HTTP/1.1 403"), "{headers}: {reply}");
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn reload_json_defaults_to_waiting() {
+        let r = Reload::from_json(br#"{"exe":"C:/x/glance.exe"}"#).unwrap();
+        assert!(!r.now);
+        assert_eq!(Reload::from_json(br#"{"now":true}"#), None);
     }
 
     #[test]

@@ -5,6 +5,9 @@
 
 use serde::Deserialize;
 
+use crate::title::Title;
+use crate::usage::Status;
+
 /// A hook event as received from Claude Code.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct HookEvent {
@@ -15,6 +18,9 @@ pub struct HookEvent {
     /// Working directory of the session when the hook fired.
     #[serde(default)]
     pub cwd: String,
+    /// The conversation's JSONL file. Where Claude Code keeps its title.
+    #[serde(default)]
+    pub transcript_path: String,
     /// Present when the hook fired inside a subagent. Subagent activity
     /// never changes the phase of the parent session.
     #[serde(default)]
@@ -22,6 +28,10 @@ pub struct HookEvent {
     /// `SessionStart` only: `startup`, `resume`, `clear` or `compact`.
     #[serde(default)]
     pub source: Option<String>,
+    /// `SessionEnd` only: `clear`, `resume`, `logout`, `prompt_input_exit`
+    /// and others.
+    #[serde(default)]
+    pub reason: Option<String>,
     /// `Notification` only: `permission_prompt`, `idle_prompt` and friends.
     #[serde(default)]
     pub notification_type: Option<String>,
@@ -46,12 +56,27 @@ pub struct HookEvent {
     /// session. Not part of any Claude Code payload.
     #[serde(default)]
     pub name: Option<String>,
+    /// The conversation's title, read from the transcript by the listener
+    /// before the event is passed on. Never in a payload.
+    #[serde(skip)]
+    pub title: Option<Title>,
+    /// Glance's own `Status` event only: what the status line was told.
+    #[serde(skip)]
+    pub status: Option<Status>,
 }
 
 impl HookEvent {
     /// The event `glance run` sends before Claude starts, so a session shows
     /// up as idle instead of appearing on its first prompt.
     pub const REGISTER: &'static str = "GlanceRegister";
+
+    /// Glance's own event for a session whose process is gone but whose
+    /// conversation can be resumed.
+    pub const PAUSE: &'static str = "GlancePause";
+
+    /// Glance's own event for what Claude Code gave the status line: the
+    /// model, the context and the usage limits. It never changes a phase.
+    pub const STATUS: &'static str = "GlanceStatus";
 
     /// An event Glance makes up itself, with every optional field empty.
     pub fn synthetic(hook_event_name: &str) -> Self {
@@ -69,5 +94,36 @@ impl HookEvent {
     /// True when the event came from a subagent rather than the main loop.
     pub fn is_subagent(&self) -> bool {
         self.agent_id.as_deref().is_some_and(|id| !id.is_empty())
+    }
+
+    /// Whether the conversation's title may have changed since the last
+    /// event that said so. Claude Code writes it early in the first turn,
+    /// `/rename` changes it between turns, and a resume brings an old one.
+    pub fn may_retitle(&self) -> bool {
+        !self.is_subagent()
+            && !self.transcript_path.is_empty()
+            && matches!(
+                self.hook_event_name.as_str(),
+                "SessionStart" | "UserPromptSubmit" | "Stop"
+            )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_main_loop_turn_edges_with_a_transcript_retitle() {
+        let e = |name: &str, path: &str, agent: Option<&str>| HookEvent {
+            transcript_path: path.into(),
+            agent_id: agent.map(str::to_string),
+            ..HookEvent::synthetic(name)
+        };
+        assert!(e("Stop", "t.jsonl", None).may_retitle());
+        assert!(e("UserPromptSubmit", "t.jsonl", None).may_retitle());
+        assert!(!e("PreToolUse", "t.jsonl", None).may_retitle());
+        assert!(!e("Stop", "", None).may_retitle());
+        assert!(!e("Stop", "t.jsonl", Some("sub")).may_retitle());
     }
 }

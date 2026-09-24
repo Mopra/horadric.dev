@@ -11,7 +11,9 @@ use std::time::SystemTime;
 
 use glance_core::{session_id, HookEvent};
 use glance_hooks::listener::NewSession;
-use glance_hooks::{client, COMMAND_HEADER, HOOK_PATH, NEW_PATH, SESSION_ENV, SESSION_HEADER};
+use glance_hooks::{
+    client, COMMAND_HEADER, HOOK_PATH, NEW_PATH, OWNER_ENV, SESSION_ENV, SESSION_HEADER,
+};
 use serde_json::json;
 
 /// What both commands accept.
@@ -103,6 +105,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .args(&passthrough)
         .current_dir(&cwd)
         .env(SESSION_ENV, &id)
+        .env(OWNER_ENV, glance_hooks::port().to_string())
         .status()
         .map_err(|e| format!("could not start `claude`: {e}"))?;
 

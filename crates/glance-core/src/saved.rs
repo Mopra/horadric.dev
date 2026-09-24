@@ -1,0 +1,301 @@
+//! What Glance keeps on disk so it can pick up where it left off: the
+//! sessions it owned, where the clusters were, the recent projects.
+//!
+//! No process survives a restart, but a conversation does: Claude Code can
+//! resume one by id. A saved session comes back as a paused tile, and
+//! clicking it runs `claude --resume <id>` in the same folder.
+
+use std::collections::BTreeMap;
+use std::time::SystemTime;
+
+use serde::{Deserialize, Serialize};
+
+use crate::session::{Phase, Session};
+use crate::title::Title;
+use crate::usage::{Defaults, Usage};
+
+/// Bumped when a change would make an older file mean something else.
+pub const VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SavedState {
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub sessions: Vec<SavedSession>,
+    #[serde(default)]
+    pub clusters: Vec<SavedCluster>,
+    /// Newest first.
+    #[serde(default)]
+    pub recent: Vec<String>,
+    /// Start with Windows is switched on once, the first time Glance runs.
+    /// After that it is the user's call, so this remembers it was offered.
+    #[serde(default)]
+    pub autostart_offered: bool,
+    /// The shared terminal window as left, top, right, bottom in physical
+    /// pixels, as it was last left.
+    #[serde(default)]
+    pub stage: Option<[i32; 4]>,
+    /// The session with the focus on the stage when the state was written,
+    /// if it was open. Its project is the one the stage showed.
+    #[serde(default)]
+    pub on_stage: Option<String>,
+    /// The order of each project's sessions on the stage, by project key.
+    #[serde(default)]
+    pub grids: BTreeMap<String, Vec<String>>,
+    /// Model, effort and permission mode for the sessions Glance starts.
+    #[serde(default)]
+    pub defaults: Defaults,
+    /// The usage limits as last heard, so the usage window is not empty
+    /// until the first reply after a restart.
+    #[serde(default)]
+    pub usage: Option<Usage>,
+    /// Where the usage window was.
+    #[serde(default)]
+    pub usage_window: Option<SavedPanel>,
+}
+
+impl SavedState {
+    pub fn to_json(&self) -> String {
+        let mut s = self.clone();
+        s.version = VERSION;
+        serde_json::to_string_pretty(&s).unwrap_or_default()
+    }
+
+    /// A file from a newer Glance, or a damaged one, reads as empty rather
+    /// than half understood.
+    pub fn from_json(bytes: &[u8]) -> SavedState {
+        match serde_json::from_slice::<SavedState>(bytes) {
+            Ok(s) if s.version <= VERSION => s,
+            _ => SavedState::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedSession {
+    /// Glance's id, kept so the tile is the same tile after a restart.
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub title: Option<Title>,
+    pub cwd: String,
+    /// What the session was started with, `--model` and friends.
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
+    #[serde(default)]
+    pub prompted: bool,
+    #[serde(default)]
+    pub last_line: String,
+    /// Its process was running when the state was written. A reload resumes
+    /// exactly these; an ordinary start leaves every session paused.
+    #[serde(default)]
+    pub running: bool,
+}
+
+impl SavedSession {
+    pub fn from_session(s: &Session, args: Vec<String>, running: bool) -> Self {
+        SavedSession {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            title: s.title.clone(),
+            cwd: s.cwd.clone(),
+            args,
+            claude_session_id: s.claude_session_id.clone(),
+            prompted: s.prompted,
+            last_line: s.last_line.clone(),
+            running,
+        }
+    }
+
+    /// The session as a paused tile.
+    pub fn to_session(&self, now: SystemTime) -> Session {
+        let mut s = Session::new(&self.id, &self.name, &self.cwd);
+        s.title = self.title.clone();
+        s.claude_session_id = self.claude_session_id.clone();
+        s.prompted = self.prompted;
+        s.last_line = self.last_line.clone();
+        s.phase = Phase::Paused;
+        s.since = now;
+        s
+    }
+
+    /// Arguments for `claude` to carry on: the original ones with
+    /// `--resume <id>` in front when there is a conversation to resume, and
+    /// without any earlier resume or continue flag, which would fight it.
+    pub fn launch_args(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let (true, Some(id)) = (self.prompted, &self.claude_session_id) {
+            out.push("--resume".to_string());
+            out.push(id.clone());
+        }
+        let mut args = self.args.iter();
+        while let Some(a) = args.next() {
+            match a.as_str() {
+                "--resume" | "-r" | "--session-id" => {
+                    // Their value, unless the next thing is another flag.
+                    if args.as_slice().first().is_some_and(|v| !v.starts_with('-')) {
+                        args.next();
+                    }
+                }
+                "--continue" | "-c" => {}
+                _ if a.starts_with("--resume=") || a.starts_with("--session-id=") => {}
+                _ => out.push(a.clone()),
+            }
+        }
+        out
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedCluster {
+    /// The project key the cluster shows.
+    pub key: String,
+    /// Dragged by the user. Only then do `x` and `y` mean anything.
+    pub pinned: bool,
+    pub x: i32,
+    pub y: i32,
+    pub collapsed: bool,
+    /// The files tile folded down to its header.
+    #[serde(default)]
+    pub files_collapsed: bool,
+    /// How tall the files tile grows below its header before it scrolls,
+    /// in DIPs, once its bottom edge has been dragged.
+    #[serde(default)]
+    pub files_height: Option<f32>,
+}
+
+/// A window that is not a project's: where it was and whether it was folded.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SavedPanel {
+    /// Dragged by the user. Only then do `x` and `y` mean anything.
+    pub pinned: bool,
+    pub x: i32,
+    pub y: i32,
+    pub collapsed: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn saved(args: &[&str], prompted: bool) -> SavedSession {
+        SavedSession {
+            id: "fix-1".into(),
+            name: "fix".into(),
+            title: Some(Title {
+                text: "Fix the login".into(),
+                custom: false,
+            }),
+            cwd: "C:/app".into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            claude_session_id: Some("abc".into()),
+            prompted,
+            last_line: String::new(),
+            running: true,
+        }
+    }
+
+    #[test]
+    fn resumes_with_the_original_arguments() {
+        let s = saved(&["--model", "haiku"], true);
+        assert_eq!(s.launch_args(), vec!["--resume", "abc", "--model", "haiku"]);
+    }
+
+    #[test]
+    fn old_resume_and_continue_flags_are_dropped() {
+        let s = saved(
+            &["-c", "--resume", "old", "--model", "x", "--session-id=z"],
+            true,
+        );
+        assert_eq!(s.launch_args(), vec!["--resume", "abc", "--model", "x"]);
+        // A bare --resume followed by a flag has no value to drop.
+        let s = saved(&["--resume", "--verbose"], true);
+        assert_eq!(s.launch_args(), vec!["--resume", "abc", "--verbose"]);
+    }
+
+    #[test]
+    fn nothing_to_resume_before_the_first_prompt() {
+        let s = saved(&["--model", "haiku"], false);
+        assert_eq!(s.launch_args(), vec!["--model", "haiku"]);
+    }
+
+    #[test]
+    fn round_trips_and_comes_back_paused() {
+        let state = SavedState {
+            sessions: vec![saved(&[], true)],
+            clusters: vec![SavedCluster {
+                key: "c:/app".into(),
+                pinned: true,
+                x: 10,
+                y: -20,
+                collapsed: false,
+                files_collapsed: true,
+                files_height: Some(412.0),
+            }],
+            recent: vec!["C:/app".into()],
+            autostart_offered: true,
+            stage: Some([300, 12, 1300, 712]),
+            on_stage: Some("fix-1".into()),
+            grids: BTreeMap::from([("c:/app".into(), vec!["fix-1".into()])]),
+            defaults: Defaults {
+                effort: Some("high".into()),
+                ..Default::default()
+            },
+            usage: Some(Usage {
+                at: 7,
+                ..Default::default()
+            }),
+            usage_window: Some(SavedPanel {
+                pinned: true,
+                x: 5,
+                y: 6,
+                collapsed: true,
+            }),
+            ..Default::default()
+        };
+        let back = SavedState::from_json(state.to_json().as_bytes());
+        assert_eq!(back.version, VERSION);
+        assert_eq!(back.sessions, state.sessions);
+        assert_eq!(back.clusters, state.clusters);
+        assert_eq!(back.stage, state.stage);
+        assert_eq!(back.on_stage, state.on_stage);
+        assert_eq!(back.grids, state.grids);
+        assert_eq!(back.defaults, state.defaults);
+        assert_eq!(back.usage, state.usage);
+        assert_eq!(back.usage_window, state.usage_window);
+        let tile = back.sessions[0].to_session(SystemTime::now());
+        assert_eq!(tile.phase, Phase::Paused);
+        assert!(tile.prompted);
+        assert_eq!(tile.title, state.sessions[0].title);
+    }
+
+    #[test]
+    fn unreadable_or_newer_files_read_as_empty() {
+        assert_eq!(SavedState::from_json(b"not json"), SavedState::default());
+        assert_eq!(
+            SavedState::from_json(br#"{"version": 99, "recent": ["x"]}"#),
+            SavedState::default()
+        );
+        assert!(SavedState::from_json(br#"{"recent": ["x"]}"#).recent.len() == 1);
+    }
+
+    #[test]
+    fn a_file_with_popped_windows_still_reads() {
+        let old = br#"{"version": 1, "sessions": [{"id": "a", "name": "a", "cwd": "C:/p",
+            "placement": [0, 0, 800, 600], "popped": true}]}"#;
+        let s = SavedState::from_json(old);
+        assert_eq!(s.sessions[0].id, "a");
+        assert!(s.grids.is_empty());
+    }
+
+    #[test]
+    fn a_file_from_before_reload_resumes_nothing() {
+        let old = br#"{"version": 1, "sessions": [{"id": "a", "name": "a", "cwd": "C:/p"}]}"#;
+        let s = SavedState::from_json(old);
+        assert!(!s.sessions[0].running);
+        assert_eq!(s.on_stage, None);
+    }
+}

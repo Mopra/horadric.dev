@@ -18,27 +18,29 @@ const fn rgb(hex: u32) -> Rgb {
 }
 
 /// Matches the cluster window, so a terminal reads as part of the same app.
-pub const BACKGROUND: Rgb = rgb(0x1B1B1F);
-pub const FOREGROUND: Rgb = rgb(0xDCDCE0);
-pub const CURSOR: Rgb = rgb(0xECECEE);
-pub const SELECTION: Rgb = rgb(0x3A4A66);
+pub const BACKGROUND: Rgb = rgb(0x0A0A0D);
+pub const FOREGROUND: Rgb = rgb(0xE6E6EB);
+pub const CURSOR: Rgb = rgb(0xF5F5F7);
+pub const SELECTION: Rgb = rgb(0x1E3A5C);
+/// Between the panes of the stage, darker than any of them.
+pub const GUTTER: Rgb = rgb(0x000000);
 
 const ANSI: [Rgb; 16] = [
-    rgb(0x2E2E34),
-    rgb(0xE06C75),
-    rgb(0x98C379),
-    rgb(0xE5C07B),
-    rgb(0x61AFEF),
-    rgb(0xC678DD),
-    rgb(0x56B6C2),
-    rgb(0xDCDFE4),
-    rgb(0x6E6E76),
-    rgb(0xFF7B86),
-    rgb(0xB5E890),
-    rgb(0xFFD68A),
-    rgb(0x7CC4FF),
-    rgb(0xDA9EF0),
-    rgb(0x72D4E0),
+    rgb(0x23232B),
+    rgb(0xFF5D66),
+    rgb(0x3DD68C),
+    rgb(0xFFC53D),
+    rgb(0x3DB4FF),
+    rgb(0xB78CFF),
+    rgb(0x2ED3C6),
+    rgb(0xD4D4DC),
+    rgb(0x5C5C68),
+    rgb(0xFF8A91),
+    rgb(0x70EBAE),
+    rgb(0xFFDB7A),
+    rgb(0x7DCBFF),
+    rgb(0xD0B4FF),
+    rgb(0x6FE8DE),
     rgb(0xFFFFFF),
 ];
 

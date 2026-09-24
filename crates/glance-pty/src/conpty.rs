@@ -9,18 +9,19 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
 use std::thread;
 
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::System::Console::{
     ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
 };
+use windows::Win32::System::JobObjects::{CreateJobObjectW, IsProcessInJob};
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
     WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 use crate::{command_line, environment_block, wide};
@@ -50,6 +51,10 @@ pub struct Pty {
     /// reach end of file, which it never does on its own.
     console: Mutex<HPCON>,
     process: OwnedHandle,
+    /// Holds the child and everything it starts, so a window can be traced
+    /// back to the session whose agent opened it. Nothing is limited, and
+    /// closing it ends nothing.
+    job: OwnedHandle,
     input: Sender<Vec<u8>>,
     pid: u32,
 }
@@ -74,7 +79,14 @@ impl Pty {
             drop(in_read);
             drop(out_write);
 
-            let started = start(cmd, console);
+            let job = match CreateJobObjectW(None, PCWSTR::null()) {
+                Ok(j) => OwnedHandle::from_raw_handle(j.0),
+                Err(e) => {
+                    ClosePseudoConsole(console);
+                    return Err(e.into());
+                }
+            };
+            let started = start(cmd, console, &job);
             let (process, pid) = match started {
                 Ok(p) => p,
                 Err(e) => {
@@ -96,6 +108,7 @@ impl Pty {
             let pty = Pty {
                 console: Mutex::new(console),
                 process,
+                job,
                 input,
                 pid,
             };
@@ -105,6 +118,14 @@ impl Pty {
 
     pub fn pid(&self) -> u32 {
         self.pid
+    }
+
+    /// Whether a process is the child or was started by it, however far
+    /// down. `process` needs `PROCESS_QUERY_LIMITED_INFORMATION`.
+    pub fn contains(&self, process: HANDLE) -> bool {
+        let mut inside = BOOL(0);
+        let job = HANDLE(self.job.as_raw_handle());
+        unsafe { IsProcessInJob(process, Some(job), &mut inside) }.is_ok() && inside.as_bool()
     }
 
     /// Queues bytes for the child's input. Silently dropped once it exited.
@@ -171,16 +192,22 @@ unsafe fn pipe() -> io::Result<(OwnedHandle, OwnedHandle)> {
     ))
 }
 
-/// Creates the process with the pseudo console attached.
-unsafe fn start(cmd: &Command, console: HPCON) -> io::Result<(OwnedHandle, u32)> {
+/// Creates the process with the pseudo console attached, inside `job`.
+unsafe fn start(
+    cmd: &Command,
+    console: HPCON,
+    job: &OwnedHandle,
+) -> io::Result<(OwnedHandle, u32)> {
     // Ask for the size, then initialise in a buffer of that size. The first
     // call fails by design.
     let mut size = 0usize;
-    let _ = InitializeProcThreadAttributeList(None, 1, None, &mut size);
+    let _ = InitializeProcThreadAttributeList(None, 2, None, &mut size);
     // usize elements keep the buffer pointer aligned.
     let mut buf = vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
     let list = LPPROC_THREAD_ATTRIBUTE_LIST(buf.as_mut_ptr() as *mut c_void);
-    InitializeProcThreadAttributeList(Some(list), 1, None, &mut size)?;
+    InitializeProcThreadAttributeList(Some(list), 2, None, &mut size)?;
+    // Read by CreateProcessW, so it has to outlive the list.
+    let jobs = [HANDLE(job.as_raw_handle())];
 
     let result = (|| {
         UpdateProcThreadAttribute(
@@ -189,6 +216,17 @@ unsafe fn start(cmd: &Command, console: HPCON) -> io::Result<(OwnedHandle, u32)>
             PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
             Some(console.0 as *const c_void),
             std::mem::size_of::<HPCON>(),
+            None,
+            None,
+        )?;
+        // In the job from its first instruction. Assigning it after the
+        // start would miss whatever it launched in between.
+        UpdateProcThreadAttribute(
+            list,
+            0,
+            PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
+            Some(jobs.as_ptr() as *const c_void),
+            std::mem::size_of_val(&jobs),
             None,
             None,
         )?;
@@ -258,5 +296,37 @@ mod tests {
         assert_eq!(pty.wait(), 0);
         let text = reader.join().unwrap();
         assert!(text.contains("pty-says-hi"), "output was {text:?}");
+    }
+
+    #[test]
+    fn the_child_is_in_its_job_and_we_are_not() {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+        let cmd = Command {
+            program: comspec.into(),
+            // Long enough to be asked about while it still runs.
+            args: vec!["/c".into(), "ping -n 3 127.0.0.1 >nul".into()],
+            cwd: std::env::temp_dir(),
+            env_set: vec![],
+            env_remove: vec![],
+            cols: 80,
+            rows: 24,
+        };
+        let (pty, mut out) = Pty::spawn(&cmd).unwrap();
+        thread::spawn(move || {
+            let _ = out.read_to_end(&mut Vec::new());
+        });
+        let child =
+            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pty.pid()) }.unwrap();
+        assert!(pty.contains(child));
+        assert!(!pty.contains(unsafe { GetCurrentProcess() }));
+        unsafe {
+            let _ = CloseHandle(child);
+        }
+        pty.kill();
+        pty.wait();
     }
 }

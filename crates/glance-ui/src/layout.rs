@@ -42,10 +42,30 @@ pub struct Metrics {
     pub pad: f32,
     pub header_h: f32,
     pub tile_h: f32,
+    pub add_h: f32,
     pub gap: f32,
     pub radius: f32,
+    /// The corner Windows 11 rounds a window to.
+    pub window_radius: f32,
     pub tile_radius: f32,
-    pub dot: f32,
+    pub files_header_h: f32,
+    pub file_row_h: f32,
+    /// The most rows the files tile shows before it scrolls, until its
+    /// bottom edge is dragged.
+    pub file_rows: usize,
+    /// The fewest rows a drag leaves. Folding it is the header's job.
+    pub file_rows_min: usize,
+    /// Room under the last row, which is also where the drag handle sits.
+    pub file_foot: f32,
+    /// How far each folder level is indented.
+    pub file_indent: f32,
+    /// The button on a tile whose session has a browser open.
+    pub mark_w: f32,
+    pub mark_h: f32,
+    /// A usage limit in the usage window: its name and numbers, and a bar.
+    pub limit_row_h: f32,
+    /// A setting in the usage window.
+    pub setting_row_h: f32,
 }
 
 impl Default for Metrics {
@@ -54,11 +74,22 @@ impl Default for Metrics {
             width: 280.0,
             pad: 10.0,
             header_h: 30.0,
-            tile_h: 54.0,
+            tile_h: 58.0,
+            add_h: 26.0,
             gap: 6.0,
             radius: 12.0,
+            window_radius: 8.0,
             tile_radius: 8.0,
-            dot: 8.0,
+            files_header_h: 26.0,
+            file_row_h: 20.0,
+            file_rows: 14,
+            file_rows_min: 3,
+            file_foot: 8.0,
+            file_indent: 12.0,
+            mark_w: 24.0,
+            mark_h: 20.0,
+            limit_row_h: 38.0,
+            setting_row_h: 28.0,
         }
     }
 }
@@ -69,15 +100,53 @@ pub struct ClusterLayout {
     /// Full window size.
     pub size: (f32, f32),
     pub header: Rect,
-    /// The button at the right end of the header that starts a new session
-    /// in this project. Inside `header`, so it is hit tested first.
+    /// The button at the right end of the header that picks a folder for a
+    /// new project. Inside `header`, so it is hit tested first.
     pub new: Rect,
     /// One rect per tile, in the order given. Empty when collapsed.
     pub tiles: Vec<Rect>,
+    /// The browser button on each tile, in the same order, where its
+    /// session has a browser open. See [`mark`].
+    pub marks: Vec<Option<Rect>>,
+    /// The full width button below the last tile that starts another
+    /// session in this project at once. None when collapsed.
+    pub add: Option<Rect>,
+    /// The files tile, below everything else. None when the project is not
+    /// in git or the cluster is collapsed.
+    pub files: Option<FilesLayout>,
 }
 
-/// Lays out a cluster with `n` tiles.
-pub fn cluster(m: &Metrics, n: usize, collapsed: bool) -> ClusterLayout {
+/// Where the files tile and its rows go.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilesLayout {
+    /// The whole tile.
+    pub rect: Rect,
+    /// Its title row, which collapses and expands it.
+    pub header: Rect,
+    /// One rect per visible row, top to bottom.
+    pub rows: Vec<Rect>,
+    /// The strip along the bottom edge that a drag resizes the tile by.
+    /// None when it is folded.
+    pub grip: Option<Rect>,
+}
+
+impl FilesLayout {
+    /// Where the rows are, header excluded: the part the wheel scrolls.
+    pub fn body(&self) -> Rect {
+        Rect::new(
+            self.rect.x,
+            self.header.bottom(),
+            self.rect.w,
+            self.rect.bottom() - self.header.bottom(),
+        )
+    }
+}
+
+/// Lays out a cluster with `n` tiles. `files` is how tall the files tile is
+/// below its header, in DIPs, none for no files tile. Zero is the tile
+/// folded to its header. It holds as many whole rows as fit and the rest is
+/// room under the last one. Sizing it is the caller's job, see `files_body`.
+pub fn cluster(m: &Metrics, n: usize, collapsed: bool, files: Option<f32>) -> ClusterLayout {
     let header = Rect::new(m.pad, m.pad, m.width - 2.0 * m.pad, m.header_h);
     let new = Rect::new(
         header.right() - m.header_h,
@@ -85,16 +154,51 @@ pub fn cluster(m: &Metrics, n: usize, collapsed: bool) -> ClusterLayout {
         m.header_h,
         m.header_h,
     );
+    let full = m.width - 2.0 * m.pad;
     let mut tiles = Vec::new();
+    let mut add = None;
+    let mut files_layout = None;
     let mut y = header.bottom() + m.gap;
     if !collapsed {
         for _ in 0..n {
-            tiles.push(Rect::new(m.pad, y, m.width - 2.0 * m.pad, m.tile_h));
+            tiles.push(Rect::new(m.pad, y, full, m.tile_h));
             y += m.tile_h + m.gap;
+        }
+        add = Some(Rect::new(m.pad, y, full, m.add_h));
+        y += m.add_h + m.gap;
+        if let Some(body) = files {
+            let body = body.max(0.0);
+            // A height that came back from physical pixels is a hair off.
+            let rows = ((body - m.file_foot) / m.file_row_h + 0.01)
+                .floor()
+                .max(0.0) as usize;
+            let header = Rect::new(m.pad, y, full, m.files_header_h);
+            let mut row_y = header.bottom();
+            let row_rects = (0..rows)
+                .map(|_| {
+                    let r = Rect::new(m.pad, row_y, full, m.file_row_h);
+                    row_y += m.file_row_h;
+                    r
+                })
+                .collect();
+            // The foot under the last row keeps it off the rounded corner
+            // and holds the drag handle.
+            let bottom = header.bottom() + body;
+            // The grip reaches into the window's bottom padding: a strip as
+            // thin as the handle would be hard to catch.
+            let grip = (body > 0.0)
+                .then(|| Rect::new(m.pad, bottom - m.file_foot, full, m.file_foot + m.pad));
+            files_layout = Some(FilesLayout {
+                rect: Rect::new(m.pad, y, full, bottom - y),
+                header,
+                rows: row_rects,
+                grip,
+            });
+            y = bottom + m.gap;
         }
     }
     // Trailing gap becomes bottom padding.
-    let height = if tiles.is_empty() {
+    let height = if collapsed {
         header.bottom() + m.pad
     } else {
         y - m.gap + m.pad
@@ -103,8 +207,52 @@ pub fn cluster(m: &Metrics, n: usize, collapsed: bool) -> ClusterLayout {
         size: (m.width, height),
         header,
         new,
+        marks: vec![None; tiles.len()],
         tiles,
+        add,
+        files: files_layout,
     }
+}
+
+/// Puts the browser button on the tiles whose session has a browser open,
+/// at the right end of the tile's second line.
+pub fn mark(layout: &mut ClusterLayout, m: &Metrics, marked: &[bool]) {
+    layout.marks = layout
+        .tiles
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            marked.get(i).copied().unwrap_or(false).then(|| {
+                // Centred on the second line of text, which sits a little
+                // above the middle of the tile's lower half.
+                let line = t.y + t.h * 0.75 - 4.0;
+                Rect::new(
+                    t.right() - 4.0 - m.mark_w,
+                    line - m.mark_h / 2.0,
+                    m.mark_w,
+                    m.mark_h,
+                )
+            })
+        })
+        .collect();
+}
+
+/// How tall the files tile is below its header, holding `rows` rows. As
+/// tall as they need up to `cap` (the user's, or `file_rows` rows), never
+/// more than fits in `room` DIPs of window height, given the window is
+/// `base` tall with the tile folded, and never too short for a few rows.
+pub fn files_body(m: &Metrics, rows: usize, cap: Option<f32>, base: f32, room: f32) -> f32 {
+    if rows == 0 {
+        return 0.0;
+    }
+    let need = rows as f32 * m.file_row_h + m.file_foot;
+    let cap = cap.unwrap_or(m.file_rows as f32 * m.file_row_h + m.file_foot);
+    need.min(cap).min((room - base).max(min_files_body(m)))
+}
+
+/// The shortest a drag makes the files tile. Folding it is the header's job.
+pub fn min_files_body(m: &Metrics) -> f32 {
+    m.file_rows_min as f32 * m.file_row_h + m.file_foot
 }
 
 /// Which part of the cluster a point is on.
@@ -113,7 +261,47 @@ pub enum Hit {
     New,
     Header,
     Tile(usize),
+    /// The browser button on a tile.
+    Browser(usize),
+    Add,
+    FilesHeader,
+    /// The bottom edge of the files tile, which resizes it.
+    FilesGrip,
+    /// A row of the files tile, counted from the top one showing.
+    File(usize),
     Nothing,
+}
+
+impl Hit {
+    /// Whether this part lights up under the cursor. The files tile does
+    /// not yet.
+    pub fn lights(self) -> bool {
+        matches!(
+            self,
+            Hit::New | Hit::Header | Hit::Tile(_) | Hit::Browser(_) | Hit::Add
+        )
+    }
+}
+
+/// How a button draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    Idle,
+    Hover,
+    Pressed,
+}
+
+/// How the button at `which` draws, with the cursor over `hot` and the left
+/// button held since it went down on `pressed`. Slid off while held, it
+/// looks idle, because letting go there does nothing. While something else
+/// is held, nothing lights up under the cursor, as in Windows.
+pub fn button<T: PartialEq>(which: T, hot: T, pressed: Option<T>) -> Button {
+    match pressed {
+        Some(p) if p == which && hot == which => Button::Pressed,
+        Some(_) => Button::Idle,
+        None if hot == which => Button::Hover,
+        None => Button::Idle,
+    }
 }
 
 pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
@@ -123,19 +311,109 @@ pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
     if layout.header.contains(x, y) {
         return Hit::Header;
     }
+    for (i, r) in layout.marks.iter().enumerate() {
+        if r.is_some_and(|r| r.contains(x, y)) {
+            return Hit::Browser(i);
+        }
+    }
     for (i, t) in layout.tiles.iter().enumerate() {
         if t.contains(x, y) {
             return Hit::Tile(i);
         }
     }
+    if layout.add.is_some_and(|a| a.contains(x, y)) {
+        return Hit::Add;
+    }
+    if let Some(f) = &layout.files {
+        if f.header.contains(x, y) {
+            return Hit::FilesHeader;
+        }
+        if f.grip.is_some_and(|g| g.contains(x, y)) {
+            return Hit::FilesGrip;
+        }
+        if let Some(i) = f.rows.iter().position(|r| r.contains(x, y)) {
+            return Hit::File(i);
+        }
+    }
     Hit::Nothing
 }
 
-/// Stacks cluster windows down the right edge of a work area.
+/// The geometry of the usage window: the account's limits in one tile, the
+/// settings for new sessions in another.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageLayout {
+    pub size: (f32, f32),
+    pub header: Rect,
+    /// The tile around the limits. None when collapsed.
+    pub limits_box: Option<Rect>,
+    /// One row per limit, or one for the line that says none is known yet.
+    pub limits: Vec<Rect>,
+    pub settings_box: Option<Rect>,
+    /// One row per setting, each a button that opens its menu.
+    pub settings: Vec<Rect>,
+}
+
+/// Lays out the usage window with `limits` limits known and `settings`
+/// settings. With no limit known it keeps one row, for saying so.
+pub fn usage(m: &Metrics, limits: usize, settings: usize, collapsed: bool) -> UsageLayout {
+    let header = Rect::new(m.pad, m.pad, m.width - 2.0 * m.pad, m.header_h);
+    let full = m.width - 2.0 * m.pad;
+    // Inside a tile, rows keep off its rounded corners.
+    let inner = 4.0;
+    let mut l = UsageLayout {
+        size: (m.width, header.bottom() + m.pad),
+        header,
+        limits_box: None,
+        limits: Vec::new(),
+        settings_box: None,
+        settings: Vec::new(),
+    };
+    if collapsed {
+        return l;
+    }
+    let mut y = header.bottom() + m.gap;
+    let mut section = |n: usize, row_h: f32, rows: &mut Vec<Rect>| {
+        let top = y;
+        y += inner;
+        for _ in 0..n {
+            rows.push(Rect::new(m.pad, y, full, row_h));
+            y += row_h;
+        }
+        y += inner;
+        let r = Rect::new(m.pad, top, full, y - top);
+        y += m.gap;
+        r
+    };
+    l.limits_box = Some(section(limits.max(1), m.limit_row_h, &mut l.limits));
+    l.settings_box = Some(section(settings, m.setting_row_h, &mut l.settings));
+    // Trailing gap becomes bottom padding.
+    l.size.1 = y - m.gap + m.pad;
+    l
+}
+
+/// Which part of the usage window a point is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageHit {
+    Header,
+    Setting(usize),
+    Nothing,
+}
+
+pub fn usage_hit(l: &UsageLayout, x: f32, y: f32) -> UsageHit {
+    if l.header.contains(x, y) {
+        return UsageHit::Header;
+    }
+    match l.settings.iter().position(|r| r.contains(x, y)) {
+        Some(i) => UsageHit::Setting(i),
+        None => UsageHit::Nothing,
+    }
+}
+
+/// Stacks cluster windows down the left edge of a work area.
 ///
 /// `heights` are window heights in physical pixels, `work` is the monitor
 /// work area as (left, top, right, bottom). Returns the top left corner for
-/// each window. When the column overflows, a new column starts to the left.
+/// each window. When the column overflows, a new column starts to the right.
 pub fn stack(
     heights: &[i32],
     width: i32,
@@ -145,19 +423,261 @@ pub fn stack(
 ) -> Vec<(i32, i32)> {
     let (left, top, right, bottom) = work;
     let mut out = Vec::with_capacity(heights.len());
-    let mut x = right - margin - width;
+    let mut x = left + margin;
     let mut y = top + margin;
     for &h in heights {
         if y + h > bottom - margin && y != top + margin {
-            x -= width + gap;
+            x += width + gap;
             y = top + margin;
         }
-        // Never leave the screen to the left. Overlap is better than lost.
-        let x = x.max(left + margin);
+        // Never leave the screen to the right. Overlap is better than lost.
+        let x = x.min(right - margin - width);
         out.push((x, y));
         y += h + gap;
     }
     out
+}
+
+/// How far apart things sit when snapped, in physical pixels.
+#[derive(Debug, Clone, Copy)]
+pub struct Spacing {
+    /// From the edge of the work area, the same as `stack` uses.
+    pub margin: i32,
+    /// Between two windows, the same as `stack` uses.
+    pub gap: i32,
+    /// How close an edge has to come before it snaps.
+    pub reach: i32,
+}
+
+/// Where a dragged window lands once its edges are pulled onto nearby lines.
+///
+/// `pos` is where the drag alone would put its top left corner, `size` its
+/// size, `work` the work area of the monitor it is on and `others` the other
+/// windows, all as (left, top, right, bottom) in physical pixels. Each axis
+/// snaps on its own to the nearest line within reach: the work area inset by
+/// the margin, beside another window with the gap between, or lined up with
+/// another window's edge.
+pub fn snap(
+    pos: (i32, i32),
+    size: (i32, i32),
+    work: (i32, i32, i32, i32),
+    others: &[(i32, i32, i32, i32)],
+    s: Spacing,
+) -> (i32, i32) {
+    let (w, h) = size;
+    let (x, y) = pos;
+    let lines = Lines::new([x, y, x + w, y + h], work, others, s);
+    // A left or top line takes the corner there, a right or bottom line
+    // takes it one window size before.
+    let xs: Vec<i32> = lines
+        .left
+        .iter()
+        .copied()
+        .chain(lines.right.iter().map(|r| r - w))
+        .collect();
+    let ys: Vec<i32> = lines
+        .top
+        .iter()
+        .copied()
+        .chain(lines.bottom.iter().map(|b| b - h))
+        .collect();
+    (nearest(x, &xs, s.reach), nearest(y, &ys, s.reach))
+}
+
+/// Where a window being resized lands once the edges it is dragging are
+/// pulled onto nearby lines, the same lines [`snap`] uses. `rect` is where
+/// the drag alone would put it and `edges` says which edges move, as left,
+/// top, right, bottom. The other edges stay put.
+pub fn snap_edges(
+    rect: [i32; 4],
+    edges: [bool; 4],
+    work: (i32, i32, i32, i32),
+    others: &[(i32, i32, i32, i32)],
+    s: Spacing,
+) -> [i32; 4] {
+    let lines = Lines::new(rect, work, others, s);
+    let sets = [&lines.left, &lines.top, &lines.right, &lines.bottom];
+    let mut out = rect;
+    for i in 0..4 {
+        if edges[i] {
+            out[i] = nearest(rect[i], sets[i], s.reach);
+        }
+    }
+    out
+}
+
+/// The lines each edge of a window at `rect` can snap to.
+struct Lines {
+    left: Vec<i32>,
+    top: Vec<i32>,
+    right: Vec<i32>,
+    bottom: Vec<i32>,
+}
+
+impl Lines {
+    fn new(
+        [x, y, r, b]: [i32; 4],
+        work: (i32, i32, i32, i32),
+        others: &[(i32, i32, i32, i32)],
+        s: Spacing,
+    ) -> Self {
+        let mut lines = Lines {
+            left: vec![work.0 + s.margin],
+            top: vec![work.1 + s.margin],
+            right: vec![work.2 - s.margin],
+            bottom: vec![work.3 - s.margin],
+        };
+        // A window only pulls on an axis when it is near on the other one, or
+        // lining up with a window across the screen would snap too.
+        let near = s.gap + s.reach;
+        for &(ol, ot, or, ob) in others {
+            if y - near < ob && b + near > ot {
+                lines.left.extend([or + s.gap, ol]);
+                lines.right.extend([ol - s.gap, or]);
+            }
+            if x - near < or && r + near > ol {
+                lines.top.extend([ob + s.gap, ot]);
+                lines.bottom.extend([ot - s.gap, ob]);
+            }
+        }
+        lines
+    }
+}
+
+/// Tiles `n` windows over `area` (left, top, right, bottom) with `gap`
+/// between them: as many columns as the square root rounded up, filled row
+/// by row, the last row stretched across when it has fewer windows. Four
+/// windows are two by two, three are two above one wide.
+pub fn grid(n: usize, area: (i32, i32, i32, i32), gap: i32) -> Vec<[i32; 4]> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let (left, top, right, bottom) = area;
+    let cols = (1..=n).find(|c| c * c >= n).unwrap_or(1);
+    let rows = n.div_ceil(cols);
+    let span = |from: i32, to: i32, count: usize, i: usize| {
+        let count = count as i32;
+        let each = (to - from - gap * (count - 1)) / count;
+        let start = from + i as i32 * (each + gap);
+        (start, start + each)
+    };
+    (0..n)
+        .map(|i| {
+            let (row, col) = (i / cols, i % cols);
+            let in_row = if row == rows - 1 {
+                n - row * cols
+            } else {
+                cols
+            };
+            let (l, r) = span(left, right, in_row, col);
+            let (t, b) = span(top, bottom, rows, row);
+            [l, t, r, b]
+        })
+        .collect()
+}
+
+/// The order a project's sessions sit in on the stage. `order` is the one
+/// remembered, which keeps sessions that are paused right now so they come
+/// back to their place; new `live` ones join its end. Returns the live ones
+/// in that order.
+pub fn grid_order(order: &mut Vec<String>, live: &[String]) -> Vec<String> {
+    for s in live {
+        if !order.contains(s) {
+            order.push(s.clone());
+        }
+    }
+    order.iter().filter(|s| live.contains(s)).cloned().collect()
+}
+
+/// The space beside the tiles for the stage: the work area inset by the
+/// margin, less the box around `tiles` and the gap after it, on whichever
+/// side of them has more room. Tiles outside the work area do not count.
+/// All as (left, top, right, bottom). Returns the space and whether the
+/// tiles are on its left.
+pub fn beside(
+    work: (i32, i32, i32, i32),
+    tiles: &[[i32; 4]],
+    margin: i32,
+    gap: i32,
+) -> ([i32; 4], bool) {
+    let (wl, wt, wr, wb) = work;
+    let inner = [wl + margin, wt + margin, wr - margin, wb - margin];
+    let seen = tiles
+        .iter()
+        .filter(|&&[l, t, r, b]| l < wr && r > wl && t < wb && b > wt);
+    let Some((left, right)) = seen.fold(None, |span: Option<(i32, i32)>, &[l, _, r, _]| {
+        Some(span.map_or((l, r), |(a, b)| (a.min(l), b.max(r))))
+    }) else {
+        return (inner, true);
+    };
+    let on_right = [right + gap, inner[1], inner[2], inner[3]];
+    let on_left = [inner[0], inner[1], left - gap, inner[3]];
+    let width = |a: [i32; 4]| a[2] - a[0];
+    if width(on_right) >= width(on_left) {
+        (on_right, true)
+    } else {
+        (on_left, false)
+    }
+}
+
+/// A window of `size` moved into `area` against the tiles: its left edge
+/// on the area's left when the tiles are on the left, otherwise its right
+/// edge on the area's right, and its top on the area's top. It keeps its
+/// size where the area has room and shrinks to fit where it has not.
+pub fn dock(size: (i32, i32), area: [i32; 4], tiles_left: bool) -> [i32; 4] {
+    let [l, t, r, b] = area;
+    let w = size.0.clamp(1, (r - l).max(1));
+    let h = size.1.clamp(1, (b - t).max(1));
+    if tiles_left {
+        [l, t, l + w, t + h]
+    } else {
+        [r - w, t, r, t + h]
+    }
+}
+
+/// Where a new session puts the stage: a square as tall as `area`, against
+/// the tiles, narrower only where the area is. Square because a grid of
+/// panes splits it evenly both ways.
+pub fn square(area: [i32; 4], tiles_left: bool) -> [i32; 4] {
+    let side = area[3] - area[1];
+    dock((side, side), area, tiles_left)
+}
+
+/// Where a browser window a session opened goes when it first appears: in
+/// the space beside the tiles and the stage together, against the stage,
+/// its own size where that fits and shrunk where it does not. Nothing when
+/// that space is narrower than `min_w`, which leaves the window where it
+/// opened. All as (left, top, right, bottom).
+pub fn beside_stage(
+    work: (i32, i32, i32, i32),
+    tiles: &[[i32; 4]],
+    stage: [i32; 4],
+    size: (i32, i32),
+    margin: i32,
+    gap: i32,
+    min_w: i32,
+) -> Option<[i32; 4]> {
+    let mut taken = tiles.to_vec();
+    taken.push(stage);
+    let (area, stage_left) = beside(work, &taken, margin, gap);
+    (area[2] - area[0] >= min_w).then(|| dock(size, area, stage_left))
+}
+
+/// Which of `rects` (left, top, right, bottom) holds the point, if any.
+pub fn slot_at(rects: &[[i32; 4]], x: i32, y: i32) -> Option<usize> {
+    rects
+        .iter()
+        .position(|&[l, t, r, b]| x >= l && x < r && y >= t && y < b)
+}
+
+/// The line closest to `v` if it is within `reach`, else `v` itself.
+fn nearest(v: i32, lines: &[i32], reach: i32) -> i32 {
+    lines
+        .iter()
+        .copied()
+        .filter(|l| (l - v).abs() <= reach)
+        .min_by_key(|l| (l - v).abs())
+        .unwrap_or(v)
 }
 
 #[cfg(test)]
@@ -165,32 +685,507 @@ mod tests {
     use super::*;
 
     #[test]
+    fn usage_window_holds_limits_then_settings() {
+        let m = Metrics::default();
+        let l = usage(&m, 2, 3, false);
+        assert_eq!(l.limits.len(), 2);
+        assert_eq!(l.settings.len(), 3);
+        let limits = l.limits_box.unwrap();
+        let settings = l.settings_box.unwrap();
+        assert!(limits.y >= l.header.bottom());
+        assert_eq!(settings.y, limits.bottom() + m.gap);
+        assert!(l
+            .limits
+            .iter()
+            .all(|r| r.y >= limits.y && r.bottom() <= limits.bottom()));
+        assert_eq!(l.size.1, settings.bottom() + m.pad);
+        let s = l.settings[1];
+        assert_eq!(usage_hit(&l, s.x + 5.0, s.y + 5.0), UsageHit::Setting(1));
+        assert_eq!(
+            usage_hit(&l, l.header.x + 5.0, l.header.y + 5.0),
+            UsageHit::Header
+        );
+        let r = l.limits[0];
+        assert_eq!(usage_hit(&l, r.x + 5.0, r.y + 5.0), UsageHit::Nothing);
+    }
+
+    #[test]
+    fn usage_window_keeps_a_row_to_say_nothing_is_known() {
+        let m = Metrics::default();
+        assert_eq!(usage(&m, 0, 3, false).limits.len(), 1);
+        let folded = usage(&m, 2, 3, true);
+        assert!(folded.limits.is_empty() && folded.settings.is_empty());
+        assert_eq!(folded.size.1, folded.header.bottom() + m.pad);
+    }
+
+    #[test]
     fn collapsed_is_header_only() {
         let m = Metrics::default();
-        let l = cluster(&m, 5, true);
+        let l = cluster(&m, 5, true, Some(100.0));
         assert!(l.tiles.is_empty());
+        assert!(l.add.is_none());
         assert_eq!(l.size.1, m.pad + m.header_h + m.pad);
+        assert!(l.files.is_none());
+    }
+
+    #[test]
+    fn files_tile_sits_below_the_plus() {
+        let m = Metrics::default();
+        let l = cluster(&m, 1, false, Some(14.0 * m.file_row_h + m.file_foot));
+        let add = l.add.unwrap();
+        let f = l.files.as_ref().unwrap();
+        assert_eq!(f.rect.y - add.bottom(), m.gap);
+        assert_eq!(f.rows.len(), 14);
+        assert_eq!(f.rows[0].y, f.header.bottom());
+        assert_eq!(l.size.1, f.rect.bottom() + m.pad);
+        assert_eq!(hit(&l, 20.0, f.header.y + 1.0), Hit::FilesHeader);
+        assert_eq!(hit(&l, 20.0, f.rows[2].y + 1.0), Hit::File(2));
+        assert_eq!(f.body().y, f.header.bottom());
+    }
+
+    #[test]
+    fn the_grip_is_the_bottom_edge_and_reaches_the_window_edge() {
+        let m = Metrics::default();
+        let l = cluster(&m, 1, false, Some(5.0 * m.file_row_h + m.file_foot));
+        let f = l.files.as_ref().unwrap();
+        let g = f.grip.unwrap();
+        assert_eq!(g.y, f.rows[4].bottom());
+        assert_eq!(g.bottom(), l.size.1);
+        assert_eq!(hit(&l, 20.0, f.rect.bottom() - 1.0), Hit::FilesGrip);
+        assert_eq!(hit(&l, 20.0, l.size.1 - 1.0), Hit::FilesGrip);
+        assert_eq!(hit(&l, 20.0, f.rows[4].y + 1.0), Hit::File(4));
+    }
+
+    #[test]
+    fn files_body_takes_the_rows_then_the_cap_then_the_screen() {
+        let m = Metrics::default();
+        let rows = |n: usize| n as f32 * m.file_row_h + m.file_foot;
+        let room = 10_000.0;
+        assert_eq!(files_body(&m, 100, None, 100.0, room), rows(m.file_rows));
+        assert_eq!(files_body(&m, 5, None, 100.0, room), rows(5));
+        assert_eq!(files_body(&m, 100, Some(500.0), 100.0, room), 500.0);
+        assert_eq!(files_body(&m, 100, Some(500.0), 100.0, 311.0), 211.0);
+        // A tiny screen still shows a few.
+        assert_eq!(files_body(&m, 100, None, 100.0, 50.0), min_files_body(&m));
+        assert_eq!(files_body(&m, 0, None, 100.0, room), 0.0);
+    }
+
+    #[test]
+    fn a_files_tile_between_rows_holds_the_whole_rows() {
+        let m = Metrics::default();
+        let l = cluster(&m, 1, false, Some(10.0 * m.file_row_h + m.file_foot + 13.0));
+        let f = l.files.unwrap();
+        assert_eq!(f.rows.len(), 10);
+        assert_eq!(
+            f.rect.bottom(),
+            f.header.bottom() + 10.0 * m.file_row_h + m.file_foot + 13.0
+        );
+        // Back from physical pixels at 150%, a hair short of 7 rows.
+        let l = cluster(&m, 1, false, Some(7.0 * m.file_row_h + m.file_foot - 0.1));
+        assert_eq!(l.files.unwrap().rows.len(), 7);
+    }
+
+    #[test]
+    fn collapsed_files_tile_is_its_header() {
+        let m = Metrics::default();
+        let l = cluster(&m, 1, false, Some(0.0));
+        let f = l.files.unwrap();
+        assert!(f.rows.is_empty());
+        assert_eq!(f.rect, f.header);
     }
 
     #[test]
     fn tiles_stack_with_gaps() {
         let m = Metrics::default();
-        let l = cluster(&m, 3, false);
+        let l = cluster(&m, 3, false, None);
         assert_eq!(l.tiles.len(), 3);
         assert_eq!(l.tiles[1].y - l.tiles[0].bottom(), m.gap);
-        assert_eq!(l.size.1, l.tiles[2].bottom() + m.pad);
+        let add = l.add.unwrap();
+        assert_eq!(add.y - l.tiles[2].bottom(), m.gap);
+        assert_eq!(add.w, l.tiles[2].w);
+        assert_eq!(l.size.1, add.bottom() + m.pad);
         assert_eq!(hit(&l, 20.0, l.tiles[2].y + 1.0), Hit::Tile(2));
+        assert_eq!(hit(&l, 20.0, add.y + 1.0), Hit::Add);
         assert_eq!(hit(&l, 20.0, m.pad + 1.0), Hit::Header);
         assert_eq!(hit(&l, m.width - m.pad - 2.0, m.pad + 1.0), Hit::New);
         assert_eq!(hit(&l, 1.0, 1.0), Hit::Nothing);
     }
 
     #[test]
-    fn stack_goes_down_then_left() {
+    fn a_button_lights_under_the_cursor_and_presses_only_where_it_went_down() {
+        assert_eq!(button(Hit::Add, Hit::Nothing, None), Button::Idle);
+        assert_eq!(button(Hit::Add, Hit::Add, None), Button::Hover);
+        assert_eq!(button(Hit::Add, Hit::New, None), Button::Idle);
+        assert_eq!(button(Hit::Add, Hit::Add, Some(Hit::Add)), Button::Pressed);
+        // Held down on it, then slid off.
+        assert_eq!(button(Hit::Add, Hit::Tile(0), Some(Hit::Add)), Button::Idle);
+        // Held down on the header, then slid over it.
+        assert_eq!(button(Hit::Add, Hit::Add, Some(Hit::Header)), Button::Idle);
+        // Each tile is its own button.
+        assert_eq!(button(Hit::Tile(1), Hit::Tile(0), None), Button::Idle);
+        assert_eq!(button(Hit::Tile(1), Hit::Tile(1), None), Button::Hover);
+    }
+
+    #[test]
+    fn the_header_its_plus_tiles_and_the_bottom_plus_light_up() {
+        for h in [Hit::New, Hit::Header, Hit::Tile(3), Hit::Add] {
+            assert!(h.lights(), "{h:?}");
+        }
+        for h in [Hit::FilesHeader, Hit::FilesGrip, Hit::File(0), Hit::Nothing] {
+            assert!(!h.lights(), "{h:?}");
+        }
+    }
+
+    #[test]
+    fn a_browser_button_sits_on_the_second_line_of_marked_tiles_only() {
+        let m = Metrics::default();
+        let mut l = cluster(&m, 3, false, None);
+        assert_eq!(l.marks, vec![None; 3]);
+        mark(&mut l, &m, &[false, true]);
+        assert_eq!(l.marks.len(), 3);
+        assert!(l.marks[0].is_none() && l.marks[2].is_none());
+        let b = l.marks[1].unwrap();
+        let t = l.tiles[1];
+        assert_eq!(b.right(), t.right() - 4.0);
+        assert!(b.y > t.y + t.h / 2.0 - 4.0 && b.bottom() < t.bottom());
+        // The button wins over its tile, the rest of the tile is the tile.
+        assert_eq!(hit(&l, b.x + 1.0, b.y + 1.0), Hit::Browser(1));
+        assert_eq!(hit(&l, t.x + 1.0, b.y + 1.0), Hit::Tile(1));
+        let unmarked = l.tiles[0];
+        assert_eq!(hit(&l, b.x + 1.0, unmarked.y + 40.0), Hit::Tile(0));
+        assert!(Hit::Browser(1).lights());
+    }
+
+    #[test]
+    fn collapsing_drops_the_browser_buttons() {
+        let m = Metrics::default();
+        let mut l = cluster(&m, 2, true, None);
+        mark(&mut l, &m, &[true, true]);
+        assert!(l.marks.is_empty());
+    }
+
+    #[test]
+    fn a_browser_docks_against_the_stage_on_the_side_with_room() {
+        let tiles = [[12, 12, 292, 300]];
+        let stage = [304, 12, 1360, 1068];
+        assert_eq!(
+            beside_stage(WORK, &tiles, stage, (400, 700), 12, 12, 300),
+            Some([1372, 12, 1772, 712])
+        );
+        // Too wide for the space: it fills it.
+        assert_eq!(
+            beside_stage(WORK, &tiles, stage, (1280, 2000), 12, 12, 300),
+            Some([1372, 12, 1908, 1068])
+        );
+        // Tiles and stage on the right: the browser goes left of the stage.
+        let tiles = [[1628, 12, 1908, 300]];
+        let stage = [560, 12, 1616, 1068];
+        assert_eq!(
+            beside_stage(WORK, &tiles, stage, (400, 700), 12, 12, 300),
+            Some([148, 12, 548, 712])
+        );
+    }
+
+    #[test]
+    fn a_browser_stays_put_when_there_is_no_room_beside_the_stage() {
+        let tiles = [[12, 12, 292, 300]];
+        let stage = [304, 12, 1700, 1068];
+        assert_eq!(
+            beside_stage(WORK, &tiles, stage, (400, 700), 12, 12, 300),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_cluster_still_offers_another_session() {
+        let m = Metrics::default();
+        let l = cluster(&m, 0, false, None);
+        let add = l.add.unwrap();
+        assert_eq!(add.y, l.header.bottom() + m.gap);
+        assert_eq!(l.size.1, add.bottom() + m.pad);
+    }
+
+    #[test]
+    fn stack_goes_down_then_right() {
         let pos = stack(&[100, 100, 100], 280, 12, 12, (0, 0, 1920, 250));
-        assert_eq!(pos[0], (1920 - 12 - 280, 12));
-        assert_eq!(pos[1], (1920 - 12 - 280, 124));
+        assert_eq!(pos[0], (12, 12));
+        assert_eq!(pos[1], (12, 124));
         // Third does not fit below, new column.
-        assert_eq!(pos[2], (1920 - 12 - 280 - 292, 12));
+        assert_eq!(pos[2], (12 + 292, 12));
+    }
+
+    #[test]
+    fn stack_never_leaves_the_screen_to_the_right() {
+        let pos = stack(&[100, 100, 100], 280, 12, 12, (0, 0, 600, 130));
+        assert_eq!(pos[2], (600 - 12 - 280, 12));
+    }
+
+    const SPACING: Spacing = Spacing {
+        margin: 12,
+        gap: 12,
+        reach: 10,
+    };
+    const WORK: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
+
+    #[test]
+    fn beside_fills_the_work_area_without_tiles() {
+        assert_eq!(beside(WORK, &[], 12, 12), ([12, 12, 1908, 1068], true));
+    }
+
+    #[test]
+    fn beside_takes_the_space_right_of_the_column() {
+        let column = [[12, 12, 292, 300], [12, 312, 292, 500]];
+        assert_eq!(beside(WORK, &column, 12, 12), ([304, 12, 1908, 1068], true));
+    }
+
+    #[test]
+    fn beside_takes_the_left_when_tiles_are_moved_right() {
+        let tiles = [[1500, 100, 1780, 300], [1600, 400, 1880, 600]];
+        assert_eq!(beside(WORK, &tiles, 12, 12), ([12, 12, 1488, 1068], false));
+    }
+
+    #[test]
+    fn beside_ignores_tiles_on_another_monitor() {
+        let elsewhere = [[-1900, 12, -1620, 300]];
+        assert_eq!(
+            beside(WORK, &elsewhere, 12, 12),
+            ([12, 12, 1908, 1068], true)
+        );
+    }
+
+    #[test]
+    fn dock_keeps_the_size_against_the_tiles() {
+        let area = [304, 12, 1908, 1068];
+        assert_eq!(dock((800, 600), area, true), [304, 12, 1104, 612]);
+        assert_eq!(dock((800, 600), area, false), [1108, 12, 1908, 612]);
+    }
+
+    #[test]
+    fn dock_shrinks_to_fit_the_area() {
+        let area = [304, 12, 1908, 1068];
+        assert_eq!(dock((3000, 2000), area, true), area);
+    }
+
+    #[test]
+    fn square_fills_top_to_bottom_against_the_tiles() {
+        let area = [304, 12, 1908, 1068];
+        assert_eq!(square(area, true), [304, 12, 1360, 1068]);
+        assert_eq!(square(area, false), [852, 12, 1908, 1068]);
+    }
+
+    #[test]
+    fn square_narrows_to_fit_the_area() {
+        let area = [304, 12, 1000, 1068];
+        assert_eq!(square(area, true), area);
+    }
+
+    #[test]
+    fn snap_leaves_a_window_far_from_everything() {
+        assert_eq!(snap((500, 400), (280, 200), WORK, &[], SPACING), (500, 400));
+    }
+
+    #[test]
+    fn snap_pulls_to_the_screen_edges_at_the_margin() {
+        assert_eq!(snap((5, 20), (280, 200), WORK, &[], SPACING), (12, 12));
+        let right = 1920 - 12 - 280;
+        let bottom = 1080 - 12 - 200;
+        assert_eq!(
+            snap((right + 7, bottom - 9), (280, 200), WORK, &[], SPACING),
+            (right, bottom)
+        );
+    }
+
+    #[test]
+    fn snap_releases_past_the_reach() {
+        assert_eq!(snap((23, 23), (280, 200), WORK, &[], SPACING), (23, 23));
+    }
+
+    #[test]
+    fn snap_sits_beside_another_window_with_the_gap() {
+        let other = (1000, 300, 1280, 500);
+        // Dropped just right of it, tops a little off: beside it, tops lined up.
+        assert_eq!(
+            snap((1296, 306), (280, 100), WORK, &[other], SPACING),
+            (1292, 300)
+        );
+        // Dropped just left of it.
+        assert_eq!(
+            snap((712, 350), (280, 100), WORK, &[other], SPACING),
+            (708, 350)
+        );
+    }
+
+    #[test]
+    fn snap_stacks_below_and_lines_up_the_sides() {
+        let other = (1000, 300, 1280, 500);
+        assert_eq!(
+            snap((1006, 515), (280, 100), WORK, &[other], SPACING),
+            (1000, 512)
+        );
+        // A narrower window lines up its right side with the one above.
+        assert_eq!(
+            snap((1083, 515), (200, 100), WORK, &[other], SPACING),
+            (1080, 512)
+        );
+    }
+
+    #[test]
+    fn snap_ignores_windows_that_are_not_near_on_the_other_axis() {
+        // Same column, far below: the left edges must not pull together.
+        let other = (1000, 900, 1280, 1000);
+        assert_eq!(
+            snap((1006, 300), (280, 100), WORK, &[other], SPACING),
+            (1006, 300)
+        );
+    }
+
+    #[test]
+    fn snap_edges_moves_only_the_edges_being_dragged() {
+        // Right edge dragged to 7 short of the margin: it snaps, the left
+        // edge near the other margin does not, it is not being dragged.
+        assert_eq!(
+            snap_edges(
+                [5, 300, 1901, 700],
+                [false, false, true, false],
+                WORK,
+                &[],
+                SPACING
+            ),
+            [5, 300, 1908, 700]
+        );
+        assert_eq!(
+            snap_edges(
+                [5, 300, 1901, 700],
+                [true, false, true, false],
+                WORK,
+                &[],
+                SPACING
+            ),
+            [12, 300, 1908, 700]
+        );
+    }
+
+    #[test]
+    fn snap_edges_stops_short_of_a_neighbour_and_lines_up_with_it() {
+        let other = (1000, 300, 1280, 500);
+        // A window to its left grows right: it stops the gap short.
+        assert_eq!(
+            snap_edges(
+                [400, 350, 985, 700],
+                [false, false, true, false],
+                WORK,
+                &[other],
+                SPACING
+            ),
+            [400, 350, 988, 700]
+        );
+        // A window below grows up and down: the top stops the gap below, the
+        // bottom is far from everything.
+        assert_eq!(
+            snap_edges(
+                [1000, 518, 1280, 800],
+                [false, true, false, true],
+                WORK,
+                &[other],
+                SPACING
+            ),
+            [1000, 512, 1280, 800]
+        );
+        // A window below lines its right edge up with the one above.
+        assert_eq!(
+            snap_edges(
+                [1000, 512, 1273, 800],
+                [false, false, true, false],
+                WORK,
+                &[other],
+                SPACING
+            ),
+            [1000, 512, 1280, 800]
+        );
+    }
+
+    #[test]
+    fn snap_edges_ignores_windows_that_are_not_near_on_the_other_axis() {
+        let other = (1000, 900, 1280, 1000);
+        assert_eq!(
+            snap_edges(
+                [400, 100, 985, 400],
+                [false, false, true, false],
+                WORK,
+                &[other],
+                SPACING
+            ),
+            [400, 100, 985, 400]
+        );
+    }
+
+    #[test]
+    fn grid_of_one_fills_the_area() {
+        assert_eq!(grid(1, (0, 0, 1000, 800), 10), vec![[0, 0, 1000, 800]]);
+        assert!(grid(0, (0, 0, 1000, 800), 10).is_empty());
+    }
+
+    #[test]
+    fn grid_puts_two_side_by_side_and_four_two_by_two() {
+        assert_eq!(
+            grid(2, (0, 0, 1010, 800), 10),
+            vec![[0, 0, 500, 800], [510, 0, 1010, 800]]
+        );
+        let four = grid(4, (0, 0, 1010, 810), 10);
+        assert_eq!(four[0], [0, 0, 500, 400]);
+        assert_eq!(four[3], [510, 410, 1010, 810]);
+    }
+
+    #[test]
+    fn grid_stretches_a_short_last_row() {
+        let three = grid(3, (0, 0, 1010, 810), 10);
+        assert_eq!(three[0], [0, 0, 500, 400]);
+        assert_eq!(three[1], [510, 0, 1010, 400]);
+        assert_eq!(three[2], [0, 410, 1010, 810]);
+        // Five: three columns, then two wider ones below.
+        let five = grid(5, (0, 0, 920, 410), 10);
+        assert_eq!(five[2], [620, 0, 920, 200]);
+        assert_eq!(five[4], [465, 210, 920, 410]);
+    }
+
+    #[test]
+    fn snap_picks_the_closest_line() {
+        // Across, the screen margin is 8 away and the window's side 4.
+        let other = (0, 400, 280, 600);
+        assert_eq!(
+            snap((4, 603), (280, 100), WORK, &[other], SPACING),
+            (0, 612)
+        );
+        assert_eq!(
+            snap((4, 615), (280, 100), WORK, &[other], SPACING),
+            (0, 612)
+        );
+    }
+
+    #[test]
+    fn grid_order_keeps_places_for_paused_sessions_and_appends_new_ones() {
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut order = v(&["b", "paused", "a"]);
+        assert_eq!(
+            grid_order(&mut order, &v(&["a", "b", "c"])),
+            v(&["b", "a", "c"])
+        );
+        assert_eq!(order, v(&["b", "paused", "a", "c"]));
+        // Resumed, it is back between b and a.
+        assert_eq!(
+            grid_order(&mut order, &v(&["a", "b", "c", "paused"])),
+            v(&["b", "paused", "a", "c"])
+        );
+        assert!(grid_order(&mut Vec::new(), &[]).is_empty());
+    }
+
+    #[test]
+    fn slot_at_finds_the_rect_under_the_point() {
+        let rects = grid(2, (0, 0, 1010, 800), 10);
+        assert_eq!(slot_at(&rects, 10, 10), Some(0));
+        assert_eq!(slot_at(&rects, 700, 799), Some(1));
+        // In the gap between them, or outside.
+        assert_eq!(slot_at(&rects, 505, 10), None);
+        assert_eq!(slot_at(&rects, 10, 800), None);
     }
 }

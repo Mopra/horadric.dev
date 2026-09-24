@@ -39,6 +39,11 @@ impl Registry {
     /// name, since the project folder is already the cluster's title.
     /// Returns true when the session's phase changed.
     pub fn apply(&mut self, glance_id: &str, event: &HookEvent, now: SystemTime) -> bool {
+        // A status line says nothing about whether a session is alive. One
+        // ended and pruned must not come back as a tile from it.
+        if event.hook_event_name == HookEvent::STATUS && !self.sessions.contains_key(glance_id) {
+            return false;
+        }
         let session = self
             .sessions
             .entry(glance_id.to_string())
@@ -113,6 +118,22 @@ mod tests {
         assert!(!r.apply("day3-123", &e, SystemTime::now()));
         let s = r.get("day3-123").unwrap();
         assert_eq!(s.name, "day3");
+        assert_eq!(s.phase, Phase::Idle);
+    }
+
+    #[test]
+    fn a_status_updates_a_known_session_and_adopts_nobody() {
+        let mut r = Registry::new();
+        let status = HookEvent {
+            status: crate::Status::from_json(br#"{"context_window":{"used_percentage":40}}"#),
+            ..HookEvent::synthetic(HookEvent::STATUS)
+        };
+        assert!(!r.apply("ghost", &status, SystemTime::now()));
+        assert!(r.is_empty());
+        r.add(Session::new("g1", "x", "C:/p"));
+        assert!(!r.apply("g1", &status, SystemTime::now()));
+        let s = r.get("g1").unwrap();
+        assert_eq!(s.status.as_ref().and_then(|st| st.context), Some(40.0));
         assert_eq!(s.phase, Phase::Idle);
     }
 
