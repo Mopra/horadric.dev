@@ -650,6 +650,12 @@ typing `/usage`, and so a model can be picked once instead of per session.
   snapped the same way, folded by its header, pinned once dragged, raised
   and tidied from the tray with the rest. It counts as a tile when the
   stage docks. Kept as `usage_window` in `state.json`.
+- **It looks like a cluster too** (see The look): acrylic behind it, the
+  limits and settings as panes of glass (`Painter::glass_pane`, shared with
+  tiles and the files tile), the name in the display face beside a mark
+  with no colour, since an accent would claim a project, and Fluent
+  chevrons for folding and for each setting's menu. It was built before
+  the look and drew flat and opaque until then.
 
 Tested with a dev instance: the empty window, fake limits at 41 % and 82 %
 (blue and amber bars, the window growing to fit), a tile's context at
@@ -733,8 +739,7 @@ matching its cluster's mark, context rings at 38 % and 82 %. After the first
 look proved too light and its borders too bright, the darker pass was
 checked the same way beside the installed build.
 
-Not done: the usage window still draws the old flat way (it was built
-alongside), the tray menu is still light, and the terminal font is still
+Not done: the tray menu is still light, and the terminal font is still
 fixed. Panes are square: a child window can only be rounded with a window
 region, whose corners are jagged.
 

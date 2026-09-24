@@ -14,9 +14,9 @@ use std::time::SystemTime;
 
 use glance_core::Setting;
 use windows::core::{w, Result, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient, ValidateRect};
@@ -36,6 +36,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::app::{self, Input};
+use crate::backdrop::{self, Material};
 use crate::layout::{self, UsageHit, UsageLayout};
 use crate::render::{Target, UsageScene};
 use crate::snapping;
@@ -58,6 +59,8 @@ pub struct UsageWindow {
     hot: Cell<UsageHit>,
     pressed: Cell<Option<UsageHit>>,
     tracking: Cell<bool>,
+    /// Acrylic is behind the window, as behind a cluster.
+    glass: Cell<bool>,
 }
 
 struct Drag {
@@ -99,6 +102,7 @@ impl UsageWindow {
             hot: Cell::new(UsageHit::Nothing),
             pressed: Cell::new(None),
             tracking: Cell::new(false),
+            glass: Cell::new(false),
         });
         unsafe {
             let hwnd = CreateWindowExW(
@@ -123,13 +127,9 @@ impl UsageWindow {
                 &pref as *const _ as *const c_void,
                 std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
             );
-            let none = COLORREF(0xFFFF_FFFE);
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_BORDER_COLOR,
-                &none as *const _ as *const c_void,
-                std::mem::size_of::<COLORREF>() as u32,
-            );
+            // The glass draws its own edge.
+            backdrop::border(hwnd, None);
+            win.glass.set(backdrop::apply(hwnd, Material::Acrylic));
             win.fit();
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
@@ -250,7 +250,14 @@ impl UsageWindow {
         let dpi = self.dpi();
         let mut slot = self.target.borrow_mut();
         if slot.is_none() {
-            match Target::new(&self.shared.gpu, self.hwnd, w as u32, h as u32, dpi) {
+            match Target::with_glass(
+                &self.shared.gpu,
+                self.hwnd,
+                w as u32,
+                h as u32,
+                dpi,
+                self.glass.get(),
+            ) {
                 Ok(t) => *slot = Some(t),
                 Err(e) => {
                     eprintln!("glance: render target for the usage window: {e}");

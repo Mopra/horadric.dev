@@ -358,11 +358,6 @@ pub fn resize_target(rt: &ID2D1HwndRenderTarget, width_px: u32, height_px: u32) 
 }
 
 impl Target {
-    /// An opaque target.
-    pub fn new(gpu: &Gpu, hwnd: HWND, width_px: u32, height_px: u32, dpi: u32) -> Result<Self> {
-        Self::with_glass(gpu, hwnd, width_px, height_px, dpi, false)
-    }
-
     /// With `glass`, for a window with a material behind it: what is left
     /// clear shows it.
     pub fn with_glass(
@@ -481,10 +476,7 @@ impl Painter<'_> {
         if scene.on_stage {
             self.frame(m, scene);
         } else if self.glass {
-            // Glass needs an edge to end at, as Windows' own flyouts have.
-            let (w, h) = scene.layout.size;
-            let r = Rect::new(0.5, 0.5, w - 1.0, h - 1.0);
-            self.stroke_rounded(&r, m.window_radius - 0.5, theme::GLASS_EDGE.fade(0.8), 1.0);
+            self.glass_edge(m, scene.layout.size);
         }
 
         self.header(gpu, scene);
@@ -502,32 +494,53 @@ impl Painter<'_> {
         }
     }
 
+    /// The usage window, dressed like a cluster: the same glass, header and
+    /// tiles, so it reads as one more of them.
     unsafe fn usage(&self, gpu: &Gpu, m: &Metrics, scene: &UsageScene) {
-        self.rt.Clear(Some(&color(theme::WINDOW_BG)));
         let l = scene.layout;
+        if self.glass {
+            self.rt.Clear(Some(&color(theme::GLASS_TINT)));
+            self.glass_edge(m, l.size);
+        } else {
+            self.rt.Clear(Some(&color(theme::WINDOW_BG)));
+        }
         let h = l.header;
-        if let (Some(fill), _) = theme::button_look(scene.button(UsageHit::Header)) {
+        let header_button = scene.button(UsageHit::Header);
+        if let (Some(fill), _) = theme::button_look(header_button) {
             let x = h.x - 4.0;
             let r = Rect::new(x, h.y + 3.0, h.right() + 4.0 - x, h.h - 6.0);
             self.fill_rounded(&r, 6.0, fill);
         }
-        let chevron = if scene.collapsed {
-            "\u{25B8}"
-        } else {
-            "\u{25BE}"
-        };
-        self.text(
-            &gpu.title,
-            theme::TEXT_DIM,
-            chevron,
-            Rect::new(h.x, h.y, 14.0, h.h),
+        // A cluster's mark, without a colour: it belongs to no project, and
+        // an accent here would read as one.
+        let cy = h.y + h.h / 2.0;
+        let gem_x = h.x + 5.0;
+        self.fill_rounded(
+            &Rect::new(gem_x - 4.0, cy - 4.0, 8.0, 8.0),
+            2.5,
+            theme::TEXT_DIM.with_alpha(0.6),
         );
+        let name_x = h.x + 18.0;
+        let name_w = self.measure(gpu, &gpu.display, "Claude");
         self.text(
-            &gpu.title,
+            &gpu.display,
             theme::TEXT,
             "Claude",
-            Rect::new(h.x + 16.0, h.y, h.w * 0.5, h.h),
+            Rect::new(name_x, h.y, name_w + 1.0, h.h),
         );
+        if scene.collapsed || header_button != Button::Idle {
+            let chevron = if scene.collapsed {
+                '\u{E76C}'
+            } else {
+                '\u{E70D}'
+            };
+            self.icon(
+                &gpu.icon_small,
+                theme::TEXT_DIM,
+                chevron,
+                Rect::new(name_x + name_w + 4.0, h.y + 1.0, 14.0, h.h),
+            );
+        }
         let heard = match scene.usage {
             Some(u) => format!(
                 "{} ago",
@@ -543,7 +556,7 @@ impl Painter<'_> {
         );
 
         if let Some(b) = l.limits_box {
-            self.fill_rounded(&b, m.tile_radius, theme::TILE_BG);
+            self.glass_pane(&b, m.tile_radius, 1.0);
             let limits = scene.usage.map(|u| u.limits.named()).unwrap_or_default();
             if limits.is_empty() {
                 if let Some(r) = l.limits.first() {
@@ -562,11 +575,11 @@ impl Painter<'_> {
         }
 
         if let Some(b) = l.settings_box {
-            self.fill_rounded(&b, m.tile_radius, theme::TILE_BG);
+            self.glass_pane(&b, m.tile_radius, 1.0);
         }
         for (i, (r, (label, value))) in l.settings.iter().zip(&scene.settings).enumerate() {
             if let (Some(fill), _) = theme::button_look(scene.button(UsageHit::Setting(i))) {
-                self.fill_rounded(&r.inset(2.0), 6.0, fill);
+                self.fill_rounded(&r.inset(3.0), 6.0, fill);
             }
             let inner = Rect::new(r.x + 10.0, r.y, r.w - 20.0, r.h);
             self.text(&gpu.small, theme::TEXT_DIM, label, inner);
@@ -575,7 +588,16 @@ impl Painter<'_> {
             } else {
                 theme::TEXT
             };
-            self.text(&gpu.small_right, ink, &format!("{value}  \u{25BE}"), inner);
+            // The menu it opens, as the chevron the cluster headers use.
+            let chevron = 12.0;
+            self.icon(
+                &gpu.icon_small,
+                theme::TEXT_DIM,
+                '\u{E70D}',
+                Rect::new(inner.right() - chevron, inner.y + 1.0, chevron, inner.h),
+            );
+            let value_r = Rect::new(inner.x, inner.y, inner.w - chevron - 6.0, inner.h);
+            self.text(&gpu.small_right, ink, value, value_r);
         }
     }
 
@@ -591,7 +613,7 @@ impl Painter<'_> {
         };
         self.text(&gpu.small_right, theme::TEXT_DIM, &numbers, inner);
         let track = Rect::new(inner.x, inner.bottom() + 5.0, inner.w, 4.0);
-        self.fill_rounded(&track, 2.0, theme::TILE_BG_STAGED);
+        self.fill_rounded(&track, 2.0, theme::GLASS_TILE.with_alpha(0.07));
         let fill = track.w * (used / 100.0).clamp(0.0, 1.0);
         if fill > 0.0 {
             let bar = Rect::new(track.x, track.y, fill.max(track.h), track.h);
@@ -721,6 +743,33 @@ impl Painter<'_> {
             self.fill_rounded(&layout.new.inset(3.0), 6.0, fill);
         }
         self.icon(&gpu.icon_small, ink, '\u{E710}', layout.new);
+    }
+
+    /// A pane of glass, a breath of white with light catching its top
+    /// edge: every tile, the files tile, the usage window's boxes.
+    /// `opacity` fades it in.
+    unsafe fn glass_pane(&self, r: &Rect, radius: f32, opacity: f32) {
+        self.fill_rounded(r, radius, theme::GLASS_TILE.fade(opacity));
+        if let Some(edge) = self.linear(
+            r.x,
+            r.y,
+            r.x,
+            r.bottom(),
+            &[
+                (0.0, theme::GLASS_EDGE),
+                (1.0, theme::GLASS_EDGE.fade(0.25)),
+            ],
+        ) {
+            edge.SetOpacity(opacity);
+            self.rt
+                .DrawRoundedRectangle(&rounded(&r.inset(0.5), radius - 0.5), &edge, 1.0, None);
+        }
+    }
+
+    /// The edge glass needs to end at, as Windows' own flyouts have.
+    unsafe fn glass_edge(&self, m: &Metrics, (w, h): (f32, f32)) {
+        let r = Rect::new(0.5, 0.5, w - 1.0, h - 1.0);
+        self.stroke_rounded(&r, m.window_radius - 0.5, theme::GLASS_EDGE.fade(0.8), 1.0);
     }
 
     unsafe fn fill_rounded(&self, r: &Rect, radius: f32, c: Color) {
@@ -940,22 +989,7 @@ impl Painter<'_> {
         let radius = m.tile_radius;
         let ambient = scene.ambient;
 
-        // The pane of glass, and light catching its top edge.
-        self.fill_rounded(r, radius, theme::GLASS_TILE.fade(look.enter));
-        if let Some(edge) = self.linear(
-            r.x,
-            r.y,
-            r.x,
-            r.bottom(),
-            &[
-                (0.0, theme::GLASS_EDGE),
-                (1.0, theme::GLASS_EDGE.fade(0.25)),
-            ],
-        ) {
-            edge.SetOpacity(look.enter);
-            self.rt
-                .DrawRoundedRectangle(&rounded(&r.inset(0.5), radius - 0.5), &edge, 1.0, None);
-        }
+        self.glass_pane(r, radius, look.enter);
 
         // The phase, as light. Waiting needs you, so it is the one that
         // moves most: it breathes. Working has light going round it. A
@@ -1308,24 +1342,7 @@ impl Painter<'_> {
     /// chevron, names in the colour of their change, the change letter at the
     /// right edge, a dot on a folder holding one.
     unsafe fn files(&self, gpu: &Gpu, m: &Metrics, l: &FilesLayout, f: &FilesScene) {
-        self.fill_rounded(&l.rect, m.tile_radius, theme::GLASS_TILE);
-        if let Some(edge) = self.linear(
-            l.rect.x,
-            l.rect.y,
-            l.rect.x,
-            l.rect.bottom(),
-            &[
-                (0.0, theme::GLASS_EDGE),
-                (1.0, theme::GLASS_EDGE.fade(0.25)),
-            ],
-        ) {
-            self.rt.DrawRoundedRectangle(
-                &rounded(&l.rect.inset(0.5), m.tile_radius - 0.5),
-                &edge,
-                1.0,
-                None,
-            );
-        }
+        self.glass_pane(&l.rect, m.tile_radius, 1.0);
 
         let pad = 10.0;
         let h = l.header;
