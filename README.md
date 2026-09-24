@@ -1,11 +1,11 @@
-# Glance
+# Horadric
 
 Every coding agent session you have running becomes a small tile on your
 Windows desktop, grouped by project, that lights up when it needs you and
 grows into a full terminal when you click it. Each session works in its own
 git worktree, and the tile shows you what it changed.
 
-Glance is a window manager for agent sessions that already exist. It never
+Horadric is a window manager for agent sessions that already exist. It never
 puts its own chat UI in front of the agent. The terminal is the UI.
 
 Status: early. The tiles, the state stream behind them and the terminals
@@ -13,12 +13,12 @@ work. Worktrees are next.
 
 ## What works now
 
-- `glance` opens one cluster window per project on the left edge of your
+- `horadric` opens one cluster window per project on the left edge of your
   screen: frameless, rounded, never takes focus, not in the taskbar or
   alt-tab. It stacks like a normal window: other windows can cover it, a
   click brings it forward, and "Bring tiles to front" in the tray menu
   brings them all back. Drag it anywhere: it snaps to the screen edges and to
-  the other Glance windows, or hold Shift to place it freely. Click the header to
+  the other Horadric windows, or hold Shift to place it freely. Click the header to
   collapse it. "Tidy up tiles" in the tray menu stacks them all back on the
   left edge.
 - Each tile shows a session: an icon for its state, name, an age line like
@@ -30,10 +30,10 @@ work. Worktrees are next.
   updates as files change, without polling. Click a folder to open it, a
   file to open it in VS Code, the header to fold it.
 - A tray icon starts sessions: "New session..." asks for a folder, and your
-  recent projects are one click away. It also quits Glance.
-- `glance explorer install` adds "Open in Glance" to folders in Explorer,
-  which starts Glance too if it is not running.
-- A session runs `claude` in a Glance terminal: a real terminal with the
+  recent projects are one click away. It also quits Horadric.
+- `horadric explorer install` adds "Open in Horadric" to folders in Explorer,
+  which starts Horadric too if it is not running.
+- A session runs `claude` in a Horadric terminal: a real terminal with the
   real CLI in it, permissions, slash commands and all. The sessions share one
   terminal window, the stage, which shows one project at a time: every
   session of that project is a pane in a grid. One fills the window, two
@@ -41,7 +41,7 @@ work. Worktrees are next.
   to its project with that session typing; click it again or close the
   window to collapse it. Other projects keep running unseen, and the tiles
   on stage are lit. The `+` in a cluster header starts another, and
-  `glance new --name fix-login` does it from a script.
+  `horadric new --name fix-login` does it from a script.
 - Drag a pane by its header onto another to swap the two. The order is
   remembered. "Fit terminal beside tiles" in the tray menu fills the space
   right of the clusters. The terminal snaps like clusters do, when moved and
@@ -51,22 +51,22 @@ work. Worktrees are next.
   in any pane, or "New terminal" in the project menu opens PowerShell in the
   project, as a pane on the stage and a tile in the cluster. The tile shows
   what the terminal's title says and how busy its output is. `exit` closes
-  it. `GLANCE_SHELL` picks another shell.
+  it. `HORADRIC_SHELL` picks another shell.
 - Ctrl+Alt+Space, from anywhere, shows the session that has waited on you
   longest. Press it again to move on to the next one.
 - A Claude window at the top of the stack shows how much of your five hour,
   weekly and spend limits is used and when each resets, and picks the
-  model, effort and permission mode for every session Glance starts or
+  model, effort and permission mode for every session Horadric starts or
   resumes. Each tile shows how full its session's context is. The numbers
-  come from Claude Code's status line, which Glance sets for its own
+  come from Claude Code's status line, which Horadric sets for its own
   sessions only.
-- `glance hooks install` adds Claude Code hooks to `~/.claude/settings.json`.
-  They are `http` hooks: Claude Code posts each lifecycle event to Glance on
+- `horadric hooks install` adds Claude Code hooks to `~/.claude/settings.json`.
+  They are `http` hooks: Claude Code posts each lifecycle event to Horadric on
   localhost. No script runs, no process is spawned per event.
-- `glance run --name fix-login` starts a tagged `claude` in the terminal you
+- `horadric run --name fix-login` starts a tagged `claude` in the terminal you
   are in instead. Its tile shows state but can not expand. A `claude`
   started any other way is ignored.
-- `glance serve` shows the same state as a table in the terminal.
+- `horadric serve` shows the same state as a table in the terminal.
 
 The whole app is one process. With two projects and four sessions on screen
 it uses about 45 MB and no CPU between events. The terminals are ConPTY,
@@ -74,9 +74,9 @@ it uses about 45 MB and no CPU between events. The terminals are ConPTY,
 
 ## How it knows
 
-Glance sets `GLANCE_SESSION` in the environment of every `claude` it starts.
+Horadric sets `HORADRIC_SESSION` in the environment of every `claude` it starts.
 The hook is configured to send that variable as a header, so every event
-arrives already tagged with the tile it belongs to. Outside Glance the header
+arrives already tagged with the tile it belongs to. Outside Horadric the header
 is empty and the event is dropped.
 
 State comes from hook events, never from reading terminal output:
@@ -97,32 +97,32 @@ Rust stable on Windows.
 
 ```
 cargo build --release
-target\release\glance.exe install
+target\release\horadric.exe install
 ```
 
-That installs Glance for your user, no admin rights: it is in the Start
-menu (search "Glance"), `glance` works in any new terminal, "Open in Glance"
+That installs Horadric for your user, no admin rights: it is in the Start
+menu (search "Horadric"), `horadric` works in any new terminal, "Open in Horadric"
 is on folders in Explorer (under "Show more options" on Windows 11), it
-starts with Windows, and the Claude Code hooks are in place. Glance lives in
+starts with Windows, and the Claude Code hooks are in place. Horadric lives in
 the tray; Windows may hide a new icon behind the `^` by the clock.
 
 Sessions survive a quit or a restart: they come back as paused tiles, and a
 click resumes the conversation.
 
-`GLANCE_AGENT=cmd.exe` runs a shell instead of `claude` in the terminals,
+`HORADRIC_AGENT=cmd.exe` runs a shell instead of `claude` in the terminals,
 which is the cheap way to try them.
 
-`GLANCE_DEV=1` runs a build beside the installed Glance without touching
+`HORADRIC_DEV=1` runs a build beside the installed Horadric without touching
 it: its own port and saved state, no autostart, a red tray icon. That is how
-Glance is developed from a session inside Glance.
+Horadric is developed from a session inside Horadric.
 
-`target\release\glance.exe reload` updates a running Glance to a new build
+`target\release\horadric.exe reload` updates a running Horadric to a new build
 without the quit: once no session is mid turn it hands over, and the
 sessions that were running resume by themselves. A build that fails to
 start is rolled back.
 
-`glance uninstall` takes it all back out. The hooks it removes are only
-Glance's; everything else in your Claude Code settings stays as it was.
+`horadric uninstall` takes it all back out. The hooks it removes are only
+Horadric's; everything else in your Claude Code settings stays as it was.
 
 ## Plan
 

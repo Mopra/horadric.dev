@@ -176,54 +176,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
 
 [[package]]
-name = "glance"
-version = "0.1.0"
-dependencies = [
- "glance-core",
- "glance-hooks",
- "glance-ui",
- "serde_json",
- "windows",
-]
-
-[[package]]
-name = "glance-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "glance-hooks"
-version = "0.1.0"
-dependencies = [
- "glance-core",
- "serde_json",
-]
-
-[[package]]
-name = "glance-pty"
-version = "0.1.0"
-dependencies = [
- "windows",
-]
-
-[[package]]
-name = "glance-ui"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "glance-core",
- "glance-hooks",
- "glance-pty",
- "serde_json",
- "syntect",
- "windows",
- "windows-numerics",
-]
-
-[[package]]
 name = "hermit-abi"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -236,6 +188,54 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "horadric"
+version = "0.1.0"
+dependencies = [
+ "horadric-core",
+ "horadric-hooks",
+ "horadric-ui",
+ "serde_json",
+ "windows",
+]
+
+[[package]]
+name = "horadric-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "horadric-hooks"
+version = "0.1.0"
+dependencies = [
+ "horadric-core",
+ "serde_json",
+]
+
+[[package]]
+name = "horadric-pty"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
+name = "horadric-ui"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "horadric-core",
+ "horadric-hooks",
+ "horadric-pty",
+ "serde_json",
+ "syntect",
+ "windows",
+ "windows-numerics",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
-# Working on Glance
+# Working on Horadric
 
-Glance shows every coding agent session you have running as a tile on your
+Horadric shows every coding agent session you have running as a tile on your
 Windows desktop, grouped by project. Read [README.md](README.md) for what it
 does and [docs/PLAN.md](docs/PLAN.md) for where the work is up to and what
 comes next. Read the plan before starting anything.
@@ -46,29 +46,29 @@ Do not reopen these without asking. They were argued through and chosen.
 
 Tests cannot tell you a window looks right. The loop that works:
 
-1. Always test as a dev instance: `GLANCE_DEV=1`. It listens on 43118,
-   keeps its state in `%APPDATA%\Glance-dev`, never turns on autostart, has
+1. Always test as a dev instance: `HORADRIC_DEV=1`. It listens on 43118,
+   keeps its state in `%APPDATA%\Horadric-dev`, never turns on autostart, has
    a red tray icon, and refuses `install`, `uninstall` and hook or Explorer
-   changes. The installed Glance keeps running beside it.
-2. Stop only the dev build, never every `glance.exe`. You may be running
+   changes. The installed Horadric keeps running beside it.
+2. Stop only the dev build, never every `horadric.exe`. You may be running
    inside a terminal of the installed one, and killing it kills you.
-   `Get-Process glance | ? Path -like '*\target\*' | Stop-Process -Force`,
-   then build. The installed copy lives in `%LOCALAPPDATA%\Programs\Glance`,
+   `Get-Process horadric | ? Path -like '*\target\*' | Stop-Process -Force`,
+   then build. The installed copy lives in `%LOCALAPPDATA%\Programs\Horadric`,
    so it never locks `target`.
-3. Start the tiles with `target\debug\glance.exe app` in the background
-   (plain `glance` starts it hidden and returns). Use `Start-Process
+3. Start the tiles with `target\debug\horadric.exe app` in the background
+   (plain `horadric` starts it hidden and returns). Use `Start-Process
    -NoNewWindow`, never `-WindowStyle Hidden`: Windows turns the first
    window the app shows into a hidden one, and the stage never appears.
-   Then `glance new` or post
-   fake sessions at port 43118 with a short Python script. `GLANCE_AGENT=cmd.exe`
+   Then `horadric new` or post
+   fake sessions at port 43118 with a short Python script. `HORADRIC_AGENT=cmd.exe`
    puts a shell in the terminals instead of `claude`.
 4. Never leave a test running unwatched that can start agents. A resume bug
    once started 167 `claude` processes in a minute. Count `claude.exe`
-   children of the dev `glance.exe` after any change to how sessions start.
+   children of the dev `horadric.exe` after any change to how sessions start.
 5. Screenshot the top right corner with PowerShell and `CopyFromScreen`, then
    read the image. For a window that is behind another, `PrintWindow` with
    flag 2 captures it anyway.
-6. `GLANCE_DEBUG=1` makes the app log cluster positions, sizes and paints.
+6. `HORADRIC_DEBUG=1` makes the app log cluster positions, sizes and paints.
 
 Two bugs found this way that tests would never have caught: a window born
 with its final layout never resized past 10 pixels, and a window created off
@@ -76,31 +76,31 @@ screen never painted after being moved into view.
 
 ## Testing against a real agent
 
-`glance run --name x` in a project starts a tagged `claude`. For a
+`horadric run --name x` in a project starts a tagged `claude`. For a
 non-interactive check, add `-- -p "Reply with pong" --model
 claude-haiku-4-5-20251001`. The hooks are in `~/.claude/settings.json` and a
-backup of the pre-Glance file sits beside it. A `claude` started by a dev
-instance still posts to the installed Glance, which passes the event on to
-the dev one by the `X-Glance-Port` header.
+backup of the pre-Horadric file sits beside it. A `claude` started by a dev
+instance still posts to the installed Horadric, which passes the event on to
+the dev one by the `X-Horadric-Port` header.
 
-## Developing Glance from inside Glance
+## Developing Horadric from inside Horadric
 
-The agent working on Glance runs in a terminal of the installed Glance. It
+The agent working on Horadric runs in a terminal of the installed Horadric. It
 builds and tests dev instances as above and never touches the installed
 one, with one exception: shipping, and only when the human says to ship.
 
-Shipping is `cargo build --release`, then `target\release\glance.exe
-reload`. The installed Glance waits until no session is mid turn, hands
+Shipping is `cargo build --release`, then `target\release\horadric.exe
+reload`. The installed Horadric waits until no session is mid turn, hands
 over to the new build and resumes every session that was running,
 including the agent's own. So the agent says what it shipped before it
 runs `reload`, ends its turn, and does nothing after. A build that does not
 come up is rolled back to the old binaries by itself. What happened is in
-`%APPDATA%\Glance\reload.log`.
+`%APPDATA%\Horadric\reload.log`.
 
-`reload` with `GLANCE_DEV=1` restarts the dev instance the same way, from
+`reload` with `HORADRIC_DEV=1` restarts the dev instance the same way, from
 its own build, which is how to test a change to reloading itself.
 
-The first time, and whenever the installed Glance is older than `reload`,
-it has to be installed by hand from a terminal outside Glance: Quit from
+The first time, and whenever the installed Horadric is older than `reload`,
+it has to be installed by hand from a terminal outside Horadric: Quit from
 the tray (sessions pause), `cargo build --release`,
-`target\release\glance.exe install`, then click each tile to resume.
+`target\release\horadric.exe install`, then click each tile to resume.

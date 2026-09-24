@@ -1,6 +1,6 @@
 # Implementation plan
 
-Where Glance is, what comes next, and what was decided along the way. Update
+Where Horadric is, what comes next, and what was decided along the way. Update
 this file when a step lands or a decision changes. It is the handover
 document: someone picking the project up cold should need nothing else.
 
@@ -14,15 +14,15 @@ Five crates, one binary.
 
 | Crate | Owns | Platform |
 |---|---|---|
-| `glance-core` | Session, Phase, Registry, the state machine | any |
-| `glance-hooks` | The localhost listener, its client, the settings installer | any |
-| `glance-pty` | Child processes in ConPTY pseudo consoles | Windows |
-| `glance-ui` | Cluster and terminal windows, layout, drawing | Windows |
-| `glance` | The command line, `glancew` for Explorer, the wiring | Windows |
+| `horadric-core` | Session, Phase, Registry, the state machine | any |
+| `horadric-hooks` | The localhost listener, its client, the settings installer | any |
+| `horadric-pty` | Child processes in ConPTY pseudo consoles | Windows |
+| `horadric-ui` | Cluster and terminal windows, layout, drawing | Windows |
+| `horadric` | The command line, `horadricw` for Explorer, the wiring | Windows |
 
-`glance-core` and the pure halves of `glance-ui` (`layout`, `theme`,
+`horadric-core` and the pure halves of `horadric-ui` (`layout`, `theme`,
 `palette`, `keys`, `frame`, `files`, `viewer`, `highlight`, `shell`) have no I/O and
-are tested. `glance-pty` has a
+are tested. `horadric-pty` has a
 test that runs `cmd.exe` in a real pseudo console. Everything else is
 verified on screen.
 
@@ -41,17 +41,17 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 ### Step 1: hook receiver and state machine
 
 Claude Code `http` hooks post every lifecycle event to
-`127.0.0.1:43117/glance/hook`. The hook config carries `X-Glance-Session:
-$GLANCE_SESSION`, so an event arrives already tagged with the session it
-belongs to. A `claude` started outside Glance sends an empty header and the
-event is dropped, which is what keeps Glance from instrumenting the whole
+`127.0.0.1:43117/horadric/hook`. The hook config carries `X-Horadric-Session:
+$HORADRIC_SESSION`, so an event arrives already tagged with the session it
+belongs to. A `claude` started outside Horadric sends an empty header and the
+event is dropped, which is what keeps Horadric from instrumenting the whole
 machine. Superset got this wrong and wrote it up in their
 `HOOKS_INVESTIGATION.md`; the guard is the lesson.
 
-The state machine is in `glance-core/src/session.rs`. Prompt and tool events
+The state machine is in `horadric-core/src/session.rs`. Prompt and tool events
 mean working, permission and notification events mean waiting, `Stop` means
 done, `SessionEnd` means ended. Subagent events and compaction restarts
-change nothing. `glance run` posts a `GlanceRegister` event of its own before
+change nothing. `horadric run` posts a `HoradricRegister` event of its own before
 starting Claude, because Claude Code sends no hook until the first prompt and
 a fresh session would otherwise be invisible.
 
@@ -65,7 +65,7 @@ native rather than like an app window:
 - `WS_EX_TOOLWINDOW` so it stays out of alt-tab and the taskbar.
 - `SWP_NOACTIVATE` on every move, resize and raise.
 - Dragging handled by hand, because the system move loop activates.
-- A dragged cluster snaps to the work area edges and to the other Glance
+- A dragged cluster snaps to the work area edges and to the other Horadric
   windows, at the same margin and gap `arrange` uses (`layout::snap`). Shift held
   places it freely. Not Alt: a lone Alt press opens the menu bar of the app
   with the focus. "Tidy up tiles" in the tray menu unpins them all.
@@ -85,16 +85,16 @@ Clicking a tile expands it into a real terminal running the real `claude`.
 Verified end to end against Claude Code 2.1 with Haiku: the trust dialog,
 arrow keys, a prompt and its answer, resize, collapse and expand, `/exit`.
 
-- **Starting a session.** `glance new [--name] [--cwd] [-- claude args]`
-  posts to `/glance/new` on the running app, which starts the agent in a
-  console and opens its terminal. `glance run` is unchanged: a tagged
-  `claude` in your own terminal, whose tile can not expand because Glance
+- **Starting a session.** `horadric new [--name] [--cwd] [-- claude args]`
+  posts to `/horadric/new` on the running app, which starts the agent in a
+  console and opens its terminal. `horadric run` is unchanged: a tagged
+  `claude` in your own terminal, whose tile can not expand because Horadric
   does not own it. The friendlier ways in are under Launchers below.
-- **`/glance/new` is guarded.** A web page can reach localhost, so starting a
-  process needs an `X-Glance-Command: new` header, which a browser can not
+- **`/horadric/new` is guarded.** A web page can reach localhost, so starting a
+  process needs an `X-Horadric-Command: new` header, which a browser can not
   send cross origin without a preflight we never answer, and any request
   with an `Origin` header is refused.
-- **ConPTY on the `windows` crate directly**, in `glance-pty`, not
+- **ConPTY on the `windows` crate directly**, in `horadric-pty`, not
   `portable-pty`. Five calls did not justify its crates. The traps, both
   handled: the output pipe never reaches end of file on its own, so the
   waiter closes the console after the exit; and a parent with redirected
@@ -120,8 +120,8 @@ arrow keys, a prompt and its answer, resize, collapse and expand, `/exit`.
   a selection. Ctrl+V pastes text with bracketed paste and escape characters
   stripped. Alt+F4 still closes.
 - **Images.** Passing Ctrl+V on for Claude Code to read the clipboard did
-  not work, so Glance does it: a clipboard image is saved as a PNG in
-  `%TEMP%\Glance` and its path is pasted, which Claude Code turns into an
+  not work, so Horadric does it: a clipboard image is saved as a PNG in
+  `%TEMP%\Horadric` and its path is pasted, which Claude Code turns into an
   attachment. The clipboard's own PNG is used when a browser or the Snipping
   Tool offers one, otherwise the Windows Imaging Component encodes the
   bitmap. Text beats an image, because Excel puts a picture beside copied
@@ -138,12 +138,12 @@ arrow keys, a prompt and its answer, resize, collapse and expand, `/exit`.
   clean exit closes the window; a failed one keeps it open so the error can
   be read. An exit Claude Code could not report (a crash, a kill) becomes a
   `SessionEnd` of our own.
-- **Environment.** The child gets `GLANCE_SESSION`, `GLANCE_OWNER_PORT` and `COLORTERM`, and
-  loses the variables Claude Code sets to name a parent session. When Glance
+- **Environment.** The child gets `HORADRIC_SESSION`, `HORADRIC_OWNER_PORT` and `COLORTERM`, and
+  loses the variables Claude Code sets to name a parent session. When Horadric
   was started from inside Claude Code those made the tile's agent believe it
   was nested, and it stopped saving its transcript.
-- `GLANCE_AGENT` runs something other than `claude.exe` in a terminal.
-  `GLANCE_AGENT=cmd.exe` is how to test the terminal without spending
+- `HORADRIC_AGENT` runs something other than `claude.exe` in a terminal.
+  `HORADRIC_AGENT=cmd.exe` is how to test the terminal without spending
   tokens.
 
 Measured: one process, 51 MB (debug build) with a cluster and one open
@@ -152,14 +152,14 @@ terminal. History is 2000 rows per session, at about 24 bytes a cell: under
 
 ### Launchers
 
-Typing `glance new --cwd` was too much friction for starting a session in a
+Typing `horadric new --cwd` was too much friction for starting a session in a
 new project, so three ways in that need no terminal:
 
 - **Tray icon.** Always there, even with no tiles. Its menu has "New
   session..." (the folder picker, opening in the last project), up to eight
   recent projects one click away, and Quit, which warns when sessions in
-  Glance terminals would end. Recent projects live in
-  `%APPDATA%\Glance\recent.json`. The tooltip counts sessions and waiting
+  Horadric terminals would end. Recent projects live in
+  `%APPDATA%\Horadric\recent.json`. The tooltip counts sessions and waiting
   ones. The icon is drawn in code (`icon.rs`), so there is no file to ship.
   Pulled forward from step 5.
 - **The full width `+` below a cluster's last tile** starts another session
@@ -169,12 +169,12 @@ new project, so three ways in that need no terminal:
   picker in the folder that holds this project, since projects tend to sit
   side by side. It used to open in the project itself, which made another
   session there the easy path; the bottom button is that path now.
-- **Explorer.** `glance explorer install` adds "Open in Glance" when right
+- **Explorer.** `horadric explorer install` adds "Open in Horadric" when right
   clicking a folder or the empty space inside one, under
   `HKEY_CURRENT_USER`, so no admin rights. On Windows 11 it is under "Show
   more options"; the short menu only takes packaged apps. It runs
-  `glancew.exe`, a second, windowless binary, so a right click never flashes
-  a console. `glancew` starts the app when it is not running (hidden, no
+  `horadricw.exe`, a second, windowless binary, so a right click never flashes
+  a console. `horadricw` starts the app when it is not running (hidden, no
   console window) and then asks it for the session. With no folder it only
   starts the app.
 
@@ -187,12 +187,12 @@ procedure itself.
 
 ### Persistence
 
-Glance picks up where it left off, after a quit, a crash or a restart. The
+Horadric picks up where it left off, after a quit, a crash or a restart. The
 processes can not survive that, but the conversations can: Claude Code
 resumes one with `claude --resume <id>`, and every hook carries the id.
 
-- `%APPDATA%\Glance\state.json` (`glance_core::saved`) holds the sessions
-  Glance owned, with name, folder, original arguments, Claude's session id,
+- `%APPDATA%\Horadric\state.json` (`horadric_core::saved`) holds the sessions
+  Horadric owned, with name, folder, original arguments, Claude's session id,
   whether a prompt was ever sent, the last line and the window position;
   the cluster positions; the recent projects; whether autostart was offered.
   Written from the one second tick when it changed, beside and renamed.
@@ -210,7 +210,7 @@ resumes one with `claude --resume <id>`, and every hook carries the id.
   asks first when a session is running and says how many are mid turn.
 - On `WM_QUERYENDSESSION` and on Quit the state is written once more and
   then frozen, so sessions dying on the way out are not saved as gone.
-- Claude's session id is the latest non empty one from any hook. Glance's
+- Claude's session id is the latest non empty one from any hook. Horadric's
   own events carry none; the first version stored that empty id and never
   learned the real one.
 - **The runaway, and the guard.** The first resume cleared the paused mark
@@ -218,38 +218,38 @@ resumes one with `claude --resume <id>`, and every hook carries the id.
   saw a paused tile and resumed again: 167 `claude` processes in a minute.
   Now the mark is cleared first, and `launch` refuses any session that
   already has a live console, whatever path led there.
-- A second Glance refuses to start when the port answers. Autostart plus a
+- A second Horadric refuses to start when the port answers. Autostart plus a
   manual start would otherwise show every saved session twice.
 
 ### Install
 
-`glance install` makes Glance a normal per user app, no admin rights:
+`horadric install` makes Horadric a normal per user app, no admin rights:
 
-- Copies `glance.exe` and `glancew.exe` to `%LOCALAPPDATA%\Programs\Glance`.
+- Copies `horadric.exe` and `horadricw.exe` to `%LOCALAPPDATA%\Programs\Horadric`.
 - Adds that folder to the user `PATH` (registry, then `WM_SETTINGCHANGE`).
-- A Start menu shortcut to `glancew.exe`, so Windows search finds Glance.
-- Points Explorer's "Open in Glance" and Start with Windows at the copy.
-- Installs the Claude Code hooks, then starts Glance.
+- A Start menu shortcut to `horadricw.exe`, so Windows search finds Horadric.
+- Points Explorer's "Open in Horadric" and Start with Windows at the copy.
+- Installs the Claude Code hooks, then starts Horadric.
 
-`glance uninstall` reverses it and leaves the saved state. The executables
-carry the icon and version information, baked in by `crates/glance/build.rs`,
+`horadric uninstall` reverses it and leaves the saved state. The executables
+carry the icon and version information, baked in by `crates/horadric/build.rs`,
 which writes the `.res` file itself from the tray icon's drawing code, so
-Explorer, Start, the taskbar and Task Manager all say Glance.
+Explorer, Start, the taskbar and Task Manager all say Horadric.
 
-`glance` with no arguments now starts the app hidden and returns. Running
+`horadric` with no arguments now starts the app hidden and returns. Running
 the app inside a terminal meant closing the terminal ended every session.
-`glance app` is the old behaviour, for the log.
+`horadric app` is the old behaviour, for the log.
 
 ### Reload
 
-Shipping a build used to be four steps from a terminal outside Glance and a
-click on every tile. Now it is `target\release\glance.exe reload`, run by
+Shipping a build used to be four steps from a terminal outside Horadric and a
+click on every tile. Now it is `target\release\horadric.exe reload`, run by
 the agent when the human says ship.
 
-- **The request.** `reload` posts `/glance/reload` with the path of the
-  binary it was run from, guarded like `/glance/new` (its own
-  `X-Glance-Command` value, no `Origin`). `--now` skips the wait.
-- **The wait.** The app hands over once no session in a Glance terminal is
+- **The request.** `reload` posts `/horadric/reload` with the path of the
+  binary it was run from, guarded like `/horadric/new` (its own
+  `X-Horadric-Command` value, no `Origin`). `--now` skips the wait.
+- **The wait.** The app hands over once no session in a Horadric terminal is
   mid turn (`Phase::mid_turn`, only `Working`). A session waiting on you
   is not mid turn; it resumes to the same question. The agent that ran
   `reload` finishes its turn first, which is why the command returns at
@@ -259,15 +259,15 @@ the agent when the human says ship.
   keyboard on the stage,
   starts `<new build> swap --pid <its pid>` with no window, and quits.
 - **`swap`** waits for that process to exit, moves each installed binary
-  aside as `glance.old.exe` and `glancew.old.exe` (a running binary can be
+  aside as `horadric.old.exe` and `horadricw.old.exe` (a running binary can be
   renamed, not overwritten), copies the build in, rewrites the hooks as
-  `install` would, and starts `glance.exe app --reload`. It counts as up
+  `install` would, and starts `horadric.exe app --reload`. It counts as up
   when the port answers and the process is still alive 3 seconds later,
   since the app listens before it builds its windows.
 - **Rollback.** A build that is not up within 20 seconds is killed, the
   moved binaries go back, and the old build is started the same way. Only
   what was moved goes back, so a copy failing half way restores exactly
-  that. `%APPDATA%\Glance\reload.log` has the last reload.
+  that. `%APPDATA%\Horadric\reload.log` has the last reload.
 - **`app --reload`** resumes the sessions saved as `running`, once each,
   without opening a window for each, then puts the stage back. An ordinary
   start still leaves every session paused until clicked.
@@ -281,34 +281,34 @@ path and the rollback were tested against a fake install folder with its
 own `APPDATA`, `LOCALAPPDATA`, home and port, the rollback by squatting the
 port so the new build could not listen.
 
-The installed Glance has to know `/glance/reload`, so the first build with
+The installed Horadric has to know `/horadric/reload`, so the first build with
 it is installed by hand. Sessions still end with the process; reload only
 makes the restart cheap. Keeping them alive across it is the separate
 process question below.
 
 ### Dev instances
 
-Glance is developed from a session inside the installed Glance, so a test
-build must never disturb the one hosting the agent. `GLANCE_DEV=1` makes
+Horadric is developed from a session inside the installed Horadric, so a test
+build must never disturb the one hosting the agent. `HORADRIC_DEV=1` makes
 a dev instance:
 
-- Port 43118 unless `GLANCE_PORT` says otherwise, so both can listen.
-- State in `%APPDATA%\Glance-dev`. Sharing `state.json` would load the real
+- Port 43118 unless `HORADRIC_PORT` says otherwise, so both can listen.
+- State in `%APPDATA%\Horadric-dev`. Sharing `state.json` would load the real
   sessions as paused tiles, and a click would resume a conversation that is
-  already live in the installed Glance.
+  already live in the installed Horadric.
 - No autostart offer and no switch for it in the tray. The first dev run
-  used to point the `Run` key at `target\debug\glancew.exe`.
-- A red tray icon and "Glance dev" in the tooltip.
+  used to point the `Run` key at `target\debug\horadricw.exe`.
+- A red tray icon and "Horadric dev" in the tooltip.
 - `install`, `uninstall` and the hook and Explorer installers refuse to run.
 
 The hook URL is fixed at install time, so a `claude` in a dev terminal
-still posts to the installed Glance. Every Glance-started `claude` now gets
-`GLANCE_OWNER_PORT`, the hook sends it as `X-Glance-Port`, and a listener
+still posts to the installed Horadric. Every Horadric-started `claude` now gets
+`HORADRIC_OWNER_PORT`, the hook sends it as `X-Horadric-Port`, and a listener
 that is not the owner passes the event on to the one that is. Without the
-header the installed Glance would adopt dev sessions as ghost tiles.
+header the installed Horadric would adopt dev sessions as ghost tiles.
 
 Tested on screen: a dev instance beside no installed one, a `cmd.exe` tile,
-state written to `Glance-dev` only. The hand off between two running
+state written to `Horadric-dev` only. The hand off between two running
 instances is covered by a listener test, not yet seen with a real `claude`.
 
 ### The stage
@@ -347,7 +347,7 @@ and popped windows were the freedom that made the desktop a pile again.
   never let go. The free rect comes from the cursor instead, at the
   distance from each edge it had when the drag began.
 - The windows to snap to are found by class name, so a dev instance also
-  snaps to the installed Glance's windows. Harmless, and useful: that is
+  snaps to the installed Horadric's windows. Harmless, and useful: that is
   where they are on screen.
 
 Found while testing it: a click on a tile made the cluster the foreground
@@ -359,7 +359,7 @@ answers `WM_MOUSEACTIVATE` with `MA_NOACTIVATE` itself.
 A test trap, not a bug: an app started with `Start-Process -WindowStyle
 Hidden` has its first `ShowWindow(SW_SHOWNORMAL)` turned into a hide by
 Windows, so the first terminal never appears. Start dev builds with
-`-NoNewWindow` instead. `glancew` and the `Run` key are not affected.
+`-NoNewWindow` instead. `horadricw` and the `Run` key are not affected.
 
 ### The project grid
 
@@ -424,7 +424,7 @@ editor.
   regard to case. Names take VS Code's dark theme colours and letters: M
   modified, A added, U untracked, D deleted, R renamed, C conflict. A
   folder takes the most important change inside it and a dot. A chain of
-  folders with one child each shares a row (`crates/glance-ui/src`). The
+  folders with one child each shares a row (`crates/horadric-ui/src`). The
   header counts changed files.
 - **Folders.** One holding a change opens by itself, so a new change is in
   view without a click. A click opens or closes any folder and is
@@ -470,7 +470,7 @@ index is outside what is watched. Changed files still rescan it.
 A click on a file in the files tile shows it on the stage, read only, beside
 the project's sessions: line numbers, VS Code's Dark+ colours, long lines
 wrapped at a space and indented under their text. Asked for so a file an
-agent is working on can be read without leaving Glance. A viewer, not an
+agent is working on can be read without leaving Horadric. A viewer, not an
 editor, on purpose.
 
 - **A pane with no program.** A file view is a `Console` without a pseudo
@@ -516,13 +516,13 @@ the gutter), a search, and horizontal scrolling instead of wrapping.
 
 An agent testing a web page starts a browser of its own, through Playwright
 or the Chrome DevTools MCP. Its window used to land anywhere, with nothing
-saying which session opened it. Embedding a browser in Glance was
+saying which session opened it. Embedding a browser in Horadric was
 considered and dropped: the agent drives its browser over a debug protocol
-and never needs a window Glance owns, and it would be the web view the
-settled decisions rule out. So Glance manages the browser's window instead.
+and never needs a window Horadric owns, and it would be the web view the
+settled decisions rule out. So Horadric manages the browser's window instead.
 
 - **Which session.** Every agent starts inside a job object of its own
-  (`glance-pty`, `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so it is in the job from
+  (`horadric-pty`, `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so it is in the job from
   its first instruction), and everything it starts joins the job. A window
   belongs to the session whose job holds its process (`IsProcessInJob`).
   The job limits nothing and closing it ends nothing.
@@ -531,7 +531,7 @@ settled decisions rule out. So Glance manages the browser's window instead.
   them to the app window. Only main windows count (no owner, a title bar,
   not a tool window) and only browsers, by executable name: Chrome, Edge,
   Firefox, Brave, Chromium, Vivaldi, Opera and Playwright's WebKit. An editor
-  or an app under test is left alone, and so is a dev Glance started inside
+  or an app under test is left alone, and so is a dev Horadric started inside
   a session, whose windows are in that session's job too.
 - **Where it goes.** When it first appears, against the stage in the space
   beside the tiles and the stage together (`layout::beside_stage`), its own
@@ -581,12 +581,12 @@ sessions instead of in another terminal app.
   "New terminal" in the project menu. It opens in the project folder, joins
   the stage without moving it, and gets the keyboard. Named Terminal,
   Terminal 2 and so on.
-- **Which shell** (`shell::program`): `GLANCE_SHELL` by path or name,
+- **Which shell** (`shell::program`): `HORADRIC_SHELL` by path or name,
   otherwise `pwsh`, otherwise Windows PowerShell, otherwise `COMSPEC`.
-- **Not a session to the hooks.** The shell gets no `GLANCE_SESSION` or
-  `GLANCE_OWNER_PORT`, and loses them when Glance itself inherited them, so
+- **Not a session to the hooks.** The shell gets no `HORADRIC_SESSION` or
+  `HORADRIC_OWNER_PORT`, and loses them when Horadric itself inherited them, so
   a `claude` typed into it is nobody's and stays off the tiles, as it
-  would outside Glance. Found on screen: a dev instance started from a
+  would outside Horadric. Found on screen: a dev instance started from a
   session handed its tag down.
 - **The tile.** No hook reports on a shell, so its phase stays idle and the
   tile reads the terminal instead: the terminal glyph, the title the program
@@ -597,7 +597,7 @@ sessions instead of in another terminal app.
   cleaned title.
 - **Lifetime.** Any exit closes it, tile and pane, whatever the code: `exit`
   means done, and there is nothing to resume. Closing the stage leaves it
-  running. "Start over" leaves a project's terminals alone. Quitting Glance
+  running. "Start over" leaves a project's terminals alone. Quitting Horadric
   says terminals close, apart from the sessions that resume. After a restart
   a terminal comes back as a paused tile in its place, and a click opens a
   fresh shell there; a reload reopens the ones that were open. What ran in
@@ -615,17 +615,17 @@ key would go to whatever window has the focus; the mapping is unit tested.
 
 A window of its own at the top of the stack: how much of the account's
 Claude limits is used, and the model, effort and permission mode every
-session Glance starts gets. Asked for so the limits are in view without
+session Horadric starts gets. Asked for so the limits are in view without
 typing `/usage`, and so a model can be picked once instead of per session.
 
 - **Where the numbers come from.** No hook carries usage, and there is no
   public API for a subscription's limits. Claude Code gives them only to the
   status line command, as JSON on stdin after each reply: the model, how
   full the context is, and the five hour, weekly and spend limits with when
-  each resets. So Glance hands every `claude` it starts `--settings
-  %APPDATA%\Glance\claude-settings.json`, written at each start, which makes
-  `glance status` its status line. That passes the JSON to
-  `/glance/status` on the owner's port, tagged like a hook, and prints
+  each resets. So Horadric hands every `claude` it starts `--settings
+  %APPDATA%\Horadric\claude-settings.json`, written at each start, which makes
+  `horadric status` its status line. That passes the JSON to
+  `/horadric/status` on the owner's port, tagged like a hook, and prints
   `Haiku 4.5 · context 21% · session 28%` for the terminal. A `claude`
   started anywhere else is not touched, the same rule the hooks keep. The
   path goes without quotes unless it has a space, since PowerShell takes a
@@ -645,7 +645,7 @@ typing `/usage`, and so a model can be picked once instead of per session.
   already say, and never saved in its arguments, so a resume takes the
   defaults as they are then. A running session keeps what it started with;
   the menu says that. Saved as `defaults` in `state.json`. Nothing goes to
-  a shell put in with `GLANCE_AGENT`.
+  a shell put in with `HORADRIC_AGENT`.
 - **Context on tiles.** Each session keeps the last status it heard
   (`Session::status`, not saved), which the tile draws, see The look.
 - **The window** (`usage.rs`) behaves like a cluster: no focus, dragged and
@@ -665,7 +665,7 @@ Tested with a dev instance: the empty window, fake limits at 41 % and 82 %
 ran as `claude --model haiku --effort low --settings ...`, one process,
 and after its reply the window showed 28 % and 21 % with reset times and
 the terminal the status line. Not tested: picking from a setting menu by
-hand, since a scripted click lands on the installed Glance's windows.
+hand, since a scripted click lands on the installed Horadric's windows.
 
 ### The look
 
@@ -751,7 +751,7 @@ region, whose corners are jagged.
 ### Step 4: worktrees and the git glance
 
 - `git worktree add` per session, branch named from the session name.
-- `.glance/config.json` per repo with `setup` commands, copied into each new
+- `.horadric/config.json` per repo with `setup` commands, copied into each new
   worktree because gitignored files do not come along. Superset learned this
   the hard way; their worktrees break without it. Allocate a port range per
   worktree too, so dev servers do not collide.
@@ -771,14 +771,14 @@ region, whose corners are jagged.
   whether it also needs a window or a sort order inside the clusters. Decide
   when forty sessions is real, not before.
 - A signed updater, liftable from Purrch (`../purrch.fun/src-tauri`).
-  `glance install` covers installing for now; NSIS only if a download for
+  `horadric install` covers installing for now; NSIS only if a download for
   other people needs it.
 - The tray icon exists (see Launchers). What is left for it here: start
   with Windows, and a way to show collapsed terminals.
 
 ## Not in any step yet, but needed before daily use
 
-- **Sessions die with Glance.** The consoles live in the Glance process, so
+- **Sessions die with Horadric.** The consoles live in the Horadric process, so
   quitting or crashing it ends every agent in a terminal. Surviving that
   needs the consoles in a separate process, which is a real decision.
 - **`claude.cmd` is not found.** Only `claude.exe` on `PATH` (the native
@@ -793,7 +793,7 @@ region, whose corners are jagged.
 
 - **Cluster positions are not remembered.** Restart and everything goes back
   to the left edge. Needs a settings file, probably
-  `%APPDATA%\Glance\state.json`.
+  `%APPDATA%\Horadric\state.json`.
 - **Only the primary monitor.** `arrange` reads `SPI_GETWORKAREA`, which
   ignores the other screens. Snapping already uses the monitor under the
   cursor.
@@ -827,6 +827,6 @@ Carried from the concept, with what is known now.
 
 ## Name collision
 
-`glanceapp/glance` is a self-hosted dashboard with more than twenty thousand
+`horadricapp/horadric` is a self-hosted dashboard with more than twenty thousand
 stars on GitHub. The crate name, the binary name and any published package
 need a decision before this goes public. Undecided.
