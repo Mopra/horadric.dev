@@ -727,12 +727,11 @@ typing `/usage`, and so a model can be picked once instead of per session.
   snapped the same way, folded by its header, pinned once dragged, raised
   and tidied from the tray with the rest. It counts as a tile when the
   stage docks. Kept as `usage_window` in `state.json`.
-- **It looks like a cluster too** (see The look): acrylic behind it, the
-  limits and settings as panes of glass (`Painter::glass_pane`, shared with
-  tiles and the files tile), the name in the display face beside a mark
-  with no colour, since an accent would claim a project, and Fluent
-  chevrons for folding and for each setting's menu. It was built before
-  the look and drew flat and opaque until then.
+- **It looks like a cluster too** (see The look): the same faceplate, the
+  limits as segmented meters on a screen sunk into it, the settings in a
+  grooved section, the name in the display face with no colour, since an
+  accent would claim a project, and Fluent chevrons for folding and for
+  each setting's menu.
 
 Tested with a dev instance: the empty window, fake limits at 41 % and 82 %
 (blue and amber bars, the window growing to fit), a tile's context at
@@ -747,31 +746,48 @@ hand, since a scripted click lands on the installed Horadric's windows.
 The first look was a default dev tool: flat boxes, one type size, a phase
 as a tinted fill, nothing moving. Asked for something with its own
 identity. The rule behind it: colour has two jobs and they never share a
-place. A phase is light, on a tile's edge and in its icon. A project is an
+place. A phase is light, in a tile's lamp and icon. A project is an
 accent, on its mark and on the stage's edge. So a project's colour can never
 be read as a session needing you.
 
-- **Deep dark, then glass.** The look is near black first. Clusters have
-  acrylic behind them (`backdrop.rs`, `DWMWA_SYSTEMBACKDROP_TYPE` with the
-  frame extended over the client area), under a tint of 92 %, so the
-  desktop is only a hint of depth. The cluster's render target is
-  premultiplied, so what it leaves clear shows the acrylic. Text there is
-  greyscale: ClearType needs to know the colour behind it. Tiles are a
-  breath of white (3 %) with a faint lit top edge. Every edge is soft light,
-  never a bright line: only a waiting tile's edge is plainly visible, since
-  it is the one thing meant to catch the eye. The stage had Mica at first
-  and it lifted the whole window toward grey, so it has none: its title bar
-  is the terminal's near black (`DWMWA_CAPTION_COLOR`), its gaps are black
-  and the panes float a shade lighter. A Windows without system backdrops
-  refuses the attribute and gets opaque clusters.
-  `DwmExtendFrameIntoClientArea` is declared by hand: the windows crate has
-  it behind `Win32_UI_Controls`, a large feature for one call.
-- **Phase as light.** A working tile has a light going round its edge, a
-  dash on the outline with a radial fade for its tail. A waiting tile
-  breathes, and sends a ring off itself the moment it starts waiting. A
-  finished turn flashes green once and settles to a soft edge. Idle, paused
-  and ended tiles have no edge and fade back. `theme::edge_strength` and
-  `theme::presence` hold the numbers.
+The look went through three versions. First deep dark glass: acrylic
+behind every cluster, tiles a breath of white. Then clay (commit
+`d0354b5`): soft moulded surfaces, raised or pressed in, which made the app
+distinct but never sat right beside the terminals. Now a hardware control
+panel in the dark, the metaphor that fits: sessions are keys with lamps,
+and a terminal is a screen set into the panel.
+
+- **Metal, keys, screens.** Every window is a matte faceplate, a shade
+  lighter at the top where the light falls, with a groove cut round it
+  and another under the header (`Painter::plate`, `Painter::engrave`). No
+  texture: the reality is in bevels, shadows and light. A session is a key
+  (`Painter::key`): a face lit from above, a bevel along its top edge, its
+  side showing below the face, its shadow on the plate. The plus bays are
+  sunk into the plate with a dashed edge, and a key rises into one under
+  the cursor. Anything that scrolls sits on a screen sunk into the plate:
+  the files, the usage limits. The header counts are small LEDs, the plus a
+  round push button, limits and context segmented meters. The stage's
+  faceplate is painted with the same light (`TerminalWindow::paint_plate`,
+  a GDI gradient and seam), and each pane is a screen set into it: a bezel
+  of plate that continues the stage's light from where the pane sits, the
+  glass sunk in with rounded corners and shade under its top edge, the
+  name printed on the plate above it beside the session's lamp, and the
+  glass rimmed in the project's colour on the pane with the keyboard
+  (`glyphs::grid_origin`, tested). The terminal's black is the screens'
+  glass and its red, green, yellow and blue are the lamps' colours. No
+  acrylic any more, so every window is opaque and its text ClearType.
+- **Soft shadows without blur.** Direct2D's hwnd targets have no effects,
+  so a soft edge is eight copies of a shape, each a little bigger and
+  fainter (`blur_steps`, tested). A shadow inside a shape is the outside of
+  a moved copy, drawn as a wide stroke under a layer clipped to the shape
+  (`Painter::inner`, `Painter::hollow`).
+- **Phase as light.** Each key has a lamp down its left edge
+  (`theme::lamp`). Working is blue with a hot spot running up and down it.
+  Waiting breathes amber and backlights its whole key, light spilling out
+  under it, and sends a ring off itself the moment it starts waiting. Done
+  is green and flashes once. Idle, paused and ended lamps are dark glass,
+  and paused and ended keys are latched down (`theme::depth`) and fade back
+  (`theme::presence`).
 - **Project accents.** Eight colours chosen away from every phase colour,
   picked by an FNV hash of the project key (`theme::accent`), so a project
   keeps its colour across runs. It marks the cluster's name, washes faintly
@@ -796,7 +812,7 @@ be read as a session needing you.
   it still.
 - **Type.** Project names in Segoe UI Variable Display, session names
   semibold, ages with tabular digits so they do not shuffle each second,
-  FILES letter spaced, the header counts as small chips.
+  FILES and RECENT letter spaced like legends printed on the plate.
 
 What it costs, measured on a release build with two clusters of fake
 sessions: 1.1 % of one core while two tiles work and two wait, 0.8 % with
@@ -817,8 +833,10 @@ matching its cluster's mark, context rings at 38 % and 82 %. After the first
 look proved too light and its borders too bright, the darker pass was
 checked the same way beside the installed build.
 
-Not done: the tray menu is still light. Panes are square: a child window
-can only be rounded with a window region, whose corners are jagged.
+Not done: the tray menu is still light, and the stage keeps Windows' own
+title bar, plate coloured, since drawing our own means taking over dragging,
+snapping and the caption buttons. Panes are still square child windows; the
+glass inside them is what is rounded.
 
 ### Quality of life
 
@@ -896,6 +914,170 @@ opened from a synthetic click does.
   repository, via `git rev-parse --git-common-dir`.
 - Worktrees must be optional per project. A session that wants the shared
   working tree, or is not in a repo at all, has to keep working.
+
+### The task list
+
+A list of work per project that agents take items from, one at a time or
+all the way down by themselves. Asked for because every feature or fix
+today means starting a terminal by hand and pasting the story in. Linear
+and the like were ruled out as too much: this is a text file and a tile,
+not a tracker.
+
+- **The list is a file in the repo**, `.horadric/tasks.md`, beside the
+  `config.json` of step 4. The human edits it in VS Code, agents read and
+  write it like any other file, and git keeps its history. No database, no
+  sync, nothing in `state.json`. Committing it is the project's choice.
+- **The format** is a Markdown checklist, and the file order is the work
+  order. Moving a line is how priority changes. Indented lines under an
+  item are its notes and go to the agent with it.
+
+  ```
+  - [x] Rename Glance to Horadric
+  - [/] Fix the login redirect @fix-login-redirect
+    Happens only after a session expires. Repro in #12.
+  - [?] Add dark mode to the settings page @add-dark-mode
+  - [!] Migrate to the new API @migrate-api: needs a key I do not have
+  - [ ] Show the build time in the footer
+  ```
+
+  `[ ]` open, `[/]` being worked on, `[?]` done by the agent and waiting
+  for review, `[!]` blocked with a reason, `[x]` done. `@name` is the
+  session that holds it, so the file alone says who has what and a
+  restart loses nothing. GitHub renders only `[ ]` and `[x]` as boxes; the
+  rest show as text, which is fine. No dependencies, labels, estimates or
+  assignees.
+- **Who writes what.** Horadric changes the markers and the `@name`, one
+  line at a time: read the file, change that line, write it back, so an
+  edit made in VS Code a second earlier survives. Everything else belongs
+  to the human and the agents. A line Horadric cannot parse is left alone.
+- **Taking an item.** A click on an open item starts a session named after
+  it (`fix-login-redirect`) with the item and its notes as the first
+  prompt. `--append-system-prompt` tells the agent it is working a task
+  from the list, to commit its work when finished, and how to report back:
+  `horadric task done` or `horadric task blocked "reason"`. Both find
+  their session through `HORADRIC_SESSION` and post to the running app
+  like `horadric new` does (`COMMAND_HEADER`). `horadric task add "text"`
+  appends an item, so an agent that finds a bug on the way can file it.
+- **Why the agent reports done.** `Stop` only means a turn ended. It is
+  just as often a question as a finished job, so the hooks cannot tell
+  the two apart. The agent can.
+- **Three modes per project**, switched in the tile's header and kept in
+  `.horadric/config.json`:
+  - *Manual.* Nothing starts by itself. Click items to take them.
+  - *Review.* Horadric takes the first open item. When the agent reports
+    done, the item goes `[?]`, the tile lights amber and the usual
+    notification fires. Approve on the tasks tile and the item goes `[x]`,
+    the session closes and the next item starts. Or type into the session
+    what is wrong; the agent keeps going and reports done again.
+  - *Auto.* The same without the gate: done goes straight to `[x]` and the
+    next item starts, until the list is empty.
+- **One fresh session per item.** Carrying one session down the list
+  would fill its context with the items before. The commit the agent made
+  is what the next one builds on.
+- **When the runner stops.** At a blocked item, since the order is the
+  order and the next item may need this one. At `StopFailure`. At a `Stop`
+  with no report, which means the agent is asking something; the session
+  lights up like any waiting one and the runner waits with it. A
+  permission prompt pauses it the same way, so how far auto mode gets
+  alone depends on the permission mode picked in the usage window. Later,
+  maybe: when the five hour limit runs out, wait for the reset and go on.
+- **One at a time until worktrees.** Two agents in one working tree
+  trample each other, so the runner holds one item per project. With step
+  4 each item gets its own worktree and `parallel` in `config.json` lets
+  the runner hold several. The file then lives in the main working tree
+  only: every worktree has its own copy, and those are ignored.
+- **The tasks tile** sits in the cluster above the files tile, built the
+  same way: rows for the items not done yet, the marker as a glyph, the
+  holding session's name, a count of done items in the header, the
+  header's fold. A click on an open row takes it, on a held row shows its
+  session, on a `[?]` row shows the session with an Approve button on the
+  row. The header has the mode and a `+` that asks for a line of text, as
+  the rename dialog does. The file is watched as the files tile watches
+  the tree, so an edit in VS Code shows within a second.
+- **Planning is an item too.** "Plan the billing page" is an item whose
+  agent writes the smaller items it decides on into the file, below its
+  own line. No manager agent sits over the runner: a fixed loop is cheaper
+  and does what it says.
+- **Pure and tested:** the parser and the one line rewrite (`tasks.rs`,
+  round trips a file byte for byte apart from the changed line) and the
+  runner's decision, which item to start or whether to wait, given the
+  list, the sessions and the mode.
+- **Verifying it.** The runner starts agents by itself, which is exactly
+  what went wrong once (see Verifying Windows code in `CLAUDE.md`). Test
+  with `HORADRIC_AGENT=cmd.exe` and `horadric task done` typed by hand
+  first, and count `claude.exe` children after every change to the runner.
+
+Order of work: the file and a read only tile, then taking an item with
+`done` and `blocked`, then review mode, then auto, then parallel once
+step 4 is in. Manual and review are useful before worktrees exist.
+
+Open: whether a `Stop` with no report should get one automatic nudge in
+auto mode ("if you are finished, run `horadric task done`") before the
+runner gives up and waits for the human.
+
+### SSH hosts
+
+A project's servers, at hand from the project: a terminal on the VPS a
+click away, and agents that know the servers exist and work on them. Asked
+for because a lot of what a project runs on lives on a VPS, and telling the
+agent what to do there should be enough.
+
+- **The agent stays local.** A session runs on this machine as always and
+  reaches a server with `ssh myvps '<command>'` from its own shell tool. It
+  has the code and the server in one place, so it can fix a bug, deploy it
+  and read the logs after. Running `claude` on the server instead was ruled
+  out: its hooks would post to the server's own localhost, which needs a
+  reverse tunnel per connection, and every server would need Claude
+  installed and logged in.
+- **Horadric does not speak SSH.** It runs the `ssh` that ships with
+  Windows, which reads `~/.ssh/config` for aliases, users, ports and keys.
+  A library would be a dependency for what one executable already does,
+  the same reasoning as the VT parser. Keys and passwords never pass
+  through Horadric.
+- **A project's hosts** are a list in `.horadric/config.json`, the
+  `config.json` of step 4 that the task list needs too: `"hosts":
+  ["myvps", "deploy@203.0.113.7"]`, each anything `ssh` takes as a
+  destination. An alias is best, since it keeps users and ports out of
+  the repo. "Add host" in the project menu asks for one, as the rename
+  dialog does, and offers the `Host` names in `~/.ssh/config` that have
+  no wildcard.
+- **The SSH terminal** is a plain terminal (see Plain terminals) whose
+  program is `ssh <host>`. "SSH to myvps" in the project menu, one entry a
+  host. It gets a tile, a pane and a place in the order like any shell, a
+  glyph of its own, and the host as its second line until the remote shell
+  sets a title. An exit with code 0 closes it, as a shell does. Code 255 is
+  `ssh` failing (connection refused, dropped, key refused), so the pane
+  stays with the error in view and the tile goes paused; a click
+  reconnects. After a restart it comes back paused, as a shell does.
+- **Telling the agent.** Every session in a project with hosts gets them
+  through `--append-system-prompt` when it starts or resumes: which hosts
+  belong to the project, to reach them with `ssh <host> '<command>'`, and
+  to pass `-o BatchMode=yes`, so a host that wants a password or a
+  passphrase fails at once instead of hanging on a prompt the agent cannot
+  answer. With the task list's prompt the two are joined into one. A
+  resume takes the list as it is then, like the defaults.
+- **Permissions are the user's.** A command on a server goes through the
+  permission mode picked in the usage window like any other command. With
+  bypass permissions on, the agent runs remote commands without asking,
+  because that is what the user chose. Horadric adds no gate of its own.
+- **Keys the agent can use.** An agent's shell is not interactive, so the
+  key has to work without typing: no passphrase, or one held by an agent
+  its `ssh` can reach. Git Bash, which Claude Code uses on Windows, brings
+  its own `ssh` that does not talk to the Windows `ssh-agent` service.
+  Worth checking on screen which one the agent gets, and saying in the
+  prompt which `ssh` to run if it matters.
+- **Pure and tested:** reading `hosts` from `config.json`, the `Host`
+  names out of an `ssh_config` (wildcards and `Match` blocks skipped), the
+  command line for an SSH terminal, the prompt text, and the exit code to
+  close or keep.
+- **Verifying it.** On screen against a real server with a harmless
+  command (`uptime`), and against `localhost` if the Windows OpenSSH server
+  is installed. The agent side with `horadric run -- -p "Run uptime on
+  myvps" --model claude-haiku-4-5-20251001` in a project with a host.
+
+Order of work: hosts in `config.json` and the SSH terminal from the
+project menu, then the prompt for agents, then "Add host" with the
+suggestions from `~/.ssh/config`.
 
 ### Step 5: inbox, installer, updater
 

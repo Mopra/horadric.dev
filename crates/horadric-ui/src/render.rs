@@ -5,12 +5,14 @@
 //! one window's render target and brushes. Drawing happens in DIPs; Direct2D
 //! applies the DPI.
 //!
-//! A cluster is dark clay: a slab with tiles moulded out of it, lit from
-//! the top left. Direct2D's hwnd targets have no blur, so every soft shadow
-//! is a stack of shapes each a little bigger and fainter (`Painter::cast`,
-//! `Painter::hollow`). A session's phase is how far its tile stands off the
-//! slab and what tints it: a waiting tile puffs up and glows, a working one
-//! has a light going round it, an ended one sinks in.
+//! A cluster is a faceplate on a piece of hardware: matte metal lit from
+//! above, sessions as keys standing up off it, each with a lamp, and a
+//! screen sunk into it for the files. Direct2D's hwnd targets have no blur,
+//! so every soft shadow is a stack of shapes each a little bigger and
+//! fainter (`Painter::cast`, `Painter::hollow`). A session's lamp says what
+//! it does: a working one has light running up and down it, a waiting one
+//! breathes and backlights its whole key, an ended one is dark and its key
+//! latched down.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -28,9 +30,9 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1BitmapRenderTarget, ID2D1Factory, ID2D1Geometry,
     ID2D1GradientStopCollection, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush,
-    ID2D1RadialGradientBrush, ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    ID2D1RadialGradientBrush, ID2D1RenderTarget, ID2D1SolidColorBrush,
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-    D2D1_CAP_STYLE_FLAT, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_CUSTOM,
+    D2D1_CAP_STYLE_ROUND, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_CUSTOM,
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAMMA_2_2,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
@@ -69,10 +71,12 @@ const ICON_FONTS: [PCWSTR; 2] = [w!("Segoe Fluent Icons"), w!("Segoe MDL2 Assets
 const TEXT_CONTRAST: f32 = 2.0;
 
 /// Where the name and the lines under it start in a tile, after the icon.
-const TILE_TEXT_X: f32 = 46.0;
+const TILE_TEXT_X: f32 = 56.0;
 /// A window's name from the left of its header, in line with the text in
 /// the boxes below it.
-const NAME_INSET: f32 = 10.0;
+const NAME_INSET: f32 = INNER_PAD;
+/// Between the edge of a key, screen or section and the text in it.
+const INNER_PAD: f32 = 14.0;
 /// The activity trace at the bottom right of a tile.
 const TRACE_BARS: usize = 20;
 const TRACE_BAR_W: f32 = 1.6;
@@ -416,7 +420,7 @@ impl Target {
                 );
             }
             if scene.ambient {
-                self.painter(&self.rt).light(gpu, m, scene);
+                self.painter(&self.rt).light(m, scene);
             }
             self.rt.EndDraw(None, None)
         }
@@ -459,7 +463,7 @@ struct Painter<'a> {
 impl Painter<'_> {
     /// Everything that holds still between frames.
     unsafe fn still(&self, gpu: &Gpu, m: &Metrics, scene: &Scene) {
-        self.slab(gpu, m, scene.layout.size);
+        self.plate(m, scene.layout.size);
         self.wash(scene);
         if scene.on_stage {
             self.frame(m, scene);
@@ -489,11 +493,11 @@ impl Painter<'_> {
         }
     }
 
-    /// The usage window, dressed like a cluster: the same clay, header and
-    /// tiles, so it reads as one more of them.
+    /// The usage window, dressed like a cluster: the same plate and header,
+    /// the limits on a screen and the settings in a grooved section.
     unsafe fn usage(&self, gpu: &Gpu, m: &Metrics, scene: &UsageScene) {
         let l = scene.layout;
-        self.slab(gpu, m, l.size);
+        self.plate(m, l.size);
         let h = l.header;
         let header_button = scene.button(UsageHit::Header);
         if let (Some(fill), _) = theme::button_look(header_button) {
@@ -524,11 +528,11 @@ impl Painter<'_> {
         }
 
         if let Some(b) = l.limits_box {
-            self.panel(gpu, &b, m.tile_radius);
+            self.screen(gpu, &b, m.tile_radius);
             let limits = scene.usage.map(|u| u.limits.named()).unwrap_or_default();
             if limits.is_empty() {
                 if let Some(r) = l.limits.first() {
-                    let r = Rect::new(r.x + 10.0, r.y, r.w - 20.0, r.h);
+                    let r = Rect::new(r.x + INNER_PAD, r.y, r.w - 2.0 * INNER_PAD, r.h);
                     self.text(
                         &gpu.small,
                         theme::TEXT_DIM,
@@ -543,13 +547,13 @@ impl Painter<'_> {
         }
 
         if let Some(b) = l.settings_box {
-            self.panel(gpu, &b, m.tile_radius);
+            self.group(&b, m.tile_radius);
         }
         for (i, (r, (label, value))) in l.settings.iter().zip(&scene.settings).enumerate() {
             if let (Some(fill), _) = theme::button_look(scene.button(UsageHit::Setting(i))) {
                 self.fill_rounded(&r.inset(3.0), 8.0, fill);
             }
-            let inner = Rect::new(r.x + 10.0, r.y, r.w - 20.0, r.h);
+            let inner = Rect::new(r.x + INNER_PAD, r.y, r.w - 2.0 * INNER_PAD, r.h);
             self.text(&gpu.small, theme::TEXT_DIM, label, inner);
             let ink = if *value == "Default" {
                 theme::TEXT_DIM
@@ -570,10 +574,10 @@ impl Painter<'_> {
     }
 
     /// The start window: a cluster with no project yet. Its tile is drawn
-    /// as the hollow a tile will fill, pressed in like the bottom plus.
+    /// as the empty bay a key will fill, like the bottom plus.
     unsafe fn start(&self, gpu: &Gpu, m: &Metrics, scene: &StartScene) {
         let l = scene.layout;
-        self.slab(gpu, m, l.size);
+        self.plate(m, l.size);
         let h = l.header;
         self.text(
             &gpu.display,
@@ -594,7 +598,7 @@ impl Painter<'_> {
             Rect::new(ix - 14.0, iy - 14.0, 28.0, 28.0),
         );
         let left = r.x + TILE_TEXT_X;
-        let width = r.right() - 10.0 - left;
+        let width = r.right() - INNER_PAD - left;
         let row_h = r.h / 2.0;
         self.text(
             &gpu.name,
@@ -612,12 +616,12 @@ impl Painter<'_> {
         let (Some(b), Some(label)) = (l.recent_box, l.recent_label) else {
             return;
         };
-        self.panel(gpu, &b, m.tile_radius);
-        let pad = 10.0;
+        self.group(&b, m.tile_radius);
+        let pad = INNER_PAD;
         self.text_spaced(
             gpu,
             &gpu.chip,
-            theme::TEXT_DIM,
+            theme::LEGEND,
             "RECENT",
             1.2,
             Rect::new(label.x + pad, label.y, label.w - 2.0 * pad, label.h),
@@ -650,25 +654,20 @@ impl Painter<'_> {
     /// it starts over.
     unsafe fn limit(&self, gpu: &Gpu, r: &Rect, name: &str, limit: &Limit, now: u64) {
         let (used, left) = limit.at(now);
-        let inner = Rect::new(r.x + 10.0, r.y + 2.0, r.w - 20.0, 20.0);
+        let inner = Rect::new(r.x + INNER_PAD, r.y + 5.0, r.w - 2.0 * INNER_PAD, 22.0);
         self.text(&gpu.body, theme::TEXT, name, inner);
         let numbers = match left {
             Some(s) => format!("{}% \u{00B7} resets in {}", used.round(), format_until(s)),
             None => format!("{}%", used.round()),
         };
         self.text(&gpu.small_right, theme::TEXT_DIM, &numbers, inner);
-        let track = Rect::new(inner.x, inner.bottom() + 5.0, inner.w, 4.0);
-        self.fill_rounded(&track, 2.0, theme::WELL);
-        let fill = track.w * (used / 100.0).clamp(0.0, 1.0);
-        if fill > 0.0 {
-            let bar = Rect::new(track.x, track.y, fill.max(track.h), track.h);
-            self.fill_rounded(&bar, 2.0, theme::fullness_color(used));
-        }
+        let track = Rect::new(inner.x, inner.bottom() + 5.0, inner.w, 5.0);
+        self.meter(&track, used / 100.0, theme::fullness_color(used), 32);
     }
 
     /// The light that never stops while a session works or waits, drawn
     /// fresh over the kept layer every frame.
-    unsafe fn light(&self, gpu: &Gpu, m: &Metrics, scene: &Scene) {
+    unsafe fn light(&self, m: &Metrics, scene: &Scene) {
         let radius = m.tile_radius;
         for (r, s, look) in tiles(scene) {
             let phase = &s.phase;
@@ -676,11 +675,13 @@ impl Painter<'_> {
             match phase {
                 Phase::Working => {
                     let t = motion::cycle(look.phase_age, ORBIT);
-                    self.comet(gpu, &r, radius, c, t, look.enter);
+                    self.scan(&lamp_rect(&r), c, t, look.enter);
                 }
                 Phase::Waiting(_) => {
                     let breath = motion::breathe(look.phase_age, BREATH);
-                    self.halo(&r, radius, c, (0.5 + 0.5 * breath) * look.enter);
+                    self.halo(&r, radius, c, (0.3 + 0.4 * breath) * look.enter);
+                    let level = (0.55 + 0.45 * breath) * look.enter;
+                    self.lamp(&lamp_rect(&r), c, level);
                 }
                 _ => {}
             }
@@ -696,7 +697,7 @@ impl Painter<'_> {
             &Rect::new(0.0, 0.0, w, depth),
             (0.0, depth),
             &[
-                (0.0, scene.accent.with_alpha(0.07)),
+                (0.0, scene.accent.with_alpha(0.05)),
                 (1.0, scene.accent.with_alpha(0.0)),
             ],
         );
@@ -755,83 +756,188 @@ impl Painter<'_> {
                 continue;
             }
             let text = format!("{n} {label}");
-            let w = self.measure(gpu, &gpu.chip, &text) + 14.0;
-            let chip = Rect::new(right - w, cy - 9.0, w, 18.0);
-            if chip.x < name_x + name_w + 20.0 {
+            let text_w = self.measure(gpu, &gpu.chip, &text) + 2.0;
+            let w = text_w + 12.0;
+            let x = right - w;
+            if x < name_x + name_w + 20.0 {
                 break;
             }
-            self.clay(gpu, &chip, 9.0, theme::SURFACE.mix(c, 0.14), 0.45, 1.0);
-            self.text(
-                &gpu.chip,
-                c,
-                &text,
-                Rect::new(chip.x + 7.0, chip.y, w - 7.0, chip.h),
-            );
-            right = chip.x - 5.0;
+            self.led(x + 3.0, cy, c);
+            let at = Rect::new(x + 12.0, cy - 9.0, text_w, 18.0);
+            self.text(&gpu.chip, theme::TEXT_DIM, &text, at);
+            right = x - 10.0;
         }
 
-        let (fill, ink) = theme::button_look(scene.button(Hit::New));
-        if let Some(fill) = fill {
-            self.fill_rounded(&layout.new.inset(3.0), 8.0, fill);
-        }
+        self.groove(h.x, h.right(), h.bottom() + 3.0);
+
+        let b = scene.button(Hit::New);
+        let (_, ink) = theme::button_look(b);
+        let depth = match b {
+            Button::Idle => 0.35,
+            Button::Hover => 0.6,
+            Button::Pressed => 0.1,
+        };
+        let cap = layout.new.inset(4.0);
+        self.key(gpu, &cap, cap.h / 2.0, theme::SURFACE, depth, 1.0);
         self.icon(&gpu.icon_small, ink, '\u{E710}', layout.new);
     }
 
-    /// The window itself, moulded: its clay, with the light catching the
-    /// top left of it and the far edges in shade.
-    unsafe fn slab(&self, gpu: &Gpu, m: &Metrics, (w, h): (f32, f32)) {
-        self.rt.Clear(Some(&color(theme::WINDOW_BG)));
-        let r = Rect::new(0.0, 0.0, w, h);
-        self.inner(
-            gpu,
-            &r,
-            m.window_radius,
-            (3.0, 10.0),
-            theme::SLAB_LIGHT,
-            theme::SLAB_SHADE,
-            1.0,
+    /// The faceplate: matte metal, lighter at the top where the light
+    /// falls, with a seam cut round it inside the window's edge.
+    unsafe fn plate(&self, m: &Metrics, (w, h): (f32, f32)) {
+        self.rt.Clear(Some(&color(theme::PLATE_BOTTOM)));
+        let all = Rect::new(0.0, 0.0, w, h);
+        self.fill_gradient(
+            &all,
+            (0.0, h),
+            &[(0.0, theme::PLATE_TOP), (1.0, theme::PLATE_BOTTOM)],
         );
+        let seam = Rect::new(5.5, 5.5, w - 11.0, h - 11.0);
+        self.engrave(&seam, (m.window_radius - 3.0).max(2.0));
     }
 
-    /// A panel of clay holding rows: the files tile, the usage window's
-    /// boxes. Raised a little less than a tile, since it is a place, not a
-    /// thing to click.
-    unsafe fn panel(&self, gpu: &Gpu, r: &Rect, radius: f32) {
-        self.clay(gpu, r, radius, theme::SURFACE, 0.7, 1.0);
+    /// A line cut into the plate: a dark groove with the light catching the
+    /// edge under it.
+    unsafe fn engrave(&self, r: &Rect, radius: f32) {
+        let lit = Rect::new(r.x, r.y + 1.0, r.w, r.h);
+        self.stroke_rounded(&lit, radius, theme::ENGRAVE_LIGHT, 1.0);
+        self.stroke_rounded(r, radius, theme::ENGRAVE_DARK, 1.0);
     }
 
-    /// `r` moulded out of `fill`, standing `depth` off the window, lit from
-    /// the top left. One is a resting tile. Below zero it is pressed into
-    /// the window instead. `opacity` fades the whole of it in.
-    unsafe fn clay(&self, gpu: &Gpu, r: &Rect, radius: f32, fill: Color, depth: f32, opacity: f32) {
+    /// A straight groove across the plate, from `x0` to `x1` at `y`.
+    unsafe fn groove(&self, x0: f32, x1: f32, y: f32) {
+        self.fill_rounded(
+            &Rect::new(x0, y + 1.0, x1 - x0, 1.0),
+            0.0,
+            theme::ENGRAVE_LIGHT,
+        );
+        self.fill_rounded(&Rect::new(x0, y, x1 - x0, 1.0), 0.0, theme::ENGRAVE_DARK);
+    }
+
+    /// A key standing `depth` off the plate: its face lit from above, a
+    /// bevel along its top edge, its side showing below the face and its
+    /// shadow falling on the plate. Near zero it is latched down.
+    /// `opacity` fades the whole of it in.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn key(&self, gpu: &Gpu, r: &Rect, radius: f32, face: Color, depth: f32, opacity: f32) {
         let opacity = opacity.clamp(0.0, 1.0);
         if opacity <= 0.0 {
             return;
         }
-        let d = depth.abs().min(2.5);
-        if depth > 0.0 {
-            // The shadow it casts, down and to the right, softer and further
-            // the higher it stands.
-            let shadow = theme::CAST.fade(opacity);
-            self.cast(r, radius, (1.5 * d, 4.0 * d), 4.0 + 10.0 * d, shadow);
-            // Where it meets the window, a tight dark line, so it sits on
-            // the slab rather than floating over it.
-            self.cast(r, radius, (0.0, 1.0), 2.0, shadow.fade(0.6));
-        } else if depth < 0.0 {
-            // A hollow's lower lip catches the light.
-            self.cast(r, radius, (0.0, 1.0), 1.0, theme::LIP.fade(opacity));
-        }
-        self.fill_rounded(r, radius, fill.fade(opacity));
-        if d <= 0.0 {
+        let d = depth.clamp(0.0, 2.5);
+        let side = 1.0 + 2.5 * d;
+        let shadow = theme::CAST.fade(opacity * (0.35 + 0.35 * d.min(1.0)));
+        self.cast(r, radius, (0.0, side + 1.5 * d), 3.0 + 6.0 * d, shadow);
+        let below = Rect::new(r.x, r.y + side, r.w, r.h);
+        let black = Color::rgb(0);
+        self.fill_rounded(&below, radius, face.mix(black, 0.6).fade(opacity));
+        let white = Color::rgb(0xFFFFFF);
+        self.fill_rounded_gradient(
+            r,
+            radius,
+            &[(0.0, face.mix(white, 0.07)), (1.0, face.mix(black, 0.1))],
+            opacity,
+        );
+        let bevel = (1.0, 2.0);
+        let shade = theme::BEVEL_SHADE.fade(0.6);
+        self.inner(gpu, r, radius, bevel, theme::BEVEL_LIGHT, shade, opacity);
+    }
+
+    /// Something sunk into the plate: its floor in `fill`, shade under its
+    /// top edge, and the plate's lit lip along its bottom.
+    unsafe fn sunk(&self, gpu: &Gpu, r: &Rect, radius: f32, fill: Color) {
+        let lip = Rect::new(r.x, r.y + 1.0, r.w, r.h).inset(-0.5);
+        self.stroke_rounded(&lip, radius + 0.5, theme::ENGRAVE_LIGHT, 1.0);
+        self.fill_rounded(r, radius, fill);
+        let (near, far) = (theme::HOLLOW_SHADE, theme::HOLLOW_LIGHT);
+        self.inner(gpu, r, radius, (1.5, 5.0), near, far, 1.0);
+    }
+
+    /// A screen sunk into the plate, for anything that scrolls: black
+    /// glass with a faint sheen across its top.
+    unsafe fn screen(&self, gpu: &Gpu, r: &Rect, radius: f32) {
+        self.sunk(gpu, r, radius, theme::SCREEN);
+        let white = Color::rgb(0xFFFFFF);
+        let sheen = Rect::new(r.x, r.y, r.w, (r.h * 0.4).min(60.0));
+        self.fill_rounded_gradient(
+            &sheen,
+            radius,
+            &[(0.0, white.with_alpha(0.035)), (1.0, white.with_alpha(0.0))],
+            1.0,
+        );
+    }
+
+    /// A section of the plate, outlined by a groove, holding rows of
+    /// labelled settings.
+    unsafe fn group(&self, r: &Rect, radius: f32) {
+        self.engrave(r, radius);
+    }
+
+    /// A session's lamp in its slot at `r`, burning `level` of full in `c`.
+    /// Off, it is dark glass with a glint on it, so an unlit lamp still
+    /// reads as a lamp.
+    unsafe fn lamp(&self, r: &Rect, c: Color, level: f32) {
+        let round = r.w / 2.0;
+        let housing = r.inset(-1.5);
+        let black = Color::rgb(0);
+        self.fill_rounded(&housing, round + 1.5, black.with_alpha(0.55));
+        if level <= 0.0 {
+            self.fill_rounded(r, round, theme::LAMP_OFF);
+            let glint = Rect::new(r.x + 1.0, r.y + 2.0, r.w - 2.0, r.h * 0.3);
+            self.fill_rounded(&glint, 1.0, Color::rgb(0xFFFFFF).with_alpha(0.08));
             return;
         }
-        let spread = (1.5 + 2.0 * d.min(1.5), 5.0 + 4.0 * d);
-        let (near, far) = if depth > 0.0 {
-            (theme::RIM_LIGHT, theme::RIM_SHADE)
-        } else {
-            (theme::HOLLOW_SHADE, theme::HOLLOW_LIGHT)
+        let level = level.min(1.0);
+        // The light spilling onto the key round it.
+        let rings = 4;
+        for i in 0..rings {
+            let s = 1.5 + i as f32 * 2.0;
+            let k = 1.0 - i as f32 / rings as f32;
+            let spill = c.with_alpha(level * 0.16 * k * k);
+            self.stroke_rounded(&r.inset(-s), round + s, spill, 2.0);
+        }
+        self.fill_rounded(r, round, theme::LAMP_OFF.mix(c, level));
+        let hot = c.mix(Color::rgb(0xFFFFFF), 0.45).fade(level);
+        self.fill_rounded(&r.inset(1.0), (round - 1.0).max(0.5), hot);
+    }
+
+    /// A hot spot running up and down a working session's lamp, `t` of
+    /// the way through a sweep.
+    unsafe fn scan(&self, r: &Rect, c: Color, t: f32, strength: f32) {
+        let travel = (1.0 - (t * std::f32::consts::TAU).cos()) / 2.0;
+        let y = r.y + 2.0 + (r.h - 4.0) * travel;
+        let hot = c.mix(Color::rgb(0xFFFFFF), 0.5);
+        self.glow_dot(r.x + r.w / 2.0, y, 7.0, hot, strength);
+    }
+
+    /// A small round indicator, lit in `c`.
+    unsafe fn led(&self, x: f32, y: f32, c: Color) {
+        self.glow_dot(x, y, 6.0, c, 0.45);
+        let dot = D2D1_ELLIPSE {
+            point: Vector2 { X: x, Y: y },
+            radiusX: 2.5,
+            radiusY: 2.5,
         };
-        self.inner(gpu, r, radius, spread, near, far, opacity);
+        self.brush
+            .SetColor(&color(c.mix(Color::rgb(0xFFFFFF), 0.3)));
+        self.rt.FillEllipse(&dot, self.brush);
+    }
+
+    /// A bar of lamps across `r`, `fraction` of them lit in `c`, as a
+    /// level meter on a mixing desk.
+    unsafe fn meter(&self, r: &Rect, fraction: f32, c: Color, segments: usize) {
+        let gap = if r.w / segments as f32 > 4.0 {
+            1.5
+        } else {
+            1.0
+        };
+        let w = (r.w - gap * (segments as f32 - 1.0)) / segments as f32;
+        let lit = (fraction.clamp(0.0, 1.0) * segments as f32).ceil() as usize;
+        for i in 0..segments {
+            let seg = Rect::new(r.x + i as f32 * (w + gap), r.y, w, r.h);
+            let c = if i < lit { c } else { theme::LAMP_OFF };
+            self.fill_rounded(&seg, 1.0, c);
+        }
     }
 
     /// `r`'s shadow, moved by `(dx, dy)` and blurred `blur` wide: the same
@@ -935,6 +1041,21 @@ impl Painter<'_> {
             return;
         };
         self.rt.FillRectangle(&rect(r), &brush);
+    }
+
+    /// A rounded rectangle filled top to bottom through `stops`.
+    unsafe fn fill_rounded_gradient(
+        &self,
+        r: &Rect,
+        radius: f32,
+        stops: &[(f32, Color)],
+        opacity: f32,
+    ) {
+        let Some(brush) = self.linear(r.x, r.y, r.x, r.bottom(), stops) else {
+            return;
+        };
+        brush.SetOpacity(opacity);
+        self.rt.FillRoundedRectangle(&rounded(r, radius), &brush);
     }
 
     unsafe fn gradient_stops(&self, stops: &[(f32, Color)]) -> Option<ID2D1GradientStopCollection> {
@@ -1041,47 +1162,6 @@ impl Painter<'_> {
         self.rt.FillEllipse(&e, &brush);
     }
 
-    /// A light travelling round a tile's edge, `t` of the way round, with a
-    /// tail that fades behind it.
-    unsafe fn comet(&self, gpu: &Gpu, r: &Rect, radius: f32, c: Color, t: f32, strength: f32) {
-        let edge = r.inset(0.5);
-        let radius = radius - 0.5;
-        let length = motion::perimeter(edge.w, edge.h, radius);
-        let tail = (length * 0.3).min(140.0);
-        let head = t * length;
-        let rr = rounded(&edge, radius);
-        let Ok(geometry) = gpu.d2d.CreateRoundedRectangleGeometry(&rr) else {
-            return;
-        };
-        let mut at = Vector2::default();
-        if geometry
-            .ComputePointAtLength(head, None, 0.25, Some(&mut at), None)
-            .is_err()
-        {
-            return;
-        }
-        let Some(fade) = self.radial(
-            at.X,
-            at.Y,
-            tail,
-            &[
-                (0.0, c),
-                (0.35, c.with_alpha(0.55)),
-                (1.0, c.with_alpha(0.0)),
-            ],
-        ) else {
-            return;
-        };
-        for (width, alpha) in [(5.0, 0.22), (1.5, 1.0)] {
-            let Some(style) = dash(gpu, head - tail, tail, length, width) else {
-                continue;
-            };
-            fade.SetOpacity(alpha * strength);
-            self.rt.DrawRoundedRectangle(&rr, &fade, width, &style);
-        }
-        self.glow_dot(at.X, at.Y, 7.0, c, 0.5 * strength);
-    }
-
     /// The stage shows a whole project, so the project is what gets marked,
     /// not each of its tiles: its colour around everything in the window.
     unsafe fn frame(&self, m: &Metrics, scene: &Scene) {
@@ -1122,26 +1202,28 @@ impl Painter<'_> {
         let radius = m.tile_radius;
         let ambient = scene.ambient;
 
-        // The phase, as how far the tile stands off the slab and the tint of
-        // its clay. The cursor lifts it a little more and a press pushes it
-        // down, so the text keeps its colours: dimming a session's name on a
-        // press would look like the session changed.
+        // A key. The cursor lifts it a little and a press pushes it down,
+        // so the text keeps its colours: dimming a session's name on a press
+        // would look like the session changed.
         let lift = match b {
-            Button::Pressed => 0.25 - theme::depth(phase).max(0.0),
-            _ => 0.5 * look.hover,
+            Button::Pressed => 0.15 - theme::depth(phase),
+            _ => 0.3 * look.hover,
         };
         let held = if scene.held == Some(i) { 1.0 } else { 0.0 };
         let depth = theme::depth(phase) + lift + held;
-        self.clay(gpu, r, radius, theme::phase_fill(phase), depth, look.enter);
+        let face = theme::phase_fill(phase).mix(theme::TEXT, 0.03 * look.hover);
+        self.key(gpu, r, radius, face, depth, look.enter);
 
-        // And as light. Waiting needs you, so it is the one that moves
-        // most: it glows and breathes. Working has light going round it. A
-        // finished turn flashes once.
+        // The phase, as light. Waiting needs you, so it is the one that
+        // moves most: its lamp breathes and its key is backlit, light
+        // spilling out under it. A finished turn flashes once.
         let arrival = if ambient { look.arrival } else { 0.0 };
         match phase {
             Phase::Waiting(_) => {
+                let glow = c.with_alpha(0.3);
+                self.inner(gpu, r, radius, (2.0, 8.0), glow, glow, look.enter);
                 if !ambient {
-                    self.halo(r, radius, c, 0.85);
+                    self.halo(r, radius, c, 0.6);
                 }
                 if arrival > 0.0 {
                     // A ring leaving the tile the moment it starts waiting.
@@ -1155,17 +1237,19 @@ impl Painter<'_> {
                     self.stroke_rounded(&ring, radius + spread, c.with_alpha(arrival * 0.45), 1.2);
                 }
             }
-            Phase::Working | Phase::Done => {
-                if arrival > 0.0 {
-                    self.fill_rounded(r, radius, c.with_alpha(0.16 * arrival * look.enter));
-                }
-                let strength = 3.0 * theme::edge_strength(phase) + 0.6 * arrival;
-                let edge = r.inset(0.75);
-                let a = strength * look.enter;
-                self.stroke_rounded(&edge, radius - 0.75, c.with_alpha(a), 1.2);
+            Phase::Done if arrival > 0.0 => {
+                self.fill_rounded(r, radius, c.with_alpha(0.14 * arrival * look.enter));
             }
-            Phase::Idle | Phase::Ended | Phase::Paused => {}
+            _ => {}
         }
+        // A waiting lamp breathes, so the light draws it fresh each frame.
+        let breathing = ambient && phase.is_waiting();
+        let level = if breathing {
+            0.0
+        } else {
+            (theme::lamp(phase) + 0.3 * arrival) * look.enter
+        };
+        self.lamp(&lamp_rect(r), c, level);
 
         // The icon: what the agent is doing, in the phase's light.
         let icon_c = if matches!(phase, Phase::Idle | Phase::Ended | Phase::Paused) {
@@ -1188,13 +1272,8 @@ impl Painter<'_> {
             } else {
                 theme::TEXT_DIM.with_alpha(0.7)
             };
-            let track = Rect::new(ix - 10.0, iy + 14.0, 20.0, 2.0);
-            self.fill_rounded(&track, 1.0, theme::TEXT_DIM.with_alpha(0.14));
-            let fill = track.w * (c / 100.0).clamp(0.0, 1.0);
-            if fill > 0.0 {
-                let bar = Rect::new(track.x, track.y, fill.max(track.h), track.h);
-                self.fill_rounded(&bar, 1.0, ink.fade(presence));
-            }
+            let track = Rect::new(ix - 10.0, iy + 14.0, 20.0, 3.0);
+            self.meter(&track, c / 100.0, ink.fade(presence), 5);
         }
         self.icon(
             &gpu.icon,
@@ -1206,7 +1285,7 @@ impl Painter<'_> {
             Rect::new(ix - 14.0, iy - 14.0, 28.0, 28.0),
         );
 
-        let pad = 10.0;
+        let pad = INNER_PAD;
         let left = r.x + TILE_TEXT_X;
         let width = r.right() - pad - left;
         let row_h = r.h / 2.0;
@@ -1340,8 +1419,8 @@ impl Painter<'_> {
         );
     }
 
-    /// Another session in this project, or a plain terminal: an empty slot
-    /// where the next tile would go, pressed in so it never reads as a
+    /// Another session in this project, or a plain terminal: an empty bay
+    /// where the next key would go, sunk in so it never reads as a
     /// session.
     unsafe fn add(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Button, glyph: char) {
         let (_, ink) = theme::button_look(b);
@@ -1349,24 +1428,55 @@ impl Painter<'_> {
         self.icon(&gpu.icon_small, ink, glyph, *r);
     }
 
-    /// A hollow pressed into the slab, where something is yet to go. The
-    /// cursor raises it into a tile, as if offering one.
+    /// A bay sunk into the plate, where something is yet to go, its edge
+    /// dashed. The cursor raises a key into it, as if offering one.
     unsafe fn slot(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Button) {
-        let (fill, depth) = match b {
-            Button::Idle => (theme::WELL, -0.5),
-            Button::Hover => (theme::SURFACE, 0.6),
-            Button::Pressed => (theme::WELL, -0.8),
-        };
-        self.clay(gpu, r, m.tile_radius, fill, depth, 1.0);
+        match b {
+            Button::Hover => self.key(gpu, r, m.tile_radius, theme::SURFACE, 0.6, 1.0),
+            Button::Idle | Button::Pressed => {
+                self.sunk(gpu, r, m.tile_radius, theme::WELL);
+                self.dashed(gpu, m, r);
+            }
+        }
+    }
+
+    /// The dashed outline of a bay.
+    unsafe fn dashed(&self, gpu: &Gpu, m: &Metrics, r: &Rect) {
+        let edge = r.inset(2.5);
+        let radius = m.tile_radius - 2.5;
+        let length = motion::perimeter(edge.w, edge.h, radius);
+        // Whole dashes all the way round, so no seam where the outline meets
+        // itself.
+        let count = (length / 7.0).round().max(1.0);
+        let unit = length / count / 1.2;
+        let style = gpu.d2d.CreateStrokeStyle(
+            &D2D1_STROKE_STYLE_PROPERTIES {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                dashCap: D2D1_CAP_STYLE_ROUND,
+                lineJoin: D2D1_LINE_JOIN_ROUND,
+                miterLimit: 1.0,
+                dashStyle: D2D1_DASH_STYLE_CUSTOM,
+                dashOffset: 0.0,
+            },
+            Some(&[unit * 0.35, unit * 0.65]),
+        );
+        self.brush.SetColor(&color(theme::LEGEND.with_alpha(0.35)));
+        self.rt.DrawRoundedRectangle(
+            &rounded(&edge, radius),
+            self.brush,
+            1.0,
+            style.ok().as_ref(),
+        );
     }
 
     /// The project's files as VS Code's explorer shows them: folders with a
     /// chevron, names in the colour of their change, the change letter at the
     /// right edge, a dot on a folder holding one.
     unsafe fn files(&self, gpu: &Gpu, m: &Metrics, l: &FilesLayout, f: &FilesScene) {
-        self.panel(gpu, &l.rect, m.tile_radius);
+        self.screen(gpu, &l.rect, m.tile_radius);
 
-        let pad = 10.0;
+        let pad = INNER_PAD;
         let h = l.header;
         let chevron = if f.collapsed { '\u{E76C}' } else { '\u{E70D}' };
         self.icon(
@@ -1583,35 +1693,12 @@ fn tiles<'a>(scene: &'a Scene) -> impl Iterator<Item = (Rect, &'a Session, Look)
 }
 
 fn icon_centre(r: &Rect) -> (f32, f32) {
-    (r.x + 23.0, r.y + r.h / 2.0)
+    (r.x + 33.0, r.y + r.h / 2.0)
 }
 
-/// A stroke with one dash, `length` long, starting `from` along an outline
-/// `total` long, for a line `width` wide. Dashes are measured in widths.
-unsafe fn dash(
-    gpu: &Gpu,
-    from: f32,
-    length: f32,
-    total: f32,
-    width: f32,
-) -> Option<ID2D1StrokeStyle> {
-    let from = from.rem_euclid(total);
-    gpu.d2d
-        .CreateStrokeStyle(
-            &D2D1_STROKE_STYLE_PROPERTIES {
-                startCap: D2D1_CAP_STYLE_FLAT,
-                endCap: D2D1_CAP_STYLE_FLAT,
-                dashCap: D2D1_CAP_STYLE_FLAT,
-                lineJoin: D2D1_LINE_JOIN_ROUND,
-                miterLimit: 1.0,
-                dashStyle: D2D1_DASH_STYLE_CUSTOM,
-                // A positive offset pulls the pattern back toward the start,
-                // so this puts the dash's start at `from`.
-                dashOffset: (total - from) / width,
-            },
-            Some(&[length / width, (total - length) / width]),
-        )
-        .ok()
+/// Where a tile's lamp sits: a slot down its left edge.
+fn lamp_rect(r: &Rect) -> Rect {
+    Rect::new(r.x + 12.0, r.y + 14.0, 4.0, r.h - 28.0)
 }
 
 /// How far each of the shapes that make a `blur` wide soft edge grows past

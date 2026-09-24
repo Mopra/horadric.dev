@@ -30,7 +30,7 @@ use alacritty_terminal::term::search::{Match, RegexSearch};
 use alacritty_terminal::term::TermMode;
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient, ValidateRect};
+use windows::Win32::Graphics::Gdi::{ClientToScreen, InvalidateRect, ScreenToClient, ValidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -54,7 +54,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::app::{self, Input};
 use crate::clipboard;
 use crate::console::{Console, GridSize};
-use crate::glyphs::{self, CellSize, FindBar, GridTarget, Header, HEADER_H, PAD};
+use crate::glyphs::{self, CellSize, FindBar, GridTarget, Header, HEADER_H};
 use crate::keys::{self, CharAction, Chord, FontStep, Key, Mods};
 use crate::layout::Dir;
 use crate::motion::{self, REVEAL, SPOTLIGHT};
@@ -368,15 +368,6 @@ impl Pane {
         self.shared.font.cell(self.dpi_now())
     }
 
-    /// Where the grid starts, below the header when there is one.
-    fn top(&self) -> f32 {
-        if self.header.get() {
-            HEADER_H
-        } else {
-            0.0
-        }
-    }
-
     /// Resizes the grid to fill the pane below its header.
     fn fit_grid(&self) {
         let mut r = RECT::default();
@@ -388,12 +379,13 @@ impl Pane {
         }
         let scale = self.dpi_now() as f32 / 96.0;
         let cell = self.cell();
-        let cols = ((r.right as f32 / scale - 2.0 * PAD) / cell.w)
-            .floor()
-            .max(2.0);
-        let rows = ((r.bottom as f32 / scale - self.top() - 2.0 * PAD) / cell.h)
-            .floor()
-            .max(1.0);
+        let (w, h) = glyphs::grid_room(
+            r.right as f32 / scale,
+            r.bottom as f32 / scale,
+            self.header.get(),
+        );
+        let cols = (w / cell.w).floor().max(2.0);
+        let rows = (h / cell.h).floor().max(1.0);
         self.console.resize(GridSize {
             cols: cols as u16,
             rows: rows as u16,
@@ -470,6 +462,7 @@ impl Pane {
             status: find::status(&s.query, s.found.is_some()),
         });
         let veil = self.veil();
+        let plate = self.place_in_stage();
         let font = &self.shared.font;
         let cell = font.cell(dpi);
         let frame = match self.console.screen.lock() {
@@ -486,10 +479,28 @@ impl Pane {
                 find.as_ref(),
                 self.drop_target.get(),
                 veil,
+                plate,
             )
         });
         if let Some(Err(_)) = result {
             *slot = None;
+        }
+    }
+
+    /// Where the pane's top is in the stage and how tall the stage is, in
+    /// DIPs, for the faceplate's light to run across every pane as one.
+    fn place_in_stage(&self) -> (f32, f32) {
+        let scale = self.dpi_now() as f32 / 96.0;
+        unsafe {
+            let Ok(parent) = GetParent(self.hwnd) else {
+                return (0.0, 1.0);
+            };
+            let mut stage = RECT::default();
+            let _ = GetClientRect(parent, &mut stage);
+            let mut at = POINT::default();
+            let _ = ClientToScreen(self.hwnd, &mut at);
+            let _ = ScreenToClient(parent, &mut at);
+            (at.y as f32 / scale, stage.bottom.max(1) as f32 / scale)
         }
     }
 
@@ -934,14 +945,15 @@ impl Pane {
         let (x, y) = self.dip(lparam);
         let cell = self.cell();
         let size = self.console.size();
-        let colf = ((x - PAD) / cell.w).max(0.0);
+        let (ox, oy) = glyphs::grid_origin(self.header.get());
+        let colf = ((x - ox) / cell.w).max(0.0);
         let col = (colf as usize).min(size.cols as usize - 1);
         let side = if colf.fract() < 0.5 && (colf as usize) < size.cols as usize {
             Side::Left
         } else {
             Side::Right
         };
-        let row = (((y - self.top() - PAD) / cell.h).max(0.0) as usize).min(size.rows as usize - 1);
+        let row = (((y - oy) / cell.h).max(0.0) as usize).min(size.rows as usize - 1);
         (col, row, side)
     }
 

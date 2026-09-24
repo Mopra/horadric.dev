@@ -1,10 +1,11 @@
-//! Colours and icons. Dark clay: deep plum slate surfaces that look
-//! moulded, lit from the top left, so everything is either puffed up off
-//! the window or pressed into it. Bright text, and phase colours saturated
-//! enough to glow against the dark.
+//! Colours and icons. A hardware control panel in the dark: matte metal
+//! faceplates lit from above, sessions as keys that stand up off the plate,
+//! lamps that say what each one is doing, and screens sunk into the plate
+//! for anything that scrolls. No texture: the reality is in the bevels,
+//! the shadows and the light.
 //!
-//! Colour has two jobs and they never share a place. A phase is a tint and
-//! a light: the fill and the edge of a tile, its icon, the line along a pane
+//! Colour has two jobs and they never share a place. A phase is a light:
+//! a tile's lamp and icon, a waiting key's backlight, the line along a pane
 //! header. A project is an accent: the wash down its cluster, the edge of
 //! the stage showing it. So a project's colour is never mistaken for a
 //! session needing you.
@@ -57,31 +58,37 @@ impl Color {
     }
 }
 
-/// The clay every window is moulded from: a deep plum slate.
-pub const WINDOW_BG: Color = Color::rgb(0x1C1A27);
-/// A surface puffed up off the window: a tile, a panel. A shade lighter
-/// than the window, so it catches more of the light.
-pub const SURFACE: Color = Color::rgb(0x282536);
-/// A surface pressed into the window: an empty slot, an ended session.
-pub const WELL: Color = Color::rgb(0x16141F);
-pub const TEXT: Color = Color::rgb(0xF2F0F8);
-pub const TEXT_DIM: Color = Color::rgb(0xA6A1B8);
+/// The faceplate every window is, a dark matte metal, a shade lighter at
+/// the top where the light falls.
+pub const WINDOW_BG: Color = Color::rgb(0x141518);
+pub const PLATE_TOP: Color = Color::rgb(0x191A1E);
+pub const PLATE_BOTTOM: Color = Color::rgb(0x111214);
+/// A key's face: a session's tile, a button.
+pub const SURFACE: Color = Color::rgb(0x202227);
+/// A bay sunk into the plate, where a key is yet to go, and the face of a
+/// key latched down.
+pub const WELL: Color = Color::rgb(0x0C0D0F);
+/// The glass of a screen: the files list, the limits, the terminals.
+pub const SCREEN: Color = Color::rgb(0x08090B);
+/// A lamp with nothing behind it.
+pub const LAMP_OFF: Color = Color::rgb(0x2A2C32);
+pub const TEXT: Color = Color::rgb(0xE8E9ED);
+pub const TEXT_DIM: Color = Color::rgb(0x8F939E);
+/// Printed on the plate: labels, section names.
+pub const LEGEND: Color = Color::rgb(0x6E727C);
 
-/// The shadow anything raised casts on the window.
-pub const CAST: Color = Color::rgb(0x000000).with_alpha(0.55);
-/// The light catching the top left rim of anything raised, and the shade
-/// on its far rim. On dark clay the light has to stay faint, or it reads
-/// as a white edge rather than a curve.
-pub const RIM_LIGHT: Color = Color::rgb(0xFFFFFF).with_alpha(0.09);
-pub const RIM_SHADE: Color = Color::rgb(0x000000).with_alpha(0.35);
-/// Inside a hollow: shade under its top left lip, light on the far side.
-pub const HOLLOW_SHADE: Color = Color::rgb(0x000000).with_alpha(0.5);
-pub const HOLLOW_LIGHT: Color = Color::rgb(0xFFFFFF).with_alpha(0.04);
-/// A hollow's lower lip, catching the light on the window around it.
-pub const LIP: Color = Color::rgb(0xFFFFFF).with_alpha(0.06);
-/// The window's own rim.
-pub const SLAB_LIGHT: Color = Color::rgb(0xFFFFFF).with_alpha(0.06);
-pub const SLAB_SHADE: Color = Color::rgb(0x000000).with_alpha(0.3);
+/// The shadow a key casts on the plate.
+pub const CAST: Color = Color::rgb(0x000000).with_alpha(0.6);
+/// The light catching the top edge of anything raised, and the shade
+/// along its bottom.
+pub const BEVEL_LIGHT: Color = Color::rgb(0xFFFFFF).with_alpha(0.11);
+pub const BEVEL_SHADE: Color = Color::rgb(0x000000).with_alpha(0.35);
+/// Inside anything sunk: shade under its top edge, light on its bottom.
+pub const HOLLOW_SHADE: Color = Color::rgb(0x000000).with_alpha(0.55);
+pub const HOLLOW_LIGHT: Color = Color::rgb(0xFFFFFF).with_alpha(0.05);
+/// A line cut into the plate: its dark groove and the lit edge under it.
+pub const ENGRAVE_DARK: Color = Color::rgb(0x000000).with_alpha(0.5);
+pub const ENGRAVE_LIGHT: Color = Color::rgb(0xFFFFFF).with_alpha(0.05);
 
 /// Behind a button under the cursor and one held down: white laid over
 /// whatever is there, as Windows 11 does it, so it works on any surface.
@@ -193,15 +200,24 @@ pub fn edge_strength(phase: &Phase) -> f32 {
     }
 }
 
-/// How far a tile stands off the window, by phase. One is a resting
-/// pillow. Waiting needs you, so it puffs up furthest. A session that can
-/// no longer act sinks into the clay, below zero.
+/// How far a session's key stands off the plate, by phase. One is a key
+/// at rest. A session that can no longer act is latched down.
 pub fn depth(phase: &Phase) -> f32 {
     match phase {
-        Phase::Waiting(_) => 1.4,
-        Phase::Working | Phase::Done => 1.0,
-        Phase::Idle => 0.8,
-        Phase::Paused | Phase::Ended => -0.6,
+        Phase::Waiting(_) | Phase::Working | Phase::Done | Phase::Idle => 1.0,
+        Phase::Paused | Phase::Ended => 0.25,
+    }
+}
+
+/// How bright a session's lamp burns at rest, by phase. Off is zero: a
+/// session doing nothing has a dark lamp, so a lit one always means
+/// something.
+pub fn lamp(phase: &Phase) -> f32 {
+    match phase {
+        Phase::Waiting(_) => 1.0,
+        Phase::Working => 0.85,
+        Phase::Done => 0.7,
+        Phase::Idle | Phase::Ended | Phase::Paused => 0.0,
     }
 }
 
@@ -226,18 +242,15 @@ pub fn phase_color(phase: &Phase) -> Color {
     }
 }
 
-/// A tile's clay, tinted by its phase. Waiting is the strongest because it
-/// needs you. A session doing nothing keeps the plain surface, so colour
-/// always means something, and one that has stopped is the pressed well.
+/// A session's key face. Waiting is backlit in its colour, since it needs
+/// you and has to be seen from across the room. The rest leave the lamp to
+/// say what they do, and one that has stopped is latched down, darker.
 pub fn phase_fill(phase: &Phase) -> Color {
-    let strength = match phase {
-        Phase::Waiting(_) => 0.2,
-        Phase::Working => 0.1,
-        Phase::Done => 0.12,
-        Phase::Idle => return SURFACE,
-        Phase::Ended | Phase::Paused => return WELL,
-    };
-    SURFACE.mix(phase_color(phase), strength)
+    match phase {
+        Phase::Waiting(_) => SURFACE.mix(phase_color(phase), 0.22),
+        Phase::Working | Phase::Done | Phase::Idle => SURFACE,
+        Phase::Ended | Phase::Paused => WELL.mix(SURFACE, 0.5),
+    }
 }
 
 /// How much of a limit or a context window is used, in percent, as a
@@ -300,20 +313,24 @@ mod tests {
     }
 
     #[test]
-    fn a_quiet_session_keeps_the_plain_clay_and_a_stopped_one_sinks() {
-        assert_eq!(phase_fill(&Phase::Idle), SURFACE);
+    fn only_waiting_is_backlit_and_a_stopped_key_is_latched_down() {
+        for p in [Phase::Working, Phase::Done, Phase::Idle] {
+            assert_eq!(phase_fill(&p), SURFACE);
+        }
+        assert_ne!(phase_fill(&Phase::Waiting(WaitReason::Input)), SURFACE);
         for p in [Phase::Ended, Phase::Paused] {
-            assert_eq!(phase_fill(&p), WELL);
-            assert!(depth(&p) < 0.0);
+            assert!(depth(&p) < depth(&Phase::Idle));
+            assert!(depth(&p) > 0.0);
         }
     }
 
     #[test]
-    fn waiting_puffs_up_furthest() {
-        let waiting = depth(&Phase::Waiting(WaitReason::Input));
-        for p in [Phase::Working, Phase::Done, Phase::Idle] {
-            assert!(waiting > depth(&p));
-            assert!(depth(&p) > 0.0);
+    fn a_lamp_burns_only_while_there_is_something_to_say() {
+        let waiting = lamp(&Phase::Waiting(WaitReason::Permission));
+        assert!(waiting > lamp(&Phase::Working));
+        assert!(lamp(&Phase::Working) > 0.0 && lamp(&Phase::Done) > 0.0);
+        for p in [Phase::Idle, Phase::Ended, Phase::Paused] {
+            assert_eq!(lamp(&p), 0.0);
         }
     }
 

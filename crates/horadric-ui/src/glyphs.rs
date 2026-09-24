@@ -4,18 +4,27 @@
 //! width as its advance, so text lands exactly on the grid no matter what the
 //! font's own advances say. Characters the font lacks go through DirectWrite
 //! font fallback one at a time, each pinned to its own cell.
+//!
+//! A pane is a screen set into the stage's faceplate: a bezel of plate
+//! round it, the glass sunk in with rounded corners and shade under its top
+//! edge, and the session's name printed on the plate above it beside a
+//! lamp.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
+use windows::core::Interface;
 use windows::core::{w, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1HwndRenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED,
-    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    ID2D1Geometry, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1SolidColorBrush,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
+    D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteFactory, IDWriteFontCollection, IDWriteFontFace, IDWriteTextFormat, DWRITE_FONT_METRICS,
@@ -24,7 +33,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_METRICS, DWRITE_GLYPH_RUN,
     DWRITE_MEASURING_MODE_NATURAL, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::frame::{Decoration, Frame, BOLD, ITALIC};
 use crate::render::{self, hwnd_target, Gpu};
@@ -33,11 +42,39 @@ use crate::theme::{self, Color};
 /// Cascadia ships with Windows 11. Consolas is on every Windows since Vista.
 const FAMILIES: [PCWSTR; 2] = [w!("Cascadia Mono"), w!("Consolas")];
 
-/// Space between the grid and the window edge, in DIPs.
-pub const PAD: f32 = 6.0;
+/// Space between the grid and the edge of the glass, in DIPs.
+pub const PAD: f32 = 14.0;
 
-/// Height of a pane's header, in DIPs.
+/// The plate between the glass and the pane's edge, in DIPs.
+pub const BEZEL: f32 = 6.0;
+
+/// The glass's corners, in DIPs.
+const SCREEN_RADIUS: f32 = 8.0;
+
+/// Height of a pane's header, in DIPs: the plate above the glass that the
+/// name is printed on.
 pub const HEADER_H: f32 = 26.0;
+
+/// Where the glass starts, below the header when there is one.
+pub fn screen_top(header: bool) -> f32 {
+    if header {
+        HEADER_H
+    } else {
+        BEZEL
+    }
+}
+
+/// Where the first cell of the grid is drawn, in DIPs from the pane's top
+/// left.
+pub fn grid_origin(header: bool) -> (f32, f32) {
+    (BEZEL + PAD, screen_top(header) + PAD)
+}
+
+/// How much of a pane `width` by `height` DIPs the grid can have.
+pub fn grid_room(width: f32, height: f32, header: bool) -> (f32, f32) {
+    let (x, y) = grid_origin(header);
+    (width - 2.0 * x, height - y - PAD - BEZEL)
+}
 
 /// The strip above a pane's grid when the stage shows more than one: which
 /// session it is, and the handle it is dragged by.
@@ -62,10 +99,12 @@ pub struct Header<'a> {
 }
 
 /// Where a header's buttons start, from its left, in a pane `width` DIPs
-/// wide: the zoom button's, then the cross's.
+/// wide: the zoom button's, then the cross's. They end over the glass's
+/// right edge.
 pub fn header_buttons(width: f32, zoom: bool, close: bool) -> (Option<f32>, Option<f32>) {
-    let close_at = close.then_some(width - HEADER_H);
-    let zoom_at = zoom.then_some(close_at.unwrap_or(width) - HEADER_H);
+    let end = width - BEZEL;
+    let close_at = close.then_some(end - HEADER_H);
+    let zoom_at = zoom.then_some(close_at.unwrap_or(end) - HEADER_H);
     (zoom_at, close_at)
 }
 
@@ -81,9 +120,9 @@ const FIND_W: f32 = 320.0;
 const FIND_H: f32 = 30.0;
 const FIND_INSET: f32 = 8.0;
 
-/// Behind a pane's header: the clay of a tile, so the header reads as the
-/// label on the dark well under it.
-const HEADER_BG: Color = theme::SURFACE;
+/// Behind the search bar: the plate, tinted toward the blue of a
+/// selection.
+const HEADER_BG: Color = theme::WINDOW_BG;
 
 /// Cell geometry in DIPs, snapped so every cell edge is a whole device pixel.
 /// Without the snap, backgrounds of neighbouring cells leave hairline seams.
@@ -252,6 +291,10 @@ fn glyph_index(face: &IDWriteFontFace, c: char) -> u16 {
 pub struct GridTarget {
     rt: ID2D1HwndRenderTarget,
     brush: ID2D1SolidColorBrush,
+    /// The faceplate's light, top to bottom of the whole stage.
+    plate: ID2D1LinearGradientBrush,
+    /// The shade the bezel casts down onto the top of the glass.
+    shade: ID2D1LinearGradientBrush,
 }
 
 impl GridTarget {
@@ -262,7 +305,15 @@ impl GridTarget {
             // edges would blend into a visible line.
             rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
             let brush = rt.CreateSolidColorBrush(&color(Rgb { r: 0, g: 0, b: 0 }), None)?;
-            Ok(GridTarget { rt, brush })
+            let black = Color::rgb(0);
+            let plate = gradient(&rt, &[theme::PLATE_TOP, theme::PLATE_BOTTOM])?;
+            let shade = gradient(&rt, &[black.with_alpha(0.55), black.with_alpha(0.0)])?;
+            Ok(GridTarget {
+                rt,
+                brush,
+                plate,
+                shade,
+            })
         }
     }
 
@@ -276,9 +327,11 @@ impl GridTarget {
 
     /// Draws a frame, below `header` when there is one, and the search bar
     /// over it when open. With `drop`, the pane is where a dragged one
-    /// would land. `veil` from 0 to 1 lays the background over everything:
+    /// would land. `veil` from 0 to 1 lays the background over the glass:
     /// a pane without the keyboard steps back, a pane just shown fades in.
-    /// `Err` means the target must be recreated.
+    /// `plate` is where the pane's top is in the stage and how tall the
+    /// stage is, in DIPs, so the faceplate's light runs across all panes as
+    /// one. `Err` means the target must be recreated.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
@@ -290,10 +343,11 @@ impl GridTarget {
         find: Option<&FindBar>,
         drop: bool,
         veil: f32,
+        plate: (f32, f32),
     ) -> Result<()> {
-        let top = if header.is_some() { HEADER_H } else { 0.0 };
-        let x = |col: usize| PAD + col as f32 * cell.w;
-        let y = |row: usize| top + PAD + row as f32 * cell.h;
+        let (ox, oy) = grid_origin(header.is_some());
+        let x = |col: usize| ox + col as f32 * cell.w;
+        let y = |row: usize| oy + row as f32 * cell.h;
         let rect = |row: usize, col: usize, cells: usize| D2D_RECT_F {
             left: x(col),
             top: y(row),
@@ -301,8 +355,19 @@ impl GridTarget {
             bottom: y(row) + cell.h,
         };
         unsafe {
+            let size = self.rt.GetSize();
+            let screen = D2D_RECT_F {
+                left: BEZEL,
+                top: screen_top(header.is_some()),
+                right: size.width - BEZEL,
+                bottom: size.height - BEZEL,
+            };
             self.rt.BeginDraw();
-            self.rt.Clear(Some(&color(frame.background)));
+            self.bezel(&screen, frame.background, plate, size);
+            self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+            // Nothing a program draws spills out of the glass.
+            self.rt
+                .PushAxisAlignedClip(&screen, D2D1_ANTIALIAS_MODE_ALIASED);
 
             for f in &frame.fills {
                 self.brush.SetColor(&color(f.color));
@@ -412,35 +477,29 @@ impl GridTarget {
                     }
                 }
             }
+            self.rt.PopAxisAlignedClip();
+            self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
+            self.glass(gpu, &screen, header);
             if let Some(h) = header {
                 self.header(gpu, h);
             }
             if let Some(f) = find {
-                self.find_bar(gpu, f, top);
+                self.find_bar(gpu, f, &screen);
             }
             if veil > 0.0 {
-                let size = self.rt.GetSize();
+                // Over the glass only: the plate and the name printed on it
+                // stay, and the dimmer name already says the pane is not in
+                // use.
                 let bg = frame.background;
                 self.brush.SetColor(&D2D1_COLOR_F {
                     a: veil.min(1.0),
                     ..color(bg)
                 });
-                // The header stays clay: a dark veil over it would read as
-                // dirt, and its dimmer name already says it is not in use.
-                let top = if header.is_some() { HEADER_H } else { 0.0 };
-                self.rt.FillRectangle(
-                    &D2D_RECT_F {
-                        left: 0.0,
-                        top,
-                        right: size.width,
-                        bottom: size.height,
-                    },
-                    &self.brush,
-                );
+                self.rt
+                    .FillRoundedRectangle(&rounded(&screen, SCREEN_RADIUS), &self.brush);
             }
             if drop {
-                let size = self.rt.GetSize();
                 let all = D2D_RECT_F {
                     left: 0.0,
                     top: 0.0,
@@ -464,42 +523,137 @@ impl GridTarget {
         }
     }
 
+    /// The plate round the glass and the glass itself, with the plate's lit
+    /// lip along the glass's bottom edge where it is sunk in.
+    unsafe fn bezel(
+        &self,
+        screen: &D2D_RECT_F,
+        glass: Rgb,
+        (offset, stage_h): (f32, f32),
+        size: windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_F,
+    ) {
+        self.plate.SetStartPoint(Vector2 { X: 0.0, Y: -offset });
+        self.plate.SetEndPoint(Vector2 {
+            X: 0.0,
+            Y: stage_h - offset,
+        });
+        let all = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: size.width,
+            bottom: size.height,
+        };
+        self.rt.FillRectangle(&all, &self.plate);
+        self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        let lip = D2D_RECT_F {
+            left: screen.left - 0.5,
+            top: screen.top + 0.5,
+            right: screen.right + 0.5,
+            bottom: screen.bottom + 1.5,
+        };
+        self.brush
+            .SetColor(&render::color(theme::ENGRAVE_LIGHT.fade(1.6)));
+        self.rt
+            .FillRoundedRectangle(&rounded(&lip, SCREEN_RADIUS + 0.5), &self.brush);
+        self.brush.SetColor(&color(glass));
+        self.rt
+            .FillRoundedRectangle(&rounded(screen, SCREEN_RADIUS), &self.brush);
+    }
+
+    /// What makes the glass look sunk: shade falling from its top edge,
+    /// and its rim, lit in the project's colour on the pane with the
+    /// keyboard.
+    unsafe fn glass(&self, gpu: &Gpu, screen: &D2D_RECT_F, header: Option<&Header>) {
+        if let Ok(mask) = gpu
+            .d2d
+            .CreateRoundedRectangleGeometry(&rounded(screen, SCREEN_RADIUS))
+        {
+            if let Ok(layer) = self.rt.CreateLayer(None) {
+                let params = D2D1_LAYER_PARAMETERS {
+                    contentBounds: *screen,
+                    geometricMask: ManuallyDrop::new(mask.cast::<ID2D1Geometry>().ok()),
+                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    maskTransform: Matrix3x2::identity(),
+                    opacity: 1.0,
+                    opacityBrush: ManuallyDrop::new(None),
+                    layerOptions: D2D1_LAYER_OPTIONS_NONE,
+                };
+                self.rt.PushLayer(&params, &layer);
+                let depth = 10.0;
+                self.shade.SetStartPoint(Vector2 {
+                    X: 0.0,
+                    Y: screen.top,
+                });
+                self.shade.SetEndPoint(Vector2 {
+                    X: 0.0,
+                    Y: screen.top + depth,
+                });
+                let band = D2D_RECT_F {
+                    bottom: screen.top + depth,
+                    ..*screen
+                };
+                self.rt.FillRectangle(&band, &self.shade);
+                self.rt.PopLayer();
+                drop(ManuallyDrop::into_inner(params.geometricMask));
+            }
+        }
+        let rim = match header {
+            Some(h) if h.active && !h.lifted => h.accent.with_alpha(0.55),
+            _ => theme::ENGRAVE_DARK,
+        };
+        let edge = D2D_RECT_F {
+            left: screen.left + 0.5,
+            top: screen.top + 0.5,
+            right: screen.right - 0.5,
+            bottom: screen.bottom - 0.5,
+        };
+        self.brush.SetColor(&render::color(rim));
+        self.rt
+            .DrawRoundedRectangle(&rounded(&edge, SCREEN_RADIUS - 0.5), &self.brush, 1.0, None);
+    }
+
+    /// The session's name printed on the plate above the glass, after its
+    /// lamp: lit in its phase's colour, dark glass when it does nothing.
     unsafe fn header(&self, gpu: &Gpu, h: &Header) {
         let width = self.rt.GetSize().width;
-        let bar = |c: Color, top: f32, bottom: f32| {
-            self.brush.SetColor(&render::color(c));
+        if h.lifted {
+            self.brush
+                .SetColor(&render::color(theme::WORKING.with_alpha(0.22)));
             self.rt.FillRectangle(
                 &D2D_RECT_F {
                     left: 0.0,
-                    top,
+                    top: 0.0,
                     right: width,
-                    bottom,
+                    bottom: HEADER_H,
+                },
+                &self.brush,
+            );
+        }
+        let (lx, ly) = (BEZEL + 6.0, HEADER_H / 2.0);
+        let dot = |r: f32, c: Color| {
+            self.brush.SetColor(&render::color(c));
+            self.rt.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2 { X: lx, Y: ly },
+                    radiusX: r,
+                    radiusY: r,
                 },
                 &self.brush,
             );
         };
-        let bg = if h.lifted {
-            HEADER_BG.mix(theme::WORKING, 0.35)
-        } else {
-            HEADER_BG
-        };
-        bar(bg, 0.0, HEADER_H);
-        // The phase, as a line of light along the top, as on a tile's edge.
-        // It is the only mark of the phase here, so it is strong enough to
-        // read from across the room.
-        if let (Some(c), false) = (h.phase, h.lifted) {
-            bar(c.with_alpha(0.1), 0.0, HEADER_H);
-            bar(c.with_alpha(0.85), 0.0, 2.0);
-        }
-        // The project's colour under the pane that has the keyboard: the
-        // same colour the stage's edge and the cluster's wash have.
-        if h.active && !h.lifted {
-            bar(h.accent.with_alpha(0.8), HEADER_H - 2.0, HEADER_H);
-        } else {
-            bar(theme::RIM_SHADE, HEADER_H - 1.0, HEADER_H);
+        match h.phase {
+            Some(c) => {
+                dot(6.0, c.with_alpha(0.12));
+                dot(4.0, c.with_alpha(0.25));
+                dot(2.5, c.mix(Color::rgb(0xFFFFFF), 0.3));
+            }
+            None => {
+                dot(3.5, Color::rgb(0).with_alpha(0.55));
+                dot(2.5, theme::LAMP_OFF);
+            }
         }
 
-        let left = 10.0;
+        let left = BEZEL + 16.0;
         let (zoom_at, close_at) = header_buttons(width, h.zoom.is_some(), h.close);
         let right = zoom_at.or(close_at).unwrap_or(width - 8.0);
         let button = |glyph: &str, at: f32| {
@@ -575,15 +729,15 @@ impl GridTarget {
         }
     }
 
-    /// The search bar, in the top right corner below the header at `top`:
-    /// a magnifier, the query with a caret after it, and what was found.
-    unsafe fn find_bar(&self, gpu: &Gpu, f: &FindBar, top: f32) {
-        let width = self.rt.GetSize().width;
+    /// The search bar, in the top right corner of the glass: a magnifier,
+    /// the query with a caret after it, and what was found.
+    unsafe fn find_bar(&self, gpu: &Gpu, f: &FindBar, screen: &D2D_RECT_F) {
+        let right = screen.right - FIND_INSET;
         let bar = D2D_RECT_F {
-            left: (width - FIND_INSET - FIND_W).max(FIND_INSET),
-            top: top + FIND_INSET,
-            right: width - FIND_INSET,
-            bottom: top + FIND_INSET + FIND_H,
+            left: (right - FIND_W).max(screen.left + FIND_INSET),
+            top: screen.top + FIND_INSET,
+            right,
+            bottom: screen.top + FIND_INSET + FIND_H,
         };
         self.brush
             .SetColor(&render::color(HEADER_BG.mix(theme::WORKING, 0.12)));
@@ -654,6 +808,38 @@ impl GridTarget {
 // Styles index the face arrays directly.
 const _: () = assert!(BOLD | ITALIC == 3);
 
+fn rounded(r: &D2D_RECT_F, radius: f32) -> D2D1_ROUNDED_RECT {
+    D2D1_ROUNDED_RECT {
+        rect: *r,
+        radiusX: radius,
+        radiusY: radius,
+    }
+}
+
+/// A top to bottom gradient through `colors`, evenly spaced, placed by
+/// setting its start and end points when drawn.
+unsafe fn gradient(
+    rt: &ID2D1HwndRenderTarget,
+    colors: &[Color],
+) -> Result<ID2D1LinearGradientBrush> {
+    let last = (colors.len().max(2) - 1) as f32;
+    let stops: Vec<D2D1_GRADIENT_STOP> = colors
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| D2D1_GRADIENT_STOP {
+            position: i as f32 / last,
+            color: render::color(c),
+        })
+        .collect();
+    let collection =
+        rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)?;
+    rt.CreateLinearGradientBrush(
+        &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES::default(),
+        None,
+        &collection,
+    )
+}
+
 fn color(c: Rgb) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
         r: c.r as f32 / 255.0,
@@ -669,18 +855,32 @@ mod tests {
 
     #[test]
     fn header_buttons_sit_at_the_end_zoom_first() {
+        let end = 400.0 - BEZEL;
         assert_eq!(header_buttons(400.0, false, false), (None, None));
         assert_eq!(
             header_buttons(400.0, false, true),
-            (None, Some(400.0 - HEADER_H))
+            (None, Some(end - HEADER_H))
         );
         assert_eq!(
             header_buttons(400.0, true, false),
-            (Some(400.0 - HEADER_H), None)
+            (Some(end - HEADER_H), None)
         );
         assert_eq!(
             header_buttons(400.0, true, true),
-            (Some(400.0 - 2.0 * HEADER_H), Some(400.0 - HEADER_H))
+            (Some(end - 2.0 * HEADER_H), Some(end - HEADER_H))
         );
+    }
+
+    #[test]
+    fn the_grid_sits_inside_the_glass_inside_the_bezel() {
+        let (x, y) = grid_origin(false);
+        assert_eq!((x, y), (BEZEL + PAD, BEZEL + PAD));
+        assert_eq!(grid_origin(true).1, HEADER_H + PAD);
+        let (w, h) = grid_room(400.0, 300.0, false);
+        assert_eq!(w, 400.0 - 2.0 * (BEZEL + PAD));
+        assert_eq!(h, 300.0 - 2.0 * (BEZEL + PAD));
+        // The header takes the top bezel's place, not room on top of it.
+        let (_, with_header) = grid_room(400.0, 300.0, true);
+        assert_eq!(h - with_header, HEADER_H - BEZEL);
     }
 }

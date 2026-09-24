@@ -25,7 +25,10 @@ use std::sync::Arc;
 use windows::core::{w, Result, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
-use windows::Win32::Graphics::Gdi::{CreateSolidBrush, ScreenToClient};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FrameRect, GradientFill, InvalidateRect,
+    ScreenToClient, GRADIENT_FILL_RECT_V, GRADIENT_RECT, PAINTSTRUCT, TRIVERTEX,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, ReleaseCapture, SetCapture};
@@ -37,9 +40,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IDC_ARROW, IDC_SIZEALL, SM_CXMINTRACK, SM_CYMINTRACK, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE,
     SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WINDOW_EX_STYLE, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT,
     WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
-    WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOVING, WM_NCCREATE, WM_NCDESTROY, WM_SETFOCUS, WM_SIZE, WM_SIZING, WNDCLASSW,
-    WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
+    WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOVING, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SIZE, WM_SIZING,
+    WNDCLASSW, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::app::{self, Input};
@@ -50,9 +53,11 @@ use crate::window::Shared;
 use crate::{layout, snapping, theme};
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricTerminal");
-/// Between panes, and around them, in DIPs. The gaps are the clusters'
-/// clay, and the dark panes sit in it like wells.
-const PANE_GAP_DIP: f32 = 10.0;
+/// Between panes, and around them, in DIPs. Each pane has a bezel of its
+/// own inside this, so the glass of two panes is this plus two bezels apart.
+const PANE_GAP_DIP: f32 = 8.0;
+/// The seam cut round the stage's faceplate, in from its edge, in DIPs.
+const SEAM_DIP: f32 = 4.0;
 /// How far a header has to move before a press becomes a drag.
 const DRAG_THRESHOLD: i32 = 4;
 
@@ -106,17 +111,12 @@ pub fn register_class() -> Result<()> {
     pane::register_class()?;
     unsafe {
         let instance = GetModuleHandleW(None)?;
-        let bg = theme::WINDOW_BG;
-        let byte = |v: f32| (v * 255.0).round() as u32;
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
             lpszClassName: CLASS,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
-            // Only the gaps between panes show it.
-            hbrBackground: CreateSolidBrush(COLORREF(
-                byte(bg.r) | byte(bg.g) << 8 | byte(bg.b) << 16,
-            )),
+            // No background brush: the faceplate is painted on WM_PAINT.
             // The icon the build script put in the executable, so a terminal
             // shows as Horadric on the taskbar. Resource 1 is the app icon.
             hIcon: LoadIconW(
@@ -272,7 +272,7 @@ impl TerminalWindow {
         }
         let panes = self.panes.borrow();
         let gap = (PANE_GAP_DIP * self.dpi() as f32 / 96.0).round() as i32;
-        let area = (gap, 0, r.right - gap, r.bottom - gap);
+        let area = (gap, gap, r.right - gap, r.bottom - gap);
         let grid = layout::grid(panes.len(), area, gap);
         let many = panes.len() > 1;
         let zoomed = many && self.zoomed.get();
@@ -522,6 +522,69 @@ impl TerminalWindow {
         unsafe { GetForegroundWindow() == self.hwnd }
     }
 
+    /// The faceplate behind the panes, the same as a cluster's: lighter at
+    /// the top where the light falls, a seam cut round it. The panes paint
+    /// their own bezels with the same light, placed by where they sit.
+    fn paint_plate(&self) {
+        let channel = |v: f32| (v.clamp(0.0, 1.0) * 65535.0).round() as u16;
+        let vertex = |x: i32, y: i32, c: theme::Color| TRIVERTEX {
+            x,
+            y,
+            Red: channel(c.r),
+            Green: channel(c.g),
+            Blue: channel(c.b),
+            Alpha: 0,
+        };
+        let colorref = |c: theme::Color| {
+            let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+            COLORREF(byte(c.r) | byte(c.g) << 8 | byte(c.b) << 16)
+        };
+        unsafe {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(self.hwnd, &mut ps);
+            let mut r = RECT::default();
+            let _ = GetClientRect(self.hwnd, &mut r);
+            let verts = [
+                vertex(0, 0, theme::PLATE_TOP),
+                vertex(r.right, r.bottom, theme::PLATE_BOTTOM),
+            ];
+            let mesh = GRADIENT_RECT {
+                UpperLeft: 0,
+                LowerRight: 1,
+            };
+            let _ = GradientFill(
+                hdc,
+                &verts,
+                &mesh as *const GRADIENT_RECT as *const c_void,
+                1,
+                GRADIENT_FILL_RECT_V,
+            );
+            // GDI has no alpha, so the groove's colours are the plate's own
+            // mixed toward black and white, as the clusters' blend comes out.
+            let inset = (SEAM_DIP * self.dpi() as f32 / 96.0).round() as i32;
+            let seam = RECT {
+                left: inset,
+                top: inset,
+                right: r.right - inset,
+                bottom: r.bottom - inset,
+            };
+            let lit = RECT {
+                top: seam.top + 1,
+                bottom: seam.bottom + 1,
+                ..seam
+            };
+            let black = theme::Color::rgb(0);
+            let white = theme::Color::rgb(0xFFFFFF);
+            let light = CreateSolidBrush(colorref(theme::WINDOW_BG.mix(white, 0.05)));
+            let dark = CreateSolidBrush(colorref(theme::WINDOW_BG.mix(black, 0.5)));
+            FrameRect(hdc, &lit, light);
+            FrameRect(hdc, &seam, dark);
+            let _ = DeleteObject(light.into());
+            let _ = DeleteObject(dark.into());
+            let _ = EndPaint(self.hwnd, &ps);
+        }
+    }
+
     pub fn dpi(&self) -> u32 {
         unsafe { GetDpiForWindow(self.hwnd) }.max(96)
     }
@@ -702,8 +765,18 @@ impl TerminalWindow {
         match msg {
             WM_SIZE => {
                 self.layout();
+                // The faceplate's light runs top to bottom of the whole
+                // window, so a new height moves all of it.
+                unsafe {
+                    let _ = InvalidateRect(Some(self.hwnd), None, false);
+                }
                 None
             }
+            WM_PAINT => {
+                self.paint_plate();
+                Some(LRESULT(0))
+            }
+            WM_ERASEBKGND => Some(LRESULT(1)),
             WM_DPICHANGED => {
                 let r = unsafe { *(lparam.0 as *const RECT) };
                 unsafe {

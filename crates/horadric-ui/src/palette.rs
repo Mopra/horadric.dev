@@ -17,23 +17,26 @@ const fn rgb(hex: u32) -> Rgb {
     }
 }
 
-/// Near black: a terminal is a dark well sunk into the clay, which is what
-/// every agent's own colours are made for.
-pub const BACKGROUND: Rgb = rgb(0x0A0A0D);
-pub const FOREGROUND: Rgb = rgb(0xE6E6EB);
+/// The glass of the screen a terminal is, the same black as the clusters'
+/// screens. Near black is also what every agent's own colours are made for.
+pub const BACKGROUND: Rgb = rgb(0x08090B);
+pub const FOREGROUND: Rgb = rgb(0xE8E9ED);
 pub const CURSOR: Rgb = rgb(0xF5F5F7);
 pub const SELECTION: Rgb = rgb(0x1E3A5C);
 
+/// Red, green, yellow and blue are the lamps' colours, so what an agent
+/// prints speaks the same language as the keys: amber is the waiting lamp,
+/// blue the working one.
 const ANSI: [Rgb; 16] = [
-    rgb(0x23232B),
+    rgb(0x202227),
     rgb(0xFF5D66),
     rgb(0x3DD68C),
-    rgb(0xFFC53D),
+    rgb(0xFFB224),
     rgb(0x3DB4FF),
     rgb(0xB78CFF),
     rgb(0x2ED3C6),
-    rgb(0xD4D4DC),
-    rgb(0x5C5C68),
+    rgb(0xD4D5DC),
+    rgb(0x6E727C),
     rgb(0xFF8A91),
     rgb(0x70EBAE),
     rgb(0xFFDB7A),

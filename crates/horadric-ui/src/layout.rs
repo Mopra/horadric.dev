@@ -73,28 +73,28 @@ pub struct Metrics {
 impl Default for Metrics {
     fn default() -> Self {
         Metrics {
-            // Clay needs room: a raised tile casts its shadow into the gap
-            // below it and the padding round it.
-            width: 288.0,
-            pad: 14.0,
-            header_h: 30.0,
-            tile_h: 58.0,
-            add_h: 28.0,
-            shell_w: 48.0,
-            gap: 10.0,
+            // Hardware needs room: a key casts its shadow into the gap
+            // below it, and controls crowded together read as cheap.
+            width: 304.0,
+            pad: 18.0,
+            header_h: 36.0,
+            tile_h: 64.0,
+            add_h: 32.0,
+            shell_w: 52.0,
+            gap: 12.0,
             radius: 12.0,
             window_radius: 8.0,
-            tile_radius: 14.0,
-            files_header_h: 26.0,
-            file_row_h: 20.0,
+            tile_radius: 12.0,
+            files_header_h: 30.0,
+            file_row_h: 22.0,
             file_rows: 14,
             file_rows_min: 3,
-            file_foot: 8.0,
+            file_foot: 10.0,
             file_indent: 12.0,
             mark_w: 24.0,
             mark_h: 20.0,
-            limit_row_h: 38.0,
-            setting_row_h: 28.0,
+            limit_row_h: 44.0,
+            setting_row_h: 32.0,
         }
     }
 }
