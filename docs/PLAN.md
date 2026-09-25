@@ -133,7 +133,10 @@ arrow keys, a prompt and its answer, resize, collapse and expand, `/exit`.
 - **Mouse.** Drag selects and copies on release, double click selects a
   word, right click copies a selection or pastes. Dropped files paste as
   paths. The wheel scrolls history, or sends arrows to a full screen
-  program.
+  program. A program that asks for the mouse (modes 1000, 1002 and 1003,
+  encoded as 1006, 1005 or the old bytes) gets clicks, releases, the
+  wheel and moves instead; Shift keeps a click for selecting, as in
+  xterm.
 - **Lifetime.** Closing the window collapses: window and renderer go, the
   console and its grid stay, and the window comes back where it was. A
   clean exit closes the window; a failed one keeps it open so the error can
@@ -1566,8 +1569,7 @@ the human.
   decision (A, then B) are under "Sessions that outlive Horadric" in
   Next.
 - **Terminal gaps.** The IME composition window is not placed at the cursor.
-  Mouse reporting to programs, the kitty keyboard protocol and cursor blink
-  are not implemented. The font family is fixed.
+  The kitty keyboard protocol and cursor blink are not implemented. The font family is fixed.
 - **Expanding from a synthetic click can open behind other windows.** Windows
   only lets a process take the foreground after real input. A real click on
   a tile is real input, so this only bites scripted tests.

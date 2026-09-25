@@ -236,18 +236,104 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     out
 }
 
-/// One notch of the wheel as a mouse report, for a program that asked for
-/// the mouse. `col` and `row` count cells from the top left, from 0. `sgr`
-/// is mode 1006; without it the old encoding can only reach cell 223.
-pub fn wheel_bytes(up: bool, col: usize, row: usize, mods: Mods, sgr: bool) -> Vec<u8> {
-    let button =
-        if up { 64 } else { 65 } + 4 * mods.shift as u8 + 8 * mods.alt as u8 + 16 * mods.ctrl as u8;
-    if sgr {
-        format!("\x1b[<{button};{};{}M", col + 1, row + 1).into_bytes()
-    } else {
-        let at = |n: usize| (32 + 1 + n).min(255) as u8;
-        vec![0x1b, b'[', b'M', 32 + button, at(col), at(row)]
+/// A mouse button as programs number them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    Left,
+    Middle,
+    Right,
+    WheelUp,
+    WheelDown,
+}
+
+impl Button {
+    fn code(self) -> u32 {
+        match self {
+            Button::Left => 0,
+            Button::Middle => 1,
+            Button::Right => 2,
+            Button::WheelUp => 64,
+            Button::WheelDown => 65,
+        }
     }
+}
+
+/// What the mouse did, for a program that asked for the mouse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseEvent {
+    Press(Button),
+    Release(Button),
+    /// A move, with the button held down if any.
+    Move(Option<Button>),
+}
+
+/// How a report is written. `Sgr` is mode 1006 and has no limit on the
+/// cell. `Utf8` is mode 1005 and reaches cell 2015. `X10` is the old one
+/// byte form, which can only reach cell 223.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseEncoding {
+    X10,
+    Utf8,
+    Sgr,
+}
+
+/// A mouse report. `col` and `row` count cells from the top left, from 0.
+pub fn mouse_bytes(
+    event: MouseEvent,
+    col: usize,
+    row: usize,
+    mods: Mods,
+    encoding: MouseEncoding,
+) -> Vec<u8> {
+    let held = |b: Option<Button>| b.map_or(3, Button::code);
+    let code = match event {
+        MouseEvent::Press(b) => b.code(),
+        // Only SGR can say which button came up; the older forms send 3.
+        MouseEvent::Release(b) if encoding == MouseEncoding::Sgr => b.code(),
+        MouseEvent::Release(_) => 3,
+        MouseEvent::Move(b) => 32 + held(b),
+    } + 4 * mods.shift as u32
+        + 8 * mods.alt as u32
+        + 16 * mods.ctrl as u32;
+    match encoding {
+        MouseEncoding::Sgr => {
+            let end = if matches!(event, MouseEvent::Release(_)) {
+                'm'
+            } else {
+                'M'
+            };
+            format!("\x1b[<{code};{};{}{end}", col + 1, row + 1).into_bytes()
+        }
+        MouseEncoding::Utf8 => {
+            let mut out = b"\x1b[M".to_vec();
+            for n in [
+                32 + code,
+                33 + col.min(2014) as u32,
+                33 + row.min(2014) as u32,
+            ] {
+                let c = char::from_u32(n).unwrap_or(' ');
+                out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+            }
+            out
+        }
+        MouseEncoding::X10 => {
+            let at = |n: usize| (33 + n).min(255) as u8;
+            vec![
+                0x1b,
+                b'[',
+                b'M',
+                (32 + code).min(255) as u8,
+                at(col),
+                at(row),
+            ]
+        }
+    }
+}
+
+/// Whether a move is reported: every move in mode 1003, only moves with a
+/// button down in mode 1002, none in plain click mode 1000.
+pub fn reports_move(any: bool, drag: bool, held: bool) -> bool {
+    any || (drag && held)
 }
 
 #[cfg(test)]
@@ -369,16 +455,70 @@ mod tests {
     }
 
     #[test]
-    fn wheel_reports_in_both_encodings() {
-        assert_eq!(wheel_bytes(true, 0, 0, Mods::NONE, true), b"\x1b[<64;1;1M");
-        assert_eq!(wheel_bytes(false, 9, 4, CTRL, true), b"\x1b[<81;10;5M");
+    fn wheel_reports_in_every_encoding() {
+        let wheel = |up, col, row, mods, enc| {
+            let b = if up {
+                Button::WheelUp
+            } else {
+                Button::WheelDown
+            };
+            mouse_bytes(MouseEvent::Press(b), col, row, mods, enc)
+        };
+        use MouseEncoding::*;
+        assert_eq!(wheel(true, 0, 0, Mods::NONE, Sgr), b"\x1b[<64;1;1M");
+        assert_eq!(wheel(false, 9, 4, CTRL, Sgr), b"\x1b[<81;10;5M");
         assert_eq!(
-            wheel_bytes(true, 2, 3, Mods::NONE, false),
+            wheel(true, 2, 3, Mods::NONE, X10),
             [0x1b, b'[', b'M', 96, 35, 36]
         );
+        assert_eq!(wheel(false, 500, 0, SHIFT, X10)[3..], [101, 255, 33]);
+    }
+
+    #[test]
+    fn clicks_and_releases() {
+        use MouseEncoding::*;
+        let left = MouseEvent::Press(Button::Left);
+        let up = MouseEvent::Release(Button::Right);
+        assert_eq!(mouse_bytes(left, 0, 0, Mods::NONE, Sgr), b"\x1b[<0;1;1M");
+        assert_eq!(mouse_bytes(up, 4, 2, Mods::NONE, Sgr), b"\x1b[<2;5;3m");
         assert_eq!(
-            wheel_bytes(false, 500, 0, SHIFT, false)[3..],
-            [101, 255, 33]
+            mouse_bytes(left, 1, 1, ALT, X10),
+            [0x1b, b'[', b'M', 40, 34, 34]
         );
+        assert_eq!(mouse_bytes(up, 1, 1, Mods::NONE, X10)[3], 35);
+        let middle = MouseEvent::Press(Button::Middle);
+        assert_eq!(mouse_bytes(middle, 0, 0, CTRL, Sgr), b"\x1b[<17;1;1M");
+    }
+
+    #[test]
+    fn moves_add_32_and_say_which_button_is_held() {
+        use MouseEncoding::*;
+        let drag = MouseEvent::Move(Some(Button::Left));
+        let hover = MouseEvent::Move(None);
+        assert_eq!(mouse_bytes(drag, 2, 0, Mods::NONE, Sgr), b"\x1b[<32;3;1M");
+        assert_eq!(mouse_bytes(hover, 2, 0, Mods::NONE, Sgr), b"\x1b[<35;3;1M");
+        assert_eq!(mouse_bytes(hover, 0, 0, Mods::NONE, X10)[3], 67);
+    }
+
+    #[test]
+    fn utf8_reaches_past_cell_223() {
+        let b = mouse_bytes(
+            MouseEvent::Press(Button::Left),
+            300,
+            0,
+            Mods::NONE,
+            MouseEncoding::Utf8,
+        );
+        let mut want = b"\x1b[M ".to_vec();
+        want.extend_from_slice("\u{14d}!".as_bytes());
+        assert_eq!(b, want);
+    }
+
+    #[test]
+    fn which_moves_are_reported() {
+        assert!(!reports_move(false, false, true));
+        assert!(!reports_move(false, true, false));
+        assert!(reports_move(false, true, true));
+        assert!(reports_move(true, false, false));
     }
 }

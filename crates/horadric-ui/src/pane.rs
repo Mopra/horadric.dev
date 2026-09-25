@@ -44,18 +44,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, KillTimer, LoadCursorW, PeekMessageW, RegisterClassW, SendMessageW,
     SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW, CS_DBLCLKS,
     GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_IBEAM, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOZORDER,
-    SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_CHAR, WM_DEADCHAR, WM_DPICHANGED_AFTERPARENT,
-    WM_DROPFILES, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_TIMER,
-    WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+    SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DEADCHAR,
+    WM_DPICHANGED_AFTERPARENT, WM_DROPFILES, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_USER, WNDCLASSW,
+    WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 
 use crate::app::{self, Input};
 use crate::clipboard;
 use crate::console::{Console, GridSize};
 use crate::glyphs::{self, CellSize, FindBar, GridTarget, Header, HEADER_H};
-use crate::keys::{self, CharAction, Chord, FontStep, Key, Mods};
+use crate::keys::{
+    self, Button, CharAction, Chord, FontStep, Key, Mods, MouseEncoding, MouseEvent,
+};
 use crate::layout::Dir;
 use crate::motion::{self, REVEAL, SPOTLIGHT};
 use crate::paste::{self, Source};
@@ -111,6 +114,11 @@ pub struct Pane {
     dpi: Cell<u32>,
     focused: Cell<bool>,
     selecting: Cell<bool>,
+    /// The button whose press went to the program, until it comes up.
+    reported: Cell<Option<Button>>,
+    /// The cell of the last reported move, so a move within a cell is not
+    /// sent again.
+    moved_to: Cell<Option<(usize, usize)>>,
     /// First half of a character outside the BMP, until the second arrives.
     high_surrogate: Cell<Option<u16>>,
     /// Wheel movement below one notch, from precision touchpads.
@@ -170,6 +178,8 @@ impl Pane {
             dpi: Cell::new(0),
             focused: Cell::new(false),
             selecting: Cell::new(false),
+            reported: Cell::new(None),
+            moved_to: Cell::new(None),
             high_surrogate: Cell::new(None),
             wheel: Cell::new(0),
             accent: Cell::new(theme::ACCENTS[0]),
@@ -971,6 +981,84 @@ impl Pane {
         self.invalidate();
     }
 
+    fn encoding(mode: TermMode) -> MouseEncoding {
+        if mode.contains(TermMode::SGR_MOUSE) {
+            MouseEncoding::Sgr
+        } else if mode.contains(TermMode::UTF8_MOUSE) {
+            MouseEncoding::Utf8
+        } else {
+            MouseEncoding::X10
+        }
+    }
+
+    /// The mode, when clicks go to the program rather than to selecting.
+    /// Shift keeps them here, as in xterm, so text can still be selected
+    /// and copied from a program that took the mouse.
+    fn mouse_mode(&self) -> Option<TermMode> {
+        let mode = self.mode();
+        (mode.intersects(TermMode::MOUSE_MODE) && !Self::mods().shift && !self.console.is_view())
+            .then_some(mode)
+    }
+
+    fn report(&self, event: MouseEvent, lparam: LPARAM, mode: TermMode) {
+        let (col, row, _) = self.screen_cell(lparam);
+        self.report_at(event, (col, row), mode);
+    }
+
+    fn report_at(&self, event: MouseEvent, (col, row): (usize, usize), mode: TermMode) {
+        self.moved_to.set(Some((col, row)));
+        let bytes = keys::mouse_bytes(event, col, row, Self::mods(), Self::encoding(mode));
+        self.console.write(bytes);
+    }
+
+    /// A button went down over the grid. Returns whether it went to the
+    /// program.
+    fn report_press(&self, button: Button, lparam: LPARAM) -> bool {
+        let Some(mode) = self.mouse_mode() else {
+            return false;
+        };
+        if let Some(held) = self.reported.replace(Some(button)) {
+            self.report(MouseEvent::Release(held), lparam, mode);
+        }
+        self.report(MouseEvent::Press(button), lparam, mode);
+        unsafe {
+            SetCapture(self.hwnd);
+        }
+        true
+    }
+
+    /// A button came up. Returns whether its press went to the program.
+    fn report_release(&self, button: Button, lparam: LPARAM) -> bool {
+        if self.reported.get() != Some(button) {
+            return false;
+        }
+        self.reported.set(None);
+        // The program asked for the press, so it hears the release even if
+        // it has let go of the mouse in between.
+        self.report(MouseEvent::Release(button), lparam, self.mode());
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        true
+    }
+
+    fn report_move(&self, lparam: LPARAM) {
+        let mode = self.mode();
+        let held = self.reported.get();
+        let wanted = keys::reports_move(
+            mode.contains(TermMode::MOUSE_MOTION),
+            mode.contains(TermMode::MOUSE_DRAG),
+            held.is_some(),
+        );
+        if !wanted || (held.is_none() && self.mouse_mode().is_none()) || self.in_header(lparam) {
+            return;
+        }
+        let (col, row, _) = self.screen_cell(lparam);
+        if self.moved_to.get() != Some((col, row)) {
+            self.report(MouseEvent::Move(held), lparam, mode);
+        }
+    }
+
     fn on_wheel(&self, wparam: WPARAM, lparam: LPARAM) {
         let delta = ((wparam.0 >> 16) & 0xffff) as i16 as i32 + self.wheel.get();
         let notches = delta / 120;
@@ -1005,8 +1093,13 @@ impl Pane {
             }
             let at = LPARAM(((p.y as u16 as isize) << 16) | p.x as u16 as isize);
             let (col, row, _) = self.screen_cell(at);
-            let sgr = mode.contains(TermMode::SGR_MOUSE);
-            let one = keys::wheel_bytes(lines > 0, col, row, Self::mods(), sgr);
+            let button = if lines > 0 {
+                Button::WheelUp
+            } else {
+                Button::WheelDown
+            };
+            let event = MouseEvent::Press(button);
+            let one = keys::mouse_bytes(event, col, row, Self::mods(), Self::encoding(mode));
             self.console
                 .write(one.repeat(notches.unsigned_abs() as usize));
         } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
@@ -1152,6 +1245,7 @@ impl Pane {
                     } else {
                         self.tell_stage(WM_PANE_GRAB);
                     }
+                } else if self.report_press(Button::Left, lparam) {
                 } else if msg == WM_LBUTTONDOWN {
                     self.start_selection(lparam, SelectionType::Simple);
                 } else {
@@ -1168,11 +1262,14 @@ impl Pane {
                         }
                     }
                     self.invalidate();
+                } else {
+                    self.report_move(lparam);
                 }
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
-                if self.selecting.replace(false) {
+                if self.report_release(Button::Left, lparam) {
+                } else if self.selecting.replace(false) {
                     unsafe {
                         let _ = ReleaseCapture();
                     }
@@ -1193,10 +1290,35 @@ impl Pane {
                 }
                 Some(LRESULT(0))
             }
+            WM_RBUTTONDOWN | WM_MBUTTONDOWN if !self.in_header(lparam) => {
+                let button = if msg == WM_RBUTTONDOWN {
+                    Button::Right
+                } else {
+                    Button::Middle
+                };
+                if self.report_press(button, lparam) {
+                    self.focus();
+                }
+                Some(LRESULT(0))
+            }
+            WM_MBUTTONUP => {
+                self.report_release(Button::Middle, lparam);
+                Some(LRESULT(0))
+            }
+            WM_CAPTURECHANGED => {
+                // Capture taken away mid press, by a menu or Alt+Tab: the
+                // program must not think the button is still down.
+                if let Some(held) = self.reported.take() {
+                    let at = self.moved_to.get().unwrap_or_default();
+                    self.report_at(MouseEvent::Release(held), at, self.mode());
+                }
+                None
+            }
             WM_RBUTTONUP => {
-                // The console convention: right click copies a selection,
-                // otherwise pastes.
-                if (!self.has_selection() || !self.copy()) && !self.console.is_view() {
+                // The console convention, unless the program took the press:
+                // right click copies a selection, otherwise pastes.
+                if self.report_release(Button::Right, lparam) {
+                } else if (!self.has_selection() || !self.copy()) && !self.console.is_view() {
                     self.paste();
                 }
                 Some(LRESULT(0))
