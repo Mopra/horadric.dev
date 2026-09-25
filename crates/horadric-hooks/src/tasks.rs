@@ -7,6 +7,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use horadric_core::ssh;
 use horadric_core::tasks::{self, Mode, CONFIG_FILE, TASKS_FILE};
 
 /// The list's path in a project.
@@ -27,6 +28,11 @@ pub fn read(project: &Path) -> String {
 /// The project's mode. No config, or one that says nothing, is manual.
 pub fn mode(project: &Path) -> Mode {
     tasks::mode(&fs::read_to_string(config_file(project)).unwrap_or_default())
+}
+
+/// The project's SSH hosts, none without a config.
+pub fn hosts(project: &Path) -> Vec<String> {
+    ssh::hosts(&fs::read_to_string(config_file(project)).unwrap_or_default())
 }
 
 pub fn set_mode(project: &Path, mode: Mode) -> io::Result<()> {

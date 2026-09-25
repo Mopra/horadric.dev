@@ -177,6 +177,15 @@ pub fn shell_program() -> Option<PathBuf> {
     })
 }
 
+/// The `ssh` an SSH terminal runs, see [`shell::ssh_program`].
+pub fn ssh_program() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let root = std::env::var("SystemRoot").ok();
+    shell::ssh_program(root.as_deref(), Path::is_file, |name| {
+        find_program(name, &path, &[".exe"], Path::is_file)
+    })
+}
+
 impl Console {
     /// Starts the agent and the threads that read its output and wait for it.
     /// `notify` is the window that hears about output and exit.

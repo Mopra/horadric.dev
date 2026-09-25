@@ -154,6 +154,9 @@ pub fn accent(key: &str) -> Color {
 /// A plain terminal's tile, and the button that opens one.
 pub const SHELL_ICON: char = '\u{E756}';
 
+/// An SSH terminal's tile: a terminal on another machine.
+pub const SSH_ICON: char = '\u{E968}';
+
 /// The Segoe Fluent Icons glyph for a session: the tool it is in while it
 /// works, otherwise what its phase is.
 pub fn icon(phase: &Phase, tool: Option<&str>) -> char {

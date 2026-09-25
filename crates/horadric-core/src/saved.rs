@@ -111,6 +111,9 @@ pub struct SavedSession {
     /// A plain shell. It has no conversation, so it starts afresh.
     #[serde(default)]
     pub shell: bool,
+    /// The host of an SSH terminal. It reconnects rather than resumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<String>,
 }
 
 impl SavedSession {
@@ -127,6 +130,7 @@ impl SavedSession {
             last_line: s.last_line.clone(),
             running,
             shell: s.shell,
+            ssh: s.ssh.clone(),
         }
     }
 
@@ -139,6 +143,7 @@ impl SavedSession {
         s.prompted = self.prompted;
         s.last_line = self.last_line.clone();
         s.shell = self.shell;
+        s.ssh = self.ssh.clone();
         s.phase = Phase::Paused;
         s.since = now;
         s
@@ -214,6 +219,7 @@ mod tests {
             last_line: String::new(),
             running: true,
             shell: false,
+            ssh: None,
         }
     }
 
@@ -345,5 +351,28 @@ mod tests {
         );
         assert!(back.sessions[0].shell);
         assert!(back.sessions[0].to_session(SystemTime::now()).shell);
+    }
+
+    #[test]
+    fn an_ssh_terminal_comes_back_to_its_host() {
+        let mut s = saved(&[], false);
+        s.shell = true;
+        s.ssh = Some("myvps".into());
+        let back = SavedState::from_json(
+            SavedState {
+                sessions: vec![s],
+                ..Default::default()
+            }
+            .to_json()
+            .as_bytes(),
+        );
+        let session = back.sessions[0].to_session(SystemTime::now());
+        assert_eq!(session.ssh.as_deref(), Some("myvps"));
+        assert_eq!(
+            SavedSession::from_session(&session, Vec::new(), false)
+                .ssh
+                .as_deref(),
+            Some("myvps")
+        );
     }
 }

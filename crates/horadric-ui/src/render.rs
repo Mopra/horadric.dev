@@ -1445,6 +1445,7 @@ impl Painter<'_> {
             &gpu.icon,
             icon_c.fade(presence),
             match phase {
+                Phase::Idle if s.ssh.is_some() => theme::SSH_ICON,
                 Phase::Idle if s.shell => theme::SHELL_ICON,
                 _ => theme::icon(phase, s.tool.as_deref()),
             },

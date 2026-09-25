@@ -1249,6 +1249,19 @@ agent what to do there should be enough.
   is installed. The agent side with `horadric run -- -p "Run uptime on
   myvps" --model claude-haiku-4-5-20251001` in a project with a host.
 
+Done: hosts in `config.json` (`horadric_core::ssh`, which leaves out a
+host that starts with `-` or holds a space, since the file comes with the
+repository, and passes the host after `--`), and "SSH to <host>" in the
+project menu. An SSH terminal is a shell with `Session::ssh` set, named
+SSH, SSH 2 and so on, running `System32\OpenSSH\ssh.exe` before any `ssh`
+on `PATH`. Tested on screen with a dev instance against `localhost` with
+no SSH server: the menu listed the host once and left out a
+`-oProxyCommand` one, the refusal stayed in the pane with the tile paused
+and `localhost` as its second line, a click reconnected with one
+`ssh.exe`, and a restart brought it back paused with its host. Not tested
+on screen: a session that connects and exits 0, since this machine has no
+server to reach; it takes the path a shell's exit takes.
+
 Order of work: hosts in `config.json` and the SSH terminal from the
 project menu, then the prompt for agents, then "Add host" with the
 suggestions from `~/.ssh/config`.

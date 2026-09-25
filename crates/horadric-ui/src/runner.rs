@@ -27,6 +27,7 @@ use horadric_hooks::tasks as file;
 use windows::Win32::Foundation::HWND;
 
 use super::{post, with_app, App, WM_HORADRIC_TASK_MENU};
+use crate::app::Run;
 use crate::board::{self, Board, RowState};
 use crate::tray::{self, Item};
 use crate::window::project_name;
@@ -209,7 +210,7 @@ impl App {
             .prompts
             .insert(id.clone(), tasks::prompt(&task, &horadric_command()));
         self.refresh_boards(true);
-        if let Err(e) = self.launch(&id, title, dir.clone(), Vec::new(), false, false) {
+        if let Err(e) = self.launch(&id, title, dir.clone(), Vec::new(), Run::Agent, false) {
             self.tasks.prompts.remove(&id);
             let _ = file::update(&dir, |text| tasks::set_mark(text, line, title, Mark::Open));
             self.refresh_boards(true);

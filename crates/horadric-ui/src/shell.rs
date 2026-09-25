@@ -25,6 +25,20 @@ pub fn program(
         .or_else(|| comspec.map(PathBuf::from))
 }
 
+/// The `ssh` for an SSH terminal: the one Windows ships, which talks to
+/// the Windows `ssh-agent` service, before any other on `PATH` (Git's own
+/// does not).
+pub fn ssh_program(
+    system_root: Option<&str>,
+    exists: impl Fn(&Path) -> bool,
+    find: impl Fn(&str) -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    system_root
+        .map(|root| Path::new(root).join(r"System32\OpenSSH\ssh.exe"))
+        .filter(|p| exists(p))
+        .or_else(|| find("ssh"))
+}
+
 /// What a console's title is worth showing. Windows names a console after
 /// its executable until the program says otherwise, and `cmd.exe` puts the
 /// running command after it, so `C:\...\pwsh.exe` says nothing and
@@ -92,6 +106,21 @@ mod tests {
             program(Some(" "), None, &find),
             Some(PathBuf::from("C:\\bin\\pwsh.exe"))
         );
+    }
+
+    #[test]
+    fn the_windows_ssh_comes_before_any_on_path() {
+        let windows = PathBuf::from(r"C:\Windows\System32\OpenSSH\ssh.exe");
+        let there = |p: &Path| p == windows;
+        assert_eq!(
+            ssh_program(Some(r"C:\Windows"), there, on_path(&["ssh"])),
+            Some(windows.clone())
+        );
+        assert_eq!(
+            ssh_program(Some(r"C:\Windows"), |_| false, on_path(&["ssh"])),
+            Some(PathBuf::from(r"C:\bin\ssh.exe"))
+        );
+        assert_eq!(ssh_program(None, there, on_path(&[])), None);
     }
 
     #[test]

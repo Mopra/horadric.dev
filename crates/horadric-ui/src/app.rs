@@ -44,6 +44,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use horadric_core::ssh;
 use horadric_core::usage::has_flag;
 use horadric_core::{
     session_id, HookEvent, Phase, Registry, SavedCluster, SavedPanel, SavedSession, SavedState,
@@ -828,6 +829,15 @@ const BATCH: usize = 4;
 /// opens Claude Code's own picker for the rest.
 const HISTORY: usize = 10;
 
+/// What a session's console runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Run {
+    Agent,
+    Shell,
+    /// `ssh` to this host, a shell on another machine.
+    Ssh(String),
+}
+
 fn project_menu(hwnd: HWND, key: &str) {
     const ADD: usize = 1;
     const START_BATCH: usize = 2;
@@ -836,19 +846,30 @@ fn project_menu(hwnd: HWND, key: &str) {
     const SHELL: usize = 5;
     const CODE: usize = 7;
     const EXPLORE: usize = 8;
+    const SSH: usize = 20;
     const PAST: usize = 100;
     let dir = with_app(|app| app.project_dir(key)).flatten();
     let past = match &dir {
         Some(d) => with_app(|app| app.history(d)).unwrap_or_default(),
         None => Vec::new(),
     };
-    let items = [
+    let mut hosts = dir
+        .as_deref()
+        .map(horadric_hooks::tasks::hosts)
+        .unwrap_or_default();
+    hosts.truncate(PAST - SSH);
+    let mut items = vec![
         Item::action(ADD, "New session"),
         Item::Submenu("History".into(), history_items(&past, PAST)),
         Item::action(START_BATCH, format!("Start {BATCH} sessions")),
         Item::action(START_OVER, format!("Start over with {BATCH} sessions")),
         Item::Separator,
         Item::action(SHELL, "New terminal\tCtrl+Shift+T"),
+    ];
+    for (i, host) in hosts.iter().enumerate() {
+        items.push(Item::action(SSH + i, format!("SSH to {host}")));
+    }
+    items.extend([
         Item::Separator,
         if watch::vs_code().is_some() {
             Item::action(CODE, "Open in VS Code")
@@ -858,7 +879,7 @@ fn project_menu(hwnd: HWND, key: &str) {
         Item::action(EXPLORE, "Open in Explorer"),
         Item::Separator,
         Item::action(END_ALL, "End all sessions"),
-    ];
+    ]);
     let picked = tray::popup(hwnd, &items);
     let ending = matches!(picked, Some(START_OVER | END_ALL));
     if ending && !confirm_end(hwnd, Some(key)) {
@@ -870,6 +891,7 @@ fn project_menu(hwnd: HWND, key: &str) {
         Some(START_OVER) => app.start_over(key, BATCH),
         Some(END_ALL) => app.end_all(Some(key)),
         Some(SHELL) => app.open_shell(key),
+        Some(i) if (SSH..PAST).contains(&i) => app.open_ssh(key, &hosts[i - SSH]),
         Some(CODE) => {
             if let Some(dir) = app.project_dir(key) {
                 watch::open_in_code(&dir);
@@ -1240,7 +1262,7 @@ impl App {
             if let Ok(mut r) = self.shared.registry.lock() {
                 if let Some(s) = r.get_mut(&console.id) {
                     s.touch(SystemTime::now());
-                    s.last_line = title.unwrap_or_default();
+                    s.last_line = title.or_else(|| s.ssh.clone()).unwrap_or_default();
                 }
             }
         }
@@ -1257,8 +1279,16 @@ impl App {
             return;
         };
         // A shell has nothing to resume, and `exit` means done with it
-        // whatever code the last command left behind.
-        if console.shell {
+        // whatever code the last command left behind. `ssh` failing to
+        // connect or dropping is the exception: it pauses below, and a
+        // click reconnects.
+        let ssh_failed = console.exit_code().is_some_and(ssh::keeps)
+            && self
+                .shared
+                .registry
+                .lock()
+                .is_ok_and(|r| r.get(&console.id).is_some_and(|s| s.ssh.is_some()));
+        if console.shell && !ssh_failed {
             self.forget(&console.id);
             self.reconcile(false);
             return;
@@ -1309,7 +1339,7 @@ impl App {
         let base = name.clone().unwrap_or_else(|| folder.clone());
         let id = self.unique_id(&base);
         let shown = name.unwrap_or(folder);
-        self.launch(&id, &shown, cwd, args, false, false)?;
+        self.launch(&id, &shown, cwd, args, Run::Agent, false)?;
         // A new session is where the eye already is: against the tiles, not
         // wherever the stage was left.
         if let Some(key) = self.project_of(&id) {
@@ -1382,7 +1412,12 @@ impl App {
         let cwd = PathBuf::from(&saved.cwd);
         let result = if cwd.is_dir() {
             let args = saved.launch_args();
-            self.launch(id, &saved.name, cwd, args, saved.shell, show)
+            let run = match (&saved.ssh, saved.shell) {
+                (Some(host), _) => Run::Ssh(host.clone()),
+                (None, true) => Run::Shell,
+                (None, false) => Run::Agent,
+            };
+            self.launch(id, &saved.name, cwd, args, run, show)
         } else {
             Err(format!("{} no longer exists", cwd.display()))
         };
@@ -1405,7 +1440,7 @@ impl App {
             .map(|r| r.all().filter(|s| s.shell && project_key(s) == key).count())
             .unwrap_or(0);
         let id = self.unique_id("terminal");
-        if let Err(e) = self.launch(&id, &shell::name(n), dir, Vec::new(), true, false) {
+        if let Err(e) = self.launch(&id, &shell::name(n), dir, Vec::new(), Run::Shell, false) {
             eprintln!("horadric: cannot open a terminal: {e}");
             return;
         }
@@ -1416,16 +1451,45 @@ impl App {
         }
     }
 
+    /// Opens an SSH terminal on `host` in the project with this key, the
+    /// way [`App::open_shell`] opens a plain one.
+    fn open_ssh(&mut self, key: &str, host: &str) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        let n = self
+            .shared
+            .registry
+            .lock()
+            .map(|r| {
+                r.all()
+                    .filter(|s| s.ssh.is_some() && project_key(s) == key)
+                    .count()
+            })
+            .unwrap_or(0);
+        let id = self.unique_id("ssh");
+        let run = Run::Ssh(host.to_string());
+        if let Err(e) = self.launch(&id, &ssh::name(n), dir, Vec::new(), run, false) {
+            eprintln!("horadric: cannot open ssh to {host}: {e}");
+            return;
+        }
+        if self.fill_stage(key, false) {
+            if let Some(stage) = &self.stage {
+                stage.focus_session(&id);
+            }
+        }
+    }
+
     /// Registers a session, starts its console and, with `show`, opens its
-    /// terminal. With `shell`, the console runs a plain shell instead of
-    /// the agent.
-    fn launch(
+    /// terminal. `run` says whether the console runs the agent, a plain
+    /// shell or `ssh`.
+    pub(crate) fn launch(
         &mut self,
         id: &str,
         name: &str,
         cwd: PathBuf,
         args: Vec<String>,
-        shell: bool,
+        run: Run,
         show: bool,
     ) -> Result<(), String> {
         // One agent per session, whatever path led here. A second would be
@@ -1437,10 +1501,25 @@ impl App {
         {
             return Err(format!("{id} is already running"));
         }
-        let program = if shell {
-            console::shell_program().ok_or("no shell found (set HORADRIC_SHELL)")?
-        } else {
-            console::agent_program().ok_or("claude not found on PATH (or set HORADRIC_AGENT)")?
+        let shell = run != Run::Agent;
+        let host = match &run {
+            Run::Ssh(h) => Some(h.clone()),
+            _ => None,
+        };
+        let (program, args) = match &run {
+            Run::Agent => (
+                console::agent_program()
+                    .ok_or("claude not found on PATH (or set HORADRIC_AGENT)")?,
+                args,
+            ),
+            Run::Shell => (
+                console::shell_program().ok_or("no shell found (set HORADRIC_SHELL)")?,
+                args,
+            ),
+            Run::Ssh(h) => (
+                console::ssh_program().ok_or("no ssh found (install OpenSSH Client)")?,
+                ssh::args(h),
+            ),
         };
         recent::remember(&mut self.recent, &cwd.to_string_lossy());
 
@@ -1458,6 +1537,12 @@ impl App {
                 r.apply(id, &register, SystemTime::now());
                 if let Some(s) = r.get_mut(id) {
                     s.shell = shell;
+                    // Until the remote shell sets a title, the tile says
+                    // where it is.
+                    if let Some(h) = &host {
+                        s.last_line = h.clone();
+                    }
+                    s.ssh = host;
                 }
                 known
             })

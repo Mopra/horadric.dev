@@ -95,6 +95,9 @@ pub struct Session {
     /// put, and what the tile says comes from the terminal's title.
     #[serde(default)]
     pub shell: bool,
+    /// The host a shell is `ssh` to, which makes it an SSH terminal.
+    #[serde(default)]
+    pub ssh: Option<String>,
     pub phase: Phase,
     /// When the current phase began. The tile's age line counts from here.
     pub since: SystemTime,
@@ -137,6 +140,7 @@ impl Session {
             prompted: false,
             cwd: cwd.into(),
             shell: false,
+            ssh: None,
             phase: Phase::Idle,
             since: now,
             last_line: String::new(),
