@@ -2796,14 +2796,27 @@ impl App {
     }
 
     /// The folder the project with this key lives in, as a session in it
-    /// spelled it.
+    /// spelled it. A session in a worktree has the key too, but the
+    /// project's own folder is the main working tree, so a session there
+    /// comes first and the key itself stands in when none is.
     fn project_dir(&self, key: &str) -> Option<PathBuf> {
         let r = self.shared.registry.lock().ok()?;
-        let dir = r
+        let mut dirs = r
             .all()
-            .find(|s| project_key(s) == key && !s.cwd.is_empty())
-            .map(|s| PathBuf::from(&s.cwd));
-        dir
+            .filter(|s| project_key(s) == key && !s.cwd.is_empty())
+            .map(|s| s.cwd.clone());
+        let first = dirs.next()?;
+        let spelled = |d: &String| {
+            d.replace('\\', "/")
+                .trim_end_matches('/')
+                .eq_ignore_ascii_case(key)
+        };
+        let dir = if spelled(&first) {
+            first
+        } else {
+            dirs.find(spelled).unwrap_or_else(|| key.to_string())
+        };
+        Some(PathBuf::from(dir))
     }
 
     /// Brings every tile window above the other windows.

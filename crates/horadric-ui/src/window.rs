@@ -49,6 +49,7 @@ use crate::board::{self, Board, RowState};
 use crate::files::{Change, Expansion, Row, Tree};
 use crate::glyphs::Font;
 use crate::layout::{self, ClusterLayout, Hit, Metrics};
+pub use crate::project::{folder_key, project_key, project_name};
 use crate::render::{FilesScene, Gpu, Scene, Target, TaskRow, TasksScene};
 use crate::theme;
 use crate::watch::{self, Slot, Watcher};
@@ -1184,28 +1185,6 @@ impl Cluster {
         }
         self.refit();
     }
-}
-
-/// The project a session belongs to. For now its working directory,
-/// normalised. Worktrees will map back to their repository in step 4.
-pub fn project_key(s: &Session) -> String {
-    folder_key(&s.cwd)
-}
-
-/// The project key of the project in this folder.
-pub fn folder_key(dir: &str) -> String {
-    dir.replace('\\', "/")
-        .trim_end_matches('/')
-        .to_ascii_lowercase()
-}
-
-/// A readable name for a project key.
-pub fn project_name(key: &str) -> String {
-    key.rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(key)
-        .to_string()
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
