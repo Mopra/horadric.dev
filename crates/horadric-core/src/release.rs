@@ -20,6 +20,12 @@ pub const SIGNATURE_LEN: usize = 64;
 /// A P-256 public key is the point's `x` and `y`, 32 bytes each.
 pub const PUBLIC_KEY_LEN: usize = 64;
 
+/// The public half of `%USERPROFILE%\.horadric\updater.key`, the only key
+/// an install trusts a release from. Changing it strands every install
+/// built before the change.
+pub const PUBLIC_KEY: &str =
+    "8wrKH/wZATizeAmuj0oEfEGhBJytxORaRtNzXw7XTA0gb3Z1zc5DRz4HiisPxgYk1snLIvQmAL87JH6LGL0DgA==";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct File {
     pub name: String,
@@ -238,6 +244,13 @@ pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_public_key_is_a_whole_point() {
+        let key = base64_decode(PUBLIC_KEY).unwrap();
+        assert_eq!(key.len(), PUBLIC_KEY_LEN);
+        assert_eq!(base64_encode(&key), PUBLIC_KEY);
+    }
 
     fn manifest() -> Manifest {
         Manifest {
