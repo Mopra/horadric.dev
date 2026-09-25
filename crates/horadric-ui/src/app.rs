@@ -53,7 +53,10 @@ use horadric_hooks::listener::{self, Command, Reload, Tagged};
 use horadric_hooks::transcript::{self, Past};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTONULL,
+};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -64,12 +67,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage,
-    RegisterClassW, RegisterWindowMessageW, SetTimer, SystemParametersInfoW, TranslateMessage, MSG,
-    SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_APP, WM_HOTKEY, WM_LBUTTONUP,
-    WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostMessageW,
+    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer, SystemParametersInfoW,
+    TranslateMessage, MSG, SPI_GETWORKAREA, SPI_SETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY, WM_LBUTTONUP, WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
+use crate::columns::{self, Columns};
 use crate::console::{self, Console, Launch};
 use crate::glyphs::Font;
 use crate::keys::{self, FontStep};
@@ -79,7 +84,7 @@ use crate::start::{self, StartWindow};
 use crate::terminal::{self, Place, TerminalWindow};
 use crate::tray::{self, Choice, Item, Tray};
 use crate::usage::{self, UsageWindow};
-use crate::window::{self, project_key, project_name, Cluster, Shared};
+use crate::window::{self, folder_key, project_key, project_name, Cluster, Shared};
 use crate::{
     ask, autostart, browsers, history, inbox, picker, recent, shell, snapping, store, watch,
 };
@@ -115,6 +120,11 @@ const APP_CLASS: PCWSTR = w!("HoradricApp");
 /// Runs a console program without giving it a console window.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const HOTKEY_NEXT: i32 = 1;
+/// The app window's timer that moves the ages on and saves.
+const TICK_TIMER: usize = 1;
+/// Fires once, a moment after a screen change, to lay the tiles out again
+/// once Windows has finished moving windows off a screen that went away.
+const SCREEN_TIMER: usize = 2;
 const ENDED_LINGER: Duration = Duration::from_secs(20);
 /// Starts the id of a file view, which is no session.
 const VIEW: &str = "view:";
@@ -130,8 +140,13 @@ const BROWSER_MIN_DIP: i32 = 360;
 pub(crate) enum Input {
     /// Header clicked: collapse or expand the cluster with this window.
     Toggle(isize),
-    /// Cluster dragged: auto layout leaves it alone from now on.
-    Pin(isize),
+    /// A cluster, or the usage window, by its key in the columns, let go of
+    /// after a drag with the cursor here: it takes the place in the columns
+    /// under the cursor.
+    Drop(String, i32, i32),
+    /// The wheel turned this many notches over the window with this key,
+    /// outside anything that scrolls by itself: its column scrolls.
+    Scroll(String, i32),
     /// Tile clicked: show this session's terminal, resume it, or collapse it.
     Expand(String),
     /// Tile right clicked: offer what can be done with this session.
@@ -169,10 +184,12 @@ pub(crate) enum Input {
     Font(FontStep),
     /// Files of the project with this key changed on disk.
     FilesChanged(String),
-    /// A cluster changed size by itself, its files tile growing or
-    /// shrinking, or the usage window was folded or dragged: stack the
-    /// windows again.
+    /// A cluster changed size by itself, a files tile was folded or opened,
+    /// the usage window was folded, or a window moved to a screen of
+    /// another scale: lay the columns out again.
     Arrange,
+    /// Another pane on the stage has the keyboard: its tile latches down.
+    Spotlight,
     /// A setting in the usage window clicked: offer its values.
     SettingMenu(Setting),
     /// The start window's tile clicked: pick a folder for the first
@@ -323,6 +340,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         registry,
         orders: RefCell::new(saved.grids.clone().into_iter().collect()),
         staged: RefCell::new(HashSet::new()),
+        active: RefCell::new(None),
         browsing: RefCell::new(HashSet::new()),
         usage,
         defaults: RefCell::new(saved.defaults.clone()),
@@ -336,15 +354,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         -10_000,
         -10_000,
     ) {
-        Ok(w) => {
-            if let Some(p) = saved.usage_window.as_ref() {
-                if p.pinned && on_screen(p.x, p.y) {
-                    w.pinned.set(true);
-                    w.move_to(p.x, p.y);
-                }
-            }
-            Some(w)
-        }
+        Ok(w) => Some(w),
         Err(e) => {
             eprintln!("horadric: cannot create the usage window: {e}");
             None
@@ -377,6 +387,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 .iter()
                 .map(|c| (c.key.clone(), c.clone()))
                 .collect(),
+            columns: Columns::from_keys(&saved.columns),
             recent: saved.recent.clone(),
             autostart_offered,
             quiet: saved.quiet,
@@ -397,7 +408,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     });
 
     unsafe {
-        SetTimer(Some(notify), 1, 1000, None);
+        SetTimer(Some(notify), TICK_TIMER, 1000, None);
     }
 
     let mut msg = MSG::default();
@@ -503,6 +514,15 @@ unsafe extern "system" fn app_proc(
         WM_QUERYENDSESSION => {
             with_app(App::freeze);
             return LRESULT(1);
+        }
+        // A screen came or went, changed resolution or scale, or the
+        // taskbar moved. Laid out now and once more when the timer fires.
+        WM_DISPLAYCHANGE | WM_SETTINGCHANGE
+            if msg == WM_DISPLAYCHANGE || wparam.0 as u32 == SPI_SETWORKAREA.0 =>
+        {
+            with_app(App::screen_changed);
+            SetTimer(Some(hwnd), SCREEN_TIMER, 1000, None);
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
         // Menus and dialogs run modal loops that dispatch messages, including
         // ours. They run here, with the app not borrowed, so those messages
@@ -975,8 +995,10 @@ struct App {
     /// Sessions with no process that a click resumes: restored from disk,
     /// or left behind by a crash.
     paused: HashMap<String, SavedSession>,
-    /// Where each project's cluster was, applied when the cluster appears.
+    /// How each project's cluster was folded, applied when it appears.
     cluster_places: HashMap<String, SavedCluster>,
+    /// Which column each cluster and the usage window stand in.
+    columns: Columns,
     /// Projects sessions were started in, newest first, for the tray menu.
     recent: Vec<String>,
     autostart_offered: bool,
@@ -1046,6 +1068,12 @@ impl App {
                 }
             }
             WM_HOTKEY if wparam as i32 == HOTKEY_NEXT => self.next_waiting(),
+            WM_TIMER if wparam == SCREEN_TIMER => {
+                unsafe {
+                    let _ = KillTimer(Some(self.notify), SCREEN_TIMER);
+                }
+                self.screen_changed();
+            }
             WM_TIMER => {
                 self.tick();
                 self.reload_when_ready();
@@ -2207,21 +2235,22 @@ impl App {
         let clusters = self
             .clusters
             .iter()
-            .map(|c| {
-                let (x, y) = c.position();
-                SavedCluster {
-                    key: c.key.clone(),
-                    pinned: c.pinned,
-                    x,
-                    y,
-                    collapsed: c.collapsed,
-                    files_collapsed: c.files_collapsed(),
-                    files_height: c.files_height(),
-                }
+            .map(|c| SavedCluster {
+                key: c.key.clone(),
+                collapsed: c.collapsed,
+                files_collapsed: c.files_collapsed(),
             })
             .collect();
+        // A project closed for good does not keep a place forever: only
+        // one still in the recent list does.
+        let mut columns = self.columns.clone();
+        let recent: HashSet<String> = self.recent.iter().map(|p| folder_key(p)).collect();
+        columns.forget(|k| {
+            k == columns::USAGE || recent.contains(k) || self.clusters.iter().any(|c| c.key == k)
+        });
         SavedState {
             clusters,
+            columns: columns.keys(),
             recent: self.recent.clone(),
             autostart_offered: self.autostart_offered,
             stage: self
@@ -2252,14 +2281,8 @@ impl App {
             sessions,
             defaults: self.shared.defaults.borrow().clone(),
             usage: self.shared.usage.lock().ok().and_then(|u| u.clone()),
-            usage_window: self.usage_window.as_ref().map(|u| {
-                let (x, y) = u.position();
-                SavedPanel {
-                    pinned: u.pinned.get(),
-                    x,
-                    y,
-                    collapsed: u.collapsed.get(),
-                }
+            usage_window: self.usage_window.as_ref().map(|u| SavedPanel {
+                collapsed: u.collapsed.get(),
             }),
             font_size: Some(self.shared.font.size()).filter(|&s| s != keys::FONT_DEFAULT),
             quiet: self.quiet,
@@ -2329,12 +2352,6 @@ impl App {
                     if let Some(place) = self.cluster_places.get(key) {
                         c.collapsed = place.collapsed;
                         c.set_files_collapsed(place.files_collapsed);
-                        c.set_files_height(place.files_height);
-                        // A monitor that is gone would leave it unreachable.
-                        if place.pinned && on_screen(place.x, place.y) {
-                            c.pinned = true;
-                            c.move_to(place.x, place.y);
-                        }
                     }
                     self.clusters.push(c);
                 }
@@ -2355,11 +2372,11 @@ impl App {
         if std::env::var_os("HORADRIC_DEBUG").is_some() {
             for c in &self.clusters {
                 eprintln!(
-                    "cluster {} at {:?} size {:?} pinned={}",
+                    "cluster {} at {:?} size {:?} column {:?}",
                     c.name,
                     c.position(),
                     c.size_px(),
-                    c.pinned
+                    self.columns.find(&c.key)
                 );
             }
         }
@@ -2406,9 +2423,9 @@ impl App {
                         relayout = true;
                     }
                 }
-                Input::Pin(hwnd) => {
-                    if let Some(c) = self.clusters.iter_mut().find(|c| c.hwnd.0 as isize == hwnd) {
-                        c.pinned = true;
+                Input::Drop(key, x, y) => self.drop_window(&key, x, y),
+                Input::Scroll(key, notches) => {
+                    if self.scroll_column(&key, notches) {
                         relayout = true;
                     }
                 }
@@ -2459,6 +2476,11 @@ impl App {
                 Input::Font(step) => self.set_font(step),
                 Input::FilesChanged(key) => self.files_changed(&key),
                 Input::Arrange => relayout = true,
+                Input::Spotlight => {
+                    for c in &self.clusters {
+                        c.invalidate();
+                    }
+                }
                 Input::SettingMenu(s) => {
                     self.setting_menu_for = Some(s);
                     post(self.notify.0 as isize, WM_HORADRIC_SETTING_MENU, 0);
@@ -2521,7 +2543,7 @@ impl App {
         dir
     }
 
-    /// Unpins every cluster, so they all go back down the left edge.
+    /// Brings every tile window above the other windows.
     fn raise(&mut self) {
         if let Some(u) = &self.usage_window {
             u.raise();
@@ -2534,89 +2556,308 @@ impl App {
         }
     }
 
+    /// Scrolls every column back to its top and lays them out again.
     fn tidy(&mut self) {
-        if let Some(u) = &self.usage_window {
-            u.pinned.set(false);
-        }
-        for c in &mut self.clusters {
-            c.pinned = false;
+        for c in &mut self.columns.cols {
+            c.scroll = 0;
         }
         self.arrange();
     }
 
-    /// Stacks the unpinned windows down the left edge of the work area, the
-    /// usage window first: it is about every project, so above them all.
-    fn arrange(&self) {
-        let usage = self.usage_window.as_deref().filter(|u| !u.pinned.get());
-        let free: Vec<&Cluster> = self
-            .clusters
-            .iter()
-            .map(|c| c.as_ref())
-            .filter(|c| !c.pinned)
-            .collect();
-        // It stands in for the first cluster, so it goes where that would.
-        let start = self.start_window.as_deref();
-        let Some(dpi) = usage
+    /// How the columns sit on the primary screen at the DPI the tiles are
+    /// drawn at. None while there is no window to measure.
+    fn grid(&self) -> Option<Grid> {
+        let dpi = self
+            .usage_window
+            .as_deref()
             .map(UsageWindow::dpi)
-            .or_else(|| start.map(StartWindow::dpi))
-            .or_else(|| free.first().map(|c| c.dpi()))
-        else {
-            return;
-        };
+            .or_else(|| self.start_window.as_deref().map(StartWindow::dpi))
+            .or_else(|| self.clusters.first().map(|c| c.dpi()))?;
         let work = work_area();
         let scale = dpi as f32 / 96.0;
-        let width = (self.shared.metrics.width * scale).round() as i32;
-        let heights: Vec<i32> = usage
-            .map(|u| u.size_px().1)
-            .into_iter()
-            .chain(start.map(|s| s.size_px().1))
-            .chain(free.iter().map(|c| c.size_px().1))
-            .collect();
-        let pinned_usage = self
-            .usage_window
+        let px = |dip: f32| (dip * scale).round() as i32;
+        let width = px(self.shared.metrics.width);
+        let margin = px(MARGIN_DIP as f32);
+        let gap = px(GAP_DIP as f32);
+        Some(Grid {
+            left: work.0 + margin,
+            right: work.2 - margin,
+            top: work.1 + margin,
+            height: work.3 - work.1 - 2 * margin,
+            width,
+            gap,
+            min_files: px(layout::min_files_body(&self.shared.metrics)),
+            fits: ((work.2 - work.0 - 2 * margin + gap) / (width + gap)).max(1) as usize,
+            step: px(self.shared.metrics.tile_h + self.shared.metrics.gap),
+        })
+    }
+
+    /// The keys that have a window right now.
+    fn present(&self) -> HashSet<String> {
+        self.clusters
             .iter()
-            .filter(|u| u.pinned.get())
-            .map(|u| (u.position(), u.size_px()));
-        let pinned: Vec<[i32; 4]> = self
+            .map(|c| c.key.clone())
+            .chain(self.usage_window.iter().map(|_| columns::USAGE.to_string()))
+            .collect()
+    }
+
+    /// The windows standing in a column with these keys, top to bottom.
+    /// The start window stands in for the first project, so it goes below
+    /// the usage window in the first column.
+    fn column_windows(&self, keys: &[String], first: bool) -> Vec<Tile<'_>> {
+        let mut out: Vec<Tile> = keys
+            .iter()
+            .filter_map(|k| {
+                if k == columns::USAGE {
+                    return self.usage_window.as_deref().map(Tile::Usage);
+                }
+                self.clusters
+                    .iter()
+                    .find(|c| &c.key == k)
+                    .map(|c| Tile::Cluster(c))
+            })
+            .collect();
+        if let Some(s) = self.start_window.as_deref().filter(|_| first) {
+            let at = out
+                .iter()
+                .position(|t| matches!(t, Tile::Usage(_)))
+                .map_or(0, |i| i + 1);
+            out.insert(at, Tile::Start(s));
+        }
+        out
+    }
+
+    /// Lays the tiles out in their columns down the left of the primary
+    /// screen, a column as tall as the work area. A project not yet in a
+    /// column gets the one with the most room, or a new one when none has
+    /// enough and another fits. See `columns`.
+    fn arrange(&mut self) {
+        let Some(g) = self.grid() else {
+            return;
+        };
+        let present = self.present();
+        let is_present = |k: &str| present.contains(k);
+        self.columns.prune(is_present);
+        if self.usage_window.is_some() && !self.columns.contains(columns::USAGE) {
+            self.columns.add_first(columns::USAGE);
+        }
+        let mut fresh: Vec<(String, String, i32)> = self
             .clusters
             .iter()
-            .filter(|c| c.pinned)
-            .map(|c| (c.position(), c.size_px()))
-            .chain(pinned_usage)
-            .map(|((x, y), (w, h))| [x, y, x + w, y + h])
+            .filter(|c| !self.columns.contains(&c.key))
+            .map(|c| (c.name.to_lowercase(), c.key.clone(), c.need_px()))
             .collect();
-        let mut positions = layout::stack(
-            &heights,
-            width,
-            (MARGIN_DIP as f32 * scale) as i32,
-            (GAP_DIP as f32 * scale) as i32,
-            work,
-            &pinned,
-        )
-        .into_iter();
-        if let Some(u) = usage {
-            if let Some((x, y)) = positions.next() {
-                if u.position() != (x, y) {
-                    u.move_to(x, y);
-                    u.invalidate();
-                }
+        // Several at once, as on the first start, go in an order that does
+        // not change from one start to the next.
+        fresh.sort();
+        for (_, key, need) in fresh {
+            let shown = self.columns.shown(g.fits, is_present);
+            let rooms: Vec<i32> = shown
+                .iter()
+                .enumerate()
+                .map(|(i, (_, keys))| {
+                    let used: i32 = self
+                        .column_windows(keys, i == 0)
+                        .iter()
+                        .map(|t| {
+                            let s = t.stacked();
+                            s.fixed + g.gap + s.files.map_or(0, |_| g.min_files)
+                        })
+                        .sum();
+                    g.height - used
+                })
+                .collect();
+            let col = columns::place_new(&rooms, need, shown.len() < g.fits);
+            self.columns.add(&key, col, is_present);
+        }
+
+        let shown = self.columns.shown(g.fits, is_present);
+        let mut scrolls = Vec::new();
+        for (i, (model, keys)) in shown.iter().enumerate() {
+            let x = g.x(i);
+            let tiles = self.column_windows(keys, i == 0);
+            let items: Vec<columns::Stacked> = tiles.iter().map(Tile::stacked).collect();
+            let scroll = self.columns.cols[*model].scroll;
+            let (filled, room) = columns::fill(&items, g.top, g.height, g.gap, g.min_files, scroll);
+            scrolls.push((*model, scroll.clamp(0, room)));
+            for (t, f) in tiles.iter().zip(filled) {
+                t.place(x, f);
             }
         }
-        if let Some(s) = start {
-            if let Some((x, y)) = positions.next() {
-                if s.position() != (x, y) {
-                    s.move_to(x, y);
-                    s.invalidate();
-                }
+        if shown.is_empty() {
+            if let Some(s) = self.start_window.as_deref() {
+                Tile::Start(s).place(
+                    g.x(0),
+                    columns::Filled {
+                        y: g.top,
+                        files: None,
+                    },
+                );
             }
         }
-        for (c, (x, y)) in free.iter().zip(positions) {
-            if c.position() != (x, y) {
-                c.move_to(x, y);
-                // A window that was created off screen has never painted.
-                // Moving it into view does not always ask it to.
-                c.invalidate();
+        for (model, scroll) in scrolls {
+            self.columns.cols[model].scroll = scroll;
+        }
+    }
+
+    /// A window let go of after a drag takes the place in the columns under
+    /// the cursor, or a new column right of the last when there is room.
+    fn drop_window(&mut self, key: &str, x: i32, y: i32) {
+        let Some(g) = self.grid() else {
+            return;
+        };
+        let present = self.present();
+        let is_present = |k: &str| present.contains(k);
+        // Moved against what the screen shows, so extra columns folded into
+        // the last one on a narrow screen become part of it.
+        self.columns.merge_past(g.fits, is_present);
+        let shown = self.columns.shown(g.fits, is_present);
+        let lefts: Vec<i32> = (0..shown.len()).map(|i| g.x(i)).collect();
+        let alone = shown
+            .iter()
+            .any(|(_, keys)| keys.len() == 1 && keys[0] == key);
+        let col = columns::drop_column(&lefts, g.width, g.gap, x, shown.len() < g.fits || alone);
+        let others: Vec<(i32, i32)> = shown
+            .get(col)
+            .map(|(_, keys)| {
+                let keys: Vec<String> = keys.iter().filter(|k| *k != key).cloned().collect();
+                self.column_windows(&keys, false)
+                    .iter()
+                    .map(Tile::span)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let slot = columns::drop_slot(&others, y);
+        self.columns.move_to(key, col, slot, is_present);
+        self.arrange();
+        self.save();
+    }
+
+    /// Scrolls the column holding the window with this key by the wheel's
+    /// notches. False when that changed nothing.
+    fn scroll_column(&mut self, key: &str, notches: i32) -> bool {
+        let Some(g) = self.grid() else {
+            return false;
+        };
+        let present = self.present();
+        let shown = self.columns.shown(g.fits, |k| present.contains(k));
+        let Some(&(model, _)) = shown.iter().find(|(_, keys)| keys.iter().any(|k| k == key)) else {
+            return false;
+        };
+        let c = &mut self.columns.cols[model];
+        let was = c.scroll;
+        c.scroll = (c.scroll - notches * g.step).max(0);
+        // Past the end is clamped when laid out, so a turn the other way
+        // answers at once.
+        c.scroll != was
+    }
+
+    /// A screen came or went, or the taskbar moved: the columns fit the new
+    /// work area, and a stage left off every screen or over the tiles docks
+    /// beside them again.
+    fn screen_changed(&mut self) {
+        self.arrange();
+        self.stage_rect = self.stage_rect.filter(|r| on_screen(r[0], r[1]));
+        let Some(stage) = &self.stage else {
+            return;
+        };
+        let Ok(r) = snapping::visible_rect(stage.hwnd) else {
+            return;
+        };
+        let rect = [r.left, r.top, r.right, r.bottom];
+        let covers =
+            |t: &[i32; 4]| rect[0] < t[2] && t[0] < rect[2] && rect[1] < t[3] && t[1] < rect[3];
+        if on_one_screen(rect) && !self.tile_rects().iter().any(covers) {
+            return;
+        }
+        let (area, tiles_left) = self.stage_area();
+        if let Some(stage) = &self.stage {
+            stage.set_visible_rect(layout::square(area, tiles_left));
+        }
+    }
+}
+
+/// How the columns sit on the screen, in physical pixels.
+struct Grid {
+    left: i32,
+    right: i32,
+    top: i32,
+    height: i32,
+    width: i32,
+    gap: i32,
+    /// The shortest a files tile gets before its column folds it.
+    min_files: i32,
+    /// How many columns side by side fit on the screen.
+    fits: usize,
+    /// How far a notch of the wheel scrolls a column: one tile.
+    step: i32,
+}
+
+impl Grid {
+    /// The left edge of the `i`th column. Never off the screen to the
+    /// right: overlap is better than lost.
+    fn x(&self, i: usize) -> i32 {
+        (self.left + i as i32 * (self.width + self.gap)).min(self.right - self.width)
+    }
+}
+
+/// A window that stands in the columns.
+enum Tile<'a> {
+    Usage(&'a UsageWindow),
+    Start(&'a StartWindow),
+    Cluster(&'a Cluster),
+}
+
+impl Tile<'_> {
+    fn stacked(&self) -> columns::Stacked {
+        match self {
+            Tile::Usage(u) => columns::Stacked {
+                fixed: u.size_px().1,
+                files: None,
+            },
+            Tile::Start(s) => columns::Stacked {
+                fixed: s.size_px().1,
+                files: None,
+            },
+            Tile::Cluster(c) => columns::Stacked {
+                fixed: c.fixed_px(),
+                files: c.files_claim(),
+            },
+        }
+    }
+
+    /// Its top and bottom on screen.
+    fn span(&self) -> (i32, i32) {
+        let ((_, y), (_, h)) = match self {
+            Tile::Usage(u) => (u.position(), u.size_px()),
+            Tile::Start(s) => (s.position(), s.size_px()),
+            Tile::Cluster(c) => (c.position(), c.size_px()),
+        };
+        (y, y + h)
+    }
+
+    /// Moves it to its place in the column at `x`, a cluster's files tile
+    /// sized first.
+    fn place(&self, x: i32, f: columns::Filled) {
+        // A window that was created off screen has never painted. Moving
+        // it into view does not always ask it to, hence the invalidate.
+        match self {
+            Tile::Usage(u) if u.position() != (x, f.y) => {
+                u.move_to(x, f.y);
+                u.invalidate();
             }
+            Tile::Start(s) if s.position() != (x, f.y) => {
+                s.move_to(x, f.y);
+                s.invalidate();
+            }
+            Tile::Cluster(c) => {
+                c.set_files_room(f.files);
+                if c.position() != (x, f.y) {
+                    c.move_to(x, f.y);
+                    c.invalidate();
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -2638,6 +2879,29 @@ fn on_screen(x: i32, y: i32) -> bool {
         y: y + 10,
     };
     !unsafe { MonitorFromPoint(p, MONITOR_DEFAULTTONULL) }.is_invalid()
+}
+
+/// Whether a rect lies inside the work area of one screen, a pixel either
+/// way allowed.
+fn on_one_screen(r: [i32; 4]) -> bool {
+    let rect = RECT {
+        left: r[0],
+        top: r[1],
+        right: r[2],
+        bottom: r[3],
+    };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let found =
+        unsafe { GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &mut info) };
+    let w = info.rcWork;
+    found.as_bool()
+        && r[0] >= w.left - 1
+        && r[1] >= w.top - 1
+        && r[2] <= w.right + 1
+        && r[3] <= w.bottom + 1
 }
 
 fn folder_name(cwd: &Path) -> String {

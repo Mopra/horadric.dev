@@ -23,13 +23,14 @@
 //! whatever else the work needs. They are sessions with a tile and a pane
 //! like the rest ([`shell`]).
 //!
-//! [`anim`], [`files`], [`find`], [`layout`], [`theme`], [`palette`], [`paste`],
+//! [`anim`], [`columns`], [`files`], [`find`], [`layout`], [`theme`], [`palette`], [`paste`],
 //! [`keys`], [`frame`], [`icon`], [`inbox`], [`motion`], [`viewer`],
 //! [`highlight`], [`history`] and [`shell`] are pure and tested, and so is
 //! the list logic in `recent`.
 //! The rest is Windows only and verified on screen.
 
 pub mod anim;
+pub mod columns;
 pub mod files;
 pub mod find;
 pub mod frame;

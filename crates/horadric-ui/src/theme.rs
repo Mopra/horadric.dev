@@ -209,6 +209,20 @@ pub fn depth(phase: &Phase) -> f32 {
     }
 }
 
+/// How far off the plate the key of the session with the keyboard stands:
+/// latched in level with it, as the one button held down on a tape deck.
+pub const LATCHED: f32 = 0.0;
+
+/// How far a session's key stands off the plate: by phase, and latched
+/// down while its pane on the stage has the keyboard.
+pub fn key_depth(phase: &Phase, selected: bool) -> f32 {
+    if selected {
+        LATCHED
+    } else {
+        depth(phase)
+    }
+}
+
 /// How bright a session's lamp burns at rest, by phase. Off is zero: a
 /// session doing nothing has a dark lamp, so a lit one always means
 /// something.
@@ -322,6 +336,24 @@ mod tests {
             assert!(depth(&p) < depth(&Phase::Idle));
             assert!(depth(&p) > 0.0);
         }
+    }
+
+    #[test]
+    fn the_key_with_the_keyboard_latches_down_below_every_other() {
+        let all = [
+            Phase::Working,
+            Phase::Waiting(WaitReason::Input),
+            Phase::Done,
+            Phase::Idle,
+            Phase::Paused,
+            Phase::Ended,
+        ];
+        for p in &all {
+            assert_eq!(key_depth(p, false), depth(p));
+            assert_eq!(key_depth(p, true), LATCHED);
+        }
+        let lowest = all.iter().map(depth).fold(f32::MAX, f32::min);
+        assert!(key_depth(&Phase::Working, true) < lowest);
     }
 
     #[test]

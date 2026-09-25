@@ -253,13 +253,17 @@ impl TerminalWindow {
         self.refresh_title();
     }
 
-    /// Lights the pane with the keyboard and steps the others back.
+    /// Lights the pane with the keyboard and steps the others back, and
+    /// tells the tiles, so its key latches down.
     fn spotlight(&self) {
         let active = self.active.borrow().clone();
         let panes = self.panes.borrow();
         let many = panes.len() > 1;
         for p in panes.iter() {
             p.set_dimmed(many && Some(p.session()) != active.as_deref());
+        }
+        if self.shared.active.replace(active.clone()) != active {
+            app::push(Input::Spotlight);
         }
     }
 

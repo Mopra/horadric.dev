@@ -1,5 +1,6 @@
 //! What Horadric keeps on disk so it can pick up where it left off: the
-//! sessions it owned, where the clusters were, the recent projects.
+//! sessions it owned, which column each project stands in, the recent
+//! projects.
 //!
 //! No process survives a restart, but a conversation does: Claude Code can
 //! resume one by id. A saved session comes back as a paused tile, and
@@ -25,6 +26,11 @@ pub struct SavedState {
     pub sessions: Vec<SavedSession>,
     #[serde(default)]
     pub clusters: Vec<SavedCluster>,
+    /// The columns the tiles stand in, left to right, each a list of keys
+    /// top to bottom: project keys, and the usage window's own. An order,
+    /// never pixels, so it fits whatever screen comes next.
+    #[serde(default)]
+    pub columns: Vec<Vec<String>>,
     /// Newest first.
     #[serde(default)]
     pub recent: Vec<String>,
@@ -167,29 +173,21 @@ impl SavedSession {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedCluster {
-    /// The project key the cluster shows.
+    /// The project key the cluster shows. Where it stands is in
+    /// `columns`: the `pinned`, `x`, `y` and `files_height` an older file
+    /// has are read and ignored.
     pub key: String,
-    /// Dragged by the user. Only then do `x` and `y` mean anything.
-    pub pinned: bool,
-    pub x: i32,
-    pub y: i32,
+    #[serde(default)]
     pub collapsed: bool,
     /// The files tile folded down to its header.
     #[serde(default)]
     pub files_collapsed: bool,
-    /// How tall the files tile grows below its header before it scrolls,
-    /// in DIPs, once its bottom edge has been dragged.
-    #[serde(default)]
-    pub files_height: Option<f32>,
 }
 
-/// A window that is not a project's: where it was and whether it was folded.
+/// A window that is not a project's: whether it was folded.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SavedPanel {
-    /// Dragged by the user. Only then do `x` and `y` mean anything.
-    pub pinned: bool,
-    pub x: i32,
-    pub y: i32,
+    #[serde(default)]
     pub collapsed: bool,
 }
 
@@ -246,13 +244,10 @@ mod tests {
             sessions: vec![saved(&[], true)],
             clusters: vec![SavedCluster {
                 key: "c:/app".into(),
-                pinned: true,
-                x: 10,
-                y: -20,
                 collapsed: false,
                 files_collapsed: true,
-                files_height: Some(412.0),
             }],
+            columns: vec![vec!["horadric:usage".into()], vec!["c:/app".into()]],
             recent: vec!["C:/app".into()],
             autostart_offered: true,
             stage: Some([300, 12, 1300, 712]),
@@ -266,12 +261,7 @@ mod tests {
                 at: 7,
                 ..Default::default()
             }),
-            usage_window: Some(SavedPanel {
-                pinned: true,
-                x: 5,
-                y: 6,
-                collapsed: true,
-            }),
+            usage_window: Some(SavedPanel { collapsed: true }),
             font_size: Some(17.0),
             quiet: true,
             ..Default::default()
@@ -280,6 +270,7 @@ mod tests {
         assert_eq!(back.version, VERSION);
         assert_eq!(back.sessions, state.sessions);
         assert_eq!(back.clusters, state.clusters);
+        assert_eq!(back.columns, state.columns);
         assert_eq!(back.stage, state.stage);
         assert_eq!(back.on_stage, state.on_stage);
         assert_eq!(back.grids, state.grids);
@@ -312,6 +303,19 @@ mod tests {
         let s = SavedState::from_json(old);
         assert_eq!(s.sessions[0].id, "a");
         assert!(s.grids.is_empty());
+    }
+
+    #[test]
+    fn a_file_with_pinned_clusters_still_reads() {
+        let old = br#"{"version": 1,
+            "clusters": [{"key": "c:/app", "pinned": true, "x": 10, "y": -20,
+                "collapsed": true, "files_collapsed": false, "files_height": 412.0}],
+            "usage_window": {"pinned": true, "x": 5, "y": 6, "collapsed": true}}"#;
+        let s = SavedState::from_json(old);
+        assert_eq!(s.clusters[0].key, "c:/app");
+        assert!(s.clusters[0].collapsed);
+        assert!(s.usage_window.is_some_and(|u| u.collapsed));
+        assert!(s.columns.is_empty());
     }
 
     #[test]

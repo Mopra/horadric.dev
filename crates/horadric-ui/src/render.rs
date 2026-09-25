@@ -216,6 +216,8 @@ pub struct Scene<'a> {
     pub held: Option<usize>,
     /// This project is the one the stage shows.
     pub on_stage: bool,
+    /// The tile whose pane on the stage has the keyboard.
+    pub selected: Option<usize>,
     /// The project's colour.
     pub accent: Color,
     pub now: SystemTime,
@@ -853,6 +855,16 @@ impl Painter<'_> {
         self.inner(gpu, r, radius, (1.5, 5.0), near, far, 1.0);
     }
 
+    /// A key latched in, level with the plate: the plate's shade falls in
+    /// over its top edge and the plate's lit lip runs along its bottom, as
+    /// round a bay.
+    unsafe fn latched(&self, gpu: &Gpu, r: &Rect, radius: f32, opacity: f32) {
+        let lip = Rect::new(r.x, r.y + 1.0, r.w, r.h).inset(-0.5);
+        self.stroke_rounded(&lip, radius + 0.5, theme::ENGRAVE_LIGHT.fade(opacity), 1.0);
+        let (near, far) = (theme::HOLLOW_SHADE, theme::HOLLOW_LIGHT);
+        self.inner(gpu, r, radius, (2.0, 6.0), near, far, opacity);
+    }
+
     /// A screen sunk into the plate, for anything that scrolls: black
     /// glass with a faint sheen across its top.
     unsafe fn screen(&self, gpu: &Gpu, r: &Rect, radius: f32) {
@@ -1204,15 +1216,28 @@ impl Painter<'_> {
 
         // A key. The cursor lifts it a little and a press pushes it down,
         // so the text keeps its colours: dimming a session's name on a press
-        // would look like the session changed.
+        // would look like the session changed. The one with the keyboard
+        // stays latched in, level with the plate and out of the light, and
+        // does not rise under the cursor.
+        let selected = scene.selected == Some(i) && scene.held != Some(i);
+        let rest = theme::key_depth(phase, selected);
         let lift = match b {
-            Button::Pressed => 0.15 - theme::depth(phase),
+            Button::Pressed => (0.15 - rest).min(0.0),
+            _ if selected => 0.0,
             _ => 0.3 * look.hover,
         };
         let held = if scene.held == Some(i) { 1.0 } else { 0.0 };
-        let depth = theme::depth(phase) + lift + held;
+        let depth = rest + lift + held;
         let face = theme::phase_fill(phase).mix(theme::TEXT, 0.03 * look.hover);
+        let face = if selected {
+            face.mix(theme::WELL, 0.25)
+        } else {
+            face
+        };
         self.key(gpu, r, radius, face, depth, look.enter);
+        if selected {
+            self.latched(gpu, r, radius, look.enter);
+        }
 
         // The phase, as light. Waiting needs you, so it is the one that
         // moves most: its lamp breathes and its key is backlit, light
@@ -1560,22 +1585,6 @@ impl Painter<'_> {
                 &Rect::new(body.right() - 4.0, thumb_y, 3.0, thumb_h),
                 1.5,
                 theme::TEXT_DIM.with_alpha(0.5),
-            );
-        }
-
-        // The bottom edge can be dragged, and nothing else says so until
-        // the cursor changes over it.
-        if l.grip.is_some() {
-            let w = 24.0;
-            self.fill_rounded(
-                &Rect::new(
-                    l.rect.x + (l.rect.w - w) / 2.0,
-                    l.rect.bottom() - m.file_foot / 2.0 - 1.0,
-                    w,
-                    2.0,
-                ),
-                1.0,
-                theme::TEXT_DIM.with_alpha(0.35),
             );
         }
     }

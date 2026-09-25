@@ -4,9 +4,9 @@ Where Horadric is, what comes next, and what was decided along the way. Update
 this file when a step lands or a decision changes. It is the handover
 document: someone picking the project up cold should need nothing else.
 
-Last updated 2026-09-24, after step 3, the launchers, persistence, install,
+Last updated 2026-09-25, after step 3, the launchers, persistence, install,
 the stage, reload, the project grid, browser windows, the look, plain
-terminals and a pass of quality of life.
+terminals, a pass of quality of life and the columns.
 
 ## Shape of the thing
 
@@ -20,7 +20,7 @@ Five crates, one binary.
 | `horadric-ui` | Cluster and terminal windows, layout, drawing | Windows |
 | `horadric` | The command line, `horadricw` for Explorer, the wiring | Windows |
 
-`horadric-core` and the pure halves of `horadric-ui` (`layout`, `theme`,
+`horadric-core` and the pure halves of `horadric-ui` (`layout`, `columns`, `theme`,
 `palette`, `keys`, `frame`, `files`, `viewer`, `highlight`, `shell`) have no I/O and
 are tested. `horadric-pty` has a
 test that runs `cmd.exe` in a real pseudo console. Everything else is
@@ -57,18 +57,16 @@ a fresh session would otherwise be invisible.
 
 ### Step 2: cluster windows
 
-One frameless window per project, stacked down the left edge of the work
-area, drawn with Direct2D and DirectWrite. The Win32 rules that make it feel
+One frameless window per project, standing in columns down the left edge
+of the work area (see The columns), drawn with Direct2D and DirectWrite. The Win32 rules that make it feel
 native rather than like an app window:
 
 - `WS_EX_NOACTIVATE` so clicking a tile never takes focus from the editor.
 - `WS_EX_TOOLWINDOW` so it stays out of alt-tab and the taskbar.
 - `SWP_NOACTIVATE` on every move, resize and raise.
 - Dragging handled by hand, because the system move loop activates.
-- A dragged cluster snaps to the work area edges and to the other Horadric
-  windows, at the same margin and gap `arrange` uses (`layout::snap`). Shift held
-  places it freely. Not Alt: a lone Alt press opens the menu bar of the app
-  with the focus. "Tidy up tiles" in the tray menu unpins them all.
+- A dragged cluster takes the place in the columns it is let go over.
+  Placing it freely, with snapping and Shift, was dropped for the columns.
 - DWM rounded corners and a suppressed border, so it matches Windows 11.
 - Not topmost. It stacks like a normal window, so an editor can cover it.
   A click raises it by going topmost and straight back, since a plain
@@ -395,11 +393,11 @@ and popped windows were the freedom that made the desktop a pile again.
 - **Fit terminal beside tiles** in the tray menu fills that same space
   beside the clusters with the stage, by its visible edges: a Windows 11 window
   has an invisible resize border that would otherwise double every gap.
-- **Terminals snap** like clusters, with the same lines, margin and gap:
-  when moved (`WM_MOVING`, `layout::snap`) and when an edge is dragged
-  (`WM_SIZING`, `layout::snap_edges`). Both measure visible edges. Clusters
-  and terminals snap to each other (`snapping::others`), and Shift places
-  either freely. The system loops build each rect from the one returned
+- **Terminals snap** to the work area edges and the other Horadric
+  windows, with the margin and gap the columns use: when moved
+  (`WM_MOVING`, `layout::snap`) and when an edge is dragged (`WM_SIZING`,
+  `layout::snap_edges`). Both measure visible edges (`snapping::others`),
+  and Shift places it freely. The system loops build each rect from the one returned
   last, so a snapped rect snapped again on every small step and the window
   never let go. The free rect comes from the cursor instead, at the
   distance from each edge it had when the drag began.
@@ -508,16 +506,14 @@ editor.
   Ctrl+click opens it in VS Code instead, in the window with the project
   (`Code.exe <project> <file>`, found beside `bin\code.cmd` on `PATH`, so
   no console flashes). Without VS Code, whatever Windows opens it with.
-- **Size.** At most 14 rows, then it scrolls with the wheel and shows a
-  thin bar. Dragging its bottom edge (a small handle, the cursor turns to
-  a resize arrow) sets its height, from 3 rows to the bottom of the
-  monitor, kept as `files_height` per cluster. The height is free, not
-  whole rows, and the edge snaps like a dragged window, so it lines up
-  with the bottom of the stage; room left under the last row stays empty.
-  It never grows past the monitor's height, whatever was saved. The header
-  folds it to one row, kept in `state.json` as `files_collapsed` per
-  cluster. It sits below the `+`, which stays the
-  slot where the next session tile goes.
+- **Size.** Its column decides (see The columns): the files tiles in a
+  column share the height the rest leaves, and a longer tree scrolls with
+  the wheel, with a thin bar. Room left under the last row stays empty.
+  The header folds it to one row, kept in `state.json` as
+  `files_collapsed` per cluster. It used to be 14 rows, or as tall as its
+  bottom edge was dragged, which made every cluster a different height
+  and let a change in one move the rest. It sits below the `+`, which
+  stays the slot where the next session tile goes.
 - **Where the data comes from** (`watch.rs`). One thread per project runs
   `git ls-files` and `git status` and hands the tree (`files.rs`, pure and
   tested) to the cluster with a window message. Then it sleeps in
@@ -686,6 +682,79 @@ restart brought it back paused and a click reopened it, one process each
 time and no `claude`. Not tested on screen: Ctrl+Shift+T, since a scripted
 key would go to whatever window has the focus; the mapping is unit tested.
 
+### The columns
+
+On a laptop taken off a desktop setup, and as projects were added, the
+tiles became a mess, with things moving about by themselves. There were
+four causes. Every cluster was as tall as its content, the files tile up
+to 14 rows, and the stack started a new column wherever one overflowed,
+so one new tile or one changed file could move every project below it.
+Nothing listened for a screen change, and `arrange` only read the
+primary work area, so after undocking the windows stayed wherever Windows
+put them. A dragged cluster was saved in pixels, which meant nothing on a
+smaller screen. And new clusters were made in `HashMap` order, so the
+order changed from one start to the next.
+
+- **Columns as tall as the screen** (`columns.rs`, pure and tested). A
+  project keeps its column and its place in it until it is dragged. A new
+  project, a new session or a changed file never moves another project to
+  another column.
+- **Only the files tiles flex.** A cluster's header, tiles and plus keep
+  their height, and the files tiles in a column share what is left
+  equally (`columns::fill`). One project alone gets a files tile to the
+  bottom of the screen, five get short ones. The shares are equal rather
+  than by content, so a file that changes never moves anything.
+- **When a column is full.** Files tiles that would be under 3 rows fold
+  to their header, the one opened longest ago first, and among equals the
+  lowest. A click on a folded header opens it again and another folds
+  instead. Past that the column scrolls: the wheel over anything that
+  does not scroll by itself moves it a tile per notch (`Input::Scroll`).
+  Nothing jumps to another column by itself. That was asked for, since
+  things moving on their own was what made it a mess.
+- **Where a new project goes.** The column with the most room, when its
+  cluster fits there with a files tile of 3 rows (`Cluster::need_px`,
+  which counts a folder in git before git has answered). Otherwise a new
+  column at the right, while one fits on the screen. Several at once, as
+  on the first start, go in name order.
+- **Dragging.** A cluster or the usage window follows the cursor, and
+  when let go it takes the place under it (`Input::Drop`,
+  `columns::drop_column`, `columns::drop_slot`): another column, another
+  place in its own, or a new column right of the last. Free placement,
+  snapping and `pinned` are gone, and so is the files tile's drag handle,
+  since the column decides its height now. Asked for: columns only.
+- **An order, not pixels.** `columns` in `state.json` is a list of keys
+  per column, the usage window's among them (`columns::USAGE`). The pixel
+  fields an older file has are read and ignored. A project with no tiles
+  left keeps its place while its column has others and it is in the
+  recent list.
+- **Any screen.** A screen too narrow for every column shows the ones
+  that do not fit at the bottom of the last one that does
+  (`Columns::shown`). The model keeps them apart, so docking again splits
+  them back. A drag on the narrow screen makes the merge real first,
+  since the user moves against what they see. `WM_DISPLAYCHANGE` and a
+  work area change (`WM_SETTINGCHANGE` with `SPI_SETWORKAREA`) lay
+  everything out again, and once more a second later, after Windows has
+  moved the windows off a screen that went away. A stage left off every
+  screen, or lying over the tiles, docks beside them again.
+  `WM_DPICHANGED` on a tile lays its column out again too.
+- "Tidy up tiles" scrolls every column back to the top.
+
+Tested on screen with a dev instance on its own port and `APPDATA`, with
+the old state file of four paused projects. They came up as three small
+clusters under the usage window in the first column, and the one with
+fifteen tiles in a second, its files tile folded for want of 6 pixels. A
+session in a new git project opened a third column with its files tile to
+the bottom of the screen. Dragging it onto the second column put it on
+top and pushed the other past the bottom; the wheel scrolled that column
+to its end and no further; dragging it right of the last column gave it
+its own again. A second git project dragged under it split the column
+into two equal files tiles. Clusters, the usage window and the stage,
+moved out of place by hand, all came back on a posted `WM_DISPLAYCHANGE`,
+the stage docked again since it lay over the tiles. The order came back
+after a restart. Not tested on screen: a real undock, a narrow screen
+merging columns (unit tested), and a real mouse drag rather than a
+scripted one.
+
 ### The usage window
 
 A window of its own at the top of the stack: how much of the account's
@@ -723,9 +792,9 @@ typing `/usage`, and so a model can be picked once instead of per session.
   a shell put in with `HORADRIC_AGENT`.
 - **Context on tiles.** Each session keeps the last status it heard
   (`Session::status`, not saved), which the tile draws, see The look.
-- **The window** (`usage.rs`) behaves like a cluster: no focus, dragged and
-  snapped the same way, folded by its header, pinned once dragged, raised
-  and tidied from the tray with the rest. It counts as a tile when the
+- **The window** (`usage.rs`) behaves like a cluster: no focus, dragged
+  to a place in the columns the same way, folded by its header, raised
+  from the tray with the rest. It starts at the top of the first column. It counts as a tile when the
   stage docks. Kept as `usage_window` in `state.json`.
 - **It looks like a cluster too** (see The look): the same faceplate, the
   limits as segmented meters on a screen sunk into it, the settings in a
@@ -788,6 +857,14 @@ and a terminal is a screen set into the panel.
   is green and flashes once. Idle, paused and ended lamps are dark glass,
   and paused and ended keys are latched down (`theme::depth`) and fade back
   (`theme::presence`).
+- **The selected key is held in.** The session whose pane on the stage has
+  the keyboard has its key latched in level with the plate, like the one
+  button held down on a tape deck: out of the light, shade falling in over
+  its top edge, the plate's lit lip under it (`theme::key_depth`,
+  `Painter::latched`). It is fully lit, so it never reads as paused. The
+  stage keeps `Shared::active` and a change sends `Input::Spotlight`, which
+  redraws the clusters, so the latch follows a tile click, a pane click
+  and a keyboard move between panes.
 - **Project accents.** Eight colours chosen away from every phase colour,
   picked by an FNV hash of the project key (`theme::accent`), so a project
   keeps its colour across runs. It marks the cluster's name, washes faintly
@@ -1105,12 +1182,10 @@ suggestions from `~/.ssh/config`.
 - **Expanding from a synthetic click can open behind other windows.** Windows
   only lets a process take the foreground after real input. A real click on
   a tile is real input, so this only bites scripted tests.
-- **Only the primary monitor.** `arrange` reads `SPI_GETWORKAREA`, which
-  ignores the other screens. Snapping already uses the monitor under the
-  cursor.
-- **Snapped clusters do not stay together.** Nothing remembers that two
-  clusters were snapped, so a cluster that grows can overlap the one below
-  it, and moving one leaves the other behind.
+- **Only the primary monitor.** The columns stand on the primary screen's
+  work area (`SPI_GETWORKAREA`). Undocking usually makes the laptop's own
+  screen primary, so they follow it; there is no way yet to pick another
+  screen.
 - **The tray menu is light in dark mode.** Win32 popup menus only follow
   the dark theme through undocumented `uxtheme` calls.
 - **New tray icons start hidden.** Windows 11 puts them behind the `^`

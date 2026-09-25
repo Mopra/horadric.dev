@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -24,10 +25,7 @@ use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     DWM_WINDOW_CORNER_PREFERENCE,
 };
-use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, InvalidateRect, MonitorFromWindow, ScreenToClient, ValidateRect, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST,
-};
+use windows::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient, ValidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -36,24 +34,23 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
-    KillTimer, LoadCursorW, RegisterClassW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HTCLIENT, HWND_NOTOPMOST,
-    HWND_TOPMOST, IDC_ARROW, IDC_SIZENS, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
-    WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TIMER, WNDCLASSW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    KillTimer, LoadCursorW, RegisterClassW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW,
+    MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_APP,
+    WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+    WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::anim::{self, TileIn};
-use crate::app::{self, Input, MARGIN_DIP};
+use crate::app::{self, Input};
 use crate::backdrop;
 use crate::files::{Change, Expansion, Row, Tree};
 use crate::glyphs::Font;
 use crate::layout::{self, ClusterLayout, Hit, Metrics};
 use crate::render::{FilesScene, Gpu, Scene, Target};
+use crate::theme;
 use crate::watch::{self, Slot, Watcher};
-use crate::{snapping, theme};
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricCluster");
 const DRAG_THRESHOLD: i32 = 4;
@@ -80,6 +77,8 @@ pub struct Shared {
     /// both show them, by project key. Paused ones keep their place.
     pub orders: RefCell<HashMap<String, Vec<String>>>,
     pub staged: RefCell<HashSet<String>>,
+    /// The session whose pane has the keyboard, or last had it.
+    pub active: RefCell<Option<String>>,
     pub browsing: RefCell<HashSet<String>>,
     /// Written by the feeder thread as status lines arrive.
     pub usage: Arc<Mutex<Option<Usage>>>,
@@ -93,8 +92,6 @@ pub struct Cluster {
     pub key: String,
     pub name: String,
     pub collapsed: bool,
-    /// Once the user has dragged it, auto layout leaves it alone.
-    pub pinned: bool,
     /// The project folder, as a session spelled it.
     dir: Option<PathBuf>,
     files: RefCell<Files>,
@@ -103,7 +100,6 @@ pub struct Cluster {
     target: RefCell<Option<Target>>,
     drag: RefCell<Option<Drag>>,
     lift: RefCell<Option<Lift>>,
-    resize: RefCell<Option<Resize>>,
     layout: RefCell<ClusterLayout>,
     /// What the cursor is over, for the buttons to light up.
     hot: Cell<Hit>,
@@ -132,11 +128,19 @@ struct Files {
     rows: Vec<Row>,
     /// Rows above the top of the tile.
     scroll: usize,
+    /// Folded by a click on its header.
     collapsed: bool,
-    /// How tall it may grow below its header before it scrolls, in DIPs,
-    /// set by dragging its bottom edge. None for the default.
-    cap: Option<f32>,
+    /// How tall its column lets it be below its header, in DIPs. None when
+    /// the column had no room for it, which folds it too.
+    room: Option<f32>,
+    /// When a click last opened it, by [`OPENED`]. The oldest folds first
+    /// when a column runs out of room.
+    opened: u64,
 }
+
+/// Counts clicks that open a files tile, so the one opened last is the
+/// last its column folds.
+static OPENED: AtomicU64 = AtomicU64::new(1);
 
 impl Files {
     fn rebuild(&mut self) {
@@ -148,16 +152,20 @@ impl Files {
     }
 
     /// How tall the layout should make the tile below its header, none for
-    /// no tile, with the window `base` DIPs tall without it and `room` DIPs
-    /// of screen to grow into.
-    fn wanted(&self, m: &Metrics, base: f32, room: f32) -> Option<f32> {
+    /// no tile.
+    fn wanted(&self) -> Option<f32> {
         self.tree.as_ref().map(|_| {
             if self.collapsed {
                 0.0
             } else {
-                layout::files_body(m, self.rows.len(), self.cap, base, room)
+                self.room.unwrap_or(0.0)
             }
         })
+    }
+
+    /// Showing only its header, by a click or for want of room.
+    fn folded(&self) -> bool {
+        self.collapsed || self.room.is_none()
     }
 }
 
@@ -165,8 +173,6 @@ struct Drag {
     start_cursor: POINT,
     start_window: POINT,
     moved: bool,
-    /// The other windows, read once: they cannot move during this drag.
-    others: Vec<snapping::Edges>,
 }
 
 /// A tile pressed, and once past the drag threshold carried, to a new
@@ -181,21 +187,6 @@ struct Lift {
     /// The place it takes if let go now.
     slot: usize,
     moved: bool,
-}
-
-/// The files tile's bottom edge being dragged.
-struct Resize {
-    start_y: i32,
-    /// The window's bottom edge when the drag began, in physical pixels.
-    start_bottom: i32,
-    /// The window's height in DIPs with the tile folded.
-    base: f32,
-    /// The tallest the tile gets: down to the bottom of the monitor.
-    max: f32,
-    /// Past the drag threshold, so a click leaves the height alone.
-    moved: bool,
-    /// The other windows, read once: they cannot move during this drag.
-    others: Vec<snapping::Edges>,
 }
 
 pub fn register_class() -> Result<()> {
@@ -239,7 +230,6 @@ impl Cluster {
             key,
             name,
             collapsed: false,
-            pinned: false,
             dir,
             files: RefCell::new(Files::default()),
             watcher: None,
@@ -247,7 +237,6 @@ impl Cluster {
             target: RefCell::new(None),
             drag: RefCell::new(None),
             lift: RefCell::new(None),
-            resize: RefCell::new(None),
             layout: RefCell::new(initial),
             hot: Cell::new(Hit::Nothing),
             pressed: Cell::new(None),
@@ -402,32 +391,55 @@ impl Cluster {
         self.files.borrow_mut().collapsed = collapsed;
     }
 
-    pub fn files_height(&self) -> Option<f32> {
-        self.files.borrow().cap
-    }
-
-    pub fn set_files_height(&self, cap: Option<f32>) {
-        self.files.borrow_mut().cap = cap;
-    }
-
-    /// The work area of the monitor the window is on, in physical pixels.
-    fn work(&self) -> Option<RECT> {
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        let monitor = unsafe { MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST) };
-        unsafe { GetMonitorInfoW(monitor, &mut info) }
-            .as_bool()
-            .then_some(info.rcWork)
-    }
-
-    /// The window's height in DIPs with the files tile folded.
-    fn base_height(&self, n: usize) -> f32 {
+    /// The window's height in physical pixels with the files tile folded:
+    /// what it takes of its column before the files tiles share the rest.
+    pub fn fixed_px(&self) -> i32 {
         let folded = self.files.borrow().tree.as_ref().map(|_| 0.0);
-        layout::cluster(&self.shared.metrics, n, self.collapsed, folded)
+        let n = self.sessions().len();
+        let h = layout::cluster(&self.shared.metrics, n, self.collapsed, folded)
             .size
-            .1
+            .1;
+        (h * self.scale()).round() as i32
+    }
+
+    /// The fewest physical pixels of a column the window needs to show its
+    /// files tile open. Counted before git has answered for a folder in
+    /// git, or a project new in a column would land where its files tile
+    /// has no room a moment later.
+    pub fn need_px(&self) -> i32 {
+        let m = &self.shared.metrics;
+        let f = self.files.borrow();
+        let git = f.tree.is_some()
+            || self
+                .dir
+                .as_deref()
+                .is_some_and(|d| d.ancestors().any(|a| a.join(".git").exists()));
+        let body = git.then(|| {
+            if f.collapsed {
+                0.0
+            } else {
+                layout::min_files_body(m)
+            }
+        });
+        let h = layout::cluster(m, self.sessions().len(), self.collapsed, body)
+            .size
+            .1;
+        (h * self.scale()).round() as i32
+    }
+
+    /// Whether the files tile asks its column for room, and when it was
+    /// opened, which decides who folds first when there is not enough.
+    pub fn files_claim(&self) -> Option<u64> {
+        let f = self.files.borrow();
+        (f.tree.is_some() && !f.collapsed && !self.collapsed).then_some(f.opened)
+    }
+
+    /// Gives the files tile the room its column has for it, in physical
+    /// pixels below its header, and fits the window to it.
+    pub fn set_files_room(&self, px: Option<i32>) {
+        let room = px.map(|p| p as f32 / self.scale());
+        self.files.borrow_mut().room = room;
+        self.fit();
     }
 
     /// Recomputes layout from the registry and resizes the window to fit.
@@ -436,12 +448,7 @@ impl Cluster {
         let sessions = self.sessions();
         let n = sessions.len();
         let m = &self.shared.metrics;
-        // The whole height of the monitor rather than what is left below
-        // the window: where an unpinned cluster goes depends on its height.
-        let room = self.work().map_or(f32::MAX, |w| {
-            (w.bottom - w.top) as f32 / self.scale() - 2.0 * MARGIN_DIP as f32
-        });
-        let wanted = self.files.borrow().wanted(m, self.base_height(n), room);
+        let wanted = self.files.borrow().wanted();
         let mut l = layout::cluster(m, n, self.collapsed, wanted);
         let marked: Vec<bool> = {
             let browsing = self.shared.browsing.borrow();
@@ -516,6 +523,12 @@ impl Cluster {
             let staged = self.shared.staged.borrow();
             refs.iter().any(|s| staged.contains(&s.id))
         };
+        let selected = on_stage
+            .then(|| {
+                let active = self.shared.active.borrow();
+                refs.iter().position(|s| active.as_deref() == Some(&s.id))
+            })
+            .flatten();
         let files = self.files.borrow();
         let hot = self.hot.get();
         let pressed = self.pressed.get();
@@ -552,6 +565,7 @@ impl Cluster {
             looks: &looks,
             held,
             on_stage,
+            selected,
             accent: theme::accent(&self.key),
             ambient,
             rebuild,
@@ -560,7 +574,7 @@ impl Cluster {
                 tree,
                 rows: &files.rows,
                 scroll: files.scroll,
-                collapsed: files.collapsed,
+                collapsed: files.folded(),
             }),
             hot: self.hot.get(),
             pressed: self.pressed.get(),
@@ -642,11 +656,16 @@ impl Cluster {
                 }
                 let s = self.scale();
                 let (x, y) = (p.x as f32 / s, p.y as f32 / s);
+                let notches = ((wparam.0 >> 16) & 0xffff) as i16 as i32 / 120;
                 let shown = match &self.layout.borrow().files {
                     Some(fl) if fl.body().contains(x, y) => fl.rows.len(),
-                    _ => return Some(LRESULT(0)),
+                    // Anywhere else scrolls the column, when it holds more
+                    // than fits.
+                    _ => {
+                        app::push(Input::Scroll(self.key.clone(), notches));
+                        return Some(LRESULT(0));
+                    }
                 };
-                let notches = ((wparam.0 >> 16) & 0xffff) as i16 as i32 / 120;
                 let mut f = self.files.borrow_mut();
                 let max = f.rows.len().saturating_sub(shown) as i32;
                 let scroll = (f.scroll as i32 - notches * WHEEL_ROWS).clamp(0, max) as usize;
@@ -688,19 +707,10 @@ impl Cluster {
                         SWP_NOACTIVATE | SWP_NOZORDER,
                     );
                 }
+                // On a screen of another scale its column is another
+                // height in pixels.
+                app::push(Input::Arrange);
                 Some(LRESULT(0))
-            }
-            WM_SETCURSOR if (lparam.0 & 0xffff) as u32 == HTCLIENT => {
-                let hit = self.cursor_hit();
-                let cursor = if self.resize.borrow().is_some() || hit == Hit::FilesGrip {
-                    IDC_SIZENS
-                } else {
-                    IDC_ARROW
-                };
-                unsafe {
-                    SetCursor(LoadCursorW(None, cursor).ok());
-                }
-                Some(LRESULT(1))
             }
             WM_LBUTTONDOWN => {
                 self.raise();
@@ -711,10 +721,6 @@ impl Cluster {
                 }
                 let hit = self.hit(lparam);
                 self.press(Some(hit));
-                if hit == Hit::FilesGrip {
-                    self.start_resize(cursor.y);
-                    return Some(LRESULT(0));
-                }
                 if let Hit::Tile(i) = hit {
                     if self.start_lift(i, lparam) {
                         return Some(LRESULT(0));
@@ -725,17 +731,12 @@ impl Cluster {
                     start_cursor: cursor,
                     start_window: POINT { x, y },
                     moved: false,
-                    others: snapping::others(self.hwnd),
                 });
                 Some(LRESULT(0))
             }
             WM_MOUSEMOVE => {
                 self.track();
                 self.hover(self.hit(lparam));
-                if self.resize.borrow().is_some() {
-                    self.resizing();
-                    return Some(LRESULT(0));
-                }
                 if self.lift.borrow().is_some() {
                     self.carry(lparam);
                     return Some(LRESULT(0));
@@ -753,9 +754,7 @@ impl Cluster {
                         // A drag that began on a button moves the window
                         // instead, so the button lets go.
                         self.press(None);
-                        let (x, y) =
-                            self.snapped((d.start_window.x + dx, d.start_window.y + dy), &d.others);
-                        self.move_to(x, y);
+                        self.move_to(d.start_window.x + dx, d.start_window.y + dy);
                     }
                 }
                 Some(LRESULT(0))
@@ -773,12 +772,15 @@ impl Cluster {
                     return Some(LRESULT(0));
                 }
                 self.press(None);
-                if self.resize.borrow_mut().take().is_some() {
-                    return Some(LRESULT(0));
-                }
                 let drag = self.drag.borrow_mut().take();
                 match drag {
-                    Some(d) if d.moved => app::push(Input::Pin(self.hwnd.0 as isize)),
+                    Some(d) if d.moved => {
+                        let mut cursor = POINT::default();
+                        unsafe {
+                            let _ = GetCursorPos(&mut cursor);
+                        }
+                        app::push(Input::Drop(self.key.clone(), cursor.x, cursor.y));
+                    }
                     Some(_) => self.click(lparam),
                     None => {}
                 }
@@ -817,16 +819,6 @@ impl Cluster {
                 Some(LRESULT(0))
             }
             _ => None,
-        }
-    }
-
-    /// Where a drag to `pos` lands once snapped to the edges of the monitor
-    /// under the cursor and to the other Horadric windows.
-    fn snapped(&self, pos: (i32, i32), others: &[snapping::Edges]) -> (i32, i32) {
-        // Read each time: crossing onto another monitor can change the DPI.
-        match snapping::frame(self.dpi()) {
-            Some((work, spacing)) => layout::snap(pos, self.size_px(), work, others, spacing),
-            None => pos,
         }
     }
 
@@ -953,66 +945,6 @@ impl Cluster {
         ((lparam.0 >> 16) & 0xffff) as i16 as f32 / self.scale()
     }
 
-    fn start_resize(&self, cursor_y: i32) {
-        let Some(body) = self.layout.borrow().files.as_ref().map(|f| f.body().h) else {
-            return;
-        };
-        let (_, top) = self.position();
-        let base = self.base_height(self.sessions().len());
-        let room = self.work().map_or(f32::MAX, |w| {
-            (w.bottom - top) as f32 / self.scale() - MARGIN_DIP as f32
-        });
-        *self.resize.borrow_mut() = Some(Resize {
-            start_y: cursor_y,
-            start_bottom: top + self.size_px().1,
-            base,
-            max: (room - base).max(body),
-            moved: false,
-            others: snapping::others(self.hwnd),
-        });
-    }
-
-    /// Follows the cursor with the tile's height while its bottom edge is
-    /// dragged. The edge snaps like a dragged window does, so it can line
-    /// up with the bottom of the stage or the screen.
-    fn resizing(&self) {
-        let mut cursor = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut cursor);
-        }
-        let s = self.scale();
-        let cap = {
-            let mut r = self.resize.borrow_mut();
-            let Some(r) = r.as_mut() else {
-                return;
-            };
-            let dy = cursor.y - r.start_y;
-            r.moved |= dy.abs() > DRAG_THRESHOLD;
-            if !r.moved {
-                return;
-            }
-            let mut rect = [0; 4];
-            let mut w = RECT::default();
-            unsafe {
-                let _ = GetWindowRect(self.hwnd, &mut w);
-            }
-            rect[0] = w.left;
-            rect[1] = w.top;
-            rect[2] = w.right;
-            rect[3] = r.start_bottom + dy;
-            if let Some((work, spacing)) = snapping::frame(self.dpi()) {
-                rect =
-                    layout::snap_edges(rect, [false, false, false, true], work, &r.others, spacing);
-            }
-            let body = (rect[3] - rect[1]) as f32 / s - r.base;
-            body.clamp(layout::min_files_body(&self.shared.metrics), r.max.max(0.0))
-        };
-        if self.files.borrow().cap != Some(cap) {
-            self.set_files_height(Some(cap));
-            self.refit();
-        }
-    }
-
     fn click(&self, lparam: LPARAM) {
         match self.hit(lparam) {
             Hit::New => app::push(Input::New(self.key.clone())),
@@ -1020,12 +952,20 @@ impl Cluster {
             Hit::Shell => app::push(Input::Shell(Some(self.key.clone()))),
             Hit::Header => app::push(Input::Toggle(self.hwnd.0 as isize)),
             Hit::FilesHeader => {
-                let collapsed = !self.files_collapsed();
-                self.set_files_collapsed(collapsed);
-                self.refit();
+                {
+                    let mut f = self.files.borrow_mut();
+                    if f.folded() {
+                        // Folded for want of room, a click still opens it
+                        // and its column folds another instead.
+                        f.collapsed = false;
+                        f.opened = OPENED.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        f.collapsed = true;
+                    }
+                }
+                app::push(Input::Arrange);
             }
             Hit::File(i) => self.file_clicked(i),
-            Hit::FilesGrip => {}
             Hit::Tile(i) => {
                 // Tiles are laid out in registry order, the same order
                 // `sessions` returns.
@@ -1080,8 +1020,12 @@ impl Cluster {
 /// The project a session belongs to. For now its working directory,
 /// normalised. Worktrees will map back to their repository in step 4.
 pub fn project_key(s: &Session) -> String {
-    s.cwd
-        .replace('\\', "/")
+    folder_key(&s.cwd)
+}
+
+/// The project key of the project in this folder.
+pub fn folder_key(dir: &str) -> String {
+    dir.replace('\\', "/")
         .trim_end_matches('/')
         .to_ascii_lowercase()
 }

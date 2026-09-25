@@ -17,10 +17,12 @@ work. Worktrees are next.
   screen: frameless, rounded, never takes focus, not in the taskbar or
   alt-tab. It stacks like a normal window: other windows can cover it, a
   click brings it forward, and "Bring tiles to front" in the tray menu
-  brings them all back. Drag it anywhere: it snaps to the screen edges and to
-  the other Horadric windows, or hold Shift to place it freely. Click the header to
-  collapse it. "Tidy up tiles" in the tray menu stacks them all back on the
-  left edge.
+  brings them all back. The clusters stand in columns as tall as the
+  screen, and the files tiles in a column share the room the tiles leave.
+  Drag a cluster to another place, another column or a new one at the
+  right. A new project never moves the others, and another screen lays the
+  same columns out again. The wheel scrolls a column that holds more than
+  fits. Click the header to collapse a cluster.
 - Each tile shows a session: an icon for its state, name, an age line like
   "needs permission 12 min", and the last line worth reading. Waiting tiles
   light up amber.
@@ -44,8 +46,9 @@ work. Worktrees are next.
   `horadric new --name fix-login` does it from a script.
 - Drag a pane by its header onto another to swap the two. The order is
   remembered. "Fit terminal beside tiles" in the tray menu fills the space
-  right of the clusters. The terminal snaps like clusters do, when moved and
-  when an edge is dragged to resize, and Shift again places it freely.
+  right of the clusters. The terminal snaps to the screen edges and the
+  tiles, when moved and when an edge is dragged to resize, and Shift
+  places it freely.
 - Plain terminals for everything that is not the agent: a dev server, a
   log, a deploy. The small button beside a cluster's bottom `+`, Ctrl+Shift+T
   in any pane, or "New terminal" in the project menu opens PowerShell in the

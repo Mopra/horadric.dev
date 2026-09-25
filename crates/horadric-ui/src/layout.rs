@@ -52,12 +52,9 @@ pub struct Metrics {
     pub tile_radius: f32,
     pub files_header_h: f32,
     pub file_row_h: f32,
-    /// The most rows the files tile shows before it scrolls, until its
-    /// bottom edge is dragged.
-    pub file_rows: usize,
-    /// The fewest rows a drag leaves. Folding it is the header's job.
+    /// The fewest rows a files tile shows before its column folds it.
     pub file_rows_min: usize,
-    /// Room under the last row, which is also where the drag handle sits.
+    /// Room under the last row.
     pub file_foot: f32,
     /// How far each folder level is indented.
     pub file_indent: f32,
@@ -87,7 +84,6 @@ impl Default for Metrics {
             tile_radius: 12.0,
             files_header_h: 30.0,
             file_row_h: 22.0,
-            file_rows: 14,
             file_rows_min: 3,
             file_foot: 10.0,
             file_indent: 12.0,
@@ -133,9 +129,6 @@ pub struct FilesLayout {
     pub header: Rect,
     /// One rect per visible row, top to bottom.
     pub rows: Vec<Rect>,
-    /// The strip along the bottom edge that a drag resizes the tile by.
-    /// None when it is folded.
-    pub grip: Option<Rect>,
 }
 
 impl FilesLayout {
@@ -153,7 +146,8 @@ impl FilesLayout {
 /// Lays out a cluster with `n` tiles. `files` is how tall the files tile is
 /// below its header, in DIPs, none for no files tile. Zero is the tile
 /// folded to its header. It holds as many whole rows as fit and the rest is
-/// room under the last one. Sizing it is the caller's job, see `files_body`.
+/// room under the last one. Sizing it is the column's job, see
+/// [`crate::columns::fill`].
 pub fn cluster(m: &Metrics, n: usize, collapsed: bool, files: Option<f32>) -> ClusterLayout {
     let header = Rect::new(m.pad, m.pad, m.width - 2.0 * m.pad, m.header_h);
     let new = Rect::new(
@@ -192,18 +186,12 @@ pub fn cluster(m: &Metrics, n: usize, collapsed: bool, files: Option<f32>) -> Cl
                     r
                 })
                 .collect();
-            // The foot under the last row keeps it off the rounded corner
-            // and holds the drag handle.
+            // The foot under the last row keeps it off the rounded corner.
             let bottom = header.bottom() + body;
-            // The grip reaches into the window's bottom padding: a strip as
-            // thin as the handle would be hard to catch.
-            let grip = (body > 0.0)
-                .then(|| Rect::new(m.pad, bottom - m.file_foot, full, m.file_foot + m.pad));
             files_layout = Some(FilesLayout {
                 rect: Rect::new(m.pad, y, full, bottom - y),
                 header,
                 rows: row_rects,
-                grip,
             });
             y = bottom + m.gap;
         }
@@ -249,20 +237,7 @@ pub fn mark(layout: &mut ClusterLayout, m: &Metrics, marked: &[bool]) {
         .collect();
 }
 
-/// How tall the files tile is below its header, holding `rows` rows. As
-/// tall as they need up to `cap` (the user's, or `file_rows` rows), never
-/// more than fits in `room` DIPs of window height, given the window is
-/// `base` tall with the tile folded, and never too short for a few rows.
-pub fn files_body(m: &Metrics, rows: usize, cap: Option<f32>, base: f32, room: f32) -> f32 {
-    if rows == 0 {
-        return 0.0;
-    }
-    let need = rows as f32 * m.file_row_h + m.file_foot;
-    let cap = cap.unwrap_or(m.file_rows as f32 * m.file_row_h + m.file_foot);
-    need.min(cap).min((room - base).max(min_files_body(m)))
-}
-
-/// The shortest a drag makes the files tile. Folding it is the header's job.
+/// The shortest a files tile is before its column folds it to its header.
 pub fn min_files_body(m: &Metrics) -> f32 {
     m.file_rows_min as f32 * m.file_row_h + m.file_foot
 }
@@ -279,8 +254,6 @@ pub enum Hit {
     /// The terminal button beside the bottom plus.
     Shell,
     FilesHeader,
-    /// The bottom edge of the files tile, which resizes it.
-    FilesGrip,
     /// A row of the files tile, counted from the top one showing.
     File(usize),
     Nothing,
@@ -344,9 +317,6 @@ pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
     if let Some(f) = &layout.files {
         if f.header.contains(x, y) {
             return Hit::FilesHeader;
-        }
-        if f.grip.is_some_and(|g| g.contains(x, y)) {
-            return Hit::FilesGrip;
         }
         if let Some(i) = f.rows.iter().position(|r| r.contains(x, y)) {
             return Hit::File(i);
@@ -490,54 +460,6 @@ pub fn start_hit(l: &StartLayout, x: f32, y: f32) -> StartHit {
         Some(i) => StartHit::Recent(i),
         None => StartHit::Nothing,
     }
-}
-
-/// Stacks cluster windows down the left edge of a work area.
-///
-/// `heights` are window heights in physical pixels, `work` is the monitor
-/// work area as (left, top, right, bottom). Returns the top left corner for
-/// each window. When the column overflows, a new column starts to the right.
-/// `taken` are windows the user put somewhere, as (left, top, right,
-/// bottom): the stack goes around them, or a new tile lands on a pinned one.
-pub fn stack(
-    heights: &[i32],
-    width: i32,
-    margin: i32,
-    gap: i32,
-    work: (i32, i32, i32, i32),
-    taken: &[[i32; 4]],
-) -> Vec<(i32, i32)> {
-    let (left, top, right, bottom) = work;
-    let last_x = right - margin - width;
-    let mut out = Vec::with_capacity(heights.len());
-    let mut x = left + margin;
-    let mut y = top + margin;
-    for &h in heights {
-        loop {
-            if y + h > bottom - margin && y != top + margin {
-                // Past the last column there is nowhere left to go around.
-                if x >= last_x {
-                    x += width + gap;
-                    y = top + margin;
-                    break;
-                }
-                x += width + gap;
-                y = top + margin;
-            }
-            // Never leave the screen to the right. Overlap is better than lost.
-            let cx = x.min(last_x);
-            let hit = taken.iter().find(|r| {
-                cx < r[2] + gap && cx + width + gap > r[0] && y < r[3] + gap && y + h + gap > r[1]
-            });
-            match hit {
-                Some(r) => y = r[3] + gap,
-                None => break,
-            }
-        }
-        out.push((x.min(last_x), y));
-        y += h + gap;
-    }
-    out
 }
 
 /// How far apart things sit when snapped, in physical pixels.
@@ -932,33 +854,6 @@ mod tests {
     }
 
     #[test]
-    fn the_grip_is_the_bottom_edge_and_reaches_the_window_edge() {
-        let m = Metrics::default();
-        let l = cluster(&m, 1, false, Some(5.0 * m.file_row_h + m.file_foot));
-        let f = l.files.as_ref().unwrap();
-        let g = f.grip.unwrap();
-        assert_eq!(g.y, f.rows[4].bottom());
-        assert_eq!(g.bottom(), l.size.1);
-        assert_eq!(hit(&l, 20.0, f.rect.bottom() - 1.0), Hit::FilesGrip);
-        assert_eq!(hit(&l, 20.0, l.size.1 - 1.0), Hit::FilesGrip);
-        assert_eq!(hit(&l, 20.0, f.rows[4].y + 1.0), Hit::File(4));
-    }
-
-    #[test]
-    fn files_body_takes_the_rows_then_the_cap_then_the_screen() {
-        let m = Metrics::default();
-        let rows = |n: usize| n as f32 * m.file_row_h + m.file_foot;
-        let room = 10_000.0;
-        assert_eq!(files_body(&m, 100, None, 100.0, room), rows(m.file_rows));
-        assert_eq!(files_body(&m, 5, None, 100.0, room), rows(5));
-        assert_eq!(files_body(&m, 100, Some(500.0), 100.0, room), 500.0);
-        assert_eq!(files_body(&m, 100, Some(500.0), 100.0, 311.0), 211.0);
-        // A tiny screen still shows a few.
-        assert_eq!(files_body(&m, 100, None, 100.0, 50.0), min_files_body(&m));
-        assert_eq!(files_body(&m, 0, None, 100.0, room), 0.0);
-    }
-
-    #[test]
     fn a_files_tile_between_rows_holds_the_whole_rows() {
         let m = Metrics::default();
         let l = cluster(&m, 1, false, Some(10.0 * m.file_row_h + m.file_foot + 13.0));
@@ -1025,7 +920,7 @@ mod tests {
         for h in [Hit::New, Hit::Header, Hit::Tile(3), Hit::Add, Hit::Shell] {
             assert!(h.lights(), "{h:?}");
         }
-        for h in [Hit::FilesHeader, Hit::FilesGrip, Hit::File(0), Hit::Nothing] {
+        for h in [Hit::FilesHeader, Hit::File(0), Hit::Nothing] {
             assert!(!h.lights(), "{h:?}");
         }
     }
@@ -1097,56 +992,6 @@ mod tests {
         let add = l.add.unwrap();
         assert_eq!(add.y, l.header.bottom() + m.gap);
         assert_eq!(l.size.1, add.bottom() + m.pad);
-    }
-
-    #[test]
-    fn stack_goes_down_then_right() {
-        let pos = stack(&[100, 100, 100], 280, 12, 12, (0, 0, 1920, 250), &[]);
-        assert_eq!(pos[0], (12, 12));
-        assert_eq!(pos[1], (12, 124));
-        // Third does not fit below, new column.
-        assert_eq!(pos[2], (12 + 292, 12));
-    }
-
-    #[test]
-    fn stack_never_leaves_the_screen_to_the_right() {
-        let pos = stack(&[100, 100, 100], 280, 12, 12, (0, 0, 600, 130), &[]);
-        assert_eq!(pos[2], (600 - 12 - 280, 12));
-    }
-
-    #[test]
-    fn stack_goes_below_a_pinned_window_in_its_place() {
-        let pinned = [12, 12, 292, 212];
-        let pos = stack(&[100, 100], 280, 12, 12, (0, 0, 1920, 1080), &[pinned]);
-        assert_eq!(pos, vec![(12, 224), (12, 336)]);
-    }
-
-    #[test]
-    fn stack_goes_around_a_pinned_window_in_the_middle() {
-        let pinned = [12, 150, 292, 250];
-        let pos = stack(&[100, 100], 280, 12, 12, (0, 0, 1920, 1080), &[pinned]);
-        assert_eq!(pos, vec![(12, 12), (12, 262)]);
-    }
-
-    #[test]
-    fn stack_ignores_a_pinned_window_elsewhere() {
-        let pinned = [900, 12, 1180, 212];
-        let pos = stack(&[100], 280, 12, 12, (0, 0, 1920, 1080), &[pinned]);
-        assert_eq!(pos, vec![(12, 12)]);
-    }
-
-    #[test]
-    fn stack_starts_a_column_when_a_pinned_window_fills_this_one() {
-        let pinned = [12, 12, 292, 1068];
-        let pos = stack(&[100], 280, 12, 12, (0, 0, 1920, 1080), &[pinned]);
-        assert_eq!(pos, vec![(304, 12)]);
-    }
-
-    #[test]
-    fn stack_overlaps_a_pinned_window_rather_than_leave_the_screen() {
-        let pinned = [8, 12, 288, 118];
-        let pos = stack(&[100], 280, 12, 12, (0, 0, 300, 130), &[pinned]);
-        assert_eq!(pos, vec![(8, 12)]);
     }
 
     const SPACING: Spacing = Spacing {

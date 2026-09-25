@@ -2,9 +2,9 @@
 //! the model, effort and permission mode every session Horadric starts gets.
 //!
 //! It belongs to no project, so it is a window of its own rather than a tile
-//! in a cluster, and it sits at the top of the stack the clusters make. It
-//! behaves like a cluster: it never takes the focus, it drags and snaps the
-//! same way, and its header folds it. A setting opens a menu, which the app
+//! in a cluster, and it sits at the top of the first column of tiles. It
+//! behaves like a cluster: it never takes the focus, it drags to another
+//! place in the columns the same way, and its header folds it. A setting opens a menu, which the app
 //! runs, since it owns the defaults.
 
 use std::cell::{Cell, RefCell};
@@ -31,16 +31,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_CAPTURECHANGED,
     WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-    WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SIZE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_POPUP,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SIZE, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::app::{self, Input};
-use crate::backdrop;
 use crate::layout::{self, UsageHit, UsageLayout};
 use crate::render::{Target, UsageScene};
-use crate::snapping;
 use crate::window::Shared;
+use crate::{backdrop, columns};
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricUsage");
 const DRAG_THRESHOLD: i32 = 4;
@@ -50,8 +49,6 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 pub struct UsageWindow {
     pub hwnd: HWND,
     pub collapsed: Cell<bool>,
-    /// Once the user has dragged it, auto layout leaves it alone.
-    pub pinned: Cell<bool>,
     shared: Rc<Shared>,
     target: RefCell<Option<Target>>,
     layout: RefCell<UsageLayout>,
@@ -65,8 +62,6 @@ struct Drag {
     start_cursor: POINT,
     start_window: POINT,
     moved: bool,
-    /// The other windows, read once: they cannot move during this drag.
-    others: Vec<snapping::Edges>,
 }
 
 pub fn register_class() -> Result<()> {
@@ -92,7 +87,6 @@ impl UsageWindow {
         let mut win = Box::new(UsageWindow {
             hwnd: HWND::default(),
             collapsed: Cell::new(collapsed),
-            pinned: Cell::new(false),
             shared,
             target: RefCell::new(None),
             layout: RefCell::new(initial),
@@ -367,6 +361,12 @@ impl UsageWindow {
                         SWP_NOACTIVATE | SWP_NOZORDER,
                     );
                 }
+                app::push(Input::Arrange);
+                Some(LRESULT(0))
+            }
+            WM_MOUSEWHEEL => {
+                let notches = ((wparam.0 >> 16) & 0xffff) as i16 as i32 / 120;
+                app::push(Input::Scroll(columns::USAGE.into(), notches));
                 Some(LRESULT(0))
             }
             WM_LBUTTONDOWN => {
@@ -382,7 +382,6 @@ impl UsageWindow {
                     start_cursor: cursor,
                     start_window: POINT { x, y },
                     moved: false,
-                    others: snapping::others(self.hwnd),
                 });
                 Some(LRESULT(0))
             }
@@ -400,14 +399,7 @@ impl UsageWindow {
                     if d.moved || dx.abs() > DRAG_THRESHOLD || dy.abs() > DRAG_THRESHOLD {
                         d.moved = true;
                         self.press(None);
-                        let pos = (d.start_window.x + dx, d.start_window.y + dy);
-                        let (x, y) = match snapping::frame(self.dpi()) {
-                            Some((work, spacing)) => {
-                                layout::snap(pos, self.size_px(), work, &d.others, spacing)
-                            }
-                            None => pos,
-                        };
-                        self.move_to(x, y);
+                        self.move_to(d.start_window.x + dx, d.start_window.y + dy);
                     }
                 }
                 Some(LRESULT(0))
@@ -423,8 +415,11 @@ impl UsageWindow {
                 let drag = self.drag.borrow_mut().take();
                 match drag {
                     Some(d) if d.moved => {
-                        self.pinned.set(true);
-                        app::push(Input::Arrange);
+                        let mut cursor = POINT::default();
+                        unsafe {
+                            let _ = GetCursorPos(&mut cursor);
+                        }
+                        app::push(Input::Drop(columns::USAGE.into(), cursor.x, cursor.y));
                     }
                     // Only where the press began, as a button does.
                     Some(_) if pressed == Some(self.hit(lparam)) => self.click(self.hit(lparam)),
