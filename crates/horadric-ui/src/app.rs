@@ -56,11 +56,11 @@ use horadric_core::{
 use horadric_hooks::listener::{self, Command, Reload, Tagged};
 use horadric_hooks::transcript::{self, Past};
 use horadric_hooks::{install, TASKS_ENV};
-use windows::core::{w, PCWSTR};
+use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    MONITOR_DEFAULTTONULL,
+    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, HDC, HMONITOR,
+    MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -74,9 +74,10 @@ use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostMessageW,
     PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer, SystemParametersInfoW,
-    TranslateMessage, MSG, SPI_GETWORKAREA, SPI_SETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY, WM_LBUTTONUP, WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP,
-    WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+    TranslateMessage, MONITORINFOF_PRIMARY, MSG, SPI_GETWORKAREA, SPI_SETWORKAREA,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY, WM_LBUTTONUP,
+    WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::columns::{self, Columns};
@@ -86,6 +87,7 @@ use crate::glyphs::Font;
 use crate::keys::{self, FontStep};
 use crate::layout::{self, Metrics};
 use crate::render::Gpu;
+use crate::screens::{self, Screen};
 use crate::start::{self, StartWindow};
 use crate::terminal::{self, Place, TerminalWindow};
 use crate::tray::{self, Choice, Item, Tray};
@@ -430,6 +432,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             recent: saved.recent.clone(),
             autostart_offered,
             quiet: saved.quiet,
+            screen: saved.screen.clone(),
             last_saved: Some(saved),
             frozen: false,
             pick_from: None,
@@ -689,7 +692,19 @@ fn tray_menu(hwnd: HWND) {
         .enumerate()
         .map(|(i, p)| history_items(p, tray::HISTORY + i * history::SPAN))
         .collect();
-    match tray::menu(hwnd, &projects, lines, autostart, hotkey, notify) {
+    let (screens, chosen) = (monitors(), with_app(|app| app.screen.clone()).flatten());
+    let shown = screens::pick(&screens, chosen.as_deref()).map(|s| s.name.clone());
+    let menu = tray::menu(
+        hwnd,
+        &projects,
+        lines,
+        autostart,
+        hotkey,
+        notify,
+        &screens,
+        shown.as_deref(),
+    );
+    match menu {
         Some(Choice::ToggleNotify) => {
             with_app(|app| {
                 app.quiet = !app.quiet;
@@ -716,6 +731,14 @@ fn tray_menu(hwnd: HWND) {
         }
         Some(Choice::Arrange) => {
             with_app(App::fit_stage);
+        }
+        Some(Choice::Screen(i)) => {
+            if let Some(screen) = screens.get(i) {
+                with_app(|app| app.move_to_screen(screens::choice(screen)));
+                // The tiles take the new screen's DPI when they get there,
+                // and lay out again for it.
+                unsafe { SetTimer(Some(hwnd), SCREEN_TIMER, 1000, None) };
+            }
         }
         Some(Choice::ToggleAutostart) => {
             if autostart::is_enabled() {
@@ -1257,6 +1280,9 @@ struct App {
     alert_for: Option<String>,
     /// No notifications, from the tray menu.
     quiet: bool,
+    /// The screen the columns stand on, by device name. None follows the
+    /// primary one.
+    screen: Option<String>,
     /// The task lists: what was read, and what the runner is up to.
     tasks: runner::State,
     /// Worktrees just added for sessions about to start, by session id,
@@ -2384,7 +2410,7 @@ impl App {
             .map(|r| [r.left, r.top, r.right, r.bottom])
             .unwrap_or_else(|| layout::square(area, tiles_left));
         let place = layout::beside_stage(
-            work_area(),
+            work_area(self.screen.as_deref()),
             &self.tile_rects(),
             stage,
             size,
@@ -2729,7 +2755,7 @@ impl App {
     /// so one moved to the right puts the stage on the left.
     fn stage_area(&self) -> ([i32; 4], bool) {
         layout::beside(
-            work_area(),
+            work_area(self.screen.as_deref()),
             &self.tile_rects(),
             self.px(MARGIN_DIP),
             self.px(GAP_DIP),
@@ -2901,6 +2927,7 @@ impl App {
             }),
             font_size: Some(self.shared.font.size()).filter(|&s| s != keys::FONT_DEFAULT),
             quiet: self.quiet,
+            screen: self.screen.clone(),
             live: !self.quit,
             recovering: self.recovering.is_some(),
             ..Default::default()
@@ -3235,7 +3262,7 @@ impl App {
             .map(UsageWindow::dpi)
             .or_else(|| self.start_window.as_deref().map(StartWindow::dpi))
             .or_else(|| self.clusters.first().map(|c| c.dpi()))?;
-        let work = work_area();
+        let work = work_area(self.screen.as_deref());
         let scale = dpi as f32 / 96.0;
         let px = |dip: f32| (dip * scale).round() as i32;
         let width = px(self.shared.metrics.width);
@@ -3417,6 +3444,19 @@ impl App {
     /// A screen came or went, or the taskbar moved: the columns fit the new
     /// work area, and a stage left off every screen or over the tiles docks
     /// beside them again.
+    /// Stands the columns on another screen, None for the primary one. The
+    /// stage stays where it is, since tiles on a small screen beside a
+    /// terminal on the big one is a reason to move them, unless the tiles
+    /// now lie over it.
+    fn move_to_screen(&mut self, screen: Option<String>) {
+        if self.screen == screen {
+            return;
+        }
+        self.screen = screen;
+        self.save();
+        self.screen_changed();
+    }
+
     fn screen_changed(&mut self) {
         self.arrange();
         self.stage_rect = self.stage_rect.filter(|r| on_screen(r[0], r[1]));
@@ -3572,8 +3612,45 @@ fn folder_name(cwd: &Path) -> String {
         .unwrap_or_else(|| "session".into())
 }
 
-/// Primary monitor work area as (left, top, right, bottom).
-pub(crate) fn work_area() -> (i32, i32, i32, i32) {
+/// Every screen plugged in, in the order `screens::in_order` gives.
+fn monitors() -> Vec<Screen> {
+    unsafe extern "system" fn each(m: HMONITOR, _: HDC, _: *mut RECT, out: LPARAM) -> BOOL {
+        let out = unsafe { &mut *(out.0 as *mut Vec<Screen>) };
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if unsafe { GetMonitorInfoW(m, &mut info as *mut MONITORINFOEXW as *mut MONITORINFO) }
+            .as_bool()
+        {
+            let i = info.monitorInfo;
+            let len = info.szDevice.iter().position(|&c| c == 0).unwrap_or(32);
+            let rect = |r: RECT| [r.left, r.top, r.right, r.bottom];
+            out.push(Screen {
+                name: String::from_utf16_lossy(&info.szDevice[..len]),
+                bounds: rect(i.rcMonitor),
+                work: rect(i.rcWork),
+                primary: i.dwFlags & MONITORINFOF_PRIMARY != 0,
+            });
+        }
+        true.into()
+    }
+    let mut found: Vec<Screen> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(each),
+            LPARAM(&mut found as *mut Vec<Screen> as isize),
+        );
+    }
+    screens::in_order(found)
+}
+
+/// The work area of the screen the columns stand on, `chosen` or else the
+/// primary one, as (left, top, right, bottom).
+pub(crate) fn work_area(chosen: Option<&str>) -> (i32, i32, i32, i32) {
+    if let Some(s) = screens::pick(&monitors(), chosen) {
+        return (s.work[0], s.work[1], s.work[2], s.work[3]);
+    }
     let mut r = RECT::default();
     unsafe {
         let _ = SystemParametersInfoW(

@@ -23,6 +23,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TPM_RIGHTBUTTON, WM_NULL,
 };
 
+use crate::screens::{self, Screen};
 use crate::{icon, recent};
 
 const ID: u32 = 1;
@@ -51,6 +52,8 @@ pub enum Choice {
     NextWaiting,
     /// Fill the space beside the clusters with the terminal.
     Arrange,
+    /// Stand the columns on the screen at this place in the list given.
+    Screen(usize),
     ToggleAutostart,
     /// Say, or stop saying, when a session starts waiting.
     ToggleNotify,
@@ -259,6 +262,9 @@ pub const HISTORY: usize = 1000;
 /// `hotkey` is the shortcut for the next waiting session, if it has one,
 /// and `notify` whether a session that starts waiting says so. `history`
 /// holds a History menu for each of `recent_projects`, in order.
+/// `screens` are offered when there is more than one, with the one named
+/// `shown` checked.
+#[allow(clippy::too_many_arguments)]
 pub fn menu(
     hwnd: HWND,
     recent_projects: &[String],
@@ -266,6 +272,8 @@ pub fn menu(
     autostart: Option<bool>,
     hotkey: Option<&str>,
     notify: bool,
+    screens: &[Screen],
+    shown: Option<&str>,
 ) -> Option<Choice> {
     const NEW: usize = 1;
     const QUIT: usize = 2;
@@ -276,6 +284,7 @@ pub fn menu(
     const RAISE: usize = 7;
     const END_ALL: usize = 8;
     const NOTIFY: usize = 9;
+    const SCREEN: usize = 50;
     const RECENT: usize = 100;
     let mut items = vec![Item::action(NEW, "New session\u{2026}"), Item::Separator];
     if recent_projects.is_empty() {
@@ -308,6 +317,18 @@ pub fn menu(
     items.push(Item::action(RAISE, "Bring tiles to front"));
     items.push(Item::action(ARRANGE, "Fit terminal beside tiles"));
     items.push(Item::action(TIDY, "Tidy up tiles"));
+    if screens.len() > 1 {
+        let lines = screens
+            .iter()
+            .enumerate()
+            .map(|(i, screen)| Item::Action {
+                id: SCREEN + i,
+                label: screens::label(i + 1, screen),
+                checked: Some(screen.name.as_str()) == shown,
+            })
+            .collect();
+        items.push(Item::Submenu("Tiles on screen".into(), lines));
+    }
     items.push(Item::Action {
         id: NOTIFY,
         label: "Notify when a session needs you".into(),
@@ -335,6 +356,7 @@ pub fn menu(
         RAISE => Some(Choice::Raise),
         END_ALL => Some(Choice::EndAll),
         i if i >= HISTORY => Some(Choice::History(i)),
+        i if (SCREEN..RECENT).contains(&i) => Some(Choice::Screen(i - SCREEN)),
         i if i >= RECENT => recent_projects
             .get(i - RECENT)
             .map(|p| Choice::Recent(p.clone())),

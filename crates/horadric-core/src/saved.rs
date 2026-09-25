@@ -66,6 +66,10 @@ pub struct SavedState {
     /// No notification when a session starts waiting on you.
     #[serde(default)]
     pub quiet: bool,
+    /// The device name of the screen the columns stand on, when it is not
+    /// the primary one.
+    #[serde(default)]
+    pub screen: Option<String>,
     /// Written by a Horadric that was still running. Only Quit writes it
     /// false, so a start that finds it true follows a crash, a kill or a
     /// logoff, and the sessions that were running start again.
@@ -365,6 +369,7 @@ mod tests {
             usage_window: Some(SavedPanel { collapsed: true }),
             font_size: Some(17.0),
             quiet: true,
+            screen: Some(r"\\.\DISPLAY2".into()),
             ..Default::default()
         };
         let back = SavedState::from_json(state.to_json().as_bytes());
@@ -380,6 +385,7 @@ mod tests {
         assert_eq!(back.usage_window, state.usage_window);
         assert_eq!(back.font_size, state.font_size);
         assert!(back.quiet);
+        assert_eq!(back.screen, state.screen);
         let tile = back.sessions[0].to_session(SystemTime::now());
         assert_eq!(tile.phase, Phase::Paused);
         assert!(tile.prompted);

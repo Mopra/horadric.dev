@@ -30,7 +30,7 @@
 //!
 //! [`anim`], [`board`], [`columns`], [`files`], [`find`], [`layout`], [`theme`], [`palette`], [`paste`],
 //! [`keys`], [`frame`], [`icon`], [`inbox`], [`motion`], [`viewer`],
-//! [`highlight`], [`history`] and [`shell`] are pure and tested, and so is
+//! [`highlight`], [`history`], [`screens`] and [`shell`] are pure and tested, and so is
 //! the list logic in `recent`.
 //! The rest is Windows only and verified on screen.
 
@@ -49,6 +49,7 @@ pub mod layout;
 pub mod motion;
 pub mod palette;
 pub mod paste;
+pub mod screens;
 pub mod shell;
 pub mod theme;
 pub mod viewer;

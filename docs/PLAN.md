@@ -755,6 +755,15 @@ order changed from one start to the next.
   screen, or lying over the tiles, docks beside them again.
   `WM_DPICHANGED` on a tile lays its column out again too.
 - "Tidy up tiles" scrolls every column back to the top.
+- **Which screen.** The columns stand on the primary screen unless "Tiles
+  on screen" in the tray menu, shown with more than one screen, picks
+  another (`screens.rs`, pure and tested). `screen` in `state.json` keeps
+  its device name, `\\.\DISPLAY2`, and picking the primary one clears it,
+  so undocking a laptop still brings the columns to its own screen. A
+  chosen screen that is unplugged falls back to the primary one and is
+  not forgotten, so plugging it in again brings them back. The stage stays
+  where it was left, since tiles on a small screen beside a terminal on
+  the big one is a reason to move them, unless the tiles now cover it.
 
 Tested on screen with a dev instance on its own port and `APPDATA`, with
 the old state file of four paused projects. They came up as three small
@@ -1562,10 +1571,6 @@ the human.
 - **Expanding from a synthetic click can open behind other windows.** Windows
   only lets a process take the foreground after real input. A real click on
   a tile is real input, so this only bites scripted tests.
-- **Only the primary monitor.** The columns stand on the primary screen's
-  work area (`SPI_GETWORKAREA`). Undocking usually makes the laptop's own
-  screen primary, so they follow it; there is no way yet to pick another
-  screen.
 - **The tray menu is light in dark mode.** Win32 popup menus only follow
   the dark theme through undocumented `uxtheme` calls.
 - **New tray icons start hidden.** Windows 11 puts them behind the `^`
