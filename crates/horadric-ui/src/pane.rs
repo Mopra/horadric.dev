@@ -30,9 +30,14 @@ use alacritty_terminal::term::search::{Match, RegexSearch};
 use alacritty_terminal::term::TermMode;
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::LOGFONTW;
 use windows::Win32::Graphics::Gdi::{ClientToScreen, InvalidateRect, ScreenToClient, ValidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::Ime::{
+    ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW,
+    ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, VIRTUAL_KEY, VK_CONTROL, VK_DELETE, VK_DOWN,
     VK_END, VK_F1, VK_F12, VK_F3, VK_F4, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR,
@@ -45,10 +50,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW, CS_DBLCLKS,
     GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_IBEAM, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOZORDER,
     SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_CHAR, WM_DEADCHAR, WM_DPICHANGED_AFTERPARENT,
-    WM_DROPFILES, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_TIMER,
-    WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+    WM_DROPFILES, WM_ERASEBKGND, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
+    WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR,
+    WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS,
+    WS_VISIBLE,
 };
 
 use crate::app::{self, Input};
@@ -110,6 +116,9 @@ pub struct Pane {
     /// new monitor only through its parent.
     dpi: Cell<u32>,
     focused: Cell<bool>,
+    /// Where the input method's window was last put, in client pixels, so
+    /// a paint moves it only when the cursor has.
+    ime_at: Cell<Option<[i32; 4]>>,
     selecting: Cell<bool>,
     /// First half of a character outside the BMP, until the second arrives.
     high_surrogate: Cell<Option<u16>>,
@@ -169,6 +178,7 @@ impl Pane {
             target: RefCell::new(None),
             dpi: Cell::new(0),
             focused: Cell::new(false),
+            ime_at: Cell::new(None),
             selecting: Cell::new(false),
             high_surrogate: Cell::new(None),
             wheel: Cell::new(0),
@@ -465,10 +475,19 @@ impl Pane {
         let plate = self.place_in_stage();
         let font = &self.shared.font;
         let cell = font.cell(dpi);
-        let frame = match self.console.screen.lock() {
-            Ok(s) => frame::build(&s.term, self.focused.get(), |c, style| font.glyph(c, style)),
+        let (frame, at) = match self.console.screen.lock() {
+            Ok(s) => (
+                frame::build(&s.term, self.focused.get(), |c, style| font.glyph(c, style)),
+                frame::cursor_cell(&s.term),
+            ),
             Err(_) => return,
         };
+        if let (true, Some((row, col))) = (self.focused.get(), at) {
+            let rect = glyphs::cell_rect(self.header.get(), &cell, row, col, dpi as f32 / 96.0);
+            if self.ime_at.replace(Some(rect)) != Some(rect) {
+                self.place_ime(rect);
+            }
+        }
         let result = slot.as_ref().map(|t| {
             t.draw(
                 &self.shared.gpu,
@@ -484,6 +503,46 @@ impl Pane {
         });
         if let Some(Err(_)) = result {
             *slot = None;
+        }
+    }
+
+    /// Puts the input method's composition at the cursor cell, in the
+    /// terminal's font, and keeps its candidate list off that cell.
+    fn place_ime(&self, [left, top, right, bottom]: [i32; 4]) {
+        let scale = self.dpi_now() as f32 / 96.0;
+        let mut font = LOGFONTW {
+            lfHeight: -(self.shared.font.size() * scale).round() as i32,
+            ..Default::default()
+        };
+        let family = self.shared.font.family();
+        let family = unsafe { family.as_wide() };
+        let n = family.len().min(font.lfFaceName.len() - 1);
+        font.lfFaceName[..n].copy_from_slice(&family[..n]);
+        let composition = COMPOSITIONFORM {
+            dwStyle: CFS_POINT,
+            ptCurrentPos: POINT { x: left, y: top },
+            rcArea: RECT::default(),
+        };
+        let candidates = CANDIDATEFORM {
+            dwIndex: 0,
+            dwStyle: CFS_EXCLUDE,
+            ptCurrentPos: POINT { x: left, y: bottom },
+            rcArea: RECT {
+                left,
+                top,
+                right,
+                bottom,
+            },
+        };
+        unsafe {
+            let imc = ImmGetContext(self.hwnd);
+            if imc.is_invalid() {
+                return;
+            }
+            let _ = ImmSetCompositionFontW(imc, &font);
+            let _ = ImmSetCompositionWindow(imc, &composition);
+            let _ = ImmSetCandidateWindow(imc, &candidates);
+            let _ = ImmReleaseContext(self.hwnd, imc);
         }
     }
 
@@ -1093,6 +1152,14 @@ impl Pane {
             WM_KILLFOCUS => {
                 self.set_focus(false);
                 Some(LRESULT(0))
+            }
+            WM_IME_STARTCOMPOSITION => {
+                // A composition can start before the first paint with the
+                // keyboard, or after a font change moved nothing on screen.
+                if let Some(rect) = self.ime_at.get() {
+                    self.place_ime(rect);
+                }
+                None
             }
             WM_SETCURSOR if (lparam.0 & 0xffff) as u32 == HTCLIENT => {
                 let mut p = POINT::default();
