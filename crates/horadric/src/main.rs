@@ -3,8 +3,9 @@
 //! it must not take every session with it. `app` runs the app in the
 //! foreground instead, for its log. `new` asks the running app for a session
 //! in a terminal of its own, `run` starts a tagged `claude` in the current
-//! terminal, `serve` shows the state stream as a table, `reload` hands the
-//! running app over to this build, and the rest set Horadric up on this machine.
+//! terminal, `task` reports on an item of the task list, `serve` shows the
+//! state stream as a table, `reload` hands the running app over to this
+//! build, and the rest set Horadric up on this machine.
 
 mod console;
 mod explorer;
@@ -12,6 +13,7 @@ mod install;
 mod reload;
 mod run;
 mod status;
+mod task;
 
 use std::net::TcpStream;
 use std::os::windows::process::CommandExt;
@@ -32,6 +34,9 @@ Usage:
                                Start a session in a Horadric terminal
   horadric run [--name NAME] [--cwd DIR] [-- claude args...]
                                Start a tagged `claude` in this terminal instead
+  horadric task done|blocked WHY|add TITLE|list
+                               Report on the task list item this session works, or
+                               add to the project's list (.horadric/tasks.md)
   horadric serve                 Listen for Claude Code hook events and show a live table
   horadric hooks install         Add Horadric hooks to ~/.claude/settings.json
   horadric hooks uninstall       Remove them
@@ -70,6 +75,7 @@ fn main() -> ExitCode {
         Some("serve") => console::serve(),
         Some("new") => run::new(&args[1..]),
         Some("run") => run::run(&args[1..]),
+        Some("task") => task::run(&args[1..]),
         Some("hooks") => hooks(args.get(1).map(String::as_str)),
         Some("explorer") => explorer_command(args.get(1).map(String::as_str)),
         None => std::env::current_exe()

@@ -45,10 +45,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::anim::{self, TileIn};
 use crate::app::{self, Input};
 use crate::backdrop;
+use crate::board::{self, Board, RowState};
 use crate::files::{Change, Expansion, Row, Tree};
 use crate::glyphs::Font;
 use crate::layout::{self, ClusterLayout, Hit, Metrics};
-use crate::render::{FilesScene, Gpu, Scene, Target};
+use crate::render::{FilesScene, Gpu, Scene, Target, TaskRow, TasksScene};
 use crate::theme;
 use crate::watch::{self, Slot, Watcher};
 
@@ -83,6 +84,8 @@ pub struct Shared {
     /// Written by the feeder thread as status lines arrive.
     pub usage: Arc<Mutex<Option<Usage>>>,
     pub defaults: RefCell<Defaults>,
+    /// Each project's task list as last read, by project key.
+    pub boards: RefCell<HashMap<String, Board>>,
 }
 
 /// One project cluster on screen.
@@ -95,6 +98,7 @@ pub struct Cluster {
     /// The project folder, as a session spelled it.
     dir: Option<PathBuf>,
     files: RefCell<Files>,
+    tasks: RefCell<Tasks>,
     watcher: Option<Watcher>,
     shared: Rc<Shared>,
     target: RefCell<Option<Target>>,
@@ -169,6 +173,21 @@ impl Files {
     }
 }
 
+/// The tasks tile. Every project with a folder has one, empty or not.
+#[derive(Default)]
+struct Tasks {
+    collapsed: bool,
+    /// Rows above the top of the tile.
+    scroll: usize,
+}
+
+/// A row of the tasks tile as the cluster reads it: which item, and how.
+struct Item {
+    line: usize,
+    title: String,
+    state: RowState,
+}
+
 struct Drag {
     start_cursor: POINT,
     start_window: POINT,
@@ -223,7 +242,7 @@ impl Cluster {
             .lock()
             .map(|r| r.all().filter(|s| project_key(s) == key).count())
             .unwrap_or(0);
-        let initial = layout::cluster(&shared.metrics, n, false, None);
+        let initial = layout::cluster(&shared.metrics, n, false, None, None);
 
         let mut cluster = Box::new(Cluster {
             hwnd: HWND::default(),
@@ -232,6 +251,7 @@ impl Cluster {
             collapsed: false,
             dir,
             files: RefCell::new(Files::default()),
+            tasks: RefCell::new(Tasks::default()),
             watcher: None,
             shared,
             target: RefCell::new(None),
@@ -391,14 +411,82 @@ impl Cluster {
         self.files.borrow_mut().collapsed = collapsed;
     }
 
+    pub fn tasks_collapsed(&self) -> bool {
+        self.tasks.borrow().collapsed
+    }
+
+    pub fn set_tasks_collapsed(&self, collapsed: bool) {
+        self.tasks.borrow_mut().collapsed = collapsed;
+    }
+
+    /// The project's items that get a row, in list order, with how each
+    /// reads. None for a project with no folder, which gets no tile.
+    fn items(&self) -> Option<Vec<Item>> {
+        self.dir.as_ref()?;
+        let boards = self.shared.boards.borrow();
+        let Some(b) = boards.get(&self.key) else {
+            return Some(Vec::new());
+        };
+        let registry = self.shared.registry.lock().ok();
+        let phase = |t: &horadric_core::tasks::Task| {
+            let r = registry.as_ref()?;
+            Some(r.get(t.holder.as_deref()?)?.phase.clone())
+        };
+        Some(
+            b.shown()
+                .into_iter()
+                .map(|i| {
+                    let t = &b.tasks[i];
+                    Item {
+                        line: t.line,
+                        title: t.title.clone(),
+                        state: board::row_state(t, phase(t).as_ref()),
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// For each row the tasks tile shows, whether it has an approve button,
+    /// none for no tile. Folded, it shows none.
+    fn task_rows(&self, items: Option<&[Item]>) -> Option<Vec<bool>> {
+        let items = items?;
+        let t = self.tasks.borrow();
+        if t.collapsed {
+            return Some(Vec::new());
+        }
+        let shown = self.shared.metrics.task_rows;
+        Some(
+            items
+                .iter()
+                .skip(t.scroll)
+                .take(shown)
+                .map(|i| i.state == RowState::Review)
+                .collect(),
+        )
+    }
+
+    /// The item on the `i`th row showing, counted from the top.
+    fn item_at(&self, i: usize) -> Option<Item> {
+        let scroll = self.tasks.borrow().scroll;
+        self.items()?.into_iter().nth(scroll + i)
+    }
+
     /// The window's height in physical pixels with the files tile folded:
     /// what it takes of its column before the files tiles share the rest.
     pub fn fixed_px(&self) -> i32 {
         let folded = self.files.borrow().tree.as_ref().map(|_| 0.0);
         let n = self.sessions().len();
-        let h = layout::cluster(&self.shared.metrics, n, self.collapsed, folded)
-            .size
-            .1;
+        let tasks = self.task_rows(self.items().as_deref());
+        let h = layout::cluster(
+            &self.shared.metrics,
+            n,
+            self.collapsed,
+            tasks.as_deref(),
+            folded,
+        )
+        .size
+        .1;
         (h * self.scale()).round() as i32
     }
 
@@ -421,9 +509,16 @@ impl Cluster {
                 layout::min_files_body(m)
             }
         });
-        let h = layout::cluster(m, self.sessions().len(), self.collapsed, body)
-            .size
-            .1;
+        let tasks = self.task_rows(self.items().as_deref());
+        let h = layout::cluster(
+            m,
+            self.sessions().len(),
+            self.collapsed,
+            tasks.as_deref(),
+            body,
+        )
+        .size
+        .1;
         (h * self.scale()).round() as i32
     }
 
@@ -448,8 +543,17 @@ impl Cluster {
         let sessions = self.sessions();
         let n = sessions.len();
         let m = &self.shared.metrics;
+        let items = self.items();
+        {
+            // Items can go from under the view: done, or taken out of the
+            // file.
+            let mut t = self.tasks.borrow_mut();
+            let total = items.as_ref().map_or(0, Vec::len);
+            t.scroll = t.scroll.min(total.saturating_sub(m.task_rows));
+        }
         let wanted = self.files.borrow().wanted();
-        let mut l = layout::cluster(m, n, self.collapsed, wanted);
+        let tasks = self.task_rows(items.as_deref());
+        let mut l = layout::cluster(m, n, self.collapsed, tasks.as_deref(), wanted);
         let marked: Vec<bool> = {
             let browsing = self.shared.browsing.borrow();
             sessions.iter().map(|s| browsing.contains(&s.id)).collect()
@@ -530,6 +634,28 @@ impl Cluster {
             })
             .flatten();
         let files = self.files.borrow();
+        let items = self.items();
+        let tasks_scene = items.as_ref().map(|items| {
+            let t = self.tasks.borrow();
+            let boards = self.shared.boards.borrow();
+            let b = boards.get(&self.key);
+            TasksScene {
+                rows: items
+                    .iter()
+                    .skip(t.scroll)
+                    .take(layout.tasks.as_ref().map_or(0, |l| l.rows.len()))
+                    .map(|i| TaskRow {
+                        title: i.title.clone(),
+                        state: i.state,
+                    })
+                    .collect(),
+                total: items.len(),
+                scroll: t.scroll,
+                summary: b.map_or_else(|| "empty".to_string(), Board::summary),
+                mode: b.map(|b| b.mode).unwrap_or_default().label(),
+                collapsed: t.collapsed,
+            }
+        });
         let hot = self.hot.get();
         let pressed = self.pressed.get();
         let lift = self.lift.borrow();
@@ -576,6 +702,7 @@ impl Cluster {
                 scroll: files.scroll,
                 collapsed: files.folded(),
             }),
+            tasks: tasks_scene,
             hot: self.hot.get(),
             pressed: self.pressed.get(),
         };
@@ -657,6 +784,23 @@ impl Cluster {
                 let s = self.scale();
                 let (x, y) = (p.x as f32 / s, p.y as f32 / s);
                 let notches = ((wparam.0 >> 16) & 0xffff) as i16 as i32 / 120;
+                let over_tasks = match &self.layout.borrow().tasks {
+                    Some(tl) if tl.body().contains(x, y) => Some(tl.rows.len()),
+                    _ => None,
+                };
+                if let Some(shown) = over_tasks {
+                    let total = self.items().map_or(0, |i| i.len());
+                    let scroll = {
+                        let mut t = self.tasks.borrow_mut();
+                        let max = total.saturating_sub(shown) as i32;
+                        let scroll = (t.scroll as i32 - notches).clamp(0, max) as usize;
+                        std::mem::replace(&mut t.scroll, scroll) != scroll
+                    };
+                    if scroll {
+                        self.fit();
+                    }
+                    return Some(LRESULT(0));
+                }
                 let shown = match &self.layout.borrow().files {
                     Some(fl) if fl.body().contains(x, y) => fl.rows.len(),
                     // Anywhere else scrolls the column, when it holds more
@@ -814,6 +958,14 @@ impl Cluster {
                     Hit::Header | Hit::Add | Hit::Shell => {
                         app::push(Input::ProjectMenu(self.key.clone()))
                     }
+                    Hit::Task(i) | Hit::TaskApprove(i) => {
+                        if let Some(item) = self.item_at(i) {
+                            app::push(Input::TaskMenu(self.key.clone(), item.line, item.title));
+                        }
+                    }
+                    Hit::TasksHeader | Hit::TasksMode | Hit::TasksAdd => {
+                        app::push(Input::TasksMode(self.key.clone()))
+                    }
                     _ => {}
                 }
                 Some(LRESULT(0))
@@ -966,6 +1118,23 @@ impl Cluster {
                 app::push(Input::Arrange);
             }
             Hit::File(i) => self.file_clicked(i),
+            Hit::TasksHeader => {
+                let collapsed = !self.tasks_collapsed();
+                self.set_tasks_collapsed(collapsed);
+                app::push(Input::Arrange);
+            }
+            Hit::TasksMode => app::push(Input::TasksMode(self.key.clone())),
+            Hit::TasksAdd => app::push(Input::TaskAdd(self.key.clone())),
+            Hit::Task(i) => {
+                if let Some(item) = self.item_at(i) {
+                    app::push(Input::TaskClick(self.key.clone(), item.line, item.title));
+                }
+            }
+            Hit::TaskApprove(i) => {
+                if let Some(item) = self.item_at(i) {
+                    app::push(Input::TaskApprove(self.key.clone(), item.line, item.title));
+                }
+            }
             Hit::Tile(i) => {
                 // Tiles are laid out in registry order, the same order
                 // `sessions` returns.

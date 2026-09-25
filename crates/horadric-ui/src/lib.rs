@@ -24,13 +24,18 @@
 //! whatever else the work needs. They are sessions with a tile and a pane
 //! like the rest ([`shell`]).
 //!
-//! [`anim`], [`columns`], [`files`], [`find`], [`layout`], [`theme`], [`palette`], [`paste`],
+//! Each project has a task list, `.horadric/tasks.md`, shown in a tasks
+//! tile in its cluster. A click on an item starts a session on it, and the
+//! app can work down the list by itself ([`board`], `horadric_core::tasks`).
+//!
+//! [`anim`], [`board`], [`columns`], [`files`], [`find`], [`layout`], [`theme`], [`palette`], [`paste`],
 //! [`keys`], [`frame`], [`icon`], [`inbox`], [`motion`], [`viewer`],
 //! [`highlight`], [`history`] and [`shell`] are pure and tested, and so is
 //! the list logic in `recent`.
 //! The rest is Windows only and verified on screen.
 
 pub mod anim;
+pub mod board;
 pub mod columns;
 pub mod files;
 pub mod find;

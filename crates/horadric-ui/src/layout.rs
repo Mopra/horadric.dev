@@ -58,6 +58,14 @@ pub struct Metrics {
     pub file_foot: f32,
     /// How far each folder level is indented.
     pub file_indent: f32,
+    /// A row of the tasks tile.
+    pub task_row_h: f32,
+    /// The most rows the tasks tile shows before it scrolls.
+    pub task_rows: usize,
+    /// Room under the last task, off the rounded corner.
+    pub task_foot: f32,
+    /// The button in the tasks tile's header that shows the mode.
+    pub mode_w: f32,
     /// The button on a tile whose session has a browser open.
     pub mark_w: f32,
     pub mark_h: f32,
@@ -95,6 +103,10 @@ impl Default for Metrics {
             file_rows_min: 3,
             file_foot: 10.0,
             file_indent: 12.0,
+            task_row_h: 26.0,
+            task_rows: 8,
+            task_foot: 6.0,
+            mode_w: 64.0,
             mark_w: 24.0,
             mark_h: 20.0,
             limit_row_h: 44.0,
@@ -128,9 +140,41 @@ pub struct ClusterLayout {
     /// The small button at its right that opens a plain terminal in the
     /// project. None when collapsed.
     pub shell: Option<Rect>,
+    /// The tasks tile, between the plus and the files. None when the
+    /// cluster is collapsed or its project has no folder.
+    pub tasks: Option<TasksLayout>,
     /// The files tile, below everything else. None when the project is not
     /// in git or the cluster is collapsed.
     pub files: Option<FilesLayout>,
+}
+
+/// Where the tasks tile, its buttons and its rows go.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TasksLayout {
+    /// The whole tile.
+    pub rect: Rect,
+    /// Its title row, which folds it.
+    pub header: Rect,
+    /// The button in the header that picks the mode. Inside `header`.
+    pub mode: Rect,
+    /// The plus at the header's right end, which adds an item.
+    pub add: Rect,
+    /// One rect per visible row, top to bottom.
+    pub rows: Vec<Rect>,
+    /// The approve button at the right end of each row waiting for review.
+    pub approve: Vec<Option<Rect>>,
+}
+
+impl TasksLayout {
+    /// Where the rows are, header excluded: the part the wheel scrolls.
+    pub fn body(&self) -> Rect {
+        Rect::new(
+            self.rect.x,
+            self.header.bottom(),
+            self.rect.w,
+            self.rect.bottom() - self.header.bottom(),
+        )
+    }
 }
 
 /// Where the files tile and its rows go.
@@ -156,12 +200,20 @@ impl FilesLayout {
     }
 }
 
-/// Lays out a cluster with `n` tiles. `files` is how tall the files tile is
+/// Lays out a cluster with `n` tiles. `tasks` is one entry per task row
+/// shown, true where the row has an approve button, none for no tasks
+/// tile; empty is its header alone. `files` is how tall the files tile is
 /// below its header, in DIPs, none for no files tile. Zero is the tile
 /// folded to its header. It holds as many whole rows as fit and the rest is
 /// room under the last one. Sizing it is the column's job, see
 /// [`crate::columns::fill`].
-pub fn cluster(m: &Metrics, n: usize, collapsed: bool, files: Option<f32>) -> ClusterLayout {
+pub fn cluster(
+    m: &Metrics,
+    n: usize,
+    collapsed: bool,
+    tasks: Option<&[bool]>,
+    files: Option<f32>,
+) -> ClusterLayout {
     let header = Rect::new(m.pad, m.pad, m.width - 2.0 * m.pad, m.header_h);
     let new = Rect::new(
         header.right() - m.header_h,
@@ -173,6 +225,7 @@ pub fn cluster(m: &Metrics, n: usize, collapsed: bool, files: Option<f32>) -> Cl
     let mut tiles = Vec::new();
     let mut add = None;
     let mut shell = None;
+    let mut tasks_layout = None;
     let mut files_layout = None;
     let mut y = header.bottom() + m.gap;
     if !collapsed {
@@ -184,6 +237,11 @@ pub fn cluster(m: &Metrics, n: usize, collapsed: bool, files: Option<f32>) -> Cl
         add = Some(Rect::new(m.pad, y, wide, m.add_h));
         shell = Some(Rect::new(m.pad + wide + m.gap, y, m.shell_w, m.add_h));
         y += m.add_h + m.gap;
+        if let Some(approve) = tasks {
+            let l = tasks_tile(m, y, approve);
+            y = l.rect.bottom() + m.gap;
+            tasks_layout = Some(l);
+        }
         if let Some(body) = files {
             let body = body.max(0.0);
             // A height that came back from physical pixels is a hair off.
@@ -223,7 +281,39 @@ pub fn cluster(m: &Metrics, n: usize, collapsed: bool, files: Option<f32>) -> Cl
         tiles,
         add,
         shell,
+        tasks: tasks_layout,
         files: files_layout,
+    }
+}
+
+/// The tasks tile with its top at `y`, a row for each of `approve`.
+fn tasks_tile(m: &Metrics, y: f32, approve: &[bool]) -> TasksLayout {
+    let full = m.width - 2.0 * m.pad;
+    let header = Rect::new(m.pad, y, full, m.files_header_h);
+    let add = Rect::new(header.right() - header.h, y, header.h, header.h);
+    let mode = Rect::new(add.x - m.mode_w, y + 4.0, m.mode_w, header.h - 8.0);
+    let mut rows = Vec::new();
+    let mut buttons = Vec::new();
+    let mut row_y = header.bottom();
+    for &a in approve {
+        let r = Rect::new(m.pad, row_y, full, m.task_row_h);
+        let side = m.task_row_h - 6.0;
+        buttons.push(a.then(|| Rect::new(r.right() - 8.0 - side, r.y + 3.0, side, side)));
+        rows.push(r);
+        row_y += m.task_row_h;
+    }
+    let bottom = if approve.is_empty() {
+        header.bottom()
+    } else {
+        row_y + m.task_foot
+    };
+    TasksLayout {
+        rect: Rect::new(m.pad, y, full, bottom - y),
+        header,
+        mode,
+        add,
+        rows,
+        approve: buttons,
     }
 }
 
@@ -269,6 +359,15 @@ pub enum Hit {
     FilesHeader,
     /// A row of the files tile, counted from the top one showing.
     File(usize),
+    TasksHeader,
+    /// The mode button in the tasks tile's header.
+    TasksMode,
+    /// The plus in the tasks tile's header.
+    TasksAdd,
+    /// A row of the tasks tile, counted from the top one showing.
+    Task(usize),
+    /// The approve button on that row.
+    TaskApprove(usize),
     Nothing,
 }
 
@@ -278,7 +377,16 @@ impl Hit {
     pub fn lights(self) -> bool {
         matches!(
             self,
-            Hit::New | Hit::Header | Hit::Tile(_) | Hit::Browser(_) | Hit::Add | Hit::Shell
+            Hit::New
+                | Hit::Header
+                | Hit::Tile(_)
+                | Hit::Browser(_)
+                | Hit::Add
+                | Hit::Shell
+                | Hit::TasksMode
+                | Hit::TasksAdd
+                | Hit::Task(_)
+                | Hit::TaskApprove(_)
         )
     }
 }
@@ -326,6 +434,25 @@ pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
     }
     if layout.shell.is_some_and(|a| a.contains(x, y)) {
         return Hit::Shell;
+    }
+    if let Some(t) = &layout.tasks {
+        if t.mode.contains(x, y) {
+            return Hit::TasksMode;
+        }
+        if t.add.contains(x, y) {
+            return Hit::TasksAdd;
+        }
+        if t.header.contains(x, y) {
+            return Hit::TasksHeader;
+        }
+        for (i, r) in t.approve.iter().enumerate() {
+            if r.is_some_and(|r| r.contains(x, y)) {
+                return Hit::TaskApprove(i);
+            }
+        }
+        if let Some(i) = t.rows.iter().position(|r| r.contains(x, y)) {
+            return Hit::Task(i);
+        }
     }
     if let Some(f) = &layout.files {
         if f.header.contains(x, y) {
@@ -979,7 +1106,7 @@ mod tests {
     #[test]
     fn collapsed_is_header_only() {
         let m = Metrics::default();
-        let l = cluster(&m, 5, true, Some(100.0));
+        let l = cluster(&m, 5, true, None, Some(100.0));
         assert!(l.tiles.is_empty());
         assert!(l.add.is_none());
         assert!(l.shell.is_none());
@@ -990,7 +1117,7 @@ mod tests {
     #[test]
     fn files_tile_sits_below_the_plus() {
         let m = Metrics::default();
-        let l = cluster(&m, 1, false, Some(14.0 * m.file_row_h + m.file_foot));
+        let l = cluster(&m, 1, false, None, Some(14.0 * m.file_row_h + m.file_foot));
         let add = l.add.unwrap();
         let f = l.files.as_ref().unwrap();
         assert_eq!(f.rect.y - add.bottom(), m.gap);
@@ -1005,7 +1132,13 @@ mod tests {
     #[test]
     fn a_files_tile_between_rows_holds_the_whole_rows() {
         let m = Metrics::default();
-        let l = cluster(&m, 1, false, Some(10.0 * m.file_row_h + m.file_foot + 13.0));
+        let l = cluster(
+            &m,
+            1,
+            false,
+            None,
+            Some(10.0 * m.file_row_h + m.file_foot + 13.0),
+        );
         let f = l.files.unwrap();
         assert_eq!(f.rows.len(), 10);
         assert_eq!(
@@ -1013,23 +1146,73 @@ mod tests {
             f.header.bottom() + 10.0 * m.file_row_h + m.file_foot + 13.0
         );
         // Back from physical pixels at 150%, a hair short of 7 rows.
-        let l = cluster(&m, 1, false, Some(7.0 * m.file_row_h + m.file_foot - 0.1));
+        let l = cluster(
+            &m,
+            1,
+            false,
+            None,
+            Some(7.0 * m.file_row_h + m.file_foot - 0.1),
+        );
         assert_eq!(l.files.unwrap().rows.len(), 7);
     }
 
     #[test]
     fn collapsed_files_tile_is_its_header() {
         let m = Metrics::default();
-        let l = cluster(&m, 1, false, Some(0.0));
+        let l = cluster(&m, 1, false, None, Some(0.0));
         let f = l.files.unwrap();
         assert!(f.rows.is_empty());
         assert_eq!(f.rect, f.header);
     }
 
     #[test]
+    fn the_tasks_tile_sits_between_the_plus_and_the_files() {
+        let m = Metrics::default();
+        let approve = [false, true, false];
+        let l = cluster(
+            &m,
+            1,
+            false,
+            Some(&approve),
+            Some(5.0 * m.file_row_h + m.file_foot),
+        );
+        let add = l.add.unwrap();
+        let t = l.tasks.as_ref().unwrap();
+        let f = l.files.as_ref().unwrap();
+        assert_eq!(t.rect.y - add.bottom(), m.gap);
+        assert_eq!(f.rect.y - t.rect.bottom(), m.gap);
+        assert_eq!(t.rows.len(), 3);
+        assert_eq!(t.rows[0].y, t.header.bottom());
+        assert_eq!(t.body().y, t.header.bottom());
+        assert_eq!(t.rect.bottom(), t.rows[2].bottom() + m.task_foot);
+        assert!(t.approve[0].is_none() && t.approve[2].is_none());
+        let a = t.approve[1].unwrap();
+        assert!(t.rows[1].contains(a.x, a.y) && a.right() < t.rows[1].right());
+        // The header's buttons come before the header, the approve button
+        // before its row.
+        assert_eq!(hit(&l, t.mode.x + 1.0, t.mode.y + 1.0), Hit::TasksMode);
+        assert_eq!(hit(&l, t.add.x + 1.0, t.add.y + 1.0), Hit::TasksAdd);
+        assert_eq!(hit(&l, 20.0, t.header.y + 1.0), Hit::TasksHeader);
+        assert_eq!(hit(&l, a.x + 1.0, a.y + 1.0), Hit::TaskApprove(1));
+        assert_eq!(hit(&l, 20.0, t.rows[1].y + 1.0), Hit::Task(1));
+        assert!(t.mode.right() <= t.add.x && t.add.right() == t.header.right());
+    }
+
+    #[test]
+    fn an_empty_or_folded_tasks_tile_is_its_header() {
+        let m = Metrics::default();
+        let l = cluster(&m, 1, false, Some(&[]), None);
+        let t = l.tasks.unwrap();
+        assert!(t.rows.is_empty());
+        assert_eq!(t.rect, t.header);
+        assert_eq!(l.size.1, t.rect.bottom() + m.pad);
+        assert!(cluster(&m, 1, true, Some(&[true]), None).tasks.is_none());
+    }
+
+    #[test]
     fn tiles_stack_with_gaps() {
         let m = Metrics::default();
-        let l = cluster(&m, 3, false, None);
+        let l = cluster(&m, 3, false, None, None);
         assert_eq!(l.tiles.len(), 3);
         assert_eq!(l.tiles[1].y - l.tiles[0].bottom(), m.gap);
         let add = l.add.unwrap();
@@ -1077,7 +1260,7 @@ mod tests {
     #[test]
     fn a_browser_button_sits_on_the_second_line_of_marked_tiles_only() {
         let m = Metrics::default();
-        let mut l = cluster(&m, 3, false, None);
+        let mut l = cluster(&m, 3, false, None, None);
         assert_eq!(l.marks, vec![None; 3]);
         mark(&mut l, &m, &[false, true]);
         assert_eq!(l.marks.len(), 3);
@@ -1097,7 +1280,7 @@ mod tests {
     #[test]
     fn collapsing_drops_the_browser_buttons() {
         let m = Metrics::default();
-        let mut l = cluster(&m, 2, true, None);
+        let mut l = cluster(&m, 2, true, None, None);
         mark(&mut l, &m, &[true, true]);
         assert!(l.marks.is_empty());
     }
@@ -1137,7 +1320,7 @@ mod tests {
     #[test]
     fn empty_cluster_still_offers_another_session() {
         let m = Metrics::default();
-        let l = cluster(&m, 0, false, None);
+        let l = cluster(&m, 0, false, None, None);
         let add = l.add.unwrap();
         assert_eq!(add.y, l.header.bottom() + m.gap);
         assert_eq!(l.size.1, add.bottom() + m.pad);

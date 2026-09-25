@@ -91,6 +91,9 @@ use crate::{
     ask, autostart, browsers, history, inbox, picker, recent, shell, snapping, store, watch,
 };
 
+#[path = "runner.rs"]
+mod runner;
+
 /// A hook event changed the registry. `wparam` is 1 when a phase changed.
 const WM_HORADRIC_EVENT: u32 = WM_APP + 1;
 /// A window procedure queued input with [`push`].
@@ -117,6 +120,8 @@ const WM_HORADRIC_WINDOW_GONE: u32 = WM_APP + 11;
 const WM_HORADRIC_SETTING_MENU: u32 = WM_APP + 12;
 /// Show the menu for the recent project the app's `recent_menu_for` names.
 const WM_HORADRIC_RECENT_MENU: u32 = WM_APP + 13;
+/// Show the task list menu or dialog the app's `tasks.menu` holds.
+const WM_HORADRIC_TASK_MENU: u32 = WM_APP + 14;
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
 /// Runs a console program without giving it a console window.
@@ -208,6 +213,17 @@ pub(crate) enum Input {
     /// A recent project right clicked in the start window: offer a new
     /// session or an old conversation in this folder.
     RecentMenu(PathBuf),
+    /// A row of a tasks tile clicked, in the project with this key: the
+    /// item on this line of the file, with this title.
+    TaskClick(String, usize, String),
+    /// The approve button on such a row.
+    TaskApprove(String, usize, String),
+    /// Such a row right clicked: offer what can be done with the item.
+    TaskMenu(String, usize, String),
+    /// The mode button in a tasks tile's header: offer the modes.
+    TasksMode(String),
+    /// The plus in a tasks tile's header: ask for a new item.
+    TaskAdd(String),
 }
 
 thread_local! {
@@ -352,6 +368,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         browsing: RefCell::new(HashSet::new()),
         usage,
         defaults: RefCell::new(saved.defaults.clone()),
+        boards: RefCell::new(HashMap::new()),
     });
     let status_settings = std::env::current_exe()
         .ok()
@@ -412,6 +429,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             browsers: HashMap::new(),
             waiting: HashSet::new(),
             alert_for: None,
+            tasks: runner::State::default(),
         };
         app.reconcile(false);
         app.carry_on(&carry, on_stage.as_deref());
@@ -592,6 +610,12 @@ unsafe extern "system" fn app_proc(
                     }
                     Err(e) => eprintln!("horadric: cannot open a setting's list: {e}"),
                 }
+            }
+            return LRESULT(0);
+        }
+        WM_HORADRIC_TASK_MENU => {
+            if let Some(menu) = with_app(|app| app.tasks.menu.take()).flatten() {
+                runner::show_menu(hwnd, menu);
             }
             return LRESULT(0);
         }
@@ -1028,6 +1052,8 @@ struct App {
     alert_for: Option<String>,
     /// No notifications, from the tray menu.
     quiet: bool,
+    /// The task lists: what was read, and what the runner is up to.
+    tasks: runner::State,
 }
 
 /// A browser window a session opened.
@@ -1044,6 +1070,7 @@ impl App {
             WM_HORADRIC_EVENT => {
                 self.reconcile(wparam != 0);
                 self.switch_free();
+                self.run_tasks();
             }
             WM_HORADRIC_INPUT => self.apply_input(),
             WM_HORADRIC_OUTPUT => self.output(wparam),
@@ -1068,6 +1095,10 @@ impl App {
                             self.reconcile(false);
                             self.reload_when_ready();
                         }
+                        Command::Tasks(_) => {
+                            self.refresh_boards(true);
+                            self.run_tasks();
+                        }
                     }
                 }
             }
@@ -1081,6 +1112,7 @@ impl App {
             WM_TIMER => {
                 self.tick();
                 self.switch_free();
+                self.tick_tasks();
                 self.reload_when_ready();
             }
             _ => {}
@@ -1431,7 +1463,7 @@ impl App {
             })
             .unwrap_or(false);
 
-        let extra = self.extra_args(&program, &args);
+        let extra = self.extra_args(id, &program, &args);
         let serial = self.next_serial;
         self.next_serial += 1;
         let console = Console::spawn(
@@ -1469,10 +1501,11 @@ impl App {
     }
 
     /// What goes before a session's own arguments this time: the defaults
-    /// from the usage window, and the status line that feeds it. Only for
-    /// Claude Code, not for a shell put in its place with `HORADRIC_AGENT`,
-    /// and not over settings the session brought itself.
-    fn extra_args(&self, program: &Path, args: &[String]) -> Vec<String> {
+    /// from the usage window, the status line that feeds it, and what it
+    /// is told about the task list when it works an item. Only for Claude
+    /// Code, not for a shell put in its place with `HORADRIC_AGENT`, and not
+    /// over settings the session brought itself.
+    fn extra_args(&mut self, id: &str, program: &Path, args: &[String]) -> Vec<String> {
         if !console::is_claude(program) {
             return Vec::new();
         }
@@ -1481,6 +1514,7 @@ impl App {
             extra.push("--settings".into());
             extra.push(path.to_string_lossy().into_owned());
         }
+        extra.extend(self.task_args(id, program));
         extra
     }
 
@@ -2313,6 +2347,7 @@ impl App {
                 key: c.key.clone(),
                 collapsed: c.collapsed,
                 files_collapsed: c.files_collapsed(),
+                tasks_collapsed: c.tasks_collapsed(),
             })
             .collect();
         // A project closed for good does not keep a place forever: only
@@ -2426,6 +2461,7 @@ impl App {
                     if let Some(place) = self.cluster_places.get(key) {
                         c.collapsed = place.collapsed;
                         c.set_files_collapsed(place.files_collapsed);
+                        c.set_tasks_collapsed(place.tasks_collapsed);
                     }
                     self.clusters.push(c);
                 }
@@ -2434,6 +2470,7 @@ impl App {
         }
 
         self.order_sessions();
+        self.refresh_boards(false);
         for c in &self.clusters {
             c.fit();
         }
@@ -2591,6 +2628,15 @@ impl App {
                         eprintln!("horadric: cannot start session: {e}");
                     }
                 }
+                Input::TaskClick(key, line, title) => self.task_clicked(&key, line, &title),
+                Input::TaskApprove(key, line, title) => {
+                    self.set_task(&key, line, &title, horadric_core::tasks::Mark::Done)
+                }
+                Input::TaskMenu(key, line, title) => {
+                    runner::ask_for(self, runner::Menu::Item(key, line, title))
+                }
+                Input::TasksMode(key) => runner::ask_for(self, runner::Menu::Mode(key)),
+                Input::TaskAdd(key) => runner::ask_for(self, runner::Menu::Add(key)),
             }
         }
         if relayout {

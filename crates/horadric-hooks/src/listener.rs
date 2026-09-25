@@ -1,7 +1,7 @@
-//! A minimal HTTP/1.1 server for four purposes: accept `POST /horadric/hook`
+//! A minimal HTTP/1.1 server for five purposes: accept `POST /horadric/hook`
 //! from Claude Code, `POST /horadric/status` from its status line,
-//! `POST /horadric/new` from `horadric new`, and `POST /horadric/reload` from
-//! `horadric reload`.
+//! `POST /horadric/new` from `horadric new`, `POST /horadric/reload` from
+//! `horadric reload`, and `POST /horadric/tasks` from `horadric task`.
 //!
 //! Hand rolled on `std::net` because the whole protocol we need is a request
 //! line, a handful of headers, a `Content-Length` body and a fixed reply. A
@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 
 use crate::{
     client, transcript, COMMAND_HEADER, HOOK_PATH, NEW_PATH, OWNER_HEADER, RELOAD_PATH,
-    SESSION_HEADER, STATUS_PATH,
+    SESSION_HEADER, STATUS_PATH, TASKS_PATH,
 };
 
 /// A hook event together with the Horadric session id from the header.
@@ -82,11 +82,31 @@ impl Reload {
     }
 }
 
+/// `horadric task` changed the task list of the project in this folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TasksChanged {
+    pub dir: String,
+}
+
+impl TasksChanged {
+    pub fn to_json(&self) -> String {
+        json!({ "dir": self.dir }).to_string()
+    }
+
+    pub fn from_json(body: &[u8]) -> Option<Self> {
+        let v: Value = serde_json::from_slice(body).ok()?;
+        Some(TasksChanged {
+            dir: v.get("dir")?.as_str()?.to_string(),
+        })
+    }
+}
+
 /// What the command line can ask the running app for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     New(NewSession),
     Reload(Reload),
+    Tasks(TasksChanged),
 }
 
 /// Starts listening on 127.0.0.1 and forwards every tagged event on `tx`,
@@ -174,7 +194,8 @@ fn handle(
         }
     }
 
-    if method != "POST" || ![HOOK_PATH, STATUS_PATH, NEW_PATH, RELOAD_PATH].contains(&path) {
+    let paths = [HOOK_PATH, STATUS_PATH, NEW_PATH, RELOAD_PATH, TASKS_PATH];
+    if method != "POST" || !paths.contains(&path) {
         return respond(&mut stream, "404 Not Found");
     }
     // A megabyte is far more than any hook payload. Anything bigger is not
@@ -202,17 +223,21 @@ fn handle(
 
     if path != HOOK_PATH {
         // Starting a process is the one thing a web page must never reach.
-        let wanted = if path == NEW_PATH { "new" } else { "reload" };
+        let wanted = match path {
+            NEW_PATH => "new",
+            TASKS_PATH => "tasks",
+            _ => "reload",
+        };
         if from_browser || command != wanted {
             return respond(&mut stream, "403 Forbidden");
         }
         let Some(commands) = commands else {
             return respond(&mut stream, "503 Service Unavailable");
         };
-        let request = if path == NEW_PATH {
-            NewSession::from_json(&body).map(Command::New)
-        } else {
-            Reload::from_json(&body).map(Command::Reload)
+        let request = match path {
+            NEW_PATH => NewSession::from_json(&body).map(Command::New),
+            TASKS_PATH => TasksChanged::from_json(&body).map(Command::Tasks),
+            _ => Reload::from_json(&body).map(Command::Reload),
         };
         let Some(request) = request else {
             return respond(&mut stream, "400 Bad Request");
@@ -439,6 +464,23 @@ mod tests {
             assert!(reply.starts_with("HTTP/1.1 403"), "{headers}: {reply}");
         }
         assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn a_changed_task_list_is_forwarded_with_its_own_header_only() {
+        let (port, rx) = start_with_new();
+        let want = TasksChanged {
+            dir: "C:/dev/app".into(),
+        };
+        let json = want.to_json();
+        let reply = post_to(port, TASKS_PATH, "X-Horadric-Command: new\r\n", &json);
+        assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+        let reply = post_to(port, TASKS_PATH, "X-Horadric-Command: tasks\r\n", &json);
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Command::Tasks(want)
+        );
     }
 
     #[test]

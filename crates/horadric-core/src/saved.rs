@@ -182,6 +182,9 @@ pub struct SavedCluster {
     /// The files tile folded down to its header.
     #[serde(default)]
     pub files_collapsed: bool,
+    /// The tasks tile folded down to its header.
+    #[serde(default)]
+    pub tasks_collapsed: bool,
 }
 
 /// A window that is not a project's: whether it was folded.
@@ -246,6 +249,7 @@ mod tests {
                 key: "c:/app".into(),
                 collapsed: false,
                 files_collapsed: true,
+                tasks_collapsed: true,
             }],
             columns: vec![vec!["horadric:usage".into()], vec!["c:/app".into()]],
             recent: vec!["C:/app".into()],

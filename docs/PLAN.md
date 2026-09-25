@@ -6,7 +6,7 @@ document: someone picking the project up cold should need nothing else.
 
 Last updated 2026-09-25, after step 3, the launchers, persistence, install,
 the stage, reload, the project grid, browser windows, the look, plain
-terminals, a pass of quality of life and the columns.
+terminals, a pass of quality of life, the columns and the task list.
 
 ## Shape of the thing
 
@@ -21,7 +21,8 @@ Five crates, one binary.
 | `horadric` | The command line, `horadricw` for Explorer, the wiring | Windows |
 
 `horadric-core` and the pure halves of `horadric-ui` (`layout`, `columns`, `theme`,
-`palette`, `keys`, `frame`, `files`, `viewer`, `highlight`, `shell`) have no I/O and
+`palette`, `keys`, `frame`, `files`, `viewer`, `highlight`, `shell`, `board`) have no
+I/O and
 are tested. `horadric-pty` has a
 test that runs `cmd.exe` in a real pseudo console. Everything else is
 verified on screen.
@@ -1012,6 +1013,164 @@ not seen, since Do not disturb was on; how it looks and a click on it are
 not tested yet. The rename dialog opened behind other windows, as anything
 opened from a synthetic click does.
 
+### The task list
+
+A list of work per project that agents take items from, one at a time or
+all the way down by themselves. Asked for because every feature or fix
+meant starting a terminal by hand and pasting the story in. Linear and the
+like were ruled out as too much: this is a text file and a tile, not a
+tracker.
+
+- **The list is a file in the repo**, `.horadric/tasks.md`, beside
+  `.horadric/config.json`, which holds the mode (`{"tasks": {"mode":
+  "auto"}}`) and will hold step 4's settings and the SSH hosts. The human
+  edits the list in VS Code, agents read and write it like any other file,
+  and git keeps its history. Nothing about it is in `state.json` but
+  whether the tile is folded. Committing it is the project's choice.
+- **The format** is a Markdown checklist, and the file order is the work
+  order. Moving a line is how priority changes. Indented lines under an
+  item are its notes and go to the agent with it.
+
+  ```
+  - [x] Rename Glance to Horadric
+  - [/] Fix the login redirect @fix-the-login-redirect-51234
+    Happens only after a session expires. Repro in #12.
+  - [?] Add dark mode to the settings page @add-dark-mode-51300
+  - [!] Migrate to the new API @migrate-api-51400: needs a key I do not have
+  - [ ] Show the build time in the footer
+  ```
+
+  `[ ]` open, `[/]` being worked on, `[?]` done by the agent and waiting
+  for review, `[!]` blocked with a reason, `[x]` done. `@id` is the
+  Horadric id of the session that holds it, so the file alone says who has
+  what and a restart loses nothing. Only lines starting at the left edge
+  with `- [` or `* [` are items; headings, prose and nested lists are left
+  out. An `@` inside the title stays in the title: only the last ` @id` at
+  the end, or before a colon, is a holder. No dependencies, labels,
+  estimates or assignees.
+- **Who writes what** (`horadric_core::tasks`, pure and tested). Horadric
+  changes the marker and the `@id`, one line at a time: read the file,
+  change that line, write it back through a temporary file and a rename
+  (`horadric_hooks::tasks::update`), every other byte as it was, CRLF
+  included. A change finds its item by line and title together, or by
+  holder, and does nothing when the file moved under it. Everything else
+  belongs to the human and the agents.
+- **Taking an item** (`runner.rs`, `App::take_task`). A click on an open
+  row writes `[/] @id` into the file first, then starts the session, named
+  after the item, with the item, its notes and one line on how to report
+  as its first prompt. The file is the lock: a list read a moment later
+  already says the item is taken. `--append-system-prompt` tells the agent
+  it works one item of the list, to commit when finished, how to report
+  (`task done`, `task blocked "why"`), to file other work with `task add`
+  rather than do it, and the file's format, so a planning item can write
+  its own items below itself. It goes on every start and resume while the
+  session holds an item; the first prompt only on the first start, never
+  saved with the session's arguments, or a resume would send it again.
+  A failed start puts the item back as open.
+- **The first prompt says how to report too.** Tested with Haiku: given
+  only the system prompt it answered the item and never ran `task done`.
+  With one line at the end of the prompt, `(An item from
+  .horadric/tasks.md. When it is finished, run `.../horadric.exe task
+  done`.)`, it ran it. The human sees that line in the terminal, which is
+  no loss.
+- **`horadric task done|blocked WHY|add TITLE|list`** (`task.rs`). The
+  command changes the file itself rather than asking the app, so the agent
+  hears at once whether it worked: it walks up from its folder to the
+  list holding an item for `HORADRIC_SESSION`, marks it `[?]`, or `[x]` in
+  auto mode, or `[!]` with the reason, then posts to `/horadric/tasks` on
+  `HORADRIC_OWNER_PORT` so the app looks at once. The agent runs this
+  build by its full path with forward slashes (`runner::command_for`),
+  since the `horadric` on `PATH` may be another build and Git Bash and
+  PowerShell both take it.
+- **Why the agent reports done.** `Stop` only means a turn ended. It is
+  just as often a question as a finished job, so the hooks cannot tell the
+  two apart. The agent can.
+- **Three modes per project**, from the button in the tile's header:
+  - *Manual.* Nothing starts by itself. Click items to take them. Done
+    goes to review.
+  - *Review.* Horadric takes the first open item. When the agent reports
+    done, the item goes `[?]`, the row shows an approve button and a
+    notification says so. Approve and the item goes `[x]`, the session
+    closes and the next item starts. Or type into the session what is
+    wrong; the agent goes on and reports done again.
+  - *Auto.* The same without the gate: done goes straight to `[x]`, and
+    the list is worked until it is empty. Then a notification says so.
+- **One fresh session per item.** Carrying one session down the list
+  would fill its context with the items before. The commit the agent made
+  is what the next one builds on. A session whose item is `[x]` closes
+  once it is not mid turn, since the agent reports from inside its turn.
+- **When the runner stops.** At a blocked item, since the order is the
+  order and the next may need this one; an item added meanwhile waits
+  behind it. At an item whose session is gone. At a paused session, after
+  a restart: the runner never resumes one by itself, a click on its row
+  or tile does. At a permission prompt, like any session, so how far auto
+  mode gets alone depends on the permission mode in the usage window.
+- **The nudge.** A session in review or auto mode whose turn ends without
+  a report is asked once, typed into its terminal, whether it is finished,
+  with the command spelled out. The Enter follows 400 ms later, so the
+  input box takes the text as typed and not as a paste with a newline in
+  it. If it stops again after that without a report, the row reads "asks
+  you" and a notification says it needs you. Asked for by the user once
+  the plan left it open.
+- **Fuses.** The runner is the one part of Horadric that starts agents by
+  itself, which is what ran away once. It holds one item per project, it
+  starts at most one session per project every 10 seconds, it never
+  resumes a paused session, a start writes the file before it launches
+  and checks the item is still open in a fresh read, and `launch` still
+  refuses a second process for a session.
+- **Notifications**, once each while they hold: an item ready for review,
+  one blocked (with the reason), one whose session stopped after the
+  nudge, and a list finished by the runner.
+- **The tasks tile** (`board.rs` for what a row says, pure and tested;
+  `layout::TasksLayout`; `Painter::tasks`). It sits between the plus and
+  the files tile, on a screen like the files: a chevron and TASKS, a
+  summary ("2 of 5 done"), the mode as a small key that opens a menu, and
+  a plus that asks for a new item with the rename dialog. A row per item
+  not done, eight before the wheel scrolls: a glyph and a word in the
+  colour its session's lamp burns in (working blue, asks you and review
+  amber, blocked red, paused and session gone dim). A click on an open row
+  takes it, on a row whose session is gone starts it again, on any other
+  shows its session. Right click: start, show session, approve or mark
+  done, put back in the list (which ends its session), edit the list. Its
+  height is fixed, counted like the plus row; only the files tile flexes.
+  The fold is kept as `tasks_collapsed` per cluster.
+- **Reading the list.** Every second the app compares each project's list
+  and config with when they last changed (`fs::metadata`, two calls a
+  project) and reads again only what changed, so an edit in VS Code shows
+  within a second. Not the files tile's `ReadDirectoryChangesW` watcher:
+  that one only runs in git projects, and ignores what git ignores, which
+  a `.horadric` folder may well be. Horadric's own writes and `horadric
+  task` read at once.
+
+Tested on screen with a dev instance on its own port and `APPDATA`, first
+with `HORADRIC_AGENT=cmd.exe` and `horadric task` typed by hand: a click on
+a row wrote `[/] @id` and started one `cmd.exe`; `task done` from a
+subfolder marked it `[?]` with a notification; the approve button marked it
+`[x]` and closed the session. Auto mode, switched by writing the config,
+started the next item within a second, closed each finished session and
+started the next, never more than one agent for the list. `task blocked`
+showed a red row and stopped the runner, with an item added behind it left
+waiting; `task done` on it went on. A fake `Stop` got the nudge typed and
+entered in the terminal, and only the stop after it the "needs you"
+notification. After a restart the held item read "paused", nothing
+started, and a click on the row resumed it. The plus asked for a title and
+review mode started the new item at once. Then with a real `claude` on
+Haiku in review mode: the runner started it, it ran `task done` after its
+permission prompt, the row went to review with a notification, and
+approving closed the session and said the list was done. Not tested on
+screen: the right click menu and the mode menu, which a synthetic click
+opens behind other windows.
+
+Not done yet:
+- A project shows its tile only while it has a cluster, so only while it
+  has a session. A list with nothing running has no tile, and its runner
+  does not run.
+- The runner holds one item at a time. With step 4 each item gets its own
+  worktree and `parallel` in `config.json` lets it hold several; the file
+  then lives in the main working tree only.
+- When the five hour limit runs out, the runner could wait for the reset
+  and go on.
+
 ## Next
 
 ### Step 4: worktrees and the git glance
@@ -1029,106 +1188,6 @@ opened from a synthetic click does.
   repository, via `git rev-parse --git-common-dir`.
 - Worktrees must be optional per project. A session that wants the shared
   working tree, or is not in a repo at all, has to keep working.
-
-### The task list
-
-A list of work per project that agents take items from, one at a time or
-all the way down by themselves. Asked for because every feature or fix
-today means starting a terminal by hand and pasting the story in. Linear
-and the like were ruled out as too much: this is a text file and a tile,
-not a tracker.
-
-- **The list is a file in the repo**, `.horadric/tasks.md`, beside the
-  `config.json` of step 4. The human edits it in VS Code, agents read and
-  write it like any other file, and git keeps its history. No database, no
-  sync, nothing in `state.json`. Committing it is the project's choice.
-- **The format** is a Markdown checklist, and the file order is the work
-  order. Moving a line is how priority changes. Indented lines under an
-  item are its notes and go to the agent with it.
-
-  ```
-  - [x] Rename Glance to Horadric
-  - [/] Fix the login redirect @fix-login-redirect
-    Happens only after a session expires. Repro in #12.
-  - [?] Add dark mode to the settings page @add-dark-mode
-  - [!] Migrate to the new API @migrate-api: needs a key I do not have
-  - [ ] Show the build time in the footer
-  ```
-
-  `[ ]` open, `[/]` being worked on, `[?]` done by the agent and waiting
-  for review, `[!]` blocked with a reason, `[x]` done. `@name` is the
-  session that holds it, so the file alone says who has what and a
-  restart loses nothing. GitHub renders only `[ ]` and `[x]` as boxes; the
-  rest show as text, which is fine. No dependencies, labels, estimates or
-  assignees.
-- **Who writes what.** Horadric changes the markers and the `@name`, one
-  line at a time: read the file, change that line, write it back, so an
-  edit made in VS Code a second earlier survives. Everything else belongs
-  to the human and the agents. A line Horadric cannot parse is left alone.
-- **Taking an item.** A click on an open item starts a session named after
-  it (`fix-login-redirect`) with the item and its notes as the first
-  prompt. `--append-system-prompt` tells the agent it is working a task
-  from the list, to commit its work when finished, and how to report back:
-  `horadric task done` or `horadric task blocked "reason"`. Both find
-  their session through `HORADRIC_SESSION` and post to the running app
-  like `horadric new` does (`COMMAND_HEADER`). `horadric task add "text"`
-  appends an item, so an agent that finds a bug on the way can file it.
-- **Why the agent reports done.** `Stop` only means a turn ended. It is
-  just as often a question as a finished job, so the hooks cannot tell
-  the two apart. The agent can.
-- **Three modes per project**, switched in the tile's header and kept in
-  `.horadric/config.json`:
-  - *Manual.* Nothing starts by itself. Click items to take them.
-  - *Review.* Horadric takes the first open item. When the agent reports
-    done, the item goes `[?]`, the tile lights amber and the usual
-    notification fires. Approve on the tasks tile and the item goes `[x]`,
-    the session closes and the next item starts. Or type into the session
-    what is wrong; the agent keeps going and reports done again.
-  - *Auto.* The same without the gate: done goes straight to `[x]` and the
-    next item starts, until the list is empty.
-- **One fresh session per item.** Carrying one session down the list
-  would fill its context with the items before. The commit the agent made
-  is what the next one builds on.
-- **When the runner stops.** At a blocked item, since the order is the
-  order and the next item may need this one. At `StopFailure`. At a `Stop`
-  with no report, which means the agent is asking something; the session
-  lights up like any waiting one and the runner waits with it. A
-  permission prompt pauses it the same way, so how far auto mode gets
-  alone depends on the permission mode picked in the usage window. Later,
-  maybe: when the five hour limit runs out, wait for the reset and go on.
-- **One at a time until worktrees.** Two agents in one working tree
-  trample each other, so the runner holds one item per project. With step
-  4 each item gets its own worktree and `parallel` in `config.json` lets
-  the runner hold several. The file then lives in the main working tree
-  only: every worktree has its own copy, and those are ignored.
-- **The tasks tile** sits in the cluster above the files tile, built the
-  same way: rows for the items not done yet, the marker as a glyph, the
-  holding session's name, a count of done items in the header, the
-  header's fold. A click on an open row takes it, on a held row shows its
-  session, on a `[?]` row shows the session with an Approve button on the
-  row. The header has the mode and a `+` that asks for a line of text, as
-  the rename dialog does. The file is watched as the files tile watches
-  the tree, so an edit in VS Code shows within a second.
-- **Planning is an item too.** "Plan the billing page" is an item whose
-  agent writes the smaller items it decides on into the file, below its
-  own line. No manager agent sits over the runner: a fixed loop is cheaper
-  and does what it says.
-- **Pure and tested:** the parser and the one line rewrite (`tasks.rs`,
-  round trips a file byte for byte apart from the changed line) and the
-  runner's decision, which item to start or whether to wait, given the
-  list, the sessions and the mode.
-- **Verifying it.** The runner starts agents by itself, which is exactly
-  what went wrong once (see Verifying Windows code in `CLAUDE.md`). Test
-  with `HORADRIC_AGENT=cmd.exe` and `horadric task done` typed by hand
-  first, and count `claude.exe` children after every change to the runner.
-
-Order of work: the file and a read only tile, then taking an item with
-`done` and `blocked`, then review mode, then auto, then parallel once
-step 4 is in. Manual and review are useful before worktrees exist.
-
-Open: whether a `Stop` with no report should get one automatic nudge in
-auto mode ("if you are finished, run `horadric task done`") before the
-runner gives up and waits for the human.
 
 ### SSH hosts
 
