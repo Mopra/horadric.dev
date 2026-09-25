@@ -413,6 +413,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             views: HashMap::new(),
             stage: None,
             stage_rect: saved.stage.filter(|r| on_screen(r[0], r[1])),
+            stage_key: None,
             hotkey,
             next_serial: 1,
             requests,
@@ -676,8 +677,15 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 fn tray_menu(hwnd: HWND) {
-    let (recent, hotkey, notify) =
-        with_app(|app| (app.recent.clone(), app.hotkey, !app.quiet)).unwrap_or_default();
+    let (recent, hotkey, notify, terminal) = with_app(|app| {
+        (
+            app.recent.clone(),
+            app.hotkey,
+            !app.quiet,
+            !app.consoles.is_empty(),
+        )
+    })
+    .unwrap_or_default();
     let projects: Vec<String> = recent
         .into_iter()
         .filter(|p| Path::new(p).is_dir())
@@ -701,6 +709,7 @@ fn tray_menu(hwnd: HWND) {
         autostart,
         hotkey,
         notify,
+        terminal,
         &screens,
         shown.as_deref(),
     );
@@ -725,6 +734,9 @@ fn tray_menu(hwnd: HWND) {
         }
         Some(Choice::Raise) => {
             with_app(App::raise);
+        }
+        Some(Choice::ShowStage) => {
+            with_app(App::show_stage);
         }
         Some(Choice::NextWaiting) => {
             with_app(App::next_waiting);
@@ -766,6 +778,18 @@ fn tray_menu(hwnd: HWND) {
         }
         None => {}
     }
+}
+
+/// The projects to try showing on the stage, best first: the one it last
+/// showed, while its cluster is still there, then the clusters in order.
+fn stage_order(last: Option<&str>, keys: &[String]) -> Vec<String> {
+    let mut order: Vec<String> = keys
+        .iter()
+        .filter(|k| Some(k.as_str()) == last)
+        .cloned()
+        .collect();
+    order.extend(keys.iter().filter(|k| Some(k.as_str()) != last).cloned());
+    order
 }
 
 /// What to ask before quitting with `agents` sessions and `shells` plain
@@ -1229,6 +1253,9 @@ struct App {
     stage: Option<Box<TerminalWindow>>,
     /// Where the stage was when it last closed.
     stage_rect: Option<[i32; 4]>,
+    /// The project the stage showed when it last closed, which "Show
+    /// terminal" in the tray brings back.
+    stage_key: Option<String>,
     /// The next waiting session's shortcut, as the tray menu shows it.
     hotkey: Option<&'static str>,
     next_serial: usize,
@@ -2713,6 +2740,7 @@ impl App {
             if let Some(r) = stage.rect() {
                 self.stage_rect = Some(r);
             }
+            self.stage_key = Some(stage.project());
             stage.destroy();
         }
         self.mark_staged();
@@ -2784,6 +2812,26 @@ impl App {
     }
 
     /// Fills the space beside the clusters with the stage.
+    /// Brings the stage back after it was closed, showing the project it
+    /// showed then, or else the first cluster with a terminal. In front
+    /// when it is already open.
+    fn show_stage(&mut self) {
+        if let Some(stage) = &self.stage {
+            stage.bring_to_front();
+            return;
+        }
+        let keys: Vec<String> = self.clusters.iter().map(|c| c.key.clone()).collect();
+        let order = stage_order(self.stage_key.as_deref(), &keys);
+        for key in order {
+            if self.fill_stage(&key, false) {
+                if let Some(stage) = &self.stage {
+                    stage.bring_to_front();
+                }
+                return;
+            }
+        }
+    }
+
     fn fit_stage(&mut self) {
         let (area, _) = self.stage_area();
         if let Some(stage) = &self.stage {
@@ -3669,6 +3717,15 @@ pub(crate) fn work_area(chosen: Option<&str>) -> (i32, i32, i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_stage_comes_back_with_the_project_it_showed() {
+        let keys = ["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(stage_order(Some("b"), &keys), ["b", "a", "c"]);
+        assert_eq!(stage_order(None, &keys), ["a", "b", "c"]);
+        assert_eq!(stage_order(Some("gone"), &keys), ["a", "b", "c"]);
+        assert!(stage_order(Some("b"), &[]).is_empty());
+    }
 
     #[test]
     fn ending_asks_only_when_something_runs() {

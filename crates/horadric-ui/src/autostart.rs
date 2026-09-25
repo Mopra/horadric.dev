@@ -45,6 +45,12 @@ pub fn enable() -> bool {
 /// Starts this `horadricw.exe` at login. `horadric install` uses it to point at
 /// the installed copy rather than the one doing the installing.
 pub fn enable_at(horadricw: &Path) -> bool {
+    // A dev instance starting at login would sit beside the installed one
+    // on every boot. The tray hides the item for it; this holds for every
+    // other way in.
+    if horadric_hooks::dev() {
+        return false;
+    }
     let cmd = format!("\"{}\"", horadricw.display());
     let data: Vec<u16> = cmd.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {

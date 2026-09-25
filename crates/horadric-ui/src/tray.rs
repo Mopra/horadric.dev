@@ -48,6 +48,8 @@ pub enum Choice {
     Tidy,
     /// Bring every cluster in front of the other windows.
     Raise,
+    /// Open the terminal again after it was closed.
+    ShowStage,
     /// Show the session that has waited on you longest.
     NextWaiting,
     /// Fill the space beside the clusters with the terminal.
@@ -272,6 +274,7 @@ pub fn menu(
     autostart: Option<bool>,
     hotkey: Option<&str>,
     notify: bool,
+    terminal: bool,
     screens: &[Screen],
     shown: Option<&str>,
 ) -> Option<Choice> {
@@ -284,6 +287,7 @@ pub fn menu(
     const RAISE: usize = 7;
     const END_ALL: usize = 8;
     const NOTIFY: usize = 9;
+    const STAGE: usize = 10;
     const SCREEN: usize = 50;
     const RECENT: usize = 100;
     let mut items = vec![Item::action(NEW, "New session\u{2026}"), Item::Separator];
@@ -314,6 +318,13 @@ pub fn menu(
         None => "Next waiting session".into(),
     };
     items.push(Item::action(NEXT, next));
+    // A closed terminal leaves only its tiles, and a tile click shows one
+    // project. This is the way back without picking one.
+    if terminal {
+        items.push(Item::action(STAGE, "Show terminal"));
+    } else {
+        items.push(Item::Disabled("Show terminal".into()));
+    }
     items.push(Item::action(RAISE, "Bring tiles to front"));
     items.push(Item::action(ARRANGE, "Fit terminal beside tiles"));
     items.push(Item::action(TIDY, "Tidy up tiles"));
@@ -354,6 +365,7 @@ pub fn menu(
         NEXT => Some(Choice::NextWaiting),
         ARRANGE => Some(Choice::Arrange),
         RAISE => Some(Choice::Raise),
+        STAGE => Some(Choice::ShowStage),
         END_ALL => Some(Choice::EndAll),
         i if i >= HISTORY => Some(Choice::History(i)),
         i if (SCREEN..RECENT).contains(&i) => Some(Choice::Screen(i - SCREEN)),
