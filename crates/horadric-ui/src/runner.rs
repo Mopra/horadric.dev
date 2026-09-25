@@ -23,20 +23,22 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, TASKS_FILE};
 use horadric_core::usage::format_until;
-use horadric_core::{ssh, worktree, Phase, WaitReason};
+use horadric_core::worktree::{self, Worktree};
+use horadric_core::{ssh, Phase, WaitReason};
 use horadric_hooks::tasks as file;
 use windows::Win32::Foundation::HWND;
 
-use super::{post, unix_now, with_app, App, WM_HORADRIC_TASK_MENU};
+use super::{post, unix_now, with_app, App, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
 use crate::app::Run;
 use crate::board::{self, Board, RowState};
 use crate::tray::{self, Item};
 use crate::window::{folder_key, project_key, project_name};
-use crate::{ask, watch};
+use crate::{ask, picker, watch};
 
 /// The least time between two sessions the runner starts in one project.
 const START_GAP: Duration = Duration::from_secs(10);
@@ -73,6 +75,12 @@ pub(super) struct State {
     refused: HashMap<String, Refused>,
     /// Menus and dialogs waiting for the app's window to show them.
     pub(super) menu: Option<Menu>,
+    /// Worktrees whose branch stayed when their session ended, with the
+    /// session's project, back from the thread that removed them.
+    pub(super) kept: Arc<Mutex<Vec<(String, Worktree)>>>,
+    /// The finished branch the last notification offered to merge, which
+    /// a click on it asks about.
+    pub(super) merge_for: Option<Merge>,
     /// Set while the runner acts. Starting a session reconciles, and
     /// nothing in there may start the runner again.
     busy: bool,
@@ -99,6 +107,16 @@ pub(super) enum Menu {
     Mode(String),
     /// A new item's title.
     Add(String),
+    /// Whether to merge a finished item's branch.
+    Merge(Merge),
+}
+
+/// A finished item's branch, still to merge into the main tree.
+#[derive(Clone)]
+pub(super) struct Merge {
+    pub main: PathBuf,
+    pub branch: String,
+    pub title: String,
 }
 
 fn stamp(dir: &Path) -> Stamp {
@@ -190,6 +208,13 @@ impl App {
         );
         let mut seen = HashSet::new();
         keys.retain(|(k, _)| seen.insert(k.clone()));
+        // A session in a worktree of its own has no list there, or an old
+        // copy: the list is the project's, in the main tree.
+        for (key, dir) in &mut keys {
+            if let Some(d) = self.project_dir(key) {
+                *dir = d;
+            }
+        }
         let mut changed = Vec::new();
         for (key, dir) in &keys {
             let now = stamp(dir);
@@ -734,6 +759,86 @@ impl App {
         }
     }
 
+    /// Removes a session's worktree, and has the app hear of a branch that
+    /// stayed, so a finished item's branch can be offered for merging.
+    pub(super) fn remove_tree(&self, key: String, w: Worktree) {
+        let kept = Arc::clone(&self.tasks.kept);
+        let notify = self.notify.0 as isize;
+        crate::worktree::remove_then(w, move |w| {
+            if let Ok(mut k) = kept.lock() {
+                k.push((key, w));
+            }
+            post(notify, WM_HORADRIC_KEPT, 0);
+        });
+    }
+
+    /// The branches that stayed as their sessions ended: one whose item is
+    /// done is offered for merging, in a notification a click answers.
+    pub(super) fn offer_merges(&mut self) {
+        let kept = self
+            .tasks
+            .kept
+            .lock()
+            .map(|mut k| std::mem::take(&mut *k))
+            .unwrap_or_default();
+        for (key, w) in kept {
+            let dir = self
+                .project_dir(&key)
+                .unwrap_or_else(|| PathBuf::from(&key));
+            let list = tasks::parse(&file::read(&dir));
+            let Some((branch, title)) = worktree::finished(&list, &[w.branch]).pop() else {
+                continue;
+            };
+            let main = PathBuf::from(&w.main);
+            let into = crate::worktree::checked_out(&main).unwrap_or_else(|| "main".into());
+            if !self.quiet {
+                self.alert_for = None;
+                self.tray.notify(
+                    &format!("Finished: {}", tasks::one_line(&title)),
+                    &format!("Click to merge {branch} into {into}."),
+                );
+            }
+            self.tasks.merge_for = Some(Merge {
+                main,
+                branch,
+                title,
+            });
+        }
+    }
+
+    /// The finished branches of a project not merged yet, for its menu.
+    pub(super) fn merges(&self, dir: &Path) -> Vec<Merge> {
+        let Some(place) = crate::worktree::main_tree(dir) else {
+            return Vec::new();
+        };
+        let main = PathBuf::from(&place.top);
+        let list = tasks::parse(&file::read(dir));
+        worktree::finished(&list, &crate::worktree::unmerged(&main))
+            .into_iter()
+            .map(|(branch, title)| Merge {
+                main: main.clone(),
+                branch,
+                title,
+            })
+            .collect()
+    }
+
+    /// Merges a finished branch and says how it went.
+    pub(super) fn merge(&mut self, m: &Merge) {
+        let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
+        match crate::worktree::merge(&m.main, &m.branch) {
+            Ok(()) => self.tray.notify(
+                &format!("Merged {}", m.branch),
+                &format!("{} is in {into}.", tasks::one_line(&m.title)),
+            ),
+            Err(e) => {
+                eprintln!("horadric: cannot merge {}: {e}", m.branch);
+                self.tray
+                    .notify(&format!("Cannot merge {}", m.branch), &merge_failed(&e));
+            }
+        }
+    }
+
     /// Opens the list in VS Code, or whatever opens Markdown.
     fn edit_list(&self, key: &str) {
         if let Some(dir) = self.project_dir(key) {
@@ -770,7 +875,39 @@ pub(super) fn show_menu(hwnd: HWND, menu: Menu) {
                 with_app(|app| app.add_task(&key, &a.text, &a.notes));
             }
         }
+        Menu::Merge(m) => {
+            let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
+            if picker::yes_no(hwnd, &merge_question(&m.title, &m.branch, &into)) {
+                with_app(|app| app.merge(&m));
+            }
+        }
     }
+}
+
+/// What to ask before merging a finished item's branch.
+fn merge_question(title: &str, branch: &str, into: &str) -> String {
+    format!(
+        "\"{}\" is finished on the branch {branch}.\n\nMerge it into {into}? A conflict \
+         undoes the merge and keeps the branch.",
+        tasks::one_line(title)
+    )
+}
+
+/// Why a merge failed, short enough for a notification: the conflict
+/// git found, or else the first thing it said.
+fn merge_failed(git: &str) -> String {
+    let lines: Vec<&str> = git
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let why = lines
+        .iter()
+        .find(|l| l.starts_with("CONFLICT"))
+        .or(lines.first())
+        .copied()
+        .unwrap_or("git refused");
+    format!("{why} The merge was undone and the branch kept.")
 }
 
 fn item_menu(hwnd: HWND, key: &str, line: usize, title: &str) {
@@ -862,5 +999,30 @@ mod tests {
             command_for(r"C:\Program Files\Horadric\horadric.exe"),
             "\"C:/Program Files/Horadric/horadric.exe\""
         );
+    }
+
+    #[test]
+    fn the_merge_question_names_the_item_and_both_branches() {
+        let q = merge_question("Fix the\nlogin", "fix-the-login", "main");
+        assert!(q.starts_with("\"Fix the login\" is finished on the branch fix-the-login."));
+        assert!(q.ends_with(
+            "\n\nMerge it into main? A conflict undoes the merge and keeps the branch."
+        ));
+    }
+
+    #[test]
+    fn a_failed_merge_says_the_conflict_or_what_git_said_first() {
+        let conflict = "Auto-merging src/a.rs\n\
+                        CONFLICT (content): Merge conflict in src/a.rs\n\
+                        Automatic merge failed; fix conflicts and then commit the result.";
+        assert_eq!(
+            merge_failed(conflict),
+            "CONFLICT (content): Merge conflict in src/a.rs The merge was undone and the branch kept."
+        );
+        assert!(
+            merge_failed("error: Your local changes would be overwritten\nPlease commit")
+                .starts_with("error: Your local changes would be overwritten ")
+        );
+        assert!(merge_failed("").starts_with("git refused "));
     }
 }

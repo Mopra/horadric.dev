@@ -11,7 +11,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, IDNO, IDOK, IDYES, MB_DEFBUTTON1, MB_DEFBUTTON2, MB_ICONQUESTION, MB_ICONWARNING,
-    MB_OKCANCEL, MB_SETFOREGROUND, MB_YESNOCANCEL,
+    MB_OKCANCEL, MB_SETFOREGROUND, MB_YESNO, MB_YESNOCANCEL,
 };
 
 /// Asks for a folder, starting in `start`. None when cancelled. Runs a modal
@@ -44,7 +44,6 @@ pub fn pick_folder(owner: HWND, start: Option<&Path>) -> Option<PathBuf> {
     }
 }
 
-/// An OK or Cancel warning. True for OK.
 /// Asks a yes, no or cancel question whose yes keeps something running:
 /// Some(true) for yes, Some(false) for no, None for cancel. Enter answers
 /// yes when `keep_first`, otherwise no.
@@ -69,6 +68,7 @@ pub fn keep_or_stop(owner: HWND, text: &str, keep_first: bool) -> Option<bool> {
     }
 }
 
+/// An OK or Cancel warning. True for OK.
 pub fn confirm(owner: HWND, text: &str) -> bool {
     unsafe {
         MessageBoxW(
@@ -77,5 +77,17 @@ pub fn confirm(owner: HWND, text: &str) -> bool {
             w!("Horadric"),
             MB_OKCANCEL | MB_ICONWARNING | MB_SETFOREGROUND,
         ) == IDOK
+    }
+}
+
+/// A yes or no question. True for yes.
+pub fn yes_no(owner: HWND, text: &str) -> bool {
+    unsafe {
+        MessageBoxW(
+            Some(owner),
+            &HSTRING::from(text),
+            w!("Horadric"),
+            MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND,
+        ) == IDYES
     }
 }

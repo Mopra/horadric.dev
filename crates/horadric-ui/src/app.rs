@@ -138,6 +138,8 @@ const WM_HORADRIC_COUNTED: u32 = WM_APP + 15;
 const WM_HORADRIC_UPDATE: u32 = WM_APP + 16;
 /// An update's download came back, into the app's `downloaded`.
 const WM_HORADRIC_DOWNLOADED: u32 = WM_APP + 17;
+/// A worktree went but its branch stayed, into the runner's `kept`.
+const WM_HORADRIC_KEPT: u32 = WM_APP + 18;
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
 /// Runs a console program without giving it a console window.
@@ -676,6 +678,7 @@ unsafe extern "system" fn app_proc(
             | WM_HORADRIC_COUNTED
             | WM_HORADRIC_UPDATE
             | WM_HORADRIC_DOWNLOADED
+            | WM_HORADRIC_KEPT
             | WM_HOTKEY
             | WM_TIMER
     );
@@ -1082,6 +1085,8 @@ fn project_menu(hwnd: HWND, key: &str) {
     const PAST: usize = 100;
     const SUGGEST: usize = 200;
     const SUGGEST_END: usize = 300;
+    const MERGE: usize = 300;
+    const MERGE_END: usize = 400;
     let dir = with_app(|app| app.project_dir(key)).flatten();
     let past = match &dir {
         Some(d) => with_app(|app| app.history(d)).unwrap_or_default(),
@@ -1095,6 +1100,11 @@ fn project_menu(hwnd: HWND, key: &str) {
     let mut suggested = horadric_hooks::tasks::ssh_config_hosts();
     suggested.retain(|h| !hosts.contains(h));
     suggested.truncate(SUGGEST_END - SUGGEST);
+    let mut merges = match &dir {
+        Some(d) => with_app(|app| app.merges(d)).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    merges.truncate(MERGE_END - MERGE);
     let mut items = vec![
         Item::action(ADD, "New session"),
         Item::Submenu("History".into(), history_items(&past, PAST)),
@@ -1134,6 +1144,19 @@ fn project_menu(hwnd: HWND, key: &str) {
             },
         ]);
     }
+    if !merges.is_empty() {
+        let into = merges
+            .first()
+            .and_then(|m| worktree::checked_out(&m.main))
+            .unwrap_or_else(|| "main".into());
+        items.push(Item::Separator);
+        for (i, m) in merges.iter().enumerate() {
+            items.push(Item::action(
+                MERGE + i,
+                format!("Merge {} into {into}", m.branch),
+            ));
+        }
+    }
     items.extend([
         Item::Separator,
         if watch::vs_code().is_some() {
@@ -1171,6 +1194,7 @@ fn project_menu(hwnd: HWND, key: &str) {
         Some(END_ALL) => app.end_all(Some(key)),
         Some(SHELL) => app.open_shell(key),
         Some(i) if (SSH..PAST).contains(&i) => app.open_ssh(key, &hosts[i - SSH]),
+        Some(i) if (MERGE..MERGE_END).contains(&i) => app.merge(&merges[i - MERGE]),
         Some(CODE) => {
             if let Some(dir) = app.project_dir(key) {
                 watch::open_in_code(&dir);
@@ -1451,6 +1475,7 @@ impl App {
             WM_HORADRIC_COUNTED => self.take_counts(),
             WM_HORADRIC_UPDATE => self.take_update(),
             WM_HORADRIC_DOWNLOADED => self.take_download(),
+            WM_HORADRIC_KEPT => self.offer_merges(),
             WM_HORADRIC_INPUT => self.apply_input(),
             WM_HORADRIC_OUTPUT => self.output(wparam),
             WM_HORADRIC_WINDOW_SHOWN => self.window_shown(wparam as isize),
@@ -2483,11 +2508,13 @@ impl App {
             order.retain(|s| s != id);
         }
         let own_tree = match self.shared.registry.lock() {
-            Ok(mut r) => r.remove(id).and_then(|s| s.worktree),
+            Ok(mut r) => r
+                .remove(id)
+                .and_then(|s| Some((project_key(&s), s.worktree?))),
             Err(_) => None,
         };
-        if let Some(w) = own_tree {
-            worktree::remove(w);
+        if let Some((key, w)) = own_tree {
+            self.remove_tree(key, w);
         }
     }
 
@@ -2845,6 +2872,7 @@ impl App {
         self.waiting = now;
         if let Some(a) = alert {
             self.alert_for = about;
+            self.tasks.merge_for = None;
             self.tray.notify(&a.title, &a.text);
         }
     }
@@ -2852,6 +2880,10 @@ impl App {
     /// The notification was clicked: show the session it was about, or,
     /// for several, the one that has waited longest.
     fn open_alert(&mut self) {
+        if let Some(m) = self.tasks.merge_for.take() {
+            runner::ask_for(self, runner::Menu::Merge(m));
+            return;
+        }
         match self.alert_for.take() {
             Some(id)
                 if self

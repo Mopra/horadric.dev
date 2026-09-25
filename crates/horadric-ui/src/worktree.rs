@@ -95,6 +95,13 @@ pub fn add(dir: &Path, name: &str, taken: &[Ports]) -> Result<Option<Fresh>, Str
 /// branch, and then both stay for the human. In the background, since the
 /// ended agent may hold its files for a moment.
 pub fn remove(w: Worktree) {
+    remove_then(w, |_| ());
+}
+
+/// Removes as `remove` does, and calls `kept` with the worktree when its
+/// tree went but its branch stayed, since it has commits the main tree
+/// lacks: a branch worth offering to merge.
+pub fn remove_then(w: Worktree, kept: impl FnOnce(Worktree) + Send + 'static) {
     std::thread::spawn(move || {
         let main = Path::new(&w.main);
         let mut result = Ok(String::new());
@@ -111,8 +118,43 @@ pub fn remove(w: Worktree) {
         }
         if let Err(e) = git(main, &["branch", "-d", &w.branch]) {
             eprintln!("horadric: kept the branch {}: {e}", w.branch);
+            kept(w);
         }
     });
+}
+
+/// The branches with commits that what the main tree has checked out
+/// lacks.
+pub fn unmerged(main: &Path) -> Vec<String> {
+    git(
+        main,
+        &["branch", "--no-merged", "HEAD", "--format=%(refname:short)"],
+    )
+    .map(|out| out.lines().map(str::to_string).collect())
+    .unwrap_or_default()
+}
+
+/// What the main tree has checked out, for saying where a merge goes.
+pub fn checked_out(main: &Path) -> Option<String> {
+    git(main, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty() && b != "HEAD")
+}
+
+/// Merges `branch` into what the main tree has checked out, always with a
+/// merge commit so the item stays one piece in the history, and then
+/// deletes the branch. A merge that stops on a conflict is undone, so the
+/// main tree is never left half merged; the branch stays for the human.
+pub fn merge(main: &Path, branch: &str) -> Result<(), String> {
+    if let Err(e) = git(main, &["merge", "--no-ff", "--no-edit", branch]) {
+        let _ = git(main, &["merge", "--abort"]);
+        return Err(e);
+    }
+    if let Err(e) = git(main, &["branch", "-d", branch]) {
+        eprintln!("horadric: merged but kept the branch {branch}: {e}");
+    }
+    Ok(())
 }
 
 /// Counts what a session's worktree has changed: against its last commit,
@@ -177,6 +219,13 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        // A merge that stops on a conflict says why on stdout.
+        let said =
+            [&out.stdout, &out.stderr].map(|s| String::from_utf8_lossy(s).trim().to_string());
+        Err(said
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 }

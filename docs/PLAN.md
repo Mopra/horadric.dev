@@ -1322,6 +1322,26 @@ session gets a worktree of its own, and its tile shows what it changed.
   `cmd.exe` the whole time (two items and one plain session). Not checked
   on screen: that `HORADRIC_TASKS` reaches the agent's shell, which goes
   the same way as the ports.
+- **Merging a finished item.** When a session ends and `git branch -d`
+  refuses its branch, the app hears of it, and if the branch is a done
+  item's (its title's slug, or that with 2, 3 and on after it:
+  `worktree::finished`, pure and tested) a notification says "Finished:
+  <item>, click to merge <branch> into main". The click asks yes or no,
+  and yes runs `git merge --no-ff --no-edit` in the main tree, then `git
+  branch -d`. A merge that stops (a conflict, or local changes in the way)
+  is undone with `git merge --abort`, so main is never left half merged,
+  and the notification says why and that the branch stays. The project
+  menu lists "Merge <branch> into main" for every done item's branch not
+  merged yet, from `git branch --no-merged HEAD`, so a missed notification
+  or a restart loses nothing. Tested on screen with a dev instance and
+  `HORADRIC_AGENT=cmd.exe`: an item with a commit on its branch got the
+  notification, the click asked, yes gave a merge commit on main and the
+  branch went; a second item whose change conflicted with one on main left
+  main clean and kept its branch. The project menu's entries were not
+  clicked, the installed Horadric's column stood over the dev one. The
+  lists are now read from the project's folder rather than a session's:
+  a project whose sessions were all in worktrees showed an empty list,
+  since a worktree has none.
 - **What it changed.** A tile whose session has a worktree shows the lines
   added and removed, `+9 −1` in the files tile's green and red, beside the
   last line, and a `</>` button that opens the worktree in VS Code. Its

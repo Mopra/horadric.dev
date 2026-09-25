@@ -20,7 +20,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::tasks::slug;
+use crate::tasks::{self, slug, Mark, Task};
 
 /// Where the port ranges start: above the ports dev servers pick by
 /// default (3000, 5173, 8080), which the main working tree keeps.
@@ -201,6 +201,34 @@ pub fn system_prompt(w: &Worktree) -> String {
         ));
     }
     out
+}
+
+/// Which of `unmerged`, the branches not merged into the main tree yet,
+/// hold finished items, each with its item's title. A done item's branch is
+/// named from its title, with 2, 3 and on after it when that name was
+/// taken; a branch that is some item's name exactly goes to that item.
+pub fn finished(list: &[Task], unmerged: &[String]) -> Vec<(String, String)> {
+    let done: Vec<(String, &str)> = list
+        .iter()
+        .filter(|t| t.mark == Mark::Done && t.holder.is_some())
+        .map(|t| (branch(&tasks::slug(&t.title), |_| false), t.title.as_str()))
+        .collect();
+    let numbered = |b: &str, base: &str| {
+        b.strip_prefix(base)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .and_then(|n| n.parse::<u32>().ok())
+            .is_some_and(|n| n >= 2)
+    };
+    unmerged
+        .iter()
+        .filter_map(|b| {
+            let (_, title) = done
+                .iter()
+                .find(|(base, _)| base == b)
+                .or_else(|| done.iter().find(|(base, _)| numbered(b, base)))?;
+            Some((b.clone(), title.to_string()))
+        })
+        .collect()
 }
 
 /// What `git rev-parse --path-format=absolute --git-dir --git-common-dir
@@ -412,6 +440,36 @@ mod tests {
         assert!(p.contains("Ports 4110 to 4119 are yours"));
         w.ports = None;
         assert!(!system_prompt(&w).contains("Ports"));
+    }
+
+    #[test]
+    fn finished_items_are_found_by_their_branch() {
+        let list = tasks::parse(
+            "- [x] Fix the login @fix-1\n\
+             - [x] Fix @fix-2\n\
+             - [x] Fix 2 @fix-3\n\
+             - [/] Add dark mode @dark-1\n\
+             - [x] Done by hand\n",
+        );
+        let unmerged: Vec<String> = [
+            "fix-the-login-3",
+            "fix-2",
+            "fix-4",
+            "add-dark-mode",
+            "done-by-hand",
+            "fix-the-login-x",
+            "release",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            finished(&list, &unmerged),
+            [
+                ("fix-the-login-3".into(), "Fix the login".into()),
+                ("fix-2".into(), "Fix 2".into()),
+                ("fix-4".into(), "Fix".into()),
+            ]
+        );
     }
 
     #[test]
