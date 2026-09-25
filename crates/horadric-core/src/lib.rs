@@ -13,6 +13,7 @@ pub mod ssh;
 pub mod tasks;
 pub mod title;
 pub mod usage;
+pub mod worktree;
 
 pub use event::HookEvent;
 pub use registry::Registry;

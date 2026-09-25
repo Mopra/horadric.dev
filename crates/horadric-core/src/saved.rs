@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::session::{Phase, Session};
 use crate::title::Title;
 use crate::usage::{Defaults, Usage};
+use crate::worktree::Worktree;
 
 /// Bumped when a change would make an older file mean something else.
 pub const VERSION: u32 = 1;
@@ -114,6 +115,9 @@ pub struct SavedSession {
     /// The host of an SSH terminal. It reconnects rather than resumes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<String>,
+    /// The session's own git worktree, which a resume goes back into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<Worktree>,
 }
 
 impl SavedSession {
@@ -131,6 +135,7 @@ impl SavedSession {
             running,
             shell: s.shell,
             ssh: s.ssh.clone(),
+            worktree: s.worktree.clone(),
         }
     }
 
@@ -144,6 +149,7 @@ impl SavedSession {
         s.last_line = self.last_line.clone();
         s.shell = self.shell;
         s.ssh = self.ssh.clone();
+        s.worktree = self.worktree.clone();
         s.phase = Phase::Paused;
         s.since = now;
         s
@@ -220,6 +226,7 @@ mod tests {
             running: true,
             shell: false,
             ssh: None,
+            worktree: None,
         }
     }
 
@@ -373,6 +380,34 @@ mod tests {
                 .ssh
                 .as_deref(),
             Some("myvps")
+        );
+    }
+
+    #[test]
+    fn a_session_comes_back_to_its_worktree() {
+        let mut s = saved(&[], true);
+        s.worktree = Some(Worktree {
+            path: "C:/app.fix".into(),
+            main: "C:/app".into(),
+            branch: "fix".into(),
+            ports: Some(crate::worktree::Ports {
+                first: 4100,
+                count: 10,
+            }),
+        });
+        let back = SavedState::from_json(
+            SavedState {
+                sessions: vec![s.clone()],
+                ..Default::default()
+            }
+            .to_json()
+            .as_bytes(),
+        );
+        let session = back.sessions[0].to_session(SystemTime::now());
+        assert_eq!(session.worktree, s.worktree);
+        assert_eq!(
+            SavedSession::from_session(&session, Vec::new(), false).worktree,
+            s.worktree
         );
     }
 }

@@ -12,6 +12,7 @@ mod explorer;
 mod install;
 mod reload;
 mod run;
+mod setup;
 mod status;
 mod task;
 
@@ -76,6 +77,7 @@ fn main() -> ExitCode {
         Some("new") => run::new(&args[1..]),
         Some("run") => run::run(&args[1..]),
         Some("task") => task::run(&args[1..]),
+        Some("setup") => setup::run(&args[1..]),
         Some("hooks") => hooks(args.get(1).map(String::as_str)),
         Some("explorer") => explorer_command(args.get(1).map(String::as_str)),
         None => std::env::current_exe()

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::tasks::{self, Mark, Mode, Next, Task, TASKS_FILE};
 use horadric_core::usage::format_until;
-use horadric_core::{ssh, Phase, WaitReason};
+use horadric_core::{ssh, worktree, Phase, WaitReason};
 use horadric_hooks::tasks as file;
 use windows::Win32::Foundation::HWND;
 
@@ -33,7 +33,7 @@ use super::{post, unix_now, with_app, App, WM_HORADRIC_TASK_MENU};
 use crate::app::Run;
 use crate::board::{self, Board, RowState};
 use crate::tray::{self, Item};
-use crate::window::project_name;
+use crate::window::{folder_key, project_name};
 use crate::{ask, watch};
 
 /// The least time between two sessions the runner starts in one project.
@@ -190,8 +190,9 @@ impl App {
     }
 
     /// What to add to a session's command line started in `cwd`: what it
-    /// is told about the task list when it holds an item and about the
-    /// project's hosts when it has some, as one system prompt since Claude
+    /// is told about the task list when it holds an item, about its own
+    /// worktree when it has one and about the project's hosts when it has
+    /// some, as one system prompt since Claude
     /// Code takes only one, and, the first time only, the item as its
     /// prompt. Last, since the prompt is positional. Both are read as they
     /// are now, so a resume sees the hosts of today.
@@ -208,7 +209,16 @@ impl App {
         if holds {
             system.push(tasks::system_prompt(&horadric_command()));
         }
-        system.extend(ssh_prompt(cwd));
+        let own_tree = self
+            .shared
+            .registry
+            .lock()
+            .ok()
+            .and_then(|r| r.get(id)?.worktree.clone());
+        system.extend(own_tree.as_ref().map(worktree::system_prompt));
+        // The config may be kept out of git, so a worktree reads its
+        // project's from the main tree.
+        system.extend(ssh_prompt(Path::new(&folder_key(&cwd.to_string_lossy()))));
         let mut out = Vec::new();
         if !system.is_empty() {
             out.push("--append-system-prompt".into());

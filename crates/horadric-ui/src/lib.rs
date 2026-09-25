@@ -97,3 +97,5 @@ mod usage;
 mod watch;
 #[cfg(windows)]
 mod window;
+#[cfg(windows)]
+mod worktree;

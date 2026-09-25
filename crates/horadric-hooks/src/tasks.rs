@@ -7,8 +7,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use horadric_core::ssh;
 use horadric_core::tasks::{self, Mode, CONFIG_FILE, TASKS_FILE};
+use horadric_core::{ssh, worktree};
 
 /// The list's path in a project.
 pub fn file(project: &Path) -> PathBuf {
@@ -53,6 +53,18 @@ pub fn ssh_config_hosts() -> Vec<String> {
     };
     let path = Path::new(&home).join(".ssh").join("config");
     ssh::config_hosts(&fs::read_to_string(path).unwrap_or_default())
+}
+
+/// What the project's config says about worktrees.
+pub fn worktrees(project: &Path) -> worktree::Settings {
+    worktree::settings(&fs::read_to_string(config_file(project)).unwrap_or_default())
+}
+
+/// Switches a worktree for each new session on or off for the project.
+pub fn set_worktrees(project: &Path, enabled: bool) -> io::Result<()> {
+    let path = config_file(project);
+    let old = fs::read_to_string(&path).unwrap_or_default();
+    write(&path, &worktree::with_enabled(&old, enabled))
 }
 
 pub fn set_mode(project: &Path, mode: Mode) -> io::Result<()> {

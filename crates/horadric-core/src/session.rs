@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::event::HookEvent;
 use crate::title::Title;
 use crate::usage::Status;
+use crate::worktree::Worktree;
 
 /// Why a session is waiting on the human.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +99,9 @@ pub struct Session {
     /// The host a shell is `ssh` to, which makes it an SSH terminal.
     #[serde(default)]
     pub ssh: Option<String>,
+    /// The git worktree of its own the session works in, if it has one.
+    #[serde(default)]
+    pub worktree: Option<Worktree>,
     pub phase: Phase,
     /// When the current phase began. The tile's age line counts from here.
     pub since: SystemTime,
@@ -141,6 +145,7 @@ impl Session {
             cwd: cwd.into(),
             shell: false,
             ssh: None,
+            worktree: None,
             phase: Phase::Idle,
             since: now,
             last_line: String::new(),

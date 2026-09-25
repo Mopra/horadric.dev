@@ -23,6 +23,7 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::Point;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
+use horadric_core::worktree::SETUP_ENV;
 use horadric_hooks::{OWNER_ENV, SESSION_ENV};
 use horadric_pty::{find_program, Command, Pty, PROGRAM_EXTS};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
@@ -143,6 +144,11 @@ pub struct Launch {
     /// A plain shell. It is not tagged as a session, so a `claude` typed
     /// into it is nobody's and stays off the tiles, as outside Horadric.
     pub shell: bool,
+    /// Added to the environment, the ports of a session's worktree.
+    pub env: Vec<(String, String)>,
+    /// Run before the program, in its pane, by `horadric setup`: a new
+    /// worktree's setup commands.
+    pub setup: Vec<String>,
 }
 
 /// The agent binary: `HORADRIC_AGENT` when set, which is also how a plain
@@ -195,19 +201,32 @@ impl Console {
             rows: DEFAULT_ROWS,
         };
         let claude = !launch.shell && is_claude(&launch.program);
+        let mut program = launch.program;
+        let mut args: Vec<String> = launch.extra.iter().chain(&launch.args).cloned().collect();
+        let mut env_set = if launch.shell {
+            vec![("COLORTERM".into(), "truecolor".into())]
+        } else {
+            vec![
+                (SESSION_ENV.into(), launch.id.clone()),
+                (OWNER_ENV.into(), horadric_hooks::port().to_string()),
+                ("COLORTERM".into(), "truecolor".into()),
+            ]
+        };
+        env_set.extend(launch.env);
+        // The setup runs in the pane, where its output can be read, and
+        // the agent starts after it in the same console.
+        if !launch.setup.is_empty() {
+            let setup = serde_json::to_string(&launch.setup).unwrap_or_default();
+            env_set.push((SETUP_ENV.into(), setup));
+            args.insert(0, program.to_string_lossy().into_owned());
+            args.insert(0, "setup".into());
+            program = std::env::current_exe()?;
+        }
         let cmd = Command {
-            program: launch.program,
-            args: launch.extra.iter().chain(&launch.args).cloned().collect(),
+            program,
+            args,
             cwd: launch.cwd,
-            env_set: if launch.shell {
-                vec![("COLORTERM".into(), "truecolor".into())]
-            } else {
-                vec![
-                    (SESSION_ENV.into(), launch.id.clone()),
-                    (OWNER_ENV.into(), horadric_hooks::port().to_string()),
-                    ("COLORTERM".into(), "truecolor".into()),
-                ]
-            },
+            env_set,
             // A Horadric started from inside a session would hand its own tag
             // down, and a `claude` in the shell would report as that session.
             env_remove: if launch.shell {

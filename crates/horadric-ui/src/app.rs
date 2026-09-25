@@ -46,6 +46,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::ssh;
 use horadric_core::usage::has_flag;
+use horadric_core::worktree::{self as tree, Worktree};
 use horadric_core::{
     session_id, HookEvent, Phase, Registry, SavedCluster, SavedPanel, SavedSession, SavedState,
     Session, Setting, Usage,
@@ -90,6 +91,7 @@ use crate::usage::{self, UsageWindow};
 use crate::window::{self, folder_key, project_key, project_name, Cluster, Shared};
 use crate::{
     ask, autostart, browsers, history, inbox, picker, recent, shell, snapping, store, watch,
+    worktree,
 };
 
 #[path = "runner.rs"]
@@ -433,6 +435,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             waiting: HashSet::new(),
             alert_for: None,
             tasks: runner::State::default(),
+            new_trees: HashMap::new(),
         };
         app.reconcile(false);
         app.carry_on(&carry, on_stage.as_deref());
@@ -849,6 +852,7 @@ fn project_menu(hwnd: HWND, key: &str) {
     const CODE: usize = 7;
     const EXPLORE: usize = 8;
     const OTHER_HOST: usize = 9;
+    const WORKTREES: usize = 10;
     const SSH: usize = 20;
     const PAST: usize = 100;
     const SUGGEST: usize = 200;
@@ -890,6 +894,21 @@ fn project_menu(hwnd: HWND, key: &str) {
             Item::Submenu("Add host".into(), offer)
         });
     }
+    // Only a repository's main tree can add worktrees.
+    let own_trees = dir
+        .as_deref()
+        .filter(|d| worktree::main_tree(d).is_some())
+        .map(|d| horadric_hooks::tasks::worktrees(d).enabled);
+    if let Some(on) = own_trees {
+        items.extend([
+            Item::Separator,
+            Item::Action {
+                id: WORKTREES,
+                label: "A worktree for each new session".into(),
+                checked: on,
+            },
+        ]);
+    }
     items.extend([
         Item::Separator,
         if watch::vs_code().is_some() {
@@ -907,6 +926,13 @@ fn project_menu(hwnd: HWND, key: &str) {
             return add_host(dir, &suggested[i - SUGGEST]);
         }
         (Some(OTHER_HOST), Some(dir)) => return ask_host(hwnd, dir),
+        (Some(WORKTREES), Some(dir)) => {
+            let on = own_trees.unwrap_or(false);
+            if let Err(e) = horadric_hooks::tasks::set_worktrees(dir, !on) {
+                eprintln!("horadric: cannot write the project's config: {e}");
+            }
+            return;
+        }
         _ => {}
     }
     let ending = matches!(picked, Some(START_OVER | END_ALL));
@@ -1121,6 +1147,9 @@ struct App {
     quiet: bool,
     /// The task lists: what was read, and what the runner is up to.
     tasks: runner::State,
+    /// Worktrees just added for sessions about to start, by session id,
+    /// with the setup commands to run in them first. Taken by the launch.
+    new_trees: HashMap<String, (Worktree, Vec<String>)>,
 }
 
 /// A browser window a session opened.
@@ -1383,8 +1412,16 @@ impl App {
         let folder = folder_name(&cwd);
         let base = name.clone().unwrap_or_else(|| folder.clone());
         let id = self.unique_id(&base);
+        let branch = name.as_deref().unwrap_or("session").to_string();
         let shown = name.unwrap_or(folder);
-        self.launch(&id, &shown, cwd, args, Run::Agent, false)?;
+        let cwd = self.own_tree(&id, &branch, cwd, &args);
+        if let Err(e) = self.launch(&id, &shown, cwd, args, Run::Agent, false) {
+            // A worktree the session never started in holds nothing.
+            if let Some((w, _)) = self.new_trees.remove(&id) {
+                worktree::remove(w);
+            }
+            return Err(e);
+        }
         // A new session is where the eye already is: against the tiles, not
         // wherever the stage was left.
         if let Some(key) = self.project_of(&id) {
@@ -1395,6 +1432,42 @@ impl App {
             }
         }
         Ok(id)
+    }
+
+    /// Where a new session starts: a worktree of its own added from `cwd`,
+    /// or `cwd` itself when the project keeps one shared tree, is not in a
+    /// repository, or `args` carry on a conversation, which Claude Code
+    /// keeps by the folder it was held in.
+    fn own_tree(&mut self, id: &str, branch: &str, cwd: PathBuf, args: &[String]) -> PathBuf {
+        let carries_on = ["--resume", "-r", "--continue", "-c"]
+            .iter()
+            .any(|f| has_flag(args, f));
+        if carries_on {
+            return cwd;
+        }
+        match worktree::add(&cwd, branch, &self.ports_taken()) {
+            Ok(Some(fresh)) => {
+                // The project is where it was asked for, not the worktree.
+                recent::remember(&mut self.recent, &cwd.to_string_lossy());
+                self.new_trees
+                    .insert(id.to_string(), (fresh.worktree, fresh.setup));
+                fresh.cwd
+            }
+            Ok(None) => cwd,
+            Err(e) => {
+                eprintln!("horadric: no worktree for {id}, it shares the main tree: {e}");
+                cwd
+            }
+        }
+    }
+
+    /// The ports of every session's worktree, running or paused.
+    fn ports_taken(&self) -> Vec<tree::Ports> {
+        self.shared
+            .registry
+            .lock()
+            .map(|r| r.all().filter_map(|s| s.worktree.as_ref()?.ports).collect())
+            .unwrap_or_default()
     }
 
     /// The past conversations held in `dir` that no tile holds, newest
@@ -1566,13 +1639,17 @@ impl App {
                 ssh::args(h),
             ),
         };
-        recent::remember(&mut self.recent, &cwd.to_string_lossy());
+        let fresh = self.new_trees.remove(id);
+        if fresh.is_none() {
+            recent::remember(&mut self.recent, &cwd.to_string_lossy());
+        }
 
         let register = HookEvent {
             cwd: cwd.to_string_lossy().to_string(),
             name: Some(name.to_string()),
             ..HookEvent::synthetic(HookEvent::REGISTER)
         };
+        let mut own_tree = None;
         let was_known = self
             .shared
             .registry
@@ -1581,6 +1658,10 @@ impl App {
                 let known = r.get(id).is_some();
                 r.apply(id, &register, SystemTime::now());
                 if let Some(s) = r.get_mut(id) {
+                    if let Some((w, _)) = &fresh {
+                        s.worktree = Some(w.clone());
+                    }
+                    own_tree = s.worktree.clone();
                     s.shell = shell;
                     // Until the remote shell sets a title, the tile says
                     // where it is.
@@ -1605,6 +1686,12 @@ impl App {
                 extra,
                 cwd,
                 shell,
+                env: own_tree
+                    .as_ref()
+                    .and_then(|w| w.ports)
+                    .map(tree::env)
+                    .unwrap_or_default(),
+                setup: fresh.map(|(_, setup)| setup).unwrap_or_default(),
             },
             self.notify,
         )
@@ -1616,8 +1703,8 @@ impl App {
                         &HookEvent::synthetic(HookEvent::PAUSE),
                         SystemTime::now(),
                     );
-                } else {
-                    r.remove(id);
+                } else if let Some(w) = r.remove(id).and_then(|s| s.worktree) {
+                    worktree::remove(w);
                 }
             }
             format!("could not start the agent: {e}")
@@ -1823,8 +1910,12 @@ impl App {
         for order in self.shared.orders.borrow_mut().values_mut() {
             order.retain(|s| s != id);
         }
-        if let Ok(mut r) = self.shared.registry.lock() {
-            r.remove(id);
+        let own_tree = match self.shared.registry.lock() {
+            Ok(mut r) => r.remove(id).and_then(|s| s.worktree),
+            Err(_) => None,
+        };
+        if let Some(w) = own_tree {
+            worktree::remove(w);
         }
     }
 

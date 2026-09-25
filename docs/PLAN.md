@@ -1201,6 +1201,49 @@ Not done yet:
 - Worktrees must be optional per project. A session that wants the shared
   working tree, or is not in a repo at all, has to keep working.
 
+Built so far: the project key resolves to the main working tree, and each
+new session gets a worktree of its own.
+
+- **Where.** A new session started from a repository's main working tree
+  (the plus, the project menu, the start window, `horadric new`) runs `git
+  worktree add -b <branch>` from what the main tree has checked out. The
+  branch is the session's name made into a slug, `session` when it has
+  none, with 2, 3 and on after it when taken. The folder goes beside the
+  main tree, `app.fix-login` for `app`, so the main tree's watchers never
+  see it. A session started in a subfolder starts in the same subfolder of
+  the worktree. Carrying on a past conversation (`--resume`, `--continue`)
+  keeps the folder it was held in, since Claude Code finds it by that. A
+  folder already in a linked worktree, outside a repository, or a git that
+  refuses, keeps the shared tree.
+- **Config.** `.horadric/config.json`, read from the main tree since it may
+  be kept out of git: `"worktrees": {"setup": [...], "ports": 10}`. On by
+  default. `"worktrees": false` or `"enabled": false` keeps the shared tree,
+  and "A worktree for each new session" in the project menu switches it.
+- **Setup.** The commands run in the session's own pane before the agent,
+  through `horadric setup <program> <args>`, which runs each with `cmd /d /s
+  /c` and then starts the agent with its arguments exactly as given (a
+  batch file in between would have had to quote them for cmd). A command
+  that fails says so and the agent starts anyway, since it can read the
+  error and put it right. Only on the first start: a resume goes straight
+  to the agent.
+- **Ports.** Each worktree gets the lowest free range of `ports` ports on a
+  step from 4100, above the defaults dev servers pick (3000, 5173, 8080),
+  which the main tree keeps. The session gets `PORT` and
+  `HORADRIC_PORT_FIRST` and `HORADRIC_PORT_LAST`, and is told the range.
+  The worktree and its range are saved with the session, so a resume gets
+  the same ones.
+- **Telling the agent.** Its system prompt says where its worktree is, its
+  branch, where the main tree is and not to edit there, to commit on its
+  branch, and its ports. Joined with the task list's and the hosts' prompt.
+- **Ending a session** removes its worktree with plain `git worktree remove`
+  and then `git branch -d`. Git refuses the first while the tree has
+  changed or untracked files and the second while the branch has commits
+  the main tree lacks, so nothing is lost: what refuses stays for the human.
+  Quitting pauses and removes nothing.
+- **The task runner** still starts its sessions in the shared tree. It holds
+  one item at a time, so they do not collide; its sessions move to
+  worktrees with `parallel`, the next item.
+
 ### SSH hosts
 
 A project's servers, at hand from the project: a terminal on the VPS a
