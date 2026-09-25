@@ -8,6 +8,8 @@
 //! crypto itself is CNG and lives with the Windows code; this is only the
 //! bytes and the rules.
 
+use std::time::Duration;
+
 use serde_json::{json, Value};
 
 /// Starts the signed bytes, so a signature over something else of ours
@@ -190,6 +192,80 @@ pub fn is_update(offered: &str, current: &str) -> bool {
         (Some(o), Some(c)) => o > c,
         _ => false,
     }
+}
+
+/// Where an install looks for the newest release. GitHub sends `latest`
+/// to the newest published release, so a draft is never offered.
+pub const LATEST_URL: &str =
+    "https://github.com/Mopra/horadric.dev/releases/latest/download/latest.json";
+
+/// How long a running Horadric waits between checks.
+pub const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The manifest to check, given `HORADRIC_UPDATE_URL`. A dev instance
+/// never looks at the real releases, only at that variable when set, so
+/// testing one never offers a published build.
+pub fn manifest_url(dev: bool, env: Option<&str>) -> Option<String> {
+    let env = env.map(str::trim).filter(|u| !u.is_empty());
+    if dev {
+        env.map(str::to_string)
+    } else {
+        Some(LATEST_URL.to_string())
+    }
+}
+
+/// The key a release must be signed with, given `HORADRIC_UPDATE_KEY`. A
+/// debug build takes a test key from it, so a release signed by a key
+/// made for the test can be checked; a release build only ever trusts
+/// [`PUBLIC_KEY`].
+pub fn trusted_key(debug: bool, env: Option<&str>) -> String {
+    match env.map(str::trim).filter(|k| !k.is_empty()) {
+        Some(key) if debug => key.to_string(),
+        _ => PUBLIC_KEY.to_string(),
+    }
+}
+
+/// An `http` or `https` URL in the parts WinHTTP takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Url {
+    pub secure: bool,
+    pub host: String,
+    pub port: u16,
+    /// From the first `/`, query included. `/` when the URL has none.
+    pub path: String,
+}
+
+/// Splits a URL for WinHTTP. None for anything but plain `http` or
+/// `https` with a host: no user info, since nothing here needs it.
+pub fn split_url(url: &str) -> Option<Url> {
+    let (secure, rest) = if let Some(r) = url.strip_prefix("https://") {
+        (true, r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (false, r)
+    } else {
+        return None;
+    };
+    let (authority, path) = match rest.find(['/', '?']) {
+        Some(i) if rest[i..].starts_with('/') => (&rest[..i], rest[i..].to_string()),
+        Some(i) => (&rest[..i], format!("/{}", &rest[i..])),
+        None => (rest, "/".to_string()),
+    };
+    if authority.contains('@') {
+        return None;
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().ok().filter(|&p| p != 0)?),
+        None => (authority, if secure { 443 } else { 80 }),
+    };
+    if host.is_empty() || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    Some(Url {
+        secure,
+        host: host.to_string(),
+        port,
+        path,
+    })
 }
 
 pub fn hex(bytes: &[u8]) -> String {
@@ -392,5 +468,64 @@ mod tests {
     #[test]
     fn hex_is_lowercase() {
         assert_eq!(hex(&[0x00, 0xab, 0x0f]), "00ab0f");
+    }
+
+    #[test]
+    fn a_dev_instance_checks_only_what_it_is_told() {
+        assert_eq!(manifest_url(true, None), None);
+        assert_eq!(manifest_url(true, Some("  ")), None);
+        assert_eq!(
+            manifest_url(true, Some("http://localhost:8000/latest.json")).as_deref(),
+            Some("http://localhost:8000/latest.json")
+        );
+        assert_eq!(manifest_url(false, None).as_deref(), Some(LATEST_URL));
+        assert_eq!(
+            manifest_url(false, Some("http://evil.example/latest.json")).as_deref(),
+            Some(LATEST_URL)
+        );
+    }
+
+    #[test]
+    fn only_a_debug_build_takes_a_test_key() {
+        assert_eq!(trusted_key(true, Some("abc=")), "abc=");
+        assert_eq!(trusted_key(true, None), PUBLIC_KEY);
+        assert_eq!(trusted_key(true, Some(" ")), PUBLIC_KEY);
+        assert_eq!(trusted_key(false, Some("abc=")), PUBLIC_KEY);
+    }
+
+    #[test]
+    fn urls_split_into_their_parts() {
+        let u = split_url(LATEST_URL).unwrap();
+        assert!(u.secure);
+        assert_eq!(u.host, "github.com");
+        assert_eq!(u.port, 443);
+        assert_eq!(
+            u.path,
+            "/Mopra/horadric.dev/releases/latest/download/latest.json"
+        );
+        let u = split_url("http://127.0.0.1:8123/r/latest.json?x=1").unwrap();
+        assert!(!u.secure);
+        assert_eq!((u.host.as_str(), u.port), ("127.0.0.1", 8123));
+        assert_eq!(u.path, "/r/latest.json?x=1");
+        let u = split_url("http://localhost").unwrap();
+        assert_eq!((u.port, u.path.as_str()), (80, "/"));
+        assert_eq!(split_url("http://h?q").unwrap().path, "/?q");
+    }
+
+    #[test]
+    fn urls_that_are_not_plain_http_are_refused() {
+        for bad in [
+            "ftp://host/x",
+            "github.com/x",
+            "https://",
+            "https://:443/x",
+            "https://host:0/x",
+            "https://host:99999/x",
+            "https://host:port/x",
+            "https://user:pw@host/x",
+            "https://ho st/x",
+        ] {
+            assert_eq!(split_url(bad), None, "{bad}");
+        }
     }
 }

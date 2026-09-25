@@ -1,6 +1,7 @@
-//! The crypto behind the updater, through Windows CNG: SHA-256, and ECDSA
-//! P-256 to sign a release manifest and check it. No crate for it, since
-//! `bcrypt.dll` already does both (see "The updater" in docs/PLAN.md).
+//! The updater: the check for a newer release, and the crypto behind it
+//! through Windows CNG: SHA-256, and ECDSA P-256 to sign a release manifest
+//! and check it. No crate for it, since `bcrypt.dll` already does both (see
+//! "The updater" in docs/PLAN.md).
 //!
 //! A private key is kept as `x`, `y` and `d`, 32 bytes each; a public key
 //! as `x` and `y`. CNG wants them behind a `BCRYPT_ECCKEY_BLOB` header,
@@ -195,6 +196,22 @@ pub fn verify(public: &[u8], data: &[u8], signature: &[u8]) -> bool {
         return false;
     };
     unsafe { BCryptVerifySignature(key.0, None, &hash, signature, BCRYPT_FLAGS(0)) }.is_ok()
+}
+
+/// A manifest is a few hundred bytes. Anything much larger is not one.
+const MANIFEST_LIMIT: usize = 64 * 1024;
+
+/// Fetches the manifest at `url` and checks it was signed by the trusted
+/// key. The manifest when it offers a version newer than `current`, None
+/// when this build is up to date. Blocks, so it runs on a thread.
+pub fn look(url: &str, current: &str) -> Result<Option<Manifest>, String> {
+    let body = crate::net::get(url, MANIFEST_LIMIT)?;
+    let text = String::from_utf8(body).map_err(|_| "the manifest is not UTF-8".to_string())?;
+    let env = std::env::var("HORADRIC_UPDATE_KEY").ok();
+    let key = release::trusted_key(cfg!(debug_assertions), env.as_deref());
+    let key = release::base64_decode(&key).ok_or("the trusted key is not base64")?;
+    let manifest = verify_manifest(&key, &text)?;
+    Ok(release::is_update(&manifest.version, current).then_some(manifest))
 }
 
 /// Signs a manifest and gives `latest.json`.

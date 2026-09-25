@@ -46,6 +46,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::diff::{self as changes, Diff, FileDiff, Recount};
+use horadric_core::release::{self, Manifest};
 use horadric_core::ssh;
 use horadric_core::usage::has_flag;
 use horadric_core::worktree::{self as tree, Worktree};
@@ -56,7 +57,7 @@ use horadric_core::{
 use horadric_hooks::listener::{self, Command, Reload, Tagged};
 use horadric_hooks::transcript::{self, Past};
 use horadric_hooks::{install, TASKS_ENV};
-use windows::core::{w, BOOL, PCWSTR};
+use windows::core::{w, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, HDC, HMONITOR,
@@ -70,11 +71,11 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VK_SPACE,
 };
-use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
+use windows::Win32::UI::Shell::{ShellExecuteW, NIN_BALLOONUSERCLICK};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostMessageW,
     PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer, SystemParametersInfoW,
-    TranslateMessage, MONITORINFOF_PRIMARY, MSG, SPI_GETWORKAREA, SPI_SETWORKAREA,
+    TranslateMessage, MONITORINFOF_PRIMARY, MSG, SPI_GETWORKAREA, SPI_SETWORKAREA, SW_SHOWNORMAL,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY, WM_LBUTTONUP,
     WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW,
     WS_EX_TOOLWINDOW, WS_POPUP,
@@ -94,8 +95,8 @@ use crate::tray::{self, Choice, Item, Tray};
 use crate::usage::{self, UsageWindow};
 use crate::window::{self, folder_key, project_key, project_name, Cluster, Shared};
 use crate::{
-    ask, autostart, browsers, history, inbox, picker, recent, shell, snapping, store, watch,
-    worktree,
+    ask, autostart, browsers, history, inbox, picker, recent, shell, snapping, store, update,
+    watch, worktree,
 };
 
 #[path = "runner.rs"]
@@ -133,6 +134,8 @@ const WM_HORADRIC_RECENT_MENU: u32 = WM_APP + 13;
 const WM_HORADRIC_TASK_MENU: u32 = WM_APP + 14;
 /// A worktree's changes were counted, into the app's `counted`.
 const WM_HORADRIC_COUNTED: u32 = WM_APP + 15;
+/// An update check came back, into the app's `looked`.
+const WM_HORADRIC_UPDATE: u32 = WM_APP + 16;
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
 /// Runs a console program without giving it a console window.
@@ -451,6 +454,10 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             new_trees: HashMap::new(),
             recounts: HashMap::new(),
             counted: Arc::new(Mutex::new(Vec::new())),
+            update: None,
+            last_check: None,
+            checking: false,
+            looked: Arc::new(Mutex::new(None)),
         };
         app.reconcile(false);
         app.attach_hosts();
@@ -657,6 +664,7 @@ unsafe extern "system" fn app_proc(
             | WM_HORADRIC_WINDOW_SHOWN
             | WM_HORADRIC_WINDOW_GONE
             | WM_HORADRIC_COUNTED
+            | WM_HORADRIC_UPDATE
             | WM_HOTKEY
             | WM_TIMER
     );
@@ -677,12 +685,13 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 fn tray_menu(hwnd: HWND) {
-    let (recent, hotkey, notify, terminal) = with_app(|app| {
+    let (recent, hotkey, notify, terminal, update) = with_app(|app| {
         (
             app.recent.clone(),
             app.hotkey,
             !app.quiet,
             !app.consoles.is_empty(),
+            app.update.as_ref().map(|m| m.version.clone()),
         )
     })
     .unwrap_or_default();
@@ -712,6 +721,7 @@ fn tray_menu(hwnd: HWND) {
         terminal,
         &screens,
         shown.as_deref(),
+        update.as_deref(),
     );
     match menu {
         Some(Choice::ToggleNotify) => {
@@ -759,6 +769,14 @@ fn tray_menu(hwnd: HWND) {
                 autostart::enable();
             }
         }
+        Some(Choice::CheckUpdates) => {
+            with_app(|app| app.check_update(true));
+        }
+        Some(Choice::Update) => {
+            if let Some(version) = update {
+                open_release(&version);
+            }
+        }
         Some(Choice::EndAll) => {
             if confirm_end(hwnd, None) {
                 with_app(|app| app.end_all(None));
@@ -777,6 +795,21 @@ fn tray_menu(hwnd: HWND) {
             }
         }
         None => {}
+    }
+}
+
+/// Shows the release's page, until the updater installs it itself.
+fn open_release(version: &str) {
+    let url = format!("https://github.com/Mopra/horadric.dev/releases/tag/v{version}");
+    unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            &HSTRING::from(url),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        );
     }
 }
 
@@ -1319,7 +1352,19 @@ struct App {
     recounts: HashMap<String, Recount>,
     /// Counts back from their threads.
     counted: Arc<Mutex<Vec<Counted>>>,
+    /// A newer release, verified, that the tray offers.
+    update: Option<Manifest>,
+    /// When the last update check started. The first tick checks.
+    last_check: Option<Instant>,
+    /// An update check is on its thread.
+    checking: bool,
+    /// An update check back from its thread, and whether the tray asked
+    /// for it.
+    looked: Arc<Mutex<Option<(bool, Looked)>>>,
 }
+
+/// What an update check found: a newer release, none, or why it failed.
+type Looked = Result<Option<Manifest>, String>;
 
 /// A worktree's count back from its thread: the session's id, and what
 /// changed, None for a worktree that is gone.
@@ -1343,6 +1388,7 @@ impl App {
                 self.recount();
             }
             WM_HORADRIC_COUNTED => self.take_counts(),
+            WM_HORADRIC_UPDATE => self.take_update(),
             WM_HORADRIC_INPUT => self.apply_input(),
             WM_HORADRIC_OUTPUT => self.output(wparam),
             WM_HORADRIC_WINDOW_SHOWN => self.window_shown(wparam as isize),
@@ -1387,6 +1433,12 @@ impl App {
                 self.switch_free();
                 self.tick_tasks();
                 self.reload_when_ready();
+                if self
+                    .last_check
+                    .is_none_or(|t| t.elapsed() >= release::CHECK_EVERY)
+                {
+                    self.check_update(false);
+                }
             }
             _ => {}
         }
@@ -1737,6 +1789,71 @@ impl App {
                 }
                 post(notify, WM_HORADRIC_COUNTED, 0);
             });
+        }
+    }
+
+    /// Looks for a newer release on a thread. `asked` when the tray asked,
+    /// which is the only time the outcome is said out loud.
+    fn check_update(&mut self, asked: bool) {
+        self.last_check = Some(Instant::now());
+        let env = std::env::var("HORADRIC_UPDATE_URL").ok();
+        let Some(url) = release::manifest_url(horadric_hooks::dev(), env.as_deref()) else {
+            if asked {
+                self.tray.notify(
+                    "No updates to check",
+                    "A dev instance checks HORADRIC_UPDATE_URL only, and it is not set.",
+                );
+            }
+            return;
+        };
+        if self.checking {
+            return;
+        }
+        self.checking = true;
+        let looked = Arc::clone(&self.looked);
+        let notify = self.notify.0 as isize;
+        std::thread::spawn(move || {
+            let found = update::look(&url, env!("CARGO_PKG_VERSION"));
+            if let Ok(mut l) = looked.lock() {
+                *l = Some((asked, found));
+            }
+            post(notify, WM_HORADRIC_UPDATE, 0);
+        });
+    }
+
+    /// What the update check found. A newer release only ever shows in the
+    /// tray menu, unless the tray asked.
+    fn take_update(&mut self) {
+        let Some((asked, found)) = self.looked.lock().ok().and_then(|mut l| l.take()) else {
+            return;
+        };
+        self.checking = false;
+        match found {
+            Ok(Some(m)) => {
+                eprintln!("horadric: Horadric {} is out", m.version);
+                if asked {
+                    self.tray.notify(
+                        &format!("Horadric {} is out", m.version),
+                        &format!("Pick \"Update to {}\" in the tray menu.", m.version),
+                    );
+                }
+                self.update = Some(m);
+            }
+            Ok(None) => {
+                self.update = None;
+                if asked {
+                    self.tray.notify(
+                        "Horadric is up to date",
+                        &format!("{} is the newest release.", env!("CARGO_PKG_VERSION")),
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("horadric: update check failed: {e}");
+                if asked {
+                    self.tray.notify("Update check failed", &e);
+                }
+            }
         }
     }
 

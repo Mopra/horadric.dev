@@ -1575,7 +1575,12 @@ sign`, the manifest in `horadric_core::release`, CNG in
 `horadric_ui::update`. The signed bytes are `horadric release 1` and a
 newline, then compact JSON of version, notes and files in that order,
 rebuilt from the parsed fields, so the file's layout and key order do not
-matter. The check and the install are not built yet.
+matter. The check is built: `horadric_ui::update::look` over WinHTTP
+(`net.rs`), on the first tick after start, every 24 hours, and from "Check
+for updates" in the tray. A verified newer version adds "Update to
+<version>", which opens the release page until the install is built. A
+check that finds this build up to date takes the item away again; a failed
+one leaves it. The install is not built yet.
 
 Today a new build reaches this machine through
 `reload`, from a checkout. The updater is for a machine with no checkout:

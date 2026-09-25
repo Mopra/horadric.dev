@@ -59,6 +59,10 @@ pub enum Choice {
     ToggleAutostart,
     /// Say, or stop saying, when a session starts waiting.
     ToggleNotify,
+    /// Look for a newer release now, and say what was found.
+    CheckUpdates,
+    /// Install the newer release the menu offered.
+    Update,
     /// End every session in every project, after asking.
     EndAll,
     Quit,
@@ -265,7 +269,8 @@ pub const HISTORY: usize = 1000;
 /// and `notify` whether a session that starts waiting says so. `history`
 /// holds a History menu for each of `recent_projects`, in order.
 /// `screens` are offered when there is more than one, with the one named
-/// `shown` checked.
+/// `shown` checked. `update` is a newer release's version, when a check
+/// found one.
 #[allow(clippy::too_many_arguments)]
 pub fn menu(
     hwnd: HWND,
@@ -277,6 +282,7 @@ pub fn menu(
     terminal: bool,
     screens: &[Screen],
     shown: Option<&str>,
+    update: Option<&str>,
 ) -> Option<Choice> {
     const NEW: usize = 1;
     const QUIT: usize = 2;
@@ -288,6 +294,8 @@ pub fn menu(
     const END_ALL: usize = 8;
     const NOTIFY: usize = 9;
     const STAGE: usize = 10;
+    const CHECK: usize = 11;
+    const UPDATE: usize = 12;
     const SCREEN: usize = 50;
     const RECENT: usize = 100;
     let mut items = vec![Item::action(NEW, "New session\u{2026}"), Item::Separator];
@@ -352,6 +360,10 @@ pub fn menu(
             checked,
         });
     }
+    items.push(Item::action(CHECK, "Check for updates"));
+    if let Some(version) = update {
+        items.push(Item::action(UPDATE, format!("Update to {version}")));
+    }
     items.push(Item::Separator);
     items.push(Item::action(END_ALL, "End all sessions"));
     items.push(Item::action(QUIT, "Quit Horadric"));
@@ -366,6 +378,8 @@ pub fn menu(
         ARRANGE => Some(Choice::Arrange),
         RAISE => Some(Choice::Raise),
         STAGE => Some(Choice::ShowStage),
+        CHECK => Some(Choice::CheckUpdates),
+        UPDATE => Some(Choice::Update),
         END_ALL => Some(Choice::EndAll),
         i if i >= HISTORY => Some(Choice::History(i)),
         i if (SCREEN..RECENT).contains(&i) => Some(Choice::Screen(i - SCREEN)),
