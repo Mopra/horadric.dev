@@ -632,6 +632,106 @@ pub fn dropdown_hit(l: &DropdownLayout, x: f32, y: f32) -> Option<usize> {
     l.items.iter().position(|r| r.contains(x, y))
 }
 
+/// The geometry of the input the app asks with: its title, what it asks,
+/// the field, the notes when it takes them, and a line saying which keys
+/// do what.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AskLayout {
+    pub size: (f32, f32),
+    pub title: Rect,
+    pub prompt: Rect,
+    pub field: Rect,
+    /// The notes' label and their field, for a new task.
+    pub notes_label: Option<Rect>,
+    pub notes: Option<Rect>,
+    pub hint: Rect,
+}
+
+/// How wide the input is, in DIPs: a task's title fits without scrolling.
+pub const ASK_W: f32 = 400.0;
+/// Between the window's edge and what is in it.
+const ASK_PAD: f32 = 20.0;
+const ASK_FIELD_H: f32 = 34.0;
+/// Five lines of notes.
+const ASK_NOTES_H: f32 = 108.0;
+
+/// Lays out an input whose prompt wraps to `prompt_h` DIPs at
+/// [`ask_text_w`] wide.
+pub fn ask(prompt_h: f32, notes: bool) -> AskLayout {
+    let w = ASK_W - 2.0 * ASK_PAD;
+    let title = Rect::new(ASK_PAD, 16.0, w, 24.0);
+    let prompt = Rect::new(ASK_PAD, title.bottom() + 2.0, w, prompt_h);
+    let field = Rect::new(ASK_PAD, prompt.bottom() + 10.0, w, ASK_FIELD_H);
+    let (notes_label, notes, below) = if notes {
+        let label = Rect::new(ASK_PAD, field.bottom() + 12.0, w, 18.0);
+        let notes = Rect::new(ASK_PAD, label.bottom() + 4.0, w, ASK_NOTES_H);
+        (Some(label), Some(notes), notes.bottom())
+    } else {
+        (None, None, field.bottom())
+    };
+    let hint = Rect::new(ASK_PAD, below + 8.0, w, 20.0);
+    AskLayout {
+        size: (ASK_W, hint.bottom() + 12.0),
+        title,
+        prompt,
+        field,
+        notes_label,
+        notes,
+        hint,
+    }
+}
+
+/// Where a field's text goes inside its well.
+pub fn ask_inner(field: &Rect) -> Rect {
+    Rect::new(
+        field.x + 11.0,
+        field.y + 7.0,
+        field.w - 22.0,
+        field.h - 14.0,
+    )
+}
+
+/// How wide the prompt wraps.
+pub fn ask_text_w() -> f32 {
+    ASK_W - 2.0 * ASK_PAD
+}
+
+/// Which field a point is in: 0 the first, 1 the notes.
+pub fn ask_hit(l: &AskLayout, x: f32, y: f32) -> Option<usize> {
+    if l.field.contains(x, y) {
+        Some(0)
+    } else if l.notes.is_some_and(|n| n.contains(x, y)) {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+/// Where a window `size` goes beside `owner`, both in screen pixels, with
+/// its top a little above `y`, the height it was asked from. Clusters
+/// stand at the right edge of the screen, so it goes to the left when there
+/// is room and to the right when not, and it stays on the work area.
+pub fn ask_place(
+    owner: [i32; 4],
+    y: i32,
+    size: (i32, i32),
+    gap: i32,
+    work: [i32; 4],
+) -> (i32, i32) {
+    let [left, _, right, _] = owner;
+    let [wl, wt, wr, wb] = work;
+    let (w, h) = size;
+    let x = if left - gap - w >= wl {
+        left - gap - w
+    } else if right + gap + w <= wr {
+        right + gap
+    } else {
+        wl.max(wr - w)
+    };
+    let y = (y - h / 3).min(wb - h).max(wt);
+    (x, y)
+}
+
 /// The geometry of the start window, the ghost cluster that stands where
 /// the first project will go while none is open: a tile that picks a
 /// folder, then the recent projects.
@@ -1070,6 +1170,55 @@ mod tests {
             assert_eq!(slider_stop(&t, 6, slider_x(&t, 6, i)), i);
         }
         assert_eq!(slider_stop(&t, 1, 80.0), 0);
+    }
+
+    #[test]
+    fn an_input_stacks_its_parts_and_its_notes_only_when_asked() {
+        let l = ask(18.0, false);
+        assert!(l.notes.is_none() && l.notes_label.is_none());
+        assert!(l.prompt.y >= l.title.bottom());
+        assert!(l.field.y >= l.prompt.bottom());
+        assert!(l.hint.y >= l.field.bottom());
+        assert!(l.hint.bottom() <= l.size.1);
+        let t = ask(36.0, true);
+        let notes = t.notes.unwrap();
+        assert!(t.notes_label.unwrap().bottom() <= notes.y);
+        assert!(notes.y >= t.field.bottom() && t.hint.y >= notes.bottom());
+        assert!(t.size.1 > l.size.1 + 18.0 + notes.h);
+        assert_eq!(ask_hit(&t, t.field.x + 1.0, t.field.y + 1.0), Some(0));
+        assert_eq!(ask_hit(&t, notes.x + 1.0, notes.bottom() - 1.0), Some(1));
+        assert_eq!(ask_hit(&t, t.hint.x + 1.0, t.hint.y + 1.0), None);
+        assert_eq!(ask_hit(&l, 1.0, 1.0), None);
+    }
+
+    #[test]
+    fn an_input_goes_left_of_its_cluster_and_stays_on_screen() {
+        let work = [0, 0, 1920, 1040];
+        // A cluster at the right edge: to its left, a third of it above
+        // the click.
+        assert_eq!(
+            ask_place([1500, 0, 1920, 600], 300, (400, 150), 8, work),
+            (1092, 250)
+        );
+        // No room on the left: to the right.
+        assert_eq!(
+            ask_place([100, 0, 500, 600], 300, (400, 150), 8, work),
+            (508, 250)
+        );
+        // Room on neither side: inside the screen.
+        assert_eq!(
+            ask_place([0, 0, 1900, 600], 300, (400, 150), 8, work),
+            (1520, 250)
+        );
+        // Near the bottom or the top: kept on the work area.
+        assert_eq!(
+            ask_place([1500, 0, 1920, 1040], 1030, (400, 150), 8, work).1,
+            890
+        );
+        assert_eq!(
+            ask_place([1500, 0, 1920, 1040], 10, (400, 150), 8, work).1,
+            0
+        );
     }
 
     #[test]

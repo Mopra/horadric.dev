@@ -203,6 +203,13 @@ pub fn replace_line(text: &str, line: usize, new: &str) -> Option<String> {
 
 /// `text` with a new open item at the end, in the file's own line endings.
 pub fn append(text: &str, title: &str) -> String {
+    append_with_notes(text, title, "")
+}
+
+/// `text` with a new open item at the end and `notes` indented under it,
+/// in the file's own line endings. Blank lines in the notes would end the
+/// item, so they are left out.
+pub fn append_with_notes(text: &str, title: &str, notes: &str) -> String {
     let ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let mut out = text.to_string();
     if !out.is_empty() && !out.ends_with('\n') {
@@ -210,6 +217,11 @@ pub fn append(text: &str, title: &str) -> String {
     }
     out.push_str(&item_line(Mark::Open, &one_line(title), None, None));
     out.push_str(ending);
+    for line in notes.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        out.push_str("  ");
+        out.push_str(line);
+        out.push_str(ending);
+    }
     out
 }
 
@@ -607,6 +619,15 @@ mod tests {
         assert_eq!(append("", "First"), "- [ ] First\n");
         assert_eq!(append("- [ ] A", "B"), "- [ ] A\n- [ ] B\n");
         assert_eq!(append("- [ ] A\r\n", "B\nC"), "- [ ] A\r\n- [ ] B C\r\n");
+    }
+
+    #[test]
+    fn notes_go_indented_under_the_new_item_and_parse_back() {
+        let text = append_with_notes("- [ ] A\n", "B", "First line.\n\n  Second one.\r\n");
+        assert_eq!(text, "- [ ] A\n- [ ] B\n  First line.\n  Second one.\n");
+        let t = parse(&text);
+        assert_eq!(t[1].notes, ["First line.", "Second one."]);
+        assert_eq!(append_with_notes("", "C", "  "), "- [ ] C\n");
     }
 
     #[test]
