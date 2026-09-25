@@ -18,6 +18,7 @@
 
 use std::ffi::c_void;
 use std::io;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -26,7 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::Point;
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor};
 use horadric_core::worktree::SETUP_ENV;
@@ -38,7 +39,7 @@ use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::app::{WM_HORADRIC_EXIT, WM_HORADRIC_OUTPUT};
-use crate::viewer::{self, Cell, Row, Span};
+use crate::viewer::{self, Cell, Hit, Mark, Row, Span};
 use crate::{clipboard, highlight, palette, shell, store};
 
 /// History per session, as much as Windows Terminal keeps. 2000 rows was
@@ -47,6 +48,7 @@ use crate::{clipboard, highlight, palette, shell, store};
 /// columns is under 30 MB even when full. Forty full sessions would be
 /// 1.1 GB, which is the number to watch.
 const SCROLLBACK: usize = 10_000;
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Set by Claude Code for the processes it starts, naming that session.
 /// When Horadric itself was started from inside Claude Code they leak into
@@ -146,6 +148,8 @@ struct View {
     stamp: Option<(u64, SystemTime)>,
     lines: Arc<Vec<String>>,
     spans: Vec<Vec<Span>>,
+    /// How each line differs from the last commit.
+    marks: Vec<Option<Mark>>,
     rows: Vec<Row>,
     gutter: usize,
     /// Counts reads, so colours for an older one are not applied to a newer.
@@ -463,6 +467,7 @@ impl Console {
                 stamp: None,
                 lines: Arc::new(Vec::new()),
                 spans: Vec::new(),
+                marks: Vec::new(),
                 rows: Vec::new(),
                 gutter: 0,
                 read: 0,
@@ -494,16 +499,19 @@ impl Console {
     }
 
     /// Reads the file again when it changed since it was shown, keeping the
-    /// line at the top where it is. True when it did.
+    /// line at the top where it is. True when it did. When it did not, a
+    /// commit may still have changed how it differs from the last one.
     pub fn reload(self: &Arc<Self>, notify: HWND) -> bool {
         let Some(view) = &self.view else {
             return false;
         };
-        let (path, shown) = match view.lock() {
-            Ok(v) => (v.path.clone(), v.stamp),
+        let (path, shown, read) = match view.lock() {
+            Ok(v) => (v.path.clone(), v.stamp, v.read),
             Err(_) => return false,
         };
         if stamp(&path) == shown {
+            let (me, notify) = (Arc::clone(self), notify.0 as isize);
+            thread::spawn(move || me.mark(&path, read, notify));
             return false;
         }
         self.load(notify.0 as isize);
@@ -536,6 +544,7 @@ impl Console {
             .unwrap_or_default();
         let me = Arc::clone(self);
         thread::spawn(move || {
+            me.mark(&path, read, notify);
             let spans = highlight::highlight(&name, &lines);
             if spans.is_empty() {
                 return;
@@ -552,6 +561,25 @@ impl Console {
         });
     }
 
+    /// Asks git how the file differs from the last commit, and shows it in
+    /// the gutter when that changed. Runs off the UI thread.
+    fn mark(&self, path: &Path, read: u64, notify: isize) {
+        let Some(view) = &self.view else { return };
+        let count = match view.lock() {
+            Ok(v) => v.lines.len(),
+            Err(_) => return,
+        };
+        let marks = viewer::marks(&diff(path).unwrap_or_default(), count);
+        match view.lock() {
+            Ok(mut v) if v.read == read && v.marks != marks => v.marks = marks,
+            _ => return,
+        }
+        self.lay_out();
+        if !self.dirty.swap(true, Ordering::AcqRel) {
+            post(notify, WM_HORADRIC_OUTPUT, self.serial);
+        }
+    }
+
     /// Lays the file out again for the grid's width, into a fresh terminal
     /// with room for every row, scrolled so the same line stays on top.
     fn lay_out(&self) {
@@ -566,7 +594,7 @@ impl Console {
             v.rows.get(row).map_or(0, |r| r.line)
         };
         let size = self.size();
-        let r = viewer::render(&v.lines, &v.spans, size.cols as usize);
+        let r = viewer::render(&v.lines, &v.spans, &v.marks, size.cols as usize);
         let events = Events {
             remote: None,
             title: Arc::clone(&self.title),
@@ -588,6 +616,27 @@ impl Console {
         s.parser = parser;
         v.rows = r.rows;
         v.gutter = r.gutter;
+    }
+
+    /// Where `query` is next in a view's file, from a line and byte or from
+    /// the top line on screen, and the grid cells to select for it.
+    pub fn find(
+        &self,
+        query: &str,
+        from: Option<(usize, usize)>,
+        forward: bool,
+    ) -> Option<(Hit, Point, Point)> {
+        let v = self.view.as_ref()?.lock().ok()?;
+        let s = self.screen.lock().ok()?;
+        let history = s.term.grid().history_size();
+        let (line, byte) = from.unwrap_or_else(|| {
+            let top = history.saturating_sub(s.term.grid().display_offset());
+            (v.rows.get(top).map_or(0, |r| r.line), 0)
+        });
+        let hit = viewer::find(&v.lines, query, line, byte, forward)?;
+        let (a, b) = viewer::cells(&v.lines, &v.rows, v.gutter, hit)?;
+        let point = |c: Cell| Point::new(Line(c.row as i32 - history as i32), Column(c.col));
+        Some((hit, point(a), point(b)))
     }
 
     /// The selected text. For a view, as it is in the file: no line numbers,
@@ -709,6 +758,24 @@ impl Console {
 fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
     let meta = std::fs::metadata(path).ok()?;
     Some((meta.len(), meta.modified().ok()?))
+}
+
+/// `git diff -U0` of the file against the last commit. None outside a
+/// repository or before its first commit, when there is nothing to mark.
+fn diff(path: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["--no-optional-locks", "diff", "--no-color", "--no-ext-diff"])
+        .args(["-U0", "HEAD", "--"])
+        .arg(path.file_name()?)
+        .current_dir(path.parent()?)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// A file's lines for a view, or a line saying why there are none.

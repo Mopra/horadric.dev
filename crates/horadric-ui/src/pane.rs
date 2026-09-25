@@ -69,6 +69,7 @@ use crate::layout::Dir;
 use crate::motion::{self, REVEAL, SPOTLIGHT};
 use crate::paste::{self, Source};
 use crate::theme::{self, Color};
+use crate::viewer::Hit;
 use crate::window::Shared;
 use crate::{find, frame};
 
@@ -105,6 +106,8 @@ struct Search {
     regex: Option<RegexSearch>,
     /// The match shown, which is also the selection.
     found: Option<Match>,
+    /// In a file view, the same match as it is in the file.
+    hit: Option<Hit>,
 }
 
 pub struct Pane {
@@ -487,7 +490,7 @@ impl Pane {
         let search = self.search.borrow();
         let find = search.as_ref().map(|s| FindBar {
             query: &s.query,
-            status: find::status(&s.query, s.found.is_some()),
+            status: find::status(&s.query, s.found.is_some(), self.console.is_view()),
         });
         let veil = self.veil();
         let plate = self.place_in_stage();
@@ -792,8 +795,9 @@ impl Pane {
         // The search bar has the keyboard. Nothing reaches the program.
         if self.search.borrow().is_some() {
             match vk {
-                VK_F3 if mods.shift => self.find_next(Direction::Right),
-                VK_F3 | VK_UP => self.find_next(Direction::Left),
+                VK_F3 if mods.shift => self.find_next(self.onward().opposite()),
+                VK_F3 => self.find_next(self.onward()),
+                VK_UP => self.find_next(Direction::Left),
                 VK_DOWN => self.find_next(Direction::Right),
                 _ => {}
             }
@@ -890,6 +894,7 @@ impl Pane {
                 query: String::new(),
                 regex: None,
                 found: None,
+                hit: None,
             });
         }
         drop(search);
@@ -905,8 +910,8 @@ impl Pane {
     fn search_char(&self, c: char, mods: Mods) {
         match c {
             '\u{1b}' => return self.close_search(),
-            '\r' if mods.shift => return self.find_next(Direction::Right),
-            '\r' => return self.find_next(Direction::Left),
+            '\r' if mods.shift => return self.find_next(self.onward().opposite()),
+            '\r' => return self.find_next(self.onward()),
             '\u{3}' => {
                 self.copy_found();
                 return;
@@ -934,9 +939,27 @@ impl Pane {
         self.search_for(query);
     }
 
+    /// Where Enter goes: down a file, as an editor does, and up a
+    /// terminal's history, where the newest output is at the bottom.
+    fn onward(&self) -> Direction {
+        if self.console.is_view() {
+            Direction::Right
+        } else {
+            Direction::Left
+        }
+    }
+
     /// A new query. It looks up the history from the match shown, so
-    /// typing more of a word stays on the same line.
+    /// typing more of a word stays on the same line. A file view looks
+    /// down the file instead.
     fn search_for(&self, query: String) {
+        if self.console.is_view() {
+            let from = self.search.borrow_mut().as_mut().and_then(|s| {
+                s.query = query;
+                s.hit.map(|h| (h.line, h.start))
+            });
+            return self.search_view(from, true);
+        }
         let regex = if query.is_empty() {
             None
         } else {
@@ -958,6 +981,14 @@ impl Pane {
     /// The next match from the one shown, up the history (`Left`) or down
     /// it (`Right`), wrapping round at either end.
     fn find_next(&self, direction: Direction) {
+        if self.console.is_view() {
+            let forward = direction == Direction::Right;
+            let from = self.search.borrow().as_ref().and_then(|s| s.hit).map(|h| {
+                // Forward from just past the match, so it is not found again.
+                (h.line, h.start + usize::from(forward))
+            });
+            return self.search_view(from, forward);
+        }
         let found = self
             .search
             .borrow()
@@ -999,6 +1030,32 @@ impl Pane {
                 s.term.scroll_to_point(*m.start());
             }
             search.found = found;
+        }
+        self.invalidate();
+    }
+
+    /// Looks for the query in a view's file rather than its grid, so the
+    /// line numbers never match and a match may cross a wrap.
+    fn search_view(&self, from: Option<(usize, usize)>, forward: bool) {
+        {
+            let mut search = self.search.borrow_mut();
+            let Some(search) = search.as_mut() else {
+                return;
+            };
+            let found = self.console.find(&search.query, from, forward);
+            let Ok(mut s) = self.console.screen.lock() else {
+                return;
+            };
+            s.term.selection = found.map(|(_, a, b)| {
+                let mut sel = Selection::new(SelectionType::Simple, a, Side::Left);
+                sel.update(b, Side::Right);
+                sel
+            });
+            if let Some((_, a, _)) = found {
+                s.term.scroll_to_point(a);
+            }
+            search.hit = found.map(|f| f.0);
+            search.found = found.map(|(_, a, b)| a..=b);
         }
         self.invalidate();
     }
