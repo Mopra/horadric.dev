@@ -18,7 +18,7 @@ pub mod worktree;
 
 pub use event::HookEvent;
 pub use registry::Registry;
-pub use saved::{SavedCluster, SavedPanel, SavedSession, SavedState};
+pub use saved::{Carry, SavedCluster, SavedPanel, SavedSession, SavedState};
 pub use session::{format_age, session_id, Phase, Session, WaitReason};
 pub use title::Title;
 pub use usage::{Defaults, Limit, Limits, Setting, Status, Usage};

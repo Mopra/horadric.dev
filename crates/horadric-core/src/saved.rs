@@ -66,9 +66,59 @@ pub struct SavedState {
     /// No notification when a session starts waiting on you.
     #[serde(default)]
     pub quiet: bool,
+    /// Written by a Horadric that was still running. Only Quit writes it
+    /// false, so a start that finds it true follows a crash, a kill or a
+    /// logoff, and the sessions that were running start again.
+    #[serde(default)]
+    pub live: bool,
+    /// Written while a start after a crash is young. A start that finds
+    /// it true follows a crash soon after resuming, maybe caused by one of
+    /// the sessions resumed, so it resumes nothing.
+    #[serde(default)]
+    pub recovering: bool,
+}
+
+/// Whether a start brings back the sessions that were running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Carry {
+    /// After Quit, or the first start: every session waits for a click.
+    Paused,
+    /// `app --reload`, handed over by the build before.
+    Reload,
+    /// The last Horadric ended without Quit.
+    Crash,
+    /// It ended without Quit twice in a row, the second time soon after
+    /// resuming. Resuming again could be a loop.
+    CrashLoop,
+}
+
+impl Carry {
+    pub fn resumes(self) -> bool {
+        matches!(self, Carry::Reload | Carry::Crash)
+    }
 }
 
 impl SavedState {
+    pub fn carry(&self, reload: bool) -> Carry {
+        match (reload, self.live, self.recovering) {
+            (true, _, _) => Carry::Reload,
+            (false, true, false) => Carry::Crash,
+            (false, true, true) => Carry::CrashLoop,
+            (false, false, _) => Carry::Paused,
+        }
+    }
+
+    /// The sessions to start again, once each.
+    pub fn running_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        for s in self.sessions.iter().filter(|s| s.running) {
+            if !ids.contains(&s.id) {
+                ids.push(s.id.clone());
+            }
+        }
+        ids
+    }
+
     pub fn to_json(&self) -> String {
         let mut s = self.clone();
         s.version = VERSION;
@@ -228,6 +278,40 @@ mod tests {
             ssh: None,
             worktree: None,
         }
+    }
+
+    #[test]
+    fn only_a_start_after_quit_leaves_sessions_paused() {
+        let state = |live, recovering| SavedState {
+            live,
+            recovering,
+            ..Default::default()
+        };
+        assert_eq!(state(false, false).carry(false), Carry::Paused);
+        assert_eq!(state(true, false).carry(false), Carry::Crash);
+        assert_eq!(state(true, true).carry(false), Carry::CrashLoop);
+        assert_eq!(state(false, false).carry(true), Carry::Reload);
+        assert_eq!(state(true, true).carry(true), Carry::Reload);
+        assert!(!Carry::CrashLoop.resumes());
+        assert!(Carry::Crash.resumes());
+    }
+
+    #[test]
+    fn a_file_from_before_live_reads_as_after_quit() {
+        let state = SavedState::from_json(br#"{"version":1,"sessions":[]}"#);
+        assert_eq!(state.carry(false), Carry::Paused);
+    }
+
+    #[test]
+    fn the_running_sessions_start_once_each() {
+        let mut paused = saved(&[], true);
+        paused.id = "paused".into();
+        paused.running = false;
+        let state = SavedState {
+            sessions: vec![saved(&[], true), paused, saved(&[], true)],
+            ..Default::default()
+        };
+        assert_eq!(state.running_ids(), vec!["fix-1"]);
     }
 
     #[test]

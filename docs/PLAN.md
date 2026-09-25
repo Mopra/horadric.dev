@@ -325,8 +325,17 @@ the agent when the human says ship.
   what was moved goes back, so a copy failing half way restores exactly
   that. `%APPDATA%\Horadric\reload.log` has the last reload.
 - **`app --reload`** resumes the sessions saved as `running`, once each,
-  without opening a window for each, then puts the stage back. An ordinary
-  start still leaves every session paused until clicked.
+  without opening a window for each, then puts the stage back.
+- **After a crash** the same happens without `--reload`. Every save writes
+  `live: true`; only tray Quit writes it false, so a start that finds it
+  true follows a crash, a kill or a logoff, and resumes the sessions saved
+  as `running`. A start after Quit still leaves every session paused. The
+  fuses: once each, never one already heard from since the start (its agent
+  outlived the old Horadric), and never twice in a row. A start that
+  resumes after a crash writes `recovering: true` for its first 60 seconds,
+  and a start that finds both resumes nothing. Tested with a dev instance
+  and two `cmd.exe` sessions: killed, both came back, one process each;
+  killed again within the minute, both stayed paused.
 - **A dev instance** restarts from its own build and copies nothing, which
   is how reloading itself gets tested.
 
@@ -1375,15 +1384,16 @@ Persistence and `reload` make the restart cheap (a click, or nothing, and
 `claude --resume` brings the conversation back), but a restart still costs:
 the turn in flight is cut off, tools the agent was running die, the
 scrollback is gone, and `reload` has to wait for every session to be idle.
-A crash is worse than a reload, because nothing marks the sessions as
-running, so they all come back paused.
+A crash used to be worse than a reload, since the sessions came back
+paused. Option A, below, is built: they come back running.
 
 The console can only outlive the UI if a process that is not the UI created
 it. An `HPCON` is not a kernel handle and can not be handed to another
 process, so there is no way to move a console after the fact. Whatever
 survives has to own it from the start.
 
-**Option A: stay in process, resume after a crash.** No new process. Mark
+**Option A: stay in process, resume after a crash.** Built, see "After a
+crash" under the reload. No new process. Mark
 `running` in `state.json` all the time, not only on `reload`, and on a start
 after an unclean exit resume those sessions as `app --reload` does. Small,
 maybe a day. Covers the conversation, not the turn in flight, the tools or

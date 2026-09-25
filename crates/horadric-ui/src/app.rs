@@ -49,8 +49,8 @@ use horadric_core::ssh;
 use horadric_core::usage::has_flag;
 use horadric_core::worktree::{self as tree, Worktree};
 use horadric_core::{
-    session_id, HookEvent, Phase, Registry, SavedCluster, SavedPanel, SavedSession, SavedState,
-    Session, Setting, Usage,
+    session_id, Carry, HookEvent, Phase, Registry, SavedCluster, SavedPanel, SavedSession,
+    SavedState, Session, Setting, Usage,
 };
 use horadric_hooks::listener::{self, Command, Reload, Tagged};
 use horadric_hooks::transcript::{self, Past};
@@ -141,6 +141,9 @@ const TICK_TIMER: usize = 1;
 /// once Windows has finished moving windows off a screen that went away.
 const SCREEN_TIMER: usize = 2;
 const ENDED_LINGER: Duration = Duration::from_secs(20);
+/// A crash this long after resuming sessions after a crash is a crash of
+/// its own, not the same one again, so the next start resumes once more.
+const RECOVERED_AFTER: Duration = Duration::from_secs(60);
 /// Starts the id of a file view, which is no session.
 const VIEW: &str = "view:";
 pub(crate) const MARGIN_DIP: i32 = 12;
@@ -259,8 +262,8 @@ fn post(window: isize, msg: u32, wparam: usize) {
 }
 
 /// Runs the whole desktop app on the calling thread until quit. With
-/// `reload`, the sessions that were running when the last one saved start
-/// again by themselves.
+/// `reload`, or after a Horadric that ended without Quit, the sessions that
+/// were running when the last one saved start again by themselves.
 pub fn run(port: u16, reload: bool) -> Result<(), String> {
     // A second copy would fail to listen, then show every saved session a
     // second time. Autostart plus a manual start makes that easy to hit.
@@ -350,18 +353,17 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         autostart_offered = autostart::enable();
     }
 
-    // An ordinary start leaves every saved session paused until clicked.
-    let carry: Vec<String> = if reload {
-        saved
-            .sessions
-            .iter()
-            .filter(|s| s.running)
-            .map(|s| s.id.clone())
-            .collect()
+    // A start after Quit leaves every saved session paused until clicked.
+    let how = saved.carry(reload);
+    if how == Carry::CrashLoop {
+        eprintln!("horadric: ended twice without Quit, resuming nothing this time");
+    }
+    let carry = if how.resumes() {
+        saved.running_ids()
     } else {
         Vec::new()
     };
-    let on_stage = saved.on_stage.clone().filter(|_| reload);
+    let on_stage = saved.on_stage.clone().filter(|_| how.resumes());
 
     let gpu = Gpu::new()?;
     let font = Font::new(&gpu.dw, saved.font_size.unwrap_or(keys::FONT_DEFAULT))?;
@@ -434,6 +436,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             project_menu_for: None,
             recent_menu_for: None,
             reload: None,
+            quit: false,
+            recovering: (how == Carry::Crash).then(Instant::now),
             browsers: HashMap::new(),
             waiting: HashSet::new(),
             alert_for: None,
@@ -444,6 +448,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         };
         app.reconcile(false);
         app.carry_on(&carry, on_stage.as_deref());
+        // Written before anything resumed can crash it, so that crash is
+        // known for what it is.
+        app.save();
         *a.borrow_mut() = Some(app);
     });
 
@@ -725,7 +732,7 @@ fn tray_menu(hwnd: HWND) {
                 None => true,
             };
             if ok {
-                with_app(App::freeze);
+                with_app(App::quit);
                 unsafe { PostQuitMessage(0) };
             }
         }
@@ -1218,6 +1225,13 @@ struct App {
     recent_menu_for: Option<PathBuf>,
     /// A new build to hand over to, once no session is mid turn.
     reload: Option<Reload>,
+    /// Quit from the tray: the next start leaves every session paused.
+    /// Anything else that ends the app, a reload, a logoff or a crash,
+    /// resumes the sessions that were running.
+    quit: bool,
+    /// When this start resumed sessions after a crash, until it has run
+    /// long enough not to count as the same crash again.
+    recovering: Option<Instant>,
     /// Browser windows sessions opened, by window handle.
     browsers: HashMap<isize, Browser>,
     /// The sessions waiting on you as last seen, so only one that starts
@@ -1383,10 +1397,21 @@ impl App {
         }
     }
 
-    /// After a reload: starts again the sessions that were running, without
+    /// After a reload or a crash: starts again the sessions that were running, without
     /// opening a window for each, and puts back the one that was on stage.
     fn carry_on(&mut self, ids: &[String], on_stage: Option<&str>) {
         for id in ids {
+            // A hook heard already means its agent outlived the last
+            // Horadric, and a second on the same conversation would fight it.
+            let heard = self
+                .shared
+                .registry
+                .lock()
+                .map(|r| r.get(id).is_some_and(|s| s.phase != Phase::Paused))
+                .unwrap_or(true);
+            if heard {
+                continue;
+            }
             if let Err(e) = self.resume(id, false) {
                 eprintln!("horadric: cannot resume {id}: {e}");
             }
@@ -2672,6 +2697,12 @@ impl App {
     /// Once a second: drop long ended sessions and their consoles, redraw
     /// ages, save what changed.
     fn tick(&mut self) {
+        if self
+            .recovering
+            .is_some_and(|since| since.elapsed() > RECOVERED_AFTER)
+        {
+            self.recovering = None;
+        }
         let running: Vec<&String> = self
             .consoles
             .iter()
@@ -2799,6 +2830,8 @@ impl App {
             }),
             font_size: Some(self.shared.font.size()).filter(|&s| s != keys::FONT_DEFAULT),
             quiet: self.quiet,
+            live: !self.quit,
+            recovering: self.recovering.is_some(),
             ..Default::default()
         }
     }
@@ -2813,6 +2846,12 @@ impl App {
             store::save(&now);
             self.last_saved = Some(now);
         }
+    }
+
+    /// Saves for the last time as quit, so the next start resumes nothing.
+    fn quit(&mut self) {
+        self.quit = true;
+        self.freeze();
     }
 
     /// Saves one last time and stops saving.
