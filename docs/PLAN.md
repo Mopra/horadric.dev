@@ -535,6 +535,11 @@ editor.
   ls-files --ignored --directory`, or every `cargo build` would rerun git;
   inside `.git` only `index` and `HEAD` count. A burst is waited out (300
   ms quiet, at least 1 s between scans, at most 3 s of waiting).
+- **A git folder elsewhere.** A session in a subfolder of a repository,
+  or in a worktree whose `.git` is a file, has its index outside the
+  project folder. The thread then also watches the top of `git rev-parse
+  --absolute-git-dir`, not its subfolders, and names what changes there as
+  if it were in `.git`, so the same rule applies and commits are heard.
 - `git --no-optional-locks` is required: a plain `git status` may rewrite
   the index, which the watcher would see, and scan again forever.
 - A folder outside git gets no tile and no thread.
@@ -543,11 +548,10 @@ Tested on screen with a dev instance on this repo: 43 changes shown
 coloured, a new file at the root appeared as U within a second and went
 when deleted, five writes to `target\` caused no scan, folding, the wheel
 and the header fold worked, and a click opened `main.rs` in VS Code. A scan
-takes about 100 ms in a debug build, most of it starting git.
-
-Not done yet: a folder with a `.git` above the project folder (a session
-started in a subfolder of a repository) does not hear commits, since the
-index is outside what is watched. Changed files still rescan it.
+takes about 100 ms in a debug build, most of it starting git. A session
+started in a subfolder of a scratch repository showed a new file, rescanned
+on a commit made at the repository root, and did not rescan on `git
+status`, `git log` or `git gc`.
 
 ### The file viewer
 

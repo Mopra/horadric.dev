@@ -77,7 +77,16 @@ fn run(dir: &Path, hwnd: isize, msg: u32, slot: &Slot, stop: &Event) {
         return;
     };
     let prefix = String::from_utf8_lossy(&prefix).trim_end().to_string();
-    let mut changes = DirChanges::open(dir);
+    let mut changes: Vec<DirChanges> = DirChanges::open(dir, true, "").into_iter().collect();
+    // A session in a subfolder of a repository, or in a worktree, has its
+    // index and HEAD outside the folder. Their changes are named as if they
+    // were in `.git`, so `files::relevant` treats both cases alike. Only
+    // the top of it is watched: objects and refs churn on every git command.
+    if !changes.is_empty() {
+        if let Some(git_dir) = outside_git_dir(dir) {
+            changes.extend(DirChanges::open(&git_dir, false, ".git/"));
+        }
+    }
     loop {
         let started = Instant::now();
         let ignored = match scan(dir, &prefix) {
@@ -96,14 +105,14 @@ fn run(dir: &Path, hwnd: isize, msg: u32, slot: &Slot, stop: &Event) {
         if std::env::var_os("HORADRIC_DEBUG").is_some() {
             eprintln!("files {} scanned in {:?}", dir.display(), started.elapsed());
         }
-        let Some(ch) = changes.as_mut() else {
+        if changes.is_empty() {
             // No way to hear about changes: the one scan is all there is.
             return;
-        };
+        }
 
         // Sleep until something that matters changes.
         loop {
-            match ch.next(stop, None) {
+            match next(&mut changes, stop, None) {
                 Next::Stop | Next::Failed => return,
                 Next::Quiet => {}
                 Next::Paths(paths) => {
@@ -118,7 +127,7 @@ fn run(dir: &Path, hwnd: isize, msg: u32, slot: &Slot, stop: &Event) {
         let settling = Instant::now();
         while settling.elapsed() < MAX_SETTLE {
             let wait = SETTLE.max(MIN_GAP.saturating_sub(started.elapsed()));
-            match ch.next(stop, Some(wait)) {
+            match next(&mut changes, stop, Some(wait)) {
                 Next::Stop | Next::Failed => return,
                 Next::Quiet => break,
                 Next::Paths(_) | Next::Overflow => {}
@@ -167,6 +176,17 @@ fn scan(dir: &Path, prefix: &str) -> Option<(Tree, HashSet<String>)> {
         &files::parse_status(&status, prefix),
     );
     Some((tree, files::parse_list(&ignored).into_iter().collect()))
+}
+
+/// The repository's git folder when it is not the project's own `.git`:
+/// the project is a subfolder of the repository, or a worktree, whose
+/// `.git` is a file pointing into the main repository.
+fn outside_git_dir(dir: &Path) -> Option<PathBuf> {
+    let out = git(dir, &["rev-parse", "--absolute-git-dir"])?;
+    let git_dir = PathBuf::from(String::from_utf8_lossy(&out).trim_end());
+    let git_dir = std::fs::canonicalize(git_dir).ok()?;
+    let own = std::fs::canonicalize(dir.join(".git")).ok();
+    (own.as_ref() != Some(&git_dir)).then_some(git_dir)
 }
 
 fn git(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
@@ -293,10 +313,36 @@ enum Next {
     Failed,
 }
 
-/// `ReadDirectoryChangesW` on a whole folder tree, one read always pending
-/// so nothing is missed between two waits.
+/// Waits for the next batch of changes in any of `watches`, `stop`, or
+/// `timeout`.
+fn next(watches: &mut [DirChanges], stop: &Event, timeout: Option<Duration>) -> Next {
+    for w in watches.iter_mut() {
+        if !w.arm() {
+            return Next::Failed;
+        }
+    }
+    let mut handles: Vec<HANDLE> = watches.iter().map(|w| w.done.0).collect();
+    handles.push(stop.0);
+    let ms = timeout.map_or(u32::MAX, |t| t.as_millis() as u32);
+    let woke = unsafe { WaitForMultipleObjects(&handles, false, ms) };
+    let i = woke.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
+    if i == watches.len() {
+        return Next::Stop;
+    }
+    match watches.get_mut(i) {
+        Some(w) => w.take(),
+        None => Next::Quiet,
+    }
+}
+
+/// `ReadDirectoryChangesW` on a folder, one read always pending so nothing
+/// is missed between two waits.
 struct DirChanges {
     dir: HANDLE,
+    /// Whether folders inside it count too.
+    subtree: bool,
+    /// Put before every path it reports.
+    prefix: &'static str,
     done: Event,
     // Boxed: the kernel writes to both while a read is pending, so they must
     // not move.
@@ -306,7 +352,7 @@ struct DirChanges {
 }
 
 impl DirChanges {
-    fn open(dir: &Path) -> Option<Self> {
+    fn open(dir: &Path, subtree: bool, prefix: &'static str) -> Option<Self> {
         let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
         let handle = unsafe {
             CreateFileW(
@@ -331,6 +377,8 @@ impl DirChanges {
         };
         Some(DirChanges {
             dir: handle,
+            subtree,
+            prefix,
             overlapped: Box::new(OVERLAPPED {
                 hEvent: done.0,
                 ..Default::default()
@@ -341,15 +389,15 @@ impl DirChanges {
         })
     }
 
-    /// Waits for the next batch of changes, `stop`, or `timeout`.
-    fn next(&mut self, stop: &Event, timeout: Option<Duration>) -> Next {
+    /// Makes sure a read is pending. False when one cannot be started.
+    fn arm(&mut self) -> bool {
         if !self.pending {
             let started = unsafe {
                 ReadDirectoryChangesW(
                     self.dir,
                     self.buf.as_mut_ptr() as *mut c_void,
                     std::mem::size_of_val(&*self.buf) as u32,
-                    true,
+                    self.subtree,
                     FILE_NOTIFY_CHANGE_FILE_NAME
                         | FILE_NOTIFY_CHANGE_DIR_NAME
                         | FILE_NOTIFY_CHANGE_LAST_WRITE,
@@ -359,18 +407,15 @@ impl DirChanges {
                 )
             };
             if started.is_err() {
-                return Next::Failed;
+                return false;
             }
             self.pending = true;
         }
-        let ms = timeout.map_or(u32::MAX, |t| t.as_millis() as u32);
-        let woke = unsafe { WaitForMultipleObjects(&[self.done.0, stop.0], false, ms) };
-        if woke.0 == WAIT_OBJECT_0.0 + 1 {
-            return Next::Stop;
-        }
-        if woke != WAIT_OBJECT_0 {
-            return Next::Quiet;
-        }
+        true
+    }
+
+    /// The finished read, once its event is set.
+    fn take(&mut self) -> Next {
         self.pending = false;
         let mut bytes = 0u32;
         if unsafe { GetOverlappedResult(self.dir, &*self.overlapped, &mut bytes, false) }.is_err() {
@@ -379,7 +424,13 @@ impl DirChanges {
         if bytes == 0 {
             return Next::Overflow;
         }
-        Next::Paths(notifications(&self.buf[..], bytes as usize))
+        let paths = notifications(&self.buf[..], bytes as usize);
+        Next::Paths(
+            paths
+                .into_iter()
+                .map(|p| format!("{}{p}", self.prefix))
+                .collect(),
+        )
     }
 }
 
