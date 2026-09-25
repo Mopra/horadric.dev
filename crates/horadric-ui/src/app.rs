@@ -42,13 +42,14 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::usage::has_flag;
 use horadric_core::{
     session_id, HookEvent, Phase, Registry, SavedCluster, SavedPanel, SavedSession, SavedState,
     Session, Setting, Usage,
 };
+use horadric_hooks::install;
 use horadric_hooks::listener::{self, Command, Reload, Tagged};
 use horadric_hooks::transcript::{self, Past};
 use windows::core::{w, PCWSTR};
@@ -76,6 +77,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::columns::{self, Columns};
 use crate::console::{self, Console, Launch};
+use crate::dropdown::{self, Dropdown};
 use crate::glyphs::Font;
 use crate::keys::{self, FontStep};
 use crate::layout::{self, Metrics};
@@ -111,7 +113,7 @@ const WM_HORADRIC_PROJECT_MENU: u32 = WM_APP + 9;
 const WM_HORADRIC_WINDOW_SHOWN: u32 = WM_APP + 10;
 /// A browser window a session opened is gone. `wparam` is its handle.
 const WM_HORADRIC_WINDOW_GONE: u32 = WM_APP + 11;
-/// Show the menu for the setting the app's `setting_menu_for` names.
+/// Drop the list for the setting the app's `setting_menu_for` names.
 const WM_HORADRIC_SETTING_MENU: u32 = WM_APP + 12;
 /// Show the menu for the recent project the app's `recent_menu_for` names.
 const WM_HORADRIC_RECENT_MENU: u32 = WM_APP + 13;
@@ -190,8 +192,13 @@ pub(crate) enum Input {
     Arrange,
     /// Another pane on the stage has the keyboard: its tile latches down.
     Spotlight,
-    /// A setting in the usage window clicked: offer its values.
-    SettingMenu(Setting),
+    /// A list setting in the usage window clicked: drop its list under its
+    /// row, given in screen pixels.
+    SettingMenu(Setting, RECT),
+    /// A setting's list closed, with the value picked, if one was.
+    Picked(Setting, Option<Option<String>>),
+    /// A slider in the usage window let go at a new value.
+    SetDefault(Setting, Option<String>),
     /// The start window's tile clicked: pick a folder for the first
     /// project.
     Pick,
@@ -250,6 +257,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     }
     window::register_class()?;
     usage::register_class()?;
+    dropdown::register_class()?;
     start::register_class()?;
     terminal::register_class()?;
     let notify = create_app_window()?;
@@ -367,6 +375,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             start_window: None,
             status_settings,
             setting_menu_for: None,
+            dropdown: None,
+            switches: HashMap::new(),
+            settings_before: None,
             clusters: Vec::new(),
             consoles: HashMap::new(),
             views: HashMap::new(),
@@ -560,8 +571,27 @@ unsafe extern "system" fn app_proc(
             return LRESULT(0);
         }
         WM_HORADRIC_SETTING_MENU => {
-            if let Some(setting) = with_app(|app| app.setting_menu_for.take()).flatten() {
-                setting_menu(hwnd, setting);
+            // Outside the app's borrow: the list takes the focus as it opens,
+            // and the windows losing it are the app's.
+            let want = with_app(|app| {
+                let (setting, row) = app.setting_menu_for.take()?;
+                let current = app
+                    .shared
+                    .defaults
+                    .borrow()
+                    .get(setting)
+                    .map(str::to_string);
+                let dpi = app.usage_window.as_ref().map_or(96, |u| u.dpi());
+                Some((Rc::clone(&app.shared), setting, current, row, dpi))
+            })
+            .flatten();
+            if let Some((shared, setting, current, row, dpi)) = want {
+                match Dropdown::open(shared, setting, current.as_deref(), row, dpi) {
+                    Ok(d) => {
+                        with_app(|app| app.dropped(d));
+                    }
+                    Err(e) => eprintln!("horadric: cannot open a setting's list: {e}"),
+                }
             }
             return LRESULT(0);
         }
@@ -762,49 +792,9 @@ fn rename_session(hwnd: HWND, id: &str) {
     }
 }
 
-/// The values a setting can take, the current one checked. Default, none,
-/// leaves it to Claude Code's own settings. A running session keeps what it
-/// started with; the menu says so, since that is the surprise.
-fn setting_menu(hwnd: HWND, setting: Setting) {
-    const DEFAULT: usize = 1;
-    const FIRST: usize = 2;
-    let Some(current) = with_app(|app| {
-        app.shared
-            .defaults
-            .borrow()
-            .get(setting)
-            .map(str::to_string)
-    }) else {
-        return;
-    };
-    let entry = |id, label: &str, checked| Item::Action {
-        id,
-        label: label.to_string(),
-        checked,
-    };
-    let mut items = vec![
-        Item::Disabled("For sessions started or resumed from now on".into()),
-        Item::Separator,
-        entry(DEFAULT, "Default", current.is_none()),
-        Item::Separator,
-    ];
-    let choices = setting.choices();
-    for (i, (value, label)) in choices.iter().enumerate() {
-        if setting == Setting::Permissions && i + 1 == choices.len() {
-            items.push(Item::Separator);
-        }
-        items.push(entry(FIRST + i, label, current.as_deref() == Some(*value)));
-    }
-    let value = match tray::popup(hwnd, &items) {
-        Some(DEFAULT) => None,
-        Some(id) if id >= FIRST => match choices.get(id - FIRST) {
-            Some((value, _)) => Some(value.to_string()),
-            None => return,
-        },
-        _ => return,
-    };
-    with_app(|app| app.set_default(setting, value));
-}
+/// How long Claude Code may take to save a switched model or effort as the
+/// default. It gives itself three seconds.
+const SAVED_WITHIN: Duration = Duration::from_secs(5);
 
 /// How many sessions a batch starts: enough to work on several things at
 /// once, few enough to keep an eye on.
@@ -969,8 +959,19 @@ struct App {
     /// The settings file that gives a session `horadric status` as its status
     /// line. None when it could not be written, and then sessions go without.
     status_settings: Option<PathBuf>,
-    /// The setting whose menu is about to show.
-    setting_menu_for: Option<Setting>,
+    /// The setting whose list is about to drop, and its row on screen.
+    setting_menu_for: Option<(Setting, RECT)>,
+    /// A setting's list, while it is dropped down.
+    dropdown: Option<Box<Dropdown>>,
+    /// Slash commands waiting to be typed into running sessions, by session
+    /// id, for settings picked since they started: each goes in once the
+    /// session is free for it, see [`Session::free_for_command`].
+    switches: HashMap<String, Vec<(Setting, String)>>,
+    /// The user's own default model and effort, from before the first of
+    /// those commands went in, and when the last one did. Claude Code saves
+    /// what they pick as the default for every new session, even outside
+    /// Horadric, so these go back once it has.
+    settings_before: Option<(Vec<Option<serde_json::Value>>, Instant)>,
     // Boxed on purpose: the window procedures hold a raw pointer to each
     // window struct, so it must not move when the Vec grows.
     #[allow(clippy::vec_box)]
@@ -1040,7 +1041,10 @@ struct Browser {
 impl App {
     fn on_message(&mut self, msg: u32, wparam: usize) {
         match msg {
-            WM_HORADRIC_EVENT => self.reconcile(wparam != 0),
+            WM_HORADRIC_EVENT => {
+                self.reconcile(wparam != 0);
+                self.switch_free();
+            }
             WM_HORADRIC_INPUT => self.apply_input(),
             WM_HORADRIC_OUTPUT => self.output(wparam),
             WM_HORADRIC_WINDOW_SHOWN => self.window_shown(wparam as isize),
@@ -1076,6 +1080,7 @@ impl App {
             }
             WM_TIMER => {
                 self.tick();
+                self.switch_free();
                 self.reload_when_ready();
             }
             _ => {}
@@ -1468,10 +1473,7 @@ impl App {
     /// Claude Code, not for a shell put in its place with `HORADRIC_AGENT`,
     /// and not over settings the session brought itself.
     fn extra_args(&self, program: &Path, args: &[String]) -> Vec<String> {
-        let claude = program
-            .file_stem()
-            .is_some_and(|s| s.eq_ignore_ascii_case("claude"));
-        if !claude {
+        if !console::is_claude(program) {
             return Vec::new();
         }
         let mut extra = self.shared.defaults.borrow().flags(args);
@@ -1482,14 +1484,86 @@ impl App {
         extra
     }
 
-    /// A setting picked in the usage window. It reaches sessions as they
-    /// start or resume.
+    /// A setting picked in the usage window. Sessions take it as they start
+    /// or resume. Running ones switch too where Claude Code has a command
+    /// for it, typed in once each is free, unless it chose the setting with
+    /// its own arguments.
     fn set_default(&mut self, setting: Setting, value: Option<String>) {
+        if let Some(command) = setting.command(value.as_deref()) {
+            for (id, c) in &self.consoles {
+                if !c.claude || c.exit_code().is_some() || setting.chosen_by(&c.args) {
+                    continue;
+                }
+                let queue = self.switches.entry(id.clone()).or_default();
+                queue.retain(|(s, _)| *s != setting);
+                queue.push((setting, command.clone()));
+            }
+        }
         self.shared.defaults.borrow_mut().set(setting, value);
         if let Some(u) = &self.usage_window {
             u.invalidate();
         }
         self.save();
+        self.switch_free();
+    }
+
+    /// Types the next waiting command into each session free for it. One
+    /// at a time, so the agent has taken one before the next comes. Once
+    /// all are in and Claude Code has had time to save them, the user's own
+    /// defaults go back.
+    fn switch_free(&mut self) {
+        let settings = install::settings_path();
+        if self.switches.is_empty() {
+            if let (Some((was, last)), Some(path)) = (&self.settings_before, &settings) {
+                if last.elapsed() >= SAVED_WITHIN {
+                    if let Err(e) = install::restore(path, &install::SWITCHED, was) {
+                        eprintln!("horadric: cannot put back the default model: {e}");
+                    }
+                    self.settings_before = None;
+                }
+            }
+            return;
+        }
+        let Ok(registry) = self.shared.registry.lock() else {
+            return;
+        };
+        let consoles = &self.consoles;
+        let before = &mut self.settings_before;
+        self.switches.retain(|id, queue| {
+            let (Some(c), Some(s)) = (consoles.get(id), registry.get(id)) else {
+                return false;
+            };
+            if c.exit_code().is_some() || queue.is_empty() {
+                return false;
+            }
+            if s.free_for_command(c.typed_at()) {
+                let was = match (before.take(), &settings) {
+                    (Some((was, _)), _) => Some(was),
+                    (None, Some(path)) => install::snapshot(path, &install::SWITCHED).ok(),
+                    (None, None) => None,
+                };
+                *before = was.map(|w| (w, Instant::now()));
+                let (_, command) = queue.remove(0);
+                c.write(format!("{command}\r").into_bytes());
+            }
+            !queue.is_empty()
+        });
+    }
+
+    /// A setting's list opened. Its row in the usage window stays lit
+    /// while it is.
+    fn dropped(&mut self, d: Box<Dropdown>) {
+        if let Some(old) = self.dropdown.replace(d) {
+            old.destroy();
+        }
+        let i = self
+            .dropdown
+            .as_ref()
+            .and_then(|d| Setting::ALL.iter().position(|s| *s == d.setting));
+        if let Some(u) = &self.usage_window {
+            u.open.set(i);
+            u.invalidate();
+        }
     }
 
     /// Ends a session for good: the process, the window, the tile, and its
@@ -2481,10 +2555,23 @@ impl App {
                         c.invalidate();
                     }
                 }
-                Input::SettingMenu(s) => {
-                    self.setting_menu_for = Some(s);
+                Input::SettingMenu(s, row) => {
+                    self.setting_menu_for = Some((s, row));
                     post(self.notify.0 as isize, WM_HORADRIC_SETTING_MENU, 0);
                 }
+                Input::Picked(setting, pick) => {
+                    if let Some(d) = self.dropdown.take() {
+                        d.destroy();
+                    }
+                    if let Some(u) = &self.usage_window {
+                        u.open.set(None);
+                        u.invalidate();
+                    }
+                    if let Some(value) = pick {
+                        self.set_default(setting, value);
+                    }
+                }
+                Input::SetDefault(setting, value) => self.set_default(setting, value),
                 Input::Pick => {
                     // A new project most likely sits beside the last one.
                     self.pick_from = self

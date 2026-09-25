@@ -113,6 +113,10 @@ pub struct Session {
     /// [`ACTIVITY_SPAN`]. The tile draws it as a trace of the last minutes.
     #[serde(skip)]
     pub activity: Vec<SystemTime>,
+    /// When the last prompt went in. Anything typed into the terminal
+    /// after it may still sit in the prompt box as a draft.
+    #[serde(skip)]
+    pub prompted_at: Option<SystemTime>,
 }
 
 /// How far back a session remembers what it did.
@@ -140,7 +144,26 @@ impl Session {
             status: None,
             tool: None,
             activity: Vec::new(),
+            prompted_at: None,
         }
+    }
+
+    /// Whether a command can be typed into the agent now without landing in
+    /// the middle of something: it sits at its prompt, its screen is up (its
+    /// status line has been heard), and nothing was typed since the last
+    /// prompt went in, which could be a draft the command would run into.
+    /// `typed` is when a key last went to its terminal.
+    pub fn free_for_command(&self, typed: Option<SystemTime>) -> bool {
+        let at_prompt = matches!(
+            self.phase,
+            Phase::Idle | Phase::Done | Phase::Waiting(WaitReason::Input)
+        );
+        let no_draft = match (typed, self.prompted_at) {
+            (None, _) => true,
+            (Some(t), Some(p)) => t <= p,
+            (Some(_), None) => false,
+        };
+        !self.shell && at_prompt && self.status.is_some() && no_draft
     }
 
     /// How long the session has been in its current phase.
@@ -224,6 +247,7 @@ impl Session {
             },
             "UserPromptSubmit" => {
                 self.prompted = true;
+                self.prompted_at = Some(now);
                 if let Some(p) = &event.user_prompt {
                     self.last_line = first_line(p);
                 }
@@ -567,6 +591,28 @@ mod tests {
         assert!(!s.prompted);
         s.apply(&ev("UserPromptSubmit"), now());
         assert!(s.prompted);
+    }
+
+    #[test]
+    fn a_command_waits_for_the_prompt_and_for_any_draft() {
+        let t = |secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("SessionStart"), t(1));
+        assert!(!s.free_for_command(None), "screen not up yet");
+        s.status = Some(Status::default());
+        assert!(s.free_for_command(None));
+        assert!(!s.free_for_command(Some(t(2))), "typed, never sent");
+        s.apply(&ev("UserPromptSubmit"), t(3));
+        assert!(!s.free_for_command(Some(t(2))), "mid turn");
+        s.apply(&ev("Stop"), t(4));
+        assert!(s.free_for_command(Some(t(2))));
+        assert!(s.free_for_command(Some(t(3))));
+        assert!(!s.free_for_command(Some(t(5))), "a draft since");
+        s.apply(&ev("PermissionRequest"), t(6));
+        assert!(!s.free_for_command(None));
+        s.shell = true;
+        s.phase = Phase::Idle;
+        assert!(!s.free_for_command(None));
     }
 
     #[test]

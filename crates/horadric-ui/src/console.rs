@@ -108,6 +108,12 @@ pub struct Console {
     pub args: Vec<String>,
     /// A plain shell, not an agent.
     pub shell: bool,
+    /// Claude Code, not a shell or another agent put in its place with
+    /// `HORADRIC_AGENT`, so its slash commands work.
+    pub claude: bool,
+    /// When a key was last typed into it, which may have left a draft in
+    /// its prompt box.
+    typed: Mutex<Option<SystemTime>>,
 }
 
 /// The file a view shows, and how it is laid out in the grid now.
@@ -153,6 +159,14 @@ pub fn agent_program() -> Option<PathBuf> {
     find_program(bare, &path, PROGRAM_EXTS, Path::is_file)
 }
 
+/// Whether `program` is Claude Code, which takes Horadric's flags and slash
+/// commands. A shell or another agent put in with `HORADRIC_AGENT` does not.
+pub fn is_claude(program: &Path) -> bool {
+    program
+        .file_stem()
+        .is_some_and(|s| s.eq_ignore_ascii_case("claude"))
+}
+
 /// The shell a plain terminal runs, see [`shell::program`].
 pub fn shell_program() -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -171,6 +185,7 @@ impl Console {
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
         };
+        let claude = !launch.shell && is_claude(&launch.program);
         let cmd = Command {
             program: launch.program,
             args: launch.extra.iter().chain(&launch.args).cloned().collect(),
@@ -221,6 +236,8 @@ impl Console {
             title,
             args: launch.args,
             shell: launch.shell,
+            claude,
+            typed: Mutex::new(None),
         });
 
         let notify = notify.0 as isize;
@@ -296,6 +313,8 @@ impl Console {
             title,
             args: Vec::new(),
             shell: false,
+            claude: false,
+            typed: Mutex::new(None),
         });
         console.load(notify.0 as isize);
         console
@@ -434,6 +453,18 @@ impl Console {
         if let Some(pty) = &self.pty {
             pty.write(bytes);
         }
+    }
+
+    /// Notes that the human typed into it.
+    pub fn note_typed(&self) {
+        if let Ok(mut t) = self.typed.lock() {
+            *t = Some(SystemTime::now());
+        }
+    }
+
+    /// When the human last typed into it.
+    pub fn typed_at(&self) -> Option<SystemTime> {
+        self.typed.lock().ok().and_then(|t| *t)
     }
 
     /// Clears the output flag. True when there was new output to show.
@@ -584,5 +615,18 @@ impl EventListener for Events {
             Event::ClipboardStore(_, text) => clipboard::set_text(&text),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_is_claude_however_it_is_installed() {
+        assert!(is_claude(Path::new(r"C:\Users\x\.local\bin\claude.exe")));
+        assert!(is_claude(Path::new(r"C:\npm\Claude.cmd")));
+        assert!(!is_claude(Path::new(r"C:\Windows\System32\cmd.exe")));
+        assert!(!is_claude(Path::new(r"C:\bin\claude-dev.exe")));
     }
 }

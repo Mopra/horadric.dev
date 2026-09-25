@@ -165,9 +165,62 @@ pub fn status(path: &Path, port: u16) -> io::Result<bool> {
     Ok(is_installed(&read(path)?, port))
 }
 
+/// What Claude Code's `/model` and `/effort` save into the user's settings
+/// as they switch a session: typed in, as Horadric does, they switch this
+/// session and also make the pick the default for every new one. Effort is
+/// saved for the model in use, under `modelSettings`.
+pub const SWITCHED: [&str; 3] = ["model", "effortLevel", "modelSettings"];
+
+/// What `keys` hold in `settings`, None where one is missing.
+pub fn pick(settings: &Value, keys: &[&str]) -> Vec<Option<Value>> {
+    keys.iter().map(|k| settings.get(*k).cloned()).collect()
+}
+
+/// Puts `keys` back as [`pick`] found them. True when anything changed.
+pub fn put_back(settings: &mut Value, keys: &[&str], was: &[Option<Value>]) -> bool {
+    if pick(settings, keys) == was {
+        return false;
+    }
+    let map = ensure_object(settings);
+    for (k, v) in keys.iter().zip(was) {
+        match v {
+            Some(v) => map.insert(k.to_string(), v.clone()),
+            None => map.remove(*k),
+        };
+    }
+    true
+}
+
+/// What `keys` hold in the user's settings file now.
+pub fn snapshot(path: &Path, keys: &[&str]) -> io::Result<Vec<Option<Value>>> {
+    Ok(pick(&read(path)?, keys))
+}
+
+/// Puts `keys` in the user's settings file back as a [`snapshot`] had
+/// them, writing only when something changed.
+pub fn restore(path: &Path, keys: &[&str], was: &[Option<Value>]) -> io::Result<()> {
+    let mut settings = read(path)?;
+    if put_back(&mut settings, keys, was) {
+        write(path, &settings)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_switch_saved_as_the_default_is_put_back() {
+        let mut s = json!({"model": "opus", "hooks": {}});
+        let was = pick(&s, &SWITCHED);
+        assert_eq!(was, [Some(json!("opus")), None, None]);
+        assert!(!put_back(&mut s, &SWITCHED, &was));
+        s["model"] = json!("claude-haiku-4-5-20251001");
+        s["modelSettings"] = json!({"claude-haiku-4-5": {"effortLevel": "low"}});
+        assert!(put_back(&mut s, &SWITCHED, &was));
+        assert_eq!(s, json!({"model": "opus", "hooks": {}}));
+    }
 
     #[test]
     fn install_is_idempotent_and_removable() {

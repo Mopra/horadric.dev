@@ -3,9 +3,11 @@
 //!
 //! It belongs to no project, so it is a window of its own rather than a tile
 //! in a cluster, and it sits at the top of the first column of tiles. It
-//! behaves like a cluster: it never takes the focus, it drags to another
-//! place in the columns the same way, and its header folds it. A setting opens a menu, which the app
-//! runs, since it owns the defaults.
+//! behaves like a cluster: it never takes the focus, and it drags to
+//! another place in the columns the same way. A click on the limits folds
+//! it down to the session's budget alone. A list setting drops its list,
+//! which the app opens, since it owns the defaults. Effort is a slider in
+//! the window itself.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -37,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::app::{self, Input};
 use crate::layout::{self, UsageHit, UsageLayout};
-use crate::render::{Target, UsageScene};
+use crate::render::{SettingLook, Target, UsageScene};
 use crate::window::Shared;
 use crate::{backdrop, columns};
 
@@ -56,6 +58,23 @@ pub struct UsageWindow {
     hot: Cell<UsageHit>,
     pressed: Cell<Option<UsageHit>>,
     tracking: Cell<bool>,
+    /// The setting whose list is dropped down, set by the app.
+    pub open: Cell<Option<usize>>,
+    /// A slider held down: its setting and the stop it is at so far. It is
+    /// set when let go.
+    slide: Cell<Option<(usize, usize)>>,
+}
+
+/// Which settings are sliders, in the order the window shows them.
+fn scales() -> Vec<bool> {
+    Setting::ALL.iter().map(|s| s.is_scale()).collect()
+}
+
+/// What each stop of a scale sets: the default, then its values.
+fn stops(setting: Setting) -> Vec<Option<&'static str>> {
+    std::iter::once(None)
+        .chain(setting.choices().iter().map(|(v, _)| Some(*v)))
+        .collect()
 }
 
 struct Drag {
@@ -83,7 +102,7 @@ impl UsageWindow {
     /// Creates the window at `(x, y)` in physical pixels and shows it
     /// without activating it.
     pub fn create(shared: Rc<Shared>, collapsed: bool, x: i32, y: i32) -> Result<Box<Self>> {
-        let initial = layout::usage(&shared.metrics, 0, Setting::ALL.len(), collapsed);
+        let initial = layout::usage(&shared.metrics, 0, &scales(), collapsed);
         let mut win = Box::new(UsageWindow {
             hwnd: HWND::default(),
             collapsed: Cell::new(collapsed),
@@ -94,6 +113,8 @@ impl UsageWindow {
             hot: Cell::new(UsageHit::Nothing),
             pressed: Cell::new(None),
             tracking: Cell::new(false),
+            open: Cell::new(None),
+            slide: Cell::new(None),
         });
         unsafe {
             let hwnd = CreateWindowExW(
@@ -206,7 +227,7 @@ impl UsageWindow {
         let l = layout::usage(
             &self.shared.metrics,
             self.limits(),
-            Setting::ALL.len(),
+            &scales(),
             self.collapsed.get(),
         );
         *self.layout.borrow_mut() = l;
@@ -261,10 +282,26 @@ impl UsageWindow {
             now,
             settings: Setting::ALL
                 .iter()
-                .map(|&s| (s.label(), s.name_of(defaults.get(s))))
+                .enumerate()
+                .map(|(i, &s)| {
+                    let value = match self.slide.get() {
+                        Some((j, stop)) if j == i => stops(s).get(stop).copied().flatten(),
+                        _ => defaults.get(s),
+                    };
+                    let all = stops(s);
+                    SettingLook {
+                        label: s.label(),
+                        value: s.name_of(value),
+                        stop: s.is_scale().then(|| {
+                            let at = all.iter().position(|v| *v == value).unwrap_or(0);
+                            (at, all.len())
+                        }),
+                    }
+                })
                 .collect(),
             hot: self.hot.get(),
             pressed: self.pressed.get(),
+            open: self.open.get(),
         };
         let result = slot
             .as_ref()
@@ -310,18 +347,86 @@ impl UsageWindow {
 
     fn click(&self, hit: UsageHit) {
         match hit {
-            UsageHit::Header => {
+            UsageHit::Limits => {
                 self.collapsed.set(!self.collapsed.get());
                 self.fit();
                 app::push(Input::Arrange);
             }
             UsageHit::Setting(i) => {
-                if let Some(&s) = Setting::ALL.get(i) {
-                    app::push(Input::SettingMenu(s));
+                if let (Some(&s), Some(row)) = (Setting::ALL.get(i), self.row_on_screen(i)) {
+                    app::push(Input::SettingMenu(s, row));
                 }
             }
             UsageHit::Nothing => {}
         }
+    }
+
+    /// Setting `i`'s row in screen pixels, for its list to drop from.
+    fn row_on_screen(&self, i: usize) -> Option<RECT> {
+        let r = self.layout.borrow().settings.get(i)?.rect;
+        let (x, y) = self.position();
+        let s = self.scale();
+        let px = |v: f32| (v * s).round() as i32;
+        Some(RECT {
+            left: x + px(r.x),
+            top: y + px(r.y),
+            right: x + px(r.right()),
+            bottom: y + px(r.bottom()),
+        })
+    }
+
+    /// The slider under a point, if the point is on one's half of its row:
+    /// the setting and the stop nearest.
+    fn slider_at(&self, lparam: LPARAM) -> Option<(usize, usize)> {
+        let s = self.scale();
+        let x = (lparam.0 & 0xffff) as i16 as f32 / s;
+        let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32 / s;
+        let l = self.layout.borrow();
+        let (i, row) = l
+            .settings
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.rect.contains(x, y))?;
+        let track = row.track?;
+        if y < row.line.y + row.line.h / 2.0 {
+            return None;
+        }
+        let n = stops(*Setting::ALL.get(i)?).len();
+        Some((i, layout::slider_stop(&track, n, x)))
+    }
+
+    /// Moves a held slider to the stop under the cursor, past its ends too.
+    fn slide_to(&self, lparam: LPARAM) {
+        let Some((i, _)) = self.slide.get() else {
+            return;
+        };
+        let s = self.scale();
+        let x = (lparam.0 & 0xffff) as i16 as f32 / s;
+        let l = self.layout.borrow();
+        let (Some(track), Some(&setting)) =
+            (l.settings.get(i).and_then(|r| r.track), Setting::ALL.get(i))
+        else {
+            return;
+        };
+        let stop = layout::slider_stop(&track, stops(setting).len(), x);
+        if self.slide.replace(Some((i, stop))) != Some((i, stop)) {
+            self.invalidate();
+        }
+    }
+
+    /// Lets go of a held slider, which sets its value.
+    fn release_slider(&self) {
+        let Some((i, stop)) = self.slide.take() else {
+            return;
+        };
+        let Some(&setting) = Setting::ALL.get(i) else {
+            return;
+        };
+        let value = stops(setting).get(stop).copied().flatten();
+        if value != self.shared.defaults.borrow().get(setting) {
+            app::push(Input::SetDefault(setting, value.map(str::to_string)));
+        }
+        self.invalidate();
     }
 
     fn handle(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
@@ -377,6 +482,12 @@ impl UsageWindow {
                     SetCapture(self.hwnd);
                 }
                 self.press(Some(self.hit(lparam)));
+                // A slider moves under the mouse instead of the window.
+                if let Some(at) = self.slider_at(lparam) {
+                    self.slide.set(Some(at));
+                    self.invalidate();
+                    return Some(LRESULT(0));
+                }
                 let (x, y) = self.position();
                 *self.drag.borrow_mut() = Some(Drag {
                     start_cursor: cursor,
@@ -388,6 +499,10 @@ impl UsageWindow {
             WM_MOUSEMOVE => {
                 self.track();
                 self.hover(self.hit(lparam));
+                if self.slide.get().is_some() {
+                    self.slide_to(lparam);
+                    return Some(LRESULT(0));
+                }
                 let mut drag = self.drag.borrow_mut();
                 if let Some(d) = drag.as_mut() {
                     let mut cursor = POINT::default();
@@ -408,10 +523,18 @@ impl UsageWindow {
                 // Before letting go: releasing capture sends
                 // WM_CAPTURECHANGED at once, and that clears the press.
                 let pressed = self.pressed.get();
+                let sliding = self.slide.get().is_some();
+                if sliding {
+                    self.slide_to(lparam);
+                    self.release_slider();
+                }
                 unsafe {
                     let _ = ReleaseCapture();
                 }
                 self.press(None);
+                if sliding {
+                    return Some(LRESULT(0));
+                }
                 let drag = self.drag.borrow_mut().take();
                 match drag {
                     Some(d) if d.moved => {
@@ -434,6 +557,8 @@ impl UsageWindow {
             }
             WM_CAPTURECHANGED => {
                 self.press(None);
+                // Taken away mid slide: the stop it was at counts.
+                self.release_slider();
                 None
             }
             _ => None,
@@ -476,5 +601,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match win.handle(msg, wparam, lparam) {
         Some(r) => r,
         None => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_scale_starts_at_its_default_then_runs_through_its_values() {
+        let all = stops(Setting::Effort);
+        assert_eq!(all.first(), Some(&None));
+        assert_eq!(all.last(), Some(&Some("max")));
+        assert_eq!(all.len(), Setting::Effort.choices().len() + 1);
+        assert_eq!(scales(), [false, true, false]);
     }
 }

@@ -514,7 +514,8 @@ impl Pane {
     }
 
     /// Sends typed bytes: the view jumps back to the live screen and any
-    /// selection goes, as in every terminal.
+    /// selection goes, as in every terminal. The console notes it, since
+    /// what was typed may sit in the agent's prompt box as a draft.
     fn send(&self, bytes: Vec<u8>) {
         if let Ok(mut s) = self.console.screen.lock() {
             s.term.selection = None;
@@ -522,6 +523,7 @@ impl Pane {
                 s.term.scroll_display(Scroll::Bottom);
             }
         }
+        self.console.note_typed();
         self.console.write(bytes);
         self.invalidate();
     }
