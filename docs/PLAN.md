@@ -1679,8 +1679,9 @@ trusted from the file.
 - **Publishing** is `gh release create v<version> --draft` with the three
   files, then a human publishes it after trying it. Local, not CI, for now:
   shipping already happens from this machine, and a key in a CI secret is
-  one more place to guard. The workspace version (`0.1.0` today, never
-  bumped) becomes the release version and has to go up each release.
+  one more place to guard. The workspace version is the release version
+  and has to go up each release. 0.2.0 is the first. `RELEASING.md` has
+  the steps.
 
 **The check.** On start and once a day, and from a tray item "Check for
 updates", fetch `latest.json`, verify the signature against the built in
