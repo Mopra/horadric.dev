@@ -101,7 +101,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
         eprintln!("horadric: tiles are not running, the session will appear on its first prompt");
     }
     eprintln!("horadric: starting claude as session {id}");
-    let status = Command::new("claude")
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let program =
+        horadric_pty::find_program("claude", &path, horadric_pty::PROGRAM_EXTS, Path::is_file)
+            .ok_or("`claude` not found on PATH")?;
+    let status = Command::new(program)
         .args(&passthrough)
         .current_dir(&cwd)
         .env(SESSION_ENV, &id)

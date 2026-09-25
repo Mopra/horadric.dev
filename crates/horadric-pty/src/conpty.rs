@@ -24,7 +24,7 @@ use windows::Win32::System::Threading::{
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
-use crate::{command_line, environment_block, wide};
+use crate::{environment_block, launch_line, wide};
 
 /// What to run and how big the console starts.
 #[derive(Debug, Clone)]
@@ -241,7 +241,7 @@ unsafe fn start(
         si.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
         si.lpAttributeList = list;
 
-        let mut line: Vec<u16> = wide(command_line(&cmd.program, &cmd.args).as_ref());
+        let mut line: Vec<u16> = wide(launch_line(&cmd.program, &cmd.args).as_ref());
         let env = environment_block(std::env::vars_os(), &cmd.env_set, &cmd.env_remove);
         let cwd = wide(cmd.cwd.as_os_str());
         let mut pi = PROCESS_INFORMATION::default();

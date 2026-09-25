@@ -412,8 +412,10 @@ fn notifications(buf: &[u32], len: usize) -> Vec<String> {
         let name_len = word(at + 8);
         let name = bytes.get(at + 12..at + 12 + name_len).unwrap_or(&[]);
         let units: Vec<u16> = name
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| u16::from_le_bytes(c))
             .collect();
         out.push(String::from_utf16_lossy(&units));
         if next == 0 {

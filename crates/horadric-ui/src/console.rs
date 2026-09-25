@@ -24,7 +24,7 @@ use alacritty_terminal::index::Point;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
 use horadric_hooks::{OWNER_ENV, SESSION_ENV};
-use horadric_pty::{find_program, Command, Pty};
+use horadric_pty::{find_program, Command, Pty, PROGRAM_EXTS};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
@@ -140,15 +140,17 @@ pub struct Launch {
 }
 
 /// The agent binary: `HORADRIC_AGENT` when set, which is also how a plain
-/// shell gets into a tile for testing, otherwise `claude.exe` from `PATH`.
+/// shell gets into a tile for testing, otherwise `claude` from `PATH`, the
+/// first of `claude.exe` or `claude.cmd` in path order, as cmd.exe resolves
+/// it. The npm install is a `.cmd` shim, so `.exe` alone would skip it.
 pub fn agent_program() -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let name = std::env::var("HORADRIC_AGENT").unwrap_or_else(|_| "claude".into());
     if Path::new(&name).is_absolute() {
         return Some(PathBuf::from(name));
     }
-    let bare = name.trim_end_matches(".exe");
-    find_program(bare, &path, &[".exe"], Path::is_file)
+    let bare = name.trim_end_matches(".exe").trim_end_matches(".cmd");
+    find_program(bare, &path, PROGRAM_EXTS, Path::is_file)
 }
 
 /// The shell a plain terminal runs, see [`shell::program`].

@@ -39,6 +39,37 @@ pub fn find_program(
     None
 }
 
+/// Extensions a program on `PATH` may have, in the order cmd.exe tries them.
+/// The npm install of Claude Code is a `claude.cmd` shim with no `.exe`, so
+/// looking for `.exe` alone finds an older install further down the path or
+/// nothing at all.
+pub const PROGRAM_EXTS: &[&str] = &[".exe", ".cmd", ".bat"];
+
+/// Whether `program` is a batch file, which `CreateProcessW` will not run on
+/// its own.
+pub fn is_batch(program: &Path) -> bool {
+    program
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+}
+
+/// The command line handed to `CreateProcessW`. A batch file is run through
+/// the command interpreter: `cmd.exe /d /s /c "<program> <args>"`, where
+/// `/s` makes cmd strip exactly the outer quotes and leave ours alone.
+pub fn launch_line(program: &Path, args: &[String]) -> String {
+    let line = command_line(program, args);
+    if !is_batch(program) {
+        return line;
+    }
+    let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+    let mut out = String::new();
+    push_quoted(&mut out, &comspec);
+    out.push_str(" /d /s /c \"");
+    out.push_str(&line);
+    out.push('"');
+    out
+}
+
 /// Joins arguments into one Windows command line, quoted the way the MSVC
 /// runtime splits them again.
 pub fn command_line(program: &Path, args: &[String]) -> String {
@@ -144,6 +175,19 @@ mod tests {
             line,
             r#""C:\Program Files\claude.exe" "Reply with pong" "say \"hi\"" "C:\dir with space\\" """#
         );
+    }
+
+    #[test]
+    fn batch_files_run_through_cmd() {
+        let line = launch_line(Path::new(r"C:\npm\claude.cmd"), &["--resume".into()]);
+        assert!(
+            line.ends_with(r#" /d /s /c "C:\npm\claude.cmd --resume""#),
+            "{line}"
+        );
+        assert!(is_batch(Path::new("a.CMD")));
+        assert!(!is_batch(Path::new("claude.exe")));
+        let plain = launch_line(Path::new("claude.exe"), &[]);
+        assert_eq!(plain, "claude.exe");
     }
 
     #[test]

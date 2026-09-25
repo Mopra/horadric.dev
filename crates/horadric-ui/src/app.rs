@@ -1375,8 +1375,7 @@ impl App {
         let program = if shell {
             console::shell_program().ok_or("no shell found (set HORADRIC_SHELL)")?
         } else {
-            console::agent_program()
-                .ok_or("claude.exe not found on PATH (or set HORADRIC_AGENT)")?
+            console::agent_program().ok_or("claude not found on PATH (or set HORADRIC_AGENT)")?
         };
         recent::remember(&mut self.recent, &cwd.to_string_lossy());
 
