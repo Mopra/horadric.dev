@@ -1367,6 +1367,84 @@ Order of work: hosts in `config.json` and the SSH terminal from the
 project menu, then the prompt for agents, then "Add host" with the
 suggestions from `~/.ssh/config`.
 
+### Sessions that outlive Horadric (proposed, not decided)
+
+Today every pseudo console is created by the Horadric process. When that
+process ends, its `HPCON`s close, conhost goes, and every agent with it.
+Persistence and `reload` make the restart cheap (a click, or nothing, and
+`claude --resume` brings the conversation back), but a restart still costs:
+the turn in flight is cut off, tools the agent was running die, the
+scrollback is gone, and `reload` has to wait for every session to be idle.
+A crash is worse than a reload, because nothing marks the sessions as
+running, so they all come back paused.
+
+The console can only outlive the UI if a process that is not the UI created
+it. An `HPCON` is not a kernel handle and can not be handed to another
+process, so there is no way to move a console after the fact. Whatever
+survives has to own it from the start.
+
+**Option A: stay in process, resume after a crash.** No new process. Mark
+`running` in `state.json` all the time, not only on `reload`, and on a start
+after an unclean exit resume those sessions as `app --reload` does. Small,
+maybe a day. Covers the conversation, not the turn in flight, the tools or
+the scrollback. Worth doing whatever else is chosen, since logoff and
+restart end every process anyway.
+
+**Option B: one host process per session.** `horadric host` is a small
+process that creates the console, starts the agent, and serves one named
+pipe, `\.\pipe\horadric-<instance>-<session id>`, with a DACL for the
+current user only. The UI connects to it and sends input and resizes; the
+host sends output and the exit code. The host keeps the last few MB of raw
+output in a ring, and a UI that attaches replays the ring into a fresh
+`Term`, then forces a resize so a full screen program like Claude Code
+redraws. The host does not parse anything, so it has no `alacritty_terminal`
+and almost no reason to change between builds. A host crash takes one
+session; a UI crash takes none. Cost: one more process a session, a few MB
+each, about 150 MB for forty.
+
+**Option C: one broker for all sessions.** The same, but one process holds
+every console, like a tmux server. Fewer processes and one pipe. A bug in
+the broker ends every session at once, which is the thing we are trying to
+get away from, and the broker can never be restarted without ending them
+all, so every change to it is the same problem again one layer down.
+
+**Option D: an existing multiplexer.** tmux in WSL, or similar. Rejected:
+it would put the agents in Linux, not Windows, and it adds a toolkit
+between us and the terminal, which is the settled decision.
+
+**Recommendation: B, with A first.** A is cheap and still needed for logoff
+and restart. B isolates the failure where it happens and keeps the part that
+must never change tiny. Things B has to settle when it is built:
+
+- **Quit.** Tray Quit could leave the hosts running (sessions go on, tiles
+  come back on the next start) or end them as today. Proposed: Quit asks,
+  with "keep running" as the default when any session is mid turn. This is
+  the human's call.
+- **Reload** stops waiting for idle sessions: the new build attaches to the
+  same hosts. The UI and the host speak a versioned protocol, and a new UI
+  must understand every host version still running, since hosts from old
+  builds live on until their session ends. Keep the protocol to five
+  messages (input, resize, output, exit, kill) so that stays easy.
+- **Hooks while no UI runs** go nowhere, since they are HTTP posts to the
+  port. On attach, the phase comes from the transcript tail as it does for
+  the title, and is right again at the next event. Buffering in the host
+  would mean the host listens on the port, which is not worth it.
+- **Orphans.** A host with no UI and an exited agent ends itself. A host
+  whose agent is still running stays, and `horadric` with no app running
+  lists them, so a session never runs where nobody can see it.
+- **Jobs.** The host is started with `CREATE_BREAKAWAY_FROM_JOB` and
+  detached, so it outlives the UI even when the UI itself runs in a job, as
+  it does when started from inside Claude Code. The job that traces windows
+  back to a session moves into the host, which answers "is this process
+  yours" over the pipe.
+- **Dev instances** name their pipes with their own instance, so a dev UI
+  never attaches to an installed session.
+
+Sizing: A is a day. B is about a week: the host and its pipe server, the
+UI side replacing `Pty` in `Console` behind the same four calls, attaching
+on start, the replay, and on screen tests of kill the UI, start it again,
+and find every session where it was.
+
 ### Step 5: inbox, installer, updater
 
 - The inbox is the sessions waiting on you, oldest first, with what each is
@@ -1382,8 +1460,9 @@ suggestions from `~/.ssh/config`.
 ## Not in any step yet, but needed before daily use
 
 - **Sessions die with Horadric.** The consoles live in the Horadric process, so
-  quitting or crashing it ends every agent in a terminal. Surviving that
-  needs the consoles in a separate process, which is a real decision.
+  quitting or crashing it ends every agent in a terminal. The options and a
+  recommendation are under "Sessions that outlive Horadric" in Next,
+  waiting for a decision.
 - **Terminal gaps.** The IME composition window is not placed at the cursor.
   Mouse reporting to programs, the kitty keyboard protocol and cursor blink
   are not implemented. The font family is fixed.
