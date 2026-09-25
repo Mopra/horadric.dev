@@ -277,6 +277,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     window::register_class()?;
     usage::register_class()?;
     dropdown::register_class()?;
+    ask::register_class()?;
     start::register_class()?;
     terminal::register_class()?;
     let notify = create_app_window()?;
@@ -802,21 +803,45 @@ fn tile_menu(hwnd: HWND, id: &str) {
         Some(END) => {
             with_app(|app| app.end(id));
         }
-        Some(RENAME) => rename_session(hwnd, id),
+        Some(RENAME) => rename_session(id),
         _ => {}
     }
 }
 
 /// Asks for a session's new name. An empty one gives the naming back to
 /// Claude's own title.
-fn rename_session(hwnd: HWND, id: &str) {
-    let Some(label) = with_app(|app| app.label_of(id)).flatten() else {
+fn rename_session(id: &str) {
+    let Some((label, key)) = with_app(|app| {
+        let r = app.shared.registry.lock().ok()?;
+        let s = r.get(id)?;
+        Some((s.label().to_string(), project_key(s)))
+    })
+    .flatten() else {
         return;
     };
-    let prompt = "Name it. Leave it empty and Claude names it again.";
-    if let Some(name) = ask::text(hwnd, "Rename session", prompt, &label) {
-        with_app(|app| app.rename(id, &name));
+    let question = ask::Ask {
+        title: "Rename session",
+        prompt: "Leave it empty and Claude names it again.",
+        initial: &label,
+        placeholder: "Claude's own title",
+        verb: "rename",
+        notes: false,
+    };
+    if let Some(a) = ask_beside(Some(&key), &question) {
+        with_app(|app| app.rename(id, &a.text));
     }
+}
+
+/// Asks beside the cluster of project `key`, outside the app's borrow: the
+/// question runs a modal loop that dispatches the app's messages.
+fn ask_beside(key: Option<&str>, question: &ask::Ask) -> Option<ask::Answer> {
+    let (shared, beside) = with_app(|app| {
+        let beside = key
+            .and_then(|k| app.clusters.iter().find(|c| c.key == k))
+            .map(|c| c.hwnd);
+        (Rc::clone(&app.shared), beside)
+    })?;
+    ask::ask(shared, beside, question)
 }
 
 /// How long Claude Code may take to save a switched model or effort as the
@@ -906,7 +931,7 @@ fn project_menu(hwnd: HWND, key: &str) {
         (Some(i), Some(dir)) if (SUGGEST..SUGGEST_END).contains(&i) => {
             return add_host(dir, &suggested[i - SUGGEST]);
         }
-        (Some(OTHER_HOST), Some(dir)) => return ask_host(hwnd, dir),
+        (Some(OTHER_HOST), Some(dir)) => return ask_host(key, dir),
         _ => {}
     }
     let ending = matches!(picked, Some(START_OVER | END_ALL));
@@ -940,10 +965,20 @@ fn project_menu(hwnd: HWND, key: &str) {
 }
 
 /// Asks for a host to add to the project, anything `ssh` takes.
-fn ask_host(hwnd: HWND, dir: &Path) {
-    let prompt = "An alias from ~/.ssh/config, or user@address.";
-    if let Some(host) = ask::text(hwnd, "Add host", prompt, "") {
-        add_host(dir, &host);
+fn ask_host(key: &str, dir: &Path) {
+    let question = ask::Ask {
+        title: "Add host",
+        prompt: "Anything ssh takes: an alias from ~/.ssh/config, or user@address.",
+        initial: "",
+        placeholder: "user@address",
+        verb: "add it",
+        notes: false,
+    };
+    if let Some(a) = ask_beside(Some(key), &question) {
+        let host = a.text.trim();
+        if !host.is_empty() {
+            add_host(dir, host);
+        }
     }
 }
 
@@ -2218,12 +2253,6 @@ impl App {
             stage.refont();
         }
         self.save();
-    }
-
-    /// What a session's tile calls it now.
-    fn label_of(&self, id: &str) -> Option<String> {
-        let r = self.shared.registry.lock().ok()?;
-        r.get(id).map(|s| s.label().to_string())
     }
 
     /// Names a session from its tile's menu. Its tile, pane and the stage's

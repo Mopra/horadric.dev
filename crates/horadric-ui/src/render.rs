@@ -46,9 +46,11 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteTextFormat, IDWriteTextLayout, IDWriteTextLayout1, DWRITE_FACTORY_TYPE_SHARED,
     DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, DWRITE_FONT_STRETCH_NORMAL,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_HIT_TEST_METRICS, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_RANGE,
-    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_TRIMMING_GRANULARITY_NONE,
+    DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows_numerics::{Matrix3x2, Vector2};
@@ -57,8 +59,8 @@ use crate::anim::Look;
 use crate::board::RowState;
 use crate::files::{Row, Tree};
 use crate::layout::{
-    self, Button, ClusterLayout, DropdownLayout, FilesLayout, Hit, Metrics, Rect, SettingRow,
-    StartHit, StartLayout, TasksLayout, UsageHit, UsageLayout, KNOB_R,
+    self, AskLayout, Button, ClusterLayout, DropdownLayout, FilesLayout, Hit, Metrics, Rect,
+    SettingRow, StartHit, StartLayout, TasksLayout, UsageHit, UsageLayout, KNOB_R,
 };
 use crate::motion::{self, BREATH, ORBIT};
 use crate::theme::{self, Color};
@@ -303,6 +305,32 @@ pub struct DropdownScene<'a> {
     pub pressed: Option<usize>,
 }
 
+/// Everything one frame of the input the app asks with needs.
+pub struct AskScene<'a> {
+    pub layout: &'a AskLayout,
+    pub title: &'a str,
+    /// What it asks, wrapped to the layout's width by [`wrapped`].
+    pub prompt: &'a IDWriteTextLayout,
+    pub notes_label: &'a str,
+    pub hint: &'a str,
+    pub fields: Vec<FieldLook<'a>>,
+}
+
+/// One field of the input. Everything in it is in DIPs from the top left
+/// of the field's text, before scrolling.
+pub struct FieldLook<'a> {
+    pub rect: Rect,
+    pub text: &'a IDWriteTextLayout,
+    /// Shown in place of the text while there is none.
+    pub placeholder: Option<&'a str>,
+    pub multiline: bool,
+    pub scroll: (f32, f32),
+    pub selection: Vec<Rect>,
+    /// While the field has the keyboard and the caret is lit.
+    pub caret: Option<Rect>,
+    pub focused: bool,
+}
+
 impl UsageScene<'_> {
     fn button(&self, which: UsageHit) -> Button {
         layout::button(which, self.hot, self.pressed)
@@ -484,6 +512,15 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).dropdown(gpu, m, scene);
+            self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// Draws the input. `Err` means the target must be recreated.
+    pub fn draw_ask(&self, gpu: &Gpu, m: &Metrics, scene: &AskScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.painter(&self.rt).ask(gpu, m, scene);
             self.rt.EndDraw(None, None)
         }
     }
@@ -714,6 +751,59 @@ impl Painter<'_> {
             let text = Rect::new(r.x + pad + 14.0, r.y, r.w - 2.0 * pad - 14.0, r.h);
             self.text(&gpu.small, ink, label, text);
         }
+    }
+
+    /// The input: its title and what it asks on the plate, each field a
+    /// well sunk into it, and under them which keys do what.
+    unsafe fn ask(&self, gpu: &Gpu, m: &Metrics, scene: &AskScene) {
+        let l = scene.layout;
+        self.plate(m, l.size);
+        self.text(&gpu.title, theme::TEXT, scene.title, l.title);
+        self.draw_layout(scene.prompt, theme::TEXT_DIM, l.prompt);
+        if let Some(r) = l.notes_label {
+            self.text_spaced(gpu, &gpu.chip, theme::LEGEND, scene.notes_label, 1.2, r);
+        }
+        for f in &scene.fields {
+            self.input(gpu, f);
+        }
+        self.text(&gpu.small, theme::LEGEND, scene.hint, l.hint);
+    }
+
+    unsafe fn input(&self, gpu: &Gpu, f: &FieldLook) {
+        let radius = 8.0;
+        self.sunk(gpu, &f.rect, radius, theme::WELL);
+        if f.focused {
+            self.stroke_rounded(
+                &f.rect.inset(0.5),
+                radius,
+                theme::WORKING.with_alpha(0.55),
+                1.0,
+            );
+        }
+        let inner = layout::ask_inner(&f.rect);
+        self.rt.PushAxisAlignedClip(
+            &rect(&Rect::new(inner.x - 2.0, inner.y, inner.w + 4.0, inner.h)),
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+        );
+        let (ox, oy) = (inner.x - f.scroll.0, inner.y - f.scroll.1);
+        let shade = if f.focused { 0.4 } else { 0.18 };
+        for r in &f.selection {
+            let r = Rect::new(ox + r.x, oy + r.y, r.w.max(3.0), r.h);
+            self.fill_rounded(&r, 2.0, theme::WORKING.with_alpha(shade));
+        }
+        match f.placeholder {
+            Some(p) => {
+                let h = if f.multiline { FIELD_LINE_H } else { inner.h };
+                let at = Rect::new(inner.x, inner.y, inner.w, h);
+                self.text(&gpu.body, theme::TEXT_DIM.with_alpha(0.55), p, at);
+            }
+            None => self.draw_layout(f.text, theme::TEXT, Rect::new(ox, oy, inner.w, inner.h)),
+        }
+        if let Some(c) = f.caret {
+            let r = Rect::new((ox + c.x).round() - 0.5, oy + c.y, 1.5, c.h);
+            self.fill_rounded(&r, 0.0, theme::TEXT);
+        }
+        self.rt.PopAxisAlignedClip();
     }
 
     /// The start window: a cluster with no project yet. Its tile is drawn
@@ -1992,6 +2082,101 @@ fn lamp_rect(r: &Rect) -> Rect {
 /// middle stays where the sharp edge was.
 fn blur_steps(blur: f32) -> impl Iterator<Item = f32> {
     (0..BLUR_STEPS).map(move |i| blur * ((i as f32 + 0.5) / BLUR_STEPS as f32 - 0.5))
+}
+
+/// One line of body text, what a field's placeholder takes up.
+const FIELD_LINE_H: f32 = 19.0;
+
+/// A field's text laid out for drawing and for the caret. One line runs on
+/// past the field and scrolls; notes wrap at its width and scroll down.
+pub fn field_layout(
+    gpu: &Gpu,
+    s: &str,
+    inner: &Rect,
+    multiline: bool,
+) -> Result<IDWriteTextLayout> {
+    let wide: Vec<u16> = s.encode_utf16().collect();
+    unsafe {
+        let (w, h) = if multiline {
+            (inner.w, 10_000.0)
+        } else {
+            (100_000.0, inner.h)
+        };
+        let l = gpu.dw.CreateTextLayout(&wide, &gpu.body, w, h)?;
+        let none = DWRITE_TRIMMING {
+            granularity: DWRITE_TRIMMING_GRANULARITY_NONE,
+            delimiter: 0,
+            delimiterCount: 0,
+        };
+        l.SetTrimming(&none, None)?;
+        if multiline {
+            l.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
+            l.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
+        }
+        Ok(l)
+    }
+}
+
+/// Text that wraps at `width`, from the top.
+pub fn wrapped(
+    gpu: &Gpu,
+    fmt: &IDWriteTextFormat,
+    s: &str,
+    width: f32,
+) -> Result<IDWriteTextLayout> {
+    let wide: Vec<u16> = s.encode_utf16().collect();
+    unsafe {
+        let l = gpu.dw.CreateTextLayout(&wide, fmt, width, 10_000.0)?;
+        l.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
+        l.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
+        Ok(l)
+    }
+}
+
+/// How wide and tall laid out text is.
+pub fn text_size(l: &IDWriteTextLayout) -> (f32, f32) {
+    let mut m = Default::default();
+    match unsafe { l.GetMetrics(&mut m) } {
+        Ok(()) => (m.widthIncludingTrailingWhitespace, m.height),
+        Err(_) => (0.0, 0.0),
+    }
+}
+
+/// The caret before UTF-16 offset `at`, as a rect one line tall.
+pub fn caret_at(l: &IDWriteTextLayout, at: u32) -> Rect {
+    let (mut x, mut y) = (0.0, 0.0);
+    let mut hit = DWRITE_HIT_TEST_METRICS::default();
+    let _ = unsafe { l.HitTestTextPosition(at, false, &mut x, &mut y, &mut hit) };
+    Rect::new(x, hit.top, 1.0, hit.height.max(FIELD_LINE_H - 2.0))
+}
+
+/// The UTF-16 offset nearest a point.
+pub fn offset_at(l: &IDWriteTextLayout, x: f32, y: f32) -> u32 {
+    let (mut trailing, mut inside) = (BOOL(0), BOOL(0));
+    let mut hit = DWRITE_HIT_TEST_METRICS::default();
+    let _ = unsafe { l.HitTestPoint(x, y, &mut trailing, &mut inside, &mut hit) };
+    hit.textPosition + if trailing.as_bool() { hit.length } else { 0 }
+}
+
+/// The boxes a run of text covers, one a line.
+pub fn range_rects(l: &IDWriteTextLayout, at: u32, len: u32) -> Vec<Rect> {
+    if len == 0 {
+        return Vec::new();
+    }
+    unsafe {
+        let mut n = 0u32;
+        let _ = l.HitTestTextRange(at, len, 0.0, 0.0, None, &mut n);
+        let mut hits = vec![DWRITE_HIT_TEST_METRICS::default(); n as usize];
+        if l.HitTestTextRange(at, len, 0.0, 0.0, Some(&mut hits), &mut n)
+            .is_err()
+        {
+            return Vec::new();
+        }
+        hits.iter()
+            .take(n as usize)
+            .map(|h| Rect::new(h.left, h.top, h.width, h.height))
+            .collect()
+    }
 }
 
 fn whole(s: &str) -> DWRITE_TEXT_RANGE {

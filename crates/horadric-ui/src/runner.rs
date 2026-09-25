@@ -321,12 +321,13 @@ impl App {
         self.run_tasks();
     }
 
-    fn add_task(&mut self, key: &str, title: &str) {
+    fn add_task(&mut self, key: &str, title: &str, notes: &str) {
         let title = tasks::one_line(title);
         let Some(dir) = self.project_dir(key).filter(|_| !title.is_empty()) else {
             return;
         };
-        if let Err(e) = file::update(&dir, |text| Some(tasks::append(text, &title))) {
+        let add = |text: &str| Some(tasks::append_with_notes(text, &title, notes));
+        if let Err(e) = file::update(&dir, add) {
             eprintln!("horadric: cannot write {}: {e}", file::file(&dir).display());
         }
         self.refresh_boards(true);
@@ -553,9 +554,16 @@ pub(super) fn show_menu(hwnd: HWND, menu: Menu) {
         Menu::Item(key, line, title) => item_menu(hwnd, &key, line, &title),
         Menu::Mode(key) => mode_menu(hwnd, &key),
         Menu::Add(key) => {
-            let prompt = "What should be done? Notes go on indented lines under it in the file.";
-            if let Some(title) = ask::text(hwnd, "New task", prompt, "") {
-                with_app(|app| app.add_task(&key, &title));
+            let question = ask::Ask {
+                title: "New task",
+                prompt: "What should be done? The notes go to the agent with it.",
+                initial: "",
+                placeholder: "A title for the list",
+                verb: "add it",
+                notes: true,
+            };
+            if let Some(a) = super::ask_beside(Some(&key), &question) {
+                with_app(|app| app.add_task(&key, &a.text, &a.notes));
             }
         }
     }
