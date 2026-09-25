@@ -126,7 +126,12 @@ arrow keys, a prompt and its answer, resize, collapse and expand, `/exit`.
   Keys without characters come from `WM_KEYDOWN` in xterm encoding.
   Shift+Enter sends Meta+Enter, Claude Code's newline. Ctrl+C copies when there is
   a selection. Ctrl+V pastes text with bracketed paste and escape characters
-  stripped. Alt+F4 still closes.
+  stripped. Alt+F4 still closes. An input method composes at the cursor
+  in the terminal's font, placed through IMM32 on each paint the cursor
+  moved, with its candidate list kept off the cursor's cell. A hidden
+  cursor counts, since agents hide it and park it where the user types.
+  Checked on screen by reading the placement back against a screenshot;
+  no IME is installed here, so a real composition is not seen yet.
 - **Images.** Passing Ctrl+V on for Claude Code to read the clipboard did
   not work, so Horadric does it: a clipboard image is saved as a PNG in
   `%TEMP%\Horadric` and its path is pasted, which Claude Code turns into an
@@ -1716,8 +1721,7 @@ if people download Horadric by hand, the same point as NSIS above.
   quitting or crashing it ends every agent in a terminal. The options and a
   decision (A, then B) are under "Sessions that outlive Horadric" in
   Next.
-- **Terminal gaps.** The IME composition window is not placed at the cursor.
-  The kitty keyboard protocol is not implemented.
+- **Terminal gaps.** The kitty keyboard protocol is not implemented.
 - **Expanding from a synthetic click can open behind other windows.** Windows
   only lets a process take the foreground after real input. A real click on
   a tile is real input, so this only bites scripted tests.

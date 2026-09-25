@@ -70,6 +70,20 @@ pub fn grid_origin(header: bool) -> (f32, f32) {
     (BEZEL + PAD, screen_top(header) + PAD)
 }
 
+/// The pixel rectangle of the cell at `row` and `col`, from the pane's top
+/// left, at `scale` pixels per DIP.
+pub fn cell_rect(header: bool, cell: &CellSize, row: usize, col: usize, scale: f32) -> [i32; 4] {
+    let (ox, oy) = grid_origin(header);
+    let x = ox + col as f32 * cell.w;
+    let y = oy + row as f32 * cell.h;
+    [
+        (x * scale).round() as i32,
+        (y * scale).round() as i32,
+        ((x + cell.w) * scale).round() as i32,
+        ((y + cell.h) * scale).round() as i32,
+    ]
+}
+
 /// How much of a pane `width` by `height` DIPs the grid can have.
 pub fn grid_room(width: f32, height: f32, header: bool) -> (f32, f32) {
     let (x, y) = grid_origin(header);
@@ -264,6 +278,10 @@ impl Font {
             size: Cell::new(size),
             cache: RefCell::new(HashMap::new()),
         })
+    }
+
+    pub fn family(&self) -> PCWSTR {
+        self.family
     }
 
     pub fn size(&self) -> f32 {
@@ -1015,5 +1033,23 @@ mod tests {
         // The header takes the top bezel's place, not room on top of it.
         let (_, with_header) = grid_room(400.0, 300.0, true);
         assert_eq!(h - with_header, HEADER_H - BEZEL);
+    }
+
+    #[test]
+    fn a_cell_rect_is_in_pixels_from_the_grid_origin() {
+        let cell = CellSize {
+            w: 8.0,
+            h: 16.0,
+            baseline: 12.0,
+            underline: 14.0,
+            strike: 8.0,
+            stroke: 1.0,
+        };
+        let (ox, oy) = grid_origin(true);
+        let r = cell_rect(true, &cell, 2, 3, 1.5);
+        assert_eq!(r[0], ((ox + 24.0) * 1.5).round() as i32);
+        assert_eq!(r[1], ((oy + 32.0) * 1.5).round() as i32);
+        assert_eq!(r[2] - r[0], 12);
+        assert_eq!(r[3] - r[1], 24);
     }
 }

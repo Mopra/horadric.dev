@@ -268,6 +268,16 @@ pub fn build<T: EventListener>(
     frame
 }
 
+/// The screen row and column of the terminal's cursor, if the view shows
+/// it. A hidden cursor still counts: agents hide it and park it where the
+/// user types, which is where an input method's window belongs.
+pub fn cursor_cell<T: EventListener>(term: &Term<T>) -> Option<(usize, usize)> {
+    let content = term.renderable_content();
+    let row = content.cursor.point.line.0 + content.display_offset as i32;
+    (row >= 0 && (row as usize) < term.screen_lines())
+        .then_some((row as usize, content.cursor.point.column.0))
+}
+
 fn close(run: &mut Option<Run>, spaces: &mut usize, frame: &mut Frame) {
     if let Some(r) = run.take() {
         frame.runs.push(r);
@@ -292,6 +302,17 @@ mod tests {
 
     fn glyphs(s: &str) -> Vec<u16> {
         s.chars().map(|c| c as u16).collect()
+    }
+
+    #[test]
+    fn cursor_cell_follows_the_cursor_even_when_hidden() {
+        use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode};
+        let mut term = mock_term("ab\r\ncde");
+        assert_eq!(cursor_cell(&term), Some((0, 0)));
+        term.goto(1, 2);
+        assert_eq!(cursor_cell(&term), Some((1, 2)));
+        term.unset_private_mode(NamedPrivateMode::ShowCursor.into());
+        assert_eq!(cursor_cell(&term), Some((1, 2)));
     }
 
     #[test]
