@@ -57,7 +57,7 @@ use horadric_core::{
 use horadric_hooks::listener::{self, Command, Reload, Tagged};
 use horadric_hooks::transcript::{self, Past};
 use horadric_hooks::{install, TASKS_ENV};
-use windows::core::{w, BOOL, HSTRING, PCWSTR};
+use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, HDC, HMONITOR,
@@ -71,11 +71,11 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VK_SPACE,
 };
-use windows::Win32::UI::Shell::{ShellExecuteW, NIN_BALLOONUSERCLICK};
+use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostMessageW,
     PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer, SystemParametersInfoW,
-    TranslateMessage, MONITORINFOF_PRIMARY, MSG, SPI_GETWORKAREA, SPI_SETWORKAREA, SW_SHOWNORMAL,
+    TranslateMessage, MONITORINFOF_PRIMARY, MSG, SPI_GETWORKAREA, SPI_SETWORKAREA,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY, WM_LBUTTONUP,
     WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW,
     WS_EX_TOOLWINDOW, WS_POPUP,
@@ -136,6 +136,8 @@ const WM_HORADRIC_TASK_MENU: u32 = WM_APP + 14;
 const WM_HORADRIC_COUNTED: u32 = WM_APP + 15;
 /// An update check came back, into the app's `looked`.
 const WM_HORADRIC_UPDATE: u32 = WM_APP + 16;
+/// An update's download came back, into the app's `downloaded`.
+const WM_HORADRIC_DOWNLOADED: u32 = WM_APP + 17;
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
 /// Runs a console program without giving it a console window.
@@ -458,6 +460,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             last_check: None,
             checking: false,
             looked: Arc::new(Mutex::new(None)),
+            downloading: false,
+            downloaded: Arc::new(Mutex::new(None)),
         };
         app.reconcile(false);
         app.attach_hosts();
@@ -665,6 +669,7 @@ unsafe extern "system" fn app_proc(
             | WM_HORADRIC_WINDOW_GONE
             | WM_HORADRIC_COUNTED
             | WM_HORADRIC_UPDATE
+            | WM_HORADRIC_DOWNLOADED
             | WM_HOTKEY
             | WM_TIMER
     );
@@ -773,9 +778,7 @@ fn tray_menu(hwnd: HWND) {
             with_app(|app| app.check_update(true));
         }
         Some(Choice::Update) => {
-            if let Some(version) = update {
-                open_release(&version);
-            }
+            with_app(|app| app.install_update());
         }
         Some(Choice::EndAll) => {
             if confirm_end(hwnd, None) {
@@ -798,19 +801,15 @@ fn tray_menu(hwnd: HWND) {
     }
 }
 
-/// Shows the release's page, until the updater installs it itself.
-fn open_release(version: &str) {
-    let url = format!("https://github.com/Mopra/horadric.dev/releases/tag/v{version}");
-    unsafe {
-        ShellExecuteW(
-            None,
-            w!("open"),
-            &HSTRING::from(url),
-            None,
-            None,
-            SW_SHOWNORMAL,
-        );
-    }
+/// Where to look for a release, or None for a dev instance that was not
+/// pointed anywhere.
+fn update_url() -> Option<String> {
+    let env = std::env::var("HORADRIC_UPDATE_URL").ok();
+    release::manifest_url(
+        horadric_hooks::dev(),
+        cfg!(debug_assertions),
+        env.as_deref(),
+    )
 }
 
 /// The projects to try showing on the stage, best first: the one it last
@@ -1361,6 +1360,11 @@ struct App {
     /// An update check back from its thread, and whether the tray asked
     /// for it.
     looked: Arc<Mutex<Option<(bool, Looked)>>>,
+    /// An update is downloading on its thread.
+    downloading: bool,
+    /// A download back from its thread: the `horadric.exe` it put in
+    /// place, verified, or why it failed.
+    downloaded: Arc<Mutex<Option<Result<PathBuf, String>>>>,
 }
 
 /// What an update check found: a newer release, none, or why it failed.
@@ -1389,6 +1393,7 @@ impl App {
             }
             WM_HORADRIC_COUNTED => self.take_counts(),
             WM_HORADRIC_UPDATE => self.take_update(),
+            WM_HORADRIC_DOWNLOADED => self.take_download(),
             WM_HORADRIC_INPUT => self.apply_input(),
             WM_HORADRIC_OUTPUT => self.output(wparam),
             WM_HORADRIC_WINDOW_SHOWN => self.window_shown(wparam as isize),
@@ -1407,11 +1412,7 @@ impl App {
                                 eprintln!("horadric: cannot start session: {e}");
                             }
                         }
-                        Command::Reload(r) => {
-                            self.reload = Some(r);
-                            self.reconcile(false);
-                            self.reload_when_ready();
-                        }
+                        Command::Reload(r) => self.begin_reload(r),
                         Command::Tasks(_) => {
                             self.refresh_boards(true);
                             self.run_tasks();
@@ -1481,6 +1482,12 @@ impl App {
                 c.exit_code().is_none() && r.get(id).is_some_and(|s| s.phase.mid_turn())
             })
             .count()
+    }
+
+    fn begin_reload(&mut self, reload: Reload) {
+        self.reload = Some(reload);
+        self.reconcile(false);
+        self.reload_when_ready();
     }
 
     /// Hands over to the new build: saves, starts the new build's `swap`,
@@ -1796,8 +1803,7 @@ impl App {
     /// which is the only time the outcome is said out loud.
     fn check_update(&mut self, asked: bool) {
         self.last_check = Some(Instant::now());
-        let env = std::env::var("HORADRIC_UPDATE_URL").ok();
-        let Some(url) = release::manifest_url(horadric_hooks::dev(), env.as_deref()) else {
+        let Some(url) = update_url() else {
             if asked {
                 self.tray.notify(
                     "No updates to check",
@@ -1853,6 +1859,66 @@ impl App {
                 if asked {
                     self.tray.notify("Update check failed", &e);
                 }
+            }
+        }
+    }
+
+    /// Downloads the release the tray offered on a thread. Its hashes are
+    /// checked there against the manifest whose signature the check
+    /// verified, and only then does [`Self::take_download`] reload into it.
+    fn install_update(&mut self) {
+        let (Some(manifest), Some(url)) = (self.update.clone(), update_url()) else {
+            return;
+        };
+        if self.downloading {
+            return;
+        }
+        self.downloading = true;
+        self.tray.notify(
+            &format!("Updating to Horadric {}", manifest.version),
+            "Downloading. The sessions carry on through the update.",
+        );
+        let downloaded = Arc::clone(&self.downloaded);
+        let notify = self.notify.0 as isize;
+        std::thread::spawn(move || {
+            let got = update::download(&url, &manifest);
+            if let Ok(mut d) = downloaded.lock() {
+                *d = Some(got);
+            }
+            post(notify, WM_HORADRIC_DOWNLOADED, 0);
+        });
+    }
+
+    /// Hands over to a verified download the way `horadric reload` would.
+    /// A dev instance stops short: its `swap` restarts from the folder it
+    /// was started from, so it would run the download in place and never
+    /// install anything.
+    fn take_download(&mut self) {
+        let Some(got) = self.downloaded.lock().ok().and_then(|mut d| d.take()) else {
+            return;
+        };
+        self.downloading = false;
+        match got {
+            Ok(exe) if horadric_hooks::dev() => {
+                eprintln!("horadric: update downloaded to {}", exe.display());
+                self.tray.notify(
+                    "Update downloaded",
+                    "A dev instance does not install it. It is verified, in the updates folder.",
+                );
+            }
+            Ok(exe) => {
+                eprintln!(
+                    "horadric: update downloaded, reloading into {}",
+                    exe.display()
+                );
+                self.begin_reload(Reload {
+                    exe: exe.to_string_lossy().into_owned(),
+                    now: true,
+                });
+            }
+            Err(e) => {
+                eprintln!("horadric: update failed: {e}");
+                self.tray.notify("Update failed", &e);
             }
         }
     }

@@ -1,5 +1,5 @@
-//! The updater: the check for a newer release, and the crypto behind it
-//! through Windows CNG: SHA-256, and ECDSA P-256 to sign a release manifest
+//! The updater: the check for a newer release, its download, and the
+//! crypto behind both through Windows CNG: SHA-256, and ECDSA P-256 to sign a release manifest
 //! and check it. No crate for it, since `bcrypt.dll` already does both (see
 //! "The updater" in docs/PLAN.md).
 //!
@@ -7,7 +7,10 @@
 //! as `x` and `y`. CNG wants them behind a `BCRYPT_ECCKEY_BLOB` header,
 //! which is added here and never stored.
 
-use horadric_core::release::{self, Manifest, Signed, PUBLIC_KEY_LEN, SIGNATURE_LEN};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use horadric_core::release::{self, hex, Manifest, Signed, PUBLIC_KEY_LEN, SIGNATURE_LEN};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::NTSTATUS;
 use windows::Win32::Security::Cryptography::{
@@ -214,6 +217,61 @@ pub fn look(url: &str, current: &str) -> Result<Option<Manifest>, String> {
     Ok(release::is_update(&manifest.version, current).then_some(manifest))
 }
 
+/// A release binary is a few megabytes. This leaves room to grow and
+/// still stops a server that never ends its answer.
+const BINARY_LIMIT: usize = 256 * 1024 * 1024;
+
+/// Downloads the verified `manifest`'s binaries into
+/// `%LOCALAPPDATA%\Horadric\updates\<version>` and gives the `horadric.exe`
+/// there, for `reload`. Blocks, so it runs on a thread.
+pub fn download(manifest_url: &str, manifest: &Manifest) -> Result<PathBuf, String> {
+    let dir = crate::store::local_dir()
+        .ok_or("cannot find %LOCALAPPDATA%")?
+        .join("updates");
+    fetch_into(&dir, manifest_url, manifest, |url| {
+        crate::net::get(url, BINARY_LIMIT)
+    })
+}
+
+/// [`download`] with the fetching handed in. Both binaries are fetched
+/// and checked against their hashes in memory, and only when both match
+/// is anything written, so nothing under `updates` was ever not what the
+/// signed manifest names.
+fn fetch_into(
+    updates: &Path,
+    manifest_url: &str,
+    manifest: &Manifest,
+    get: impl Fn(&str) -> Result<Vec<u8>, String>,
+) -> Result<PathBuf, String> {
+    // The version names a folder, so it must be one parse accepts.
+    release::parse_version(&manifest.version)
+        .ok_or_else(|| format!("version `{}` is not x.y.z", manifest.version))?;
+    let mut bodies = Vec::new();
+    for (name, want) in release::binary_hashes(manifest)? {
+        let url = release::download_url(manifest_url, &manifest.version, name)
+            .ok_or_else(|| format!("no URL for {name} beside {manifest_url}"))?;
+        let body = get(&url)?;
+        let got = hex(&sha256(&body)?);
+        if got != want {
+            return Err(format!(
+                "{name} does not match the signed release ({got}, not {want})"
+            ));
+        }
+        bodies.push((name, body));
+    }
+    let dir = updates.join(&manifest.version);
+    // A download broken off earlier may have left a part behind.
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(|e| format!("cannot clear {}: {e}", dir.display()))?;
+    }
+    fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    for (name, body) in &bodies {
+        let path = dir.join(name);
+        fs::write(&path, body).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    Ok(dir.join(release::BINARIES[0]))
+}
+
 /// Signs a manifest and gives `latest.json`.
 pub fn sign_manifest(key: &PrivateKey, manifest: &Manifest) -> Result<String, String> {
     let signature = sign(key, &manifest.signed_bytes())?;
@@ -340,6 +398,91 @@ mod tests {
         let signature = sign(&key, data).unwrap();
         assert!(!verify(&[0u8; PUBLIC_KEY_LEN], data, &signature));
         assert!(!verify(&key.public()[..32], data, &signature));
+    }
+
+    /// A folder of its own under the temp folder, gone when dropped.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("horadric-update-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const URL: &str = "http://127.0.0.1:8123/latest.json";
+
+    fn serve(url: &str) -> Result<Vec<u8>, String> {
+        match url {
+            "http://127.0.0.1:8123/horadric.exe" => Ok(b"one".to_vec()),
+            "http://127.0.0.1:8123/horadricw.exe" => Ok(b"two".to_vec()),
+            other => Err(format!("404 {other}")),
+        }
+    }
+
+    #[test]
+    fn a_matching_download_lands_in_its_version_folder() {
+        let scratch = Scratch::new("good");
+        let exe = fetch_into(&scratch.0, URL, &manifest(), serve).unwrap();
+        assert_eq!(exe, scratch.0.join("0.2.0").join("horadric.exe"));
+        assert_eq!(fs::read(&exe).unwrap(), b"one");
+        assert_eq!(
+            fs::read(scratch.0.join("0.2.0").join("horadricw.exe")).unwrap(),
+            b"two"
+        );
+    }
+
+    #[test]
+    fn a_wrong_binary_writes_nothing() {
+        let scratch = Scratch::new("bad");
+        let evil = |url: &str| {
+            if url.ends_with("/horadricw.exe") {
+                Ok(b"evil".to_vec())
+            } else {
+                serve(url)
+            }
+        };
+        let e = fetch_into(&scratch.0, URL, &manifest(), evil).unwrap_err();
+        assert!(e.contains("horadricw.exe does not match"), "{e}");
+        assert!(!scratch.0.join("0.2.0").exists());
+    }
+
+    #[test]
+    fn a_failed_fetch_writes_nothing() {
+        let scratch = Scratch::new("gone");
+        let other = "http://127.0.0.1:8123/x/latest.json";
+        let e = fetch_into(&scratch.0, other, &manifest(), serve).unwrap_err();
+        assert!(e.starts_with("404"), "{e}");
+        assert!(!scratch.0.exists());
+    }
+
+    #[test]
+    fn an_old_part_is_replaced() {
+        let scratch = Scratch::new("part");
+        let dir = scratch.0.join("0.2.0");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("horadric.exe"), b"half").unwrap();
+        fs::write(dir.join("stray.exe"), b"x").unwrap();
+        fetch_into(&scratch.0, URL, &manifest(), serve).unwrap();
+        assert_eq!(fs::read(dir.join("horadric.exe")).unwrap(), b"one");
+        assert!(!dir.join("stray.exe").exists());
+    }
+
+    #[test]
+    fn a_version_that_is_a_path_is_refused() {
+        let scratch = Scratch::new("path");
+        let mut m = manifest();
+        m.version = "..".into();
+        assert!(fetch_into(&scratch.0, URL, &m, serve).is_err());
+        assert!(!scratch.0.exists());
     }
 
     #[test]

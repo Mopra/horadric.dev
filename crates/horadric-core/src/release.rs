@@ -204,14 +204,49 @@ pub const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The manifest to check, given `HORADRIC_UPDATE_URL`. A dev instance
 /// never looks at the real releases, only at that variable when set, so
-/// testing one never offers a published build.
-pub fn manifest_url(dev: bool, env: Option<&str>) -> Option<String> {
+/// testing one never offers a published build. A debug build that is not
+/// a dev instance honours it too, which is how an install into a fake
+/// install folder gets tested; a release build never does.
+pub fn manifest_url(dev: bool, debug: bool, env: Option<&str>) -> Option<String> {
     let env = env.map(str::trim).filter(|u| !u.is_empty());
-    if dev {
-        env.map(str::to_string)
-    } else {
-        Some(LATEST_URL.to_string())
+    match env {
+        Some(url) if dev || debug => Some(url.to_string()),
+        _ if dev => None,
+        _ => Some(LATEST_URL.to_string()),
     }
+}
+
+/// The binaries a release must carry, in the order they are fetched.
+/// Nothing else a manifest lists is ever downloaded.
+pub const BINARIES: [&str; 2] = ["horadric.exe", "horadricw.exe"];
+
+/// Where to fetch `name` of release `version`, given the manifest's URL.
+/// The real releases are fetched by their tag, not through `latest`, so a
+/// release published during the download can not mix two versions. Any
+/// other manifest has its binaries beside it.
+pub fn download_url(manifest_url: &str, version: &str, name: &str) -> Option<String> {
+    if manifest_url == LATEST_URL {
+        return Some(format!(
+            "https://github.com/Mopra/horadric.dev/releases/download/v{version}/{name}"
+        ));
+    }
+    let without_query = &manifest_url[..manifest_url.find('?').unwrap_or(manifest_url.len())];
+    let url = split_url(without_query)?;
+    let dir = &url.path[..=url.path.rfind('/')?];
+    let scheme = if url.secure { "https" } else { "http" };
+    Some(format!("{scheme}://{}:{}{dir}{name}", url.host, url.port))
+}
+
+/// The hash the manifest gives each of [`BINARIES`], or which one it
+/// lacks.
+pub fn binary_hashes(manifest: &Manifest) -> Result<[(&'static str, &str); 2], String> {
+    let hash = |name: &'static str| {
+        manifest
+            .file(name)
+            .map(|f| (name, f.sha256.as_str()))
+            .ok_or_else(|| format!("release {} has no {name}", manifest.version))
+    };
+    Ok([hash(BINARIES[0])?, hash(BINARIES[1])?])
 }
 
 /// The key a release must be signed with, given `HORADRIC_UPDATE_KEY`. A
@@ -472,16 +507,84 @@ mod tests {
 
     #[test]
     fn a_dev_instance_checks_only_what_it_is_told() {
-        assert_eq!(manifest_url(true, None), None);
-        assert_eq!(manifest_url(true, Some("  ")), None);
+        let local = "http://localhost:8000/latest.json";
+        for debug in [false, true] {
+            assert_eq!(manifest_url(true, debug, None), None);
+            assert_eq!(manifest_url(true, debug, Some("  ")), None);
+            assert_eq!(
+                manifest_url(true, debug, Some(local)).as_deref(),
+                Some(local)
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_debug_build_is_pointed_elsewhere() {
+        let evil = "http://evil.example/latest.json";
         assert_eq!(
-            manifest_url(true, Some("http://localhost:8000/latest.json")).as_deref(),
-            Some("http://localhost:8000/latest.json")
-        );
-        assert_eq!(manifest_url(false, None).as_deref(), Some(LATEST_URL));
-        assert_eq!(
-            manifest_url(false, Some("http://evil.example/latest.json")).as_deref(),
+            manifest_url(false, false, None).as_deref(),
             Some(LATEST_URL)
+        );
+        assert_eq!(
+            manifest_url(false, false, Some(evil)).as_deref(),
+            Some(LATEST_URL)
+        );
+        assert_eq!(manifest_url(false, true, Some(evil)).as_deref(), Some(evil));
+        assert_eq!(manifest_url(false, true, None).as_deref(), Some(LATEST_URL));
+    }
+
+    #[test]
+    fn real_binaries_come_by_their_tag() {
+        assert_eq!(
+            download_url(LATEST_URL, "0.2.0", "horadric.exe").as_deref(),
+            Some("https://github.com/Mopra/horadric.dev/releases/download/v0.2.0/horadric.exe")
+        );
+    }
+
+    #[test]
+    fn other_binaries_sit_beside_their_manifest() {
+        assert_eq!(
+            download_url(
+                "http://127.0.0.1:8123/r/latest.json?x=1",
+                "0.2.0",
+                "horadricw.exe"
+            )
+            .as_deref(),
+            Some("http://127.0.0.1:8123/r/horadricw.exe")
+        );
+        assert_eq!(
+            download_url("https://example.com/latest.json", "0.2.0", "horadric.exe").as_deref(),
+            Some("https://example.com:443/horadric.exe")
+        );
+        assert_eq!(
+            download_url("ftp://x/latest.json", "0.2.0", "horadric.exe"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_release_must_carry_both_binaries() {
+        let file = |name: &str| File {
+            name: name.into(),
+            sha256: name.len().to_string(),
+        };
+        let mut m = Manifest {
+            version: "0.2.0".into(),
+            notes: String::new(),
+            files: vec![
+                file("notes.txt"),
+                file("horadricw.exe"),
+                file("horadric.exe"),
+            ],
+        };
+        assert_eq!(
+            binary_hashes(&m),
+            Ok([("horadric.exe", "12"), ("horadricw.exe", "13")])
+        );
+        m.files.retain(|f| f.name != "horadricw.exe");
+        assert_eq!(
+            binary_hashes(&m),
+            Err("release 0.2.0 has no horadricw.exe".to_string())
         );
     }
 

@@ -1578,9 +1578,9 @@ rebuilt from the parsed fields, so the file's layout and key order do not
 matter. The check is built: `horadric_ui::update::look` over WinHTTP
 (`net.rs`), on the first tick after start, every 24 hours, and from "Check
 for updates" in the tray. A verified newer version adds "Update to
-<version>", which opens the release page until the install is built. A
-check that finds this build up to date takes the item away again; a failed
-one leaves it. The install is not built yet.
+<version>". A check that finds this build up to date takes the item away
+again; a failed one leaves it. The install is built too:
+`horadric_ui::update::download`, then the app's own `Reload`, as below.
 
 Today a new build reaches this machine through
 `reload`, from a checkout. The updater is for a machine with no checkout:
@@ -1663,6 +1663,15 @@ matches. From there it is `reload`: rollback included, sessions untouched.
 The hosts need nothing, since the host binary is a copy of `horadric.exe`
 per build already.
 
+As built: only `horadric.exe` and `horadricw.exe` are fetched, whatever
+else the manifest lists. The real ones come from
+`releases/download/v<version>/`, by tag, so a release published mid
+download can not mix two versions; a manifest from anywhere else has its
+binaries beside it. Both are held and hashed in memory, and the version
+folder is cleared and written only when both match, so nothing under
+`updates` was ever not what the signed manifest names. A failure is said
+in a notification and changes nothing.
+
 **A dev instance** checks against `HORADRIC_UPDATE_URL` when set and
 nothing otherwise, and never installs: `swap` under `HORADRIC_DEV` restarts
 from its own folder and copies nothing, which would just restart the
@@ -1670,6 +1679,20 @@ downloaded build in place. Testing the install means the fake install
 folder the reload test used (own `APPDATA`, `LOCALAPPDATA`, home and port)
 with a local HTTP server serving a signed test release, signed by a test
 key given through `HORADRIC_UPDATE_KEY` that only a debug build honours.
+A debug build that is not a dev instance also honours
+`HORADRIC_UPDATE_URL`, since the fake install is not one; a release build
+never does. A dev instance downloads and verifies but does not reload.
+
+Tested that way: a 0.1.0 debug build in the fake install, a 0.2.0 debug
+build signed by a key made in the fake home and served by `python -m
+http.server`. "Update to 0.2.0" fetched both, reloaded, and the install
+folder held the 0.2.0 hashes. With the new build killed as it started,
+`reload.log` said "rolled back" and the 0.1.0 build ran again. With one
+served byte changed, both were fetched, nothing was written and nothing
+reloaded. No session hosts, no `claude.exe`. The fake install's first
+start pointed the real "Start with Windows" value at the fake folder
+(it is in `HKCU`, shared with the installed Horadric), and it had to be
+put back by hand; a fake install test must check that value after.
 
 **Not covered.** Authenticode. Downloads of the updater's own binaries do
 not go through SmartScreen, so it is not needed to update; it is needed only
