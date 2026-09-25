@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::tasks::{self, Mark, Mode, Next, Task, TASKS_FILE};
-use horadric_core::Phase;
+use horadric_core::{ssh, Phase};
 use horadric_hooks::tasks as file;
 use windows::Win32::Foundation::HWND;
 
@@ -111,6 +111,15 @@ fn horadric_command() -> String {
         .unwrap_or_else(|_| "horadric".into())
 }
 
+/// What an agent started in `dir` is told about the project's hosts,
+/// with the Windows `ssh` it should run, the one an SSH terminal runs.
+pub fn ssh_prompt(dir: &Path) -> Option<String> {
+    let ssh = crate::console::ssh_program()
+        .map(|p| command_for(&p.to_string_lossy()))
+        .unwrap_or_else(|| "ssh".into());
+    ssh::system_prompt(&file::hosts(dir), &ssh)
+}
+
 impl App {
     /// Reads again every project's list that changed on disk, or all of
     /// them with `force`, and resizes the clusters whose tile changed.
@@ -159,10 +168,13 @@ impl App {
             .is_some_and(|c| c.exit_code().is_none())
     }
 
-    /// What to add to a session's command line for the task list: what it
-    /// is told about the list when it holds an item, and, the first time
-    /// only, the item as its prompt. Last, since the prompt is positional.
-    pub(super) fn task_args(&mut self, id: &str, program: &Path) -> Vec<String> {
+    /// What to add to a session's command line started in `cwd`: what it
+    /// is told about the task list when it holds an item and about the
+    /// project's hosts when it has some, as one system prompt since Claude
+    /// Code takes only one, and, the first time only, the item as its
+    /// prompt. Last, since the prompt is positional. Both are read as they
+    /// are now, so a resume sees the hosts of today.
+    pub(super) fn task_args(&mut self, id: &str, program: &Path, cwd: &Path) -> Vec<String> {
         let holds = self
             .shared
             .boards
@@ -170,14 +182,21 @@ impl App {
             .values()
             .flat_map(|b| &b.tasks)
             .any(|t| t.mark.held() && t.holder.as_deref() == Some(id));
-        let mut out = Vec::new();
+        let batch = horadric_pty::is_batch(program);
+        let mut system = Vec::new();
         if holds {
+            system.push(tasks::system_prompt(&horadric_command()));
+        }
+        system.extend(ssh_prompt(cwd));
+        let mut out = Vec::new();
+        if !system.is_empty() {
             out.push("--append-system-prompt".into());
-            out.push(tasks::system_prompt(&horadric_command()));
+            // `cmd.exe` ends a command line at a newline.
+            out.push(system.join(if batch { " " } else { "\n\n" }));
         }
         if let Some(prompt) = self.tasks.prompts.remove(id) {
             // `cmd.exe` ends a command line at a newline.
-            out.push(if horadric_pty::is_batch(program) {
+            out.push(if batch {
                 tasks::one_line(&prompt)
             } else {
                 prompt

@@ -43,6 +43,34 @@ pub fn keeps(code: u32) -> bool {
     code == 255
 }
 
+/// What every agent in a project with `hosts` is told about them, none
+/// without any. `ssh` is how its shell runs the Windows `ssh`: Git Bash
+/// brings its own, which reads the same `~/.ssh` but can not reach the
+/// Windows `ssh-agent`, so a key held there works only through this one.
+/// `BatchMode` makes a host that wants a password, a passphrase or a new
+/// host key fail at once, since nobody can answer a prompt in the agent's
+/// shell.
+pub fn system_prompt(hosts: &[String], ssh: &str) -> Option<String> {
+    if hosts.is_empty() {
+        return None;
+    }
+    let list = hosts
+        .iter()
+        .map(|h| format!("`{h}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "This project has servers you can reach over SSH: {list}. Run a command on \
+         one with `{ssh} -o BatchMode=yes <host> '<command>'` from your shell. Use \
+         that `ssh` rather than the one on your PATH: it is the Windows one, which \
+         reaches the keys in the Windows ssh-agent. Your shell can not answer a \
+         prompt, so with BatchMode a host that asks for a password or a passphrase, \
+         or whose host key is not known yet, fails at once. If that happens, say so \
+         and ask the human to connect once from the project's SSH terminal instead \
+         of working around it."
+    ))
+}
+
 /// A name for the `n`th SSH terminal of a project, counting from zero.
 pub fn name(n: usize) -> String {
     match n {
@@ -88,6 +116,22 @@ mod tests {
         assert!(!keeps(0));
         assert!(!keeps(1));
         assert!(!keeps(130));
+    }
+
+    #[test]
+    fn the_prompt_names_every_host_and_the_ssh_to_run() {
+        let hosts = vec!["myvps".to_string(), "deploy@203.0.113.7".to_string()];
+        let p = system_prompt(&hosts, "C:/Windows/System32/OpenSSH/ssh.exe").unwrap();
+        assert!(p.contains("`myvps`, `deploy@203.0.113.7`."));
+        assert!(
+            p.contains("`C:/Windows/System32/OpenSSH/ssh.exe -o BatchMode=yes <host> '<command>'`")
+        );
+        assert!(!p.contains('\n'));
+    }
+
+    #[test]
+    fn no_prompt_without_hosts() {
+        assert_eq!(system_prompt(&[], "ssh"), None);
     }
 
     #[test]

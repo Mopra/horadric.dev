@@ -95,6 +95,8 @@ use crate::{
 #[path = "runner.rs"]
 mod runner;
 
+pub use runner::ssh_prompt;
+
 /// A hook event changed the registry. `wparam` is 1 when a phase changed.
 const WM_HORADRIC_EVENT: u32 = WM_APP + 1;
 /// A window procedure queued input with [`push`].
@@ -1548,7 +1550,7 @@ impl App {
             })
             .unwrap_or(false);
 
-        let extra = self.extra_args(id, &program, &args);
+        let extra = self.extra_args(id, &program, &args, &cwd);
         let serial = self.next_serial;
         self.next_serial += 1;
         let console = Console::spawn(
@@ -1587,10 +1589,10 @@ impl App {
 
     /// What goes before a session's own arguments this time: the defaults
     /// from the usage window, the status line that feeds it, and what it
-    /// is told about the task list when it works an item. Only for Claude
+    /// is told about the task list and the project's hosts. Only for Claude
     /// Code, not for a shell put in its place with `HORADRIC_AGENT`, and not
     /// over settings the session brought itself.
-    fn extra_args(&mut self, id: &str, program: &Path, args: &[String]) -> Vec<String> {
+    fn extra_args(&mut self, id: &str, program: &Path, args: &[String], cwd: &Path) -> Vec<String> {
         if !console::is_claude(program) {
             return Vec::new();
         }
@@ -1599,7 +1601,7 @@ impl App {
             extra.push("--settings".into());
             extra.push(path.to_string_lossy().into_owned());
         }
-        extra.extend(self.task_args(id, program));
+        extra.extend(self.task_args(id, program, cwd));
         extra
     }
 

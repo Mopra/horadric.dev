@@ -105,7 +105,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let program =
         horadric_pty::find_program("claude", &path, horadric_pty::PROGRAM_EXTS, Path::is_file)
             .ok_or("`claude` not found on PATH")?;
-    let status = Command::new(program)
+    // Not through the app, so the hosts are told here. The task list is
+    // not: an item is only ever worked by a session the app started.
+    let mut command = Command::new(program);
+    if let Some(prompt) = horadric_ui::app::ssh_prompt(&cwd) {
+        command.arg("--append-system-prompt").arg(prompt);
+    }
+    let status = command
         .args(&passthrough)
         .current_dir(&cwd)
         .env(SESSION_ENV, &id)

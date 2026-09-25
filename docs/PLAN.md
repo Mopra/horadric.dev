@@ -1262,6 +1262,19 @@ and `localhost` as its second line, a click reconnected with one
 on screen: a session that connects and exits 0, since this machine has no
 server to reach; it takes the path a shell's exit takes.
 
+Done: the prompt for agents (`ssh::system_prompt`). Every Claude Code
+session the app starts or resumes in a project with hosts gets it, joined
+with the task list's into one `--append-system-prompt`, and so does one
+from `horadric run`. Checked on screen: the agent's Git Bash runs its own
+`/usr/bin/ssh`, which cannot reach the Windows `ssh-agent` pipe, so the
+prompt names the Windows `ssh.exe` by its full path with forward slashes,
+the same one the SSH terminal runs. Verified with `horadric run -- -p "Run
+uptime on localhost"` on haiku: it ran
+`C:/WINDOWS/System32/OpenSSH/ssh.exe -o BatchMode=yes localhost 'uptime'`
+and reported the refusal, and a dev instance's `claude.exe` carried the
+prompt on its command line. Not tested: a host that answers, for want of
+one.
+
 Order of work: hosts in `config.json` and the SSH terminal from the
 project menu, then the prompt for agents, then "Add host" with the
 suggestions from `~/.ssh/config`.
