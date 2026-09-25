@@ -1384,9 +1384,6 @@ suggestions from `~/.ssh/config`.
 - **Sessions die with Horadric.** The consoles live in the Horadric process, so
   quitting or crashing it ends every agent in a terminal. Surviving that
   needs the consoles in a separate process, which is a real decision.
-- **`claude.cmd` is not found.** Only `claude.exe` on `PATH` (the native
-  installer) is looked for. An npm install needs `cmd.exe /c` and its own
-  quoting rules.
 - **Terminal gaps.** The IME composition window is not placed at the cursor.
   Mouse reporting to programs, the kitty keyboard protocol and cursor blink
   are not implemented. The font family is fixed.

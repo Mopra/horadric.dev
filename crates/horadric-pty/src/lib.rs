@@ -54,20 +54,65 @@ pub fn is_batch(program: &Path) -> bool {
 }
 
 /// The command line handed to `CreateProcessW`. A batch file is run through
-/// the command interpreter: `cmd.exe /d /s /c "<program> <args>"`, where
-/// `/s` makes cmd strip exactly the outer quotes and leave ours alone.
+/// the command interpreter: `cmd.exe /d /e:on /v:off /s /c "<program>
+/// <args>"`, where `/s` makes cmd strip exactly the outer quotes and leave
+/// ours alone, and delayed expansion is off so a `!` is only a `!`.
 pub fn launch_line(program: &Path, args: &[String]) -> String {
-    let line = command_line(program, args);
     if !is_batch(program) {
-        return line;
+        return command_line(program, args);
     }
     let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
     let mut out = String::new();
     push_quoted(&mut out, &comspec);
-    out.push_str(" /d /s /c \"");
-    out.push_str(&line);
+    out.push_str(" /d /e:on /v:off /s /c \"");
+    push_batch_quoted(&mut out, &program.to_string_lossy());
+    for a in args {
+        out.push(' ');
+        push_batch_quoted(&mut out, a);
+    }
     out.push('"');
     out
+}
+
+/// Quotes one argument for a batch file, which cmd reads twice: once as
+/// the `/c` line and again where the shim hands on `%*`. Inside quotes its
+/// operators are plain text, so anything that could be one is quoted. A
+/// quote is doubled, which keeps cmd inside the quotes and which the MSVC
+/// runtime reads back as one quote. cmd has no escape for `%` on a command
+/// line, so it becomes `%%cd:~,%`, a `%` and then an empty expansion, as
+/// the standard library does. cmd ends the line at a newline, so one
+/// becomes a space. Callers flatten their text before it gets here.
+fn push_batch_quoted(out: &mut String, arg: &str) {
+    const SPECIAL: &[char] = &[
+        ' ', '\t', '\r', '\n', '&', '(', ')', '[', ']', '{', '}', '^', '=', ';', '!', '\'', '+',
+        ',', '`', '~', '%', '|', '<', '>', '"',
+    ];
+    if !arg.is_empty() && !arg.contains(SPECIAL) {
+        out.push_str(arg);
+        return;
+    }
+    out.push('"');
+    let mut backslashes = 0;
+    for c in arg.chars() {
+        if c == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        // Backslashes before a quote are escapes to the runtime, so they
+        // are doubled to stay backslashes.
+        let before_quote = if c == '"' { 2 } else { 1 };
+        out.extend(std::iter::repeat_n('\\', backslashes * before_quote));
+        backslashes = 0;
+        match c {
+            '"' => out.push_str("\"\""),
+            '%' => out.push_str("%%cd:~,%"),
+            '\r' | '\n' => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    // Trailing backslashes sit before the closing quote.
+    out.extend(std::iter::repeat_n('\\', backslashes * 2));
+    out.push('"');
 }
 
 /// Joins arguments into one Windows command line, quoted the way the MSVC
@@ -181,13 +226,31 @@ mod tests {
     fn batch_files_run_through_cmd() {
         let line = launch_line(Path::new(r"C:\npm\claude.cmd"), &["--resume".into()]);
         assert!(
-            line.ends_with(r#" /d /s /c "C:\npm\claude.cmd --resume""#),
+            line.ends_with(r#" /d /e:on /v:off /s /c "C:\npm\claude.cmd --resume""#),
             "{line}"
         );
         assert!(is_batch(Path::new("a.CMD")));
         assert!(!is_batch(Path::new("claude.exe")));
         let plain = launch_line(Path::new("claude.exe"), &[]);
         assert_eq!(plain, "claude.exe");
+    }
+
+    #[test]
+    fn batch_arguments_hide_cmd_operators() {
+        let quoted = |a: &str| {
+            let mut out = String::new();
+            push_batch_quoted(&mut out, a);
+            out
+        };
+        assert_eq!(quoted("--resume"), "--resume");
+        assert_eq!(quoted(""), r#""""#);
+        assert_eq!(quoted("a&b|c"), r#""a&b|c""#);
+        assert_eq!(quoted(r#"say "hi""#), r#""say ""hi""""#);
+        assert_eq!(quoted("100%"), r#""100%%cd:~,%""#);
+        assert_eq!(quoted("one\ntwo"), r#""one two""#);
+        assert_eq!(quoted(r"C:\dir with space\"), r#""C:\dir with space\\""#);
+        assert_eq!(quoted(r#"a\"b"#), r#""a\\""b""#);
+        assert_eq!(quoted(r"a\b c"), r#""a\b c""#);
     }
 
     #[test]
