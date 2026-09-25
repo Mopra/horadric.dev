@@ -1134,6 +1134,16 @@ tracker.
   done, put back in the list (which ends its session), edit the list. Its
   height is fixed, counted like the plus row; only the files tile flexes.
   The fold is kept as `tasks_collapsed` per cluster.
+- **A list keeps its project up.** A project in the recent list whose
+  list has an item not done gets its cluster with no session in it, so
+  the list shows and its runner runs (`tasks::unfinished`,
+  `App::listed`). Once every item is done and no session is left, the
+  cluster goes as it did before. Only recent projects, the eight the
+  tray offers, since those are the folders Horadric knows. Tested on
+  screen: a recent folder with two open items came up as a cluster with
+  only the tasks tile, marking both done took it away and an added item
+  brought it back within a second, auto mode started one `cmd.exe` on
+  it, and `task done` closed that session and the cluster.
 - **Reading the list.** Every second the app compares each project's list
   and config with when they last changed (`fs::metadata`, two calls a
   project) and reads again only what changed, so an edit in VS Code shows
@@ -1162,9 +1172,6 @@ screen: the right click menu and the mode menu, which a synthetic click
 opens behind other windows.
 
 Not done yet:
-- A project shows its tile only while it has a cluster, so only while it
-  has a session. A list with nothing running has no tile, and its runner
-  does not run.
 - The runner holds one item at a time. With step 4 each item gets its own
   worktree and `parallel` in `config.json` lets it hold several; the file
   then lives in the main working tree only.
