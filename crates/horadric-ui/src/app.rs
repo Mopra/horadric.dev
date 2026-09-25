@@ -44,6 +44,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use horadric_core::diff::{self as changes, Diff, FileDiff, Recount};
 use horadric_core::ssh;
 use horadric_core::usage::has_flag;
 use horadric_core::worktree::{self as tree, Worktree};
@@ -127,6 +128,8 @@ const WM_HORADRIC_SETTING_MENU: u32 = WM_APP + 12;
 const WM_HORADRIC_RECENT_MENU: u32 = WM_APP + 13;
 /// Show the task list menu or dialog the app's `tasks.menu` holds.
 const WM_HORADRIC_TASK_MENU: u32 = WM_APP + 14;
+/// A worktree's changes were counted, into the app's `counted`.
+const WM_HORADRIC_COUNTED: u32 = WM_APP + 15;
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
 /// Runs a console program without giving it a console window.
@@ -436,6 +439,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             alert_for: None,
             tasks: runner::State::default(),
             new_trees: HashMap::new(),
+            recounts: HashMap::new(),
+            counted: Arc::new(Mutex::new(Vec::new())),
         };
         app.reconcile(false);
         app.carry_on(&carry, on_stage.as_deref());
@@ -636,6 +641,7 @@ unsafe extern "system" fn app_proc(
             | WM_HORADRIC_NEW
             | WM_HORADRIC_WINDOW_SHOWN
             | WM_HORADRIC_WINDOW_GONE
+            | WM_HORADRIC_COUNTED
             | WM_HOTKEY
             | WM_TIMER
     );
@@ -798,7 +804,34 @@ fn tile_menu(hwnd: HWND, id: &str) {
         ],
         (TileKind::Elsewhere, _) => vec![rename, Item::action(END, "Remove tile")],
     };
-    match tray::popup(hwnd, &items) {
+    let tree = with_app(|app| app.diff_of(id)).flatten();
+    let mut items = items;
+    if let Some((w, diff)) = &tree {
+        items.insert(0, changes_menu(w, diff.as_ref()));
+        items.insert(1, Item::Separator);
+    }
+    let picked = tray::popup(hwnd, &items);
+    if let (Some(i), Some((w, diff))) = (picked, &tree) {
+        let file = diff.as_ref().and_then(|d| match i {
+            _ if (UNCOMMITTED..COMMITTED).contains(&i) => d.uncommitted.get(i - UNCOMMITTED),
+            _ if (COMMITTED..COMMITTED_END).contains(&i) => d.committed.get(i - COMMITTED),
+            _ => None,
+        });
+        if let Some(f) = file {
+            let dir = PathBuf::from(&w.path);
+            with_app(|app| {
+                if let Some(key) = app.project_of(id) {
+                    app.open_view(&key, &dir, &f.path);
+                }
+            });
+            return;
+        }
+        if i == CODE {
+            watch::open_in_code(Path::new(&w.path));
+            return;
+        }
+    }
+    match picked {
         Some(OPEN) => {
             with_app(|app| app.reveal(id, false));
         }
@@ -808,6 +841,56 @@ fn tile_menu(hwnd: HWND, id: &str) {
         Some(RENAME) => rename_session(hwnd, id),
         _ => {}
     }
+}
+
+/// Where the tile menu's changed files start: those not committed, then
+/// those committed on the branch, then VS Code.
+const UNCOMMITTED: usize = 100;
+const COMMITTED: usize = 400;
+const COMMITTED_END: usize = 700;
+const CODE: usize = 700;
+/// The most files a half of the changes lists. A menu taller than the
+/// screen scrolls by the pixel, which is no way to look at a change.
+const CHANGES_LISTED: usize = 40;
+
+/// What a session's worktree changed, as a submenu: each file with its
+/// counts, the ones not committed first, and the worktree in VS Code.
+fn changes_menu(w: &Worktree, diff: Option<&Diff>) -> Item {
+    let empty = Diff::default();
+    let d = diff.unwrap_or(&empty);
+    let mut items = vec![Item::Disabled("Not committed".into())];
+    let list = |items: &mut Vec<Item>, files: &[FileDiff], first: usize| {
+        for (i, f) in files.iter().take(CHANGES_LISTED).enumerate() {
+            items.push(Item::action(first + i, changes::menu_label(f)));
+        }
+        if files.len() > CHANGES_LISTED {
+            let more = files.len() - CHANGES_LISTED;
+            items.push(Item::Disabled(format!("and {more} more")));
+        }
+        if files.is_empty() {
+            items.push(Item::Disabled("Nothing".into()));
+        }
+    };
+    list(&mut items, &d.uncommitted, UNCOMMITTED);
+    items.extend([
+        Item::Separator,
+        Item::Disabled(format!("Committed on {}", w.branch.replace('&', "&&"))),
+    ]);
+    list(&mut items, &d.committed, COMMITTED);
+    items.extend([
+        Item::Separator,
+        if watch::vs_code().is_some() {
+            Item::action(CODE, "Open worktree in VS Code")
+        } else {
+            Item::Disabled("Open worktree in VS Code".into())
+        },
+    ]);
+    let label = match diff {
+        None => "Changes".to_string(),
+        Some(d) if d.is_empty() => "No changes".to_string(),
+        Some(d) => format!("Changes\t{}", changes::glance(d.totals())),
+    };
+    Item::Submenu(label, items)
 }
 
 /// Asks for a session's new name. An empty one gives the naming back to
@@ -1150,7 +1233,15 @@ struct App {
     /// Worktrees just added for sessions about to start, by session id,
     /// with the setup commands to run in them first. Taken by the launch.
     new_trees: HashMap<String, (Worktree, Vec<String>)>,
+    /// When each session's worktree is counted again, by session id.
+    recounts: HashMap<String, Recount>,
+    /// Counts back from their threads.
+    counted: Arc<Mutex<Vec<Counted>>>,
 }
+
+/// A worktree's count back from its thread: the session's id, and what
+/// changed, None for a worktree that is gone.
+type Counted = (String, Option<Diff>);
 
 /// A browser window a session opened.
 struct Browser {
@@ -1167,7 +1258,9 @@ impl App {
                 self.reconcile(wparam != 0);
                 self.switch_free();
                 self.run_tasks();
+                self.recount();
             }
+            WM_HORADRIC_COUNTED => self.take_counts(),
             WM_HORADRIC_INPUT => self.apply_input(),
             WM_HORADRIC_OUTPUT => self.output(wparam),
             WM_HORADRIC_WINDOW_SHOWN => self.window_shown(wparam as isize),
@@ -1207,6 +1300,8 @@ impl App {
             }
             WM_TIMER => {
                 self.tick();
+                // Activity heard while a count was due too soon.
+                self.recount();
                 self.switch_free();
                 self.tick_tasks();
                 self.reload_when_ready();
@@ -1459,6 +1554,89 @@ impl App {
                 cwd
             }
         }
+    }
+
+    /// Counts again what each session's worktree has changed, where the
+    /// agent did something since the last count. On threads of their own,
+    /// since each count starts git three times.
+    fn recount(&mut self) {
+        let trees: Vec<(String, Worktree, Option<SystemTime>)> = match self.shared.registry.lock() {
+            Ok(r) => r
+                .all()
+                .filter_map(|s| {
+                    let w = s.worktree.clone()?;
+                    Some((s.id.clone(), w, s.activity.last().copied()))
+                })
+                .collect(),
+            Err(_) => return,
+        };
+        self.recounts
+            .retain(|id, _| trees.iter().any(|(t, _, _)| t == id));
+        let now = Instant::now();
+        for (id, w, activity) in trees {
+            let r = self.recounts.entry(id.clone()).or_default();
+            r.heard(activity);
+            if !r.start(now) {
+                continue;
+            }
+            let counted = Arc::clone(&self.counted);
+            let notify = self.notify.0 as isize;
+            std::thread::spawn(move || {
+                let diff = worktree::count(&w);
+                if let Ok(mut c) = counted.lock() {
+                    c.push((id, diff));
+                }
+                post(notify, WM_HORADRIC_COUNTED, 0);
+            });
+        }
+    }
+
+    /// Puts the counts that came back on their sessions' tiles.
+    fn take_counts(&mut self) {
+        let counts = self
+            .counted
+            .lock()
+            .map(|mut c| std::mem::take(&mut *c))
+            .unwrap_or_default();
+        if counts.is_empty() {
+            return;
+        }
+        if let Ok(mut r) = self.shared.registry.lock() {
+            for (id, diff) in counts {
+                if let Some(rc) = self.recounts.get_mut(&id) {
+                    rc.done();
+                }
+                if let Some(s) = r.get_mut(&id) {
+                    s.diff = diff;
+                }
+            }
+        }
+        for c in &self.clusters {
+            c.invalidate();
+        }
+    }
+
+    /// The worktree of a session, counted now, for its menu to list what
+    /// changed as it is this moment.
+    fn diff_of(&mut self, id: &str) -> Option<(Worktree, Option<Diff>)> {
+        let w = self
+            .shared
+            .registry
+            .lock()
+            .ok()?
+            .get(id)?
+            .worktree
+            .clone()?;
+        let diff = worktree::count(&w);
+        if let Ok(mut r) = self.shared.registry.lock() {
+            if let Some(s) = r.get_mut(id) {
+                s.diff = diff.clone();
+            }
+        }
+        for c in &self.clusters {
+            c.invalidate();
+        }
+        Some((w, diff))
     }
 
     /// The ports of every session's worktree, running or paused.

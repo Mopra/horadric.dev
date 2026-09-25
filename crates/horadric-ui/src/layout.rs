@@ -134,6 +134,9 @@ pub struct ClusterLayout {
     /// The browser button on each tile, in the same order, where its
     /// session has a browser open. See [`mark`].
     pub marks: Vec<Option<Rect>>,
+    /// The button on each tile whose session has a worktree of its own,
+    /// which opens it in VS Code. Left of the browser button when both.
+    pub codes: Vec<Option<Rect>>,
     /// The wide button below the last tile that starts another session in
     /// this project at once. None when collapsed.
     pub add: Option<Rect>,
@@ -278,6 +281,7 @@ pub fn cluster(
         header,
         new,
         marks: vec![None; tiles.len()],
+        codes: vec![None; tiles.len()],
         tiles,
         add,
         shell,
@@ -318,25 +322,26 @@ fn tasks_tile(m: &Metrics, y: f32, approve: &[bool]) -> TasksLayout {
 }
 
 /// Puts the browser button on the tiles whose session has a browser open,
-/// at the right end of the tile's second line.
-pub fn mark(layout: &mut ClusterLayout, m: &Metrics, marked: &[bool]) {
-    layout.marks = layout
-        .tiles
-        .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            marked.get(i).copied().unwrap_or(false).then(|| {
-                // Centred on the second line of text, which sits a little
-                // above the middle of the tile's lower half.
-                let line = t.y + t.h * 0.75 - 4.0;
-                Rect::new(
-                    t.right() - 4.0 - m.mark_w,
-                    line - m.mark_h / 2.0,
-                    m.mark_w,
-                    m.mark_h,
-                )
-            })
-        })
+/// at the right end of the tile's second line, and the VS Code button on
+/// those with a worktree, left of it.
+pub fn mark(layout: &mut ClusterLayout, m: &Metrics, marked: &[bool], coded: &[bool]) {
+    let on = |flags: &[bool], i: usize| flags.get(i).copied().unwrap_or(false);
+    // Centred on the second line of text, which sits a little above the
+    // middle of the tile's lower half.
+    let button = |t: &Rect, from_right: usize| {
+        let line = t.y + t.h * 0.75 - 4.0;
+        Rect::new(
+            t.right() - 4.0 - m.mark_w - from_right as f32 * (m.mark_w + 2.0),
+            line - m.mark_h / 2.0,
+            m.mark_w,
+            m.mark_h,
+        )
+    };
+    layout.marks = (layout.tiles.iter().enumerate())
+        .map(|(i, t)| on(marked, i).then(|| button(t, 0)))
+        .collect();
+    layout.codes = (layout.tiles.iter().enumerate())
+        .map(|(i, t)| on(coded, i).then(|| button(t, usize::from(on(marked, i)))))
         .collect();
 }
 
@@ -353,6 +358,8 @@ pub enum Hit {
     Tile(usize),
     /// The browser button on a tile.
     Browser(usize),
+    /// The VS Code button on a tile.
+    Code(usize),
     Add,
     /// The terminal button beside the bottom plus.
     Shell,
@@ -381,6 +388,7 @@ impl Hit {
                 | Hit::Header
                 | Hit::Tile(_)
                 | Hit::Browser(_)
+                | Hit::Code(_)
                 | Hit::Add
                 | Hit::Shell
                 | Hit::TasksMode
@@ -422,6 +430,11 @@ pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
     for (i, r) in layout.marks.iter().enumerate() {
         if r.is_some_and(|r| r.contains(x, y)) {
             return Hit::Browser(i);
+        }
+    }
+    for (i, r) in layout.codes.iter().enumerate() {
+        if r.is_some_and(|r| r.contains(x, y)) {
+            return Hit::Code(i);
         }
     }
     for (i, t) in layout.tiles.iter().enumerate() {
@@ -1262,7 +1275,7 @@ mod tests {
         let m = Metrics::default();
         let mut l = cluster(&m, 3, false, None, None);
         assert_eq!(l.marks, vec![None; 3]);
-        mark(&mut l, &m, &[false, true]);
+        mark(&mut l, &m, &[false, true], &[]);
         assert_eq!(l.marks.len(), 3);
         assert!(l.marks[0].is_none() && l.marks[2].is_none());
         let b = l.marks[1].unwrap();
@@ -1278,11 +1291,27 @@ mod tests {
     }
 
     #[test]
+    fn a_worktree_button_stands_left_of_the_browser_or_in_its_place() {
+        let m = Metrics::default();
+        let mut l = cluster(&m, 3, false, None, None);
+        mark(&mut l, &m, &[true, false, false], &[true, true, false]);
+        let (browser, both) = (l.marks[0].unwrap(), l.codes[0].unwrap());
+        assert_eq!(both.right() + 2.0, browser.x);
+        assert_eq!(both.y, browser.y);
+        let alone = l.codes[1].unwrap();
+        assert_eq!(alone.right(), l.tiles[1].right() - 4.0);
+        assert!(l.codes[2].is_none());
+        assert_eq!(hit(&l, both.x + 1.0, both.y + 1.0), Hit::Code(0));
+        assert_eq!(hit(&l, alone.x + 1.0, alone.y + 1.0), Hit::Code(1));
+        assert!(Hit::Code(0).lights());
+    }
+
+    #[test]
     fn collapsing_drops_the_browser_buttons() {
         let m = Metrics::default();
         let mut l = cluster(&m, 2, true, None, None);
-        mark(&mut l, &m, &[true, true]);
-        assert!(l.marks.is_empty());
+        mark(&mut l, &m, &[true, true], &[true, true]);
+        assert!(l.marks.is_empty() && l.codes.is_empty());
     }
 
     #[test]

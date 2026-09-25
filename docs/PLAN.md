@@ -1201,8 +1201,8 @@ Not done yet:
 - Worktrees must be optional per project. A session that wants the shared
   working tree, or is not in a repo at all, has to keep working.
 
-Built so far: the project key resolves to the main working tree, and each
-new session gets a worktree of its own.
+Built so far: the project key resolves to the main working tree, each new
+session gets a worktree of its own, and its tile shows what it changed.
 
 - **Where.** A new session started from a repository's main working tree
   (the plus, the project menu, the start window, `horadric new`) runs `git
@@ -1243,6 +1243,21 @@ new session gets a worktree of its own.
 - **The task runner** still starts its sessions in the shared tree. It holds
   one item at a time, so they do not collide; its sessions move to
   worktrees with `parallel`, the next item.
+- **What it changed.** A tile whose session has a worktree shows the lines
+  added and removed, `+9 −1` in the files tile's green and red, beside the
+  last line, and a `</>` button that opens the worktree in VS Code. Its
+  right click menu has a Changes submenu: each file with its counts, those
+  not committed apart from those committed on the branch, and a click
+  shows the file on the stage. Not committed is `git diff --numstat HEAD`
+  plus untracked files, all their lines added; committed is `git diff
+  --numstat <main tree's HEAD>...HEAD`, from where the branch left. The
+  count (`diff.rs`, pure and tested) runs on a thread after the agent did
+  something, at most every 3 s, and again as the menu opens. Nothing
+  polls, so an edit made outside the agent shows at its next hook. Tested
+  on screen with a dev instance: a worktree with a changed file, an
+  untracked one and a commit showed `+9 −1`, the menu split them as git
+  does, and a click showed the worktree's copy of the file. The VS Code
+  button was not clicked, it uses the same launch as the project menu.
 
 ### SSH hosts
 

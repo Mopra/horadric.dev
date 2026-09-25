@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+use crate::diff::Diff;
 use crate::event::HookEvent;
 use crate::title::Title;
 use crate::usage::Status;
@@ -102,6 +103,10 @@ pub struct Session {
     /// The git worktree of its own the session works in, if it has one.
     #[serde(default)]
     pub worktree: Option<Worktree>,
+    /// What its worktree has changed, as last counted. Counted again after
+    /// the agent does something, so it is not saved.
+    #[serde(skip)]
+    pub diff: Option<Diff>,
     pub phase: Phase,
     /// When the current phase began. The tile's age line counts from here.
     pub since: SystemTime,
@@ -146,6 +151,7 @@ impl Session {
             shell: false,
             ssh: None,
             worktree: None,
+            diff: None,
             phase: Phase::Idle,
             since: now,
             last_line: String::new(),

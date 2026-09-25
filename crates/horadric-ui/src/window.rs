@@ -12,7 +12,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -559,7 +559,8 @@ impl Cluster {
             let browsing = self.shared.browsing.borrow();
             sessions.iter().map(|s| browsing.contains(&s.id)).collect()
         };
-        layout::mark(&mut l, m, &marked);
+        let coded: Vec<bool> = sessions.iter().map(|s| s.worktree.is_some()).collect();
+        layout::mark(&mut l, m, &marked, &coded);
         {
             // Rows can go away under the view: a folder closed, files
             // committed. Never scroll past the last one.
@@ -951,7 +952,7 @@ impl Cluster {
                 let x = (lparam.0 & 0xffff) as i16 as f32 / s;
                 let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32 / s;
                 match layout::hit(&self.layout.borrow(), x, y) {
-                    Hit::Tile(i) | Hit::Browser(i) => {
+                    Hit::Tile(i) | Hit::Browser(i) | Hit::Code(i) => {
                         if let Some(s) = self.sessions().get(i) {
                             app::push(Input::TileMenu(s.id.clone()));
                         }
@@ -1146,6 +1147,11 @@ impl Cluster {
             Hit::Browser(i) => {
                 if let Some(s) = self.sessions().get(i) {
                     app::push(Input::Browser(s.id.clone()));
+                }
+            }
+            Hit::Code(i) => {
+                if let Some(w) = self.sessions().get(i).and_then(|s| s.worktree.clone()) {
+                    watch::open_in_code(Path::new(&w.path));
                 }
             }
             Hit::Nothing => {}

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use horadric_core::diff::{self, Diff};
 use horadric_core::worktree::{self, Place, Ports, Worktree};
 use horadric_hooks::tasks as file;
 
@@ -112,6 +113,56 @@ pub fn remove(w: Worktree) {
             eprintln!("horadric: kept the branch {}: {e}", w.branch);
         }
     });
+}
+
+/// Counts what a session's worktree has changed: against its last commit,
+/// untracked files included, and on its branch since the main tree's
+/// commit. None once the worktree is gone. `--no-optional-locks` keeps
+/// git from rewriting the index, which a watcher would take for a change.
+pub fn count(w: &Worktree) -> Option<Diff> {
+    let top = Path::new(&w.path);
+    if !top.is_dir() {
+        return None;
+    }
+    let numstat = |range: &str| {
+        git(
+            top,
+            &[
+                "--no-optional-locks",
+                "diff",
+                "--numstat",
+                "-z",
+                "--no-renames",
+                range,
+            ],
+        )
+        .map(|out| diff::parse_numstat(&out))
+    };
+    let mut uncommitted = numstat("HEAD").ok()?;
+    let others = git(
+        top,
+        &[
+            "--no-optional-locks",
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+        ],
+    )
+    .unwrap_or_default();
+    for path in others.split('\0').filter(|p| !p.is_empty()) {
+        let content = std::fs::read(top.join(path)).unwrap_or_default();
+        uncommitted.push(diff::untracked(path, &content));
+    }
+    // The main tree may have moved on since; `...` counts from where the
+    // branch left it.
+    let committed = git(Path::new(&w.main), &["rev-parse", "HEAD"])
+        .and_then(|main| numstat(&format!("{}...HEAD", main.trim())))
+        .unwrap_or_default();
+    Some(Diff {
+        uncommitted,
+        committed,
+    })
 }
 
 /// Runs git in `dir`: what it printed, or what it said when it failed.

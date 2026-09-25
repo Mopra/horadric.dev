@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::time::SystemTime;
 
+use horadric_core::diff::Diff;
 use horadric_core::usage::format_until;
 use horadric_core::{format_age, Limit, Phase, Session, Usage};
 use windows::core::{w, Interface, Result, BOOL, PCWSTR};
@@ -1342,13 +1343,15 @@ impl Painter<'_> {
         // The layout puts the browser button where the tile will be; the
         // tile may still be sliding there.
         let slid = r.y - scene.layout.tiles.get(i).map_or(r.y, |t| t.y);
-        let mark = scene
-            .layout
-            .marks
-            .get(i)
-            .copied()
-            .flatten()
-            .map(|k| Rect::new(k.x, k.y + slid, k.w, k.h));
+        let slide = |rects: &[Option<Rect>]| {
+            rects
+                .get(i)
+                .copied()
+                .flatten()
+                .map(|k| Rect::new(k.x, k.y + slid, k.w, k.h))
+        };
+        let mark = slide(&scene.layout.marks);
+        let code = slide(&scene.layout.codes);
         let phase = &s.phase;
         let c = theme::phase_color(phase);
         let presence = theme::presence(phase) * look.enter;
@@ -1484,9 +1487,31 @@ impl Painter<'_> {
         } else {
             &s.last_line
         };
-        // Stopping short of a browser button at its end.
-        let short = if mark.is_some() { m.mark_w + 2.0 } else { 0.0 };
+        // Stopping short of the buttons at its end.
+        let buttons = usize::from(mark.is_some()) + usize::from(code.is_some());
+        let short = buttons as f32 * (m.mark_w + 2.0);
         let mut bottom = Rect::new(bottom.x, bottom.y, bottom.w - short, bottom.h);
+        // What its worktree changed, in the files tile's colours, so a
+        // session with work to look at shows it from across the screen.
+        if let Some((added, removed)) = s.diff.as_ref().map(Diff::totals) {
+            if added + removed > 0 {
+                let minus = format!("\u{2212}{removed}");
+                let plus = format!("+{added}");
+                let minus_w = self.measure(gpu, &gpu.small, &minus);
+                let plus_w = self.measure(gpu, &gpu.small, &plus);
+                let ink = |c: Color| c.fade(presence);
+                self.text_tabular(
+                    gpu,
+                    &gpu.small_right,
+                    ink(theme::GIT_DELETED),
+                    &minus,
+                    bottom,
+                );
+                let left = Rect::new(bottom.x, bottom.y, bottom.w - minus_w - 4.0, bottom.h);
+                self.text_tabular(gpu, &gpu.small_right, ink(theme::GIT_ADDED), &plus, left);
+                bottom.w -= minus_w + plus_w + 4.0 + 8.0;
+            }
+        }
         // A context nearly full is worth words, not only the ring: it says
         // the session is due a `/compact` or a fresh start. It takes the
         // trace's place.
@@ -1534,6 +1559,37 @@ impl Painter<'_> {
         if let Some(mark) = mark {
             self.browser_mark(&mark, scene.button(Hit::Browser(i)));
         }
+        if let Some(code) = code {
+            self.code_mark(&code, scene.button(Hit::Code(i)));
+        }
+    }
+
+    /// The session has a worktree of its own: angle brackets, code, since
+    /// a click opens the worktree in VS Code.
+    unsafe fn code_mark(&self, r: &Rect, b: Button) {
+        let (fill, ink) = theme::button_look(b);
+        if let Some(fill) = fill {
+            self.fill_rounded(r, 5.0, fill);
+        }
+        self.brush.SetColor(&color(ink));
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let line = |a: (f32, f32), b: (f32, f32)| {
+            self.rt.DrawLine(
+                Vector2 { X: a.0, Y: a.1 },
+                Vector2 { X: b.0, Y: b.1 },
+                self.brush,
+                1.2,
+                None,
+            );
+        };
+        let (reach, half) = (7.0, 4.0);
+        for side in [-1.0, 1.0] {
+            let tip = (cx + side * reach, cy);
+            let back = cx + side * (reach - half);
+            line((back, cy - half), tip);
+            line(tip, (back, cy + half));
+        }
+        line((cx + 1.5, cy - half - 0.5), (cx - 1.5, cy + half + 0.5));
     }
 
     /// Bars of how busy a session was over the last minutes, oldest on the
