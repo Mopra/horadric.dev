@@ -848,8 +848,11 @@ fn project_menu(hwnd: HWND, key: &str) {
     const SHELL: usize = 5;
     const CODE: usize = 7;
     const EXPLORE: usize = 8;
+    const OTHER_HOST: usize = 9;
     const SSH: usize = 20;
     const PAST: usize = 100;
+    const SUGGEST: usize = 200;
+    const SUGGEST_END: usize = 300;
     let dir = with_app(|app| app.project_dir(key)).flatten();
     let past = match &dir {
         Some(d) => with_app(|app| app.history(d)).unwrap_or_default(),
@@ -860,6 +863,9 @@ fn project_menu(hwnd: HWND, key: &str) {
         .map(horadric_hooks::tasks::hosts)
         .unwrap_or_default();
     hosts.truncate(PAST - SSH);
+    let mut suggested = horadric_hooks::tasks::ssh_config_hosts();
+    suggested.retain(|h| !hosts.contains(h));
+    suggested.truncate(SUGGEST_END - SUGGEST);
     let mut items = vec![
         Item::action(ADD, "New session"),
         Item::Submenu("History".into(), history_items(&past, PAST)),
@@ -870,6 +876,19 @@ fn project_menu(hwnd: HWND, key: &str) {
     ];
     for (i, host) in hosts.iter().enumerate() {
         items.push(Item::action(SSH + i, format!("SSH to {host}")));
+    }
+    if dir.is_some() {
+        items.push(if suggested.is_empty() {
+            Item::action(OTHER_HOST, "Add host")
+        } else {
+            let mut offer: Vec<Item> = suggested
+                .iter()
+                .enumerate()
+                .map(|(i, h)| Item::action(SUGGEST + i, h.as_str()))
+                .collect();
+            offer.extend([Item::Separator, Item::action(OTHER_HOST, "Other host")]);
+            Item::Submenu("Add host".into(), offer)
+        });
     }
     items.extend([
         Item::Separator,
@@ -883,6 +902,13 @@ fn project_menu(hwnd: HWND, key: &str) {
         Item::action(END_ALL, "End all sessions"),
     ]);
     let picked = tray::popup(hwnd, &items);
+    match (picked, &dir) {
+        (Some(i), Some(dir)) if (SUGGEST..SUGGEST_END).contains(&i) => {
+            return add_host(dir, &suggested[i - SUGGEST]);
+        }
+        (Some(OTHER_HOST), Some(dir)) => return ask_host(hwnd, dir),
+        _ => {}
+    }
     let ending = matches!(picked, Some(START_OVER | END_ALL));
     if ending && !confirm_end(hwnd, Some(key)) {
         return;
@@ -911,6 +937,23 @@ fn project_menu(hwnd: HWND, key: &str) {
         }
         _ => {}
     });
+}
+
+/// Asks for a host to add to the project, anything `ssh` takes.
+fn ask_host(hwnd: HWND, dir: &Path) {
+    let prompt = "An alias from ~/.ssh/config, or user@address.";
+    if let Some(host) = ask::text(hwnd, "Add host", prompt, "") {
+        add_host(dir, &host);
+    }
+}
+
+/// Writes `host` into the project's config. The menu reads the hosts each
+/// time it opens and sessions at their next start, so nothing else is
+/// told.
+fn add_host(dir: &Path, host: &str) {
+    if let Err(e) = horadric_hooks::tasks::add_host(dir, host) {
+        eprintln!("horadric: cannot add host {host}: {e}");
+    }
 }
 
 /// The lines of a History menu: each past conversation, `first` on, then

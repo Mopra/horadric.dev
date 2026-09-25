@@ -35,6 +35,26 @@ pub fn hosts(project: &Path) -> Vec<String> {
     ssh::hosts(&fs::read_to_string(config_file(project)).unwrap_or_default())
 }
 
+/// Adds `host` to the project's hosts. False when it was there already or
+/// is not something `ssh` takes as one destination.
+pub fn add_host(project: &Path, host: &str) -> io::Result<bool> {
+    let path = config_file(project);
+    let old = fs::read_to_string(&path).unwrap_or_default();
+    match ssh::with_host(&old, host) {
+        Some(new) => write(&path, &new).map(|_| true),
+        None => Ok(false),
+    }
+}
+
+/// The plain host names in the user's `~/.ssh/config`, none without one.
+pub fn ssh_config_hosts() -> Vec<String> {
+    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
+        return Vec::new();
+    };
+    let path = Path::new(&home).join(".ssh").join("config");
+    ssh::config_hosts(&fs::read_to_string(path).unwrap_or_default())
+}
+
 pub fn set_mode(project: &Path, mode: Mode) -> io::Result<()> {
     let path = config_file(project);
     let old = fs::read_to_string(&path).unwrap_or_default();
@@ -103,6 +123,17 @@ mod tests {
         assert_eq!(read(&dir), "- [ ] First\n");
         assert!(!update(&dir, |_| None).unwrap());
         assert!(!dir.join(".horadric/tasks.horadric-tmp").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_host_is_added_to_the_config_once() {
+        let dir = scratch("host");
+        set_mode(&dir, Mode::Auto).unwrap();
+        assert!(add_host(&dir, "myvps").unwrap());
+        assert!(!add_host(&dir, "myvps").unwrap());
+        assert_eq!(hosts(&dir), vec!["myvps"]);
+        assert_eq!(mode(&dir), Mode::Auto);
         fs::remove_dir_all(&dir).unwrap();
     }
 
