@@ -22,6 +22,72 @@ const MIN_TEXT: usize = 8;
 /// VS Code's dark theme: its text and its line numbers.
 pub const TEXT: Style = Style::plain([0xD4, 0xD4, 0xD4]);
 const NUMBER: Style = Style::plain([0x6E, 0x76, 0x81]);
+/// VS Code's gutter colours for lines added, changed and removed.
+const ADDED: Style = Style::plain([0x2E, 0xA0, 0x43]);
+const MODIFIED: Style = Style::plain([0x00, 0x78, 0xD4]);
+const DELETED: Style = Style::plain([0xF8, 0x51, 0x49]);
+
+/// How a line differs from the last commit, drawn in the gutter between
+/// its number and its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    Added,
+    Modified,
+    /// Lines were removed after this one.
+    DeletedBelow,
+    /// Lines were removed before this one, which is the first.
+    DeletedAbove,
+}
+
+impl Mark {
+    fn glyph(self) -> (char, Style) {
+        match self {
+            Mark::Added => ('\u{258e}', ADDED),
+            Mark::Modified => ('\u{258e}', MODIFIED),
+            Mark::DeletedBelow => ('\u{2581}', DELETED),
+            Mark::DeletedAbove => ('\u{2594}', DELETED),
+        }
+    }
+}
+
+/// Each line's mark, from the hunk headers of `git diff -U0`. A line both
+/// changed and followed by a removal shows the change.
+pub fn marks(diff: &str, lines: usize) -> Vec<Option<Mark>> {
+    let mut out = vec![None; lines];
+    let mut set = |line: usize, mark: Mark, over: bool| {
+        if let Some(slot) = out.get_mut(line) {
+            if over || slot.is_none() {
+                *slot = Some(mark);
+            }
+        }
+    };
+    for header in diff.lines().filter_map(|l| l.strip_prefix("@@ -")) {
+        let mut parts = header.split(' ');
+        let (Some(old), Some(new)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let (Some((_, removed)), Some((start, added))) =
+            (range(old), new.strip_prefix('+').and_then(range))
+        else {
+            continue;
+        };
+        match (removed, added) {
+            (_, 0) if start == 0 => set(0, Mark::DeletedAbove, false),
+            (_, 0) => set(start - 1, Mark::DeletedBelow, false),
+            (0, n) => (start..start + n).for_each(|l| set(l - 1, Mark::Added, true)),
+            (_, n) => (start..start + n).for_each(|l| set(l - 1, Mark::Modified, true)),
+        }
+    }
+    out
+}
+
+/// `12,3` as start and count, a count of one left out as git does.
+fn range(s: &str) -> Option<(usize, usize)> {
+    match s.split_once(',') {
+        Some((a, n)) => Some((a.parse().ok()?, n.parse().ok()?)),
+        None => Some((s.parse().ok()?, 1)),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Style {
@@ -163,7 +229,13 @@ pub fn gutter(lines: usize) -> usize {
 
 /// Lays the lines out for a grid `cols` wide. `spans` may cover fewer
 /// lines than there are, while highlighting is still running.
-pub fn render(lines: &[String], spans: &[Vec<Span>], cols: usize) -> Rendered {
+/// `marks` may be empty, or shorter than the lines.
+pub fn render(
+    lines: &[String],
+    spans: &[Vec<Span>],
+    marks: &[Option<Mark>],
+    cols: usize,
+) -> Rendered {
     let gutter = gutter(lines.len());
     let avail = cols.saturating_sub(gutter).max(MIN_TEXT);
     let digits = gutter - 3;
@@ -183,11 +255,24 @@ pub fn render(lines: &[String], spans: &[Vec<Span>], cols: usize) -> Rendered {
             }
             NUMBER.sgr(&mut bytes);
             let number = if start == 0 {
-                format!(" {:>digits$}  ", n + 1)
+                format!(" {:>digits$}", n + 1)
             } else {
-                " ".repeat(gutter)
+                " ".repeat(gutter - 2)
             };
             bytes.extend_from_slice(number.as_bytes());
+            let mark = marks.get(n).copied().flatten().filter(|m| match m {
+                Mark::DeletedBelow => end >= line.len(),
+                Mark::DeletedAbove => start == 0,
+                _ => true,
+            });
+            match mark {
+                Some(m) => {
+                    let (c, style) = m.glyph();
+                    style.sgr(&mut bytes);
+                    bytes.extend_from_slice(format!(" {c}").as_bytes());
+                }
+                None => bytes.extend_from_slice(b"  "),
+            }
             let mut current = None;
             for (i, c) in line[start..end].char_indices() {
                 let style = styles.at(start + i);
@@ -268,6 +353,91 @@ impl<'a> Styles<'a> {
 pub fn row_of(rows: &[Row], line: usize) -> usize {
     rows.partition_point(|r| r.line < line)
         .min(rows.len().saturating_sub(1))
+}
+
+/// A match of a search: bytes `start..end` of a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hit {
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// The next place `query` is in the file from byte `byte` of `line`:
+/// forward, the first one starting there or later; backward, the last one
+/// starting before it. Round the end of the file to its start and back.
+/// Case is ignored unless the query has a capital, as in the terminal.
+pub fn find(lines: &[String], query: &str, line: usize, byte: usize, forward: bool) -> Option<Hit> {
+    if query.is_empty() || lines.is_empty() {
+        return None;
+    }
+    let exact = query.chars().any(char::is_uppercase);
+    let n = lines.len();
+    let line = line.min(n - 1);
+    // The starting line comes round again last, for its other side.
+    for step in 0..=n {
+        let l = if forward {
+            (line + step) % n
+        } else {
+            (line + n - step % n) % n
+        };
+        let hits = hits_in(&lines[l], query, exact);
+        let pick = match (step, forward) {
+            (0, true) => hits.into_iter().find(|&(s, _)| s >= byte),
+            (0, false) => hits.into_iter().rfind(|&(s, _)| s < byte),
+            (s, true) if s == n => hits.into_iter().find(|&(s, _)| s < byte),
+            (s, false) if s == n => hits.into_iter().rfind(|&(s, _)| s >= byte),
+            (_, true) => hits.into_iter().next(),
+            (_, false) => hits.into_iter().next_back(),
+        };
+        if let Some((start, end)) = pick {
+            return Some(Hit {
+                line: l,
+                start,
+                end,
+            });
+        }
+    }
+    None
+}
+
+/// Where `query` starts and ends in `text`, overlapping matches included.
+fn hits_in(text: &str, query: &str, exact: bool) -> Vec<(usize, usize)> {
+    text.char_indices()
+        .filter_map(|(i, _)| {
+            let rest = &text[i..];
+            if exact {
+                return rest.starts_with(query).then(|| (i, i + query.len()));
+            }
+            let mut have = rest.char_indices();
+            for q in query.chars() {
+                let (_, c) = have.next()?;
+                if !c.to_lowercase().eq(q.to_lowercase()) {
+                    return None;
+                }
+            }
+            let end = have.next().map_or(text.len(), |(j, _)| i + j);
+            Some((i, end))
+        })
+        .collect()
+}
+
+/// The first and last cell a match covers, for selecting it.
+pub fn cells(lines: &[String], rows: &[Row], gutter: usize, hit: Hit) -> Option<(Cell, Cell)> {
+    let text = lines.get(hit.line)?;
+    let last = text[hit.start..hit.end].char_indices().last()?.0 + hit.start;
+    let cell = |byte: usize, after: bool| {
+        let row = rows.iter().position(|r| {
+            r.line == hit.line && r.start <= byte && (byte < r.end || r.end == text.len())
+        })?;
+        let r = rows[row];
+        let mut col = gutter + text[r.start..byte].chars().map(width).sum::<usize>();
+        if after {
+            col += text[byte..].chars().next().map_or(1, width) - 1;
+        }
+        Some(Cell { row, col })
+    };
+    Some((cell(hit.start, false)?, cell(last, true)?))
 }
 
 /// A cell in the grid, as the selection names it.
@@ -384,7 +554,7 @@ mod tests {
 
     #[test]
     fn numbers_sit_in_the_gutter_and_wraps_indent_under_the_text() {
-        let r = render(&s(&["abcdefghijkl", "", "xy"]), &[], 6 + 8);
+        let r = render(&s(&["abcdefghijkl", "", "xy"]), &[], &[], 6 + 8);
         assert_eq!(
             screen(&r),
             s(&["   1  abcdefgh", "      ijkl", "   2  ", "   3  xy"])
@@ -418,7 +588,7 @@ mod tests {
 
     #[test]
     fn words_wrap_whole_unless_one_is_wider_than_the_row() {
-        let r = render(&s(&["ab cd efgh ijklmnopq"]), &[], 6 + 8);
+        let r = render(&s(&["ab cd efgh ijklmnopq"]), &[], &[], 6 + 8);
         assert_eq!(
             screen(&r),
             s(&["   1  ab cd ", "      efgh ", "      ijklmnop", "      q"])
@@ -427,7 +597,7 @@ mod tests {
 
     #[test]
     fn a_wide_character_wraps_whole() {
-        let r = render(&s(&["abcdefg\u{4e00}z"]), &[], 6 + 8);
+        let r = render(&s(&["abcdefg\u{4e00}z"]), &[], &[], 6 + 8);
         assert_eq!(screen(&r), s(&["   1  abcdefg", "      \u{4e00}z"]));
     }
 
@@ -442,7 +612,7 @@ mod tests {
                 style: TEXT,
             },
         ]];
-        let r = render(&s(&["fn x"]), &spans, 40);
+        let r = render(&s(&["fn x"]), &spans, &[], 40);
         let text = String::from_utf8(r.bytes).unwrap();
         assert!(text.ends_with("\x1b[0;38;2;255;0;0mfn \x1b[0;38;2;212;212;212mx"));
     }
@@ -456,6 +626,7 @@ mod tests {
                 len: 1,
                 style: bold,
             }]],
+            &[],
             40,
         );
         let text = String::from_utf8(r.bytes).unwrap();
@@ -465,12 +636,12 @@ mod tests {
     #[test]
     fn rows_stop_at_the_limit() {
         let many = vec!["x".to_string(); MAX_ROWS + 10];
-        assert_eq!(render(&many, &[], 40).rows.len(), MAX_ROWS);
+        assert_eq!(render(&many, &[], &[], 40).rows.len(), MAX_ROWS);
     }
 
     #[test]
     fn row_of_finds_a_line_after_a_resize() {
-        let r = render(&s(&["abcdefghijkl", "", "xy"]), &[], 6 + 8);
+        let r = render(&s(&["abcdefghijkl", "", "xy"]), &[], &[], 6 + 8);
         assert_eq!(row_of(&r.rows, 0), 0);
         assert_eq!(row_of(&r.rows, 1), 2);
         assert_eq!(row_of(&r.rows, 2), 3);
@@ -480,7 +651,7 @@ mod tests {
     #[test]
     fn copy_leaves_the_numbers_and_joins_a_wrapped_line() {
         let l = s(&["abcdefghijkl", "", "xy"]);
-        let r = render(&l, &[], 6 + 8);
+        let r = render(&l, &[], &[], 6 + 8);
         let g = r.gutter;
         let c = |row, col| Cell { row, col };
         // From the gutter of the first row to the end of the last.
@@ -499,10 +670,105 @@ mod tests {
     #[test]
     fn copy_takes_a_wide_character_whole() {
         let l = s(&["a\u{4e00}b"]);
-        let r = render(&l, &[], 40);
+        let r = render(&l, &[], &[], 40);
         let g = r.gutter;
         let c = |col| Cell { row: 0, col };
         assert_eq!(copy(&l, &r.rows, g, c(g + 2), c(g + 2)), "\u{4e00}");
         assert_eq!(copy(&l, &r.rows, g, c(g + 1), c(g + 3)), "\u{4e00}b");
+    }
+
+    #[test]
+    fn hunk_headers_mark_added_changed_and_removed_lines() {
+        let diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n\
+                    @@ -0,0 +1,2 @@\n+a\n+b\n\
+                    @@ -5 +7 @@ fn x\n-c\n+d\n\
+                    @@ -9,2 +10,0 @@\n-e\n-f\n\
+                    @@ -20,3 +20,2 @@\n";
+        let m = marks(diff, 22);
+        assert_eq!(m[0..3], [Some(Mark::Added), Some(Mark::Added), None]);
+        assert_eq!(m[6], Some(Mark::Modified));
+        assert_eq!(m[9], Some(Mark::DeletedBelow));
+        assert_eq!(m[19..21], [Some(Mark::Modified), Some(Mark::Modified)]);
+        assert_eq!(m.iter().flatten().count(), 6);
+    }
+
+    #[test]
+    fn a_removal_before_the_first_line_and_past_the_end_are_safe() {
+        assert_eq!(marks("@@ -1,2 +0,0 @@", 3)[0], Some(Mark::DeletedAbove));
+        assert!(marks("@@ -1 +50,4 @@", 3).iter().all(Option::is_none));
+        // A change wins over a removal after the line.
+        let m = marks("@@ -2 +2 @@\n@@ -4 +2,0 @@", 3);
+        assert_eq!(m[1], Some(Mark::Modified));
+    }
+
+    #[test]
+    fn marks_sit_between_the_number_and_the_text() {
+        let l = s(&["abcdefghijkl", "x"]);
+        let m = [Some(Mark::Modified), Some(Mark::DeletedBelow)];
+        let r = render(&l, &[], &m, 6 + 8);
+        assert_eq!(
+            screen(&r),
+            s(&[
+                "   1 \u{258e}abcdefgh",
+                "     \u{258e}ijkl",
+                "   2 \u{2581}x"
+            ])
+        );
+        // A removal marks only the last row of its line.
+        let m = [Some(Mark::DeletedBelow)];
+        let r = render(&l[..1], &[], &m, 6 + 8);
+        assert_eq!(screen(&r), s(&["   1  abcdefgh", "     \u{2581}ijkl"]));
+    }
+
+    #[test]
+    fn find_goes_on_from_where_it_is_and_wraps_round() {
+        let l = s(&["a foo", "bar", "foo foo"]);
+        let hit = |line, start| {
+            Some(Hit {
+                line,
+                start,
+                end: start + 3,
+            })
+        };
+        assert_eq!(find(&l, "foo", 0, 0, true), hit(0, 2));
+        assert_eq!(find(&l, "foo", 0, 3, true), hit(2, 0));
+        assert_eq!(find(&l, "foo", 2, 1, true), hit(2, 4));
+        assert_eq!(find(&l, "foo", 2, 5, true), hit(0, 2));
+        assert_eq!(find(&l, "foo", 2, 4, false), hit(2, 0));
+        assert_eq!(find(&l, "foo", 2, 0, false), hit(0, 2));
+        assert_eq!(find(&l, "foo", 0, 2, false), hit(2, 4));
+        // The only match, found again from just past itself.
+        assert_eq!(find(&l, "bar", 1, 1, true), hit(1, 0));
+        assert_eq!(find(&l, "baz", 0, 0, true), None);
+        assert_eq!(find(&l, "", 0, 0, true), None);
+    }
+
+    #[test]
+    fn find_ignores_case_unless_the_query_has_a_capital() {
+        let l = s(&["Foo foo \u{d6}l"]);
+        assert_eq!(find(&l, "foo", 0, 0, true).map(|h| h.start), Some(0));
+        assert_eq!(find(&l, "Foo", 0, 1, true).map(|h| h.start), Some(0));
+        let h = find(&l, "\u{f6}l", 0, 0, true).unwrap();
+        assert_eq!(&l[0][h.start..h.end], "\u{d6}l");
+    }
+
+    #[test]
+    fn a_match_maps_to_the_cells_it_covers_across_a_wrap() {
+        let l = s(&["abcdefghijkl", "a\u{4e00}b"]);
+        let r = render(&l, &[], &[], 6 + 8);
+        let g = r.gutter;
+        let c = |row, col| Cell { row, col };
+        let hit = Hit {
+            line: 0,
+            start: 6,
+            end: 10,
+        };
+        assert_eq!(cells(&l, &r.rows, g, hit), Some((c(0, g + 6), c(1, g + 1))));
+        let hit = Hit {
+            line: 1,
+            start: 1,
+            end: 4,
+        };
+        assert_eq!(cells(&l, &r.rows, g, hit), Some((c(2, g + 1), c(2, g + 2))));
     }
 }

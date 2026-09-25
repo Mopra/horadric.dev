@@ -593,15 +593,31 @@ editor, on purpose.
   rows the rest is left out and counted. Each row is a full width of
   cells, so the rows limit is what bounds memory, about 60 MB at 120
   columns.
+- **Changed lines.** Between a line's number and its text, a bar in VS
+  Code's gutter colours says how it differs from the last commit: green
+  for added, blue for changed, and a red underline on the line a removal
+  follows. It comes from the hunk headers of `git diff -U0 HEAD` for the
+  one file (`viewer::marks`, pure), run on the colouring thread. Every
+  rescan asks again even when the file did not change, so a commit clears
+  the marks. An untracked file, or one outside a repository, has none.
+- **Search.** Ctrl+Shift+F opens the terminal's search bar, but a view
+  searches its file, not its grid (`viewer::find` and `viewer::cells`), so
+  a line number never matches and a match can cross a wrap. It starts at
+  the top line on screen, and Enter and F3 go down the file, as in an
+  editor, where a terminal goes up its history. Shift goes back, and both
+  wrap round. Case is ignored unless the query has a capital.
 
 Tested on screen with a dev instance on this repo: `main.rs` opened beside
 a `cmd.exe` pane with the colours right, the wheel scrolled it, a click on
 another file replaced it, an edit to the shown file appeared within a few
 seconds, a drag across the gutter copied only the text, and Esc and the
-cross both closed it with the keyboard back in the session.
+cross both closed it with the keyboard back in the session. The changed
+lines and the search were checked on a scratch repository with a line
+changed, two removed and two added: each mark in its place, Enter stepping
+to the next match and round to the first, "12" (only a line number there)
+not found, and the marks gone a few seconds after a commit.
 
-Not done yet: a diff view (the changed lines of a modified file marked in
-the gutter), a search, and horizontal scrolling instead of wrapping.
+Not done yet: horizontal scrolling instead of wrapping.
 
 ### Browser windows
 
