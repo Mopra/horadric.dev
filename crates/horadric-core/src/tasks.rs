@@ -445,6 +445,14 @@ pub fn nudge(horadric: &str) -> String {
     )
 }
 
+/// What a session stopped by the usage limit is told once the limit has
+/// reset, so it picks up the item where the refusal left it.
+pub fn go_on(horadric: &str) -> String {
+    format!(
+        "The usage limit has reset. Go on with this item where you left off,          and when it is finished, commit your work and run `{horadric} task done`."
+    )
+}
+
 /// Text on one line: newlines and tabs become spaces.
 pub fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -632,6 +640,7 @@ mod tests {
         );
         assert!(system_prompt("hx").contains("`hx task done`"));
         assert!(nudge("hx").contains("`hx task done`"));
+        assert!(go_on("hx").contains("`hx task done`"));
     }
 
     #[test]

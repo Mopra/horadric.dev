@@ -15,18 +15,21 @@
 //! - a session whose turn ended without a report is asked, once, whether
 //!   it is finished;
 //! - review, blocked and unanswered items are announced once each;
-//! - with nothing in hand, the next open item starts.
+//! - with nothing in hand, the next open item starts;
+//! - while a usage limit is used up nothing starts, and a session the
+//!   limit stopped is told to go on once it has reset.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::tasks::{self, Mark, Mode, Next, Task, TASKS_FILE};
-use horadric_core::{ssh, Phase};
+use horadric_core::usage::format_until;
+use horadric_core::{ssh, Phase, WaitReason};
 use horadric_hooks::tasks as file;
 use windows::Win32::Foundation::HWND;
 
-use super::{post, with_app, App, WM_HORADRIC_TASK_MENU};
+use super::{post, unix_now, with_app, App, WM_HORADRIC_TASK_MENU};
 use crate::app::Run;
 use crate::board::{self, Board, RowState};
 use crate::tray::{self, Item};
@@ -38,6 +41,11 @@ const START_GAP: Duration = Duration::from_secs(10);
 /// How long after the nudge's text its Enter goes, so the agent's input
 /// box takes the text as typed rather than as one paste with a newline.
 const ENTER_AFTER: Duration = Duration::from_millis(400);
+/// How long past a limit's reset the runner waits before it goes on, in
+/// seconds, so a clock a little ahead of Anthropic's is not refused again.
+const AFTER_RESET: u64 = 60;
+/// The `StopFailure` error Claude Code gives when a usage limit refuses a turn.
+const RATE_LIMIT: &str = "rate_limit";
 
 /// What the app keeps for the task lists.
 #[derive(Default)]
@@ -59,6 +67,8 @@ pub(super) struct State {
     ran: HashSet<String>,
     /// When the runner last started a session, by project.
     started: HashMap<String, Instant>,
+    /// Sessions holding an item that a usage limit stopped mid turn.
+    refused: HashMap<String, Refused>,
     /// Menus and dialogs waiting for the app's window to show them.
     pub(super) menu: Option<Menu>,
     /// Set while the runner acts. Starting a session reconciles, and
@@ -67,6 +77,17 @@ pub(super) struct State {
 }
 
 type Stamp = [Option<(SystemTime, u64)>; 2];
+
+/// A session a usage limit stopped.
+struct Refused {
+    /// When it was stopped, so a second refusal after going on counts anew.
+    since: SystemTime,
+    /// When it can go on, in Unix seconds, none when no reset is known and
+    /// only the human can tell.
+    at: Option<u64>,
+    /// Already told to go on.
+    told: bool,
+}
 
 /// A menu or dialog asked for from a cluster.
 pub(super) enum Menu {
@@ -366,8 +387,12 @@ impl App {
             .iter()
             .map(|(k, b)| (k.clone(), b.clone()))
             .collect();
+        let now = unix_now();
+        self.watch_refusals(&boards, now);
+        let held = self.held_until(now);
         let mut closed = false;
         let mut said = Vec::new();
+        let mut waiting = false;
         for (key, b) in &boards {
             if self.close_finished(b) {
                 closed = true;
@@ -377,13 +402,114 @@ impl App {
             }
             self.nudge(b);
             said.extend(self.worth_saying(key, b));
-            self.start_next(key, b);
+            if held.is_none() {
+                self.start_next(key, b);
+            } else if b.mode.runs() {
+                waiting |= matches!(
+                    tasks::next(&b.tasks, b.mode, |id| self.phase_of(id).is_some()),
+                    Next::Start(_)
+                ) || b.tasks.iter().any(|t| {
+                    t.holder
+                        .as_ref()
+                        .is_some_and(|h| self.tasks.refused.contains_key(h))
+                });
+            }
+        }
+        if let (Some(at), true) = (held, waiting) {
+            said.push((
+                format!("limit:{at}"),
+                "Usage limit reached".to_string(),
+                format!(
+                    "The task list goes on in {}, once it resets.",
+                    format_until(at.saturating_sub(now))
+                ),
+            ));
         }
         self.announce_tasks(said);
         self.tasks.busy = false;
         if closed {
             self.reconcile(false);
         }
+    }
+
+    /// Keeps track of the sessions on an item that a usage limit stopped,
+    /// and tells each to go on once its limit has reset. Only typed into a
+    /// running terminal, so it can never start an agent.
+    fn watch_refusals(&mut self, boards: &[(String, Board)], now: u64) {
+        let limits = self
+            .shared
+            .usage
+            .lock()
+            .ok()
+            .and_then(|u| u.as_ref().map(|u| u.limits.clone()))
+            .unwrap_or_default();
+        let working: Vec<String> = boards
+            .iter()
+            .flat_map(|(_, b)| &b.tasks)
+            .filter(|t| t.mark == Mark::Working)
+            .filter_map(|t| t.holder.clone())
+            .collect();
+        let stopped: HashMap<String, SystemTime> = {
+            let Ok(r) = self.shared.registry.lock() else {
+                return;
+            };
+            working
+                .iter()
+                .filter_map(|h| {
+                    let s = r.get(h)?;
+                    let refused =
+                        matches!(&s.phase, Phase::Waiting(WaitReason::Error(e)) if e == RATE_LIMIT);
+                    refused.then(|| (h.clone(), s.since))
+                })
+                .collect()
+        };
+        self.tasks
+            .refused
+            .retain(|h, r| stopped.get(h) == Some(&r.since));
+        for (h, since) in stopped {
+            self.tasks.refused.entry(h).or_insert_with(|| Refused {
+                since,
+                at: limits.out_until(now, true).map(|t| t + AFTER_RESET),
+                told: false,
+            });
+        }
+        let due: Vec<String> = self
+            .tasks
+            .refused
+            .iter()
+            .filter(|(_, r)| !r.told && r.at.is_some_and(|t| t <= now))
+            .map(|(h, _)| h.clone())
+            .collect();
+        for h in due {
+            let Some(c) = self.consoles.get(&h).filter(|c| c.exit_code().is_none()) else {
+                continue;
+            };
+            c.write(tasks::go_on(&horadric_command()).into_bytes());
+            self.tasks.enters.push((h.clone(), Instant::now()));
+            if let Some(r) = self.tasks.refused.get_mut(&h) {
+                r.told = true;
+            }
+        }
+    }
+
+    /// Until when, in Unix seconds, the runner starts nothing: a limit the
+    /// numbers say is used up, or one that stopped a session and has not
+    /// reset yet.
+    fn held_until(&self, now: u64) -> Option<u64> {
+        let heard = self
+            .shared
+            .usage
+            .lock()
+            .ok()
+            // Looked at a margin earlier, so the hold lasts past the reset.
+            .and_then(|u| {
+                u.as_ref()?
+                    .limits
+                    .out_until(now.saturating_sub(AFTER_RESET), false)
+            })
+            .map(|t| t + AFTER_RESET);
+        let refused = self.tasks.refused.values().filter_map(|r| r.at);
+        heard.into_iter().chain(refused).filter(|&t| t > now).max()
     }
 
     /// Ends the sessions whose items are done, once they are not mid turn:

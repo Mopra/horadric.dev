@@ -1105,6 +1105,20 @@ tracker.
   a restart: the runner never resumes one by itself, a click on its row
   or tile does. At a permission prompt, like any session, so how far auto
   mode gets alone depends on the permission mode in the usage window.
+- **When a usage limit runs out** the runner waits instead of stopping
+  (`Limits::out_until`, pure and tested). While the numbers the status
+  line last gave say a limit is at 100 %, nothing starts until a minute
+  past its reset, the latest reset if several are full. A session on an
+  item that the limit refuses mid turn (a `StopFailure` with
+  `rate_limit`) gets no nudge; the runner notes when the fullest limit
+  resets, holds every list until then, and a minute after types into it
+  once that the limit has reset and to go on with the item
+  (`tasks::go_on`). With no reset known it stays for the human. A
+  notification says when the list goes on. Only typed into a running
+  terminal, so it never starts an agent. Tested with a dev instance and
+  faked limits: a full limit resetting in 20 s held the first start for
+  80 s, and a refused session was told to go on 70 s after a limit at
+  97 % resetting in 10 s, once.
 - **The nudge.** A session in review or auto mode whose turn ends without
   a report is asked once, typed into its terminal, whether it is finished,
   with the command spelled out. The Enter follows 400 ms later, so the
@@ -1168,8 +1182,6 @@ Not done yet:
 - The runner holds one item at a time. With step 4 each item gets its own
   worktree and `parallel` in `config.json` lets it hold several; the file
   then lives in the main working tree only.
-- When the five hour limit runs out, the runner could wait for the reset
-  and go on.
 
 ## Next
 

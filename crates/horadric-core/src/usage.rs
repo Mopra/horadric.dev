@@ -69,6 +69,31 @@ impl Limits {
         .filter_map(|(name, l)| Some((name, l?)))
         .collect()
     }
+
+    /// When the account can work again, in Unix seconds, if a limit is
+    /// used up at `now`: the latest reset among the full ones, since
+    /// nothing runs until every one of them starts over. With `hit`, a
+    /// session was just refused for its limit, though the numbers last
+    /// heard may not show one full yet, so the fullest limit still to
+    /// reset is taken as the one that ran out. None when no reset is known.
+    pub fn out_until(&self, now: u64, hit: bool) -> Option<u64> {
+        let pending: Vec<(f32, u64)> = [self.five_hour, self.seven_day, self.spend]
+            .into_iter()
+            .flatten()
+            .filter_map(|l| Some((l.used, l.resets_at.filter(|&t| t > now)?)))
+            .collect();
+        let full = pending.iter().filter(|(used, _)| *used >= 100.0);
+        if let Some(t) = full.map(|&(_, t)| t).max() {
+            return Some(t);
+        }
+        if !hit {
+            return None;
+        }
+        pending
+            .iter()
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|&(_, t)| t)
+    }
 }
 
 /// The limits as last heard, and when, in Unix seconds.
@@ -371,6 +396,57 @@ mod tests {
             resets_at: None,
         };
         assert_eq!(open.at(1000), (5.0, None));
+    }
+
+    fn limit(used: f32, resets_at: u64) -> Option<Limit> {
+        Some(Limit {
+            used,
+            resets_at: Some(resets_at),
+        })
+    }
+
+    #[test]
+    fn a_full_limit_holds_until_it_resets() {
+        let l = Limits {
+            five_hour: limit(100.0, 500),
+            seven_day: limit(60.0, 9000),
+            spend: None,
+        };
+        assert_eq!(l.out_until(100, false), Some(500));
+        // Its reset has passed, so it is empty again.
+        assert_eq!(l.out_until(500, false), None);
+    }
+
+    #[test]
+    fn every_full_limit_has_to_reset() {
+        let l = Limits {
+            five_hour: limit(100.0, 500),
+            seven_day: limit(100.0, 9000),
+            spend: None,
+        };
+        assert_eq!(l.out_until(100, false), Some(9000));
+    }
+
+    #[test]
+    fn a_limit_not_full_holds_nothing() {
+        let l = Limits {
+            five_hour: limit(99.0, 500),
+            ..Limits::default()
+        };
+        assert_eq!(l.out_until(100, false), None);
+        assert_eq!(Limits::default().out_until(100, true), None);
+    }
+
+    #[test]
+    fn a_refused_session_waits_for_the_fullest_limit() {
+        let l = Limits {
+            five_hour: limit(97.0, 500),
+            seven_day: limit(40.0, 9000),
+            spend: None,
+        };
+        assert_eq!(l.out_until(100, true), Some(500));
+        // Nothing left to reset, so nothing to wait for.
+        assert_eq!(l.out_until(9000, true), None);
     }
 
     #[test]
