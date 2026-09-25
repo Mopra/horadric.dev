@@ -1367,7 +1367,7 @@ Order of work: hosts in `config.json` and the SSH terminal from the
 project menu, then the prompt for agents, then "Add host" with the
 suggestions from `~/.ssh/config`.
 
-### Sessions that outlive Horadric (proposed, not decided)
+### Sessions that outlive Horadric
 
 Today every pseudo console is created by the Horadric process. When that
 process ends, its `HPCON`s close, conhost goes, and every agent with it.
@@ -1412,14 +1412,14 @@ all, so every change to it is the same problem again one layer down.
 it would put the agents in Linux, not Windows, and it adds a toolkit
 between us and the terminal, which is the settled decision.
 
-**Recommendation: B, with A first.** A is cheap and still needed for logoff
+**Decided 2026-09-25: A first, then B**, with Quit as proposed below. A is cheap and still needed for logoff
 and restart. B isolates the failure where it happens and keeps the part that
 must never change tiny. Things B has to settle when it is built:
 
 - **Quit.** Tray Quit could leave the hosts running (sessions go on, tiles
   come back on the next start) or end them as today. Proposed: Quit asks,
-  with "keep running" as the default when any session is mid turn. This is
-  the human's call.
+  with "keep running" as the default when any session is mid turn.
+  Decided.
 - **Reload** stops waiting for idle sessions: the new build attaches to the
   same hosts. The UI and the host speak a versioned protocol, and a new UI
   must understand every host version still running, since hosts from old
@@ -1461,8 +1461,8 @@ and find every session where it was.
 
 - **Sessions die with Horadric.** The consoles live in the Horadric process, so
   quitting or crashing it ends every agent in a terminal. The options and a
-  recommendation are under "Sessions that outlive Horadric" in Next,
-  waiting for a decision.
+  decision (A, then B) are under "Sessions that outlive Horadric" in
+  Next.
 - **Terminal gaps.** The IME composition window is not placed at the cursor.
   Mouse reporting to programs, the kitty keyboard protocol and cursor blink
   are not implemented. The font family is fixed.
