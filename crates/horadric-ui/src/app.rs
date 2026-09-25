@@ -22,14 +22,15 @@
 //! first appears, and follows its project: switching the stage to another
 //! project minimises the browsers of the rest and brings back that one's.
 //!
-//! What Horadric owned is saved to disk as it changes. On the next start the
-//! sessions come back as paused tiles, and clicking one resumes its
-//! conversation with `claude --resume`.
+//! Every console runs in a session host of its own, so the sessions outlive
+//! the app: a start finds the hosts still running and attaches to them,
+//! with their screens replayed. What Horadric owned is saved to disk as it
+//! changes too. A session whose host is gone comes back as a paused tile,
+//! and clicking one resumes its conversation with `claude --resume`.
 //!
-//! `horadric reload` hands the app over to a new build. Once no session is mid
-//! turn this one saves, starts the new build's `swap`, and quits. The new
-//! app starts with `reload` set and resumes the sessions that were running,
-//! so an update costs a few seconds instead of a click on every tile.
+//! `horadric reload` hands the app over to a new build at once: this one
+//! saves, starts the new build's `swap`, and quits. The new app attaches to
+//! the same hosts, so an update costs a few seconds and no session notices.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -380,9 +381,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         defaults: RefCell::new(saved.defaults.clone()),
         boards: RefCell::new(HashMap::new()),
     });
-    let status_settings = std::env::current_exe()
-        .ok()
-        .and_then(|exe| store::write_status_settings(&exe));
+    // From the hosts' copy, since a session that outlives this app keeps
+    // running the status line from wherever it pointed.
+    let status_settings = store::write_status_settings(&console::host_program());
     let usage_window = match UsageWindow::create(
         Rc::clone(&shared),
         saved.usage_window.as_ref().is_some_and(|p| p.collapsed),
@@ -437,6 +438,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             recent_menu_for: None,
             reload: None,
             quit: false,
+            stop_on_exit: false,
             recovering: (how == Carry::Crash).then(Instant::now),
             browsers: HashMap::new(),
             waiting: HashSet::new(),
@@ -447,6 +449,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             counted: Arc::new(Mutex::new(Vec::new())),
         };
         app.reconcile(false);
+        app.attach_hosts();
         app.carry_on(&carry, on_stage.as_deref());
         // Written before anything resumed can crash it, so that crash is
         // known for what it is.
@@ -484,8 +487,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             if let Some(s) = &app.start_window {
                 s.destroy();
             }
-            for c in app.consoles.values() {
-                c.kill();
+            // Otherwise the hosts run on and the next start attaches.
+            if app.stop_on_exit {
+                app.stop_all();
             }
         }
     });
@@ -727,12 +731,13 @@ fn tray_menu(hwnd: HWND) {
         }
         Some(Choice::Quit) => {
             let (agents, shells) = with_app(|app| app.live_counts()).unwrap_or((0, 0));
-            let ok = match quit_question(agents, shells) {
-                Some(q) => picker::confirm(hwnd, &q),
-                None => true,
+            let working = with_app(|app| app.mid_turn_count()).unwrap_or(0);
+            let keep = match quit_question(agents, shells) {
+                Some(q) => picker::keep_or_stop(hwnd, &q, working > 0),
+                None => Some(false),
             };
-            if ok {
-                with_app(App::quit);
+            if let Some(keep) = keep {
+                with_app(|app| app.quit(!keep));
                 unsafe { PostQuitMessage(0) };
             }
         }
@@ -741,29 +746,36 @@ fn tray_menu(hwnd: HWND) {
 }
 
 /// What to ask before quitting with `agents` sessions and `shells` plain
-/// terminals running. Nothing when none is.
+/// terminals running: whether they keep running without Horadric. Nothing
+/// when none is.
 fn quit_question(agents: usize, shells: usize) -> Option<String> {
-    let sessions = match agents {
-        0 => None,
-        1 => Some(
-            "The running session will stop. It comes back as a paused tile the next time \
-             Horadric starts, and resumes where it left off."
-                .to_string(),
+    let what = match (agents, shells) {
+        (0, 0) => return None,
+        (1, 0) => "the running session".to_string(),
+        (n, 0) => format!("the {n} running sessions"),
+        (0, 1) => "the open terminal".to_string(),
+        (0, n) => format!("the {n} open terminals"),
+        (1, 1) => "the running session and the open terminal".to_string(),
+        (a, s) => format!(
+            "{} and {}",
+            plural(a, "running session"),
+            plural(s, "open terminal")
         ),
-        n => Some(format!(
-            "{n} running sessions will stop. They come back as paused tiles the next time \
-             Horadric starts, and resume where they left off."
-        )),
     };
-    let terminals = match shells {
-        0 => None,
-        1 => Some("The open terminal will close, and whatever runs in it.".to_string()),
-        n => Some(format!(
-            "{n} open terminals will close, and whatever runs in them."
-        )),
-    };
-    let said: Vec<String> = sessions.into_iter().chain(terminals).collect();
-    (!said.is_empty()).then(|| format!("Quit Horadric?\n\n{}", said.join(" ")))
+    Some(format!(
+        "Quit Horadric, and keep {what} going without it?\n\n\
+         Yes: they run on, and their tiles come back as they are when Horadric starts \
+         again.\n\
+         No: they stop. A session comes back as a paused tile and resumes where it left \
+         off. A terminal closes, and whatever runs in it."
+    ))
+}
+
+fn plural(n: usize, what: &str) -> String {
+    match n {
+        1 => format!("1 {what}"),
+        n => format!("{n} {what}s"),
+    }
 }
 
 /// What a tile's menu can offer for its session.
@@ -1223,12 +1235,15 @@ struct App {
     project_menu_for: Option<String>,
     /// The recent project whose menu is about to show.
     recent_menu_for: Option<PathBuf>,
-    /// A new build to hand over to, once no session is mid turn.
+    /// A new build to hand over to.
     reload: Option<Reload>,
-    /// Quit from the tray: the next start leaves every session paused.
-    /// Anything else that ends the app, a reload, a logoff or a crash,
-    /// resumes the sessions that were running.
+    /// Quit from the tray: the next start resumes no session whose host
+    /// is gone. Anything else that ends the app, a reload, a logoff or a
+    /// crash, resumes the sessions that were running.
     quit: bool,
+    /// Quit chose to stop the sessions rather than leave their hosts
+    /// running.
+    stop_on_exit: bool,
     /// When this start resumed sessions after a crash, until it has run
     /// long enough not to count as the same crash again.
     recovering: Option<Instant>,
@@ -1363,17 +1378,14 @@ impl App {
             .count()
     }
 
-    /// Hands over to the new build once no session would be cut off mid
-    /// turn: saves, starts the new build's `swap`, and quits. `swap` waits
-    /// for this process to exit, installs the build, and starts it with
-    /// `--reload`, which resumes the sessions saved as running.
+    /// Hands over to the new build: saves, starts the new build's `swap`,
+    /// and quits. `swap` waits for this process to exit, installs the
+    /// build, and starts it with `--reload`. The sessions' hosts run on and
+    /// the new build attaches to them, so nothing waits for a turn to end.
     fn reload_when_ready(&mut self) {
         let Some(reload) = &self.reload else {
             return;
         };
-        if !reload.now && self.mid_turn_count() > 0 {
-            return;
-        }
         let exe = PathBuf::from(&reload.exe);
         self.freeze();
         let started = std::process::Command::new(&exe)
@@ -1397,8 +1409,67 @@ impl App {
         }
     }
 
-    /// After a reload or a crash: starts again the sessions that were running, without
-    /// opening a window for each, and puts back the one that was on stage.
+    /// Connects to every session host still running for this instance,
+    /// after a crash, a reload or a Quit that kept them. Each session
+    /// carries on where it was, its screen replayed, and its phase read
+    /// from its transcript, since its hooks went nowhere while no app ran.
+    fn attach_hosts(&mut self) {
+        for id in console::running_hosts() {
+            let Some(saved) = self.paused.get(&id).cloned() else {
+                eprintln!("horadric: a session host runs for {id}, which is not a saved session");
+                continue;
+            };
+            let serial = self.next_serial;
+            let console =
+                match Console::attach(&id, serial, saved.args.clone(), saved.shell, self.notify) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("horadric: cannot attach to {id}: {e}");
+                        continue;
+                    }
+                };
+            self.next_serial += 1;
+            self.paused.remove(&id);
+            let busy = saved
+                .claude_session_id
+                .as_deref()
+                .filter(|_| !saved.shell)
+                .and_then(|claude| transcript::mid_turn(&saved.cwd, claude))
+                .unwrap_or(false);
+            if let Ok(mut r) = self.shared.registry.lock() {
+                let now = SystemTime::now();
+                r.apply(&id, &HookEvent::synthetic(HookEvent::REGISTER), now);
+                if busy {
+                    r.apply(&id, &HookEvent::synthetic("PreToolUse"), now);
+                }
+            }
+            self.consoles.insert(id, console);
+        }
+        self.reconcile(true);
+    }
+
+    /// Ends every session and waits a moment for their hosts to say so,
+    /// since the kills go out on threads that end with this process.
+    fn stop_all(&self) {
+        for c in self.consoles.values() {
+            if c.exit_code().is_none() {
+                c.kill();
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline
+            && self
+                .consoles
+                .values()
+                .any(|c| !c.is_view() && c.exit_code().is_none())
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// After a reload or a crash: starts again the sessions that were running
+    /// and have no host any more, without opening a window for each, and
+    /// puts back the one that was on stage.
     fn carry_on(&mut self, ids: &[String], on_stage: Option<&str>) {
         for id in ids {
             // A hook heard already means its agent outlived the last
@@ -2848,9 +2919,11 @@ impl App {
         }
     }
 
-    /// Saves for the last time as quit, so the next start resumes nothing.
-    fn quit(&mut self) {
+    /// Saves for the last time as quit, so the next start resumes nothing
+    /// whose host is gone. With `stop`, the sessions end with the app.
+    fn quit(&mut self, stop: bool) {
         self.quit = true;
+        self.stop_on_exit = stop;
         self.freeze();
     }
 
@@ -2955,7 +3028,7 @@ impl App {
             "Horadric"
         };
         let tip = match (total, waiting) {
-            _ if self.reload.is_some() => format!("{app}: reloads when no session is working"),
+            _ if self.reload.is_some() => format!("{app}: reloading"),
             (0, _) => format!("{app}: no sessions"),
             (t, 0) => format!("{app}: {t} session{}", if t == 1 { "" } else { "s" }),
             (t, w) => format!("{app}: {t} sessions, {w} waiting"),
@@ -3542,26 +3615,36 @@ mod tests {
     }
 
     #[test]
-    fn quitting_says_what_stops_and_what_comes_back() {
+    fn quitting_asks_whether_what_runs_keeps_running() {
         assert_eq!(quit_question(0, 0), None);
+        let first = |a, s| {
+            quit_question(a, s)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap()
+                .to_string()
+        };
         assert_eq!(
-            quit_question(2, 0).as_deref(),
-            Some(
-                "Quit Horadric?\n\n2 running sessions will stop. They come back as paused tiles \
-                 the next time Horadric starts, and resume where they left off."
-            )
+            first(1, 0),
+            "Quit Horadric, and keep the running session going without it?"
         );
         assert_eq!(
-            quit_question(0, 1).as_deref(),
-            Some("Quit Horadric?\n\nThe open terminal will close, and whatever runs in it.")
+            first(2, 0),
+            "Quit Horadric, and keep the 2 running sessions going without it?"
         );
         assert_eq!(
-            quit_question(1, 3).as_deref(),
-            Some(
-                "Quit Horadric?\n\nThe running session will stop. It comes back as a paused tile \
-                 the next time Horadric starts, and resumes where it left off. 3 open terminals \
-                 will close, and whatever runs in them."
-            )
+            first(0, 1),
+            "Quit Horadric, and keep the open terminal going without it?"
         );
+        assert_eq!(
+            first(1, 1),
+            "Quit Horadric, and keep the running session and the open terminal going without it?"
+        );
+        assert_eq!(
+            first(1, 3),
+            "Quit Horadric, and keep 1 running session and 3 open terminals going without it?"
+        );
+        assert!(quit_question(2, 0).unwrap().contains("\nNo: they stop."));
     }
 }

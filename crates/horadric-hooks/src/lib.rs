@@ -60,7 +60,7 @@ pub const STATUS_PATH: &str = "/horadric/status";
 pub const NEW_PATH: &str = "/horadric/new";
 
 /// Path `horadric reload` posts to, asking the running app to hand over to a
-/// new build once no session is mid turn.
+/// new build.
 pub const RELOAD_PATH: &str = "/horadric/reload";
 
 /// Path `horadric task` posts to after it changed a project's task list, so
@@ -90,6 +90,12 @@ fn port_from(horadric_port: Option<&str>, dev: bool) -> u16 {
     horadric_port
         .and_then(|p| p.parse().ok())
         .unwrap_or(if dev { DEV_PORT } else { DEFAULT_PORT })
+}
+
+/// Names this Horadric among the others on the machine, in the pipes of
+/// its session hosts: the port, which no two running instances share.
+pub fn instance() -> String {
+    port().to_string()
 }
 
 pub fn hook_url(port: u16) -> String {

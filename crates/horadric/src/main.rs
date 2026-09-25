@@ -5,7 +5,8 @@
 //! in a terminal of its own, `run` starts a tagged `claude` in the current
 //! terminal, `task` reports on an item of the task list, `serve` shows the
 //! state stream as a table, `reload` hands the running app over to this
-//! build, and the rest set Horadric up on this machine.
+//! build, and the rest set Horadric up on this machine. `host` is not for
+//! people: the app starts one per session to hold its console.
 
 mod console;
 mod explorer;
@@ -16,6 +17,7 @@ mod setup;
 mod status;
 mod task;
 
+use std::io::Read;
 use std::net::TcpStream;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
@@ -51,7 +53,8 @@ Usage:
   horadric status                The status line Horadric gives its sessions: reads Claude
                                Code's JSON on stdin and passes it to the app
   horadric reload [--now]        Swap the running Horadric for this build once no session
-                               is working, and resume the running sessions in it.
+                               is working (a build from before session hosts waits),
+                               and carry the running sessions over to it.
                                --now does not wait. A dev instance just restarts.
 
 Environment:
@@ -78,6 +81,7 @@ fn main() -> ExitCode {
         Some("run") => run::run(&args[1..]),
         Some("task") => task::run(&args[1..]),
         Some("setup") => setup::run(&args[1..]),
+        Some("host") => host(),
         Some("hooks") => hooks(args.get(1).map(String::as_str)),
         Some("explorer") => explorer_command(args.get(1).map(String::as_str)),
         None => std::env::current_exe()
@@ -122,11 +126,46 @@ fn running() -> bool {
     TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(200)).is_ok()
 }
 
+/// `horadric host`: holds one session's console, as the [`Spec`] on stdin
+/// says, until its program ends. An error goes to stderr, where the app
+/// that started it reads it.
+///
+/// [`Spec`]: horadric_pty::host::Spec
+fn host() -> Result<(), String> {
+    let mut json = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut json)
+        .map_err(|e| e.to_string())?;
+    let spec: horadric_pty::host::Spec =
+        serde_json::from_slice(&json).map_err(|e| format!("host: {e}"))?;
+    horadric_pty::host::serve(spec).map_err(|e| format!("could not start the agent: {e}"))
+}
+
+/// The sessions whose hosts run with no app to show them, after a crash or
+/// a Quit that kept them.
+fn orphans() -> Vec<String> {
+    let instance = horadric_hooks::instance();
+    horadric_pty::pipe::list(&horadric_pty::wire::pipe_prefix(&instance))
+}
+
 /// Starts `exe app` hidden and detached, and waits until it listens.
 fn launch(exe: &Path) -> Result<(), String> {
     if running() {
         println!("Horadric is already running. Its icon is in the tray, by the clock.");
         return Ok(());
+    }
+    // A session never runs where nobody can see it for long: say which
+    // ones are, and the app about to start attaches to them.
+    let kept = orphans();
+    if !kept.is_empty() {
+        println!(
+            "{} ran on without Horadric: {}",
+            match kept.len() {
+                1 => "1 session".to_string(),
+                n => format!("{n} sessions"),
+            },
+            kept.join(", ")
+        );
     }
     Command::new(exe)
         .arg("app")

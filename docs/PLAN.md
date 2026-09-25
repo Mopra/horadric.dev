@@ -6,7 +6,8 @@ document: someone picking the project up cold should need nothing else.
 
 Last updated 2026-09-25, after step 3, the launchers, persistence, install,
 the stage, reload, the project grid, browser windows, the look, plain
-terminals, a pass of quality of life, the columns and the task list.
+terminals, a pass of quality of life, the columns, the task list and
+session hosts.
 
 ## Shape of the thing
 
@@ -16,7 +17,7 @@ Five crates, one binary.
 |---|---|---|
 | `horadric-core` | Session, Phase, Registry, the state machine | any |
 | `horadric-hooks` | The localhost listener, its client, the settings installer | any |
-| `horadric-pty` | Child processes in ConPTY pseudo consoles | Windows |
+| `horadric-pty` | ConPTY pseudo consoles, the session host and its pipe protocol | Windows |
 | `horadric-ui` | Cluster and terminal windows, layout, drawing | Windows |
 | `horadric` | The command line, `horadricw` for Explorer, the wiring | Windows |
 
@@ -29,9 +30,10 @@ verified on screen.
 
 Threads: the listener thread owns the socket, a feeder thread applies events
 to the registry, the UI thread owns every window and never blocks. Each
-console adds three: a reader that parses output into its grid, a waiter
-that notices the exit, and a writer that owns the input pipe so typing never
-blocks the UI. Everything off the UI thread reaches it as a message to one
+console adds two: a reader that parses what its session host sends into
+the grid and notices the exit, and a writer that owns the pipe's sending
+side so typing never blocks the UI. The host process has its own, see
+"Sessions that outlive Horadric". Everything off the UI thread reaches it as a message to one
 hidden message-only window, never a thread message: thread messages are
 dropped while Windows runs a modal loop, and dragging a terminal's edge is
 one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
@@ -347,9 +349,10 @@ own `APPDATA`, `LOCALAPPDATA`, home and port, the rollback by squatting the
 port so the new build could not listen.
 
 The installed Horadric has to know `/horadric/reload`, so the first build with
-it is installed by hand. Sessions still end with the process; reload only
-makes the restart cheap. Keeping them alive across it is the separate
-process question below.
+it is installed by hand. Since session hosts (below) the sessions no longer
+end with the process: the new build attaches to them, and the wait for
+idle sessions is gone. What this section says about resuming still holds
+for a session whose host is gone.
 
 ### Dev instances
 
@@ -1454,6 +1457,82 @@ Sizing: A is a day. B is about a week: the host and its pipe server, the
 UI side replacing `Pty` in `Console` behind the same four calls, attaching
 on start, the replay, and on screen tests of kill the UI, start it again,
 and find every session where it was.
+
+**Option B is built**, as settled above, with these details:
+
+- **`horadric host`** reads a JSON `Spec` (the command and the pipe name)
+  on stdin, takes the first instance of its pipe with
+  `FILE_FLAG_FIRST_PIPE_INSTANCE` (so a second host for the same session
+  fails before it starts a second agent), starts the program in a pseudo
+  console, and serves until the program ends. A startup error goes to
+  stderr, which the UI reads and shows as it did before.
+- **The pipe** is `\\.\pipe\horadric-<port>-<session id>`, the port
+  standing for the instance, so a dev instance never attaches to the
+  installed one's sessions. Its DACL names the current user's SID and
+  nobody else, and it refuses remote clients. Every handle is overlapped:
+  a synchronous handle runs one call at a time, and the reader sitting in
+  a read would hold up every write.
+- **The protocol**, `horadric_pty::wire`: a hello (`HRDH` and a version
+  byte, 1 today), then frames of a kind byte, a length and a body. Five
+  kinds: input, resize, output, exit, kill. Unknown kinds are skipped. The
+  host sends its console size first, as a resize, then the replay, so the
+  UI builds its grid at the size the replay was drawn at.
+- **The ring** is the last 4 MB of output. Once it has dropped bytes the
+  replay starts after the first line break, out of whatever escape
+  sequence it began in. On every attach after the first the host resizes
+  the console one row smaller and back, which makes ConPTY repaint and
+  Claude Code redraw.
+- **One client, the newest.** A UI that connects while another holds the
+  pipe takes it over, as during a reload. The old one is disconnected.
+- **Exit.** The host sends every byte of output, then the exit code, waits
+  up to 5 seconds for the UI to read it, and ends. With no UI connected it
+  ends at once. A host that disappears without an exit reads as
+  `HOST_LOST`, a non zero code, so the session pauses and a click resumes
+  it.
+- **The binary** hosts run from is a copy of the UI's,
+  `horadric-host-<size>-<mtime>.exe` in `%LOCALAPPDATA%\Horadric\hosts`
+  (`Horadric-dev` for a dev instance). A long lived host running
+  `horadric.exe` itself would stop `swap` from moving it aside a second
+  time and lock `target\debug` against the next build. Copies no host
+  runs from are deleted when a new build makes its own. The status line
+  runs from the copy too. Task Manager shows the name, which tells a host
+  from the UI.
+- **Jobs.** The host is started with `DETACHED_PROCESS`,
+  `CREATE_NEW_PROCESS_GROUP` and `CREATE_BREAKAWAY_FROM_JOB`, and without
+  the last when the UI's job refuses it. The session's own job is named
+  `Local\horadric-<port>-<id>`; the UI opens it for query and asks
+  `IsProcessInJob` itself, so "is this window's process yours" needed no
+  message of its own. Session jobs allow breakaway, so a dev Horadric
+  started from a session's terminal gets hosts that outlive that terminal.
+- **Attaching.** On every start, before resuming anything, the app lists
+  the pipes with its prefix and attaches to each one that is a saved
+  session. Its phase comes from the transcript's last user or assistant
+  record (`title::mid_turn`): working after a prompt, a tool call or a
+  tool's result, idle after a reply that ended the turn or an interrupt.
+  Resuming after a crash (option A) then skips those sessions, since they
+  are no longer paused, so A only resumes sessions whose host is gone.
+- **Orphans.** `horadric` with no app running prints the sessions that ran
+  on without it, then starts the app, which attaches to them.
+- **Quit** asks "keep them going without it?" with Yes, No and Cancel.
+  Enter is Yes when a session is mid turn, No otherwise. No kills every
+  session and waits up to 3 seconds for the hosts to confirm, since the
+  kills leave on threads that end with the process.
+- **Reload** hands over at once. An installed Horadric from before hosts
+  still waits for idle sessions and ends them on the way out, so the first
+  reload into this build resumes them as before; from then on they run
+  through.
+
+Tested with a dev instance, three `cmd.exe` sessions (one printing a line
+a second) and one real `claude`: the dev UI killed four times and started
+again, then `reload`. Every session came back each time with its screen
+replayed and the counter further on, the `claude` with the same pid, two
+`claude.exe` on the machine (the agent doing the test, and that one).
+Killing one host paused only its tile. Found on the way: the `windows`
+crate turns an error into an `io::Error` holding the HRESULT, so a missing
+pipe never read as `NotFound` and the UI gave up on a host it had just
+started; `pipe::os` converts it back. Not seen on screen: the Quit
+question itself, since a message box would have taken the screen from
+the human.
 
 ### Step 5: inbox, installer, updater
 

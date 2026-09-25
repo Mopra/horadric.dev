@@ -12,6 +12,9 @@
 #![cfg(windows)]
 
 mod conpty;
+pub mod host;
+pub mod pipe;
+pub mod wire;
 
 pub use conpty::{Command, Pty};
 

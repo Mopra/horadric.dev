@@ -127,8 +127,11 @@ is on folders in Explorer (under "Show more options" on Windows 11), it
 starts with Windows, and the Claude Code hooks are in place. Horadric lives in
 the tray; Windows may hide a new icon behind the `^` by the clock.
 
-Sessions survive a quit or a restart: they come back as paused tiles, and a
-click resumes the conversation.
+Each session's console runs in a small host process of its own, so the
+agents keep running when Horadric crashes, reloads, or quits with "keep
+running": the next start finds them where they were, screen and all.
+Sessions whose process is gone (a restart of Windows, or Quit with "stop
+them") come back as paused tiles, and a click resumes the conversation.
 
 `HORADRIC_AGENT=cmd.exe` runs a shell instead of `claude` in the terminals,
 which is the cheap way to try them.
@@ -138,9 +141,9 @@ it: its own port and saved state, no autostart, a red tray icon. That is how
 Horadric is developed from a session inside Horadric.
 
 `target\release\horadric.exe reload` updates a running Horadric to a new build
-without the quit: once no session is mid turn it hands over, and the
-sessions that were running resume by themselves. A build that fails to
-start is rolled back.
+without the quit. It hands over at once and the new build attaches to the
+running sessions, mid turn or not. A build that fails to start is rolled
+back.
 
 `horadric uninstall` takes it all back out. The hooks it removes are only
 Horadric's; everything else in your Claude Code settings stays as it was.

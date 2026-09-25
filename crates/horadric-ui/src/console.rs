@@ -5,18 +5,24 @@
 //! and the renderer, and the reader thread keeps parsing output into the
 //! grid, so expanding it again shows the screen as it is now.
 //!
+//! The console itself lives in a session host, a process of its own (see
+//! `horadric_pty::host`), so the agent outlives this one. A console here
+//! is the UI's end of it: the grid, fed by what the host sends, and a
+//! handle to send keys, sizes and a kill back. On a start after the UI
+//! ended, [`Console::attach`] connects to a host still running and gets
+//! the screen back from its replay.
+//!
 //! A console can also have no program at all and show a file read only
 //! ([`Console::view`]). The pane draws it like any other grid, which is how
 //! it gets selection, scrolling and fallback fonts for nothing.
 
 use std::ffi::c_void;
-use std::fs::File;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -25,13 +31,15 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
 use horadric_core::worktree::SETUP_ENV;
 use horadric_hooks::{OWNER_ENV, SESSION_ENV};
-use horadric_pty::{find_program, Command, Pty, PROGRAM_EXTS};
+use horadric_pty::host::{Attached, Incoming, Remote, Spec};
+use horadric_pty::wire::{self, Message};
+use horadric_pty::{find_program, Command, PROGRAM_EXTS};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::app::{WM_HORADRIC_EXIT, WM_HORADRIC_OUTPUT};
 use crate::viewer::{self, Cell, Row, Span};
-use crate::{clipboard, highlight, palette, shell};
+use crate::{clipboard, highlight, palette, shell, store};
 
 /// History per session, as much as Windows Terminal keeps. 2000 rows was
 /// gone in an afternoon of Claude Code output. Rows are allocated as output
@@ -58,6 +66,11 @@ const PARENT_SESSION_ENV: [&str; 11] = [
     "CLAUDE_PID",
     "AI_AGENT",
 ];
+
+/// The exit code of a session whose host went away without saying how the
+/// program ended: a crashed host, or one killed by hand. Not zero, so the
+/// session pauses and a click resumes it.
+pub const HOST_LOST: u32 = 0xFFFF_FFFE;
 
 pub const DEFAULT_COLS: u16 = 120;
 pub const DEFAULT_ROWS: u16 = 36;
@@ -94,8 +107,8 @@ pub struct Console {
     pub id: String,
     /// Small number for window messages, which carry integers, not strings.
     pub serial: usize,
-    /// None for a file view, which has no program.
-    pty: Option<Arc<Pty>>,
+    /// The session host, None for a file view, which has no program.
+    remote: Option<Arc<Remote>>,
     view: Option<Mutex<View>>,
     pub screen: Mutex<Screen>,
     size: Mutex<GridSize>,
@@ -115,6 +128,15 @@ pub struct Console {
     /// When a key was last typed into it, which may have left a draft in
     /// its prompt box.
     typed: Mutex<Option<SystemTime>>,
+}
+
+/// What a hosted console is, beside its host.
+struct Meta {
+    id: String,
+    serial: usize,
+    args: Vec<String>,
+    shell: bool,
+    claude: bool,
 }
 
 /// The file a view shows, and how it is laid out in the grid now.
@@ -192,9 +214,72 @@ pub fn ssh_program() -> Option<PathBuf> {
     })
 }
 
+/// The name of a session's host pipe for this Horadric instance.
+pub fn pipe_name(id: &str) -> String {
+    wire::pipe_name(&horadric_hooks::instance(), id)
+}
+
+fn job_name(id: &str) -> String {
+    wire::job_name(&horadric_hooks::instance(), id)
+}
+
+/// The sessions whose hosts are running for this instance, with or
+/// without a UI.
+pub fn running_hosts() -> Vec<String> {
+    horadric_pty::pipe::list(&wire::pipe_prefix(&horadric_hooks::instance()))
+}
+
+/// The binary session hosts run from: a copy of this one, named for its
+/// build, in `%LOCALAPPDATA%\Horadric\hosts`. A host outlives the UI, and
+/// the UI's own binary has to stay free: `reload` renames it and a dev
+/// build overwrites it. Copies no host runs from any more are deleted as
+/// a new one is made; one still running can not be, and stays.
+pub fn host_program() -> PathBuf {
+    static HOST: OnceLock<PathBuf> = OnceLock::new();
+    HOST.get_or_init(|| {
+        let exe = std::env::current_exe().unwrap_or_else(|_| "horadric.exe".into());
+        copy_for_hosts(&exe).unwrap_or(exe)
+    })
+    .clone()
+}
+
+fn copy_for_hosts(exe: &Path) -> Option<PathBuf> {
+    let dir = store::local_dir()?.join("hosts");
+    let meta = std::fs::metadata(exe).ok()?;
+    let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    let name = host_file_name(meta.len(), modified.as_secs());
+    let target = dir.join(&name);
+    if target.is_file() {
+        return Some(target);
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
+    std::fs::copy(exe, &tmp).ok()?;
+    if std::fs::rename(&tmp, &target).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+        let path = entry.path();
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if path != target && file.starts_with(HOST_PREFIX) && !file.ends_with(".tmp") {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    target.is_file().then_some(target)
+}
+
+const HOST_PREFIX: &str = "horadric-host-";
+
+/// A host binary's file name, the same for the same build and different
+/// for any other. Task Manager shows it, which tells a host from the UI.
+fn host_file_name(len: u64, modified: u64) -> String {
+    format!("{HOST_PREFIX}{len}-{modified}.exe")
+}
+
 impl Console {
-    /// Starts the agent and the threads that read its output and wait for it.
-    /// `notify` is the window that hears about output and exit.
+    /// Starts the agent in a session host and the thread that reads what
+    /// the host sends. `notify` is the window that hears about output and
+    /// exit.
     pub fn spawn(launch: Launch, notify: HWND) -> io::Result<Arc<Console>> {
         let size = GridSize {
             cols: DEFAULT_COLS,
@@ -220,7 +305,7 @@ impl Console {
             env_set.push((SETUP_ENV.into(), setup));
             args.insert(0, program.to_string_lossy().into_owned());
             args.insert(0, "setup".into());
-            program = std::env::current_exe()?;
+            program = host_program();
         }
         let cmd = Command {
             program,
@@ -233,16 +318,62 @@ impl Console {
                 [&PARENT_SESSION_ENV[..], &[SESSION_ENV, OWNER_ENV]].concat()
             } else {
                 PARENT_SESSION_ENV.to_vec()
-            },
+            }
+            .into_iter()
+            .map(String::from)
+            .collect(),
             cols: size.cols,
             rows: size.rows,
+            job_name: Some(job_name(&launch.id)),
         };
-        let (pty, output) = Pty::spawn(&cmd)?;
-        let pty = Arc::new(pty);
+        let spec = Spec {
+            pipe: pipe_name(&launch.id),
+            command: cmd,
+        };
+        let attached = Remote::start(&host_program(), &spec, &job_name(&launch.id))?;
+        let meta = Meta {
+            id: launch.id,
+            serial: launch.serial,
+            args: launch.args,
+            shell: launch.shell,
+            claude,
+        };
+        Ok(Console::hosted(attached, meta, notify))
+    }
 
+    /// Connects to the host of a session that kept running while no UI
+    /// did, and replays what it kept of the screen. NotFound when there is
+    /// no such host.
+    pub fn attach(
+        id: &str,
+        serial: usize,
+        args: Vec<String>,
+        shell: bool,
+        notify: HWND,
+    ) -> io::Result<Arc<Console>> {
+        let attached = Remote::attach(&pipe_name(id), &job_name(id))?;
+        let meta = Meta {
+            id: id.to_string(),
+            serial,
+            args,
+            shell,
+            claude: !shell && agent_program().is_some_and(|p| is_claude(&p)),
+        };
+        Ok(Console::hosted(attached, meta, notify))
+    }
+
+    fn hosted(attached: Attached, meta: Meta, notify: HWND) -> Arc<Console> {
+        let Attached {
+            remote,
+            incoming,
+            cols,
+            rows,
+        } = attached;
+        let size = GridSize { cols, rows };
+        let remote = Arc::new(remote);
         let title = Arc::new(Mutex::new(None));
         let events = Events {
-            pty: Some(Arc::clone(&pty)),
+            remote: Some(Arc::clone(&remote)),
             title: Arc::clone(&title),
         };
         let config = Config {
@@ -250,9 +381,9 @@ impl Console {
             ..Config::default()
         };
         let console = Arc::new(Console {
-            id: launch.id,
-            serial: launch.serial,
-            pty: Some(Arc::clone(&pty)),
+            id: meta.id,
+            serial: meta.serial,
+            remote: Some(remote),
             view: None,
             screen: Mutex::new(Screen {
                 term: Term::new(config, &size, events),
@@ -262,41 +393,40 @@ impl Console {
             dirty: AtomicBool::new(false),
             exit: Mutex::new(None),
             title,
-            args: launch.args,
-            shell: launch.shell,
-            claude,
+            args: meta.args,
+            shell: meta.shell,
+            claude: meta.claude,
             typed: Mutex::new(None),
         });
-
         let notify = notify.0 as isize;
         let reader = Arc::clone(&console);
-        thread::spawn(move || reader.read(output, notify));
-        let waiter = Arc::clone(&console);
-        thread::spawn(move || {
-            let code = pty.wait();
-            if let Ok(mut e) = waiter.exit.lock() {
-                *e = Some(code);
-            }
-            post(notify, WM_HORADRIC_EXIT, waiter.serial);
-        });
-        Ok(console)
+        thread::spawn(move || reader.read(incoming, notify));
+        console
     }
 
-    fn read(&self, mut output: File, notify: isize) {
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            let n = match output.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => n,
-            };
-            if let Ok(mut s) = self.screen.lock() {
-                let Screen { term, parser } = &mut *s;
-                parser.advance(term, &buf[..n]);
+    /// Parses output into the grid until the host says the program ended,
+    /// or goes away without saying.
+    fn read(&self, mut incoming: Incoming, notify: isize) {
+        let code = loop {
+            match incoming.recv() {
+                Some(Message::Output(bytes)) => {
+                    if let Ok(mut s) = self.screen.lock() {
+                        let Screen { term, parser } = &mut *s;
+                        parser.advance(term, &bytes);
+                    }
+                    if !self.dirty.swap(true, Ordering::AcqRel) {
+                        post(notify, WM_HORADRIC_OUTPUT, self.serial);
+                    }
+                }
+                Some(Message::Exit(code)) => break code,
+                Some(_) => {}
+                None => break HOST_LOST,
             }
-            if !self.dirty.swap(true, Ordering::AcqRel) {
-                post(notify, WM_HORADRIC_OUTPUT, self.serial);
-            }
+        };
+        if let Ok(mut e) = self.exit.lock() {
+            *e = Some(code);
         }
+        post(notify, WM_HORADRIC_EXIT, self.serial);
     }
 
     /// A console with no program, showing the file at `path` read only.
@@ -315,13 +445,13 @@ impl Console {
         };
         let title = Arc::new(Mutex::new(Some(detail)));
         let events = Events {
-            pty: None,
+            remote: None,
             title: Arc::clone(&title),
         };
         let console = Arc::new(Console {
             id,
             serial,
-            pty: None,
+            remote: None,
             view: Some(Mutex::new(View {
                 path,
                 stamp: None,
@@ -432,7 +562,7 @@ impl Console {
         let size = self.size();
         let r = viewer::render(&v.lines, &v.spans, size.cols as usize);
         let events = Events {
-            pty: None,
+            remote: None,
             title: Arc::clone(&self.title),
         };
         let config = Config {
@@ -478,8 +608,8 @@ impl Console {
     }
 
     pub fn write(&self, bytes: impl Into<Vec<u8>>) {
-        if let Some(pty) = &self.pty {
-            pty.write(bytes);
+        if let Some(remote) = &self.remote {
+            remote.write(bytes);
         }
     }
 
@@ -519,27 +649,28 @@ impl Console {
             }
             *current = size;
         }
-        match &self.pty {
-            Some(pty) => {
+        match &self.remote {
+            Some(remote) => {
                 if let Ok(mut s) = self.screen.lock() {
                     s.term.resize(size);
                 }
-                let _ = pty.resize(size.cols, size.rows);
+                remote.resize(size.cols, size.rows);
             }
             None => self.lay_out(),
         }
     }
 
+    /// Ends the program. The host ends too, once it has said so.
     pub fn kill(&self) {
-        if let Some(pty) = &self.pty {
-            pty.kill();
+        if let Some(remote) = &self.remote {
+            remote.kill();
         }
     }
 
     /// Whether a process is the agent or was started by it, however far
     /// down: a browser its tests opened, say.
     pub fn contains(&self, process: HANDLE) -> bool {
-        self.pty.as_ref().is_some_and(|p| p.contains(process))
+        self.remote.as_ref().is_some_and(|r| r.contains(process))
     }
 
     pub fn exit_code(&self) -> Option<u32> {
@@ -610,7 +741,7 @@ fn post(notify: isize, msg: u32, serial: usize) {
 /// Requests the terminal makes of the outside world while parsing. Runs on
 /// the reader thread with the screen locked, so nothing here may block.
 pub struct Events {
-    pty: Option<Arc<Pty>>,
+    remote: Option<Arc<Remote>>,
     title: Arc<Mutex<Option<String>>>,
 }
 
@@ -619,14 +750,14 @@ impl EventListener for Events {
         match event {
             // Answers to device status and attribute queries.
             Event::PtyWrite(text) => {
-                if let Some(pty) = &self.pty {
-                    pty.write(text.into_bytes());
+                if let Some(remote) = &self.remote {
+                    remote.write(text.into_bytes());
                 }
             }
             // Programs ask for the background to pick a light or dark theme.
             Event::ColorRequest(index, format) => {
-                if let Some(pty) = &self.pty {
-                    pty.write(format(palette::default_rgb(index)).into_bytes());
+                if let Some(remote) = &self.remote {
+                    remote.write(format(palette::default_rgb(index)).into_bytes());
                 }
             }
             Event::Title(t) => {
@@ -656,5 +787,13 @@ mod tests {
         assert!(is_claude(Path::new(r"C:\npm\Claude.cmd")));
         assert!(!is_claude(Path::new(r"C:\Windows\System32\cmd.exe")));
         assert!(!is_claude(Path::new(r"C:\bin\claude-dev.exe")));
+    }
+
+    #[test]
+    fn a_host_binary_is_named_for_its_build() {
+        let a = host_file_name(12_345, 1_700_000_000);
+        assert_eq!(a, "horadric-host-12345-1700000000.exe");
+        assert_ne!(a, host_file_name(12_345, 1_700_000_001));
+        assert!(a.starts_with(HOST_PREFIX));
     }
 }

@@ -10,7 +10,8 @@ use windows::Win32::UI::Shell::{
     FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    MessageBoxW, IDOK, MB_ICONWARNING, MB_OKCANCEL, MB_SETFOREGROUND,
+    MessageBoxW, IDNO, IDOK, IDYES, MB_DEFBUTTON1, MB_DEFBUTTON2, MB_ICONQUESTION, MB_ICONWARNING,
+    MB_OKCANCEL, MB_SETFOREGROUND, MB_YESNOCANCEL,
 };
 
 /// Asks for a folder, starting in `start`. None when cancelled. Runs a modal
@@ -44,6 +45,30 @@ pub fn pick_folder(owner: HWND, start: Option<&Path>) -> Option<PathBuf> {
 }
 
 /// An OK or Cancel warning. True for OK.
+/// Asks a yes, no or cancel question whose yes keeps something running:
+/// Some(true) for yes, Some(false) for no, None for cancel. Enter answers
+/// yes when `keep_first`, otherwise no.
+pub fn keep_or_stop(owner: HWND, text: &str, keep_first: bool) -> Option<bool> {
+    let default = if keep_first {
+        MB_DEFBUTTON1
+    } else {
+        MB_DEFBUTTON2
+    };
+    let answer = unsafe {
+        MessageBoxW(
+            Some(owner),
+            &HSTRING::from(text),
+            w!("Horadric"),
+            MB_YESNOCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND | default,
+        )
+    };
+    match answer {
+        IDYES => Some(true),
+        IDNO => Some(false),
+        _ => None,
+    }
+}
+
 pub fn confirm(owner: HWND, text: &str) -> bool {
     unsafe {
         MessageBoxW(

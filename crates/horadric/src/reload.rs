@@ -1,11 +1,11 @@
 //! `horadric reload`: the shortest way from a new build to using it.
 //!
 //! Run from the new build (`target\release\horadric.exe reload`), it asks the
-//! running Horadric to hand over. That one waits until no session is mid
-//! turn, saves, starts this binary as `horadric swap`, and quits. `swap` waits
-//! for it to be gone, copies the build into the install folder with the old
-//! binaries kept beside it, and starts the new one with `app --reload`,
-//! which resumes the sessions that were running.
+//! running Horadric to hand over. That one saves, starts this binary as
+//! `horadric swap`, and quits. `swap` waits for it to be gone, copies the
+//! build into the install folder with the old binaries kept beside it, and
+//! starts the new one with `app --reload`. The sessions run on in their
+//! hosts and the new app attaches to them; any without a host is resumed.
 //!
 //! A build that does not come up is rolled back: the old binaries go back
 //! and are started instead. A dev instance restarts from its own build and
@@ -61,16 +61,15 @@ pub fn request(args: &[String]) -> Result<(), String> {
         &request.to_json(),
     ) {
         Ok(200) => {
+            // A Horadric from before session hosts still waits for idle
+            // sessions unless told `--now`, whatever this build says.
             if now {
                 println!("Horadric is reloading into {}.", exe.display());
             } else {
-                println!(
-                    "Horadric reloads into {} as soon as no session is working.",
-                    exe.display()
-                );
+                println!("Horadric reloads into {}.", exe.display());
             }
             println!(
-                "Running sessions resume by themselves. Log: {}",
+                "Running sessions carry on in the new build. Log: {}",
                 log_path().display()
             );
             Ok(())

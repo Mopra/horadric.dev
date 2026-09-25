@@ -64,11 +64,18 @@ Tests cannot tell you a window looks right. The loop that works:
    puts a shell in the terminals instead of `claude`.
 4. Never leave a test running unwatched that can start agents. A resume bug
    once started 167 `claude` processes in a minute. Count `claude.exe`
-   children of the dev `horadric.exe` after any change to how sessions start.
-5. Screenshot the top right corner with PowerShell and `CopyFromScreen`, then
+   children of the dev instance's `horadric-host-*.exe` processes after any
+   change to how sessions start.
+5. Each session runs in a host process, `horadric-host-<build>.exe` in
+   `%LOCALAPPDATA%\Horadric-dev\hosts`, which outlives the dev UI on
+   purpose. When a test is done, stop those too: `Get-Process
+   horadric-host* | ? Path -like '*\Horadric-dev\hosts\*' | Stop-Process
+   -Force`. The installed Horadric's hosts are in `Horadric\hosts`; leave
+   them alone, one of them runs you.
+6. Screenshot the top right corner with PowerShell and `CopyFromScreen`, then
    read the image. For a window that is behind another, `PrintWindow` with
    flag 2 captures it anyway.
-6. `HORADRIC_DEBUG=1` makes the app log cluster positions, sizes and paints.
+7. `HORADRIC_DEBUG=1` makes the app log cluster positions, sizes and paints.
 
 Two bugs found this way that tests would never have caught: a window born
 with its final layout never resized past 10 pixels, and a window created off
@@ -90,10 +97,12 @@ builds and tests dev instances as above and never touches the installed
 one, with one exception: shipping, and only when the human says to ship.
 
 Shipping is `cargo build --release`, then `target\release\horadric.exe
-reload`. The installed Horadric waits until no session is mid turn, hands
-over to the new build and resumes every session that was running,
-including the agent's own. So the agent says what it shipped before it
-runs `reload`, ends its turn, and does nothing after. A build that does not
+reload`. The installed Horadric hands over to the new build at once, and
+the new build attaches to every session's host, including the agent's
+own, which keeps running through it. An installed Horadric from before
+session hosts waits until no session is mid turn and resumes them
+instead. Either way the agent says what it shipped before it runs
+`reload`, ends its turn, and does nothing after. A build that does not
 come up is rolled back to the old binaries by itself. What happened is in
 `%APPDATA%\Horadric\reload.log`.
 

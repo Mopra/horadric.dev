@@ -9,12 +9,16 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
 use std::thread;
 
+use serde::{Deserialize, Serialize};
 use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::System::Console::{
     ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
 };
-use windows::Win32::System::JobObjects::{CreateJobObjectW, IsProcessInJob};
+use windows::Win32::System::JobObjects::{
+    CreateJobObjectW, IsProcessInJob, JobObjectBasicLimitInformation, SetInformationJobObject,
+    JOBOBJECT_BASIC_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+};
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
@@ -27,7 +31,7 @@ use windows::Win32::System::Threading::{
 use crate::{environment_block, launch_line, wide};
 
 /// What to run and how big the console starts.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command {
     pub program: PathBuf,
     pub args: Vec<String>,
@@ -35,9 +39,13 @@ pub struct Command {
     /// Added to the inherited environment, replacing any existing value.
     pub env_set: Vec<(String, String)>,
     /// Removed from the inherited environment.
-    pub env_remove: Vec<&'static str>,
+    pub env_remove: Vec<String>,
     pub cols: u16,
     pub rows: u16,
+    /// Names the job holding the child, so another process can open it
+    /// and ask whether a process is the child's. Unnamed when None.
+    #[serde(default)]
+    pub job_name: Option<String>,
 }
 
 /// A running child in a pseudo console.
@@ -79,13 +87,29 @@ impl Pty {
             drop(in_read);
             drop(out_write);
 
-            let job = match CreateJobObjectW(None, PCWSTR::null()) {
+            let job_name = cmd.job_name.as_ref().map(|n| wide(n.as_ref()));
+            let job_name = job_name
+                .as_ref()
+                .map_or(PCWSTR::null(), |n| PCWSTR(n.as_ptr()));
+            let job = match CreateJobObjectW(None, job_name) {
                 Ok(j) => OwnedHandle::from_raw_handle(j.0),
                 Err(e) => {
                     ClosePseudoConsole(console);
                     return Err(e.into());
                 }
             };
+            // A Horadric started from a terminal of another lets its own
+            // session hosts leave this job, so they outlive that terminal.
+            let limits = JOBOBJECT_BASIC_LIMIT_INFORMATION {
+                LimitFlags: JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+                ..Default::default()
+            };
+            let _ = SetInformationJobObject(
+                HANDLE(job.as_raw_handle()),
+                JobObjectBasicLimitInformation,
+                &limits as *const _ as *const c_void,
+                std::mem::size_of_val(&limits) as u32,
+            );
             let started = start(cmd, console, &job);
             let (process, pid) = match started {
                 Ok(p) => p,
@@ -242,7 +266,8 @@ unsafe fn start(
         si.lpAttributeList = list;
 
         let mut line: Vec<u16> = wide(launch_line(&cmd.program, &cmd.args).as_ref());
-        let env = environment_block(std::env::vars_os(), &cmd.env_set, &cmd.env_remove);
+        let remove: Vec<&str> = cmd.env_remove.iter().map(String::as_str).collect();
+        let env = environment_block(std::env::vars_os(), &cmd.env_set, &remove);
         let cwd = wide(cmd.cwd.as_os_str());
         let mut pi = PROCESS_INFORMATION::default();
         CreateProcessW(
@@ -285,6 +310,7 @@ mod tests {
             env_remove: vec![],
             cols: 80,
             rows: 24,
+            job_name: None,
         };
         let (pty, mut out) = Pty::spawn(&cmd).unwrap();
         let reader = thread::spawn(move || {
@@ -314,6 +340,7 @@ mod tests {
             env_remove: vec![],
             cols: 80,
             rows: 24,
+            job_name: None,
         };
         let (pty, mut out) = Pty::spawn(&cmd).unwrap();
         thread::spawn(move || {

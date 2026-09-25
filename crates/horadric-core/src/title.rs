@@ -49,6 +49,48 @@ pub fn latest(transcript: &[u8]) -> Option<Title> {
         }))
 }
 
+/// Whether a conversation is in the middle of a turn, from the end of its
+/// transcript: after a prompt or a tool's result, or while the reply asks
+/// for a tool, Claude is at work. After a reply that ended its turn, or an
+/// interrupt, it is not. None when the stretch holds neither. Horadric
+/// asks when it attaches to a session that ran on while no UI heard its
+/// hooks; the next hook corrects it either way.
+pub fn mid_turn(transcript: &[u8]) -> Option<bool> {
+    for line in transcript.rsplit(|&b| b == b'\n') {
+        let user = contains(line, br#""type":"user""#);
+        if !user && !contains(line, br#""type":"assistant""#) {
+            continue;
+        }
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        let message = &v["message"];
+        match v["type"].as_str() {
+            Some("user") => {
+                // Slash commands like `/model` write their own records,
+                // which are neither a prompt nor a tool's result.
+                let text = message["content"].as_str().unwrap_or_default();
+                if v["isMeta"].as_bool() == Some(true)
+                    || text.starts_with("<command-")
+                    || text.starts_with("<local-command-")
+                {
+                    continue;
+                }
+                let raw = String::from_utf8_lossy(line);
+                return Some(!raw.contains("[Request interrupted by user"));
+            }
+            Some("assistant") => {
+                return Some(matches!(
+                    message["stop_reason"].as_str(),
+                    None | Some("tool_use")
+                ))
+            }
+            _ => continue,
+        }
+    }
+    None
+}
+
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
@@ -92,6 +134,34 @@ mod tests {
         assert_eq!(latest(b"{\"type\":\"user\"}\n"), None);
         assert_eq!(latest(br#"{"type":"ai-title","aiTitle":"  "}"#), None);
         assert_eq!(latest(b""), None);
+    }
+
+    #[test]
+    fn a_turn_is_open_until_a_reply_ends_it() {
+        let prompt = r#"{"type":"user","message":{"role":"user","content":"fix it"}}"#;
+        let tool = r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[]}}"#;
+        let result = r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#;
+        let done = r#"{"type":"assistant","message":{"stop_reason":"end_turn","content":[]}}"#;
+        let after = r#"{"type":"system","subtype":"turn_duration"}"#;
+        let t = |lines: &[&str]| mid_turn(lines.join("\n").as_bytes());
+        assert_eq!(t(&[prompt]), Some(true));
+        assert_eq!(t(&[prompt, tool]), Some(true));
+        assert_eq!(t(&[prompt, tool, result]), Some(true));
+        assert_eq!(t(&[prompt, tool, result, done, after, ""]), Some(false));
+        assert_eq!(t(&[after]), None);
+        assert_eq!(t(&[]), None);
+    }
+
+    #[test]
+    fn slash_commands_and_interrupts_do_not_open_a_turn() {
+        let done = r#"{"type":"assistant","message":{"stop_reason":"end_turn"}}"#;
+        let command =
+            r#"{"type":"user","message":{"content":"<command-name>/model</command-name>"}}"#;
+        let meta = r#"{"type":"user","isMeta":true,"message":{"content":"Caveat"}}"#;
+        let stopped = r#"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;
+        let t = |lines: &[&str]| mid_turn(lines.join("\n").as_bytes());
+        assert_eq!(t(&[done, meta, command]), Some(false));
+        assert_eq!(t(&[done, stopped]), Some(false));
     }
 
     #[test]

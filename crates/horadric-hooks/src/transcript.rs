@@ -27,6 +27,20 @@ pub fn title(path: &str) -> Option<Title> {
     read_from(&mut file, 0).and_then(|b| title::latest(&b))
 }
 
+/// Whether the conversation `id`, held in `cwd`, is in the middle of a
+/// turn, see [`title::mid_turn`]. None when its transcript can not be read.
+pub fn mid_turn(cwd: &str, id: &str) -> Option<bool> {
+    let root = projects_root(
+        std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+        std::env::var("USERPROFILE").ok().as_deref(),
+    )?;
+    folders(&root, cwd).iter().find_map(|dir| {
+        let mut file = File::open(dir.join(format!("{id}.jsonl"))).ok()?;
+        let len = file.metadata().ok()?.len();
+        title::mid_turn(&read_from(&mut file, len.saturating_sub(TAIL))?)
+    })
+}
+
 /// A conversation Claude Code kept, which `claude --resume <id>` carries on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Past {
