@@ -113,7 +113,14 @@ arrow keys, a prompt and its answer, resize, collapse and expand, `/exit`.
   characters and combining sequences are drawn one at a time with
   DirectWrite fallback, pinned to their cells. Colour fonts only for wide
   characters, so a one cell symbol keeps the colour the program gave it.
-  Cascadia Mono, falling back to Consolas, 14 DIPs.
+  Cascadia Mono, falling back to Consolas, 14 DIPs. "Terminal font" in
+  the tray menu picks any installed monospaced family instead, for every
+  pane at once, kept in state.json as picked so a family that is
+  uninstalled for a while comes back. The cursor blinks at the Windows
+  caret rate in the pane with the keyboard, unless caret blinking is off
+  in Settings or the program asked for a steady cursor. It is lit while it
+  moves and stays lit 15 seconds after it last did, so an idle stage does
+  not repaint.
 - **Keyboard.** Characters come from `WM_CHAR` after the layout has done its
   work, so dead keys and AltGr on a Danish keyboard need nothing special.
   Keys without characters come from `WM_KEYDOWN` in xterm encoding.
@@ -1569,7 +1576,7 @@ the human.
   decision (A, then B) are under "Sessions that outlive Horadric" in
   Next.
 - **Terminal gaps.** The IME composition window is not placed at the cursor.
-  The kitty keyboard protocol and cursor blink are not implemented. The font family is fixed.
+  The kitty keyboard protocol is not implemented.
 - **Expanding from a synthetic click can open behind other windows.** Windows
   only lets a process take the foreground after real input. A real click on
   a tile is real input, so this only bites scripted tests.

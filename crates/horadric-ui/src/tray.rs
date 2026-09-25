@@ -54,6 +54,9 @@ pub enum Choice {
     Arrange,
     /// Stand the columns on the screen at this place in the list given.
     Screen(usize),
+    /// Draw the terminals in this font family, by its place in the list
+    /// given.
+    Font(usize),
     ToggleAutostart,
     /// Say, or stop saying, when a session starts waiting.
     ToggleNotify,
@@ -263,7 +266,8 @@ pub const HISTORY: usize = 1000;
 /// and `notify` whether a session that starts waiting says so. `history`
 /// holds a History menu for each of `recent_projects`, in order.
 /// `screens` are offered when there is more than one, with the one named
-/// `shown` checked.
+/// `shown` checked. `fonts` are the families the terminals can be drawn in,
+/// with `font` checked.
 #[allow(clippy::too_many_arguments)]
 pub fn menu(
     hwnd: HWND,
@@ -274,6 +278,8 @@ pub fn menu(
     notify: bool,
     screens: &[Screen],
     shown: Option<&str>,
+    fonts: &[String],
+    font: &str,
 ) -> Option<Choice> {
     const NEW: usize = 1;
     const QUIT: usize = 2;
@@ -286,6 +292,7 @@ pub fn menu(
     const NOTIFY: usize = 9;
     const SCREEN: usize = 50;
     const RECENT: usize = 100;
+    const FONT: usize = 200;
     let mut items = vec![Item::action(NEW, "New session\u{2026}"), Item::Separator];
     if recent_projects.is_empty() {
         items.push(Item::Disabled("No recent projects".into()));
@@ -329,6 +336,21 @@ pub fn menu(
             .collect();
         items.push(Item::Submenu("Tiles on screen".into(), lines));
     }
+    if !fonts.is_empty() {
+        // Up to the first History id, which is more families than anyone
+        // has installed.
+        let lines = fonts
+            .iter()
+            .take(HISTORY - FONT)
+            .enumerate()
+            .map(|(i, name)| Item::Action {
+                id: FONT + i,
+                label: name.replace('&', "&&"),
+                checked: name.eq_ignore_ascii_case(font),
+            })
+            .collect();
+        items.push(Item::Submenu("Terminal font".into(), lines));
+    }
     items.push(Item::Action {
         id: NOTIFY,
         label: "Notify when a session needs you".into(),
@@ -357,6 +379,7 @@ pub fn menu(
         END_ALL => Some(Choice::EndAll),
         i if i >= HISTORY => Some(Choice::History(i)),
         i if (SCREEN..RECENT).contains(&i) => Some(Choice::Screen(i - SCREEN)),
+        i if (FONT..HISTORY).contains(&i) => Some(Choice::Font(i - FONT)),
         i if i >= RECENT => recent_projects
             .get(i - RECENT)
             .map(|p| Choice::Recent(p.clone())),

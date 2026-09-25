@@ -63,6 +63,9 @@ pub struct SavedState {
     /// The terminal's font size in DIPs, once changed from the default.
     #[serde(default)]
     pub font_size: Option<f32>,
+    /// The terminal's font family, once one is picked from the tray.
+    #[serde(default)]
+    pub font_family: Option<String>,
     /// No notification when a session starts waiting on you.
     #[serde(default)]
     pub quiet: bool,

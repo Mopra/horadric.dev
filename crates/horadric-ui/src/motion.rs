@@ -25,6 +25,10 @@ pub const REVEAL: Duration = Duration::from_millis(220);
 /// The panes without the keyboard dimming back.
 pub const SPOTLIGHT: Duration = Duration::from_millis(160);
 
+/// A cursor blinks this long after it last moved, then stays lit. Blinking
+/// on would repaint an idle pane twice a second for no one.
+pub const BLINK_FOR: Duration = Duration::from_secs(15);
+
 /// Between frames while something moves quickly: an arrival, a hover.
 pub const FRAME_FAST: Duration = Duration::from_millis(16);
 /// Between frames while a light goes round a working tile. Slow enough to
@@ -33,6 +37,26 @@ pub const FRAME_ORBIT: Duration = Duration::from_millis(40);
 /// Between frames while only a waiting tile breathes. A breath is slow, and
 /// fifteen frames a second of it looks the same as sixty.
 pub const FRAME_BREATH: Duration = Duration::from_millis(66);
+
+/// Whether a blinking cursor is lit `elapsed` after it last moved, when it
+/// is lit for `half` and dark for `half`. Lit first, so a cursor never
+/// vanishes as it moves, and lit for good once [`BLINK_FOR`] is up.
+pub fn caret_lit(elapsed: Duration, half: Duration) -> bool {
+    if half.is_zero() || elapsed >= BLINK_FOR {
+        return true;
+    }
+    (elapsed.as_millis() / half.as_millis()).is_multiple_of(2)
+}
+
+/// How long until a blinking cursor next turns on or off, or None when it
+/// has stopped blinking.
+pub fn caret_turns(elapsed: Duration, half: Duration) -> Option<Duration> {
+    if half.is_zero() || elapsed >= BLINK_FOR {
+        return None;
+    }
+    let into = elapsed.as_millis() % half.as_millis();
+    Some(half - Duration::from_millis(into as u64))
+}
 
 /// How far through an animation of `length` that began `elapsed` ago, from
 /// 0 to 1.
@@ -114,6 +138,28 @@ pub fn fade(value: f32, target: f32, elapsed: Duration, length: Duration) -> f32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_caret_blinks_lit_first_then_stays_lit() {
+        let half = Duration::from_millis(500);
+        let at = Duration::from_millis;
+        assert!(caret_lit(at(0), half));
+        assert!(caret_lit(at(499), half));
+        assert!(!caret_lit(at(500), half));
+        assert!(caret_lit(at(1000), half));
+        assert!(caret_lit(BLINK_FOR + at(500), half));
+        assert!(caret_lit(at(500), Duration::ZERO));
+    }
+
+    #[test]
+    fn a_caret_turns_at_the_next_half_until_it_stops() {
+        let half = Duration::from_millis(500);
+        let at = Duration::from_millis;
+        assert_eq!(caret_turns(at(0), half), Some(at(500)));
+        assert_eq!(caret_turns(at(620), half), Some(at(380)));
+        assert_eq!(caret_turns(BLINK_FOR, half), None);
+        assert_eq!(caret_turns(at(0), Duration::ZERO), None);
+    }
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
