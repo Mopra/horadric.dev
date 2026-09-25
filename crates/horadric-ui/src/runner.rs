@@ -1,0 +1,634 @@
+//! The app's side of the task list: reading each project's list when it
+//! changes, starting a session on an item, and the runner that works down
+//! a list by itself in review and auto mode.
+//!
+//! The file is the state. Taking an item writes its session beside it
+//! before the session starts, so a list read a moment later already says
+//! the item is taken, and the runner can never start it twice. The runner
+//! holds one item per project at a time, starts at most one session per
+//! project every few seconds, and never resumes a paused one by itself:
+//! a runner that starts agents is the one piece of Horadric that could run
+//! away, and each of those rules is a fuse against it.
+//!
+//! What the runner does on each look, per project:
+//! - a session whose item is done, and that is not mid turn, closes;
+//! - a session whose turn ended without a report is asked, once, whether
+//!   it is finished;
+//! - review, blocked and unanswered items are announced once each;
+//! - with nothing in hand, the next open item starts.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
+
+use horadric_core::tasks::{self, Mark, Mode, Next, Task, TASKS_FILE};
+use horadric_core::Phase;
+use horadric_hooks::tasks as file;
+use windows::Win32::Foundation::HWND;
+
+use super::{post, with_app, App, WM_HORADRIC_TASK_MENU};
+use crate::board::{self, Board, RowState};
+use crate::tray::{self, Item};
+use crate::window::project_name;
+use crate::{ask, watch};
+
+/// The least time between two sessions the runner starts in one project.
+const START_GAP: Duration = Duration::from_secs(10);
+/// How long after the nudge's text its Enter goes, so the agent's input
+/// box takes the text as typed rather than as one paste with a newline.
+const ENTER_AFTER: Duration = Duration::from_millis(400);
+
+/// What the app keeps for the task lists.
+#[derive(Default)]
+pub(super) struct State {
+    /// When each project's list and config last changed on disk, as last
+    /// read, so an unchanged file is not read again.
+    stamps: HashMap<String, Stamp>,
+    /// The first prompt of a session about to start on an item, taken by
+    /// the launch.
+    prompts: HashMap<String, String>,
+    /// Sessions already asked whether they are finished, and when.
+    nudged: HashMap<String, SystemTime>,
+    /// Nudges whose Enter is still to be sent.
+    enters: Vec<(String, Instant)>,
+    /// What has been announced and still holds, so each is said once.
+    announced: HashSet<String>,
+    /// Projects whose runner started or closed a session on an item, so
+    /// the end of the list is worth saying.
+    ran: HashSet<String>,
+    /// When the runner last started a session, by project.
+    started: HashMap<String, Instant>,
+    /// Menus and dialogs waiting for the app's window to show them.
+    pub(super) menu: Option<Menu>,
+    /// Set while the runner acts. Starting a session reconciles, and
+    /// nothing in there may start the runner again.
+    busy: bool,
+}
+
+type Stamp = [Option<(SystemTime, u64)>; 2];
+
+/// A menu or dialog asked for from a cluster.
+pub(super) enum Menu {
+    /// What can be done with an item, by its line and title.
+    Item(String, usize, String),
+    /// The project's mode.
+    Mode(String),
+    /// A new item's title.
+    Add(String),
+}
+
+fn stamp(dir: &Path) -> Stamp {
+    let of = |p: PathBuf| {
+        let m = std::fs::metadata(p).ok()?;
+        Some((m.modified().ok()?, m.len()))
+    };
+    [of(file::file(dir)), of(file::config_file(dir))]
+}
+
+fn read_board(dir: &Path) -> Board {
+    Board {
+        mode: file::mode(dir),
+        tasks: tasks::parse(&file::read(dir)),
+    }
+}
+
+/// How the agent runs this Horadric from its shell: the full path, since
+/// the `horadric` on `PATH` may be another build. Forward slashes work in
+/// both Git Bash and PowerShell, and quotes only when a space needs them.
+pub(super) fn command_for(exe: &str) -> String {
+    let exe = exe.replace('\\', "/");
+    if exe.contains(' ') {
+        format!("\"{exe}\"")
+    } else {
+        exe
+    }
+}
+
+fn horadric_command() -> String {
+    std::env::current_exe()
+        .map(|p| command_for(&p.to_string_lossy()))
+        .unwrap_or_else(|_| "horadric".into())
+}
+
+impl App {
+    /// Reads again every project's list that changed on disk, or all of
+    /// them with `force`, and resizes the clusters whose tile changed.
+    pub(super) fn refresh_boards(&mut self, force: bool) {
+        let keys: Vec<(String, PathBuf)> = self
+            .clusters
+            .iter()
+            .filter_map(|c| Some((c.key.clone(), self.project_dir(&c.key)?)))
+            .collect();
+        let mut changed = Vec::new();
+        for (key, dir) in &keys {
+            let now = stamp(dir);
+            if !force && self.tasks.stamps.get(key) == Some(&now) {
+                continue;
+            }
+            self.tasks.stamps.insert(key.clone(), now);
+            let fresh = read_board(dir);
+            let mut boards = self.shared.boards.borrow_mut();
+            if boards.get(key) != Some(&fresh) {
+                boards.insert(key.clone(), fresh);
+                changed.push(key.clone());
+            }
+        }
+        {
+            let mut boards = self.shared.boards.borrow_mut();
+            boards.retain(|k, _| keys.iter().any(|(key, _)| key == k));
+            self.tasks.stamps.retain(|k, _| boards.contains_key(k));
+        }
+        let mut resized = false;
+        for c in self.clusters.iter().filter(|c| changed.contains(&c.key)) {
+            resized |= c.fit();
+        }
+        if resized {
+            self.arrange();
+        }
+    }
+
+    /// The phase of a session, none when it is gone.
+    fn phase_of(&self, id: &str) -> Option<Phase> {
+        Some(self.shared.registry.lock().ok()?.get(id)?.phase.clone())
+    }
+
+    fn live(&self, id: &str) -> bool {
+        self.consoles
+            .get(id)
+            .is_some_and(|c| c.exit_code().is_none())
+    }
+
+    /// What to add to a session's command line for the task list: what it
+    /// is told about the list when it holds an item, and, the first time
+    /// only, the item as its prompt. Last, since the prompt is positional.
+    pub(super) fn task_args(&mut self, id: &str, program: &Path) -> Vec<String> {
+        let holds = self
+            .shared
+            .boards
+            .borrow()
+            .values()
+            .flat_map(|b| &b.tasks)
+            .any(|t| t.mark.held() && t.holder.as_deref() == Some(id));
+        let mut out = Vec::new();
+        if holds {
+            out.push("--append-system-prompt".into());
+            out.push(tasks::system_prompt(&horadric_command()));
+        }
+        if let Some(prompt) = self.tasks.prompts.remove(id) {
+            // `cmd.exe` ends a command line at a newline.
+            out.push(if horadric_pty::is_batch(program) {
+                tasks::one_line(&prompt)
+            } else {
+                prompt
+            });
+        }
+        out
+    }
+
+    /// Starts a session on the open item on `line` titled `title`. With
+    /// `show`, its project comes onto the stage with it typing.
+    pub(super) fn take_task(
+        &mut self,
+        key: &str,
+        line: usize,
+        title: &str,
+        show: bool,
+    ) -> Result<String, String> {
+        let dir = self.project_dir(key).ok_or("the project has no folder")?;
+        let task = tasks::parse(&file::read(&dir))
+            .into_iter()
+            .find(|t| t.line == line && t.title == title && t.mark == Mark::Open)
+            .ok_or("the list changed, so that item is not there to take")?;
+        let id = self.unique_id(&tasks::slug(title));
+        let taken = file::update(&dir, |text| tasks::take(text, line, title, &id))
+            .map_err(|e| format!("cannot write {}: {e}", file::file(&dir).display()))?;
+        if !taken {
+            return Err("the list changed, so that item is not there to take".into());
+        }
+        self.tasks
+            .prompts
+            .insert(id.clone(), tasks::prompt(&task, &horadric_command()));
+        self.refresh_boards(true);
+        if let Err(e) = self.launch(&id, title, dir.clone(), Vec::new(), false, false) {
+            self.tasks.prompts.remove(&id);
+            let _ = file::update(&dir, |text| tasks::set_mark(text, line, title, Mark::Open));
+            self.refresh_boards(true);
+            return Err(e);
+        }
+        if show && self.fill_stage(key, true) {
+            if let Some(stage) = &self.stage {
+                stage.focus_session(&id);
+            }
+        }
+        Ok(id)
+    }
+
+    /// The item on `line` titled `title` in the project's list as last read.
+    fn task_at(&self, key: &str, line: usize, title: &str) -> Option<Task> {
+        let boards = self.shared.boards.borrow();
+        boards
+            .get(key)?
+            .tasks
+            .iter()
+            .find(|t| t.line == line && t.title == title)
+            .cloned()
+    }
+
+    fn row_state(&self, task: &Task) -> RowState {
+        let phase = task.holder.as_deref().and_then(|h| self.phase_of(h));
+        board::row_state(task, phase.as_ref())
+    }
+
+    /// A row clicked: an open item starts, one whose session is gone
+    /// starts again, and any other shows its session.
+    pub(super) fn task_clicked(&mut self, key: &str, line: usize, title: &str) {
+        let Some(task) = self.task_at(key, line, title) else {
+            return;
+        };
+        let result = match self.row_state(&task) {
+            RowState::Open => self.take_task(key, line, title, true).map(drop),
+            RowState::Gone => self.start_again(key, line, title),
+            _ => {
+                if let Some(h) = &task.holder {
+                    self.reveal(h, false);
+                }
+                Ok(())
+            }
+        };
+        if let Err(e) = result {
+            eprintln!("horadric: cannot start the task: {e}");
+        }
+    }
+
+    fn start_again(&mut self, key: &str, line: usize, title: &str) -> Result<(), String> {
+        self.set_task(key, line, title, Mark::Open);
+        self.take_task(key, line, title, true).map(drop)
+    }
+
+    /// Sets an item's mark in the file and looks again.
+    pub(super) fn set_task(&mut self, key: &str, line: usize, title: &str, mark: Mark) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        if let Err(e) = file::update(&dir, |text| tasks::set_mark(text, line, title, mark)) {
+            eprintln!("horadric: cannot write {}: {e}", file::file(&dir).display());
+        }
+        self.refresh_boards(true);
+        self.run_tasks();
+    }
+
+    /// Puts an item back as open and ends the session that had it, which
+    /// would otherwise go on working an item nobody holds.
+    fn put_back(&mut self, key: &str, line: usize, title: &str) {
+        let holder = self.task_at(key, line, title).and_then(|t| t.holder);
+        if let Some(h) = holder {
+            self.end(&h);
+        }
+        self.set_task(key, line, title, Mark::Open);
+    }
+
+    fn set_mode(&mut self, key: &str, mode: Mode) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        if let Err(e) = file::set_mode(&dir, mode) {
+            eprintln!(
+                "horadric: cannot write {}: {e}",
+                file::config_file(&dir).display()
+            );
+        }
+        self.refresh_boards(true);
+        self.run_tasks();
+    }
+
+    fn add_task(&mut self, key: &str, title: &str) {
+        let title = tasks::one_line(title);
+        let Some(dir) = self.project_dir(key).filter(|_| !title.is_empty()) else {
+            return;
+        };
+        if let Err(e) = file::update(&dir, |text| Some(tasks::append(text, &title))) {
+            eprintln!("horadric: cannot write {}: {e}", file::file(&dir).display());
+        }
+        self.refresh_boards(true);
+        self.run_tasks();
+    }
+
+    /// Once a second: the Enter of a nudge that is due, and a look at the
+    /// lists in case one changed.
+    pub(super) fn tick_tasks(&mut self) {
+        let due: Vec<String> = {
+            let now = Instant::now();
+            let (due, later) = std::mem::take(&mut self.tasks.enters)
+                .into_iter()
+                .partition(|(_, at)| now.duration_since(*at) >= ENTER_AFTER);
+            self.tasks.enters = later;
+            due.into_iter().map(|(id, _)| id).collect()
+        };
+        for id in due {
+            if let Some(c) = self.consoles.get(&id).filter(|c| c.exit_code().is_none()) {
+                c.write(b"\r".to_vec());
+            }
+        }
+        self.refresh_boards(false);
+        self.run_tasks();
+    }
+
+    /// One look by the runner at every project's list.
+    pub(super) fn run_tasks(&mut self) {
+        if self.frozen || self.reload.is_some() || self.tasks.busy {
+            return;
+        }
+        self.tasks.busy = true;
+        let boards: Vec<(String, Board)> = self
+            .shared
+            .boards
+            .borrow()
+            .iter()
+            .map(|(k, b)| (k.clone(), b.clone()))
+            .collect();
+        let mut closed = false;
+        let mut said = Vec::new();
+        for (key, b) in &boards {
+            if self.close_finished(b) {
+                closed = true;
+                if b.mode.runs() {
+                    self.tasks.ran.insert(key.clone());
+                }
+            }
+            self.nudge(b);
+            said.extend(self.worth_saying(key, b));
+            self.start_next(key, b);
+        }
+        self.announce_tasks(said);
+        self.tasks.busy = false;
+        if closed {
+            self.reconcile(false);
+        }
+    }
+
+    /// Ends the sessions whose items are done, once they are not mid turn:
+    /// the agent reports done from inside its turn, and gets to finish it.
+    fn close_finished(&mut self, b: &Board) -> bool {
+        let finished: Vec<String> = b
+            .tasks
+            .iter()
+            .filter(|t| t.mark == Mark::Done)
+            .filter_map(|t| t.holder.clone())
+            .filter(|h| self.live(h) && self.phase_of(h).is_some_and(|p| !p.mid_turn()))
+            .collect();
+        for h in &finished {
+            self.forget(h);
+            self.tasks.nudged.remove(h);
+        }
+        !finished.is_empty()
+    }
+
+    /// Asks a session whose turn ended without a report whether it is
+    /// finished. Once: after that, a stop is a question for the human.
+    fn nudge(&mut self, b: &Board) {
+        if !b.mode.runs() {
+            return;
+        }
+        for t in b.tasks.iter().filter(|t| t.mark == Mark::Working) {
+            let Some(h) = t.holder.as_deref() else {
+                continue;
+            };
+            if self.tasks.nudged.contains_key(h) || self.phase_of(h) != Some(Phase::Done) {
+                continue;
+            }
+            let Some(c) = self.consoles.get(h).filter(|c| c.exit_code().is_none()) else {
+                continue;
+            };
+            c.write(tasks::nudge(&horadric_command()).into_bytes());
+            self.tasks.enters.push((h.to_string(), Instant::now()));
+            self.tasks.nudged.insert(h.to_string(), SystemTime::now());
+        }
+    }
+
+    /// The session was nudged and stopped again after that without a
+    /// report: whatever it said, it is the human's turn.
+    fn stopped_after_nudge(&self, id: &str) -> bool {
+        let Some(&at) = self.tasks.nudged.get(id) else {
+            return false;
+        };
+        let Ok(r) = self.shared.registry.lock() else {
+            return false;
+        };
+        r.get(id)
+            .is_some_and(|s| s.phase == Phase::Done && s.since > at)
+    }
+
+    /// What about this list the human should hear, as keys that stay the
+    /// same while it holds, each with its title and text.
+    fn worth_saying(&self, key: &str, b: &Board) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        for t in &b.tasks {
+            let Some(h) = t.holder.as_deref() else {
+                continue;
+            };
+            match t.mark {
+                Mark::Review => out.push((
+                    format!("review:{h}"),
+                    "Ready for review".to_string(),
+                    t.title.clone(),
+                )),
+                Mark::Blocked => out.push((
+                    format!("blocked:{h}"),
+                    format!("Blocked: {}", t.title),
+                    t.reason.clone().unwrap_or_default(),
+                )),
+                Mark::Working if b.mode.runs() && self.stopped_after_nudge(h) => out.push((
+                    format!("asks:{h}"),
+                    format!("{} needs you", t.title),
+                    "It stopped without saying the item is done.".to_string(),
+                )),
+                _ => {}
+            }
+        }
+        if b.mode.runs() && self.tasks.ran.contains(key) {
+            if let Next::Finished = tasks::next(&b.tasks, b.mode, |_| true) {
+                out.push((
+                    format!("finished:{key}"),
+                    "Task list done".to_string(),
+                    format!("Every item in {} is done.", project_name(key)),
+                ));
+            }
+        }
+        out
+    }
+
+    fn announce_tasks(&mut self, said: Vec<(String, String, String)>) {
+        let now: HashSet<String> = said.iter().map(|(k, _, _)| k.clone()).collect();
+        let new: Vec<&(String, String, String)> = said
+            .iter()
+            .filter(|(k, _, _)| !self.tasks.announced.contains(k))
+            .collect();
+        for (k, _, _) in &new {
+            if let Some(key) = k.strip_prefix("finished:") {
+                self.tasks.ran.remove(key);
+            }
+        }
+        if !self.quiet {
+            match new.as_slice() {
+                [] => {}
+                [(_, title, text)] => self.tray.notify(title, text),
+                many => self.tray.notify(
+                    &format!("{} task list items need you", many.len()),
+                    &many
+                        .iter()
+                        .map(|(_, t, _)| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+            }
+        }
+        self.tasks.announced = now;
+    }
+
+    /// Starts the next open item when the list runs by itself and nothing
+    /// is in hand.
+    fn start_next(&mut self, key: &str, b: &Board) {
+        let Next::Start(i) = tasks::next(&b.tasks, b.mode, |id| self.phase_of(id).is_some()) else {
+            return;
+        };
+        if self
+            .tasks
+            .started
+            .get(key)
+            .is_some_and(|at| at.elapsed() < START_GAP)
+        {
+            return;
+        }
+        self.tasks.started.insert(key.to_string(), Instant::now());
+        let t = &b.tasks[i];
+        match self.take_task(key, t.line, &t.title, false) {
+            Ok(_) => {
+                self.tasks.ran.insert(key.to_string());
+            }
+            Err(e) => eprintln!("horadric: the runner cannot start \"{}\": {e}", t.title),
+        }
+    }
+
+    /// Opens the list in VS Code, or whatever opens Markdown.
+    fn edit_list(&self, key: &str) {
+        if let Some(dir) = self.project_dir(key) {
+            if !file::file(&dir).is_file() {
+                let _ = file::update(&dir, |_| Some(String::new()));
+            }
+            watch::open(&dir, TASKS_FILE);
+        }
+    }
+}
+
+/// Queues a menu for the app's window, which shows it outside the app's
+/// borrow: a menu runs a modal loop that dispatches the app's messages.
+pub(super) fn ask_for(app: &mut App, menu: Menu) {
+    app.tasks.menu = Some(menu);
+    post(app.notify.0 as isize, WM_HORADRIC_TASK_MENU, 0);
+}
+
+/// Shows the menu or dialog the app queued.
+pub(super) fn show_menu(hwnd: HWND, menu: Menu) {
+    match menu {
+        Menu::Item(key, line, title) => item_menu(hwnd, &key, line, &title),
+        Menu::Mode(key) => mode_menu(hwnd, &key),
+        Menu::Add(key) => {
+            let prompt = "What should be done? Notes go on indented lines under it in the file.";
+            if let Some(title) = ask::text(hwnd, "New task", prompt, "") {
+                with_app(|app| app.add_task(&key, &title));
+            }
+        }
+    }
+}
+
+fn item_menu(hwnd: HWND, key: &str, line: usize, title: &str) {
+    const START: usize = 1;
+    const SHOW: usize = 2;
+    const APPROVE: usize = 3;
+    const DONE: usize = 4;
+    const BACK: usize = 5;
+    const EDIT: usize = 6;
+    let Some((state, holder)) = with_app(|app| {
+        let t = app.task_at(key, line, title)?;
+        Some((app.row_state(&t), t.holder))
+    })
+    .flatten() else {
+        return;
+    };
+    let mut items = Vec::new();
+    match state {
+        RowState::Open => items.push(Item::action(START, "Start")),
+        RowState::Gone => items.push(Item::action(START, "Start again")),
+        _ => items.push(Item::action(SHOW, "Show session")),
+    }
+    match state {
+        RowState::Review => items.push(Item::action(APPROVE, "Approve")),
+        RowState::Open => {}
+        _ => items.push(Item::action(DONE, "Mark done")),
+    }
+    if holder.is_some() {
+        items.push(Item::action(BACK, "Put back in the list"));
+    }
+    items.push(Item::Separator);
+    items.push(Item::action(EDIT, "Edit the list"));
+    // Outside the app's borrow: the menu's loop dispatches its messages.
+    let picked = tray::popup(hwnd, &items);
+    with_app(|app| match picked {
+        Some(START) => app.task_clicked(key, line, title),
+        Some(SHOW) => {
+            if let Some(h) = &holder {
+                app.reveal(h, false);
+            }
+        }
+        Some(APPROVE | DONE) => app.set_task(key, line, title, Mark::Done),
+        Some(BACK) => app.put_back(key, line, title),
+        Some(EDIT) => app.edit_list(key),
+        _ => {}
+    });
+}
+
+fn mode_menu(hwnd: HWND, key: &str) {
+    const EDIT: usize = 10;
+    let Some(current) = with_app(|app| app.shared.boards.borrow().get(key).map(|b| b.mode)) else {
+        return;
+    };
+    let current = current.unwrap_or_default();
+    let mut items: Vec<Item> = Mode::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, m)| Item::Action {
+            id: i + 1,
+            label: m.explain().to_string(),
+            checked: *m == current,
+        })
+        .collect();
+    items.push(Item::Separator);
+    items.push(Item::action(EDIT, "Edit the list"));
+    let picked = tray::popup(hwnd, &items);
+    with_app(|app| match picked {
+        Some(EDIT) => app.edit_list(key),
+        Some(i) => {
+            if let Some(m) = Mode::ALL.get(i - 1) {
+                app.set_mode(key, *m);
+            }
+        }
+        None => {}
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_agent_runs_this_build_by_its_full_path() {
+        assert_eq!(
+            command_for(r"C:\Users\me\AppData\Local\Programs\Horadric\horadric.exe"),
+            "C:/Users/me/AppData/Local/Programs/Horadric/horadric.exe"
+        );
+        assert_eq!(
+            command_for(r"C:\Program Files\Horadric\horadric.exe"),
+            "\"C:/Program Files/Horadric/horadric.exe\""
+        );
+    }
+}

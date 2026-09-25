@@ -1,0 +1,168 @@
+//! What a project's tasks tile shows: its list as last read from disk, and
+//! how each item reads on a row, given how the session holding it is doing.
+
+use horadric_core::tasks::{Mark, Mode, Task};
+use horadric_core::Phase;
+
+use crate::theme::{self, Color};
+
+/// A project's task list and mode, as the app last read them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Board {
+    pub mode: Mode,
+    pub tasks: Vec<Task>,
+}
+
+impl Board {
+    /// The items the tile has a row for, by index: every one not done yet.
+    /// An item with no title yet is still being written.
+    pub fn shown(&self) -> Vec<usize> {
+        self.tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.mark != Mark::Done && !t.title.trim().is_empty())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// What the header says about the whole list.
+    pub fn summary(&self) -> String {
+        let named = self.tasks.iter().filter(|t| !t.title.trim().is_empty());
+        let total = named.clone().count();
+        let done = named.filter(|t| t.mark == Mark::Done).count();
+        match (done, total) {
+            (_, 0) => "empty".into(),
+            (d, t) if d == t => "all done".into(),
+            (0, t) => format!("{t} to do"),
+            (d, t) => format!("{d} of {t} done"),
+        }
+    }
+}
+
+/// How an item reads on its row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowState {
+    Open,
+    /// Its session is at it.
+    Working,
+    /// Its session stopped without saying the item is done: it asks
+    /// something, or waits on a permission.
+    Asks,
+    /// Its session is paused, after a restart or a crash.
+    Paused,
+    /// Its session no longer exists. A click starts the item again.
+    Gone,
+    Review,
+    Blocked,
+}
+
+/// How `task` reads, given the phase of the session that holds it, none
+/// when that session is gone.
+pub fn row_state(task: &Task, holder: Option<&Phase>) -> RowState {
+    match task.mark {
+        Mark::Open | Mark::Done => RowState::Open,
+        Mark::Review => RowState::Review,
+        Mark::Blocked => RowState::Blocked,
+        Mark::Working => match holder {
+            None | Some(Phase::Ended) => RowState::Gone,
+            Some(Phase::Paused) => RowState::Paused,
+            Some(Phase::Working | Phase::Idle) => RowState::Working,
+            Some(Phase::Waiting(_) | Phase::Done) => RowState::Asks,
+        },
+    }
+}
+
+impl RowState {
+    /// What the right end of the row says. Nothing for an open item.
+    pub fn label(self) -> &'static str {
+        match self {
+            RowState::Open => "",
+            RowState::Working => "working",
+            RowState::Asks => "asks you",
+            RowState::Paused => "paused",
+            RowState::Gone => "session gone",
+            RowState::Review => "review",
+            RowState::Blocked => "blocked",
+        }
+    }
+
+    /// The glyph at the row's left, in Segoe Fluent Icons.
+    pub fn icon(self) -> char {
+        match self {
+            RowState::Open => '\u{E739}',
+            RowState::Working => '\u{E768}',
+            RowState::Asks => '\u{E9CE}',
+            RowState::Paused => '\u{E769}',
+            RowState::Gone => '\u{E711}',
+            RowState::Review => '\u{E73E}',
+            RowState::Blocked => '\u{E7BA}',
+        }
+    }
+
+    /// The colour of the glyph and the label: the same colours a session's
+    /// lamp burns in, so a row and its session's tile agree.
+    pub fn color(self) -> Color {
+        match self {
+            RowState::Open => theme::TEXT_DIM,
+            RowState::Working => theme::WORKING,
+            RowState::Asks | RowState::Review => theme::WAITING,
+            RowState::Blocked => theme::ERROR,
+            RowState::Paused | RowState::Gone => theme::IDLE,
+        }
+    }
+
+    /// The row waits on the human, so it lights up.
+    pub fn needs_you(self) -> bool {
+        matches!(
+            self,
+            RowState::Asks | RowState::Review | RowState::Blocked | RowState::Gone
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use horadric_core::tasks::parse;
+    use horadric_core::WaitReason;
+
+    fn board(text: &str) -> Board {
+        Board {
+            mode: Mode::Manual,
+            tasks: parse(text),
+        }
+    }
+
+    #[test]
+    fn done_and_unnamed_items_get_no_row() {
+        let b = board("- [x] A\n- [ ]\n- [/] B @b-1\n- [ ] C\n");
+        assert_eq!(b.shown(), [2, 3]);
+        assert_eq!(b.summary(), "1 of 3 done");
+        assert_eq!(board("- [x] A\n").summary(), "all done");
+        assert_eq!(board("- [ ] A\n- [ ] B\n").summary(), "2 to do");
+        assert_eq!(board("").summary(), "empty");
+    }
+
+    #[test]
+    fn an_item_in_hand_reads_as_its_session_is_doing() {
+        let t = &parse("- [/] A @a-1\n")[0];
+        assert_eq!(row_state(t, Some(&Phase::Working)), RowState::Working);
+        assert_eq!(row_state(t, Some(&Phase::Idle)), RowState::Working);
+        assert_eq!(row_state(t, Some(&Phase::Done)), RowState::Asks);
+        let permission = Phase::Waiting(WaitReason::Permission);
+        assert_eq!(row_state(t, Some(&permission)), RowState::Asks);
+        assert_eq!(row_state(t, Some(&Phase::Paused)), RowState::Paused);
+        assert_eq!(row_state(t, Some(&Phase::Ended)), RowState::Gone);
+        assert_eq!(row_state(t, None), RowState::Gone);
+    }
+
+    #[test]
+    fn review_and_blocked_read_the_same_whatever_the_session_does() {
+        let t = parse("- [?] A @a-1\n- [!] B @b-1: why\n- [ ] C\n");
+        assert_eq!(row_state(&t[0], None), RowState::Review);
+        assert_eq!(row_state(&t[1], Some(&Phase::Working)), RowState::Blocked);
+        assert_eq!(row_state(&t[2], None), RowState::Open);
+        assert!(RowState::Review.needs_you() && !RowState::Working.needs_you());
+        assert_eq!(RowState::Open.label(), "");
+    }
+}

@@ -1,0 +1,109 @@
+//! `horadric task`: how an agent working an item of the task list reports
+//! back, and how anyone adds to the list from a shell.
+//!
+//! The command changes the file itself rather than asking the app to, so an
+//! agent hears at once whether it worked. It finds its item by the session
+//! it runs in, `HORADRIC_SESSION`, which is written beside the item when a
+//! session takes it. Then it tells the app, which reads the list again and
+//! lets the runner move on.
+
+use std::path::{Path, PathBuf};
+
+use horadric_core::tasks::{self, Mark, TASKS_FILE};
+use horadric_hooks::listener::TasksChanged;
+use horadric_hooks::{client, tasks as file, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, TASKS_PATH};
+
+const USAGE: &str = "\
+usage: horadric task done              The item this session works is finished
+       horadric task blocked \"why\"     It can not go on without the human
+       horadric task add \"title\"       Add an item to the end of the list
+       horadric task list              Show the list";
+
+pub fn run(args: &[String]) -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let rest = || args[1..].join(" ");
+    match args.first().map(String::as_str) {
+        Some("done") => report(&cwd, None),
+        Some("blocked") => {
+            let why = rest();
+            if why.trim().is_empty() {
+                return Err("say why: horadric task blocked \"what you need\"".into());
+            }
+            report(&cwd, Some(&why))
+        }
+        Some("add") => {
+            let title = tasks::one_line(&rest());
+            if title.is_empty() {
+                return Err("say what: horadric task add \"title\"".into());
+            }
+            add(&cwd, &title)
+        }
+        Some("list") => list(&cwd),
+        _ => Err(USAGE.into()),
+    }
+}
+
+/// The agent's item is done, or blocked with `why`.
+fn report(cwd: &Path, why: Option<&str>) -> Result<(), String> {
+    let id = session().ok_or("this is not a Horadric session, so there is no item to report on")?;
+    let project = file::find_held(cwd, &id).ok_or(format!(
+        "no {TASKS_FILE} above here has an item held by {id}"
+    ))?;
+    let mode = file::mode(&project);
+    let mark = match why {
+        Some(_) => Mark::Blocked,
+        None => mode.finished(),
+    };
+    let changed = file::update(&project, |text| tasks::set_held(text, &id, mark, why))
+        .map_err(|e| format!("{}: {e}", file::file(&project).display()))?;
+    if !changed {
+        return Err(format!("the item held by {id} is already done"));
+    }
+    tell_app(&project);
+    match (why, mark) {
+        (Some(_), _) => println!("Marked blocked. Say what you need, then wait for the human."),
+        (None, Mark::Done) => println!("Marked done. The next item starts once this turn ends."),
+        _ => println!("Marked for review. The human looks next; stop here."),
+    }
+    Ok(())
+}
+
+fn add(cwd: &Path, title: &str) -> Result<(), String> {
+    let project = session()
+        .and_then(|id| file::find_held(cwd, &id))
+        .or_else(|| file::find_list(cwd))
+        .unwrap_or_else(|| cwd.to_path_buf());
+    file::update(&project, |text| Some(tasks::append(text, title)))
+        .map_err(|e| format!("{}: {e}", file::file(&project).display()))?;
+    tell_app(&project);
+    println!("Added to {}", file::file(&project).display());
+    Ok(())
+}
+
+fn list(cwd: &Path) -> Result<(), String> {
+    let project = file::find_list(cwd).ok_or(format!("no {TASKS_FILE} above here"))?;
+    for t in tasks::parse(&file::read(&project)) {
+        let holder = t.holder.map(|h| format!(" @{h}")).unwrap_or_default();
+        println!("[{}] {}{holder}", t.mark.char(), t.title);
+    }
+    Ok(())
+}
+
+fn session() -> Option<String> {
+    std::env::var(SESSION_ENV).ok().filter(|s| !s.is_empty())
+}
+
+/// Asks the Horadric that owns this session, or the one on the usual port,
+/// to read the list again. It would notice by itself within a second, so a
+/// Horadric that is not listening is no error.
+fn tell_app(project: &Path) {
+    let port = std::env::var(OWNER_ENV)
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(horadric_hooks::port);
+    let body = TasksChanged {
+        dir: PathBuf::from(project).to_string_lossy().into_owned(),
+    }
+    .to_json();
+    let _ = client::post(port, TASKS_PATH, &[(COMMAND_HEADER, "tasks")], &body);
+}

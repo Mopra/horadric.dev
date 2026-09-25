@@ -54,10 +54,11 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::anim::Look;
+use crate::board::RowState;
 use crate::files::{Row, Tree};
 use crate::layout::{
-    self, Button, ClusterLayout, FilesLayout, Hit, Metrics, Rect, StartHit, StartLayout, UsageHit,
-    UsageLayout,
+    self, Button, ClusterLayout, FilesLayout, Hit, Metrics, Rect, StartHit, StartLayout,
+    TasksLayout, UsageHit, UsageLayout,
 };
 use crate::motion::{self, BREATH, ORBIT};
 use crate::theme::{self, Color};
@@ -220,6 +221,7 @@ pub struct Scene<'a> {
     pub accent: Color,
     pub now: SystemTime,
     pub files: Option<FilesScene<'a>>,
+    pub tasks: Option<TasksScene>,
     /// What the cursor is over and what the left button is held on, for
     /// the buttons to light up.
     pub hot: Hit,
@@ -244,6 +246,25 @@ pub struct FilesScene<'a> {
     pub rows: &'a [Row],
     pub scroll: usize,
     pub collapsed: bool,
+}
+
+/// What the tasks tile shows.
+pub struct TasksScene {
+    /// The rows in view, top to bottom.
+    pub rows: Vec<TaskRow>,
+    /// How many rows there are in all, and how many are above the top.
+    pub total: usize,
+    pub scroll: usize,
+    /// What the header says about the whole list.
+    pub summary: String,
+    pub mode: &'static str,
+    pub collapsed: bool,
+}
+
+/// One item on a row of the tasks tile.
+pub struct TaskRow {
+    pub title: String,
+    pub state: RowState,
 }
 
 /// Everything one frame of the usage window needs.
@@ -487,6 +508,9 @@ impl Painter<'_> {
         }
         if let Some(shell) = &scene.layout.shell {
             self.add(gpu, m, shell, scene.button(Hit::Shell), theme::SHELL_ICON);
+        }
+        if let (Some(l), Some(t)) = (&scene.layout.tasks, &scene.tasks) {
+            self.tasks(gpu, m, scene, l, t);
         }
         if let (Some(l), Some(f)) = (&scene.layout.files, &scene.files) {
             self.files(gpu, m, l, f);
@@ -1468,6 +1492,141 @@ impl Painter<'_> {
             1.0,
             style.ok().as_ref(),
         );
+    }
+
+    /// The project's task list on a screen of its own: a row per item not
+    /// done yet, its state as a glyph and a word in its session's colour,
+    /// and in the header the mode and a plus for another item.
+    unsafe fn tasks(&self, gpu: &Gpu, m: &Metrics, scene: &Scene, l: &TasksLayout, t: &TasksScene) {
+        self.screen(gpu, &l.rect, m.tile_radius);
+
+        let pad = INNER_PAD;
+        let h = l.header;
+        let chevron = if t.collapsed { '\u{E76C}' } else { '\u{E70D}' };
+        self.icon(
+            &gpu.icon_small,
+            theme::TEXT_DIM,
+            chevron,
+            Rect::new(h.x + pad - 2.0, h.y, 14.0, h.h),
+        );
+        let label_x = h.x + pad + 14.0;
+        let label_w = self.measure(gpu, &gpu.chip, "TASKS") + 8.0;
+        self.text_spaced(
+            gpu,
+            &gpu.chip,
+            theme::TEXT_DIM,
+            "TASKS",
+            1.2,
+            Rect::new(label_x, h.y, label_w, h.h),
+        );
+        let summary_x = label_x + label_w + 4.0;
+        self.text_tabular(
+            gpu,
+            &gpu.small_right,
+            theme::TEXT_DIM,
+            &t.summary,
+            Rect::new(summary_x, h.y, l.mode.x - 6.0 - summary_x, h.h),
+        );
+
+        // The mode, as a small key: a click offers the others.
+        let mode = scene.button(Hit::TasksMode);
+        let (fill, ink) = theme::button_look(mode);
+        self.fill_rounded(&l.mode, 5.0, fill.unwrap_or(theme::SURFACE.with_alpha(0.6)));
+        let word_w = self.measure(gpu, &gpu.chip, t.mode);
+        let caret_w = 10.0;
+        let x = l.mode.x + (l.mode.w - word_w - caret_w) / 2.0;
+        self.text(
+            &gpu.chip,
+            ink,
+            t.mode,
+            Rect::new(x, l.mode.y, word_w + 1.0, l.mode.h),
+        );
+        self.icon(
+            &gpu.icon_small,
+            ink,
+            '\u{E70D}',
+            Rect::new(x + word_w + 1.0, l.mode.y, caret_w, l.mode.h),
+        );
+
+        let add = scene.button(Hit::TasksAdd);
+        let (fill, ink) = theme::button_look(add);
+        if let Some(fill) = fill {
+            self.fill_rounded(&l.add.inset(4.0), 6.0, fill);
+        }
+        self.icon(&gpu.icon_small, ink, '\u{E710}', l.add);
+
+        for (i, (r, row)) in l.rows.iter().zip(&t.rows).enumerate() {
+            if let (Some(fill), _) = theme::button_look(scene.button(Hit::Task(i))) {
+                self.fill_rounded(&r.inset(2.0), 5.0, fill);
+            }
+            let c = row.state.color();
+            self.icon(
+                &gpu.icon_small,
+                c,
+                row.state.icon(),
+                Rect::new(r.x + pad - 3.0, r.y, 14.0, r.h),
+            );
+            let mut right = r.right() - pad;
+            if let Some(Some(a)) = l.approve.get(i) {
+                let b = scene.button(Hit::TaskApprove(i));
+                let depth = match b {
+                    Button::Idle => 0.35,
+                    Button::Hover => 0.6,
+                    Button::Pressed => 0.1,
+                };
+                self.key(
+                    gpu,
+                    a,
+                    5.0,
+                    theme::SURFACE.mix(theme::DONE, 0.25),
+                    depth,
+                    1.0,
+                );
+                self.icon(&gpu.icon_small, theme::DONE, '\u{E8FB}', *a);
+                right = a.x - 6.0;
+            }
+            let word = row.state.label();
+            let word_w = if word.is_empty() {
+                0.0
+            } else {
+                self.measure(gpu, &gpu.small, word) + 2.0
+            };
+            if word_w > 0.0 {
+                self.text(
+                    &gpu.small_right,
+                    c,
+                    word,
+                    Rect::new(right - word_w, r.y, word_w, r.h),
+                );
+            }
+            let title_x = r.x + pad + 16.0;
+            let ink = if row.state.needs_you() || row.state == RowState::Working {
+                theme::TEXT
+            } else {
+                theme::TEXT.mix(theme::TEXT_DIM, 0.35)
+            };
+            self.text(
+                &gpu.body,
+                ink,
+                &row.title,
+                Rect::new(title_x, r.y, right - word_w - 8.0 - title_x, r.h),
+            );
+        }
+
+        // Where the view is in a list longer than the tile.
+        let shown = l.rows.len();
+        if shown > 0 && t.total > shown {
+            let body = l.body();
+            let track = shown as f32 * m.task_row_h;
+            let total = t.total as f32;
+            let thumb_h = (track * shown as f32 / total).max(12.0);
+            let thumb_y = body.y + (track - thumb_h) * t.scroll as f32 / (total - shown as f32);
+            self.fill_rounded(
+                &Rect::new(body.right() - 4.0, thumb_y, 3.0, thumb_h),
+                1.5,
+                theme::TEXT_DIM.with_alpha(0.5),
+            );
+        }
     }
 
     /// The project's files as VS Code's explorer shows them: folders with a

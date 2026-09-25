@@ -13,6 +13,7 @@
 pub mod client;
 pub mod install;
 pub mod listener;
+pub mod tasks;
 pub mod transcript;
 
 /// Environment variable Horadric sets on every `claude` it spawns.
@@ -56,6 +57,10 @@ pub const NEW_PATH: &str = "/horadric/new";
 /// Path `horadric reload` posts to, asking the running app to hand over to a
 /// new build once no session is mid turn.
 pub const RELOAD_PATH: &str = "/horadric/reload";
+
+/// Path `horadric task` posts to after it changed a project's task list, so
+/// the app reads it at once rather than on its next look.
+pub const TASKS_PATH: &str = "/horadric/tasks";
 
 /// Header a command request must carry. A browser can not send a custom
 /// header to another origin without a preflight we never answer, so this is

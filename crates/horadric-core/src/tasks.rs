@@ -1,0 +1,643 @@
+//! A project's task list: `.horadric/tasks.md`, a Markdown checklist that
+//! agents take items from, one at a time or all the way down by themselves.
+//!
+//! The file belongs to the human and the agents. Horadric only ever changes
+//! one line at a time, the marker and the session that holds the item, and
+//! leaves every other byte as it found it, line endings included. A line it
+//! cannot read is left alone.
+//!
+//! ```text
+//! - [x] Rename Glance to Horadric
+//! - [/] Fix the login redirect @fix-login-redirect-51234
+//!   Happens only after a session expires.
+//! - [?] Add dark mode to the settings page @add-dark-mode-51300
+//! - [!] Migrate to the new API @migrate-api-51400: needs a key I do not have
+//! - [ ] Show the build time in the footer
+//! ```
+
+use serde_json::{Map, Value};
+
+/// Where the list lives, from the project folder.
+pub const TASKS_FILE: &str = ".horadric/tasks.md";
+
+/// Where the mode lives, from the project folder.
+pub const CONFIG_FILE: &str = ".horadric/config.json";
+
+/// What state an item is in, from the character between its brackets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// `[ ]`: nobody has it.
+    Open,
+    /// `[/]`: a session is on it.
+    Working,
+    /// `[?]`: its agent says it is done, and the human has not looked.
+    Review,
+    /// `[!]`: its agent can not go on without the human.
+    Blocked,
+    /// `[x]`: finished.
+    Done,
+}
+
+impl Mark {
+    fn from_char(c: char) -> Option<Mark> {
+        match c {
+            ' ' => Some(Mark::Open),
+            '/' => Some(Mark::Working),
+            '?' => Some(Mark::Review),
+            '!' => Some(Mark::Blocked),
+            'x' | 'X' => Some(Mark::Done),
+            _ => None,
+        }
+    }
+
+    pub fn char(self) -> char {
+        match self {
+            Mark::Open => ' ',
+            Mark::Working => '/',
+            Mark::Review => '?',
+            Mark::Blocked => '!',
+            Mark::Done => 'x',
+        }
+    }
+
+    /// A session holds an item it is on, or has finished and waits on.
+    pub fn held(self) -> bool {
+        matches!(self, Mark::Working | Mark::Review | Mark::Blocked)
+    }
+}
+
+/// One item of the list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Task {
+    /// Which line of the file it is on, counting from zero.
+    pub line: usize,
+    pub mark: Mark,
+    pub title: String,
+    /// The Horadric id of the session that holds it.
+    pub holder: Option<String>,
+    /// Why it is blocked, as its agent said.
+    pub reason: Option<String>,
+    /// The indented lines under it, indent taken off.
+    pub notes: Vec<String>,
+}
+
+/// Every item in the file, top to bottom. Only lines that start a list item
+/// at the left edge count; indented lines under one are its notes, and
+/// everything else (headings, prose, nested lists) is left out.
+pub fn parse(text: &str) -> Vec<Task> {
+    let mut tasks: Vec<Task> = Vec::new();
+    let mut in_item = false;
+    for (i, raw) in text.lines().enumerate() {
+        if let Some(t) = parse_item(raw, i) {
+            tasks.push(t);
+            in_item = true;
+            continue;
+        }
+        let indented = raw.starts_with([' ', '\t']);
+        if raw.trim().is_empty() {
+            continue;
+        }
+        match tasks.last_mut() {
+            Some(t) if in_item && indented => t.notes.push(raw.trim().to_string()),
+            _ => in_item = false,
+        }
+    }
+    tasks
+}
+
+/// Reads one line as an item, or None.
+fn parse_item(raw: &str, line: usize) -> Option<Task> {
+    let rest = raw
+        .strip_prefix("- [")
+        .or_else(|| raw.strip_prefix("* ["))?;
+    let mut chars = rest.chars();
+    let mark = Mark::from_char(chars.next()?)?;
+    let rest = chars.as_str().strip_prefix(']')?;
+    // `- [ ]` alone is an item still to be named.
+    let body = match rest.strip_prefix(' ') {
+        Some(b) => b,
+        None if rest.trim().is_empty() => "",
+        None => return None,
+    };
+    let (title, holder, reason) = split_holder(body.trim_end());
+    Some(Task {
+        line,
+        mark,
+        title,
+        holder,
+        reason,
+        notes: Vec::new(),
+    })
+}
+
+/// Splits `Fix it @fix-it-51234: why` into the title, the holder and the
+/// reason. The last ` @` followed by an id and then the end or a colon is
+/// the holder, so an `@` in the title itself stays in the title.
+fn split_holder(body: &str) -> (String, Option<String>, Option<String>) {
+    let mut search = body.len();
+    while let Some(at) = body[..search].rfind('@') {
+        search = at;
+        if at > 0 && !body[..at].ends_with(' ') {
+            continue;
+        }
+        let after = &body[at + 1..];
+        let id_len = after.find(|c: char| !is_id_char(c)).unwrap_or(after.len());
+        if id_len == 0 {
+            continue;
+        }
+        let tail = &after[id_len..];
+        let reason = if tail.is_empty() {
+            None
+        } else if let Some(r) = tail.strip_prefix(':') {
+            Some(r.trim().to_string()).filter(|r| !r.is_empty())
+        } else {
+            continue;
+        };
+        let title = body[..at].trim_end().to_string();
+        return (title, Some(after[..id_len].to_string()), reason);
+    }
+    (body.to_string(), None, None)
+}
+
+fn is_id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')
+}
+
+/// An item's line as Horadric writes it back.
+pub fn item_line(mark: Mark, title: &str, holder: Option<&str>, reason: Option<&str>) -> String {
+    let mut out = format!("- [{}] {}", mark.char(), title);
+    if let Some(h) = holder {
+        out.push_str(" @");
+        out.push_str(h);
+        if let Some(r) = reason.filter(|r| !r.is_empty()) {
+            out.push_str(": ");
+            out.push_str(&one_line(r));
+        }
+    }
+    out
+}
+
+/// `text` with line `line` swapped for `new`, every other byte as it was,
+/// the line keeping its own ending. None when there is no such line.
+pub fn replace_line(text: &str, line: usize, new: &str) -> Option<String> {
+    let mut out = String::with_capacity(text.len() + new.len());
+    let mut found = false;
+    for (i, part) in text.split_inclusive('\n').enumerate() {
+        if i == line {
+            let ending = if part.ends_with("\r\n") {
+                "\r\n"
+            } else if part.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
+            out.push_str(new);
+            out.push_str(ending);
+            found = true;
+        } else {
+            out.push_str(part);
+        }
+    }
+    found.then_some(out)
+}
+
+/// `text` with a new open item at the end, in the file's own line endings.
+pub fn append(text: &str, title: &str) -> String {
+    let ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out = text.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push_str(ending);
+    }
+    out.push_str(&item_line(Mark::Open, &one_line(title), None, None));
+    out.push_str(ending);
+    out
+}
+
+/// Changes the item held by `holder` to `mark`, keeping the holder. None
+/// when no item is held by it.
+pub fn set_held(text: &str, holder: &str, mark: Mark, reason: Option<&str>) -> Option<String> {
+    let task = parse(text)
+        .into_iter()
+        .find(|t| t.holder.as_deref() == Some(holder) && t.mark != Mark::Done)?;
+    let line = item_line(mark, &task.title, Some(holder), reason);
+    replace_line(text, task.line, &line)
+}
+
+/// Gives the open item on `line` titled `title` to `holder`. None when that
+/// line no longer holds that open item, because the file changed under us.
+pub fn take(text: &str, line: usize, title: &str, holder: &str) -> Option<String> {
+    let task = parse(text).into_iter().find(|t| t.line == line)?;
+    if task.mark != Mark::Open || task.title != title {
+        return None;
+    }
+    replace_line(
+        text,
+        line,
+        &item_line(Mark::Working, title, Some(holder), None),
+    )
+}
+
+/// Sets the item on `line` titled `title` to `mark`. `Open` lets go of the
+/// holder; every other mark keeps it. None when the line holds something
+/// else now.
+pub fn set_mark(text: &str, line: usize, title: &str, mark: Mark) -> Option<String> {
+    let task = parse(text).into_iter().find(|t| t.line == line)?;
+    if task.title != title {
+        return None;
+    }
+    let holder = task.holder.as_deref().filter(|_| mark != Mark::Open);
+    let reason = task.reason.as_deref().filter(|_| mark == Mark::Blocked);
+    replace_line(text, line, &item_line(mark, title, holder, reason))
+}
+
+/// How a project's list gets worked through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Nothing starts by itself. A click takes an item.
+    #[default]
+    Manual,
+    /// The next item starts once the human approves the last one.
+    Review,
+    /// The next item starts as soon as the last one is done.
+    Auto,
+}
+
+impl Mode {
+    pub const ALL: [Mode; 3] = [Mode::Manual, Mode::Review, Mode::Auto];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Manual => "manual",
+            Mode::Review => "review",
+            Mode::Auto => "auto",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Manual => "Manual",
+            Mode::Review => "Review",
+            Mode::Auto => "Auto",
+        }
+    }
+
+    /// What a menu says about it.
+    pub fn explain(self) -> &'static str {
+        match self {
+            Mode::Manual => "Manual: click an item to start it",
+            Mode::Review => "Review: the next item starts when you approve the last",
+            Mode::Auto => "Auto: work down the list until it is done",
+        }
+    }
+
+    fn from_name(s: &str) -> Option<Mode> {
+        Mode::ALL.into_iter().find(|m| m.name() == s)
+    }
+
+    /// Items start by themselves.
+    pub fn runs(self) -> bool {
+        self != Mode::Manual
+    }
+
+    /// What an agent's "done" makes of its item.
+    pub fn finished(self) -> Mark {
+        match self {
+            Mode::Auto => Mark::Done,
+            Mode::Manual | Mode::Review => Mark::Review,
+        }
+    }
+}
+
+/// The mode in a `config.json`. Anything unreadable is manual, the mode
+/// that starts nothing.
+pub fn mode(config: &str) -> Mode {
+    serde_json::from_str::<Value>(config)
+        .ok()
+        .and_then(|v| {
+            let name = v.get("tasks")?.get("mode")?.as_str()?.to_string();
+            Mode::from_name(&name)
+        })
+        .unwrap_or_default()
+}
+
+/// `config` with the mode set, everything else in it kept. A file that is
+/// not a JSON object is started afresh rather than lost in part.
+pub fn with_mode(config: &str, mode: Mode) -> String {
+    let mut root = match serde_json::from_str::<Value>(config) {
+        Ok(Value::Object(m)) => m,
+        _ => Map::new(),
+    };
+    let tasks = root
+        .entry("tasks")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !tasks.is_object() {
+        *tasks = Value::Object(Map::new());
+    }
+    if let Some(t) = tasks.as_object_mut() {
+        t.insert("mode".into(), Value::String(mode.name().into()));
+    }
+    let mut out = serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_default();
+    out.push('\n');
+    out
+}
+
+/// What the runner does next for a project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    /// Manual mode: nothing.
+    Off,
+    /// Start the item at this index.
+    Start(usize),
+    /// An item is being worked on. One at a time until worktrees.
+    Wait,
+    /// The item at this index is in the way: blocked, or held by a session
+    /// that is gone. The order is the order, so the runner stops there.
+    Stuck(usize),
+    /// Nothing left to do.
+    Finished,
+}
+
+/// The runner's decision, given the list, the mode, and which sessions
+/// still exist.
+pub fn next(tasks: &[Task], mode: Mode, exists: impl Fn(&str) -> bool) -> Next {
+    if !mode.runs() {
+        return Next::Off;
+    }
+    let alive = |t: &Task| t.holder.as_deref().is_some_and(&exists);
+    if tasks
+        .iter()
+        .any(|t| matches!(t.mark, Mark::Working | Mark::Review) && alive(t))
+    {
+        return Next::Wait;
+    }
+    for (i, t) in tasks.iter().enumerate() {
+        match t.mark {
+            Mark::Done => {}
+            Mark::Open if t.title.trim().is_empty() => {}
+            Mark::Open => return Next::Start(i),
+            Mark::Working | Mark::Review | Mark::Blocked => return Next::Stuck(i),
+        }
+    }
+    Next::Finished
+}
+
+/// A session name from an item's title: lower case words joined by
+/// hyphens, short enough for a tile.
+pub fn slug(title: &str) -> String {
+    let mut out = String::new();
+    for word in title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+    {
+        if out.len() + word.len() > 40 {
+            break;
+        }
+        if !out.is_empty() {
+            out.push('-');
+        }
+        out.extend(word.chars().flat_map(char::to_lowercase));
+    }
+    if out.is_empty() {
+        out.push_str("task");
+    }
+    out
+}
+
+/// The first prompt of a session that takes `task`: the item, its notes,
+/// and how to report back. The system prompt says so too, but an agent
+/// follows its prompt more surely, and the human sees what it was asked.
+pub fn prompt(task: &Task, horadric: &str) -> String {
+    let mut out = task.title.clone();
+    if !task.notes.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&task.notes.join("\n"));
+    }
+    out.push_str(&format!(
+        "\n\n(An item from {TASKS_FILE}. When it is finished, run `{horadric} task done`.)"
+    ));
+    out
+}
+
+/// What the agent is told beside its first prompt, every time it starts or
+/// resumes: that it works one item of the list, and how to report back.
+/// `horadric` is how to run this Horadric from the agent's shell.
+pub fn system_prompt(horadric: &str) -> String {
+    format!(
+        "You are working on one item of this project's task list, {TASKS_FILE}. \
+         Horadric started you on it and does not know you are finished until you \
+         tell it, so your last step is always a command in your shell. Do only this \
+         item. When it is finished, commit your work if you changed files, then run \
+         `{horadric} task done` with your Bash tool. If you can not go on without \
+         the human, run `{horadric} task blocked \"<why>\"` instead and say what you \
+         need. If you find other work worth doing, add it to the list with \
+         `{horadric} task add \"<title>\"` instead of doing it now. Items in \
+         {TASKS_FILE} are lines like `- [ ] Title`, in the order they should be \
+         done, with notes indented under them; when your item is to plan work, \
+         write the items you decide on into the file below your own line."
+    )
+}
+
+/// What an agent is told, once, when its turn ended without a report.
+pub fn nudge(horadric: &str) -> String {
+    format!(
+        "If you are finished with this item, commit your work and run \
+         `{horadric} task done`. If not, say what you need from me."
+    )
+}
+
+/// Text on one line: newlines and tabs become spaces.
+pub fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = "# Backlog\n\
+        \n\
+        - [x] Rename Glance to Horadric\n\
+        - [/] Fix the login redirect @fix-login-51234\n\
+        \x20 Happens only after a session expires.\n\
+        \x20 Repro in #12.\n\
+        - [?] Add dark mode @dark-mode-51300\n\
+        - [!] Migrate to the new API @migrate-51400: needs a key I do not have\n\
+        - [ ] Mail support@example.com about it\n\
+        - [-] Something Horadric does not know\n\
+        Some prose.\n\
+        \x20 Not a note, the item before is over.\n";
+
+    #[test]
+    fn every_mark_parses_with_its_holder_reason_and_notes() {
+        let t = parse(SAMPLE);
+        assert_eq!(t.len(), 5);
+        assert_eq!((t[0].mark, t[0].line), (Mark::Done, 2));
+        assert_eq!(t[0].title, "Rename Glance to Horadric");
+        assert_eq!(t[1].mark, Mark::Working);
+        assert_eq!(t[1].title, "Fix the login redirect");
+        assert_eq!(t[1].holder.as_deref(), Some("fix-login-51234"));
+        assert_eq!(
+            t[1].notes,
+            ["Happens only after a session expires.", "Repro in #12."]
+        );
+        assert_eq!(t[2].mark, Mark::Review);
+        assert_eq!(t[3].mark, Mark::Blocked);
+        assert_eq!(t[3].reason.as_deref(), Some("needs a key I do not have"));
+        // An @ inside a word is the title's.
+        assert_eq!(t[4].title, "Mail support@example.com about it");
+        assert_eq!(t[4].holder, None);
+        assert!(t[4].notes.is_empty());
+    }
+
+    #[test]
+    fn crlf_files_parse_the_same() {
+        let crlf = SAMPLE.replace('\n', "\r\n");
+        assert_eq!(parse(&crlf), parse(SAMPLE));
+    }
+
+    #[test]
+    fn an_at_in_the_middle_of_a_title_is_not_a_holder() {
+        let t = &parse("- [ ] Ask @alice about it\n")[0];
+        assert_eq!(t.title, "Ask @alice about it");
+        assert_eq!(t.holder, None);
+        let t = &parse("- [/] Ask @alice about it @ask-1\n")[0];
+        assert_eq!(t.title, "Ask @alice about it");
+        assert_eq!(t.holder.as_deref(), Some("ask-1"));
+    }
+
+    #[test]
+    fn a_line_is_rewritten_and_nothing_else_moves() {
+        let crlf = SAMPLE.replace('\n', "\r\n");
+        for text in [SAMPLE.to_string(), crlf] {
+            let out = replace_line(&text, 8, "- [/] Mail it @mail-1").unwrap();
+            let before: Vec<&str> = text.split_inclusive('\n').collect();
+            let after: Vec<&str> = out.split_inclusive('\n').collect();
+            assert_eq!(before.len(), after.len());
+            for (i, (a, b)) in before.iter().zip(&after).enumerate() {
+                if i == 8 {
+                    assert!(b.starts_with("- [/] Mail it @mail-1"));
+                    assert_eq!(a.ends_with("\r\n"), b.ends_with("\r\n"));
+                } else {
+                    assert_eq!(a, b);
+                }
+            }
+        }
+        assert_eq!(replace_line("a\nb", 1, "c").as_deref(), Some("a\nc"));
+        assert_eq!(replace_line("a\n", 5, "c"), None);
+    }
+
+    #[test]
+    fn taking_an_item_marks_it_and_names_its_holder() {
+        let out = take(SAMPLE, 8, "Mail support@example.com about it", "mail-9").unwrap();
+        let t = &parse(&out)[4];
+        assert_eq!(t.mark, Mark::Working);
+        assert_eq!(t.holder.as_deref(), Some("mail-9"));
+        assert_eq!(t.title, "Mail support@example.com about it");
+        // The file changed under us: that line is something else now.
+        assert_eq!(take(SAMPLE, 8, "Another title", "x"), None);
+        assert_eq!(take(SAMPLE, 3, "Fix the login redirect", "x"), None);
+    }
+
+    #[test]
+    fn the_holder_reports_done_or_blocked() {
+        let out = set_held(SAMPLE, "fix-login-51234", Mark::Review, None).unwrap();
+        assert_eq!(parse(&out)[1].mark, Mark::Review);
+        let out = set_held(&out, "fix-login-51234", Mark::Blocked, Some("no\nkey")).unwrap();
+        let t = &parse(&out)[1];
+        assert_eq!(t.mark, Mark::Blocked);
+        assert_eq!(t.reason.as_deref(), Some("no key"));
+        // Notes stay under it.
+        assert_eq!(t.notes.len(), 2);
+        assert_eq!(set_held(SAMPLE, "nobody", Mark::Done, None), None);
+    }
+
+    #[test]
+    fn putting_an_item_back_lets_go_of_its_holder() {
+        let out = set_mark(SAMPLE, 7, "Migrate to the new API", Mark::Open).unwrap();
+        let t = &parse(&out)[3];
+        assert_eq!(
+            (t.mark, t.holder.as_deref(), t.reason.as_deref()),
+            (Mark::Open, None, None)
+        );
+        let out = set_mark(SAMPLE, 6, "Add dark mode", Mark::Done).unwrap();
+        assert_eq!(parse(&out)[2].holder.as_deref(), Some("dark-mode-51300"));
+    }
+
+    #[test]
+    fn appending_keeps_the_file_s_line_endings() {
+        assert_eq!(append("", "First"), "- [ ] First\n");
+        assert_eq!(append("- [ ] A", "B"), "- [ ] A\n- [ ] B\n");
+        assert_eq!(append("- [ ] A\r\n", "B\nC"), "- [ ] A\r\n- [ ] B C\r\n");
+    }
+
+    #[test]
+    fn the_mode_round_trips_and_keeps_the_rest_of_the_config() {
+        assert_eq!(mode(""), Mode::Manual);
+        assert_eq!(mode("{\"tasks\":{\"mode\":\"auto\"}}"), Mode::Auto);
+        assert_eq!(mode("{\"tasks\":{\"mode\":\"wild\"}}"), Mode::Manual);
+        let out = with_mode("{\"hosts\":[\"vps\"]}", Mode::Review);
+        assert_eq!(mode(&out), Mode::Review);
+        assert!(out.contains("\"vps\""));
+        assert_eq!(mode(&with_mode("not json", Mode::Auto)), Mode::Auto);
+        assert_eq!(mode(&with_mode("{\"tasks\":3}", Mode::Auto)), Mode::Auto);
+    }
+
+    #[test]
+    fn the_runner_waits_for_the_item_in_hand() {
+        let t = parse(SAMPLE);
+        assert_eq!(next(&t, Mode::Manual, |_| true), Next::Off);
+        assert_eq!(next(&t, Mode::Auto, |_| true), Next::Wait);
+    }
+
+    #[test]
+    fn the_runner_stops_at_a_blocked_item_or_one_whose_session_is_gone() {
+        let t = parse(SAMPLE);
+        // The login fix's session is gone: that item is in the way.
+        assert_eq!(next(&t, Mode::Auto, |_| false), Next::Stuck(1));
+        let t = parse("- [x] A\n- [!] B @b-1: why\n- [ ] C\n");
+        assert_eq!(next(&t, Mode::Review, |_| true), Next::Stuck(1));
+    }
+
+    #[test]
+    fn the_runner_starts_the_first_open_item_then_finishes() {
+        let t = parse("- [x] A @a-1\n- [ ]\n- [ ] B\n- [ ] C\n");
+        assert_eq!(next(&t, Mode::Auto, |_| true), Next::Start(2));
+        let t = parse("- [x] A\n");
+        assert_eq!(next(&t, Mode::Auto, |_| true), Next::Finished);
+        assert_eq!(next(&[], Mode::Review, |_| true), Next::Finished);
+    }
+
+    #[test]
+    fn a_blocked_item_does_not_count_as_in_hand() {
+        // Its session is still there, but it waits on the human: nothing
+        // else starts past it either.
+        let t = parse("- [!] A @a-1: why\n- [ ] B\n");
+        assert_eq!(next(&t, Mode::Auto, |_| true), Next::Stuck(0));
+    }
+
+    #[test]
+    fn a_slug_is_short_lower_case_words() {
+        assert_eq!(slug("Fix the login redirect!"), "fix-the-login-redirect");
+        assert_eq!(slug("  ...  "), "task");
+        assert!(slug(&"word ".repeat(30)).len() <= 40);
+    }
+
+    #[test]
+    fn the_first_prompt_is_the_item_its_notes_and_how_to_report() {
+        let t = &parse(SAMPLE)[1];
+        assert_eq!(
+            prompt(t, "hx"),
+            "Fix the login redirect\n\nHappens only after a session expires.\nRepro in #12.\n\n\
+             (An item from .horadric/tasks.md. When it is finished, run `hx task done`.)"
+        );
+        assert!(system_prompt("hx").contains("`hx task done`"));
+        assert!(nudge("hx").contains("`hx task done`"));
+    }
+
+    #[test]
+    fn done_means_review_unless_the_list_runs_by_itself() {
+        assert_eq!(Mode::Auto.finished(), Mark::Done);
+        assert_eq!(Mode::Review.finished(), Mark::Review);
+        assert_eq!(Mode::Manual.finished(), Mark::Review);
+    }
+}

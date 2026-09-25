@@ -177,6 +177,9 @@ pub struct SavedCluster {
     /// The files tile folded down to its header.
     #[serde(default)]
     pub files_collapsed: bool,
+    /// The tasks tile folded down to its header.
+    #[serde(default)]
+    pub tasks_collapsed: bool,
     /// How tall the files tile grows below its header before it scrolls,
     /// in DIPs, once its bottom edge has been dragged.
     #[serde(default)]
@@ -251,6 +254,7 @@ mod tests {
                 y: -20,
                 collapsed: false,
                 files_collapsed: true,
+                tasks_collapsed: true,
                 files_height: Some(412.0),
             }],
             recent: vec!["C:/app".into()],
