@@ -28,6 +28,11 @@ pub const SESSION_HEADER: &str = "x-horadric-session";
 /// which reads this from [`OWNER_HEADER`] and passes the event on.
 pub const OWNER_ENV: &str = "HORADRIC_OWNER_PORT";
 
+/// Environment variable Horadric sets on a session in a worktree of its
+/// own: the project folder in the main working tree, where its task list
+/// is. The worktree has none, or an old copy.
+pub const TASKS_ENV: &str = "HORADRIC_TASKS";
+
 /// Header the hook carries [`OWNER_ENV`] in.
 pub const OWNER_HEADER: &str = "x-horadric-port";
 

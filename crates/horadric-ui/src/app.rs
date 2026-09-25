@@ -52,9 +52,9 @@ use horadric_core::{
     session_id, HookEvent, Phase, Registry, SavedCluster, SavedPanel, SavedSession, SavedState,
     Session, Setting, Usage,
 };
-use horadric_hooks::install;
 use horadric_hooks::listener::{self, Command, Reload, Tagged};
 use horadric_hooks::transcript::{self, Past};
+use horadric_hooks::{install, TASKS_ENV};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -1853,6 +1853,15 @@ impl App {
             .unwrap_or(false);
 
         let extra = self.extra_args(id, &program, &args, &cwd);
+        let env = own_tree
+            .as_ref()
+            .map(|w| {
+                let mut env = w.ports.map(tree::env).unwrap_or_default();
+                // `horadric task` finds the list in the main tree.
+                env.push((TASKS_ENV.into(), folder_key(&cwd.to_string_lossy())));
+                env
+            })
+            .unwrap_or_default();
         let serial = self.next_serial;
         self.next_serial += 1;
         let console = Console::spawn(
@@ -1864,11 +1873,7 @@ impl App {
                 extra,
                 cwd,
                 shell,
-                env: own_tree
-                    .as_ref()
-                    .and_then(|w| w.ports)
-                    .map(tree::env)
-                    .unwrap_or_default(),
+                env,
                 setup: fresh.map(|(_, setup)| setup).unwrap_or_default(),
             },
             self.notify,

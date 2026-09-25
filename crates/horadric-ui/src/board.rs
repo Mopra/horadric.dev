@@ -11,6 +11,9 @@ use crate::theme::{self, Color};
 pub struct Board {
     pub mode: Mode,
     pub tasks: Vec<Task>,
+    /// How many items the runner may hold at once, each in a worktree of
+    /// its own. One when the project keeps a shared tree.
+    pub parallel: usize,
 }
 
 impl Board {
@@ -130,6 +133,7 @@ mod tests {
         Board {
             mode: Mode::Manual,
             tasks: parse(text),
+            parallel: 1,
         }
     }
 

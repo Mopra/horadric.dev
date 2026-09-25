@@ -5,8 +5,10 @@
 //! The file is the state. Taking an item writes its session beside it
 //! before the session starts, so a list read a moment later already says
 //! the item is taken, and the runner can never start it twice. The runner
-//! holds one item per project at a time, starts at most one session per
-//! project every few seconds, and never resumes a paused one by itself:
+//! holds one item per project at a time, or with `"parallel"` in the
+//! config several, each in a worktree of its own while the list stays in
+//! the main tree. It starts at most one session per project every few
+//! seconds, and never resumes a paused one by itself:
 //! a runner that starts agents is the one piece of Horadric that could run
 //! away, and each of those rules is a fuse against it.
 //!
@@ -23,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use horadric_core::tasks::{self, Mark, Mode, Next, Task, TASKS_FILE};
+use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, TASKS_FILE};
 use horadric_core::usage::format_until;
 use horadric_core::{ssh, worktree, Phase, WaitReason};
 use horadric_hooks::tasks as file;
@@ -108,9 +110,12 @@ fn stamp(dir: &Path) -> Stamp {
 }
 
 fn read_board(dir: &Path) -> Board {
+    // Items side by side in one tree would edit the same files.
+    let own_trees = file::worktrees(dir).enabled && crate::worktree::main_tree(dir).is_some();
     Board {
         mode: file::mode(dir),
         tasks: tasks::parse(&file::read(dir)),
+        parallel: if own_trees { file::parallel(dir) } else { 1 },
     }
 }
 
@@ -183,6 +188,14 @@ impl App {
         Some(self.shared.registry.lock().ok()?.get(id)?.phase.clone())
     }
 
+    fn holder(&self, id: &str) -> Holder {
+        match self.phase_of(id) {
+            None => Holder::Gone,
+            Some(Phase::Paused) => Holder::Paused,
+            Some(_) => Holder::Live,
+        }
+    }
+
     fn live(&self, id: &str) -> bool {
         self.consoles
             .get(id)
@@ -206,15 +219,18 @@ impl App {
             .any(|t| t.mark.held() && t.holder.as_deref() == Some(id));
         let batch = horadric_pty::is_batch(program);
         let mut system = Vec::new();
-        if holds {
-            system.push(tasks::system_prompt(&horadric_command()));
-        }
         let own_tree = self
             .shared
             .registry
             .lock()
             .ok()
             .and_then(|r| r.get(id)?.worktree.clone());
+        if holds {
+            let list = own_tree
+                .as_ref()
+                .map(|_| format!("{}/{TASKS_FILE}", folder_key(&cwd.to_string_lossy())));
+            system.push(tasks::system_prompt(&horadric_command(), list.as_deref()));
+        }
         system.extend(own_tree.as_ref().map(worktree::system_prompt));
         // The config may be kept out of git, so a worktree reads its
         // project's from the main tree.
@@ -236,7 +252,8 @@ impl App {
         out
     }
 
-    /// Starts a session on the open item on `line` titled `title`. With
+    /// Starts a session on the open item on `line` titled `title`, in a
+    /// worktree of its own when the project runs several at once. With
     /// `show`, its project comes onto the stage with it typing.
     pub(super) fn take_task(
         &mut self,
@@ -260,7 +277,22 @@ impl App {
             .prompts
             .insert(id.clone(), tasks::prompt(&task, &horadric_command()));
         self.refresh_boards(true);
-        if let Err(e) = self.launch(&id, title, dir.clone(), Vec::new(), Run::Agent, false) {
+        let parallel = self
+            .shared
+            .boards
+            .borrow()
+            .get(key)
+            .is_some_and(|b| b.parallel > 1);
+        let cwd = if parallel {
+            self.own_tree(&id, &tasks::slug(title), dir.clone(), &[])
+        } else {
+            dir.clone()
+        };
+        if let Err(e) = self.launch(&id, title, cwd, Vec::new(), Run::Agent, false) {
+            // A worktree the session never started in holds nothing.
+            if let Some((w, _)) = self.new_trees.remove(&id) {
+                crate::worktree::remove(w);
+            }
             self.tasks.prompts.remove(&id);
             let _ = file::update(&dir, |text| tasks::set_mark(text, line, title, Mark::Open));
             self.refresh_boards(true);
@@ -416,7 +448,7 @@ impl App {
                 self.start_next(key, b);
             } else if b.mode.runs() {
                 waiting |= matches!(
-                    tasks::next(&b.tasks, b.mode, |id| self.phase_of(id).is_some()),
+                    tasks::next(&b.tasks, b.mode, b.parallel, |id| self.holder(id)),
                     Next::Start(_)
                 ) || b.tasks.iter().any(|t| {
                     t.holder
@@ -602,7 +634,7 @@ impl App {
             }
         }
         if b.mode.runs() && self.tasks.ran.contains(key) {
-            if let Next::Finished = tasks::next(&b.tasks, b.mode, |_| true) {
+            if let Next::Finished = tasks::next(&b.tasks, b.mode, b.parallel, |_| Holder::Live) {
                 out.push((
                     format!("finished:{key}"),
                     "Task list done".to_string(),
@@ -644,7 +676,7 @@ impl App {
     /// Starts the next open item when the list runs by itself and nothing
     /// is in hand.
     fn start_next(&mut self, key: &str, b: &Board) {
-        let Next::Start(i) = tasks::next(&b.tasks, b.mode, |id| self.phase_of(id).is_some()) else {
+        let Next::Start(i) = tasks::next(&b.tasks, b.mode, b.parallel, |id| self.holder(id)) else {
             return;
         };
         if self

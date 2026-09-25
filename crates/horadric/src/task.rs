@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 
 use horadric_core::tasks::{self, Mark, TASKS_FILE};
 use horadric_hooks::listener::TasksChanged;
-use horadric_hooks::{client, tasks as file, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, TASKS_PATH};
+use horadric_hooks::{
+    client, tasks as file, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, TASKS_ENV, TASKS_PATH,
+};
 
 const USAGE: &str = "\
 usage: horadric task done              The item this session works is finished
@@ -46,7 +48,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
 /// The agent's item is done, or blocked with `why`.
 fn report(cwd: &Path, why: Option<&str>) -> Result<(), String> {
     let id = session().ok_or("this is not a Horadric session, so there is no item to report on")?;
-    let project = file::find_held(cwd, &id).ok_or(format!(
+    let project = held(cwd, &id).ok_or(format!(
         "no {TASKS_FILE} above here has an item held by {id}"
     ))?;
     let mode = file::mode(&project);
@@ -70,7 +72,8 @@ fn report(cwd: &Path, why: Option<&str>) -> Result<(), String> {
 
 fn add(cwd: &Path, title: &str) -> Result<(), String> {
     let project = session()
-        .and_then(|id| file::find_held(cwd, &id))
+        .and_then(|id| held(cwd, &id))
+        .or_else(main_list)
         .or_else(|| file::find_list(cwd))
         .unwrap_or_else(|| cwd.to_path_buf());
     file::update(&project, |text| Some(tasks::append(text, title)))
@@ -81,12 +84,32 @@ fn add(cwd: &Path, title: &str) -> Result<(), String> {
 }
 
 fn list(cwd: &Path) -> Result<(), String> {
-    let project = file::find_list(cwd).ok_or(format!("no {TASKS_FILE} above here"))?;
+    let project = main_list()
+        .or_else(|| file::find_list(cwd))
+        .ok_or(format!("no {TASKS_FILE} above here"))?;
     for t in tasks::parse(&file::read(&project)) {
         let holder = t.holder.map(|h| format!(" @{h}")).unwrap_or_default();
         println!("[{}] {}{holder}", t.mark.char(), t.title);
     }
     Ok(())
+}
+
+/// The project whose list has the session's item: above `cwd`, or, for a
+/// session in a worktree of its own, in the main working tree.
+fn held(cwd: &Path, id: &str) -> Option<PathBuf> {
+    file::find_held(cwd, id).or_else(|| file::find_held(&main_tree()?, id))
+}
+
+/// The list in the main working tree, for a session in a worktree, which
+/// has none of its own or an old copy.
+fn main_list() -> Option<PathBuf> {
+    file::find_list(&main_tree()?)
+}
+
+fn main_tree() -> Option<PathBuf> {
+    std::env::var_os(TASKS_ENV)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
 }
 
 fn session() -> Option<String> {

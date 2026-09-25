@@ -30,6 +30,11 @@ pub fn mode(project: &Path) -> Mode {
     tasks::mode(&fs::read_to_string(config_file(project)).unwrap_or_default())
 }
 
+/// How many items the project's runner holds at once.
+pub fn parallel(project: &Path) -> usize {
+    tasks::parallel(&fs::read_to_string(config_file(project)).unwrap_or_default())
+}
+
 /// The project's SSH hosts, none without a config.
 pub fn hosts(project: &Path) -> Vec<String> {
     ssh::hosts(&fs::read_to_string(config_file(project)).unwrap_or_default())
@@ -135,6 +140,15 @@ mod tests {
         assert_eq!(read(&dir), "- [ ] First\n");
         assert!(!update(&dir, |_| None).unwrap());
         assert!(!dir.join(".horadric/tasks.horadric-tmp").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parallel_is_read_from_the_config() {
+        let dir = scratch("parallel");
+        assert_eq!(parallel(&dir), 1);
+        write(&config_file(&dir), "{\"tasks\":{\"parallel\":3}}").unwrap();
+        assert_eq!(parallel(&dir), 3);
         fs::remove_dir_all(&dir).unwrap();
     }
 

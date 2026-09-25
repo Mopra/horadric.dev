@@ -341,6 +341,19 @@ pub fn with_mode(config: &str, mode: Mode) -> String {
     out
 }
 
+/// At most this many items in hand at once, so a typo in the config can
+/// not start a crowd of agents.
+pub const MOST_PARALLEL: usize = 8;
+
+/// How many items the runner holds at once, from `"tasks": {"parallel":
+/// 3}` in a `config.json`. One when it says nothing or nonsense.
+pub fn parallel(config: &str) -> usize {
+    serde_json::from_str::<Value>(config)
+        .ok()
+        .and_then(|v| v.get("tasks")?.get("parallel")?.as_u64())
+        .map_or(1, |n| (n as usize).clamp(1, MOST_PARALLEL))
+}
+
 /// What the runner does next for a project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Next {
@@ -348,7 +361,8 @@ pub enum Next {
     Off,
     /// Start the item at this index.
     Start(usize),
-    /// An item is being worked on. One at a time until worktrees.
+    /// As many items are in hand as the project lets run at once, or one
+    /// of them waits for a click to resume.
     Wait,
     /// The item at this index is in the way: blocked, or held by a session
     /// that is gone. The order is the order, so the runner stops there.
@@ -357,17 +371,30 @@ pub enum Next {
     Finished,
 }
 
-/// The runner's decision, given the list, the mode, and which sessions
-/// still exist.
-pub fn next(tasks: &[Task], mode: Mode, exists: impl Fn(&str) -> bool) -> Next {
+/// What became of the session holding an item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holder {
+    Gone,
+    /// Brought back after a restart. Only a click resumes it, and until
+    /// then the runner starts nothing beside it either.
+    Paused,
+    Live,
+}
+
+/// The runner's decision, given the list, the mode, how many items may be
+/// in hand at once, and what became of each holder.
+pub fn next(tasks: &[Task], mode: Mode, parallel: usize, holder: impl Fn(&str) -> Holder) -> Next {
     if !mode.runs() {
         return Next::Off;
     }
-    let alive = |t: &Task| t.holder.as_deref().is_some_and(&exists);
-    if tasks
+    let of = |t: &Task| t.holder.as_deref().map_or(Holder::Gone, &holder);
+    let in_hand: Vec<Holder> = tasks
         .iter()
-        .any(|t| matches!(t.mark, Mark::Working | Mark::Review) && alive(t))
-    {
+        .filter(|t| matches!(t.mark, Mark::Working | Mark::Review))
+        .map(of)
+        .filter(|h| *h != Holder::Gone)
+        .collect();
+    if in_hand.contains(&Holder::Paused) || in_hand.len() >= parallel.max(1) {
         return Next::Wait;
     }
     for (i, t) in tasks.iter().enumerate() {
@@ -375,10 +402,15 @@ pub fn next(tasks: &[Task], mode: Mode, exists: impl Fn(&str) -> bool) -> Next {
             Mark::Done => {}
             Mark::Open if t.title.trim().is_empty() => {}
             Mark::Open => return Next::Start(i),
+            Mark::Working | Mark::Review if of(t) == Holder::Live => {}
             Mark::Working | Mark::Review | Mark::Blocked => return Next::Stuck(i),
         }
     }
-    Next::Finished
+    if in_hand.is_empty() {
+        Next::Finished
+    } else {
+        Next::Wait
+    }
 }
 
 /// A session name from an item's title: lower case words joined by
@@ -420,21 +452,19 @@ pub fn prompt(task: &Task, horadric: &str) -> String {
 
 /// What the agent is told beside its first prompt, every time it starts or
 /// resumes: that it works one item of the list, and how to report back.
-/// `horadric` is how to run this Horadric from the agent's shell.
-pub fn system_prompt(horadric: &str) -> String {
-    format!(
-        "You are working on one item of this project's task list, {TASKS_FILE}. \
-         Horadric started you on it and does not know you are finished until you \
-         tell it, so your last step is always a command in your shell. Do only this \
-         item. When it is finished, commit your work if you changed files, then run \
-         `{horadric} task done` with your Bash tool. If you can not go on without \
-         the human, run `{horadric} task blocked \"<why>\"` instead and say what you \
-         need. If you find other work worth doing, add it to the list with \
-         `{horadric} task add \"<title>\"` instead of doing it now. Items in \
-         {TASKS_FILE} are lines like `- [ ] Title`, in the order they should be \
-         done, with notes indented under them; when your item is to plan work, \
-         write the items you decide on into the file below your own line."
-    )
+/// `horadric` is how to run this Horadric from the agent's shell. `list`
+/// is where the list is when the agent works in a worktree of its own,
+/// which has no list or an old copy of it.
+pub fn system_prompt(horadric: &str, list: Option<&str>) -> String {
+    let mut out = format!(
+        "You are working on one item of this project's task list, {TASKS_FILE}.          Horadric started you on it and does not know you are finished until you          tell it, so your last step is always a command in your shell. Do only this          item. When it is finished, commit your work if you changed files, then run          `{horadric} task done` with your Bash tool. If you can not go on without          the human, run `{horadric} task blocked \"<why>\"` instead and say what you          need. If you find other work worth doing, add it to the list with          `{horadric} task add \"<title>\"` instead of doing it now. Items in          {TASKS_FILE} are lines like `- [ ] Title`, in the order they should be          done, with notes indented under them; when your item is to plan work,          write the items you decide on into the file below your own line."
+    );
+    if let Some(list) = list {
+        out.push_str(&format!(
+            " Other items run beside yours, each in a worktree of its own. The list              lives only in the main working tree, at {list}: read and write it              there, the one file in the main tree you may change, and never a              copy in your worktree. `{horadric} task` finds it from anywhere."
+        ));
+    }
+    out
 }
 
 /// What an agent is told, once, when its turn ended without a report.
@@ -449,7 +479,8 @@ pub fn nudge(horadric: &str) -> String {
 /// reset, so it picks up the item where the refusal left it.
 pub fn go_on(horadric: &str) -> String {
     format!(
-        "The usage limit has reset. Go on with this item where you left off,          and when it is finished, commit your work and run `{horadric} task done`."
+        "The usage limit has reset. Go on with this item where you left off, \
+         and when it is finished, commit your work and run `{horadric} task done`."
     )
 }
 
@@ -590,29 +621,33 @@ mod tests {
         assert_eq!(mode(&with_mode("{\"tasks\":3}", Mode::Auto)), Mode::Auto);
     }
 
+    fn live(_: &str) -> Holder {
+        Holder::Live
+    }
+
     #[test]
     fn the_runner_waits_for_the_item_in_hand() {
         let t = parse(SAMPLE);
-        assert_eq!(next(&t, Mode::Manual, |_| true), Next::Off);
-        assert_eq!(next(&t, Mode::Auto, |_| true), Next::Wait);
+        assert_eq!(next(&t, Mode::Manual, 1, live), Next::Off);
+        assert_eq!(next(&t, Mode::Auto, 1, live), Next::Wait);
     }
 
     #[test]
     fn the_runner_stops_at_a_blocked_item_or_one_whose_session_is_gone() {
         let t = parse(SAMPLE);
         // The login fix's session is gone: that item is in the way.
-        assert_eq!(next(&t, Mode::Auto, |_| false), Next::Stuck(1));
+        assert_eq!(next(&t, Mode::Auto, 1, |_| Holder::Gone), Next::Stuck(1));
         let t = parse("- [x] A\n- [!] B @b-1: why\n- [ ] C\n");
-        assert_eq!(next(&t, Mode::Review, |_| true), Next::Stuck(1));
+        assert_eq!(next(&t, Mode::Review, 1, live), Next::Stuck(1));
     }
 
     #[test]
     fn the_runner_starts_the_first_open_item_then_finishes() {
         let t = parse("- [x] A @a-1\n- [ ]\n- [ ] B\n- [ ] C\n");
-        assert_eq!(next(&t, Mode::Auto, |_| true), Next::Start(2));
+        assert_eq!(next(&t, Mode::Auto, 1, live), Next::Start(2));
         let t = parse("- [x] A\n");
-        assert_eq!(next(&t, Mode::Auto, |_| true), Next::Finished);
-        assert_eq!(next(&[], Mode::Review, |_| true), Next::Finished);
+        assert_eq!(next(&t, Mode::Auto, 1, live), Next::Finished);
+        assert_eq!(next(&[], Mode::Review, 1, live), Next::Finished);
     }
 
     #[test]
@@ -620,7 +655,84 @@ mod tests {
         // Its session is still there, but it waits on the human: nothing
         // else starts past it either.
         let t = parse("- [!] A @a-1: why\n- [ ] B\n");
-        assert_eq!(next(&t, Mode::Auto, |_| true), Next::Stuck(0));
+        assert_eq!(next(&t, Mode::Auto, 1, live), Next::Stuck(0));
+    }
+
+    #[test]
+    fn several_items_run_at_once_up_to_the_config_s_number() {
+        let t = parse(
+            "- [/] A @a-1
+- [ ] B
+- [ ] C
+",
+        );
+        assert_eq!(next(&t, Mode::Auto, 1, live), Next::Wait);
+        assert_eq!(next(&t, Mode::Auto, 2, live), Next::Start(1));
+        let t = parse(
+            "- [/] A @a-1
+- [?] B @b-1
+- [ ] C
+",
+        );
+        assert_eq!(next(&t, Mode::Review, 2, live), Next::Wait);
+        assert_eq!(next(&t, Mode::Review, 3, live), Next::Start(2));
+        // Everything started, nothing finished yet.
+        assert_eq!(next(&t[..2], Mode::Auto, 3, live), Next::Wait);
+    }
+
+    #[test]
+    fn with_several_at_once_a_blocked_item_still_stops_the_list() {
+        let t = parse(
+            "- [/] A @a-1
+- [!] B @b-1: why
+- [ ] C
+",
+        );
+        assert_eq!(next(&t, Mode::Auto, 3, live), Next::Stuck(1));
+        let t = parse(
+            "- [/] A @a-1
+- [/] B @b-1
+- [ ] C
+",
+        );
+        let gone = |id: &str| {
+            if id == "b-1" {
+                Holder::Gone
+            } else {
+                Holder::Live
+            }
+        };
+        assert_eq!(next(&t, Mode::Auto, 3, gone), Next::Stuck(1));
+    }
+
+    #[test]
+    fn a_paused_item_holds_the_runner_however_many_may_run() {
+        let t = parse(
+            "- [/] A @a-1
+- [ ] B
+",
+        );
+        assert_eq!(next(&t, Mode::Auto, 4, |_| Holder::Paused), Next::Wait);
+    }
+
+    #[test]
+    fn parallel_is_one_unless_the_config_says_more_and_has_a_ceiling() {
+        assert_eq!(parallel(""), 1);
+        assert_eq!(parallel("{\"tasks\":{\"mode\":\"auto\"}}"), 1);
+        assert_eq!(parallel("{\"tasks\":{\"parallel\":3}}"), 3);
+        assert_eq!(parallel("{\"tasks\":{\"parallel\":0}}"), 1);
+        assert_eq!(parallel("{\"tasks\":{\"parallel\":\"3\"}}"), 1);
+        assert_eq!(parallel("{\"tasks\":{\"parallel\":500}}"), MOST_PARALLEL);
+        // Setting the mode keeps it.
+        let out = with_mode("{\"tasks\":{\"parallel\":3}}", Mode::Auto);
+        assert_eq!(parallel(&out), 3);
+    }
+
+    #[test]
+    fn an_agent_in_a_worktree_is_told_where_the_list_is() {
+        assert!(!system_prompt("hx", None).contains("main working tree"));
+        assert!(system_prompt("hx", Some("C:/app/.horadric/tasks.md"))
+            .contains("at C:/app/.horadric/tasks.md"));
     }
 
     #[test]
@@ -638,7 +750,7 @@ mod tests {
             "Fix the login redirect\n\nHappens only after a session expires.\nRepro in #12.\n\n\
              (An item from .horadric/tasks.md. When it is finished, run `hx task done`.)"
         );
-        assert!(system_prompt("hx").contains("`hx task done`"));
+        assert!(system_prompt("hx", None).contains("`hx task done`"));
         assert!(nudge("hx").contains("`hx task done`"));
         assert!(go_on("hx").contains("`hx task done`"));
     }

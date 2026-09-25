@@ -1127,9 +1127,10 @@ tracker.
   you" and a notification says it needs you. Asked for by the user once
   the plan left it open.
 - **Fuses.** The runner is the one part of Horadric that starts agents by
-  itself, which is what ran away once. It holds one item per project, it
-  starts at most one session per project every 10 seconds, it never
-  resumes a paused session, a start writes the file before it launches
+  itself, which is what ran away once. It holds one item per project, or
+  as many as `parallel` says and never more than 8, it starts at most one
+  session per project every 10 seconds, it never resumes a paused session
+  and starts nothing beside one, a start writes the file before it launches
   and checks the item is still open in a fresh read, and `launch` still
   refuses a second process for a session.
 - **Notifications**, once each while they hold: an item ready for review,
@@ -1179,9 +1180,6 @@ Not done yet:
 - A project shows its tile only while it has a cluster, so only while it
   has a session. A list with nothing running has no tile, and its runner
   does not run.
-- The runner holds one item at a time. With step 4 each item gets its own
-  worktree and `parallel` in `config.json` lets it hold several; the file
-  then lives in the main working tree only.
 
 ## Next
 
@@ -1240,9 +1238,29 @@ session gets a worktree of its own, and its tile shows what it changed.
   changed or untracked files and the second while the branch has commits
   the main tree lacks, so nothing is lost: what refuses stays for the human.
   Quitting pauses and removes nothing.
-- **The task runner** still starts its sessions in the shared tree. It holds
-  one item at a time, so they do not collide; its sessions move to
-  worktrees with `parallel`, the next item.
+- **The task runner** holds one item at a time in the shared tree, unless
+  `"tasks": {"parallel": 3}` in the config lets it hold several. Then each
+  item it takes (or a click takes) gets a worktree of its own, its branch
+  named after the item, and the runner fills a free place with the next
+  open item, one start every 10 seconds. A blocked item or one whose
+  session is gone still stops the list, and a paused one holds it until a
+  click resumes it. With worktrees off, or outside a repository, `parallel`
+  counts as 1, since items side by side in one tree edit the same files.
+  The list lives only in the main working tree: the app reads it there,
+  the agent is told its path and that it is the one file in the main tree
+  it may change, and `horadric task` finds it through `HORADRIC_TASKS`,
+  which a session in a worktree gets, since the worktree has no list or an
+  old copy. A finished item's session ends as always; its branch stays
+  until the human merges it, so an item no longer builds on the one before
+  unless that one was merged first. Tested with a dev instance and
+  `HORADRIC_AGENT=cmd.exe`: with `parallel` 2 in auto mode, item one
+  started in `par.item-one`, item two 10 s later in `par.item-two`, and
+  item three waited. `task done` run from inside `par.item-one` with its
+  session's environment marked the main tree's list, the session closed,
+  its clean worktree went away and item three started in its own. Three
+  `cmd.exe` the whole time (two items and one plain session). Not checked
+  on screen: that `HORADRIC_TASKS` reaches the agent's shell, which goes
+  the same way as the ports.
 - **What it changed.** A tile whose session has a worktree shows the lines
   added and removed, `+9 −1` in the files tile's green and red, beside the
   last line, and a `</>` button that opens the worktree in VS Code. Its
