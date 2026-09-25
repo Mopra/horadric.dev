@@ -32,6 +32,8 @@
 //! [`keys`], [`frame`], [`icon`], [`inbox`], [`motion`], [`viewer`],
 //! [`highlight`], [`history`], [`screens`] and [`shell`] are pure and tested, and so is
 //! the list logic in `recent`.
+//! `update` is the updater's crypto through CNG, tested with keys made in
+//! the tests.
 //! The rest is Windows only and verified on screen.
 
 pub mod anim;
@@ -92,6 +94,8 @@ mod store;
 mod terminal;
 #[cfg(windows)]
 mod tray;
+#[cfg(windows)]
+pub mod update;
 #[cfg(windows)]
 mod usage;
 #[cfg(windows)]

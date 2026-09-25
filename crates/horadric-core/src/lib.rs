@@ -8,6 +8,7 @@
 pub mod diff;
 pub mod event;
 pub mod registry;
+pub mod release;
 pub mod saved;
 pub mod session;
 pub mod ssh;

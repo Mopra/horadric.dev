@@ -5,12 +5,14 @@
 //! in a terminal of its own, `run` starts a tagged `claude` in the current
 //! terminal, `task` reports on an item of the task list, `serve` shows the
 //! state stream as a table, `reload` hands the running app over to this
-//! build, and the rest set Horadric up on this machine. `host` is not for
-//! people: the app starts one per session to hold its console.
+//! build, `release` signs a build for the updater, and the rest set
+//! Horadric up on this machine. `host` is not for people: the app starts
+//! one per session to hold its console.
 
 mod console;
 mod explorer;
 mod install;
+mod release;
 mod reload;
 mod run;
 mod setup;
@@ -56,6 +58,11 @@ Usage:
                                is working (a build from before session hosts waits),
                                and carry the running sessions over to it.
                                --now does not wait. A dev instance just restarts.
+  horadric release keygen        Make the updater's signing key, kept in
+                               %USERPROFILE%\\.horadric\\updater.key, and print its public half
+  horadric release sign DIR [--notes TEXT]
+                               Hash horadric.exe and horadricw.exe in DIR and write a
+                               signed DIR\\latest.json for this build's version
 
 Environment:
   HORADRIC_PORT                  Port to listen on (default 43117, or 43118 with HORADRIC_DEV)
@@ -92,6 +99,7 @@ fn main() -> ExitCode {
             args.get(1).is_some_and(|a| a == "--reload"),
         ),
         Some("reload") => reload::request(&args[1..]),
+        Some("release") => release::run(&args[1..]),
         Some("status") => status::run(),
         Some("swap") => reload::swap(&args[1..]),
         Some("install") => install_command(),
