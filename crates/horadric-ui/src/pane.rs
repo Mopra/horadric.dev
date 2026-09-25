@@ -23,11 +23,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::search::{Match, RegexSearch};
-use alacritty_terminal::term::TermMode;
+use alacritty_terminal::term::{Term, TermMode};
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, InvalidateRect, ScreenToClient, ValidateRect};
@@ -40,11 +41,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetParent,
-    GetWindowLongPtrW, KillTimer, LoadCursorW, PeekMessageW, RegisterClassW, SendMessageW,
-    SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW, CS_DBLCLKS,
-    GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_IBEAM, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOZORDER,
-    SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DEADCHAR,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCaretBlinkTime, GetClientRect, GetCursorPos,
+    GetParent, GetWindowLongPtrW, KillTimer, LoadCursorW, PeekMessageW, RegisterClassW,
+    SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW,
+    CS_DBLCLKS, GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_IBEAM, MSG, PM_REMOVE, SWP_NOACTIVATE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DEADCHAR,
     WM_DPICHANGED_AFTERPARENT, WM_DROPFILES, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS,
     WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
@@ -70,6 +71,8 @@ const CLASS: PCWSTR = w!("HoradricPane");
 const SYNC_TIMER: usize = 1;
 /// Asks for the next frame while the pane fades in or steps back.
 const ANIM_TIMER: usize = 2;
+/// Fires when a blinking cursor next turns on or off.
+const BLINK_TIMER: usize = 3;
 /// How far a pane without the keyboard steps back: the background laid
 /// over it at this strength.
 const DIMMED: f32 = 0.32;
@@ -138,6 +141,10 @@ pub struct Pane {
     /// and whether this one is zoomed.
     zoom: Cell<Option<bool>>,
     search: RefCell<Option<Search>>,
+    /// Where the cursor was at the last paint and since when, which is
+    /// where its blink starts: a cursor on the move stays lit.
+    caret_at: Cell<Option<Point>>,
+    caret_since: Cell<Instant>,
 }
 
 pub fn register_class() -> Result<()> {
@@ -190,6 +197,8 @@ impl Pane {
             animating: Cell::new(false),
             zoom: Cell::new(None),
             search: RefCell::new(None),
+            caret_at: Cell::new(None),
+            caret_since: Cell::new(Instant::now()),
         });
         unsafe {
             let instance = GetModuleHandleW(None)?;
@@ -476,7 +485,12 @@ impl Pane {
         let font = &self.shared.font;
         let cell = font.cell(dpi);
         let frame = match self.console.screen.lock() {
-            Ok(s) => frame::build(&s.term, self.focused.get(), |c, style| font.glyph(c, style)),
+            Ok(s) => {
+                let lit = self.caret_lit(&s.term);
+                frame::build(&s.term, self.focused.get(), lit, |c, style| {
+                    font.glyph(c, style)
+                })
+            }
             Err(_) => return,
         };
         let result = slot.as_ref().map(|t| {
@@ -495,6 +509,44 @@ impl Pane {
         if let Some(Err(_)) = result {
             *slot = None;
         }
+    }
+
+    /// Whether the cursor is lit in this paint, and a timer for the next
+    /// turn while it blinks. Only the pane with the keyboard blinks, and
+    /// only when Windows blinks carets and the program has not asked for a
+    /// steady cursor.
+    fn caret_lit<T: EventListener>(&self, term: &Term<T>) -> bool {
+        let now = Instant::now();
+        let at = term.grid().cursor.point;
+        if self.caret_at.replace(Some(at)) != Some(at) {
+            self.caret_since.set(now);
+        }
+        // INFINITE when caret blinking is off in Settings, zero on failure.
+        let half = match unsafe { GetCaretBlinkTime() } {
+            u32::MAX => Duration::ZERO,
+            ms => Duration::from_millis(ms as u64),
+        };
+        let blinks = self.focused.get()
+            && term.mode().contains(TermMode::SHOW_CURSOR)
+            && term.cursor_style().blinking;
+        let elapsed = now.duration_since(self.caret_since.get());
+        let next = motion::caret_turns(elapsed, half).filter(|_| blinks);
+        unsafe {
+            match next {
+                Some(wait) => {
+                    SetTimer(
+                        Some(self.hwnd),
+                        BLINK_TIMER,
+                        wait.as_millis() as u32 + 1,
+                        None,
+                    );
+                }
+                None => {
+                    let _ = KillTimer(Some(self.hwnd), BLINK_TIMER);
+                }
+            }
+        }
+        !blinks || motion::caret_lit(elapsed, half)
     }
 
     /// Where the pane's top is in the stage and how tall the stage is, in
@@ -534,6 +586,7 @@ impl Pane {
             }
         }
         self.console.note_typed();
+        self.caret_since.set(Instant::now());
         self.console.write(bytes);
         self.invalidate();
     }
@@ -1118,6 +1171,7 @@ impl Pane {
     /// that asked to hear it.
     fn set_focus(&self, focused: bool) {
         self.focused.set(focused);
+        self.caret_since.set(Instant::now());
         let mode = self.mode();
         if let Ok(mut s) = self.console.screen.lock() {
             s.term.is_focused = focused;
@@ -1168,6 +1222,13 @@ impl Pane {
                 Some(LRESULT(0))
             }
             WM_TIMER if wparam.0 == ANIM_TIMER => {
+                self.invalidate();
+                Some(LRESULT(0))
+            }
+            WM_TIMER if wparam.0 == BLINK_TIMER => {
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), BLINK_TIMER);
+                }
                 self.invalidate();
                 Some(LRESULT(0))
             }

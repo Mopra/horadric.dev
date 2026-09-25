@@ -28,7 +28,7 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::Point;
 use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor};
 use horadric_core::worktree::SETUP_ENV;
 use horadric_hooks::{OWNER_ENV, SESSION_ENV};
 use horadric_pty::host::{Attached, Incoming, Remote, Spec};
@@ -378,6 +378,12 @@ impl Console {
         };
         let config = Config {
             scrolling_history: SCROLLBACK,
+            // Blinking until a program asks for a steady cursor, as in
+            // Windows Terminal.
+            default_cursor_style: CursorStyle {
+                shape: CursorShape::Block,
+                blinking: true,
+            },
             ..Config::default()
         };
         let console = Arc::new(Console {

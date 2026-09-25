@@ -84,7 +84,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::columns::{self, Columns};
 use crate::console::{self, Console, Launch};
 use crate::dropdown::{self, Dropdown};
-use crate::glyphs::Font;
+use crate::glyphs::{self, Font};
 use crate::keys::{self, FontStep};
 use crate::layout::{self, Metrics};
 use crate::render::Gpu;
@@ -375,7 +375,11 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     let on_stage = saved.on_stage.clone().filter(|_| how.resumes());
 
     let gpu = Gpu::new()?;
-    let font = Font::new(&gpu.dw, saved.font_size.unwrap_or(keys::FONT_DEFAULT))?;
+    let font = Font::new(
+        &gpu.dw,
+        saved.font_family.as_deref(),
+        saved.font_size.unwrap_or(keys::FONT_DEFAULT),
+    )?;
     let shared = Rc::new(Shared {
         gpu,
         font,
@@ -439,6 +443,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             recent: saved.recent.clone(),
             autostart_offered,
             quiet: saved.quiet,
+            font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),
             last_saved: Some(saved),
             frozen: false,
@@ -717,6 +722,13 @@ fn tray_menu(hwnd: HWND) {
         .collect();
     let (screens, chosen) = (monitors(), with_app(|app| app.screen.clone()).flatten());
     let shown = screens::pick(&screens, chosen.as_deref()).map(|s| s.name.clone());
+    let (fonts, font) = with_app(|app| {
+        (
+            glyphs::monospaced(&app.shared.gpu.dw),
+            app.shared.font.family(),
+        )
+    })
+    .unwrap_or_default();
     let menu = tray::menu(
         hwnd,
         &projects,
@@ -728,6 +740,8 @@ fn tray_menu(hwnd: HWND) {
         &screens,
         shown.as_deref(),
         update.as_deref(),
+        &fonts,
+        &font,
     );
     match menu {
         Some(Choice::ToggleNotify) => {
@@ -766,6 +780,11 @@ fn tray_menu(hwnd: HWND) {
                 // The tiles take the new screen's DPI when they get there,
                 // and lay out again for it.
                 unsafe { SetTimer(Some(hwnd), SCREEN_TIMER, 1000, None) };
+            }
+        }
+        Some(Choice::Font(i)) => {
+            if let Some(family) = fonts.get(i) {
+                with_app(|app| app.set_font_family(family));
             }
         }
         Some(Choice::ToggleAutostart) => {
@@ -1374,6 +1393,9 @@ struct App {
     alert_for: Option<String>,
     /// No notifications, from the tray menu.
     quiet: bool,
+    /// The terminal font picked from the tray menu. Kept as picked, so a
+    /// family that is uninstalled for a while comes back when it is not.
+    font_family: Option<String>,
     /// The screen the columns stand on, by device name. None follows the
     /// primary one.
     screen: Option<String>,
@@ -2861,6 +2883,19 @@ impl App {
         self.save();
     }
 
+    /// The terminal font's family, for every pane at once.
+    fn set_font_family(&mut self, family: &str) {
+        if let Err(e) = self.shared.font.set_family(family) {
+            eprintln!("horadric: cannot load the font {family}: {e}");
+            return;
+        }
+        self.font_family = Some(family.to_string());
+        if let Some(stage) = &self.stage {
+            stage.refont();
+        }
+        self.save();
+    }
+
     /// Names a session from its tile's menu. Its tile, pane and the stage's
     /// title follow.
     fn rename(&mut self, id: &str, name: &str) {
@@ -3187,6 +3222,7 @@ impl App {
             }),
             font_size: Some(self.shared.font.size()).filter(|&s| s != keys::FONT_DEFAULT),
             quiet: self.quiet,
+            font_family: self.font_family.clone(),
             screen: self.screen.clone(),
             live: !self.quit,
             recovering: self.recovering.is_some(),

@@ -16,7 +16,7 @@ use std::mem::ManuallyDrop;
 
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use windows::core::Interface;
-use windows::core::{w, Result, BOOL, PCWSTR};
+use windows::core::{w, Result, BOOL, HSTRING};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{
@@ -27,10 +27,10 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    IDWriteFactory, IDWriteFontCollection, IDWriteFontFace, IDWriteTextFormat, DWRITE_FONT_METRICS,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE, DWRITE_FONT_STYLE_ITALIC,
-    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_METRICS, DWRITE_GLYPH_RUN,
+    IDWriteFactory, IDWriteFont1, IDWriteFontCollection, IDWriteFontFace, IDWriteFontFamily,
+    IDWriteTextFormat, DWRITE_FONT_METRICS, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE,
+    DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_METRICS, DWRITE_GLYPH_RUN,
     DWRITE_MEASURING_MODE_NATURAL, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows_numerics::{Matrix3x2, Vector2};
@@ -40,7 +40,7 @@ use crate::render::{self, hwnd_target, Gpu};
 use crate::theme::{self, Color};
 
 /// Cascadia ships with Windows 11. Consolas is on every Windows since Vista.
-const FAMILIES: [PCWSTR; 2] = [w!("Cascadia Mono"), w!("Consolas")];
+const FAMILIES: [&str; 2] = ["Cascadia Mono", "Consolas"];
 
 /// Space between the grid and the edge of the glass, in DIPs.
 pub const PAD: f32 = 14.0;
@@ -138,19 +138,24 @@ pub struct CellSize {
 }
 
 pub struct Font {
-    /// Regular, bold, italic, bold italic: indexed by the frame's style bits.
-    faces: [IDWriteFontFace; 4],
-    /// For the characters drawn one at a time. They carry the size, so a
-    /// new size makes new ones.
+    /// The family and its faces. A new family swaps them all at once.
+    faces: RefCell<Faces>,
+    /// For the characters drawn one at a time. They carry the size and the
+    /// family, so a new size or family makes new ones.
     formats: RefCell<[IDWriteTextFormat; 4]>,
-    family: PCWSTR,
     dw: IDWriteFactory,
-    metrics: DWRITE_FONT_METRICS,
-    /// Advance of `0` in design units. Monospace, so every glyph's.
-    advance: u32,
     /// In DIPs, the same for every pane.
     size: Cell<f32>,
     cache: RefCell<HashMap<(char, u8), u16>>,
+}
+
+struct Faces {
+    /// Regular, bold, italic, bold italic: indexed by the frame's style bits.
+    faces: [IDWriteFontFace; 4],
+    family: HSTRING,
+    metrics: DWRITE_FONT_METRICS,
+    /// Advance of `0` in design units. Monospace, so every glyph's.
+    advance: u32,
 }
 
 const VARIANTS: [(DWRITE_FONT_WEIGHT, DWRITE_FONT_STYLE); 4] = [
@@ -160,7 +165,7 @@ const VARIANTS: [(DWRITE_FONT_WEIGHT, DWRITE_FONT_STYLE); 4] = [
     (DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_ITALIC),
 ];
 
-fn formats(dw: &IDWriteFactory, family: PCWSTR, size: f32) -> Result<[IDWriteTextFormat; 4]> {
+fn formats(dw: &IDWriteFactory, family: &HSTRING, size: f32) -> Result<[IDWriteTextFormat; 4]> {
     let format = |(weight, style): (DWRITE_FONT_WEIGHT, DWRITE_FONT_STYLE)| unsafe {
         let f = dw.CreateTextFormat(
             family,
@@ -182,18 +187,38 @@ fn formats(dw: &IDWriteFactory, family: PCWSTR, size: f32) -> Result<[IDWriteTex
     ])
 }
 
-impl Font {
-    pub fn new(dw: &IDWriteFactory, size: f32) -> Result<Font> {
-        unsafe {
-            let mut collection: Option<IDWriteFontCollection> = None;
-            dw.GetSystemFontCollection(&mut collection, false)?;
-            let collection = collection.ok_or_else(windows::core::Error::empty)?;
+/// The families to try in order: the one chosen, then the defaults. A
+/// chosen family that was uninstalled falls through to them.
+pub fn families(chosen: Option<&str>) -> Vec<&str> {
+    let mut names: Vec<&str> = chosen
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .into_iter()
+        .collect();
+    for name in FAMILIES {
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            names.push(name);
+        }
+    }
+    names
+}
 
+fn system_fonts(dw: &IDWriteFactory) -> Result<IDWriteFontCollection> {
+    let mut collection: Option<IDWriteFontCollection> = None;
+    unsafe { dw.GetSystemFontCollection(&mut collection, false)? };
+    collection.ok_or_else(windows::core::Error::empty)
+}
+
+impl Faces {
+    fn load(dw: &IDWriteFactory, chosen: Option<&str>) -> Result<Faces> {
+        unsafe {
+            let collection = system_fonts(dw)?;
+            let names = families(chosen);
             let mut family_index = 0u32;
-            let mut family_name = FAMILIES[0];
-            for name in FAMILIES {
+            let mut family_name = names[names.len() - 1];
+            for name in &names {
                 let mut exists = BOOL(0);
-                collection.FindFamilyName(name, &mut family_index, &mut exists)?;
+                collection.FindFamilyName(&HSTRING::from(*name), &mut family_index, &mut exists)?;
                 if exists.as_bool() {
                     family_name = name;
                     break;
@@ -218,35 +243,61 @@ impl Font {
             let zero = glyph_index(&faces[0], '0');
             let mut gm = DWRITE_GLYPH_METRICS::default();
             faces[0].GetDesignGlyphMetrics(&zero, 1, &mut gm, false)?;
-
-            Ok(Font {
+            Ok(Faces {
                 faces,
-                formats: RefCell::new(formats(dw, family_name, size)?),
-                family: family_name,
-                dw: dw.clone(),
+                family: HSTRING::from(family_name),
                 metrics,
                 advance: gm.advanceWidth.max(1),
-                size: Cell::new(size),
-                cache: RefCell::new(HashMap::new()),
             })
         }
+    }
+}
+
+impl Font {
+    /// The terminal font: `family` when it is installed, else the defaults.
+    pub fn new(dw: &IDWriteFactory, family: Option<&str>, size: f32) -> Result<Font> {
+        let faces = Faces::load(dw, family)?;
+        Ok(Font {
+            formats: RefCell::new(formats(dw, &faces.family, size)?),
+            faces: RefCell::new(faces),
+            dw: dw.clone(),
+            size: Cell::new(size),
+            cache: RefCell::new(HashMap::new()),
+        })
     }
 
     pub fn size(&self) -> f32 {
         self.size.get()
     }
 
+    /// The family in use, which is not the one asked for when that one is
+    /// not installed.
+    pub fn family(&self) -> String {
+        self.faces.borrow().family.to_string()
+    }
+
     /// Changes the size for every pane. They have to fit their grids again.
     pub fn set_size(&self, size: f32) -> Result<()> {
-        *self.formats.borrow_mut() = formats(&self.dw, self.family, size)?;
+        *self.formats.borrow_mut() = formats(&self.dw, &self.faces.borrow().family, size)?;
         self.size.set(size);
+        Ok(())
+    }
+
+    /// Changes the family for every pane. Its cells are another size, so
+    /// they have to fit their grids again.
+    pub fn set_family(&self, family: &str) -> Result<()> {
+        let faces = Faces::load(&self.dw, Some(family))?;
+        *self.formats.borrow_mut() = formats(&self.dw, &faces.family, self.size.get())?;
+        *self.faces.borrow_mut() = faces;
+        self.cache.borrow_mut().clear();
         Ok(())
     }
 
     /// Cell geometry at a DPI.
     pub fn cell(&self, dpi: u32) -> CellSize {
         let scale = dpi.max(96) as f32 / 96.0;
-        let m = &self.metrics;
+        let faces = self.faces.borrow();
+        let m = &faces.metrics;
         let k = self.size.get() / m.designUnitsPerEm as f32;
         let snap_round = |dip: f32| (dip * scale).round().max(1.0) / scale;
         let snap_up = |dip: f32| (dip * scale).ceil().max(1.0) / scale;
@@ -254,7 +305,7 @@ impl Font {
         let ascent = m.ascent as f32 * k;
         let descent = m.descent as f32 * k;
         let gap = (m.lineGap.max(0)) as f32 * k;
-        let w = snap_round(self.advance as f32 * k);
+        let w = snap_round(faces.advance as f32 * k);
         let h = snap_up(ascent + descent + gap);
         let baseline = snap_round(ascent + (h - ascent - descent) / 2.0);
         let stroke = snap_round((m.underlineThickness as f32 * k).max(1.0 / scale));
@@ -274,8 +325,62 @@ impl Font {
             .cache
             .borrow_mut()
             .entry((c, style))
-            .or_insert_with(|| glyph_index(&self.faces[style as usize & 3], c))
+            .or_insert_with(|| glyph_index(&self.faces.borrow().faces[style as usize & 3], c))
     }
+}
+
+/// The installed families whose regular face is monospaced, for the menu
+/// that picks the terminal font.
+pub fn monospaced(dw: &IDWriteFactory) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(collection) = system_fonts(dw) else {
+        return names;
+    };
+    unsafe {
+        for i in 0..collection.GetFontFamilyCount() {
+            let Ok(family) = collection.GetFontFamily(i) else {
+                continue;
+            };
+            let mono = family
+                .GetFirstMatchingFont(
+                    DWRITE_FONT_WEIGHT_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    DWRITE_FONT_STYLE_NORMAL,
+                )
+                .and_then(|f| f.cast::<IDWriteFont1>())
+                .is_ok_and(|f| f.IsMonospacedFont().as_bool());
+            if let (true, Some(name)) = (mono, family_name(&family)) {
+                names.push(name);
+            }
+        }
+    }
+    menu_names(names)
+}
+
+/// A family's English name, or its first when it has none.
+fn family_name(family: &IDWriteFontFamily) -> Option<String> {
+    unsafe {
+        let names = family.GetFamilyNames().ok()?;
+        let mut index = 0u32;
+        let mut exists = BOOL(0);
+        let _ = names.FindLocaleName(w!("en-us"), &mut index, &mut exists);
+        if !exists.as_bool() {
+            index = 0;
+        }
+        let len = names.GetStringLength(index).ok()? as usize;
+        let mut buf = vec![0u16; len + 1];
+        names.GetString(index, &mut buf).ok()?;
+        Some(String::from_utf16_lossy(&buf[..len]))
+    }
+}
+
+/// Sorted without regard to case, each once. Names that start with `@` are
+/// the vertical twins of East Asian fonts, of no use to a terminal.
+pub fn menu_names(mut names: Vec<String>) -> Vec<String> {
+    names.retain(|n| !n.is_empty() && !n.starts_with('@'));
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    names
 }
 
 fn glyph_index(face: &IDWriteFontFace, c: char) -> u16 {
@@ -375,12 +480,13 @@ impl GridTarget {
                     .FillRectangle(&rect(f.row, f.col, f.cells), &self.brush);
             }
 
+            let faces = font.faces.borrow();
             let mut advances: Vec<f32> = Vec::new();
             for r in &frame.runs {
                 advances.clear();
                 advances.resize(r.glyphs.len(), cell.w);
                 let run = DWRITE_GLYPH_RUN {
-                    fontFace: ManuallyDrop::new(Some(font.faces[r.style as usize & 3].clone())),
+                    fontFace: ManuallyDrop::new(Some(faces.faces[r.style as usize & 3].clone())),
                     fontEmSize: font.size.get(),
                     glyphCount: r.glyphs.len() as u32,
                     glyphIndices: r.glyphs.as_ptr(),
@@ -852,6 +958,33 @@ fn color(c: Rgb) -> D2D1_COLOR_F {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chosen_family_goes_first_and_the_defaults_stay_behind_it() {
+        assert_eq!(families(None), ["Cascadia Mono", "Consolas"]);
+        assert_eq!(families(Some("  ")), ["Cascadia Mono", "Consolas"]);
+        assert_eq!(
+            families(Some(" JetBrains Mono ")),
+            ["JetBrains Mono", "Cascadia Mono", "Consolas"]
+        );
+        assert_eq!(families(Some("consolas")), ["consolas", "Cascadia Mono"]);
+    }
+
+    #[test]
+    fn menu_names_sort_without_case_and_drop_vertical_twins() {
+        let names = [
+            "Consolas",
+            "@MS Gothic",
+            "cascadia Mono",
+            "",
+            "Consolas",
+            "MS Gothic",
+        ];
+        assert_eq!(
+            menu_names(names.iter().map(|n| n.to_string()).collect()),
+            ["cascadia Mono", "Consolas", "MS Gothic"]
+        );
+    }
 
     #[test]
     fn header_buttons_sit_at_the_end_zoom_first() {

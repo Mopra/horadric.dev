@@ -87,10 +87,12 @@ pub struct Frame {
 }
 
 /// Builds a frame. `glyph` maps a character and style to a glyph index in
-/// the primary font, zero when the font lacks it.
+/// the primary font, zero when the font lacks it. `lit` is false while a
+/// blinking cursor is off, which only a focused pane's cursor ever is.
 pub fn build<T: EventListener>(
     term: &Term<T>,
     focused: bool,
+    lit: bool,
     mut glyph: impl FnMut(char, u8) -> u16,
 ) -> Frame {
     let content = term.renderable_content();
@@ -102,7 +104,8 @@ pub fn build<T: EventListener>(
 
     let cursor = content.cursor;
     let cursor_wide = term.grid()[cursor.point].flags.contains(Flags::WIDE_CHAR);
-    let block = focused && cursor.shape == CursorShape::Block;
+    let lit = lit || !focused;
+    let block = lit && focused && cursor.shape == CursorShape::Block;
     let is_cursor = |p: Point| {
         p.line == cursor.point.line
             && (p.column == cursor.point.column
@@ -248,7 +251,7 @@ pub fn build<T: EventListener>(
 
     let row = cursor.point.line.0 + offset;
     let visible = row >= 0 && (row as usize) < rows;
-    if visible && cursor.shape != CursorShape::Hidden && !block {
+    if lit && visible && cursor.shape != CursorShape::Hidden && !block {
         let shape = if focused {
             cursor.shape
         } else {
@@ -294,7 +297,7 @@ mod tests {
     #[test]
     fn inner_spaces_join_a_run_and_trailing_ones_do_not() {
         let term = mock_term("ab  c    \r\nxy");
-        let f = build(&term, false, ascii);
+        let f = build(&term, false, true, ascii);
         assert_eq!(f.runs.len(), 2);
         assert_eq!((f.runs[0].row, f.runs[0].col), (0, 0));
         assert_eq!(f.runs[0].glyphs, glyphs("ab  c"));
@@ -305,7 +308,7 @@ mod tests {
     #[test]
     fn wide_and_missing_characters_are_loose() {
         let term = mock_term("a\u{4e2d}b\u{23fa}c");
-        let f = build(&term, false, ascii);
+        let f = build(&term, false, true, ascii);
         let loose: Vec<(usize, usize, &str)> = f
             .loose
             .iter()
@@ -336,7 +339,7 @@ mod tests {
             )]
             .bg = Color::Named(NamedColor::Blue);
         }
-        let f = build(&term, false, ascii);
+        let f = build(&term, false, true, ascii);
         assert_eq!(f.runs.len(), 3);
         assert_eq!(f.runs[1].col, 2);
         assert_eq!(f.fills.len(), 1);
@@ -346,16 +349,31 @@ mod tests {
     #[test]
     fn focused_block_cursor_inverts_its_cell() {
         let term = mock_term("ab");
-        let f = build(&term, true, ascii);
+        let f = build(&term, true, true, ascii);
         assert!(f.caret.is_none());
         assert_eq!(f.fills.len(), 1);
         assert_eq!(f.fills[0].col, 0);
         assert_eq!(f.fills[0].color, palette::CURSOR);
         assert_eq!(f.runs[0].color, palette::BACKGROUND);
 
-        let unfocused = build(&term, false, ascii);
+        let unfocused = build(&term, false, true, ascii);
         let caret = unfocused.caret.unwrap();
         assert_eq!(caret.shape, CursorShape::HollowBlock);
         assert!(unfocused.fills.is_empty());
+    }
+
+    #[test]
+    fn a_blinking_cursor_that_is_off_draws_nothing_unless_unfocused() {
+        let term = mock_term("ab");
+        let off = build(&term, true, false, ascii);
+        assert!(off.caret.is_none());
+        assert!(off.fills.is_empty());
+        assert_eq!(
+            off.runs[0].color,
+            build(&term, false, true, ascii).runs[0].color
+        );
+
+        let unfocused = build(&term, false, false, ascii);
+        assert_eq!(unfocused.caret.unwrap().shape, CursorShape::HollowBlock);
     }
 }
