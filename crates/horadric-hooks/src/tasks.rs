@@ -22,29 +22,29 @@ pub fn config_file(project: &Path) -> PathBuf {
 
 /// The list's text, empty when there is none yet.
 pub fn read(project: &Path) -> String {
-    fs::read_to_string(file(project)).unwrap_or_default()
+    read_text(&file(project))
 }
 
 /// The project's mode. No config, or one that says nothing, is manual.
 pub fn mode(project: &Path) -> Mode {
-    tasks::mode(&fs::read_to_string(config_file(project)).unwrap_or_default())
+    tasks::mode(&read_text(&config_file(project)))
 }
 
 /// How many items the project's runner holds at once.
 pub fn parallel(project: &Path) -> usize {
-    tasks::parallel(&fs::read_to_string(config_file(project)).unwrap_or_default())
+    tasks::parallel(&read_text(&config_file(project)))
 }
 
 /// The project's SSH hosts, none without a config.
 pub fn hosts(project: &Path) -> Vec<String> {
-    ssh::hosts(&fs::read_to_string(config_file(project)).unwrap_or_default())
+    ssh::hosts(&read_text(&config_file(project)))
 }
 
 /// Adds `host` to the project's hosts. False when it was there already or
 /// is not something `ssh` takes as one destination.
 pub fn add_host(project: &Path, host: &str) -> io::Result<bool> {
     let path = config_file(project);
-    let old = fs::read_to_string(&path).unwrap_or_default();
+    let old = read_text(&path);
     match ssh::with_host(&old, host) {
         Some(new) => write(&path, &new).map(|_| true),
         None => Ok(false),
@@ -57,24 +57,24 @@ pub fn ssh_config_hosts() -> Vec<String> {
         return Vec::new();
     };
     let path = Path::new(&home).join(".ssh").join("config");
-    ssh::config_hosts(&fs::read_to_string(path).unwrap_or_default())
+    ssh::config_hosts(&read_text(&path))
 }
 
 /// What the project's config says about worktrees.
 pub fn worktrees(project: &Path) -> worktree::Settings {
-    worktree::settings(&fs::read_to_string(config_file(project)).unwrap_or_default())
+    worktree::settings(&read_text(&config_file(project)))
 }
 
 /// Switches a worktree for each new session on or off for the project.
 pub fn set_worktrees(project: &Path, enabled: bool) -> io::Result<()> {
     let path = config_file(project);
-    let old = fs::read_to_string(&path).unwrap_or_default();
+    let old = read_text(&path);
     write(&path, &worktree::with_enabled(&old, enabled))
 }
 
 pub fn set_mode(project: &Path, mode: Mode) -> io::Result<()> {
     let path = config_file(project);
-    let old = fs::read_to_string(&path).unwrap_or_default();
+    let old = read_text(&path);
     write(&path, &tasks::with_mode(&old, mode))
 }
 
@@ -83,7 +83,7 @@ pub fn set_mode(project: &Path, mode: Mode) -> io::Result<()> {
 /// before is not lost. False when `change` found nothing to change.
 pub fn update(project: &Path, change: impl FnOnce(&str) -> Option<String>) -> io::Result<bool> {
     let path = file(project);
-    let old = fs::read_to_string(&path).unwrap_or_default();
+    let old = read_text(&path);
     match change(&old) {
         Some(new) if new != old => write(&path, &new).map(|_| true),
         Some(_) => Ok(true),
@@ -100,6 +100,17 @@ fn write(path: &Path, text: &str) -> io::Result<()> {
     let tmp = path.with_extension("horadric-tmp");
     fs::write(&tmp, text)?;
     fs::rename(&tmp, path)
+}
+
+/// A file's text, empty when there is none. Without a UTF-8 byte order
+/// mark: PowerShell 5 writes one, and left in it hides the first item of a
+/// list and makes a config unreadable JSON.
+fn read_text(path: &Path) -> String {
+    let text = fs::read_to_string(path).unwrap_or_default();
+    match text.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_string(),
+        None => text,
+    }
 }
 
 /// The project folder above `from`, or `from` itself, whose list has an
@@ -168,6 +179,20 @@ mod tests {
         let dir = scratch("mode");
         assert_eq!(mode(&dir), Mode::Manual);
         set_mode(&dir, Mode::Auto).unwrap();
+        assert_eq!(mode(&dir), Mode::Auto);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_byte_order_mark_hides_neither_the_first_item_nor_the_mode() {
+        let dir = scratch("bom");
+        write(&file(&dir), "\u{feff}- [ ] First\n- [ ] Second\n").unwrap();
+        write(
+            &config_file(&dir),
+            "\u{feff}{\"tasks\":{\"mode\":\"auto\"}}",
+        )
+        .unwrap();
+        assert_eq!(tasks::parse(&read(&dir))[0].title, "First");
         assert_eq!(mode(&dir), Mode::Auto);
         fs::remove_dir_all(&dir).unwrap();
     }
