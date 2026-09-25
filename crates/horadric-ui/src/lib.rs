@@ -12,7 +12,8 @@
 //! as a pane in a grid. A click on a tile switches it to that project.
 //!
 //! One more window belongs to no project: the usage window, with the
-//! account's Claude limits and the defaults for new sessions ([`usage`]).
+//! account's Claude limits and the settings for sessions ([`usage`]), whose
+//! lists drop down in a window of their own (`dropdown`).
 //! Another stands in for the first project while none is open, so an empty
 //! desktop says how to begin (`start`).
 //!
@@ -60,6 +61,8 @@ mod browsers;
 mod clipboard;
 #[cfg(windows)]
 mod console;
+#[cfg(windows)]
+mod dropdown;
 #[cfg(windows)]
 mod glyphs;
 #[cfg(windows)]

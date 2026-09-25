@@ -56,8 +56,8 @@ use windows_numerics::{Matrix3x2, Vector2};
 use crate::anim::Look;
 use crate::files::{Row, Tree};
 use crate::layout::{
-    self, Button, ClusterLayout, FilesLayout, Hit, Metrics, Rect, StartHit, StartLayout, UsageHit,
-    UsageLayout,
+    self, Button, ClusterLayout, DropdownLayout, FilesLayout, Hit, Metrics, Rect, SettingRow,
+    StartHit, StartLayout, UsageHit, UsageLayout, KNOB_R,
 };
 use crate::motion::{self, BREATH, ORBIT};
 use crate::theme::{self, Color};
@@ -253,10 +253,31 @@ pub struct UsageScene<'a> {
     pub usage: Option<&'a Usage>,
     /// Unix seconds.
     pub now: u64,
-    /// Each setting's name and what it is set to.
-    pub settings: Vec<(&'static str, &'static str)>,
+    pub settings: Vec<SettingLook>,
     pub hot: UsageHit,
     pub pressed: Option<UsageHit>,
+    /// The setting whose list is dropped down.
+    pub open: Option<usize>,
+}
+
+/// A setting as the usage window shows it.
+pub struct SettingLook {
+    pub label: &'static str,
+    /// What it is set to, "Default" for nothing.
+    pub value: &'static str,
+    /// For a scale, the stop it is at and how many there are.
+    pub stop: Option<(usize, usize)>,
+}
+
+/// Everything one frame of a setting's dropped down list needs.
+pub struct DropdownScene<'a> {
+    pub layout: &'a DropdownLayout,
+    /// When a pick takes hold.
+    pub note: &'a str,
+    pub items: &'a [&'a str],
+    pub current: usize,
+    pub hot: Option<usize>,
+    pub pressed: Option<usize>,
 }
 
 impl UsageScene<'_> {
@@ -435,6 +456,15 @@ impl Target {
         }
     }
 
+    /// Draws a setting's list. `Err` means the target must be recreated.
+    pub fn draw_dropdown(&self, gpu: &Gpu, m: &Metrics, scene: &DropdownScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.painter(&self.rt).dropdown(gpu, m, scene);
+            self.rt.EndDraw(None, None)
+        }
+    }
+
     /// Draws the start window. `Err` means the target must be recreated.
     pub fn draw_start(&self, gpu: &Gpu, m: &Metrics, scene: &StartScene) -> Result<()> {
         unsafe {
@@ -493,83 +523,170 @@ impl Painter<'_> {
         }
     }
 
-    /// The usage window, dressed like a cluster: the same plate and header,
-    /// the limits on a screen and the settings in a grooved section.
+    /// The usage window, dressed like a cluster: the same plate, the
+    /// limits on a screen and the settings in a grooved section. No name
+    /// on top: the limits say what it is.
     unsafe fn usage(&self, gpu: &Gpu, m: &Metrics, scene: &UsageScene) {
         let l = scene.layout;
         self.plate(m, l.size);
-        let h = l.header;
-        let header_button = scene.button(UsageHit::Header);
-        if let (Some(fill), _) = theme::button_look(header_button) {
-            let x = h.x - 4.0;
-            let r = Rect::new(x, h.y + 3.0, h.right() + 4.0 - x, h.h - 6.0);
-            self.fill_rounded(&r, 6.0, fill);
+
+        self.screen(gpu, &l.limits_box, m.tile_radius);
+        let limits = scene.usage.map(|u| u.limits.named()).unwrap_or_default();
+        let first = l.limits.first().copied();
+        match (limits.first(), first) {
+            (None, Some(r)) => {
+                let r = Rect::new(r.x + INNER_PAD, r.y, r.w - 2.0 * INNER_PAD, r.h);
+                self.text(
+                    &gpu.small,
+                    theme::TEXT_DIM,
+                    "Limits show after a reply in a session",
+                    r,
+                );
+            }
+            _ => {
+                for (r, (name, limit)) in l.limits.iter().zip(&limits) {
+                    self.limit(gpu, r, name, limit, scene.now);
+                }
+            }
         }
-        let name_x = h.x + NAME_INSET;
-        let name_w = self.measure(gpu, &gpu.display, "Claude");
-        self.text(
-            &gpu.display,
-            theme::TEXT,
-            "Claude",
-            Rect::new(name_x, h.y, name_w + 1.0, h.h),
-        );
-        if scene.collapsed || header_button != Button::Idle {
+        // The screen folds the window, so it says so as a cluster's name
+        // does: a chevron beside the first word, always there when folded.
+        let folding = scene.button(UsageHit::Limits) != Button::Idle;
+        if let (Some(r), true) = (first, scene.collapsed || folding) {
+            let name = limits.first().map_or("", |(n, _)| *n);
+            let x = r.x + INNER_PAD + self.measure(gpu, &gpu.body, name);
             let chevron = if scene.collapsed {
                 '\u{E76C}'
             } else {
                 '\u{E70D}'
             };
-            self.icon(
-                &gpu.icon_small,
-                theme::TEXT_DIM,
-                chevron,
-                Rect::new(name_x + name_w + 4.0, h.y + 1.0, 14.0, h.h),
-            );
-        }
-
-        if let Some(b) = l.limits_box {
-            self.screen(gpu, &b, m.tile_radius);
-            let limits = scene.usage.map(|u| u.limits.named()).unwrap_or_default();
-            if limits.is_empty() {
-                if let Some(r) = l.limits.first() {
-                    let r = Rect::new(r.x + INNER_PAD, r.y, r.w - 2.0 * INNER_PAD, r.h);
-                    self.text(
-                        &gpu.small,
-                        theme::TEXT_DIM,
-                        "Shows after a reply in a Horadric session",
-                        r,
-                    );
-                }
-            }
-            for (r, (name, limit)) in l.limits.iter().zip(limits) {
-                self.limit(gpu, r, name, &limit, scene.now);
+            if !name.is_empty() {
+                self.icon(
+                    &gpu.icon_small,
+                    theme::TEXT_DIM,
+                    chevron,
+                    Rect::new(x + 5.0, r.y + 6.0, 14.0, 22.0),
+                );
             }
         }
 
         if let Some(b) = l.settings_box {
             self.group(&b, m.tile_radius);
         }
-        for (i, (r, (label, value))) in l.settings.iter().zip(&scene.settings).enumerate() {
-            if let (Some(fill), _) = theme::button_look(scene.button(UsageHit::Setting(i))) {
-                self.fill_rounded(&r.inset(3.0), 8.0, fill);
+        for (i, (row, look)) in l.settings.iter().zip(&scene.settings).enumerate() {
+            let b = scene.button(UsageHit::Setting(i));
+            self.setting(gpu, m, row, look, b, scene.open == Some(i));
+        }
+    }
+
+    /// A setting's row: its name, its value, and either the chevron of the
+    /// list it drops or the slider under it.
+    unsafe fn setting(
+        &self,
+        gpu: &Gpu,
+        m: &Metrics,
+        row: &SettingRow,
+        look: &SettingLook,
+        b: Button,
+        open: bool,
+    ) {
+        let b = if open { Button::Hover } else { b };
+        let pad = m.setting_pad;
+        let inner = Rect::new(
+            row.line.x + pad,
+            row.line.y,
+            row.line.w - 2.0 * pad,
+            row.line.h,
+        );
+        let ink = if look.value == "Default" {
+            theme::TEXT_DIM
+        } else {
+            theme::TEXT
+        };
+        let Some(track) = row.track else {
+            if let (Some(fill), _) = theme::button_look(b) {
+                self.fill_rounded(&row.rect.inset(3.0), 8.0, fill);
             }
-            let inner = Rect::new(r.x + INNER_PAD, r.y, r.w - 2.0 * INNER_PAD, r.h);
-            self.text(&gpu.small, theme::TEXT_DIM, label, inner);
-            let ink = if *value == "Default" {
-                theme::TEXT_DIM
-            } else {
-                theme::TEXT
-            };
-            // The menu it opens, as the chevron the cluster headers use.
+            self.text(&gpu.small, theme::TEXT_DIM, look.label, inner);
             let chevron = 12.0;
+            let glyph = if open { '\u{E70E}' } else { '\u{E70D}' };
             self.icon(
                 &gpu.icon_small,
                 theme::TEXT_DIM,
-                '\u{E70D}',
+                glyph,
                 Rect::new(inner.right() - chevron, inner.y + 1.0, chevron, inner.h),
             );
             let value_r = Rect::new(inner.x, inner.y, inner.w - chevron - 6.0, inner.h);
-            self.text(&gpu.small_right, ink, value, value_r);
+            self.text(&gpu.small_right, ink, look.value, value_r);
+            return;
+        };
+        self.text(&gpu.small, theme::TEXT_DIM, look.label, inner);
+        self.text(&gpu.small_right, ink, look.value, inner);
+        let (stop, n) = look.stop.unwrap_or((0, 1));
+        self.slider(gpu, &track, stop, n, b);
+    }
+
+    /// A fader: a slot cut into the plate with a notch at each stop, the
+    /// ones up to the knob lit, and a small key riding in it. The cursor
+    /// lifts the key as it does every other.
+    unsafe fn slider(&self, gpu: &Gpu, track: &Rect, stop: usize, n: usize, b: Button) {
+        let cy = track.y + track.h / 2.0;
+        let slot = Rect::new(track.x - 3.0, cy - 2.5, track.w + 6.0, 5.0);
+        self.sunk(gpu, &slot, 2.5, theme::WELL);
+        let knob_x = layout::slider_x(track, n, stop);
+        if stop > 0 {
+            let lit = Rect::new(track.x, cy - 1.0, knob_x - track.x, 2.0);
+            self.fill_rounded(&lit, 1.0, theme::TEXT_DIM.fade(0.8));
+        }
+        for i in 0..n {
+            let x = layout::slider_x(track, n, i);
+            let c = if i <= stop && stop > 0 {
+                theme::TEXT
+            } else {
+                theme::LAMP_OFF.mix(theme::TEXT_DIM, 0.3)
+            };
+            let notch = Rect::new(x - 1.0, cy + 5.0, 2.0, 3.0);
+            self.fill_rounded(&notch, 1.0, c);
+        }
+        let depth = match b {
+            Button::Idle => 0.5,
+            Button::Hover => 0.8,
+            Button::Pressed => 0.2,
+        };
+        let knob = Rect::new(knob_x - KNOB_R, cy - KNOB_R, 2.0 * KNOB_R, 2.0 * KNOB_R);
+        self.key(gpu, &knob, KNOB_R, theme::SURFACE, depth, 1.0);
+    }
+
+    /// A setting's list, on a plate of its own: when a pick takes hold,
+    /// then the values, the one in use lit.
+    unsafe fn dropdown(&self, gpu: &Gpu, m: &Metrics, scene: &DropdownScene) {
+        let l = scene.layout;
+        self.plate(m, l.size);
+        let pad = m.setting_pad - m.menu_pad + 4.0;
+        let n = l.note;
+        self.text(
+            &gpu.small,
+            theme::LEGEND,
+            scene.note,
+            Rect::new(n.x + pad, n.y, n.w - 2.0 * pad, n.h),
+        );
+        for (i, (r, label)) in l.items.iter().zip(scene.items).enumerate() {
+            let b = layout::button(Some(i), scene.hot, scene.pressed.map(Some));
+            if let (Some(fill), _) = theme::button_look(b) {
+                self.fill_rounded(&r.inset(1.0), 7.0, fill);
+            }
+            let current = i == scene.current;
+            let cy = r.y + r.h / 2.0;
+            if current {
+                self.led(r.x + pad + 3.0, cy, theme::TEXT);
+            }
+            let ink = if current || b == Button::Hover {
+                theme::TEXT
+            } else {
+                theme::TEXT_DIM
+            };
+            let text = Rect::new(r.x + pad + 14.0, r.y, r.w - 2.0 * pad - 14.0, r.h);
+            self.text(&gpu.small, ink, label, text);
         }
     }
 

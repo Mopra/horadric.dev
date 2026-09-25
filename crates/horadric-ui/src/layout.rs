@@ -4,7 +4,7 @@
 //! renderer scales by DPI, this module never sees a physical pixel.
 
 /// A rectangle in DIPs.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -66,8 +66,16 @@ pub struct Metrics {
     pub mark_h: f32,
     /// A usage limit in the usage window: its name and numbers, and a bar.
     pub limit_row_h: f32,
-    /// A setting in the usage window.
+    /// A setting in the usage window, and how far in from its section's
+    /// edge its name sits.
     pub setting_row_h: f32,
+    pub setting_pad: f32,
+    /// A setting's list: its edge, the note on top, a value, and the gap
+    /// that keeps a risky value apart.
+    pub menu_pad: f32,
+    pub menu_note_h: f32,
+    pub menu_row_h: f32,
+    pub menu_apart: f32,
 }
 
 impl Default for Metrics {
@@ -95,6 +103,11 @@ impl Default for Metrics {
             mark_h: 20.0,
             limit_row_h: 44.0,
             setting_row_h: 32.0,
+            setting_pad: 14.0,
+            menu_pad: 8.0,
+            menu_note_h: 28.0,
+            menu_row_h: 30.0,
+            menu_apart: 9.0,
         }
     }
 }
@@ -355,75 +368,158 @@ pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
     Hit::Nothing
 }
 
-/// The geometry of the usage window: the account's limits in one tile, the
-/// settings for new sessions in another.
+/// The geometry of the usage window: the account's limits on a screen,
+/// the settings for sessions in a section below. Folded, only the first
+/// limit is left, the session's budget, which is the one that runs out
+/// first. It has no header: it belongs to no project, so there is no name
+/// to show, and the screen itself is what folds it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageLayout {
     pub size: (f32, f32),
-    pub header: Rect,
-    /// The tile around the limits. None when collapsed.
-    pub limits_box: Option<Rect>,
+    /// The screen the limits are on.
+    pub limits_box: Rect,
     /// One row per limit, or one for the line that says none is known yet.
     pub limits: Vec<Rect>,
+    /// The section round the settings. None when folded.
     pub settings_box: Option<Rect>,
-    /// One row per setting, each a button that opens its menu.
-    pub settings: Vec<Rect>,
+    pub settings: Vec<SettingRow>,
 }
 
-/// Lays out the usage window with `limits` limits known and `settings`
-/// settings. With no limit known it keeps one row, for saying so.
-pub fn usage(m: &Metrics, limits: usize, settings: usize, collapsed: bool) -> UsageLayout {
-    let header = Rect::new(m.pad, m.pad, m.width - 2.0 * m.pad, m.header_h);
+/// One setting: a list opens from its row, a scale has a slider under its
+/// name.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SettingRow {
+    pub rect: Rect,
+    /// The line with the setting's name and value.
+    pub line: Rect,
+    /// A scale's slider: the stops run from its left edge to its right.
+    pub track: Option<Rect>,
+}
+
+/// Room at each end of a slider for half its knob.
+pub const KNOB_R: f32 = 7.0;
+
+/// Lays out the usage window with `limits` limits known and a setting per
+/// entry of `scales`, each true for a slider. With no limit known it keeps
+/// one row, for saying so.
+pub fn usage(m: &Metrics, limits: usize, scales: &[bool], collapsed: bool) -> UsageLayout {
     let full = m.width - 2.0 * m.pad;
     // Inside a tile, rows keep off its rounded corners.
     let inner = 4.0;
+    let mut y = m.pad;
+    let top = y;
+    y += inner;
+    let rows = if collapsed { 1 } else { limits.max(1) };
     let mut l = UsageLayout {
-        size: (m.width, header.bottom() + m.pad),
-        header,
-        limits_box: None,
+        size: (m.width, 0.0),
+        limits_box: Rect::default(),
         limits: Vec::new(),
         settings_box: None,
         settings: Vec::new(),
     };
-    if collapsed {
-        return l;
+    for _ in 0..rows {
+        l.limits.push(Rect::new(m.pad, y, full, m.limit_row_h));
+        y += m.limit_row_h;
     }
-    let mut y = header.bottom() + m.gap;
-    let mut section = |n: usize, row_h: f32, rows: &mut Vec<Rect>| {
+    y += inner;
+    l.limits_box = Rect::new(m.pad, top, full, y - top);
+    if !collapsed {
+        y += m.gap;
         let top = y;
         y += inner;
-        for _ in 0..n {
-            rows.push(Rect::new(m.pad, y, full, row_h));
-            y += row_h;
+        for &scale in scales {
+            let line = Rect::new(m.pad, y, full, m.setting_row_h);
+            let (h, track) = if scale {
+                let x = m.pad + m.setting_pad + KNOB_R;
+                let track = Rect::new(x, line.bottom() - 4.0, full - 2.0 * (x - m.pad), 16.0);
+                (track.bottom() + 8.0 - y, Some(track))
+            } else {
+                (m.setting_row_h, None)
+            };
+            l.settings.push(SettingRow {
+                rect: Rect::new(m.pad, y, full, h),
+                line,
+                track,
+            });
+            y += h;
         }
         y += inner;
-        let r = Rect::new(m.pad, top, full, y - top);
-        y += m.gap;
-        r
-    };
-    l.limits_box = Some(section(limits.max(1), m.limit_row_h, &mut l.limits));
-    l.settings_box = Some(section(settings, m.setting_row_h, &mut l.settings));
-    // Trailing gap becomes bottom padding.
-    l.size.1 = y - m.gap + m.pad;
+        l.settings_box = Some(Rect::new(m.pad, top, full, y - top));
+    }
+    l.size.1 = y + m.pad;
     l
+}
+
+/// Where stop `i` of `n` sits along a slider's track.
+pub fn slider_x(track: &Rect, n: usize, i: usize) -> f32 {
+    if n < 2 {
+        return track.x;
+    }
+    track.x + track.w * i.min(n - 1) as f32 / (n - 1) as f32
+}
+
+/// The stop of `n` nearest to `x`, for a click or a drag anywhere along
+/// the slider, past its ends too.
+pub fn slider_stop(track: &Rect, n: usize, x: f32) -> usize {
+    if n < 2 || track.w <= 0.0 {
+        return 0;
+    }
+    let t = ((x - track.x) / track.w).clamp(0.0, 1.0);
+    (t * (n - 1) as f32).round() as usize
 }
 
 /// Which part of the usage window a point is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageHit {
-    Header,
+    /// The limits' screen, which folds and unfolds the window.
+    Limits,
     Setting(usize),
     Nothing,
 }
 
 pub fn usage_hit(l: &UsageLayout, x: f32, y: f32) -> UsageHit {
-    if l.header.contains(x, y) {
-        return UsageHit::Header;
+    if l.limits_box.contains(x, y) {
+        return UsageHit::Limits;
     }
-    match l.settings.iter().position(|r| r.contains(x, y)) {
+    match l.settings.iter().position(|r| r.rect.contains(x, y)) {
         Some(i) => UsageHit::Setting(i),
         None => UsageHit::Nothing,
     }
+}
+
+/// The geometry of a setting's list, dropped under its row: a note on
+/// when a pick takes hold, then one row per value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropdownLayout {
+    pub size: (f32, f32),
+    pub note: Rect,
+    pub items: Vec<Rect>,
+}
+
+/// Lays out a list `width` wide of `items` values. The one at `apart`, if
+/// any, sits a gap below the rest, out of reach of a slip.
+pub fn dropdown(m: &Metrics, width: f32, items: usize, apart: Option<usize>) -> DropdownLayout {
+    let pad = m.menu_pad;
+    let full = width - 2.0 * pad;
+    let note = Rect::new(pad, pad, full, m.menu_note_h);
+    let mut y = note.bottom();
+    let mut rows = Vec::with_capacity(items);
+    for i in 0..items {
+        if apart == Some(i) {
+            y += m.menu_apart;
+        }
+        rows.push(Rect::new(pad, y, full, m.menu_row_h));
+        y += m.menu_row_h;
+    }
+    DropdownLayout {
+        size: (width, y + pad),
+        note,
+        items: rows,
+    }
+}
+
+pub fn dropdown_hit(l: &DropdownLayout, x: f32, y: f32) -> Option<usize> {
+    l.items.iter().position(|r| r.contains(x, y))
 }
 
 /// The geometry of the start window, the ghost cluster that stands where
@@ -843,38 +939,91 @@ fn nearest(v: i32, lines: &[i32], reach: i32) -> i32 {
 mod tests {
     use super::*;
 
+    const SCALES: [bool; 3] = [false, true, false];
+
     #[test]
     fn usage_window_holds_limits_then_settings() {
         let m = Metrics::default();
-        let l = usage(&m, 2, 3, false);
+        let l = usage(&m, 2, &SCALES, false);
         assert_eq!(l.limits.len(), 2);
         assert_eq!(l.settings.len(), 3);
-        let limits = l.limits_box.unwrap();
+        let limits = l.limits_box;
         let settings = l.settings_box.unwrap();
-        assert!(limits.y >= l.header.bottom());
+        assert_eq!(limits.y, m.pad);
         assert_eq!(settings.y, limits.bottom() + m.gap);
         assert!(l
             .limits
             .iter()
             .all(|r| r.y >= limits.y && r.bottom() <= limits.bottom()));
         assert_eq!(l.size.1, settings.bottom() + m.pad);
-        let s = l.settings[1];
+        for pair in l.settings.windows(2) {
+            assert_eq!(pair[0].rect.bottom(), pair[1].rect.y);
+        }
+        assert!(l
+            .settings
+            .iter()
+            .all(|r| r.rect.bottom() <= settings.bottom()));
+        let s = l.settings[1].rect;
         assert_eq!(usage_hit(&l, s.x + 5.0, s.y + 5.0), UsageHit::Setting(1));
-        assert_eq!(
-            usage_hit(&l, l.header.x + 5.0, l.header.y + 5.0),
-            UsageHit::Header
-        );
-        let r = l.limits[0];
-        assert_eq!(usage_hit(&l, r.x + 5.0, r.y + 5.0), UsageHit::Nothing);
+        let r = l.limits[1];
+        assert_eq!(usage_hit(&l, r.x + 5.0, r.y + 5.0), UsageHit::Limits);
+        assert_eq!(usage_hit(&l, 1.0, 1.0), UsageHit::Nothing);
     }
 
     #[test]
-    fn usage_window_keeps_a_row_to_say_nothing_is_known() {
+    fn only_a_scale_gets_a_slider_under_its_name() {
         let m = Metrics::default();
-        assert_eq!(usage(&m, 0, 3, false).limits.len(), 1);
-        let folded = usage(&m, 2, 3, true);
-        assert!(folded.limits.is_empty() && folded.settings.is_empty());
-        assert_eq!(folded.size.1, folded.header.bottom() + m.pad);
+        let l = usage(&m, 2, &SCALES, false);
+        assert!(l.settings[0].track.is_none() && l.settings[2].track.is_none());
+        let row = l.settings[1];
+        let t = row.track.unwrap();
+        assert!(t.y >= row.line.y + row.line.h / 2.0 && t.bottom() <= row.rect.bottom());
+        assert!(t.x - KNOB_R >= row.rect.x && t.right() + KNOB_R <= row.rect.right());
+        assert!(row.rect.h > l.settings[0].rect.h);
+    }
+
+    #[test]
+    fn folded_it_keeps_the_first_limit_alone() {
+        let m = Metrics::default();
+        assert_eq!(usage(&m, 0, &SCALES, false).limits.len(), 1);
+        let folded = usage(&m, 3, &SCALES, true);
+        assert_eq!(folded.limits.len(), 1);
+        assert!(folded.settings.is_empty() && folded.settings_box.is_none());
+        assert_eq!(folded.size.1, folded.limits_box.bottom() + m.pad);
+        assert!(folded.size.1 < usage(&m, 3, &SCALES, false).size.1);
+    }
+
+    #[test]
+    fn a_slider_snaps_to_the_nearest_stop() {
+        let t = Rect::new(10.0, 0.0, 100.0, 16.0);
+        assert_eq!(slider_x(&t, 6, 0), 10.0);
+        assert_eq!(slider_x(&t, 6, 5), 110.0);
+        assert_eq!(slider_x(&t, 6, 9), 110.0);
+        assert_eq!(slider_stop(&t, 6, 10.0), 0);
+        assert_eq!(slider_stop(&t, 6, 39.0), 1);
+        assert_eq!(slider_stop(&t, 6, 41.0), 2);
+        assert_eq!(slider_stop(&t, 6, -50.0), 0);
+        assert_eq!(slider_stop(&t, 6, 500.0), 5);
+        for i in 0..6 {
+            assert_eq!(slider_stop(&t, 6, slider_x(&t, 6, i)), i);
+        }
+        assert_eq!(slider_stop(&t, 1, 80.0), 0);
+    }
+
+    #[test]
+    fn a_dropdown_lists_its_values_under_a_note() {
+        let m = Metrics::default();
+        let l = dropdown(&m, 200.0, 4, Some(3));
+        assert_eq!(l.items.len(), 4);
+        assert_eq!(l.items[0].y, l.note.bottom());
+        assert_eq!(l.items[2].y, l.items[1].bottom());
+        assert_eq!(l.items[3].y, l.items[2].bottom() + m.menu_apart);
+        assert_eq!(l.size, (200.0, l.items[3].bottom() + m.menu_pad));
+        let r = l.items[1];
+        assert_eq!(dropdown_hit(&l, r.x + 1.0, r.y + 1.0), Some(1));
+        assert_eq!(dropdown_hit(&l, l.note.x + 1.0, l.note.y + 1.0), None);
+        let gap = l.items[2].bottom() + 1.0;
+        assert_eq!(dropdown_hit(&l, r.x + 1.0, gap), None);
     }
 
     #[test]

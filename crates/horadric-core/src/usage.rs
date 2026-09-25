@@ -176,15 +176,19 @@ impl Setting {
         }
     }
 
-    /// What `claude` takes, and what a menu calls it. The last permission
-    /// mode sits apart in the menu, so it is never picked by a slip.
+    /// What `claude` takes, and what the window calls it. Models by their
+    /// full names, so the version picked is the version that runs, and an
+    /// alias moving on to a newer model never changes it behind your back.
+    /// The last permission mode sits apart in its list, so it is never
+    /// picked by a slip.
     pub fn choices(self) -> &'static [(&'static str, &'static str)] {
         match self {
             Setting::Model => &[
-                ("fable", "Fable"),
-                ("opus", "Opus"),
-                ("sonnet", "Sonnet"),
-                ("haiku", "Haiku"),
+                ("claude-fable-5-1", "Fable 5.1"),
+                ("claude-opus-5-5", "Opus 5.5"),
+                ("claude-opus-5-5[1m]", "Opus 5.5 1M"),
+                ("claude-sonnet-5", "Sonnet 5"),
+                ("claude-haiku-4-5-20251001", "Haiku 4.5"),
             ],
             Setting::Effort => &[
                 ("low", "Low"),
@@ -202,6 +206,30 @@ impl Setting {
                 ("bypassPermissions", "Bypass permissions"),
             ],
         }
+    }
+
+    /// Effort is a scale, so the window shows it as a slider. The others
+    /// are lists.
+    pub fn is_scale(self) -> bool {
+        self == Setting::Effort
+    }
+
+    /// What to type into a running `claude` to switch it to `value`, None
+    /// for the default. Only model and effort have a command. Both switch
+    /// this session alone and leave Claude Code's own settings be. The
+    /// permission mode has none, so it waits for the next start.
+    pub fn command(self, value: Option<&str>) -> Option<String> {
+        match self {
+            Setting::Model => Some(format!("/model {}", value.unwrap_or("default"))),
+            Setting::Effort => Some(format!("/effort {}", value.unwrap_or("auto"))),
+            Setting::Permissions => None,
+        }
+    }
+
+    /// Whether a session started with `args` chose this setting itself,
+    /// so the defaults leave it alone.
+    pub fn chosen_by(self, args: &[String]) -> bool {
+        self.overridden_by().iter().any(|f| has_flag(args, f))
     }
 
     /// What a value is called, or "Default" for none, which leaves it to
@@ -254,7 +282,7 @@ impl Defaults {
             let Some(value) = self.get(s) else {
                 continue;
             };
-            if s.overridden_by().iter().any(|f| has_flag(args, f)) {
+            if s.chosen_by(args) {
                 continue;
             }
             out.push(s.flag().to_string());
@@ -396,10 +424,40 @@ mod tests {
             Setting::Effort.name_of(d.get(Setting::Effort)),
             "Extra high"
         );
-        assert_eq!(Setting::Model.name_of(Some("claude-opus-5-5")), "Custom");
+        assert_eq!(Setting::Model.name_of(Some("claude-opus-5-5")), "Opus 5.5");
+        assert_eq!(Setting::Model.name_of(Some("opus")), "Custom");
         for s in Setting::ALL {
             assert!(!s.choices().is_empty(), "{s:?}");
         }
+    }
+
+    #[test]
+    fn model_and_effort_switch_a_running_session_permissions_do_not() {
+        assert_eq!(
+            Setting::Model.command(Some("claude-sonnet-5")).as_deref(),
+            Some("/model claude-sonnet-5")
+        );
+        assert_eq!(
+            Setting::Model.command(None).as_deref(),
+            Some("/model default")
+        );
+        assert_eq!(
+            Setting::Effort.command(Some("xhigh")).as_deref(),
+            Some("/effort xhigh")
+        );
+        assert_eq!(
+            Setting::Effort.command(None).as_deref(),
+            Some("/effort auto")
+        );
+        assert_eq!(Setting::Permissions.command(Some("plan")), None);
+        assert!(Setting::Effort.is_scale() && !Setting::Model.is_scale());
+    }
+
+    #[test]
+    fn a_session_that_chose_a_setting_keeps_it() {
+        assert!(Setting::Model.chosen_by(&args("--model=haiku")));
+        assert!(Setting::Permissions.chosen_by(&args("--dangerously-skip-permissions")));
+        assert!(!Setting::Effort.chosen_by(&args("--model haiku")));
     }
 
     #[test]
