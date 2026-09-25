@@ -51,11 +51,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW,
     CS_DBLCLKS, GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_IBEAM, MSG, PM_REMOVE, SWP_NOACTIVATE,
     SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DEADCHAR,
-    WM_DPICHANGED_AFTERPARENT, WM_DROPFILES, WM_ERASEBKGND, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
-    WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_USER, WNDCLASSW,
-    WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+    WM_DPICHANGED_AFTERPARENT, WM_DROPFILES, WM_ERASEBKGND, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_TIMER,
+    WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 
 use crate::app::{self, Input};
@@ -576,8 +576,7 @@ impl Pane {
             lfHeight: -(self.shared.font.size() * scale).round() as i32,
             ..Default::default()
         };
-        let family = self.shared.font.family();
-        let family = unsafe { family.as_wide() };
+        let family: Vec<u16> = self.shared.font.family().encode_utf16().collect();
         let n = family.len().min(font.lfFaceName.len() - 1);
         font.lfFaceName[..n].copy_from_slice(&family[..n]);
         let composition = COMPOSITIONFORM {

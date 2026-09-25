@@ -3513,7 +3513,7 @@ impl App {
                 .map(|s| s.cwd.clone());
             let first = dirs.next()?;
             let spelled = |d: &String| {
-                d.replace('\', "/")
+                d.replace('\\', "/")
                     .trim_end_matches('/')
                     .eq_ignore_ascii_case(key)
             };

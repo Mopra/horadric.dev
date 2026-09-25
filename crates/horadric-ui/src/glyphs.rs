@@ -280,10 +280,6 @@ impl Font {
         })
     }
 
-    pub fn family(&self) -> PCWSTR {
-        self.family
-    }
-
     pub fn size(&self) -> f32 {
         self.size.get()
     }
