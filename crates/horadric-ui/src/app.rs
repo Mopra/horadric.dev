@@ -3222,23 +3222,19 @@ impl App {
 
     /// Makes the windows match the projects in the registry.
     fn reconcile(&mut self, phase_changed: bool) {
-        let projects: HashMap<String, usize> = self
+        self.read_boards(false);
+        let mut projects: HashSet<String> = self
             .shared
             .registry
             .lock()
-            .map(|r| {
-                let mut m = HashMap::new();
-                for s in r.all() {
-                    *m.entry(project_key(s)).or_insert(0) += 1;
-                }
-                m
-            })
+            .map(|r| r.all().map(project_key).collect())
             .unwrap_or_default();
+        projects.extend(self.listed());
 
         // Remove clusters whose project is gone.
         let mut i = 0;
         while i < self.clusters.len() {
-            if projects.contains_key(&self.clusters[i].key) {
+            if projects.contains(&self.clusters[i].key) {
                 i += 1;
             } else {
                 let c = self.clusters.remove(i);
@@ -3248,7 +3244,7 @@ impl App {
 
         // Add clusters for new projects, off screen until laid out, or where
         // the user last put them.
-        for key in projects.keys() {
+        for key in &projects {
             if self.clusters.iter().any(|c| &c.key == key) {
                 continue;
             }
@@ -3273,7 +3269,6 @@ impl App {
         }
 
         self.order_sessions();
-        self.refresh_boards(false);
         for c in &self.clusters {
             c.fit();
         }
@@ -3471,25 +3466,33 @@ impl App {
     /// The folder the project with this key lives in, as a session in it
     /// spelled it. A session in a worktree has the key too, but the
     /// project's own folder is the main working tree, so a session there
-    /// comes first and the key itself stands in when none is.
+    /// comes first and the key itself stands in when none is. With no
+    /// session, as the recent list spells it, for a project up for its
+    /// task list alone.
     fn project_dir(&self, key: &str) -> Option<PathBuf> {
-        let r = self.shared.registry.lock().ok()?;
-        let mut dirs = r
-            .all()
-            .filter(|s| project_key(s) == key && !s.cwd.is_empty())
-            .map(|s| s.cwd.clone());
-        let first = dirs.next()?;
-        let spelled = |d: &String| {
-            d.replace('\\', "/")
-                .trim_end_matches('/')
-                .eq_ignore_ascii_case(key)
-        };
-        let dir = if spelled(&first) {
-            first
-        } else {
-            dirs.find(spelled).unwrap_or_else(|| key.to_string())
-        };
-        Some(PathBuf::from(dir))
+        let from_session = self.shared.registry.lock().ok().and_then(|r| {
+            let mut dirs = r
+                .all()
+                .filter(|s| project_key(s) == key && !s.cwd.is_empty())
+                .map(|s| s.cwd.clone());
+            let first = dirs.next()?;
+            let spelled = |d: &String| {
+                d.replace('\', "/")
+                    .trim_end_matches('/')
+                    .eq_ignore_ascii_case(key)
+            };
+            Some(if spelled(&first) {
+                first
+            } else {
+                dirs.find(spelled).unwrap_or_else(|| key.to_string())
+            })
+        });
+        from_session.map(PathBuf::from).or_else(|| {
+            self.recent
+                .iter()
+                .find(|p| folder_key(p) == key)
+                .map(PathBuf::from)
+        })
     }
 
     /// Brings every tile window above the other windows.

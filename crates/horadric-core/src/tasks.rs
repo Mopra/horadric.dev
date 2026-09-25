@@ -366,6 +366,14 @@ pub fn parallel(config: &str) -> usize {
         .map_or(1, |n| (n as usize).clamp(1, MOST_PARALLEL))
 }
 
+/// Whether the list still has work in it, which keeps its project's
+/// tile up with no session running. A list of done items is history.
+pub fn unfinished(tasks: &[Task]) -> bool {
+    tasks
+        .iter()
+        .any(|t| t.mark != Mark::Done && !t.title.trim().is_empty())
+}
+
 /// What the runner does next for a project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Next {
@@ -517,6 +525,25 @@ mod tests {
         - [-] Something Horadric does not know\n\
         Some prose.\n\
         \x20 Not a note, the item before is over.\n";
+
+    #[test]
+    fn a_list_is_unfinished_while_any_item_is_not_done() {
+        assert!(unfinished(&parse(SAMPLE)));
+        assert!(unfinished(&parse(
+            "- [!] Stuck @a: why
+"
+        )));
+        assert!(!unfinished(&parse(
+            "- [x] One
+- [X] Two
+"
+        )));
+        assert!(!unfinished(&parse(
+            "- [ ]   
+"
+        )));
+        assert!(!unfinished(&[]));
+    }
 
     #[test]
     fn every_mark_parses_with_its_holder_reason_and_notes() {

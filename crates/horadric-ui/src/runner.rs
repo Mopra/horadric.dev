@@ -35,7 +35,7 @@ use super::{post, unix_now, with_app, App, WM_HORADRIC_TASK_MENU};
 use crate::app::Run;
 use crate::board::{self, Board, RowState};
 use crate::tray::{self, Item};
-use crate::window::{folder_key, project_name};
+use crate::window::{folder_key, project_key, project_name};
 use crate::{ask, watch};
 
 /// The least time between two sessions the runner starts in one project.
@@ -148,13 +148,48 @@ pub fn ssh_prompt(dir: &Path) -> Option<String> {
 
 impl App {
     /// Reads again every project's list that changed on disk, or all of
-    /// them with `force`, and resizes the clusters whose tile changed.
+    /// them with `force`, and makes the clusters match: a list with work
+    /// left brings its project's cluster up even with no session in it.
     pub(super) fn refresh_boards(&mut self, force: bool) {
-        let keys: Vec<(String, PathBuf)> = self
-            .clusters
+        if self.read_boards(force) {
+            self.reconcile(false);
+        }
+    }
+
+    /// The projects shown for their list alone, with no session needed.
+    pub(super) fn listed(&self) -> HashSet<String> {
+        self.shared
+            .boards
+            .borrow()
             .iter()
-            .filter_map(|c| Some((c.key.clone(), self.project_dir(&c.key)?)))
-            .collect();
+            .filter(|(_, b)| tasks::unfinished(&b.tasks))
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// Reads the lists of the projects with a session and of the recent
+    /// ones, and resizes the clusters whose tile changed. True when a
+    /// project gained or lost the work that keeps its cluster up.
+    pub(super) fn read_boards(&mut self, force: bool) -> bool {
+        let before = self.listed();
+        let mut keys: Vec<(String, PathBuf)> = self
+            .shared
+            .registry
+            .lock()
+            .map(|r| {
+                r.all()
+                    .filter(|s| !s.cwd.is_empty())
+                    .map(|s| (project_key(s), PathBuf::from(&s.cwd)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        keys.extend(
+            self.recent
+                .iter()
+                .map(|p| (folder_key(p), PathBuf::from(p))),
+        );
+        let mut seen = HashSet::new();
+        keys.retain(|(k, _)| seen.insert(k.clone()));
         let mut changed = Vec::new();
         for (key, dir) in &keys {
             let now = stamp(dir);
@@ -171,7 +206,7 @@ impl App {
         }
         {
             let mut boards = self.shared.boards.borrow_mut();
-            boards.retain(|k, _| keys.iter().any(|(key, _)| key == k));
+            boards.retain(|k, _| seen.contains(k));
             self.tasks.stamps.retain(|k, _| boards.contains_key(k));
         }
         let mut resized = false;
@@ -181,6 +216,7 @@ impl App {
         if resized {
             self.arrange();
         }
+        self.listed() != before
     }
 
     /// The phase of a session, none when it is gone.
