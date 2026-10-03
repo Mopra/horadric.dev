@@ -227,7 +227,13 @@ Horadric on the human's Discord profile through Rich Presence. See "Discord Acti
   Needs the four above on main. Keep a client while the setting is on, hand it the presence whenever the registry or the setting changes (it drops what did not change), and clear on Off, quit and reload as the plan says. Count that the UI thread never waits on the pipe. Check with a real Discord and a dev instance, the installed one left off.
 - [x] Discord: check it on screen with a real Discord and write it into the README @discord-check-57759
   With a dev instance: each setting, a session working, waiting and done, the elapsed time holding across turns, names hidden and shown, quit and reload clearing it. Screenshot the profile. Add a short part to README.md and mark the plan section done.
-- [x] Discord: keep the clock of a run of work through a reload @discord-keep-the-clock-of-a-run-of-work-71634
+- [x] Discord: keep the clock of a run of work through a reload @discord-keep-the-clock-of-a-run-of-work-58450
+- [x] Lock Tiles @lock-tiles-71913
+  Lav en lille padlock ikon på session Tilen, som forhindrer den i at scrolle når man klikker paa den.
+- [x] Theme Switcher @theme-switcher-72599
+  Branch out and create 5 disctint themes for the app, changable via the tray icon menu.
+- [x] Padlock not working @padlock-not-working-75760
+  Padlock on session usage tile doesnt work. Its supposed to lock the tile at the very top and allow the tiles under it to continue scrolling from its bottom. Currently it does nothing.
 - [x] Performance pass two: the leftovers in the plan @performance-pass-two-the-leftovers-in-the-71878
   See Performance in docs/PLAN.md, 'Left for later'. Each pane paint makes a new layer and geometry for its glass (glyphs.rs); characters missing from the terminal font get a DrawText each; the pane caption repaints on every spinner frame of the title; each cluster paint clones its sessions twice. Measure the UI thread on a dev instance before and after, as the first pass did.
 - [x] Keep the browser page through a reload of Horadric @keep-the-browser-page-through-a-reload-of-72055
@@ -251,6 +257,19 @@ Runewords as rune stones in a tile of their own. See "The Runetome" under Next i
   Today a [!] quest waits on the human forever, and the runner stops the whole list at it (Next::Stuck in tasks.rs). Let a blocked quest say what it waits on, in a form Horadric can check, and have the runner check it on each look. Kinds worth having: another quest done (by title, the common case, see the Runetome tile quest), a commit or branch on main, a file existing, a command exiting 0, a time. Something like horadric quest blocked "why" --on-quest "title" | --on-file path | --on-cmd "..." | --until time, kept on the item line or in its notes so the file stays the state. When the condition holds: if the holding session is alive, send it a go on message the way go_on does after a usage limit reset and mark the quest [/] again; if the session is gone, start the quest again (start_again). A blocked quest whose condition is not met yet should not stop the list: the runner skips past it to the next open quest, but only for machine checkable waits; a plain why with no condition still needs the human and still stops the list. Update the system prompt so agents use the conditional form when they can, and the board row to show what it waits on. Tests for the parsing, the condition check and the runner choice (pure parts in horadric-core). Check on screen with a dev instance: block one fake quest on another, finish the other, watch the first resume. Count claude.exe after, since this starts agents by itself.
 - [x] Let a stone of only keys be cast on a session that is casting another runeword, so a permission prompt can be answered from the tome without stopping it @let-a-stone-of-only-keys-be-cast-on-a-77466
 
+- [x] Privacy run @privacy-run-73133
+  Branch out and spawn agents to check for privacy concerns in Horadric. Does anything transmit back to a server somewhere, can the app screenshot silently without the users conscent and send the screen back to a someone else etc.
+- [/] Gate the browser pane's DevTools passthrough: allowlist CDP methods, ask before cookie and storage reads (docs/PRIVACY.md item 1) @gate-the-browser-pane-s-devtools-36954
+- [ ] Show on the tile when an agent is driving the browser pane, even when its project is off stage (docs/PRIVACY.md item 2)
+- [ ] Require a per user secret on the listener's command paths, reload, new, tasks, browser (docs/PRIVACY.md item 3)
+- [ ] Drop the WebView2 remote debugging port and the devtools-port file (docs/PRIVACY.md item 4)
+- [ ] Make session ids random instead of name plus seconds since midnight (docs/PRIVACY.md item 5)
+- [ ] Bind the hook listener with SO_EXCLUSIVEADDRUSE and check whether port squatting works (docs/PRIVACY.md item 6)
+- [ ] Add an off switch for the daily update check and say it in the README (docs/PRIVACY.md item 7)
+- [ ] Refuse Origin headers on /horadric/hook too, and check host pipe owners before attaching (docs/PRIVACY.md items 8 and 9)
+- [?] Quest log - Horadric @quest-log-horadric-33953
+  Branch the release out to any amount of agents you need and  Build a quest log. My isssue: When i run a quest and it auto-disappears from the QUESTS window, i have no way of going back and checking what the session did or how it ended up, without aasking the main session again. The quest log could de designed as a new window which shows a tree of every quest this tile has ever undertaken, which quests lead to which other quests and where quests converged into main sessions again with a branching diagram. Clicking each quest opens its old quest log, and a ultra-short summary of what the quest achieved and the result of the session. Ship local afterwards, so i can test the app.
+
 ## Runetome feedback
 
 From the human on 2026-10-01, after using the tome.
@@ -263,3 +282,7 @@ From the human on 2026-10-01, after using the tome.
   A click on a stone asks whether to cast it, showing what it will do, with a "Do not ask again" check kept in state.json.
 - [x] Review the runeword and Runetome implementation for other quality of life fixes @horadric.dev-78569
   Read the tile, casting and the engine end to end and fix what gets in the way. List what was found and done in the plan.
+- [?] Fold the History menu into the Quest Log window @fold-the-history-menu-into-the-quest-log-36361
+  History (project menu, tray, start window right click; see History in docs/PLAN.md) lists a project's newest Claude Code conversations and resumes one, quests or not. The Quest Log now does the same for quests. Put the conversations no quest holds (transcript::history, same skip rules) on the Quest Log's own timeline, in time order between the quests, as rows on the main line itself (they are the main sessions quests grow from and converge into), drawn with a dot of their own colour and a faint row background so they read apart from quests at a glance. A quest added by one of them branches from its dot. Their detail shows the conversation's title, when it was last touched, and Read the session and Carry it on. Keep the All conversations picker in the window. Asked for by the human on 2026-10-03. Then the project menu, tray and start window offer Quest log... for that project instead of their History submenus, and the History submenu code goes. Check on screen with a dev instance, including a project with no open cluster from the tray.
+- [?] Keep a new quest's text when the input loses focus @keep-a-new-quest-s-text-when-the-input-37605
+  The themed input from the quests tile's + (ask.rs, see The task list and Replace the Win32 text dialog in docs/PLAN.md) cancels on a click outside, so clicking away to look something up loses the title and notes typed so far. Asked for by the human on 2026-10-03. A click outside should no longer throw the text away: either keep the input open (only Esc and its own cancel close it), or keep the draft per project and fill it back in the next time + is clicked, cleared once the quest is added. Same for Edit quest. Check on screen with a dev instance: type, click another window, come back, the text is there.
