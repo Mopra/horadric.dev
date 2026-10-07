@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-07 Round after the README landed (9271c1f): only a doc change since 0.16.0, so cast "Ship Local", not public. Fix-up quest closed with the duplicate branch gone.
 - 2026-10-07 Wake: "The Settings window" reported a merge conflict, but its branch (c03c61a) was a parallel duplicate of ad12f6a already on main and in 0.16.0. Told the fix-up quest to drop the branch and merge nothing.
 - 2026-10-07 Round after the human left: "Ship Public" landed as v0.16.0 (53ea7fc, tagged and pushed). 143 done, none open, no aim. Nothing to do.
 - 2026-10-07 Hourly round: main at ce183a2, checks had sat unrun for four rounds. Cast "Ship Public" for the Settings window, since the release runs the checks itself and stops if red.
@@ -23,4 +24,3 @@
 - 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
 
 ## Open
-- Check that "Fix the merge of the-settings-window-with-the-tray-s" closed with the branch deleted and nothing merged.
