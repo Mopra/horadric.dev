@@ -31,6 +31,11 @@ pub fn error(title: &str, text: &str) {
     a.runModal();
 }
 
+/// Says something worth knowing.
+pub fn info(title: &str, text: &str) {
+    alert(title, text).runModal();
+}
+
 /// Asks whether to go on. True for `ok`.
 pub fn confirm(title: &str, text: &str, ok: &str) -> bool {
     let a = alert(title, text);

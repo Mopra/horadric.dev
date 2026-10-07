@@ -250,7 +250,6 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
     APP.with(|a| *a.borrow_mut() = Some(app));
     tick_soon();
     snapshot::start();
-    update::check_soon();
 
     ns_app.activate();
     ns_app.run();
@@ -1234,10 +1233,8 @@ impl App {
         ) {
             return;
         }
-        match update::install(&m) {
-            Ok(exe) => self.reload_into(&exe),
-            Err(e) => dialog::error("Horadric could not update", &e),
-        }
+        // The download runs on a thread; the tick hands over once it is in.
+        self.update.start_install();
     }
 
     // The listener's commands.
@@ -1304,6 +1301,23 @@ impl App {
                 c.redraw();
             }
             self.save();
+        }
+        self.update.tick();
+        if let Some(checked) = self.update.take_checked() {
+            match checked {
+                Ok(true) => self.install_update(),
+                Ok(false) => dialog::info(
+                    "Horadric is up to date",
+                    &format!("{} is the newest release.", env!("CARGO_PKG_VERSION")),
+                ),
+                Err(e) => dialog::error("Horadric could not check for updates", &e),
+            }
+        }
+        if let Some(ready) = self.update.take_ready() {
+            match ready {
+                Ok(exe) => self.reload_into(&exe),
+                Err(e) => dialog::error("Horadric could not update", &e),
+            }
         }
         if self.update.take_news() {
             self.menus();
