@@ -63,10 +63,11 @@ use crate::files::{Row, Tree};
 use crate::layout::{
     self, AskLayout, Button, CaptionHit, CaptionLayout, CatchupLayout, CatchupRow, ClusterLayout,
     CubeHit, CubeLayout, DialogHit, DialogLayout, DropdownLayout, FilesLayout, Hit, MenuLayout,
-    Metrics, Rect, SettingRow, StartHit, StartLayout, StashLayout, TasksLayout, ToastLayout,
-    TomeLayout, UsageHit, UsageLayout, KNOB_R,
+    Metrics, Rect, SettingRow, SettingsHit, SettingsLayout, StartHit, StartLayout, StashLayout,
+    TasksLayout, ToastLayout, TomeLayout, UsageHit, UsageLayout, KNOB_R,
 };
 use crate::motion::{self, ORBIT};
+use crate::settings::Control;
 use crate::theme::{self, Color};
 
 mod stone;
@@ -415,6 +416,34 @@ pub struct SettingLook {
     pub stop: Option<(usize, usize)>,
     /// A click drops a list, so the row shows a chevron.
     pub list: bool,
+}
+
+/// Everything one frame of the Settings window needs.
+pub struct SettingsScene<'a> {
+    pub layout: &'a SettingsLayout,
+    /// The sections' names, down the left.
+    pub sections: &'a [&'a str],
+    /// The one picked, whose rows show.
+    pub section: usize,
+    pub heading: &'a str,
+    pub rows: &'a [SettingsLook],
+    pub hot: SettingsHit,
+    pub pressed: Option<SettingsHit>,
+}
+
+/// A row of the Settings window as it is drawn.
+pub struct SettingsLook {
+    pub label: &'static str,
+    pub value: String,
+    pub control: Control,
+    /// Its list is dropped down.
+    pub open: bool,
+}
+
+impl SettingsScene<'_> {
+    fn button(&self, which: SettingsHit) -> Button {
+        layout::button(which, self.hot, self.pressed)
+    }
 }
 
 /// Everything one frame of a setting's dropped down list needs.
@@ -879,6 +908,15 @@ impl Target {
             self.rt.BeginDraw();
             self.painter(&self.rt).cube(gpu, m, scene);
             self.fade_cut();
+            self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// Draws the Settings window. `Err` means the target must be recreated.
+    pub fn draw_settings(&self, gpu: &Gpu, m: &Metrics, scene: &SettingsScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.painter(&self.rt).settings(gpu, m, scene);
             self.rt.EndDraw(None, None)
         }
     }
@@ -1660,6 +1698,74 @@ impl Painter<'_> {
         };
         let knob = Rect::new(knob_x - KNOB_R, cy - KNOB_R, 2.0 * KNOB_R, 2.0 * KNOB_R);
         self.key(gpu, &knob, KNOB_R, theme::surface(), depth, 1.0);
+    }
+
+    /// The Settings window: its name and cross on a bar cut off by a
+    /// groove, the sections down the left with the one picked latched
+    /// down, and its rows in a group drawn as the usage window's are. A
+    /// switch has a lamp beside its word.
+    unsafe fn settings(&self, gpu: &Gpu, m: &Metrics, scene: &SettingsScene) {
+        let l = scene.layout;
+        self.plate(m, l.size);
+        let t = &l.title;
+        let name = Rect::new(m.pad + 4.0, t.y, t.w / 2.0, t.h);
+        self.text(&gpu.body, theme::text(), "Settings", name);
+        let (fill, ink) = theme::button_look(scene.button(SettingsHit::Close));
+        if let Some(fill) = fill {
+            self.fill_rounded(&l.close, 6.0, fill);
+        }
+        self.icon(&gpu.icon_small, ink, '\u{E711}', l.close);
+        self.groove(m.pad, l.size.0 - m.pad, t.bottom());
+
+        for (i, (r, name)) in l.sections.iter().zip(scene.sections).enumerate() {
+            let r = r.inset(2.0);
+            let picked = i == scene.section;
+            let b = scene.button(SettingsHit::Section(i));
+            // Lit as well as latched: a theme with no depth shows only the
+            // fill.
+            if picked {
+                self.fill_rounded(&r, 8.0, theme::hover_fill());
+                self.latched(gpu, &r, 8.0, 1.0);
+            } else if let (Some(fill), _) = theme::button_look(b) {
+                self.fill_rounded(&r, 8.0, fill);
+            }
+            let ink = if picked || b != Button::Idle {
+                theme::text()
+            } else {
+                theme::text_dim()
+            };
+            let label = Rect::new(r.x + 12.0, r.y, r.w - 24.0, r.h);
+            self.text(&gpu.small, ink, name, label);
+        }
+
+        let h = &l.heading;
+        let heading = Rect::new(h.x + 4.0, h.y, h.w - 8.0, h.h);
+        self.text(&gpu.small, theme::legend(), scene.heading, heading);
+        self.group(&l.group, m.tile_radius);
+        for (i, (row, look)) in l.rows.iter().zip(scene.rows).enumerate() {
+            let b = match look.control {
+                Control::Fixed => Button::Idle,
+                _ => scene.button(SettingsHit::Row(i)),
+            };
+            let shown = SettingLook {
+                label: look.label,
+                value: look.value.clone(),
+                stop: None,
+                list: look.control == Control::List,
+            };
+            self.setting(gpu, m, row, &shown, b, look.open);
+            if let Control::Switch(on) = look.control {
+                let right = row.line.right() - m.setting_pad;
+                let x = right - self.measure(gpu, &gpu.small, &look.value) - 10.0;
+                let y = row.line.y + row.line.h / 2.0;
+                if on {
+                    self.led(x, y, theme::working());
+                } else {
+                    let dot = Rect::new(x - 2.5, y - 2.5, 5.0, 5.0);
+                    self.fill_rounded(&dot, 2.5, theme::lamp_off().mix(theme::text_dim(), 0.3));
+                }
+            }
+        }
     }
 
     /// A setting's list, on a plate of its own: when a pick takes hold,

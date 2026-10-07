@@ -4967,9 +4967,20 @@ menu loses Work mode, Colour and Add host and gains "Project
 settings...", which opens the same window at that project. Tile menus are
 actions already and stay as they are.
 
-**Open.** Whether the window is a tile in the columns like the usage
-window or a window of its own that closes. Leaning to its own: settings
-are visited, not watched.
+**A window of its own** (decided 2026-10-07): settings are visited, not
+watched, so it closes rather than standing in the columns. It opens in the
+middle of the screen the cursor is on, has a taskbar button, moves by its
+title bar, and closes by its cross, Esc or Alt+F4. The arrow keys go
+through the sections.
+
+**Built so far** (2026-10-07): the frame (`settings.rs`, laid out and hit
+tested in `layout::settings`), Appearance, Notifications, Startup and
+updates, and Privacy. Their tray lines are gone; the tray has
+"Settings..." and keeps "Update to" when a check found a release. A list
+row drops the usage window's list, which now serves either window
+(`dropdown::Whose`), and a list too long for the screen climbs to its top.
+Sessions, Keys, Runetome and Projects come next, with the project menu's
+lines.
 
 ## Not in any step yet, but needed before daily use
 

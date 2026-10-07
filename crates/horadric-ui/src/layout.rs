@@ -954,6 +954,100 @@ pub fn dropdown_hit(l: &DropdownLayout, x: f32, y: f32) -> Option<usize> {
     l.items.iter().position(|r| r.contains(x, y))
 }
 
+/// The geometry of the Settings window: a title bar with its cross, the
+/// sections down the left, and the rows of the one picked on the right,
+/// drawn as the usage window draws its settings. It is as tall as the
+/// longest section needs, so picking another never resizes it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsLayout {
+    pub size: (f32, f32),
+    /// The bar the window is dragged by, the cross included.
+    pub title: Rect,
+    pub close: Rect,
+    pub sections: Vec<Rect>,
+    /// The picked section's name, over its rows.
+    pub heading: Rect,
+    /// The box round the rows.
+    pub group: Rect,
+    pub rows: Vec<SettingRow>,
+}
+
+const SETTINGS_TITLE_H: f32 = 40.0;
+const SETTINGS_SIDE_W: f32 = 176.0;
+const SETTINGS_PANE_W: f32 = 380.0;
+const SETTINGS_SECTION_H: f32 = 34.0;
+const SETTINGS_HEADING_H: f32 = 26.0;
+
+/// Lays out the Settings window with `sections` sections, `rows` rows in
+/// the one shown, and room for `tallest` rows, the most any section has.
+pub fn settings(m: &Metrics, sections: usize, rows: usize, tallest: usize) -> SettingsLayout {
+    let inner = 4.0;
+    let width = m.pad + SETTINGS_SIDE_W + m.gap + SETTINGS_PANE_W + m.pad;
+    let title = Rect::new(0.0, 0.0, width, SETTINGS_TITLE_H);
+    let close = Rect::new(width - m.pad - 32.0, 6.0, 32.0, SETTINGS_TITLE_H - 12.0);
+    let top = title.bottom() + 4.0;
+    let sections: Vec<Rect> = (0..sections)
+        .map(|i| {
+            let y = top + i as f32 * SETTINGS_SECTION_H;
+            Rect::new(m.pad, y, SETTINGS_SIDE_W, SETTINGS_SECTION_H)
+        })
+        .collect();
+    let x = m.pad + SETTINGS_SIDE_W + m.gap;
+    let heading = Rect::new(x, top, SETTINGS_PANE_W, SETTINGS_HEADING_H);
+    let group_top = heading.bottom() + 6.0;
+    let rows = (0..rows)
+        .map(|i| {
+            let y = group_top + inner + i as f32 * m.setting_row_h;
+            let line = Rect::new(x, y, SETTINGS_PANE_W, m.setting_row_h);
+            SettingRow {
+                rect: line,
+                line,
+                track: None,
+            }
+        })
+        .collect();
+    let group_h = 2.0 * inner + tallest.max(1) as f32 * m.setting_row_h;
+    let group = Rect::new(x, group_top, SETTINGS_PANE_W, group_h);
+    let side_bottom = sections.last().map_or(top, |r| r.bottom());
+    let height = group.bottom().max(side_bottom) + m.pad;
+    SettingsLayout {
+        size: (width, height),
+        title,
+        close,
+        sections,
+        heading,
+        group,
+        rows,
+    }
+}
+
+/// Which part of the Settings window a point is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsHit {
+    Close,
+    /// The rest of the title bar, which moves the window.
+    Title,
+    Section(usize),
+    Row(usize),
+    Nothing,
+}
+
+pub fn settings_hit(l: &SettingsLayout, x: f32, y: f32) -> SettingsHit {
+    if l.close.contains(x, y) {
+        return SettingsHit::Close;
+    }
+    if l.title.contains(x, y) {
+        return SettingsHit::Title;
+    }
+    if let Some(i) = l.sections.iter().position(|r| r.contains(x, y)) {
+        return SettingsHit::Section(i);
+    }
+    match l.rows.iter().position(|r| r.rect.contains(x, y)) {
+        Some(i) => SettingsHit::Row(i),
+        None => SettingsHit::Nothing,
+    }
+}
+
 /// One line of a menu, as far as laying it out goes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MenuLine {
@@ -3495,5 +3589,48 @@ mod tests {
         let (x, y) = (l.slots[4].x + 1.0, l.slots[4].y + 1.0);
         assert_eq!(stash_hit(&l, x, y), Some(4));
         assert_eq!(stash_hit(&l, l.header.x + 1.0, l.header.y + 1.0), None);
+    }
+
+    #[test]
+    fn the_settings_window_keeps_its_size_whichever_section_shows() {
+        let m = Metrics::default();
+        let few = settings(&m, 4, 1, 3);
+        let most = settings(&m, 4, 3, 3);
+        assert_eq!(few.size, most.size);
+        assert_eq!(most.rows.len(), 3);
+        assert!(most
+            .rows
+            .iter()
+            .all(|r| r.rect.bottom() <= most.group.bottom()));
+        for pair in most.rows.windows(2) {
+            assert_eq!(pair[0].rect.bottom(), pair[1].rect.y);
+        }
+        // The sections stand left of the rows, both under the title bar.
+        let side = most.sections[0];
+        assert!(side.right() < most.group.x);
+        assert!(side.y >= most.title.bottom() && most.heading.y >= most.title.bottom());
+        assert!(most.size.1 >= most.group.bottom());
+        assert!(most.size.1 >= most.sections[3].bottom());
+        // More sections than rows: the list down the left sets the height.
+        let tall = settings(&m, 9, 1, 1);
+        assert_eq!(tall.size.1, tall.sections[8].bottom() + m.pad);
+    }
+
+    #[test]
+    fn a_point_in_the_settings_window_finds_its_part() {
+        let m = Metrics::default();
+        let l = settings(&m, 4, 2, 3);
+        let at = |r: Rect| settings_hit(&l, r.x + 5.0, r.y + 5.0);
+        assert_eq!(at(l.close), SettingsHit::Close);
+        assert_eq!(settings_hit(&l, 30.0, 10.0), SettingsHit::Title);
+        assert_eq!(at(l.sections[2]), SettingsHit::Section(2));
+        assert_eq!(at(l.rows[1].rect), SettingsHit::Row(1));
+        assert_eq!(at(l.heading), SettingsHit::Nothing);
+        // Room kept for a third row that this section does not have.
+        let below = l.rows[1].rect.bottom() + 5.0;
+        assert_eq!(
+            settings_hit(&l, l.group.x + 5.0, below),
+            SettingsHit::Nothing
+        );
     }
 }

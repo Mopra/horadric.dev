@@ -124,8 +124,9 @@ work. Worktrees are next.
 - Ctrl+Alt+Space, from anywhere, shows the session that has waited on you
   longest. Press it again to move on to the next one. When a session starts
   waiting and you are not looking at it, Windows shows a notification; a
-  click on it shows the session. The tray menu can switch that off.
-- "Show on Discord" in the tray menu puts what your agents do on your
+  click on it shows the session. Settings, in the tray menu, can switch
+  that off.
+- "Show on Discord" in Settings, under Privacy, puts what your agents do on your
   Discord profile, "Playing Horadric: 2 agents working, 1 waits for you",
   with a clock that counts the whole run of work, not each turn. It is
   off until you choose it, and "Without project names" keeps the project

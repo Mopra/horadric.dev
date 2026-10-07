@@ -41,6 +41,12 @@ pub fn label(n: usize, screen: &Screen) -> String {
     format!("Screen {n}\t{w} \u{d7} {h}{primary}")
 }
 
+/// A screen's name alone, as the Settings window's row says it.
+pub fn short_label(n: usize, screen: &Screen) -> String {
+    let primary = if screen.primary { ", primary" } else { "" };
+    format!("Screen {n}{primary}")
+}
+
 /// What to save for a pick from the menu: nothing for the primary screen,
 /// so the columns keep following it when another becomes primary.
 pub fn choice(screen: &Screen) -> Option<String> {
@@ -103,5 +109,11 @@ mod tests {
     fn choosing_the_primary_screen_saves_nothing() {
         assert_eq!(choice(&screen("A", 0, true)), None);
         assert_eq!(choice(&screen("B", 1920, false)), Some("B".into()));
+    }
+
+    #[test]
+    fn a_short_label_names_the_screen_without_its_size() {
+        assert_eq!(short_label(2, &screen("B", 1920, false)), "Screen 2");
+        assert_eq!(short_label(1, &screen("A", 0, true)), "Screen 1, primary");
     }
 }

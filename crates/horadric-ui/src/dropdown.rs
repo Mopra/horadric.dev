@@ -1,7 +1,8 @@
-//! A setting's list, dropped down under its row in the usage window.
+//! A setting's list, dropped down under its row in the usage window or
+//! the Settings window.
 //!
-//! Drawn like the rest of the app rather than as a Windows menu. It is the
-//! one window of the app that takes the focus, and it holds the mouse while
+//! Drawn like the rest of the app rather than as a Windows menu. It takes
+//! the focus, and it holds the mouse while
 //! open, so a click anywhere else closes it, as a list box's does, and the
 //! arrow keys, Enter and Escape work on it. Whatever had the focus gets it
 //! back when it closes.
@@ -39,6 +40,7 @@ use crate::app::{self, Input};
 use crate::backdrop;
 use crate::layout::{self, DropdownLayout};
 use crate::render::{DropdownScene, Target};
+use crate::settings::Field;
 use crate::window::Shared;
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricDropdown");
@@ -46,16 +48,25 @@ pub(crate) const CLASS: PCWSTR = w!("HoradricDropdown");
 /// How far below its row the list drops, in DIPs.
 const DROP: f32 = 4.0;
 
+/// Whose list it is, which is who hears what was picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Whose {
+    /// A session default in the usage window, of the agent whose screen
+    /// it dropped from.
+    Default(Agent, Setting),
+    /// A row of the Settings window.
+    Settings(Field),
+}
+
 pub struct Dropdown {
     pub hwnd: HWND,
-    /// Whose setting it is: the usage window's screen it dropped from.
-    pub agent: Agent,
-    pub setting: Setting,
+    pub whose: Whose,
     shared: Rc<Shared>,
     target: RefCell<Option<Target>>,
     layout: DropdownLayout,
-    labels: Vec<&'static str>,
-    /// What each row sets, None for the default.
+    note: String,
+    labels: Vec<String>,
+    /// For a session default, what each row sets, None for the default.
     values: Vec<Option<&'static str>>,
     current: usize,
     hot: Cell<Option<usize>>,
@@ -104,10 +115,10 @@ impl Dropdown {
         dpi: u32,
     ) -> Result<Box<Self>> {
         let choices = setting.choices(agent);
-        let mut labels = vec!["Default"];
+        let mut labels = vec!["Default".to_string()];
         let mut values = vec![None];
         for (v, name) in choices {
-            labels.push(name);
+            labels.push(name.to_string());
             values.push(Some(*v));
         }
         let current = values
@@ -116,6 +127,48 @@ impl Dropdown {
             .unwrap_or_default();
         // The last permission mode sits apart, so it is never picked by a slip.
         let apart = (setting == Setting::Permissions).then(|| labels.len() - 1);
+        let list = List {
+            whose: Whose::Default(agent, setting),
+            note: note(agent, setting).to_string(),
+            labels,
+            values,
+            current,
+            apart,
+        };
+        Self::create(shared, list, row, dpi)
+    }
+
+    /// Opens the list for a row of the Settings window: `labels` to pick
+    /// from, `current` the one in use, with `note` on top.
+    pub fn settings(
+        shared: Rc<Shared>,
+        field: Field,
+        note: &str,
+        labels: Vec<String>,
+        current: usize,
+        row: RECT,
+        dpi: u32,
+    ) -> Result<Box<Self>> {
+        let list = List {
+            whose: Whose::Settings(field),
+            note: note.to_string(),
+            labels,
+            values: Vec::new(),
+            current,
+            apart: None,
+        };
+        Self::create(shared, list, row, dpi)
+    }
+
+    fn create(shared: Rc<Shared>, list: List, row: RECT, dpi: u32) -> Result<Box<Self>> {
+        let List {
+            whose,
+            note,
+            labels,
+            values,
+            current,
+            apart,
+        } = list;
         let s = dpi.max(96) as f32 / 96.0;
         let width = (row.right - row.left) as f32 / s;
         let layout = layout::dropdown(&shared.metrics, width, labels.len(), apart);
@@ -124,19 +177,15 @@ impl Dropdown {
             (layout.size.1 * s).round() as i32,
         );
         let drop = (DROP * s).round() as i32;
-        let below = row.bottom + drop;
-        let y = if below + h > work_bottom(&row) {
-            row.top - drop - h
-        } else {
-            below
-        };
+        let work = work_area(&row);
+        let y = place(row.top, row.bottom, h, drop, (work.top, work.bottom));
         let mut win = Box::new(Dropdown {
             hwnd: HWND::default(),
-            agent,
-            setting,
+            whose,
             shared,
             target: RefCell::new(None),
             layout,
+            note,
             labels,
             values,
             current,
@@ -211,10 +260,11 @@ impl Dropdown {
                 }
             }
         }
+        let items: Vec<&str> = self.labels.iter().map(String::as_str).collect();
         let scene = DropdownScene {
             layout: &self.layout,
-            note: note(self.agent, self.setting),
-            items: &self.labels,
+            note: &self.note,
+            items: &items,
             current: self.current,
             hot: self.hot.get(),
             pressed: self.pressed.get(),
@@ -267,10 +317,15 @@ impl Dropdown {
             }
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
-        let value = pick
-            .and_then(|i| self.values.get(i))
-            .map(|v| v.map(str::to_string));
-        app::push(Input::Picked(self.agent, self.setting, value));
+        match self.whose {
+            Whose::Default(agent, setting) => {
+                let value = pick
+                    .and_then(|i| self.values.get(i))
+                    .map(|v| v.map(str::to_string));
+                app::push(Input::Picked(agent, setting, value));
+            }
+            Whose::Settings(field) => app::push(Input::SettingsPicked(field, pick)),
+        }
     }
 
     fn handle(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
@@ -344,8 +399,34 @@ impl Dropdown {
     }
 }
 
-/// The bottom of the work area of the screen `row` is on.
-fn work_bottom(row: &RECT) -> i32 {
+/// What a list is made of, before it has a window.
+struct List {
+    whose: Whose,
+    note: String,
+    labels: Vec<String>,
+    values: Vec<Option<&'static str>>,
+    current: usize,
+    apart: Option<usize>,
+}
+
+/// Where a list `h` tall goes for a row from `top` to `bottom`: `drop`
+/// below it, or above it when there is no room below, or as high as the
+/// work area lets it when there is room on neither side, as a long list
+/// of fonts can need.
+fn place(top: i32, bottom: i32, h: i32, drop: i32, (work_top, work_bottom): (i32, i32)) -> i32 {
+    let below = bottom + drop;
+    let above = top - drop - h;
+    if below + h <= work_bottom {
+        below
+    } else if above >= work_top {
+        above
+    } else {
+        work_top.max(work_bottom - h)
+    }
+}
+
+/// The work area of the screen `row` is on.
+fn work_area(row: &RECT) -> RECT {
     let mut info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
@@ -353,9 +434,14 @@ fn work_bottom(row: &RECT) -> i32 {
     unsafe {
         let monitor = MonitorFromRect(row, MONITOR_DEFAULTTONEAREST);
         if GetMonitorInfoW(monitor, &mut info).as_bool() {
-            info.rcWork.bottom
+            info.rcWork
         } else {
-            i32::MAX
+            RECT {
+                left: 0,
+                top: i32::MIN / 2,
+                right: 0,
+                bottom: i32::MAX / 2,
+            }
         }
     }
 }
@@ -394,5 +480,15 @@ mod tests {
         assert!(claude(Setting::Effort).starts_with("Running"));
         assert!(claude(Setting::Permissions).starts_with("From the next"));
         assert!(note(Agent::Codex, Setting::Model).starts_with("From the next"));
+    }
+
+    #[test]
+    fn a_list_drops_below_its_row_or_above_or_as_high_as_it_can() {
+        let work = (0, 1000);
+        assert_eq!(place(100, 130, 200, 4, work), 134);
+        assert_eq!(place(900, 930, 200, 4, work), 696);
+        // Too long for either side: as high as the screen lets it.
+        assert_eq!(place(400, 430, 800, 4, work), 200);
+        assert_eq!(place(400, 430, 1200, 4, work), 0);
     }
 }

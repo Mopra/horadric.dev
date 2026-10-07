@@ -110,7 +110,7 @@ use crate::columns::{self, Columns};
 use crate::console::{self, Console, Launch};
 use crate::cube::{self as cube_window, CubeWindow};
 use crate::dialog::{self, Dialog, Tone};
-use crate::dropdown::{self, Dropdown};
+use crate::dropdown::{self, Dropdown, Whose};
 use crate::glide::Glides;
 use crate::glyphs::{self, Font};
 use crate::keys::{self, FontStep};
@@ -120,6 +120,7 @@ use crate::menu::{self, Item};
 use crate::questlog::{self, QuestLog};
 use crate::render::{Gpu, StashLook};
 use crate::screens::{self, Screen};
+use crate::settings::{self, Field, SettingsWindow};
 use crate::sound;
 use crate::start::{self, StartWindow};
 use crate::stash::{self, StashWindow};
@@ -212,6 +213,9 @@ const WM_HORADRIC_STONE: u32 = WM_APP + 29;
 /// Offer what can be done with the stone the app's `stone_menu_for`
 /// names, outside the app's borrow since a menu runs a loop of its own.
 const WM_HORADRIC_STONE_MENU: u32 = WM_APP + 30;
+/// Drop the list for the row of the Settings window the app's
+/// `settings_list_for` names.
+const WM_HORADRIC_SETTINGS_LIST: u32 = WM_APP + 31;
 
 /// A button in a session pane's header, handled outside the app's borrow
 /// since it may ask first.
@@ -370,6 +374,14 @@ pub(crate) enum Input {
     Version,
     /// A setting's list closed, with the value picked, if one was.
     Picked(Agent, Setting, Option<Option<String>>),
+    /// A row of the Settings window clicked, its place on screen given for
+    /// a list to drop from.
+    SettingsClick(Field, RECT),
+    /// A list of the Settings window closed, with the place of the line
+    /// picked, if one was.
+    SettingsPicked(Field, Option<usize>),
+    /// The Settings window's cross, Esc or Alt+F4.
+    SettingsClosed,
     /// A slider in the usage window let go at a new value.
     SetDefault(Agent, Setting, Option<String>),
     /// The catch-up closed, with the session of the line clicked, if one
@@ -502,6 +514,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     stash::register_class()?;
     cube_window::register_class()?;
     dropdown::register_class()?;
+    settings::register_class()?;
     ask::register_class()?;
     menu::register_class()?;
     caption::register_class()?;
@@ -710,6 +723,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             mcp_config,
             setting_menu_for: None,
             dropdown: None,
+            settings_window: None,
+            settings_list_for: None,
             switches: HashMap::new(),
             settings_before: None,
             accounts: accounts::load(),
@@ -1154,6 +1169,33 @@ unsafe extern "system" fn app_proc(
             }
             return LRESULT(0);
         }
+        WM_HORADRIC_SETTINGS_LIST => {
+            // Outside the app's borrow, as a setting's list is opened.
+            let want = with_app(|app| {
+                let (field, row) = app.settings_list_for.take()?;
+                let (note, labels, current) = app.settings_list(field)?;
+                let dpi = app.settings_window.as_ref().map_or(96, |w| w.dpi());
+                Some((
+                    Rc::clone(&app.shared),
+                    field,
+                    note,
+                    labels,
+                    current,
+                    row,
+                    dpi,
+                ))
+            })
+            .flatten();
+            if let Some((shared, field, note, labels, current, row, dpi)) = want {
+                match Dropdown::settings(shared, field, note, labels, current, row, dpi) {
+                    Ok(d) => {
+                        with_app(|app| app.dropped(d));
+                    }
+                    Err(e) => eprintln!("horadric: cannot open a setting's list: {e}"),
+                }
+            }
+            return LRESULT(0);
+        }
         WM_HORADRIC_TASK_MENU => {
             if let Some(menu) = with_app(|app| app.tasks.menu.take()).flatten() {
                 runner::show_menu(menu);
@@ -1195,15 +1237,12 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 fn tray_menu(hwnd: HWND) {
-    let (recent, hotkeys, notify, sounds, discord, terminal, update, xp) = with_app(|app| {
+    let (recent, hotkeys, terminal, update, xp) = with_app(|app| {
         let xp = app.experience.lock().ok().and_then(|e| *e);
         app.count_experience();
         (
             app.recent.clone(),
             [app.hotkey, app.listen_key, app.stop_key],
-            !app.quiet,
-            app.sounds,
-            app.discord,
             !app.consoles.is_empty(),
             app.update.as_ref().map(|m| m.version.clone()),
             xp,
@@ -1214,52 +1253,10 @@ fn tray_menu(hwnd: HWND) {
         .into_iter()
         .filter(|p| Path::new(p).is_dir())
         .collect();
-    let autostart = (!horadric_hooks::dev()).then(autostart::is_enabled);
-    let (screens, chosen) = (monitors(), with_app(|app| app.screen.clone()).flatten());
-    let shown = screens::pick(&screens, chosen.as_deref()).map(|s| s.name.clone());
-    let (fonts, font) = with_app(|app| {
-        (
-            glyphs::monospaced(&app.shared.gpu.dw),
-            app.shared.font.family(),
-        )
-    })
-    .unwrap_or_default();
     let driven = with_app(|app| app.driven()).unwrap_or_default();
-    let menu = tray::menu(
-        &projects,
-        autostart,
-        hotkeys,
-        &driven,
-        notify,
-        sounds,
-        discord,
-        terminal,
-        &screens,
-        shown.as_deref(),
-        update.as_deref(),
-        &fonts,
-        &font,
-        theme::current(),
-        xp,
-    );
+    let menu = tray::menu(&projects, hotkeys, &driven, terminal, update.as_deref(), xp);
     match menu {
-        Some(Choice::ToggleNotify) => {
-            with_app(|app| {
-                app.quiet = !app.quiet;
-                app.save();
-            });
-        }
-        Some(Choice::ToggleSounds) => {
-            with_app(|app| {
-                app.sounds = !app.sounds;
-                app.save();
-                // So the choice is heard the moment it is made.
-                app.sound(Loot::Drop);
-            });
-        }
-        Some(Choice::Discord(d)) => {
-            with_app(|app| app.set_discord(d));
-        }
+        Some(Choice::Settings) => open_settings(),
         Some(Choice::New) => pick_and_start(hwnd, projects.first().map(PathBuf::from)),
         Some(Choice::Recent(path)) => start_logged(PathBuf::from(path)),
         Some(Choice::QuestLog(path)) => {
@@ -1282,32 +1279,6 @@ fn tray_menu(hwnd: HWND) {
         }
         Some(Choice::Arrange) => {
             with_app(App::fit_stage);
-        }
-        Some(Choice::Screen(i)) => {
-            if let Some(screen) = screens.get(i) {
-                with_app(|app| app.move_to_screen(screens::choice(screen)));
-                // The tiles take the new screen's DPI when they get there,
-                // and lay out again for it.
-                unsafe { SetTimer(Some(hwnd), SCREEN_TIMER, 1000, None) };
-            }
-        }
-        Some(Choice::Theme(t)) => {
-            with_app(|app| app.set_theme(t));
-        }
-        Some(Choice::Font(i)) => {
-            if let Some(family) = fonts.get(i) {
-                with_app(|app| app.set_font_family(family));
-            }
-        }
-        Some(Choice::ToggleAutostart) => {
-            if autostart::is_enabled() {
-                autostart::disable();
-            } else {
-                autostart::enable();
-            }
-        }
-        Some(Choice::CheckUpdates) => {
-            with_app(|app| app.check_update(true));
         }
         Some(Choice::Update) => {
             if let Some(m) = with_app(|app| app.update.clone()).flatten() {
@@ -1350,6 +1321,30 @@ fn tray_menu(hwnd: HWND) {
                 unsafe { PostQuitMessage(0) };
             }
         }
+        None => {}
+    }
+}
+
+/// Opens the Settings window, or brings it back to the front when it is
+/// open. Outside the app's borrow: it takes the focus as it opens, and the
+/// windows losing it are the app's.
+fn open_settings() {
+    let want = with_app(|app| match &app.settings_window {
+        Some(w) => Err(w.hwnd),
+        None => Ok((
+            Rc::clone(&app.shared),
+            app.settings_values(),
+            app.tray.taskbar_icon(),
+        )),
+    });
+    match want {
+        Some(Err(hwnd)) => settings::bring_back(hwnd),
+        Some(Ok((shared, values, icon))) => match SettingsWindow::create(shared, values, icon) {
+            Ok(w) => {
+                with_app(|app| app.settings_window = Some(w));
+            }
+            Err(e) => eprintln!("horadric: cannot open the Settings window: {e}"),
+        },
         None => {}
     }
 }
@@ -2571,6 +2566,11 @@ struct App {
     setting_menu_for: Option<(Agent, Setting, RECT)>,
     /// A setting's list, while it is dropped down.
     dropdown: Option<Box<Dropdown>>,
+    /// The Settings window, while it is open.
+    settings_window: Option<Box<SettingsWindow>>,
+    /// The row of the Settings window whose list is about to drop, and its
+    /// place on screen.
+    settings_list_for: Option<(Field, RECT)>,
     /// Slash commands waiting to be typed into running sessions, by session
     /// id, for settings picked since they started: each goes in once the
     /// session is free for it, see [`Session::free_for_command`].
@@ -2726,12 +2726,12 @@ struct App {
     /// The session the last notification was about, which a click on it
     /// shows. None when it was about several.
     alert_for: Option<String>,
-    /// No notifications, from the tray menu.
+    /// No notifications, from the Settings window.
     quiet: bool,
-    /// Loot sounds, from the tray menu.
+    /// Loot sounds, from the Settings window.
     sounds: bool,
-    /// What the Discord profile may show, from the tray menu. Changed only
-    /// through [`App::set_discord`].
+    /// What the Discord profile may show, from the Settings window.
+    /// Changed only through [`App::set_discord`].
     discord: Discord,
     /// The Rich Presence client, kept while [`App::discord`] is on.
     rich: Option<crate::discord::Discord>,
@@ -2739,7 +2739,7 @@ struct App {
     run: presence::Run,
     /// The cube is shown, from the usage window's menu.
     cube_on: bool,
-    /// The terminal font picked from the tray menu. Kept as picked, so a
+    /// The terminal font picked in the Settings window. Kept as picked, so a
     /// family that is uninstalled for a while comes back when it is not.
     font_family: Option<String>,
     /// The screen the columns stand on, by device name. None follows the
@@ -2866,7 +2866,10 @@ impl App {
                 self.mark_sweeps();
             }
             WM_HORADRIC_COUNTED => self.take_counts(),
-            WM_HORADRIC_UPDATE => self.take_update(),
+            WM_HORADRIC_UPDATE => {
+                self.take_update();
+                self.refresh_settings();
+            }
             WM_HORADRIC_DOWNLOADED => self.take_download(),
             WM_HORADRIC_KEPT => self.offer_merges(),
             WM_HORADRIC_INPUT => self.apply_input(),
@@ -4422,13 +4425,190 @@ impl App {
         if let Some(old) = self.dropdown.replace(d) {
             old.destroy();
         }
-        let i = self
-            .dropdown
-            .as_ref()
-            .and_then(|d| d.agent.settings().iter().position(|s| *s == d.setting));
+        let whose = self.dropdown.as_ref().map(|d| d.whose);
+        let i = match whose {
+            Some(Whose::Default(agent, setting)) => {
+                agent.settings().iter().position(|s| *s == setting)
+            }
+            _ => None,
+        };
         if let Some(u) = &self.usage_window {
             u.open.set(i);
             u.invalidate();
+        }
+        if let Some(w) = &self.settings_window {
+            w.set_open(match whose {
+                Some(Whose::Settings(field)) => Some(field),
+                _ => None,
+            });
+        }
+    }
+
+    /// The settings as they are now, for the Settings window.
+    fn settings_values(&self) -> settings::Values {
+        let screens = monitors();
+        let shown = screens::pick(&screens, self.screen.as_deref()).map(|s| s.name.clone());
+        settings::Values {
+            theme: theme::current(),
+            font: self.shared.font.family(),
+            screens: screens
+                .iter()
+                .enumerate()
+                .map(|(i, s)| screens::short_label(i + 1, s))
+                .collect(),
+            screen: shown.and_then(|n| screens.iter().position(|s| s.name == n)),
+            notify: !self.quiet,
+            sounds: self.sounds,
+            autostart: (!horadric_hooks::dev()).then(autostart::is_enabled),
+            discord: self.discord,
+            update: self.update.as_ref().map(|m| m.version.clone()),
+            checking: self.checking,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+
+    /// Hands the Settings window the settings again, after a change.
+    fn refresh_settings(&self) {
+        if let Some(w) = &self.settings_window {
+            w.set_values(self.settings_values());
+        }
+    }
+
+    /// What the list of a row of the Settings window offers: the note on
+    /// top, its lines, and the place of the one in use.
+    fn settings_list(&self, field: Field) -> Option<(&'static str, Vec<String>, usize)> {
+        let at = |found: Option<usize>| found.unwrap_or(0);
+        match field {
+            Field::Theme => {
+                let now = theme::current();
+                Some((
+                    "Every window changes at once",
+                    Theme::ALL.iter().map(|t| t.label().to_string()).collect(),
+                    at(Theme::ALL.iter().position(|t| *t == now)),
+                ))
+            }
+            Field::Font => {
+                let fonts = glyphs::monospaced(&self.shared.gpu.dw);
+                let now = self.shared.font.family();
+                let current = at(fonts.iter().position(|f| f.eq_ignore_ascii_case(&now)));
+                Some(("Every terminal changes at once", fonts, current))
+            }
+            Field::Screen => {
+                let screens = monitors();
+                let shown = screens::pick(&screens, self.screen.as_deref()).map(|s| &s.name);
+                Some((
+                    "The tiles move there at once",
+                    screens
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| screens::label(i + 1, s).replace('\t', ", "))
+                        .collect(),
+                    at(screens.iter().position(|s| Some(&s.name) == shown)),
+                ))
+            }
+            Field::Discord => Some((
+                "What your Discord profile may show",
+                Discord::ALL.iter().map(|d| d.label().to_string()).collect(),
+                at(Discord::ALL.iter().position(|d| *d == self.discord)),
+            )),
+            _ => None,
+        }
+    }
+
+    /// A row of the Settings window clicked: a list drops, a switch turns,
+    /// a button does its one thing. Each takes effect at once.
+    fn settings_click(&mut self, field: Field, row: RECT) {
+        match field {
+            Field::Theme | Field::Font | Field::Screen | Field::Discord => {
+                self.settings_list_for = Some((field, row));
+                post(self.notify.0 as isize, WM_HORADRIC_SETTINGS_LIST, 0);
+            }
+            Field::Notify => {
+                self.quiet = !self.quiet;
+                self.save();
+            }
+            Field::Sounds => {
+                self.sounds = !self.sounds;
+                self.save();
+                // So the choice is heard the moment it is made.
+                self.sound(Loot::Drop);
+            }
+            Field::Autostart => {
+                if horadric_hooks::dev() {
+                    return;
+                }
+                if autostart::is_enabled() {
+                    autostart::disable();
+                } else {
+                    autostart::enable();
+                }
+            }
+            // A release found is offered with its notes, outside the app's
+            // borrow, as the usage window's Version row does it.
+            Field::Updates if self.update.is_some() => {
+                post(self.notify.0 as isize, WM_HORADRIC_VERSION, 0);
+            }
+            Field::Updates => self.check_update(true),
+            Field::Version => {}
+        }
+        self.refresh_settings();
+    }
+
+    /// A list of the Settings window closed: what was picked, if anything,
+    /// takes effect at once.
+    fn settings_picked(&mut self, field: Field, pick: Option<usize>) {
+        if let Some(d) = self.dropdown.take() {
+            d.destroy();
+        }
+        if let Some(w) = &self.settings_window {
+            w.set_open(None);
+        }
+        let Some(i) = pick else {
+            return;
+        };
+        match field {
+            Field::Theme => {
+                if let Some(t) = Theme::ALL.get(i) {
+                    self.set_theme(*t);
+                }
+            }
+            Field::Font => {
+                if let Some(family) = glyphs::monospaced(&self.shared.gpu.dw).get(i) {
+                    self.set_font_family(family);
+                }
+            }
+            Field::Screen => {
+                if let Some(screen) = monitors().get(i) {
+                    self.move_to_screen(screens::choice(screen));
+                    // The tiles take the new screen's DPI when they get
+                    // there, and lay out again for it.
+                    unsafe {
+                        SetTimer(Some(self.notify), SCREEN_TIMER, 1000, None);
+                    }
+                }
+            }
+            Field::Discord => {
+                if let Some(d) = Discord::ALL.get(i) {
+                    self.set_discord(*d);
+                }
+            }
+            _ => {}
+        }
+        self.refresh_settings();
+    }
+
+    fn close_settings(&mut self) {
+        if self
+            .dropdown
+            .as_ref()
+            .is_some_and(|d| matches!(d.whose, Whose::Settings(_)))
+        {
+            if let Some(d) = self.dropdown.take() {
+                d.destroy();
+            }
+        }
+        if let Some(w) = self.settings_window.take() {
+            w.destroy();
         }
     }
 
@@ -6315,6 +6495,9 @@ impl App {
                     }
                 }
                 Input::SetDefault(agent, setting, value) => self.set_default(agent, setting, value),
+                Input::SettingsClick(field, row) => self.settings_click(field, row),
+                Input::SettingsPicked(field, pick) => self.settings_picked(field, pick),
+                Input::SettingsClosed => self.close_settings(),
                 Input::Answered {
                     dir,
                     title,

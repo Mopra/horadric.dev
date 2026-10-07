@@ -194,7 +194,7 @@ pub enum Discord {
 }
 
 impl Discord {
-    /// The tray's lines, in order.
+    /// The choices in the Settings window's list, in order.
     pub const ALL: [Discord; 3] = [Discord::Off, Discord::Unnamed, Discord::Named];
 
     pub fn is_off(&self) -> bool {
@@ -206,7 +206,7 @@ impl Discord {
         self == Discord::Named
     }
 
-    /// Its line in the tray's "Show on Discord" menu.
+    /// Its line in the "Show on Discord" list.
     pub fn label(self) -> &'static str {
         match self {
             Discord::Off => "Off",

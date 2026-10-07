@@ -124,6 +124,8 @@ mod recent;
 #[cfg(windows)]
 mod render;
 #[cfg(windows)]
+mod settings;
+#[cfg(windows)]
 mod snapping;
 #[cfg(windows)]
 mod sound;

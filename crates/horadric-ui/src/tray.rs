@@ -1,6 +1,8 @@
 //! The notification area icon: the one piece of Horadric that is always on
-//! screen, even with no sessions and so no tiles. Its menu starts sessions
-//! and quits the app.
+//! screen, even with no sessions and so no tiles. Its menu starts sessions,
+//! opens the Settings window and quits the app. It holds actions, not
+//! settings, with one exception: Warriv drives, the go ahead to ship, which
+//! should be one click and in plain sight.
 
 use std::ffi::c_void;
 use std::time::Duration;
@@ -19,12 +21,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use horadric_core::experience;
-use horadric_core::saved::Discord;
 use horadric_core::warriv::Drive;
 
 use crate::menu::{self, Item};
-use crate::screens::{self, Screen};
-use crate::theme::Theme;
 use crate::{icon, motion, recent};
 
 const ID: u32 = 1;
@@ -76,22 +75,8 @@ pub enum Choice {
     Listen,
     /// Fill the space beside the clusters with the terminal.
     Arrange,
-    /// Stand the columns on the screen at this place in the list given.
-    Screen(usize),
-    /// Draw the whole app in this theme.
-    Theme(Theme),
-    /// Draw the terminals in this font family, by its place in the list
-    /// given.
-    Font(usize),
-    ToggleAutostart,
-    /// Say, or stop saying, when a session starts waiting.
-    ToggleNotify,
-    /// Play, or stop playing, the loot sounds.
-    ToggleSounds,
-    /// Show this much on the human's Discord profile.
-    Discord(Discord),
-    /// Look for a newer release now, and say what was found.
-    CheckUpdates,
+    /// Open the Settings window.
+    Settings,
     /// Install the newer release the menu offered.
     Update,
     /// Let Warriv drive this project, by key, or stop it.
@@ -225,54 +210,31 @@ pub struct Driven {
     pub drive: Option<Drive>,
 }
 
-/// The tray menu. `autostart` is None when the switch is not offered,
-/// `hotkeys` are the shortcuts for the next waiting session and for the
-/// catch-up, where they have one, `notify` whether a session that starts
-/// waiting says so, `sounds` whether loot drops are heard, and `discord`
-/// what the Discord profile is allowed to show.
-/// `screens` are offered when there is more than one, with the one named
-/// `shown` checked. `update` is a newer release's version, when a check
-/// found one. `fonts` are the families the terminals can be drawn in,
-/// with `font` checked, and `theme` is the one the app is drawn in. `xp` is the experience counted from git, None
-/// until the first count is back.
-#[allow(clippy::too_many_arguments)]
+/// The tray menu. `hotkeys` are the shortcuts for the next waiting
+/// session, the catch-up and stopping Warriv, where they have one.
+/// `update` is a newer release's version, when a check found one. `xp` is
+/// the experience counted from git, None until the first count is back.
 pub fn menu(
     recent_projects: &[String],
-    autostart: Option<bool>,
     hotkeys: [Option<&str>; 3],
     driven: &[Driven],
-    notify: bool,
-    sounds: bool,
-    discord: Discord,
     terminal: bool,
-    screens: &[Screen],
-    shown: Option<&str>,
     update: Option<&str>,
-    fonts: &[String],
-    font: &str,
-    theme: Theme,
     xp: Option<u64>,
 ) -> Option<Choice> {
     const NEW: usize = 1;
     const QUIT: usize = 2;
-    const AUTOSTART: usize = 3;
+    const SETTINGS: usize = 3;
     const TIDY: usize = 4;
     const NEXT: usize = 5;
     const ARRANGE: usize = 6;
     const RAISE: usize = 7;
     const END_ALL: usize = 8;
-    const NOTIFY: usize = 9;
     const STAGE: usize = 10;
-    const CHECK: usize = 11;
     const UPDATE: usize = 12;
     const LISTEN: usize = 13;
-    const SOUNDS: usize = 14;
     const STOP: usize = 15;
-    const DISCORD: usize = 20;
-    const THEME: usize = 40;
-    const SCREEN: usize = 50;
     const RECENT: usize = 100;
-    const FONT: usize = 200;
     let mut items = Vec::new();
     if let Some(xp) = xp {
         items.push(Item::Disabled(experience::label(xp)));
@@ -361,73 +323,8 @@ pub fn menu(
     items.push(Item::action(RAISE, "Bring tiles to front"));
     items.push(Item::action(ARRANGE, "Fit terminal beside tiles"));
     items.push(Item::action(TIDY, "Tidy up tiles"));
-    if screens.len() > 1 {
-        let lines = screens
-            .iter()
-            .enumerate()
-            .map(|(i, screen)| Item::Action {
-                id: SCREEN + i,
-                label: screens::label(i + 1, screen),
-                checked: Some(screen.name.as_str()) == shown,
-            })
-            .collect();
-        items.push(Item::Submenu("Tiles on screen".into(), lines));
-    }
-    let lines = Theme::ALL
-        .iter()
-        .enumerate()
-        .map(|(i, &t)| Item::Action {
-            id: THEME + i,
-            label: t.label().into(),
-            checked: t == theme,
-        })
-        .collect();
-    items.push(Item::Submenu("Theme".into(), lines));
-    if !fonts.is_empty() {
-        // Up to the first Quest log id, which is more families than anyone
-        // has installed.
-        let lines = fonts
-            .iter()
-            .take(QUEST_LOG - FONT)
-            .enumerate()
-            .map(|(i, name)| Item::Action {
-                id: FONT + i,
-                label: name.clone(),
-                checked: name.eq_ignore_ascii_case(font),
-            })
-            .collect();
-        items.push(Item::Submenu("Terminal font".into(), lines));
-    }
-    items.push(Item::Action {
-        id: NOTIFY,
-        label: "Notify when a session needs you".into(),
-        checked: notify,
-    });
-    items.push(Item::Action {
-        id: SOUNDS,
-        label: "Loot sounds".into(),
-        checked: sounds,
-    });
-    // A submenu, not a switch: what a public profile may say is worth a
-    // second look at, and the choice between names and none is the point.
-    let lines = Discord::ALL
-        .iter()
-        .enumerate()
-        .map(|(i, &d)| Item::Action {
-            id: DISCORD + i,
-            label: d.label().into(),
-            checked: d == discord,
-        })
-        .collect();
-    items.push(Item::Submenu("Show on Discord".into(), lines));
-    if let Some(checked) = autostart {
-        items.push(Item::Action {
-            id: AUTOSTART,
-            label: "Start with Windows".into(),
-            checked,
-        });
-    }
-    items.push(Item::action(CHECK, "Check for updates"));
+    items.push(Item::Separator);
+    items.push(Item::action(SETTINGS, "Settings\u{2026}"));
     if let Some(version) = update {
         items.push(Item::action(UPDATE, format!("Update to {version}\u{2026}")));
     }
@@ -438,16 +335,13 @@ pub fn menu(
     match menu::popup(&items)? {
         NEW => Some(Choice::New),
         QUIT => Some(Choice::Quit),
-        AUTOSTART => Some(Choice::ToggleAutostart),
-        NOTIFY => Some(Choice::ToggleNotify),
-        SOUNDS => Some(Choice::ToggleSounds),
+        SETTINGS => Some(Choice::Settings),
         TIDY => Some(Choice::Tidy),
         NEXT => Some(Choice::NextWaiting),
         LISTEN => Some(Choice::Listen),
         ARRANGE => Some(Choice::Arrange),
         RAISE => Some(Choice::Raise),
         STAGE => Some(Choice::ShowStage),
-        CHECK => Some(Choice::CheckUpdates),
         UPDATE => Some(Choice::Update),
         END_ALL => Some(Choice::EndAll),
         STOP => Some(Choice::StopWarriv),
@@ -460,15 +354,9 @@ pub fn menu(
         i if i >= DRIVE => driven
             .get(i - DRIVE)
             .map(|d| Choice::Drive(d.key.clone(), d.drive.is_none())),
-        i if (THEME..SCREEN).contains(&i) => Theme::ALL.get(i - THEME).copied().map(Choice::Theme),
-        i if (DISCORD..THEME).contains(&i) => {
-            Discord::ALL.get(i - DISCORD).copied().map(Choice::Discord)
-        }
         i if i >= QUEST_LOG => recent_projects
             .get(i - QUEST_LOG)
             .map(|p| Choice::QuestLog(p.clone())),
-        i if (SCREEN..RECENT).contains(&i) => Some(Choice::Screen(i - SCREEN)),
-        i if (FONT..QUEST_LOG).contains(&i) => Some(Choice::Font(i - FONT)),
         i if i >= RECENT => recent_projects
             .get(i - RECENT)
             .map(|p| Choice::Recent(p.clone())),

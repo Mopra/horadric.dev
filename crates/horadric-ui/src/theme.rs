@@ -450,9 +450,10 @@ const MATRIX: Palette = Palette {
     term_selection: Color::rgb(0x003B12),
 };
 
-/// A look for the whole app, picked from the tray.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A look for the whole app, picked in the Settings window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Theme {
+    #[default]
     Skeuomorph,
     Flat,
     Neumorph,
@@ -485,7 +486,7 @@ impl Theme {
         }
     }
 
-    /// Its name in the tray menu.
+    /// Its name in the Settings window.
     pub fn label(self) -> &'static str {
         match self {
             Theme::Skeuomorph => "Skeuomorphism",
