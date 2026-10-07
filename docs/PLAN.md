@@ -2909,8 +2909,10 @@ the quarantine flag, so Gatekeeper never asks. A browser download does,
 and the site and README say the one `xattr` line that clears it. The
 updater on a Mac reads `latest-macos.json`, signed with the same updater
 key on the Windows machine as `latest.json` is, so the private key still
-never meets CI. The signature is checked with the Security framework,
-which takes the raw `r||s` form CNG writes (`RFC4754`).
+never meets CI. The signature is checked with the Security framework.
+Its `RFC4754` algorithms take the raw `r||s` CNG writes but need macOS
+14, and a symbol missing at load would stop the app on 11 to 13, so the
+updater turns `r||s` into DER and uses the X9.62 one, there since 10.12.
 
 **Testing without a Mac on the desk.** The work is done on Windows, where
 `cargo clippy --target aarch64-apple-darwin` checks the Mac code without
