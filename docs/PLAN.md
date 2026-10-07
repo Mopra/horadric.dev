@@ -4979,8 +4979,15 @@ updates, and Privacy. Their tray lines are gone; the tray has
 "Settings..." and keeps "Update to" when a check found a release. A list
 row drops the usage window's list, which now serves either window
 (`dropdown::Whose`), and a list too long for the screen climbs to its top.
-Sessions, Keys, Runetome and Projects come next, with the project menu's
-lines.
+Sessions, Keys and Runetome come next.
+
+**Projects built** (2026-10-07): the section's first row drops every
+project (recent, on screen, or with a quest log) and the rows below it
+are the picked one's: colour, work mode, its SSH hosts and "Add...", Warriv
+drives and And ships public. A row with no choice says why: "Not a git
+repository", "Needs a quest log", "Only while Warriv drives". Ships public
+asks first, as the tray does. The project menu lost Work mode, Colour
+and Add host and has "Project settings...", which opens the window there.
 
 ## Not in any step yet, but needed before daily use
 
