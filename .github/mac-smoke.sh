@@ -114,8 +114,10 @@ sips -g pixelWidth "$OUT/Horadric.app/Contents/Resources/horadric.icns" || fail 
 
 # A real install, which this throwaway Mac can take: the app in
 # ~/Applications, the command linked, the LaunchAgent, the hooks.
+# Through install.sh, as a user would, from the archive a release ships.
 unset HORADRIC_DEV HORADRIC_SNAPSHOT
-"$OUT/Horadric.app/Contents/MacOS/horadric" install >"$OUT/install.log" 2>&1 || fail "install: $(cat "$OUT/install.log")"
+(cd "$OUT" && tar -czf Horadric-macos.tar.gz Horadric.app)
+HORADRIC_DOWNLOAD="file://$OUT/Horadric-macos.tar.gz" sh install.sh >"$OUT/install.log" 2>&1   || fail "install.sh: $(cat "$OUT/install.log")"
 cat "$OUT/install.log"
 [ -x "$HOME/Applications/Horadric.app/Contents/MacOS/horadric" ] || fail "not installed in ~/Applications"
 [ -L "$HOME/.local/bin/horadric" ] || fail "the command is not linked"

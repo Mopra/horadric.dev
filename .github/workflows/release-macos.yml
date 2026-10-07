@@ -1,0 +1,60 @@
+name: Mac release
+# A tag builds Horadric.app for both kinds of Mac and attaches
+# Horadric-macos.tar.gz to the draft release of that tag. The archive is
+# signed for the updater on the Windows machine that holds the key, as
+# RELEASING.md says; nothing here can sign it.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag to build and attach to, such as v0.17.0
+        required: true
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - run: rustup toolchain install
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: cargo build --release --target aarch64-apple-darwin
+      - run: cargo build --release --target x86_64-apple-darwin
+      - name: One binary for both
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/horadric \
+            target/aarch64-apple-darwin/release/horadric \
+            target/x86_64-apple-darwin/release/horadric
+          lipo -info dist/horadric
+      - name: Bundle, check and pack
+        run: |
+          dist/horadric bundle dist/Horadric.app
+          codesign --verify --verbose dist/Horadric.app
+          plutil -lint dist/Horadric.app/Contents/Info.plist
+          dist/Horadric.app/Contents/MacOS/horadric --help >/dev/null
+          cd dist && tar -czf Horadric-macos.tar.gz Horadric.app
+          shasum -a 256 Horadric-macos.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Horadric-macos
+          path: dist/Horadric-macos.tar.gz
+      - name: Attach to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The draft is made by hand after the tag is pushed, so wait for it.
+          for i in $(seq 1 60); do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" dist/Horadric-macos.tar.gz --clobber
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "no release $TAG after 30 minutes; the archive is in this run's artifacts"
