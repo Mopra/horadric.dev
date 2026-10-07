@@ -114,6 +114,7 @@ const NEW_SESSION: usize = 1;
 const SHOW_STAGE: usize = 2;
 pub(crate) const SHOW_STAGE_TAG: usize = SHOW_STAGE;
 const FRONT: usize = 3;
+pub(crate) const FRONT_TAG: usize = FRONT;
 const LOGIN: usize = 4;
 const CHECK_UPDATE: usize = 7;
 const INSTALL_UPDATE: usize = 8;

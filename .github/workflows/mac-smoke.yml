@@ -6,6 +6,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+# Only the newest commit's run matters; an older one still queued is
+# dropped so the Mac runners are not spent on it.
+concurrency:
+  group: mac-smoke
+  cancel-in-progress: true
 jobs:
   smoke:
     runs-on: macos-latest

@@ -120,9 +120,13 @@ fn swap_inner(pid: u32, log: &mut Log) -> Result<(), String> {
             from.display(),
             dir.display()
         ));
-        if let Err(e) = put_in_place(from, &dir, &mut moved) {
+        #[cfg(target_os = "macos")]
+        let placed = mac_put_in_place(from, &dir, &mut moved);
+        #[cfg(not(target_os = "macos"))]
+        let placed = put_in_place(from, &dir, &mut moved);
+        if let Err(e) = placed {
             log.line(&format!("install failed, putting the old build back: {e}"));
-            restore(&dir, &moved);
+            restore_any(&dir, &moved);
             let back = start_and_check(&dir, log)?;
             return Err(if back {
                 format!("install failed ({e}); the old build runs again")
@@ -143,7 +147,7 @@ fn swap_inner(pid: u32, log: &mut Log) -> Result<(), String> {
         );
     }
     log.line("the new Horadric did not come up, putting the old build back");
-    restore(&dir, &moved);
+    restore_any(&dir, &moved);
     if start_and_check(&dir, log)? {
         log.line("rolled back");
         Ok(())
@@ -230,6 +234,72 @@ fn put_in_place(from: &Path, dir: &Path, moved: &mut Vec<&'static str>) -> Resul
         fs::copy(from.join(name), &dst).map_err(|e| format!("copying {name}: {e}"))?;
     }
     Ok(())
+}
+
+/// What `moved` holds once the whole app was moved aside, not a binary.
+#[cfg(target_os = "macos")]
+const BUNDLE: &str = "Horadric.app";
+
+/// On a Mac a new build that comes as an app bundle, an update's, replaces
+/// the installed bundle whole, so its Info.plist, icon and signature come
+/// with it. A plain build from `target` is a binary, copied into the
+/// installed bundle, which is then signed again so its seal holds.
+#[cfg(target_os = "macos")]
+fn mac_put_in_place(from: &Path, dir: &Path, moved: &mut Vec<&'static str>) -> Result<(), String> {
+    let new_app = install::bundle_of(&from.join(BINARIES[0]));
+    let app = install::bundle_of(&dir.join(BINARIES[0]));
+    match (new_app, app) {
+        (Some(new_app), Some(app)) => swap_bundle(&new_app, &app, moved),
+        _ => {
+            put_in_place(from, dir, moved)?;
+            if let Some(app) = install::bundle_of(&dir.join(BINARIES[0])) {
+                let _ = Command::new("/usr/bin/codesign")
+                    .args(["--force", "--sign", "-"])
+                    .arg(&app)
+                    .status();
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Moves `app` aside as `Horadric.old.app` and copies `new_app` in its
+/// place.
+#[cfg(target_os = "macos")]
+fn swap_bundle(new_app: &Path, app: &Path, moved: &mut Vec<&'static str>) -> Result<(), String> {
+    let old = old_bundle(app);
+    let _ = fs::remove_dir_all(&old);
+    if app.exists() {
+        fs::rename(app, &old).map_err(|e| format!("moving the app aside: {e}"))?;
+        moved.push(BUNDLE);
+    }
+    let status = Command::new("/usr/bin/ditto")
+        .arg(new_app)
+        .arg(app)
+        .status()
+        .map_err(|e| format!("ditto: {e}"))?;
+    if !status.success() {
+        return Err(format!("could not copy {}", new_app.display()));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn old_bundle(app: &Path) -> PathBuf {
+    app.with_file_name("Horadric.old.app")
+}
+
+/// Puts back what was moved aside, a bundle or binaries.
+fn restore_any(dir: &Path, moved: &[&str]) {
+    #[cfg(target_os = "macos")]
+    if moved == [BUNDLE] {
+        if let Some(app) = install::bundle_of(&dir.join(BINARIES[0])) {
+            let _ = fs::remove_dir_all(&app);
+            let _ = fs::rename(old_bundle(&app), &app);
+        }
+        return;
+    }
+    restore(dir, moved);
 }
 
 fn restore(dir: &Path, moved: &[&str]) {
@@ -337,6 +407,38 @@ mod tests {
         assert_eq!(fs::read_to_string(dir.join("horadric.old")).unwrap(), "old");
 
         restore(&dir, &moved);
+        assert_eq!(fs::read_to_string(dir.join("horadric")).unwrap(), "old");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_update_replaces_the_whole_bundle_and_can_go_back() {
+        let root = std::env::temp_dir().join(format!("horadric-bundle-{}", std::process::id()));
+        let make = |app: &Path, v: &str| {
+            fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+            fs::write(app.join("Contents/MacOS/horadric"), v).unwrap();
+            fs::write(app.join("Contents/Info.plist"), v).unwrap();
+        };
+        let (new_app, app) = (
+            root.join("new/Horadric.app"),
+            root.join("apps/Horadric.app"),
+        );
+        make(&new_app, "new");
+        make(&app, "old");
+        let mut moved = Vec::new();
+        let dir = app.join("Contents/MacOS");
+        mac_put_in_place(&new_app.join("Contents/MacOS"), &dir, &mut moved).unwrap();
+        assert_eq!(moved, [BUNDLE]);
+        assert_eq!(
+            fs::read_to_string(app.join("Contents/Info.plist")).unwrap(),
+            "new"
+        );
+        restore_any(&dir, &moved);
+        assert_eq!(
+            fs::read_to_string(app.join("Contents/Info.plist")).unwrap(),
+            "old"
+        );
         assert_eq!(fs::read_to_string(dir.join("horadric")).unwrap(), "old");
         let _ = fs::remove_dir_all(&root);
     }

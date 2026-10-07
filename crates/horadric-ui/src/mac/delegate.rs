@@ -8,7 +8,7 @@ use objc2_app_kit::{
     NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSEvent,
     NSEventModifierFlags, NSEventType,
 };
-use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint};
+use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSPoint};
 
 use super::app::{self, Input};
 
@@ -35,6 +35,13 @@ define_class!(
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn after_last_window(&self, _sender: &NSApplication) -> bool {
             false
+        }
+
+        // The tiles come up with the app, so Horadric shows as one, as
+        // the Windows stage brings its tiles when it activates.
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn did_become_active(&self, _note: &NSNotification) {
+            app::input(Input::Menu(app::FRONT_TAG));
         }
 
         #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
