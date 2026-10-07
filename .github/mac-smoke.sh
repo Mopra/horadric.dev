@@ -65,7 +65,11 @@ else
 fi
 
 # Keys through AppKit, where the runner lets System Events type.
-if osascript -e 'tell application "System Events" to keystroke "echo TYPED-OK"'   -e 'tell application "System Events" to key code 36' 2>"$OUT/osascript.log"; then
+app_pid=$(cat "$OUT/app.pid")
+osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $app_pid) to true" 2>>"$OUT/osascript.log"
+sleep 1
+osascript -e 'tell application "System Events" to name of first process whose frontmost is true' 2>>"$OUT/osascript.log"
+if osascript -e 'tell application "System Events" to keystroke "echo TYPED-OK"' -e 'tell application "System Events" to key code 36' 2>>"$OUT/osascript.log"; then
   sleep 3
   if grep -q TYPED-OK "$pane"; then echo "typing reached the session"; else
     echo "WARN: keystrokes were sent but did not reach the session"; fi

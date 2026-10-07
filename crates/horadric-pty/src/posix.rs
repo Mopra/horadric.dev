@@ -345,27 +345,46 @@ mod tests {
 
     #[test]
     fn a_shell_runs_reads_and_reports_its_exit() {
-        let cmd = Command {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "echo pty-says-hi; read x; exit 3".into()],
-            cwd: std::env::temp_dir(),
-            env_set: vec![],
-            env_remove: vec![],
-            cols: 80,
-            rows: 24,
-            job_name: None,
-        };
-        let (pty, mut out) = Pty::spawn(&cmd).unwrap();
-        let mut seen = String::new();
-        let mut buf = [0u8; 4096];
-        while !seen.contains("pty-says-hi") {
-            let n = out.read(&mut buf).unwrap();
-            assert!(n > 0, "ended before the greeting: {seen}");
-            seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+        // On a thread, so a pty that never answers fails the test with what
+        // it had seen rather than holding the run until CI gives up.
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let cmd = Command {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "echo pty-says-hi; read x; exit 3".into()],
+                cwd: std::env::temp_dir(),
+                env_set: vec![],
+                env_remove: vec![],
+                cols: 80,
+                rows: 24,
+                job_name: None,
+            };
+            let (pty, mut out) = Pty::spawn(&cmd).unwrap();
+            let _ = tx.send("spawned".into());
+            let mut seen = String::new();
+            let mut buf = [0u8; 4096];
+            while !seen.contains("pty-says-hi") {
+                let n = out.read(&mut buf).unwrap();
+                assert!(n > 0, "ended before the greeting: {seen}");
+                seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+                let _ = tx.send(format!("read {seen:?}"));
+            }
+            pty.resize(100, 30).unwrap();
+            pty.write(b"go\n".to_vec());
+            let _ = tx.send("wrote go".into());
+            let code = pty.wait();
+            let _ = tx.send(format!("exited {code}"));
+            while out.read(&mut buf).unwrap() > 0 {}
+            let _ = tx.send("done".into());
+        });
+        let mut last = String::from("nothing");
+        loop {
+            match rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(m) if m == "done" => break,
+                Ok(m) => last = m,
+                Err(e) => panic!("stuck after {last}: {e}"),
+            }
         }
-        pty.resize(100, 30).unwrap();
-        pty.write(b"go\n".to_vec());
-        assert_eq!(pty.wait(), 3);
-        while out.read(&mut buf).unwrap() > 0 {}
+        assert_eq!(last, "exited 3");
     }
 }
