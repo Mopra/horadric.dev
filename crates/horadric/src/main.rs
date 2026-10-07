@@ -101,7 +101,12 @@ Environment:
 ";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        // Older macOS hands an app started from Finder its process serial
+        // number, which is no command.
+        .filter(|a| !a.starts_with("-psn_"))
+        .collect();
     if horadric_hooks::dev() && changes_machine(&args) {
         eprintln!(
             "horadric: HORADRIC_DEV is set, and `{}` would change the installed Horadric",
@@ -125,6 +130,12 @@ fn main() -> ExitCode {
         Some("hooks") => hooks(args.get(1).map(String::as_str)),
         #[cfg(windows)]
         Some("explorer") => explorer_command(args.get(1).map(String::as_str)),
+        // Started from Finder, the Dock or Spotlight there is no terminal,
+        // and the process LaunchServices started has to be the app.
+        #[cfg(target_os = "macos")]
+        None if !std::io::IsTerminal::is_terminal(&std::io::stdout()) => {
+            horadric_ui::mac::run(horadric_hooks::port(), false)
+        }
         None => std::env::current_exe()
             .map_err(|e| e.to_string())
             .and_then(|exe| launch(&exe)),

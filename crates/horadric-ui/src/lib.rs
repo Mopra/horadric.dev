@@ -53,6 +53,7 @@ pub mod keys;
 pub mod layout;
 pub mod links;
 pub mod loot;
+pub mod mac_keys;
 pub mod motion;
 pub mod palette;
 pub mod paste;
@@ -62,10 +63,14 @@ pub mod rain;
 pub mod screens;
 pub mod shell;
 pub mod spectator;
+pub mod symbols;
 pub mod theme;
 pub mod viewer;
 pub mod viewport;
 
+#[cfg(target_os = "macos")]
+#[path = "mac/clipboard.rs"]
+mod clipboard;
 #[cfg(target_os = "macos")]
 pub mod mac;
 
@@ -93,7 +98,9 @@ mod caption;
 mod catchup;
 #[cfg(windows)]
 mod clipboard;
-#[cfg(windows)]
+// The Mac has no file views or browser panes yet, which use the rest.
+#[cfg(any(windows, target_os = "macos"))]
+#[cfg_attr(not(windows), allow(dead_code))]
 mod console;
 #[cfg(windows)]
 mod cube;
@@ -119,8 +126,6 @@ mod net;
 mod pane;
 #[cfg(windows)]
 mod picker;
-// The Mac app uses all of these once it is built.
-#[cfg_attr(not(windows), allow(dead_code))]
 mod project;
 #[cfg(windows)]
 mod questlog;
@@ -138,6 +143,8 @@ mod sound;
 mod start;
 #[cfg(windows)]
 mod stash;
+// The journal, the chronicle and the MCP config wait for the Mac's quest log
+// and browser pane.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod store;
 #[cfg(windows)]

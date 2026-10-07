@@ -50,3 +50,14 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-numerics = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+horadric-pty = { path = "../horadric-pty" }
+block2 = "0.6"
+libc = "0.2"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-core-text = "0.3"

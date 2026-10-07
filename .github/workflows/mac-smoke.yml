@@ -1,0 +1,21 @@
+name: Mac smoke
+# The Mac app run for real on a Mac: windows drawn, a session in a pty,
+# the host outliving the app. The PNGs it leaves are the Mac's "verified
+# on screen", looked at from the run's artifacts.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  smoke:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - run: cargo build
+      - run: bash .github/mac-smoke.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-smoke
+          path: mac-smoke

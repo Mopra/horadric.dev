@@ -16,14 +16,16 @@
 //! ([`Console::view`]). The pane draws it like any other grid, which is how
 //! it gets selection, scrolling and fallback fonts for nothing.
 
+#[cfg(windows)]
 use std::ffi::c_void;
 use std::io;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(windows)]
+use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, SystemTime};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -37,12 +39,45 @@ use horadric_hooks::{OWNER_ENV, SESSION_ENV};
 use horadric_pty::host::{Attached, Incoming, Remote, Spec};
 use horadric_pty::wire::{self, Message};
 use horadric_pty::{find_program, Command, PROGRAM_EXTS};
+#[cfg(windows)]
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
+#[cfg(windows)]
 use crate::app::{WM_HORADRIC_EXIT, WM_HORADRIC_OUTPUT};
+#[cfg(windows)]
+use crate::store;
 use crate::viewer::{self, Cell, Hit, Mark, Row, Span};
-use crate::{clipboard, highlight, palette, shell, store};
+use crate::{clipboard, highlight, palette, shell};
+
+/// Who hears that a console has output to show or has ended: the app's
+/// message window on Windows, the main queue on a Mac.
+#[cfg(windows)]
+pub type Notify = HWND;
+#[cfg(target_os = "macos")]
+pub type Notify = crate::mac::Notify;
+
+/// [`Notify`] as a reader thread holds it.
+#[derive(Clone, Copy)]
+struct Waker(#[cfg(windows)] isize);
+
+#[cfg(windows)]
+fn waker(notify: Notify) -> Waker {
+    Waker(notify.0 as isize)
+}
+
+#[cfg(not(windows))]
+fn waker(_: Notify) -> Waker {
+    Waker()
+}
+
+/// What a console tells its [`Notify`].
+#[derive(Clone, Copy)]
+pub enum Note {
+    Output,
+    Exit,
+}
 
 /// History per session, as much as Windows Terminal keeps. 2000 rows was
 /// gone in an afternoon of Claude Code output. Rows are allocated as output
@@ -50,7 +85,6 @@ use crate::{clipboard, highlight, palette, shell, store};
 /// columns is under 30 MB even when full. Forty full sessions would be
 /// 1.1 GB, which is the number to watch.
 const SCROLLBACK: usize = 10_000;
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Set by Claude Code for the processes it starts, naming that session.
 /// When Horadric itself was started from inside Claude Code they leak into
@@ -222,7 +256,27 @@ pub fn agent_of(program: &Path) -> Option<Agent> {
     Agent::from_name(&program.file_stem()?.to_string_lossy())
 }
 
+/// The shell a plain terminal runs: `HORADRIC_SHELL`, the login shell
+/// `$SHELL` names, or zsh, the Mac's own.
+#[cfg(not(windows))]
+pub fn shell_program() -> Option<PathBuf> {
+    ["HORADRIC_SHELL", "SHELL"]
+        .into_iter()
+        .filter_map(|v| std::env::var(v).ok())
+        .map(PathBuf::from)
+        .chain([PathBuf::from("/bin/zsh"), PathBuf::from("/bin/sh")])
+        .find(|p| p.is_absolute() && p.is_file())
+}
+
+/// The `ssh` an SSH terminal runs.
+#[cfg(not(windows))]
+pub fn ssh_program() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    find_program("ssh", &path, PROGRAM_EXTS, Path::is_file)
+}
+
 /// The shell a plain terminal runs, see [`shell::program`].
+#[cfg(windows)]
 pub fn shell_program() -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let chosen = std::env::var("HORADRIC_SHELL").ok();
@@ -233,6 +287,7 @@ pub fn shell_program() -> Option<PathBuf> {
 }
 
 /// The `ssh` an SSH terminal runs, see [`shell::ssh_program`].
+#[cfg(windows)]
 pub fn ssh_program() -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let root = std::env::var("SystemRoot").ok();
@@ -253,13 +308,37 @@ pub fn claude_program() -> Option<PathBuf> {
 fn claude_search_path() -> std::ffi::OsString {
     let var = |name| std::env::var_os(name).map(PathBuf::from);
     let path = std::env::var_os("PATH").unwrap_or_default();
+    #[cfg(windows)]
     let dirs = install_dirs(var("USERPROFILE"), var("APPDATA"), var("LOCALAPPDATA"));
+    #[cfg(not(windows))]
+    let dirs = unix_install_dirs(var("HOME"));
     std::env::join_paths(std::env::split_paths(&path).chain(dirs)).unwrap_or(path)
+}
+
+/// Where the agents' installers put them on a Mac: Claude Code's native
+/// installer, npm's usual global prefixes, Homebrew on Apple Silicon and
+/// on Intel, Bun, and Grok Build's own.
+#[cfg(not(windows))]
+fn unix_install_dirs(home: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(h) = &home {
+        dirs.push(h.join(".local/bin"));
+        dirs.push(h.join(".npm-global/bin"));
+        dirs.push(h.join(".claude/local"));
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    if let Some(h) = home {
+        dirs.push(h.join(".bun/bin"));
+        dirs.push(h.join(".grok/bin"));
+    }
+    dirs
 }
 
 /// The folders the agents' installers put them in: Claude Code's native
 /// one, npm's global folder, winget's links, Scoop's shims and Grok
 /// Build's own.
+#[cfg(windows)]
 fn install_dirs(
     profile: Option<PathBuf>,
     appdata: Option<PathBuf>,
@@ -287,11 +366,10 @@ fn install_dirs(
 /// Horadric's, not any session's.
 pub fn claude_command(args: &[&str]) -> Option<std::process::Command> {
     let mut command = std::process::Command::new(claude_program()?);
-    command
+    horadric_hooks::no_window(&mut command)
         .args(args)
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW);
+        .stderr(std::process::Stdio::null());
     for name in PARENT_SESSION_ENV.iter().chain(&[SESSION_ENV, OWNER_ENV]) {
         command.env_remove(name);
     }
@@ -318,6 +396,7 @@ pub fn running_hosts() -> Vec<String> {
 /// the UI's own binary has to stay free: `reload` renames it and a dev
 /// build overwrites it. Copies no host runs from any more are deleted as
 /// a new one is made; one still running can not be, and stays.
+#[cfg(windows)]
 pub fn host_program() -> PathBuf {
     static HOST: OnceLock<PathBuf> = OnceLock::new();
     HOST.get_or_init(|| {
@@ -327,6 +406,16 @@ pub fn host_program() -> PathBuf {
     .clone()
 }
 
+/// The binary session hosts run from. A Mac lets a running binary be
+/// replaced under it, so hosts run this one as it is.
+#[cfg(not(windows))]
+pub fn host_program() -> PathBuf {
+    static HOST: OnceLock<PathBuf> = OnceLock::new();
+    HOST.get_or_init(|| std::env::current_exe().unwrap_or_else(|_| "horadric".into()))
+        .clone()
+}
+
+#[cfg(windows)]
 fn copy_for_hosts(exe: &Path) -> Option<PathBuf> {
     let dir = store::local_dir()?.join("hosts");
     let meta = std::fs::metadata(exe).ok()?;
@@ -352,10 +441,12 @@ fn copy_for_hosts(exe: &Path) -> Option<PathBuf> {
     target.is_file().then_some(target)
 }
 
+#[cfg(windows)]
 const HOST_PREFIX: &str = "horadric-host-";
 
 /// A host binary's file name, the same for the same build and different
 /// for any other. Task Manager shows it, which tells a host from the UI.
+#[cfg(windows)]
 fn host_file_name(len: u64, modified: u64) -> String {
     format!("{HOST_PREFIX}{len}-{modified}.exe")
 }
@@ -364,7 +455,7 @@ impl Console {
     /// Starts the agent in a session host and the thread that reads what
     /// the host sends. `notify` is the window that hears about output and
     /// exit.
-    pub fn spawn(launch: Launch, notify: HWND) -> io::Result<Arc<Console>> {
+    pub fn spawn(launch: Launch, notify: Notify) -> io::Result<Arc<Console>> {
         let size = GridSize {
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
@@ -442,7 +533,7 @@ impl Console {
         shell: bool,
         agent: Agent,
         cwd: PathBuf,
-        notify: HWND,
+        notify: Notify,
     ) -> io::Result<Arc<Console>> {
         let attached = Remote::attach(&pipe_name(id), &job_name(id))?;
         let meta = Meta {
@@ -458,7 +549,7 @@ impl Console {
         Ok(Console::hosted(attached, meta, notify))
     }
 
-    fn hosted(attached: Attached, meta: Meta, notify: HWND) -> Arc<Console> {
+    fn hosted(attached: Attached, meta: Meta, notify: Notify) -> Arc<Console> {
         let Attached {
             remote,
             incoming,
@@ -505,7 +596,7 @@ impl Console {
             cwd: meta.cwd,
             typed: Mutex::new(None),
         });
-        let notify = notify.0 as isize;
+        let notify = waker(notify);
         let reader = Arc::clone(&console);
         thread::spawn(move || reader.read(incoming, notify));
         console
@@ -513,7 +604,7 @@ impl Console {
 
     /// Parses output into the grid until the host says the program ended,
     /// or goes away without saying.
-    fn read(&self, mut incoming: Incoming, notify: isize) {
+    fn read(&self, mut incoming: Incoming, notify: Waker) {
         let code = loop {
             match incoming.recv() {
                 Some(Message::Output(bytes)) => {
@@ -522,7 +613,7 @@ impl Console {
                         parser.advance(term, &bytes);
                     }
                     if !self.dirty.swap(true, Ordering::AcqRel) {
-                        post(notify, WM_HORADRIC_OUTPUT, self.serial);
+                        post(notify, Note::Output, self.serial);
                     }
                 }
                 Some(Message::Exit(code)) => break code,
@@ -533,7 +624,7 @@ impl Console {
         if let Ok(mut e) = self.exit.lock() {
             *e = Some(code);
         }
-        post(notify, WM_HORADRIC_EXIT, self.serial);
+        post(notify, Note::Exit, self.serial);
     }
 
     /// A console with no program, showing the file at `path` read only.
@@ -544,7 +635,7 @@ impl Console {
         serial: usize,
         path: PathBuf,
         detail: String,
-        notify: HWND,
+        notify: Notify,
     ) -> Arc<Console> {
         let size = GridSize {
             cols: DEFAULT_COLS,
@@ -587,7 +678,7 @@ impl Console {
             cwd,
             typed: Mutex::new(None),
         });
-        console.load(notify.0 as isize);
+        console.load(waker(notify));
         console
     }
 
@@ -637,7 +728,7 @@ impl Console {
     /// Reads the file again when it changed since it was shown, keeping the
     /// line at the top where it is. True when it did. When it did not, a
     /// commit may still have changed how it differs from the last one.
-    pub fn reload(self: &Arc<Self>, notify: HWND) -> bool {
+    pub fn reload(self: &Arc<Self>, notify: Notify) -> bool {
         let Some(view) = &self.view else {
             return false;
         };
@@ -646,16 +737,16 @@ impl Console {
             Err(_) => return false,
         };
         if stamp(&path) == shown {
-            let (me, notify) = (Arc::clone(self), notify.0 as isize);
+            let (me, notify) = (Arc::clone(self), waker(notify));
             thread::spawn(move || me.mark(&path, read, notify));
             return false;
         }
-        self.load(notify.0 as isize);
+        self.load(waker(notify));
         true
     }
 
     /// Reads the file and shows it plain, then colours it on a thread.
-    fn load(self: &Arc<Self>, notify: isize) {
+    fn load(self: &Arc<Self>, notify: Waker) {
         let Some(view) = &self.view else { return };
         let (path, read) = {
             let Ok(mut v) = view.lock() else { return };
@@ -693,14 +784,14 @@ impl Console {
             }
             me.lay_out();
             if !me.dirty.swap(true, Ordering::AcqRel) {
-                post(notify, WM_HORADRIC_OUTPUT, me.serial);
+                post(notify, Note::Output, me.serial);
             }
         });
     }
 
     /// Asks git how the file differs from the last commit, and shows it in
     /// the gutter when that changed. Runs off the UI thread.
-    fn mark(&self, path: &Path, read: u64, notify: isize) {
+    fn mark(&self, path: &Path, read: u64, notify: Waker) {
         let Some(view) = &self.view else { return };
         let count = match view.lock() {
             Ok(v) => v.lines.len(),
@@ -713,7 +804,7 @@ impl Console {
         }
         self.lay_out();
         if !self.dirty.swap(true, Ordering::AcqRel) {
-            post(notify, WM_HORADRIC_OUTPUT, self.serial);
+            post(notify, Note::Output, self.serial);
         }
     }
 
@@ -933,6 +1024,7 @@ impl Console {
 
     /// Whether a process is the agent or was started by it, however far
     /// down: a browser its tests opened, say.
+    #[cfg(windows)]
     pub fn contains(&self, process: HANDLE) -> bool {
         self.remote.as_ref().is_some_and(|r| r.contains(process))
     }
@@ -972,14 +1064,13 @@ fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
 /// `git diff -U0` of the file against the last commit. None outside a
 /// repository or before its first commit, when there is nothing to mark.
 fn diff(path: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
+    let out = horadric_hooks::no_window(&mut std::process::Command::new("git"))
         .args(["--no-optional-locks", "diff", "--no-color", "--no-ext-diff"])
         .args(["-U0", "HEAD", "--"])
         .arg(path.file_name()?)
         .current_dir(path.parent()?)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     out.status
@@ -1009,15 +1100,25 @@ fn read_lines(path: &Path) -> Vec<String> {
     lines
 }
 
-fn post(notify: isize, msg: u32, serial: usize) {
+#[cfg(windows)]
+fn post(notify: Waker, note: Note, serial: usize) {
+    let msg = match note {
+        Note::Output => WM_HORADRIC_OUTPUT,
+        Note::Exit => WM_HORADRIC_EXIT,
+    };
     unsafe {
         let _ = PostMessageW(
-            Some(HWND(notify as *mut c_void)),
+            Some(HWND(notify.0 as *mut c_void)),
             msg,
             WPARAM(serial),
             LPARAM(0),
         );
     }
+}
+
+#[cfg(target_os = "macos")]
+fn post(_: Waker, note: Note, serial: usize) {
+    crate::mac::console_note(note, serial);
 }
 
 /// Requests the terminal makes of the outside world while parsing. Runs on
@@ -1063,6 +1164,7 @@ impl EventListener for Events {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn agents_are_looked_for_where_their_installers_put_them() {
         let dirs = install_dirs(
@@ -1084,6 +1186,16 @@ mod tests {
         assert!(install_dirs(None, None, None).is_empty());
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn a_mac_looks_where_mac_installers_put_agents() {
+        let dirs = unix_install_dirs(Some(PathBuf::from("/Users/x")));
+        assert_eq!(dirs[0], PathBuf::from("/Users/x/.local/bin"));
+        assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")));
+        assert!(dirs.contains(&PathBuf::from("/Users/x/.grok/bin")));
+        assert!(!unix_install_dirs(None).is_empty());
+    }
+
     #[test]
     fn claude_is_claude_however_it_is_installed() {
         assert!(is_claude(Path::new(r"C:\Users\x\.local\bin\claude.exe")));
@@ -1092,6 +1204,7 @@ mod tests {
         assert!(!is_claude(Path::new(r"C:\bin\claude-dev.exe")));
     }
 
+    #[cfg(windows)]
     #[test]
     fn a_host_binary_is_named_for_its_build() {
         let a = host_file_name(12_345, 1_700_000_000);
