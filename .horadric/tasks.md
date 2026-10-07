@@ -287,25 +287,25 @@ An orchestrator so quests run by the dozen without the human. See "Orchestration
 
 Horadric on a Mac, public and downloadable. See "macOS" in docs/PLAN.md and read it whole first. Mac code is checked here with `cargo clippy --workspace --all-targets --target aarch64-apple-darwin -- -D warnings` and tested on a real Mac in CI's macos job.
 
-- [/] Mac: the workspace builds and its tests pass on a Mac in CI @horadric.dev-59538
+- [x] Mac: the workspace builds and its tests pass on a Mac in CI
   cfg gates so every crate compiles for macOS, the state folder under Application Support, a macos job in ci.yml running clippy and the tests.
-- [/] Mac: session hosts on a POSIX pseudo terminal @horadric.dev-59538
+- [x] Mac: session hosts on a POSIX pseudo terminal
   `horadric-pty` gets a unix half: `forkpty`, a Unix socket under /tmp/horadric-<uid>, the same wire protocol. A test runs /bin/sh in a real pty through a host.
-- [/] Mac: the command line @horadric.dev-59538
+- [x] Mac: the command line
   `horadric`, `app`, `new`, `run`, `hooks`, `status`, `quest`, `serve`, `reload` on a Mac. The login shell's PATH for finding agents.
-- [/] Mac: the app, the menu bar and the tiles @horadric.dev-59538
+- [x] Mac: the app, the menu bar and the tiles
   NSApplication, NSStatusItem menu, one NSPanel a project drawn with Core Graphics from the shared layout, columns down the left.
-- [/] Mac: the stage and its terminals @horadric.dev-59538
+- [x] Mac: the stage and its terminals
   One window, a pane a session, the grid drawn with Core Text, keys, IME, selection, copy, paste, scroll, resize.
-- [/] Mac: sessions start, resume, end and survive the app @horadric.dev-59538
+- [x] Mac: sessions start, resume, end and survive the app
   Start in a folder, plain terminals, rename and end from the tile menu, attach to running hosts at start, resume saved sessions, Quit asks.
-- [/] Mac: a smoke run in CI with snapshots of every window @horadric.dev-59538
+- [x] Mac: a smoke run in CI with snapshots of every window
   HORADRIC_SNAPSHOT draws each window to a PNG; CI posts fake sessions, starts a shell session and uploads the PNGs.
-- [/] Mac: Horadric.app, install and uninstall @horadric.dev-59538
+- [x] Mac: Horadric.app, install and uninstall
   Universal app bundle with an icon, signed ad hoc. `horadric install` copies it to ~/Applications, links the command, a LaunchAgent, the hooks. install.sh for curl.
-- [/] Mac: the updater @horadric.dev-59538
+- [x] Mac: the updater
   latest-macos.json signed on Windows, checked with the Security framework, the bundle swapped and the app reloaded.
-- [/] Mac: release builds in CI and a public release @horadric.dev-59538
+- [x] Mac: release builds in CI and a public release
   A tag builds Horadric-macos.tar.gz; RELEASING.md says how it is signed and attached. Ship public.
-- [/] Mac: the site and the README offer the Mac download @horadric.dev-59538
+- [x] Mac: the site and the README offer the Mac download
   install.sh served from horadric.dev, a Mac download beside Windows, the xattr line for browser downloads.

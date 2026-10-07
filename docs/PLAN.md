@@ -2914,6 +2914,41 @@ Its `RFC4754` algorithms take the raw `r||s` CNG writes but need macOS
 14, and a symbol missing at load would stop the app on 11 to 13, so the
 updater turns `r||s` into DER and uses the X9.62 one, there since 10.12.
 
+**Built, 2026-10-07, released in 0.17.0.** Everything above the line
+"Left for later" is in. What it took, where it is not obvious from the
+code:
+
+- The console (`horadric-ui/src/console.rs`) is shared: it tells a
+  `Notify`, a window handle on Windows and the main queue on a Mac. The
+  session host (`horadric-pty/src/host.rs`) is shared too, over a `Pty`
+  and a `Pipe` per platform (`posix.rs`, `socket.rs`).
+- The tiles are the Windows faceplate ported call for call
+  (`mac/look.rs` on `mac/paint.rs`), stepped by the same `anim::Tiles`.
+  The terminal grid is built by the same `frame::build` and drawn as
+  Core Text glyph runs. Glyph positions are in text space, which the
+  flipped text matrix turns too, so each y is given negated.
+- Keys go through `mac_keys` (pure, tested); plain typing goes to
+  AppKit's text input, so dead keys and input methods work. Option is
+  never Meta: it types `@` on a Danish keyboard.
+- A pty's line discipline wants Return as `\r`: a `\n` written to the
+  master never ended the line in CI's shell.
+- Everything that changes the app is an `Input`, queued, so a menu or an
+  alert running its own loop never re-enters the app.
+- Waiting sessions show as a count on the Dock icon and a bounce when
+  you are elsewhere; Cmd+J goes to the one waiting longest.
+  Ctrl+Option+Space is macOS's next input source, so it is not taken.
+- The Dock's Quit and a logout quit at once and keep the sessions;
+  only Cmd+Q asks. A question would hold a logout up.
+- The updater verifies with the X9.62 algorithm and the signature
+  turned to DER, since the RFC 4754 one needs macOS 14 and the app runs
+  on 11. An update replaces the whole bundle, Info.plist and signature
+  included, and is rolled back like on Windows.
+- `.github/mac-smoke.sh` is the Mac's on screen check: it runs a dev
+  instance, a zsh session through `horadric new`, types into it with
+  System Events, kills the app to see the host outlive it, builds the
+  bundle and installs through `install.sh`. The PNGs and each pane's
+  text are the run's artifacts.
+
 **Testing without a Mac on the desk.** The work is done on Windows, where
 `cargo clippy --target aarch64-apple-darwin` checks the Mac code without
 linking. A `macos` job in CI runs clippy and the tests on a real Mac,

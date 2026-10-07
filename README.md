@@ -5,7 +5,7 @@
 <h1 align="center">Horadric</h1>
 
 <p align="center">
-  Every coding agent you have running, as a tile on your Windows desktop.<br />
+  Every coding agent you have running, as a tile on your desktop, on Windows and macOS.<br />
   Grouped by project. Lit when it needs you. A full terminal when you click it.
 </p>
 
@@ -18,7 +18,7 @@
 <p align="center">
   <a href="https://github.com/Mopra/horadric.dev/releases/latest"><img src="https://img.shields.io/github/v/release/Mopra/horadric.dev?style=flat-square" alt="Latest release" /></a>
   <a href="https://github.com/Mopra/horadric.dev/releases"><img src="https://img.shields.io/github/downloads/Mopra/horadric.dev/total?style=flat-square" alt="Downloads" /></a>
-  <img src="https://img.shields.io/badge/platform-Windows%2010%2B-blue?style=flat-square" alt="Platform" />
+  <img src="https://img.shields.io/badge/platform-Windows%2010%2B%20%7C%20macOS%2011%2B-blue?style=flat-square" alt="Platform" />
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Mopra/horadric.dev?style=flat-square" alt="License" /></a>
 </p>
 
@@ -116,7 +116,49 @@ chat UI of its own in front of the agent. The terminal is the UI.
 - Optional Discord status: "Playing Horadric: 2 agents working, 1 waits for
   you".
 
-## Install
+## Install on macOS
+
+You need macOS 11 or later, on Apple Silicon or Intel, and
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code). In a
+terminal:
+
+```
+curl -fsSL https://horadric.dev/install.sh | sh
+```
+
+No admin rights needed. Horadric is now in `~/Applications` (Launchpad and
+Spotlight find it), opens at login, answers to `horadric` in a terminal
+(linked from `~/.local/bin`, where Claude Code's installer puts `claude`),
+and has its hooks in Claude Code's settings. Its icon is in the menu bar.
+
+The Mac app is not notarized yet. The install script never meets
+Gatekeeper, because a download by `curl` is not quarantined. If you
+download `Horadric-macos.tar.gz` from the releases page with a browser
+instead, clear the quarantine once before opening it:
+
+```
+xattr -dr com.apple.quarantine Horadric.app
+```
+
+The first Mac release has the tiles, the stage with real terminals,
+sessions that outlive the app, plain terminals, the menu bar menu and
+the updater. The browser pane, the quest log and Warriv, the files tile,
+the usage window and Discord status are Windows only for now.
+
+| Key on a Mac | Does |
+|---|---|
+| Cmd+N | New session in a folder |
+| Cmd+J | Show the session that has waited longest, then the next |
+| Cmd+T | New plain terminal in this project |
+| Cmd+Shift+Return | Zoom the pane in or out |
+| Cmd+Option+Arrow | Move to the pane beside |
+| Cmd+C, Cmd+V | Copy the selection, paste |
+| Cmd+Plus, Cmd+Minus, Cmd+0 | Font size |
+
+The Dock icon counts the sessions waiting for you, and bounces when one
+starts waiting while you are in another app.
+
+## Install on Windows
 
 You need Windows 10 or 11 and at least one of
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
@@ -203,18 +245,21 @@ if you switch it on. [docs/PRIVACY.md](docs/PRIVACY.md) has the full audit.
 horadric uninstall
 ```
 
-This removes Horadric from PATH, the Start menu, Explorer and startup, and
-takes out only its own hooks. Your agent settings stay as they were. Saved
-sessions stay in `%APPDATA%\Horadric`.
+On Windows this removes Horadric from PATH, the Start menu, Explorer and
+startup, and takes out only its own hooks. Your agent settings stay as
+they were. Saved sessions stay in `%APPDATA%\Horadric`.
+
+On a Mac it removes the app, the `horadric` link, opening at login and its
+hooks. Saved sessions stay in `~/Library/Application Support/Horadric`.
 
 ## Build from source
 
-Rust stable on Windows (the exact version is pinned in
-`rust-toolchain.toml`).
+Rust stable (the exact version is pinned in `rust-toolchain.toml`).
 
 ```
 cargo build --release
-target\release\horadric.exe install
+target\release\horadric.exe install     # Windows
+target/release/horadric install          # macOS
 ```
 
 `HORADRIC_AGENT=cmd.exe` runs a shell instead of an agent in the terminals,
