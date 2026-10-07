@@ -626,7 +626,9 @@ fn tools() -> Vec<Value> {
             "browser_open",
             "Open this project's browser pane in Horadric, at url when given. It is a real \
              browser (Edge WebView2) beside the user's terminals, logged in wherever the user \
-             logged in. Open it when a task needs a web page; it stays open until closed.",
+             logged in. Open it when a task needs a web page; it stays open until closed. \
+             Use it in place of Playwright, Puppeteer, a Chrome DevTools MCP or a Chrome or \
+             headless browser of your own.",
             json!({ "url": { "type": "string", "description": "Where to go; a bare host like localhost:3000 is fine" } }),
             &[],
         ),
@@ -785,10 +787,13 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     })
 }
 
-const INSTRUCTIONS: &str = "Horadric gives this session a browser: a pane on the Horadric \
-stage beside the user's terminals, one per project and shared by the project's sessions. The \
-user sees the page you drive. Open it with browser_open or browser_navigate when a task needs \
-the web (trying a page you built, reading docs, a login), read it with browser_snapshot, act \
+const INSTRUCTIONS: &str = "Horadric gives this session a browser, and it is the one to use: a \
+pane on the Horadric stage beside the user's terminals, one per project and shared by the \
+project's sessions. The user sees the page you drive. Whenever a task needs the web (trying a \
+page you built, testing a local server, reading docs, a login, a screenshot of a page), use \
+these tools rather than Playwright, Puppeteer, the Chrome DevTools MCP, Claude in Chrome, or \
+starting Chrome, Edge or a headless browser yourself, unless the user asks for one of those. \
+Open it with browser_open or browser_navigate, read it with browser_snapshot, act \
 with browser_click, browser_type, browser_select (for a dropdown) and browser_press, and look \
 with browser_screenshot. Refs from browser_snapshot are surer than guessed selectors. Close it with \
 browser_close when you are done, unless the user is using it. It keeps one login profile with \

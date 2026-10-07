@@ -879,6 +879,14 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   Tested: a script through every tool against a test page and
   example.com, and a Haiku session told to fill in a form, which opened,
   typed, ticked, clicked, looked and closed by itself.
+- **Chosen over Chrome** (2026-10-07). Users saw agents start Chrome,
+  Playwright or a headless browser while the pane sat unused. Claude
+  Code defers MCP tools behind a search, so an agent that thinks of
+  Playwright first never finds them. Every Claude Code session given the
+  server is now told in its system prompt (`web::AGENT_PROMPT`) to use
+  the pane in place of those, unless the user asks for one, and the
+  server's instructions and `browser_open` say the same, naming them so
+  a search for "playwright" or "chrome" finds the pane.
 - **Grok's way in** (2026-10-01). Grok Build 1.0.44 has no per session
   way to be given a server: the TUI has no `--mcp-config` or
   `--plugin-dir` (only `grok agent` has the latter), its `GROK_CONFIG`

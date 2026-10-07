@@ -481,7 +481,7 @@ impl App {
     }
 
     /// What to add to a session's command line started in `cwd`: what it
-    /// is told about the task list when it holds an item, about its own
+    /// is told about the browser pane, about the task list when it holds an item, about its own
     /// worktree when it has one and about the project's hosts when it has
     /// some, as one system prompt since Claude
     /// Code takes only one, and, the first time only, the item as its
@@ -491,6 +491,9 @@ impl App {
         let holds = self.holds_quest(id);
         let batch = horadric_pty::is_batch(program);
         let mut system = Vec::new();
+        if self.mcp_config.is_some() {
+            system.push(crate::web::AGENT_PROMPT.to_string());
+        }
         let own_tree = self
             .shared
             .registry

@@ -57,6 +57,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetForegroundWindow, GetParent, PostMessageW, GA_ROOT,
 };
 
+/// What every Claude Code session given the browser tools is told about
+/// them. The server's own instructions were not enough: Claude Code defers
+/// MCP tools behind a search, and an agent that thinks of Playwright or
+/// Chrome first never looks for them.
+pub const AGENT_PROMPT: &str = "This session runs in Horadric, which gives it a browser pane \
+beside the user's terminals: the mcp__horadric__browser_* tools (browser_open, \
+browser_navigate, browser_snapshot, browser_click, browser_type, browser_screenshot and more). \
+Use them whenever a task needs a web page, testing a site you built included, in place of \
+Playwright, Puppeteer, the Chrome DevTools MCP, Claude in Chrome, or starting Chrome, Edge or a \
+headless browser yourself. The user sees that pane, and not a browser you start. Use another \
+browser only when the user asks for one.";
+
 use crate::app::{self, Input, WebAsk};
 use crate::terminal::WM_STAGE_LAYOUT;
 use crate::viewport;
