@@ -69,19 +69,33 @@ and only reloads this machine.
    git push origin main v0.2.0
    ```
 
-5. Create a **draft** release with the three files, and the same notes
+5. Zip the two binaries for winget. A winget installer entry is one URL,
+   and `horadric install` needs `horadricw.exe` next to `horadric.exe`, so
+   winget installs both from one archive. The updater ignores the zip.
+
+   ```powershell
+   Compress-Archive -Force -DestinationPath target/release/horadric-x64.zip `
+     -Path target/release/horadric.exe, target/release/horadricw.exe
+   ```
+
+6. Create a **draft** release with the four files, and the same notes
    as the manifest, so the release page and the app say the same thing:
 
    ```sh
    gh release create v0.2.0 --draft --title "Horadric 0.2.0" --notes "What changed" \
-     target/release/horadric.exe target/release/horadricw.exe target/release/latest.json
+     target/release/horadric.exe target/release/horadricw.exe target/release/latest.json \
+     target/release/horadric-x64.zip
    ```
 
-6. Try the build before publishing. Download the two binaries from the
+   Once it is published, the winget manifest (`Mopra.Horadric` in
+   microsoft/winget-pkgs) needs the new version, URL and the zip's
+   SHA-256: `(Get-FileHash target/release/horadric-x64.zip).Hash`.
+
+7. Try the build before publishing. Download the two binaries from the
    draft, or use the ones in `target/release`, and run them as a dev
    instance (see CLAUDE.md). Tests prove it compiles and signs; they do
    not prove the tiles appear.
-7. Publish the draft (below).
+8. Publish the draft (below).
 
 ## 3. Publishing is shipping
 
