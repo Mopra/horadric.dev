@@ -4993,7 +4993,14 @@ hook, not the window's key messages, because a chord another program
 registered never reaches the window, and that is the one to say is taken.
 A taken chord keeps the old one; a chord taken at start shows as taken.
 Naming and parsing chords is `hotkey.rs`, pure and tested.
-Projects comes next, with the project menu's lines.
+
+**Projects built** (2026-10-07): the section's first row drops every
+project (recent, on screen, or with a quest log) and the rows below it
+are the picked one's: colour, work mode, its SSH hosts and "Add...", Warriv
+drives and And ships public. A row with no choice says why: "Not a git
+repository", "Needs a quest log", "Only while Warriv drives". Ships public
+asks first, as the tray does. The project menu lost Work mode, Colour
+and Add host and has "Project settings...", which opens the window there.
 
 ## Not in any step yet, but needed before daily use
 

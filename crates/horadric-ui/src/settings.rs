@@ -65,10 +65,11 @@ pub enum Section {
     Startup,
     Privacy,
     Runetome,
+    Projects,
 }
 
 impl Section {
-    pub const ALL: [Section; 7] = [
+    pub const ALL: [Section; 8] = [
         Section::Appearance,
         Section::Notifications,
         Section::Sessions,
@@ -76,6 +77,7 @@ impl Section {
         Section::Startup,
         Section::Privacy,
         Section::Runetome,
+        Section::Projects,
     ];
 
     pub fn label(self) -> &'static str {
@@ -87,6 +89,7 @@ impl Section {
             Section::Startup => "Startup and updates",
             Section::Privacy => "Privacy",
             Section::Runetome => "Runetome",
+            Section::Projects => "Projects",
         }
     }
 }
@@ -116,6 +119,14 @@ pub enum Field {
     Ask,
     /// Brings back every built in stone put away.
     Hidden,
+    /// Which project the rows below it are about.
+    Project,
+    Colour,
+    WorkMode,
+    Hosts,
+    AddHost,
+    Drive,
+    ShipsPublic,
     /// A global shortcut: a click listens for its new chord.
     Key(Action),
     /// What the Keys section has to say: how to set one, or why the last
@@ -180,6 +191,43 @@ pub struct Values {
     pub listening: Option<Action>,
     /// Why the last chord pressed did not take, until the next try.
     pub keys_note: Option<String>,
+    /// Every project's name, in the order offered.
+    pub projects: Vec<String>,
+    /// The one picked, None when there are none.
+    pub project: Option<Project>,
+}
+
+/// The settings of the project the Projects section shows.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Project {
+    /// Its place in [`Values::projects`].
+    pub index: usize,
+    pub colour: String,
+    /// Whether each session gets a worktree of its own, None outside a
+    /// repository, where there is no choice.
+    pub branches: Option<bool>,
+    pub hosts: Vec<String>,
+    /// Whether it has a quest log, without which Warriv has nothing to
+    /// drive.
+    pub log: bool,
+    /// Whether Warriv drives it, and if so whether it ships public.
+    pub drive: Option<bool>,
+    /// Shipping held until a fix lands.
+    pub held: bool,
+}
+
+/// The rows the Projects section has with a project picked, which the
+/// window is sized for even before there is one.
+const PROJECT_ROWS: usize = 7;
+
+/// The project's hosts in a row's room: a few by name, the rest counted.
+fn hosts_line(hosts: &[String]) -> String {
+    match hosts {
+        [] => "None".into(),
+        [a] => a.clone(),
+        [a, b] => format!("{a}, {b}"),
+        [a, b, rest @ ..] => format!("{a}, {b} and {} more", rest.len()),
+    }
 }
 
 /// A global shortcut as the app has it.
@@ -334,6 +382,78 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
             };
             vec![line(Field::Ask, "Ask before a click casts", ask, a), hidden]
         }
+        Section::Projects => {
+            let Some(p) = &v.project else {
+                return vec![line(
+                    Field::Project,
+                    "Project",
+                    "None opened yet",
+                    Control::Fixed,
+                )];
+            };
+            let name = v.projects.get(p.index).map_or("", String::as_str);
+            let mode = match p.branches {
+                Some(on) => {
+                    let word = if on { "Branch per session" } else { "Trunk" };
+                    line(Field::WorkMode, "Work mode", word, Control::List)
+                }
+                None => line(
+                    Field::WorkMode,
+                    "Work mode",
+                    "Not a git repository",
+                    Control::Fixed,
+                ),
+            };
+            let drive = match (p.drive, p.log) {
+                (Some(_), _) if p.held => line(
+                    Field::Drive,
+                    "Warriv drives",
+                    "On, shipping held",
+                    Control::Switch(true),
+                ),
+                (None, false) => line(
+                    Field::Drive,
+                    "Warriv drives",
+                    "Needs a quest log",
+                    Control::Fixed,
+                ),
+                (on, _) => {
+                    let (word, c) = switch(on.is_some());
+                    line(Field::Drive, "Warriv drives", word, c)
+                }
+            };
+            let public = match p.drive {
+                Some(on) => {
+                    let (word, c) = switch(on);
+                    line(Field::ShipsPublic, "And ships public", word, c)
+                }
+                None => line(
+                    Field::ShipsPublic,
+                    "And ships public",
+                    "Only while Warriv drives",
+                    Control::Fixed,
+                ),
+            };
+            vec![
+                line(Field::Project, "Project", name, Control::List),
+                line(Field::Colour, "Colour", &p.colour, Control::List),
+                mode,
+                line(
+                    Field::Hosts,
+                    "SSH hosts",
+                    &hosts_line(&p.hosts),
+                    Control::Fixed,
+                ),
+                line(
+                    Field::AddHost,
+                    "Add an SSH host",
+                    "Add\u{2026}",
+                    Control::Button,
+                ),
+                drive,
+                public,
+            ]
+        }
     }
 }
 
@@ -354,6 +474,7 @@ fn tallest(v: &Values) -> usize {
         .chain(sessions)
         .max()
         .unwrap_or(1)
+        .max(PROJECT_ROWS)
 }
 
 /// The section `step` places after `at`, round at either end, for the
@@ -475,9 +596,14 @@ pub struct SettingsWindow {
 
 impl SettingsWindow {
     /// Opens the window in the middle of the screen the cursor is on,
-    /// showing the settings in `values`, and gives it the keyboard.
-    pub fn create(shared: Rc<Shared>, values: Values, icon: HICON) -> Result<Box<Self>> {
-        let section = Section::default();
+    /// showing `section` of the settings in `values`, and gives it the
+    /// keyboard.
+    pub fn create(
+        shared: Rc<Shared>,
+        values: Values,
+        section: Section,
+        icon: HICON,
+    ) -> Result<Box<Self>> {
         let l = layout::settings(
             &shared.metrics,
             Section::ALL.len(),
@@ -609,6 +735,11 @@ impl SettingsWindow {
         *self.layout.borrow_mut() = l;
         self.refresh_hover();
         self.invalidate();
+    }
+
+    /// Shows `section`, for the project menu's "Project settings...".
+    pub fn show(&self, section: Section) {
+        self.pick_section(section);
     }
 
     fn pick_section(&self, section: Section) {
@@ -932,6 +1063,16 @@ mod tests {
             }),
             listening: None,
             keys_note: None,
+            projects: vec!["app".into(), "site".into()],
+            project: Some(Project {
+                index: 1,
+                colour: "Violet".into(),
+                branches: Some(false),
+                hosts: vec!["pi".into()],
+                log: true,
+                drive: None,
+                held: false,
+            }),
         }
     }
 
@@ -966,7 +1107,6 @@ mod tests {
         );
         assert_eq!(fields(Section::Privacy, &v), [Field::Discord]);
         assert_eq!(fields(Section::Runetome, &v), [Field::Ask, Field::Hidden]);
-        assert_eq!(tallest(&v), 5);
         assert_eq!(
             fields(Section::Keys, &v),
             [
@@ -976,6 +1116,63 @@ mod tests {
                 Field::KeysNote
             ]
         );
+        assert_eq!(
+            fields(Section::Projects, &v),
+            [
+                Field::Project,
+                Field::Colour,
+                Field::WorkMode,
+                Field::Hosts,
+                Field::AddHost,
+                Field::Drive,
+                Field::ShipsPublic
+            ]
+        );
+        assert_eq!(tallest(&v), PROJECT_ROWS);
+    }
+
+    #[test]
+    fn a_project_shows_its_own_settings() {
+        let v = values();
+        let rows = lines(Section::Projects, &v);
+        let shown: Vec<&str> = rows.iter().map(|l| l.value.as_str()).collect();
+        assert_eq!(shown[..4], ["site", "Violet", "Trunk", "pi"]);
+        assert_eq!(rows[5].control, Control::Switch(false));
+        assert_eq!(rows[6].control, Control::Fixed);
+    }
+
+    #[test]
+    fn warriv_drives_only_a_project_with_a_quest_log() {
+        let mut v = values();
+        let p = v.project.as_mut().unwrap();
+        p.log = false;
+        assert_eq!(lines(Section::Projects, &v)[5].control, Control::Fixed);
+        let p = v.project.as_mut().unwrap();
+        p.drive = Some(true);
+        p.held = true;
+        let rows = lines(Section::Projects, &v);
+        assert_eq!(rows[5].value, "On, shipping held");
+        assert_eq!(rows[6].control, Control::Switch(true));
+    }
+
+    #[test]
+    fn no_project_and_no_repository_are_said_not_offered() {
+        let mut v = values();
+        v.project.as_mut().unwrap().branches = None;
+        assert_eq!(lines(Section::Projects, &v)[2].control, Control::Fixed);
+        v.project = None;
+        let rows = lines(Section::Projects, &v);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].control, Control::Fixed);
+        assert_eq!(tallest(&v), PROJECT_ROWS);
+    }
+
+    #[test]
+    fn many_hosts_are_counted() {
+        let h = |n: usize| (0..n).map(|i| format!("h{i}")).collect::<Vec<_>>();
+        assert_eq!(hosts_line(&h(0)), "None");
+        assert_eq!(hosts_line(&h(2)), "h0, h1");
+        assert_eq!(hosts_line(&h(5)), "h0, h1 and 3 more");
     }
 
     #[test]
@@ -1022,7 +1219,7 @@ mod tests {
             ]
         );
         assert_eq!(rows[1].value, "GPT-5.5");
-        assert_eq!(tallest(&v), 5);
+        assert!(tallest(&v) >= 5);
         assert_eq!(rows[3].control, Control::Switch(false));
         v.offered = Some(None);
         let rows = lines(Section::Sessions, &v);
@@ -1118,7 +1315,8 @@ mod tests {
     fn the_arrow_keys_go_round_the_sections() {
         assert_eq!(step(Section::Appearance, 1), Section::Notifications);
         assert_eq!(step(Section::Notifications, 1), Section::Sessions);
-        assert_eq!(step(Section::Appearance, -1), Section::Runetome);
-        assert_eq!(step(Section::Runetome, 1), Section::Appearance);
+        assert_eq!(step(Section::Runetome, 1), Section::Projects);
+        assert_eq!(step(Section::Appearance, -1), Section::Projects);
+        assert_eq!(step(Section::Projects, 1), Section::Appearance);
     }
 }

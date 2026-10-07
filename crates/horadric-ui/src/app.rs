@@ -217,6 +217,9 @@ const WM_HORADRIC_STONE_MENU: u32 = WM_APP + 30;
 /// Drop the list for the row of the Settings window the app's
 /// `settings_list_for` names.
 const WM_HORADRIC_SETTINGS_LIST: u32 = WM_APP + 31;
+/// Ask what a row of the Settings window needs asked first, the row the
+/// app's `settings_ask` names.
+const WM_HORADRIC_SETTINGS_ASK: u32 = WM_APP + 36;
 
 /// What the list of a row of the Settings window offers.
 struct SettingsList {
@@ -766,6 +769,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             settings_list_for: None,
             settings_agent: Agent::Claude,
             agents_off: saved.agents_off.clone(),
+            settings_ask: None,
+            settings_project: None,
             switches: HashMap::new(),
             settings_before: None,
             accounts: accounts::load(),
@@ -1200,6 +1205,10 @@ unsafe extern "system" fn app_proc(
             }
             return LRESULT(0);
         }
+        WM_HORADRIC_SETTINGS_ASK => {
+            settings_ask();
+            return LRESULT(0);
+        }
         WM_HORADRIC_TASK_MENU => {
             if let Some(menu) = with_app(|app| app.tasks.menu.take()).flatten() {
                 runner::show_menu(menu);
@@ -1261,7 +1270,7 @@ fn tray_menu(hwnd: HWND) {
     let hotkeys = hotkeys.each_ref().map(Option::as_deref);
     let menu = tray::menu(&projects, hotkeys, &driven, terminal, update.as_deref(), xp);
     match menu {
-        Some(Choice::Settings) => open_settings(),
+        Some(Choice::Settings) => open_settings(None),
         Some(Choice::New) => pick_and_start(hwnd, projects.first().map(PathBuf::from)),
         Some(Choice::Recent(path)) => start_logged(PathBuf::from(path)),
         Some(Choice::QuestLog(path)) => {
@@ -1291,11 +1300,17 @@ fn tray_menu(hwnd: HWND) {
             }
         }
         Some(Choice::Drive(key, on)) => {
-            with_app(|app| app.set_drive(&key, on));
+            with_app(|app| {
+                app.set_drive(&key, on);
+                app.refresh_settings();
+            });
         }
         Some(Choice::ShipsPublic(key, on)) => {
             if !on || runner::ships_public(&key) {
-                with_app(|app| app.set_ships_public(&key, on));
+                with_app(|app| {
+                    app.set_ships_public(&key, on);
+                    app.refresh_settings();
+                });
             }
         }
         Some(Choice::StopWarriv) => {
@@ -1331,25 +1346,43 @@ fn tray_menu(hwnd: HWND) {
 }
 
 /// Opens the Settings window, or brings it back to the front when it is
-/// open. Outside the app's borrow: it takes the focus as it opens, and the
-/// windows losing it are the app's.
-fn open_settings() {
-    let want = with_app(|app| match &app.settings_window {
-        Some(w) => Err(w.hwnd),
-        None => Ok((
-            Rc::clone(&app.shared),
-            app.settings_values(),
-            app.tray.taskbar_icon(),
-        )),
+/// open, at the project with key `at` when given. Outside the app's
+/// borrow: it takes the focus as it opens, and the windows losing it are
+/// the app's.
+fn open_settings(at: Option<String>) {
+    let section = match at {
+        Some(_) => settings::Section::Projects,
+        None => settings::Section::default(),
+    };
+    let want = with_app(|app| {
+        if at.is_some() {
+            app.settings_project = at;
+            app.refresh_settings();
+        }
+        match &app.settings_window {
+            Some(w) => {
+                if section == settings::Section::Projects {
+                    w.show(section);
+                }
+                Err(w.hwnd)
+            }
+            None => Ok((
+                Rc::clone(&app.shared),
+                app.settings_values(),
+                app.tray.taskbar_icon(),
+            )),
+        }
     });
     match want {
         Some(Err(hwnd)) => settings::bring_back(hwnd),
-        Some(Ok((shared, values, icon))) => match SettingsWindow::create(shared, values, icon) {
-            Ok(w) => {
-                with_app(|app| app.settings_window = Some(w));
+        Some(Ok((shared, values, icon))) => {
+            match SettingsWindow::create(shared, values, section, icon) {
+                Ok(w) => {
+                    with_app(|app| app.settings_window = Some(w));
+                }
+                Err(e) => eprintln!("horadric: cannot open the Settings window: {e}"),
             }
-            Err(e) => eprintln!("horadric: cannot open the Settings window: {e}"),
-        },
+        }
         None => {}
     }
 }
@@ -1770,6 +1803,12 @@ const BATCH: usize = 4;
 /// found by name instead.
 const MENU_HOSTS: usize = 8;
 
+/// The work modes the Settings window offers, worktrees off then on.
+const WORK_MODES: [&str; 2] = [
+    "Trunk: sessions share the tree and commit on it",
+    "Branch per session: each in a worktree of its own",
+];
+
 /// What a session's console runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Run {
@@ -1983,18 +2022,14 @@ fn project_menu(key: &str) {
     const QUESTS: usize = 15;
     const CODE: usize = 7;
     const EXPLORE: usize = 8;
-    const OTHER_HOST: usize = 9;
+    const SETTINGS: usize = 9;
     const ADD_TREE: usize = 6;
-    const TRUNK: usize = 10;
     const SSH_FIND: usize = 11;
     const CLOSE: usize = 12;
-    const BRANCHES: usize = 13;
     const SSH: usize = 20;
-    const SUGGEST: usize = 200;
-    const SUGGEST_END: usize = 300;
+    const SSH_END: usize = 200;
     const MERGE: usize = 300;
     const MERGE_END: usize = 400;
-    const COLOUR: usize = 400;
     const ADD_AGENT: usize = 500;
     let dir = with_app(|app| app.project_dir(key)).flatten();
     // Asking git is the slow part of opening the menu, so it is done
@@ -2019,9 +2054,6 @@ fn project_menu(key: &str) {
     let finding = inventory.is_some() || hosts.len() > MENU_HOSTS;
     let devices = fleet::with_hosts(&hosts, inventory.map(|(_, d)| d).unwrap_or_default());
     let listed: &[String] = if finding { &[] } else { &hosts };
-    let mut suggested = horadric_hooks::tasks::ssh_config_hosts();
-    suggested.retain(|h| !hosts.contains(h));
-    let offering = suggested.len() <= MENU_HOSTS;
     merges.truncate(MERGE_END - MERGE);
     let mut items = vec![Item::action(ADD, "New session")];
     // In trunk mode a worktree is had by asking for one.
@@ -2055,55 +2087,6 @@ fn project_menu(key: &str) {
     if finding {
         items.push(Item::action(SSH_FIND, "SSH to..."));
     }
-    if dir.is_some() {
-        items.push(if suggested.is_empty() || !offering {
-            Item::action(OTHER_HOST, "Add host")
-        } else {
-            let mut offer: Vec<Item> = suggested
-                .iter()
-                .enumerate()
-                .map(|(i, h)| Item::action(SUGGEST + i, h.as_str()))
-                .collect();
-            offer.extend([Item::Separator, Item::action(OTHER_HOST, "Other host")]);
-            Item::Submenu("Add host".into(), offer)
-        });
-    }
-    if let Some(on) = own_trees {
-        items.extend([
-            Item::Separator,
-            Item::Submenu(
-                "Work mode".into(),
-                vec![
-                    Item::Action {
-                        id: TRUNK,
-                        label: "Trunk: sessions share the tree and commit on it".into(),
-                        checked: !on,
-                    },
-                    Item::Action {
-                        id: BRANCHES,
-                        label: "Branch per session: each in a worktree of its own".into(),
-                        checked: on,
-                    },
-                ],
-            ),
-        ]);
-    }
-    let worn = theme::accent_index(key);
-    items.extend([
-        Item::Separator,
-        Item::Submenu(
-            "Colour".into(),
-            theme::ACCENTS
-                .iter()
-                .enumerate()
-                .map(|(i, (_, name))| Item::Action {
-                    id: COLOUR + i,
-                    label: (*name).into(),
-                    checked: i == worn,
-                })
-                .collect(),
-        ),
-    ]);
     if !merges.is_empty() {
         let into = merges
             .first()
@@ -2125,26 +2108,16 @@ fn project_menu(key: &str) {
             Item::Disabled("Open in VS Code".into())
         },
         Item::action(EXPLORE, "Open in Explorer"),
+        Item::action(SETTINGS, "Project settings\u{2026}"),
         Item::Separator,
         Item::action(END_ALL, "End all sessions"),
         Item::action(CLOSE, "Close project"),
     ]);
     let picked = menu::popup(&items);
     match (picked, &dir) {
-        (Some(i), Some(dir)) if (SUGGEST..SUGGEST_END).contains(&i) => {
-            return add_host(dir, &suggested[i - SUGGEST]);
-        }
-        (Some(OTHER_HOST), Some(dir)) => {
-            return ask_host(key, dir, if offering { &[] } else { &suggested });
-        }
         (Some(SSH_FIND), Some(_)) => return ssh_to(key, &hosts, &devices),
         (Some(QUESTS), _) => return push(Input::QuestLog(questlog::Ask::Open(key.into()))),
-        (Some(i @ (TRUNK | BRANCHES)), Some(dir)) => {
-            if let Err(e) = horadric_hooks::tasks::set_worktrees(dir, i == BRANCHES) {
-                eprintln!("horadric: cannot write the project's config: {e}");
-            }
-            return;
-        }
+        (Some(SETTINGS), _) => return open_settings(Some(key.to_string())),
         _ => {}
     }
     let ending = matches!(picked, Some(START_OVER | END_ALL | CLOSE));
@@ -2173,12 +2146,9 @@ fn project_menu(key: &str) {
         Some(CLOSE) => app.close_project(key),
         Some(SHELL) => app.open_shell(key),
         Some(BROWSE) => app.open_web(key, None),
-        Some(i) if (SSH..SUGGEST).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
+        Some(i) if (SSH..SSH_END).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
         Some(i) if (MERGE..MERGE_END).contains(&i) => {
             app.merge(&merges[i - MERGE]);
-        }
-        Some(i) if (COLOUR..COLOUR + theme::ACCENTS.len()).contains(&i) => {
-            app.recolour(key, i - COLOUR);
         }
         Some(CODE) => {
             if let Some(dir) = app.project_dir(key) {
@@ -2246,9 +2216,40 @@ fn ssh_to(key: &str, hosts: &[String], devices: &[Device]) {
     });
 }
 
-/// Asks for a host to add to the project, anything `ssh` takes. With
-/// `offer`, the `~/.ssh/config` names too many for a submenu, those are
-/// found as it is typed.
+/// What a row of the Settings window asks before it changes anything:
+/// a host to add, or whether Warriv may ship public. Outside the app's
+/// borrow, since a question waits for its answer.
+fn settings_ask() {
+    let Some((field, key, dir, on)) = with_app(|app| {
+        let field = app.settings_ask.take()?;
+        let key = app.settings_key()?;
+        let dir = app.project_dir(&key)?;
+        let on = app.drive_of(&key).is_some_and(|d| d.ships_public);
+        Some((field, key, dir, on))
+    })
+    .flatten() else {
+        return;
+    };
+    match field {
+        Field::AddHost => {
+            let hosts = horadric_hooks::tasks::hosts(&dir);
+            let mut offer = horadric_hooks::tasks::ssh_config_hosts();
+            offer.retain(|h| !hosts.contains(h));
+            ask_host(&key, &dir, &offer);
+        }
+        Field::ShipsPublic if on => {
+            with_app(|app| app.set_ships_public(&key, false));
+        }
+        Field::ShipsPublic if runner::ships_public(&key) => {
+            with_app(|app| app.set_ships_public(&key, true));
+        }
+        _ => {}
+    }
+    with_app(|app| app.refresh_settings());
+}
+
+/// Asks for a host to add to the project, anything `ssh` takes, the
+/// `~/.ssh/config` names in `offer` found as it is typed.
 fn ask_host(key: &str, dir: &Path, offer: &[String]) {
     let names = fleet::with_hosts(offer, Vec::new());
     let suggest = |text: &str| {
@@ -2582,6 +2583,11 @@ struct App {
     /// The row of the Settings window whose list is about to drop, and its
     /// place on screen.
     settings_list_for: Option<(Field, RECT)>,
+    /// The row of the Settings window that asks before it changes
+    /// anything, for its question to open outside the app's borrow.
+    settings_ask: Option<Field>,
+    /// The project the Settings window's Projects section shows, by key.
+    settings_project: Option<String>,
     /// Slash commands waiting to be typed into running sessions, by session
     /// id, for settings picked since they started: each goes in once the
     /// session is free for it, see [`Session::free_for_command`].
@@ -4466,6 +4472,11 @@ impl App {
     fn settings_values(&self) -> settings::Values {
         let screens = monitors();
         let shown = screens::pick(&screens, self.screen.as_deref()).map(|s| s.name.clone());
+        let projects = self.settings_projects();
+        let project = self.settings_key().and_then(|key| {
+            let i = projects.iter().position(|(k, _)| *k == key)?;
+            Some(self.project_values(&key, i))
+        });
         settings::Values {
             theme: theme::current(),
             font: self.shared.font.family(),
@@ -4496,6 +4507,70 @@ impl App {
             }),
             listening: self.key_listening,
             keys_note: self.keys_note.clone(),
+            projects: projects.into_iter().map(|(_, name)| name).collect(),
+            project,
+        }
+    }
+
+    /// Every project the Projects section offers, by key and name: the
+    /// recent ones, the ones on screen and the ones with a quest log.
+    fn settings_projects(&self) -> Vec<(String, String)> {
+        let mut keys: Vec<String> = self
+            .recent
+            .iter()
+            .filter(|p| Path::new(p).is_dir())
+            .map(|p| folder_key(p))
+            .collect();
+        keys.extend(self.clusters.iter().map(|c| c.key.clone()));
+        keys.extend(self.shared.boards.borrow().keys().cloned());
+        keys.extend(self.drives.keys().cloned());
+        keys.retain(|k| !k.is_empty());
+        keys.sort();
+        keys.dedup();
+        let mut out: Vec<(String, String)> = keys
+            .into_iter()
+            .map(|k| {
+                let name = project_name(&k);
+                (k, name)
+            })
+            .collect();
+        out.sort_by_key(|(_, name)| name.to_lowercase());
+        out
+    }
+
+    /// The project the Projects section shows: the one picked, or the
+    /// first.
+    fn settings_key(&self) -> Option<String> {
+        let projects = self.settings_projects();
+        let picked = self
+            .settings_project
+            .as_ref()
+            .filter(|k| projects.iter().any(|(key, _)| key == *k));
+        picked
+            .cloned()
+            .or_else(|| projects.first().map(|(key, _)| key.clone()))
+    }
+
+    /// The settings of the project with key `key`, at `index` in the list.
+    fn project_values(&self, key: &str, index: usize) -> settings::Project {
+        let dir = self.project_dir(key);
+        let branches = dir.as_deref().and_then(|d| {
+            worktree::main_tree(d)
+                .is_some()
+                .then(|| horadric_hooks::tasks::worktrees(d).enabled)
+        });
+        let drive = self.drive_of(key);
+        settings::Project {
+            index,
+            colour: theme::ACCENTS[theme::accent_index(key)].1.to_string(),
+            branches,
+            hosts: dir
+                .as_deref()
+                .map(horadric_hooks::tasks::hosts)
+                .unwrap_or_default(),
+            log: self.shared.boards.borrow().contains_key(key),
+            drive: drive.as_ref().map(|d| d.ships_public),
+            held: drive.is_some_and(|d| d.held.is_some()),
         }
     }
 
@@ -4635,6 +4710,32 @@ impl App {
                     current,
                 })
             }
+            Field::Project => {
+                let projects = self.settings_projects();
+                let key = self.settings_key();
+                list(
+                    "Its settings show below it",
+                    projects.iter().map(|(_, name)| name.clone()).collect(),
+                    at(projects.iter().position(|(k, _)| Some(k) == key.as_ref())),
+                )
+            }
+            Field::Colour => list(
+                "Its tiles and terminals change at once",
+                theme::ACCENTS
+                    .iter()
+                    .map(|(_, name)| name.to_string())
+                    .collect(),
+                theme::accent_index(&self.settings_key()?),
+            ),
+            Field::WorkMode => {
+                let dir = self.project_dir(&self.settings_key()?)?;
+                let on = horadric_hooks::tasks::worktrees(&dir).enabled;
+                list(
+                    "Sessions started from now on",
+                    WORK_MODES.iter().map(|m| m.to_string()).collect(),
+                    usize::from(on),
+                )
+            }
             _ => None,
         }
     }
@@ -4648,10 +4749,24 @@ impl App {
             | Field::Screen
             | Field::Discord
             | Field::Agent
-            | Field::Default(_) => {
+            | Field::Default(_)
+            | Field::Project
+            | Field::Colour
+            | Field::WorkMode => {
                 self.settings_list_for = Some((field, row));
                 post(self.notify.0 as isize, WM_HORADRIC_SETTINGS_LIST, 0);
             }
+            Field::AddHost | Field::ShipsPublic => {
+                self.settings_ask = Some(field);
+                post(self.notify.0 as isize, WM_HORADRIC_SETTINGS_ASK, 0);
+            }
+            Field::Drive => {
+                if let Some(key) = self.settings_key() {
+                    let on = self.drive_of(&key).is_none();
+                    self.set_drive(&key, on);
+                }
+            }
+            Field::Hosts => {}
             Field::Notify => {
                 self.quiet = !self.quiet;
                 self.save();
@@ -4743,6 +4858,25 @@ impl App {
                 let agent = self.settings_agent;
                 if let Some(value) = default_picked(agent, setting, i) {
                     self.set_default(agent, setting, value);
+                }
+            }
+            Field::Project => {
+                if let Some((key, _)) = self.settings_projects().into_iter().nth(i) {
+                    self.settings_project = Some(key);
+                }
+            }
+            Field::Colour => {
+                if let Some(key) = self.settings_key() {
+                    if i < theme::ACCENTS.len() {
+                        self.recolour(&key, i);
+                    }
+                }
+            }
+            Field::WorkMode => {
+                if let Some(dir) = self.settings_key().and_then(|k| self.project_dir(&k)) {
+                    if let Err(e) = horadric_hooks::tasks::set_worktrees(&dir, i == 1) {
+                        eprintln!("horadric: cannot write the project's config: {e}");
+                    }
                 }
             }
             _ => {}
