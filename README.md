@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://horadric.dev">Website</a> &middot;
   <a href="https://github.com/Mopra/horadric.dev/releases/latest">Download</a> &middot;
   <a href="docs/PRIVACY.md">Privacy</a>
 </p>
