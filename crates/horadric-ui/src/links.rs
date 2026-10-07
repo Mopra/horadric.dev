@@ -461,6 +461,8 @@ mod tests {
         );
     }
 
+    // Windows paths, which only Windows reads as absolute.
+    #[cfg(windows)]
     #[test]
     fn relative_paths_resolve_against_the_session_folder() {
         assert_eq!(
@@ -483,6 +485,8 @@ mod tests {
         );
     }
 
+    // Windows paths, which only Windows reads as absolute.
+    #[cfg(windows)]
     #[test]
     fn absolute_home_and_quoted_paths() {
         assert_eq!(
@@ -542,6 +546,8 @@ mod tests {
         assert_eq!(file_uri("file:///C:/%zz"), None);
     }
 
+    // Windows paths, which only Windows reads as absolute.
+    #[cfg(windows)]
     #[test]
     fn osc_8_links_never_run_a_program() {
         assert_eq!(

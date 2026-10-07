@@ -1188,6 +1188,14 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
+    fn claude_is_claude_on_a_mac_too() {
+        assert!(is_claude(Path::new("/Users/x/.local/bin/claude")));
+        assert!(!is_claude(Path::new("/bin/zsh")));
+        assert!(!is_claude(Path::new("/opt/homebrew/bin/claude-dev")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
     fn a_mac_looks_where_mac_installers_put_agents() {
         let dirs = unix_install_dirs(Some(PathBuf::from("/Users/x")));
         assert_eq!(dirs[0], PathBuf::from("/Users/x/.local/bin"));
@@ -1196,6 +1204,7 @@ mod tests {
         assert!(!unix_install_dirs(None).is_empty());
     }
 
+    #[cfg(windows)]
     #[test]
     fn claude_is_claude_however_it_is_installed() {
         assert!(is_claude(Path::new(r"C:\Users\x\.local\bin\claude.exe")));

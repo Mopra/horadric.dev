@@ -1392,6 +1392,9 @@ impl App {
         }
         self.update.tick();
         if let Some(checked) = self.update.take_checked() {
+            // An update found is offered from the menu too, whatever the
+            // answer to the question below.
+            self.menus();
             match checked {
                 Ok(true) => self.install_update(),
                 Ok(false) => dialog::info(

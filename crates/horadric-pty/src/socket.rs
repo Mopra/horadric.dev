@@ -34,11 +34,15 @@ pub fn socket_dir() -> io::Result<PathBuf> {
         Err(e) => return Err(e),
     }
     let meta = fs::symlink_metadata(&dir)?;
-    if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+    if !meta.is_dir() || meta.uid() != uid {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("{} is not this user's alone", dir.display()),
+            format!("{} is not this user's", dir.display()),
         ));
+    }
+    // Ours, but made under a looser umask: nobody else may see in.
+    if meta.mode() & 0o077 != 0 {
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
     }
     Ok(dir)
 }

@@ -370,21 +370,41 @@ mod tests {
                 let _ = tx.send(format!("read {seen:?}"));
             }
             pty.resize(100, 30).unwrap();
-            pty.write(b"go\n".to_vec());
+            pty.write(b"go\r".to_vec());
             let _ = tx.send("wrote go".into());
+            // The echo of what was typed, and whatever else comes, so a
+            // child that does not end says where it stopped.
+            let waiting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            {
+                let (tx, waiting) = (tx.clone(), std::sync::Arc::clone(&waiting));
+                std::thread::spawn(move || {
+                    let mut after = String::new();
+                    while waiting.load(std::sync::atomic::Ordering::SeqCst) {
+                        match out.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => after.push_str(&String::from_utf8_lossy(&buf[..n])),
+                        }
+                        let _ = tx.send(format!("after the write {after:?}"));
+                    }
+                });
+            }
             let code = pty.wait();
+            waiting.store(false, std::sync::atomic::Ordering::SeqCst);
             let _ = tx.send(format!("exited {code}"));
-            while out.read(&mut buf).unwrap() > 0 {}
             let _ = tx.send("done".into());
         });
         let mut last = String::from("nothing");
         loop {
             match rx.recv_timeout(Duration::from_secs(20)) {
                 Ok(m) if m == "done" => break,
+                Ok(m) if m.starts_with("exited") => {
+                    assert_eq!(m, "exited 3");
+                    last = m;
+                }
                 Ok(m) => last = m,
                 Err(e) => panic!("stuck after {last}: {e}"),
             }
         }
-        assert_eq!(last, "exited 3");
+        assert!(last.starts_with("exited"), "{last}");
     }
 }

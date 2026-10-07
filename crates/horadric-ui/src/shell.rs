@@ -104,6 +104,8 @@ mod tests {
         assert_eq!(program(None, None, on_path(&[])), None);
     }
 
+    // Windows paths, which only Windows reads as absolute.
+    #[cfg(windows)]
     #[test]
     fn horadric_shell_wins_by_path_or_by_name() {
         let find = on_path(&["pwsh", "nu"]);
@@ -123,6 +125,8 @@ mod tests {
         );
     }
 
+    // Windows paths, which only Windows reads as absolute.
+    #[cfg(windows)]
     #[test]
     fn the_windows_ssh_comes_before_any_on_path() {
         let windows = PathBuf::from(r"C:\Windows\System32\OpenSSH\ssh.exe");
