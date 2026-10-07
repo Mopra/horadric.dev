@@ -1,5 +1,7 @@
 # Horadric
 
+[![Downloads](https://img.shields.io/github/downloads/Mopra/horadric.dev/total?style=flat-square)](https://github.com/Mopra/horadric.dev/releases/latest)
+
 Every coding agent session you have running becomes a small tile on your
 Windows desktop, grouped by project, that lights up when it needs you and
 grows into a full terminal when you click it. Sessions share one working
