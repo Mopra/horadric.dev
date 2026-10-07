@@ -831,7 +831,7 @@ impl App {
     }
 
     /// Puts a built in stone away, or with None brings every one back.
-    fn hide_stone(&mut self, label: Option<&str>) {
+    pub(in crate::app) fn hide_stone(&mut self, label: Option<&str>) {
         match label {
             Some(l) if !self.tome.hidden.iter().any(|h| h == l) => {
                 self.tome.hidden.push(l.to_string())
@@ -841,6 +841,7 @@ impl App {
         }
         self.save();
         self.redraw_tiles();
+        self.refresh_settings();
     }
 
     /// What a click asks before it casts the stone of this label on `on`,
@@ -1246,34 +1247,33 @@ fn confirmed(key: &str, label: &str, on: Option<&str>) -> bool {
         if a.tome.ask == quiet.get() {
             a.tome.ask = !quiet.get();
             a.save();
+            a.refresh_settings();
         }
     });
     true
 }
 
 /// What a right click on a stone offers: casting or stopping it, changing
-/// or removing a stone written in a file, putting a built in one away,
-/// and whether a click asks first. `label` is None for the empty stone and
-/// the tome's header, which offer only what is about the whole tome.
+/// or removing a stone written in a file, and putting a built in one away.
+/// `label` is None for the empty stone and the tome's header, which offer
+/// making a new one. The tome's settings are in the Settings window.
 pub(in crate::app) fn stone_menu(key: &str, label: Option<&str>) {
     const CAST: usize = 1;
     const NEW: usize = 2;
     const REFORGE: usize = 3;
     const REMOVE: usize = 4;
     const HIDE: usize = 5;
-    const ASK: usize = 6;
-    const UNHIDE: usize = 7;
     const ARM: usize = 8;
     const DISARM: usize = 9;
     const STOP: usize = 100;
-    let Some((stone, casting, ask, hidden, armed)) = app::with_app(|a| {
+    let Some((stone, casting, armed)) = app::with_app(|a| {
         let stone = label.and_then(|l| a.any_stone(key, l));
         let casting = label.map(|l| a.casting(key, l)).unwrap_or_default();
         let armed = stone
             .as_ref()
             .filter(|s| errand::clocked(s))
             .map(|s| a.armed(key, s).is_some());
-        (stone, casting, a.tome.ask, a.tome.hidden.len(), armed)
+        (stone, casting, armed)
     }) else {
         return;
     };
@@ -1303,24 +1303,8 @@ pub(in crate::app) fn stone_menu(key: &str, label: Option<&str>) {
                 items.push(Item::action(REFORGE, "Change with the Runesmith"));
                 items.push(Item::action(REMOVE, "Remove"));
             }
-            items.push(Item::Separator);
         }
-        None => {
-            items.push(Item::action(NEW, "Make a new stone"));
-            items.push(Item::Separator);
-        }
-    }
-    items.push(Item::Action {
-        id: ASK,
-        label: "Ask before a click casts".into(),
-        checked: ask,
-    });
-    if hidden > 0 {
-        let s = if hidden == 1 { "" } else { "s" };
-        items.push(Item::action(
-            UNHIDE,
-            format!("Bring back {hidden} built in stone{s}"),
-        ));
+        None => items.push(Item::action(NEW, "Make a new stone")),
     }
     let Some(picked) = menu::popup(&items) else {
         return;
@@ -1352,15 +1336,6 @@ pub(in crate::app) fn stone_menu(key: &str, label: Option<&str>) {
         }
         (HIDE, Some(l)) => {
             app::with_app(|a| a.hide_stone(Some(l)));
-        }
-        (ASK, _) => {
-            app::with_app(|a| {
-                a.tome.ask = !a.tome.ask;
-                a.save();
-            });
-        }
-        (UNHIDE, _) => {
-            app::with_app(|a| a.hide_stone(None));
         }
         (p, Some(l)) if p >= STOP => {
             if let Some((on, _)) = casting.get(p - STOP) {

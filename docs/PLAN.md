@@ -4949,7 +4949,10 @@ state where the window and the app disagree. Sections down the left:
 - **Notifications:** notify when a session waits, loot sounds.
 - **Sessions:** default model, effort and permissions, and which agents
   are offered. The usage window keeps its rows as a shortcut to the same
-  values.
+  values. Built: an Agent row picks whose defaults the rows under it
+  show, effort is a list here rather than the slider, and "In the
+  project menu" turns off another installed agent's New session line
+  (Claude Code is always offered).
 - **Keys:** the three hotkeys, each set by pressing the new chord.
 - **Startup and updates:** start with Windows, check for updates now.
 - **Privacy:** what Discord may show.
@@ -4979,14 +4982,18 @@ updates, and Privacy. Their tray lines are gone; the tray has
 "Settings..." and keeps "Update to" when a check found a release. A list
 row drops the usage window's list, which now serves either window
 (`dropdown::Whose`), and a list too long for the screen climbs to its top.
-Keys too: a click on a shortcut listens, the chord pressed takes effect at
+Then Runetome: ask before a click casts is a switch, and the stones put
+away are counted with a button that brings them all back. The stone menu
+keeps only its actions (Cast, Arm, Put away, Change, Remove, Make a new
+stone).
+Then Keys: a click on a shortcut listens, the chord pressed takes effect at
 once and is kept in state.json (`hotkeys`), Esc keeps the old one and
 Backspace puts back the default. It listens through a low level keyboard
 hook, not the window's key messages, because a chord another program
 registered never reaches the window, and that is the one to say is taken.
 A taken chord keeps the old one; a chord taken at start shows as taken.
 Naming and parsing chords is `hotkey.rs`, pure and tested.
-Sessions, Runetome and Projects come next, with the project menu's lines.
+Projects comes next, with the project menu's lines.
 
 ## Not in any step yet, but needed before daily use
 
