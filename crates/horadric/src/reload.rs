@@ -316,6 +316,32 @@ mod tests {
         assert_eq!(old_name("horadric"), "horadric.old");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_install_moves_the_old_binary_aside_and_back() {
+        let root = std::env::temp_dir().join(format!("horadric-reload-{}", std::process::id()));
+        let (from, dir) = (root.join("new"), root.join("installed"));
+        fs::create_dir_all(&from).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("horadric"), "old").unwrap();
+
+        // Nothing built, so nothing may move.
+        let mut moved = Vec::new();
+        assert!(put_in_place(&from, &dir, &mut moved).is_err());
+        assert!(moved.is_empty());
+
+        fs::write(from.join("horadric"), "new").unwrap();
+        put_in_place(&from, &dir, &mut moved).unwrap();
+        assert_eq!(moved, BINARIES);
+        assert_eq!(fs::read_to_string(dir.join("horadric")).unwrap(), "new");
+        assert_eq!(fs::read_to_string(dir.join("horadric.old")).unwrap(), "old");
+
+        restore(&dir, &moved);
+        assert_eq!(fs::read_to_string(dir.join("horadric")).unwrap(), "old");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
     #[test]
     fn a_half_done_install_restores_only_what_it_moved() {
         let root = std::env::temp_dir().join(format!("horadric-reload-{}", std::process::id()));
