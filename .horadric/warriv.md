@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-07 Hourly round: 155 done, none open, no aim. Main at 08bf530, only release tooling (Mac zip) since v0.17.0, so no ship. Nothing to do.
 - 2026-10-07 Hourly round: 155 done, none open, no aim. Main at 1c5ffaf, only release tooling since v0.17.0, so no ship. Nothing to do.
 - 2026-10-07 Round after the human left: the Mac quests all landed and shipped as v0.17.0 (f54882d). Since then only release tooling (5b49bff), 155 done, none open, no aim. Nothing to do.
 - 2026-10-07 Hourly round: eleven Mac quests still under way (main at 3070821, uncommitted work in the tree), nothing landed as a quest since the last ship, no aim. Nothing to do.
