@@ -126,8 +126,11 @@ work. Worktrees are next.
   sets this and the other two shortcuts to keys of your own: click one and
   press them. When a session starts
   waiting and you are not looking at it, Windows shows a notification; a
-  click on it shows the session. Settings, in the tray menu, can switch
-  that off.
+  click on it shows the session. Settings can switch that off.
+- "Settings..." in the tray menu opens one window with every setting, in
+  sections: Appearance, Notifications, Sessions, Keys, Startup and
+  updates, Privacy, Runetome and Projects. A change takes effect the
+  moment you make it, so there is no Save.
 - "Show on Discord" in Settings, under Privacy, puts what your agents do on your
   Discord profile, "Playing Horadric: 2 agents working, 1 waits for you",
   with a clock that counts the whole run of work, not each turn. It is
