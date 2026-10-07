@@ -4927,6 +4927,50 @@ value after.
 not go through SmartScreen, so it is not needed to update; it is needed only
 if people download Horadric by hand, the same point as NSIS above.
 
+### The Settings window
+
+Settings grew one menu line at a time and now hide among the actions.
+The tray menu has about 25 lines, half of them settings: Theme, Terminal
+font, Tiles on screen, Notify when a session needs you, Loot sounds, Show
+on Discord, Start with Windows, Check for updates, and Warriv's two
+switches per project. A project's settings sit in its header menu among
+its actions (Work mode, Colour, Add host). The Runetome's menu holds Ask
+before a click casts. The session defaults live in the usage window. The
+three hotkeys can not be set at all. Nothing shows the whole of it, and a
+menu is a poor place to read a choice before making it.
+
+**One window, applied at once** (decided 2026-10-07). Drawn by Horadric
+like the usage window, with its own controls (`dropdown.rs`, `field.rs`,
+the effort slider), so no toolkit. Every change takes effect the moment
+it is made, as the menu lines do today, so there is no Save button and no
+state where the window and the app disagree. Sections down the left:
+
+- **Appearance:** theme, terminal font, which screen the tiles stand on.
+- **Notifications:** notify when a session waits, loot sounds.
+- **Sessions:** default model, effort and permissions, and which agents
+  are offered. The usage window keeps its rows as a shortcut to the same
+  values.
+- **Keys:** the three hotkeys, shown first, settable later.
+- **Startup and updates:** start with Windows, check for updates now.
+- **Privacy:** what Discord may show.
+- **Runetome:** ask before a click casts, built in stones put away.
+- **Projects:** every project in one list, not a window each. Picking one
+  shows its colour, work mode, SSH hosts, and Warriv drives with and
+  ships public.
+
+**The menus become actions.** The tray keeps New session, the recent
+projects, the quest logs, Next waiting session, Stay a while and listen,
+the tile and terminal actions, End all sessions and Quit, and gains
+"Settings...". Warriv drives stays in the tray too: it is the go ahead to
+ship, and a go ahead should be one click and in plain sight. The project
+menu loses Work mode, Colour and Add host and gains "Project
+settings...", which opens the same window at that project. Tile menus are
+actions already and stay as they are.
+
+**Open.** Whether the window is a tile in the columns like the usage
+window or a window of its own that closes. Leaning to its own: settings
+are visited, not watched.
+
 ## Not in any step yet, but needed before daily use
 
 - **Expanding from a synthetic click can open behind other windows.** Windows
