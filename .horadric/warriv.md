@@ -3,6 +3,7 @@
 ## Rules
 
 ## Lately
+- 2026-10-07 Hourly round: 143 done, none open, no aim. Main at 4f8cb74 (browser pane hint for Claude sessions), checks still unrun, so no ship yet. Nothing else to do.
 - 2026-10-07 Round after "Settings: the Keys section" landed (5f6f58d): all four Settings quests are in, but main's checks not yet run, so no ship. Next green round casts "Ship Public".
 - 2026-10-07 Round after "Settings: the Projects section" landed (5de4820): checks not yet run on main, so no ship. Keys is the last Settings quest still under way. Nothing else to do.
 - 2026-10-07 Round after "Settings: the Sessions section" landed (6d430aa): checks not yet run on main, so no ship. Projects and Keys still under way. Nothing else to do.
@@ -17,4 +18,4 @@
 - 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
 
 ## Open
-- All four Settings quests landed (5f6f58d, checks unrun). When main shows green, cast "Ship Public" (it ships local too); the Settings window is worth a release to users.
+- All four Settings quests landed (5f6f58d), plus 4f8cb74 since; checks unrun. When main shows green, cast "Ship Public" (it ships local too); the Settings window is worth a release to users.
