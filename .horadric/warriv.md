@@ -3,6 +3,7 @@
 ## Rules
 
 ## Lately
+- 2026-10-07 Round after the human left: 143 done, none open, no aim. Main at 27c2703, checks still unrun, so "Ship Public" waits for green. Nothing else to do.
 - 2026-10-07 Hourly round: 143 done, none open, no aim. Main at 4f8cb74 (browser pane hint for Claude sessions), checks still unrun, so no ship yet. Nothing else to do.
 - 2026-10-07 Round after "Settings: the Keys section" landed (5f6f58d): all four Settings quests are in, but main's checks not yet run, so no ship. Next green round casts "Ship Public".
 - 2026-10-07 Round after "Settings: the Projects section" landed (5de4820): checks not yet run on main, so no ship. Keys is the last Settings quest still under way. Nothing else to do.
