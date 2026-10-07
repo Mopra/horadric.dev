@@ -56,7 +56,7 @@ post gamma Stop "/tmp" ''
 sleep 8
 
 ls -la "$HORADRIC_SNAPSHOT" || true
-pane=$(ls "$HORADRIC_SNAPSHOT"/pane-smoke-*.txt 2>/dev/null | head -1)
+pane=$(ls "$HORADRIC_SNAPSHOT"/pane-smoke-*.txt 2>/dev/null | grep -v tmp | head -1)
 if [ -n "$pane" ]; then
   echo "--- the smoke session's screen"; cat "$pane"
   grep -q HELLO-FROM-PTY "$pane" || fail "the session's output is not on its screen"

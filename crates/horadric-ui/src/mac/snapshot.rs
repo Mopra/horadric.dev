@@ -32,8 +32,12 @@ fn take(dir: &Path) {
     let Some((views, texts)) = app::with(|a| (a.views(), a.texts())) else {
         return;
     };
+    // Through a rename, so a reader never sees a file half written.
     for (id, text) in texts {
-        let _ = std::fs::write(dir.join(format!("pane-{id}.txt")), text);
+        let tmp = dir.join(format!("pane-{id}.txt.tmp"));
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, dir.join(format!("pane-{id}.txt")));
+        }
     }
     for (name, view) in views {
         let bounds = view.bounds();
