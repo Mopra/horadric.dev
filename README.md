@@ -22,6 +22,26 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Mopra/horadric.dev?style=flat-square" alt="License" /></a>
 </p>
 
+<p align="center">
+  <img src="docs/assets/screenshot-tiles.png" alt="Horadric tiles on the Windows desktop" /><br />
+  <em>Every agent session is a small tile, grouped by project. Amber means it needs you.</em>
+</p>
+
+<p align="center">
+  <img src="docs/assets/screenshot-terminal.png" alt="A Horadric terminal with the real CLI" /><br />
+  <em>Click a tile and the real CLI opens in a real terminal. No chat UI of its own.</em>
+</p>
+
+<p align="center">
+  <img src="docs/assets/screenshot-browser.png" alt="The Horadric browser pane" /><br />
+  <em>A browser pane beside the agents, for localhost or anything else. Agents can drive it too.</em>
+</p>
+
+<p align="center">
+  <img src="docs/assets/screenshot-quests.png" alt="The Horadric quest log" /><br />
+  <em>A quest log per project, a plain Markdown checklist in the repo.</em>
+</p>
+
 ---
 
 ## What is Horadric?
