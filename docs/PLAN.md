@@ -4949,7 +4949,10 @@ state where the window and the app disagree. Sections down the left:
 - **Notifications:** notify when a session waits, loot sounds.
 - **Sessions:** default model, effort and permissions, and which agents
   are offered. The usage window keeps its rows as a shortcut to the same
-  values.
+  values. Built: an Agent row picks whose defaults the rows under it
+  show, effort is a list here rather than the slider, and "In the
+  project menu" turns off another installed agent's New session line
+  (Claude Code is always offered).
 - **Keys:** the three hotkeys, shown first, settable later.
 - **Startup and updates:** start with Windows, check for updates now.
 - **Privacy:** what Discord may show.
@@ -4979,7 +4982,10 @@ updates, and Privacy. Their tray lines are gone; the tray has
 "Settings..." and keeps "Update to" when a check found a release. A list
 row drops the usage window's list, which now serves either window
 (`dropdown::Whose`), and a list too long for the screen climbs to its top.
-Sessions, Keys and Runetome come next.
+Then Runetome: ask before a click casts is a switch, and the stones put
+away are counted with a button that brings them all back. The stone menu
+keeps only its actions (Cast, Arm, Put away, Change, Remove, Make a new
+stone). Keys comes next.
 
 **Projects built** (2026-10-07): the section's first row drops every
 project (recent, on screen, or with a quest log) and the rows below it

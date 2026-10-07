@@ -6,7 +6,7 @@
 //! resume one by id. A saved session comes back as a paused tile, and
 //! clicking it runs `claude --resume <id>` in the same folder.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -90,6 +90,10 @@ pub struct SavedState {
     /// are `defaults`, from before there was a choice.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_defaults: BTreeMap<Agent, Defaults>,
+    /// The agents a project's menu does not offer to start, though they
+    /// are installed. Claude Code is always offered.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub agents_off: BTreeSet<Agent>,
     /// The other agents' limits as last heard. Claude Code's are `usage`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_usage: BTreeMap<Agent, Usage>,
@@ -735,6 +739,7 @@ mod tests {
                     ..Default::default()
                 },
             )]),
+            agents_off: BTreeSet::from([Agent::Grok]),
             agent_usage: BTreeMap::from([(
                 Agent::Codex,
                 Usage {
@@ -780,6 +785,7 @@ mod tests {
         assert_eq!(back.defaults, state.defaults);
         assert_eq!(back.usage, state.usage);
         assert_eq!(back.agent_defaults, state.agent_defaults);
+        assert_eq!(back.agents_off, state.agents_off);
         assert_eq!(back.agent_usage, state.agent_usage);
         assert_eq!(back.usage_window, state.usage_window);
         assert_eq!(back.font_size, state.font_size);
