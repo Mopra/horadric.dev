@@ -1,0 +1,51 @@
+name: Mac release check
+# The draft's own Horadric-macos.tar.gz tried on a Mac before it is
+# published: installed through install.sh as a user would, started, and
+# its windows drawn, the Mac's step "try the build before publishing".
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The draft release to try, such as v0.17.0
+        required: true
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the draft's archive
+        run: |
+          gh release download "$TAG" --pattern Horadric-macos.tar.gz --pattern latest-macos.json --dir draft
+          shasum -a 256 draft/Horadric-macos.tar.gz
+          grep -q "$(shasum -a 256 draft/Horadric-macos.tar.gz | cut -d' ' -f1)" draft/latest-macos.json
+      - name: Install it as a user would
+        run: |
+          HORADRIC_DOWNLOAD="file://$PWD/draft/Horadric-macos.tar.gz" sh install.sh
+          app="$HOME/Applications/Horadric.app"
+          lipo -info "$app/Contents/MacOS/horadric"
+          codesign --verify --verbose "$app"
+          plutil -p "$app/Contents/Info.plist" | grep -E "Version|Identifier"
+          for i in $(seq 1 50); do nc -z 127.0.0.1 43117 && break; sleep 0.2; done
+          nc -z 127.0.0.1 43117
+          "$HOME/.local/bin/horadric" hooks status
+      - name: Start a shell session in it and look
+        run: |
+          pkill -f "Horadric.app/Contents/MacOS/horadric app"; sleep 2
+          mkdir -p shots
+          HORADRIC_SNAPSHOT="$PWD/shots" HORADRIC_AGENT=/bin/zsh "$HOME/Applications/Horadric.app/Contents/MacOS/horadric" app > app.log 2>&1 &
+          for i in $(seq 1 50); do nc -z 127.0.0.1 43117 && break; sleep 0.2; done
+          "$HOME/.local/bin/horadric" new --name release --cwd "$PWD" -- -c 'echo RELEASE-ON-A-MAC; exec /bin/zsh -i'
+          sleep 8
+          cat app.log
+          grep -q RELEASE-ON-A-MAC shots/pane-release-*.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-release-check
+          path: shots
