@@ -1,234 +1,208 @@
-# Horadric
+<p align="center">
+  <img src="docs/assets/icon.png" alt="Horadric" width="120" />
+</p>
 
-[![Downloads](https://img.shields.io/github/downloads/Mopra/horadric.dev/total?style=flat-square)](https://github.com/Mopra/horadric.dev/releases/latest)
+<h1 align="center">Horadric</h1>
 
-Every coding agent session you have running becomes a small tile on your
-Windows desktop, grouped by project, that lights up when it needs you and
-grows into a full terminal when you click it. Sessions share one working
-tree and commit on it, or, if you pick that work mode for a project, each
-works in a git worktree of its own and the tile shows you what it changed.
-When two sessions in one tree edit the same file, both you and the agent
-hear about it.
+<p align="center">
+  Every coding agent you have running, as a tile on your Windows desktop.<br />
+  Grouped by project. Lit when it needs you. A full terminal when you click it.
+</p>
 
-Horadric is a window manager for agent sessions that already exist. It never
-puts its own chat UI in front of the agent. The terminal is the UI.
+<p align="center">
+  <a href="https://github.com/Mopra/horadric.dev/releases/latest">Download</a> &middot;
+  <a href="docs/PRIVACY.md">Privacy</a>
+</p>
 
-Status: early. The tiles, the state stream behind them and the terminals
-work. Worktrees are next.
+<p align="center">
+  <a href="https://github.com/Mopra/horadric.dev/releases/latest"><img src="https://img.shields.io/github/v/release/Mopra/horadric.dev?style=flat-square" alt="Latest release" /></a>
+  <a href="https://github.com/Mopra/horadric.dev/releases"><img src="https://img.shields.io/github/downloads/Mopra/horadric.dev/total?style=flat-square" alt="Downloads" /></a>
+  <img src="https://img.shields.io/badge/platform-Windows%2010%2B-blue?style=flat-square" alt="Platform" />
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Mopra/horadric.dev?style=flat-square" alt="License" /></a>
+</p>
 
-## What works now
+---
 
-- `horadric` opens one cluster window per project on the left edge of your
-  screen: frameless, rounded, never takes focus, not in the taskbar or
-  alt-tab. It stacks like a normal window: other windows can cover it, a
-  click brings it forward, and "Bring tiles to front" in the tray menu
-  brings them all back. The clusters stand in columns as tall as the
-  screen, and the files tiles in a column share the room the tiles leave.
-  Drag a cluster to another place, another column or a new one at the
-  right. A new project never moves the others, and another screen lays the
-  same columns out again. The wheel scrolls a column that holds more than
-  fits. Click the header to collapse a cluster.
-- Each tile shows a session: an icon for its state, name, an age line like
-  "needs permission 12 min", and the last line worth reading. Waiting tiles
-  light up amber.
-- A project in git gets a files tile at the bottom of its cluster: the file
-  tree as VS Code's explorer shows it, changed files coloured with their
-  letter (M, A, U, D), folders marked when something inside changed. It
-  updates as files change, without polling. Click a folder to open it, a
-  file to open it in VS Code, the header to fold it.
-- A tray icon starts sessions: "New session..." asks for a folder, and your
-  recent projects are one click away. It also quits Horadric.
-- `horadric explorer install` adds "Open in Horadric" to folders in Explorer,
-  which starts Horadric too if it is not running.
-- A session runs `claude` in a Horadric terminal: a real terminal with the
-  real CLI in it, permissions, slash commands and all. The sessions share one
-  terminal window, the stage, which shows one project at a time: every
-  session of that project is a pane in a grid. One fills the window, two
-  sit side by side, four are two by two. Click a tile and the stage switches
-  to its project with that session typing; click it again or close the
-  window to collapse it. Other projects keep running unseen, and the tiles
-  on stage are lit. The `+` in a cluster header starts another, and
-  `horadric new --name fix-login` does it from a script.
-- Drag a pane by its header onto another to swap the two. The order is
-  remembered. "Fit terminal beside tiles" in the tray menu fills the space
-  right of the clusters. The terminal snaps to the screen edges and the
-  tiles, when moved and when an edge is dragged to resize, and Shift
-  places it freely.
-- Plain terminals for everything that is not the agent: a dev server, a
-  log, a deploy. The small button beside a cluster's bottom `+`, Ctrl+Shift+T
-  in any pane, or "New terminal" in the project menu opens PowerShell in the
-  project, as a pane on the stage and a tile in the cluster. The tile shows
-  what the terminal's title says and how busy its output is. `exit` closes
-  it. `HORADRIC_SHELL` picks another shell.
-- Zoom a pane with the button at the end of its header, a double click on
-  the header, or Ctrl+Shift+Enter: it fills the stage alone until you zoom
-  out. Ctrl+Alt and an arrow moves the keyboard to the pane beside it. Ctrl
-  and plus, minus or the wheel sizes the font, Ctrl+0 puts it back.
-- Ctrl+Shift+F searches a pane's history, which keeps 10,000 lines. Enter
-  finds the next match up, Shift+Enter the next one down, Esc closes it.
-- A browser pane: Ctrl+Shift+B in any pane, or "Browser" in the project
-  menu, puts a web page on the stage beside the sessions and asks where
-  to go (`localhost:3000`, an address, or words to search). Ctrl+L asks
-  again, a right click on its header has back, forward and reload. Every
-  project and every session share one browser profile, so a login stays.
-  The page keeps its place when the stage shows another project.
-- Ctrl+click opens what a pane shows: a web address in the browser pane
-  when the project has one, otherwise in your browser, a
-  file in VS Code at its line (`src/main.rs:12`, relative to the session's
-  folder), a folder in Explorer, a program by running it. Hold Ctrl and
-  the link under the mouse is underlined.
-- A quest log per project: `.horadric/quests.md` (a `tasks.md` from
-  before the rename is still read), a Markdown checklist in the repo,
-  shown in a quests tile in the cluster. Click a quest and a session
-  starts on it, with the quest as its prompt; the agent reports back with
-  `horadric quest done` or `horadric quest blocked "why"`, and the row
-  shows where it is. The mode button picks how the list is worked: Manual,
-  one click per item; Review, the next item starts once you approve the
-  last; Warriv reviews, as Review but a reviewer session reads each
-  finished quest and its diff first, then lands it with `horadric quest
-  pass "title"`, sends it back with `horadric quest fix "title" "what"`
-  or hands it to you; Auto, down the list until it is done. The `+` adds an item, and so
-  does `horadric quest add` from any shell. A quest blocked with
-  `--on-quest "title"`, `--on-main ref`, `--on-file path`, `--on-cmd
-  "command"` or `--until +30m` goes on by itself once that holds, and the
-  list works on past it meanwhile.
-- Warriv, an orchestrator per project, off unless `"orchestrator": true`
-  is in `.horadric/config.json`. When a quest blocks on a question, a
-  session stops without reporting, an `After:` line names nothing, a
-  merge fails or the log in auto mode has nothing left to start, a fresh
-  Warriv session wakes with what happened. It answers the quest's session
-  with `horadric quest tell "title" "message"`, adds or splits quests,
-  writes what it decided as a `Warriv:` note under the quest, and hands
-  the rest to you with `horadric quest blocked "question" --quest
-  "title"`. It changes no code, starts no session, and wakes at most six
-  times an hour per project.
-- A Runetome per project: rune stones under the quest log, each a button
-  that casts a runeword, a list of steps done in order. A step says
-  something to the session and waits for its turn to end, types keys into
-  its terminal (`"/clear{Enter}"`, `"Esc"`), runs a command in the
-  project's folder (hidden, or in a pane to watch), or tests, reviews or
-  merges. Click a stone to cast it on the session with the keyboard on the
-  stage, or pick a session; drag it onto any tile or pane to cast it
-  there. A stone of only commands needs no session. Hover one to read its
-  steps first. A click asks before it casts, showing every step, until you
-  tick "Do not ask again". While it runs it glows with its step, and a
-  click stops it. Built in stones answer a prompt (Approve), stop a turn
-  (Interrupt), ask for a recap, commit, start fresh, get a second opinion
-  from a reviewer and open the folder. The empty stone starts the
-  Runesmith, an agent that asks what the new stone should do and writes it
-  into `.horadric/config.json`, or into `runewords.json` beside Horadric's
-  state for every project. Right click a stone to remove it, have the
-  Runesmith change it, or put a built in one away. A stone that came with
-  the project and changed since you last cast it carries a dot, and asks
-  before it casts even when you said not to.
-- Right click a tile to rename its session, or a project's header to open
-  its folder in VS Code or Explorer.
-- Ctrl+Alt+Space, from anywhere, shows the session that has waited on you
-  longest. Press it again to move on to the next one. Settings, under Keys,
-  sets this and the other two shortcuts to keys of your own: click one and
-  press them. When a session starts
-  waiting and you are not looking at it, Windows shows a notification; a
-  click on it shows the session. Settings can switch that off.
-- "Settings..." in the tray menu opens one window with every setting, in
-  sections: Appearance, Notifications, Sessions, Keys, Startup and
-  updates, Privacy, Runetome and Projects. A change takes effect the
-  moment you make it, so there is no Save.
-- "Show on Discord" in Settings, under Privacy, puts what your agents do on your
-  Discord profile, "Playing Horadric: 2 agents working, 1 waits for you",
-  with a clock that counts the whole run of work, not each turn. It is
-  off until you choose it, and "Without project names" keeps the project
-  off a profile your friends and servers can see; "With project names"
-  adds the one on the stage, or the busiest. Quit, reload and Off clear
-  it. It talks to the Discord desktop app through its local pipe, so
-  nothing happens while Discord is closed.
-- A Claude window at the top of the stack shows how much of your five hour,
-  weekly and spend limits is used and when each resets, and picks the
-  model, effort and permission mode for every session Horadric starts or
-  resumes. Each tile shows how full its session's context is. The numbers
-  come from Claude Code's status line, which Horadric sets for its own
-  sessions only.
-- With more than one Claude subscription, the Account row in that window
-  switches between them. Add account opens `claude auth login` once per
-  account. A switch waits for each session to finish its turn, then
-  resumes them all on the new account, conversations and all.
-- `horadric hooks install` adds Claude Code hooks to `~/.claude/settings.json`.
-  They are `http` hooks: Claude Code posts each lifecycle event to Horadric on
-  localhost. No script runs, no process is spawned per event.
-- `horadric run --name fix-login` starts a tagged `claude` in the terminal you
-  are in instead. Its tile shows state but can not expand. A `claude`
-  started any other way is ignored.
-- `horadric serve` shows the same state as a table in the terminal.
+## What is Horadric?
 
-The whole app is one process. With two projects and four sessions on screen
-it uses about 45 MB and no CPU between events. The terminals are ConPTY,
-`alacritty_terminal` for the grid, and our own DirectWrite glyph renderer.
+Running five agent sessions at once means five terminals piled on top of
+each other, and the one that has been waiting for your permission for
+twenty minutes is always at the bottom.
+
+Horadric fixes that. Each session becomes a small tile on the edge of your
+screen, grouped by project, showing what it is doing and how long it has
+been doing it. A tile lights up amber the moment its agent needs you. Click
+it and the session opens in a real terminal, with the real CLI in it.
+
+It works with **Claude Code**, **Codex** and **Grok Build**. It never puts a
+chat UI of its own in front of the agent. The terminal is the UI.
+
+## Features
+
+**Tiles**
+
+- One small, frameless cluster window per project. Never steals focus,
+  never in the taskbar or alt tab.
+- Each tile shows the session's state, name, an age line like "needs
+  permission 12 min", the last line worth reading and how full its context
+  is.
+- A files tile shows the project's tree with changed files marked, like VS
+  Code's explorer. Click a file to open it in VS Code.
+- Drag clusters into columns, collapse them, scroll a long column.
+
+**The stage**
+
+- One terminal window for every session. It shows one project at a time,
+  each session a pane in a grid. Click a tile to switch projects.
+- Zoom a pane, swap panes by dragging, search 10,000 lines of history.
+- Plain terminals beside the agents, for a dev server, a log or a deploy.
+- A browser pane for `localhost:3000` or anything else, that your agents
+  can drive too.
+- Ctrl+click a path in a pane to open the file in VS Code at that line.
+
+**Getting your attention**
+
+- **Ctrl+Alt+Space**, from anywhere, jumps to the session that has waited
+  longest. Press it again for the next one.
+- A Windows notification when a session starts waiting and you are not
+  looking at it.
+
+**Working through a list**
+
+- A quest log per project, a plain Markdown checklist in the repo. Click a
+  quest and a session starts on it. Run the list by hand, with your review
+  between items, or all the way down.
+- Warriv, an optional orchestrator that wakes when a quest gets stuck and
+  answers it, splits it, or hands it to you.
+- The Runetome: buttons that run a list of steps on a session. Approve,
+  interrupt, commit, ask for a review, or anything you describe to the
+  Runesmith, which writes the button for you.
+
+**Accounts and limits**
+
+- See how much of your five hour, weekly and spend limits is used, and pick
+  the model, effort and permission mode for new sessions.
+- Switch between Claude subscriptions. Every session resumes on the new
+  account, conversations and all.
+
+**Built to stay out of the way**
+
+- Pure Rust, drawing straight to Win32 and Direct2D. About 45 MB with four
+  sessions open, and no CPU between events.
+- Sessions survive a crash, a restart of Horadric or an update. Click a
+  paused tile after a reboot and the conversation resumes.
+- Updates itself, with every build signed.
+- Optional Discord status: "Playing Horadric: 2 agents working, 1 waits for
+  you".
+
+## Install
+
+You need Windows 10 or 11 and at least one of
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code),
+[Codex](https://github.com/openai/codex) or Grok Build.
+
+1. Download `horadric.exe` and `horadricw.exe` from the
+   [latest release](https://github.com/Mopra/horadric.dev/releases/latest)
+   into the same folder.
+2. Open a terminal in that folder and run:
+
+   ```
+   .\horadric.exe install
+   ```
+
+That is all. No admin rights needed. Horadric now:
+
+- is in the Start menu (search "Horadric") and starts with Windows,
+- answers to `horadric` in any new terminal,
+- adds "Open in Horadric" to folders in Explorer (under "Show more options"
+  on Windows 11),
+- has the hooks it needs in your agent's settings.
+
+It lives in the tray. Windows may hide a new tray icon behind the `^` by the
+clock.
+
+The downloaded files are not yet code signed, so Windows SmartScreen may
+warn you the first time. Choose "More info", then "Run anyway". Updates
+after that are checked against Horadric's own signature.
+
+## Getting started
+
+1. Click the tray icon and pick **New session...**, or right click a project
+   folder in Explorer and choose **Open in Horadric**.
+2. A tile appears and the stage opens with your agent in it. Work as you
+   always do.
+3. Start more sessions with the `+` on the project's header. Click away. When
+   one needs you, its tile turns amber.
+
+Everything else is in **Settings...** in the tray menu.
+
+### Keys
+
+| Key | Does |
+|---|---|
+| Ctrl+Alt+Space | Show the session that has waited longest (global) |
+| Ctrl+Shift+T | New plain terminal in this project |
+| Ctrl+Shift+B | Browser pane |
+| Ctrl+Shift+Enter | Zoom the pane in or out |
+| Ctrl+Alt+Arrow | Move to the pane beside |
+| Ctrl+Shift+F | Search the pane's history |
+| Ctrl+Plus, Ctrl+Minus, Ctrl+0 | Font size |
+| Ctrl+click | Open the link, file or folder under the mouse |
+
+The global shortcuts can be changed in Settings, under Keys.
+
+### From the command line
+
+```
+horadric new --name fix-login          start a session in this folder
+horadric new --agent codex             start one with another agent
+horadric quest add "Fix the login bug" add to the quest log
+horadric serve                         every session's state as a table
+```
+
+`horadric help` lists the rest.
 
 ## How it knows
 
-Horadric sets `HORADRIC_SESSION` in the environment of every `claude` it starts.
-The hook is configured to send that variable as a header, so every event
-arrives already tagged with the tile it belongs to. Outside Horadric the header
-is empty and the event is dropped.
+Horadric reads state from your agent's own lifecycle hooks, never from the
+text in the terminal. Claude Code posts each event to Horadric over
+localhost: a prompt submitted means working, a permission request means
+waiting, a stop means done. Only sessions Horadric started are tracked;
+anything else is ignored.
 
-State comes from hook events, never from reading terminal output:
+## Privacy
 
-| Event | State |
-|---|---|
-| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | working |
-| `PermissionRequest`, `Notification` (permission, idle, dialog) | waiting |
-| `StopFailure` | waiting, with the error |
-| `Stop` | done |
-| `SessionEnd` | ended |
+No telemetry, no analytics, no crash reporting. The only thing that leaves
+your machine is the daily update check against GitHub, and Discord status
+if you switch it on. [docs/PRIVACY.md](docs/PRIVACY.md) has the full audit.
 
-Subagent events and compaction restarts do not change state.
+## Uninstall
 
-## Build
+```
+horadric uninstall
+```
 
-Rust stable on Windows.
+This removes Horadric from PATH, the Start menu, Explorer and startup, and
+takes out only its own hooks. Your agent settings stay as they were. Saved
+sessions stay in `%APPDATA%\Horadric`.
+
+## Build from source
+
+Rust stable on Windows (the exact version is pinned in
+`rust-toolchain.toml`).
 
 ```
 cargo build --release
 target\release\horadric.exe install
 ```
 
-That installs Horadric for your user, no admin rights: it is in the Start
-menu (search "Horadric"), `horadric` works in any new terminal, "Open in Horadric"
-is on folders in Explorer (under "Show more options" on Windows 11), it
-starts with Windows, and the Claude Code hooks are in place. Horadric lives in
-the tray; Windows may hide a new icon behind the `^` by the clock.
+`HORADRIC_AGENT=cmd.exe` runs a shell instead of an agent in the terminals,
+the cheap way to try them. `HORADRIC_DEV=1` runs a build beside the
+installed one with its own port and state, which is how Horadric is
+developed from inside Horadric. `horadric reload` swaps a running Horadric
+over to a new build without stopping a single session.
 
-Each session's console runs in a small host process of its own, so the
-agents keep running when Horadric crashes, reloads, or quits with "keep
-running": the next start finds them where they were, screen and all.
-Sessions whose process is gone (a restart of Windows, or Quit with "stop
-them") come back as paused tiles, and a click resumes the conversation.
-
-`HORADRIC_AGENT=cmd.exe` runs a shell instead of `claude` in the terminals,
-which is the cheap way to try them.
-
-`HORADRIC_DEV=1` runs a build beside the installed Horadric without touching
-it: its own port and saved state, no autostart, a red lit tray icon. That is how
-Horadric is developed from a session inside Horadric.
-
-`target\release\horadric.exe reload` updates a running Horadric to a new build
-without the quit. It hands over at once and the new build attaches to the
-running sessions, mid turn or not. A build that fails to start is rolled
-back.
-
-`horadric uninstall` takes it all back out. The hooks it removes are only
-Horadric's; everything else in your Claude Code settings stays as it was.
-
-## Plan
-
-1. Hook receiver and state machine. Done.
-2. Cluster windows on Win32 and Direct2D. Done.
-3. Terminal window: ConPTY, the alacritty grid, our own glyph renderer. Done.
-4. Worktree per session, changed files, open in VS Code.
-5. Inbox, installer, updater.
-
-Pure Rust, Win32 and Direct2D directly. No toolkit, and no web view
-except the browser pane, which shows web pages.
-[docs/PLAN.md](docs/PLAN.md) has the detail, the open questions and the
+[docs/PLAN.md](docs/PLAN.md) has the design, the decisions behind it and the
 known gaps.
 
 ## Not doing
@@ -236,9 +210,8 @@ known gaps.
 - A chat UI of its own.
 - Progress bars or time estimates.
 - An embedded editor or diff viewer. VS Code does that.
-- Merging worktrees back. Git and the human do that.
 - Mac or Linux, for now.
 
 ## License
 
-MIT.
+[MIT](LICENSE).
