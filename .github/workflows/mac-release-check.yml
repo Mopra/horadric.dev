@@ -8,8 +8,9 @@ on:
       tag:
         description: The draft release to try, such as v0.17.0
         required: true
+# A draft is only seen by a token that may write to the releases.
 permissions:
-  contents: read
+  contents: write
 jobs:
   check:
     runs-on: macos-latest
