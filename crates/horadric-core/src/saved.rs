@@ -176,6 +176,11 @@ pub struct SavedState {
     /// runner starts no quest until the human picks a mode or drives again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stopped: Vec<String>,
+    /// The global shortcuts set in the Settings window, by what they do
+    /// ("next", "listen", "stop"), each as its name ("Ctrl+Alt+Space").
+    /// One not here has its default.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub hotkeys: BTreeMap<String, String>,
 }
 
 /// The "Show on Discord" setting: whether Rich Presence is on, and whether

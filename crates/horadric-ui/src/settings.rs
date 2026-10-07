@@ -26,21 +26,24 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DOWN, VK_ESCAPE,
-    VK_UP,
+    GetAsyncKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
-    IsIconic, LoadCursorW, RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HICON,
-    HTCAPTION, HTCLIENT, ICON_BIG, ICON_SMALL, IDC_ARROW, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE,
-    SW_SHOW, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_PAINT, WM_SETICON,
-    WM_SIZE, WNDCLASSW, WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos,
+    GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsIconic, LoadCursorW, RegisterClassW,
+    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW,
+    ShowWindow, UnhookWindowsHookEx, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HHOOK,
+    HICON, HTCAPTION, HTCLIENT, ICON_BIG, ICON_SMALL, IDC_ARROW, KBDLLHOOKSTRUCT, SWP_NOACTIVATE,
+    SWP_NOZORDER, SW_RESTORE, SW_SHOW, WH_KEYBOARD_LL, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCHAR,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
 };
 
 use crate::app::{self, Input};
 use crate::backdrop;
+use crate::hotkey::{self, Action, Mods, Press};
 use crate::layout::{self, SettingsHit, SettingsLayout};
 use crate::render::{SettingsLook, SettingsScene, Target};
 use crate::theme::Theme;
@@ -56,14 +59,16 @@ pub enum Section {
     #[default]
     Appearance,
     Notifications,
+    Keys,
     Startup,
     Privacy,
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [
+    pub const ALL: [Section; 5] = [
         Section::Appearance,
         Section::Notifications,
+        Section::Keys,
         Section::Startup,
         Section::Privacy,
     ];
@@ -72,6 +77,7 @@ impl Section {
         match self {
             Section::Appearance => "Appearance",
             Section::Notifications => "Notifications",
+            Section::Keys => "Keys",
             Section::Startup => "Startup and updates",
             Section::Privacy => "Privacy",
         }
@@ -92,6 +98,11 @@ pub enum Field {
     Updates,
     Version,
     Discord,
+    /// A global shortcut: a click listens for its new chord.
+    Key(Action),
+    /// What the Keys section has to say: how to set one, or why the last
+    /// try did not take.
+    KeysNote,
 }
 
 /// What a row does when clicked.
@@ -105,6 +116,8 @@ pub enum Control {
     Button,
     /// Only says, a click does nothing.
     Fixed,
+    /// A line of help across the row, no label.
+    Note,
 }
 
 /// A row as the window shows it.
@@ -134,6 +147,35 @@ pub struct Values {
     pub update: Option<String>,
     pub checking: bool,
     pub version: String,
+    /// The global shortcuts in [`Action::ALL`]'s order.
+    pub keys: [Key; 3],
+    /// The shortcut whose new chord the window waits for.
+    pub listening: Option<Action>,
+    /// Why the last chord pressed did not take, until the next try.
+    pub keys_note: Option<String>,
+}
+
+/// A global shortcut as the app has it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Key {
+    /// Its chord's name, "Ctrl+Alt+Space".
+    pub chord: String,
+    /// Registered. False when another program holds the chord.
+    pub live: bool,
+}
+
+/// The Keys section's note, given the shortcuts in `v`.
+fn keys_note(v: &Values) -> String {
+    if let Some(note) = &v.keys_note {
+        return note.clone();
+    }
+    if v.listening.is_some() {
+        return "Esc keeps it, Backspace puts back the default".to_string();
+    }
+    match v.keys.iter().find(|k| !k.live) {
+        Some(k) => format!("{} is taken by another program", k.chord),
+        None => "Click a shortcut, then press its new keys".to_string(),
+    }
 }
 
 /// The rows of `section`, given the settings in `v`.
@@ -196,6 +238,24 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                 line(Field::Version, "Version", &v.version, Control::Fixed),
             ]
         }
+        Section::Keys => {
+            let mut rows: Vec<Line> = Action::ALL
+                .iter()
+                .map(|a| {
+                    let k = &v.keys[a.index()];
+                    let value = if v.listening == Some(*a) {
+                        "Press the keys\u{2026}".to_string()
+                    } else if k.live {
+                        k.chord.clone()
+                    } else {
+                        format!("{}, taken", k.chord)
+                    };
+                    line(Field::Key(*a), a.label(), &value, Control::Button)
+                })
+                .collect();
+            rows.push(line(Field::KeysNote, "", &keys_note(v), Control::Note));
+            rows
+        }
         Section::Privacy => vec![line(
             Field::Discord,
             "Show on Discord",
@@ -220,6 +280,74 @@ fn step(at: Section, step: isize) -> Section {
     let n = Section::ALL.len() as isize;
     let i = Section::ALL.iter().position(|s| *s == at).unwrap_or(0) as isize;
     Section::ALL[(i + step).rem_euclid(n) as usize]
+}
+
+thread_local! {
+    /// The keyboard hook while the window listens for a chord, and the
+    /// window it listens for.
+    static HOOK: Cell<Option<(HHOOK, HWND)>> = const { Cell::new(None) };
+}
+
+/// Hooks the keyboard while `hwnd` listens for a chord, and unhooks it
+/// after. A hook, not the window's own key messages: a chord another
+/// program registered never reaches the window, and that is exactly the
+/// one to say is taken.
+fn hook(hwnd: HWND, on: bool) {
+    match (HOOK.with(Cell::get), on) {
+        (None, true) => {
+            let made = unsafe {
+                SetWindowsHookExW(
+                    WH_KEYBOARD_LL,
+                    Some(keyboard),
+                    GetModuleHandleW(None).ok().map(Into::into),
+                    0,
+                )
+            };
+            match made {
+                Ok(h) => HOOK.with(|c| c.set(Some((h, hwnd)))),
+                Err(e) => eprintln!("horadric: no keyboard hook to set a shortcut: {e}"),
+            }
+        }
+        (Some((h, _)), false) => {
+            unsafe {
+                let _ = UnhookWindowsHookEx(h);
+            }
+            HOOK.with(|c| c.set(None));
+        }
+        _ => {}
+    }
+}
+
+/// Takes a key pressed while the window listens and has the focus, before
+/// any hotkey can. Modifiers go on, so the keys held stay known.
+unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+    let ours = HOOK
+        .with(Cell::get)
+        .is_some_and(|(_, hwnd)| GetForegroundWindow() == hwnd);
+    if code >= 0 && down && ours {
+        let key = (*(lparam.0 as *const KBDLLHOOKSTRUCT)).vkCode as u16;
+        match hotkey::press(key, held()) {
+            Press::Wait => {}
+            p => {
+                app::push(Input::SettingsPress(p));
+                return LRESULT(1);
+            }
+        }
+    }
+    CallNextHookEx(None, code, wparam, lparam)
+}
+
+/// The modifiers held now. Asked of the keyboard, not the message queue:
+/// a hook runs before the queue knows of the key.
+fn held() -> Mods {
+    let down = |vk: VIRTUAL_KEY| unsafe { GetAsyncKeyState(i32::from(vk.0)) } < 0;
+    Mods {
+        ctrl: down(VK_CONTROL),
+        alt: down(VK_MENU),
+        shift: down(VK_SHIFT),
+        win: down(VK_LWIN) || down(VK_RWIN),
+    }
 }
 
 /// Brings the window back to the front, for a second "Settings..." while
@@ -344,6 +472,7 @@ impl SettingsWindow {
     }
 
     pub fn destroy(&self) {
+        hook(self.hwnd, false);
         unsafe {
             let _ = DestroyWindow(self.hwnd);
         }
@@ -361,6 +490,7 @@ impl SettingsWindow {
         if *self.values.borrow() == values {
             return;
         }
+        hook(self.hwnd, values.listening.is_some());
         *self.values.borrow_mut() = values;
         self.relayout();
     }
@@ -401,8 +531,16 @@ impl SettingsWindow {
 
     fn pick_section(&self, section: Section) {
         if self.section.replace(section) != section {
+            // Leaving the keys stops listening for one.
+            if self.listening() {
+                app::push(Input::SettingsPress(Press::Keep));
+            }
             self.relayout();
         }
+    }
+
+    fn listening(&self) -> bool {
+        self.values.borrow().listening.is_some()
     }
 
     fn paint(&self) {
@@ -512,7 +650,7 @@ impl SettingsWindow {
                 let Some(line) = self.lines().into_iter().nth(i) else {
                     return;
                 };
-                if line.control == Control::Fixed {
+                if matches!(line.control, Control::Fixed | Control::Note) {
                     return;
                 }
                 if let Some(row) = self.row_on_screen(i) {
@@ -597,6 +735,16 @@ impl SettingsWindow {
                     );
                 }
                 Some(LRESULT(0))
+            }
+            // The hook has the keys while listening. What it lets through
+            // is a modifier, eaten here so Alt does not open the window's
+            // menu.
+            WM_KEYDOWN | WM_SYSKEYDOWN | WM_SYSKEYUP | WM_SYSCHAR if self.listening() => {
+                Some(LRESULT(0))
+            }
+            WM_KILLFOCUS if self.listening() => {
+                app::push(Input::SettingsPress(Press::Keep));
+                None
             }
             WM_KEYDOWN => {
                 match wparam.0 as u16 {
@@ -688,6 +836,12 @@ mod tests {
             update: None,
             checking: false,
             version: "0.9.0".into(),
+            keys: Action::ALL.map(|a| Key {
+                chord: a.default_chord(false).name(),
+                live: true,
+            }),
+            listening: None,
+            keys_note: None,
         }
     }
 
@@ -710,8 +864,17 @@ mod tests {
             fields(Section::Startup, &v),
             [Field::Autostart, Field::Updates, Field::Version]
         );
+        assert_eq!(
+            fields(Section::Keys, &v),
+            [
+                Field::Key(Action::Next),
+                Field::Key(Action::Listen),
+                Field::Key(Action::Stop),
+                Field::KeysNote
+            ]
+        );
         assert_eq!(fields(Section::Privacy, &v), [Field::Discord]);
-        assert_eq!(tallest(&v), 3);
+        assert_eq!(tallest(&v), 4);
     }
 
     #[test]
@@ -762,6 +925,36 @@ mod tests {
         let mut v = values();
         v.autostart = None;
         assert_eq!(lines(Section::Startup, &v)[0].control, Control::Fixed);
+    }
+
+    #[test]
+    fn the_keys_show_their_chords_and_listen_for_one() {
+        let mut v = values();
+        let keys = lines(Section::Keys, &v);
+        assert_eq!(keys[0].value, "Ctrl+Alt+Space");
+        assert_eq!(keys[2].value, "Ctrl+Alt+W");
+        assert_eq!(keys[0].control, Control::Button);
+        assert_eq!(keys[3].control, Control::Note);
+        assert_eq!(keys[3].value, "Click a shortcut, then press its new keys");
+        v.listening = Some(Action::Listen);
+        let keys = lines(Section::Keys, &v);
+        assert_eq!(keys[1].value, "Press the keys\u{2026}");
+        assert_eq!(keys[0].value, "Ctrl+Alt+Space");
+        assert!(keys[3].value.starts_with("Esc keeps it"));
+        v.keys_note = Some("Hold Ctrl, Alt or Win with the key".into());
+        assert_eq!(
+            lines(Section::Keys, &v)[3].value,
+            "Hold Ctrl, Alt or Win with the key"
+        );
+    }
+
+    #[test]
+    fn a_key_another_program_holds_says_so() {
+        let mut v = values();
+        v.keys[1].live = false;
+        let keys = lines(Section::Keys, &v);
+        assert_eq!(keys[1].value, "Ctrl+Alt+Home, taken");
+        assert_eq!(keys[3].value, "Ctrl+Alt+Home is taken by another program");
     }
 
     #[test]

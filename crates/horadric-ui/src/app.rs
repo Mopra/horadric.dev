@@ -86,8 +86,8 @@ use windows::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetLastInputInfo, RegisterHotKey, LASTINPUTINFO, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
-    VK_HOME, VK_SPACE,
+    GetLastInputInfo, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, LASTINPUTINFO,
+    MOD_NOREPEAT,
 };
 use windows::Win32::UI::Shell::{SHQueryUserNotificationState, NIN_BALLOONUSERCLICK};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -113,6 +113,7 @@ use crate::dialog::{self, Dialog, Tone};
 use crate::dropdown::{self, Dropdown, Whose};
 use crate::glide::Glides;
 use crate::glyphs::{self, Font};
+use crate::hotkey::{self, Action, Chord, Press};
 use crate::keys::{self, FontStep};
 use crate::layout::{self, Metrics};
 use crate::loot::Loot;
@@ -241,11 +242,6 @@ pub enum WebAsk {
 const APP_CLASS: PCWSTR = w!("HoradricApp");
 /// Runs a console program without giving it a console window.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const HOTKEY_NEXT: i32 = 1;
-/// The catch-up, on demand.
-const HOTKEY_LISTEN: i32 = 2;
-/// Stops every drive of Warriv's at once.
-const HOTKEY_STOP: i32 = 3;
 /// Not in the `windows` crate's WindowsAndMessaging.
 const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
 const WTS_SESSION_LOCK: usize = 7;
@@ -382,6 +378,9 @@ pub(crate) enum Input {
     SettingsPicked(Field, Option<usize>),
     /// The Settings window's cross, Esc or Alt+F4.
     SettingsClosed,
+    /// A key pressed in the Settings window while it listens for a
+    /// shortcut's new chord.
+    SettingsPress(Press),
     /// A slider in the usage window let go at a new value.
     SetDefault(Agent, Setting, Option<String>),
     /// The catch-up closed, with the session of the line clicked, if one
@@ -529,9 +528,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     let notify_id = notify.0 as isize;
     APP_WINDOW.with(|w| w.set(notify_id));
     web::init(notify);
-    let hotkey = register_hotkey(notify);
-    let listen_key = register_listen_key(notify);
-    let stop_key = register_stop_key(notify);
     // Locking the screen is going away, and unlocking it coming back.
     unsafe {
         let _ = WTSRegisterSessionNotification(notify, NOTIFY_FOR_THIS_SESSION);
@@ -540,6 +536,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     browsers::watch(notify, WM_HORADRIC_WINDOW_SHOWN, WM_HORADRIC_WINDOW_GONE);
 
     let saved = store::load();
+    let keys = chords(&saved.hotkeys);
+    let keys_live = Action::ALL.map(|a| register_key(notify, a, keys[a.index()]));
     web::set_sizes(&saved.page_sizes);
     theme::set_accents(&saved.accents);
     web::set_docks(&saved.page_docks);
@@ -739,9 +737,10 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             stage_rect: saved.stage.filter(|r| on_screen(r[0], r[1])),
             stage_key: None,
             tiles_edge: None,
-            hotkey,
-            listen_key,
-            stop_key,
+            keys,
+            keys_live,
+            key_listening: None,
+            keys_note: None,
             drives: saved.drives.clone(),
             stopped: saved.stopped.iter().cloned().collect(),
             away: Away::default(),
@@ -880,72 +879,36 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     Ok(())
 }
 
-/// The shortcut for the next waiting session, or None when another app
-/// holds it. A dev instance adds Shift, so it never fights the installed
-/// Horadric for it. AltGr is Ctrl+Alt, and AltGr+Space types nothing on the
-/// layouts that matter here.
-fn register_hotkey(hwnd: HWND) -> Option<&'static str> {
-    let (mods, label) = if horadric_hooks::dev() {
-        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, "Ctrl+Alt+Shift+Space")
-    } else {
-        (MOD_CONTROL | MOD_ALT, "Ctrl+Alt+Space")
-    };
-    let ok = unsafe {
-        RegisterHotKey(
-            Some(hwnd),
-            HOTKEY_NEXT,
-            mods | MOD_NOREPEAT,
-            VK_SPACE.0 as u32,
-        )
-    };
-    if let Err(e) = &ok {
-        eprintln!("horadric: {label} is taken, no hotkey for the next waiting session: {e}");
-    }
-    ok.ok().map(|_| label)
+/// The global shortcuts as state.json sets them, each one it does not
+/// set at its default.
+fn chords(saved: &BTreeMap<String, String>) -> [Chord; 3] {
+    Action::ALL.map(|a| {
+        saved
+            .get(a.key())
+            .and_then(|s| Chord::parse(s))
+            .unwrap_or_else(|| a.default_chord(horadric_hooks::dev()))
+    })
 }
 
-/// The shortcut for the catch-up, or None when another app holds it. A
-/// dev instance adds Shift, as for the next waiting session.
-fn register_listen_key(hwnd: HWND) -> Option<&'static str> {
-    let (mods, label) = if horadric_hooks::dev() {
-        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, "Ctrl+Alt+Shift+Home")
-    } else {
-        (MOD_CONTROL | MOD_ALT, "Ctrl+Alt+Home")
-    };
-    let ok = unsafe {
-        RegisterHotKey(
-            Some(hwnd),
-            HOTKEY_LISTEN,
-            mods | MOD_NOREPEAT,
-            VK_HOME.0 as u32,
-        )
-    };
+/// Registers `action`'s shortcut on `chord`. False when another program
+/// holds the chord.
+fn register_key(hwnd: HWND, action: Action, chord: Chord) -> bool {
+    let mods = HOT_KEY_MODIFIERS(chord.mods.flags()) | MOD_NOREPEAT;
+    let ok = unsafe { RegisterHotKey(Some(hwnd), action.id(), mods, u32::from(chord.key)) };
     if let Err(e) = &ok {
-        eprintln!("horadric: {label} is taken, no hotkey for the catch-up: {e}");
+        eprintln!(
+            "horadric: {} is taken, no hotkey for {}: {e}",
+            chord.name(),
+            action.label()
+        );
     }
-    ok.ok().map(|_| label)
+    ok.is_ok()
 }
 
-/// The shortcut that stops Warriv driving, or None when another app holds
-/// it. A dev instance adds Shift, as for the next waiting session.
-fn register_stop_key(hwnd: HWND) -> Option<&'static str> {
-    let (mods, label) = if horadric_hooks::dev() {
-        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, "Ctrl+Alt+Shift+W")
-    } else {
-        (MOD_CONTROL | MOD_ALT, "Ctrl+Alt+W")
-    };
-    let ok = unsafe {
-        RegisterHotKey(
-            Some(hwnd),
-            HOTKEY_STOP,
-            mods | MOD_NOREPEAT,
-            u32::from(b'W'),
-        )
-    };
-    if let Err(e) = &ok {
-        eprintln!("horadric: {label} is taken, no hotkey to stop Warriv: {e}");
+fn unregister_key(hwnd: HWND, action: Action) {
+    unsafe {
+        let _ = UnregisterHotKey(Some(hwnd), action.id());
     }
-    ok.ok().map(|_| label)
 }
 
 /// Seconds since the last real input anywhere in this session.
@@ -1242,7 +1205,7 @@ fn tray_menu(hwnd: HWND) {
         app.count_experience();
         (
             app.recent.clone(),
-            [app.hotkey, app.listen_key, app.stop_key],
+            app.key_names(),
             !app.consoles.is_empty(),
             app.update.as_ref().map(|m| m.version.clone()),
             xp,
@@ -1254,6 +1217,7 @@ fn tray_menu(hwnd: HWND) {
         .filter(|p| Path::new(p).is_dir())
         .collect();
     let driven = with_app(|app| app.driven()).unwrap_or_default();
+    let hotkeys = hotkeys.each_ref().map(Option::as_deref);
     let menu = tray::menu(&projects, hotkeys, &driven, terminal, update.as_deref(), xp);
     match menu {
         Some(Choice::Settings) => open_settings(),
@@ -2615,12 +2579,15 @@ struct App {
     /// The project the stage showed when it last closed, which "Show
     /// terminal" in the tray brings back.
     stage_key: Option<String>,
-    /// The next waiting session's shortcut, as the tray menu shows it.
-    hotkey: Option<&'static str>,
-    /// The catch-up's shortcut, likewise.
-    listen_key: Option<&'static str>,
-    /// The shortcut that stops Warriv driving, likewise.
-    stop_key: Option<&'static str>,
+    /// The global shortcuts' chords, in [`Action::ALL`]'s order.
+    keys: [Chord; 3],
+    /// Which of them are registered. Another program may hold a chord.
+    keys_live: [bool; 3],
+    /// The shortcut the Settings window waits for a new chord for. Every
+    /// shortcut is let go meanwhile, so pressing one reaches the window.
+    key_listening: Option<Action>,
+    /// Why the last chord pressed did not take, for the Settings window.
+    keys_note: Option<String>,
     /// The projects Warriv drives, by project key, from the tray and the
     /// quests tile's mode menu. Changed through [`App::set_drive`] and
     /// [`App::stop_warriv`].
@@ -2913,9 +2880,12 @@ impl App {
                     }
                 }
             }
-            WM_HOTKEY if wparam as i32 == HOTKEY_NEXT => self.next_waiting(),
-            WM_HOTKEY if wparam as i32 == HOTKEY_LISTEN => self.listen_on_demand(),
-            WM_HOTKEY if wparam as i32 == HOTKEY_STOP => self.stop_warriv(),
+            WM_HOTKEY => match Action::from_id(wparam as i32) {
+                Some(Action::Next) => self.next_waiting(),
+                Some(Action::Listen) => self.listen_on_demand(),
+                Some(Action::Stop) => self.stop_warriv(),
+                None => {}
+            },
             WM_TIMER if wparam == GLIDE_TIMER => {
                 crate::vsync::took(self.notify, GLIDE_TIMER);
                 self.glide();
@@ -4464,7 +4434,82 @@ impl App {
             update: self.update.as_ref().map(|m| m.version.clone()),
             checking: self.checking,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            keys: Action::ALL.map(|a| settings::Key {
+                chord: self.keys[a.index()].name(),
+                live: self.keys_live[a.index()],
+            }),
+            listening: self.key_listening,
+            keys_note: self.keys_note.clone(),
         }
+    }
+
+    /// The shortcuts' names for the tray, None for one not registered.
+    fn key_names(&self) -> [Option<String>; 3] {
+        Action::ALL.map(|a| self.keys_live[a.index()].then(|| self.keys[a.index()].name()))
+    }
+
+    /// Registers every shortcut on its chord again.
+    fn register_keys(&mut self) {
+        for a in Action::ALL {
+            unregister_key(self.notify, a);
+            self.keys_live[a.index()] = register_key(self.notify, a, self.keys[a.index()]);
+        }
+    }
+
+    /// Starts listening for `action`'s new chord.
+    fn listen_for_key(&mut self, action: Action) {
+        for a in Action::ALL {
+            unregister_key(self.notify, a);
+        }
+        self.key_listening = Some(action);
+        self.keys_note = None;
+    }
+
+    /// A key pressed in the Settings window while it listens for a chord:
+    /// a chord no other shortcut has and no other program holds takes
+    /// effect at once and is kept. Anything else says why and listens on.
+    fn settings_press(&mut self, press: Press) {
+        let Some(action) = self.key_listening else {
+            return;
+        };
+        let i = action.index();
+        let dev = horadric_hooks::dev();
+        let chord = match press {
+            Press::Wait => return,
+            Press::Refused(why) => {
+                self.keys_note = Some(why.to_string());
+                self.refresh_settings();
+                return;
+            }
+            Press::Keep => None,
+            Press::Reset => Some(action.default_chord(dev)),
+            Press::Set(c) => Some(c),
+        };
+        if let Some(chord) = chord {
+            if let Some(other) = hotkey::clash(&self.keys, action, chord) {
+                self.keys_note = Some(format!("{} has {} already", other.label(), chord.name()));
+                self.refresh_settings();
+                return;
+            }
+            let old = self.keys[i];
+            self.keys[i] = chord;
+            self.register_keys();
+            if self.keys_live[i] {
+                self.save();
+            } else {
+                // Keeps the chord it had rather than one that does nothing.
+                self.keys[i] = old;
+                self.key_listening = None;
+                self.register_keys();
+                self.keys_note = Some(format!("{} is taken by another program", chord.name()));
+                self.refresh_settings();
+                return;
+            }
+        }
+        self.keys_note = None;
+        self.key_listening = None;
+        self.register_keys();
+        self.refresh_settings();
     }
 
     /// Hands the Settings window the settings again, after a change.
@@ -4549,7 +4594,8 @@ impl App {
                 post(self.notify.0 as isize, WM_HORADRIC_VERSION, 0);
             }
             Field::Updates => self.check_update(true),
-            Field::Version => {}
+            Field::Key(action) => self.listen_for_key(action),
+            Field::Version | Field::KeysNote => {}
         }
         self.refresh_settings();
     }
@@ -4598,6 +4644,10 @@ impl App {
     }
 
     fn close_settings(&mut self) {
+        if self.key_listening.take().is_some() {
+            self.register_keys();
+        }
+        self.keys_note = None;
         if self
             .dropdown
             .as_ref()
@@ -5864,6 +5914,11 @@ impl App {
                 stopped.sort();
                 stopped
             },
+            hotkeys: Action::ALL
+                .into_iter()
+                .filter(|a| self.keys[a.index()] != a.default_chord(horadric_hooks::dev()))
+                .map(|a| (a.key().to_string(), self.keys[a.index()].name()))
+                .collect(),
             ..Default::default()
         }
     }
@@ -6498,6 +6553,7 @@ impl App {
                 Input::SettingsClick(field, row) => self.settings_click(field, row),
                 Input::SettingsPicked(field, pick) => self.settings_picked(field, pick),
                 Input::SettingsClosed => self.close_settings(),
+                Input::SettingsPress(press) => self.settings_press(press),
                 Input::Answered {
                     dir,
                     title,

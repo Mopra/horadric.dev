@@ -122,7 +122,9 @@ work. Worktrees are next.
 - Right click a tile to rename its session, or a project's header to open
   its folder in VS Code or Explorer.
 - Ctrl+Alt+Space, from anywhere, shows the session that has waited on you
-  longest. Press it again to move on to the next one. When a session starts
+  longest. Press it again to move on to the next one. Settings, under Keys,
+  sets this and the other two shortcuts to keys of your own: click one and
+  press them. When a session starts
   waiting and you are not looking at it, Windows shows a notification; a
   click on it shows the session. Settings, in the tray menu, can switch
   that off.

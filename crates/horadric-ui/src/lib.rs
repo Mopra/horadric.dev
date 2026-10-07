@@ -30,7 +30,7 @@
 //!
 //! [`anim`], [`art`], [`board`], [`columns`], [`field`], [`files`], [`find`], [`layout`], [`theme`], [`palette`], [`paste`],
 //! [`keys`], [`frame`], [`icon`], [`inbox`], [`loot`], [`motion`], [`paths`], [`viewer`],
-//! [`highlight`], [`history`], [`screens`] and [`shell`] are pure and tested, and so is
+//! [`highlight`], [`history`], [`hotkey`], [`screens`] and [`shell`] are pure and tested, and so is
 //! the list logic in `recent`.
 //! `update` is the updater's crypto through CNG, tested with keys made in
 //! the tests.
@@ -46,6 +46,7 @@ pub mod find;
 pub mod frame;
 pub mod glide;
 pub mod highlight;
+pub mod hotkey;
 pub mod icon;
 pub mod inbox;
 pub mod keys;

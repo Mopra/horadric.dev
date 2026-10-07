@@ -1743,6 +1743,12 @@ impl Painter<'_> {
         self.text(&gpu.small, theme::legend(), scene.heading, heading);
         self.group(&l.group, m.tile_radius);
         for (i, (row, look)) in l.rows.iter().zip(scene.rows).enumerate() {
+            if look.control == Control::Note {
+                let r = &row.line;
+                let inner = Rect::new(r.x + m.setting_pad, r.y, r.w - 2.0 * m.setting_pad, r.h);
+                self.text(&gpu.small, theme::legend(), &look.value, inner);
+                continue;
+            }
             let b = match look.control {
                 Control::Fixed => Button::Idle,
                 _ => scene.button(SettingsHit::Row(i)),
