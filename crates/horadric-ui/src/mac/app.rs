@@ -122,6 +122,7 @@ const INSTALL_UPDATE: usize = 8;
 const ABOUT: usize = 9;
 const QUIT: usize = 10;
 const NEW_TERMINAL: usize = 11;
+const NEXT_WAITING: usize = 12;
 const THEME_TAG: usize = 50;
 const RECENT_TAG: usize = 100;
 
@@ -149,6 +150,9 @@ pub struct App {
     status_settings: Option<PathBuf>,
     font_size: f32,
     last_saved: Option<SavedState>,
+    /// The sessions that were waiting at the last reconcile, to tell one
+    /// that just started.
+    waiting: HashSet<String>,
     quit: bool,
     frozen: bool,
     update: update::Updater,
@@ -225,6 +229,7 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
         status_settings,
         font_size,
         last_saved: Some(saved.clone()),
+        waiting: HashSet::new(),
         quit: false,
         frozen: false,
         update: update::Updater::new(saved.update_told.clone()),
@@ -847,8 +852,32 @@ impl App {
         }
         self.place_clusters();
         self.sync_stage(&sessions);
+        self.attention(&sessions);
         self.menus();
         self.save();
+    }
+
+    /// The Dock says how many sessions wait for the human, and bounces
+    /// once when one starts to while they are in another app.
+    fn attention(&mut self, sessions: &[horadric_core::Session]) {
+        let waiting: HashSet<String> = sessions
+            .iter()
+            .filter(|s| s.phase.is_waiting())
+            .map(|s| s.id.clone())
+            .collect();
+        let app = NSApplication::sharedApplication(self.mtm);
+        let fresh = waiting.iter().any(|id| !self.waiting.contains(id));
+        if fresh && !app.isActive() {
+            app.requestUserAttention(
+                objc2_app_kit::NSRequestUserAttentionType::InformationalRequest,
+            );
+        }
+        let badge = match waiting.len() {
+            0 => None,
+            n => Some(objc2_foundation::NSString::from_str(&n.to_string())),
+        };
+        app.dockTile().setBadgeLabel(badge.as_deref());
+        self.waiting = waiting;
     }
 
     fn redraw_clusters(&mut self) {
@@ -1135,6 +1164,33 @@ impl App {
         self.end(id);
     }
 
+    /// Shows the session that has waited longest, then the next one each
+    /// time, as Ctrl+Alt+Space does on Windows.
+    fn next_waiting(&mut self) {
+        let shown = self.stage.focused_id();
+        let mut waiting: Vec<(SystemTime, String)> = self
+            .registry
+            .lock()
+            .map(|r| {
+                r.all()
+                    .filter(|s| s.phase.is_waiting())
+                    .map(|s| (s.since, s.id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        waiting.sort();
+        // Past the one shown now, round to the first.
+        let at = shown
+            .and_then(|id| waiting.iter().position(|(_, w)| *w == id))
+            .map_or(0, |i| (i + 1) % waiting.len().max(1));
+        let Some((_, id)) = waiting.get(at).cloned() else {
+            return;
+        };
+        if let Some(key) = self.project_of(&id) {
+            self.show_project(&key, Some(&id));
+        }
+    }
+
     fn pick_and_start(&mut self) {
         let start = self.recent.first().map(PathBuf::from);
         if let Some(dir) = dialog::pick_folder(self.mtm, start.as_deref()) {
@@ -1145,8 +1201,14 @@ impl App {
     // Menus.
 
     fn menus(&self) {
+        let waiting = self.waiting.len();
         let mut items = vec![
             Item::keyed("New Session\u{2026}", NEW_SESSION, "n"),
+            if waiting > 0 {
+                Item::pick(format!("Next Waiting Session ({waiting})"), NEXT_WAITING)
+            } else {
+                Item::pick("Next Waiting Session", NEXT_WAITING)
+            },
             Item::pick("Show the Stage", SHOW_STAGE),
             Item::pick("Bring Tiles to Front", FRONT),
         ];
@@ -1191,6 +1253,7 @@ impl App {
         let session_items = [
             Item::keyed("New Session\u{2026}", NEW_SESSION, "n"),
             Item::pick("New Terminal", NEW_TERMINAL),
+            Item::keyed("Next Waiting Session", NEXT_WAITING, "j"),
             Item::Separator,
             Item::pick("Bring Tiles to Front", FRONT),
         ];
@@ -1205,6 +1268,7 @@ impl App {
                     self.open_shell(&key);
                 }
             }
+            NEXT_WAITING => self.next_waiting(),
             SHOW_STAGE => {
                 self.stage.present();
                 let app = NSApplication::sharedApplication(self.mtm);
