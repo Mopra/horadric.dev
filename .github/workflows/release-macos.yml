@@ -1,6 +1,8 @@
 name: Mac release
 # A tag builds Horadric.app for both kinds of Mac and attaches
-# Horadric-macos.tar.gz to the draft release of that tag. The archive is
+# Horadric-macos.tar.gz (for install.sh) and Horadric-macos.zip (the same
+# app, for MacUpdate, which takes only a .pkg, .dmg or .zip) to the draft
+# release of that tag. The tar.gz is
 # signed for the updater on the Windows machine that holds the key, as
 # RELEASING.md says; nothing here can sign it.
 on:
@@ -40,11 +42,14 @@ jobs:
           plutil -lint dist/Horadric.app/Contents/Info.plist
           dist/Horadric.app/Contents/MacOS/horadric --help >/dev/null
           cd dist && tar -czf Horadric-macos.tar.gz Horadric.app
-          shasum -a 256 Horadric-macos.tar.gz
+          ditto -c -k --keepParent Horadric.app Horadric-macos.zip
+          shasum -a 256 Horadric-macos.tar.gz Horadric-macos.zip
       - uses: actions/upload-artifact@v4
         with:
           name: Horadric-macos
-          path: dist/Horadric-macos.tar.gz
+          path: |
+            dist/Horadric-macos.tar.gz
+            dist/Horadric-macos.zip
       - name: Attach to the draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -52,7 +57,7 @@ jobs:
           # The draft is made by hand after the tag is pushed, so wait for it.
           for i in $(seq 1 60); do
             if gh release view "$TAG" >/dev/null 2>&1; then
-              gh release upload "$TAG" dist/Horadric-macos.tar.gz --clobber
+              gh release upload "$TAG" dist/Horadric-macos.tar.gz dist/Horadric-macos.zip --clobber
               exit 0
             fi
             sleep 30
