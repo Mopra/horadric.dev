@@ -3,6 +3,7 @@
 ## Rules
 
 ## Lately
+- 2026-10-07 Round after "Settings: the Projects section" landed (5de4820): checks not yet run on main, so no ship. Keys is the last Settings quest still under way. Nothing else to do.
 - 2026-10-07 Round after "Settings: the Sessions section" landed (6d430aa): checks not yet run on main, so no ship. Projects and Keys still under way. Nothing else to do.
 - 2026-10-07 Round after "Settings: the Runetome section" landed (0135cf0): checks not yet run on main, so no ship. Sessions, Projects and Keys still under way. Nothing else to do.
 - 2026-10-07 Round after "The Settings window" landed (ad12f6a, checks green): cast "Ship Local". Held off on public since the Settings series (Sessions, Projects, Runetome under way, Keys still to come) is half done.
@@ -15,5 +16,5 @@
 - 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
 
 ## Open
-- Ship local once main's checks are green after the next landing (6d430aa unchecked).
+- Ship local once main's checks are green after the next landing (5de4820 unchecked).
 - Once all four Settings quests have landed on green, cast "Ship Public" (the Settings window is worth a release to users).
