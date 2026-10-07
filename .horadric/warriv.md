@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-07 Hourly round: 144 done, none open, no aim, nothing landed since the README ship. Nothing to do.
 - 2026-10-07 Round after the README landed (9271c1f): only a doc change since 0.16.0, so cast "Ship Local", not public. Fix-up quest closed with the duplicate branch gone.
 - 2026-10-07 Wake: "The Settings window" reported a merge conflict, but its branch (c03c61a) was a parallel duplicate of ad12f6a already on main and in 0.16.0. Told the fix-up quest to drop the branch and merge nothing.
 - 2026-10-07 Round after the human left: "Ship Public" landed as v0.16.0 (53ea7fc, tagged and pushed). 143 done, none open, no aim. Nothing to do.
