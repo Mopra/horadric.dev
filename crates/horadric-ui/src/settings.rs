@@ -58,14 +58,16 @@ pub enum Section {
     Notifications,
     Startup,
     Privacy,
+    Runetome,
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [
+    pub const ALL: [Section; 5] = [
         Section::Appearance,
         Section::Notifications,
         Section::Startup,
         Section::Privacy,
+        Section::Runetome,
     ];
 
     pub fn label(self) -> &'static str {
@@ -74,6 +76,7 @@ impl Section {
             Section::Notifications => "Notifications",
             Section::Startup => "Startup and updates",
             Section::Privacy => "Privacy",
+            Section::Runetome => "Runetome",
         }
     }
 }
@@ -92,6 +95,10 @@ pub enum Field {
     Updates,
     Version,
     Discord,
+    /// Whether a click on a stone asks before it casts.
+    Ask,
+    /// Brings back every built in stone put away.
+    Hidden,
 }
 
 /// What a row does when clicked.
@@ -134,6 +141,9 @@ pub struct Values {
     pub update: Option<String>,
     pub checking: bool,
     pub version: String,
+    pub ask: bool,
+    /// How many built in stones are put away.
+    pub hidden: usize,
 }
 
 /// The rows of `section`, given the settings in `v`.
@@ -202,6 +212,24 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
             v.discord.label(),
             Control::List,
         )],
+        Section::Runetome => {
+            let (ask, a) = switch(v.ask);
+            let hidden = match v.hidden {
+                0 => line(
+                    Field::Hidden,
+                    "Built in stones put away",
+                    "None",
+                    Control::Fixed,
+                ),
+                n => line(
+                    Field::Hidden,
+                    "Built in stones put away",
+                    &format!("{n}, bring back"),
+                    Control::Button,
+                ),
+            };
+            vec![line(Field::Ask, "Ask before a click casts", ask, a), hidden]
+        }
     }
 }
 
@@ -688,6 +716,8 @@ mod tests {
             update: None,
             checking: false,
             version: "0.9.0".into(),
+            ask: true,
+            hidden: 0,
         }
     }
 
@@ -711,6 +741,7 @@ mod tests {
             [Field::Autostart, Field::Updates, Field::Version]
         );
         assert_eq!(fields(Section::Privacy, &v), [Field::Discord]);
+        assert_eq!(fields(Section::Runetome, &v), [Field::Ask, Field::Hidden]);
         assert_eq!(tallest(&v), 3);
     }
 
@@ -765,9 +796,28 @@ mod tests {
     }
 
     #[test]
+    fn put_away_stones_are_brought_back_only_when_there_are_some() {
+        let mut v = values();
+        let row = |v: &Values| lines(Section::Runetome, v)[1].clone();
+        assert_eq!(
+            (row(&v).value.as_str(), row(&v).control),
+            ("None", Control::Fixed)
+        );
+        v.hidden = 2;
+        assert_eq!(
+            (row(&v).value.as_str(), row(&v).control),
+            ("2, bring back", Control::Button)
+        );
+        assert_eq!(
+            lines(Section::Runetome, &v)[0].control,
+            Control::Switch(true)
+        );
+    }
+
+    #[test]
     fn the_arrow_keys_go_round_the_sections() {
         assert_eq!(step(Section::Appearance, 1), Section::Notifications);
-        assert_eq!(step(Section::Appearance, -1), Section::Privacy);
-        assert_eq!(step(Section::Privacy, 1), Section::Appearance);
+        assert_eq!(step(Section::Appearance, -1), Section::Runetome);
+        assert_eq!(step(Section::Runetome, 1), Section::Appearance);
     }
 }

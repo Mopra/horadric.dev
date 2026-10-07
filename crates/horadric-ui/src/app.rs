@@ -4464,6 +4464,8 @@ impl App {
             update: self.update.as_ref().map(|m| m.version.clone()),
             checking: self.checking,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            ask: self.tome.ask,
+            hidden: self.tome.hidden.len(),
         }
     }
 
@@ -4550,6 +4552,11 @@ impl App {
             }
             Field::Updates => self.check_update(true),
             Field::Version => {}
+            Field::Ask => {
+                self.tome.ask = !self.tome.ask;
+                self.save();
+            }
+            Field::Hidden => self.hide_stone(None),
         }
         self.refresh_settings();
     }

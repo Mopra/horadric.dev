@@ -4979,7 +4979,10 @@ updates, and Privacy. Their tray lines are gone; the tray has
 "Settings..." and keeps "Update to" when a check found a release. A list
 row drops the usage window's list, which now serves either window
 (`dropdown::Whose`), and a list too long for the screen climbs to its top.
-Sessions, Keys, Runetome and Projects come next, with the project menu's
+Then Runetome: ask before a click casts is a switch, and the stones put
+away are counted with a button that brings them all back. The stone menu
+keeps only its actions (Cast, Arm, Put away, Change, Remove, Make a new
+stone). Sessions, Keys and Projects come next, with the project menu's
 lines.
 
 ## Not in any step yet, but needed before daily use
