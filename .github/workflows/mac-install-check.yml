@@ -1,0 +1,22 @@
+name: Mac install check
+# The line horadric.dev gives Mac users, run as it is on a fresh Mac:
+# the published release, fetched through the live install.sh.
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+jobs:
+  install:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - name: curl -fsSL https://horadric.dev/install.sh | sh
+        run: curl -fsSL https://horadric.dev/install.sh | sh
+      - name: It runs, and answers as the release says
+        run: |
+          app="$HOME/Applications/Horadric.app"
+          plutil -p "$app/Contents/Info.plist" | grep CFBundleShortVersionString
+          lipo -info "$app/Contents/MacOS/horadric"
+          for i in $(seq 1 50); do nc -z 127.0.0.1 43117 && break; sleep 0.2; done
+          nc -z 127.0.0.1 43117
+          "$HOME/.local/bin/horadric" hooks status
