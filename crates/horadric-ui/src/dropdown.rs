@@ -95,7 +95,7 @@ pub fn register_class() -> Result<()> {
 /// Code session switches once it is free, see
 /// [`horadric_core::Session::free_for_command`]. The other agents have no
 /// command Horadric can type in.
-fn note(agent: Agent, setting: Setting) -> &'static str {
+pub(crate) fn note(agent: Agent, setting: Setting) -> &'static str {
     if agent == Agent::Claude && setting.command(None).is_some() {
         "Running sessions switch too"
     } else {
@@ -139,13 +139,16 @@ impl Dropdown {
     }
 
     /// Opens the list for a row of the Settings window: `labels` to pick
-    /// from, `current` the one in use, with `note` on top.
+    /// from, `current` the one in use, with `note` on top, and `apart`
+    /// the line that sits apart from the others, if one does.
+    #[allow(clippy::too_many_arguments)]
     pub fn settings(
         shared: Rc<Shared>,
         field: Field,
         note: &str,
         labels: Vec<String>,
         current: usize,
+        apart: Option<usize>,
         row: RECT,
         dpi: u32,
     ) -> Result<Box<Self>> {
@@ -155,7 +158,7 @@ impl Dropdown {
             labels,
             values: Vec::new(),
             current,
-            apart: None,
+            apart,
         };
         Self::create(shared, list, row, dpi)
     }

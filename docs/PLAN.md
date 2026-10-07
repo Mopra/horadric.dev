@@ -4949,7 +4949,10 @@ state where the window and the app disagree. Sections down the left:
 - **Notifications:** notify when a session waits, loot sounds.
 - **Sessions:** default model, effort and permissions, and which agents
   are offered. The usage window keeps its rows as a shortcut to the same
-  values.
+  values. Built: an Agent row picks whose defaults the rows under it
+  show, effort is a list here rather than the slider, and "In the
+  project menu" turns off another installed agent's New session line
+  (Claude Code is always offered).
 - **Keys:** the three hotkeys, shown first, settable later.
 - **Startup and updates:** start with Windows, check for updates now.
 - **Privacy:** what Discord may show.

@@ -33,7 +33,7 @@
 //! the same hosts, so an update costs a few seconds and no session notices.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::c_void;
 use std::net::TcpStream;
 use std::os::windows::io::AsRawHandle;
@@ -216,6 +216,47 @@ const WM_HORADRIC_STONE_MENU: u32 = WM_APP + 30;
 /// Drop the list for the row of the Settings window the app's
 /// `settings_list_for` names.
 const WM_HORADRIC_SETTINGS_LIST: u32 = WM_APP + 31;
+
+/// What the list of a row of the Settings window offers.
+struct SettingsList {
+    /// Said on top: when the pick takes hold.
+    note: &'static str,
+    labels: Vec<String>,
+    /// The line in use.
+    current: usize,
+    /// The line that sits apart, so it is never picked by a slip.
+    apart: Option<usize>,
+}
+
+/// The lines of the list for `agent`'s default `setting`, Default first,
+/// and the place of `now` among them.
+fn default_choices(agent: Agent, setting: Setting, now: Option<&str>) -> (Vec<String>, usize) {
+    let choices = setting.choices(agent);
+    let labels = std::iter::once("Default")
+        .chain(choices.iter().map(|(_, name)| *name))
+        .map(str::to_string)
+        .collect();
+    let current = match now {
+        None => 0,
+        Some(v) => choices
+            .iter()
+            .position(|(c, _)| *c == v)
+            .map_or(0, |i| i + 1),
+    };
+    (labels, current)
+}
+
+/// The value line `i` of the list from [`default_choices`] stands for:
+/// None for Default, which leaves it to the agent.
+fn default_picked(agent: Agent, setting: Setting, i: usize) -> Option<Option<String>> {
+    match i {
+        0 => Some(None),
+        i => setting
+            .choices(agent)
+            .get(i - 1)
+            .map(|(v, _)| Some(v.to_string())),
+    }
+}
 
 /// A button in a session pane's header, handled outside the app's borrow
 /// since it may ask first.
@@ -725,6 +766,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             dropdown: None,
             settings_window: None,
             settings_list_for: None,
+            settings_agent: Agent::Claude,
+            agents_off: saved.agents_off.clone(),
             switches: HashMap::new(),
             settings_before: None,
             accounts: accounts::load(),
@@ -1173,21 +1216,19 @@ unsafe extern "system" fn app_proc(
             // Outside the app's borrow, as a setting's list is opened.
             let want = with_app(|app| {
                 let (field, row) = app.settings_list_for.take()?;
-                let (note, labels, current) = app.settings_list(field)?;
+                let list = app.settings_list(field)?;
                 let dpi = app.settings_window.as_ref().map_or(96, |w| w.dpi());
-                Some((
-                    Rc::clone(&app.shared),
-                    field,
+                Some((Rc::clone(&app.shared), field, list, row, dpi))
+            })
+            .flatten();
+            if let Some((shared, field, list, row, dpi)) = want {
+                let SettingsList {
                     note,
                     labels,
                     current,
-                    row,
-                    dpi,
-                ))
-            })
-            .flatten();
-            if let Some((shared, field, note, labels, current, row, dpi)) = want {
-                match Dropdown::settings(shared, field, note, labels, current, row, dpi) {
+                    apart,
+                } = list;
+                match Dropdown::settings(shared, field, note, labels, current, apart, row, dpi) {
                     Ok(d) => {
                         with_app(|app| app.dropped(d));
                     }
@@ -2024,10 +2065,11 @@ fn project_menu(key: &str) {
         items.push(Item::action(ADD_TREE, "New session in its own worktree"));
     }
     // Claude Code is what the plus starts. Another agent is offered when
-    // it is installed.
+    // it is installed and not turned off in the Settings window.
+    let off = with_app(|app| app.agents_off.clone()).unwrap_or_default();
     let others: Vec<Agent> = [Agent::Codex, Agent::Grok]
         .into_iter()
-        .filter(|a| console::agent_program(*a).is_some())
+        .filter(|a| !off.contains(a) && console::agent_program(*a).is_some())
         .collect();
     for (i, a) in others.iter().enumerate() {
         items.push(Item::action(
@@ -2568,6 +2610,11 @@ struct App {
     dropdown: Option<Box<Dropdown>>,
     /// The Settings window, while it is open.
     settings_window: Option<Box<SettingsWindow>>,
+    /// The agent whose defaults the Settings window's Sessions section
+    /// shows.
+    settings_agent: Agent,
+    /// The installed agents a project's menu does not offer.
+    agents_off: BTreeSet<Agent>,
     /// The row of the Settings window whose list is about to drop, and its
     /// place on screen.
     settings_list_for: Option<(Field, RECT)>,
@@ -4021,6 +4068,7 @@ impl App {
         if let Some(u) = &self.usage_window {
             u.invalidate();
         }
+        self.refresh_settings();
         self.save();
         self.switch_free();
     }
@@ -4459,6 +4507,12 @@ impl App {
             screen: shown.and_then(|n| screens.iter().position(|s| s.name == n)),
             notify: !self.quiet,
             sounds: self.sounds,
+            agent: self.settings_agent,
+            defaults: self.shared.defaults_of(self.settings_agent),
+            offered: (self.settings_agent != Agent::Claude).then(|| {
+                console::agent_program(self.settings_agent)
+                    .map(|_| !self.agents_off.contains(&self.settings_agent))
+            }),
             autostart: (!horadric_hooks::dev()).then(autostart::is_enabled),
             discord: self.discord,
             update: self.update.as_ref().map(|m| m.version.clone()),
@@ -4474,29 +4528,36 @@ impl App {
         }
     }
 
-    /// What the list of a row of the Settings window offers: the note on
-    /// top, its lines, and the place of the one in use.
-    fn settings_list(&self, field: Field) -> Option<(&'static str, Vec<String>, usize)> {
+    /// What the list of a row of the Settings window offers.
+    fn settings_list(&self, field: Field) -> Option<SettingsList> {
         let at = |found: Option<usize>| found.unwrap_or(0);
+        let list = |note, labels, current| {
+            Some(SettingsList {
+                note,
+                labels,
+                current,
+                apart: None,
+            })
+        };
         match field {
             Field::Theme => {
                 let now = theme::current();
-                Some((
+                list(
                     "Every window changes at once",
                     Theme::ALL.iter().map(|t| t.label().to_string()).collect(),
                     at(Theme::ALL.iter().position(|t| *t == now)),
-                ))
+                )
             }
             Field::Font => {
                 let fonts = glyphs::monospaced(&self.shared.gpu.dw);
                 let now = self.shared.font.family();
                 let current = at(fonts.iter().position(|f| f.eq_ignore_ascii_case(&now)));
-                Some(("Every terminal changes at once", fonts, current))
+                list("Every terminal changes at once", fonts, current)
             }
             Field::Screen => {
                 let screens = monitors();
                 let shown = screens::pick(&screens, self.screen.as_deref()).map(|s| &s.name);
-                Some((
+                list(
                     "The tiles move there at once",
                     screens
                         .iter()
@@ -4504,13 +4565,29 @@ impl App {
                         .map(|(i, s)| screens::label(i + 1, s).replace('\t', ", "))
                         .collect(),
                     at(screens.iter().position(|s| Some(&s.name) == shown)),
-                ))
+                )
             }
-            Field::Discord => Some((
+            Field::Discord => list(
                 "What your Discord profile may show",
                 Discord::ALL.iter().map(|d| d.label().to_string()).collect(),
                 at(Discord::ALL.iter().position(|d| *d == self.discord)),
-            )),
+            ),
+            Field::Agent => list(
+                "Whose defaults the rows show",
+                Agent::ALL.iter().map(|a| a.label().to_string()).collect(),
+                at(Agent::ALL.iter().position(|a| *a == self.settings_agent)),
+            ),
+            Field::Default(setting) => {
+                let agent = self.settings_agent;
+                let now = self.shared.defaults_of(agent);
+                let (labels, current) = default_choices(agent, setting, now.get(setting));
+                Some(SettingsList {
+                    note: dropdown::note(agent, setting),
+                    apart: (setting == Setting::Permissions).then(|| labels.len() - 1),
+                    labels,
+                    current,
+                })
+            }
             _ => None,
         }
     }
@@ -4519,7 +4596,12 @@ impl App {
     /// a button does its one thing. Each takes effect at once.
     fn settings_click(&mut self, field: Field, row: RECT) {
         match field {
-            Field::Theme | Field::Font | Field::Screen | Field::Discord => {
+            Field::Theme
+            | Field::Font
+            | Field::Screen
+            | Field::Discord
+            | Field::Agent
+            | Field::Default(_) => {
                 self.settings_list_for = Some((field, row));
                 post(self.notify.0 as isize, WM_HORADRIC_SETTINGS_LIST, 0);
             }
@@ -4532,6 +4614,13 @@ impl App {
                 self.save();
                 // So the choice is heard the moment it is made.
                 self.sound(Loot::Drop);
+            }
+            Field::Offered => {
+                let agent = self.settings_agent;
+                if agent != Agent::Claude && !self.agents_off.remove(&agent) {
+                    self.agents_off.insert(agent);
+                }
+                self.save();
             }
             Field::Autostart => {
                 if horadric_hooks::dev() {
@@ -4590,6 +4679,17 @@ impl App {
             Field::Discord => {
                 if let Some(d) = Discord::ALL.get(i) {
                     self.set_discord(*d);
+                }
+            }
+            Field::Agent => {
+                if let Some(a) = Agent::ALL.get(i) {
+                    self.settings_agent = *a;
+                }
+            }
+            Field::Default(setting) => {
+                let agent = self.settings_agent;
+                if let Some(value) = default_picked(agent, setting, i) {
+                    self.set_default(agent, setting, value);
                 }
             }
             _ => {}
@@ -5817,6 +5917,7 @@ impl App {
                 .map(|r| r.stashed().to_vec())
                 .unwrap_or_default(),
             defaults: self.shared.defaults_of(Agent::Claude),
+            agents_off: self.agents_off.clone(),
             agent_defaults: self
                 .shared
                 .defaults
@@ -7326,6 +7427,24 @@ pub(crate) fn work_area(chosen: Option<&str>) -> (i32, i32, i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_default_list_puts_default_first_and_picks_back_its_value() {
+        let (labels, at) = default_choices(Agent::Claude, Setting::Effort, Some("xhigh"));
+        assert_eq!(labels[0], "Default");
+        assert_eq!(labels[at], "Extra high");
+        assert_eq!(
+            default_picked(Agent::Claude, Setting::Effort, at),
+            Some(Some("xhigh".to_string()))
+        );
+        assert_eq!(default_choices(Agent::Claude, Setting::Model, None).1, 0);
+        assert_eq!(
+            default_choices(Agent::Claude, Setting::Model, Some("opus")).1,
+            0
+        );
+        assert_eq!(default_picked(Agent::Codex, Setting::Model, 0), Some(None));
+        assert_eq!(default_picked(Agent::Grok, Setting::Model, 9), None);
+    }
 
     #[test]
     fn the_stage_comes_back_with_the_project_it_showed() {

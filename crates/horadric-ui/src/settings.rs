@@ -13,6 +13,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 
 use horadric_core::saved::Discord;
+use horadric_core::{Agent, Defaults, Setting};
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -56,14 +57,16 @@ pub enum Section {
     #[default]
     Appearance,
     Notifications,
+    Sessions,
     Startup,
     Privacy,
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [
+    pub const ALL: [Section; 5] = [
         Section::Appearance,
         Section::Notifications,
+        Section::Sessions,
         Section::Startup,
         Section::Privacy,
     ];
@@ -72,6 +75,7 @@ impl Section {
         match self {
             Section::Appearance => "Appearance",
             Section::Notifications => "Notifications",
+            Section::Sessions => "Sessions",
             Section::Startup => "Startup and updates",
             Section::Privacy => "Privacy",
         }
@@ -87,6 +91,13 @@ pub enum Field {
     Screen,
     Notify,
     Sounds,
+    /// Whose session defaults the rows under it show.
+    Agent,
+    /// A default for the sessions Horadric starts, the same value the
+    /// usage window's rows show.
+    Default(Setting),
+    /// Whether a project's menu offers to start the agent.
+    Offered,
     Autostart,
     /// Look for a newer release now, or install the one found.
     Updates,
@@ -127,6 +138,12 @@ pub struct Values {
     pub screen: Option<usize>,
     pub notify: bool,
     pub sounds: bool,
+    /// The agent the Sessions section shows, and its defaults.
+    pub agent: Agent,
+    pub defaults: Defaults,
+    /// Whether its project menu line is on. None where it can not be
+    /// turned off, Claude Code, and Some(None) where it is not installed.
+    pub offered: Option<Option<bool>>,
     /// None where the switch is not offered, a dev instance.
     pub autostart: Option<bool>,
     pub discord: Discord,
@@ -167,6 +184,33 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                 line(Field::Sounds, "Loot sounds", sounds, s),
             ]
         }
+        Section::Sessions => {
+            let mut rows = vec![line(Field::Agent, "Agent", v.agent.label(), Control::List)];
+            rows.extend(v.agent.settings().iter().map(|s| {
+                let value = s.name_of(v.agent, v.defaults.get(*s));
+                line(Field::Default(*s), s.label(), value, Control::List)
+            }));
+            let offered = match v.offered {
+                None => line(
+                    Field::Offered,
+                    "In the project menu",
+                    "Always",
+                    Control::Fixed,
+                ),
+                Some(None) => line(
+                    Field::Offered,
+                    "In the project menu",
+                    "Not installed",
+                    Control::Fixed,
+                ),
+                Some(Some(on)) => {
+                    let (word, c) = switch(on);
+                    line(Field::Offered, "In the project menu", word, c)
+                }
+            };
+            rows.push(offered);
+            rows
+        }
         Section::Startup => {
             let autostart = match v.autostart {
                 Some(on) => {
@@ -205,11 +249,21 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
     }
 }
 
-/// The most rows any section has, which sets the window's height.
+/// The most rows any section has, which sets the window's height. The
+/// Sessions section counts with whichever agent has the most, so picking
+/// another does not leave the window a size its rows no longer fill.
 fn tallest(v: &Values) -> usize {
+    let sessions = Agent::ALL.iter().map(|a| {
+        let v = Values {
+            agent: *a,
+            ..v.clone()
+        };
+        lines(Section::Sessions, &v).len()
+    });
     Section::ALL
         .iter()
         .map(|s| lines(*s, v).len())
+        .chain(sessions)
         .max()
         .unwrap_or(1)
 }
@@ -683,6 +737,12 @@ mod tests {
             screen: Some(1),
             notify: true,
             sounds: false,
+            agent: Agent::Claude,
+            defaults: Defaults {
+                effort: Some("xhigh".into()),
+                ..Default::default()
+            },
+            offered: None,
             autostart: Some(true),
             discord: Discord::Unnamed,
             update: None,
@@ -710,8 +770,18 @@ mod tests {
             fields(Section::Startup, &v),
             [Field::Autostart, Field::Updates, Field::Version]
         );
+        assert_eq!(
+            fields(Section::Sessions, &v),
+            [
+                Field::Agent,
+                Field::Default(Setting::Model),
+                Field::Default(Setting::Effort),
+                Field::Default(Setting::Permissions),
+                Field::Offered,
+            ]
+        );
         assert_eq!(fields(Section::Privacy, &v), [Field::Discord]);
-        assert_eq!(tallest(&v), 3);
+        assert_eq!(tallest(&v), 5);
     }
 
     #[test]
@@ -728,6 +798,43 @@ mod tests {
         assert_eq!(
             lines(Section::Privacy, &v)[0].value,
             "Without project names"
+        );
+    }
+
+    #[test]
+    fn the_sessions_rows_show_the_picked_agents_defaults() {
+        let mut v = values();
+        let rows = lines(Section::Sessions, &v);
+        let values: Vec<&str> = rows.iter().map(|l| l.value.as_str()).collect();
+        assert_eq!(
+            values,
+            ["Claude Code", "Default", "Extra high", "Default", "Always"]
+        );
+        assert_eq!(rows[4].control, Control::Fixed);
+        v.agent = Agent::Codex;
+        v.defaults = Defaults {
+            model: Some("gpt-5.5".into()),
+            ..Default::default()
+        };
+        v.offered = Some(Some(false));
+        let rows = lines(Section::Sessions, &v);
+        assert_eq!(
+            rows.iter().map(|l| l.field).collect::<Vec<_>>(),
+            [
+                Field::Agent,
+                Field::Default(Setting::Model),
+                Field::Default(Setting::Effort),
+                Field::Offered,
+            ]
+        );
+        assert_eq!(rows[1].value, "GPT-5.5");
+        assert_eq!(tallest(&v), 5);
+        assert_eq!(rows[3].control, Control::Switch(false));
+        v.offered = Some(None);
+        let rows = lines(Section::Sessions, &v);
+        assert_eq!(
+            (rows[3].value.as_str(), rows[3].control),
+            ("Not installed", Control::Fixed)
         );
     }
 
@@ -767,6 +874,7 @@ mod tests {
     #[test]
     fn the_arrow_keys_go_round_the_sections() {
         assert_eq!(step(Section::Appearance, 1), Section::Notifications);
+        assert_eq!(step(Section::Notifications, 1), Section::Sessions);
         assert_eq!(step(Section::Appearance, -1), Section::Privacy);
         assert_eq!(step(Section::Privacy, 1), Section::Appearance);
     }
