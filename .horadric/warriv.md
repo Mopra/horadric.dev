@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-07 Hourly round: eleven Mac quests still under way (main at 3070821, uncommitted work in the tree), nothing landed as a quest since the last ship, no aim. Nothing to do.
 - 2026-10-07 Round after the human left: the eleven Mac quests still under way in one session, nothing landed since the last ship, no aim. Nothing to do.
 - 2026-10-07 Hourly round: the eleven Mac quests are all under way in one session (4f29480 is its first landing), nothing landed since the README ship, no aim. Nothing to do.
 - 2026-10-07 Hourly round: 144 done, none open, no aim, nothing landed since the README ship. Nothing to do.
