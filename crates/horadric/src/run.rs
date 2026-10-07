@@ -125,6 +125,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // Not through the app, so the hosts are told here. The task list is
     // not: an item is only ever worked by a session the app started.
     let mut command = Command::new(program);
+    #[cfg(windows)]
     if let Some(prompt) = horadric_ui::app::ssh_prompt(&cwd) {
         command.arg("--append-system-prompt").arg(prompt);
     }

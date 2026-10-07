@@ -57,6 +57,7 @@ pub mod motion;
 pub mod palette;
 pub mod paste;
 pub mod paths;
+pub mod plist;
 pub mod rain;
 pub mod screens;
 pub mod shell;
@@ -64,6 +65,9 @@ pub mod spectator;
 pub mod theme;
 pub mod viewer;
 pub mod viewport;
+
+#[cfg(target_os = "macos")]
+pub mod mac;
 
 #[cfg(windows)]
 mod accounts;
@@ -102,7 +106,6 @@ pub use dialog::error_alone;
 pub use store::exe_command;
 /// For `horadric quest`, which writes the chronicle from a session's shell
 /// under the same project key the app uses.
-#[cfg(windows)]
 pub use {project::folder_key, store::chronicle};
 #[cfg(windows)]
 mod dropdown;
@@ -116,7 +119,8 @@ mod net;
 mod pane;
 #[cfg(windows)]
 mod picker;
-#[cfg(windows)]
+// The Mac app uses all of these once it is built.
+#[cfg_attr(not(windows), allow(dead_code))]
 mod project;
 #[cfg(windows)]
 mod questlog;
@@ -134,7 +138,7 @@ mod sound;
 mod start;
 #[cfg(windows)]
 mod stash;
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 mod store;
 #[cfg(windows)]
 mod terminal;

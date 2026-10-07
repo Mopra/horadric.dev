@@ -40,7 +40,7 @@ pub fn history(cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
 pub fn codex_home() -> Option<PathBuf> {
     home(
         std::env::var("CODEX_HOME").ok().as_deref(),
-        std::env::var("USERPROFILE").ok().as_deref(),
+        crate::home().as_deref(),
     )
 }
 

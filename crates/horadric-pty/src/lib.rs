@@ -1,26 +1,59 @@
-//! Child processes in Windows pseudo consoles.
+//! Child processes in pseudo consoles.
 //!
-//! A Horadric terminal is a real `claude` attached to a ConPTY: Windows runs
-//! the console host, we get a byte stream of VT output and send VT input
-//! back. This crate owns that plumbing and nothing else. Parsing the stream
-//! into a grid is the UI's job.
+//! A Horadric terminal is a real `claude` attached to a ConPTY on Windows,
+//! or a POSIX pseudo terminal on a Mac: we get a byte stream of VT output
+//! and send VT input back. This crate owns that plumbing and nothing else.
+//! Parsing the stream into a grid is the UI's job.
 //!
-//! Written on the `windows` crate directly rather than `portable-pty`. The
-//! whole API we need is five calls, and the wrapper would bring a trait
-//! object design and a dozen crates for them.
+//! Written on the `windows` crate and `libc` directly rather than
+//! `portable-pty`. The whole API we need is five calls on each, and the
+//! wrapper would bring a trait object design and a dozen crates for them.
 
-#![cfg(windows)]
-
+#[cfg(windows)]
 mod conpty;
+#[cfg(any(windows, unix))]
 pub mod host;
+#[cfg(windows)]
 pub mod pipe;
+#[cfg(unix)]
+#[path = "socket.rs"]
+pub mod pipe;
+#[cfg(unix)]
+mod posix;
 pub mod wire;
 
-pub use conpty::{Command, Pty};
+#[cfg(windows)]
+pub use conpty::Pty;
+#[cfg(unix)]
+pub use posix::Pty;
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
+#[cfg(windows)]
+use std::ffi::OsString;
+#[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// What to run and how big the console starts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Command {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    /// Added to the inherited environment, replacing any existing value.
+    pub env_set: Vec<(String, String)>,
+    /// Removed from the inherited environment.
+    pub env_remove: Vec<String>,
+    pub cols: u16,
+    pub rows: u16,
+    /// Names the job holding the child, so another process can open it
+    /// and ask whether a process is the child's. Unnamed when None, and
+    /// unused off Windows.
+    #[serde(default)]
+    pub job_name: Option<String>,
+}
 
 /// Finds `name` on a `PATH` style list, trying each extension in order.
 ///
@@ -46,7 +79,12 @@ pub fn find_program(
 /// The npm install of Claude Code is a `claude.cmd` shim with no `.exe`, so
 /// looking for `.exe` alone finds an older install further down the path or
 /// nothing at all.
+#[cfg(windows)]
 pub const PROGRAM_EXTS: &[&str] = &[".exe", ".cmd", ".bat"];
+
+/// A program on a POSIX `PATH` has no extension.
+#[cfg(not(windows))]
+pub const PROGRAM_EXTS: &[&str] = &[""];
 
 /// Whether `program` is a batch file, which `CreateProcessW` will not run on
 /// its own.
@@ -56,6 +94,7 @@ pub fn is_batch(program: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
 }
 
+#[cfg(windows)]
 /// The command line handed to `CreateProcessW`. A batch file is run through
 /// the command interpreter: `cmd.exe /d /e:on /v:off /s /c "<program>
 /// <args>"`, where `/s` makes cmd strip exactly the outer quotes and leave
@@ -77,6 +116,7 @@ pub fn launch_line(program: &Path, args: &[String]) -> String {
     out
 }
 
+#[cfg(windows)]
 /// Quotes one argument for a batch file, which cmd reads twice: once as
 /// the `/c` line and again where the shim hands on `%*`. Inside quotes its
 /// operators are plain text, so anything that could be one is quoted. A
@@ -118,6 +158,7 @@ fn push_batch_quoted(out: &mut String, arg: &str) {
     out.push('"');
 }
 
+#[cfg(windows)]
 /// Joins arguments into one Windows command line, quoted the way the MSVC
 /// runtime splits them again.
 pub fn command_line(program: &Path, args: &[String]) -> String {
@@ -130,6 +171,7 @@ pub fn command_line(program: &Path, args: &[String]) -> String {
     out
 }
 
+#[cfg(windows)]
 fn push_quoted(out: &mut String, arg: &str) {
     let plain = !arg.is_empty() && !arg.contains([' ', '\t', '\n', '\x0b', '"']);
     if plain {
@@ -160,6 +202,7 @@ fn push_quoted(out: &mut String, arg: &str) {
     out.push('"');
 }
 
+#[cfg(windows)]
 /// Builds a Unicode environment block: `KEY=value` pairs, each NUL
 /// terminated, sorted the way Windows expects, with a final NUL.
 ///
@@ -195,12 +238,13 @@ pub fn environment_block(
     block
 }
 
+#[cfg(windows)]
 /// NUL terminated UTF-16, for the W functions.
 pub(crate) fn wide(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(std::iter::once(0)).collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 

@@ -13,18 +13,19 @@
 
 use std::fs::{self, File};
 use std::io::Write;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use horadric_hooks::listener::Reload;
 use horadric_hooks::{client, COMMAND_HEADER, RELOAD_PATH, STATE_HEADER};
+#[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+#[cfg(windows)]
 use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
 
 use crate::install::{self, BINARIES};
-use crate::{running, CREATE_NO_WINDOW};
+use crate::running;
 
 /// How long the new app gets to listen before it counts as broken.
 const START_TIMEOUT: Duration = Duration::from_secs(20);
@@ -40,7 +41,7 @@ pub fn request(args: &[String]) -> Result<(), String> {
         _ => return Err("usage: horadric reload [--now]".into()),
     };
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    if !horadric_hooks::dev() {
+    if cfg!(windows) && !horadric_hooks::dev() {
         let horadricw = exe.with_file_name("horadricw.exe");
         if !horadricw.is_file() {
             return Err(format!(
@@ -109,7 +110,7 @@ fn swap_inner(pid: u32, log: &mut Log) -> Result<(), String> {
     let dir = if horadric_hooks::dev() {
         from.to_path_buf()
     } else {
-        install::dir().ok_or("cannot find %LOCALAPPDATA%")?
+        install::dir().ok_or("cannot find the install folder")?
     };
 
     let mut moved = Vec::new();
@@ -155,7 +156,7 @@ fn swap_inner(pid: u32, log: &mut Log) -> Result<(), String> {
 /// case the new build changed them. A failure is logged, not fatal: the old
 /// hooks still reach Horadric.
 fn hooks(dir: &Path, log: &mut Log) {
-    if let Err(e) = install::grok_hooks(&dir.join("horadric.exe")) {
+    if let Err(e) = install::grok_hooks(&dir.join(BINARIES[0])) {
         log.line(&format!("Grok hooks not updated: {e}"));
     }
     let Some(settings) = horadric_hooks::install::settings_path() else {
@@ -170,16 +171,16 @@ fn hooks(dir: &Path, log: &mut Log) {
 /// stayed up. One that did not is killed, so the port is free for the next
 /// try.
 fn start_and_check(dir: &Path, log: &mut Log) -> Result<bool, String> {
-    let app = dir.join("horadric.exe");
+    let app = dir.join(BINARIES[0]);
     log.line(&format!("starting {}", app.display()));
-    let mut child = Command::new(&app)
-        .args(["app", "--reload"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(|e| format!("could not start {}: {e}", app.display()))?;
+    let mut child = crate::detach(horadric_hooks::no_window(
+        Command::new(&app).args(["app", "--reload"]),
+    ))
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .map_err(|e| format!("could not start {}: {e}", app.display()))?;
     let up = came_up(&mut child);
     if !up {
         let _ = child.kill();
@@ -248,6 +249,21 @@ pub fn old_name(name: &str) -> String {
 }
 
 /// Waits for a process to exit. One that is already gone counts as exited.
+#[cfg(unix)]
+fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    // Signal 0 checks the process is there without touching it.
+    while unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+/// Waits for a process to exit. One that is already gone counts as exited.
+#[cfg(windows)]
 fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     unsafe {
         let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) else {

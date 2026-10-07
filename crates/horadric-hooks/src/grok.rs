@@ -18,7 +18,7 @@ use crate::transcript::Past;
 pub fn history(cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
     let Some(root) = home(
         std::env::var("GROK_HOME").ok().as_deref(),
-        std::env::var("USERPROFILE").ok().as_deref(),
+        crate::home().as_deref(),
     ) else {
         return Vec::new();
     };

@@ -13,7 +13,9 @@
 //! still holds the pipe, as during a reload, takes it over.
 
 use std::io::{self, Read, Write};
+#[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
@@ -23,16 +25,22 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
 use windows::core::{BOOL, PCWSTR};
+#[cfg(windows)]
 use windows::Win32::Foundation::HANDLE;
+#[cfg(windows)]
 use windows::Win32::System::JobObjects::{IsProcessInJob, OpenJobObjectW};
 
 /// The access right `IsProcessInJob` needs, which the crate leaves out.
+#[cfg(windows)]
 const JOB_OBJECT_QUERY: u32 = 0x0004;
 
 use crate::pipe::Pipe;
+#[cfg(windows)]
+use crate::wide;
 use crate::wire::{hello, read_hello, Decoder, Message, Ring};
-use crate::{wide, Command, Pty};
+use crate::{Command, Pty};
 
 /// Output kept for a UI that attaches later. Forty sessions is 160 MB.
 const RING: usize = 4 * 1024 * 1024;
@@ -43,8 +51,11 @@ const LAST_WORDS: Duration = Duration::from_secs(5);
 /// How long a UI waits for a host it started to answer.
 const START: Duration = Duration::from_secs(10);
 
+#[cfg(windows)]
 const DETACHED_PROCESS: u32 = 0x0000_0008;
+#[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+#[cfg(windows)]
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
 /// What a host is to run and where to serve it.
@@ -255,6 +266,7 @@ fn welcome(pipe: Pipe, state: &Arc<Mutex<State>>, pty: &Arc<Pty>) {
 pub struct Remote {
     input: Sender<Vec<u8>>,
     /// The job holding the program and everything it starts.
+    #[cfg(windows)]
     job: Option<OwnedHandle>,
 }
 
@@ -279,23 +291,20 @@ impl Remote {
     /// leaves this process's job when it may, and has no console of its
     /// own, so it outlives this process whatever ends it.
     pub fn start(exe: &Path, spec: &Spec, job: &str) -> io::Result<Attached> {
-        let spawn = |flags: u32| {
+        let command = || {
             let mut c = std::process::Command::new(exe);
             c.arg("host")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .creation_flags(flags);
+                .stderr(Stdio::piped());
             // Not the caller's folder, which the host would keep from being
             // deleted for as long as the session runs.
             if let Some(dir) = exe.parent() {
                 c.current_dir(dir);
             }
-            c.spawn()
+            c
         };
-        let detached = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
-        // A job that does not allow leaving refuses the whole start.
-        let mut child = spawn(detached | CREATE_BREAKAWAY_FROM_JOB).or_else(|_| spawn(detached))?;
+        let mut child = spawn_detached(command)?;
         let json = serde_json::to_vec(spec).map_err(io::Error::other)?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(&json)?;
@@ -377,12 +386,21 @@ impl Remote {
                 }
             }
         });
-        let name = wide(job.as_ref());
-        let job = unsafe { OpenJobObjectW(JOB_OBJECT_QUERY, false, PCWSTR(name.as_ptr())) }
-            .ok()
-            .map(|h| unsafe { OwnedHandle::from_raw_handle(h.0) });
+        #[cfg(windows)]
+        let remote = {
+            let name = wide(job.as_ref());
+            let job = unsafe { OpenJobObjectW(JOB_OBJECT_QUERY, false, PCWSTR(name.as_ptr())) }
+                .ok()
+                .map(|h| unsafe { OwnedHandle::from_raw_handle(h.0) });
+            Remote { input, job }
+        };
+        #[cfg(not(windows))]
+        let remote = {
+            let _ = job;
+            Remote { input }
+        };
         Ok(Attached {
-            remote: Remote { input, job },
+            remote,
             incoming,
             cols,
             rows,
@@ -411,6 +429,7 @@ impl Remote {
 
     /// Whether a process is the program or was started by it, however far
     /// down. `process` needs `PROCESS_QUERY_LIMITED_INFORMATION`.
+    #[cfg(windows)]
     pub fn contains(&self, process: HANDLE) -> bool {
         let Some(job) = &self.job else {
             return false;
@@ -440,6 +459,34 @@ impl Incoming {
     }
 }
 
+/// Starts the host apart from this process, so it outlives it whatever
+/// ends it. On Windows it leaves this process's job when it may and has no
+/// console; a job that does not allow leaving refuses the whole start, so
+/// it is tried again without. Elsewhere it gets a session of its own, out
+/// of reach of the hang up a closing terminal sends.
+#[cfg(windows)]
+fn spawn_detached(command: impl Fn() -> std::process::Command) -> io::Result<std::process::Child> {
+    let detached = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+    command()
+        .creation_flags(detached | CREATE_BREAKAWAY_FROM_JOB)
+        .spawn()
+        .or_else(|_| command().creation_flags(detached).spawn())
+}
+
+#[cfg(unix)]
+fn spawn_detached(command: impl Fn() -> std::process::Command) -> io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    let mut c = command();
+    // SAFETY: setsid is async signal safe and touches no memory.
+    unsafe {
+        c.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    c.spawn()
+}
+
 fn wait_for(child: &mut std::process::Child, limit: Duration) -> io::Result<()> {
     let deadline = Instant::now() + limit;
     while child.try_wait()?.is_none() && Instant::now() < deadline {
@@ -458,12 +505,12 @@ mod tests {
     fn a_host_serves_replays_and_passes_a_kill_on() {
         let pipe = format!(r"\\.\pipe\horadric-test-host-{}", std::process::id());
         let job = format!(r"Local\horadric-test-host-{}", std::process::id());
-        let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+        let (program, args) = shell("echo host-says-hi");
         let spec = Spec {
             pipe: pipe.clone(),
             command: Command {
-                program: comspec.into(),
-                args: vec!["/q".into(), "/k".into(), "echo host-says-hi".into()],
+                program,
+                args,
                 cwd: std::env::temp_dir(),
                 env_set: vec![],
                 env_remove: vec![],
@@ -485,7 +532,7 @@ mod tests {
         assert_eq!((first.cols, first.rows), (80, 24));
         let seen = read_until(&mut first.incoming, "host-says-hi");
         assert!(seen.contains("host-says-hi"), "{seen}");
-        first.remote.write("echo typed-in\r");
+        first.remote.write(format!("echo typed-in{ENTER}"));
         read_until(&mut first.incoming, "typed-in");
         first.remote.resize(100, 30);
         thread::sleep(Duration::from_millis(200));
@@ -504,7 +551,29 @@ mod tests {
                 exit = Some(code);
             }
         }
-        assert_eq!(exit, Some(1));
+        // TerminateProcess gives 1, a hang up 128 and SIGHUP.
+        assert_eq!(exit, Some(if cfg!(windows) { 1 } else { 129 }));
+    }
+
+    #[cfg(windows)]
+    const ENTER: &str = "\r";
+    #[cfg(not(windows))]
+    const ENTER: &str = "\n";
+
+    /// A shell that says `greeting` and then waits for commands.
+    #[cfg(windows)]
+    fn shell(greeting: &str) -> (std::path::PathBuf, Vec<String>) {
+        let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+        (
+            comspec.into(),
+            vec!["/q".into(), "/k".into(), greeting.into()],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn shell(greeting: &str) -> (std::path::PathBuf, Vec<String>) {
+        let script = format!("{greeting}; exec /bin/sh");
+        ("/bin/sh".into(), vec!["-c".into(), script])
     }
 
     /// `serve` ends the process when the program ends, which would end the

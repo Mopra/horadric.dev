@@ -198,6 +198,7 @@ dependencies = [
  "horadric-hooks",
  "horadric-pty",
  "horadric-ui",
+ "libc",
  "serde_json",
  "windows",
 ]
@@ -222,6 +223,7 @@ dependencies = [
 name = "horadric-pty"
 version = "0.16.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "windows",

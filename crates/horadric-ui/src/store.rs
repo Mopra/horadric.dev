@@ -14,6 +14,7 @@ pub(crate) fn dir() -> Option<PathBuf> {
 
 /// The same folder under `%LOCALAPPDATA%`, for what should not roam with
 /// the profile: the programs session hosts run from.
+#[cfg(windows)]
 pub(crate) fn local_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|a| PathBuf::from(a).join(horadric_hooks::state_name()))
 }

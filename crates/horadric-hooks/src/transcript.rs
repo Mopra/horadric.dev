@@ -34,7 +34,7 @@ pub fn title(path: &str) -> Option<Title> {
 pub fn mid_turn(cwd: &str, id: &str) -> Option<bool> {
     let root = projects_root(
         std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
-        std::env::var("USERPROFILE").ok().as_deref(),
+        crate::home().as_deref(),
     )?;
     folders(&root, cwd).iter().find_map(|dir| {
         let mut file = File::open(dir.join(format!("{id}.jsonl"))).ok()?;
@@ -49,7 +49,7 @@ pub fn mid_turn(cwd: &str, id: &str) -> Option<bool> {
 pub fn path(cwd: &str, id: &str) -> Option<PathBuf> {
     let root = projects_root(
         std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
-        std::env::var("USERPROFILE").ok().as_deref(),
+        crate::home().as_deref(),
     )?;
     path_in(&root, cwd, id)
 }
@@ -94,7 +94,7 @@ const LOOKED_AT: usize = 40;
 pub fn history(cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
     let Some(root) = projects_root(
         std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
-        std::env::var("USERPROFILE").ok().as_deref(),
+        crate::home().as_deref(),
     ) else {
         return Vec::new();
     };

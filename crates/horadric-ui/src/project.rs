@@ -3,15 +3,12 @@
 //! one cluster instead of a cluster each.
 
 use std::collections::HashMap;
-use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use horadric_core::Session;
-
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// The project a session belongs to.
 pub fn project_key(s: &Session) -> String {
@@ -91,7 +88,7 @@ fn normalise(dir: &str) -> String {
 }
 
 fn ask_git(dir: &str) -> Option<String> {
-    let out = Command::new("git")
+    let out = horadric_hooks::no_window(&mut Command::new("git"))
         .args([
             "--no-optional-locks",
             "rev-parse",
@@ -103,7 +100,6 @@ fn ask_git(dir: &str) -> Option<String> {
         .current_dir(dir)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     out.status

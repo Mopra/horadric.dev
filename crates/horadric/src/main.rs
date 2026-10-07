@@ -11,28 +11,40 @@
 //! one per session to hold its console.
 
 mod console;
+#[cfg(windows)]
 mod explorer;
 mod hook;
+#[cfg(windows)]
 mod install;
+#[cfg(target_os = "macos")]
+#[path = "install_mac.rs"]
+mod install;
+#[cfg(windows)]
 mod mcp;
+#[cfg(windows)]
 mod release;
 mod reload;
 mod run;
+#[cfg(windows)]
 mod runestep;
+#[cfg(windows)]
 mod runeword;
+#[cfg(windows)]
 mod setup;
 mod status;
 mod task;
 
 use std::io::Read;
 use std::net::TcpStream;
-use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
-/// Runs a console program without giving it a console window.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Where a user finds the running app, to end the lines that mention it.
+#[cfg(windows)]
+const WHERE: &str = "Its icon is in the tray, by the clock.";
+#[cfg(not(windows))]
+const WHERE: &str = "Its icon is in the menu bar.";
 
 const USAGE: &str = "\
 horadric: every coding agent session as a tile on your desktop
@@ -103,23 +115,37 @@ fn main() -> ExitCode {
         Some("run") => run::run(&args[1..]),
         // `task` is how sessions started before the rename report back.
         Some("quest" | "task") => task::run(&args[1..]),
+        #[cfg(windows)]
         Some("runeword") => runeword::run(&args[1..]),
+        #[cfg(windows)]
         Some("setup") => setup::run(&args[1..]),
+        #[cfg(windows)]
         Some("runestep") => runestep::run(&args[1..]),
         Some("host") => host(),
         Some("hooks") => hooks(args.get(1).map(String::as_str)),
+        #[cfg(windows)]
         Some("explorer") => explorer_command(args.get(1).map(String::as_str)),
         None => std::env::current_exe()
             .map_err(|e| e.to_string())
             .and_then(|exe| launch(&exe)),
+        #[cfg(windows)]
         Some("app") => horadric_ui::app::run(
             horadric_hooks::port(),
             args.get(1).is_some_and(|a| a == "--reload"),
         ),
+        #[cfg(target_os = "macos")]
+        Some("app") => horadric_ui::mac::run(
+            horadric_hooks::port(),
+            args.get(1).is_some_and(|a| a == "--reload"),
+        ),
+        #[cfg(target_os = "macos")]
+        Some("bundle") => install::bundle_command(&args[1..]),
         Some("reload") => reload::request(&args[1..]),
+        #[cfg(windows)]
         Some("release") => release::run(&args[1..]),
         Some("status") => status::run(),
         Some("hook") => hook::run(&args[1..]),
+        #[cfg(windows)]
         Some("mcp") => mcp::run(),
         Some("swap") => reload::swap(&args[1..]),
         Some("install") => install_command(),
@@ -179,7 +205,7 @@ fn orphans() -> Vec<String> {
 /// Starts `exe app` hidden and detached, and waits until it listens.
 fn launch(exe: &Path) -> Result<(), String> {
     if running() {
-        println!("Horadric is already running. Its icon is in the tray, by the clock.");
+        println!("Horadric is already running. {WHERE}");
         return Ok(());
     }
     // A session never runs where nobody can see it for long: say which
@@ -195,12 +221,10 @@ fn launch(exe: &Path) -> Result<(), String> {
             kept.join(", ")
         );
     }
-    Command::new(exe)
-        .arg("app")
+    detach(horadric_hooks::no_window(Command::new(exe).arg("app")))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("could not start {}: {e}", exe.display()))?;
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -210,10 +234,29 @@ fn launch(exe: &Path) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    println!("Horadric started. Its icon is in the tray, by the clock.");
+    println!("Horadric started. {WHERE}");
     Ok(())
 }
 
+/// The app started from a terminal must outlive it. Windows gives it no
+/// console; elsewhere it gets a session of its own, so the hang up a
+/// closing terminal sends never reaches it.
+pub(crate) fn detach(cmd: &mut Command) -> &mut Command {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid is async signal safe and touches no memory.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    cmd
+}
+
+#[cfg(windows)]
 fn install_command() -> Result<(), String> {
     let dir = install::install(running())?;
     let settings =
@@ -233,6 +276,7 @@ fn install_command() -> Result<(), String> {
     launch(&dir.join("horadric.exe"))
 }
 
+#[cfg(windows)]
 fn uninstall_command() -> Result<(), String> {
     install::uninstall(running())?;
     let settings =
@@ -251,6 +295,51 @@ fn uninstall_command() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn install_command() -> Result<(), String> {
+    let app = install::install(running())?;
+    let settings =
+        horadric_hooks::install::settings_path().ok_or("cannot find your home directory")?;
+    horadric_hooks::install::install(&settings, horadric_hooks::port())
+        .map_err(|e| format!("{}: {e}", settings.display()))?;
+    let exe = install::dir()
+        .ok_or("cannot find your home directory")?
+        .join("horadric");
+    let grok = install::grok_hooks(&exe)?;
+    println!("installed Horadric in {}", app.display());
+    println!("  Launchpad and Spotlight: Horadric");
+    match install::link() {
+        Some((link, true)) => println!("  Terminal:   `horadric`, linked from {}", link.display()),
+        Some((link, false)) => println!(
+            "  Terminal:   linked from {}, which is not on your PATH yet",
+            link.display()
+        ),
+        None => {}
+    }
+    println!("  Opens at login (switch it off from the menu bar)");
+    println!("  Claude Code hooks in {}", settings.display());
+    if let Some(grok) = grok {
+        println!("  Grok Build hooks in {}", grok.display());
+    }
+    launch(&exe)
+}
+
+#[cfg(target_os = "macos")]
+fn uninstall_command() -> Result<(), String> {
+    install::uninstall(running())?;
+    let settings =
+        horadric_hooks::install::settings_path().ok_or("cannot find your home directory")?;
+    horadric_hooks::install::uninstall(&settings)
+        .map_err(|e| format!("{}: {e}", settings.display()))?;
+    install::remove_grok_hooks()?;
+    println!("uninstalled Horadric: the app, the command, opening at login and the hooks");
+    if let Some(dir) = horadric_hooks::state_dir() {
+        println!("saved sessions stay in {}", dir.display());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn explorer_command(sub: Option<&str>) -> Result<(), String> {
     match sub {
         Some("install") => {

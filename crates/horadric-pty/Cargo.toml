@@ -3,7 +3,7 @@ name = "horadric-pty"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Child processes in Windows pseudo consoles, for Horadric terminals"
+description = "Child processes in pseudo consoles, for Horadric terminals"
 
 [dependencies]
 serde = { workspace = true }
@@ -21,3 +21,6 @@ windows = { version = "0.62", features = [
     "Win32_System_Threading",
     "Win32_System_IO",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

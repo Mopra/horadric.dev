@@ -3,7 +3,6 @@
 //! human looks for it on the tile. `horadric runeword cast` has the app
 //! cast one, which is how Warriv's rounds use the tome.
 
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -11,8 +10,6 @@ use horadric_core::runeword::{self, Source, Stone};
 use horadric_core::tasks::CONFIG_FILE;
 use horadric_hooks::listener::TasksChanged;
 use horadric_hooks::TASKS_ENV;
-
-use crate::CREATE_NO_WINDOW;
 
 const USAGE: &str = "\
 usage: horadric runeword list         Every stone this project has, and any that do not parse
@@ -155,7 +152,7 @@ fn project(cwd: &Path) -> PathBuf {
 
 /// The same folder in the main working tree when `cwd` is in a linked one.
 fn main_tree_dir(cwd: &Path) -> Option<PathBuf> {
-    let out = Command::new("git")
+    let out = horadric_hooks::no_window(&mut Command::new("git"))
         .args([
             "--no-optional-locks",
             "rev-parse",
@@ -166,7 +163,6 @@ fn main_tree_dir(cwd: &Path) -> Option<PathBuf> {
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()
         .filter(|o| o.status.success())?;

@@ -117,8 +117,14 @@ pub fn instance() -> String {
 
 /// Where this Horadric keeps its state: `%APPDATA%\Horadric`, or
 /// `Horadric-dev` for a dev instance, which must never touch the real one.
+/// On a Mac the same names under `~/Library/Application Support`.
 pub fn state_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join(state_name()))
+    #[cfg(windows)]
+    let base = std::env::var_os("APPDATA").map(std::path::PathBuf::from);
+    #[cfg(not(windows))]
+    let base = std::env::var_os("HOME")
+        .map(|h| std::path::PathBuf::from(h).join("Library/Application Support"));
+    base.map(|b| b.join(state_name()))
 }
 
 /// The state folder's name, used under `%LOCALAPPDATA%` too.
@@ -156,6 +162,26 @@ pub fn refusal(port: u16, ours: &str, theirs: &str) -> String {
         "port {port} belongs to the Horadric keeping its state in {ours}, not {theirs}. \
          Give this one a port of its own with HORADRIC_PORT."
     )
+}
+
+/// The user's home folder: `%USERPROFILE%` on Windows, `$HOME` elsewhere.
+pub fn home() -> Option<String> {
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()
+        .filter(|h| !h.is_empty())
+}
+
+/// Keeps a console program from flashing a console window up on Windows.
+/// Elsewhere a child has no window to show, and this changes nothing.
+pub fn no_window(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
 }
 
 pub fn hook_url(port: u16) -> String {

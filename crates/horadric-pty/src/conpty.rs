@@ -4,12 +4,10 @@ use std::ffi::c_void;
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
 use std::thread;
 
-use serde::{Deserialize, Serialize};
 use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::System::Console::{
@@ -28,25 +26,7 @@ use windows::Win32::System::Threading::{
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
-use crate::{environment_block, launch_line, wide};
-
-/// What to run and how big the console starts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Command {
-    pub program: PathBuf,
-    pub args: Vec<String>,
-    pub cwd: PathBuf,
-    /// Added to the inherited environment, replacing any existing value.
-    pub env_set: Vec<(String, String)>,
-    /// Removed from the inherited environment.
-    pub env_remove: Vec<String>,
-    pub cols: u16,
-    pub rows: u16,
-    /// Names the job holding the child, so another process can open it
-    /// and ask whether a process is the child's. Unnamed when None.
-    #[serde(default)]
-    pub job_name: Option<String>,
-}
+use crate::{environment_block, launch_line, wide, Command};
 
 /// A running child in a pseudo console.
 ///
