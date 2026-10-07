@@ -90,6 +90,9 @@ Usage:
   horadric release sign DIR [--notes TEXT]
                                Hash horadric.exe and horadricw.exe in DIR and write a
                                signed DIR\\latest.json for this build's version
+  horadric release sign-mac ARCHIVE [--notes TEXT]
+                               Hash the Mac's Horadric-macos.tar.gz and write a signed
+                               latest-macos.json beside it for this build's version
 
 Environment:
   HORADRIC_PORT                  Port to listen on (default 43117, or 43118 with HORADRIC_DEV)

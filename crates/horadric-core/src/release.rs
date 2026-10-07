@@ -202,18 +202,65 @@ pub const LATEST_URL: &str =
 /// How long a running Horadric waits between checks.
 pub const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// How long after start a Mac makes its first check, so the network is
+/// not the first thing a launch at login waits on.
+pub const FIRST_CHECK: Duration = Duration::from_secs(15);
+
+/// Whether a check is due, [`FIRST_CHECK`] after start and then every
+/// [`CHECK_EVERY`] after the last one.
+pub fn check_due(since_start: Duration, since_check: Option<Duration>) -> bool {
+    match since_check {
+        Some(t) => t >= CHECK_EVERY,
+        None => since_start >= FIRST_CHECK,
+    }
+}
+
 /// The manifest to check, given `HORADRIC_UPDATE_URL`. A dev instance
 /// never looks at the real releases, only at that variable when set, so
 /// testing one never offers a published build. A debug build that is not
 /// a dev instance honours it too, which is how an install into a fake
 /// install folder gets tested; a release build never does.
 pub fn manifest_url(dev: bool, debug: bool, env: Option<&str>) -> Option<String> {
+    pick_manifest(dev, debug, env, LATEST_URL)
+}
+
+/// Where a Mac looks for the newest release: [`LATEST_MAC_URL`], under
+/// the same rules as [`manifest_url`]. `HORADRIC_UPDATE_URL` on a Mac
+/// names a Mac manifest.
+pub fn mac_manifest_url(dev: bool, debug: bool, env: Option<&str>) -> Option<String> {
+    pick_manifest(dev, debug, env, LATEST_MAC_URL)
+}
+
+fn pick_manifest(dev: bool, debug: bool, env: Option<&str>, latest: &str) -> Option<String> {
     let env = env.map(str::trim).filter(|u| !u.is_empty());
     match env {
         Some(url) if dev || debug => Some(url.to_string()),
         _ if dev => None,
-        _ => Some(LATEST_URL.to_string()),
+        _ => Some(latest.to_string()),
     }
+}
+
+/// The Mac's manifest, signed with the same key and in the same format
+/// as `latest.json`, listing only [`MAC_ARCHIVE`].
+pub const LATEST_MAC_URL: &str =
+    "https://github.com/Mopra/horadric.dev/releases/latest/download/latest-macos.json";
+
+/// The file name of [`LATEST_MAC_URL`], written beside the archive.
+pub const MAC_MANIFEST: &str = "latest-macos.json";
+
+/// The Mac release: `Horadric.app`, a universal bundle, packed with tar.
+pub const MAC_ARCHIVE: &str = "Horadric-macos.tar.gz";
+
+/// The bundle [`MAC_ARCHIVE`] unpacks to, and its `horadric` inside.
+pub const MAC_APP: &str = "Horadric.app";
+pub const MAC_EXE: &str = "Horadric.app/Contents/MacOS/horadric";
+
+/// The hash the manifest gives [`MAC_ARCHIVE`], or that it lacks one.
+pub fn archive_hash(manifest: &Manifest) -> Result<&str, String> {
+    manifest
+        .file(MAC_ARCHIVE)
+        .map(|f| f.sha256.as_str())
+        .ok_or_else(|| format!("release {} has no {MAC_ARCHIVE}", manifest.version))
 }
 
 /// The binaries a release must carry, in the order they are fetched.
@@ -231,7 +278,7 @@ pub fn notes_url(version: &str) -> String {
 /// release published during the download can not mix two versions. Any
 /// other manifest has its binaries beside it.
 pub fn download_url(manifest_url: &str, version: &str, name: &str) -> Option<String> {
-    if manifest_url == LATEST_URL {
+    if manifest_url == LATEST_URL || manifest_url == LATEST_MAC_URL {
         return Some(format!(
             "https://github.com/Mopra/horadric.dev/releases/download/v{version}/{name}"
         ));
@@ -264,6 +311,35 @@ pub fn trusted_key(debug: bool, env: Option<&str>) -> String {
         Some(key) if debug => key.to_string(),
         _ => PUBLIC_KEY.to_string(),
     }
+}
+
+/// `r || s` as the DER `SEQUENCE { INTEGER r, INTEGER s }` that X9.62
+/// verifiers take. The Security framework's raw `r || s` form needs
+/// macOS 14, and a symbol missing at load would stop the app on older
+/// Macs before it could say why.
+pub fn signature_der(signature: &[u8; SIGNATURE_LEN]) -> Vec<u8> {
+    let (r, s) = signature.split_at(SIGNATURE_LEN / 2);
+    let r = der_integer(r);
+    let s = der_integer(s);
+    // At most 2 * 35 bytes, so the short length form always fits.
+    let mut out = vec![0x30, (r.len() + s.len()) as u8];
+    out.extend(r);
+    out.extend(s);
+    out
+}
+
+/// An unsigned big endian number as a DER INTEGER: no leading zero bytes
+/// but one, and a zero in front when the top bit would read as a sign.
+fn der_integer(n: &[u8]) -> Vec<u8> {
+    let start = n.iter().position(|&b| b != 0).unwrap_or(n.len() - 1);
+    let n = &n[start..];
+    let pad = n[0] & 0x80 != 0;
+    let mut out = vec![0x02, (n.len() + usize::from(pad)) as u8];
+    if pad {
+        out.push(0);
+    }
+    out.extend_from_slice(n);
+    out
 }
 
 /// An `http` or `https` URL in the parts WinHTTP takes.
@@ -589,6 +665,110 @@ mod tests {
             download_url(LATEST_URL, "0.2.0", "horadric.exe").as_deref(),
             Some("https://github.com/Mopra/horadric.dev/releases/download/v0.2.0/horadric.exe")
         );
+    }
+
+    #[test]
+    fn the_first_check_waits_then_one_a_day() {
+        let s = Duration::from_secs;
+        assert!(!check_due(s(0), None));
+        assert!(!check_due(s(14), None));
+        assert!(check_due(s(15), None));
+        assert!(!check_due(s(100_000), Some(s(60))));
+        assert!(check_due(s(100_000), Some(CHECK_EVERY)));
+    }
+
+    #[test]
+    fn a_mac_checks_its_own_manifest_under_the_same_rules() {
+        let local = "http://localhost:8000/latest-macos.json";
+        assert_eq!(
+            mac_manifest_url(false, false, None).as_deref(),
+            Some(LATEST_MAC_URL)
+        );
+        assert_eq!(
+            mac_manifest_url(false, false, Some(local)).as_deref(),
+            Some(LATEST_MAC_URL)
+        );
+        assert_eq!(
+            mac_manifest_url(false, true, Some(local)).as_deref(),
+            Some(local)
+        );
+        assert_eq!(mac_manifest_url(true, false, None), None);
+        assert_eq!(mac_manifest_url(true, true, Some(" ")), None);
+        assert_eq!(
+            mac_manifest_url(true, false, Some(local)).as_deref(),
+            Some(local)
+        );
+        assert!(LATEST_MAC_URL.ends_with(MAC_MANIFEST));
+    }
+
+    #[test]
+    fn the_real_mac_archive_comes_by_its_tag() {
+        assert_eq!(
+            download_url(LATEST_MAC_URL, "0.17.0", MAC_ARCHIVE).as_deref(),
+            Some(
+                "https://github.com/Mopra/horadric.dev/releases/download/v0.17.0/Horadric-macos.tar.gz"
+            )
+        );
+        assert_eq!(
+            download_url(
+                "http://127.0.0.1:8123/m/latest-macos.json",
+                "0.17.0",
+                MAC_ARCHIVE
+            )
+            .as_deref(),
+            Some("http://127.0.0.1:8123/m/Horadric-macos.tar.gz")
+        );
+    }
+
+    #[test]
+    fn a_mac_release_must_carry_its_archive() {
+        let mut m = Manifest {
+            version: "0.17.0".into(),
+            notes: String::new(),
+            files: vec![File {
+                name: MAC_ARCHIVE.into(),
+                sha256: "c".repeat(64),
+            }],
+        };
+        assert_eq!(archive_hash(&m), Ok("c".repeat(64).as_str()));
+        m.files[0].name = "horadric.exe".into();
+        assert_eq!(
+            archive_hash(&m),
+            Err("release 0.17.0 has no Horadric-macos.tar.gz".to_string())
+        );
+        assert!(MAC_EXE.starts_with(MAC_APP));
+    }
+
+    #[test]
+    fn a_signature_becomes_strict_der() {
+        let mut sig = [0u8; SIGNATURE_LEN];
+        sig[..32].copy_from_slice(&[0x11; 32]);
+        sig[32..].copy_from_slice(&[0x22; 32]);
+        let der = signature_der(&sig);
+        assert_eq!(&der[..4], &[0x30, 68, 0x02, 32]);
+        assert_eq!(&der[4..36], &[0x11; 32]);
+        assert_eq!(&der[36..38], &[0x02, 32]);
+        assert_eq!(der.len(), 70);
+
+        // A top bit set takes a zero in front, so it does not read as negative.
+        sig[0] = 0x80;
+        let der = signature_der(&sig);
+        assert_eq!(&der[..5], &[0x30, 69, 0x02, 33, 0x00]);
+        assert_eq!(der[5], 0x80);
+
+        // Leading zero bytes go, down to one byte for zero itself.
+        let mut sig = [0u8; SIGNATURE_LEN];
+        sig[2] = 0x7f;
+        sig[63] = 5;
+        let der = signature_der(&sig);
+        assert_eq!(der, {
+            let mut want = vec![0x30, 35, 0x02, 30, 0x7f];
+            want.extend([0u8; 29]);
+            want.extend([0x02, 1, 5]);
+            want
+        });
+        let zero = signature_der(&[0u8; SIGNATURE_LEN]);
+        assert_eq!(zero, vec![0x30, 6, 0x02, 1, 0, 0x02, 1, 0]);
     }
 
     #[test]

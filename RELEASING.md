@@ -91,11 +91,34 @@ and only reloads this machine.
    microsoft/winget-pkgs) needs the new version, URL and the zip's
    SHA-256: `(Get-FileHash target/release/horadric-x64.zip).Hash`.
 
-7. Try the build before publishing. Download the two binaries from the
+7. Sign the Mac build. CI builds `Horadric-macos.tar.gz` (the universal
+   `Horadric.app`, packed with tar) and attaches it to the draft. The
+   key stays here, so the Mac manifest is signed here too: download the
+   archive from the draft, sign it with the same build as above, and
+   upload the manifest to the draft.
+
+   ```sh
+   gh release download v0.2.0 --pattern Horadric-macos.tar.gz --dir target/mac
+   target/release/horadric.exe release sign-mac target/mac/Horadric-macos.tar.gz --notes "What changed"
+   gh release upload v0.2.0 target/mac/latest-macos.json
+   ```
+
+   This writes `latest-macos.json` beside the archive: the same format,
+   version and key as `latest.json`, with one file, the archive and its
+   SHA-256. A Mac checks
+   `https://github.com/Mopra/horadric.dev/releases/latest/download/latest-macos.json`,
+   downloads the archive into
+   `~/Library/Caches/Horadric/updates/<version>/`, checks its hash
+   against the signed manifest before unpacking it, and hands over to
+   the new `Horadric.app` the way `reload` does. A release published
+   without `latest-macos.json` offers Macs nothing; one with a manifest
+   but no archive offers an update that fails to download, so upload
+   both before publishing.
+8. Try the build before publishing. Download the two binaries from the
    draft, or use the ones in `target/release`, and run them as a dev
    instance (see CLAUDE.md). Tests prove it compiles and signs; they do
    not prove the tiles appear.
-8. Publish the draft (below).
+9. Publish the draft (below).
 
 ## 3. Publishing is shipping
 

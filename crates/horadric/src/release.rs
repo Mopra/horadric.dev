@@ -1,6 +1,8 @@
 //! `horadric release`: the signing half of the updater. `keygen` makes the
 //! key once, `sign` turns a release build folder into a signed
-//! `latest.json` beside its binaries. See "The updater" in docs/PLAN.md.
+//! `latest.json` beside its binaries, and `sign-mac` turns the Mac archive
+//! CI built into a signed `latest-macos.json` beside it. See "The updater"
+//! in docs/PLAN.md.
 //!
 //! The key never leaves this machine. Losing it strands every install, since
 //! they only trust the public half built into them, so `keygen` refuses to
@@ -17,8 +19,10 @@ const FILES: [&str; 2] = ["horadric.exe", "horadricw.exe"];
 const MANIFEST: &str = "latest.json";
 
 const USAGE: &str = "\
-usage: horadric release keygen                   Make the signing key and print its public half
-       horadric release sign DIR [--notes TEXT]  Write a signed DIR\\latest.json";
+usage: horadric release keygen                           Make the signing key and print its public half
+       horadric release sign DIR [--notes TEXT]          Write a signed DIR\\latest.json
+       horadric release sign-mac ARCHIVE [--notes TEXT]  Write a signed latest-macos.json beside
+                                                         ARCHIVE, a Horadric-macos.tar.gz";
 
 pub fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
@@ -26,6 +30,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Some("sign") => {
             let (dir, notes) = sign_args(&args[1..])?;
             sign(&key_path()?, &dir, &notes)
+        }
+        Some("sign-mac") => {
+            let (archive, notes) = sign_args(&args[1..])?;
+            sign_mac(&key_path()?, &archive, &notes)
         }
         _ => Err(USAGE.into()),
     }
@@ -71,7 +79,7 @@ fn sign_args(args: &[String]) -> Result<(PathBuf, String), String> {
     Ok((dir.ok_or(USAGE)?, notes))
 }
 
-fn sign(key_path: &Path, dir: &Path, notes: &str) -> Result<(), String> {
+fn load_key(key_path: &Path) -> Result<PrivateKey, String> {
     let text = std::fs::read_to_string(key_path).map_err(|e| {
         format!(
             "{}: {e} (make one with `horadric release keygen`)",
@@ -80,7 +88,30 @@ fn sign(key_path: &Path, dir: &Path, notes: &str) -> Result<(), String> {
     })?;
     let raw = release::base64_decode(&text)
         .ok_or_else(|| format!("{} is not a key", key_path.display()))?;
-    let key = PrivateKey::from_bytes(&raw)?;
+    PrivateKey::from_bytes(&raw)
+}
+
+/// Signs a manifest of `files` at this build's version and writes it to
+/// `out`.
+fn write_signed(key: &PrivateKey, files: Vec<File>, notes: &str, out: &Path) -> Result<(), String> {
+    // The version is this build's, the signer being the release build it
+    // signs, so the manifest can not claim a version the binaries are not.
+    let manifest = Manifest {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        notes: notes.to_string(),
+        files,
+    };
+    let json = update::sign_manifest(key, &manifest)?;
+    // A key that does not match its own public half would sign releases no
+    // install accepts; better to hear it here than after publishing.
+    update::verify_manifest(&key.public(), &json)?;
+    std::fs::write(out, json).map_err(|e| format!("{}: {e}", out.display()))?;
+    println!("Signed {} {}", out.display(), manifest.version);
+    Ok(())
+}
+
+fn sign(key_path: &Path, dir: &Path, notes: &str) -> Result<(), String> {
+    let key = load_key(key_path)?;
     let mut files = Vec::new();
     for name in FILES {
         let path = dir.join(name);
@@ -90,21 +121,33 @@ fn sign(key_path: &Path, dir: &Path, notes: &str) -> Result<(), String> {
             sha256: release::hex(&update::sha256(&bytes)?),
         });
     }
-    // The version is this build's, the signer being the release build it
-    // signs, so the manifest can not claim a version the binaries are not.
-    let manifest = Manifest {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        notes: notes.to_string(),
-        files,
-    };
-    let json = update::sign_manifest(&key, &manifest)?;
-    // A key that does not match its own public half would sign releases no
-    // install accepts; better to hear it here than after publishing.
-    update::verify_manifest(&key.public(), &json)?;
-    let out = dir.join(MANIFEST);
-    std::fs::write(&out, json).map_err(|e| format!("{}: {e}", out.display()))?;
-    println!("Signed {} {}", out.display(), manifest.version);
-    Ok(())
+    write_signed(&key, files, notes, &dir.join(MANIFEST))
+}
+
+/// Where `latest-macos.json` goes for `archive`: beside it. A Mac fetches
+/// the archive by the name in the manifest, so one renamed on the way
+/// would sign a release no Mac can download.
+fn mac_manifest_path(archive: &Path) -> Result<PathBuf, String> {
+    if archive.file_name().and_then(|n| n.to_str()) != Some(release::MAC_ARCHIVE) {
+        return Err(format!(
+            "{} is not {}, the name a Mac downloads",
+            archive.display(),
+            release::MAC_ARCHIVE
+        ));
+    }
+    let dir = archive.parent().unwrap_or(Path::new(""));
+    Ok(dir.join(release::MAC_MANIFEST))
+}
+
+fn sign_mac(key_path: &Path, archive: &Path, notes: &str) -> Result<(), String> {
+    let out = mac_manifest_path(archive)?;
+    let key = load_key(key_path)?;
+    let bytes = std::fs::read(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
+    let files = vec![File {
+        name: release::MAC_ARCHIVE.to_string(),
+        sha256: release::hex(&update::sha256(&bytes)?),
+    }];
+    write_signed(&key, files, notes, &out)
 }
 
 #[cfg(test)]
@@ -154,6 +197,43 @@ mod tests {
             release::hex(&update::sha256(b"two").unwrap())
         );
         assert!(keygen(&key_path).is_err(), "keygen replaced a key");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_mac_manifest_sits_beside_an_archive_of_the_right_name() {
+        assert_eq!(
+            mac_manifest_path(Path::new("dl/Horadric-macos.tar.gz")).unwrap(),
+            Path::new("dl").join("latest-macos.json")
+        );
+        assert_eq!(
+            mac_manifest_path(Path::new("Horadric-macos.tar.gz")).unwrap(),
+            PathBuf::from("latest-macos.json")
+        );
+        assert!(mac_manifest_path(Path::new("dl/horadric.tar.gz")).is_err());
+        assert!(mac_manifest_path(Path::new("dl")).is_err());
+    }
+
+    #[test]
+    fn sign_mac_writes_a_manifest_of_the_archive_alone() {
+        let dir = std::env::temp_dir().join(format!("horadric-release-mac-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join(release::MAC_ARCHIVE);
+        std::fs::write(&archive, b"tarball").unwrap();
+        let key = update::generate().unwrap();
+        let key_path = dir.join("test.key");
+        std::fs::write(&key_path, release::base64_encode(&key.0)).unwrap();
+
+        sign_mac(&key_path, &archive, "Mac notes").unwrap();
+        let text = std::fs::read_to_string(dir.join(release::MAC_MANIFEST)).unwrap();
+        let manifest = update::verify_manifest(&key.public(), &text).unwrap();
+        assert_eq!(manifest.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(manifest.notes, "Mac notes");
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(
+            release::archive_hash(&manifest).unwrap(),
+            release::hex(&update::sha256(b"tarball").unwrap())
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
