@@ -5,6 +5,9 @@ name: Mac smoke
 on:
   push:
     branches: [main]
+    # Notes and the quest log change nothing it runs, and a run they
+    # started would cancel the one for the last change to the code.
+    paths-ignore: ["**.md", "docs/**", ".horadric/**"]
   workflow_dispatch:
 # Only the newest commit's run matters; an older one still queued is
 # dropped so the Mac runners are not spent on it.
@@ -14,6 +17,7 @@ concurrency:
 jobs:
   smoke:
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install

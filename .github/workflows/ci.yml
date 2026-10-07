@@ -19,8 +19,11 @@ jobs:
   # where its tests and its pseudo terminal meet a real Mac.
   macos:
     runs-on: macos-latest
+    # A test that hangs on the Mac would hold a runner for six hours.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace --no-fail-fast
+      # One at a time, so a test that hangs is the last one named.
+      - run: cargo test --workspace --no-fail-fast -- --test-threads=1

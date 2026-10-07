@@ -27,9 +27,11 @@ define_class!(
             &self,
             _sender: &NSApplication,
         ) -> NSApplicationTerminateReply {
-            // Asked here, answered by the app once it has asked the human.
-            app::input(Input::Quit);
-            NSApplicationTerminateReply::TerminateCancel
+            // Cmd+Q asks from the app's own menu. This is the Dock's Quit or
+            // a logout, which a question would hold up: the sessions run on
+            // in their hosts, and come back at the next start.
+            app::with(|a| a.quit_now());
+            NSApplicationTerminateReply::TerminateNow
         }
 
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]

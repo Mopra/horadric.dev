@@ -66,8 +66,6 @@ pub enum Input {
     Commands,
     Console(Note, usize),
     Tick,
-    /// The app is asked to quit, by Cmd+Q or the Dock.
-    Quit,
 }
 
 thread_local! {
@@ -153,6 +151,9 @@ pub struct App {
     /// The sessions that were waiting at the last reconcile, to tell one
     /// that just started.
     waiting: HashSet<String>,
+    /// Sessions ended by hand whose exit has not arrived yet. Their kill
+    /// exits nonzero, which must not pause them.
+    ending: HashSet<String>,
     quit: bool,
     frozen: bool,
     update: update::Updater,
@@ -230,6 +231,7 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
         font_size,
         last_saved: Some(saved.clone()),
         waiting: HashSet::new(),
+        ending: HashSet::new(),
         quit: false,
         frozen: false,
         update: update::Updater::new(saved.update_told.clone()),
@@ -406,7 +408,6 @@ impl App {
             Input::Console(Note::Output, serial) => self.output(serial),
             Input::Console(Note::Exit, serial) => self.exited(serial),
             Input::Tick => self.tick(),
-            Input::Quit => self.ask_quit(),
         }
     }
 
@@ -701,7 +702,7 @@ impl App {
         let Some(console) = self.console_by_serial(serial).cloned() else {
             return;
         };
-        if console.shell {
+        if console.shell || self.ending.remove(&console.id) {
             self.forget(&console.id);
             self.reconcile();
             return;
@@ -747,6 +748,7 @@ impl App {
         match self.consoles.get(id) {
             Some(c) if c.exit_code().is_none() => {
                 // A clean end: the tile goes when the exit arrives.
+                self.ending.insert(id.to_string());
                 c.kill();
                 if let Ok(mut r) = self.registry.lock() {
                     r.apply(id, &HookEvent::synthetic("SessionEnd"), SystemTime::now());
@@ -1479,6 +1481,13 @@ impl App {
     fn freeze(&mut self) {
         self.save();
         self.frozen = true;
+    }
+
+    /// Quits now, the sessions running on in their hosts: the Dock's
+    /// Quit, and a logout, which must never wait on a question.
+    pub(crate) fn quit_now(&mut self) {
+        self.quit = true;
+        self.freeze();
     }
 
     fn ask_quit(&mut self) {
