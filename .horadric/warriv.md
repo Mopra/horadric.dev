@@ -1,8 +1,10 @@
 # Warriv's memory
 
 ## Rules
+- Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-07 Hourly round: main at ce183a2, checks had sat unrun for four rounds. Cast "Ship Public" for the Settings window, since the release runs the checks itself and stops if red.
 - 2026-10-07 Round after the human left: 143 done, none open, no aim. Main at 27c2703, checks still unrun, so "Ship Public" waits for green. Nothing else to do.
 - 2026-10-07 Hourly round: 143 done, none open, no aim. Main at 4f8cb74 (browser pane hint for Claude sessions), checks still unrun, so no ship yet. Nothing else to do.
 - 2026-10-07 Round after "Settings: the Keys section" landed (5f6f58d): all four Settings quests are in, but main's checks not yet run, so no ship. Next green round casts "Ship Public".
@@ -19,4 +21,4 @@
 - 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
 
 ## Open
-- All four Settings quests landed (5f6f58d), plus 4f8cb74 since; checks unrun. When main shows green, cast "Ship Public" (it ships local too); the Settings window is worth a release to users.
+- Cast "Ship Public" at ce183a2 (Settings window). Next round: check a new tag and release exist, or what stopped it.
