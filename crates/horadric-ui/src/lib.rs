@@ -47,6 +47,7 @@ pub mod frame;
 pub mod glide;
 pub mod highlight;
 pub mod hotkey;
+pub mod icns;
 pub mod icon;
 pub mod inbox;
 pub mod keys;

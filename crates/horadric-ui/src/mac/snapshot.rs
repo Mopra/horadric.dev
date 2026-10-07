@@ -29,9 +29,12 @@ fn schedule(dir: PathBuf) {
 }
 
 fn take(dir: &Path) {
-    let Some(views) = app::with(|a| a.views()) else {
+    let Some((views, texts)) = app::with(|a| (a.views(), a.texts())) else {
         return;
     };
+    for (id, text) in texts {
+        let _ = std::fs::write(dir.join(format!("pane-{id}.txt")), text);
+    }
     for (name, view) in views {
         let bounds = view.bounds();
         if bounds.size.width < 1.0 || bounds.size.height < 1.0 {

@@ -56,6 +56,22 @@ post gamma Stop "/tmp" ''
 sleep 8
 
 ls -la "$HORADRIC_SNAPSHOT" || true
+pane=$(ls "$HORADRIC_SNAPSHOT"/pane-smoke-*.txt 2>/dev/null | head -1)
+if [ -n "$pane" ]; then
+  echo "--- the smoke session's screen"; cat "$pane"
+  grep -q HELLO-FROM-PTY "$pane" || fail "the session's output is not on its screen"
+else
+  fail "no text of the smoke session's screen"
+fi
+
+# Keys through AppKit, where the runner lets System Events type.
+if osascript -e 'tell application "System Events" to keystroke "echo TYPED-OK"'   -e 'tell application "System Events" to key code 36' 2>"$OUT/osascript.log"; then
+  sleep 3
+  if grep -q TYPED-OK "$pane"; then echo "typing reached the session"; else
+    echo "WARN: keystrokes were sent but did not reach the session"; fi
+else
+  echo "WARN: System Events may not type here: $(cat "$OUT/osascript.log")"
+fi
 for f in stage cluster-0 cluster-1; do
   [ -s "$HORADRIC_SNAPSHOT/$f.png" ] || fail "no $f.png"
 done
@@ -86,6 +102,33 @@ grep -q "cannot attach" "$OUT/app-second.log" && fail "the second app could not 
 kill -9 "$(cat "$OUT/app.pid")" 2>/dev/null
 pkill -f "horadric host" 2>/dev/null
 sleep 1
+
+# The bundle a release ships, made the way CI's release build makes it.
+"$BIN" bundle "$OUT/Horadric.app" || fail "horadric bundle"
+for f in Contents/Info.plist Contents/MacOS/horadric Contents/Resources/horadric.icns; do
+  [ -s "$OUT/Horadric.app/$f" ] || fail "the bundle has no $f"
+done
+plutil -lint "$OUT/Horadric.app/Contents/Info.plist" || fail "Info.plist does not parse"
+codesign --verify --verbose "$OUT/Horadric.app" || fail "the bundle's signature does not verify"
+sips -g pixelWidth "$OUT/Horadric.app/Contents/Resources/horadric.icns" || fail "the icon does not read"
+
+# A real install, which this throwaway Mac can take: the app in
+# ~/Applications, the command linked, the LaunchAgent, the hooks.
+unset HORADRIC_DEV HORADRIC_SNAPSHOT
+"$OUT/Horadric.app/Contents/MacOS/horadric" install >"$OUT/install.log" 2>&1 || fail "install: $(cat "$OUT/install.log")"
+cat "$OUT/install.log"
+[ -x "$HOME/Applications/Horadric.app/Contents/MacOS/horadric" ] || fail "not installed in ~/Applications"
+[ -L "$HOME/.local/bin/horadric" ] || fail "the command is not linked"
+[ -f "$HOME/Library/LaunchAgents/dev.horadric.app.plist" ] || fail "no LaunchAgent"
+plutil -lint "$HOME/Library/LaunchAgents/dev.horadric.app.plist" || fail "the LaunchAgent does not parse"
+grep -q horadric "$HOME/.claude/settings.json" || fail "no hooks in ~/.claude/settings.json"
+nc -z 127.0.0.1 43117 || fail "the installed app is not running"
+"$HOME/.local/bin/horadric" hooks status || fail "hooks status"
+pkill -f "Horadric.app/Contents/MacOS/horadric app" ; sleep 2
+"$HOME/.local/bin/horadric" uninstall >"$OUT/uninstall.log" 2>&1 || fail "uninstall: $(cat "$OUT/uninstall.log")"
+cat "$OUT/uninstall.log"
+[ ! -e "$HOME/Applications/Horadric.app" ] || fail "uninstall left the app"
+[ ! -e "$HOME/Library/LaunchAgents/dev.horadric.app.plist" ] || fail "uninstall left the LaunchAgent"
 echo "--- app logs"
 cat "$OUT"/app-*.log
 exit $failed

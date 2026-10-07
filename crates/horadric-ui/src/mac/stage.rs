@@ -843,7 +843,8 @@ impl StageView {
         }
         let cx: &CGContext = p.cx();
         // Glyphs are drawn upside down into a flipped view unless the text
-        // matrix turns them back.
+        // matrix turns them back. Their positions are in text space, which
+        // the matrix turns too, so each one's y is given negated.
         CGContext::set_text_matrix(
             Some(cx),
             CGAffineTransform {
@@ -869,7 +870,7 @@ impl StageView {
                 .map(|i| {
                     CGPoint::new(
                         (g.x + (run.col + i) as f32 * cw) as CGFloat,
-                        base as CGFloat,
+                        -base as CGFloat,
                     )
                 })
                 .collect();
@@ -912,6 +913,24 @@ impl StageView {
             }
         }
     }
+}
+
+/// The text on a console's screen, a line a row, for the snapshots: CI
+/// reads it to see what a session printed.
+pub fn screen_text(console: &Console) -> String {
+    let Ok(s) = console.screen.lock() else {
+        return String::new();
+    };
+    let term = &s.term;
+    let grid = term.grid();
+    let mut out = String::new();
+    for line in 0..term.screen_lines() {
+        let row = &grid[Line(line as i32)];
+        let text: String = (0..term.columns()).map(|c| row[Column(c)].c).collect();
+        out.push_str(text.trim_end());
+        out.push('\n');
+    }
+    out
 }
 
 fn draw_string(s: &str, font: &NSFont, c: Color, x: f32, y: f32) {

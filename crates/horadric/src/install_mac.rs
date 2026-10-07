@@ -110,13 +110,14 @@ pub fn bundle(exe: &Path, app: &Path, icon: Option<&Path>) -> Result<(), String>
         fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
     fs::copy(exe, macos.join("horadric")).map_err(|e| format!("copying the binary: {e}"))?;
-    let icon_name = match icon {
-        Some(i) => {
-            fs::copy(i, resources.join("horadric.icns")).map_err(|e| format!("icon: {e}"))?;
-            Some("horadric")
-        }
-        None => None,
-    };
+    let icns = resources.join("horadric.icns");
+    match icon {
+        Some(i) => fs::copy(i, &icns).map(|_| ()),
+        // Drawn by the same code as the tiles' and the tray's icon.
+        None => fs::write(&icns, horadric_ui::icns::horadric(horadric_hooks::dev())),
+    }
+    .map_err(|e| format!("icon: {e}"))?;
+    let icon_name = Some("horadric");
     let version = env!("CARGO_PKG_VERSION");
     fs::write(
         contents.join("Info.plist"),

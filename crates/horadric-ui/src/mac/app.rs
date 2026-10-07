@@ -18,7 +18,7 @@ use horadric_core::agent::Agent;
 use horadric_core::{HookEvent, Phase, Registry, Route, SavedSession, SavedState};
 use horadric_hooks::listener::{self, Command, Reload, Tagged};
 use horadric_hooks::{transcript, TASKS_ENV};
-use objc2::{MainThreadMarker, Message};
+use objc2::{AnyThread, MainThreadMarker, Message};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSScreen};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
@@ -169,6 +169,8 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
 
     let ns_app = NSApplication::sharedApplication(mtm);
     ns_app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // A build run from `target` has no bundle to take an icon from.
+    set_dock_icon(&ns_app);
     super::delegate::install(mtm);
 
     store::trim_journal(unix_now());
@@ -259,6 +261,24 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+/// The cube in the Dock, drawn as the tiles' icon is, red for a dev
+/// instance.
+fn set_dock_icon(app: &NSApplication) {
+    const SIZE: u32 = 512;
+    let pixels = if horadric_hooks::dev() {
+        crate::icon::dev_pixels(SIZE)
+    } else {
+        crate::icon::pixels(SIZE)
+    };
+    let png = crate::icns::png(SIZE, SIZE, &pixels);
+    let data = objc2_foundation::NSData::with_bytes(&png);
+    if let Some(image) =
+        objc2_app_kit::NSImage::initWithData(objc2_app_kit::NSImage::alloc(), &data)
+    {
+        unsafe { app.setApplicationIconImage(Some(&image)) };
+    }
 }
 
 fn tick_soon() {
@@ -1445,6 +1465,15 @@ pub(crate) fn with<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 impl App {
+    /// Every session's screen as text, by id, whether the stage shows it
+    /// or not.
+    pub(crate) fn texts(&self) -> Vec<(String, String)> {
+        self.consoles
+            .iter()
+            .map(|(id, c)| (id.clone(), stage::screen_text(c)))
+            .collect()
+    }
+
     /// Every window's view, named for the snapshot files.
     pub(crate) fn views(&self) -> Vec<(String, objc2::rc::Retained<objc2_app_kit::NSView>)> {
         let mut out = Vec::new();
