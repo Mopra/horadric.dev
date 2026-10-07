@@ -559,6 +559,10 @@ impl StageView {
 
     fn on_mouse_down(&self, event: &NSEvent) {
         let at = self.point(event);
+        if self.ivars().panes.borrow().is_empty() {
+            app::input(Input::Menu(app::NEW_SESSION_TAG));
+            return;
+        }
         let Some(i) = self.pane_at(at) else {
             return;
         };
@@ -724,12 +728,24 @@ impl StageView {
         p.fill_rect(&all, theme::window_bg());
         let panes = self.ivars().panes.borrow();
         if panes.is_empty() {
-            p.text(
-                Font::Body,
+            // The first start has no tiles yet, so this is where to begin.
+            let mid = all.h / 2.0;
+            p.icon(
+                '\u{E710}',
                 theme::text_dim(),
-                "Click a tile, or + on a project, to start a session here.",
-                Rect::new(all.w / 2.0 - 200.0, all.h / 2.0 - 12.0, 400.0, 24.0),
+                22.0,
+                Rect::new(all.w / 2.0 - 20.0, mid - 56.0, 40.0, 40.0),
             );
+            for (i, line) in [
+                "Click to pick a project folder and start Claude Code in it.",
+                "Its sessions show here, and as tiles at the left of the screen.",
+            ]
+            .iter()
+            .enumerate()
+            {
+                let r = Rect::new(all.w / 2.0 - 260.0, mid + i as f32 * 22.0, 520.0, 22.0);
+                p.text(Font::BodyCentre, theme::text_dim(), line, r);
+            }
             return;
         }
         let focused = self.ivars().focused.get();

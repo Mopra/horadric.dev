@@ -33,7 +33,7 @@ pub enum Font {
     Display,
     /// A session's name on its tile.
     Name,
-    Body,
+    BodyCentre,
     Small,
     SmallRight,
     /// The counts in a cluster's header.
@@ -47,7 +47,7 @@ impl Font {
         match self {
             Font::Display => (15.0, Weight::Semibold, NSTextAlignment::Left),
             Font::Name => (13.0, Weight::Semibold, NSTextAlignment::Left),
-            Font::Body => (13.5, Weight::Regular, NSTextAlignment::Left),
+            Font::BodyCentre => (13.5, Weight::Regular, NSTextAlignment::Center),
             Font::Small => (12.0, Weight::Regular, NSTextAlignment::Left),
             Font::SmallRight => (12.0, Weight::Regular, NSTextAlignment::Right),
             Font::Chip => (11.0, Weight::Semibold, NSTextAlignment::Left),

@@ -111,6 +111,7 @@ fn drain() {
 
 /// Menu tags. Recent folders start at [`RECENT_TAG`].
 const NEW_SESSION: usize = 1;
+pub(crate) const NEW_SESSION_TAG: usize = NEW_SESSION;
 const SHOW_STAGE: usize = 2;
 pub(crate) const SHOW_STAGE_TAG: usize = SHOW_STAGE;
 const FRONT: usize = 3;
