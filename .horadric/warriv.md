@@ -3,6 +3,7 @@
 ## Rules
 
 ## Lately
+- 2026-10-07 Hourly round (twelfth today): 138 done, none open, no aim. The human planned a Settings window in PLAN.md (b26e26a) but set no aim, so no quests filed for it. Nothing to do.
 - 2026-10-07 Hourly round (eleventh today): 138 done, none open, no aim, nothing landed since 0.15.0. Nothing to do.
 - 2026-10-07 Hourly round (tenth today): 138 done, none open, no aim, nothing landed since 0.15.0. Nothing to do.
 - 2026-10-07 Hourly round (ninth today): 138 done, none open, no aim, nothing landed since 0.15.0. Nothing to do.
