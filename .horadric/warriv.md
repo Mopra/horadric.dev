@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-08 Hourly round: 155 done, none open, no aim. Main at 4a73721, only memory commits since the Mac zip tooling, so no ship. Nothing to do.
 - 2026-10-08 Hourly round: 155 done, none open, no aim. Main at 45efcb4, only memory commits since the Mac zip tooling, so no ship. Nothing to do.
 - 2026-10-08 Hourly round: 155 done, none open, no aim. Main at 0be736a, only memory commits since the Mac zip tooling, so no ship. Nothing to do.
 - 2026-10-07 Hourly round: 155 done, none open, no aim. Main at dc09fb5, only memory commits since the Mac zip tooling, so no ship. Nothing to do.
