@@ -4,7 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
-- 2026-10-08 Hourly rounds (twelve since 8d25fd8, latest at 253a488): 155 done, none open, no aim, only memory commits since the last ship. Nothing to do.
+- 2026-10-08 Hourly rounds (thirteen since 8d25fd8, latest at 58af95c): 155 done, none open, no aim, only memory commits since the last ship. Nothing to do.
 - 2026-10-08 Round after the human left: 155 done, none open, no aim, only memory commits since the Mac zip tooling (main at 4cf3e35), so no ship. Nothing to do.
 - 2026-10-08 Daily look back: the day was clean (17 quests completed, nothing repeated in the chronicle).
 - 2026-10-08 Hourly rounds (seven today, latest at d15db06): 155 done, none open, no aim, only memory commits since the Mac zip tooling, so no ship. Nothing to do.
