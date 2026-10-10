@@ -557,6 +557,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     stash::register_class()?;
     cube_window::register_class()?;
     dropdown::register_class()?;
+    crate::suggest::register_class()?;
     settings::register_class()?;
     ask::register_class()?;
     menu::register_class()?;

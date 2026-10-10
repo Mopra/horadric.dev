@@ -979,6 +979,31 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   side with the grid beside it, the top seam dragged 150 pixels made it
   that much taller, and the lit button put it back in the grid.
 
+- **History and suggestions** (`horadric_core::history`, pure, kept in
+  `browser-history.json` beside the state; `suggest.rs`). Asked for so
+  the address field works as a browser's does. Every page a tab the user
+  drives goes to is kept with its title, its visits and the last one, at
+  most 5000; a tab an agent works in is not the user's history. Typing in
+  the field finishes a site gone to before inline, the rest selected
+  (`History::complete`), and drops a list of the pages that fit under it,
+  every word typed in the address or title, a begun address first, then
+  by visits that count for less the longer ago they were
+  (`History::suggest`). An empty field, as on a new tab, lists the latest
+  sites, one page each. The list is a window of its own that never takes
+  the focus, so typing goes on; Up and Down move through it with the
+  address in the field, Enter or a click goes, Esc closes it first, and
+  Shift+Delete forgets the page. Deleting never finishes inline again.
+  Tested with a dev instance on its own port and `APPDATA`, by messages
+  posted to the pane: "git" became github.com with two pages listed,
+  Down twice and Enter went to the second, `+` listed the latest six,
+  and a click on one went there and counted a visit.
+- **Zoom per site.** A zoom the user gives a fitted page, with Ctrl and
+  the wheel or the keys, is kept for its host in the same file, and a
+  page going to a site takes that site's zoom, or 100%. One Horadric sets
+  itself (`Tab::own`) is not taken for the user's. Not seen on screen
+  yet: a posted Ctrl and wheel does not zoom Chromium, which reads the
+  real keys.
+
 Tested on screen with a dev instance on its own port and `cmd.exe`
 sessions in two projects: Ctrl+Shift+B put the pane in the grid and asked
 for an address, `example.com` loaded with its title in the header, a

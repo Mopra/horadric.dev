@@ -90,6 +90,7 @@ use crate::layout::Dir;
 use crate::links::{self, Target};
 use crate::motion::{self, REVEAL, SPOTLIGHT};
 use crate::paste::{self, Source};
+use crate::suggest::{self, Suggest};
 use crate::theme::{self, Color};
 use crate::viewer::Hit;
 use crate::viewport::{self, Fit, Grip};
@@ -118,6 +119,10 @@ const WHEEL_COL: i32 = 20;
 const ARROW_COLS: isize = 4;
 /// Longer than any address worth typing; some sign in links run long.
 const MAX_ADDRESS: usize = 8000;
+
+/// The narrowest the suggestions drop, in DIPs, so a page's title and
+/// address both show under a narrow field.
+const SUGGEST_MIN_W: f32 = 420.0;
 /// With `WM_WEB_EDIT`: give the address field back the keyboard it had,
 /// leaving what is typed as it is.
 const RETAKE: usize = 1;
@@ -255,6 +260,11 @@ pub struct Pane {
     /// A browser pane's address as it is typed, while its field has the
     /// keyboard.
     address: RefCell<Option<Field>>,
+    /// The pages suggested for what is typed in the address field, dropped
+    /// under it, and what they were found for, which the field shows again
+    /// when the arrow keys leave the list.
+    suggest: RefCell<Option<Box<Suggest>>>,
+    typed: RefCell<String>,
     /// A sized page's grip, while it is held down.
     resizing: Cell<Option<Resize>>,
     /// The cells of the link under the mouse while Ctrl is held, drawn
@@ -344,6 +354,8 @@ impl Pane {
             caret_at: Cell::new(None),
             caret_since: Cell::new(Instant::now()),
             address: RefCell::new(None),
+            suggest: RefCell::new(None),
+            typed: RefCell::new(String::new()),
             resizing: Cell::new(None),
         });
         // A browser pane's page is a window inside it, which its own
@@ -718,6 +730,12 @@ impl Pane {
     }
 
     pub fn invalidate(&self) {
+        // The suggestions go with the field, however it was left.
+        if self.address.try_borrow().is_ok_and(|a| a.is_none()) {
+            if let Ok(mut s) = self.suggest.try_borrow_mut() {
+                s.take();
+            }
+        }
         self.stale.set(true);
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
@@ -1837,13 +1855,95 @@ impl Pane {
                     .filter(|u| u != "about:blank")
                     .unwrap_or_default();
                 *slot = Some(Field::new(&url, false, MAX_ADDRESS));
+                drop(slot);
+                // A new tab lists the latest sites before anything is typed.
+                if url.is_empty() {
+                    self.suggest_for("");
+                }
             }
         }
-        drop(slot);
         unsafe {
             let _ = SetFocus(Some(self.hwnd));
         }
         self.invalidate();
+    }
+
+    /// Lists the pages that fit `typed` under the address field, or closes
+    /// the list when none do.
+    fn suggest_for(&self, typed: &str) {
+        *self.typed.borrow_mut() = typed.to_string();
+        let rows = web::suggestions(typed, suggest::MAX_ROWS);
+        let mut slot = self.suggest.borrow_mut();
+        let kept = slot.as_ref().is_some_and(|s| s.set_rows(rows.clone()));
+        if !kept {
+            *slot = Suggest::open(Rc::clone(&self.shared), self.hwnd, rows, self.suggest_at());
+        }
+    }
+
+    /// Where the suggestions hang, under the address field: its left edge
+    /// and the header's bottom on screen, and its width, in pixels.
+    fn suggest_at(&self) -> (i32, i32, i32) {
+        let l = self.bar_layout();
+        let s = self.dpi_now() as f32 / 96.0;
+        let mut p = POINT {
+            x: (l.field.0 * s).round() as i32,
+            y: (HEADER_H * s).round() as i32,
+        };
+        unsafe {
+            let _ = ClientToScreen(self.hwnd, &mut p);
+        }
+        let w = ((l.field.1 - l.field.0).max(SUGGEST_MIN_W) * s).round() as i32;
+        (p.x, p.y, w)
+    }
+
+    /// The arrow keys move through the suggestions, the field showing the
+    /// address of the one they are on, or what was typed off the list.
+    fn suggest_step(&self, by: i32) -> bool {
+        let picked = match self.suggest.borrow().as_ref() {
+            Some(s) => s.step(by),
+            None => return false,
+        };
+        let text = picked.unwrap_or_else(|| self.typed.borrow().clone());
+        if let Some(f) = self.address.borrow_mut().as_mut() {
+            *f = Field::new(&text, false, MAX_ADDRESS);
+            f.anchor = f.caret;
+        }
+        self.invalidate();
+        true
+    }
+
+    /// A suggestion was clicked: the page goes there.
+    fn suggest_pick(&self, row: usize) {
+        let url = self.suggest.borrow().as_ref().and_then(|s| s.url(row));
+        let Some(url) = url else {
+            return;
+        };
+        if let Some(f) = self.address.borrow_mut().as_mut() {
+            *f = Field::new(&url, false, MAX_ADDRESS);
+        }
+        self.end_edit(true);
+    }
+
+    /// Shift+Delete on the suggestion the arrows are on takes it out of the
+    /// history.
+    fn suggest_forget(&self) -> bool {
+        let url = self
+            .suggest
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.url(s.chosen()?));
+        let Some(url) = url else {
+            return false;
+        };
+        web::forget(&url);
+        let typed = self.typed.borrow().clone();
+        if let Some(f) = self.address.borrow_mut().as_mut() {
+            *f = Field::new(&typed, false, MAX_ADDRESS);
+            f.anchor = f.caret;
+        }
+        self.suggest_for(&typed);
+        self.invalidate();
+        true
     }
 
     /// Whether the keyboard went from the address field to this pane's
@@ -1902,27 +2002,69 @@ impl Pane {
         };
         let (word, extend) = (mods.ctrl, mods.shift);
         let mut copy = None;
+        let mut edited = false;
         match vk {
+            // Esc closes the suggestions first, as in a browser.
+            VK_ESCAPE if self.suggest.borrow().is_some() => {
+                drop(slot);
+                self.drop_char();
+                self.suggest.take();
+                return true;
+            }
             VK_RETURN | VK_ESCAPE => {
                 drop(slot);
                 self.drop_char();
                 self.end_edit(vk == VK_RETURN);
                 return true;
             }
+            VK_UP | VK_DOWN => {
+                drop(slot);
+                self.drop_char();
+                let by = if vk == VK_UP { -1 } else { 1 };
+                if !self.suggest_step(by) {
+                    // Down with no list open lists what fits the field.
+                    let text = self.address.borrow().as_ref().map(|f| f.text.clone());
+                    if let (Some(t), false) = (text, vk == VK_UP) {
+                        self.suggest_for(&t);
+                    }
+                }
+                return true;
+            }
+            VK_DELETE if mods.shift && !mods.ctrl && self.suggest.borrow().is_some() => {
+                drop(slot);
+                self.drop_char();
+                if !self.suggest_forget() {
+                    if let Some(f) = self.address.borrow_mut().as_mut() {
+                        f.delete(false);
+                    }
+                    self.invalidate();
+                }
+                return true;
+            }
             VK_LEFT => f.left(word, extend),
             VK_RIGHT => f.right(word, extend),
             VK_HOME => f.home(true, extend),
             VK_END => f.end(true, extend),
-            VK_BACK => f.backspace(word),
-            VK_DELETE => f.delete(word),
+            VK_BACK => {
+                f.backspace(word);
+                edited = true;
+            }
+            VK_DELETE => {
+                f.delete(word);
+                edited = true;
+            }
             _ if mods.ctrl && !mods.shift => match vk.0 as u8 {
                 b'A' | b'L' => f.select_all(),
                 b'C' => copy = Some(f.selected().to_string()),
-                b'X' => copy = Some(f.cut()),
+                b'X' => {
+                    copy = Some(f.cut());
+                    edited = true;
+                }
                 b'V' => {
                     if let Some(t) = clipboard::get_text() {
                         f.insert(&t);
                     }
+                    edited = true;
                 }
                 _ => return false,
             },
@@ -1930,11 +2072,17 @@ impl Pane {
             // A character comes as WM_CHAR.
             _ => return true,
         }
+        let text = f.text.clone();
         drop(slot);
         if let Some(t) = copy.filter(|t| !t.is_empty()) {
             clipboard::set_text(&t);
         }
         self.drop_char();
+        // Deleting is never finished inline again, or the finish just
+        // deleted would come straight back.
+        if edited {
+            self.suggest_for(&text);
+        }
         self.invalidate();
         true
     }
@@ -1944,9 +2092,26 @@ impl Pane {
         let Some(c) = char::from_u32(unit as u32).filter(|c| !c.is_control()) else {
             return;
         };
-        if let Some(f) = self.address.borrow_mut().as_mut() {
+        let typed = {
+            let mut slot = self.address.borrow_mut();
+            let Some(f) = slot.as_mut() else {
+                return;
+            };
             f.insert(c.encode_utf8(&mut [0; 4]));
-        }
+            let typed = f.text.clone();
+            // An address gone to before is finished inline, the rest of it
+            // selected so the next letter types over it.
+            if f.caret == f.text.len() {
+                if let Some(rest) = web::completion(&f.text) {
+                    let end = f.text.len();
+                    f.insert(&rest);
+                    f.anchor = f.text.len();
+                    f.caret = end;
+                }
+            }
+            typed
+        };
+        self.suggest_for(&typed);
         self.invalidate();
     }
 
@@ -2682,6 +2847,10 @@ impl Pane {
             }
             web::WM_WEB_EDIT => {
                 self.edit_address();
+                Some(LRESULT(0))
+            }
+            suggest::WM_SUGGEST_PICK => {
+                self.suggest_pick(wparam.0);
                 Some(LRESULT(0))
             }
             // Before the page's own window goes with this one.

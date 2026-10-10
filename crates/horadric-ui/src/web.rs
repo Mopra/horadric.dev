@@ -46,6 +46,7 @@ use webview2_com::{
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
     DocumentTitleChangedEventHandler, HistoryChangedEventHandler, NavigationCompletedEventHandler,
     NewWindowRequestedEventHandler, SourceChangedEventHandler, WindowCloseRequestedEventHandler,
+    ZoomFactorChangedEventHandler,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
@@ -71,8 +72,10 @@ headless browser yourself. The user sees that pane, and not a browser you start.
 browser only when the user asks for one.";
 
 use crate::app::{self, Input, WebAsk};
+use crate::store;
 use crate::terminal::WM_STAGE_LAYOUT;
 use crate::viewport;
+use horadric_core::history::History;
 use horadric_core::saved::{Dock, SavedPages, SavedTab, Side};
 
 /// Posted to the pane showing a project's page when its title or address
@@ -94,6 +97,9 @@ struct Tab {
     /// The zoom factor it was last given, so a zoom the user made with
     /// Ctrl and the wheel in a fitted page is not undone by every resize.
     zoom: f64,
+    /// The zoom factor Horadric itself last set, so the change it causes
+    /// is not taken for the user's zoom of the site.
+    own: Option<f64>,
     /// The address to open once it is made.
     pending: Option<String>,
     /// A page that opened this tab as a new window, waiting to be handed
@@ -139,6 +145,7 @@ impl Tab {
             controller: None,
             webview: None,
             zoom: 1.0,
+            own: None,
             pending,
             opener: None,
             focus: false,
@@ -204,6 +211,77 @@ thread_local! {
     static DOCKS: RefCell<HashMap<String, Dock>> = RefCell::new(HashMap::new());
     /// The app's hidden window, where a page not on the stage waits.
     static PARK: Cell<isize> = const { Cell::new(0) };
+    /// The pages the user went to, read from its file when first needed.
+    static HISTORY: RefCell<Option<History>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` on the history, saving it when `f` says it changed it.
+fn with_history<T>(f: impl FnOnce(&mut History) -> (T, bool)) -> T {
+    HISTORY.with(|h| {
+        let mut h = h.borrow_mut();
+        let h = h.get_or_insert_with(store::load_history);
+        let (out, changed) = f(h);
+        if changed {
+            store::save_history(h);
+        }
+        out
+    })
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// What the address field suggests for `typed`: the title and address of
+/// each page, best first, or the latest sites with nothing typed.
+pub fn suggestions(typed: &str, max: usize) -> Vec<(String, String)> {
+    with_history(|h| {
+        let found = h
+            .suggest(typed, now(), max)
+            .into_iter()
+            .map(|p| (p.title.clone(), p.url.clone()))
+            .collect();
+        (found, false)
+    })
+}
+
+/// What finishes `typed` as an address gone to before, after what was
+/// typed.
+pub fn completion(typed: &str) -> Option<String> {
+    with_history(|h| (h.complete(typed, now()), false))
+}
+
+/// Takes a page out of the history, as Shift+Delete on a suggestion does.
+pub fn forget(url: &str) {
+    with_history(|h| ((), h.forget(url)));
+}
+
+/// The zoom the user gave the site at `url`, where they gave one.
+fn site_zoom(url: &str) -> Option<f64> {
+    with_history(|h| (h.zoom(url), false))
+}
+
+/// The tab `id` went to a page, or the page it shows has a title now. A
+/// tab an agent works in is not the user's history.
+fn visited(key: &str, id: u64, title_only: bool) {
+    let Some((url, title, driven)) = read_tab(key, Some(id), |t| {
+        (t.url.clone(), t.title.clone(), t.driver.is_some())
+    }) else {
+        return;
+    };
+    if driven {
+        return;
+    }
+    with_history(|h| {
+        let changed = if title_only {
+            h.retitle(&url, &title)
+        } else {
+            h.visit(&url, &title, now())
+        };
+        ((), changed)
+    });
 }
 
 /// Where a page not on the stage waits: the app's hidden window.
@@ -935,7 +1013,7 @@ pub fn set_bounds(key: &str, bounds: RECT, zoom: f64) {
         web.zoom = zoom;
         web.pane?;
         let tab = web.tabs.get_mut(web.active)?;
-        let zoom = place(tab, zoom);
+        let zoom = place(tab, zoom, size(key).is_none());
         Some((tab.controller.clone()?, zoom))
     });
     if let Some((c, zoom)) = placed {
@@ -959,13 +1037,14 @@ fn show(key: &str) {
         let web = w.get_mut(key)?;
         let (active, want) = (web.active, web.zoom);
         let pane = web.pane;
+        let fitted = size(key).is_none();
         let placed: Vec<Placed> = web
             .tabs
             .iter_mut()
             .enumerate()
             .filter_map(|(i, t)| {
                 let shown = pane.is_some() && i == active;
-                let zoom = if shown { place(t, want) } else { None };
+                let zoom = if shown { place(t, want, fitted) } else { None };
                 Some(Placed {
                     controller: t.controller.clone()?,
                     shown,
@@ -1007,11 +1086,20 @@ fn show(key: &str) {
     }
 }
 
-/// Says the zoom to give the tab when it is not the one given last.
-fn place(tab: &mut Tab, zoom: f64) -> Option<f64> {
+/// Says the zoom to give the tab when the pane wants another than it gave
+/// last. A fitted page takes the zoom the user gave its site instead.
+fn place(tab: &mut Tab, zoom: f64, fitted: bool) -> Option<f64> {
     let changed = (tab.zoom - zoom).abs() > 1e-6;
     tab.zoom = zoom;
-    changed.then_some(zoom)
+    if !changed {
+        return None;
+    }
+    let zoom = match fitted {
+        true => site_zoom(&tab.url).unwrap_or(zoom),
+        false => zoom,
+    };
+    tab.own = Some(zoom);
+    Some(zoom)
 }
 
 /// Bounds, then zoom, so the page lays out once at its size. A sized page
@@ -1296,6 +1384,7 @@ fn ready(key: &str, id: u64, controller: ICoreWebView2Controller) {
     }
     listen(key, id, &view);
     keys(key, &controller);
+    zooms(key, id, &controller);
     // The console is kept from the first page on, so it goes in before it.
     let first = Rc::new(Cell::new(Some((view.clone(), opener, pending))));
     let start = Rc::clone(&first);
@@ -1377,6 +1466,7 @@ fn listen(key: &str, id: u64, view: &ICoreWebView2) {
         if let Some(v) = view {
             let t = read(|p| unsafe { v.DocumentTitle(p) });
             changed(&owned, Some(id), |w| w.title = t);
+            visited(&owned, id, true);
         }
         Ok(())
     }));
@@ -1392,7 +1482,10 @@ fn listen(key: &str, id: u64, view: &ICoreWebView2) {
         if let Some(a) = args {
             let _ = unsafe { a.IsNewDocument(&mut new) };
         }
-        if !new.as_bool() {
+        if new.as_bool() {
+            site_zoom_for(&owned, id);
+        } else {
+            visited(&owned, id, false);
             loaded(&owned, id, true);
         }
         Ok(())
@@ -1402,6 +1495,9 @@ fn listen(key: &str, id: u64, view: &ICoreWebView2) {
         let mut ok = BOOL(0);
         if let Some(a) = args {
             let _ = unsafe { a.IsSuccess(&mut ok) };
+        }
+        if ok.as_bool() {
+            visited(&owned, id, false);
         }
         loaded(&owned, id, ok.as_bool());
         Ok(())
@@ -1469,6 +1565,60 @@ fn listen(key: &str, id: u64, view: &ICoreWebView2) {
         let _ = view.add_NewWindowRequested(&popup, &mut token);
         let _ = view.add_WindowCloseRequested(&closing, &mut token);
     }
+}
+
+/// A zoom the user gave a fitted page, with Ctrl and the wheel or the
+/// keys, is kept for its site. One Horadric set is not.
+fn zooms(key: &str, id: u64, controller: &ICoreWebView2Controller) {
+    let owned = key.to_string();
+    let handler = ZoomFactorChangedEventHandler::create(Box::new(move |c, _| {
+        let Some(c) = c else { return Ok(()) };
+        let mut zoom = 1.0;
+        unsafe { c.ZoomFactor(&mut zoom)? };
+        if size(&owned).is_some() {
+            return Ok(());
+        }
+        let url = WEBS.with(|w| {
+            let mut w = w.borrow_mut();
+            let tab = w.get_mut(&owned)?.by_id(id)?;
+            let ours = tab.own.take().is_some_and(|o| (o - zoom).abs() < 1e-3);
+            (!ours).then(|| tab.url.clone())
+        });
+        if let Some(url) = url {
+            with_history(|h| ((), h.set_zoom(&url, zoom)));
+        }
+        Ok(())
+    }));
+    let mut token = Default::default();
+    let _ = unsafe { controller.add_ZoomFactorChanged(&handler, &mut token) };
+}
+
+/// The tab `id` went to a new page: a fitted page takes the zoom the user
+/// gave that site, or the pane's where they gave it none.
+fn site_zoom_for(key: &str, id: u64) {
+    if size(key).is_some() {
+        return;
+    }
+    let found = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let tab = w.get_mut(key)?.by_id(id)?;
+        Some((tab.controller.clone()?, tab.url.clone(), tab.zoom))
+    });
+    let Some((c, url, base)) = found else {
+        return;
+    };
+    let want = site_zoom(&url).unwrap_or(base);
+    let mut now = 1.0;
+    let _ = unsafe { c.ZoomFactor(&mut now) };
+    if (now - want).abs() < 1e-3 {
+        return;
+    }
+    WEBS.with(|w| {
+        if let Some(t) = w.borrow_mut().get_mut(key).and_then(|w| w.by_id(id)) {
+            t.own = Some(want);
+        }
+    });
+    let _ = unsafe { c.SetZoomFactor(want) };
 }
 
 /// The tab's navigation ended: whoever waits on it hears whether it loaded.

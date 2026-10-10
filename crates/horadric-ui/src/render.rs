@@ -64,7 +64,7 @@ use crate::layout::{
     self, AskLayout, Button, CaptionHit, CaptionLayout, CatchupLayout, CatchupRow, ClusterLayout,
     CubeHit, CubeLayout, DialogHit, DialogLayout, DropdownLayout, FilesLayout, Hit, MenuLayout,
     Metrics, Rect, SettingRow, SettingsHit, SettingsLayout, StartHit, StartLayout, StashLayout,
-    TasksLayout, ToastLayout, TomeLayout, UsageHit, UsageLayout, KNOB_R,
+    SuggestLayout, TasksLayout, ToastLayout, TomeLayout, UsageHit, UsageLayout, KNOB_R,
 };
 use crate::motion::{self, ORBIT};
 use crate::settings::Control;
@@ -460,6 +460,16 @@ pub struct DropdownScene<'a> {
     pub current: usize,
     pub hot: Option<usize>,
     pub pressed: Option<usize>,
+}
+
+/// Everything one frame of the address field's suggestions needs.
+pub struct SuggestScene<'a> {
+    pub layout: &'a SuggestLayout,
+    /// Each page's title, which may be empty, and its address.
+    pub rows: &'a [(String, String)],
+    /// The row the arrow keys are on.
+    pub chosen: Option<usize>,
+    pub hot: Option<usize>,
 }
 
 /// Everything one frame of a menu needs.
@@ -935,6 +945,16 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).dropdown(gpu, m, scene);
+            self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// Draws the address field's suggestions. `Err` means the target must
+    /// be recreated.
+    pub fn draw_suggest(&self, gpu: &Gpu, m: &Metrics, scene: &SuggestScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.painter(&self.rt).suggest(gpu, m, scene);
             self.rt.EndDraw(None, None)
         }
     }
@@ -1819,6 +1839,42 @@ impl Painter<'_> {
             };
             let text = Rect::new(r.x + pad + 14.0, r.y, r.w - 2.0 * pad - 14.0, r.h);
             self.text(&gpu.small, ink, label, text);
+        }
+    }
+
+    /// The pages the address field suggests, on a plate of their own like
+    /// a menu: each one's title, then its address fainter, the one the
+    /// arrows or the mouse are on lit.
+    unsafe fn suggest(&self, gpu: &Gpu, m: &Metrics, scene: &SuggestScene) {
+        let l = scene.layout;
+        self.plate(m, l.size);
+        for (i, (r, (title, url))) in l.rows.iter().zip(scene.rows).enumerate() {
+            let lit = scene.chosen == Some(i) || scene.hot == Some(i);
+            if lit {
+                self.fill_rounded(&r.inset(1.0), 7.0, theme::hover_fill());
+            }
+            let ink = if lit {
+                theme::text()
+            } else {
+                theme::text_dim().mix(theme::text(), 0.35)
+            };
+            let pad = 12.0;
+            let inner = Rect::new(r.x + pad, r.y, r.w - 2.0 * pad, r.h);
+            let address = horadric_core::history::bare(url).trim_end_matches('/');
+            if title.is_empty() {
+                self.text(&gpu.small, ink, address, inner);
+                continue;
+            }
+            let w = self.measure(gpu, &gpu.small, title).min(inner.w * 0.6);
+            self.text(
+                &gpu.small,
+                ink,
+                title,
+                Rect::new(inner.x, inner.y, w, inner.h),
+            );
+            let x = inner.x + w + 14.0;
+            let rest = Rect::new(x, inner.y, inner.right() - x, inner.h);
+            self.text(&gpu.small, theme::legend(), address, rest);
         }
     }
 

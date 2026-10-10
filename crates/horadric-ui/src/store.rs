@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use horadric_core::chronicle;
+use horadric_core::history::{self, History};
 use horadric_core::journal::{self, Entry};
 use horadric_core::SavedState;
 
@@ -124,6 +125,24 @@ pub fn save(state: &SavedState) {
         let _ = fs::rename(&tmp, dir.join("state.json"));
     }
     let _ = fs::remove_file(dir.join("recent.json"));
+}
+
+/// The browser pane's history, or none when there is no file yet.
+pub fn load_history() -> History {
+    dir()
+        .and_then(|d| fs::read(d.join(history::FILE)).ok())
+        .map(|b| History::read(&b))
+        .unwrap_or_default()
+}
+
+/// Writes the browser pane's history the way [`save`] writes the state.
+pub fn save_history(h: &History) {
+    let Some(dir) = dir() else { return };
+    let _ = fs::create_dir_all(&dir);
+    let tmp = dir.join(format!("{}.tmp", history::FILE));
+    if fs::write(&tmp, h.to_json()).is_ok() {
+        let _ = fs::rename(&tmp, dir.join(history::FILE));
+    }
 }
 
 /// Adds a line to the journal the catch-up reads.

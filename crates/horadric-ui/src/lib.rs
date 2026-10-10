@@ -149,6 +149,8 @@ mod stash;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod store;
 #[cfg(windows)]
+mod suggest;
+#[cfg(windows)]
 mod terminal;
 #[cfg(windows)]
 mod tip;

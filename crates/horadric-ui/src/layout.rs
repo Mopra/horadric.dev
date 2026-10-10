@@ -957,6 +957,38 @@ pub fn dropdown_hit(l: &DropdownLayout, x: f32, y: f32) -> Option<usize> {
     l.items.iter().position(|r| r.contains(x, y))
 }
 
+/// The geometry of the pages a browser's address field suggests, dropped
+/// under it: one row per page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SuggestLayout {
+    pub size: (f32, f32),
+    pub rows: Vec<Rect>,
+}
+
+/// Lays out `rows` suggestions `width` wide.
+pub fn suggest(m: &Metrics, width: f32, rows: usize) -> SuggestLayout {
+    let pad = m.menu_pad;
+    let rows: Vec<Rect> = (0..rows)
+        .map(|i| {
+            Rect::new(
+                pad,
+                pad + i as f32 * m.menu_row_h,
+                width - 2.0 * pad,
+                m.menu_row_h,
+            )
+        })
+        .collect();
+    let bottom = rows.last().map_or(pad, |r| r.bottom());
+    SuggestLayout {
+        size: (width, bottom + pad),
+        rows,
+    }
+}
+
+pub fn suggest_hit(l: &SuggestLayout, x: f32, y: f32) -> Option<usize> {
+    l.rows.iter().position(|r| r.contains(x, y))
+}
+
 /// The geometry of the Settings window: a title bar with its cross, the
 /// sections down the left, and the rows of the one picked on the right,
 /// drawn as the usage window draws its settings. It is as tall as the
@@ -2619,6 +2651,20 @@ mod tests {
         assert_eq!(dropdown_hit(&l, l.note.x + 1.0, l.note.y + 1.0), None);
         let gap = l.items[2].bottom() + 1.0;
         assert_eq!(dropdown_hit(&l, r.x + 1.0, gap), None);
+    }
+
+    #[test]
+    fn suggestions_stack_one_page_a_row() {
+        let m = Metrics::default();
+        let l = suggest(&m, 400.0, 3);
+        assert_eq!(l.rows.len(), 3);
+        assert_eq!(l.rows[0].y, m.menu_pad);
+        assert_eq!(l.rows[1].y, l.rows[0].bottom());
+        assert_eq!(l.size, (400.0, l.rows[2].bottom() + m.menu_pad));
+        let r = l.rows[2];
+        assert_eq!(suggest_hit(&l, r.x + 1.0, r.y + 1.0), Some(2));
+        assert_eq!(suggest_hit(&l, 1.0, 1.0), None);
+        assert_eq!(suggest(&m, 400.0, 0).size, (400.0, 2.0 * m.menu_pad));
     }
 
     #[test]
