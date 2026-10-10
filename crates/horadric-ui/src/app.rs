@@ -281,6 +281,8 @@ pub enum WebAsk {
     Menu,
     /// The size the page lays out at.
     Size,
+    /// The list of downloads.
+    Downloads,
 }
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
@@ -1119,6 +1121,7 @@ unsafe extern "system" fn app_proc(
                     WebAsk::Address => go_to(&key),
                     WebAsk::Menu => web_menu(&key),
                     WebAsk::Size => size_menu(&key),
+                    WebAsk::Downloads => web::downloads(&key),
                 }
             }
             return LRESULT(0);
@@ -1873,6 +1876,23 @@ fn ask_address(key: &str) {
     }
 }
 
+/// Asks what to find in the project's page, then finds it there with the
+/// page's own find bar.
+fn ask_find(key: &str) {
+    let question = ask::Ask {
+        title: "Find in page",
+        prompt: "Words to find in the page. Ctrl+F in the page finds too.",
+        initial: "",
+        placeholder: "",
+        verb: "find",
+        notes: false,
+        pick: None,
+    };
+    if let Some(a) = ask_beside(Some(key), &question).filter(|a| !a.text.trim().is_empty()) {
+        web::find(key, a.text.trim());
+    }
+}
+
 /// The menu lines for the page's size, numbered from `base`: fit, each
 /// preset, resize by hand, and a size typed in.
 fn size_items(key: &str, base: usize) -> Vec<Item> {
@@ -1976,6 +1996,8 @@ fn web_menu(key: &str) {
     const CLOSE: usize = 6;
     const NEW_TAB: usize = 7;
     const CLOSE_TAB: usize = 8;
+    const FIND: usize = 9;
+    const DOWNLOADS: usize = 10;
     const SIZE: usize = 100;
     let items = vec![
         Item::action(NEW_TAB, "New tab\tCtrl+T"),
@@ -1986,6 +2008,8 @@ fn web_menu(key: &str) {
         Item::action(FORWARD, "Forward\tAlt+Right"),
         Item::action(RELOAD, "Reload\tF5"),
         Item::Separator,
+        Item::action(FIND, "Find in page...\tCtrl+F"),
+        Item::action(DOWNLOADS, "Downloads\tCtrl+J"),
         Item::Submenu("Size and place".into(), size_items(key, SIZE)),
         Item::action(OUTSIDE, "Open in your browser"),
         Item::Separator,
@@ -1998,6 +2022,8 @@ fn web_menu(key: &str) {
         Some(BACK) => web::go(key, web::Step::Back),
         Some(FORWARD) => web::go(key, web::Step::Forward),
         Some(RELOAD) => web::go(key, web::Step::Reload),
+        Some(FIND) => ask_find(key),
+        Some(DOWNLOADS) => web::downloads(key),
         Some(OUTSIDE) => {
             if let Some((_, url)) = web::label(key).filter(|(_, u)| u.starts_with("http")) {
                 watch::open_link(&crate::links::Target::Web(url), None);

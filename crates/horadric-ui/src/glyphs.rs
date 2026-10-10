@@ -13,6 +13,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
+use std::rc::Rc;
 
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use windows::core::Interface;
@@ -35,6 +36,7 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows_numerics::{Matrix3x2, Vector2};
 
+use crate::favicon::{self, Favicon};
 use crate::frame::{Decoration, Frame, BOLD, ITALIC};
 use crate::render::{self, hwnd_target, Gpu};
 use crate::theme::{self, Color};
@@ -137,6 +139,8 @@ pub struct Bar<'a> {
     pub tab: usize,
     /// The session whose agent works in each tab, where one does.
     pub badges: &'a [Option<TabBadge>],
+    /// Each tab's site's picture, where it has one.
+    pub icons: &'a [Option<Rc<Favicon>>],
 }
 
 /// The mark on a tab an agent works in: its session's initial on a disc
@@ -159,6 +163,9 @@ pub fn badge_letter(label: &str) -> char {
 
 /// A tab badge's radius, in DIPs.
 const BADGE_R: f32 = 6.5;
+
+/// A site's picture on its tab, in DIPs square.
+const ICON: f32 = 16.0;
 
 /// Height of a browser pane's tab strip, a row of keys on the plate
 /// between its address bar and its glass.
@@ -1072,6 +1079,16 @@ impl GridTarget {
             if let Some(b) = bar.badges.get(i).copied().flatten().filter(|_| wide) {
                 self.tab_badge(gpu, b, text_left + BADGE_R, (top + bottom) / 2.0);
                 text_left += 2.0 * BADGE_R + 5.0;
+            } else if let Some(icon) = bar.icons.get(i).and_then(Option::as_ref).filter(|_| wide) {
+                let y = (top + bottom) / 2.0 - ICON / 2.0;
+                let at = D2D_RECT_F {
+                    left: text_left,
+                    top: y,
+                    right: text_left + ICON,
+                    bottom: y + ICON,
+                };
+                favicon::draw(&self.rt, icon, at);
+                text_left += ICON + 5.0;
             }
             let text_right = cross.unwrap_or(right - 4.0);
             let name: Vec<u16> = name.encode_utf16().collect();

@@ -146,6 +146,8 @@ mod start;
 mod stash;
 // The journal, the chronicle and the MCP config wait for the Mac's quest log
 // and browser pane.
+#[cfg(windows)]
+mod favicon;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod store;
 #[cfg(windows)]

@@ -30,6 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::backdrop;
+use crate::favicon::{self, Favicon};
 use crate::layout::{self, SuggestLayout};
 use crate::render::{SuggestScene, Target};
 use crate::window::Shared;
@@ -53,6 +54,7 @@ pub struct Suggest {
     target: RefCell<Option<Target>>,
     layout: RefCell<SuggestLayout>,
     rows: RefCell<Vec<(String, String)>>,
+    icons: RefCell<Vec<Option<Rc<Favicon>>>>,
     chosen: Cell<Option<usize>>,
     hot: Cell<Option<usize>>,
     /// Where it hangs: under the field, in screen pixels, its left edge,
@@ -96,6 +98,7 @@ impl Suggest {
             shared,
             target: RefCell::new(None),
             layout: RefCell::new(layout),
+            icons: RefCell::new(icons_of(&rows)),
             rows: RefCell::new(rows),
             chosen: Cell::new(None),
             hot: Cell::new(None),
@@ -151,6 +154,7 @@ impl Suggest {
         let layout = layout::suggest(&self.shared.metrics, width as f32 / s, rows.len());
         let h = (layout.size.1 * s).round() as i32;
         *self.layout.borrow_mut() = layout;
+        *self.icons.borrow_mut() = icons_of(&rows);
         *self.rows.borrow_mut() = rows;
         self.chosen.set(None);
         self.hot.set(None);
@@ -226,9 +230,11 @@ impl Suggest {
         }
         let layout = self.layout.borrow();
         let rows = self.rows.borrow();
+        let icons = self.icons.borrow();
         let scene = SuggestScene {
             layout: &layout,
             rows: &rows,
+            icons: &icons,
             chosen: self.chosen.get(),
             hot: self.hot.get(),
         };
@@ -294,6 +300,11 @@ impl Suggest {
             _ => None,
         }
     }
+}
+
+/// The picture of each row's site.
+fn icons_of(rows: &[(String, String)]) -> Vec<Option<Rc<Favicon>>> {
+    rows.iter().map(|(_, url)| favicon::of(url)).collect()
 }
 
 /// The window goes with its Box, whichever of the field or the pane ends

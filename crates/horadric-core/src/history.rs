@@ -234,8 +234,8 @@ pub fn bare(url: &str) -> &str {
     }
 }
 
-/// The host of an address without its scheme, its port kept.
-fn host(rest: &str) -> &str {
+/// The host of an address, its port kept.
+pub fn host(rest: &str) -> &str {
     let rest = after_scheme(rest);
     rest.split(['/', '?', '#']).next().unwrap_or(rest)
 }

@@ -1003,6 +1003,20 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   itself (`Tab::own`) is not taken for the user's. Not seen on screen
   yet: a posted Ctrl and wheel does not zoom Chromium, which reads the
   real keys.
+- **Site pictures** (`favicon.rs`). A tab shows its site's picture
+  where no agent's badge is, and so does each suggestion. WebView2 hands
+  it over as a PNG on `FaviconChanged`; WIC decodes it once to 32 pixels
+  square, and the PNG is kept by host in `favicons\` beside the state, so
+  a suggestion has it before its site is opened again. A tab going to
+  another site shows the one kept for it until the page sends its own.
+  Seen on screen: Hacker News and GitHub on their tabs and in the list.
+- **Find and downloads.** WebView2's own find bar and download list were
+  there all along, Ctrl+F in the page and the list a download opens. The
+  header's menu now has Find in page, which asks for the words and opens
+  the find bar on them (`ICoreWebView2Find`), and Downloads, as does
+  Ctrl+J in the page. Seen on screen through a test hook since taken out:
+  "points" found 30 times on Hacker News, all lit, with the bar's count
+  and arrows, and the Downloads list opened over the page.
 
 Tested on screen with a dev instance on its own port and `cmd.exe`
 sessions in two projects: Ctrl+Shift+B put the pane in the grid and asked

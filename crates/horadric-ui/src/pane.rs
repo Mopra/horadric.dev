@@ -871,12 +871,19 @@ impl Pane {
             .as_deref()
             .map(|key| self.tab_badges(key))
             .unwrap_or_default();
+        let icons = self
+            .console
+            .web
+            .as_deref()
+            .map(web::icons)
+            .unwrap_or_default();
         let bar = self.console.web.as_deref().map(|key| {
             let (back, forward) = web::history(key);
             Bar {
                 tabs: &tab_names,
                 tab,
                 badges: &badges,
+                icons: &icons,
                 text: &shown,
                 edit: edit.as_ref().map(|f| {
                     let (a, b) = f.selection();

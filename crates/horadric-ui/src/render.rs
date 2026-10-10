@@ -467,6 +467,8 @@ pub struct SuggestScene<'a> {
     pub layout: &'a SuggestLayout,
     /// Each page's title, which may be empty, and its address.
     pub rows: &'a [(String, String)],
+    /// Each page's site's picture, where it has one.
+    pub icons: &'a [Option<std::rc::Rc<crate::favicon::Favicon>>],
     /// The row the arrow keys are on.
     pub chosen: Option<usize>,
     pub hot: Option<usize>,
@@ -1859,7 +1861,15 @@ impl Painter<'_> {
                 theme::text_dim().mix(theme::text(), 0.35)
             };
             let pad = 12.0;
-            let inner = Rect::new(r.x + pad, r.y, r.w - 2.0 * pad, r.h);
+            let mut inner = Rect::new(r.x + pad, r.y, r.w - 2.0 * pad, r.h);
+            // Every row keeps the picture's room, so the titles line up.
+            let side = 16.0;
+            if let Some(icon) = scene.icons.get(i).and_then(Option::as_ref) {
+                let at = Rect::new(inner.x, r.y + (r.h - side) / 2.0, side, side);
+                crate::favicon::draw(self.rt, icon, rect(&at));
+            }
+            inner.x += side + 10.0;
+            inner.w -= side + 10.0;
             let address = horadric_core::history::bare(url).trim_end_matches('/');
             if title.is_empty() {
                 self.text(&gpu.small, ink, address, inner);

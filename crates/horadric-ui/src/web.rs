@@ -37,8 +37,12 @@ use std::time::{Duration, Instant};
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller,
     ICoreWebView2Deferral, ICoreWebView2Environment, ICoreWebView2EnvironmentOptions,
-    ICoreWebView2NewWindowRequestedEventArgs, COREWEBVIEW2_KEY_EVENT_KIND,
+    ICoreWebView2NewWindowRequestedEventArgs, ICoreWebView2_15,
+    COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG, COREWEBVIEW2_KEY_EVENT_KIND,
     COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
+};
+use webview2_com::Microsoft::Web::WebView2::Win32::{
+    ICoreWebView2Environment15, ICoreWebView2_28, ICoreWebView2_9,
 };
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler,
@@ -47,6 +51,9 @@ use webview2_com::{
     DocumentTitleChangedEventHandler, HistoryChangedEventHandler, NavigationCompletedEventHandler,
     NewWindowRequestedEventHandler, SourceChangedEventHandler, WindowCloseRequestedEventHandler,
     ZoomFactorChangedEventHandler,
+};
+use webview2_com::{
+    FaviconChangedEventHandler, FindStartCompletedHandler, GetFaviconCompletedHandler,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
@@ -72,11 +79,13 @@ headless browser yourself. The user sees that pane, and not a browser you start.
 browser only when the user asks for one.";
 
 use crate::app::{self, Input, WebAsk};
+use crate::favicon::{self, Favicon};
 use crate::store;
 use crate::terminal::WM_STAGE_LAYOUT;
 use crate::viewport;
-use horadric_core::history::History;
+use horadric_core::history::{self, History};
 use horadric_core::saved::{Dock, SavedPages, SavedTab, Side};
+use windows::core::Interface;
 
 /// Posted to the pane showing a project's page when its title or address
 /// changed, so the header is drawn again.
@@ -109,6 +118,8 @@ struct Tab {
     focus: bool,
     title: String,
     url: String,
+    /// Its site's picture, where it has one.
+    icon: Option<Rc<Favicon>>,
     back: bool,
     forward: bool,
     /// Agents waiting for the page to be made, given None if it never is.
@@ -151,6 +162,7 @@ impl Tab {
             focus: false,
             title: String::new(),
             url: String::new(),
+            icon: None,
             back: false,
             forward: false,
             waiting: Vec::new(),
@@ -805,6 +817,16 @@ pub fn tabs(key: &str) -> Option<(Vec<String>, usize)> {
     })
 }
 
+/// The picture of each of the project's tabs' sites, where it has one.
+pub fn icons(key: &str) -> Vec<Option<Rc<Favicon>>> {
+    WEBS.with(|w| {
+        w.borrow()
+            .get(key)
+            .map(|web| web.tabs.iter().map(|t| t.icon.clone()).collect())
+            .unwrap_or_default()
+    })
+}
+
 /// The session whose agent works in each of the project's tabs.
 pub fn drivers(key: &str) -> Vec<Option<String>> {
     WEBS.with(|w| {
@@ -961,6 +983,7 @@ pub fn restore(key: &str, saved: &SavedPages) {
             let mut tab = Tab::new(Some(t.url.clone()));
             tab.title = t.title.clone();
             tab.url = t.url.clone();
+            tab.icon = favicon::of(&t.url);
             tab.driver = t.driver.clone();
             web.tabs.push(tab);
         }
@@ -1229,6 +1252,42 @@ pub fn go_in(key: &str, id: Option<u64>, step: Step) {
     };
 }
 
+/// Opens the list of downloads over the shown page, the one a download
+/// shows by itself when it starts.
+pub fn downloads(key: &str) {
+    let view = read_tab(key, None, |t| t.webview.clone()).flatten();
+    if let Some(v) = view.and_then(|v| v.cast::<ICoreWebView2_9>().ok()) {
+        let _ = unsafe { v.OpenDefaultDownloadDialog() };
+    }
+}
+
+/// Finds `term` in the shown page with WebView2's own find bar, which
+/// counts the matches and steps through them, as Ctrl+F in the page does.
+pub fn find(key: &str, term: &str) {
+    let env = ENV.with(|e| match &*e.borrow() {
+        Env::Ready(env) => env.cast::<ICoreWebView2Environment15>().ok(),
+        _ => None,
+    });
+    let view = read_tab(key, None, |t| t.webview.clone()).flatten();
+    let (Some(env), Some(view)) = (env, view.and_then(|v| v.cast::<ICoreWebView2_28>().ok()))
+    else {
+        return;
+    };
+    unsafe {
+        let Ok(options) = env.CreateFindOptions() else {
+            return;
+        };
+        let _ = options.SetFindTerm(&HSTRING::from(term));
+        let _ = options.SetSuppressDefaultFindDialog(false);
+        let _ = options.SetShouldHighlightAllMatches(true);
+        let done = FindStartCompletedHandler::create(Box::new(|_| Ok(())));
+        if let Ok(f) = view.Find() {
+            let _ = f.Start(&options, &done);
+        }
+    }
+    focus(key);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
     Back,
@@ -1474,7 +1533,13 @@ fn listen(key: &str, id: u64, view: &ICoreWebView2) {
     let source = SourceChangedEventHandler::create(Box::new(move |view, args| {
         if let Some(v) = view {
             let u = read(|p| unsafe { v.Source(p) });
-            changed(&owned, Some(id), |w| w.url = u);
+            // The picture kept for the site shows until the page sends its own.
+            changed(&owned, Some(id), |w| {
+                if history::host(&w.url) != history::host(&u) {
+                    w.icon = favicon::of(&u);
+                }
+                w.url = u;
+            });
         }
         // A move within the page, a fragment or a pushed state, has no
         // load to wait for.
@@ -1556,8 +1621,18 @@ fn listen(key: &str, id: u64, view: &ICoreWebView2) {
         }
         Ok(())
     }));
+    let owned = key.to_string();
+    let icon = FaviconChangedEventHandler::create(Box::new(move |view, _| {
+        if let Some(v) = view.and_then(|v| v.cast::<ICoreWebView2_15>().ok()) {
+            fetch_icon(&owned, id, &v);
+        }
+        Ok(())
+    }));
     let mut token = Default::default();
     unsafe {
+        if let Ok(v) = view.cast::<ICoreWebView2_15>() {
+            let _ = v.add_FaviconChanged(&icon, &mut token);
+        }
         let _ = view.add_DocumentTitleChanged(&title, &mut token);
         let _ = view.add_SourceChanged(&source, &mut token);
         let _ = view.add_HistoryChanged(&history, &mut token);
@@ -1621,6 +1696,50 @@ fn site_zoom_for(key: &str, id: u64) {
     let _ = unsafe { c.SetZoomFactor(want) };
 }
 
+/// Asks the page for its picture, and shows it on its tab once it comes.
+/// A page with none leaves the tab without one.
+fn fetch_icon(key: &str, id: u64, view: &ICoreWebView2_15) {
+    let uri = read(|p| unsafe { view.FaviconUri(p) });
+    if uri.is_empty() {
+        changed(key, Some(id), |t| t.icon = None);
+        return;
+    }
+    let owned = key.to_string();
+    let handler = GetFaviconCompletedHandler::create(Box::new(move |result, stream| {
+        let png = match (result, stream) {
+            (Ok(()), Some(s)) => read_stream(&s),
+            _ => return Ok(()),
+        };
+        let url = read_tab(&owned, Some(id), |t| t.url.clone()).unwrap_or_default();
+        if let Some(icon) = favicon::keep(&url, &png) {
+            changed(&owned, Some(id), |t| t.icon = Some(icon));
+        }
+        Ok(())
+    }));
+    unsafe {
+        let _ = view.GetFavicon(COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG, &handler);
+    }
+}
+
+/// Everything in a stream WebView2 handed over.
+fn read_stream(s: &windows::Win32::System::Com::IStream) -> Vec<u8> {
+    let mut all = Vec::new();
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let mut got = 0u32;
+        let hr = unsafe { s.Read(buf.as_mut_ptr().cast(), buf.len() as u32, Some(&mut got)) };
+        if hr.is_err() || got == 0 {
+            break;
+        }
+        all.extend_from_slice(&buf[..got as usize]);
+        // A picture is small; anything this big is not one.
+        if all.len() > 4 << 20 {
+            return Vec::new();
+        }
+    }
+    all
+}
+
 /// The tab's navigation ended: whoever waits on it hears whether it loaded.
 fn loaded(key: &str, id: u64, ok: bool) {
     let waiting = WEBS.with(|w| {
@@ -1656,6 +1775,7 @@ fn keys(key: &str, controller: &ICoreWebView2Controller) {
         let input = match (vk as u8, ctrl, shift, alt) {
             (b'L', true, false, false) => Input::WebAsk(owned.clone(), WebAsk::Address),
             (b'T', true, true, false) => Input::Shell(None),
+            (b'J', true, false, false) => Input::WebAsk(owned.clone(), WebAsk::Downloads),
             _ => match tab_key(VIRTUAL_KEY(vk as u16), ctrl, shift, alt) {
                 Some(step) => Input::WebTab(owned.clone(), step),
                 None => return Ok(()),
