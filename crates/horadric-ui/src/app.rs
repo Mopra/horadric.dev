@@ -132,8 +132,8 @@ use crate::tray::{self, Choice, Tray};
 use crate::usage::{self, UsageWindow};
 use crate::window::{self, folder_key, project_key, project_name, Cluster, Shared};
 use crate::{
-    ask, autostart, browsers, inbox, paths, picker, recent, shell, snapping, store, theme, update,
-    viewport, watch, web, worktree,
+    ask, autostart, browsers, history, inbox, paths, picker, recent, shell, snapping, store, theme,
+    update, viewport, watch, web, worktree,
 };
 
 #[path = "runner.rs"]
@@ -1803,6 +1803,10 @@ const SAVED_WITHIN: Duration = Duration::from_secs(5);
 /// once, few enough to keep an eye on.
 const BATCH: usize = 4;
 
+/// How many past conversations a History menu lists. The last line opens
+/// Claude Code's own picker for the rest.
+const HISTORY: usize = 10;
+
 /// How many hosts the project menu lists one by one. Past that they are
 /// found by name instead.
 const MENU_HOSTS: usize = 8;
@@ -2058,19 +2062,26 @@ fn project_menu(key: &str) {
     const MERGE: usize = 300;
     const MERGE_END: usize = 400;
     const ADD_AGENT: usize = 500;
+    const PAST: usize = 600;
     let dir = with_app(|app| app.project_dir(key)).flatten();
-    // Asking git is the slow part of opening the menu, so it is done
-    // side by side.
-    let (mut merges, own_trees) = match &dir {
+    // Reading transcripts and asking git are the slow part of opening the
+    // menu, so they are done side by side.
+    let held = with_app(|app| app.held_conversations()).unwrap_or_default();
+    let (past, mut merges, own_trees) = match &dir {
         Some(d) => std::thread::scope(|scope| {
+            let past = scope.spawn(|| past_in(d, &held, HISTORY));
             let merges = scope.spawn(|| runner::merges(d));
             // Only a repository's main tree can add worktrees.
             let own_trees = worktree::main_tree(d)
                 .is_some()
                 .then(|| horadric_hooks::tasks::worktrees(d).enabled);
-            (merges.join().unwrap_or_default(), own_trees)
+            (
+                past.join().unwrap_or_default(),
+                merges.join().unwrap_or_default(),
+                own_trees,
+            )
         }),
-        None => (Vec::new(), None),
+        None => (Vec::new(), Vec::new(), None),
     };
     let hosts = dir
         .as_deref()
@@ -2101,6 +2112,7 @@ fn project_menu(key: &str) {
         ));
     }
     items.extend([
+        Item::Submenu("History".into(), history_items(&past, PAST)),
         Item::action(QUESTS, "Quest log..."),
         Item::action(START_BATCH, format!("Start {BATCH} sessions")),
         Item::action(START_OVER, format!("Start over with {BATCH} sessions")),
@@ -2185,6 +2197,11 @@ fn project_menu(key: &str) {
         Some(EXPLORE) => {
             if let Some(dir) = app.project_dir(key) {
                 watch::explore(&dir);
+            }
+        }
+        Some(i) => {
+            if let (Some(pick), Some(dir)) = (history::pick(i, PAST), &dir) {
+                app.reopen(dir, &past, pick);
             }
         }
         _ => {}
@@ -2335,6 +2352,26 @@ fn past_in(dir: &Path, held: &[String], limit: usize) -> Vec<Past> {
     past
 }
 
+/// The lines of a History menu: each past conversation, `first` on, then
+/// Claude Code's own picker for the rest.
+fn history_items(past: &[Past], first: usize) -> Vec<Item> {
+    let now = SystemTime::now();
+    let mut items: Vec<Item> = past
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let ago = now.duration_since(p.modified).unwrap_or_default();
+            Item::action(first + i, history::label(&p.title.text, ago))
+        })
+        .collect();
+    if items.is_empty() {
+        items.push(Item::Disabled("No earlier conversations".into()));
+    }
+    items.push(Item::Separator);
+    items.push(Item::action(history::all(first), "All conversations..."));
+    items
+}
+
 /// The usage window's menu, for what the settings rows do not hold.
 fn usage_menu() {
     const CUBE: usize = 1;
@@ -2423,13 +2460,17 @@ fn account_menu(agent: Agent) {
 }
 
 /// A recent project right clicked in the start window, which has no
-/// cluster and so no project menu: a new session, or its quest log, the
-/// way back to its old conversations.
+/// cluster and so no project menu: a new session, an old one back, or its
+/// quest log.
 fn recent_menu(dir: PathBuf) {
     const ADD: usize = 1;
     const QUESTS: usize = 2;
+    const PAST: usize = 100;
+    let held = with_app(|app| app.held_conversations()).unwrap_or_default();
+    let past = past_in(&dir, &held, HISTORY);
     let items = [
         Item::action(ADD, "New session"),
+        Item::Submenu("History".into(), history_items(&past, PAST)),
         Item::action(QUESTS, "Quest log..."),
     ];
     match menu::popup(&items) {
@@ -2437,7 +2478,12 @@ fn recent_menu(dir: PathBuf) {
         Some(QUESTS) => push(Input::QuestLog(questlog::Ask::Open(folder_key(
             &dir.to_string_lossy(),
         )))),
-        _ => {}
+        Some(i) => {
+            if let Some(pick) = history::pick(i, PAST) {
+                with_app(|app| app.reopen(&dir, &past, pick));
+            }
+        }
+        None => {}
     }
 }
 
@@ -3736,6 +3782,57 @@ impl App {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// The conversations tiles hold, running, paused or stashed, which a
+    /// History menu leaves out: two agents on one would write over each
+    /// other.
+    fn held_conversations(&self) -> Vec<String> {
+        self.shared
+            .registry
+            .lock()
+            .map(|r| {
+                r.all()
+                    .filter_map(|s| s.claude_session_id.clone())
+                    .chain(
+                        r.stashed()
+                            .iter()
+                            .filter_map(|s| s.claude_session_id.clone()),
+                    )
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Carries on a past conversation from `past`, a History menu's list
+    /// for `dir`, in a new tile. Or the tile opens Claude Code's own picker
+    /// of every conversation in the folder.
+    fn reopen(&mut self, dir: &Path, past: &[Past], pick: history::Pick) {
+        let past = match pick {
+            history::Pick::Past(i) => match past.get(i) {
+                Some(p) => Some(p),
+                None => return,
+            },
+            history::Pick::All => None,
+        };
+        let agent = past.map_or(Agent::Claude, |p| p.agent);
+        let args = agent.resume_args(past.map(|p| p.id.as_str()));
+        let id = match self.start_in(None, dir.to_path_buf(), args, agent, false) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("horadric: cannot resume a conversation: {e}");
+                return;
+            }
+        };
+        // Known before any hook says so. A pause before the next prompt
+        // would otherwise resume nothing and start afresh.
+        if let (Some(p), Ok(mut r)) = (past, self.shared.registry.lock()) {
+            if let Some(s) = r.get_mut(&id) {
+                s.claude_session_id = Some(p.id.clone());
+                s.prompted = true;
+                s.title = Some(p.title.clone());
+            }
+        }
     }
 
     /// Resumes a paused session in the same tile, with its conversation.
