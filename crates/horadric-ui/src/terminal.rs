@@ -38,8 +38,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
-    GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsIconic, IsZoomed,
-    LoadCursorW, LoadIconW, RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow,
+    GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsChild, IsIconic,
+    IsZoomed, LoadCursorW, LoadIconW, RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CW_USEDEFAULT,
     GWLP_USERDATA, HICON, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT,
     HTTOPRIGHT, ICON_BIG, IDC_ARROW, IDC_SIZEALL, IDC_SIZENS, IDC_SIZEWE, NCCALCSIZE_PARAMS,
@@ -602,9 +602,15 @@ impl TerminalWindow {
         }
     }
 
+    /// A browser pane's page is a child window of the pane, so a field
+    /// typed into there has the keyboard inside it too. Missing that took
+    /// the keyboard away mid word whenever a session's state changed.
     fn pane_has_focus(&self) -> bool {
         let focus = unsafe { GetFocus() };
-        self.panes.borrow().iter().any(|p| p.hwnd == focus)
+        self.panes
+            .borrow()
+            .iter()
+            .any(|p| p.hwnd == focus || unsafe { IsChild(p.hwnd, focus) }.as_bool())
     }
 
     /// Gives the keyboard to the active session's pane.
