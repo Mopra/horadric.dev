@@ -4,7 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
-- 2026-10-10 Hourly rounds (six today, latest at 07d4c8a): 155 done, none open, no aim, only memory commits since v0.18.0. Nothing to do.
+- 2026-10-10 Hourly rounds (seven today, latest at cef7365): 155 done, none open, no aim, only memory commits since v0.18.0. Nothing to do.
 - 2026-10-10 Daily look back: the day was clean (no quests, 25 idle Warriv rounds, nothing repeated).
 - 2026-10-10 Round after the human left (main at 723fefd): 155 done, none open, no aim, only memory commits since v0.18.0. Nothing to do.
 - 2026-10-09 Hourly round (main at f78c6dd, v0.18.0 tagged): 155 done, none open, no aim, release already cut. Nothing to do.
