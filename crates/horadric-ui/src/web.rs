@@ -1684,11 +1684,17 @@ fn begin(view: &ICoreWebView2, opener: Option<Opener>, pending: Option<String>) 
     }
 }
 
-/// Keeps what every page writes to its console, and its errors, where an
-/// agent can read them: `window.__horadricConsole`, the last 500.
+/// Keeps what every page writes to its console, and its errors, the last
+/// 500, for an agent to read by dispatching a `horadric-console` event.
+/// Bot checks like GoDaddy's look for traces of automation, so nothing is
+/// left on `window` and the console's functions are proxies: they keep
+/// their names and read as native code.
 const KEEP_CONSOLE: &str = r#"(() => {
-  if (window.__horadricConsole) return;
-  const kept = (window.__horadricConsole = []);
+  const kept = [];
+  addEventListener("horadric-console", (e) => {
+    e.detail.out = kept.slice();
+    if (e.detail.clear) kept.length = 0;
+  });
   const say = (a) => {
     if (typeof a === "string") return a;
     if (a instanceof Error) return a.stack || String(a);
@@ -1699,8 +1705,9 @@ const KEEP_CONSOLE: &str = r#"(() => {
     if (kept.length > 500) kept.shift();
   };
   for (const level of ["log", "info", "warn", "error", "debug"]) {
-    const was = console[level];
-    console[level] = function (...args) { keep(level, args); return was.apply(this, args); };
+    console[level] = new Proxy(console[level], {
+      apply(was, self, args) { keep(level, args); return Reflect.apply(was, self, args); },
+    });
   }
   addEventListener("error", (e) => keep("error", [e.error || e.message]));
   addEventListener("unhandledrejection", (e) => keep("error", ["Unhandled rejection:", e.reason]));

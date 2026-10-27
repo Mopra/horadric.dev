@@ -537,8 +537,9 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
         let clear = args.get("clear") == Some(&json!(true));
         let level = args.get("level").and_then(Value::as_str);
         let kept = self.eval(&format!(
-            "(() => {{ const k = window.__horadricConsole || []; const out = k.slice(); \
-             if ({clear}) k.length = 0; return out; }})()"
+            "(() => {{ const detail = {{ clear: {clear}, out: [] }}; \
+             dispatchEvent(new CustomEvent('horadric-console', {{ detail }})); \
+             return detail.out; }})()"
         ))?;
         let lines: Vec<String> = kept
             .as_array()
