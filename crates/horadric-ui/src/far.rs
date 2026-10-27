@@ -982,7 +982,9 @@ impl App {
                 (horadric_core::mesh::load(&d), held)
             })
             .unwrap_or_default();
-        let list = &afar::shown_list(list, name, &roster, held);
+        let mut list = afar::shown_list(list, name, &roster, held);
+        list.retain(|e| !self.far_hidden.contains(&afar::local_id(name, &e.id)));
+        let list = &list;
         let now = SystemTime::now();
         let mut changed = false;
         let mut gone = Vec::new();
@@ -1364,6 +1366,11 @@ impl App {
     /// Acts on a pick from [`App::far_menu`] that is its own; false for
     /// any other.
     pub(super) fn far_picked(&mut self, id: &str, picked: usize) -> bool {
+        if picked == FAR_HIDE {
+            self.far_hide(&[id.to_string()]);
+            self.reconcile(false);
+            return true;
+        }
         if picked != FAR_END {
             return false;
         }
@@ -1373,6 +1380,36 @@ impl App {
             }
         }
         true
+    }
+
+    /// Takes brothers' tiles `ids` off this PC's screen for good, their
+    /// sessions left running there.
+    fn far_hide(&mut self, ids: &[String]) {
+        for id in ids {
+            hide(&mut self.far_hidden, id);
+            self.far.consoles.remove(id);
+        }
+        if let Ok(mut r) = self.shared.registry.lock() {
+            for id in ids {
+                r.remove(id);
+            }
+        }
+        self.save();
+    }
+
+    /// Hides every brother's tile in the project keyed `key`.
+    pub(super) fn far_hide_in(&mut self, key: &str) {
+        let ids: Vec<String> = match self.shared.registry.lock() {
+            Ok(r) => r
+                .all()
+                .filter(|s| s.brother.is_some() && project_key(s) == key)
+                .map(|s| s.id.clone())
+                .collect(),
+            Err(_) => return,
+        };
+        if !ids.is_empty() {
+            self.far_hide(&ids);
+        }
     }
 
     /// Renames brother's tile `id` where it runs, which lists it back
@@ -1434,6 +1471,23 @@ fn went(
 /// The tile menu's id for ending a brother's session there.
 const FAR_END: usize = 2400;
 
+/// The tile menu's id for hiding a brother's tile here.
+const FAR_HIDE: usize = 2401;
+
+/// How many hidden tiles are remembered. One is not dropped when its
+/// brother stops listing it, since a brother coming back up may list its
+/// sessions late, so the oldest go instead.
+const HIDDEN_KEPT: usize = 500;
+
+/// Adds tile `id` to the hidden list, newest last, keeping the newest
+/// [`HIDDEN_KEPT`].
+fn hide(hidden: &mut Vec<String>, id: &str) {
+    hidden.retain(|h| h != id);
+    hidden.push(id.to_string());
+    let over = hidden.len().saturating_sub(HIDDEN_KEPT);
+    hidden.drain(..over);
+}
+
 /// What a brother's tile can do now.
 #[derive(Debug, Clone, Copy)]
 struct Can {
@@ -1447,10 +1501,13 @@ struct Can {
 
 /// A brother's tile's menu lines. Resuming, renaming and ending are asks
 /// the brother serves, and only with control; out of reach, nothing goes.
+/// Hiding is this PC's own, so it is always there.
 fn far_items(name: &str, can: Can, open: usize, rename: usize) -> Vec<Item> {
+    let hide = Item::action(FAR_HIDE, "Hide here");
     let mut items = Vec::new();
     if !can.up {
         items.push(Item::Disabled(format!("{name} out of reach")));
+        items.extend([Item::Separator, hide]);
         return items;
     }
     match (can.paused, can.control) {
@@ -1462,10 +1519,12 @@ fn far_items(name: &str, can: Can, open: usize, rename: usize) -> Vec<Item> {
         items.push(Item::Disabled(format!(
             "View only: {name} lets this PC watch"
         )));
+        items.extend([Item::Separator, hide]);
         return items;
     }
     items.push(Item::action(rename, "Rename\u{2026}"));
     items.push(Item::Separator);
+    items.push(hide);
     items.push(Item::action(FAR_END, format!("End session on {name}")));
     items
 }
@@ -1613,6 +1672,7 @@ mod tests {
                 "1 Show terminal",
                 "3 Rename\u{2026}",
                 "|",
+                "2401 Hide here",
                 "2400 End session on Beta"
             ]
         );
@@ -1622,15 +1682,38 @@ mod tests {
         );
         assert_eq!(
             labels(&far_items("Beta", can(true, false, false), 1, 3)),
-            ["1 Show terminal", "- View only: Beta lets this PC watch"]
+            [
+                "1 Show terminal",
+                "- View only: Beta lets this PC watch",
+                "|",
+                "2401 Hide here"
+            ]
         );
         assert_eq!(
             labels(&far_items("Beta", can(true, true, false), 1, 3)),
-            ["- View only: Beta lets this PC watch"]
+            [
+                "- View only: Beta lets this PC watch",
+                "|",
+                "2401 Hide here"
+            ]
         );
         assert_eq!(
             labels(&far_items("Beta", can(false, false, true), 1, 3)),
-            ["- Beta out of reach"]
+            ["- Beta out of reach", "|", "2401 Hide here"]
         );
+    }
+
+    #[test]
+    fn hiding_keeps_each_tile_once_and_only_the_newest() {
+        let mut hidden = Vec::new();
+        hide(&mut hidden, "a@b");
+        hide(&mut hidden, "c@b");
+        hide(&mut hidden, "a@b");
+        assert_eq!(hidden, ["c@b", "a@b"]);
+        for i in 0..HIDDEN_KEPT {
+            hide(&mut hidden, &format!("s{i}@b"));
+        }
+        assert_eq!(hidden.len(), HIDDEN_KEPT);
+        assert_eq!(hidden[0], "s0@b");
     }
 }

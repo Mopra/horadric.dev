@@ -47,6 +47,11 @@ pub struct SavedState {
     /// tasks until a session starts in them again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub closed: Vec<String>,
+    /// Brothers' tiles hidden here, by tile id, oldest first. Their
+    /// sessions run on there and are still listed, so only this keeps
+    /// them off screen.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub far_hidden: Vec<String>,
     /// Start with Windows is switched on once, the first time Horadric runs.
     /// After that it is the user's call, so this remembers it was offered.
     #[serde(default)]

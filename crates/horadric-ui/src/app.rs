@@ -949,6 +949,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 .collect(),
             open: saved.clusters.iter().map(|c| c.key.clone()).collect(),
             closed: saved.closed.iter().cloned().collect(),
+            far_hidden: saved.far_hidden.clone(),
             columns: Columns::from_keys(&saved.columns),
             recent: saved.recent.clone(),
             town_listed: None,
@@ -3594,6 +3595,9 @@ struct App {
     /// longer keep the cluster up, and the runner leaves them alone, until
     /// a session starts in them again.
     closed: HashSet<String>,
+    /// Brothers' tiles hidden here, by tile id, oldest first: their
+    /// brother's lists leave them out.
+    far_hidden: Vec<String>,
     /// Which column each cluster and the usage window stand in.
     columns: Columns,
     /// Projects sessions were started in, newest first, for the tray menu.
@@ -6684,6 +6688,9 @@ impl App {
         }
         self.open.remove(key);
         self.closed.insert(key.to_string());
+        // A brother's sessions are not this PC's to end. Forgotten only,
+        // they would be back with the brother's next list.
+        self.far_hide_in(key);
         self.end_all(Some(key));
     }
 
@@ -7857,6 +7864,7 @@ impl App {
                 closed.sort();
                 closed
             },
+            far_hidden: self.far_hidden.clone(),
             autostart_offered: self.autostart_offered,
             explorer_offered: self.explorer_offered,
             stage: self
