@@ -58,7 +58,8 @@ shape, not from case by case care:
   never a change of keepers), the keepers that owner names, and whether
   and how it ended. All of it is `resolve` of the words held on it, cached.
 - `outcast` and `contested`: `standing` of the cast out words and the
-  tree, cached.
+  tree, cached. Which phones are served (`phones`) is not cached: it is
+  worked out from the words whenever it is asked.
 - The **root**: the keys the brotherhood started from, as this machine
   pinned them (below), and whether it is pinned for good yet.
 - Notes for itself alone, never served and never consulted by `resolve`
@@ -116,19 +117,23 @@ one byte.
 | `ended` | `origin`, `session` | `by`, the owner at `n`, ended it for good |
 | `admits` | `id`, `key`, `name` | `by`'s human let brother `id` in under `key` by a code both humans saw; `n` is 0 |
 | `cast_out` | `id`, `key`, `retired` | `by`'s human cast out brother `id`, whose key was `key`; with `retired`, only that key goes, not those let in through it (the machine was set up anew); `n` is 0 |
+| `vouches` | `phone`, `key`, `name` | `by`'s human paired phone `phone`, called `name`, whose public key is `key`; `n` is 0 |
+| `forgets` | `phone`, `key` | `by`'s human (or the phone itself, through `by`) forgot phone `phone`, whose key is `key`, for good; `n` is 0 |
 
 A word is **taken** by a brother when:
 
 - `under` is the key it holds for `by`, or the key it held for `by` before
   (a key a human replaced). A key named only in some word is never taken
   as anyone's: a thief cannot make its own key pass for another
-  brother's by naming it. Admissions and cast outs speak of keys, never
-  of ids, so one is taken under any key the tree reaches, held here or
-  not yet: a brother just let in learns every other so, and a key no
-  admission path reaches signs nothing that counts.
+  brother's by naming it. Admissions, cast outs, vouches and forgets
+  speak of keys, never of ids, so one is taken under any key the tree
+  reaches, held here or not yet: a brother just let in learns every
+  other so, and a key no admission path reaches signs nothing that
+  counts.
 - the signature verifies under `under`;
-- it is within bounds: every id and key at most 256 bytes, at most 16
-  keepers, an admitted or cast out `key` a P-256 point.
+- it is within bounds: every id, name and key at most 256 bytes, at most
+  16 keepers, an admitted, cast out, vouched or forgotten `key` a P-256
+  point.
 
 A word under a key that is out is taken like any other. What it counts
 for is `resolve`'s and `standing`'s to say, so two brothers that heard a
@@ -308,6 +313,36 @@ the roster held:
 - A plain `{"t":"cast_out"}` on a link is no word: it only says a roster
   is worth asking for, and changes nothing by itself.
 
+## `phones`: which phones are served
+
+Input: every `vouches` and `forgets` word held, the tree, and `standing`.
+Output: the phones every brother serves, each with its id, its key, its
+name, and the members that vouched for it.
+
+1. **Counted vouches.** Of one signer's `vouches`, one per phone key (the
+   lowest word); none of a key the same signer forgot; of the rest, only
+   the 16 naming the lowest keys count. So a thief cannot make every
+   brother hold a thousand phones, and a human that paired and forgot
+   many can still pair another.
+2. A phone is **served** when a counted vouch of its key is signed by a
+   member that is in (neither out nor contested), and no `forgets` of its
+   key is signed by a member that is not out.
+3. A forget wins over every vouch, whatever came first, and is worked out
+   afresh from the words, never stored. A contested signer's forget
+   counts: a forget only ever takes a phone away, and the contested one
+   may be the honest one. A forget by a brother out counts for nothing,
+   so a thief cast out cannot cut the humans' phones off.
+
+So:
+
+- A phone forgotten on any brother is served by none once they hold the
+  word, however many brothers vouched for it.
+- A brother out takes the phones it alone vouched for with it: a stolen
+  PC cannot keep adding phones. A vouch is kept while its signer is out,
+  so a later word that puts it back in brings its phones back too.
+- Pairing a phone again after a forget is a new key pair: a brother never
+  vouches for a key it forgot.
+
 ## `resolve`: whose a session is
 
 Input: the session's creator `origin`, every word held on it, and which
@@ -367,6 +402,12 @@ brothers that ran a copy whose word did not stand.
   than 16,384 words for all of them, dropping whole sessions from the
   highest key down. Which sessions are kept depends only on the words
   held, never on their order.
+- **Bounds per signer on phones.** It keeps the vouches `phones` counts;
+  of the forgets, one per signer's key and phone key (the lowest), every
+  one naming a phone a kept vouch names, and of the rest the 256 naming
+  the lowest keys. A vouch its own signer forgot goes, its forget stays.
+  The same words are kept whatever order they came in, and working it out
+  again from what was kept keeps the same.
 - A creator takes no word on a session it created that it does not hold:
   it knows its own sessions, and one it let go stays gone. Nor does it
   start one it let go afresh: a session let go here is not this
@@ -430,6 +471,9 @@ brothers that ran a copy whose word did not stand.
   linked to the owner. A relay that drops only the frames between the
   owner and this keeper starts no takeover.
 - **Ending** signs `ended` at its number.
+- **Pairing a phone** signs `vouches` of its public key, unless this
+  machine forgot that key before. **Forgetting** one, from any brother,
+  signs `forgets`.
 - **Joining** by a code signs `admits` of the other, and pins the root
   (above). A key the brother joined under before is **retired**, not
   cast out: the human set the machine up anew, so those let in through it
@@ -483,7 +527,8 @@ the five reviews has a scenario of its own.
   second line casts it out as well.
 - **I5, bounded.** No brother can make an honest one hold more than the
   bounds above (sessions per creator, words per creator, words per
-  session, admissions and cast outs per signer, members, tombstones), nor
+  session, admissions, cast outs, vouches and forgets per signer,
+  members, tombstones), nor
   send a frame past 1 MB: rosters go in parts of at most 256 KB, and no
   word is longer than a part.
 - **I6, no honest dead end.** In honest use (many sessions, Warriv, failed
@@ -492,6 +537,12 @@ the five reviews has a scenario of its own.
   tried again to the same brother and lands, a session can always be
   ended, every ended session is pruned in the end, and no ended session
   comes back.
+- **I7, phones.** A phone an honest brother forgot is served by no honest
+  brother that holds the forget, while that brother is in there. A phone
+  vouched for only by brothers that are out is served by none. Two
+  honest brothers that hold the same words serve the same phones. Holds
+  because `phones` is a function of the words, the tree and `standing`,
+  and a forget beats every vouch.
 - **R, recovery.** Once the humans have answered every stolen brother
   (cast it out from brothers of two lines), every honest brother not in
   a stolen one's line is in, holds every other under its own key, links
@@ -547,6 +598,13 @@ the five reviews has a scenario of its own.
   brothers, who join by codes of their own.
 - A machine joined by a code to a thief pins what the thief says is the
   root, and is in the thief's line.
+- A phone forgotten by a brother that is out is still served: a thief
+  cast out cannot cut the humans' phones off, so its forgets count for
+  nothing. A human whose brother was cast out forgets the phone again
+  from a brother that is in.
+- A signer that forgot more than 256 phones nobody vouches for any more
+  may lose its forgets past the lowest 256 keys: a vouch heard again from
+  a brother asleep through all of them would be served again.
 - More than 256 members: the members furthest from the root are not
   held. A thief can fill places as far from the root as its fakes are,
   never closer.

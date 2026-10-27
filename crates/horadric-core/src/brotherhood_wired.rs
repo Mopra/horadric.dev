@@ -241,6 +241,14 @@ struct Truth {
     /// Cast outs by honest humans that were in when they cast: (caster,
     /// cast).
     casts: Vec<(String, String)>,
+    /// Phones honest humans paired: (phone, key).
+    paired: Vec<(String, String)>,
+    /// Phones honest humans forgot: (the key the forget is signed under,
+    /// the phone's key).
+    forgot: Vec<(String, String)>,
+    /// Phones only a thief or its fake vouched for: key to that brother.
+    thief_phones: BTreeMap<String, String>,
+    phones_made: usize,
 }
 
 /// What broke, where.
@@ -1666,6 +1674,72 @@ impl World {
         self.pump();
     }
 
+    /// Machine `i`'s human pairs `count` phones, each vouched for in its
+    /// word: a thief's or a fake's are the thief's phones.
+    pub fn pair_phones(&mut self, i: usize, count: usize) -> Vec<(String, String)> {
+        let (_, s) = self.trust(i);
+        let Some(s) = s else {
+            return Vec::new();
+        };
+        let dir = self.m[i].dir.clone();
+        let mut out = Vec::new();
+        for _ in 0..count {
+            let phone = format!("ph{}", self.truth.phones_made);
+            self.truth.phones_made += 1;
+            let key = crate::brotherhood_sim::keys::key(&phone);
+            if mesh::vouch(&dir, Some(&s), &phone, &key, &phone, clock()) {
+                out.push((phone, key));
+            }
+        }
+        for (_, key) in &out {
+            if self.m[i].role == Role::Honest {
+                continue;
+            }
+            self.truth
+                .thief_phones
+                .insert(key.clone(), self.m[i].id.clone());
+        }
+        if self.m[i].role == Role::Honest {
+            self.truth.paired.extend(out.iter().cloned());
+        }
+        let name = self.m[i].name.clone();
+        self.note(format!("{name} pairs {} phones", out.len()));
+        self.serve(i);
+        self.pump();
+        out
+    }
+
+    /// Machine `i`'s human forgets phone `phone` under `key`, everywhere.
+    pub fn forget_phone(&mut self, i: usize, phone: &str, key: &str) {
+        let (_, s) = self.trust(i);
+        let Some(s) = s else {
+            return;
+        };
+        if !mesh::forget(&self.m[i].dir, Some(&s), phone, key, clock()) {
+            return;
+        }
+        if self.m[i].role == Role::Honest {
+            self.truth.forgot.push((s.key(), key.to_string()));
+        }
+        let name = self.m[i].name.clone();
+        self.note(format!("{name} forgets {phone}"));
+        self.serve(i);
+        self.pump();
+    }
+
+    /// Machine `i`'s human pairs a phone and another honest human forgets
+    /// it before the vouch reaches it.
+    pub fn pair_and_race(&mut self, i: usize, other: usize) {
+        let mut cut = BTreeSet::new();
+        std::mem::swap(&mut cut, &mut self.net.cut);
+        self.net.cut.insert((i, other));
+        let paired = self.pair_phones(i, 1);
+        for (phone, key) in &paired {
+            self.forget_phone(other, phone, key);
+        }
+        self.net.cut = cut;
+    }
+
     // The checks.
 
     fn honest(&self) -> Vec<usize> {
@@ -1949,6 +2023,28 @@ impl World {
                     ));
                 }
             }
+            let mut phones: BTreeMap<(&str, bool), usize> = BTreeMap::new();
+            for w in &held.roster.said {
+                match &w.what {
+                    What::Vouches { .. } => {
+                        *phones.entry((w.under.as_str(), true)).or_default() += 1
+                    }
+                    What::Forgets { .. } => {
+                        *phones.entry((w.under.as_str(), false)).or_default() += 1
+                    }
+                    _ => {}
+                }
+            }
+            let forgets = said::MOST_FORGETS + said::MOST_PHONES * self.m.len();
+            for ((_, vouch), n) in phones {
+                let most = if vouch { said::MOST_PHONES } else { forgets };
+                if n > most {
+                    return Err(self.broken(
+                        "I5",
+                        format!("{} holds {n} phone words of one signer", self.m[i].name),
+                    ));
+                }
+            }
             let mut sessions: BTreeMap<&str, usize> = BTreeMap::new();
             for k in held.roster.sessions.keys() {
                 if let Some(origin) = said::split(k).0 {
@@ -1969,6 +2065,50 @@ impl World {
                     "I5",
                     format!("{} holds {brothers} brothers", self.m[i].name),
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Phones: one an honest human forgot is served by no honest brother
+    /// that holds the forget while its signer is in there; one only a thief
+    /// or its fake vouched for is served by no honest brother that holds
+    /// that brother out.
+    fn phones_hold(&self) -> Result<(), Broken> {
+        for h in self.honest() {
+            let held = mesh::load_held(&self.m[h].dir);
+            let served: BTreeSet<String> = mesh::phones(&held).into_iter().map(|p| p.key).collect();
+            let barred =
+                |k: &str| held.roster.outcast.contains(k) || held.roster.contested.contains(k);
+            for (fk, pk) in &self.truth.forgot {
+                let holds = held.roster.said.iter().any(|w| {
+                    w.under == *fk && matches!(&w.what, What::Forgets { key, .. } if key == pk)
+                });
+                if holds && !barred(fk) && served.contains(pk) {
+                    let why = self.describe(h);
+                    return Err(self.broken(
+                        "phones",
+                        format!(
+                            "{} serves a phone an honest human forgot: {why}",
+                            self.m[h].name
+                        ),
+                    ));
+                }
+            }
+            for (pk, by) in &self.truth.thief_phones {
+                let Some(vk) = self.real_key(by) else {
+                    continue;
+                };
+                if barred(vk) && served.contains(pk) {
+                    let why = self.describe(h);
+                    return Err(self.broken(
+                        "phones",
+                        format!(
+                            "{} serves a phone only {by}, out, vouched for: {why}",
+                            self.m[h].name
+                        ),
+                    ));
+                }
             }
         }
         Ok(())
@@ -2242,6 +2382,7 @@ impl World {
         self.identity()?;
         self.bounded()?;
         self.stays_ended()?;
+        self.phones_hold()?;
         Ok(())
     }
 
@@ -2435,7 +2576,22 @@ pub fn run(seed: u64, steps: usize) -> Result<(), Broken> {
                     .then(|| w.rng.pick(&bad).copied())
                     .flatten();
                 if let Some(t) = actor {
-                    match w.rng.below(8) {
+                    match w.rng.below(9) {
+                        8 => {
+                            // A thief vouches for phones of its own, past
+                            // what any signer counts for, or forgets an
+                            // honest one, as any brother may.
+                            if w.rng.chance(60) {
+                                let many = if w.rng.chance(40) {
+                                    said::MOST_PHONES + 6
+                                } else {
+                                    1
+                                };
+                                w.pair_phones(t, many);
+                            } else if let Some((p, k)) = w.rng.pick(&w.truth.paired).cloned() {
+                                w.forget_phone(t, &p, &k);
+                            }
+                        }
                         0 => {
                             let v = w.rng.pick(&honest).map(|&v| w.m[v].id.clone());
                             if let Some(v) = v {
@@ -2458,6 +2614,23 @@ pub fn run(seed: u64, steps: usize) -> Result<(), Broken> {
                             }
                         }
                     }
+                }
+            }
+            80..=83 => {
+                let other = honest
+                    .iter()
+                    .copied()
+                    .find(|&o| o != i && w.m[o].b.is_some());
+                match other {
+                    Some(o) if w.rng.chance(30) => w.pair_and_race(i, o),
+                    _ => {
+                        w.pair_phones(i, 1);
+                    }
+                }
+            }
+            84..=86 => {
+                if let Some((p, k)) = w.rng.pick(&w.truth.paired).cloned() {
+                    w.forget_phone(i, &p, &k);
                 }
             }
             _ => {}
@@ -2787,6 +2960,72 @@ mod tests {
         mesh::own(&w.m[0].dir, s.as_ref(), &t, &sid, clock());
         w.quiet();
         passes(w.check_quiet());
+    }
+
+    fn served(w: &World, i: usize) -> BTreeSet<String> {
+        mesh::phones(&mesh::load_held(&w.m[i].dir))
+            .into_iter()
+            .map(|p| p.key)
+            .collect()
+    }
+
+    /// One portal: a phone paired with one brother is served by every
+    /// brother, and forgotten on another it is served by none, even when
+    /// the forget raced the vouch.
+    #[test]
+    fn a_phone_paired_once_is_served_everywhere_until_forgotten_anywhere() {
+        let mut w = brotherhood("phones", 14, 3);
+        let (phone, key) = w.pair_phones(0, 1).remove(0);
+        w.quiet();
+        for i in 0..3 {
+            assert!(
+                served(&w, i).contains(&key),
+                "{} does not serve it",
+                w.m[i].name
+            );
+        }
+        w.forget_phone(1, &phone, &key);
+        w.quiet();
+        passes(w.check_quiet());
+        for i in 0..3 {
+            assert!(served(&w, i).is_empty(), "{} still serves it", w.m[i].name);
+        }
+        w.pair_and_race(2, 0);
+        w.quiet();
+        passes(w.check_quiet());
+        for i in 0..3 {
+            assert!(
+                served(&w, i).is_empty(),
+                "{} serves the raced one",
+                w.m[i].name
+            );
+        }
+    }
+
+    /// A thief vouches for more phones than any signer counts for: every
+    /// brother holds a few, and none serves any once it is cast out.
+    #[test]
+    fn a_thiefs_phones_go_with_it() {
+        let mut w = brotherhood("thief-phones", 15, 4);
+        let honest = w.pair_phones(0, 1);
+        w.steal(3);
+        let theirs = w.pair_phones(3, said::MOST_PHONES + 8);
+        w.quiet();
+        passes(w.check_quiet());
+        assert_eq!(served(&w, 1).len(), said::MOST_PHONES + 1);
+        w.cast(0, "a3");
+        w.cast(1, "a3");
+        w.quiet();
+        passes(w.check_quiet());
+        for i in 0..3 {
+            let s = served(&w, i);
+            assert!(
+                theirs.iter().all(|(_, k)| !s.contains(k)),
+                "{}",
+                w.m[i].name
+            );
+            assert!(s.contains(&honest[0].1), "{}", w.m[i].name);
+        }
     }
 
     #[test]

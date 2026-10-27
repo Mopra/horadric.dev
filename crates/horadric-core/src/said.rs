@@ -1,9 +1,9 @@
 //! A brother's word, signed: what it says about the brotherhood that
-//! others pass on, and the two pure functions every brother works the
-//! brotherhood out with: [`resolve`], whose a session is, and
-//! [`standing`], who is out. Both depend on the words held and nothing
-//! else, so two brothers that hold the same words agree whatever order
-//! they came in. docs/plan/brotherhood-ownership.md is the specification;
+//! others pass on, and the pure functions every brother works the
+//! brotherhood out with: [`resolve`], whose a session is, [`standing`],
+//! who is out, and [`phones`], which phones are served. Each depends on
+//! the words held and nothing else, so two brothers that hold the same
+//! words agree whatever order they came in. docs/plan/brotherhood-ownership.md is the specification;
 //! docs/PORTAL.md, "Signed word", the wire format.
 //!
 //! Every brother signs with its long term key, the ECDH pair it joined
@@ -51,6 +51,15 @@ pub const MOST_CAST: usize = 32;
 
 /// The most admissions one signer's key counts for, the lowest keys.
 pub const MOST_ADMITS: usize = 32;
+
+/// The most phones one signer's key vouches for at once, the lowest keys
+/// of those it has not forgotten itself: past any human's phones, and so a
+/// thief cannot make every brother hold a thousand.
+pub const MOST_PHONES: usize = 16;
+
+/// The most forgets one signer's key is held for of phones no counted
+/// vouch names, the lowest: those of phones vouched for all count.
+pub const MOST_FORGETS: usize = 256;
 
 /// One signed statement.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -138,6 +147,17 @@ pub enum What {
         #[serde(default)]
         name: String,
     },
+    /// `by`'s human paired phone `phone`, called `name`, whose public key
+    /// is `key`: every brother that takes the word serves it.
+    Vouches {
+        phone: String,
+        key: String,
+        #[serde(default)]
+        name: String,
+    },
+    /// `by`'s human, or the phone itself through `by`, forgot phone
+    /// `phone` under `key`, for good.
+    Forgets { phone: String, key: String },
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -154,11 +174,13 @@ impl What {
             What::Ended { .. } => "ended",
             What::CastOut { .. } => "cast_out",
             What::Admits { .. } => "admits",
+            What::Vouches { .. } => "vouches",
+            What::Forgets { .. } => "forgets",
         }
     }
 
-    /// The session it speaks of, its creator and its id, None for a cast
-    /// out or an admission.
+    /// The session it speaks of, its creator and its id, None for a word
+    /// on the brotherhood or its phones.
     pub fn session(&self) -> Option<(&str, &str)> {
         match self {
             What::Owns {
@@ -174,7 +196,10 @@ impl What {
                 origin, session, ..
             }
             | What::Ended { origin, session } => Some((origin, session)),
-            What::CastOut { .. } | What::Admits { .. } => None,
+            What::CastOut { .. }
+            | What::Admits { .. }
+            | What::Vouches { .. }
+            | What::Forgets { .. } => None,
         }
     }
 
@@ -257,6 +282,15 @@ pub fn signed_bytes(s: &Word) -> Vec<u8> {
             led(&mut out, key.as_bytes());
             led(&mut out, name.as_bytes());
         }
+        What::Vouches { phone, key, name } => {
+            led(&mut out, phone.as_bytes());
+            led(&mut out, key.as_bytes());
+            led(&mut out, name.as_bytes());
+        }
+        What::Forgets { phone, key } => {
+            led(&mut out, phone.as_bytes());
+            led(&mut out, key.as_bytes());
+        }
     }
     out
 }
@@ -329,8 +363,9 @@ pub fn is_point(key: &str) -> bool {
 }
 
 /// Whether word `s` is within bounds: no id, key or signature past
-/// [`LONGEST`], no more than [`MOST_KEEPERS`] keepers, and a cast out or
-/// an admission of a real key. So a word never swells a roster past what a link carries.
+/// [`LONGEST`], no more than [`MOST_KEEPERS`] keepers, and a cast out, an
+/// admission, a vouch or a forget of a real key. So a word never swells a
+/// roster past what a link carries.
 pub fn word_fits(s: &Word) -> bool {
     let short = |x: &str| x.len() <= LONGEST;
     let keepers = |k: &[String]| k.len() <= MOST_KEEPERS && k.iter().all(|x| short(x));
@@ -346,6 +381,8 @@ pub fn word_fits(s: &Word) -> bool {
         What::Ended { .. } => true,
         What::CastOut { id, key, .. } => short(id) && is_point(key),
         What::Admits { id, key, name } => short(id) && short(name) && is_point(key),
+        What::Vouches { phone, key, name } => short(phone) && short(name) && is_point(key),
+        What::Forgets { phone, key } => short(phone) && is_point(key),
     };
     base && session && own
 }
@@ -716,6 +753,99 @@ fn contested_standing<'a>(raw: &[(&'a str, &'a str)], tree: &'a Tree) -> Standin
         }
         out = now_out;
     }
+}
+
+/// A phone a brother serves: its id, its public key and name as the
+/// vouch with the lowest signer's key says them, and every member that is
+/// in and vouched for it, key to id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Phone {
+    pub phone: String,
+    pub key: String,
+    pub name: String,
+    pub by: BTreeMap<String, String>,
+}
+
+/// Of every `vouches` in `words` (words of other kinds are skipped but
+/// for the forgets), those that count for their signer's key: one per
+/// signer's key and phone key (the lowest word), none of a phone key the
+/// same signer forgot, and of the rest the [`MOST_PHONES`] lowest phone
+/// keys, in order of signer's key and phone key. A function of the words
+/// alone, whose own forgets free a place, so a human that paired and
+/// forgot many phones can still pair another.
+pub fn counted_vouches<'a>(words: impl IntoIterator<Item = &'a Word>) -> Vec<&'a Word> {
+    let mut vouched: BTreeMap<(&str, &str), &Word> = BTreeMap::new();
+    let mut forgot: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for w in words {
+        match &w.what {
+            What::Vouches { key, .. } => {
+                let at = (w.under.as_str(), key.as_str());
+                if vouched.get(&at).is_none_or(|had| w < *had) {
+                    vouched.insert(at, w);
+                }
+            }
+            What::Forgets { key, .. } => {
+                forgot.insert((w.under.as_str(), key.as_str()));
+            }
+            _ => {}
+        }
+    }
+    let mut per: BTreeMap<&str, usize> = BTreeMap::new();
+    vouched
+        .into_iter()
+        .filter(|(at, _)| !forgot.contains(at))
+        .filter(|((under, _), _)| {
+            let c = per.entry(under).or_default();
+            *c += 1;
+            *c <= MOST_PHONES
+        })
+        .map(|(_, w)| w)
+        .collect()
+}
+
+/// The phones served, from every vouch and forget in `words`, the tree of
+/// members `tree` and who is out `standing`: a function of the three
+/// alone, so the order words came in never matters. See the spec,
+/// "Phones".
+///
+/// A phone is served when a vouch of its key counts ([`counted_vouches`])
+/// and is signed by a member that is in, and no forget of its key is
+/// signed by a member that is not out. A forget wins over every vouch,
+/// whichever came first; a contested signer's forget counts too, since a
+/// forget only ever takes a phone away and the contested one may be the
+/// honest one.
+pub fn phones<'a>(
+    words: impl IntoIterator<Item = &'a Word>,
+    tree: &Tree,
+    standing: &Standing,
+) -> Vec<Phone> {
+    let words: Vec<&Word> = words.into_iter().collect();
+    let forgotten: BTreeSet<&str> = words
+        .iter()
+        .filter_map(|w| match &w.what {
+            What::Forgets { key, .. } if tree.has(&w.under) && !standing.out.contains(&w.under) => {
+                Some(key.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    let mut out: BTreeMap<&str, Phone> = BTreeMap::new();
+    for w in counted_vouches(words.iter().copied()) {
+        let What::Vouches { phone, key, name } = &w.what else {
+            continue;
+        };
+        if !tree.has(&w.under) || standing.bars(&w.under) || forgotten.contains(key.as_str()) {
+            continue;
+        }
+        let p = out.entry(key).or_insert_with(|| Phone {
+            phone: phone.clone(),
+            key: key.clone(),
+            name: name.clone(),
+            by: BTreeMap::new(),
+        });
+        p.by.insert(w.under.clone(), w.by.clone());
+    }
+    out.into_values().collect()
 }
 
 /// Whose a session is, worked out from the words held on it.
@@ -1353,6 +1483,25 @@ mod tests {
                     name: String::new(),
                 },
             )),
+            signed_bytes(&word(
+                "x",
+                1,
+                7,
+                What::Vouches {
+                    phone: "lap".into(),
+                    key: "s".into(),
+                    name: String::new(),
+                },
+            )),
+            signed_bytes(&word(
+                "x",
+                1,
+                7,
+                What::Forgets {
+                    phone: "lap".into(),
+                    key: "s".into(),
+                },
+            )),
         ];
         for (i, x) in all.iter().enumerate() {
             for y in &all[i + 1..] {
@@ -1395,6 +1544,98 @@ mod tests {
             name: String::new(),
         };
         assert!(!word_fits(&admits_none));
+        let c = Fake::new();
+        let point = b64url(&public_of(&c.pair().unwrap()));
+        let vouch = |phone: String, key: String, name: String| {
+            word("lap", 0, 1, What::Vouches { phone, key, name })
+        };
+        let forget = |phone: String, key: String| word("lap", 0, 1, What::Forgets { phone, key });
+        let long = "x".repeat(LONGEST + 1);
+        assert!(word_fits(&vouch("p".into(), point.clone(), "Pixel".into())));
+        assert!(word_fits(&forget("p".into(), point.clone())));
+        assert!(!word_fits(&vouch("p".into(), "nope".into(), String::new())));
+        assert!(!word_fits(&vouch(
+            long.clone(),
+            point.clone(),
+            String::new()
+        )));
+        assert!(!word_fits(&vouch("p".into(), point.clone(), long.clone())));
+        assert!(!word_fits(&forget("p".into(), "nope".into())));
+        assert!(!word_fits(&forget(long, point)));
+    }
+
+    #[test]
+    fn a_vouch_and_a_forget_are_signed_whole() {
+        let c = Fake::new();
+        let (a, p) = (c.pair().unwrap(), c.pair().unwrap());
+        let signer = Signer {
+            me: "lap",
+            private: a,
+            crypto: &c,
+        };
+        let key = b64url(&public_of(&p));
+        let v = signer
+            .sign(
+                0,
+                9,
+                What::Vouches {
+                    phone: "ph1".into(),
+                    key: key.clone(),
+                    name: "Pixel".into(),
+                },
+            )
+            .unwrap();
+        let f = signer
+            .sign(
+                0,
+                9,
+                What::Forgets {
+                    phone: "ph1".into(),
+                    key: key.clone(),
+                },
+            )
+            .unwrap();
+        for w in [&v, &f] {
+            assert!(verifies(&c, w));
+            assert!(word_fits(w));
+            let text = serde_json::to_string(w).unwrap();
+            assert_eq!(serde_json::from_str::<Word>(&text).unwrap(), *w, "{text}");
+        }
+        assert!(serde_json::to_string(&v)
+            .unwrap()
+            .contains(r#""kind":"vouches""#));
+        assert!(serde_json::to_string(&f)
+            .unwrap()
+            .contains(r#""kind":"forgets""#));
+        let bent = [
+            What::Vouches {
+                phone: "ph2".into(),
+                key: key.clone(),
+                name: "Pixel".into(),
+            },
+            What::Vouches {
+                phone: "ph1".into(),
+                key: b64url(&public_of(&a)),
+                name: "Pixel".into(),
+            },
+            What::Vouches {
+                phone: "ph1".into(),
+                key: key.clone(),
+                name: "Thief".into(),
+            },
+        ];
+        for what in bent {
+            let w = Word { what, ..v.clone() };
+            assert!(!verifies(&c, &w), "{w:?}");
+        }
+        let w = Word {
+            what: What::Forgets {
+                phone: "ph2".into(),
+                key,
+            },
+            ..f.clone()
+        };
+        assert!(!verifies(&c, &w));
     }
 
     #[test]
@@ -2004,5 +2245,142 @@ mod tests {
         let t = tree(&["pc1", "pc2"], &[("pc1", "node"), ("pc2", "node")]);
         let out = (ks(&["pc1"]), ks(&[]));
         assert_eq!(standing_in(&[cast("node", "pc1")], &t), out);
+    }
+
+    fn vouch(by: &str, phone: &str) -> Word {
+        let what = What::Vouches {
+            phone: phone.into(),
+            key: format!("p{phone}"),
+            name: format!("{phone} of {by}"),
+        };
+        let mut w = word(by, 0, 1, what);
+        w.sig = format!("{by}-vouches-{phone}");
+        w
+    }
+
+    fn forget(by: &str, phone: &str) -> Word {
+        let what = What::Forgets {
+            phone: phone.into(),
+            key: format!("p{phone}"),
+        };
+        let mut w = word(by, 0, 1, what);
+        w.sig = format!("{by}-forgets-{phone}");
+        w
+    }
+
+    fn standing_with(out: &[&str], contested: &[&str]) -> Standing {
+        Standing {
+            out: ks(out).into_iter().collect(),
+            contested: ks(contested).into_iter().collect(),
+        }
+    }
+
+    /// The phone ids served, with who vouched by id, from `words` in
+    /// several orders.
+    fn served(words: &[Word], t: &Tree, s: &Standing) -> Vec<(String, Vec<String>)> {
+        let mut answers = BTreeSet::new();
+        let mut order: Vec<&Word> = words.iter().collect();
+        for _ in 0..words.len().max(1) {
+            let got: Vec<(String, Vec<String>)> = phones(order.iter().copied(), t, s)
+                .into_iter()
+                .map(|p| (p.phone, p.by.into_values().collect()))
+                .collect();
+            answers.insert(got);
+            order.rotate_left(1);
+        }
+        order.reverse();
+        answers.insert(
+            phones(order.iter().copied(), t, s)
+                .into_iter()
+                .map(|p| (p.phone, p.by.into_values().collect()))
+                .collect(),
+        );
+        assert_eq!(answers.len(), 1, "order changed it: {answers:?}");
+        answers.into_iter().next().unwrap()
+    }
+
+    fn ph(phone: &str, by: &[&str]) -> (String, Vec<String>) {
+        (phone.into(), by.iter().map(|b| b.to_string()).collect())
+    }
+
+    #[test]
+    fn a_phone_vouched_for_by_a_member_in_is_served_by_every_brother() {
+        let t = tree(&["lap", "desk"], &[("lap", "vps")]);
+        let none = Standing::default();
+        let w = [vouch("lap", "a"), vouch("desk", "a"), vouch("vps", "b")];
+        assert_eq!(
+            served(&w, &t, &none),
+            vec![ph("a", &["desk", "lap"]), ph("b", &["vps"])]
+        );
+        let p = &phones(&w, &t, &none)[0];
+        assert_eq!((p.key.as_str(), p.name.as_str()), ("pa", "a of desk"));
+        // A key no admission reaches vouches for nothing.
+        assert!(served(&[vouch("nas", "c")], &t, &none).is_empty());
+    }
+
+    #[test]
+    fn a_phone_goes_with_the_brother_that_alone_vouched_for_it() {
+        let t = tree(&["lap", "desk"], &[("lap", "vps")]);
+        let w = [vouch("lap", "a"), vouch("desk", "a"), vouch("vps", "b")];
+        // Vps out takes its phone with it; Lap out leaves Desk's word.
+        let s = standing_with(&["vps"], &[]);
+        assert_eq!(served(&w, &t, &s), vec![ph("a", &["desk", "lap"])]);
+        let s = standing_with(&["lap", "vps"], &[]);
+        assert_eq!(served(&w, &t, &s), vec![ph("a", &["desk"])]);
+        // Contested is no more in than out.
+        let s = standing_with(&[], &["desk", "vps"]);
+        assert_eq!(served(&w, &t, &s), vec![ph("a", &["lap"])]);
+    }
+
+    #[test]
+    fn a_forget_wins_over_every_vouch_whatever_came_first() {
+        let t = tree(&["lap", "desk"], &[("lap", "vps")]);
+        let none = Standing::default();
+        let w = [
+            vouch("lap", "a"),
+            vouch("desk", "a"),
+            vouch("lap", "b"),
+            forget("vps", "a"),
+        ];
+        assert_eq!(served(&w, &t, &none), vec![ph("b", &["lap"])]);
+        // A forget by a brother out counts for nothing; one contested still
+        // takes the phone away.
+        assert_eq!(
+            served(&w, &t, &standing_with(&["vps"], &[])),
+            vec![ph("a", &["desk", "lap"]), ph("b", &["lap"])]
+        );
+        assert_eq!(
+            served(&w, &t, &standing_with(&[], &["vps"])),
+            vec![ph("b", &["lap"])]
+        );
+        // Nor does one by a key no admission reaches.
+        let w = [vouch("lap", "a"), forget("nas", "a")];
+        assert_eq!(served(&w, &t, &none), vec![ph("a", &["lap"])]);
+        // Vouching again after a forget brings nothing back.
+        let mut again = vouch("lap", "a");
+        again.at = 99;
+        again.sig = "lap-vouches-a-again".into();
+        let w = [vouch("lap", "a"), forget("lap", "a"), again];
+        assert!(served(&w, &t, &none).is_empty());
+    }
+
+    #[test]
+    fn a_signer_vouches_for_so_many_phones_and_its_own_forgets_free_a_place() {
+        let t = tree(&["lap", "desk"], &[]);
+        let none = Standing::default();
+        let ids: Vec<String> = (0..MOST_PHONES + 4).map(|i| format!("{i:02}")).collect();
+        let mut w: Vec<Word> = ids.iter().map(|i| vouch("lap", i)).collect();
+        let got = served(&w, &t, &none);
+        assert_eq!(got.len(), MOST_PHONES);
+        assert_eq!(got.last().unwrap().0, ids[MOST_PHONES - 1]);
+        // The thief's flood takes no place of another signer's.
+        w.push(vouch("desk", "zz"));
+        assert_eq!(served(&w, &t, &none).len(), MOST_PHONES + 1);
+        // Lap forgets its lowest: the next one counts.
+        w.push(forget("lap", &ids[0]));
+        let got = served(&w, &t, &none);
+        assert!(!got.iter().any(|(p, _)| *p == ids[0]));
+        assert!(got.iter().any(|(p, _)| *p == ids[MOST_PHONES]));
+        assert_eq!(counted_vouches(&w).len(), MOST_PHONES + 1);
     }
 }

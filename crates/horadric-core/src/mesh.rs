@@ -25,8 +25,12 @@
 //! creator, [`MOST_SESSIONS`] live and [`MOST_ENDED`] ended sessions and
 //! [`MOST_WORDS`] words, chosen by the words alone; per session, what
 //! `resolve` keeps; per signer, its cast outs of members and
-//! [`crate::said::MOST_CAST`] others, and [`crate::said::MOST_ADMITS`]
-//! admissions.
+//! [`crate::said::MOST_CAST`] others, [`crate::said::MOST_ADMITS`]
+//! admissions, the vouches [`crate::said::counted_vouches`] counts, its
+//! forgets of phones vouched for and [`crate::said::MOST_FORGETS`] others.
+//!
+//! Which phones are served comes from every vouch and forget held by
+//! [`crate::said::phones`] ([`phones`] on what is held), never stored.
 //!
 //! What this machine says of itself is not kept here: its own entry is put
 //! together afresh each time it is served, from the files that hold its
@@ -519,6 +523,7 @@ fn rework(h: &mut Held, me: &str, touched: Option<BTreeSet<String>>) {
     let admits = counted_admits(&loose);
     let tree = crate::lineage::Tree::of(&h.root, &admits);
     let casts = counted_casts(&loose, &tree);
+    let phones = counted_phone_words(&loose);
     let standing = said::standing(casts.iter(), &tree);
     let changed_standing = apply_standing(h, &standing);
     let mut by = index(&h.roster.said);
@@ -570,12 +575,67 @@ fn rework(h: &mut Held, me: &str, touched: Option<BTreeSet<String>>) {
     bound(&mut by, &mut h.roster, me, &mut elsewhere);
     h.elsewhere = elsewhere;
     // Held in session order, so a roster's parts carry a chain whole and
-    // in order, after who is in and who is out.
+    // in order, after who is in, who is out and which phones are vouched.
     h.roster.said = admits
         .into_iter()
         .chain(casts)
+        .chain(phones)
         .chain(by.into_values().flatten())
         .collect();
+}
+
+/// The phones served as `h` holds the words ([`crate::said::phones`]).
+pub fn phones(h: &Held) -> Vec<said::Phone> {
+    let standing = Standing {
+        out: h.roster.outcast.clone(),
+        contested: h.roster.contested.clone(),
+    };
+    let loose = h.roster.said.iter().filter(|w| w.what.session().is_none());
+    said::phones(loose, &tree(h), &standing)
+}
+
+/// Of every vouch and forget held, those that are kept: the vouches that
+/// count ([`crate::said::counted_vouches`]); of the forgets, one per
+/// signer's key and phone key (the lowest), every one naming a phone one
+/// of those vouches names, and of the rest at most
+/// [`crate::said::MOST_FORGETS`] per signer's key (the lowest). A vouch
+/// its own signer forgot goes, and its forget among the rest stays. The
+/// same set whatever order they came in, and again the same when worked
+/// out from what it kept.
+fn counted_phone_words(words: &BTreeSet<Word>) -> Vec<Word> {
+    let vouches = said::counted_vouches(words);
+    let vouched: BTreeSet<&str> = vouches
+        .iter()
+        .filter_map(|w| match &w.what {
+            What::Vouches { key, .. } => Some(key.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut by: BTreeMap<(&str, &str), &Word> = BTreeMap::new();
+    for w in words {
+        let What::Forgets { key, .. } = &w.what else {
+            continue;
+        };
+        let at = (w.under.as_str(), key.as_str());
+        if by.get(&at).is_none_or(|had| w < *had) {
+            by.insert(at, w);
+        }
+    }
+    let mut per: BTreeMap<&str, usize> = BTreeMap::new();
+    let forgets = by.into_iter().filter(|((under, key), _)| {
+        if vouched.contains(key) {
+            return true;
+        }
+        let c = per.entry(under).or_default();
+        *c += 1;
+        *c <= said::MOST_FORGETS
+    });
+    vouches
+        .iter()
+        .copied()
+        .chain(forgets.map(|(_, w)| w))
+        .cloned()
+        .collect()
 }
 
 /// The tree of members as `h` holds it.
@@ -1961,6 +2021,101 @@ pub fn admit_in(
     }
 }
 
+/// This machine's human paired phone `phone`, called `name`, whose public
+/// key is `key`: signed, so every brother that takes the word serves it.
+/// False when there is no key pair to sign with, `key` is no P-256 point,
+/// or this machine forgot that key before: a phone paired again after a
+/// forget comes with a new key pair.
+pub fn vouch(
+    dir: &Path,
+    signer: Option<&Signer>,
+    phone: &str,
+    key: &str,
+    name: &str,
+    now: u64,
+) -> bool {
+    update_held(dir, |h| vouch_in(h, signer, phone, key, name, now))
+}
+
+/// [`vouch`] on what is held.
+pub fn vouch_in(
+    h: &mut Held,
+    signer: Option<&Signer>,
+    phone: &str,
+    key: &str,
+    name: &str,
+    now: u64,
+) -> bool {
+    let Some(signer) = signer else {
+        return false;
+    };
+    let mine = signer.key();
+    let said_of = |vouches: bool| {
+        h.roster.said.iter().any(|w| {
+            w.under == mine
+                && match &w.what {
+                    What::Vouches { key: k, .. } => vouches && k == key,
+                    What::Forgets { key: k, .. } => !vouches && k == key,
+                    _ => false,
+                }
+        })
+    };
+    if said_of(false) {
+        return false;
+    }
+    if said_of(true) {
+        return true;
+    }
+    let what = What::Vouches {
+        phone: phone.to_string(),
+        key: key.to_string(),
+        name: name.to_string(),
+    };
+    match signer.sign(0, now, what).filter(said::word_fits) {
+        Some(w) => {
+            h.roster.said.push(w);
+            rework(h, signer.me, None);
+            true
+        }
+        None => false,
+    }
+}
+
+/// This machine's human, or the phone itself, forgot phone `phone` under
+/// `key`, for good: signed, so every brother that takes the word stops
+/// serving it, whoever vouched for it. False when there is no key pair to
+/// sign with or `key` is no P-256 point.
+pub fn forget(dir: &Path, signer: Option<&Signer>, phone: &str, key: &str, now: u64) -> bool {
+    update_held(dir, |h| forget_in(h, signer, phone, key, now))
+}
+
+/// [`forget`] on what is held.
+pub fn forget_in(h: &mut Held, signer: Option<&Signer>, phone: &str, key: &str, now: u64) -> bool {
+    let Some(signer) = signer else {
+        return false;
+    };
+    let mine = signer.key();
+    let known =
+        h.roster.said.iter().any(|w| {
+            w.under == mine && matches!(&w.what, What::Forgets { key: k, .. } if k == key)
+        });
+    if known {
+        return true;
+    }
+    let what = What::Forgets {
+        phone: phone.to_string(),
+        key: key.to_string(),
+    };
+    match signer.sign(0, now, what).filter(said::word_fits) {
+        Some(w) => {
+            h.roster.said.push(w);
+            rework(h, signer.me, None);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Signs again what this machine's human did that words carry, where its
 /// word is not held: each cast out (an upgrade starts the words anew), and
 /// an admission of each brother it let in by a code and still holds under
@@ -3242,5 +3397,148 @@ mod tests {
         first_root(&dir, "lap", &key("lap"), &key("nas"), true);
         assert_eq!(load_held(&dir).root, [key("desk"), key("vps")].into());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn vouch_w(by: &'static str, phone: &str) -> Word {
+        let what = What::Vouches {
+            phone: phone.into(),
+            key: key(phone),
+            name: phone.into(),
+        };
+        word(by, 0, 1, what)
+    }
+
+    fn forget_w(by: &'static str, phone: &str) -> Word {
+        let what = What::Forgets {
+            phone: phone.into(),
+            key: key(phone),
+        };
+        word(by, 0, 1, what)
+    }
+
+    fn served(h: &Held) -> Vec<String> {
+        phones(h).into_iter().map(|p| p.phone).collect()
+    }
+
+    #[test]
+    fn a_phone_paired_here_is_served_by_every_brother_until_one_forgets_it() {
+        let mut lap = fresh();
+        let s = signer("lap");
+        assert!(vouch_in(
+            &mut lap,
+            Some(&s),
+            "pixel",
+            &key("pixel"),
+            "Pixel",
+            1
+        ));
+        assert!(vouch_in(
+            &mut lap,
+            Some(&s),
+            "pixel",
+            &key("pixel"),
+            "Pixel",
+            2
+        ));
+        assert!(!vouch_in(&mut lap, Some(&s), "bad", "nope", "", 2));
+        assert!(!vouch_in(&mut lap, None, "x", &key("x"), "", 2));
+        assert_eq!(served(&lap), ids(&["pixel"]));
+        let p = &phones(&lap)[0];
+        assert_eq!(p.by.get(&key("lap")).map(String::as_str), Some("lap"));
+        let vouches = |h: &Held| {
+            h.roster
+                .said
+                .iter()
+                .filter(|w| matches!(w.what, What::Vouches { .. }))
+                .count()
+        };
+        assert_eq!(vouches(&lap), 1);
+        // Desk hears it, and serves the phone too.
+        let mut desk = fresh();
+        take_in_words(&mut desk, &lap.roster.said.clone(), &trust("desk"));
+        assert_eq!(served(&desk), ids(&["pixel"]));
+        // Desk's human forgets it: gone on Desk, and on Lap once it hears.
+        assert!(forget_in(
+            &mut desk,
+            Some(&signer("desk")),
+            "pixel",
+            &key("pixel"),
+            3
+        ));
+        assert!(served(&desk).is_empty());
+        take_in_words(&mut lap, &desk.roster.said.clone(), &trust("lap"));
+        assert!(served(&lap).is_empty());
+        // Lap never vouches for a key it forgot.
+        assert!(forget_in(&mut lap, Some(&s), "pixel", &key("pixel"), 4));
+        assert!(!vouch_in(
+            &mut lap,
+            Some(&s),
+            "pixel",
+            &key("pixel"),
+            "Pixel",
+            5
+        ));
+    }
+
+    #[test]
+    fn a_phone_vouched_for_by_a_brother_out_goes_with_it() {
+        let mut h = fresh();
+        let t = trust("lap");
+        take_in_words(&mut h, &[vouch_w("vps", "p1"), vouch_w("desk", "p2")], &t);
+        assert_eq!(served(&h), ids(&["p1", "p2"]));
+        take_in_words(&mut h, &[cast_key("lap", "vps")], &t);
+        assert_eq!(served(&h), ids(&["p2"]));
+        // The vouch is still held, so a later word that puts it back in
+        // brings its phone back with it.
+        assert!(h
+            .roster
+            .said
+            .iter()
+            .any(|w| w.under == key("vps") && matches!(w.what, What::Vouches { .. })));
+    }
+
+    #[test]
+    fn a_signer_makes_every_brother_hold_so_many_phones_whatever_order() {
+        let t = trust("lap");
+        let mut words: Vec<Word> = (0..said::MOST_PHONES + 8)
+            .map(|i| vouch_w("vps", &format!("v{i:02}")))
+            .collect();
+        words.extend((0..said::MOST_FORGETS + 8).map(|i| forget_w("vps", &format!("f{i:03}"))));
+        // Desk forgets one of the phones Vps vouched for, past any bound.
+        let named = said::counted_vouches(&words)
+            .last()
+            .and_then(|w| match &w.what {
+                What::Vouches { phone, .. } => Some(phone.clone()),
+                _ => None,
+            })
+            .unwrap();
+        words.push(forget_w("desk", &named));
+        let mut once = fresh();
+        take_in_words(&mut once, &words, &t);
+        let mut piece = fresh();
+        let mut rev = words.clone();
+        rev.reverse();
+        for chunk in rev.chunks(7) {
+            take_in_words(&mut piece, chunk, &t);
+        }
+        let set = |h: &Held| h.roster.said.iter().cloned().collect::<BTreeSet<Word>>();
+        assert_eq!(set(&once), set(&piece));
+        let count = |h: &Held, f: &dyn Fn(&What) -> bool| {
+            h.roster.said.iter().filter(|w| f(&w.what)).count()
+        };
+        assert_eq!(
+            count(&once, &|w| matches!(w, What::Vouches { .. })),
+            said::MOST_PHONES
+        );
+        assert_eq!(
+            count(&once, &|w| matches!(w, What::Forgets { .. })),
+            said::MOST_FORGETS + 1
+        );
+        assert_eq!(served(&once).len(), said::MOST_PHONES - 1);
+        assert!(!served(&once).contains(&named));
+        // Worked out again from what it kept, it keeps the same.
+        let mut again = once.clone();
+        rework(&mut again, "lap", None);
+        assert_eq!(set(&again), set(&once));
     }
 }

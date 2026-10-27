@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::brotherhood::Roster;
-use crate::said::Word;
+use crate::said::{What, Word};
 
 /// A deterministic generator: splitmix64.
 pub struct Rng(u64);
@@ -98,6 +98,12 @@ pub trait Core: Sized {
     fn prune(&mut self, now: u64);
     /// Whether it lets brother `id` act on it.
     fn controls(&self, id: &str) -> bool;
+    /// Its human pairs phone `phone`, whose public key is `key`.
+    fn vouch(&mut self, phone: &str, key: &str, now: u64);
+    /// Its human forgets phone `phone`, whose public key is `key`.
+    fn forget(&mut self, phone: &str, key: &str, now: u64);
+    /// The keys of the phones it serves.
+    fn served(&self) -> BTreeSet<String>;
 
     // What a thief holding this brother's key can sign.
 
@@ -108,6 +114,8 @@ pub trait Core: Sized {
     fn forge_flood(&self, first: usize, count: usize) -> Vec<Word>;
     /// A cast out of `id`.
     fn forge_cast(&self, id: &str, now: u64) -> Option<Word>;
+    /// A vouch for phone `phone` under `key`, or a forget of it.
+    fn forge_phone(&self, phone: &str, key: &str, forget: bool, now: u64) -> Option<Word>;
 }
 
 /// The test brothers' key pairs and keys, the same every run.
@@ -210,6 +218,11 @@ pub const IDS: [&str; 6] = ["ash", "birch", "cedar", "dogwood", "elm", "fir"];
 pub const WORDS_PER_ORIGIN: usize = 16_384;
 pub const CASTS_PER_SIGNER: usize = 32;
 
+/// The bounds on one signer's phone words: its vouches that count, and its
+/// forgets of phones nobody vouched for plus those of every phone vouched.
+pub const VOUCHES_PER_SIGNER: usize = 16;
+pub const FORGETS_PER_SIGNER: usize = 256 + 16 * IDS.len();
+
 /// The whole simulated brotherhood.
 pub struct Sim<C: Core> {
     seed: u64,
@@ -239,6 +252,13 @@ pub struct Sim<C: Core> {
     /// Handoffs that failed, which their sender tries again to the same
     /// brother, as a human would.
     retries: Vec<(usize, String, usize)>,
+    /// Phones honest humans paired: (phone, key).
+    paired: Vec<(String, String)>,
+    /// Phones honest humans forgot: (who forgot, key).
+    forgot: Vec<(usize, String)>,
+    /// Keys of the phones only the thief vouched for.
+    thief_phones: BTreeSet<String>,
+    phones_next: usize,
     now: u64,
     step: usize,
     flood_next: usize,
@@ -294,6 +314,10 @@ impl<C: Core> Sim<C> {
             cast_by: None,
             refused: BTreeMap::new(),
             retries: Vec::new(),
+            paired: Vec::new(),
+            forgot: Vec::new(),
+            thief_phones: BTreeSet::new(),
+            phones_next: 0,
             now: 1_800_000_000,
             step: 0,
             flood_next: 0,
@@ -345,6 +369,7 @@ impl<C: Core> Sim<C> {
             self.act();
             self.deliver();
             self.check_bounds();
+            self.check_phones();
             if self.step.is_multiple_of(15) {
                 self.flush();
                 self.check_all();
@@ -368,7 +393,9 @@ impl<C: Core> Sim<C> {
             51..=55 => self.rekeep(me),
             56..=60 => self.sleep_or_wake(),
             61..=63 => self.restart(me),
-            64..=82 => self.gossip(me),
+            64..=80 => self.gossip(me),
+            81 => self.pair_phone(me),
+            82 => self.forget_phone(me),
             83..=86 => self.steal(),
             87..=89 => self.cast_thief(me),
             _ => self.thief_acts(),
@@ -644,6 +671,39 @@ impl<C: Core> Sim<C> {
         self.post(me, to, roster);
     }
 
+    /// `me`'s human pairs a phone. Sometimes another brother's human
+    /// forgets it before the vouch reaches it: the forget wins all the same.
+    fn pair_phone(&mut self, me: usize) {
+        let phone = format!("ph{}", self.phones_next);
+        self.phones_next += 1;
+        let key = keys::key(&phone);
+        self.nodes[me].vouch(&phone, &key, self.now);
+        self.note(format!("{} pairs {phone}", self.ids[me]));
+        self.paired.push((phone.clone(), key.clone()));
+        if self.rng.chance(25) {
+            let others: Vec<usize> = self
+                .honest_awake()
+                .into_iter()
+                .filter(|o| *o != me)
+                .collect();
+            if let Some(&o) = self.rng.pick(&others) {
+                self.nodes[o].forget(&phone, &key, self.now);
+                self.note(format!("{} forgets {phone} before it heard", self.ids[o]));
+                self.forgot.push((o, key));
+            }
+        }
+    }
+
+    /// `me`'s human forgets a phone any brother paired.
+    fn forget_phone(&mut self, me: usize) {
+        let Some((phone, key)) = self.rng.pick(&self.paired).cloned() else {
+            return;
+        };
+        self.nodes[me].forget(&phone, &key, self.now);
+        self.note(format!("{} forgets {phone}", self.ids[me]));
+        self.forgot.push((me, key));
+    }
+
     fn post(&mut self, from: usize, to: usize, roster: Roster) {
         if self.rng.chance(self.plan.relay_drop) {
             return;
@@ -785,6 +845,33 @@ impl<C: Core> Sim<C> {
                     }
                 }
             }
+            // Vouches for a phone of its own, or for more than any signer
+            // counts for; or forgets a phone an honest human paired, as
+            // any brother may.
+            4 => {
+                if self.rng.chance(70) {
+                    let many = if self.rng.chance(30) {
+                        VOUCHES_PER_SIGNER + 8
+                    } else {
+                        1
+                    };
+                    for _ in 0..many {
+                        let phone = format!("tph{}", self.phones_next);
+                        self.phones_next += 1;
+                        let key = keys::key(&phone);
+                        if let Some(w) = self.nodes[t].forge_phone(&phone, &key, false, self.now) {
+                            self.thief_phones.insert(key);
+                            words.push(w);
+                        }
+                    }
+                    self.note(format!("{thief} vouches for {many} phones"));
+                } else if let Some((phone, key)) = self.rng.pick(&self.paired).cloned() {
+                    if let Some(w) = self.nodes[t].forge_phone(&phone, &key, true, self.now) {
+                        self.note(format!("{thief} forgets {phone}"));
+                        words.push(w);
+                    }
+                }
+            }
             _ => {}
         }
         // The thief's own roster carries them, to every brother.
@@ -862,6 +949,84 @@ impl<C: Core> Sim<C> {
         self.check_one_owner();
         self.check_cast_out();
         self.check_one_hand();
+        self.check_phones();
+        self.check_phone_bounds();
+    }
+
+    /// Phones: one forgotten by an honest brother that is in where the
+    /// forget is held is served by none there, and one only the thief
+    /// vouched for is served by no honest brother that holds it out. And
+    /// I5 for phone words: no signer's past its bounds.
+    fn check_phones(&mut self) {
+        if self.forgot.is_empty() && self.thief_phones.is_empty() {
+            return;
+        }
+        let thief = self.stolen.map(|t| keys::key(self.ids[t]));
+        for a in self.honest_awake() {
+            let served = self.nodes[a].served();
+            let barred = self.nodes[a].out_keys();
+            if thief.as_ref().is_some_and(|k| barred.contains(k))
+                && served.iter().any(|k| self.thief_phones.contains(k))
+            {
+                let what = format!(
+                    "{} serves a phone only the thief, out, vouched for",
+                    self.ids[a]
+                );
+                self.fail("phones", what);
+            }
+            // Every word held is many: looked at only when a phone forgotten
+            // somewhere is served here.
+            if !self.forgot.iter().any(|(_, pk)| served.contains(pk)) {
+                continue;
+            }
+            let forgets: BTreeSet<(String, String)> = self.nodes[a]
+                .words()
+                .into_iter()
+                .filter_map(|w| match w.what {
+                    What::Forgets { key, .. } => Some((w.under, key)),
+                    _ => None,
+                })
+                .collect();
+            let wrong = self.forgot.iter().find(|(f, pk)| {
+                let fk = keys::key(self.ids[*f]);
+                forgets.contains(&(fk.clone(), pk.clone()))
+                    && !barred.contains(&fk)
+                    && served.contains(pk)
+            });
+            if let Some((f, _)) = wrong {
+                let what = format!("{} serves a phone {} forgot", self.ids[a], self.ids[*f]);
+                self.fail("phones", what);
+            }
+        }
+    }
+
+    /// I5 for phone words, at every check: what each honest brother holds
+    /// of one signer's vouches and forgets stays bounded.
+    fn check_phone_bounds(&mut self) {
+        for i in 0..self.nodes.len() {
+            if !self.honest(i) {
+                continue;
+            }
+            let mut held: BTreeMap<(String, bool), usize> = BTreeMap::new();
+            for w in self.nodes[i].words() {
+                match &w.what {
+                    What::Vouches { .. } => *held.entry((w.under, true)).or_default() += 1,
+                    What::Forgets { .. } => *held.entry((w.under, false)).or_default() += 1,
+                    _ => {}
+                }
+            }
+            for ((s, vouch), n) in held {
+                let most = if vouch {
+                    VOUCHES_PER_SIGNER
+                } else {
+                    FORGETS_PER_SIGNER
+                };
+                if n > most {
+                    let what = format!("{} holds {n} phone words under {}", self.ids[i], &s[..8]);
+                    self.fail("I5", what);
+                }
+            }
+        }
     }
 
     /// I1: awake honest brothers, having passed every word, agree.
@@ -870,18 +1035,39 @@ impl<C: Core> Sim<C> {
         let Some(&first) = awake.first() else {
             return;
         };
-        type View = (BTreeMap<String, Option<(String, u64)>>, BTreeSet<String>);
+        type View = (
+            BTreeMap<String, Option<(String, u64)>>,
+            BTreeSet<String>,
+            BTreeSet<String>,
+        );
         let view = |n: &C| -> View {
             let s = n
                 .sessions()
                 .into_iter()
                 .map(|k| (k.clone(), n.owner_of(&k)))
                 .collect();
-            (s, n.out_keys())
+            (s, n.out_keys(), n.served())
         };
         let base = view(&self.nodes[first]);
         for &b in &awake[1..] {
             let other = view(&self.nodes[b]);
+            let loose = |n: &C| -> BTreeSet<Word> {
+                n.words()
+                    .into_iter()
+                    .filter(|w| w.what.session().is_none())
+                    .collect()
+            };
+            let same = loose(&self.nodes[first]) == loose(&self.nodes[b]);
+            if same && other.2 != base.2 {
+                let what = format!(
+                    "{} serves {} phones, {} serves {}",
+                    self.ids[first],
+                    base.2.len(),
+                    self.ids[b],
+                    other.2.len()
+                );
+                self.fail("I1", what);
+            }
             if other.1 != base.1 {
                 let what = format!(
                     "{} holds {:?} out, {} holds {:?}",
@@ -1037,6 +1223,8 @@ impl<C: Core> Sim<C> {
                     crate::said::What::Ended { .. } => "ended".to_string(),
                     crate::said::What::CastOut { .. } => "cast".to_string(),
                     crate::said::What::Admits { .. } => "admits".to_string(),
+                    crate::said::What::Vouches { .. } => "vouches".to_string(),
+                    crate::said::What::Forgets { .. } => "forgets".to_string(),
                 };
                 format!("[{} {} {kind} @{}]", w.n, w.by, w.at)
             })
@@ -1388,9 +1576,10 @@ pub mod core {
             let mut per: BTreeMap<String, usize> = BTreeMap::new();
             let mut casts: BTreeMap<String, usize> = BTreeMap::new();
             for w in &self.held.roster.said {
-                match w.what.session() {
-                    Some((o, _)) => *per.entry(o.to_string()).or_default() += 1,
-                    None => *casts.entry(w.by.clone()).or_default() += 1,
+                match (w.what.session(), &w.what) {
+                    (Some((o, _)), _) => *per.entry(o.to_string()).or_default() += 1,
+                    (None, What::CastOut { .. }) => *casts.entry(w.by.clone()).or_default() += 1,
+                    _ => {}
                 }
             }
             (per, casts)
@@ -1402,6 +1591,23 @@ pub mod core {
 
         fn controls(&self, id: &str) -> bool {
             self.trust().controls(id)
+        }
+
+        fn vouch(&mut self, phone: &str, key: &str, now: u64) {
+            let s = self.signer();
+            mesh::vouch_in(&mut self.held, Some(&s), phone, key, phone, now);
+        }
+
+        fn forget(&mut self, phone: &str, key: &str, now: u64) {
+            let s = self.signer();
+            mesh::forget_in(&mut self.held, Some(&s), phone, key, now);
+        }
+
+        fn served(&self) -> BTreeSet<String> {
+            mesh::phones(&self.held)
+                .into_iter()
+                .map(|p| p.key)
+                .collect()
         }
 
         fn forge_takes(&self, key: &str, from: &str, n: u64, now: u64) -> Option<Word> {
@@ -1449,6 +1655,20 @@ pub mod core {
                     retired: false,
                 },
             )
+        }
+
+        fn forge_phone(&self, phone: &str, key: &str, forget: bool, now: u64) -> Option<Word> {
+            let (phone, key) = (phone.to_string(), key.to_string());
+            let what = if forget {
+                What::Forgets { phone, key }
+            } else {
+                What::Vouches {
+                    name: phone.clone(),
+                    phone,
+                    key,
+                }
+            };
+            self.signer().sign(0, now, what)
         }
     }
 }
