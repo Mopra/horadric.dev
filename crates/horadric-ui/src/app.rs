@@ -1427,6 +1427,11 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.with(|a| a.try_borrow_mut().ok()?.as_mut().map(f))
 }
 
+/// Whether any brother's tile is hidden here, for the tray's way back.
+pub(crate) fn tiles_hidden() -> bool {
+    with_app(|app| !app.far_hidden.is_empty()).unwrap_or_default()
+}
+
 fn tray_menu(hwnd: HWND) {
     let (recent, hotkeys, terminal, update, xp) = with_app(|app| {
         let xp = app.experience.lock().ok().and_then(|e| *e);
@@ -1468,6 +1473,9 @@ fn tray_menu(hwnd: HWND) {
         }
         Some(Choice::Raise) => {
             with_app(App::raise);
+        }
+        Some(Choice::ShowHidden) => {
+            with_app(App::far_unhide);
         }
         Some(Choice::ShowStage) => {
             with_app(App::show_stage);

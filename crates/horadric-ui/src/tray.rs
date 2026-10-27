@@ -68,6 +68,8 @@ pub enum Choice {
     Tidy,
     /// Bring every cluster in front of the other windows.
     Raise,
+    /// Show again every brother's tile hidden here.
+    ShowHidden,
     /// Open the terminal again after it was closed.
     ShowStage,
     /// Show the session that has waited on you longest.
@@ -284,6 +286,7 @@ pub fn menu(
     const SIGN_IN: usize = 16;
     const SIGN_OUT: usize = 17;
     const ADD_NODE: usize = 18;
+    const SHOW_HIDDEN: usize = 19;
     const RECENT: usize = 100;
     let mut items = Vec::new();
     if let Some(xp) = xp {
@@ -373,6 +376,10 @@ pub fn menu(
     items.push(Item::action(RAISE, "Bring tiles to front"));
     items.push(Item::action(ARRANGE, "Fit terminal beside tiles"));
     items.push(Item::action(TIDY, "Tidy up tiles"));
+    // A hidden tile has no menu of its own to bring it back by.
+    if crate::app::tiles_hidden() {
+        items.push(Item::action(SHOW_HIDDEN, "Show hidden tiles"));
+    }
     items.push(Item::Separator);
     if !logins.is_empty() {
         items.push(Item::Submenu("Account".into(), account_items(logins)));
@@ -434,6 +441,7 @@ pub fn menu(
         LISTEN => Some(Choice::Listen),
         ARRANGE => Some(Choice::Arrange),
         RAISE => Some(Choice::Raise),
+        SHOW_HIDDEN => Some(Choice::ShowHidden),
         STAGE => Some(Choice::ShowStage),
         UPDATE => Some(Choice::Update),
         END_ALL => Some(Choice::EndAll),

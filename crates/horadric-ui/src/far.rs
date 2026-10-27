@@ -1398,6 +1398,23 @@ impl App {
         self.save();
     }
 
+    /// Shows every hidden brother's tile again, from the lists last heard
+    /// rather than at each brother's next.
+    pub(super) fn far_unhide(&mut self) {
+        self.far_hidden.clear();
+        self.save();
+        let lists: Vec<(String, Vec<afar::Entry>)> = self
+            .far
+            .peers
+            .iter()
+            .map(|(k, p)| (k.clone(), p.list.clone()))
+            .collect();
+        for (key, list) in lists {
+            self.far_sessions(&key, &list);
+        }
+        self.reconcile(false);
+    }
+
     /// Hides every brother's tile in the project keyed `key`.
     pub(super) fn far_hide_in(&mut self, key: &str) {
         let ids: Vec<String> = match self.shared.registry.lock() {
