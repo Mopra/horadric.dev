@@ -611,6 +611,15 @@ phone hears none of it, and its `lore` and `entries` are ignored.
 - `{"t":"state","state":"awake"|"sleeping"|"leaving"}` after the hello, at
   once when it changes ("sleeping" as Windows suspends, "leaving" as it
   shuts down, "awake" after) and every 15 seconds as a heartbeat.
+- `{"t":"usage","list":[{"agent","account","email","usage":{"limits","at"}}]}`
+  after the hello and whenever it changes (added in 0.34): the limits of
+  each agent's account in use, as its status lines told them. `account`
+  is the id every machine knows a login by (account and organization).
+  A brother using the same account, or none it knows, takes the reading
+  into its usage window, the truer of each limit kept as with its own
+  sessions; one of another account it keeps goes to that account. So a
+  human working on a brother's sessions sees the session and week
+  budget run down on the PC in front of them.
 - `{"t":"lore","project","have"}` after the hello, one per tile project in
   git, `project` its repository (`{"remotes","roots"}`, as handing off
   matches one) and `have` the highest number held of each writing

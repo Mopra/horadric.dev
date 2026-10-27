@@ -947,6 +947,7 @@ impl App {
                 let listed = self.far_sessions(&name, &list);
                 self.far_lines() || listed
             }
+            Heard::Usage(told) => self.take_told(told),
             Heard::Unpaired => {
                 eprintln!(
                     "horadric: {} forgot this PC",

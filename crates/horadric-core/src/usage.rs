@@ -239,6 +239,50 @@ pub struct Usage {
     pub at: u64,
 }
 
+impl Usage {
+    /// The held usage with a reading from elsewhere taken in, as
+    /// [`Limits::merge`] does, heard when the newer of the two was.
+    pub fn merge(&self, heard: &Usage, now: u64) -> Usage {
+        Usage {
+            limits: self.limits.merge(&heard.limits, now),
+            at: self.at.max(heard.at),
+        }
+    }
+}
+
+/// One account's limits as a brother tells them: the account in use there
+/// for `agent`, by the id every machine knows it by (see
+/// `crate::accounts::identify`), when the brother knows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Told {
+    pub agent: Agent,
+    #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    pub usage: Usage,
+}
+
+/// The `usage` message a brother sends: its accounts' limits, one per
+/// agent. A limit belongs to the account, so a human working on a
+/// brother's sessions sees it run down here, though no session here spoke.
+pub fn usage_message(told: &[Told]) -> Value {
+    serde_json::json!({"t": "usage", "list": told})
+}
+
+/// What a `usage` message tells, the entries it can read.
+pub fn told(msg: &Value) -> Vec<Told> {
+    msg.get("list")
+        .and_then(Value::as_array)
+        .map(|l| {
+            l.iter()
+                .filter_map(|t| serde_json::from_value::<Told>(t.clone()).ok())
+                .filter(|t| !t.usage.limits.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// What one status line call said about its session.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Status {
@@ -673,6 +717,55 @@ mod tests {
             resets_at: Some(resets_at),
             minutes: None,
         })
+    }
+
+    #[test]
+    fn a_brothers_usage_reads_back_as_told() {
+        let told = vec![Told {
+            agent: Agent::Claude,
+            account: Some("acc:org".into()),
+            email: Some("a@b.c".into()),
+            usage: Usage {
+                limits: Limits {
+                    five_hour: limit(30.0, 10_000),
+                    ..Limits::default()
+                },
+                at: 900,
+            },
+        }];
+        let msg = usage_message(&told);
+        assert_eq!(msg["t"], "usage");
+        assert_eq!(super::told(&msg), told);
+        // An entry with no limits, or one this build cannot read, is left out.
+        let odd = serde_json::json!({"t": "usage", "list": [
+            {"agent": "claude", "usage": {"limits": {}, "at": 1}},
+            {"agent": "someone new", "usage": {"limits": {}, "at": 1}},
+            {"nothing": true},
+        ]});
+        assert!(super::told(&odd).is_empty());
+    }
+
+    #[test]
+    fn a_brothers_reading_merges_and_keeps_the_newer_time() {
+        let held = Usage {
+            limits: Limits {
+                five_hour: limit(40.0, 10_000),
+                ..Limits::default()
+            },
+            at: 2_000,
+        };
+        let heard = Usage {
+            limits: Limits {
+                five_hour: limit(55.0, 10_000),
+                seven_day: limit(10.0, 500_000),
+                spend: None,
+            },
+            at: 1_500,
+        };
+        let merged = held.merge(&heard, 2_100);
+        assert_eq!(merged.limits.five_hour, limit(55.0, 10_000));
+        assert_eq!(merged.limits.seven_day, limit(10.0, 500_000));
+        assert_eq!(merged.at, 2_000);
     }
 
     #[test]

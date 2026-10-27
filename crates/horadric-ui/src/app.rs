@@ -5336,6 +5336,70 @@ impl App {
         }
     }
 
+    /// The limits of each agent's account in use, for the brothers.
+    fn told_usage(&self) -> Vec<horadric_core::usage::Told> {
+        Agent::ALL
+            .into_iter()
+            .filter_map(|agent| {
+                let usage = self.usage_of(agent)?;
+                let account = self.logins.get(&agent).and_then(|l| l.account.clone());
+                let email = self.shared.account.borrow().get(&agent).cloned();
+                Some(horadric_core::usage::Told {
+                    agent,
+                    account,
+                    email,
+                    usage,
+                })
+            })
+            .collect()
+    }
+
+    /// Takes in the limits a brother told. A reading of the account in
+    /// use here, or of any while none is known here, shows in the usage
+    /// window; one of another account kept here goes to that account, for
+    /// the Account menu. True when the window has more to show.
+    fn take_told(&mut self, told: Vec<horadric_core::usage::Told>) -> bool {
+        let now = unix_now();
+        let mut changed = false;
+        for t in told {
+            let live = self.logins.get(&t.agent).and_then(|l| l.account.clone());
+            let here = match (&live, &t.account) {
+                (None, _) => true,
+                (Some(live), Some(theirs)) => live == theirs,
+                (Some(_), None) => false,
+            };
+            if !here {
+                if let Some(id) = &t.account {
+                    let kept = self.accounts.get(id).and_then(|a| a.usage.clone());
+                    let merged = kept.map_or(t.usage.clone(), |k| k.merge(&t.usage, now));
+                    self.accounts.set_usage(id, Some(merged));
+                }
+                continue;
+            }
+            let merged =
+                |held: Option<&Usage>| held.map_or(t.usage.clone(), |h| h.merge(&t.usage, now));
+            let before = self.usage_of(t.agent);
+            match t.agent {
+                Agent::Claude => {
+                    if let Ok(mut u) = self.shared.usage.lock() {
+                        *u = Some(merged(u.as_ref()));
+                    }
+                }
+                agent => {
+                    if let Ok(mut all) = self.shared.agent_usage.lock() {
+                        let m = merged(all.get(&agent));
+                        all.insert(agent, m);
+                    }
+                }
+            }
+            if live.is_none() && t.email.is_some() {
+                self.show_account(t.agent, t.email.clone());
+            }
+            changed |= self.usage_of(t.agent) != before;
+        }
+        changed
+    }
+
     /// Each agent's kept accounts for the tray's Account menu, with what
     /// each has left. Only agents logged in to some.
     fn logins(&mut self) -> Vec<tray::Logins> {

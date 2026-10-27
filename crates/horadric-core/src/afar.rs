@@ -233,6 +233,8 @@ pub enum Heard {
         project: Value,
         have: Value,
     },
+    /// Its accounts' limits, see [`crate::usage::usage_message`].
+    Usage(Vec<crate::usage::Told>),
     /// It forgot this PC: the key opens nothing any more.
     Unpaired,
     Other,
@@ -295,6 +297,7 @@ pub fn hear(msg: &Value) -> Heard {
             id: text("id"),
             text: text("text").unwrap_or_default(),
         },
+        Some("usage") => Heard::Usage(crate::usage::told(msg)),
         Some("state") => match msg.get("state").cloned().map(serde_json::from_value) {
             Some(Ok(said)) => Heard::State(said),
             _ => Heard::Other,

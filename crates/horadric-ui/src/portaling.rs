@@ -778,6 +778,11 @@ impl Serve for Here<'_> {
             .unwrap_or_default()
     }
 
+    fn usage(&self) -> Option<Value> {
+        let told = self.0.told_usage();
+        (!told.is_empty()).then(|| horadric_core::usage::usage_message(&told))
+    }
+
     fn state(&self) -> &'static str {
         STATES[POWER.load(Ordering::Relaxed) as usize % STATES.len()]
     }

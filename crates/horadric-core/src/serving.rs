@@ -137,6 +137,11 @@ pub trait Serve {
     fn roster(&self) -> Vec<Value> {
         Vec::new()
     }
+    /// The `usage` message: the limits of the accounts in use here (see
+    /// `crate::usage::usage_message`). None while none were heard.
+    fn usage(&self) -> Option<Value> {
+        None
+    }
     /// What this machine says it is doing: "awake", "sleeping" or
     /// "leaving".
     fn state(&self) -> &'static str {
@@ -216,6 +221,7 @@ struct Client {
     /// The sessions it streams raw, by id.
     streams: HashMap<String, Stream>,
     roster_sent: Option<u64>,
+    usage_sent: Option<u64>,
     /// What this brother holds of each shared project's lore, as it said
     /// and as was sent it since.
     lore: HashMap<String, (Value, Value)>,
@@ -363,6 +369,7 @@ impl Server {
             c.v = answer_version(msg);
             c.streams.clear();
             c.roster_sent = None;
+            c.usage_sent = None;
             c.lore.clear();
             asked.hellos.push(ch);
             return Vec::new();
@@ -675,6 +682,7 @@ impl Server {
         } else {
             Vec::new()
         };
+        let usage = if brothers { serve.usage() } else { None };
         let state = serve.state();
         for &ch in hellos {
             let Some(c) = self.clients.get_mut(&ch) else {
@@ -701,6 +709,10 @@ impl Server {
                     }
                 }
                 out.send(ch, state_message(state));
+                if let Some(u) = &usage {
+                    c.usage_sent = Some(fingerprint(u));
+                    out.send(ch, u.clone());
+                }
                 for (project, have) in &lore {
                     out.send(ch, lore_message(project, have));
                 }
@@ -886,6 +898,15 @@ impl Server {
                 }
             }
         }
+        if let Some(usage) = serve.usage() {
+            let print = fingerprint(&usage);
+            for (&ch, c) in self.clients.iter_mut().filter(|(_, c)| c.brother()) {
+                if c.usage_sent != Some(print) {
+                    c.usage_sent = Some(print);
+                    out.send(ch, usage.clone());
+                }
+            }
+        }
         let state = serve.state();
         if heartbeat_due(self.told, state, Instant::now()) {
             self.told = Some((state, Instant::now()));
@@ -1021,6 +1042,8 @@ mod tests {
         locked: bool,
         /// Its projects' paths.
         projects: Vec<&'static str>,
+        /// The session limit used, in percent, when one was heard.
+        used: Option<u32>,
     }
 
     impl Serve for Fake {
@@ -1097,6 +1120,9 @@ mod tests {
         }
         fn roster(&self) -> Vec<Value> {
             vec![json!({"t": "roster", "n": 1, "locked": self.locked})]
+        }
+        fn usage(&self) -> Option<Value> {
+            self.used.map(|u| json!({"t": "usage", "used": u}))
         }
         fn lore_projects(&mut self) -> Vec<(Value, Value)> {
             vec![(json!("repo"), json!({"me": 3}))]
@@ -1517,6 +1543,32 @@ mod tests {
             .collect();
         assert!(of(&msgs, "roster").is_empty());
         assert_eq!(of(&msgs, "state")[0]["state"], "sleeping");
+    }
+
+    #[test]
+    fn brothers_hear_the_usage_at_hello_and_when_it_changes_phones_never() {
+        let mut serve = Fake {
+            used: Some(10),
+            ..Fake::default()
+        };
+        let hello = json!({"t": "hello", "v": 3, "kind": "brother"});
+        let (mut server, msgs) = greeted(&mut serve, "b", hello);
+        assert_eq!(of(&msgs, "usage")[0]["used"], 10);
+        server.open(2);
+        server.heard(2, "phone", &json!({"t": "hello", "v": 3}), 0, || "P".into());
+        let to_phone = sent(server.answer(&mut serve, 0));
+        assert!(of(&to_phone, "usage").is_empty());
+        server.looked = None;
+        assert!(of(&sent(server.tick(&mut serve)), "usage").is_empty());
+        serve.used = Some(20);
+        server.looked = None;
+        let told = server.tick(&mut serve).msgs;
+        let usage: Vec<u32> = told
+            .iter()
+            .filter(|(_, m)| m["t"] == "usage")
+            .map(|(ch, _)| *ch)
+            .collect();
+        assert_eq!(usage, [1]);
     }
 
     #[test]
