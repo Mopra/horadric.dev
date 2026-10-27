@@ -33,7 +33,14 @@ it off everywhere, and that is what keeps the cost bearable.
   the brother's public key, the phone's id and the brother's relay id.
   So no brother holds a key that opens the phone's link to another, and
   a brother that is cast out learns nothing it could pose as the phone
-  with.
+  with. Public keys travel as b64url of the 65 byte uncompressed point;
+  the shared secret is the 32 byte x coordinate (WebCrypto's
+  `deriveBits` of 256). Pairing v3: the phone's `pair` (sealed with the
+  ticket, as today) carries `"v":3` and `"key"`; the brother answers
+  `{"t":"paired","phone","brother":"<its relay id>","bkey":"<its public
+  key>"}`, and from then on both seal with the derived key and the
+  phone's hello carries `"v":3`. A brother tells a phone sealed with a
+  derived key from a v2 phone by trying every key it has, as today.
 - **Two new words.** In `said.rs`, beside `admits` and `cast_out`, both
   with `n` 0:
 
@@ -46,7 +53,11 @@ it off everywhere, and that is what keeps the cost bearable.
   signed by a member that is in (not out, not contested, by `standing`),
   and no `forgets` names its key. `forgets` from any member that is in
   wins over every `vouches`, whatever came first, as cast out does: it
-  is worked out afresh from the words, never stored. A brother cast out
+  is worked out afresh from the words, never stored. A forget counts
+  from a contested brother too (only one that is out says nothing),
+  since a forget only ever takes a phone away and the contested one may
+  be the honest one. A signer's own forgets free their places in its
+  16. A brother cast out
   takes the phones it alone vouched for with it, so a stolen PC cannot
   keep adding phones. Of one signer's `vouches`, only the 16 naming the
   lowest keys count, so a thief cannot make every brother hold a
