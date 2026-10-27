@@ -100,8 +100,10 @@ screen. What it lacks:
 
 - **A brother is a full member, a phone is not.** Brothers see each
   other's sessions, hold each other's snapshots and can take over from
-  each other. A phone stays paired with one PC and sees that PC's
-  sessions, as today.
+  each other. A phone is paired once, with any brother, and sees every
+  brother's sessions, served by each brother itself, but can never own,
+  keep or let anyone in (changed 2026-10-27, see
+  [One portal](one-portal.md)).
 - **Joining once joins everyone.** Any machine, Windows PC or Linux
   node, joins by signing in and an approval on one brother. The brother
   that let it in introduces it to every other (see "Introductions"
@@ -1312,10 +1314,9 @@ brother given its `have`, matching a project by repository.
 
 ## Open questions
 
-- Should a phone see the whole brotherhood through the PC it is paired
-  with? The old answer was no: one stolen phone would reach every
-  machine. A brotherhood makes the ask stronger. A per brother switch,
-  off by default, is the likely answer.
+- Should a phone see the whole brotherhood? Answered 2026-10-27: yes,
+  paired once, forgotten everywhere at once. See
+  [One portal](one-portal.md).
 - A quest's session handed to another brother: does the quest move with
   it, or stay on the brother whose quest log it is in? Warriv on two
   brothers working the same repository would need to agree on who runs
