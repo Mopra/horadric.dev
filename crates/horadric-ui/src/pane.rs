@@ -951,6 +951,7 @@ impl Pane {
                 back,
                 forward,
                 sized: web::size(key).is_some(),
+                zoom: web::zoom_percent(key),
                 dock: web::dock(key).map(|d| d.side),
             }
         });

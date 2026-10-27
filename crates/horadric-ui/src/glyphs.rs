@@ -136,6 +136,8 @@ pub struct Bar<'a> {
     pub forward: bool,
     /// The page has a size of its own, so the size button is lit.
     pub sized: bool,
+    /// The zoom the user gave the page, as a percent, where it is not 100.
+    pub zoom: Option<u32>,
     /// The side the pane stands on beside the grid, whose place button is
     /// lit. None in the grid.
     pub dock: Option<Side>,
@@ -300,6 +302,8 @@ pub const PLACE_W: f32 = 20.0;
 pub const BAR_INSET: f32 = 8.0;
 /// Between the field and the header's top and bottom.
 const BAR_MARGIN: f32 = 3.0;
+/// Room at the field's right end for the page's zoom, "500%" at most.
+const BAR_ZOOM_W: f32 = 40.0;
 
 /// Back, forward, reload and size after the lamp, one square each, the
 /// three place buttons, then the field up to the zoom button or the cross.
@@ -2196,7 +2200,7 @@ impl GridTarget {
 
     /// Back, forward and reload, dim when there is nowhere to go, the size
     /// button, lit when the page has a size, then the address in a sunk
-    /// field, lit while it is typed in.
+    /// field, lit while it is typed in, with the page's zoom at its end.
     unsafe fn bar(&self, gpu: &Gpu, bar: &Bar, l: &BarLayout, accent: Color) {
         let button = |glyph: &str, at: f32, ink: Color| {
             let glyph: Vec<u16> = glyph.encode_utf16().collect();
@@ -2271,7 +2275,28 @@ impl GridTarget {
             .DrawRoundedRectangle(&rounded(&edge, radius - 0.5), &self.brush, 1.0, None);
 
         let left = field.left + BAR_INSET;
-        let view = bar_view(l);
+        let mut view = bar_view(l);
+        // Typing hides the zoom, so the caret has the whole field.
+        if let Some(z) = bar.zoom.filter(|_| bar.edit.is_none()) {
+            if view > 2.0 * BAR_ZOOM_W {
+                view -= BAR_ZOOM_W;
+                let wide: Vec<u16> = format!("{z}%").encode_utf16().collect();
+                self.brush.SetColor(&render::color(theme::text()));
+                self.rt.DrawText(
+                    &wide,
+                    &gpu.small_right,
+                    &D2D_RECT_F {
+                        left: field.right - BAR_INSET - BAR_ZOOM_W,
+                        top: 0.0,
+                        right: field.right - BAR_INSET,
+                        bottom: HEADER_H,
+                    },
+                    &self.brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
+        }
         self.rt.PushAxisAlignedClip(
             &D2D_RECT_F {
                 left: left - 1.0,

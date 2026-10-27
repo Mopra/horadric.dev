@@ -117,6 +117,9 @@ struct Tab {
     /// The zoom factor Horadric itself last set, so the change it causes
     /// is not taken for the user's zoom of the site.
     own: Option<f64>,
+    /// The zoom factor the page has now, whoever gave it, for the address
+    /// bar to show.
+    factor: f64,
     /// The address to open once it is made.
     pending: Option<String>,
     /// A page that opened this tab as a new window, waiting to be handed
@@ -169,6 +172,7 @@ impl Tab {
             webview: None,
             zoom: 1.0,
             own: None,
+            factor: 1.0,
             pending,
             opener: None,
             focus: false,
@@ -1385,6 +1389,21 @@ pub fn label_of(key: &str, id: Option<u64>) -> Option<(String, String)> {
     read_tab(key, id, |t| (t.title.clone(), t.url.clone()))
 }
 
+/// The zoom the user gave the shown page, as a whole percent, where it is
+/// not 100. A sized page's is not theirs: its frame's label says it.
+pub fn zoom_percent(key: &str) -> Option<u32> {
+    if size(key).is_some() {
+        return None;
+    }
+    read_tab(key, None, |t| percent(t.factor)).flatten()
+}
+
+/// `factor` as a whole percent, None at 100.
+fn percent(factor: f64) -> Option<u32> {
+    let p = (factor * 100.0).round() as u32;
+    (p != 100).then_some(p)
+}
+
 /// Whether the shown page has somewhere to go back and forward to.
 pub fn history(key: &str) -> (bool, bool) {
     history_of(key, None)
@@ -1888,6 +1907,7 @@ fn zooms(key: &str, id: u64, controller: &ICoreWebView2Controller) {
         let Some(c) = c else { return Ok(()) };
         let mut zoom = 1.0;
         unsafe { c.ZoomFactor(&mut zoom)? };
+        changed(&owned, Some(id), |t| t.factor = zoom);
         if size(&owned).is_some() {
             return Ok(());
         }
@@ -2116,6 +2136,14 @@ pub fn address(typed: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_zoom_shows_as_a_percent_but_not_at_100() {
+        assert_eq!(percent(1.0), None);
+        assert_eq!(percent(1.0000001), None);
+        assert_eq!(percent(1.25), Some(125));
+        assert_eq!(percent(0.6667), Some(67));
+    }
 
     #[test]
     fn typed_addresses_become_urls() {
