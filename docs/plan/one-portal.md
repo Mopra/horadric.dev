@@ -77,10 +77,13 @@ it off everywhere, and that is what keeps the cost bearable.
   page offers "See every brother": it makes its key pair and sends
   `{"t":"upgrade","key"}` over the link it has, which the PC vouches for
   as if it paired. No new scan. The old key stays good with that PC.
-- **Push from every brother.** The page sends its push subscription to
-  each brother it reaches, so a waiting session on the VPS notifies as
-  one on the desktop does. A notification names the brother when it is
-  not the only one.
+- **Push from the brother that paired it.** A browser holds one push
+  subscription, bound to one VAPID key, so only one brother can push to
+  it. That brother already sees every brother's sessions on its stage,
+  so it pushes for a waiting session on the VPS as for its own, and the
+  notification names the brother when it is not the only one. If it is
+  asleep, nothing pushes; a later step may hand the subscription to
+  another brother along with the VAPID key over their sealed link.
 
 ## The page
 
