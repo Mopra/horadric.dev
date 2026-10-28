@@ -9,6 +9,8 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 "Start a quest's worktree from main" landed red on a checkpoint git-init temp flake, not its code. Gave the fix-up Model: sonnet and a note to rerun first.
+- 2026-10-29 "Find merge hotspot files" stopped undone but waits on its own queued tests and review agent. No tell; gave it Model: sonnet.
 - 2026-10-28 "Headless sessions: the spike" woke me blocked, but it is the human's own gate (title says wait for their go, no run yet). Left it, gave it Model: opus.
 - 2026-10-24 Round (hourly, main at 480aa04, only my memory since the 14:06 ship): log done, no aim. Nothing to do.
 - 2026-10-24 Round (hourly, main at 0866cbd, only my memory since the 14:06 ship): log done, no aim. Nothing to do.
