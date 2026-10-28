@@ -551,6 +551,7 @@ pub fn kind_word(kind: Kind) -> &'static str {
         Kind::Asks => "asks",
         Kind::Tangled => "tangled",
         Kind::Merge => "not merged",
+        Kind::Overlap => "may overlap",
         Kind::Stalled => "stalled",
         Kind::Dry => "ran dry",
         Kind::Round => "a round",

@@ -126,6 +126,8 @@ pub struct TasksChanged {
     pub fix: Option<String>,
     /// A stone to cast, from `horadric runeword cast`.
     pub cast: Option<String>,
+    /// What the quest just filed, `quest`, shares with others, for Warriv.
+    pub overlap: Option<String>,
     /// The session that ran the command, so the app knows Warriv's own.
     pub by: Option<String>,
 }
@@ -140,6 +142,7 @@ impl TasksChanged {
             "tell": self.tell,
             "fix": self.fix,
             "cast": self.cast,
+            "overlap": self.overlap,
             "by": self.by,
         })
         .to_string()
@@ -156,6 +159,7 @@ impl TasksChanged {
             tell: text("tell"),
             fix: text("fix"),
             cast: text("cast"),
+            overlap: text("overlap"),
             by: text("by"),
         })
     }
@@ -1118,6 +1122,7 @@ X-Horadric-Port: {dev}
             tell: Some("Use port 4100.".into()),
             fix: Some("No tests.".into()),
             cast: Some("Ship Local".into()),
+            overlap: Some("Shares crates/api with Fix the API.".into()),
             by: Some("warriv-5".into()),
         };
         let json = want.to_json();
