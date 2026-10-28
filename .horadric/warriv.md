@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-28 "Headless sessions: the spike" woke me blocked, but it is the human's own gate (title says wait for their go, no run yet). Left it, gave it Model: opus.
 - 2026-10-24 Round (hourly, main at 480aa04, only my memory since the 14:06 ship): log done, no aim. Nothing to do.
 - 2026-10-24 Round (hourly, main at 0866cbd, only my memory since the 14:06 ship): log done, no aim. Nothing to do.
 - 2026-10-24 Round (hourly, main at de22ce2, only my memory since the 14:06 ship): log done, no aim. Nothing to do.
@@ -148,4 +149,5 @@
 - 2026-10-06 to 2026-10-10 Mostly idle rounds (no quests, no aim). Settings window series landed 10-07 and shipped public as v0.16.0; Mac quests shipped as v0.17.0; v0.18.0 and v0.19.0 were cut by hand.
 
 ## Open
+- "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
