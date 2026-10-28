@@ -9,6 +9,8 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (landing, main at b593561, "Catch duplicate scope" landed): gave Model lines to the three unstarted quests (Tell running quests: sonnet, Context panel: opus, Slim CLAUDE.md: sonnet). Held Ship Local: one landing, four quests in flight on runner and worktree code; ship once the merge fix-up and "Land a quest while its session is still alive" land.
+- 2026-10-29 Look back: the day gave 3 lore notes (#540 brother usage, #541 hide needs its way back, #542 portal deploy skipped on a dirty repo). The day was clean: nothing went wrong twice.
 - 2026-10-29 "Start a quest's worktree from main" landed red on a checkpoint git-init temp flake, not its code. Gave the fix-up Model: sonnet and a note to rerun first.
 - 2026-10-29 "Find merge hotspot files" stopped undone but waits on its own queued tests and review agent. No tell; gave it Model: sonnet.
 - 2026-10-28 "Headless sessions: the spike" woke me blocked, but it is the human's own gate (title says wait for their go, no run yet). Left it, gave it Model: opus.
@@ -153,3 +155,4 @@
 ## Open
 - "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
+- Cast "Ship Local" once "Fix the merge of start-a-quest-s-worktree-from-main-not" and "Land a quest while its session is still alive" have landed.
