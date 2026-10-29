@@ -1,6 +1,7 @@
 # Warriv's memory
 
 ## Rules
+- A landing red on checkpoint's git init in %TEMP% (template hook copy) is a test flake: tell the fix-up to rerun, never to change the quest's code.
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings. Ship Public runs all three first (RELEASING.md step 2) and Ship Local does too since 5170f91; both stop on red (lore #30).
 - Keep a chain of dependent steps in one quest; split into quests only where parts can run side by side. The human finds handovers slow (lore #34).
 - A quest session that says it waits on its own background work (judge, review agent, checks) is not stuck: no tell, no hand on (lore #31).
@@ -9,6 +10,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 "Land a quest while its session is still alive" landed red on the same checkpoint git-init temp flake as the worktree quest. Told its fix-up to cherry-pick and rerun only, and filed "Make checkpoint tests' git init not copy hook templates" (haiku, --template=).
 - 2026-10-29 Round (landing, main at b593561, "Catch duplicate scope" landed): gave Model lines to the three unstarted quests (Tell running quests: sonnet, Context panel: opus, Slim CLAUDE.md: sonnet). Held Ship Local: one landing, four quests in flight on runner and worktree code; ship once the merge fix-up and "Land a quest while its session is still alive" land.
 - 2026-10-29 Look back: the day gave 3 lore notes (#540 brother usage, #541 hide needs its way back, #542 portal deploy skipped on a dirty repo). The day was clean: nothing went wrong twice.
 - 2026-10-29 "Start a quest's worktree from main" landed red on a checkpoint git-init temp flake, not its code. Gave the fix-up Model: sonnet and a note to rerun first.
@@ -153,6 +155,7 @@
 - 2026-10-06 to 2026-10-10 Mostly idle rounds (no quests, no aim). Settings window series landed 10-07 and shipped public as v0.16.0; Mac quests shipped as v0.17.0; v0.18.0 and v0.19.0 were cut by hand.
 
 ## Open
+- Check "Make checkpoint tests' git init not copy hook templates" lands; if the flake shows again after, look at %TEMP% itself (antivirus, locks).
 - "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
 - Cast "Ship Local" once "Fix the merge of start-a-quest-s-worktree-from-main-not" and "Land a quest while its session is still alive" have landed.
