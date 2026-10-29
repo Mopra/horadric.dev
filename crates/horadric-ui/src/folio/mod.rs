@@ -29,7 +29,10 @@
 mod backdrop;
 mod cards;
 mod composer;
+mod controls;
+mod editor;
 mod flow;
+mod picker;
 mod rich;
 mod select;
 mod transcript;
@@ -58,7 +61,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::app::{self, Input};
-use crate::field::Field;
 use crate::folio_look as look;
 
 pub use view::{attach, char, key, place, register_class, wheel};
@@ -69,7 +71,6 @@ pub const WM_FOLIO_REFRESH: u32 = WM_USER + 9;
 const WM_FOLIO_LINES: u32 = WM_USER + 10;
 
 const ROUTER_CLASS: PCWSTR = w!("HoradricFolioRouter");
-const COMPOSER_MAX: usize = 100_000;
 
 /// What a Folio's host keeps for the app, handed back on every attach, so
 /// the app after a reload knows what the session was.
@@ -104,8 +105,7 @@ struct Chat {
     ended: bool,
     error: Option<String>,
     view: Option<HWND>,
-    composer: Field,
-    composer_scroll: f32,
+    input: composer::Input,
     scroll: f32,
     /// Keeps the end in view as it streams, until scrolled away from.
     follow: bool,
@@ -147,8 +147,7 @@ impl Chat {
             ended: false,
             error: None,
             view: None,
-            composer: Field::new("", true, COMPOSER_MAX),
-            composer_scroll: 0.0,
+            input: composer::Input::new(),
             scroll: 0.0,
             follow: true,
             content_h: 0.0,
@@ -506,6 +505,7 @@ fn drain() {
                 }
             }
             chat.flush();
+            composer::tend(id, chat);
             chat.note_busy();
             let now = chat.state();
             if chat.told.replace(now) != Some(now) {
@@ -571,27 +571,7 @@ fn redraw(id: &str) {
 }
 
 fn send_prompt(id: &str) {
-    with(id, |c| {
-        if c.folio.busy || c.ended || c.to_terminal {
-            return;
-        }
-        let Some(text) = look::prompt_of(&c.composer.text) else {
-            return;
-        };
-        let Some(h) = &c.hosted else {
-            return;
-        };
-        c.folio.push_prompt(&text);
-        if let Err(e) = h.send_prompt(&text) {
-            c.error = Some(format!("The prompt did not reach Claude: {e}"));
-            // No turn started, so none will end with a result.
-            c.folio.end();
-        }
-        c.composer = Field::new("", true, COMPOSER_MAX);
-        c.composer_scroll = 0.0;
-        c.follow = true;
-        c.note_busy();
-    });
+    with(id, |c| composer::send(c, false));
 }
 
 fn answer(id: &str, request_id: &str, allow: bool) {

@@ -29,20 +29,21 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_DELETE, VK_DOWN, VK_END, VK_HOME,
-    VK_LEFT, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_UP,
+    GetKeyState, ReleaseCapture, SetFocus, VK_NEXT, VK_PRIOR, VK_SHIFT,
 };
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetAncestor, GetClientRect, GetCursorPos, GetParent,
     GetWindowLongPtrW, IsIconic, IsWindowVisible, KillTimer, LoadCursorW, RegisterClassW,
     SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, CREATESTRUCTW, CS_DBLCLKS, GA_ROOT,
     GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, SWP_NOACTIVATE, SWP_NOZORDER,
-    WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDBLCLK,
+    WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_DESTROY, WM_DROPFILES, WM_ERASEBKGND, WM_LBUTTONDBLCLK,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR,
     WM_SIZE, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 use windows_numerics::Vector2;
 
+use super::composer::{self, Act};
 use super::{answer, interrupt, redraw, select, send_prompt, transcript, with, Chat, CHATS};
 use crate::app::{self, Input};
 use crate::clipboard;
@@ -125,6 +126,8 @@ pub fn attach(key: &str, shared: &Rc<Shared>, parent: HWND) {
         )
     };
     if let Ok(hwnd) = hwnd {
+        // Files dropped on the conversation go into the composer.
+        unsafe { DragAcceptFiles(hwnd, true) };
         with(key, |c| c.view = Some(hwnd));
     }
 }
@@ -157,53 +160,12 @@ pub(super) fn dpi(hwnd: HWND) -> u32 {
     unsafe { GetDpiForWindow(hwnd) }.max(96)
 }
 
-/// A key that makes a character, from the pane. Enter sends, Shift+Enter
-/// breaks the line, Esc stops Claude while it works.
+/// A key that makes a character, from the pane: the composer's.
 pub fn char(key: &str, c: char, mods: Mods) {
     if select::char(key, c, mods) {
         return;
     }
-    let mut send = false;
-    with(key, |chat| {
-        let f = &mut chat.composer;
-        match c {
-            '\r' if mods.shift => f.insert("\n"),
-            '\r' => send = true,
-            '\u{1b}' => {
-                if chat.folio.busy {
-                    if let Some(h) = &chat.hosted {
-                        let _ = h.interrupt();
-                    }
-                } else {
-                    f.set_caret(f.caret, false);
-                }
-            }
-            '\u{8}' => f.backspace(false),
-            '\u{7f}' => f.backspace(true),
-            '\u{1}' => f.select_all(),
-            '\u{3}' => {
-                if !f.selected().is_empty() {
-                    clipboard::set_text(f.selected());
-                }
-            }
-            '\u{18}' => {
-                if !f.selected().is_empty() {
-                    clipboard::set_text(&f.cut());
-                }
-            }
-            '\u{16}' => {
-                if let Some(t) = clipboard::get_text() {
-                    f.insert(&t);
-                }
-            }
-            c if (c as u32) < 0x20 => {}
-            c => f.insert(c.encode_utf8(&mut [0; 4])),
-        }
-    });
-    if send {
-        send_prompt(key);
-    }
-    redraw(key);
+    composer::on_char(key, c, mods);
 }
 
 /// A key that makes no character, from the pane. False leaves it to the
@@ -212,25 +174,8 @@ pub fn key(key: &str, vk: u16, mods: Mods) -> bool {
     if select::key(key, vk, mods) {
         return true;
     }
-    let (word, extend) = (mods.ctrl, mods.shift);
     let page = with(key, |c| c.view_h * 0.85).unwrap_or(0.0);
-    let vertical = |up: bool| -> bool {
-        // The caret moves a line in the composer, or past its ends the
-        // conversation scrolls.
-        let moved = view_of(key).and_then(|v| v.caret_line(key, up, extend));
-        if moved.is_none() {
-            scroll_by(key, if up { -NOTCH } else { NOTCH });
-        }
-        true
-    };
     let done = match vk {
-        v if v == VK_LEFT.0 => with(key, |c| c.composer.left(word, extend)).is_some(),
-        v if v == VK_RIGHT.0 => with(key, |c| c.composer.right(word, extend)).is_some(),
-        v if v == VK_HOME.0 => with(key, |c| c.composer.home(word, extend)).is_some(),
-        v if v == VK_END.0 => with(key, |c| c.composer.end(word, extend)).is_some(),
-        v if v == VK_DELETE.0 => with(key, |c| c.composer.delete(word)).is_some(),
-        v if v == VK_UP.0 => vertical(true),
-        v if v == VK_DOWN.0 => vertical(false),
         v if v == VK_PRIOR.0 => {
             scroll_by(key, -page);
             true
@@ -239,7 +184,7 @@ pub fn key(key: &str, vk: u16, mods: Mods) -> bool {
             scroll_by(key, page);
             true
         }
-        _ => false,
+        _ => return composer::on_key(key, vk, mods),
     };
     if done {
         redraw(key);
@@ -265,9 +210,8 @@ pub(super) fn scroll_by(key: &str, by: f32) {
 pub(super) enum Hit {
     Answer(String, bool),
     Fold(usize),
-    Send,
-    Stop,
-    Composer,
+    /// The composer and its controls.
+    Input(Act),
     /// Opens the session in a terminal.
     Terminal,
     /// The transcript's own buttons and links.
@@ -667,6 +611,7 @@ impl View {
         gfx.shade.SetEndPoint(Vector2 { X: 0.0, Y: 9.0 });
         rt.FillRectangle(&d2d(&Rect::new(0.0, 0.0, w, 9.0)), &gfx.shade);
         self.terminal_button(gfx, &pal, chat, w, &mut composer_hits);
+        self.composer_menu(gfx, chat, &pal, cx, cw, &mut composer_hits);
 
         hits.extend(composer_hits);
         *self.hits.borrow_mut() = hits;
@@ -748,26 +693,15 @@ impl View {
                     c.follow = false;
                 });
             }
-            Some(Hit::Send) => send_prompt(&key),
-            Some(Hit::Stop) => interrupt(&key),
+            Some(Hit::Input(Act::Send)) => send_prompt(&key),
+            Some(Hit::Input(Act::Stop)) => {
+                with(&key, composer::hold);
+                interrupt(&key);
+            }
             Some(Hit::Terminal) => app::push(Input::FolioToTerminal(key.clone())),
-            Some(Hit::Composer) => {
-                if let Some(at) = self.composer_at(x, y) {
-                    let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
-                    with(&key, |c| {
-                        if double {
-                            c.composer.select_word(at);
-                        } else {
-                            c.composer.set_caret(at, shift);
-                        }
-                    });
-                    if !double {
-                        self.selecting.set(true);
-                        unsafe {
-                            SetCapture(hwnd);
-                        }
-                    }
-                }
+            Some(Hit::Input(act)) => {
+                let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+                self.press_input(act, x, y, double, shift);
             }
             None => {
                 let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
@@ -779,13 +713,10 @@ impl View {
 
     pub(super) fn on_drag(&self, lparam: LPARAM) {
         let (x, y) = self.dip(lparam);
-        if select::moved(self, x, y) || !self.selecting.get() {
+        if select::moved(self, x, y) {
             return;
         }
-        if let Some(at) = self.composer_at(x, y) {
-            with(&self.key, |c| c.composer.set_caret(at, true));
-            redraw(&self.key);
-        }
+        self.hover_input(x, y);
     }
 
     pub(super) fn cursor(&self) -> bool {
@@ -796,7 +727,7 @@ impl View {
         }
         let s = self.scale();
         let id = match self.hit_at(p.x as f32 / s, p.y as f32 / s) {
-            Some(Hit::Composer) => IDC_IBEAM,
+            Some(Hit::Input(Act::Text)) => IDC_IBEAM,
             Some(_) => IDC_HAND,
             None if select::over_text(&self.key, p.x as f32 / s, p.y as f32 / s) => IDC_IBEAM,
             None => IDC_ARROW,
@@ -859,6 +790,14 @@ impl View {
             }
             WM_MOUSELEAVE => {
                 select::left(&self.key);
+                self.leave_input();
+                Some(LRESULT(0))
+            }
+            WM_DROPFILES => {
+                let drop = HDROP(wparam.0 as *mut c_void);
+                let paths = clipboard::drop_paths(drop);
+                unsafe { DragFinish(drop) };
+                composer::drop_files(&self.key, paths);
                 Some(LRESULT(0))
             }
             WM_CAPTURECHANGED => {
