@@ -12,6 +12,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 "Fix the merge of land-the-worktree-fix-from-fix-the-merge" stopped undone: conflict resolved, its clippy and tests queued in heavy. Own work, no tell, noted it.
 - 2026-10-29 "Land the worktree fix..." ended with a real conflict in worktree.rs against 6576c9d. Gave its fix-up Model: sonnet and told it to keep both features, flake rerun only.
 - 2026-10-29 "Slim CLAUDE.md to under 120 lines" landed red on the checkpoint git-init temp flake (third time today), its branch is docs only. Gave the fix-up Model: haiku over the opus escalation and a note to cherry-pick 40f9f09 and rerun only.
 - 2026-10-29 Round (landing, main at 6576c9d, checks green): the land-a-quest merge fix-up landed, so cast "Ship Local" (4 quests since the last ship). Four quests still run.
