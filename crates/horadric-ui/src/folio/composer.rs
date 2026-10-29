@@ -88,6 +88,7 @@ pub(super) enum Act {
     Model,
     Effort,
     Meter,
+    Tasks,
     Pick(usize),
     Unattach(usize),
     Unqueue(usize),
@@ -167,7 +168,7 @@ pub(super) struct Input {
     top: f32,
     /// Where the pickers' controls were last drawn, to open their menus
     /// under them.
-    anchors: [f32; 3],
+    anchors: [f32; 4],
     ime: Option<[i32; 4]>,
 }
 
@@ -196,7 +197,7 @@ impl Input {
             dirty: false,
             saved_at: Instant::now(),
             top: 0.0,
-            anchors: [0.0; 3],
+            anchors: [0.0; 4],
             ime: None,
         }
     }
@@ -433,10 +434,7 @@ fn terminal_command(text: &str) -> Option<&'static str> {
 /// Opens or follows the `/` and `@` menus for the word at the caret.
 fn follow_menu(chat: &mut Chat) {
     let inp = &mut chat.input;
-    if matches!(
-        inp.menu.as_ref().map(|m| m.kind),
-        Some(MenuKind::Model | MenuKind::Effort | MenuKind::Mode)
-    ) {
+    if inp.menu.as_ref().is_some_and(|m| m.kind.is_picker()) {
         return;
     }
     let (start, word) = inp.ed.word_at_caret();
@@ -611,6 +609,7 @@ fn pick(chat: &mut Chat, how: How) -> bool {
             }
         }
         MenuKind::Effort => set_effort(chat, &item.value),
+        MenuKind::Tasks => {}
     }
     true
 }
@@ -697,6 +696,14 @@ fn open_picker(chat: &mut Chat, kind: MenuKind) {
                 })
                 .collect()
         }
+        MenuKind::Tasks => (chat.folio.background.iter())
+            .map(|t| Item {
+                label: controls::task_kind(&t.task_type).to_string(),
+                detail: controls::task_label(t),
+                value: t.task_id.clone(),
+                ..Default::default()
+            })
+            .collect(),
         _ => {
             let now = chat.input.effort.clone();
             effort_levels(chat)
@@ -1262,7 +1269,7 @@ impl View {
                 None,
             )
         };
-        chat.input.anchors = [a0, a1, a2];
+        chat.input.anchors = [a0, a1, a2, 0.0];
 
         // Send, and stop while Claude works.
         let mut right = r.right() - PAD;
@@ -1299,6 +1306,14 @@ impl View {
             right = b.x - 6.0;
         }
 
+        // The background tasks, when any run, go left of the meter.
+        let tasks = chat.folio.background.len();
+        let tasks_pill = (tasks > 0).then(|| {
+            let words = controls::tasks_line(tasks);
+            let tw = width_of(gpu, &gfx.small, &words).ceil();
+            (words, tw)
+        });
+
         // The context meter, when the CLI has said how full it is.
         if let Some(ctx) = chat.folio.context.as_ref().filter(|c| c.limit > 0) {
             let (full, words) = controls::meter(ctx.used, ctx.limit);
@@ -1329,6 +1344,29 @@ impl View {
                     pal.dim,
                 );
                 hits.push((m, Hit::Input(Act::Meter)));
+                right = m.x - 2.0;
+            }
+        }
+        if let Some((words, tw)) = tasks_pill {
+            let b = Rect::new(right - tw - 38.0, cy, tw + 34.0, PILL_H);
+            if b.x > x + 8.0 {
+                if hover == Some(Act::Tasks) || open == Some(MenuKind::Tasks) {
+                    gfx.fill_round(&b, PILL_H / 2.0, pal.fg.with_alpha(0.08));
+                }
+                gfx.text_in(
+                    "\u{E9F5}",
+                    &gfx.icon,
+                    &Rect::new(b.x + 8.0, cy, 14.0, PILL_H),
+                    pal.accent,
+                );
+                gfx.text_in(
+                    &words,
+                    &gfx.small,
+                    &Rect::new(b.x + 26.0, cy, tw + 2.0, PILL_H),
+                    pal.dim,
+                );
+                hits.push((b, Hit::Input(Act::Tasks)));
+                chat.input.anchors[3] = b.x;
             }
         }
     }
@@ -1433,17 +1471,15 @@ impl View {
             return;
         };
         let gpu = &self.shared.gpu;
-        let picker = matches!(
-            menu.kind,
-            MenuKind::Model | MenuKind::Effort | MenuKind::Mode
-        );
+        let picker = menu.kind.is_picker();
         let (x, w) = if picker {
             let a = match menu.kind {
                 MenuKind::Mode => chat.input.anchors[0],
                 MenuKind::Model => chat.input.anchors[1],
+                MenuKind::Tasks => chat.input.anchors[3],
                 _ => chat.input.anchors[2],
             };
-            let w = if menu.kind == MenuKind::Model {
+            let w = if matches!(menu.kind, MenuKind::Model | MenuKind::Tasks) {
                 340.0
             } else {
                 220.0
@@ -1611,7 +1647,7 @@ impl View {
         with(&key, |chat| {
             if !matches!(
                 act,
-                Act::Pick(_) | Act::Mode | Act::Model | Act::Effort | Act::Text
+                Act::Pick(_) | Act::Mode | Act::Model | Act::Effort | Act::Tasks | Act::Text
             ) {
                 chat.input.menu = None;
             }
@@ -1626,6 +1662,7 @@ impl View {
                 Act::Mode => open_picker(chat, MenuKind::Mode),
                 Act::Model => open_picker(chat, MenuKind::Model),
                 Act::Effort => open_picker(chat, MenuKind::Effort),
+                Act::Tasks => open_picker(chat, MenuKind::Tasks),
                 Act::Meter => {
                     let line = chat.folio.get_context_usage();
                     write(chat, &line);
@@ -1647,9 +1684,7 @@ impl View {
                     }
                 }
                 Act::Text => {
-                    if chat.input.menu.as_ref().is_some_and(|m| {
-                        matches!(m.kind, MenuKind::Mode | MenuKind::Model | MenuKind::Effort)
-                    }) {
+                    if chat.input.menu.as_ref().is_some_and(|m| m.kind.is_picker()) {
                         chat.input.menu = None;
                     }
                     select = true;

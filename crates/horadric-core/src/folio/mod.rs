@@ -137,6 +137,18 @@ pub enum Notice {
     CommandOutput(String),
     /// A control request of ours the CLI refused.
     Refused(String),
+    /// A line the CLI wants the human to read, such as a notification, a
+    /// warning or a model falling back.
+    Info(String),
+}
+
+/// A task running in the background of a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundTask {
+    pub task_id: String,
+    /// Such as `local_bash`, `local_agent` or `monitor`.
+    pub task_type: String,
+    pub description: String,
 }
 
 /// An image sent with a prompt, for its thumbnail.
@@ -275,6 +287,12 @@ pub struct Folio {
     pub queued: Vec<QueuedPrompt>,
     /// How many blocks came from a transcript, before this process's own.
     pub history: usize,
+    /// The background tasks alive now (shells, monitors, agents), as the
+    /// CLI's last `background_tasks_changed` listed them.
+    pub background: Vec<BackgroundTask>,
+    /// Whether the CLI has listed its background tasks at all, so an empty
+    /// list means none run rather than a CLI that never says.
+    pub background_heard: bool,
     /// The blocks of the message streaming now, by content index.
     open: HashMap<u64, Open>,
     /// The id of the message streaming now.
@@ -830,6 +848,16 @@ impl Folio {
         true
     }
 
+    /// What a slash command printed. The CLI may say it twice, as a
+    /// `local_command_output` and in a user message, so it shows once.
+    fn command_notice(&mut self, out: String) -> bool {
+        let n = Notice::CommandOutput(out);
+        if (self.blocks.iter().rev().take(3)).any(|b| matches!(b, Block::Notice(m) if *m == n)) {
+            return false;
+        }
+        self.notice(n)
+    }
+
     fn notice(&mut self, n: Notice) -> bool {
         self.blocks.push(Block::Notice(n));
         true
@@ -899,11 +927,89 @@ impl Folio {
                 lane.tool_uses = u["tool_uses"].as_u64().unwrap_or(lane.tool_uses);
                 true
             }
+            "background_tasks_changed" => {
+                let tasks: Vec<BackgroundTask> = (v["tasks"].as_array().into_iter().flatten())
+                    .map(|t| BackgroundTask {
+                        task_id: t["task_id"].as_str().unwrap_or_default().to_string(),
+                        task_type: t["task_type"].as_str().unwrap_or_default().to_string(),
+                        description: t["description"].as_str().unwrap_or_default().to_string(),
+                    })
+                    .collect();
+                let changed = tasks != self.background;
+                self.background = tasks;
+                self.background_heard = true;
+                changed
+            }
+            "commands_changed" => {
+                self.info.read_commands(&v["commands"]);
+                false
+            }
+            "local_command_output" => match said(&v["content"]) {
+                Some(t) => self.command_notice(t),
+                None => false,
+            },
+            // Level `info` is for the CLI's verbose transcript view only.
+            "informational" if v["level"] == "info" => false,
+            "notification" => match said(&v["text"]) {
+                Some(t) => self.notice(Notice::Info(t)),
+                None => false,
+            },
+            "informational" | "model_fallback" | "model_refusal_no_fallback" => {
+                match said(&v["content"]) {
+                    Some(t) => self.notice(Notice::Info(t)),
+                    None => false,
+                }
+            }
             // Bookkeeping with nothing to show: hooks are read from the
-            // hook events, as for a terminal session, and a subagent's end
-            // shows in its step's result.
-            "hook_started" | "hook_progress" | "hook_response" | "thinking_tokens"
-            | "task_updated" | "task_notification" | "stop_hook_summary" => false,
+            // hook events, as for a terminal session, a subagent's end
+            // shows in its step's result, a turn's end in its result, and
+            // the rest is for other hosts (IDEs, remote control, the
+            // CLI's own screen).
+            "hook_started"
+            | "hook_progress"
+            | "hook_response"
+            | "thinking_tokens"
+            | "task_updated"
+            | "task_notification"
+            | "task_summary"
+            | "stop_hook_summary"
+            | "session_state_changed"
+            | "session_title_changed"
+            | "session_metadata"
+            | "turn_duration"
+            | "post_turn_summary"
+            | "api_error"
+            | "permission_denied"
+            | "permission_retry"
+            | "permission_check_status"
+            | "per_turn_effort_changed"
+            | "files_persisted"
+            | "file_snapshot"
+            | "file_attachments_missing"
+            | "elicitation_complete"
+            | "control_request_progress"
+            | "memory_recall"
+            | "memory_saved"
+            | "instruction_size_warning"
+            | "away_summary"
+            | "thinking"
+            | "vcs_state_changed"
+            | "turn_handoff_available"
+            | "turn_preempted"
+            | "inherited_asks_settled"
+            | "worker_shutting_down"
+            | "agents_killed"
+            | "cloud_session_delta"
+            | "code_change_published"
+            | "dev_intent"
+            | "feedback_draft_queued"
+            | "mirror_error"
+            | "model_consent_fallback"
+            | "peer_message_hold"
+            | "plugin_install"
+            | "scheduled_task_fire"
+            | "upgrade_relay_marker" => false,
+            s if s.starts_with("ui_") => false,
             _ => self.raw(line),
         }
     }
@@ -1242,7 +1348,7 @@ impl Folio {
     fn user(&mut self, v: &Value) -> bool {
         if let Some(s) = v["message"]["content"].as_str() {
             return match command_output(s) {
-                Some(out) => self.notice(Notice::CommandOutput(out)),
+                Some(out) => self.command_notice(out),
                 None => false,
             };
         }
@@ -1576,6 +1682,12 @@ impl Folio {
             _ => false,
         })
     }
+}
+
+/// A text field's trimmed contents, None when there are none.
+fn said(v: &Value) -> Option<String> {
+    let t = v.as_str()?.trim();
+    (!t.is_empty()).then(|| t.to_string())
 }
 
 /// What a slash command printed, from the user message the CLI wraps it
@@ -2132,6 +2244,71 @@ mod tests {
             f.feed(line);
         }
         assert_eq!(replies(&f), ["pong"]);
+    }
+
+    #[test]
+    fn background_tasks_are_state_not_blocks() {
+        let mut f = Folio::new();
+        let two = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash","description":"npm run dev"},{"task_id":"a2","task_type":"local_agent","description":"Review"}],"uuid":"u","session_id":"s"}"#;
+        assert!(f.feed(two));
+        assert!(!f.feed(two));
+        assert_eq!(f.background.len(), 2);
+        assert_eq!(f.background[0].description, "npm run dev");
+        assert!(f.feed(r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#));
+        assert!(f.background.is_empty());
+        assert!(f.blocks.is_empty());
+    }
+
+    #[test]
+    fn system_lines_for_other_hosts_stay_quiet() {
+        let mut f = Folio::new();
+        for s in [
+            "session_state_changed",
+            "turn_duration",
+            "ui_toast",
+            "task_summary",
+            "api_error",
+        ] {
+            f.feed(&format!(r#"{{"type":"system","subtype":"{s}"}}"#));
+        }
+        f.feed(r#"{"type":"system","subtype":"informational","level":"info","content":"verbose"}"#);
+        assert!(f.blocks.is_empty());
+    }
+
+    #[test]
+    fn system_lines_meant_for_the_human_are_notices() {
+        let mut f = Folio::new();
+        f.feed(r#"{"type":"system","subtype":"notification","key":"k","text":"Heads up","priority":"low"}"#);
+        f.feed(
+            r#"{"type":"system","subtype":"informational","level":"warning","content":"Careful"}"#,
+        );
+        f.feed(
+            r#"{"type":"system","subtype":"local_command_output","content":"Set model to sonnet"}"#,
+        );
+        // The same output again as the user message the CLI wraps it in.
+        f.feed(r#"{"type":"user","message":{"content":"<local-command-stdout>Set model to sonnet</local-command-stdout>"}}"#);
+        let n: Vec<_> = (f.blocks.iter())
+            .filter_map(|b| match b {
+                Block::Notice(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            n,
+            [
+                Notice::Info("Heads up".into()),
+                Notice::Info("Careful".into()),
+                Notice::CommandOutput("Set model to sonnet".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn commands_changed_replaces_the_command_list() {
+        let mut f = Folio::new();
+        f.feed(r#"{"type":"system","subtype":"commands_changed","commands":[{"name":"deploy","description":"Ship it","argumentHint":""}]}"#);
+        assert_eq!(f.info.commands.len(), 1);
+        assert_eq!(f.slash_commands("dep")[0].description, "Ship it");
     }
 
     #[test]

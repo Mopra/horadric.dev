@@ -121,9 +121,53 @@ pub fn meter(used: u64, limit: u64) -> (f32, String) {
     (full as f32, format!("{pct}% of {}", tokens(limit)))
 }
 
+/// The background tasks pill: how many run.
+pub fn tasks_line(n: usize) -> String {
+    match n {
+        1 => "1 background task".to_string(),
+        n => format!("{n} background tasks"),
+    }
+}
+
+/// What kind of task the CLI's `task_type` is, in words.
+pub fn task_kind(task_type: &str) -> &str {
+    match task_type {
+        "local_bash" => "shell",
+        "local_agent" => "agent",
+        "remote_agent" => "remote agent",
+        "monitor" | "local_monitor" => "monitor",
+        "" => "task",
+        t => t,
+    }
+}
+
+/// A background task's line in the list: what it does, else its id.
+pub fn task_label(t: &horadric_core::folio::BackgroundTask) -> String {
+    let d = t.description.lines().next().unwrap_or_default().trim();
+    if d.is_empty() {
+        t.task_id.clone()
+    } else {
+        d.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_tasks_read_plainly() {
+        assert_eq!(tasks_line(1), "1 background task");
+        assert_eq!(tasks_line(3), "3 background tasks");
+        assert_eq!(task_kind("local_bash"), "shell");
+        assert_eq!(task_kind("something_new"), "something_new");
+        let t = horadric_core::folio::BackgroundTask {
+            task_id: "b1".into(),
+            task_type: "local_bash".into(),
+            description: "npm run dev\nmore".into(),
+        };
+        assert_eq!(task_label(&t), "npm run dev");
+    }
 
     #[test]
     fn shift_tab_walks_the_modes_and_wraps() {

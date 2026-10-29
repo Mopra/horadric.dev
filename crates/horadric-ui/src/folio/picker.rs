@@ -32,6 +32,18 @@ pub enum MenuKind {
     Model,
     Effort,
     Mode,
+    /// The background tasks running now; picking one does nothing.
+    Tasks,
+}
+
+impl MenuKind {
+    /// Opened from a pill under the text rather than by typing.
+    pub fn is_picker(self) -> bool {
+        matches!(
+            self,
+            MenuKind::Model | MenuKind::Effort | MenuKind::Mode | MenuKind::Tasks
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

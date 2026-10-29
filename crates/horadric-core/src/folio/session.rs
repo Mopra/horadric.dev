@@ -122,18 +122,21 @@ impl SessionInfo {
         };
     }
 
-    /// Takes in the answer to `initialize`.
-    pub fn read_initialize(&mut self, r: &Value) {
-        self.commands = r["commands"]
-            .as_array()
-            .into_iter()
-            .flatten()
+    /// Takes in a whole command list, as `initialize` answers it and
+    /// `commands_changed` sends it again when skills turn up mid session.
+    pub fn read_commands(&mut self, commands: &Value) {
+        self.commands = (commands.as_array().into_iter().flatten())
             .map(|c| CommandInfo {
                 name: text(c, "name"),
                 description: text(c, "description"),
                 argument_hint: text(c, "argumentHint"),
             })
             .collect();
+    }
+
+    /// Takes in the answer to `initialize`.
+    pub fn read_initialize(&mut self, r: &Value) {
+        self.read_commands(&r["commands"]);
         self.models = r["models"]
             .as_array()
             .into_iter()
