@@ -1,6 +1,8 @@
 # Headless sessions and the Folio
 
-Decided on 2026-10-24. Proposed, not built. A Claude session's pane
+Decided on 2026-10-24. A first slice landed 2026-10-29: the engine,
+the model and a plain Folio behind an experimental button on each
+project cluster (see Steps). A Claude session's pane
 shows Claude Code's terminal today: PowerShell output, tool calls and
 diffs scroll past in full, take most of the room, and are rarely what
 the human wants to read. The human wants Horadric to own the whole
@@ -48,12 +50,16 @@ tests against them.
   --permission-prompt-tool stdio`, plus `--resume=<id>`,
   `--session-id=<uuid>`, `--model`, `--permission-mode`,
   `--append-system-prompt`, `--mcp-config` as today's terminal launch
-  passes them. Always the `=` form for values. The SDK does not pass
-  `-p`; whether the CLI needs it is checked in step 1. `claude.exe`
-  directly with `CreateProcess`, never a `.cmd` shim. The environment
-  drops `CLAUDECODE`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`,
-  so the subscription login is what it uses (init says
-  `apiKeySource: "none"`). Large config goes in `initialize`, not argv.
+  passes them. Always the `=` form for values. No `-p`: confirmed
+  against 2.1.312, the flags alone keep a session up across turns.
+  `claude.exe` directly, never a `.cmd` shim. The environment drops
+  `CLAUDECODE`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and the
+  `CLAUDE_CODE_*` variables naming a parent session, so the subscription
+  login is what it uses (init says `apiKeySource: "none"`, confirmed).
+  No `initialize` is needed for `can_use_tool` to arrive. No
+  `--permission-mode` either: a session follows the human's own
+  settings (the human's is `auto`, which never asks; decided
+  2026-10-29), so the ask cards show only when settings do ask.
 - **In, one JSON object a line.** A prompt is
   `{"type":"user","message":{"role":"user","content":...}}`, content a
   string or blocks (images as base64 blocks), with `uuid`, `priority`
@@ -179,6 +185,12 @@ tested against replies from the fixtures; anything it does not know
 shows as plain text.
 
 ## Steps
+
+Done so far (2026-10-29): step 1 except the resume checks and
+ExitPlanMode (`Headless` in `horadric-pty`, `horadric headless-debug`,
+five fixtures), step 2, and a first step 4 that runs `claude.exe`
+from the UI itself, not a host, so a Folio ends on reload or quit.
+The confirmed protocol is in the lore.
 
 1. **Spike.** A host that starts headless `claude.exe`, a hidden debug
    command that sends a prompt and prints the stream. Confirm: no `-p`
