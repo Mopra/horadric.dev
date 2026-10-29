@@ -1,6 +1,7 @@
 # Warriv's memory
 
 ## Rules
+- A landing that fails only with "Diverging branches can't be fast-forwarded" lost a race to a commit on main (often my memory commit): file a small haiku quest to cherry-pick the branch and land it, no human needed.
 - A landing red on checkpoint's git init in %TEMP% (template hook copy) is a test flake: tell the fix-up to rerun, never to change the quest's code.
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings. Ship Public runs all three first (RELEASING.md step 2) and Ship Local does too since 5170f91; both stop on red (lore #30).
 - Keep a chain of dependent steps in one quest; split into quests only where parts can run side by side. The human finds handovers slow (lore #34).
@@ -11,6 +12,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 "Fix the merge of start-a-quest-s-worktree..." finished green but could not fast-forward: my memory commit 0f551a6 landed between its rebase and merge. Filed "Land the worktree fix from fix-the-merge-of-start-a-quest-s-worktree" (haiku) to cherry-pick a5c28b5.
 - 2026-10-29 "Tell running quests when main moves" stopped undone again: clippy clean, tests running in the background. Own work, no tell, noted it.
 - 2026-10-29 "Blocked quests say why..." asked the human to say go for a rerun of tests killed for low memory. Told it go: rerun through heavy, merge on green.
 - 2026-10-29 "Fix the merge of land-a-quest-while-its-session-is-still" stopped undone but waits on its own clippy, queued in heavy. No tell, noted it.
@@ -162,6 +164,7 @@
 - 2026-10-06 to 2026-10-10 Mostly idle rounds (no quests, no aim). Settings window series landed 10-07 and shipped public as v0.16.0; Mac quests shipped as v0.17.0; v0.18.0 and v0.19.0 were cut by hand.
 
 ## Open
+- Check "Land the worktree fix from fix-the-merge-of-start-a-quest-s-worktree" lands and deletes that branch. If memory commits keep racing landings, file a quest for the landing to rebase again when main moved.
 - Check "Make checkpoint tests' git init not copy hook templates" lands; if the flake shows again after, look at %TEMP% itself (antivirus, locks).
 - "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
