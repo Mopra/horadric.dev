@@ -143,11 +143,13 @@ impl Editor {
         self.edit(Kind::Other, |f| f.insert(s));
     }
 
-    /// Replaces the bytes `a..b` with `s`, the caret after it.
+    /// Replaces the bytes `a..b` with `s`, the caret after it. An end
+    /// that is stale (the text changed under a menu) is taken back to the
+    /// char it falls in.
     pub fn replace(&mut self, a: usize, b: usize, s: &str) {
         self.edit(Kind::Other, |f| {
-            f.anchor = a.min(f.text.len());
-            f.caret = b.min(f.text.len());
+            f.anchor = floor_char(&f.text, a);
+            f.caret = floor_char(&f.text, b);
             f.insert(s);
         });
     }
@@ -232,25 +234,25 @@ impl Editor {
     /// The text with each chip opened back into what was pasted: what is
     /// sent, and what history keeps.
     pub fn expanded(&self) -> String {
-        let text = &self.field.text;
-        let mut out = String::with_capacity(text.len());
-        let mut at = 0;
-        for (a, b) in self.chips() {
-            out.push_str(&text[at..a]);
-            match number_of(&text[a..b]).and_then(|n| self.pastes.get(n - 1)) {
-                Some(p) => out.push_str(p),
-                None => out.push_str(&text[a..b]),
-            }
-            at = b;
-        }
-        out.push_str(&text[at..]);
-        out
+        expand(&self.field.text, &self.pastes)
     }
 
-    /// Empties it after a send. Undo can bring the text back.
+    /// Empties it after a send. Undo can bring the text back, its chips
+    /// opened, since what they held goes with the send.
     pub fn clear(&mut self) {
+        let pastes = std::mem::take(&mut self.pastes);
+        for snap in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            let open = expand(&snap.text, &pastes);
+            if open != snap.text {
+                snap.text = open;
+                snap.caret = snap.text.len();
+                snap.anchor = snap.caret;
+            }
+        }
+        self.field.text = expand(&self.field.text, &pastes);
+        let end = self.field.text.len();
+        self.field.set_caret(end, false);
         self.set_text("");
-        self.pastes.clear();
     }
 
     /// The word the caret is in, from its start: `(start, word)`. A word
@@ -276,6 +278,31 @@ fn fold(s: &str) -> Option<String> {
     }
     let chars = s.chars().count();
     (chars > FOLD_CHARS).then(|| format!("{chars} chars"))
+}
+
+/// `text` with each chip opened back into its paste.
+fn expand(text: &str, pastes: &[String]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for (a, b) in chips_in(text, pastes.len()) {
+        out.push_str(&text[at..a]);
+        match number_of(&text[a..b]).and_then(|n| pastes.get(n - 1)) {
+            Some(p) => out.push_str(p),
+            None => out.push_str(&text[a..b]),
+        }
+        at = b;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// `i` clamped to `text` and taken back to the start of the char it is in.
+fn floor_char(text: &str, i: usize) -> usize {
+    let mut i = i.min(text.len());
+    while !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 fn number_of(token: &str) -> Option<usize> {
@@ -427,6 +454,33 @@ mod tests {
         assert_eq!(e.text(), "look: [Pasted 120 lines #1] thanks");
         assert_eq!(e.chips(), vec![(6, 27)]);
         assert_eq!(e.expanded(), format!("look: {big} thanks"));
+    }
+
+    #[test]
+    fn undo_after_a_send_brings_the_paste_back_whole() {
+        let mut e = Editor::new("see ");
+        let big: String = (0..30).map(|i| format!("l{i}\n")).collect();
+        e.paste(&big);
+        e.clear();
+        assert!(e.pastes().is_empty());
+        assert!(e.undo());
+        assert_eq!(e.text(), format!("see {big}"));
+        assert_eq!(e.expanded(), e.text());
+        assert!(e.undo(), "the step before the paste");
+        assert_eq!(e.text(), "see ");
+    }
+
+    #[test]
+    fn a_replace_with_stale_ends_stays_on_char_boundaries() {
+        let mut e = Editor::new("æøå 😀");
+        // Inside æ, inside ø, past the end: none may panic.
+        e.replace(1, 3, "x");
+        assert_eq!(e.text(), "xøå 😀");
+        e.replace(5, 99, "!");
+        assert_eq!(e.text(), "xøå!");
+        let mut e = Editor::new("😀");
+        e.replace(2, 2, "a");
+        assert_eq!(e.text(), "a😀");
     }
 
     #[test]

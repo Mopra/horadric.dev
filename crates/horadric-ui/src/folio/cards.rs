@@ -3,7 +3,8 @@
 //! and a plan to approve or send back. Each is built into a [`Scene`]
 //! like any block; what is typed into their fields lives in [`State`].
 
-use horadric_core::folio::{AskState, Block};
+use horadric_core::folio::{AskState, Block, FileEdit};
+use windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_EMERGENCY_BREAK;
 
 use super::flow;
 use super::rich::{Ctx, Scene, F};
@@ -17,8 +18,8 @@ use crate::theme::{self, Color};
 
 const PAD: f32 = 14.0;
 const BUTTON_H: f32 = 30.0;
-/// The most of an ask's input a card shows before it is cut off.
-const ASK_MAX_H: f32 = 140.0;
+/// The most of an ask's input a card shows before "Show all".
+const ASK_MAX_H: f32 = 220.0;
 
 /// A button `w` wide ending at `right`, filled when it is the one to
 /// press. Returns its left edge.
@@ -109,6 +110,7 @@ pub(super) unsafe fn ask(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
         request_id,
         tool,
         shown,
+        input,
         suggestions,
         state,
         ..
@@ -124,14 +126,37 @@ pub(super) unsafe fn ask(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
         cx.pal.fg,
     );
     let mut y = PAD + 26.0;
-    if let Some(l) = cx.layout(&cx.gfx.mono, shown, inner) {
+    let waiting = *state == AskState::Waiting;
+    // An edit shows what it changes, as its step will; anything else all
+    // it acts on, every line, so nothing asked about is out of sight.
+    let edit = FileEdit::from_input(tool, input).filter(|_| waiting);
+    if let Some(e) = &edit {
+        y = cx.diff(&mut s, request_id, e, PAD, y, inner, st) + 10.0;
+    } else if let Some(l) = cx.layout(&cx.gfx.mono, shown, inner) {
+        let _ = l.SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
         let (_, lh) = render::text_size(&l);
-        let r = Rect::new(PAD - 2.0, y - 2.0, inner + 4.0, lh.min(ASK_MAX_H) + 6.0);
+        let all = st.all.contains(request_id);
+        let cut = lh > ASK_MAX_H && !all;
+        let h = if cut { ASK_MAX_H } else { lh };
+        let r = Rect::new(PAD - 2.0, y - 2.0, inner + 4.0, h + 6.0);
         s.fill(r, 6.0, Color::rgb(0).with_alpha(0.25));
         s.items.push(super::rich::Item::Clip(r));
         s.unit(&l, PAD, y + 1.0, cx.pal.fg.with_alpha(0.85), shown);
         s.items.push(super::rich::Item::Unclip);
-        y = r.bottom() + 12.0;
+        y = r.bottom() + 4.0;
+        if lh > ASK_MAX_H {
+            let lines = shown.lines().count();
+            let say = if all {
+                "Show less".to_string()
+            } else {
+                format!("Show all {lines} lines")
+            };
+            let link = Rect::new(PAD, y, inner, 20.0);
+            s.line(say, F::Small, link, cx.pal.accent.mix(cx.pal.fg, 0.45));
+            s.hit(link, Hit::Tr(Act::All(request_id.clone())));
+            y += 20.0;
+        }
+        y += 8.0;
     }
     let right = w - PAD;
     let always = flow::always_label(suggestions);

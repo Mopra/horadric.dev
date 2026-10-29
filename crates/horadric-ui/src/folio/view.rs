@@ -592,8 +592,9 @@ impl View {
     /// Draws one frame. False when the target was lost.
     pub(super) unsafe fn draw(&self, gfx: &Gfx, chat: &mut Chat) -> bool {
         let now = Instant::now();
+        chat.note_busy();
         let heat = chat.heat();
-        let moving = chat.folio.busy || heat > 0.0;
+        let moving = chat.busy_was || heat > 0.0;
         if moving {
             let dt = self
                 .last
@@ -785,8 +786,14 @@ impl View {
         }
         let (x, y) = self.dip(lparam);
         let key = self.key.clone();
+        let hit = self.hit_at(x, y);
+        // A double click's first press already did what a button does; its
+        // second only selects a word in text.
+        if double && !matches!(hit, None | Some(Hit::Input(Act::Text))) {
+            return;
+        }
         select::unfocus(&key, unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0);
-        match self.hit_at(x, y) {
+        match hit {
             Some(Hit::Answer(id, allow)) => answer(&key, &id, allow),
             Some(Hit::Tr(a)) => select::act(&key, a),
             Some(Hit::Fold(i)) => {

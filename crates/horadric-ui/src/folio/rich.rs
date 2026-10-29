@@ -420,7 +420,7 @@ impl Ctx<'_> {
                     Align::None,
                 );
                 if let Some(m) = marker {
-                    let r = Rect::new(x - flow::LIST_INDENT, 0.0, flow::LIST_INDENT - 7.0, first);
+                    let r = Rect::new(x - p.marker_w, 0.0, p.marker_w - 7.0, first);
                     s.line(m.clone(), F::Right, r, self.pal.dim);
                 }
                 if *font == Font::H1 || *font == Font::H2 {

@@ -45,11 +45,25 @@ pub fn questions(input: &Value) -> Vec<Question> {
 }
 
 /// The answers in the form the CLI takes them: by question text, several
-/// picks of one question joined with ", " as the terminal joins them.
+/// picks of one question joined with ", " as the terminal joins them. Two
+/// questions worded the same share one key, so their answers go together
+/// there rather than the second hiding the first.
 pub fn answers_object(questions: &[Question], picks: &[Vec<String>]) -> Value {
     let mut map = serde_json::Map::new();
     for (q, p) in questions.iter().zip(picks) {
-        map.insert(q.question.clone(), Value::String(p.join(", ")));
+        let said = p.join(", ");
+        match map.get_mut(&q.question) {
+            Some(Value::String(before)) if !said.is_empty() => {
+                if !before.is_empty() {
+                    before.push_str("; ");
+                }
+                before.push_str(&said);
+            }
+            Some(_) => {}
+            None => {
+                map.insert(q.question.clone(), Value::String(said));
+            }
+        }
     }
     Value::Object(map)
 }
@@ -114,6 +128,18 @@ mod tests {
             answers_object(&q, &[vec!["A".into(), "B".into()]]),
             json!({"Which?": "A, B"})
         );
+    }
+
+    #[test]
+    fn questions_worded_the_same_keep_both_answers() {
+        let q = questions(&json!({"questions": [{"question": "Which?"}, {"question": "Which?"}]}));
+        let picks = [
+            vec!["A".to_string()],
+            vec!["B".to_string(), "C".to_string()],
+        ];
+        assert_eq!(answers_object(&q, &picks), json!({"Which?": "A; B, C"}));
+        let empty_first = [vec![], vec!["B".to_string()]];
+        assert_eq!(answers_object(&q, &empty_first), json!({"Which?": "B"}));
     }
 
     #[test]

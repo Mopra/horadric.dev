@@ -300,8 +300,14 @@ pub struct Folio {
     /// Blocks that streamed, waiting for their `assistant` copy.
     streamed: Vec<Streamed>,
     /// Lines the CLI must be sent back, such as the answer to a request
-    /// it made that the human has no say in. Taken by [`Folio::take_outbox`].
-    outbox: Vec<String>,
+    /// it made that the human has no say in, by the request id it answers.
+    /// Taken by [`Folio::take_outbox`].
+    outbox: Vec<(String, String)>,
+    /// Whether `initialize` went to this process, sent here or replayed.
+    pub initialized: bool,
+    /// The input of each AskUserQuestion and ExitPlanMode ask, by request
+    /// id, for the answer to echo back whether or not it named its tool use.
+    ask_inputs: HashMap<String, Value>,
     /// The process's `total_cost_usd` at the last result, for a turn's own
     /// cost when the result does not say it.
     total_cost: f64,
@@ -520,7 +526,12 @@ impl Folio {
         };
         match v["type"].as_str().unwrap_or_default() {
             "user" => self.sent_prompt(&v),
-            "control_response" => self.sent_answer(&v["response"]),
+            "control_response" => {
+                // Answered already, so a replay must not answer it again.
+                let id = v["response"]["request_id"].as_str().unwrap_or_default();
+                self.outbox.retain(|(r, _)| r != id);
+                self.sent_answer(&v["response"])
+            }
             "control_request" => {
                 let id = v["request_id"].as_str().unwrap_or_default();
                 // Our ids count up; a later request must not reuse one.
@@ -528,7 +539,10 @@ impl Folio {
                     self.sent = self.sent.max(n);
                 }
                 let kind = match v["request"]["subtype"].as_str().unwrap_or_default() {
-                    "initialize" => Sent::Initialize,
+                    "initialize" => {
+                        self.initialized = true;
+                        Sent::Initialize
+                    }
                     "set_permission_mode" => Sent::Mode,
                     "set_model" => Sent::Model,
                     "get_context_usage" => Sent::Context,
@@ -747,7 +761,10 @@ impl Folio {
     }
 
     /// The input of the tool use a request asked about.
-    fn input_of_request(&self, request_id: &str) -> Option<Value> {
+    fn input_of_request(&mut self, request_id: &str) -> Option<Value> {
+        if let Some(input) = self.ask_inputs.remove(request_id) {
+            return Some(input);
+        }
         let tool_use = self.asked.get(request_id)?;
         self.hidden.get(tool_use).map(|(_, input)| input.clone())
     }
@@ -756,10 +773,15 @@ impl Folio {
     /// last prompt has its footer. A transcript's turns do not count, as
     /// they ended before this process.
     pub fn turn_finished(&self) -> bool {
+        !self.busy && self.turn_over()
+    }
+
+    /// Whether the last prompt of this process has its footer.
+    fn turn_over(&self) -> bool {
         let own = self.blocks.get(self.history..).unwrap_or_default();
         let last =
             (own.iter().rev()).find(|b| matches!(b, Block::Prompt(_) | Block::Footer { .. }));
-        !self.busy && matches!(last, Some(Block::Footer { .. }))
+        matches!(last, Some(Block::Footer { .. }))
     }
 
     /// The asks, questions and plans still waiting on the human, oldest
@@ -818,6 +840,7 @@ impl Folio {
     /// [`SessionInfo::models`] with each model's effort levels. Optional:
     /// the CLI works without it.
     pub fn initialize(&mut self) -> String {
+        self.initialized = true;
         let id = self.request(Sent::Initialize);
         control_request_line(&id, "initialize", serde_json::json!({}))
     }
@@ -1041,6 +1064,16 @@ impl Folio {
     fn control_response(&mut self, v: &Value) -> bool {
         let r = &v["response"];
         let id = r["request_id"].as_str().unwrap_or_default();
+        // An interrupt's answer names what still waits; anything else was
+        // dropped and will never start, so it must not keep the turn busy.
+        if let Some(still) = r["response"]["still_queued"].as_array() {
+            let still = serde_json::to_string(still).unwrap_or_default();
+            let before = self.queued.len();
+            self.queued.retain(|q| still.contains(&q.uuid));
+            if self.queued.len() != before && self.queued.is_empty() && self.turn_over() {
+                self.busy = false;
+            }
+        }
         // The answer to an interrupt, or to a request not ours.
         let Some(kind) = self.requests.remove(id) else {
             return false;
@@ -1387,7 +1420,8 @@ impl Folio {
         for block in results {
             let id = block["tool_use_id"].as_str().unwrap_or_default();
             let failed = block["is_error"].as_bool().unwrap_or(false);
-            let withdrawn = self.withdrawn.contains(id);
+            let withdrawn = self.withdrawn.remove(id);
+            self.asked.retain(|_, tool_use| tool_use != id);
             let text = result_text(&block["content"]);
             if self.hidden.contains_key(id) {
                 changed |= self.hidden_result(id, failed, withdrawn, &text, detail);
@@ -1431,7 +1465,8 @@ impl Folio {
         text: &str,
         detail: &Value,
     ) -> bool {
-        let Some((tool, input)) = self.hidden.get(id).cloned() else {
+        // Its result is the last that is heard of it.
+        let Some((tool, input)) = self.hidden.remove(id) else {
             return false;
         };
         let to = match (failed, withdrawn) {
@@ -1550,6 +1585,11 @@ impl Folio {
             let q = self.queued.remove(0);
             self.push_prompt(&q.text);
         }
+        // The CLI sends the result before it starts what waits, so idle
+        // here would let a local queue or a hand over slip in ahead of it.
+        if !self.queued.is_empty() {
+            self.busy = true;
+        }
         true
     }
 
@@ -1595,13 +1635,19 @@ impl Folio {
         self.busy = false;
         self.open.clear();
         self.streamed.clear();
+        // What a turn's asks and hidden tools kept is of no use past it.
+        self.asked.clear();
+        self.withdrawn.clear();
+        self.hidden.clear();
+        self.ask_inputs.clear();
         changed
     }
 
     /// The lines to write to the CLI's stdin that the model made on its
     /// own, oldest first.
     pub fn take_outbox(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.outbox)
+        let out = std::mem::take(&mut self.outbox);
+        out.into_iter().map(|(_, line)| line).collect()
     }
 
     fn control_request(&mut self, v: &Value, line: &str) -> bool {
@@ -1611,10 +1657,11 @@ impl Folio {
             // Unanswered, the CLI may wait on it for good. An error is what
             // it gets from any client that does not know a subtype.
             let subtype = request["subtype"].as_str().unwrap_or_default();
-            self.outbox.push(control_error(
+            let error = control_error(
                 &request_id,
                 &format!("Unsupported control request subtype: {subtype}"),
-            ));
+            );
+            self.outbox.push((request_id, error));
             return self.raw(line);
         }
         let tool = request["tool_name"]
@@ -1630,8 +1677,11 @@ impl Folio {
             self.asked.insert(request_id.clone(), tool_use_id.clone());
         }
         if hidden_tool(&tool) {
-            self.hidden
-                .insert(tool_use_id.clone(), (tool.clone(), input.clone()));
+            self.ask_inputs.insert(request_id.clone(), input.clone());
+            if !tool_use_id.is_empty() {
+                self.hidden
+                    .insert(tool_use_id.clone(), (tool.clone(), input.clone()));
+            }
         }
         match tool.as_str() {
             "AskUserQuestion" => self.blocks.push(Block::Question {
@@ -1652,7 +1702,7 @@ impl Folio {
                 let summary = summarize(&tool, &input);
                 self.blocks.push(Block::Ask {
                     request_id,
-                    shown: ask_shown(&summary, &input),
+                    shown: ask_shown(&tool, &input),
                     summary,
                     tool,
                     input,
@@ -1722,12 +1772,14 @@ pub fn effort_line(level: &str) -> String {
     prompt_line(&format!("/effort {level}"))
 }
 
-/// What an ask's card shows: its one line summary, or its input as JSON
-/// when the tool has none, cut short.
-fn ask_shown(summary: &str, input: &Value) -> String {
-    const MAX: usize = 1200;
-    if !summary.trim().is_empty() {
-        return summary.to_string();
+/// What an ask's card shows: all of what the tool acts on (every line of
+/// a command, a file's whole path), or its input as JSON when the tool
+/// names nothing, cut short only past what anyone would read.
+fn ask_shown(tool: &str, input: &Value) -> String {
+    const MAX: usize = 20_000;
+    let subject = subject(tool, input).trim_end();
+    if !subject.trim().is_empty() {
+        return subject.to_string();
     }
     let mut s = serde_json::to_string_pretty(input).unwrap_or_default();
     if s.len() > MAX {
@@ -1762,13 +1814,14 @@ pub fn control_response(request_id: &str, allow: bool, input: Value) -> String {
     control_success(request_id, response)
 }
 
-/// One line saying what a tool call does: a command, a file name, a pattern.
-pub fn summarize(tool: &str, input: &Value) -> String {
+/// What a tool call acts on, whole: a command, a file's path, a pattern.
+/// Empty for a tool not known here.
+fn subject<'a>(tool: &str, input: &'a Value) -> &'a str {
     let field = |name: &str| input[name].as_str().unwrap_or_default();
-    let text = match tool {
+    match tool {
         "Bash" | "PowerShell" => field("command"),
-        "Read" | "Edit" | "Write" | "MultiEdit" => file_name(field("file_path")),
-        "NotebookEdit" => file_name(field("notebook_path")),
+        "Read" | "Edit" | "Write" | "MultiEdit" => field("file_path"),
+        "NotebookEdit" => field("notebook_path"),
         "Grep" | "Glob" => field("pattern"),
         "WebFetch" => field("url"),
         "WebSearch" => field("query"),
@@ -1776,8 +1829,16 @@ pub fn summarize(tool: &str, input: &Value) -> String {
         "Skill" => field("skill"),
         "ToolSearch" => field("query"),
         _ => "",
-    };
-    first_line(text)
+    }
+}
+
+/// One line saying what a tool call does: a command, a file name, a pattern.
+pub fn summarize(tool: &str, input: &Value) -> String {
+    let text = subject(tool, input);
+    match tool {
+        "Read" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => first_line(file_name(text)),
+        _ => first_line(text),
+    }
 }
 
 /// The last part of a path, either slash.
@@ -2208,6 +2269,75 @@ mod tests {
     }
 
     #[test]
+    fn a_replay_does_not_answer_a_request_again() {
+        let ask = |id: &str| {
+            format!(
+                r#"{{"type":"control_request","request_id":"{id}","request":{{"subtype":"x"}}}}"#
+            )
+        };
+        let mut f = Folio::new();
+        f.feed(&ask("r1"));
+        f.feed_sent(&control_error(
+            "r1",
+            "Unsupported control request subtype: x",
+        ));
+        f.feed(&ask("r2"));
+        let out = f.take_outbox();
+        assert_eq!(out.len(), 1, "only the one never answered");
+        assert!(out[0].contains("\"r2\""));
+    }
+
+    #[test]
+    fn initialize_is_known_sent_once_replayed() {
+        let mut f = Folio::new();
+        assert!(!f.initialized);
+        let line = Folio::new().initialize();
+        f.feed_sent(&line);
+        assert!(f.initialized);
+        let mut g = Folio::new();
+        g.initialize();
+        assert!(g.initialized);
+    }
+
+    #[test]
+    fn a_question_without_its_tool_use_still_echoes_its_input() {
+        let mut f = Folio::new();
+        f.push_prompt("p");
+        let input =
+            serde_json::json!({"questions": [{"question": "Q?", "options": [{"label": "A"}]}]});
+        let line = serde_json::json!({"type": "control_request", "request_id": "q1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": input}});
+        f.feed(&line.to_string());
+        let out = f.answer_question("q1", &[vec!["A".into()]]).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let echoed = &v["response"]["response"]["updatedInput"];
+        assert_eq!(echoed["questions"], input["questions"]);
+        assert_eq!(echoed["answers"]["Q?"], "A");
+
+        let plan = serde_json::json!({"type": "control_request", "request_id": "p1", "request": {
+            "subtype": "can_use_tool", "tool_name": "ExitPlanMode", "input": {"plan": "Do it."}}});
+        f.feed(&plan.to_string());
+        let out = f.approve_plan("p1", None).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["response"]["response"]["updatedInput"]["plan"], "Do it.");
+    }
+
+    #[test]
+    fn a_turn_keeps_nothing_of_its_asks_once_over() {
+        for stream in [ASK_QUESTION, PLAN_KEEP, ASK_INTERRUPT, BASH_ALLOW] {
+            let (f, _) = live("p", stream, |f, id| {
+                let picks = [vec!["Blue".into()], vec!["Large".into()]];
+                f.answer_question(id, &picks)
+                    .or_else(|| f.keep_planning(id, KEEP))
+                    .or_else(|| f.answer(id, true))
+                    .unwrap()
+            });
+            assert!(f.hidden.is_empty() && f.asked.is_empty());
+            assert!(f.withdrawn.is_empty() && f.ask_inputs.is_empty());
+        }
+    }
+
+    #[test]
     fn a_delta_after_the_copy_adds_nothing() {
         let mut f = Folio::new();
         f.push_prompt("p");
@@ -2242,8 +2372,17 @@ mod tests {
             panic!("{:#?}", f.blocks);
         };
         assert_eq!(shown, "{\n  \"a\": 1\n}");
-        let long = ask_shown("", &serde_json::json!({"a": "\u{e9}".repeat(2000)}));
-        assert!(long.len() <= 1200 + 3 && long.ends_with('\u{2026}'));
+        let long = ask_shown("x", &serde_json::json!({"a": "\u{e9}".repeat(20_000)}));
+        assert!(long.len() <= 20_000 + 3 && long.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn an_ask_shows_all_it_acts_on() {
+        let bash = serde_json::json!({"command": "echo hi\nrm -rf ~\n"});
+        assert_eq!(ask_shown("Bash", &bash), "echo hi\nrm -rf ~");
+        let edit = serde_json::json!({"file_path": "C:\\a\\b\\pane.rs"});
+        assert_eq!(ask_shown("Edit", &edit), "C:\\a\\b\\pane.rs");
+        assert_eq!(summarize("Edit", &edit), "pane.rs");
     }
 
     #[test]
@@ -2800,6 +2939,59 @@ mod tests {
         assert_eq!(replies(&f).last(), Some(&"queued"));
         assert_eq!(footers(&f)[0].1, Ending::Done);
         assert!(!f.busy);
+    }
+
+    /// Whether the Folio was busy after each CLI line that is a result.
+    fn busy_after_results(stream: &str, priority: Priority) -> Vec<bool> {
+        let (_, _, all) = play_queued(stream, priority);
+        let mut f = Folio::new();
+        let mut busy = Vec::new();
+        for (sent, line) in &all {
+            if *sent {
+                f.feed_sent(line);
+                continue;
+            }
+            f.feed(line);
+            if line.contains("\"type\":\"result\"") {
+                busy.push(f.busy);
+            }
+        }
+        busy
+    }
+
+    #[test]
+    fn a_turn_with_a_prompt_waiting_stays_busy_past_its_result() {
+        for (stream, priority) in [(QUEUED_NEXT, Priority::Next), (QUEUED_NOW, Priority::Now)] {
+            // The first result comes before the queued prompt starts.
+            assert_eq!(busy_after_results(stream, priority), [true, false]);
+        }
+    }
+
+    #[test]
+    fn an_interrupt_that_drops_the_queue_ends_the_wait() {
+        let (_, _, all) = play_queued(QUEUED_NEXT, Priority::Next);
+        let mut f = Folio::new();
+        for (sent, line) in &all {
+            if line.contains("\"state\":\"started\"") {
+                break;
+            }
+            if *sent {
+                f.feed_sent(line);
+            } else {
+                f.feed(line);
+            }
+        }
+        assert!(f.busy && f.queued.len() == 1);
+        let uuid = f.queued[0].uuid.clone();
+        let answer = |still: Value| {
+            serde_json::json!({"type": "control_response", "response": {
+                "subtype": "success", "request_id": "x", "response": {"still_queued": still}}})
+            .to_string()
+        };
+        f.feed(&answer(serde_json::json!([{ "uuid": uuid }])));
+        assert!(f.busy && f.queued.len() == 1);
+        f.feed(&answer(serde_json::json!([])));
+        assert!(!f.busy && f.queued.is_empty());
     }
 
     #[test]

@@ -14,7 +14,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 
 use super::cards::picks_of;
 use super::flow::{self, Pos};
-use super::transcript::{deny_field, keep_field, other_field, Act, Find, State, FIND_FIELD};
+use super::transcript::{deny_field, keep_field, other_field, Act, Find, State, FIND_FIELD, SHOWN};
 use super::view::View;
 use super::{answer_with, redraw, with, Chat};
 use crate::app::{self, Input};
@@ -28,23 +28,11 @@ pub(super) fn act(key: &str, a: Act) {
         Act::Copy(t) => clipboard::set_text(&t),
         Act::Link(url) => app::push(Input::Link(url)),
         Act::Path(path, line) => {
+            // What a reply names is the model's word: only a file inside
+            // the project opens.
             if let Some((project, dir)) = with(key, |c| (c.key.clone(), c.dir.clone())) {
-                let (full, rel) = flow::project_path(&dir, &path);
-                match rel {
-                    Some(rel) => {
-                        app::push(Input::View(project, dir, rel, line.map(|n| n as usize)))
-                    }
-                    None => {
-                        if let (Some(parent), Some(name)) = (full.parent(), full.file_name()) {
-                            let name = name.to_string_lossy().into_owned();
-                            app::push(Input::View(
-                                project,
-                                parent.to_path_buf(),
-                                name,
-                                line.map(|n| n as usize),
-                            ));
-                        }
-                    }
+                if let Some(rel) = flow::project_path(&dir, &path) {
+                    app::push(Input::View(project, dir, rel, line.map(|n| n as usize)));
                 }
             }
         }
@@ -114,6 +102,17 @@ pub(super) fn act(key: &str, a: Act) {
         }
         Act::All(id) => {
             with(key, |c| toggle(&mut c.tr.state.all, id));
+        }
+        Act::Earlier => {
+            with(key, |c| {
+                let turns: Vec<usize> = (c.folio.blocks.iter().enumerate())
+                    .filter(|(_, b)| matches!(b, Block::Prompt(_)))
+                    .map(|(i, _)| i)
+                    .collect();
+                let from = c.tr.state.from.unwrap_or(0);
+                c.tr.state.from = Some(flow::shown_from(&turns, from, SHOWN));
+                c.follow = false;
+            });
         }
         Act::Todos => {
             with(key, |c| c.tr.state.todos_open = !c.tr.state.todos_open);
@@ -396,13 +395,10 @@ pub(super) fn char(key: &str, c: char, mods: Mods) -> bool {
         }
         if c == '\u{1b}' {
             // Esc closes the find bar or clears the selection before it
-            // stops Claude.
+            // stops Claude: a second Esc stops it.
             let took = with(key, |chat| {
                 let st = &mut chat.tr.state;
-                if st.find.take().is_some() {
-                    return true;
-                }
-                st.sel.take().is_some() && !chat.folio.busy
+                st.find.take().is_some() || st.sel.take().is_some()
             })
             .unwrap_or(false);
             if took {
@@ -466,6 +462,27 @@ pub(super) fn char(key: &str, c: char, mods: Mods) -> bool {
     }
     redraw(key);
     true
+}
+
+/// A card's field gives the keyboard back once its ask no longer waits,
+/// answered elsewhere, withdrawn or lapsed at the turn's end, so typing
+/// goes to the composer again.
+pub(super) fn release_lapsed(chat: &mut Chat) {
+    let st = &mut chat.tr.state;
+    let Some(focus) = st.focus.as_deref() else {
+        return;
+    };
+    if focus == FIND_FIELD {
+        return;
+    }
+    let id = focus.split_once(':').map_or("", |(_, id)| id);
+    if chat.folio.pending_asks().contains(&id) {
+        return;
+    }
+    let id = id.to_string();
+    st.denying.remove(&id);
+    st.keeping.remove(&id);
+    st.focus = None;
 }
 
 fn field_mut<'a>(chat: &'a mut Chat, id: &str) -> Option<&'a mut Field> {

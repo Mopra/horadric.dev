@@ -53,6 +53,11 @@ const THUMB_H: f32 = 135.0;
 const RAW_MAX: usize = 400;
 /// The find bar's width.
 const FIND_W: f32 = 320.0;
+/// About how many blocks a transcript shows, and lays out, at a time; the
+/// rest wait behind "Show earlier messages".
+pub(super) const SHOWN: usize = 300;
+/// Room for that line at the top.
+const EARLIER_H: f32 = 30.0;
 
 /// What a click on a part of the transcript does, beyond folding a block
 /// and answering an ask once.
@@ -83,6 +88,8 @@ pub(super) enum Act {
     /// A text field takes the keyboard.
     Field(String),
     Todos,
+    /// More of the conversation above what shows.
+    Earlier,
     FindPrev,
     FindNext,
     FindClose,
@@ -133,6 +140,8 @@ pub(super) struct State {
     pub(super) dragging: bool,
     pub(super) mouse: Option<(f32, f32)>,
     pub(super) find: Option<Find>,
+    /// The first block shown, None until the first frame picks one.
+    pub(super) from: Option<usize>,
     /// From the last frame: each block's top in the content, the prompts'
     /// blocks, and the text in view with where it was drawn.
     pub(super) tops: Vec<f32>,
@@ -275,6 +284,7 @@ fn stamp(b: &Block, open: bool, st: &State) -> u64 {
         } => {
             (*state as u8).hash(&mut h);
             st.denying.contains(request_id).hash(&mut h);
+            st.all.contains(request_id).hash(&mut h);
             hash_field(&mut h, st, &deny_field(request_id));
         }
         Block::Question {
@@ -667,7 +677,7 @@ impl Ctx<'_> {
         if let Some(lane) = &step.lane {
             y = self.lane(s, step, lane, dx, y, cw, st);
         } else if let Some(e) = &step.edit {
-            y = self.diff(s, step, e, dx, y, dw, st);
+            y = self.diff(s, &step.id, e, dx, y, dw, st);
         } else {
             y = self.output(s, step, dx, y, dw, st);
         }
@@ -739,12 +749,13 @@ impl Ctx<'_> {
         plate.bottom()
     }
 
-    /// An edit's file, as a link that opens it, and its diff inline.
+    /// An edit's file, as a link that opens it, and its diff inline. `id`
+    /// is what "Show all" is kept under: the step's, or the ask's.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn diff(
+    pub(super) unsafe fn diff(
         &self,
         s: &mut Scene,
-        step: &Step,
+        id: &str,
         e: &horadric_core::folio::FileEdit,
         x: f32,
         y: f32,
@@ -755,9 +766,7 @@ impl Ctx<'_> {
         let what = if e.created { "Created" } else { "Changed" };
         s.line(what, F::Small, Rect::new(x, y, 60.0, 22.0), self.pal.faint);
         let file = Rect::new(x + 60.0, y, (w - 60.0).min(500.0), 22.0);
-        let shown = flow::project_path(self.dir, &e.path)
-            .1
-            .unwrap_or_else(|| e.path.clone());
+        let shown = flow::project_path(self.dir, &e.path).unwrap_or_else(|| e.path.clone());
         s.line(shown, F::Small, file, self.link_ink());
         s.hit(file, Hit::Tr(Act::Path(e.path.clone(), None)));
         let _ = head;
@@ -766,7 +775,7 @@ impl Ctx<'_> {
         if rows.is_empty() {
             return y;
         }
-        let all = st.all.contains(&step.id);
+        let all = st.all.contains(id);
         let shown = if all {
             rows.len()
         } else {
@@ -833,7 +842,7 @@ impl Ctx<'_> {
                 Rect::new(x + 10.0, y, w - 10.0, 20.0),
                 self.link_ink(),
             );
-            s.hit(Rect::new(x, y, w, 20.0), Hit::Tr(Act::All(step.id.clone())));
+            s.hit(Rect::new(x, y, w, 20.0), Hit::Tr(Act::All(id.to_string())));
             y += 20.0;
         }
         y
@@ -1038,11 +1047,27 @@ impl View {
             area.h -= todo_h + 14.0;
         }
 
-        // Build what changed.
+        // Build what changed, of what shows.
         let folio = &chat.folio;
-        blocks.truncate(folio.blocks.len());
-        blocks.resize_with(folio.blocks.len(), || None);
-        for (i, b) in folio.blocks.iter().enumerate() {
+        let len = folio.blocks.len();
+        let turns: Vec<usize> = (folio.blocks.iter().enumerate())
+            .filter(|(_, b)| matches!(b, Block::Prompt(_)))
+            .map(|(i, _)| i)
+            .collect();
+        let mut from =
+            (st.from).map_or_else(|| flow::shown_from(&turns, len, SHOWN), |f| f.min(len));
+        // Following a long session, what scrolled far up folds away, so
+        // what is kept laid out stays bounded.
+        if chat.follow && len - from > 2 * SHOWN {
+            from = flow::shown_from(&turns, len, SHOWN);
+        }
+        st.from = Some(from);
+        blocks.truncate(len);
+        blocks.resize_with(len, || None);
+        for b in &mut blocks[..from] {
+            *b = None;
+        }
+        for (i, b) in folio.blocks.iter().enumerate().skip(from) {
             let open = chat.open.contains(&i);
             let stamp = stamp(b, open, st);
             if blocks[i].as_ref().is_some_and(|x| x.stamp == stamp) {
@@ -1084,7 +1109,8 @@ impl View {
             };
         st.tops.clear();
         st.prompts.clear();
-        let mut y = TOP;
+        let earlier = from > 0;
+        let mut y = TOP + if earlier { EARLIER_H } else { 0.0 };
         for (i, b) in chat.folio.blocks.iter().enumerate() {
             st.tops.push(y);
             let h = blocks[i].as_ref().map_or(0.0, |b| b.scene.h);
@@ -1107,12 +1133,26 @@ impl View {
 
         rt.PushAxisAlignedClip(&d2d(&area), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         let waits = chat.pending.is_some();
-        if chat.folio.blocks.is_empty() && chat.error.is_none() && !chat.ended && !waits {
+        if chat.loading.is_some() {
+            let r = Rect::new(cx, area.y + TOP, cw, LINE_H);
+            gfx.text_in("Reading the conversation\u{2026}", &gfx.line, &r, pal.dim);
+        } else if chat.folio.blocks.is_empty() && chat.error.is_none() && !chat.ended && !waits {
             self.empty(gfx, pal, &chat.dir, &area);
         }
         let origin = area.y - chat.scroll;
         let mouse = st.mouse;
         st.shown.clear();
+        if earlier {
+            let r = Rect::new(cx, origin + TOP, cw, EARLIER_H - 8.0);
+            if r.bottom() >= area.y {
+                let say = format!("Show earlier messages ({from} more)");
+                let ink = pal.accent.mix(pal.fg, 0.45);
+                gfx.text_in(&say, &gfx.small, &r, ink);
+                if let Some(r) = look::clip(&r, &area) {
+                    hits.push((r, Hit::Tr(Act::Earlier)));
+                }
+            }
+        }
         for (i, b) in chat.folio.blocks.iter().enumerate() {
             let Some(built) = blocks[i].as_ref() else {
                 continue;

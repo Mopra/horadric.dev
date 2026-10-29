@@ -56,8 +56,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetParent, PostMessageW, RegisterClassW, HWND_MESSAGE,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_USER, WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, GetParent, KillTimer, PostMessageW, RegisterClassW, SetTimer,
+    HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_TIMER, WM_USER, WNDCLASSW,
 };
 
 use crate::app::{self, Input};
@@ -71,6 +71,10 @@ pub const WM_FOLIO_REFRESH: u32 = WM_USER + 9;
 const WM_FOLIO_LINES: u32 = WM_USER + 10;
 
 const ROUTER_CLASS: PCWSTR = w!("HoradricFolioRouter");
+/// The router's timer that writes changed drafts.
+const SAVE_TIMER: usize = 1;
+/// How long after the last change a draft is written.
+const SAVE_AFTER_MS: u32 = 1500;
 
 /// What a Folio's host keeps for the app, handed back on every attach, so
 /// the app after a reload knows what the session was.
@@ -128,6 +132,9 @@ struct Chat {
     /// Claude Code asks before it runs a folder's hooks and MCP servers,
     /// but not headless, so the Folio asks for it.
     pending: Option<(Tag, Options)>,
+    /// A resumed conversation's history, read on a thread of its own:
+    /// filled once read, None when there is none to wait for.
+    loading: Option<Arc<Mutex<Option<Folio>>>>,
     /// The transcript's own state and what it keeps between frames.
     tr: transcript::Ui,
 }
@@ -172,20 +179,28 @@ impl Chat {
             told: None,
             live: false,
             pending: None,
+            loading: None,
             to_terminal: false,
             tr: transcript::Ui::default(),
         }
     }
 
+    /// Claude works and waits on no one. An ask that waits is at rest for
+    /// the glow, so nothing redraws while the human reads it.
+    fn working(&self) -> bool {
+        self.folio.busy && self.folio.pending_asks().is_empty()
+    }
+
     fn note_busy(&mut self) {
-        if self.folio.busy != self.busy_was {
-            self.busy_was = self.folio.busy;
+        let working = self.working();
+        if working != self.busy_was {
+            self.busy_was = working;
             self.busy_since = Instant::now();
         }
     }
 
     fn heat(&self) -> f32 {
-        look::heat(self.folio.busy, self.busy_since.elapsed())
+        look::heat(self.busy_was, self.busy_since.elapsed())
     }
 
     fn state(&self) -> State {
@@ -228,6 +243,11 @@ impl Chat {
     /// Writes what the model queued for the CLI, such as the answer to a
     /// request it cannot serve.
     fn flush(&mut self) {
+        // While a reattach replays, an answer to a request may still be
+        // on its way back; the Folio drops what it hears was answered.
+        if !self.live {
+            return;
+        }
         let lines = self.folio.take_outbox();
         let Some(h) = &self.hosted else {
             return;
@@ -272,16 +292,41 @@ fn on_event(
     }
 }
 
-/// The transcript of `conversation` held in `dir`, up to `limit` bytes
-/// when given: the history a resumed Folio shows above what it streams.
-fn history(dir: &Path, conversation: &str, limit: Option<u64>) -> Option<String> {
+/// Where the transcript of `conversation` held in `dir` is, and how long
+/// it is now.
+fn history_file(dir: &Path, conversation: &str) -> Option<(PathBuf, u64)> {
     let path = horadric_hooks::transcript::path(&dir.to_string_lossy(), conversation)?;
-    let file = std::fs::File::open(path).ok()?;
-    let mut bytes = Vec::new();
-    file.take(limit.unwrap_or(u64::MAX))
-        .read_to_end(&mut bytes)
-        .ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    let len = std::fs::metadata(&path).ok()?.len();
+    Some((path, len))
+}
+
+/// Reads the first `limit` bytes of the transcript at `path` into a Folio
+/// on a thread of its own, since a long session's runs to many megabytes:
+/// the history a resumed Folio shows above what it streams. Until it is
+/// in, [`drain`] leaves the chat's events waiting, so the history stays
+/// first.
+fn load_history(chat: &mut Chat, path: PathBuf, limit: u64) {
+    let slot: Arc<Mutex<Option<Folio>>> = Arc::default();
+    chat.loading = Some(Arc::clone(&slot));
+    let router = router();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Ok(file) = std::fs::File::open(&path) {
+            let _ = file.take(limit).read_to_end(&mut bytes);
+        }
+        let folio = Folio::from_transcript(&String::from_utf8_lossy(&bytes));
+        if let Ok(mut s) = slot.lock() {
+            *s = Some(folio);
+        }
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(router as *mut c_void)),
+                WM_FOLIO_LINES,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    });
 }
 
 /// Starts session `id`, a headless Claude in `dir` in a host of its own,
@@ -297,9 +342,9 @@ pub fn open(id: &str, dir: &Path, mut tag: Tag, options: &Options) -> Result<(),
     if let Some(conversation) = tag.resume.clone() {
         // `--resume` streams only the new turns: what came before is read
         // from the transcript, and how much there was goes in the tag.
-        if let Some(text) = history(dir, &conversation, None) {
-            tag.history = text.len() as u64;
-            chat.folio.replay_transcript(&text);
+        if let Some((path, len)) = history_file(dir, &conversation) {
+            tag.history = len;
+            load_history(&mut chat, path, len);
         }
     }
     if !crate::accounts::trusted(dir) {
@@ -383,8 +428,8 @@ pub fn reattach() -> Vec<Found> {
         chat.inbox = inbox;
         chat.posted = posted;
         if let Some(conversation) = &tag.resume {
-            if let Some(text) = history(&info.cwd, conversation, Some(tag.history)) {
-                chat.folio.replay_transcript(&text);
+            if let Some((path, _)) = history_file(&info.cwd, conversation) {
+                load_history(&mut chat, path, tag.history);
             }
         }
         chat.hosted = Some(hosted);
@@ -401,7 +446,15 @@ pub fn reattach() -> Vec<Found> {
 /// Ends session `id` for good: its claude.exe gets its stdin closed and
 /// a moment to end itself, then its host ends it.
 pub fn close(id: &str) {
-    let gone = CHATS.with(|c| c.borrow_mut().remove(id));
+    let mut gone = CHATS.with(|c| c.borrow_mut().remove(id));
+    if let Some(c) = gone.as_mut() {
+        // Handed over, it may come back as a Folio: what was typed waits.
+        if c.to_terminal {
+            c.input.fold_queue();
+        } else {
+            c.input.forget();
+        }
+    }
     if let Some(h) = gone.as_ref().and_then(|c| c.hosted.as_ref()) {
         h.close();
     }
@@ -412,7 +465,8 @@ pub fn close(id: &str) {
 /// claude.exe has ended. False while it works or an ask waits.
 pub fn hand_over(id: &str) -> bool {
     with(id, |c| {
-        if c.folio.busy || !c.folio.pending_asks().is_empty() || c.to_terminal {
+        let unsure = c.loading.is_some() || !c.live;
+        if unsure || c.folio.busy || !c.folio.pending_asks().is_empty() || c.to_terminal {
             return false;
         }
         let Some(h) = &c.hosted else {
@@ -506,7 +560,39 @@ unsafe extern "system" fn router_proc(
         drain();
         return LRESULT(0);
     }
+    if msg == WM_TIMER && wparam.0 == SAVE_TIMER {
+        let _ = KillTimer(Some(hwnd), SAVE_TIMER);
+        let saved = CHATS.with(|c| {
+            let Ok(mut chats) = c.try_borrow_mut() else {
+                return false;
+            };
+            for chat in chats.values_mut().filter(|c| c.input.dirty()) {
+                chat.input.save();
+            }
+            true
+        });
+        if !saved {
+            save_soon();
+        }
+        return LRESULT(0);
+    }
     DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+/// Writes changed drafts a moment after the last change. Each call puts
+/// the moment off again, so typing writes once it pauses.
+fn save_soon() {
+    let router = router();
+    if router != 0 {
+        unsafe {
+            SetTimer(
+                Some(HWND(router as *mut c_void)),
+                SAVE_TIMER,
+                SAVE_AFTER_MS,
+                None,
+            );
+        }
+    }
 }
 
 /// Feeds every Folio the events its reader left, redraws the ones that
@@ -521,14 +607,24 @@ fn drain() {
         for (id, chat) in chats.iter_mut() {
             // Before the drain, so an event after it posts again.
             chat.posted.store(false, Ordering::Release);
+            let mut moved = false;
+            if let Some(slot) = &chat.loading {
+                // The history goes first: what streams waits for it.
+                let Some(history) = slot.lock().ok().and_then(|mut s| s.take()) else {
+                    continue;
+                };
+                chat.folio = history;
+                chat.tr.state.from = None;
+                chat.loading = None;
+                moved = true;
+            }
             let events: Vec<Event> = match chat.inbox.lock() {
                 Ok(mut q) => q.drain(..).collect(),
                 Err(_) => continue,
             };
-            if events.is_empty() {
+            if events.is_empty() && !moved {
                 continue;
             }
-            let mut moved = false;
             for event in events {
                 match event {
                     Event::Out(l) => moved |= chat.folio.feed(&l),
@@ -555,6 +651,7 @@ fn drain() {
                 }
             }
             chat.flush();
+            select::release_lapsed(chat);
             composer::tend(id, chat);
             chat.note_busy();
             let now = chat.state();
@@ -639,6 +736,7 @@ fn answer_with(id: &str, make: impl FnOnce(&mut Folio) -> Option<String>) {
                 c.error = Some(format!("The answer did not reach Claude: {e}"));
             }
         }
+        select::release_lapsed(c);
     });
     redraw(id);
 }

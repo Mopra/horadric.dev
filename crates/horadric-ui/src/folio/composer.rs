@@ -67,8 +67,10 @@ const THUMB_PX: u32 = 104;
 const FILES_FRESH: Duration = Duration::from_secs(20);
 /// Files a project without git lists at most.
 const WALK_MAX: usize = 20_000;
-/// A draft is written at most this often while typing.
-const SAVE_EVERY: Duration = Duration::from_millis(1500);
+/// The biggest image file sent as an image: the API takes 5 MB of it in
+/// base64, which is four thirds of the file.
+const IMAGE_MAX: u64 = 5 * 1024 * 1024 / 4 * 3;
+const TOO_BIG: &str = "That image is too big to send whole (the most is 3.75 MB).";
 /// History entries longer than this are not kept, so the file stays small.
 const HISTORY_ENTRY_MAX: usize = 20_000;
 
@@ -132,6 +134,17 @@ struct Saved {
     pastes: Vec<String>,
     #[serde(default)]
     history: Vec<String>,
+    /// Prompts queued while Claude worked, so a reload loses none.
+    #[serde(default)]
+    queue: Vec<SavedPrompt>,
+}
+
+/// A queued prompt as it is kept, its images as the API takes them.
+#[derive(Serialize, Deserialize, Default)]
+struct SavedPrompt {
+    text: String,
+    #[serde(default)]
+    images: Vec<(String, String)>,
 }
 
 /// One session's composer.
@@ -158,12 +171,13 @@ pub(super) struct Input {
     model: Option<String>,
     /// Whether this session may bypass permissions: it was in that mode.
     bypass: bool,
-    initialized: bool,
     busy_was: bool,
     /// Stopped by the human: the queue comes back at the turn's end.
     held: bool,
+    /// The queue came back from disk: once the session is live it waits
+    /// for the turn running, or with none it goes back into the text.
+    restored: bool,
     dirty: bool,
-    saved_at: Instant,
     /// Where the box's top was last drawn, for the menu above it.
     top: f32,
     /// Where the pickers' controls were last drawn, to open their menus
@@ -193,11 +207,10 @@ impl Input {
             effort: None,
             model: None,
             bypass: false,
-            initialized: false,
             busy_was: false,
             held: false,
+            restored: false,
             dirty: false,
-            saved_at: Instant::now(),
             top: 0.0,
             anchors: [0.0; 4],
             menu_at: None,
@@ -226,11 +239,24 @@ impl Input {
             self.ed = Editor::from_parts(&saved.draft, saved.pastes);
         }
         self.history = History::new(saved.history);
+        if self.queue.is_empty() && !saved.queue.is_empty() {
+            self.restored = true;
+            self.queue = (saved.queue.into_iter())
+                .map(|p| Waiting {
+                    text: p.text,
+                    images: (p.images.into_iter())
+                        .map(|(media_type, base64)| Attached {
+                            data: ImageData { media_type, base64 },
+                            thumb: None,
+                        })
+                        .collect(),
+                })
+                .collect();
+        }
     }
 
-    fn save(&mut self) {
+    pub(super) fn save(&mut self) {
         self.dirty = false;
-        self.saved_at = Instant::now();
         let Some(path) = self.key.as_deref().and_then(path_of) else {
             return;
         };
@@ -238,6 +264,14 @@ impl Input {
             draft: self.ed.text().to_string(),
             pastes: self.ed.pastes().to_vec(),
             history: self.history.entries.clone(),
+            queue: (self.queue.iter())
+                .map(|w| SavedPrompt {
+                    text: w.text.clone(),
+                    images: (w.images.iter())
+                        .map(|a| (a.data.media_type.clone(), a.data.base64.clone()))
+                        .collect(),
+                })
+                .collect(),
         };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -249,9 +283,48 @@ impl Input {
 
     /// The text changed: menus follow it, the history walk stops.
     fn edited(&mut self) {
-        self.dirty = true;
+        self.changed();
         self.notice = None;
         self.history.stop();
+    }
+
+    /// What is kept changed: it is written a moment after the last change,
+    /// away from painting.
+    fn changed(&mut self) {
+        self.dirty = true;
+        super::save_soon();
+    }
+
+    /// Whether what is kept waits to be written.
+    pub(super) fn dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// The session is gone for good: so is what was kept of it.
+    pub(super) fn forget(&mut self) {
+        self.dirty = false;
+        if let Some(path) = self.key.take().as_deref().and_then(path_of) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// What waits goes back into the text, as when Claude is stopped.
+    pub(super) fn fold_queue(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+        let waiting = std::mem::take(&mut self.queue);
+        let mut texts: Vec<String> = Vec::new();
+        for w in waiting {
+            texts.push(w.text);
+            self.images.extend(w.images);
+        }
+        let now = self.ed.text().to_string();
+        if !now.trim().is_empty() {
+            texts.push(now);
+        }
+        self.ed.set_text(&texts.join("\n\n"));
+        self.edited();
     }
 }
 
@@ -309,8 +382,13 @@ pub(super) fn tend(id: &str, chat: &mut Chat) {
     if chat.hosted.is_none() || chat.ended {
         return;
     }
-    if !chat.input.initialized {
-        chat.input.initialized = true;
+    // A replay's turns ended long ago: nothing is sent for them.
+    if !chat.live || chat.loading.is_some() {
+        chat.input.busy_was = chat.folio.busy;
+        return;
+    }
+    // Once per claude.exe: a reattach's replay says whether it went.
+    if chat.live && !chat.folio.initialized {
         let line = chat.folio.initialize();
         write(chat, &line);
     }
@@ -318,42 +396,29 @@ pub(super) fn tend(id: &str, chat: &mut Chat) {
         chat.input.bypass = true;
     }
     let busy = chat.folio.busy;
+    if chat.input.restored && chat.live && chat.loading.is_none() {
+        // A turn that ended while no one listened would not send it, and
+        // one hours later should not either: it goes back into the text.
+        chat.input.restored = false;
+        if !busy {
+            chat.input.fold_queue();
+        }
+    }
     if chat.input.busy_was && !busy {
         let line = chat.folio.get_context_usage();
         write(chat, &line);
+        // Claude was stopped: what waited goes back into the composer
+        // rather than run, as the CLI does.
         if std::mem::take(&mut chat.input.held) {
-            unqueue_all(chat);
+            chat.input.fold_queue();
         } else if !chat.input.queue.is_empty() {
             let next = chat.input.queue.remove(0);
+            chat.input.changed();
             let images: Vec<ImageData> = next.images.into_iter().map(|a| a.data).collect();
             deliver(chat, &next.text, &images);
         }
     }
     chat.input.busy_was = chat.folio.busy;
-    if chat.input.dirty && chat.input.saved_at.elapsed() >= SAVE_EVERY {
-        chat.input.save();
-    }
-}
-
-/// Claude was stopped: what waited goes back into the composer rather
-/// than run, as the CLI does.
-fn unqueue_all(chat: &mut Chat) {
-    if chat.input.queue.is_empty() {
-        return;
-    }
-    let waiting = std::mem::take(&mut chat.input.queue);
-    let mut texts: Vec<String> = Vec::new();
-    for w in waiting {
-        texts.push(w.text);
-        chat.input.images.extend(w.images);
-    }
-    let now = chat.input.ed.text().to_string();
-    if !now.trim().is_empty() {
-        texts.push(now);
-    }
-    let all = texts.join("\n\n");
-    chat.input.ed.set_text(&all);
-    chat.input.edited();
 }
 
 /// Stops Claude. What was queued comes back into the composer once the
@@ -384,7 +449,8 @@ fn deliver(chat: &mut Chat, text: &str, images: &[ImageData]) {
 /// Sends what the composer holds. While Claude works it waits for the
 /// turn's end, or with `now` cuts in.
 pub(super) fn send(chat: &mut Chat, now: bool) {
-    if chat.ended || chat.to_terminal || chat.hosted.is_none() {
+    // While the history loads, a prompt would land above it.
+    if chat.ended || chat.to_terminal || chat.hosted.is_none() || chat.loading.is_some() {
         return;
     }
     let text = chat.input.ed.expanded().trim().to_string();
@@ -413,6 +479,7 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
         chat.follow = true;
     } else {
         chat.input.queue.push(Waiting { text, images });
+        chat.input.changed();
     }
 }
 
@@ -639,6 +706,7 @@ fn set_effort(chat: &mut Chat, level: &str) {
             text,
             images: Vec::new(),
         });
+        chat.input.changed();
         return;
     }
     let line = effort_line(level);
@@ -764,6 +832,10 @@ pub(super) fn on_char(key: &str, c: char, mods: Mods) {
                     if matches!(m.kind, MenuKind::Slash | MenuKind::Files) {
                         chat.input.quiet = Some((m.kind, m.start));
                     }
+                } else if !chat.input.ed.field.selected().is_empty() {
+                    // A selection goes first; a second Esc stops Claude.
+                    let f = &mut chat.input.ed.field;
+                    f.set_caret(f.caret, false);
                 } else if chat.folio.busy {
                     hold(chat);
                     if let Some(h) = &chat.hosted {
@@ -818,8 +890,16 @@ fn paste(chat: &mut Chat) {
         return;
     }
     if clipboard::has_image() {
-        let added = clipboard::save_image()
-            .and_then(|p| std::fs::read(&p).ok())
+        let Some(path) = clipboard::save_image() else {
+            chat.input.notice = Some("That image could not be read.".to_string());
+            return;
+        };
+        if !small_enough(&path) {
+            chat.input.notice = Some(TOO_BIG.to_string());
+            return;
+        }
+        let added = std::fs::read(&path)
+            .ok()
             .is_some_and(|bytes| attach(chat, &bytes));
         if !added {
             chat.input.notice = Some("That image could not be read.".to_string());
@@ -833,6 +913,12 @@ fn paste(chat: &mut Chat) {
             .collect();
         add_paths(chat, &paths);
     }
+}
+
+/// Whether the file at `path` is small enough to send as an image, known
+/// before it is read.
+fn small_enough(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.len() <= IMAGE_MAX)
 }
 
 /// Adds an image from a file's bytes. False when it is not one the API
@@ -850,6 +936,7 @@ fn attach(chat: &mut Chat, bytes: &[u8]) -> bool {
 /// relative to the project when inside it.
 fn add_paths(chat: &mut Chat, paths: &[PathBuf]) {
     let mut mentions = Vec::new();
+    let mut too_big = false;
     for p in paths {
         let image = p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
             matches!(
@@ -857,7 +944,10 @@ fn add_paths(chat: &mut Chat, paths: &[PathBuf]) {
                 "png" | "jpg" | "jpeg" | "gif" | "webp"
             )
         });
-        if image && std::fs::read(p).ok().is_some_and(|b| attach(chat, &b)) {
+        // One too big to send goes as its path, for Claude to read.
+        if image && !small_enough(p) {
+            too_big = true;
+        } else if image && std::fs::read(p).ok().is_some_and(|b| attach(chat, &b)) {
             continue;
         }
         let shown = p
@@ -874,6 +964,9 @@ fn add_paths(chat: &mut Chat, paths: &[PathBuf]) {
         ed.insert(&format!("{lead}{} ", mentions.join(" ")));
     }
     chat.input.edited();
+    if too_big {
+        chat.input.notice = Some(TOO_BIG.to_string());
+    }
 }
 
 /// Files dropped on the conversation.
@@ -1694,6 +1787,7 @@ impl View {
                 Act::Unqueue(i) => {
                     if i < chat.input.queue.len() {
                         chat.input.queue.remove(i);
+                        chat.input.changed();
                     }
                 }
                 Act::Text => {

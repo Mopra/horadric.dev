@@ -40,6 +40,8 @@ pub struct Para {
     pub quotes: u8,
     /// Room above it, none for the first.
     pub gap: f32,
+    /// How wide the column left of it is that its list marker sits in.
+    pub marker_w: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,6 +84,7 @@ fn flatten(blocks: &[md::Block], indent: f32, quotes: u8, depth: usize, out: &mu
                 indent,
                 quotes,
                 gap,
+                marker_w: 0.0,
             })
         };
         match b {
@@ -140,6 +143,13 @@ fn flatten(blocks: &[md::Block], indent: f32, quotes: u8, depth: usize, out: &mu
                 start,
                 items,
             } => {
+                // As wide as its widest number, so "25." is not cut short.
+                let step = if *ordered {
+                    let last = start + items.len().saturating_sub(1) as u64;
+                    list_indent(&last.to_string())
+                } else {
+                    LIST_INDENT
+                };
                 for (k, item) in items.iter().enumerate() {
                     let marker = if *ordered {
                         format!("{}.", start + k as u64)
@@ -147,9 +157,10 @@ fn flatten(blocks: &[md::Block], indent: f32, quotes: u8, depth: usize, out: &mu
                         ["\u{2022}", "\u{25e6}", "\u{25aa}"][depth.min(2)].to_string()
                     };
                     let at = out.len();
-                    flatten(item, indent + LIST_INDENT, quotes, depth + 1, out);
+                    flatten(item, indent + step, quotes, depth + 1, out);
                     if let Some(p) = out.get_mut(at) {
                         p.gap = if k == 0 { gap } else { ITEM_GAP };
+                        p.marker_w = step;
                         if let Kind::Text { marker: m, .. } = &mut p.kind {
                             *m = Some(marker);
                         }
@@ -158,6 +169,13 @@ fn flatten(blocks: &[md::Block], indent: f32, quotes: u8, depth: usize, out: &mu
             }
         }
     }
+}
+
+/// How far an ordered list's items sit in, room for its widest number:
+/// one digit takes the usual indent, each more about a digit's width.
+pub fn list_indent(widest: &str) -> f32 {
+    let digits = widest.chars().count().max(1) as f32;
+    LIST_INDENT + (digits - 1.0) * 7.5
 }
 
 /// Column widths for a table `avail` wide, from what each column's widest
@@ -653,20 +671,62 @@ pub fn todo_line(todos: &[Todo]) -> String {
     s
 }
 
-/// The path a link names, resolved against the project, and the part of
-/// it inside the project (with forward slashes) when it is in it.
-pub fn project_path(dir: &std::path::Path, path: &str) -> (std::path::PathBuf, Option<String>) {
-    let p = std::path::Path::new(path);
-    let full = if p.is_absolute() {
-        p.to_path_buf()
+/// The file a link names, relative to the project (with forward slashes),
+/// or None when it is not a file inside it. The name comes from the model,
+/// so it is taken apart rather than trusted: `..` may not climb out, a
+/// network path (`\\host` or `//host`) or another drive is refused, and
+/// so is a `:` past the drive (a stream, or a drive's own working folder).
+pub fn project_path(dir: &std::path::Path, path: &str) -> Option<String> {
+    let p = path.trim().replace('/', "\\");
+    if p.is_empty() || p.starts_with("\\\\") {
+        return None;
+    }
+    let root = dir.to_string_lossy().replace('/', "\\");
+    let root = root.trim_end_matches('\\');
+    let b = p.as_bytes();
+    let rest = if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        // Absolute: it must start with the project's folder, in any case.
+        let n = root.len();
+        let inside = b.len() > n && b[..n].eq_ignore_ascii_case(root.as_bytes()) && b[n] == b'\\';
+        if !inside {
+            return None;
+        }
+        &p[n..]
+    } else if p.starts_with('\\') {
+        return None;
     } else {
-        dir.join(path.replace('/', "\\"))
+        &p[..]
     };
-    let rel = full
-        .strip_prefix(dir)
-        .ok()
-        .map(|r| r.to_string_lossy().replace('\\', "/"));
-    (full, rel)
+    if rest.contains(':') {
+        return None;
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for part in rest.split('\\') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            name => parts.push(name),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// Where a transcript starts showing so it shows about `want` blocks of
+/// the first `end`: at the start of a turn, the latest that leaves at
+/// least that many, unless that turn alone holds more than twice as many,
+/// when it starts within it. `prompts` are the turns' first blocks, in
+/// order. A long session draws its end, not all of it.
+pub fn shown_from(prompts: &[usize], end: usize, want: usize) -> usize {
+    if end <= want {
+        return 0;
+    }
+    let at_most = end - want;
+    match prompts.iter().rev().find(|&&p| p <= at_most) {
+        Some(&p) if end - p <= 2 * want => p,
+        _ => at_most,
+    }
 }
 
 #[cfg(test)]
@@ -720,6 +780,30 @@ mod tests {
         assert_eq!(ps[7].indent, QUOTE_INDENT);
         assert!(matches!(&ps[8].kind, Kind::Code { lang, .. } if lang == "rust"));
         assert!(matches!(ps[9].kind, Kind::Rule));
+    }
+
+    #[test]
+    fn a_list_to_25_has_room_for_its_numbers() {
+        let src: String = (1..=25)
+            .map(|i| {
+                format!(
+                    "{i}. item {i}
+"
+                )
+            })
+            .collect();
+        let ps = paras(&src);
+        assert_eq!(ps.len(), 25);
+        assert_eq!(marker(&ps[24]), Some("25."));
+        assert!(ps.iter().all(|p| p.indent == ps[0].indent), "one column");
+        assert!(ps[0].marker_w > LIST_INDENT);
+        assert_eq!(ps[0].marker_w, ps[0].indent);
+        let short = paras(
+            "1. a
+2. b",
+        );
+        assert_eq!(short[0].marker_w, LIST_INDENT);
+        assert_eq!(list_indent("100"), LIST_INDENT + 15.0);
     }
 
     #[test]
@@ -1004,10 +1088,48 @@ mod tests {
     #[test]
     fn a_link_path_resolves_against_the_project() {
         let dir = std::path::Path::new("C:\\p");
-        let (full, rel) = project_path(dir, "src/a.rs");
-        assert_eq!(full, std::path::Path::new("C:\\p\\src\\a.rs"));
-        assert_eq!(rel.as_deref(), Some("src/a.rs"));
-        let (_, rel) = project_path(dir, "D:\\elsewhere\\b.rs");
-        assert_eq!(rel, None);
+        let rel = |p: &str| project_path(dir, p);
+        assert_eq!(rel("src/a.rs").as_deref(), Some("src/a.rs"));
+        assert_eq!(rel("./src/../b.rs").as_deref(), Some("b.rs"));
+        assert_eq!(rel("c:\\P\\src\\a.rs").as_deref(), Some("src/a.rs"));
+        assert_eq!(rel("C:/p/x/y.md").as_deref(), Some("x/y.md"));
+        assert_eq!(rel("D:\\elsewhere\\b.rs"), None);
+        assert_eq!(rel("C:\\pp\\b.rs"), None, "a sibling that starts the same");
+        assert_eq!(rel("C:\\p"), None, "the folder itself");
+        assert_eq!(rel("../secret.txt"), None);
+        assert_eq!(rel("src/../../secret.txt"), None);
+        assert_eq!(rel("C:\\p\\..\\secret.txt"), None);
+        assert_eq!(rel("\\\\host\\share\\a.rs"), None);
+        assert_eq!(rel("//host/share/a.rs"), None);
+        assert_eq!(rel("\\Windows\\win.ini"), None);
+        assert_eq!(rel("C:a.rs"), None);
+        assert_eq!(rel("a.rs:stream"), None);
+        assert_eq!(rel(""), None);
+        assert_eq!(
+            project_path(std::path::Path::new("C:\\p\\"), "a.rs").as_deref(),
+            Some("a.rs")
+        );
+        let dk = std::path::Path::new("C:\\Users\\Ærø\\p");
+        assert_eq!(
+            project_path(dk, "C:\\users\\Ærø\\p\\æ.rs").as_deref(),
+            Some("æ.rs")
+        );
+    }
+
+    #[test]
+    fn a_long_transcript_shows_its_end_from_a_turn_s_start() {
+        assert_eq!(shown_from(&[0, 10], 50, 100), 0, "short shows all");
+        assert_eq!(shown_from(&[0, 100, 300, 450], 500, 100), 300);
+        assert_eq!(
+            shown_from(&[0, 100, 300, 450], 300, 100),
+            100,
+            "earlier, up to where it shows"
+        );
+        assert_eq!(
+            shown_from(&[0], 1000, 100),
+            900,
+            "one long turn starts within it"
+        );
+        assert_eq!(shown_from(&[], 1000, 100), 900);
     }
 }

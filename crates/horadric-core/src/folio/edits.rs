@@ -114,11 +114,6 @@ impl FileEdit {
         if result["type"] == "create" {
             self.created = true;
         }
-        if let Some(before) = result["originalFile"].as_str() {
-            if self.changes.len() == 1 && self.changes[0].old.is_empty() {
-                self.changes[0].old = before.to_string();
-            }
-        }
         self.hunks = result["structuredPatch"]
             .as_array()
             .into_iter()
@@ -139,6 +134,15 @@ impl FileEdit {
                 }
             })
             .collect();
+        // The whole file before is kept only when no hunks say what
+        // changed, since it can be large and a long session has many.
+        if self.hunks.is_empty() {
+            if let Some(before) = result["originalFile"].as_str() {
+                if self.changes.len() == 1 && self.changes[0].old.is_empty() {
+                    self.changes[0].old = before.to_string();
+                }
+            }
+        }
         self.count();
     }
 
@@ -292,6 +296,24 @@ mod tests {
         assert_eq!(e.hunks.len(), 1);
         assert_eq!(e.hunks[0].new_lines, 4);
         assert_eq!((e.added, e.removed), (2, 1));
+    }
+
+    #[test]
+    fn a_write_keeps_the_file_before_only_without_hunks() {
+        let write = || {
+            FileEdit::from_input(
+                "Write",
+                &json!({"file_path": "/a/h.txt", "content": "new\n"}),
+            )
+            .unwrap()
+        };
+        let mut e = write();
+        e.apply_result(&json!({"structuredPatch": [{"oldStart": 1, "oldLines": 1,
+            "newStart": 1, "newLines": 1, "lines": ["-old", "+new"]}], "originalFile": "old\n"}));
+        assert!(e.changes[0].old.is_empty());
+        let mut e = write();
+        e.apply_result(&json!({"structuredPatch": [], "originalFile": "old\n"}));
+        assert_eq!(e.changes[0].old, "old\n");
     }
 
     #[test]
