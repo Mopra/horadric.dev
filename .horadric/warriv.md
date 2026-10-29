@@ -10,6 +10,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (landing, main at 088c162, "Find merge hotspot files" landed): held Ship Local, since "Land a quest while its session is still alive" landed red and its merge fix-up still runs. Nothing else to do.
 - 2026-10-29 "Land a quest while its session is still alive" landed red on the same checkpoint git-init temp flake as the worktree quest. Told its fix-up to cherry-pick and rerun only, and filed "Make checkpoint tests' git init not copy hook templates" (haiku, --template=).
 - 2026-10-29 Round (landing, main at b593561, "Catch duplicate scope" landed): gave Model lines to the three unstarted quests (Tell running quests: sonnet, Context panel: opus, Slim CLAUDE.md: sonnet). Held Ship Local: one landing, four quests in flight on runner and worktree code; ship once the merge fix-up and "Land a quest while its session is still alive" land.
 - 2026-10-29 Look back: the day gave 3 lore notes (#540 brother usage, #541 hide needs its way back, #542 portal deploy skipped on a dirty repo). The day was clean: nothing went wrong twice.
@@ -158,4 +159,4 @@
 - Check "Make checkpoint tests' git init not copy hook templates" lands; if the flake shows again after, look at %TEMP% itself (antivirus, locks).
 - "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Cast "Ship Local" once "Fix the merge of start-a-quest-s-worktree-from-main-not" and "Land a quest while its session is still alive" have landed.
+- Cast "Ship Local" once "Fix the merge of land-a-quest-while-its-session-is-still" lands green (the worktree fix-up is done).
