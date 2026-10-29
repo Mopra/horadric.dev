@@ -12,6 +12,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 "Tell running quests when main moves" stopped undone a third time: clippy on its merged code runs, then it fast-forwards main. Own work, no tell, noted it.
 - 2026-10-29 "Fix the merge of start-a-quest-s-worktree..." finished green but could not fast-forward: my memory commit 0f551a6 landed between its rebase and merge. Filed "Land the worktree fix from fix-the-merge-of-start-a-quest-s-worktree" (haiku) to cherry-pick a5c28b5.
 - 2026-10-29 "Tell running quests when main moves" stopped undone again: clippy clean, tests running in the background. Own work, no tell, noted it.
 - 2026-10-29 "Blocked quests say why..." asked the human to say go for a rerun of tests killed for low memory. Told it go: rerun through heavy, merge on green.
