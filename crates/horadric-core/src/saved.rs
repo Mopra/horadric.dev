@@ -462,10 +462,18 @@ pub struct SavedSession {
     /// The runeword it was given, see [`Session::runeword`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runeword: Option<Runeword>,
+    /// A Folio chat, not a terminal: it resumes as a chat whatever new
+    /// sessions open as.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub chat: bool,
 }
 
 fn is_default(loot: &Loot) -> bool {
     *loot == Loot::default()
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl SavedSession {
@@ -487,6 +495,7 @@ impl SavedSession {
             worktree: s.worktree.clone(),
             loot: s.loot.clone(),
             runeword: s.runeword.clone(),
+            chat: false,
         }
     }
 
@@ -673,7 +682,22 @@ mod tests {
             worktree: None,
             loot: Loot::default(),
             runeword: None,
+            chat: false,
         }
+    }
+
+    #[test]
+    fn a_chat_is_kept_as_one_and_a_terminal_writes_no_mark() {
+        let terminal = saved(&[], true);
+        let written = serde_json::to_string(&terminal).unwrap();
+        assert!(!written.contains("chat"));
+        let chat = SavedSession {
+            chat: true,
+            ..terminal
+        };
+        let read: SavedSession =
+            serde_json::from_str(&serde_json::to_string(&chat).unwrap()).unwrap();
+        assert!(read.chat);
     }
 
     #[test]

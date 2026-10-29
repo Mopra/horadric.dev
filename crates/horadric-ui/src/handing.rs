@@ -1097,6 +1097,7 @@ impl App {
             worktree,
             loot: Default::default(),
             runeword: None,
+            chat: false,
         };
         // No one may be at this PC to answer Claude Code's trust prompt
         // for a folder it has never seen.

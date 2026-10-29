@@ -929,6 +929,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             skies: HashMap::new(),
             folios: HashMap::new(),
             to_folio: HashSet::new(),
+            folio_args: HashMap::new(),
             glow_stamp: 0,
             web_ask: None,
             pane_ask: None,
@@ -3597,6 +3598,9 @@ struct App {
     /// Claude terminals ending so their session goes on in a Folio, which
     /// starts once the terminal has exited.
     to_folio: HashSet<String>,
+    /// The arguments each Folio was started with, its own and not the
+    /// defaults, kept for it to resume with.
+    folio_args: HashMap<String, Vec<String>>,
     /// The glows' stamp the sanctuaries were last drawn at.
     glow_stamp: u64,
     /// What to ask for which project's browser pane, once out of the borrow.
@@ -4214,7 +4218,8 @@ impl App {
                 eprintln!("horadric: cannot resume {id}: {e}");
             }
         }
-        if let Some(id) = on_stage.filter(|id| self.consoles.contains_key(*id)) {
+        let back = |id: &&str| self.consoles.contains_key(*id) || self.folios.contains_key(*id);
+        if let Some(id) = on_stage.filter(back) {
             self.reveal(id, false);
         }
     }
@@ -4299,10 +4304,33 @@ impl App {
             let conversation = (self.shared.registry.lock().ok())
                 .and_then(|r| r.get(&id)?.claude_session_id.clone());
             self.consoles.remove(&id);
-            if let (Some(conversation), Some(dir)) = (conversation, self.dir_of(&id)) {
-                if let Err(e) = self.start_folio(Some(id.clone()), dir, Some(conversation)) {
-                    eprintln!("horadric: cannot open {id} as a chat: {e}");
+            let started = match (conversation, self.dir_of(&id)) {
+                (Some(conversation), Some(dir)) => (self.start_folio(
+                    Some(id.clone()),
+                    dir,
+                    Some(conversation),
+                    &console.args,
+                    true,
+                ))
+                .map(|_| ()),
+                _ => Err("it has no conversation to carry on".to_string()),
+            };
+            // The tile stays, paused as the terminal it was, for a click to
+            // resume it.
+            if let Err(e) = started {
+                eprintln!("horadric: cannot open {id} as a chat: {e}");
+                if let Ok(mut r) = self.shared.registry.lock() {
+                    if let Some(s) = r.get(&id) {
+                        let saved = SavedSession::from_session(s, console.args.clone(), false);
+                        self.paused.insert(id.clone(), saved);
+                        r.apply(
+                            &id,
+                            &HookEvent::synthetic(HookEvent::PAUSE),
+                            SystemTime::now(),
+                        );
+                    }
                 }
+                self.reconcile(true);
             }
             return;
         }
@@ -4848,7 +4876,7 @@ impl App {
         };
         let agent = past.map_or(Agent::Claude, |p| p.agent);
         if let Some(p) = past.filter(|p| self.chat_sessions && p.agent == Agent::Claude) {
-            match self.start_folio(None, dir.to_path_buf(), Some(p.id.clone())) {
+            match self.start_folio(None, dir.to_path_buf(), Some(p.id.clone()), &[], true) {
                 Ok(id) => {
                     if let Ok(mut r) = self.shared.registry.lock() {
                         if let Some(s) = r.get_mut(&id) {
@@ -4895,11 +4923,17 @@ impl App {
         // one takes its pane's place.
         self.consoles.remove(id);
         let cwd = PathBuf::from(&saved.cwd);
-        let as_chat = (saved.claude_session_id.clone())
-            .filter(|_| self.chat_sessions && saved.agent == Agent::Claude)
-            .filter(|_| !saved.shell && saved.ssh.is_none() && cwd.is_dir());
-        if let Some(conversation) = as_chat {
-            let started = self.start_folio(Some(id.to_string()), cwd, Some(conversation));
+        // A chat resumes as one; a terminal does when new sessions open as
+        // chats and it has a conversation to carry on.
+        let as_chat = saved.agent == Agent::Claude
+            && !saved.shell
+            && saved.ssh.is_none()
+            && cwd.is_dir()
+            && (saved.chat || (self.chat_sessions && saved.claude_session_id.is_some()));
+        if as_chat {
+            let conversation = (saved.claude_session_id.clone()).filter(|_| saved.prompted);
+            let started =
+                self.start_folio(Some(id.to_string()), cwd, conversation, &saved.args, show);
             if started.is_err() {
                 self.paused.insert(id.to_string(), saved);
             }
@@ -6661,7 +6695,10 @@ impl App {
                 let Some(s) = r.get(id).filter(|s| !s.shell && s.background.is_none()) else {
                     return;
                 };
-                let saved = SavedSession::from_session(s, args, false);
+                let saved = SavedSession {
+                    chat: self.paused.get(id).is_some_and(|p| p.chat),
+                    ..SavedSession::from_session(s, args, false)
+                };
                 r.stash(saved)
             }
             Err(_) => false,
@@ -6985,6 +7022,7 @@ impl App {
         if self.folios.remove(id).is_some() {
             crate::folio::close(id);
         }
+        self.folio_args.remove(id);
         self.to_folio.remove(id);
         self.paused.remove(id);
         self.stop_agents.remove(id);
@@ -7780,7 +7818,7 @@ impl App {
         let Some(dir) = self.project_dir(key) else {
             return;
         };
-        if let Err(e) = self.start_folio(None, dir, None) {
+        if let Err(e) = self.start_folio(None, dir, None, &[], true) {
             eprintln!("horadric: cannot start a chat: {e}");
         }
     }
@@ -7789,34 +7827,36 @@ impl App {
     /// open as a chat, a terminal otherwise.
     fn start_claude(&mut self, dir: PathBuf) -> Result<String, String> {
         if self.chat_sessions {
-            self.start_folio(None, dir, None)
+            self.start_folio(None, dir, None, &[], true)
         } else {
             self.start(None, dir, Vec::new())
         }
     }
 
     /// Starts a Folio in `dir` in a host of its own, carrying on the
-    /// conversation `resume` when given, as session `id` or a new one, and
-    /// shows it on the stage with the keyboard. Its tile is registered
-    /// here; its hooks find it by its id, as a terminal session's do.
+    /// conversation `resume` when given, as session `id` or a new one, with
+    /// the session's own `args` (a terminal's or a saved chat's), and with
+    /// `show` shows it on the stage with the keyboard. Its tile is
+    /// registered here; its hooks find it by its id, as a terminal
+    /// session's do.
     fn start_folio(
         &mut self,
         id: Option<String>,
         dir: PathBuf,
         resume: Option<String>,
+        args: &[String],
+        show: bool,
     ) -> Result<String, String> {
         if !dir.is_dir() {
             return Err(format!("{} is not a directory", dir.display()));
         }
         let folder = folder_name(&dir);
         let id = id.unwrap_or_else(|| self.unique_id(&folder));
-        let name = self
-            .shared
-            .registry
-            .lock()
-            .ok()
-            .and_then(|r| r.get(&id).map(|s| s.name.clone()))
-            .unwrap_or(folder);
+        let known =
+            (self.shared.registry.lock().ok()).and_then(|r| r.get(&id).map(|s| s.name.clone()));
+        let existed = known.is_some();
+        let name = known.unwrap_or(folder);
+        let own = chat_args(args);
         recent::remember(&mut self.recent, &dir.to_string_lossy());
         self.register_folio(&id, &dir, &name, resume.as_deref());
         let key = self.project_of(&id).unwrap_or_default();
@@ -7830,8 +7870,10 @@ impl App {
             (TASKS_ENV.to_string(), String::new()),
         ];
         env_set.extend(defaults.env(Agent::Claude));
+        let mut flags = defaults.flags_for(Agent::Claude, &own, false);
+        flags.extend(own.iter().cloned());
         let options = horadric_pty::headless::Options {
-            args: defaults.flags_for(Agent::Claude, &[], false),
+            args: flags,
             env_set,
             env_remove: console::inherited_env(console::under_claude())
                 .into_iter()
@@ -7846,8 +7888,18 @@ impl App {
             history: 0,
         };
         if let Err(e) = crate::folio::open(&id, &dir, tag, &options) {
+            // A tile that was there before, a terminal going on as a chat or
+            // a paused one resuming, stays, paused, for a click to try again.
             if let Ok(mut r) = self.shared.registry.lock() {
-                r.remove(&id);
+                if existed {
+                    r.apply(
+                        &id,
+                        &HookEvent::synthetic(HookEvent::PAUSE),
+                        SystemTime::now(),
+                    );
+                } else {
+                    r.remove(&id);
+                }
             }
             self.start_failed = Some(e.clone());
             post(self.notify.0 as isize, WM_HORADRIC_START_FAILED, 0);
@@ -7857,8 +7909,9 @@ impl App {
         self.next_serial += 1;
         self.folios
             .insert(id.clone(), Console::folio(id.clone(), serial, id.clone()));
+        self.folio_args.insert(id.clone(), own);
         self.reconcile(true);
-        if self.fill_stage(&key) {
+        if show && self.fill_stage(&key) {
             if let Some(stage) = &self.stage {
                 stage.focus_session(&id);
             }
@@ -7892,6 +7945,10 @@ impl App {
     fn reattach_folios(&mut self) {
         for found in crate::folio::reattach() {
             let crate::folio::Found { id, dir, tag } = found;
+            // Saved as a paused chat too: the host it still has wins.
+            if let Some(saved) = self.paused.remove(&id) {
+                self.folio_args.insert(id.clone(), saved.args);
+            }
             self.register_folio(&id, &dir, &tag.name, tag.resume.as_deref());
             let serial = self.next_serial;
             self.next_serial += 1;
@@ -7905,9 +7962,18 @@ impl App {
     /// nothing: an ask, which headless never posts as a hook, and where a
     /// turn stands after a reattach, since hooks went nowhere meanwhile.
     fn folio_state(&mut self, id: &str, state: crate::folio::State) {
+        // A reattached tile knows its conversation only from its replay,
+        // and History must not offer it while this one runs.
+        let conversation = crate::folio::conversation(id);
         let Ok(mut r) = self.shared.registry.lock() else {
             return;
         };
+        if let (Some(c), Some(s)) = (conversation, r.get_mut(id)) {
+            if s.claude_session_id.is_none() {
+                s.claude_session_id = Some(c);
+                s.prompted = true;
+            }
+        }
         let Some(phase) = r.get(id).map(|s| s.phase.clone()) else {
             return;
         };
@@ -7942,11 +8008,12 @@ impl App {
         let conversation = crate::folio::conversation(id);
         crate::folio::close(id);
         self.folios.remove(id);
+        let own = self.folio_args.remove(id).unwrap_or_default();
         let (Some(conversation), Some(dir)) = (conversation, self.dir_of(id)) else {
             return;
         };
         let name = self.name_of(id);
-        let args = Agent::Claude.resume_args(Some(&conversation));
+        let args = Agent::Claude.carry_on(Some(&conversation), &own);
         if let Err(e) = self.launch(id, &name, dir, args, Run::Agent(Agent::Claude), true) {
             eprintln!("horadric: cannot open {id} in a terminal: {e}");
             return;
@@ -7976,6 +8043,18 @@ impl App {
             );
             return;
         };
+        // Known before the terminal goes, so one that cannot become a chat
+        // is left running.
+        if horadric_pty::headless::claude_exe().is_none() {
+            self.start_failed =
+                Some("claude.exe was not found, so it cannot open as a chat".into());
+            post(self.notify.0 as isize, WM_HORADRIC_START_FAILED, 0);
+            return;
+        }
+        if !self.dir_of(id).is_some_and(|d| d.is_dir()) {
+            eprintln!("horadric: {id} has no folder to open a chat in");
+            return;
+        }
         self.to_folio.insert(id.to_string());
         console.kill();
     }
@@ -8277,11 +8356,23 @@ impl App {
             // the next start, never resumed into a second copy.
             for s in r.all().filter(|s| s.background.is_none()) {
                 if let Some(p) = self.paused.get(&s.id) {
-                    sessions.push(SavedSession::from_session(s, p.args.clone(), false));
+                    sessions.push(SavedSession {
+                        chat: p.chat,
+                        ..SavedSession::from_session(s, p.args.clone(), false)
+                    });
                 } else if let Some(c) = self.consoles.get(&s.id) {
                     if c.exit_code().is_none() && s.phase != Phase::Ended {
                         sessions.push(SavedSession::from_session(s, c.args.clone(), true));
                     }
+                } else if self.folios.contains_key(&s.id) && s.phase != Phase::Ended {
+                    // Back as a paused chat after a Quit or a reboot, and
+                    // after a reload resumed, unless its host still runs.
+                    let args = self.folio_args.get(&s.id).cloned().unwrap_or_default();
+                    let running = crate::folio::running(&s.id);
+                    sessions.push(SavedSession {
+                        chat: true,
+                        ..SavedSession::from_session(s, args, running)
+                    });
                 }
             }
         }
@@ -9951,6 +10042,15 @@ fn on_one_screen(r: [i32; 4]) -> bool {
         && r[3] <= w.bottom + 1
 }
 
+/// A Claude session's own arguments as a chat takes them: without the
+/// resume or continue it started with, since the chat names its own, and
+/// without its first prompt, which was sent then.
+fn chat_args(args: &[String]) -> Vec<String> {
+    let mut out = Agent::Claude.carry_on(Some("-"), args);
+    out.drain(..Agent::Claude.resume_args(Some("-")).len());
+    out
+}
+
 fn folder_name(cwd: &Path) -> String {
     cwd.file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -10160,6 +10260,20 @@ mod tests {
             end_question(Some("app"), 3, 2).as_deref(),
             Some("End all 3 running sessions in app? 2 of them are in the middle of a turn.")
         );
+    }
+
+    #[test]
+    fn a_chat_keeps_the_sessions_own_flags_and_nothing_it_was_resumed_with() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            chat_args(&args(&["--resume", "abc", "--model", "opus", "fix it"])),
+            args(&["--model", "opus"])
+        );
+        assert_eq!(
+            chat_args(&args(&["-c", "--permission-mode", "plan"])),
+            args(&["--permission-mode", "plan"])
+        );
+        assert!(chat_args(&[]).is_empty());
     }
 
     #[test]

@@ -633,6 +633,7 @@ pub(super) fn adopt(
         worktree: Some(landed.worktree.clone()),
         loot: Default::default(),
         runeword: None,
+        chat: false,
     };
     {
         let mut n = lock(node);

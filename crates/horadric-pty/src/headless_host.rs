@@ -55,6 +55,9 @@ const GRACE: Duration = Duration::from_secs(3);
 /// How long stdout's end waits for claude to exit, to read its code.
 const EXIT_WAIT: Duration = Duration::from_secs(10);
 
+/// How long a client's close waits for its frame to be written.
+const CLOSE_WAIT: Duration = Duration::from_secs(2);
+
 /// A client this many bytes behind is let go rather than queued for
 /// without end. It attaches again and gets the backlog.
 const BEHIND: usize = 128 * 1024 * 1024;
@@ -433,6 +436,8 @@ pub struct Hosted {
     info: HostInfo,
     pipe: Arc<Pipe>,
     input: Mutex<Option<Sender<Vec<u8>>>>,
+    /// The thread that writes `input` to the pipe, joined by a close.
+    writer: Mutex<Option<thread::JoinHandle<()>>>,
     running: Arc<AtomicBool>,
     /// Set by Drop, so the reader it stops says nothing more.
     detached: Arc<AtomicBool>,
@@ -511,7 +516,7 @@ impl Hosted {
             mut incoming,
         } = connected;
         let (input, rx) = mpsc::channel::<Vec<u8>>();
-        {
+        let writer = {
             let pipe = Arc::clone(&pipe);
             thread::spawn(move || {
                 for frame in rx {
@@ -519,8 +524,8 @@ impl Hosted {
                         break;
                     }
                 }
-            });
-        }
+            })
+        };
         let running = Arc::new(AtomicBool::new(true));
         let detached = Arc::new(AtomicBool::new(false));
         let reader_gone = Arc::new(AtomicBool::new(false));
@@ -561,6 +566,7 @@ impl Hosted {
             info,
             pipe,
             input: Mutex::new(Some(input)),
+            writer: Mutex::new(Some(writer)),
             running,
             detached,
             reader_gone,
@@ -590,8 +596,23 @@ impl Hosted {
     /// Ends the session for good: claude gets its stdin closed and a grace
     /// period to end itself, then its whole tree is ended. The end comes
     /// back as [`Event::End`] like any other.
+    ///
+    /// Returns once the close is written, or after [`CLOSE_WAIT`]: an app
+    /// that quits right after would otherwise take a close still queued
+    /// with it, and its hosts and claude would run on to be found again at
+    /// the next start. Nothing more can be sent after.
     pub fn close(&self) {
         let _ = self.send(LineMessage::Close);
+        if let Ok(mut input) = self.input.lock() {
+            input.take();
+        }
+        let writer = self.writer.lock().ok().and_then(|mut w| w.take());
+        if let Some(writer) = writer {
+            let deadline = Instant::now() + CLOSE_WAIT;
+            while !writer.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
     }
 
     fn send(&self, message: LineMessage) -> io::Result<()> {
@@ -807,6 +828,43 @@ mod tests {
         );
         assert!(!second.running());
         assert!(second.send_line("echo too late").is_err());
+        ended.recv_timeout(Duration::from_secs(10)).unwrap();
+    }
+
+    /// A client that closes and is gone at once, as an app quitting with
+    /// its sessions, still ends the session.
+    #[test]
+    fn a_close_dropped_at_once_still_ends_the_host() {
+        let instance = format!("close{}", std::process::id());
+        let id = "chat";
+        let spec = HeadlessSpec {
+            pipe: headless_pipe_name(&instance, id),
+            cwd: std::env::temp_dir(),
+            resume: None,
+            options: Options {
+                program: Some(
+                    std::env::var("ComSpec")
+                        .unwrap_or_else(|_| "cmd.exe".into())
+                        .into(),
+                ),
+                ..Options::default()
+            },
+            tag: "project-a".into(),
+        };
+        let host = Host::start(&spec).unwrap();
+        let shared = Arc::clone(&host.shared);
+        let ended = host.ended;
+        let first_pipe = host.first;
+        thread::spawn(move || {
+            first_pipe.accept().unwrap();
+            welcome(first_pipe, &shared);
+        });
+        let client = Hosted::attach(&instance, id, |_| {}).unwrap();
+        for n in 0..50 {
+            client.send_line(&format!("echo queued-{n}")).unwrap();
+        }
+        client.close();
+        drop(client);
         ended.recv_timeout(Duration::from_secs(10)).unwrap();
     }
 
