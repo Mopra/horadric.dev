@@ -28,6 +28,7 @@ pub mod escalate;
 pub mod event;
 pub mod experience;
 pub mod fleet;
+pub mod folio;
 pub mod glow;
 pub mod google;
 pub mod guard;
