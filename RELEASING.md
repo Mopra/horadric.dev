@@ -39,11 +39,17 @@ and only reloads this machine.
 1. Bump `version` under `[workspace.package]` in `Cargo.toml`. That is the
    release's version, and every install compares its own against it, so
    it must go up each time or no one is offered the release.
-2. Check only what nothing checked yet, by the rule in section 7: most
-   ships run no checks at all, since every quest passed all three when
-   it landed, and the release build in step 3 proves it still compiles.
+2. Run `cargo fmt --all` (seconds, no build) and commit what it changed
+   with the version bump. No clippy or tests here: CI runs them.
+3. Tag and push, before building, so CI and the Mac and Linux release
+   builds run while this machine builds:
 
-3. Build and sign:
+   ```sh
+   git tag v0.2.0
+   git push origin main v0.2.0
+   ```
+
+4. Build and sign:
 
    ```sh
    cargo build --release
@@ -58,13 +64,6 @@ and only reloads this machine.
    cut to about 120 characters, so make it the one line that matters.
    All of it shows in the dialog before the update. A blank line
    separates paragraphs; `--notes` takes one argument, so quote it.
-4. Commit the version bump, tag it and push:
-
-   ```sh
-   git tag v0.2.0
-   git push origin main v0.2.0
-   ```
-
 5. Zip the two binaries for winget. A winget installer entry is one URL,
    and `horadric install` needs `horadricw.exe` next to `horadric.exe`, so
    winget installs both from one archive. The updater ignores the zip.
@@ -120,62 +119,25 @@ and only reloads this machine.
    downloads exactly that name from the latest release, so a release
    published without it leaves new Linux installs on the old node. A
    node has no updater and nothing is signed. See that it is on the
-   draft, then try it on a Linux machine you reach with ssh:
+   draft (`gh release view v0.2.0 --json assets --jq '.assets[].name'`).
+   No ssh trial: CI's smoke run already starts the node.
 
-   ```sh
-   gh release view v0.2.0 --json assets --jq '.assets[].name'
-   gh release download v0.2.0 --pattern Horadric-linux-x86_64.tar.gz --dir target/linux
-   scp target/linux/Horadric-linux-x86_64.tar.gz <host>:
-   ssh <host> 'tar -xzf Horadric-linux-x86_64.tar.gz && ./horadric node --stdio </dev/null | head -c 17'
-   ```
-
-   The last line prints `horadric-node 1` (and, with no node running
-   there, an error frame saying so). A node that is installed is
-   updated by copying the binary over `~/.local/bin/horadric` and
-   running `systemctl --user restart horadric`; its sessions' hosts
-   keep running through the restart and are attached again, and it
-   links to its brothers over the relay with no new prompt.
-
-   `install.sh` ends by running `horadric node signin` when it has a
-   terminal (`HORADRIC_NO_SIGNIN=1` skips it): a code to confirm in a
-   browser, then a signed in brother asked to let the node in, with the
-   six digit code shown on both. To try a build's sign in without
-   touching a node in use, run it as a dev node beside it, as the
-   installed Horadric runs beside a dev PC: `systemd-run --user --unit
-   horadric-dev-node -p KillMode=process -E HORADRIC_DEV=1 <binary> node`,
-   then `HORADRIC_DEV=1 <binary> node signin`. A dev node signs in with
-   WorkOS's staging client, so it pairs with a Windows dev instance.
-
-   To build the node on this machine without a release (to try a change
-   on a server before tagging), cross build it with zig, since the node
-   carries C (onig for the memory's tokenizer, tree-sitter and its
-   grammars, ring for the link) that rust-lld alone cannot compile:
-
-   ```sh
-   pip install --user ziglang        # zig, which cargo-zigbuild finds by itself
-   cargo install cargo-zigbuild
-   rustup target add x86_64-unknown-linux-musl
-   cargo zigbuild --release -p horadric --bin horadric --target x86_64-unknown-linux-musl
-   ```
-
-   The binary is `target/x86_64-unknown-linux-musl/release/horadric`,
-   static like the release's. A separate `CARGO_TARGET_DIR` keeps it out
-   of the way of the Windows builds. To lint the Linux half the same
-   way, point `CC_x86_64_unknown_linux_musl` and
-   `AR_x86_64_unknown_linux_musl` at the `zigcc-x86_64-unknown-linux-musl-*.bat`
-   and `ar.exe` wrappers cargo-zigbuild leaves under
-   `%LOCALAPPDATA%\cargo-zigbuild\<version>\wrappers`, then run
-   `cargo clippy --target x86_64-unknown-linux-musl` with the crates
-   CI's Linux job names.
+   Never build the node, or anything for Mac or Linux, on this machine.
+   CI does it on the tag.
 9. No dev instance trial: it puts windows over the human's work and
    takes minutes. The guard is the rollback instead. This machine
    reloads the same build when the ship ends, and every install that
    updates goes back to its old build by itself if the new one does not
    come up in 20 seconds. Try a dev instance only when the release
    changes reloading or updating itself.
-10. Publish the draft (below).
-11. Bump the Chocolatey package (below).
-12. Deploy the Town Portal page (below).
+10. Look at CI for the pushed commit (`gh run list --commit <sha>`). A red
+    test in the Windows `test` job holds the publish: fix it, bump the
+    patch and ship again. Red fmt or clippy, or a red Mac or Linux job,
+    does not hold it; fix those in the next commit. Do not wait for the
+    Mac and Linux CI jobs to finish, only for the Mac archive.
+11. Publish the draft (below).
+12. Bump the Chocolatey package (below).
+13. Deploy the Town Portal page (below).
 
 ## 3. Publishing is shipping
 
@@ -297,22 +259,12 @@ One ship at a time per project. If another Ship Local or Ship Public
 session of the project is open, do not ship: say so and stop. Its build
 will carry everything on `main` when it reloads.
 
-A ship does not test everything again. Every quest passed the three
-checks (`.horadric/config.json`) on its rebased tip before it landed,
-and a session committing on `main` runs them before every commit. So
-look at what changed since the last ship, or since the last tag when
-that is unknown (`git log --name-only <tag>..main`), and check only
-what nothing checked:
+Ship local runs no checks at all: no fmt, no clippy, no tests, no
+`horadric heavy`. The release build is the compile check; if it fails,
+the ship stops and the error is reported. The checks belong to ship
+public, and run in CI (section 2).
 
-- Only docs, `.horadric/` or other non-code files: no checks.
-- Code that came in through landed quests: no checks.
-- Code committed on `main` outside a quest, or a merge you made
-  yourself: `horadric heavy -- cargo clippy -p <crate> --all-targets --
-  -D warnings` and `horadric heavy -- cargo test -p <crate>` for the
-  crates it touched, not the workspace.
-
-A red check stops the ship. Do not build or reload. Report the failing
-output so the human sees why. Then build from a tree with no one
+Build from a tree with no one
 else's uncommitted edits in code: `cargo build --release`, which is
 the compile check, then `target\release\horadric.exe reload`. Before `reload`, deploy the Town Portal page if it is behind
 (RELEASING.md, "The Town Portal page"), for ship local and ship public

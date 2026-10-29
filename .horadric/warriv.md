@@ -3,7 +3,7 @@
 ## Rules
 - A landing that fails only with "Diverging branches can't be fast-forwarded" lost a race to a commit on main (often my memory commit): file a small haiku quest to cherry-pick the branch and land it, no human needed.
 - A landing red on checkpoint's git init in %TEMP% (template hook copy) is a test flake: tell the fix-up to rerun, never to change the quest's code.
-- Do not wait for main's checks before casting a ship stone: nothing runs them between landings. Ship Public runs all three first (RELEASING.md step 2) and Ship Local does too since 5170f91; both stop on red (lore #30).
+- Do not wait for main's checks before casting a ship stone: nothing runs them between landings. Since 2026-10-30 neither ship runs them: Ship Local's release build is its check, Ship Public's run in CI (RELEASING.md step 10).
 - Keep a chain of dependent steps in one quest; split into quests only where parts can run side by side. The human finds handovers slow (lore #34).
 - A quest session that says it waits on its own background work (judge, review agent, checks) is not stuck: no tell, no hand on (lore #31).
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).

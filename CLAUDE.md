@@ -56,10 +56,9 @@ Pointers, read when your work touches them: [the brotherhood](docs/plan/the-brot
 - No em dashes, en dashes or double hyphens anywhere (code comments and commits too).
 - Comments say why, not what. If a line needs a comment to say what it does,
   rewrite the line.
-- Every pure function gets a test. Anything touching Win32 or AppKit gets verified on
-  screen instead, see below.
-- `cargo fmt --all`, then `cargo clippy --workspace --all-targets -- -D
-  warnings`, then `cargo test --workspace`. All three before every commit.
+- Pure logic that is easy to get wrong gets a test. Run just that test
+  (`cargo test -p <crate> <name>`) when it is quicker than trying it.
+- Anything touching Win32 or AppKit is looked at by the human, see below.
 - The Rust version is pinned in `rust-toolchain.toml`, for this machine
   and CI alike. Moving it is a commit of its own, with whatever new
   clippy lints it brings fixed in the same commit.
@@ -72,17 +71,31 @@ Pointers, read when your work touches them: [the brotherhood](docs/plan/the-brot
 - When you are in a worktree anyway (you were asked, or it is a tomb or
   a parallel task), finish by merging it into `main`: merge `main` into
   the branch first if it has moved, then
-  `git -C <main checkout> merge --ff-only <branch>`. Run the three
-  checks again only when what came in from `main` touches a file the
-  branch changed; if `main` moves again meanwhile, merge again under the
-  same rule rather than starting the checks over. No branch is left
+  `git -C <main checkout> merge --ff-only <branch>`. After resolving a
+  conflict, `cargo check` is enough. No branch is left
   with work `main` lacks.
+
+## The loop: fast by default
+
+Speed of iteration beats ceremony. A broken lint on `main` costs a
+minute to fix later; a 30 minute check run costs 30 minutes every time.
+
+1. Write the code.
+2. `cargo check -p <crate you touched>`. That is the whole check.
+3. If it is UI, build and start the dev instance once and tell the human
+   what to look at. Do not screenshot or inspect it yourself unless asked.
+4. Commit and say what changed.
+
+Not part of the loop: `cargo fmt`, `cargo clippy`, `cargo test --workspace`,
+`horadric heavy`, building for Mac or Linux (no `--target` builds, no
+`cargo zigbuild`, no waiting on CI). Workspace fmt, clippy and tests run
+once, in CI, at ship public. Run more only when the human asks.
 
 ## Verifying UI code
 
-Tests cannot tell you a window looks right. Full loop in
-[docs/dev-instance.md](docs/dev-instance.md), which also covers testing
-against a real agent. The rules that must not be lost:
+The human looks at the dev instance; the agent builds and starts it.
+Details in [docs/dev-instance.md](docs/dev-instance.md), which also
+covers testing against a real agent. The rules that must not be lost:
 
 - Always test as a dev instance: `HORADRIC_DEV=1` (port 43118, state in
   `%APPDATA%\Horadric-dev`, refuses `install`, `uninstall` and hook changes).
@@ -103,7 +116,11 @@ against a real agent. The rules that must not be lost:
 "Ship public" cuts a release every install is offered, and is the human's
 go ahead to publish. The agent working on Horadric never touches the
 installed one except to ship, and only when the human says to ship, the
-"Warriv drives" switch allows it, or an armed errand says so. The steps
-(Warriv's switches, errands, the checks through `horadric heavy`, the
-build, the Town Portal page, `reload`, the first install) are in
-[RELEASING.md](RELEASING.md), section 7.
+"Warriv drives" switch allows it, or an armed errand says so.
+
+Ship local runs no checks: `cargo build --release` is the check, then
+`reload`. Ship public pushes first so CI runs fmt, clippy and the tests
+on all three systems while the release builds; only a red test holds
+the publish. The steps (Warriv's switches, errands, the build, the Town
+Portal page, `reload`, the first install) are in
+[RELEASING.md](RELEASING.md), sections 2 and 7.
