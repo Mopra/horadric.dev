@@ -13,6 +13,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (hourly, main at 72999b3, only my memory since the ddc6c34 ship): no aim, log done. Nothing to do.
 - 2026-10-29 Round (human left, main at 6a02ab0): the ddc6c34 Ship Local reloaded at 15:27, so main is shipped. No aim, log done. Nothing to do.
 - 2026-10-29 Round (hourly, main at ddc6c34): the Folio files are committed now (359c397, ddc6c34), tree clean apart from tasks files, no cargo, installed build from 11:19, so cast "Ship Local". No aim, log done.
 - 2026-10-29 Round (14:18, human left, main at 8482f58): the human's session did the headless spike itself (97a9e62 to 8482f58), so noted that on the spike quest. Code since the v0.35.0 ship (Tristram header, quieter typing, Folio) is unshipped, but six Folio files sit uncommitted from that live session, so held "Ship Local". No aim.
