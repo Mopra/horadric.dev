@@ -14,13 +14,13 @@ use horadric_core::markdown::{self as md, Align, Inline};
 use serde_json::Value;
 
 /// How far each level of a list or quote moves its text in.
-pub const LIST_INDENT: f32 = 22.0;
+pub const LIST_INDENT: f32 = 24.0;
 pub const QUOTE_INDENT: f32 = 16.0;
 /// Room between paragraphs, and inside a list.
-pub const PARA_GAP: f32 = 10.0;
-pub const ITEM_GAP: f32 = 4.0;
+pub const PARA_GAP: f32 = 14.0;
+pub const ITEM_GAP: f32 = 6.0;
 /// Above a heading that is not the reply's first.
-pub const HEADING_GAP: f32 = 18.0;
+pub const HEADING_GAP: f32 = 24.0;
 
 /// The size a paragraph's text is set in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

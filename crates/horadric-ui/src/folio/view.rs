@@ -19,8 +19,9 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteTextFormat, IDWriteTextLayout, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_LINE_SPACING_METHOD_UNIFORM,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TRIMMING,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Gdi::{
     CreateRoundRectRgn, InvalidateRect, ScreenToClient, SetWindowRgn, ValidateRect,
@@ -42,8 +43,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows_numerics::Vector2;
 
-use super::composer::{self, Act};
-use super::{answer, interrupt, redraw, select, send_prompt, transcript, with, Chat, CHATS};
+use super::composer::{self, Act, STRIP_H, STRIP_Y};
+use super::{answer, interrupt, redraw, select, transcript, with, Chat, CHATS};
 use crate::app::{self, Input};
 use crate::clipboard;
 use crate::folio_look as look;
@@ -63,6 +64,11 @@ const FRAME_MS: u32 = 40;
 const CORNER: f32 = 7.0;
 
 pub(super) const FONT: PCWSTR = w!("Segoe UI Variable Text");
+/// The size prose is read in, in the conversation and the composer alike.
+pub(super) const READ: f32 = 16.0;
+/// Prose lines this many times their size apart. DirectWrite's own spacing
+/// is set for interfaces and packs a long answer too tight to follow.
+const LEADING: f32 = 1.6;
 const MONO: PCWSTR = w!("Cascadia Mono");
 const ICONS: PCWSTR = w!("Segoe Fluent Icons");
 
@@ -323,6 +329,22 @@ pub(super) unsafe fn text_format(
     Ok(f)
 }
 
+/// A wrapping format for prose at `size`, its lines spread by [`LEADING`]
+/// with the baseline where the font's own spacing would put it, centred.
+pub(super) unsafe fn reading(
+    gpu: &Gpu,
+    size: f32,
+    weight: DWRITE_FONT_WEIGHT,
+) -> Result<IDWriteTextFormat> {
+    let f = text_format(gpu, FONT, size, weight, false, false)?;
+    // Segoe UI's ascent and descent, as fractions of its size.
+    let (ascent, descent) = (1.079, 0.251);
+    let line = (size * LEADING).round();
+    let baseline = (line - size * (ascent + descent)) / 2.0 + size * ascent;
+    f.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, line, baseline)?;
+    Ok(f)
+}
+
 pub(super) fn d2d(r: &Rect) -> D2D_RECT_F {
     D2D_RECT_F {
         left: r.x,
@@ -398,12 +420,12 @@ impl Gfx {
             shade,
             round,
             accent,
-            text: text_format(gpu, FONT, 14.5, normal, false, false)?,
-            line: text_format(gpu, FONT, 13.0, normal, false, true)?,
-            italic: text_format(gpu, FONT, 13.0, normal, true, false)?,
-            small: text_format(gpu, FONT, 12.0, normal, false, true)?,
-            title: text_format(gpu, FONT, 13.5, semi, false, true)?,
-            mono: text_format(gpu, MONO, 12.5, normal, false, false)?,
+            text: reading(gpu, READ, normal)?,
+            line: text_format(gpu, FONT, 14.0, normal, false, true)?,
+            italic: text_format(gpu, FONT, 14.0, normal, true, false)?,
+            small: text_format(gpu, FONT, 12.5, normal, false, true)?,
+            title: text_format(gpu, FONT, 14.5, semi, false, true)?,
+            mono: text_format(gpu, MONO, 13.0, normal, false, false)?,
             button,
             icon,
             big,
@@ -598,8 +620,8 @@ impl View {
         let pal = Palette {
             bg: p.term_bg,
             fg: p.term_fg,
-            dim: p.term_fg.with_alpha(0.6),
-            faint: p.term_fg.with_alpha(0.38),
+            dim: p.term_fg.with_alpha(0.68),
+            faint: p.term_fg.with_alpha(0.46),
             accent: gfx.accent,
         };
         let (cx, cw) = look::column(w);
@@ -620,7 +642,7 @@ impl View {
         // button sits, and fades in below it, so the two never overlap.
         // At the top nothing is under there: the first block starts lower.
         if chat.scroll > 0.0 {
-            const SOLID: f32 = 22.0;
+            const SOLID: f32 = 30.0;
             const FADE: f32 = 18.0;
             gfx.fill(&Rect::new(0.0, 0.0, w, SOLID), pal.bg);
             for i in 0..6 {
@@ -633,7 +655,8 @@ impl View {
         gfx.shade.SetStartPoint(Vector2 { X: 0.0, Y: 0.0 });
         gfx.shade.SetEndPoint(Vector2 { X: 0.0, Y: 9.0 });
         rt.FillRectangle(&d2d(&Rect::new(0.0, 0.0, w, 9.0)), &gfx.shade);
-        self.terminal_button(gfx, &pal, chat, w, &mut composer_hits);
+        let right = self.terminal_button(gfx, &pal, chat, w, &mut composer_hits);
+        self.strip(gfx, chat, &pal, 8.0, right, &mut composer_hits);
         if chat.pending.is_some() {
             self.trust_card(gfx, &pal, chat, cx, cw, &area, &mut composer_hits);
         }
@@ -647,6 +670,7 @@ impl View {
     /// "Terminal" at the top right: the session goes on in a terminal pane,
     /// for what only the CLI does. Only between turns, since claude.exe
     /// ends first, and only once there is a conversation to resume.
+    /// Returns where the settings strip to its left may end.
     unsafe fn terminal_button(
         &self,
         gfx: &Gfx,
@@ -654,24 +678,25 @@ impl View {
         chat: &Chat,
         w: f32,
         hits: &mut Vec<(Rect, Hit)>,
-    ) {
+    ) -> f32 {
         let ready = !chat.folio.busy
             && !chat.ended
             && !chat.to_terminal
             && chat.folio.session_id.is_some()
             && chat.folio.pending_asks().is_empty();
         if !ready {
-            return;
+            return w - 8.0;
         }
         // Above where the first block starts, so at the top it covers nothing.
-        let r = Rect::new(w - TERMINAL_W - 8.0, 2.0, TERMINAL_W, 18.0);
-        gfx.fill_round(&r, 9.0, pal.bg.mix(pal.fg, 0.07).with_alpha(0.9));
-        gfx.stroke_round(&r, 9.0, pal.fg.with_alpha(0.14), 1.0);
+        let r = Rect::new(w - TERMINAL_W - 8.0, STRIP_Y, TERMINAL_W, STRIP_H);
+        gfx.fill_round(&r, r.h / 2.0, pal.bg.mix(pal.fg, 0.07).with_alpha(0.9));
+        gfx.stroke_round(&r, r.h / 2.0, pal.fg.with_alpha(0.14), 1.0);
         let icon = Rect::new(r.x + 8.0, r.y, 16.0, r.h);
         gfx.text_in("\u{E756}", &gfx.icon, &icon, pal.dim);
         let label = Rect::new(r.x + 28.0, r.y, r.w - 34.0, r.h);
         gfx.text_in("Terminal", &gfx.small, &label, pal.dim);
         hits.push((r, Hit::Terminal));
+        r.x - 6.0
     }
 
     /// Asks whether to trust the folder, as Claude Code does before its
@@ -791,7 +816,6 @@ impl View {
                     c.follow = false;
                 });
             }
-            Some(Hit::Input(Act::Send)) => send_prompt(&key),
             Some(Hit::Input(Act::Stop)) => {
                 with(&key, composer::hold);
                 interrupt(&key);

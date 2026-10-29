@@ -32,13 +32,13 @@ use crate::layout::Rect;
 use crate::render::{self, color};
 use crate::theme::{self, Color};
 
-const TOP: f32 = 22.0;
-const GAP: f32 = 14.0;
-const LINE_H: f32 = 24.0;
-const STEP_H: f32 = 24.0;
+const TOP: f32 = 34.0;
+const GAP: f32 = 18.0;
+const LINE_H: f32 = 26.0;
+const STEP_H: f32 = 26.0;
 const FOOTER_H: f32 = 18.0;
-const BUBBLE_X: f32 = 14.0;
-const BUBBLE_Y: f32 = 9.0;
+const BUBBLE_X: f32 = 16.0;
+const BUBBLE_Y: f32 = 11.0;
 const BUBBLE_SHARE: f32 = 0.82;
 /// How far a step's detail and a lane sit in from their line.
 const NEST: f32 = 22.0;

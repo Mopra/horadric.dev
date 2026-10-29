@@ -37,7 +37,7 @@ use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 
 use super::flow::{self, Font, Kind, Para};
 use super::transcript::Act;
-use super::view::{d2d, text_format, Gfx, Hit, Palette, FONT};
+use super::view::{d2d, reading, text_format, Gfx, Hit, Palette, FONT, READ};
 use crate::layout::Rect;
 use crate::render::{self, color, Gpu};
 use crate::theme::Color;
@@ -54,7 +54,7 @@ const CELL_Y: f32 = 6.0;
 const CELL_LEAST: f32 = 64.0;
 /// One line of a diff or of shell output, the same for every line so
 /// rows line up with their backgrounds.
-pub(super) const MONO_LINE: f32 = 17.0;
+pub(super) const MONO_LINE: f32 = 19.0;
 
 /// Which of the frame's one line formats an [`Item::Line`] is set in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,29 +210,29 @@ impl Fonts {
     pub(super) unsafe fn new(gpu: &Gpu) -> Result<Fonts> {
         let n = DWRITE_FONT_WEIGHT_NORMAL;
         let semi = DWRITE_FONT_WEIGHT_SEMI_BOLD;
-        let code = text_format(gpu, MONO, 12.5, n, false, false)?;
+        let code = text_format(gpu, MONO, 13.5, n, false, false)?;
         code.SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK)?;
-        let rows = text_format(gpu, MONO, 12.0, n, false, false)?;
+        let rows = text_format(gpu, MONO, 13.0, n, false, false)?;
         rows.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
         rows.SetLineSpacing(
             DWRITE_LINE_SPACING_METHOD_UNIFORM,
             MONO_LINE,
             MONO_LINE * 0.78,
         )?;
-        let right = text_format(gpu, FONT, 12.0, n, false, true)?;
+        let right = text_format(gpu, FONT, 12.5, n, false, true)?;
         right.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)?;
-        let centre = text_format(gpu, FONT, 12.0, n, false, true)?;
+        let centre = text_format(gpu, FONT, 12.5, n, false, true)?;
         centre.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         Ok(Fonts {
-            body: text_format(gpu, FONT, 14.5, n, false, false)?,
-            h1: text_format(gpu, FONT, 21.0, semi, false, false)?,
-            h2: text_format(gpu, FONT, 18.0, semi, false, false)?,
-            h3: text_format(gpu, FONT, 15.5, semi, false, false)?,
+            body: reading(gpu, READ, n)?,
+            h1: reading(gpu, 23.0, semi)?,
+            h2: reading(gpu, 19.5, semi)?,
+            h3: reading(gpu, 17.0, semi)?,
             code,
             rows,
             right,
             centre,
-            small_wrap: text_format(gpu, FONT, 12.5, n, false, false)?,
+            small_wrap: text_format(gpu, FONT, 13.5, n, false, false)?,
         })
     }
 

@@ -1,7 +1,8 @@
 //! The composer at the bottom of a Folio: the text being written, images
-//! and folded pastes, the `/` and `@` menus, the controls under the text
-//! (permission mode, model, effort, the context meter, send and stop), and
-//! the prompts queued while Claude works, above it.
+//! and folded pastes, the `/` and `@` menus, and the prompts queued while
+//! Claude works, above it. The box holds only the text; the settings
+//! (permission mode, model, effort, the context meter and stop) sit in a
+//! quiet strip at the top of the glass.
 //!
 //! What it does to text is in [`super::editor`], its menus' matching in
 //! [`super::picker`], what the controls say in [`super::controls`]. Here
@@ -52,12 +53,13 @@ use crate::keys::Mods;
 use crate::layout::Rect;
 use crate::render::{self, Gpu};
 
-const PAD: f32 = 12.0;
+const PAD: f32 = 16.0;
 const BOTTOM: f32 = 16.0;
 const LINES: f32 = 8.0;
-const BUTTON: f32 = 28.0;
-const CONTROLS_H: f32 = 28.0;
-const PILL_H: f32 = 24.0;
+/// The strip of settings at the top of the glass, level with the
+/// Terminal button.
+pub(super) const STRIP_Y: f32 = 4.0;
+pub(super) const STRIP_H: f32 = 22.0;
 const THUMB: f32 = 52.0;
 const ROW_H: f32 = 26.0;
 const MENU_ROW: f32 = 30.0;
@@ -74,17 +76,14 @@ const TOO_BIG: &str = "That image is too big to send whole (the most is 3.75 MB)
 /// History entries longer than this are not kept, so the file stays small.
 const HISTORY_ENTRY_MAX: usize = 20_000;
 
-const PLACEHOLDER: &str =
-    "Message Claude. Enter sends, Shift+Enter breaks the line, / for commands, @ for files.";
-const PLACEHOLDER_BUSY: &str =
-    "Claude is working. Enter queues, Ctrl+Enter sends now, Esc stops it.";
+const PLACEHOLDER: &str = "Message Claude";
+const PLACEHOLDER_BUSY: &str = "Claude is working. Enter queues, Esc stops it.";
 const PLACEHOLDER_ENDED: &str = "This session has ended.";
 
 /// What a click on the composer does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Act {
     Text,
-    Send,
     Stop,
     Mode,
     Model,
@@ -1153,7 +1152,7 @@ impl View {
         } else {
             THUMB + 10.0
         };
-        let bh = PAD + images_h + view_h + 8.0 + CONTROLS_H + 8.0;
+        let bh = PAD + images_h + view_h + PAD;
         let r = Rect::new(cx, h - BOTTOM - bh, cw, bh);
         chat.input.top = r.y;
         // A card's field or the find bar may have the keys instead: one
@@ -1267,168 +1266,130 @@ impl View {
         }
         *self.composer.borrow_mut() = (!empty).then_some((l, ox, sy));
 
-        self.controls(gfx, chat, pal, &r, oy + view_h + 8.0, hits);
         let top = self.above(gfx, chat, pal, cx, cw, r.y, hits);
         Rect::new(cx, top, cw, r.bottom() - top)
     }
 
-    /// The row under the text: mode, model and effort on the left, the
-    /// context meter, stop and send on the right.
-    unsafe fn controls(
+    /// The quiet row at the top right of the glass, so the composer holds
+    /// only the text: from the right, stop while Claude works, effort,
+    /// model and mode, then the context meter and the background tasks.
+    /// It runs from `right` leftwards, never past `left`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn strip(
         &self,
         gfx: &Gfx,
         chat: &mut Chat,
         pal: &Palette,
-        r: &Rect,
-        y: f32,
+        left: f32,
+        right: f32,
         hits: &mut Vec<(Rect, Hit)>,
     ) {
         let gpu = &self.shared.gpu;
-        let cy = y + (CONTROLS_H - PILL_H) / 2.0;
-        let mut x = r.x + PAD - 4.0;
+        let cy = STRIP_Y;
+        let mut right = right;
         let hover = chat.input.hover;
         let open = chat.input.menu.as_ref().map(|m| m.kind);
-        let mut pill = |label: &str,
-                        icon: Option<char>,
-                        act: Act,
-                        hot: bool,
-                        tint: Option<crate::theme::Color>| {
-            let tw = width_of(gpu, &gfx.small, label).ceil();
-            let iw = if icon.is_some() { 18.0 } else { 0.0 };
-            let w = tw + iw + 16.0 + 12.0;
-            let b = Rect::new(x, cy, w, PILL_H);
-            let lit = hover == Some(act) || hot;
-            if lit {
-                gfx.fill_round(&b, PILL_H / 2.0, pal.fg.with_alpha(0.08));
-            }
-            let ink = tint.unwrap_or(if lit { pal.fg } else { pal.dim });
-            if let Some(ic) = icon {
-                gfx.text_in(
-                    &ic.to_string(),
-                    &gfx.icon,
-                    &Rect::new(b.x + 8.0, cy, 14.0, PILL_H),
-                    ink,
-                );
-            }
-            gfx.text_in(
-                label,
-                &gfx.small,
-                &Rect::new(b.x + 8.0 + iw, cy, tw + 2.0, PILL_H),
-                ink,
-            );
-            gfx.text_in(
-                "\u{E70D}",
-                &gfx.icon,
-                &Rect::new(b.right() - 18.0, cy + 1.0, 12.0, PILL_H),
-                pal.faint,
-            );
-            hits.push((b, Hit::Input(act)));
-            x += w + 2.0;
-            b.x
-        };
-        let mode = chat.folio.permission_mode().to_string();
-        let tint = match mode.as_str() {
-            "plan" => Some(pal.accent),
-            "bypassPermissions" => Some(crate::theme::Color::rgb(0xE0_8A_3C)),
-            _ => None,
-        };
-        let shown_mode = if mode.is_empty() {
-            "default"
-        } else {
-            mode.as_str()
-        };
-        let a0 = pill(
-            controls::mode_label(shown_mode),
-            Some(mode_icon(shown_mode)),
-            Act::Mode,
-            open == Some(MenuKind::Mode),
-            tint,
-        );
-        let model = controls::model_label(
-            chat.folio.model.as_deref(),
-            chat.input.model.as_deref(),
-            &chat.folio.info.models,
-        );
-        let a1 = pill(
-            &model,
-            None,
-            Act::Model,
-            open == Some(MenuKind::Model),
-            None,
-        );
-        let levels = effort_levels(chat);
-        let a2 = if levels.is_empty() {
-            a1
-        } else {
-            let label = match &chat.input.effort {
-                Some(e) => format!("Effort {e}"),
-                None => "Effort".to_string(),
-            };
-            pill(
-                &label,
-                None,
-                Act::Effort,
-                open == Some(MenuKind::Effort),
-                None,
-            )
-        };
-        chat.input.anchors = [a0, a1, a2, 0.0];
+        chat.input.anchors = [right; 4];
 
-        // Send, and stop while Claude works.
-        let mut right = r.right() - PAD;
-        let bt = y + (CONTROLS_H - BUTTON) / 2.0;
-        let has_text = !chat.input.ed.text().trim().is_empty() || !chat.input.images.is_empty();
-        if !chat.folio.busy || has_text {
-            let b = Rect::new(right - BUTTON, bt, BUTTON, BUTTON);
-            let can = has_text && !chat.ended;
-            let hot = can && hover == Some(Act::Send);
-            let fill = if can {
-                if hot {
-                    pal.accent.mix(pal.fg, 0.2)
-                } else {
-                    pal.accent
-                }
-            } else {
-                pal.fg.with_alpha(0.12)
-            };
-            gfx.fill_round(&b, BUTTON / 2.0, fill);
-            gfx.text_in("\u{E724}", &gfx.icon, &b, pal.bg);
-            hits.push((b, Hit::Input(Act::Send)));
-            right = b.x - 6.0;
-        }
         if chat.folio.busy {
-            let b = Rect::new(right - BUTTON, bt, BUTTON, BUTTON);
+            let b = Rect::new(right - STRIP_H, cy, STRIP_H, STRIP_H);
             let hot = hover == Some(Act::Stop);
             gfx.fill_round(
                 &b,
-                BUTTON / 2.0,
-                pal.fg.with_alpha(if hot { 1.0 } else { 0.82 }),
+                STRIP_H / 2.0,
+                pal.fg.with_alpha(if hot { 0.9 } else { 0.7 }),
             );
             gfx.text_in("\u{E71A}", &gfx.icon, &b, pal.bg);
             hits.push((b, Hit::Input(Act::Stop)));
             right = b.x - 6.0;
         }
 
-        // The background tasks, when any run, go left of the meter.
-        let tasks = chat.folio.background.len();
-        let tasks_pill = (tasks > 0).then(|| {
-            let words = controls::tasks_line(tasks);
-            let tw = width_of(gpu, &gfx.small, &words).ceil();
-            (words, tw)
-        });
+        // Laid right to left, so each piece is measured before it is placed.
+        let mut pill = |label: &str,
+                        icon: Option<char>,
+                        act: Act,
+                        hot: bool,
+                        tint: Option<crate::theme::Color>|
+         -> Option<f32> {
+            let tw = width_of(gpu, &gfx.small, label).ceil();
+            let iw = if icon.is_some() { 18.0 } else { 0.0 };
+            let w = tw + iw + 16.0;
+            let b = Rect::new(right - w, cy, w, STRIP_H);
+            if b.x < left {
+                return None;
+            }
+            let lit = hover == Some(act) || hot;
+            if lit {
+                gfx.fill_round(&b, STRIP_H / 2.0, pal.fg.with_alpha(0.08));
+            }
+            let ink = tint.unwrap_or(if lit { pal.fg } else { pal.faint });
+            if let Some(ic) = icon {
+                gfx.text_in(
+                    &ic.to_string(),
+                    &gfx.icon,
+                    &Rect::new(b.x + 8.0, cy, 14.0, STRIP_H),
+                    ink,
+                );
+            }
+            gfx.text_in(
+                label,
+                &gfx.small,
+                &Rect::new(b.x + 8.0 + iw, cy, tw + 2.0, STRIP_H),
+                ink,
+            );
+            hits.push((b, Hit::Input(act)));
+            right = b.x;
+            Some(b.x)
+        };
+
+        if !effort_levels(chat).is_empty() {
+            let label = match &chat.input.effort {
+                Some(e) => format!("Effort {e}"),
+                None => "Effort".to_string(),
+            };
+            let hot = open == Some(MenuKind::Effort);
+            if let Some(a) = pill(&label, None, Act::Effort, hot, None) {
+                chat.input.anchors[2] = a;
+            }
+        }
+        let model = controls::model_label(
+            chat.folio.model.as_deref(),
+            chat.input.model.as_deref(),
+            &chat.folio.info.models,
+        );
+        let hot = open == Some(MenuKind::Model);
+        if let Some(a) = pill(&model, None, Act::Model, hot, None) {
+            chat.input.anchors[1] = a;
+        }
+        let mode = chat.folio.permission_mode().to_string();
+        let shown_mode = if mode.is_empty() {
+            "default"
+        } else {
+            mode.as_str()
+        };
+        let tint = match shown_mode {
+            "plan" => Some(pal.accent),
+            "bypassPermissions" => Some(crate::theme::Color::rgb(0xE0_8A_3C)),
+            _ => None,
+        };
+        let hot = open == Some(MenuKind::Mode);
+        let label = controls::mode_label(shown_mode);
+        if let Some(a) = pill(label, Some(mode_icon(shown_mode)), Act::Mode, hot, tint) {
+            chat.input.anchors[0] = a;
+        }
 
         // The context meter, when the CLI has said how full it is.
         if let Some(ctx) = chat.folio.context.as_ref().filter(|c| c.limit > 0) {
             let (full, words) = controls::meter(ctx.used, ctx.limit);
             let tw = width_of(gpu, &gfx.small, &words).ceil();
-            let bar_w = 36.0;
-            let w = tw + bar_w + 18.0;
-            let m = Rect::new(right - w - 4.0, cy, w, PILL_H);
-            if m.x > x + 8.0 {
+            let bar_w = 28.0;
+            let w = tw + bar_w + 22.0;
+            let m = Rect::new(right - w - 4.0, cy, w, STRIP_H);
+            if m.x >= left {
                 if hover == Some(Act::Meter) {
-                    gfx.fill_round(&m, PILL_H / 2.0, pal.fg.with_alpha(0.08));
+                    gfx.fill_round(&m, STRIP_H / 2.0, pal.fg.with_alpha(0.08));
                 }
-                let bar = Rect::new(m.x + 8.0, cy + PILL_H / 2.0 - 2.0, bar_w, 4.0);
+                let bar = Rect::new(m.x + 8.0, cy + STRIP_H / 2.0 - 2.0, bar_w, 4.0);
                 gfx.fill_round(&bar, 2.0, pal.fg.with_alpha(0.14));
                 let warm = if full > 0.85 {
                     crate::theme::Color::rgb(0xE0_8A_3C)
@@ -1443,30 +1404,35 @@ impl View {
                 gfx.text_in(
                     &words,
                     &gfx.small,
-                    &Rect::new(bar.right() + 6.0, cy, tw + 2.0, PILL_H),
-                    pal.dim,
+                    &Rect::new(bar.right() + 6.0, cy, tw + 2.0, STRIP_H),
+                    pal.faint,
                 );
                 hits.push((m, Hit::Input(Act::Meter)));
-                right = m.x - 2.0;
+                right = m.x;
             }
         }
-        if let Some((words, tw)) = tasks_pill {
-            let b = Rect::new(right - tw - 38.0, cy, tw + 34.0, PILL_H);
-            if b.x > x + 8.0 {
+
+        // The background tasks, when any run.
+        let tasks = chat.folio.background.len();
+        if tasks > 0 {
+            let words = controls::tasks_line(tasks);
+            let tw = width_of(gpu, &gfx.small, &words).ceil();
+            let b = Rect::new(right - tw - 34.0, cy, tw + 30.0, STRIP_H);
+            if b.x >= left {
                 if hover == Some(Act::Tasks) || open == Some(MenuKind::Tasks) {
-                    gfx.fill_round(&b, PILL_H / 2.0, pal.fg.with_alpha(0.08));
+                    gfx.fill_round(&b, STRIP_H / 2.0, pal.fg.with_alpha(0.08));
                 }
                 gfx.text_in(
                     "\u{E9F5}",
                     &gfx.icon,
-                    &Rect::new(b.x + 8.0, cy, 14.0, PILL_H),
+                    &Rect::new(b.x + 8.0, cy, 14.0, STRIP_H),
                     pal.accent,
                 );
                 gfx.text_in(
                     &words,
                     &gfx.small,
-                    &Rect::new(b.x + 26.0, cy, tw + 2.0, PILL_H),
-                    pal.dim,
+                    &Rect::new(b.x + 26.0, cy, tw + 2.0, STRIP_H),
+                    pal.faint,
                 );
                 hits.push((b, Hit::Input(Act::Tasks)));
                 chat.input.anchors[3] = b.x;
@@ -1594,7 +1560,12 @@ impl View {
         };
         let rows = menu.items.len().clamp(1, picker::SHOWN);
         let mh = rows as f32 * MENU_ROW + 8.0;
-        let r = Rect::new(x, chat.input.top - 6.0 - mh, w, mh);
+        let y = if picker {
+            STRIP_Y + STRIP_H + 6.0
+        } else {
+            chat.input.top - 6.0 - mh
+        };
+        let r = Rect::new(x, y, w, mh);
         chat.input.menu_at = Some(r);
         let menu = chat.input.menu.as_ref().expect("checked above");
         gfx.fill_round(&r, 12.0, pal.bg.mix(pal.fg, 0.1));
@@ -1712,7 +1683,7 @@ impl View {
         }
         chat.input.ime = Some(rect);
         let mut font = LOGFONTW {
-            lfHeight: -(14.5 * s).round() as i32,
+            lfHeight: -(super::view::READ * s).round() as i32,
             ..Default::default()
         };
         let family: Vec<u16> = "Segoe UI Variable Text".encode_utf16().collect();
@@ -1758,7 +1729,6 @@ impl View {
                 chat.input.menu = None;
             }
             match act {
-                Act::Send => send(chat, false),
                 Act::Stop => {
                     hold(chat);
                     if let Some(h) = &chat.hosted {
