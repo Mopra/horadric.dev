@@ -13,6 +13,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 "Sessions waiting on their own checks..." stopped undone a third time: landing part green, its heavy agent still runs. Own work, no tell, noted it.
 - 2026-10-29 Round (landing, main at 8f6e4c3, "Blocked quests say why" landed): cast "Ship Local" as Open said (7 quests since the last ship). Told the blocked context panel go to rerun its memory-killed checks and ff-merge. "Sessions waiting on their own checks" stopped undone again, still on its own agents: no tell.
 - 2026-10-29 "Sessions waiting on their own checks are not nudged..." stopped undone while two of its own agents run (the bug it fixes). Own work, no tell, noted it.
 - 2026-10-29 Look back (10 done, 5 merged, 5 not, 17 Warriv wakes): conflicts were landing quests in runner.rs/worktree.rs side by side (new rule, the drift notice has landed); red tests were the checkpoint temp flake (quest running, told it of a second form); the 8 silent stops were sessions waiting on their own heavy checks, so filed "Sessions waiting on their own checks are not nudged or counted as stopped" (opus). The day gave 4 lore notes (#558 to #561, #561 replaces #30).
