@@ -39,16 +39,9 @@ and only reloads this machine.
 1. Bump `version` under `[workspace.package]` in `Cargo.toml`. That is the
    release's version, and every install compares its own against it, so
    it must go up each time or no one is offered the release.
-2. Run the three checks, as before any commit. Run them once: if they
-   already passed on the commit just before the bump (a merge you checked
-   a moment ago), skip them, since the bump changes nothing but the
-   version and the release build in step 3 proves it still compiles.
-
-   ```sh
-   cargo fmt --all
-   cargo clippy --workspace --all-targets -- -D warnings
-   cargo test --workspace
-   ```
+2. Check only what nothing checked yet, by the rule in section 7: most
+   ships run no checks at all, since every quest passed all three when
+   it landed, and the release build in step 3 proves it still compiles.
 
 3. Build and sign:
 
@@ -174,10 +167,12 @@ and only reloads this machine.
    `%LOCALAPPDATA%\cargo-zigbuild\<version>\wrappers`, then run
    `cargo clippy --target x86_64-unknown-linux-musl` with the crates
    CI's Linux job names.
-9. Try the build before publishing. Download the two binaries from the
-   draft, or use the ones in `target/release`, and run them as a dev
-   instance (see CLAUDE.md). Tests prove it compiles and signs; they do
-   not prove the tiles appear.
+9. No dev instance trial: it puts windows over the human's work and
+   takes minutes. The guard is the rollback instead. This machine
+   reloads the same build when the ship ends, and every install that
+   updates goes back to its old build by itself if the new one does not
+   come up in 20 seconds. Try a dev instance only when the release
+   changes reloading or updating itself.
 10. Publish the draft (below).
 11. Bump the Chocolatey package (below).
 12. Deploy the Town Portal page (below).
@@ -272,8 +267,8 @@ There are two kinds, and the human's words pick one.
 - **"Ship" or "ship local"** updates only this machine. Nothing goes to
   GitHub.
 - **"Ship public"** cuts a release every install is offered: bump the
-  version, sign, tag, push, draft the GitHub release with notes, try the
-  draft's build as a dev instance, publish it, then ship local. The steps
+  version, sign, tag, push, draft the GitHub release with notes, publish
+  it, then ship local. The steps
   are in [RELEASING.md](RELEASING.md). Saying "ship public" is the
   human's go ahead to publish, which is the moment every install sees
   it, so the agent does not stop at the draft to ask again. It picks the
@@ -298,16 +293,28 @@ told to ship public does so without the human saying it that day. A
 stone whose steps or mode change is disarmed until the human arms it
 again, so that go ahead covers only what they read.
 
-Shipping local is merging into `main` as above. Then the three checks run on
-that merged code, once, each through `horadric heavy`: `horadric heavy -- cargo fmt
---all --check`, `horadric heavy -- cargo clippy --workspace --all-targets --
--D warnings`, and `horadric heavy -- cargo test --workspace`. A red check stops
-the ship. Do not build or reload. Report the failing output (in the quest's
-blocked line or the final message) so the human sees why. Checks that
-already passed on this exact commit (a ship public that just ran them,
-or a merge you just checked) are not run again. Only when all three
-are green, run `cargo build --release` from the merged code, then
-`target\release\horadric.exe reload`. Before `reload`, deploy the Town Portal page if it is behind
+One ship at a time per project. If another Ship Local or Ship Public
+session of the project is open, do not ship: say so and stop. Its build
+will carry everything on `main` when it reloads.
+
+A ship does not test everything again. Every quest passed the three
+checks (`.horadric/config.json`) on its rebased tip before it landed,
+and a session committing on `main` runs them before every commit. So
+look at what changed since the last ship, or since the last tag when
+that is unknown (`git log --name-only <tag>..main`), and check only
+what nothing checked:
+
+- Only docs, `.horadric/` or other non-code files: no checks.
+- Code that came in through landed quests: no checks.
+- Code committed on `main` outside a quest, or a merge you made
+  yourself: `horadric heavy -- cargo clippy -p <crate> --all-targets --
+  -D warnings` and `horadric heavy -- cargo test -p <crate>` for the
+  crates it touched, not the workspace.
+
+A red check stops the ship. Do not build or reload. Report the failing
+output so the human sees why. Then build from a tree with no one
+else's uncommitted edits in code: `cargo build --release`, which is
+the compile check, then `target\release\horadric.exe reload`. Before `reload`, deploy the Town Portal page if it is behind
 (RELEASING.md, "The Town Portal page"), for ship local and ship public
 alike. The installed Horadric hands over to the new build at once, and
 the new build attaches to every session's host, including the agent's
