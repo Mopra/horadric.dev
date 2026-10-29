@@ -107,6 +107,12 @@ pub struct Task {
     pub reason: Option<String>,
     /// What a blocked item waits on, in a form the runner can check.
     pub wait: Option<Wait>,
+    /// When it was blocked, in Unix seconds, so the human sees how long a
+    /// question has stood. None on a line from before it was written.
+    pub since: Option<u64>,
+    /// What the human would do to free a quest blocked on them, in one
+    /// plain line, as against the why, which may run long.
+    pub ask: Option<String>,
     /// The indented lines under it, indent taken off.
     pub notes: Vec<String>,
 }
@@ -172,6 +178,101 @@ impl Task {
             Some(w) => w.over(),
             None => String::new(),
         }
+    }
+
+    /// What a blocked item waits on, by kind. None for any other.
+    pub fn waits(&self) -> Option<Waits> {
+        if self.mark != Mark::Blocked {
+            return None;
+        }
+        Some(match &self.wait {
+            None => Waits::Human,
+            Some(Wait::Until(_)) => Waits::Time,
+            Some(Wait::After | Wait::Quest(_)) => Waits::Quest,
+            Some(Wait::Main(_) | Wait::File(_) | Wait::Cmd(_)) => Waits::Check,
+            Some(Wait::Outside(_)) => Waits::Outside,
+        })
+    }
+
+    /// Whether it has waited on the human, or on something outside that
+    /// nothing checks, for [`STALE`] and nobody has asked them yet whether
+    /// it still matters.
+    pub fn stale(&self, now: u64) -> bool {
+        matches!(self.waits(), Some(Waits::Human | Waits::Outside))
+            && self.since.is_some_and(|s| now.saturating_sub(s) >= STALE)
+            && !self.notes.iter().any(|n| {
+                // An ask from before it was blocked this time is not one.
+                n.strip_prefix(ASKED)
+                    .is_some_and(|at| parse_utc(at) >= self.since)
+            })
+    }
+}
+
+/// What a blocked quest waits on, by kind, so the human sees at a glance
+/// which ones are theirs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Waits {
+    /// The human: no wait the runner could check.
+    Human,
+    /// A time.
+    Time,
+    /// Another quest in the log.
+    Quest,
+    /// A file, a command or a commit on main, which the runner checks.
+    Check,
+    /// Something outside that nothing here can check.
+    Outside,
+}
+
+impl Waits {
+    /// The heading the board groups it under.
+    pub fn group(self) -> &'static str {
+        match self {
+            Waits::Human => "Needs you",
+            Waits::Time => "Waiting on time",
+            Waits::Quest => "Waiting on another quest",
+            Waits::Check => "Waiting on a check",
+            Waits::Outside => "Waiting on something outside",
+        }
+    }
+}
+
+/// How long a quest may wait on the human before they are asked, once,
+/// whether it still matters: about five days.
+pub const STALE: u64 = 5 * 86_400;
+
+/// How the notes line that says the human was asked starts, so they are
+/// asked once.
+pub const ASKED: &str = "Asked if still relevant:";
+
+/// The notes line written when the human is asked whether a stale quest
+/// still matters.
+pub fn asked_note(now: u64) -> String {
+    format!("{ASKED} {}", utc(now))
+}
+
+/// How the notes line of a quest the human dropped starts.
+pub const DROPPED: &str = "Dropped:";
+
+/// The blocked quests of a log by index, in the order the human should
+/// see them: those that need the human first, then the rest by kind, each
+/// group oldest first. A line with no time counts as the oldest, since it
+/// was written before blocked lines had one.
+pub fn by_need(tasks: &[Task]) -> Vec<usize> {
+    let mut out: Vec<usize> = (0..tasks.len())
+        .filter(|&i| tasks[i].waits().is_some())
+        .collect();
+    out.sort_by_key(|&i| (tasks[i].waits(), tasks[i].since.unwrap_or(0), i));
+    out
+}
+
+/// How long ago `since` was, in its largest unit: `40m`, `5h`, `3d`.
+pub fn age(since: u64, now: u64) -> String {
+    let secs = now.saturating_sub(since);
+    match secs {
+        0..3600 => format!("{}m", secs / 60),
+        3600..86_400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
     }
 }
 
@@ -391,7 +492,7 @@ fn parse_item(raw: &str, line: usize) -> Option<Task> {
         None if rest.trim().is_empty() => "",
         None => return None,
     };
-    let (body, wait) = split_wait(body.trim_end());
+    let (body, tags) = split_tags(body.trim_end());
     let (title, holder, reason) = split_holder(body);
     Some(Task {
         line,
@@ -399,7 +500,9 @@ fn parse_item(raw: &str, line: usize) -> Option<Task> {
         title,
         holder,
         reason,
-        wait,
+        wait: tags.wait,
+        since: tags.since,
+        ask: tags.ask,
         notes: Vec::new(),
     })
 }
@@ -424,6 +527,9 @@ pub enum Wait {
     Cmd(String),
     /// A time has come, in Unix seconds.
     Until(u64),
+    /// Something outside, as said, that nothing here can check: a reply,
+    /// a delivery. Only the human or its own session frees it.
+    Outside(String),
 }
 
 impl Wait {
@@ -436,6 +542,7 @@ impl Wait {
             Wait::File(f) => format!("{{on file: {}}}", one_line(f)),
             Wait::Cmd(c) => format!("{{on cmd: {}}}", one_line(c)),
             Wait::Until(t) => format!("{{until: {}}}", utc(*t)),
+            Wait::Outside(o) => format!("{{on outside: {}}}", one_line(o)),
         }
     }
 
@@ -457,6 +564,7 @@ impl Wait {
             "on file" => Some(Wait::File(v)),
             "on cmd" => Some(Wait::Cmd(v)),
             "until" => parse_utc(value).map(Wait::Until),
+            "on outside" => Some(Wait::Outside(v)),
             _ => None,
         }
     }
@@ -469,6 +577,7 @@ impl Wait {
             Wait::After | Wait::Quest(_) => Some(true),
             Wait::Until(at) => Some(now >= *at),
             Wait::Main(_) | Wait::File(_) | Wait::Cmd(_) => None,
+            Wait::Outside(_) => Some(false),
         }
     }
 
@@ -483,6 +592,7 @@ impl Wait {
             Wait::Cmd(_) => "on a command".into(),
             Wait::Until(t) if *t > now => format!("in {}", format_until(t - now)),
             Wait::Until(_) => "due".into(),
+            Wait::Outside(o) => format!("on {}", short(o)),
         }
     }
 
@@ -495,21 +605,73 @@ impl Wait {
             Wait::File(f) => format!("{f} exists"),
             Wait::Cmd(c) => format!("`{c}` exits 0"),
             Wait::Until(t) => format!("It is past {}", utc(*t)),
+            Wait::Outside(o) => format!("{o} is in"),
         }
     }
 }
 
-/// Splits a wait in braces off the end of an item's body. The last ` {`
-/// that reads as one is it, so braces earlier in the title stay there.
-fn split_wait(body: &str) -> (&str, Option<Wait>) {
+/// What an item's line says in braces at its end.
+#[derive(Debug, Default)]
+struct Tags {
+    wait: Option<Wait>,
+    since: Option<u64>,
+    ask: Option<String>,
+}
+
+impl Tags {
+    /// Takes one pair of braces as a tag it does not have yet.
+    fn take(&mut self, braced: &str) -> bool {
+        let Some(inner) = braced.strip_prefix('{').and_then(|t| t.strip_suffix('}')) else {
+            return false;
+        };
+        // One pair, not a run of them read as one: braces inside must
+        // close where they open, as a command's own do.
+        let mut depth = 0i32;
+        for c in inner.chars() {
+            depth += match c {
+                '{' => 1,
+                '}' => -1,
+                _ => 0,
+            };
+            if depth < 0 {
+                return false;
+            }
+        }
+        if depth != 0 {
+            return false;
+        }
+        if let Some(s) = inner.strip_prefix("since:") {
+            if self.since.is_none() {
+                self.since = parse_utc(s);
+                return self.since.is_some();
+            }
+        } else if let Some(a) = inner.strip_prefix("you:").map(str::trim) {
+            if self.ask.is_none() && !a.is_empty() {
+                self.ask = Some(a.to_string());
+                return true;
+            }
+        } else if self.wait.is_none() {
+            self.wait = Wait::read(braced);
+            return self.wait.is_some();
+        }
+        false
+    }
+}
+
+/// Splits the tags in braces off the end of an item's body, one at a time
+/// from the right, in any order. Only braces that read as a tag and come
+/// last on the line count, so braces in the title stay there.
+fn split_tags(mut body: &str) -> (&str, Tags) {
+    let mut tags = Tags::default();
     let mut search = body.len();
     while let Some(at) = body[..search].rfind(" {") {
         search = at;
-        if let Some(w) = Wait::read(&body[at + 1..]) {
-            return (body[..at].trim_end(), Some(w));
+        if tags.take(&body[at + 1..]) {
+            body = body[..at].trim_end();
+            search = body.len();
         }
     }
-    (body, None)
+    (body, tags)
 }
 
 /// A time as `2026-10-01T14:05Z`, in UTC, with seconds only when it has
@@ -643,6 +805,20 @@ pub fn item_line(
     reason: Option<&str>,
     wait: Option<&Wait>,
 ) -> String {
+    blocked_line(mark, title, holder, reason, wait, None, None)
+}
+
+/// An item's line with when it was blocked and what the human would do,
+/// which only a blocked line keeps.
+pub fn blocked_line(
+    mark: Mark,
+    title: &str,
+    holder: Option<&str>,
+    reason: Option<&str>,
+    wait: Option<&Wait>,
+    since: Option<u64>,
+    ask: Option<&str>,
+) -> String {
     let mut out = format!("- [{}] {}", mark.char(), title);
     if let Some(h) = holder {
         out.push_str(" @");
@@ -652,11 +828,24 @@ pub fn item_line(
             out.push_str(&r);
         }
     }
+    let blocked = mark == Mark::Blocked;
+    if let Some(a) = ask.map(you_line).filter(|a| blocked && !a.is_empty()) {
+        out.push_str(&format!(" {{you: {a}}}"));
+    }
     if let Some(w) = wait {
         out.push(' ');
         out.push_str(&w.spell());
     }
+    if let Some(t) = since.filter(|_| blocked) {
+        out.push_str(&format!(" {{since: {}}}", utc(t)));
+    }
     out
+}
+
+/// What the human would do, on one line and without braces, which would
+/// end its tag early.
+pub fn you_line(s: &str) -> String {
+    one_line(s).replace('{', "(").replace('}', ")")
 }
 
 /// `text` with line `line` swapped for `new`, every other byte as it was,
@@ -747,8 +936,22 @@ fn new_item(title: &str, notes: &str, ending: &str) -> String {
 /// marked blocked with why and `{after}`, and an `After:` line under its
 /// notes unless it has one naming that quest already. None when no item
 /// is held by it.
-pub fn block_after(text: &str, holder: &str, reason: Option<&str>, after: &str) -> Option<String> {
-    let text = set_held(text, holder, Mark::Blocked, reason, Some(&Wait::After))?;
+pub fn block_after(
+    text: &str,
+    holder: &str,
+    reason: Option<&str>,
+    after: &str,
+    since: u64,
+) -> Option<String> {
+    let text = set_held(
+        text,
+        holder,
+        Mark::Blocked,
+        reason,
+        Some(&Wait::After),
+        Some(since),
+        None,
+    )?;
     let task = parse(&text)
         .into_iter()
         .find(|t| t.holder.as_deref() == Some(holder) && t.mark == Mark::Blocked)?;
@@ -771,18 +974,21 @@ pub fn block_after(text: &str, holder: &str, reason: Option<&str>, after: &str) 
 }
 
 /// Changes the item held by `holder` to `mark`, keeping the holder, with
-/// why it is blocked and what it waits on. None when no item is held by it.
+/// why it is blocked, what it waits on, since when and what the human
+/// would do. None when no item is held by it.
 pub fn set_held(
     text: &str,
     holder: &str,
     mark: Mark,
     reason: Option<&str>,
     wait: Option<&Wait>,
+    since: Option<u64>,
+    ask: Option<&str>,
 ) -> Option<String> {
     let task = parse(text)
         .into_iter()
         .find(|t| t.holder.as_deref() == Some(holder) && t.mark != Mark::Done)?;
-    let line = item_line(mark, &task.title, Some(holder), reason, wait);
+    let line = blocked_line(mark, &task.title, Some(holder), reason, wait, since, ask);
     replace_line(text, task.line, &line)
 }
 
@@ -822,7 +1028,47 @@ pub fn set_mark(text: &str, line: usize, title: &str, mark: Mark) -> Option<Stri
     let holder = task.holder.as_deref().filter(|_| mark != Mark::Open);
     let reason = task.reason.as_deref().filter(|_| mark == Mark::Blocked);
     let wait = task.wait.as_ref().filter(|_| mark == Mark::Blocked);
-    replace_line(text, line, &item_line(mark, title, holder, reason, wait))
+    let new = blocked_line(
+        mark,
+        title,
+        holder,
+        reason,
+        wait,
+        task.since,
+        task.ask.as_deref(),
+    );
+    replace_line(text, line, &new)
+}
+
+/// Gives the blocked item on `line` titled `title` the line of what the
+/// human would do, keeping all else. None when the line holds something
+/// else now or is not blocked.
+pub fn set_ask(text: &str, line: usize, title: &str, ask: &str) -> Option<String> {
+    let task = found(text, line, title).filter(|t| t.mark == Mark::Blocked)?;
+    let new = blocked_line(
+        Mark::Blocked,
+        title,
+        task.holder.as_deref(),
+        task.reason.as_deref(),
+        task.wait.as_ref(),
+        task.since,
+        Some(ask),
+    );
+    replace_line(text, line, &new)
+}
+
+/// Closes the item on `line` titled `title` as the human dropped it: done,
+/// with a notes line that says so and why. None when the line holds
+/// something else now.
+pub fn drop_quest(text: &str, line: usize, title: &str, why: &str) -> Option<String> {
+    let task = found(text, line, title)?;
+    let done = item_line(Mark::Done, title, task.holder.as_deref(), None, None);
+    let text = replace_line(text, line, &done)?;
+    let note = match one_line(why) {
+        w if w.is_empty() => DROPPED.to_string(),
+        w => format!("{DROPPED} {w}"),
+    };
+    Some(insert_note(&text, end_of(&text, line), &note))
 }
 
 /// The file cut into lines, each keeping its ending, and the ending the
@@ -888,12 +1134,14 @@ pub fn edit(text: &str, line: usize, title: &str, new_title: &str, notes: &str) 
     let (mut lines, ending) = cut(text);
     let covered = span(&lines, line);
     let mut item = vec![
-        item_line(
+        blocked_line(
             task.mark,
             &new_title,
             task.holder.as_deref(),
             task.reason.as_deref(),
             task.wait.as_ref(),
+            task.since,
+            task.ask.as_deref(),
         ) + ending,
     ];
     item.extend(
@@ -1512,13 +1760,19 @@ pub fn system_prompt(horadric: &str, file: &str, list: Option<&str>) -> String {
          item. When it is finished, commit your work if you changed files, then run \
          `{horadric} quest done \"<one short line on what you achieved>\"` with your \
          Bash tool; that line is kept as the quest's record. If you can not go on \
-         without the human, run `{horadric} quest blocked \"<why>\"` instead and say \
-         what you need. When what you wait on is something Horadric can check, say so and it \
+         without the human, run `{horadric} quest blocked \"<why>\" --you \"<what \
+         the human would do>\"` instead and say what you need. The why may run long; \
+         --you is one plain line the human acts on without reading it, naming the \
+         thing to look at, like `--you \"Say go or drop on clip 1 at \
+         ~/Downloads/clip-1.mp4\"`. When what you wait on is something Horadric can check, say so and it \
          wakes you itself once that holds: add `--on \"<title>\"` for another \
          quest in the log being done, `--on-main <commit or branch>` for one being on \
          the main branch, `--on-file <path>` for a file existing, `--on-cmd \
          \"<command>\"` for a command cmd.exe runs in the project folder exiting 0, \
-         or `--until <+30m or 2026-10-01T14:05Z>` for a time. Use one whenever it \
+         or `--until <+30m or 2026-10-01T14:05Z>` for a time. For something \
+         outside that nothing here can check (a reply, a delivery), add \
+         `--on-outside \"<what>\"`: nothing wakes you, but the human sees it is \
+         not theirs to act on. Use one whenever it \
          fits: the list goes on past a quest that waits on one, and stops at one that \
          waits on the human. If you find other work worth doing outside your \
          item, add it to the list with `{horadric} quest add \"<title>\"` instead \
@@ -1844,13 +2098,24 @@ mod tests {
 
     #[test]
     fn the_holder_reports_done_or_blocked() {
-        let out = set_held(SAMPLE, "fix-login-51234", Mark::Review, None, None).unwrap();
+        let out = set_held(
+            SAMPLE,
+            "fix-login-51234",
+            Mark::Review,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(parse(&out)[1].mark, Mark::Review);
         let out = set_held(
             &out,
             "fix-login-51234",
             Mark::Blocked,
             Some("no\nkey"),
+            None,
+            None,
             None,
         )
         .unwrap();
@@ -1859,7 +2124,10 @@ mod tests {
         assert_eq!(t.reason.as_deref(), Some("no key"));
         // Notes stay under it.
         assert_eq!(t.notes.len(), 2);
-        assert_eq!(set_held(SAMPLE, "nobody", Mark::Done, None, None), None);
+        assert_eq!(
+            set_held(SAMPLE, "nobody", Mark::Done, None, None, None, None),
+            None
+        );
     }
 
     #[test]
@@ -2043,6 +2311,8 @@ mod tests {
             Mark::Blocked,
             Some("later"),
             Some(&w),
+            None,
+            None,
         )
         .unwrap();
         let t = &parse(&out)[1];
@@ -2237,10 +2507,10 @@ mod tests {
     #[test]
     fn blocked_on_a_quest_writes_an_after_line_and_resumes_once_it_is_done() {
         let text = "- [/] B @b-1\n  A note.\n- [ ] A\n";
-        let out = block_after(text, "b-1", Some("needs A"), "A").unwrap();
+        let out = block_after(text, "b-1", Some("needs A"), "A", 0).unwrap();
         assert_eq!(
             out,
-            "- [!] B @b-1: needs A {after}\n  A note.\n  After: A\n- [ ] A\n"
+            "- [!] B @b-1: needs A {after} {since: 1970-01-01T00:00Z}\n  A note.\n  After: A\n- [ ] A\n"
         );
         let t = parse(&out);
         assert_eq!(t[0].wait, Some(Wait::After));
@@ -2251,15 +2521,15 @@ mod tests {
         assert!(waited("hx", &t[0]).starts_with("The quest \"A\" is done"));
         // The same name twice is one line.
         assert_eq!(
-            block_after(&out, "b-1", Some("needs A"), "a"),
+            block_after(&out, "b-1", Some("needs A"), "a", 0),
             Some(out.clone())
         );
         // A file without a last ending keeps none, and CRLF stays CRLF.
         assert_eq!(
-            block_after("- [ ] A\r\n- [/] B @b-1", "b-1", None, "A").unwrap(),
-            "- [ ] A\r\n- [!] B @b-1 {after}\r\n  After: A"
+            block_after("- [ ] A\r\n- [/] B @b-1", "b-1", None, "A", 0).unwrap(),
+            "- [ ] A\r\n- [!] B @b-1 {after} {since: 1970-01-01T00:00Z}\r\n  After: A"
         );
-        assert_eq!(block_after(text, "nobody", None, "A"), None);
+        assert_eq!(block_after(text, "nobody", None, "A", 0), None);
     }
 
     #[test]
@@ -2614,6 +2884,7 @@ mod tests {
         assert!(prompt(t, "Lore: x", "hx", QUESTS_FILE).contains("Repro in #12.\n\nLore: x\n\n"));
         let report = "`hx quest done \"<one short line on what you achieved>\"`";
         assert!(system_prompt("hx", QUESTS_FILE, None).contains(report));
+        assert!(system_prompt("hx", QUESTS_FILE, None).contains("--you"));
         // Subagents are the session's own call, not something the human asks for.
         assert!(system_prompt("hx", QUESTS_FILE, None).contains("without being asked"));
         assert!(system_prompt("hx", QUESTS_FILE, None).contains("never in a chain of quests"));
@@ -2923,5 +3194,131 @@ Kept.
             drop_done_after(notes, &log, &done),
             "Why it matters.\nAfter: Live one\nAfter: Same name\nAfter: Nowhere"
         );
+    }
+
+    #[test]
+    fn a_blocked_line_keeps_since_and_what_the_human_would_do() {
+        let line = blocked_line(
+            Mark::Blocked,
+            "Measure hits",
+            Some("m-1"),
+            Some("needs a go"),
+            None,
+            Some(parse_utc("2026-10-28T10:05Z").unwrap()),
+            Some("Say go {or} drop"),
+        );
+        assert_eq!(
+            line,
+            "- [!] Measure hits @m-1: needs a go {you: Say go (or) drop} \
+             {since: 2026-10-28T10:05Z}"
+        );
+        let t = &parse(&line)[0];
+        assert_eq!(t.title, "Measure hits");
+        assert_eq!(t.reason.as_deref(), Some("needs a go"));
+        assert_eq!(t.ask.as_deref(), Some("Say go (or) drop"));
+        assert_eq!(t.since, parse_utc("2026-10-28T10:05Z"));
+        assert_eq!(t.waits(), Some(Waits::Human));
+        // Only a blocked line writes them.
+        let open = blocked_line(Mark::Open, "A", None, None, None, Some(5), Some("x"));
+        assert_eq!(open, "- [ ] A");
+    }
+
+    #[test]
+    fn tags_come_off_the_end_in_any_order_and_braces_in_the_title_stay() {
+        let t = &parse("- [!] Fix {x} @a: why {since: 2026-10-28T10:05Z} {on file: o.txt}")[0];
+        assert_eq!(t.title, "Fix {x}");
+        assert_eq!(t.wait, Some(Wait::File("o.txt".into())));
+        assert!(t.since.is_some());
+        assert_eq!(t.waits(), Some(Waits::Check));
+        // A tag with words after it is part of the title.
+        let t = &parse("- [ ] Ship {since: 2026-10-28T10:05Z} later")[0];
+        assert_eq!(t.title, "Ship {since: 2026-10-28T10:05Z} later");
+        assert_eq!(t.since, None);
+        // An outside wait reads back and is not the human's.
+        let t = &parse("- [!] B @b: reply {on outside: the vendor's reply}")[0];
+        assert_eq!(t.wait, Some(Wait::Outside("the vendor's reply".into())));
+        assert_eq!(t.waits(), Some(Waits::Outside));
+        assert_eq!(Wait::Outside("x".into()).met(0), Some(false));
+        // A command with braces of its own still reads as the wait, with
+        // a time after it.
+        let line = "- [!] C @c {on cmd: if x {exit 0}} {since: 2026-10-28T10:05Z}";
+        let t = &parse(line)[0];
+        assert_eq!(t.title, "C");
+        assert_eq!(t.wait, Some(Wait::Cmd("if x {exit 0}".into())));
+        assert!(t.since.is_some());
+    }
+
+    #[test]
+    fn going_on_drops_since_and_reblocking_keeps_them() {
+        let text = "- [!] A @a: why {you: Say go} {since: 2026-10-28T10:05Z}\n";
+        let open = set_mark(text, 0, "A", Mark::Open).unwrap();
+        assert_eq!(open, "- [ ] A\n");
+        let edited = edit(text, 0, "A", "A2", "").unwrap();
+        assert_eq!(
+            edited,
+            "- [!] A2 @a: why {you: Say go} {since: 2026-10-28T10:05Z}\n"
+        );
+    }
+
+    #[test]
+    fn blocked_quests_sort_needs_you_first_then_oldest() {
+        let text = "- [!] Time @a {until: 2026-10-01T00:00Z} {since: 2026-09-01T00:00Z}\n\
+                    - [!] New @b: why {since: 2026-10-28T00:00Z}\n\
+                    - [ ] Open\n\
+                    - [!] Old @c: why {since: 2026-10-01T00:00Z}\n\
+                    - [!] Unknown @d: why\n\
+                    - [!] Quest @e {after}\n";
+        let t = parse(text);
+        assert_eq!(by_need(&t), vec![4, 3, 1, 0, 5]);
+        assert_eq!(Waits::Human.group(), "Needs you");
+    }
+
+    #[test]
+    fn age_is_its_largest_unit() {
+        assert_eq!(age(0, 59), "0m");
+        assert_eq!(age(0, 40 * 60), "40m");
+        assert_eq!(age(0, 5 * 3600), "5h");
+        assert_eq!(age(10, 3 * 86_400 + 10), "3d");
+        assert_eq!(age(10, 0), "0m");
+    }
+
+    #[test]
+    fn a_quest_on_the_human_goes_stale_after_five_days_and_is_asked_once() {
+        let since = parse_utc("2026-10-01T00:00Z").unwrap();
+        let text = format!("- [!] A @a: why {{since: {}}}\n", utc(since));
+        let t = &parse(&text)[0];
+        assert!(!t.stale(since + STALE - 1));
+        assert!(t.stale(since + STALE));
+        let asked = insert_note(&text, 1, &asked_note(since + STALE));
+        assert!(!parse(&asked)[0].stale(since + STALE * 2));
+        // Blocked again later, it is asked again.
+        let again = since + STALE * 3;
+        let reblocked = asked.replace(&utc(since), &utc(again));
+        assert!(parse(&reblocked)[0].stale(again + STALE));
+        // A wait the runner checks is not the human's to be asked about.
+        let timed = format!(
+            "- [!] A @a {{until: 2026-11-01T00:00Z}} {{since: {}}}\n",
+            utc(since)
+        );
+        assert!(!parse(&timed)[0].stale(since + STALE));
+        // Nor is a line with no time.
+        assert!(!parse("- [!] A @a: why\n")[0].stale(u64::MAX));
+    }
+
+    #[test]
+    fn ask_sets_the_line_and_drop_closes_with_why() {
+        let text = "- [!] A @a: why {since: 2026-10-28T10:05Z}\n  A note.\n- [ ] B\n";
+        let out = set_ask(text, 0, "A", "Say go").unwrap();
+        assert_eq!(
+            out,
+            "- [!] A @a: why {you: Say go} {since: 2026-10-28T10:05Z}\n  A note.\n- [ ] B\n"
+        );
+        assert_eq!(set_ask(text, 2, "B", "x"), None);
+        let dropped = drop_quest(text, 0, "A", "no longer needed").unwrap();
+        assert_eq!(
+            dropped,
+            "- [x] A @a\n  A note.\n  Dropped: no longer needed\n- [ ] B\n"
+        );
+        assert_eq!(drop_quest(text, 0, "Other", "x"), None);
     }
 }

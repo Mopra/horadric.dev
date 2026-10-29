@@ -869,6 +869,9 @@ pub struct Quest {
     pub outcome: Outcome,
     /// Why it is blocked.
     pub reason: String,
+    /// What the human would do to free it, when it is blocked on them and
+    /// the list says so.
+    pub ask: String,
     /// The agent's own summary.
     pub summary: String,
     /// The last thing its session said.
@@ -911,6 +914,7 @@ impl Quest {
             ended: None,
             outcome: Outcome::Working,
             reason: String::new(),
+            ask: String::new(),
             summary: String::new(),
             last: String::new(),
             conversation: None,
@@ -1039,6 +1043,13 @@ pub fn quests(
         }
         if let Some(why) = t.reason.as_ref().filter(|_| t.mark == Mark::Blocked) {
             q.reason = why.clone();
+        }
+        // The line's own time outlives a chronicle that missed the mark.
+        if let Some(at) = t.since.filter(|_| t.mark == Mark::Blocked) {
+            q.ended = Some(at);
+        }
+        if t.waits() == Some(crate::tasks::Waits::Human) {
+            q.ask = t.ask.clone().unwrap_or_default();
         }
         if !known {
             from_journal(q, journal, project);
@@ -1513,6 +1524,8 @@ mod tests {
             holder: holder.map(Into::into),
             reason: None,
             wait: None,
+            since: None,
+            ask: None,
             notes: vec![],
         }
     }
@@ -2092,6 +2105,21 @@ mod tests {
         assert_eq!((q[0].outcome, q[0].result()), (Outcome::Done, "A is in."));
         assert_eq!(q[0].name, "Tile A");
         assert_eq!((q[1].outcome, q[1].result()), (Outcome::Blocked, "no key"));
+        assert_eq!((q[1].ended, q[1].ask.as_str()), (None, ""));
+    }
+
+    #[test]
+    fn a_blocked_line_says_since_when_and_what_the_human_would_do() {
+        let mut blocked = task(0, Mark::Blocked, "C", Some("c-1"));
+        blocked.since = Some(40);
+        blocked.ask = Some("Pick a name".into());
+        let records = [accepted(1, "c-1", "C"), marked(30, "c-1", Outcome::Blocked)];
+        let q = quests(&records, &[], "p", std::slice::from_ref(&blocked));
+        assert_eq!((q[0].ended, q[0].ask.as_str()), (Some(40), "Pick a name"));
+        // What a quest waiting on a check asks is nobody's to do.
+        blocked.wait = Some(crate::tasks::Wait::Until(99));
+        let q = quests(&records, &[], "p", &[blocked]);
+        assert_eq!((q[0].ended, q[0].ask.as_str()), (Some(40), ""));
     }
 
     #[test]

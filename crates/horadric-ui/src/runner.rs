@@ -1162,7 +1162,7 @@ impl App {
                 ],
             ),
             Wait::Cmd(c) => ("cmd.exe", vec![c.clone()]),
-            Wait::After | Wait::Quest(_) | Wait::Until(_) => return false,
+            Wait::After | Wait::Quest(_) | Wait::Until(_) | Wait::Outside(_) => return false,
         };
         let id = (key.to_string(), wait.spell());
         let Ok(mut checks) = self.tasks.checks.lock() else {
@@ -1836,11 +1836,7 @@ impl App {
                 )),
                 // One that waits on a check needs nobody.
                 Mark::Blocked if t.wait.is_none() => {
-                    let reason = t.reason.clone().unwrap_or_default();
-                    let (title, text) = match horadric_core::warriv::question(&reason) {
-                        Some(q) => (format!("Warriv asks: {}", t.title), q.to_string()),
-                        None => (format!("Blocked: {}", t.title), reason),
-                    };
+                    let (title, text) = horadric_core::warriv::for_human(t);
                     out.push((format!("blocked:{h}"), title, text));
                 }
                 Mark::Working if b.mode.runs() && self.stopped_after_nudge(h) => out.push((
@@ -3137,6 +3133,8 @@ mod tests {
             holder: None,
             reason: None,
             wait: None,
+            since: None,
+            ask: None,
             notes: Vec::new(),
         };
         assert_eq!(
