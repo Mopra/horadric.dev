@@ -109,7 +109,13 @@ pub enum Happened {
         checked: String,
     },
     /// The quest's branch did not merge by itself, for `failure`.
-    NotMerged { branch: String, failure: Failure },
+    NotMerged {
+        branch: String,
+        failure: Failure,
+        /// The files a conflict stopped on, for the look back's hotspots.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
+    },
     /// The project's "Ship Local" stone was cast. It names no quest.
     Shipped,
     /// Warriv woke, the session `wake`, and was given these events. Given

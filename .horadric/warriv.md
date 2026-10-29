@@ -1,14 +1,25 @@
 # Warriv's memory
 
 ## Rules
+- A landing that fails only with "Diverging branches can't be fast-forwarded" lost a race to a commit on main (often my memory commit): file a small haiku quest to cherry-pick the branch and land it, no human needed.
+- A landing red on checkpoint's git init in %TEMP% (template hook copy) is a test flake: tell the fix-up to rerun, never to change the quest's code.
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings. Ship Public runs all three first (RELEASING.md step 2) and Ship Local does too since 5170f91; both stop on red (lore #30).
 - Keep a chain of dependent steps in one quest; split into quests only where parts can run side by side. The human finds handovers slow (lore #34).
 - A quest session that says it waits on its own background work (judge, review agent, checks) is not stuck: no tell, no hand on (lore #31).
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 - A quest I file gets an After: line for every quest whose code it calls, not only the nearest: "Backup: the Settings section" named part 2 but needed part 1, started early and blocked itself (2026-10-16).
+- A quest blocked only to ask leave to rerun checks (killed, out of memory) gets "go" from me: reruns never need the human.
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 "Fix the merge of start-a-quest-s-worktree..." finished green but could not fast-forward: my memory commit 0f551a6 landed between its rebase and merge. Filed "Land the worktree fix from fix-the-merge-of-start-a-quest-s-worktree" (haiku) to cherry-pick a5c28b5.
+- 2026-10-29 "Tell running quests when main moves" stopped undone again: clippy clean, tests running in the background. Own work, no tell, noted it.
+- 2026-10-29 "Blocked quests say why..." asked the human to say go for a rerun of tests killed for low memory. Told it go: rerun through heavy, merge on green.
+- 2026-10-29 "Fix the merge of land-a-quest-while-its-session-is-still" stopped undone but waits on its own clippy, queued in heavy. No tell, noted it.
+- 2026-10-29 Round (human left, main at eb2735d, only my memory since the last round): the land-a-quest merge fix-up still runs, so Ship Local stays held per Open. Four quests under way, three wait. Nothing to do.
+- 2026-10-29 "Tell running quests when main moves" stopped undone but waits on its own clippy, queued in heavy. No tell, noted it.
+- 2026-10-29 Round (landing, main at 088c162, "Find merge hotspot files" landed): held Ship Local, since "Land a quest while its session is still alive" landed red and its merge fix-up still runs. Nothing else to do.
+- 2026-10-29 "Land a quest while its session is still alive" landed red on the same checkpoint git-init temp flake as the worktree quest. Told its fix-up to cherry-pick and rerun only, and filed "Make checkpoint tests' git init not copy hook templates" (haiku, --template=).
 - 2026-10-29 Round (landing, main at b593561, "Catch duplicate scope" landed): gave Model lines to the three unstarted quests (Tell running quests: sonnet, Context panel: opus, Slim CLAUDE.md: sonnet). Held Ship Local: one landing, four quests in flight on runner and worktree code; ship once the merge fix-up and "Land a quest while its session is still alive" land.
 - 2026-10-29 Look back: the day gave 3 lore notes (#540 brother usage, #541 hide needs its way back, #542 portal deploy skipped on a dirty repo). The day was clean: nothing went wrong twice.
 - 2026-10-29 "Start a quest's worktree from main" landed red on a checkpoint git-init temp flake, not its code. Gave the fix-up Model: sonnet and a note to rerun first.
@@ -153,6 +164,8 @@
 - 2026-10-06 to 2026-10-10 Mostly idle rounds (no quests, no aim). Settings window series landed 10-07 and shipped public as v0.16.0; Mac quests shipped as v0.17.0; v0.18.0 and v0.19.0 were cut by hand.
 
 ## Open
+- Check "Land the worktree fix from fix-the-merge-of-start-a-quest-s-worktree" lands and deletes that branch. If memory commits keep racing landings, file a quest for the landing to rebase again when main moved.
+- Check "Make checkpoint tests' git init not copy hook templates" lands; if the flake shows again after, look at %TEMP% itself (antivirus, locks).
 - "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Cast "Ship Local" once "Fix the merge of start-a-quest-s-worktree-from-main-not" and "Land a quest while its session is still alive" have landed.
+- Cast "Ship Local" once "Fix the merge of land-a-quest-while-its-session-is-still" lands green (the worktree fix-up is done).

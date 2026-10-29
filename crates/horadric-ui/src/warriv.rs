@@ -144,9 +144,11 @@ fn looked(key: &str, live: Vec<String>) -> Looked {
     let since = lookback::since(&records, key, now);
     let mut skip = lookback::warriv_talk(&records, key);
     skip.extend(live);
+    let attributes =
+        std::fs::read_to_string(Path::new(key).join(".gitattributes")).unwrap_or_default();
     Looked {
         day: lookback::day(&records, key, since),
-        patterns: lookback::patterns(&records, key, since)
+        patterns: lookback::patterns(&records, key, since, &attributes)
             .iter()
             .map(lookback::Pattern::line)
             .collect(),
