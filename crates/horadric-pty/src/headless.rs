@@ -58,6 +58,10 @@ const GRACE: Duration = Duration::from_secs(3);
 /// How many of the last stderr lines are kept, for saying why a start failed.
 const STDERR_KEPT: usize = 40;
 
+/// How long the stream's end waits for stderr to be read to its end, so
+/// whoever is told the stream ended can say why from it.
+const STDERR_WAIT: Duration = Duration::from_millis(500);
+
 /// What [`Headless::start_with`] may add to a plain start.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
@@ -127,6 +131,12 @@ impl Headless {
         }
 
         let job = kill_on_close_job();
+        if let Err(e) = &job {
+            eprintln!(
+                "horadric: no kill-on-close job for claude.exe, so it may outlive Horadric: {e}"
+            );
+        }
+        let job = job.ok();
         let mut child = command.spawn()?;
         // Assigned after the start, which only misses what claude.exe starts
         // in its first instants, before it has read its settings. The child
@@ -154,8 +164,10 @@ impl Headless {
             }
         });
 
+        let (stderr_done, stderr_read) = mpsc::channel::<()>();
         thread::spawn(move || {
             read_lines(stdout, |line| on_line(Some(line)));
+            let _ = stderr_read.recv_timeout(STDERR_WAIT);
             on_line(None);
         });
 
@@ -170,6 +182,7 @@ impl Headless {
                     t.push_back(line);
                 }
             });
+            let _ = stderr_done.send(());
         });
 
         Ok(Headless {
@@ -342,9 +355,9 @@ fn read_lines(from: impl Read, mut each: impl FnMut(String)) {
 }
 
 /// A job that ends everything in it when its last handle closes.
-fn kill_on_close_job() -> Option<OwnedHandle> {
+fn kill_on_close_job() -> windows::core::Result<OwnedHandle> {
     unsafe {
-        let job = CreateJobObjectW(None, None).ok()?;
+        let job = CreateJobObjectW(None, None)?;
         let job = OwnedHandle::from_raw_handle(job.0);
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -353,9 +366,8 @@ fn kill_on_close_job() -> Option<OwnedHandle> {
             JobObjectExtendedLimitInformation,
             &limits as *const _ as *const c_void,
             std::mem::size_of_val(&limits) as u32,
-        )
-        .ok()?;
-        Some(job)
+        )?;
+        Ok(job)
     }
 }
 
