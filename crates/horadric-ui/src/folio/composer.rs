@@ -1046,7 +1046,9 @@ impl View {
         let bh = PAD + images_h + view_h + 8.0 + CONTROLS_H + 8.0;
         let r = Rect::new(cx, h - BOTTOM - bh, cw, bh);
         chat.input.top = r.y;
-        let focused = self.has_keyboard();
+        // A card's field or the find bar may have the keys instead: one
+        // caret on the glass, never two.
+        let focused = self.has_keyboard() && chat.tr.state.focus.is_none();
         gfx.fill_round(&r, 16.0, pal.bg.mix(pal.fg, 0.07).with_alpha(0.96));
         let edge = if focused {
             pal.accent.with_alpha(0.6)
