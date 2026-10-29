@@ -120,6 +120,8 @@ struct Chat {
     header: String,
     /// What the app was last told of it: working, asking, ended.
     told: Option<State>,
+    /// The host has sent everything it kept and goes on live.
+    live: bool,
     /// The session goes on in a terminal once claude.exe has ended.
     to_terminal: bool,
     /// The transcript's own state and what it keeps between frames.
@@ -133,6 +135,12 @@ pub struct State {
     /// An ask waits on the human.
     pub asking: bool,
     pub ended: bool,
+    /// The host's replay is in, so this is where the session stands.
+    pub live: bool,
+    /// The last turn ended, its reply not yet followed by a prompt.
+    pub finished: bool,
+    /// How many background tasks run, once the CLI has said.
+    pub background: Option<usize>,
 }
 
 impl Chat {
@@ -158,6 +166,7 @@ impl Chat {
             busy_since: Instant::now() - look::COOL,
             header: String::new(),
             told: None,
+            live: false,
             to_terminal: false,
             tr: transcript::Ui::default(),
         }
@@ -179,6 +188,9 @@ impl Chat {
             busy: self.folio.busy,
             asking: !self.folio.pending_asks().is_empty(),
             ended: self.ended,
+            live: self.live,
+            finished: self.folio.turn_finished(),
+            background: (self.folio.background_heard).then_some(self.folio.background.len()),
         }
     }
 
@@ -486,7 +498,7 @@ fn drain() {
                     Event::Dropped(n) => {
                         eprintln!("horadric: folio {id} lost its {n} oldest lines");
                     }
-                    Event::Live => {}
+                    Event::Live => chat.live = true,
                     Event::End(_) => {
                         chat.folio.end();
                         // Before any init, nothing ran: stderr says why.

@@ -930,6 +930,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             folios: HashMap::new(),
             to_folio: HashSet::new(),
             folio_args: HashMap::new(),
+            resync: HashSet::new(),
             glow_stamp: 0,
             web_ask: None,
             pane_ask: None,
@@ -3601,6 +3602,9 @@ struct App {
     /// The arguments each Folio was started with, its own and not the
     /// defaults, kept for it to resume with.
     folio_args: HashMap<String, Vec<String>>,
+    /// Folios reattached whose tile waits for their replay to say where
+    /// their turn stands.
+    resync: HashSet<String>,
     /// The glows' stamp the sanctuaries were last drawn at.
     glow_stamp: u64,
     /// What to ask for which project's browser pane, once out of the borrow.
@@ -7950,6 +7954,7 @@ impl App {
                 self.folio_args.insert(id.clone(), saved.args);
             }
             self.register_folio(&id, &dir, &tag.name, tag.resume.as_deref());
+            self.resync.insert(id.clone());
             let serial = self.next_serial;
             self.next_serial += 1;
             self.folios
@@ -7974,12 +7979,24 @@ impl App {
                 s.prompted = true;
             }
         }
-        let Some(phase) = r.get(id).map(|s| s.phase.clone()) else {
+        let Some(session) = r.get_mut(id) else {
             return;
         };
+        // The CLI lists its background tasks, where hooks only hear them
+        // start: once none run, the turn's end is not a wait on them. A
+        // headless wake for a finished task posts no prompt to say so.
+        if state.background == Some(0) {
+            session.loot.outstanding.clear();
+        }
+        let phase = session.phase.clone();
         let now = SystemTime::now();
+        // A reattached tile starts Idle; once its replay is in, a turn that
+        // ended while no app watched is Done, as it would have become.
+        let resync = state.live && self.resync.remove(id);
         let event = if state.ended {
             None
+        } else if resync && !state.busy && !state.asking && state.finished {
+            (phase == Phase::Idle).then_some("Stop")
         } else if state.asking {
             (!matches!(phase, Phase::Waiting(_))).then_some("PermissionRequest")
         } else if state.busy {

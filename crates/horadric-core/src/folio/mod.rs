@@ -752,6 +752,16 @@ impl Folio {
         self.hidden.get(tool_use).map(|(_, input)| input.clone())
     }
 
+    /// Whether a turn ran here and ended with nothing asked since: the
+    /// last prompt has its footer. A transcript's turns do not count, as
+    /// they ended before this process.
+    pub fn turn_finished(&self) -> bool {
+        let own = self.blocks.get(self.history..).unwrap_or_default();
+        let last =
+            (own.iter().rev()).find(|b| matches!(b, Block::Prompt(_) | Block::Footer { .. }));
+        !self.busy && matches!(last, Some(Block::Footer { .. }))
+    }
+
     /// The asks, questions and plans still waiting on the human, oldest
     /// first, by request id.
     pub fn pending_asks(&self) -> Vec<&str> {
@@ -2244,6 +2254,20 @@ mod tests {
             f.feed(line);
         }
         assert_eq!(replies(&f), ["pong"]);
+    }
+
+    #[test]
+    fn a_turn_is_finished_once_its_result_came() {
+        let mut f = Folio::new();
+        assert!(!f.turn_finished());
+        f.push_prompt("p");
+        assert!(!f.turn_finished());
+        for line in PLAIN.lines() {
+            f.feed(line);
+        }
+        assert!(f.turn_finished());
+        f.push_prompt("again");
+        assert!(!f.turn_finished());
     }
 
     #[test]
