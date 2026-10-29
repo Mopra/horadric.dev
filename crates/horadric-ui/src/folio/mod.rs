@@ -27,7 +27,11 @@
 //! box and its buttons, and [`backdrop`] the background.
 
 mod backdrop;
+mod cards;
 mod composer;
+mod flow;
+mod rich;
+mod select;
 mod transcript;
 mod view;
 
@@ -118,6 +122,8 @@ struct Chat {
     told: Option<State>,
     /// The session goes on in a terminal once claude.exe has ended.
     to_terminal: bool,
+    /// The transcript's own state and what it keeps between frames.
+    tr: transcript::Ui,
 }
 
 /// What the app hears of a Folio, for its tile's phase.
@@ -154,6 +160,7 @@ impl Chat {
             header: String::new(),
             told: None,
             to_terminal: false,
+            tr: transcript::Ui::default(),
         }
     }
 
@@ -588,8 +595,13 @@ fn send_prompt(id: &str) {
 }
 
 fn answer(id: &str, request_id: &str, allow: bool) {
+    answer_with(id, |f| f.answer(request_id, allow));
+}
+
+/// Answers the CLI with the line `make` has the model write, if any.
+fn answer_with(id: &str, make: impl FnOnce(&mut Folio) -> Option<String>) {
     with(id, |c| {
-        let Some(line) = c.folio.answer(request_id, allow) else {
+        let Some(line) = make(&mut c.folio) else {
             return;
         };
         if let Some(h) = &c.hosted {

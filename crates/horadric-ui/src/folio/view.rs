@@ -43,7 +43,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows_numerics::Vector2;
 
-use super::{answer, interrupt, redraw, send_prompt, with, Chat, CHATS};
+use super::{answer, interrupt, redraw, select, send_prompt, transcript, with, Chat, CHATS};
 use crate::app::{self, Input};
 use crate::clipboard;
 use crate::folio_look as look;
@@ -68,6 +68,9 @@ const ICONS: PCWSTR = w!("Segoe Fluent Icons");
 
 /// The width of the button that opens the session in a terminal.
 const TERMINAL_W: f32 = 88.0;
+
+/// Not in the windows crate's WindowsAndMessaging.
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 /// A wheel notch, in DIPs.
 const NOTCH: f32 = 54.0;
@@ -96,7 +99,6 @@ pub fn attach(key: &str, shared: &Rc<Shared>, parent: HWND) {
         shared: Rc::clone(shared),
         gfx: RefCell::new(None),
         hits: RefCell::new(Vec::new()),
-        laid: RefCell::new(Vec::new()),
         composer: RefCell::new(None),
         ticking: Cell::new(false),
         last: Cell::new(None),
@@ -158,6 +160,9 @@ pub(super) fn dpi(hwnd: HWND) -> u32 {
 /// A key that makes a character, from the pane. Enter sends, Shift+Enter
 /// breaks the line, Esc stops Claude while it works.
 pub fn char(key: &str, c: char, mods: Mods) {
+    if select::char(key, c, mods) {
+        return;
+    }
     let mut send = false;
     with(key, |chat| {
         let f = &mut chat.composer;
@@ -204,6 +209,9 @@ pub fn char(key: &str, c: char, mods: Mods) {
 /// A key that makes no character, from the pane. False leaves it to the
 /// pane.
 pub fn key(key: &str, vk: u16, mods: Mods) -> bool {
+    if select::key(key, vk, mods) {
+        return true;
+    }
     let (word, extend) = (mods.ctrl, mods.shift);
     let page = with(key, |c| c.view_h * 0.85).unwrap_or(0.0);
     let vertical = |up: bool| -> bool {
@@ -262,16 +270,8 @@ pub(super) enum Hit {
     Composer,
     /// Opens the session in a terminal.
     Terminal,
-}
-
-/// A block's text laid out, kept while its text and width stay the same.
-pub(super) struct Laid {
-    pub(super) tag: u8,
-    pub(super) len: usize,
-    pub(super) width: f32,
-    pub(super) layout: IDWriteTextLayout,
-    pub(super) w: f32,
-    pub(super) h: f32,
+    /// The transcript's own buttons and links.
+    Tr(transcript::Act),
 }
 
 pub(super) struct Gfx {
@@ -301,7 +301,6 @@ pub(super) struct View {
     pub(super) shared: Rc<Shared>,
     pub(super) gfx: RefCell<Option<Gfx>>,
     pub(super) hits: RefCell<Vec<(Rect, Hit)>>,
-    pub(super) laid: RefCell<Vec<Option<Laid>>>,
     /// The composer's text laid out and where it was drawn, in DIPs, for
     /// placing the caret by a click or an arrow.
     pub(super) composer: RefCell<Option<(IDWriteTextLayout, f32, f32)>>,
@@ -719,6 +718,13 @@ impl View {
             .map(|(_, h)| h.clone())
     }
 
+    /// The button under a point, for lighting it.
+    pub(super) fn hit_rect(&self, x: f32, y: f32) -> Option<Rect> {
+        (self.hits.borrow().iter().rev())
+            .find(|(r, _)| r.contains(x, y))
+            .map(|(r, _)| *r)
+    }
+
     pub(super) fn on_press(&self, lparam: LPARAM, double: bool) {
         let hwnd = self.hwnd();
         unsafe {
@@ -730,8 +736,10 @@ impl View {
         }
         let (x, y) = self.dip(lparam);
         let key = self.key.clone();
+        select::unfocus(&key, unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0);
         match self.hit_at(x, y) {
             Some(Hit::Answer(id, allow)) => answer(&key, &id, allow),
+            Some(Hit::Tr(a)) => select::act(&key, a),
             Some(Hit::Fold(i)) => {
                 with(&key, |c| {
                     if !c.open.remove(&i) {
@@ -761,16 +769,19 @@ impl View {
                     }
                 }
             }
-            None => {}
+            None => {
+                let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+                select::press(self, x, y, double, shift);
+            }
         }
         redraw(&key);
     }
 
     pub(super) fn on_drag(&self, lparam: LPARAM) {
-        if !self.selecting.get() {
+        let (x, y) = self.dip(lparam);
+        if select::moved(self, x, y) || !self.selecting.get() {
             return;
         }
-        let (x, y) = self.dip(lparam);
         if let Some(at) = self.composer_at(x, y) {
             with(&self.key, |c| c.composer.set_caret(at, true));
             redraw(&self.key);
@@ -787,6 +798,7 @@ impl View {
         let id = match self.hit_at(p.x as f32 / s, p.y as f32 / s) {
             Some(Hit::Composer) => IDC_IBEAM,
             Some(_) => IDC_HAND,
+            None if select::over_text(&self.key, p.x as f32 / s, p.y as f32 / s) => IDC_IBEAM,
             None => IDC_ARROW,
         };
         unsafe {
@@ -837,11 +849,16 @@ impl View {
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
+                select::release(&self.key);
                 if self.selecting.replace(false) {
                     unsafe {
                         let _ = ReleaseCapture();
                     }
                 }
+                Some(LRESULT(0))
+            }
+            WM_MOUSELEAVE => {
+                select::left(&self.key);
                 Some(LRESULT(0))
             }
             WM_CAPTURECHANGED => {

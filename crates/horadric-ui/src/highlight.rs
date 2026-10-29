@@ -96,6 +96,25 @@ pub fn highlight(name: &str, lines: &[String]) -> Vec<Vec<Span>> {
     out
 }
 
+/// Styles for every line of a code block in a reply, by its fence's
+/// language: a name such as `rust` or an extension such as `rs`. None
+/// when no grammar fits.
+pub fn highlight_code(lang: &str, lines: &[String]) -> Vec<Vec<Span>> {
+    let lang = lang.trim().to_ascii_lowercase();
+    if lang.is_empty() {
+        return Vec::new();
+    }
+    let ext = if syntax_for(&format!("x.{lang}"), "").is_some() {
+        Some(lang)
+    } else {
+        (syntaxes().find_syntax_by_token(&lang)).and_then(|s| s.file_extensions.first().cloned())
+    };
+    match ext {
+        Some(ext) => highlight(&format!("x.{ext}"), lines),
+        None => Vec::new(),
+    }
+}
+
 /// VS Code's Dark+ theme, for the scope names the Sublime grammars use.
 fn dark_plus() -> Theme {
     let rules: [(&str, u32, FontStyle); 29] = [
@@ -258,6 +277,16 @@ mod tests {
     fn a_shebang_names_the_language() {
         let l = s(&["#!/bin/bash", "echo hi"]);
         assert_eq!(highlight("run", &l).len(), 2);
+    }
+
+    #[test]
+    fn a_fence_names_its_language_by_name_or_extension() {
+        let l = s(&["fn main() {}"]);
+        assert!(!highlight_code("rust", &l).is_empty());
+        assert!(!highlight_code("rs", &l).is_empty());
+        assert!(!highlight_code("Python", &s(&["def f(): pass"])).is_empty());
+        assert!(highlight_code("", &l).is_empty());
+        assert!(highlight_code("nonsense-lang", &l).is_empty());
     }
 
     #[test]
