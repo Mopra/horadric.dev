@@ -13,6 +13,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (landing, main at 8f6e4c3, "Blocked quests say why" landed): cast "Ship Local" as Open said (7 quests since the last ship). Told the blocked context panel go to rerun its memory-killed checks and ff-merge. "Sessions waiting on their own checks" stopped undone again, still on its own agents: no tell.
 - 2026-10-29 "Sessions waiting on their own checks are not nudged..." stopped undone while two of its own agents run (the bug it fixes). Own work, no tell, noted it.
 - 2026-10-29 Look back (10 done, 5 merged, 5 not, 17 Warriv wakes): conflicts were landing quests in runner.rs/worktree.rs side by side (new rule, the drift notice has landed); red tests were the checkpoint temp flake (quest running, told it of a second form); the 8 silent stops were sessions waiting on their own heavy checks, so filed "Sessions waiting on their own checks are not nudged or counted as stopped" (opus). The day gave 4 lore notes (#558 to #561, #561 replaces #30).
 - 2026-10-29 Round (landing, main at 918796d, slim CLAUDE.md landed): Ship Local at e9c4701 came up (reload.log). No ship for a docs only landing; waits for the checkpoint flake fix.
@@ -180,5 +181,6 @@
 - Check "Make checkpoint tests' git init not copy hook templates" lands; if the flake shows again after, look at %TEMP% itself (antivirus, locks).
 - "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Cast "Ship Local" once the checkpoint flake fix lands (or "Blocked quests say why" / the context panel, whichever lands first with code).
+- Check the Ship Local cast at 8f6e4c3 came up; cast again once the context panel or the checkpoint fix lands.
+- Check the context panel lands after my go; if it blocks on memory again, the heavy memory fix in "Sessions waiting..." should help.
 - Check "Sessions waiting on their own checks..." lands; after it, the look back's silent stops count should drop.
