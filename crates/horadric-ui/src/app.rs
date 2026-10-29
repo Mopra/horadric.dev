@@ -367,8 +367,6 @@ const VIEW: &str = "view:";
 pub(crate) const WEB: &str = "web:";
 /// The start of an Arcane Sanctuary's id, before its project key.
 const SKY: &str = "sky:";
-/// The start of a Folio's id, before its project key.
-const FOLIO: &str = "folio:";
 pub(crate) const MARGIN_DIP: i32 = 12;
 pub(crate) const GAP_DIP: i32 = 12;
 /// The narrowest the stage gets when it gives way to a new column.
@@ -435,11 +433,18 @@ pub(crate) enum Input {
     Sanctuary,
     /// A sanctuary's cross: close the one of the project with this key.
     CloseSky(String),
-    /// The chat button under a project's tiles: its Folio, a headless
-    /// Claude drawn as a chat, opened or given the keyboard.
+    /// The chat button under a project's tiles: a new Folio, a headless
+    /// Claude drawn as a chat, in the project with this key.
     Folio(String),
-    /// A Folio's cross: end the one of the project with this key.
+    /// A Folio's cross: end the session with this id.
     CloseFolio(String),
+    /// A Folio's session changed what its tile should say.
+    FolioState(String, crate::folio::State),
+    /// A Folio's "Terminal": end it between turns and carry the session on
+    /// in a terminal.
+    FolioToTerminal(String),
+    /// A Folio handed over has ended: its terminal starts now.
+    FolioHandedOver(String),
     /// A web address Ctrl+clicked in a pane: to the browser pane of the
     /// project on the stage when it has one, otherwise to the user's own
     /// browser.
@@ -923,6 +928,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             webs: HashMap::new(),
             skies: HashMap::new(),
             folios: HashMap::new(),
+            to_folio: HashSet::new(),
             glow_stamp: 0,
             web_ask: None,
             pane_ask: None,
@@ -979,6 +985,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             town_hidden: saved.town_hidden,
             still: saved.still,
             switch_accounts: saved.switch_accounts,
+            chat_sessions: saved.chat_sessions,
             out_seen: HashMap::new(),
             all_out_told: false,
             discord: saved.discord,
@@ -1031,6 +1038,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         app.reconcile(false);
         app.count_experience();
         app.attach_hosts();
+        app.reattach_folios();
         app.restore_webs(&pages);
         app.carry_on(&carry, on_stage.as_deref());
         // Written before anything resumed can crash it, so that crash is
@@ -1748,7 +1756,32 @@ fn tile_menu(id: &str) {
     const STOP_RUNEWORD: usize = 6;
     const FOUND: usize = 7;
     const TAKE_OVER: usize = 8;
+    const TERMINAL: usize = 9;
+    const AS_CHAT: usize = 10;
     const UNDO: usize = 50;
+    if with_app(|app| app.folios.contains_key(id)) == Some(true) {
+        let items = vec![
+            Item::action(OPEN, "Show chat"),
+            Item::action(TERMINAL, "Open in terminal"),
+            Item::action(RENAME, "Rename\u{2026}"),
+            Item::Separator,
+            Item::action(END, "End session"),
+        ];
+        match menu::popup(&items) {
+            Some(OPEN) => {
+                with_app(|app| app.reveal(id, false));
+            }
+            Some(TERMINAL) => {
+                with_app(|app| app.folio_to_terminal(id));
+            }
+            Some(RENAME) => rename_session(id),
+            Some(END) => {
+                with_app(|app| app.end(id));
+            }
+            _ => {}
+        }
+        return;
+    }
     let Some((kind, shell)) = with_app(|app| app.tile_kind(id)).flatten() else {
         return;
     };
@@ -1760,13 +1793,19 @@ fn tile_menu(id: &str) {
     };
     let live = matches!(kind, TileKind::Live);
     let items = match (kind, shell) {
-        (TileKind::Live, false) => vec![
-            Item::action(OPEN, "Show terminal"),
-            rename,
-            stash,
-            Item::Separator,
-            Item::action(END, "End session"),
-        ],
+        (TileKind::Live, false) => {
+            let mut items = vec![Item::action(OPEN, "Show terminal")];
+            if with_app(|app| app.is_claude_terminal(id)) == Some(true) {
+                items.push(Item::action(AS_CHAT, "Open as chat"));
+            }
+            items.extend([
+                rename,
+                stash,
+                Item::Separator,
+                Item::action(END, "End session"),
+            ]);
+            items
+        }
         (TileKind::Live, true) => vec![
             Item::action(OPEN, "Show terminal"),
             rename,
@@ -1913,6 +1952,9 @@ fn tile_menu(id: &str) {
         }
         Some(UNDO) => {
             with_app(|app| app.undo_turn(id));
+        }
+        Some(AS_CHAT) => {
+            with_app(|app| app.terminal_to_folio(id));
         }
         Some(STASH) if confirm_stash(id) => {
             with_app(|app| app.stash(id));
@@ -2694,7 +2736,13 @@ fn project_menu(key: &str) {
         return;
     }
     with_app(|app| match picked {
-        Some(ADD) => app.add_sessions(key, 1),
+        Some(ADD) => {
+            if let Some(dir) = app.project_dir(key) {
+                if let Err(e) = app.start_claude(dir) {
+                    eprintln!("horadric: cannot start session: {e}");
+                }
+            }
+        }
         Some(ADD_TREE) => {
             if let Some(dir) = app.project_dir(key) {
                 if let Err(e) = app.start_in(None, dir, Vec::new(), Agent::Claude, true) {
@@ -3542,9 +3590,13 @@ struct App {
     /// Arcane Sanctuaries, at most one per project, by project key. What
     /// they show is `sanctuary`'s and outlives the pane.
     skies: HashMap<String, Arc<Console>>,
-    /// Folios, the experimental headless chats, at most one per project,
-    /// by project key. The session behind each is `folio`'s.
+    /// Folios, the experimental headless chats, by session id: each a
+    /// session with a tile like a terminal one, its pane's console with no
+    /// program. The session behind each is `folio`'s.
     folios: HashMap<String, Arc<Console>>,
+    /// Claude terminals ending so their session goes on in a Folio, which
+    /// starts once the terminal has exited.
+    to_folio: HashSet<String>,
     /// The glows' stamp the sanctuaries were last drawn at.
     glow_stamp: u64,
     /// What to ask for which project's browser pane, once out of the borrow.
@@ -3696,6 +3748,8 @@ struct App {
     /// A usage limit switches Claude Code to the account with the most
     /// left, from the Settings window.
     switch_accounts: bool,
+    /// New Claude sessions open as a Folio, from the Settings window.
+    chat_sessions: bool,
     /// The sessions a usage limit stopped that were seen to, each with
     /// when it stopped, so one stop switches once.
     out_seen: HashMap<String, SystemTime>,
@@ -3992,6 +4046,7 @@ impl App {
         self.consoles
             .values()
             .chain(self.views.values())
+            .chain(self.folios.values())
             .chain(self.far.consoles.values())
             .find(|c| c.serial == serial)
     }
@@ -4003,7 +4058,7 @@ impl App {
             .or_else(|| self.views.values().find(|v| v.id == id))
             .or_else(|| self.webs.values().find(|v| v.id == id))
             .or_else(|| self.skies.values().find(|v| v.id == id))
-            .or_else(|| self.folios.values().find(|v| v.id == id))
+            .or_else(|| self.folios.get(id))
             .or_else(|| self.far.consoles.get(id))
     }
 
@@ -4239,6 +4294,18 @@ impl App {
         let Some(console) = self.console_by_serial(serial).cloned() else {
             return;
         };
+        if self.to_folio.remove(&console.id) {
+            let id = console.id.clone();
+            let conversation = (self.shared.registry.lock().ok())
+                .and_then(|r| r.get(&id)?.claude_session_id.clone());
+            self.consoles.remove(&id);
+            if let (Some(conversation), Some(dir)) = (conversation, self.dir_of(&id)) {
+                if let Err(e) = self.start_folio(Some(id.clone()), dir, Some(conversation)) {
+                    eprintln!("horadric: cannot open {id} as a chat: {e}");
+                }
+            }
+            return;
+        }
         // Detaching closes the pane and nothing more: the daemon runs the
         // session on. Unless it was the session that ended.
         if let Some((short, _, _)) = self.background_of(&console.id) {
@@ -4780,6 +4847,19 @@ impl App {
             history::Pick::All => None,
         };
         let agent = past.map_or(Agent::Claude, |p| p.agent);
+        if let Some(p) = past.filter(|p| self.chat_sessions && p.agent == Agent::Claude) {
+            match self.start_folio(None, dir.to_path_buf(), Some(p.id.clone())) {
+                Ok(id) => {
+                    if let Ok(mut r) = self.shared.registry.lock() {
+                        if let Some(s) = r.get_mut(&id) {
+                            s.title = Some(p.title.clone());
+                        }
+                    }
+                }
+                Err(e) => eprintln!("horadric: cannot resume a conversation as a chat: {e}"),
+            }
+            return;
+        }
         let args = agent.resume_args(past.map(|p| p.id.as_str()));
         let id = match self.start_in(None, dir.to_path_buf(), args, agent, false) {
             Ok(id) => id,
@@ -4815,6 +4895,16 @@ impl App {
         // one takes its pane's place.
         self.consoles.remove(id);
         let cwd = PathBuf::from(&saved.cwd);
+        let as_chat = (saved.claude_session_id.clone())
+            .filter(|_| self.chat_sessions && saved.agent == Agent::Claude)
+            .filter(|_| !saved.shell && saved.ssh.is_none() && cwd.is_dir());
+        if let Some(conversation) = as_chat {
+            let started = self.start_folio(Some(id.to_string()), cwd, Some(conversation));
+            if started.is_err() {
+                self.paused.insert(id.to_string(), saved);
+            }
+            return started.map(|_| ());
+        }
         let result = if cwd.is_dir() {
             let args = saved.launch_args();
             let run = match (&saved.ssh, saved.shell) {
@@ -5791,6 +5881,7 @@ impl App {
             town: !self.town_hidden,
             animations: !self.still,
             switch_accounts: self.switch_accounts,
+            chat_sessions: self.chat_sessions,
             agent: self.settings_agent,
             defaults: self.shared.defaults_of(self.settings_agent),
             offered: (self.settings_agent != Agent::Claude).then(|| {
@@ -6394,6 +6485,10 @@ impl App {
                 self.save();
                 self.switch_when_out();
             }
+            Field::ChatSessions => {
+                self.chat_sessions = !self.chat_sessions;
+                self.save();
+            }
             Field::Sounds => {
                 self.sounds = !self.sounds;
                 self.save();
@@ -6887,6 +6982,10 @@ impl App {
                 c.kill();
             }
         }
+        if self.folios.remove(id).is_some() {
+            crate::folio::close(id);
+        }
+        self.to_folio.remove(id);
         self.paused.remove(id);
         self.stop_agents.remove(id);
         self.browsers.retain(|&hwnd, b| {
@@ -6914,6 +7013,7 @@ impl App {
         let id = session_id(base, SystemTime::now());
         let taken = |candidate: &str| {
             self.consoles.contains_key(candidate)
+                || self.folios.contains_key(candidate)
                 || self.paused.contains_key(candidate)
                 || self
                     .shared
@@ -6954,7 +7054,12 @@ impl App {
             }
             return;
         }
-        let Some(serial) = self.consoles.get(id).map(|c| c.serial) else {
+        let serial = self
+            .consoles
+            .get(id)
+            .or(self.folios.get(id))
+            .map(|c| c.serial);
+        let Some(serial) = serial else {
             if let Some((short, name, cwd)) = self.background_of(id) {
                 if let Err(e) = self.launch(id, &name, cwd, Vec::new(), Run::Attach(short), true) {
                     eprintln!("horadric: cannot attach to {id}: {e}");
@@ -7047,9 +7152,9 @@ impl App {
             };
             self.consoles
                 .iter()
-                .filter(|(id, c)| {
-                    c.exit_code() != Some(0) && r.get(id).is_some_and(|s| project_key(s) == key)
-                })
+                .filter(|(_, c)| c.exit_code() != Some(0))
+                .chain(&self.folios)
+                .filter(|(id, _)| r.get(id).is_some_and(|s| project_key(s) == key))
                 .map(|(id, c)| (c.serial, id.clone()))
                 .collect()
         };
@@ -7076,9 +7181,6 @@ impl App {
         }
         if let Some(sky) = self.skies.get(key) {
             ids.push(sky.id.clone());
-        }
-        if let Some(folio) = self.folios.get(key) {
-            ids.push(folio.id.clone());
         }
         ids
     }
@@ -7553,7 +7655,6 @@ impl App {
             })
             .or_else(|| id.starts_with(WEB).then(|| "Browser".to_string()))
             .or_else(|| id.starts_with(SKY).then(|| "Arcane Sanctuary".to_string()))
-            .or_else(|| id.starts_with(FOLIO).then(|| "Folio".to_string()))
             .unwrap_or_else(|| id.to_string())
     }
 
@@ -7673,33 +7774,233 @@ impl App {
         }
     }
 
-    /// Shows the project's Folio on the stage beside its sessions, with
-    /// the keyboard, starting its headless Claude when it has none yet.
+    /// Starts a new Folio in the project with this key and shows it on
+    /// the stage beside its sessions, with the keyboard.
     fn open_folio(&mut self, key: &str) {
         let Some(dir) = self.project_dir(key) else {
             return;
         };
-        let id = format!("{FOLIO}{key}");
-        if !self.folios.contains_key(key) {
-            let serial = self.next_serial;
-            self.next_serial += 1;
-            crate::folio::open(key, &dir);
-            self.folios.insert(
-                key.to_string(),
-                Console::folio(id.clone(), serial, key.to_string()),
-            );
+        if let Err(e) = self.start_folio(None, dir, None) {
+            eprintln!("horadric: cannot start a chat: {e}");
         }
-        if self.fill_stage(key) {
+    }
+
+    /// A new Claude session in `dir`: a Folio when Settings says new ones
+    /// open as a chat, a terminal otherwise.
+    fn start_claude(&mut self, dir: PathBuf) -> Result<String, String> {
+        if self.chat_sessions {
+            self.start_folio(None, dir, None)
+        } else {
+            self.start(None, dir, Vec::new())
+        }
+    }
+
+    /// Starts a Folio in `dir` in a host of its own, carrying on the
+    /// conversation `resume` when given, as session `id` or a new one, and
+    /// shows it on the stage with the keyboard. Its tile is registered
+    /// here; its hooks find it by its id, as a terminal session's do.
+    fn start_folio(
+        &mut self,
+        id: Option<String>,
+        dir: PathBuf,
+        resume: Option<String>,
+    ) -> Result<String, String> {
+        if !dir.is_dir() {
+            return Err(format!("{} is not a directory", dir.display()));
+        }
+        let folder = folder_name(&dir);
+        let id = id.unwrap_or_else(|| self.unique_id(&folder));
+        let name = self
+            .shared
+            .registry
+            .lock()
+            .ok()
+            .and_then(|r| r.get(&id).map(|s| s.name.clone()))
+            .unwrap_or(folder);
+        recent::remember(&mut self.recent, &dir.to_string_lossy());
+        self.register_folio(&id, &dir, &name, resume.as_deref());
+        let key = self.project_of(&id).unwrap_or_default();
+        let defaults = self.shared.defaults_of(Agent::Claude);
+        let mut env_set = vec![
+            (horadric_hooks::SESSION_ENV.to_string(), id.clone()),
+            (
+                horadric_hooks::OWNER_ENV.to_string(),
+                horadric_hooks::port().to_string(),
+            ),
+            (TASKS_ENV.to_string(), String::new()),
+        ];
+        env_set.extend(defaults.env(Agent::Claude));
+        let options = horadric_pty::headless::Options {
+            args: defaults.flags_for(Agent::Claude, &[], false),
+            env_set,
+            env_remove: console::inherited_env(console::under_claude())
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            ..Default::default()
+        };
+        let tag = crate::folio::Tag {
+            key: key.clone(),
+            name,
+            resume,
+            history: 0,
+        };
+        if let Err(e) = crate::folio::open(&id, &dir, tag, &options) {
+            if let Ok(mut r) = self.shared.registry.lock() {
+                r.remove(&id);
+            }
+            self.start_failed = Some(e.clone());
+            post(self.notify.0 as isize, WM_HORADRIC_START_FAILED, 0);
+            return Err(e);
+        }
+        let serial = self.next_serial;
+        self.next_serial += 1;
+        self.folios
+            .insert(id.clone(), Console::folio(id.clone(), serial, id.clone()));
+        self.reconcile(true);
+        if self.fill_stage(&key) {
             if let Some(stage) = &self.stage {
                 stage.focus_session(&id);
             }
         }
+        Ok(id)
     }
 
-    fn close_folio(&mut self, key: &str) {
-        self.folios.remove(key);
+    /// Gives a Folio its tile, as `launch` does a terminal session's.
+    fn register_folio(&mut self, id: &str, dir: &Path, name: &str, resume: Option<&str>) {
+        let register = HookEvent {
+            cwd: dir.to_string_lossy().to_string(),
+            name: Some(name.to_string()),
+            ..HookEvent::synthetic(HookEvent::REGISTER)
+        };
+        if let Ok(mut r) = self.shared.registry.lock() {
+            r.apply(id, &register, SystemTime::now());
+            if let Some(s) = r.get_mut(id) {
+                s.shell = false;
+                s.agent = Agent::Claude;
+                if let Some(conversation) = resume {
+                    s.claude_session_id = Some(conversation.to_string());
+                    s.prompted = true;
+                }
+            }
+        }
+    }
+
+    /// Finds the Folios whose hosts ran on while no app did, after a
+    /// reload, a crash or a Quit that kept them, and gives each its tile
+    /// and pane again. Their phase follows as their replay comes in.
+    fn reattach_folios(&mut self) {
+        for found in crate::folio::reattach() {
+            let crate::folio::Found { id, dir, tag } = found;
+            self.register_folio(&id, &dir, &tag.name, tag.resume.as_deref());
+            let serial = self.next_serial;
+            self.next_serial += 1;
+            self.folios
+                .insert(id.clone(), Console::folio(id.clone(), serial, id));
+        }
+        self.reconcile(true);
+    }
+
+    /// A Folio's tile follows what its stream says, where its hooks say
+    /// nothing: an ask, which headless never posts as a hook, and where a
+    /// turn stands after a reattach, since hooks went nowhere meanwhile.
+    fn folio_state(&mut self, id: &str, state: crate::folio::State) {
+        let Ok(mut r) = self.shared.registry.lock() else {
+            return;
+        };
+        let Some(phase) = r.get(id).map(|s| s.phase.clone()) else {
+            return;
+        };
+        let now = SystemTime::now();
+        let event = if state.ended {
+            None
+        } else if state.asking {
+            (!matches!(phase, Phase::Waiting(_))).then_some("PermissionRequest")
+        } else if state.busy {
+            (!phase.mid_turn() || matches!(phase, Phase::Waiting(_))).then_some("PreToolUse")
+        } else {
+            matches!(phase, Phase::Working | Phase::Waiting(_)).then_some("Stop")
+        };
+        if let Some(name) = event {
+            r.apply(id, &HookEvent::synthetic(name), now);
+        }
+        drop(r);
+        self.reconcile(false);
+    }
+
+    /// The Folio's "Terminal": it ends between turns, and once it has the
+    /// session goes on in a terminal pane in the same tile.
+    fn folio_to_terminal(&mut self, id: &str) {
+        if !crate::folio::hand_over(id) {
+            eprintln!("horadric: {id} is mid turn, or asks; it opens in a terminal once idle");
+        }
+    }
+
+    /// A Folio handed over has ended: the same tile resumes its
+    /// conversation in a terminal.
+    fn folio_handed_over(&mut self, id: &str) {
+        let conversation = crate::folio::conversation(id);
+        crate::folio::close(id);
+        self.folios.remove(id);
+        let (Some(conversation), Some(dir)) = (conversation, self.dir_of(id)) else {
+            return;
+        };
+        let name = self.name_of(id);
+        let args = Agent::Claude.resume_args(Some(&conversation));
+        if let Err(e) = self.launch(id, &name, dir, args, Run::Agent(Agent::Claude), true) {
+            eprintln!("horadric: cannot open {id} in a terminal: {e}");
+            return;
+        }
+        if let Ok(mut r) = self.shared.registry.lock() {
+            if let Some(s) = r.get_mut(id) {
+                s.claude_session_id = Some(conversation);
+                s.prompted = true;
+            }
+        }
+    }
+
+    /// A Claude terminal's "Open as chat": it ends between turns, and the
+    /// Folio starts in the same tile once its process has exited.
+    fn terminal_to_folio(&mut self, id: &str) {
+        let between = self.shared.registry.lock().is_ok_and(|r| {
+            r.get(id).is_some_and(|s| {
+                s.agent == Agent::Claude
+                    && !s.shell
+                    && s.claude_session_id.is_some()
+                    && matches!(s.phase, Phase::Idle | Phase::Done)
+            })
+        });
+        let Some(console) = self.consoles.get(id).filter(|_| between) else {
+            eprintln!(
+                "horadric: {id} is mid turn or no Claude terminal; it opens as a chat once idle"
+            );
+            return;
+        };
+        self.to_folio.insert(id.to_string());
+        console.kill();
+    }
+
+    /// Whether session `id` is Claude Code in a terminal, which can go on
+    /// as a chat.
+    fn is_claude_terminal(&self, id: &str) -> bool {
+        self.consoles.get(id).is_some_and(|c| c.claude)
+            && self.shared.registry.lock().is_ok_and(|r| {
+                r.get(id)
+                    .is_some_and(|s| s.agent == Agent::Claude && !s.shell && s.ssh.is_none())
+            })
+    }
+
+    /// Where a session works, from its tile.
+    fn dir_of(&self, id: &str) -> Option<PathBuf> {
+        let r = self.shared.registry.lock().ok()?;
+        Some(PathBuf::from(&r.get(id)?.cwd))
+    }
+
+    /// A Folio's cross: the session ends, tile and pane.
+    fn close_folio(&mut self, id: &str) {
+        self.forget(id);
+        self.reconcile(false);
         self.sync_stage();
-        crate::folio::close(key);
     }
 
     fn close_sky(&mut self, key: &str) {
@@ -7881,6 +8182,7 @@ impl App {
             .iter()
             .filter(|(_, c)| c.exit_code().is_none())
             .map(|(id, _)| id)
+            .chain(self.folios.keys().filter(|id| crate::folio::running(id)))
             .collect();
         let pruned = self
             .shared
@@ -8022,11 +8324,11 @@ impl App {
                 .as_ref()
                 .and_then(|s| s.rect())
                 .or(self.stage_rect),
-            on_stage: self.stage.as_ref().and_then(|s| s.active()).filter(|id| {
-                ![VIEW, WEB, SKY, FOLIO]
-                    .iter()
-                    .any(|prefix| id.starts_with(prefix))
-            }),
+            on_stage: self
+                .stage
+                .as_ref()
+                .and_then(|s| s.active())
+                .filter(|id| ![VIEW, WEB, SKY].iter().any(|prefix| id.starts_with(prefix))),
             grids: self
                 .shared
                 .orders
@@ -8076,6 +8378,7 @@ impl App {
             town_hidden: self.town_hidden,
             still: self.still,
             switch_accounts: self.switch_accounts,
+            chat_sessions: self.chat_sessions,
             discord: self.discord,
             recall_across: self.recall_across,
             run: self.run.saved(),
@@ -8137,8 +8440,13 @@ impl App {
     fn freeze(&mut self) {
         self.save();
         self.cut_wakes_short();
-        // A Folio's claude.exe has no host to run on in yet.
-        crate::folio::close_all();
+        // A Folio's host runs on, as a terminal's does, and the next start
+        // attaches to it. Unless the sessions end with the app.
+        if self.quit && self.stop_on_exit {
+            crate::folio::close_all();
+        } else {
+            crate::folio::detach_all();
+        }
         // Nothing brings an attached pane back, so its host must not
         // outlive this app. The session itself runs on in the daemon.
         if let Ok(r) = self.shared.registry.lock() {
@@ -8760,7 +9068,7 @@ impl App {
                 Input::Add(key) => {
                     if self.far_start(&key) {
                     } else if let Some(dir) = self.project_dir(&key) {
-                        if let Err(e) = self.start(None, dir, Vec::new()) {
+                        if let Err(e) = self.start_claude(dir) {
                             eprintln!("horadric: cannot start session: {e}");
                         }
                     }
@@ -8820,7 +9128,10 @@ impl App {
                 }
                 Input::CloseSky(key) => self.close_sky(&key),
                 Input::Folio(key) => self.open_folio(&key),
-                Input::CloseFolio(key) => self.close_folio(&key),
+                Input::CloseFolio(id) => self.close_folio(&id),
+                Input::FolioState(id, state) => self.folio_state(&id, state),
+                Input::FolioToTerminal(id) => self.folio_to_terminal(&id),
+                Input::FolioHandedOver(id) => self.folio_handed_over(&id),
                 Input::WebTab(key, step) => web::tab(&key, step),
                 Input::WebAsk(key, what) => {
                     self.web_ask = Some((key, what));
@@ -8916,7 +9227,7 @@ impl App {
                     post(self.notify.0 as isize, WM_HORADRIC_RECENT_MENU, 0);
                 }
                 Input::StartIn(dir) => {
-                    if let Err(e) = self.start(None, dir, Vec::new()) {
+                    if let Err(e) = self.start_claude(dir) {
                         eprintln!("horadric: cannot start session: {e}");
                     }
                 }

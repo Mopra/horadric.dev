@@ -44,6 +44,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_numerics::Vector2;
 
 use super::{answer, interrupt, redraw, send_prompt, with, Chat, CHATS};
+use crate::app::{self, Input};
 use crate::clipboard;
 use crate::folio_look as look;
 use crate::keys::Mods;
@@ -64,6 +65,9 @@ const CORNER: f32 = 7.0;
 pub(super) const FONT: PCWSTR = w!("Segoe UI Variable Text");
 const MONO: PCWSTR = w!("Cascadia Mono");
 const ICONS: PCWSTR = w!("Segoe Fluent Icons");
+
+/// The width of the button that opens the session in a terminal.
+const TERMINAL_W: f32 = 88.0;
 
 /// A wheel notch, in DIPs.
 const NOTCH: f32 = 54.0;
@@ -162,7 +166,7 @@ pub fn char(key: &str, c: char, mods: Mods) {
             '\r' => send = true,
             '\u{1b}' => {
                 if chat.folio.busy {
-                    if let Some(h) = &chat.headless {
+                    if let Some(h) = &chat.hosted {
                         let _ = h.interrupt();
                     }
                 } else {
@@ -256,6 +260,8 @@ pub(super) enum Hit {
     Send,
     Stop,
     Composer,
+    /// Opens the session in a terminal.
+    Terminal,
 }
 
 /// A block's text laid out, kept while its text and width stay the same.
@@ -579,12 +585,14 @@ impl View {
     pub(super) fn paint(&self) {
         let hwnd = self.hwnd();
         let mut slot = self.gfx.borrow_mut();
-        let accent = theme::accent(&self.key);
+        // The session's id is the key here; its colour is its project's.
+        let project = with(&self.key, |c| c.key.clone()).unwrap_or_default();
+        let accent = theme::accent(&project);
         if slot.as_ref().is_some_and(|g| g.accent != accent) {
             *slot = None;
         }
         if slot.is_none() {
-            match unsafe { Gfx::new(&self.shared.gpu, hwnd, &self.key) } {
+            match unsafe { Gfx::new(&self.shared.gpu, hwnd, &project) } {
                 Ok(g) => *slot = Some(g),
                 Err(e) => {
                     eprintln!("horadric: folio render target: {e}");
@@ -659,10 +667,41 @@ impl View {
         gfx.shade.SetStartPoint(Vector2 { X: 0.0, Y: 0.0 });
         gfx.shade.SetEndPoint(Vector2 { X: 0.0, Y: 9.0 });
         rt.FillRectangle(&d2d(&Rect::new(0.0, 0.0, w, 9.0)), &gfx.shade);
+        self.terminal_button(gfx, &pal, chat, w, &mut composer_hits);
 
         hits.extend(composer_hits);
         *self.hits.borrow_mut() = hits;
         rt.EndDraw(None, None).is_ok()
+    }
+
+    /// "Terminal" at the top right: the session goes on in a terminal pane,
+    /// for what only the CLI does. Only between turns, since claude.exe
+    /// ends first, and only once there is a conversation to resume.
+    unsafe fn terminal_button(
+        &self,
+        gfx: &Gfx,
+        pal: &Palette,
+        chat: &Chat,
+        w: f32,
+        hits: &mut Vec<(Rect, Hit)>,
+    ) {
+        let ready = !chat.folio.busy
+            && !chat.ended
+            && !chat.to_terminal
+            && chat.folio.session_id.is_some()
+            && chat.folio.pending_asks().is_empty();
+        if !ready {
+            return;
+        }
+        // Above where the first block starts, so at the top it covers nothing.
+        let r = Rect::new(w - TERMINAL_W - 8.0, 2.0, TERMINAL_W, 18.0);
+        gfx.fill_round(&r, 9.0, pal.bg.mix(pal.fg, 0.07).with_alpha(0.9));
+        gfx.stroke_round(&r, 9.0, pal.fg.with_alpha(0.14), 1.0);
+        let icon = Rect::new(r.x + 8.0, r.y, 16.0, r.h);
+        gfx.text_in("\u{E756}", &gfx.icon, &icon, pal.dim);
+        let label = Rect::new(r.x + 28.0, r.y, r.w - 34.0, r.h);
+        gfx.text_in("Terminal", &gfx.small, &label, pal.dim);
+        hits.push((r, Hit::Terminal));
     }
 
     /// Whether the keyboard is in the pane this conversation is laid in.
@@ -703,6 +742,7 @@ impl View {
             }
             Some(Hit::Send) => send_prompt(&key),
             Some(Hit::Stop) => interrupt(&key),
+            Some(Hit::Terminal) => app::push(Input::FolioToTerminal(key.clone())),
             Some(Hit::Composer) => {
                 if let Some(at) = self.composer_at(x, y) {
                     let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;

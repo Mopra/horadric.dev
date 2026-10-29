@@ -188,9 +188,15 @@ shows as plain text.
 
 Done so far (2026-10-29): step 1 except the resume checks and
 ExitPlanMode (`Headless` in `horadric-pty`, `horadric headless-debug`,
-five fixtures), step 2, and a first step 4 that runs `claude.exe`
-from the UI itself, not a host, so a Folio ends on reload or quit.
-The confirmed protocol is in the lore.
+five fixtures), step 2, step 3, step 4 and a first step 6. A Folio is
+a session kind: a tile of its own (its hooks find it by
+`HORADRIC_SESSION`, as a terminal's do), a pane in the stage's grid,
+several per project, its host reattached after a reload or a crash.
+The setting "New Claude sessions open as a chat" makes the new session
+button, a resumed tile and the History menu start Folios. "Terminal"
+on the Folio and "Open as chat" on a Claude terminal's tile hand one
+session between the two in the same tile. The confirmed protocol is in
+the lore.
 
 1. **Spike.** A host that starts headless `claude.exe`, a hidden debug
    command that sends a prompt and prints the stream. Confirm: no `-p`

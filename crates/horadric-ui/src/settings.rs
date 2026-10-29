@@ -121,6 +121,8 @@ pub enum Field {
     Default(Setting),
     /// Whether a usage limit switches to the account with the most left.
     SwitchAccounts,
+    /// Whether new Claude sessions open as a chat.
+    ChatSessions,
     /// Whether a project's menu offers to start the agent.
     Offered,
     Autostart,
@@ -221,6 +223,8 @@ pub struct Values {
     pub offered: Option<Option<bool>>,
     /// Claude Code switches account by itself when one runs out.
     pub switch_accounts: bool,
+    /// New Claude sessions open as a Folio, a chat.
+    pub chat_sessions: bool,
     /// None where the switch is not offered, a dev instance.
     pub autostart: Option<bool>,
     /// The same for "Open in Horadric" in Explorer.
@@ -433,6 +437,13 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                 rows.push(line(
                     Field::SwitchAccounts,
                     "Switch account when one runs out",
+                    word,
+                    c,
+                ));
+                let (word, c) = switch(v.chat_sessions);
+                rows.push(line(
+                    Field::ChatSessions,
+                    "New Claude sessions open as a chat (experimental)",
                     word,
                     c,
                 ));
@@ -1310,6 +1321,7 @@ mod tests {
             },
             offered: None,
             switch_accounts: false,
+            chat_sessions: false,
             autostart: Some(true),
             explorer: Some(false),
             discord: Discord::Unnamed,
@@ -1422,6 +1434,7 @@ mod tests {
                 Field::Default(Setting::Workflow),
                 Field::Offered,
                 Field::SwitchAccounts,
+                Field::ChatSessions,
             ]
         );
         assert_eq!(
@@ -1461,7 +1474,8 @@ mod tests {
                 Field::ShipsPublic
             ]
         );
-        assert_eq!(tallest(&v), PROJECT_ROWS);
+        // Claude Code's Sessions rows, a row more than a project's.
+        assert_eq!(tallest(&v), PROJECT_ROWS + 1);
     }
 
     #[test]
@@ -1524,7 +1538,8 @@ mod tests {
         let rows = lines(Section::Projects, &v);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].control, Control::Fixed);
-        assert_eq!(tallest(&v), PROJECT_ROWS);
+        // Claude Code's Sessions rows, a row more than a project's.
+        assert_eq!(tallest(&v), PROJECT_ROWS + 1);
     }
 
     #[test]
@@ -1566,11 +1581,13 @@ mod tests {
                 "Default",
                 "Default",
                 "Always",
+                "Off",
                 "Off"
             ]
         );
         assert_eq!(rows[5].control, Control::Fixed);
         assert_eq!(rows[6].control, Control::Switch(false));
+        assert_eq!(rows[7].field, Field::ChatSessions);
         v.agent = Agent::Codex;
         v.defaults = Defaults {
             model: Some("gpt-5.5".into()),

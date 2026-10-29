@@ -141,6 +141,11 @@ pub struct SavedState {
     /// most left and go on. Off until turned on in the Settings window.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub switch_accounts: bool,
+    /// New Claude sessions open as a Folio, a chat, not a terminal. Off
+    /// until turned on in the Settings window while the Folio is
+    /// experimental.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chat_sessions: bool,
     /// The Horadric Cube is shown, off until turned on from the usage
     /// window's menu.
     #[serde(default)]
