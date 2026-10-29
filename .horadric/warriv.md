@@ -13,6 +13,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (06:36, human left, main at 21cc39b): the ae3d444 Ship Local built 06:35 and reloaded fine. Only the spike left, waiting on the human. Nothing to do.
 - 2026-10-29 Round (landing, main at ae3d444): the stray session.rs edit landed and the main checkout is clean, so cast "Ship Local". Spike waits on the human.
 - 2026-10-29 Round (06:11, human left, main at b5c7e03): the 06:01 Ship Local reloaded fine at 06:11. The unowned session.rs edit (Stop with background work stays Working, tested) still lingered after 5 hours, so filed "Land the stray session.rs edit..." (sonnet, Assumed) instead of asking. Spike waits on the human.
 - 2026-10-29 Round (06:01, landing, main at b1693f1): the context panel landed. The 9b90bd5 Ship Local never reloaded (release exe still 05:21, no cargo, heavy idle), so cast "Ship Local" for the panel and the checkpoint fix. session.rs holds a stale uncommitted edit from 01:18 (Stop with background work stays Working), shipped before too. Spike waits on the human.
@@ -188,5 +189,4 @@
 - The checkpoint git-init fix landed (9b90bd5): if the flake shows again, look at %TEMP% itself (antivirus, locks).
 - "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Ship Local cast at ae3d444: next round, check it reloaded (release exe time).
 - "Sessions waiting on their own checks..." landed: the next look back's silent stops count should drop.
