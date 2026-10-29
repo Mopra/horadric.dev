@@ -214,6 +214,24 @@ pub fn diff(main: &Path, into: &str, branch: &str) -> String {
     git(main, &["diff", &format!("{into}...{branch}")]).unwrap_or_default()
 }
 
+/// The files `branch` changed since it left `into`. Empty when git can not
+/// say.
+pub fn changed_since(main: &Path, into: &str, branch: &str) -> Vec<String> {
+    git(
+        main,
+        &["diff", "--name-only", &format!("{into}...{branch}")],
+    )
+    .map(|out| out.lines().map(str::to_string).collect())
+    .unwrap_or_default()
+}
+
+/// Whether merging `branch` into `into` would conflict, tried in git's
+/// object store without touching any tree. True when git can not say (an
+/// old git has no `--write-tree`), so a session is told rather than left.
+pub fn would_conflict(main: &Path, into: &str, branch: &str) -> bool {
+    git(main, &["merge-tree", "--write-tree", into, branch]).is_err()
+}
+
 /// What the main tree has checked out, for saying where a merge goes.
 pub fn checked_out(main: &Path) -> Option<String> {
     git(main, &["rev-parse", "--abbrev-ref", "HEAD"])

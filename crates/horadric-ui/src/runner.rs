@@ -120,6 +120,11 @@ pub(super) struct State {
     ship_proposed: HashMap<String, usize>,
     /// Auto mode merges that came out, back from the threads that ran them.
     landed: Arc<Mutex<Vec<Landed>>>,
+    /// Running sessions whose worktree conflicts with what just landed, found
+    /// by a thread, not yet told.
+    drifted: Arc<Mutex<Vec<Drift>>>,
+    /// Notices found, waiting for their session to end its turn.
+    drift_waiting: Vec<Drift>,
     /// Held by the thread merging into a project, so two fast forwards of
     /// one `main` never race.
     merging: HashMap<String, Arc<Mutex<()>>>,
@@ -252,8 +257,17 @@ pub(super) enum Menu {
     Ship(String),
 }
 
+/// A running session that `main` moved under, and what to type to it.
+struct Drift {
+    session: String,
+    text: String,
+}
+
 /// A finished quest's merge by itself, done on its thread.
 struct Landed {
+    /// The files the branch changed, read before the merge since a merged
+    /// branch no longer differs from `into`.
+    files: Vec<String>,
     key: String,
     /// The project's folder, where its list is.
     dir: PathBuf,
@@ -1455,6 +1469,7 @@ impl App {
         }
         self.announce_tasks(said);
         self.deliver_tells();
+        self.deliver_drift();
         self.tasks.busy = false;
         if closed {
             self.reconcile(false);
@@ -1965,12 +1980,14 @@ impl App {
         let notify = self.notify.0 as isize;
         let checks = file::checks(&dir);
         std::thread::spawn(move || {
+            let files = crate::worktree::changed_since(Path::new(&w.main), &into, &w.branch);
             let landing = {
                 let _one = one.lock();
                 crate::worktree::land(&w, &into, &checks)
             };
             if let Ok(mut l) = landed.lock() {
                 l.push(Landed {
+                    files,
                     key,
                     dir,
                     w,
@@ -2046,6 +2063,7 @@ impl App {
             crate::worktree::remove(l.w);
             match l.landing {
                 Landing::Merged(checked) => {
+                    self.warn_drifted(&main, &branch, &l.into, l.files);
                     self.count_red(&l.key, false, None);
                     self.merged(&main, &branch, &l.title, &l.into, &checked)
                 }
@@ -2103,6 +2121,77 @@ impl App {
                         title: l.title,
                     });
                 }
+            }
+        }
+    }
+
+    /// After `branch` landed in `into` with `files` changed, looks for the
+    /// other worktree sessions of the repository at `main` whose branch
+    /// changed some of them and would now conflict, on a thread since each
+    /// look runs git. Those hear of it between turns, so a conflict is
+    /// resolved while it is small. No overlap, no message.
+    fn warn_drifted(&mut self, main: &Path, branch: &str, into: &str, files: Vec<String>) {
+        if files.is_empty() {
+            return;
+        }
+        let project = folder_key(&main.to_string_lossy());
+        let running: Vec<(String, String)> = match self.shared.registry.lock() {
+            Ok(r) => r
+                .all()
+                .filter_map(|s| {
+                    let w = s.worktree.as_ref()?;
+                    (w.branch != branch && folder_key(&w.main) == project)
+                        .then(|| (s.id.clone(), w.branch.clone()))
+                })
+                .collect(),
+            Err(_) => return,
+        };
+        if running.is_empty() {
+            return;
+        }
+        let drifted = Arc::clone(&self.tasks.drifted);
+        let (main, into) = (main.to_path_buf(), into.to_string());
+        std::thread::spawn(move || {
+            for (session, theirs) in running {
+                let mine = crate::worktree::changed_since(&main, &into, &theirs);
+                let both = horadric_core::worktree::overlap(&files, &mine);
+                if both.is_empty() || !crate::worktree::would_conflict(&main, &into, &theirs) {
+                    continue;
+                }
+                if let Ok(mut d) = drifted.lock() {
+                    d.push(Drift {
+                        session,
+                        text: horadric_core::worktree::main_moved(&into, &both),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Types each notice of a moved `main` into its session once that is
+    /// live and has ended its turn. Only into a terminal that is there, so
+    /// it never starts an agent; a session that is gone hears nothing.
+    pub(super) fn deliver_drift(&mut self) {
+        let fresh = self
+            .tasks
+            .drifted
+            .lock()
+            .map(|mut d| std::mem::take(&mut *d))
+            .unwrap_or_default();
+        self.tasks.drift_waiting.extend(fresh);
+        let waiting = std::mem::take(&mut self.tasks.drift_waiting);
+        for d in waiting {
+            if !self.live(&d.session) {
+                continue;
+            }
+            if self.phase_of(&d.session) != Some(Phase::Done) {
+                self.tasks.drift_waiting.push(d);
+                continue;
+            }
+            if let Some(c) = self.consoles.get(&d.session) {
+                c.write(d.text.into_bytes());
+                self.tasks.enters.push((d.session.clone(), Instant::now()));
+                self.tasks.nudged.remove(&d.session);
             }
         }
     }
