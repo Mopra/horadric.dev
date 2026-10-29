@@ -804,7 +804,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let top = base.join("main");
         std::fs::create_dir_all(&top).unwrap();
-        run(&top, &["init", "-q", "-b", "main"]);
+        run(&top, &["init", "-q", "--template=", "-b", "main"]);
         run(&top, &["config", "user.email", "t@example.com"]);
         run(&top, &["config", "user.name", "t"]);
         std::fs::write(top.join("a.txt"), "one\n").unwrap();
@@ -925,7 +925,7 @@ mod tests {
         let top = std::env::temp_dir().join(format!("horadric-changes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&top);
         std::fs::create_dir_all(top.join("src")).unwrap();
-        run(&top, &["init", "-q"]);
+        run(&top, &["init", "-q", "--template="]);
         run(&top, &["config", "user.email", "t@example.com"]);
         run(&top, &["config", "user.name", "t"]);
         std::fs::write(top.join("src/a.txt"), "one\ntwo\n").unwrap();

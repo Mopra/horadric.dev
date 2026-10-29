@@ -705,7 +705,8 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&dir).unwrap();
-        git(&dir, &["init", "-q"], &[], None).unwrap();
+        // An empty template copies no hook samples, which can fail on Windows.
+        git(&dir, &["init", "-q", "--template="], &[], None).unwrap();
         dir
     }
 

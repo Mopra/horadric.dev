@@ -1071,7 +1071,7 @@ pub(crate) mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let r = Repo(dir);
-            r.git(&["init", "-q", "-b", "main"]);
+            r.git(&["init", "-q", "--template=", "-b", "main"]);
             r.git(&["config", "user.name", "T"]);
             r.git(&["config", "user.email", "t@t"]);
             r.git(&["config", "core.autocrlf", "false"]);
