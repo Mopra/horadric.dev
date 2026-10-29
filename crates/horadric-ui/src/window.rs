@@ -1838,6 +1838,7 @@ impl Cluster {
                                 self.key.clone(),
                                 dir.clone(),
                                 node.path.clone(),
+                                None,
                             ));
                         }
                     }

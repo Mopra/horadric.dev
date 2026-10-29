@@ -1137,6 +1137,55 @@ impl Console {
         v.gutter = r.gutter;
     }
 
+    /// Scrolls a view to line `line` (1 based), a few rows under the top,
+    /// and selects it for a moment so the eye finds it: a path link such
+    /// as `src/main.rs:42` opens here.
+    pub fn go_to_line(self: &Arc<Self>, line: usize, notify: Notify) {
+        let Some(view) = &self.view else { return };
+        let Ok(v) = view.lock() else { return };
+        let Ok(mut s) = self.screen.lock() else {
+            return;
+        };
+        let n = line.saturating_sub(1).min(v.lines.len().saturating_sub(1));
+        let Some(first) = v.rows.iter().position(|r| r.line == n) else {
+            return;
+        };
+        let last = first + v.rows[first..].iter().take_while(|r| r.line == n).count() - 1;
+        let history = s.term.grid().history_size();
+        let top = first.saturating_sub(3).min(history);
+        s.term.scroll_display(Scroll::Bottom);
+        s.term.scroll_display(Scroll::Delta((history - top) as i32));
+        let cols = self.size().cols as usize;
+        let at = |row: usize, col: usize| {
+            Point::new(
+                Line(row as i32 - history as i32),
+                Column(col.min(cols.saturating_sub(1))),
+            )
+        };
+        let mut sel = Selection::new(SelectionType::Lines, at(first, v.gutter), Side::Left);
+        sel.update(at(last, cols), Side::Right);
+        s.term.selection = Some(sel);
+        let lit = s.term.selection.as_ref().and_then(|x| x.to_range(&s.term));
+        drop(s);
+        drop(v);
+        self.dirty.store(true, Ordering::Release);
+        let (me, notify) = (Arc::clone(self), waker(notify));
+        post(notify, Note::Output, self.serial);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(1600));
+            let Ok(mut s) = me.screen.lock() else { return };
+            let now = s.term.selection.as_ref().and_then(|x| x.to_range(&s.term));
+            // A selection the human made meanwhile is theirs to keep.
+            if now.is_some() && now == lit {
+                s.term.selection = None;
+                drop(s);
+                if !me.dirty.swap(true, Ordering::AcqRel) {
+                    post(notify, Note::Output, me.serial);
+                }
+            }
+        });
+    }
+
     /// Scrolls a view `cols` cells sideways, never past the start of its
     /// lines or past where the longest one ends. True when it moved.
     pub fn scroll_sideways(&self, cols: isize) -> bool {

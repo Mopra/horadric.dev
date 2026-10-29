@@ -27,15 +27,22 @@ pub(super) fn act(key: &str, a: Act) {
     match a {
         Act::Copy(t) => clipboard::set_text(&t),
         Act::Link(url) => app::push(Input::Link(url)),
-        Act::Path(path, _line) => {
+        Act::Path(path, line) => {
             if let Some((project, dir)) = with(key, |c| (c.key.clone(), c.dir.clone())) {
                 let (full, rel) = flow::project_path(&dir, &path);
                 match rel {
-                    Some(rel) => app::push(Input::View(project, dir, rel)),
+                    Some(rel) => {
+                        app::push(Input::View(project, dir, rel, line.map(|n| n as usize)))
+                    }
                     None => {
                         if let (Some(parent), Some(name)) = (full.parent(), full.file_name()) {
                             let name = name.to_string_lossy().into_owned();
-                            app::push(Input::View(project, parent.to_path_buf(), name));
+                            app::push(Input::View(
+                                project,
+                                parent.to_path_buf(),
+                                name,
+                                line.map(|n| n as usize),
+                            ));
                         }
                     }
                 }

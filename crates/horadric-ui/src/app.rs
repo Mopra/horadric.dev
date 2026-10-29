@@ -423,8 +423,8 @@ pub(crate) enum Input {
     Browser(String),
     /// A file in a files tile clicked: show it on the stage beside the
     /// sessions of the project with this key. The folder, then the file's
-    /// path inside it.
-    View(String, PathBuf, String),
+    /// path inside it, then the line to show, 1 based, when one was named.
+    View(String, PathBuf, String, Option<usize>),
     /// Ctrl+Shift+B in a pane: the browser pane of the project on the
     /// stage, opened or given the keyboard.
     Browse,
@@ -9182,7 +9182,12 @@ impl App {
                 Input::Swap(a, b) => self.swap(&a, &b),
                 Input::Reorder(key, shown) => self.reorder(&key, &shown),
                 Input::Browser(id) => self.show_browsers(&id),
-                Input::View(key, dir, rel) => self.open_view(&key, &dir, &rel),
+                Input::View(key, dir, rel, line) => {
+                    self.open_view(&key, &dir, &rel);
+                    if let (Some(line), Some(view)) = (line, self.views.get(&key)) {
+                        view.go_to_line(line, self.notify);
+                    }
+                }
                 Input::CloseView(serial) => self.close_view(serial),
                 Input::Hand(id, text) => {
                     if let Some(stage) = &self.stage {
