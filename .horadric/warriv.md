@@ -13,6 +13,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (hourly, main at c50feab, only my memory since the v0.35.0 ship): app.rs and window.rs sit uncommitted, a live session's. Spike waits on the human, no aim. Nothing to do.
 - 2026-10-29 Round (hourly, main at 39aff70, only my memory since the v0.35.0 ship): spike waits on the human, no aim. Nothing to do.
 - 2026-10-29 Round (human left, main at 804bd7b): the human cut v0.35.0 (11:19), no code since cb21098, so nothing to ship. Spike waits on the human, no aim. Nothing to do.
 - 2026-10-29 Round (hourly, main at c19b79b, only my memory since the cb21098 ship): spike waits on the human, no aim. Nothing to do.
