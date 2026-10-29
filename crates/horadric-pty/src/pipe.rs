@@ -33,7 +33,7 @@ use windows::Win32::System::Pipes::{
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{CreateEventW, GetCurrentProcess, OpenProcessToken};
-use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
 use crate::wide;
 
@@ -206,6 +206,12 @@ impl Pipe {
     /// Server side: drops the client, which makes its reads and ours end.
     pub fn disconnect(&self) {
         let _ = unsafe { DisconnectNamedPipe(self.raw()) };
+    }
+
+    /// Makes a read or write another thread is waiting in on this handle
+    /// fail now. One that starts after this is not touched.
+    pub fn cancel(&self) {
+        let _ = unsafe { CancelIoEx(self.raw(), None) };
     }
 
     fn raw(&self) -> HANDLE {

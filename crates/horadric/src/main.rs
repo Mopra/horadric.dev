@@ -26,6 +26,8 @@ mod google;
 mod guard;
 #[cfg(windows)]
 mod headless_debug;
+#[cfg(windows)]
+mod headless_host_debug;
 mod heavy;
 mod hook;
 #[cfg(windows)]
@@ -194,6 +196,9 @@ fn main() -> ExitCode {
         // Hidden: for checking the headless protocol against the real CLI.
         #[cfg(windows)]
         Some("headless-debug") => headless_debug::run(&args[1..]),
+        // Hidden: a headless session in a host, detached and attached again.
+        #[cfg(windows)]
+        Some("headless-host-debug") => headless_host_debug::run(&args[1..]),
         #[cfg(windows)]
         Some("guard") => guard::run(&args[1..]),
         #[cfg(windows)]
@@ -217,7 +222,7 @@ fn main() -> ExitCode {
         Some("setup") => setup::run(&args[1..]),
         #[cfg(windows)]
         Some("runestep") => runestep::run(&args[1..]),
-        Some("host") => host(),
+        Some("host") => host(args.get(1).map(String::as_str)),
         Some("hooks") => hooks(args.get(1).map(String::as_str)),
         #[cfg(windows)]
         Some("explorer") => explorer_command(args.get(1).map(String::as_str)),
@@ -311,11 +316,26 @@ fn running() -> bool {
 /// that started it reads it.
 ///
 /// [`Spec`]: horadric_pty::host::Spec
-fn host() -> Result<(), String> {
+///
+/// `horadric host --headless` holds a headless Claude session instead, as
+/// the [`HeadlessSpec`] on stdin says.
+///
+/// [`HeadlessSpec`]: horadric_pty::headless_host::HeadlessSpec
+fn host(mode: Option<&str>) -> Result<(), String> {
     let mut json = Vec::new();
     std::io::stdin()
         .read_to_end(&mut json)
         .map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    if mode == Some("--headless") {
+        let spec: horadric_pty::headless_host::HeadlessSpec =
+            serde_json::from_slice(&json).map_err(|e| format!("host: {e}"))?;
+        return horadric_pty::headless_host::serve_headless(spec)
+            .map_err(|e| format!("could not start claude: {e}"));
+    }
+    if let Some(other) = mode {
+        return Err(format!("host: unknown mode `{other}`"));
+    }
     let spec: horadric_pty::host::Spec =
         serde_json::from_slice(&json).map_err(|e| format!("host: {e}"))?;
     horadric_pty::host::serve(spec).map_err(|e| format!("could not start the agent: {e}"))

@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -63,7 +64,7 @@ const STDERR_KEPT: usize = 40;
 const STDERR_WAIT: Duration = Duration::from_millis(500);
 
 /// What [`Headless::start_with`] may add to a plain start.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Options {
     /// The `claude.exe` to run. Found with [`claude_exe`] when None.
     pub program: Option<PathBuf>,
@@ -236,6 +237,25 @@ impl Headless {
         self.child
             .as_mut()
             .is_some_and(|c| matches!(c.try_wait(), Ok(None)))
+    }
+
+    /// claude.exe's exit code, once it has ended.
+    pub fn exit_code(&mut self) -> Option<u32> {
+        let status = self.child.as_mut()?.try_wait().ok()??;
+        Some(status.code().map_or(1, |c| c as u32))
+    }
+
+    /// Ends claude.exe and everything it started, now. [`Drop`] gives it a
+    /// grace period first; this is for when that has run out.
+    pub fn kill(&mut self) {
+        if let Some(job) = &self.job {
+            unsafe {
+                let _ = TerminateJobObject(HANDLE(job.as_raw_handle()), 1);
+            }
+        }
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+        }
     }
 
     /// The last lines claude.exe wrote to stderr, oldest first. Its errors

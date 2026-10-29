@@ -13,6 +13,8 @@
 mod conpty;
 #[cfg(windows)]
 pub mod headless;
+#[cfg(windows)]
+pub mod headless_host;
 #[cfg(any(windows, unix))]
 pub mod host;
 #[cfg(windows)]

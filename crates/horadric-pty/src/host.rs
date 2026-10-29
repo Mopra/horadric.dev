@@ -287,77 +287,11 @@ pub struct Attached {
 }
 
 impl Remote {
-    /// Starts a host running `exe host` and connects to it. The host
-    /// leaves this process's job when it may, and has no console of its
-    /// own, so it outlives this process whatever ends it.
+    /// Starts a host running `exe host` and connects to it, as `launch`
+    /// says.
     pub fn start(exe: &Path, spec: &Spec, job: &str) -> io::Result<Attached> {
-        let command = || {
-            let mut c = std::process::Command::new(exe);
-            c.arg("host")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped());
-            // Not the caller's folder, which the host would keep from being
-            // deleted for as long as the session runs.
-            if let Some(dir) = exe.parent() {
-                c.current_dir(dir);
-            }
-            c
-        };
-        let mut child = spawn_detached(command)?;
         let json = serde_json::to_vec(spec).map_err(io::Error::other)?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(&json)?;
-        }
-        let failed = |child: &mut std::process::Child| {
-            let mut why = String::new();
-            if let Some(mut e) = child.stderr.take() {
-                let _ = e.read_to_string(&mut why);
-            }
-            let why = why.trim();
-            io::Error::other(if why.is_empty() {
-                "the session host ended at once".to_string()
-            } else {
-                why.to_string()
-            })
-        };
-        let deadline = Instant::now() + START;
-        loop {
-            match Remote::attach(&spec.pipe, job) {
-                Ok(a) => {
-                    reap(child);
-                    return Ok(a);
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    // Connected, then lost: the host failed to start its
-                    // program and said why.
-                    let _ = wait_for(&mut child, Duration::from_secs(2));
-                    return Err(match child.try_wait() {
-                        Ok(Some(_)) => failed(&mut child),
-                        // Alive but not a host this UI can use: it must not
-                        // run on with an agent nobody sees.
-                        _ => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            e
-                        }
-                    });
-                }
-            }
-            if let Ok(Some(_)) = child.try_wait() {
-                return Err(failed(&mut child));
-            }
-            if Instant::now() > deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "the session host did not answer",
-                ));
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
+        launch(exe, &["host"], &json, || Remote::attach(&spec.pipe, job))
     }
 
     /// Connects to the host serving `pipe`. NotFound when there is none.
@@ -461,6 +395,85 @@ impl Incoming {
                 Ok(n) => self.decoder.push(&self.buf[..n]),
             }
         }
+    }
+}
+
+/// Starts `exe args` as a host, hands it `json` on stdin, and calls
+/// `connect` until the host answers: its result, or why the host did not
+/// start. The host leaves this process's job when it may, and has no
+/// console of its own, so it outlives this process whatever ends it.
+/// `connect` says NotFound while there is no host to connect to yet.
+pub(crate) fn launch<T>(
+    exe: &Path,
+    args: &[&str],
+    json: &[u8],
+    connect: impl Fn() -> io::Result<T>,
+) -> io::Result<T> {
+    let command = || {
+        let mut c = std::process::Command::new(exe);
+        c.args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        // Not the caller's folder, which the host would keep from being
+        // deleted for as long as the session runs.
+        if let Some(dir) = exe.parent() {
+            c.current_dir(dir);
+        }
+        c
+    };
+    let mut child = spawn_detached(command)?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(json)?;
+    }
+    let failed = |child: &mut std::process::Child| {
+        let mut why = String::new();
+        if let Some(mut e) = child.stderr.take() {
+            let _ = e.read_to_string(&mut why);
+        }
+        let why = why.trim();
+        io::Error::other(if why.is_empty() {
+            "the session host ended at once".to_string()
+        } else {
+            why.to_string()
+        })
+    };
+    let deadline = Instant::now() + START;
+    loop {
+        match connect() {
+            Ok(a) => {
+                reap(child);
+                return Ok(a);
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                // Connected, then lost: the host failed to start its
+                // program and said why.
+                let _ = wait_for(&mut child, Duration::from_secs(2));
+                return Err(match child.try_wait() {
+                    Ok(Some(_)) => failed(&mut child),
+                    // Alive but not a host this UI can use: it must not
+                    // run on with an agent nobody sees.
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        e
+                    }
+                });
+            }
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            return Err(failed(&mut child));
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the session host did not answer",
+            ));
+        }
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
