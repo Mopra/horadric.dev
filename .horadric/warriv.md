@@ -13,6 +13,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (08:28, human left, main at cb21098): the human's two ship commits (6d1ba48, cb21098) were built and reloaded at 08:13, so main is shipped. Spike waits on the human, no aim. Nothing to do.
 - 2026-10-29 Round (hourly, main at 0a0c1bf, only my memory since the ae3d444 ship): spike waits on the human, no aim. Nothing to do.
 - 2026-10-29 Round (06:36, human left, main at 21cc39b): the ae3d444 Ship Local built 06:35 and reloaded fine. Only the spike left, waiting on the human. Nothing to do.
 - 2026-10-29 Round (landing, main at ae3d444): the stray session.rs edit landed and the main checkout is clean, so cast "Ship Local". Spike waits on the human.
