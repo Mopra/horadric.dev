@@ -8647,21 +8647,9 @@ impl App {
         for input in inputs {
             match input {
                 Input::Toggle(hwnd) => {
-                    // A town with no sessions and no browser has no tiles to
-                    // fold, so its header opens the stage with its browser
-                    // pane. Once it has a tile, a tab's included, the header
-                    // folds it as every project's does.
-                    let bare = self
-                        .clusters
-                        .iter()
-                        .find(|c| c.hwnd.0 as isize == hwnd && town::is(&c.key))
-                        .filter(|c| c.tileless())
-                        .map(|c| c.key.clone());
-                    if let Some(key) = bare {
-                        self.open_web(&key, None);
-                    } else if let Some(c) =
-                        self.clusters.iter_mut().find(|c| c.hwnd.0 as isize == hwnd)
-                    {
+                    // Tristram's header folds like every project's, empty or
+                    // not. Its browser is in the right click menu.
+                    if let Some(c) = self.clusters.iter_mut().find(|c| c.hwnd.0 as isize == hwnd) {
                         c.collapsed = !c.collapsed;
                         c.fit();
                         relayout = true;

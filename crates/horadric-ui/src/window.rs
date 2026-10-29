@@ -561,11 +561,6 @@ impl Cluster {
         }
     }
 
-    /// No session and no tab: nothing for the header to fold.
-    pub fn tileless(&self) -> bool {
-        self.sessions().is_empty() && self.pages().is_empty()
-    }
-
     pub fn files_collapsed(&self) -> bool {
         self.files.borrow().collapsed
     }
