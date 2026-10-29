@@ -78,7 +78,7 @@ fn ask_main_tree(dir: &Path) -> Option<Place> {
 }
 
 /// Adds a worktree for a new session named `name` in `dir`, on a new
-/// branch from what the main tree has checked out, with a range of ports
+/// branch from the project's main branch (see [`main_branch`]), with a range of ports
 /// that `taken` does not use. None when the project does not want one and
 /// it was not `asked` for; an error when git refused, and the session then
 /// shares the main tree.
@@ -105,7 +105,12 @@ pub fn add(dir: &Path, name: &str, taken: &[Ports], asked: bool) -> Result<Optio
             .is_ok()
     });
     let path = worktree::folder(&place.top, &branch);
-    git(top, &["worktree", "add", "-b", &branch, &path])?;
+    let mut args = vec!["worktree", "add", "-b", &branch, &path];
+    let start = main_branch(top);
+    if let Some(start) = &start {
+        args.push(start);
+    }
+    git(top, &args)?;
     if horadric_hooks::dev() {
         mark_dev_made(Path::new(&path));
     }
@@ -238,6 +243,52 @@ pub fn checked_out(main: &Path) -> Option<String> {
         .ok()
         .map(|b| b.trim().to_string())
         .filter(|b| !b.is_empty() && b != "HEAD")
+}
+
+/// The branch a quest's worktree starts from: the one [`land`] merges it
+/// back into, what the main tree `main` has checked out. While the main
+/// tree is on no branch, as in the middle of a `pull --rebase`, its HEAD
+/// is some other commit, so then the remote's default branch, or `main`
+/// or `master`. None when there is none of those either.
+pub fn main_branch(main: &Path) -> Option<String> {
+    let remote = git(
+        main,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .ok();
+    let has = |b: &str| {
+        git(
+            main,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{b}"),
+            ],
+        )
+        .is_ok()
+    };
+    pick_main_branch(checked_out(main).as_deref(), remote.as_deref(), has)
+}
+
+/// [`main_branch`] from what git said: the branch `checked_out`, the
+/// remote's default as `origin/main`, and which local branches there are.
+fn pick_main_branch(
+    checked_out: Option<&str>,
+    remote: Option<&str>,
+    has: impl Fn(&str) -> bool,
+) -> Option<String> {
+    if let Some(b) = checked_out {
+        return Some(b.to_string());
+    }
+    let remote = remote
+        .map(str::trim)
+        .and_then(|r| r.strip_prefix("origin/"));
+    remote
+        .into_iter()
+        .chain(["main", "master"])
+        .find(|b| has(b))
+        .map(str::to_string)
 }
 
 /// The file `rel` as the last commit in `dir` has it, None where it has
@@ -749,6 +800,52 @@ mod tests {
         assert_eq!(mine.trim_end(), "mine");
         let _ = git(&top, &["worktree", "remove", "--force", &path]);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_main_branch_is_what_is_checked_out_else_a_default() {
+        let has = |b: &str| ["main", "trunk"].contains(&b);
+        assert_eq!(
+            pick_main_branch(Some("dev"), None, has).as_deref(),
+            Some("dev")
+        );
+        assert_eq!(
+            pick_main_branch(None, Some("origin/trunk\n"), has).as_deref(),
+            Some("trunk")
+        );
+        assert_eq!(
+            pick_main_branch(None, Some("origin/gone"), has).as_deref(),
+            Some("main")
+        );
+        assert_eq!(pick_main_branch(None, None, |_| false), None);
+    }
+
+    #[test]
+    fn a_quest_starts_from_the_main_branch_not_a_detached_head() {
+        let top = std::env::temp_dir().join(format!("horadric-start-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&top);
+        std::fs::create_dir_all(&top).unwrap();
+        run(&top, &["init", "-q", "-b", "main"]);
+        run(&top, &["config", "user.email", "t@example.com"]);
+        run(&top, &["config", "user.name", "t"]);
+        run(&top, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        // As a `pull --rebase` leaves it midway: HEAD on a commit of its own.
+        run(&top, &["checkout", "-q", "--detach"]);
+        run(&top, &["commit", "-q", "--allow-empty", "-m", "stray"]);
+        assert_eq!(main_branch(&top).as_deref(), Some("main"));
+
+        let place = main_tree(&top).expect("a main tree");
+        let path = worktree::folder(&place.top, "quest");
+        let _ = std::fs::remove_dir_all(&path);
+        let start = main_branch(&top).unwrap();
+        run(
+            &top,
+            &["worktree", "add", "-q", "-b", "quest", &path, &start],
+        );
+        let log = git(Path::new(&path), &["log", "--format=%s"]).unwrap();
+        assert_eq!(log.trim(), "first");
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = std::fs::remove_dir_all(&top);
     }
 
     #[test]
