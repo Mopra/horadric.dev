@@ -13,6 +13,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (14:18, human left, main at 8482f58): the human's session did the headless spike itself (97a9e62 to 8482f58), so noted that on the spike quest. Code since the v0.35.0 ship (Tristram header, quieter typing, Folio) is unshipped, but six Folio files sit uncommitted from that live session, so held "Ship Local". No aim.
 - 2026-10-29 Round (hourly, main at c50feab, only my memory since the v0.35.0 ship): app.rs and window.rs sit uncommitted, a live session's. Spike waits on the human, no aim. Nothing to do.
 - 2026-10-29 Round (hourly, main at 39aff70, only my memory since the v0.35.0 ship): spike waits on the human, no aim. Nothing to do.
 - 2026-10-29 Round (human left, main at 804bd7b): the human cut v0.35.0 (11:19), no code since cb21098, so nothing to ship. Spike waits on the human, no aim. Nothing to do.
@@ -194,6 +195,7 @@
 
 ## Open
 - The checkpoint git-init fix landed (9b90bd5): if the flake shows again, look at %TEMP% itself (antivirus, locks).
-- "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
+- "Headless sessions: the spike" was done by the human's session outside the log (noted on the quest); it stays [!] until they close it.
+- Ship Local held at 8482f58 for uncommitted Folio files (folio.rs, headless.rs, folio_look.rs, headless_debug.rs): cast once they are committed and no cargo runs.
 - Once quests run with a pack, the pack comparison resumes by itself.
 - "Sessions waiting on their own checks..." landed: the next look back's silent stops count should drop.
