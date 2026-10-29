@@ -12,6 +12,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (landing, main at e9c4701, checks green): the worktree fix landed and the last ship came up, so cast "Ship Local" (5 quests since). The slim CLAUDE.md fix-up stopped undone waiting on its own checks in heavy: no tell, noted it.
 - 2026-10-29 "Fix the merge of land-the-worktree-fix-from-fix-the-merge" stopped undone: conflict resolved, its clippy and tests queued in heavy. Own work, no tell, noted it.
 - 2026-10-29 "Land the worktree fix..." ended with a real conflict in worktree.rs against 6576c9d. Gave its fix-up Model: sonnet and told it to keep both features, flake rerun only.
 - 2026-10-29 "Slim CLAUDE.md to under 120 lines" landed red on the checkpoint git-init temp flake (third time today), its branch is docs only. Gave the fix-up Model: haiku over the opus escalation and a note to cherry-pick 40f9f09 and rerun only.
@@ -172,8 +173,7 @@
 - 2026-10-06 to 2026-10-10 Mostly idle rounds (no quests, no aim). Settings window series landed 10-07 and shipped public as v0.16.0; Mac quests shipped as v0.17.0; v0.18.0 and v0.19.0 were cut by hand.
 
 ## Open
-- Check "Land the worktree fix from fix-the-merge-of-start-a-quest-s-worktree" lands and deletes that branch. If memory commits keep racing landings, file a quest for the landing to rebase again when main moved.
 - Check "Make checkpoint tests' git init not copy hook templates" lands; if the flake shows again after, look at %TEMP% itself (antivirus, locks).
 - "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Check the Ship Local cast at 6576c9d came up (reload.log); ship again once the worktree fix and checkpoint flake fix land.
+- Check the Ship Local cast at e9c4701 came up (reload.log); ship again once the checkpoint flake fix and the slim CLAUDE.md fix-up land.
