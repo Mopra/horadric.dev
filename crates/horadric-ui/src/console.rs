@@ -179,6 +179,9 @@ pub struct Console {
     /// The project whose Arcane Sanctuary this pane shows, which also has
     /// no program and draws no grid: the graph covers it.
     pub sky: Option<String>,
+    /// The project whose Folio this pane shows, a headless Claude's
+    /// conversation drawn by [`crate::folio`], with no program of its own.
+    pub folio: Option<String>,
     pub screen: Mutex<Screen>,
     size: Mutex<GridSize>,
     /// Set by the reader when output arrived and no wake message is queued
@@ -656,6 +659,7 @@ impl Console {
             view: None,
             web: None,
             sky: None,
+            folio: None,
             screen: Mutex::new(Screen {
                 term: Term::new(config, &size, events),
                 parser: Processor::new(),
@@ -787,6 +791,7 @@ impl Console {
             remote: None,
             web: None,
             sky: None,
+            folio: None,
             view: Some(Mutex::new(View {
                 path,
                 stamp: None,
@@ -843,6 +848,14 @@ impl Console {
         Console::blank(id, serial, None, Some(key))
     }
 
+    /// A console with no program for the Folio of project `key`, drawn by
+    /// [`crate::folio`] where a grid would be.
+    pub fn folio(id: String, serial: usize, key: String) -> Arc<Console> {
+        let mut c = Console::blank_bare(id, serial, None, None, None);
+        c.folio = Some(key);
+        Arc::new(c)
+    }
+
     fn blank(id: String, serial: usize, web: Option<String>, sky: Option<String>) -> Arc<Console> {
         Console::blank_with(id, serial, web, sky, None)
     }
@@ -861,6 +874,16 @@ impl Console {
         sky: Option<String>,
         far: Option<FarSink>,
     ) -> Arc<Console> {
+        Arc::new(Console::blank_bare(id, serial, web, sky, far))
+    }
+
+    fn blank_bare(
+        id: String,
+        serial: usize,
+        web: Option<String>,
+        sky: Option<String>,
+        far: Option<FarSink>,
+    ) -> Console {
         let size = GridSize {
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
@@ -876,13 +899,14 @@ impl Console {
         } else {
             Config::default()
         };
-        Arc::new(Console {
+        Console {
             id,
             serial,
             remote: None,
             view: None,
             web,
             sky,
+            folio: None,
             screen: Mutex::new(Screen {
                 term: Term::new(config, &size, events),
                 parser: Processor::new(),
@@ -900,7 +924,7 @@ impl Console {
             typed: Mutex::new(None),
             tap: Mutex::new(Tap::default()),
             far,
-        })
+        }
     }
 
     /// Output a brother streamed, drawn as a host's would be. `reset`

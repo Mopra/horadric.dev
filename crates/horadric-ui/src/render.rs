@@ -124,6 +124,10 @@ const SPARK_REACH: f32 = 7.0;
 /// A spark going once round the lamp.
 const SPARK_ORBIT: Duration = Duration::from_millis(2400);
 
+/// The Folio's button, a chat bubble. Its tooltip says it is an
+/// experiment.
+const FOLIO_ICON: char = '\u{E8F2}';
+
 /// How many shapes make one soft edge. Fewer shows as bands.
 const BLUR_STEPS: usize = 8;
 
@@ -1171,6 +1175,9 @@ impl Painter<'_> {
         }
         if let Some(shell) = &scene.layout.shell {
             self.add(gpu, m, shell, scene.button(Hit::Shell), theme::SHELL_ICON);
+        }
+        if let Some(folio) = &scene.layout.folio {
+            self.add(gpu, m, folio, scene.button(Hit::Folio), FOLIO_ICON);
         }
         if let (Some(l), Some(t)) = (&scene.layout.tasks, &scene.tasks) {
             self.tasks(gpu, m, scene, l, t);

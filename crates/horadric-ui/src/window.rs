@@ -1503,7 +1503,7 @@ impl Cluster {
                             app::push(Input::TileMenu(s.id.clone()));
                         }
                     }
-                    Hit::Header | Hit::Add | Hit::Shell | Hit::Page(_) => {
+                    Hit::Header | Hit::Add | Hit::Shell | Hit::Folio | Hit::Page(_) => {
                         app::push(Input::ProjectMenu(self.key.clone()))
                     }
                     Hit::Task(i) | Hit::TaskApprove(i) => {
@@ -1744,6 +1744,7 @@ impl Cluster {
             Hit::New => app::push(Input::New(self.key.clone())),
             Hit::Add => app::push(Input::Add(self.key.clone())),
             Hit::Shell => app::push(Input::Shell(Some(self.key.clone()))),
+            Hit::Folio => app::push(Input::Folio(self.key.clone())),
             Hit::Header => app::push(Input::Toggle(self.hwnd.0 as isize)),
             Hit::FilesHeader => {
                 {

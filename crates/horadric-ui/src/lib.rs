@@ -43,6 +43,7 @@ pub mod columns;
 pub mod field;
 pub mod files;
 pub mod find;
+pub mod folio_look;
 pub mod frame;
 pub mod glide;
 pub mod highlight;
@@ -160,6 +161,8 @@ mod link_interop;
 // The memory's thread, shared with the Linux node.
 #[cfg(windows)]
 pub use horadric_memory::service as memory;
+#[cfg(windows)]
+mod folio;
 #[cfg(windows)]
 mod menu;
 #[cfg(windows)]

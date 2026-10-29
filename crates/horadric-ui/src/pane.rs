@@ -79,6 +79,7 @@ use crate::app::{self, Input, PaneAsk};
 use crate::clipboard;
 use crate::console::{Console, GridSize};
 use crate::field::{self, Field};
+use crate::folio;
 use crate::frame::{Decoration, Stroke};
 use crate::glyphs::{
     self, Bar, BarEdit, BarHit, BarLayout, Buttons, CellSize, FindBar, GridTarget, Header,
@@ -383,7 +384,7 @@ impl Pane {
         });
         // A browser pane's page is a window inside it, which its own
         // drawing must leave alone.
-        let clip = if pane.console.web.is_some() {
+        let clip = if pane.console.web.is_some() || pane.console.folio.is_some() {
             WS_CLIPCHILDREN
         } else {
             WINDOW_STYLE(0)
@@ -406,7 +407,10 @@ impl Pane {
             )?;
             pane.hwnd = hwnd;
             // A dropped path would have nowhere to go in a file.
-            DragAcceptFiles(hwnd, !pane.console.is_view() && pane.console.sky.is_none());
+            DragAcceptFiles(hwnd, pane.is_session());
+        }
+        if let Some(key) = &pane.console.folio {
+            folio::attach(key, &pane.shared, pane.hwnd);
         }
         if let Some(key) = &pane.console.web {
             let (bounds, zoom) = pane.page_place();
@@ -744,7 +748,10 @@ impl Pane {
     /// A session's own pane, not a file view, a browser pane or a
     /// sanctuary.
     fn is_session(&self) -> bool {
-        !self.console.is_view() && self.console.web.is_none() && self.console.sky.is_none()
+        !self.console.is_view()
+            && self.console.web.is_none()
+            && self.console.sky.is_none()
+            && self.console.folio.is_none()
     }
 
     /// Runs the vsync clock while the sanctuary's layout settles, and
@@ -799,6 +806,20 @@ impl Pane {
     /// pane's page to fill its glass.
     fn fit_grid(&self) {
         if self.console.sky.is_some() {
+            return;
+        }
+        if let Some(key) = &self.console.folio {
+            // Inside the glass's rim, which stays the pane's to draw.
+            let [left, top, right, bottom] = self.glass();
+            let scale = self.dpi_now() as f32 / 96.0;
+            let px = |v: f32| (v * scale).round() as i32;
+            let glass = RECT {
+                left: px(left + 1.0),
+                top: px(top + 1.0),
+                right: px(right - 1.0),
+                bottom: px(bottom - 1.0),
+            };
+            folio::place(key, glass);
             return;
         }
         if let Some(key) = &self.console.web {
@@ -895,6 +916,9 @@ impl Pane {
         }
         if let Some(key) = &self.console.sky {
             detail = sanctuary::detail(key);
+        }
+        if let Some(key) = &self.console.folio {
+            detail = folio::detail(key);
         }
         let (session_phase, cast) = self
             .shared
@@ -1006,7 +1030,7 @@ impl Pane {
         };
         // A browser pane's grid is empty and unseen, but a page smaller
         // than the glass, or the tab strip over it, would show its cursor.
-        if self.console.web.is_some() || self.console.sky.is_some() {
+        if !self.is_session() && !self.console.is_view() {
             frame.caret = None;
             frame.fills.clear();
             frame.runs.clear();
@@ -1494,6 +1518,15 @@ impl Pane {
             self.search_char(c, mods);
             return;
         }
+        if let Some(key) = &self.console.folio {
+            match keys::char_action(c, mods) {
+                CharAction::NewShell => app::push(Input::Shell(None)),
+                CharAction::Browse => app::push(Input::Browse),
+                CharAction::Sanctuary => app::push(Input::Sanctuary),
+                _ => folio::char(key, c, mods),
+            }
+            return;
+        }
         if self.console.sky.is_some() {
             match keys::char_action(c, mods) {
                 CharAction::NewShell => app::push(Input::Shell(None)),
@@ -1541,7 +1574,7 @@ impl Pane {
                 Chord::Zoom => self.tell_stage(WM_PANE_ZOOM),
                 Chord::Focus(dir) => self.move_focus(dir),
                 Chord::Font(step) => app::push(Input::Font(step)),
-                Chord::Find if self.console.sky.is_some() => {}
+                Chord::Find if self.console.sky.is_some() || self.console.folio.is_some() => {}
                 Chord::Find => self.open_search(),
             }
             return true;
@@ -1550,6 +1583,9 @@ impl Pane {
         // Alt+F4 closes the stage. Windows passes it up from a child.
         if mods.alt && vk == VK_F4 {
             return false;
+        }
+        if let Some(key) = &self.console.folio {
+            return folio::key(key, vk.0, mods);
         }
         if mods.shift && (vk == VK_PRIOR || vk == VK_NEXT) {
             let scroll = if vk == VK_PRIOR {
@@ -1635,6 +1671,10 @@ impl Pane {
 
     /// The cross: a file view or a browser pane closes, a session ends.
     fn close(&self) {
+        if let Some(key) = &self.console.folio {
+            app::push(Input::CloseFolio(key.clone()));
+            return;
+        }
         if let Some(key) = &self.console.sky {
             app::push(Input::CloseSky(key.clone()));
             return;
@@ -2585,6 +2625,10 @@ impl Pane {
 
     fn on_wheel(&self, wparam: WPARAM, lparam: LPARAM) {
         let raw = ((wparam.0 >> 16) & 0xffff) as i16 as i32;
+        if let Some(key) = &self.console.folio {
+            folio::wheel(key, raw);
+            return;
+        }
         if let Some(key) = &self.console.sky {
             // The wheel's point is on the screen, the zoom's in the glass.
             let mut p = POINT {
@@ -2766,6 +2810,10 @@ impl Pane {
                 if let Some(key) = &self.console.sky {
                     sanctuary::step(key);
                 }
+                self.invalidate();
+                Some(LRESULT(0))
+            }
+            folio::WM_FOLIO_REFRESH => {
                 self.invalidate();
                 Some(LRESULT(0))
             }

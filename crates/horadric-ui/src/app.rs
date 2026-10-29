@@ -367,6 +367,8 @@ const VIEW: &str = "view:";
 pub(crate) const WEB: &str = "web:";
 /// The start of an Arcane Sanctuary's id, before its project key.
 const SKY: &str = "sky:";
+/// The start of a Folio's id, before its project key.
+const FOLIO: &str = "folio:";
 pub(crate) const MARGIN_DIP: i32 = 12;
 pub(crate) const GAP_DIP: i32 = 12;
 /// The narrowest the stage gets when it gives way to a new column.
@@ -433,6 +435,11 @@ pub(crate) enum Input {
     Sanctuary,
     /// A sanctuary's cross: close the one of the project with this key.
     CloseSky(String),
+    /// The chat button under a project's tiles: its Folio, a headless
+    /// Claude drawn as a chat, opened or given the keyboard.
+    Folio(String),
+    /// A Folio's cross: end the one of the project with this key.
+    CloseFolio(String),
     /// A web address Ctrl+clicked in a pane: to the browser pane of the
     /// project on the stage when it has one, otherwise to the user's own
     /// browser.
@@ -640,6 +647,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     ask::register_class()?;
     menu::register_class()?;
     caption::register_class()?;
+    crate::folio::register_class()?;
     dialog::register_class()?;
     toast::register_class()?;
     catchup::register_class()?;
@@ -914,6 +922,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             views: HashMap::new(),
             webs: HashMap::new(),
             skies: HashMap::new(),
+            folios: HashMap::new(),
             glow_stamp: 0,
             web_ask: None,
             pane_ask: None,
@@ -3533,6 +3542,9 @@ struct App {
     /// Arcane Sanctuaries, at most one per project, by project key. What
     /// they show is `sanctuary`'s and outlives the pane.
     skies: HashMap<String, Arc<Console>>,
+    /// Folios, the experimental headless chats, at most one per project,
+    /// by project key. The session behind each is `folio`'s.
+    folios: HashMap<String, Arc<Console>>,
     /// The glows' stamp the sanctuaries were last drawn at.
     glow_stamp: u64,
     /// What to ask for which project's browser pane, once out of the borrow.
@@ -3991,6 +4003,7 @@ impl App {
             .or_else(|| self.views.values().find(|v| v.id == id))
             .or_else(|| self.webs.values().find(|v| v.id == id))
             .or_else(|| self.skies.values().find(|v| v.id == id))
+            .or_else(|| self.folios.values().find(|v| v.id == id))
             .or_else(|| self.far.consoles.get(id))
     }
 
@@ -7064,6 +7077,9 @@ impl App {
         if let Some(sky) = self.skies.get(key) {
             ids.push(sky.id.clone());
         }
+        if let Some(folio) = self.folios.get(key) {
+            ids.push(folio.id.clone());
+        }
         ids
     }
 
@@ -7537,6 +7553,7 @@ impl App {
             })
             .or_else(|| id.starts_with(WEB).then(|| "Browser".to_string()))
             .or_else(|| id.starts_with(SKY).then(|| "Arcane Sanctuary".to_string()))
+            .or_else(|| id.starts_with(FOLIO).then(|| "Folio".to_string()))
             .unwrap_or_else(|| id.to_string())
     }
 
@@ -7654,6 +7671,35 @@ impl App {
                 stage.refresh(sky.serial);
             }
         }
+    }
+
+    /// Shows the project's Folio on the stage beside its sessions, with
+    /// the keyboard, starting its headless Claude when it has none yet.
+    fn open_folio(&mut self, key: &str) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        let id = format!("{FOLIO}{key}");
+        if !self.folios.contains_key(key) {
+            let serial = self.next_serial;
+            self.next_serial += 1;
+            crate::folio::open(key, &dir);
+            self.folios.insert(
+                key.to_string(),
+                Console::folio(id.clone(), serial, key.to_string()),
+            );
+        }
+        if self.fill_stage(key) {
+            if let Some(stage) = &self.stage {
+                stage.focus_session(&id);
+            }
+        }
+    }
+
+    fn close_folio(&mut self, key: &str) {
+        self.folios.remove(key);
+        self.sync_stage();
+        crate::folio::close(key);
     }
 
     fn close_sky(&mut self, key: &str) {
@@ -7976,11 +8022,11 @@ impl App {
                 .as_ref()
                 .and_then(|s| s.rect())
                 .or(self.stage_rect),
-            on_stage: self
-                .stage
-                .as_ref()
-                .and_then(|s| s.active())
-                .filter(|id| !id.starts_with(VIEW) && !id.starts_with(WEB) && !id.starts_with(SKY)),
+            on_stage: self.stage.as_ref().and_then(|s| s.active()).filter(|id| {
+                ![VIEW, WEB, SKY, FOLIO]
+                    .iter()
+                    .any(|prefix| id.starts_with(prefix))
+            }),
             grids: self
                 .shared
                 .orders
@@ -8091,6 +8137,8 @@ impl App {
     fn freeze(&mut self) {
         self.save();
         self.cut_wakes_short();
+        // A Folio's claude.exe has no host to run on in yet.
+        crate::folio::close_all();
         // Nothing brings an attached pane back, so its host must not
         // outlive this app. The session itself runs on in the daemon.
         if let Ok(r) = self.shared.registry.lock() {
@@ -8771,6 +8819,8 @@ impl App {
                     }
                 }
                 Input::CloseSky(key) => self.close_sky(&key),
+                Input::Folio(key) => self.open_folio(&key),
+                Input::CloseFolio(key) => self.close_folio(&key),
                 Input::WebTab(key, step) => web::tab(&key, step),
                 Input::WebAsk(key, what) => {
                     self.web_ask = Some((key, what));

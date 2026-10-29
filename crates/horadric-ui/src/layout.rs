@@ -161,6 +161,9 @@ pub struct ClusterLayout {
     /// The small button at its right that opens a plain terminal in the
     /// project. None when collapsed.
     pub shell: Option<Rect>,
+    /// The small button between the two that opens the project's Folio,
+    /// the experimental headless chat. None when collapsed.
+    pub folio: Option<Rect>,
     /// The tasks tile, between the plus and the files. None when the
     /// cluster is collapsed or its project has no folder.
     pub tasks: Option<TasksLayout>,
@@ -271,6 +274,7 @@ pub fn cluster(
     let mut page_rects = Vec::new();
     let mut add = None;
     let mut shell = None;
+    let mut folio = None;
     let mut tasks_layout = None;
     let mut tome_layout = None;
     let mut files_layout = None;
@@ -284,9 +288,10 @@ pub fn cluster(
             page_rects.push(Rect::new(m.pad, y, full, m.tile_h));
             y += m.tile_h + m.gap;
         }
-        let wide = full - m.shell_w - m.gap;
+        let wide = full - 2.0 * (m.shell_w + m.gap);
         add = Some(Rect::new(m.pad, y, wide, m.add_h));
-        shell = Some(Rect::new(m.pad + wide + m.gap, y, m.shell_w, m.add_h));
+        folio = Some(Rect::new(m.pad + wide + m.gap, y, m.shell_w, m.add_h));
+        shell = Some(Rect::new(m.pad + full - m.shell_w, y, m.shell_w, m.add_h));
         y += m.add_h + m.gap;
         if let Some((approve, warriv)) = tasks {
             let l = tasks_tile(m, y, approve, warriv);
@@ -339,6 +344,7 @@ pub fn cluster(
         pages: page_rects,
         add,
         shell,
+        folio,
         tasks: tasks_layout,
         tome: tome_layout,
         files: files_layout,
@@ -519,6 +525,8 @@ pub enum Hit {
     Add,
     /// The terminal button beside the bottom plus.
     Shell,
+    /// The Folio button between them.
+    Folio,
     FilesHeader,
     /// A row of the files tile, counted from the top one showing.
     File(usize),
@@ -554,6 +562,7 @@ impl Hit {
                 | Hit::Page(_)
                 | Hit::Add
                 | Hit::Shell
+                | Hit::Folio
                 | Hit::TasksMode
                 | Hit::TasksAdd
                 | Hit::TasksGive
@@ -626,6 +635,9 @@ pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
     }
     if layout.shell.is_some_and(|a| a.contains(x, y)) {
         return Hit::Shell;
+    }
+    if layout.folio.is_some_and(|a| a.contains(x, y)) {
+        return Hit::Folio;
     }
     if let Some(t) = &layout.tasks {
         if t.mode.contains(x, y) {
@@ -2967,16 +2979,20 @@ mod tests {
         assert_eq!(l.tiles[1].y - l.tiles[0].bottom(), m.gap);
         let add = l.add.unwrap();
         let shell = l.shell.unwrap();
+        let folio = l.folio.unwrap();
         assert_eq!(add.y - l.tiles[2].bottom(), m.gap);
-        // Side by side, together as wide as a tile.
+        // Side by side, together as wide as a tile, the Folio between.
         assert_eq!(shell.y, add.y);
-        assert_eq!(shell.x - add.right(), m.gap);
+        assert_eq!(folio.y, add.y);
+        assert_eq!(folio.x - add.right(), m.gap);
+        assert_eq!(shell.x - folio.right(), m.gap);
         assert_eq!(shell.right(), l.tiles[2].right());
         assert_eq!(add.x, l.tiles[2].x);
         assert_eq!(l.size.1, add.bottom() + m.pad);
         assert_eq!(hit(&l, 40.0, l.tiles[2].y + 1.0), Hit::Tile(2));
         assert_eq!(hit(&l, 20.0, add.y + 1.0), Hit::Add);
         assert_eq!(hit(&l, shell.x + 2.0, shell.y + 1.0), Hit::Shell);
+        assert_eq!(hit(&l, folio.x + 2.0, folio.y + 1.0), Hit::Folio);
         assert_eq!(hit(&l, 20.0, m.pad + 1.0), Hit::Header);
         assert_eq!(hit(&l, m.width - m.pad - 2.0, m.pad + 1.0), Hit::New);
         assert_eq!(hit(&l, 1.0, 1.0), Hit::Nothing);
