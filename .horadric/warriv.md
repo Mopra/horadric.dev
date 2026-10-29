@@ -13,6 +13,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 "Sessions waiting on their own checks are not nudged..." stopped undone while two of its own agents run (the bug it fixes). Own work, no tell, noted it.
 - 2026-10-29 Look back (10 done, 5 merged, 5 not, 17 Warriv wakes): conflicts were landing quests in runner.rs/worktree.rs side by side (new rule, the drift notice has landed); red tests were the checkpoint temp flake (quest running, told it of a second form); the 8 silent stops were sessions waiting on their own heavy checks, so filed "Sessions waiting on their own checks are not nudged or counted as stopped" (opus). The day gave 4 lore notes (#558 to #561, #561 replaces #30).
 - 2026-10-29 Round (landing, main at 918796d, slim CLAUDE.md landed): Ship Local at e9c4701 came up (reload.log). No ship for a docs only landing; waits for the checkpoint flake fix.
 - 2026-10-29 Round (landing, main at e9c4701, checks green): the worktree fix landed and the last ship came up, so cast "Ship Local" (5 quests since). The slim CLAUDE.md fix-up stopped undone waiting on its own checks in heavy: no tell, noted it.
