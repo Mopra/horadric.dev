@@ -9107,6 +9107,9 @@ impl App {
                         self.open_web(&key, None);
                     }
                 }
+                // A link may come from a reply a hostile page wrote, and
+                // Windows runs whatever it opens, so only an address goes.
+                Input::Link(url) if !horadric_core::markdown::is_web_link(&url) => {}
                 Input::Link(url) => match self.stage.as_ref().map(|s| s.project()) {
                     Some(key) if self.webs.contains_key(&key) => self.open_web_tab(&key, &url),
                     _ => watch::open_link(&crate::links::Target::Web(url), None),

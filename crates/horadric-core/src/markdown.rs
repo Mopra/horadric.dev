@@ -10,6 +10,7 @@
 //! every delta, and it takes any prefix of a reply: an unclosed fence is a
 //! code block that runs to the end, an unclosed `**` is literal text.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 /// How deep quotes, lists and links may nest before the rest is plain text,
@@ -85,7 +86,8 @@ pub enum Style {
     Italic,
     Strike,
     Code,
-    /// A `[text](url)`, a `<url>` or a bare `http(s)://` address.
+    /// A `[text](url)`, a `<url>` or a bare `http(s)://` address. The url
+    /// always passes [`is_web_link`]: a link to anything else is plain text.
     Link(String),
     /// A file path such as `crates/x/src/y.rs:120`, for the UI to open.
     Path {
@@ -119,6 +121,18 @@ impl Inline {
             });
         }
     }
+}
+
+/// Whether a link may be handed to the system to open: a web or mail
+/// address. A reply is written by a model that may have read a hostile
+/// page, and Windows runs a path, a share or an `ms-` handler on open, so
+/// a click on any other target must do nothing.
+pub fn is_web_link(url: &str) -> bool {
+    let b = url.as_bytes();
+    let scheme = ["https://", "http://", "mailto:"]
+        .iter()
+        .any(|s| b.len() > s.len() && b[..s.len()].eq_ignore_ascii_case(s.as_bytes()));
+    scheme && !url.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// Parses a whole reply, or any prefix of one, into blocks.
@@ -632,6 +646,7 @@ fn tokenize(s: &str, depth: usize) -> Toks {
     let mut toks = Vec::new();
     let mut delims = Vec::new();
     let mut buf = String::new();
+    let mut closes = HashMap::new();
     let mut i = 0;
     while i < b.len() {
         match b[i] {
@@ -686,7 +701,7 @@ fn tokenize(s: &str, depth: usize) -> Toks {
             b'[' | b'!' if depth < MAX_DEPTH => {
                 let open = if b[i] == b'!' { i + 1 } else { i };
                 if b.get(open) == Some(&b'[') {
-                    if let Some((text, url, end)) = link_at(s, open) {
+                    if let Some((text, url, end)) = link_at(s, open, &mut closes) {
                         flush(&mut buf, &mut toks);
                         toks.push(Tok::Link(Box::new(tokenize(&s[text], depth + 1)), url));
                         i = end;
@@ -770,39 +785,88 @@ fn delim(s: &str, i: usize, n: usize, ch: u8) -> Delim {
     }
 }
 
-/// `[text](url "title")` from the `[` at `open`: the text's range, the url
-/// and where the link ends. None leaves the bracket as literal text.
-fn link_at(s: &str, open: usize) -> Option<(Range<usize>, String, usize)> {
+/// The `]` that closes the `[` at `open`, by way of `closes`: every bracket
+/// a scan passes learns its close too, and a scan steps over a pair it
+/// already knows and stops at a bracket known never to close. A streamed
+/// reply full of unmatched brackets is so read once per parse, not once
+/// per bracket.
+fn close_of(s: &str, open: usize, closes: &mut HashMap<usize, Option<usize>>) -> Option<usize> {
+    if let Some(&known) = closes.get(&open) {
+        return known;
+    }
     let b = s.as_bytes();
+    let mut stack = vec![open];
     let mut j = open + 1;
-    let mut depth = 1;
-    let close = loop {
-        match *b.get(j)? {
+    while j < b.len() {
+        match b[j] {
             b'\\' => j += 2,
             b'`' => {
                 let n = run(b, j, b'`');
                 j = find_run(b, j + n, n).map_or(j + n, |c| c + n);
             }
-            b'[' => {
-                depth += 1;
-                j += 1;
-            }
+            b'[' => match closes.get(&j) {
+                Some(Some(c)) => j = c + 1,
+                Some(None) => break,
+                None => {
+                    stack.push(j);
+                    j += 1;
+                }
+            },
             b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    break j;
+                let o = stack
+                    .pop()
+                    .expect("the scan ends when its own bracket closes");
+                closes.insert(o, Some(j));
+                if stack.is_empty() {
+                    return Some(j);
                 }
                 j += 1;
             }
             _ => j += 1,
         }
-    };
+    }
+    for o in stack {
+        closes.insert(o, None);
+    }
+    None
+}
+
+/// Where a link's destination or title ends: at `stop`, or None when a
+/// bracket or the end comes first. Stopping at a bracket keeps the scans
+/// from each `](` apart, so "[](" repeated is read once, not once per link.
+fn scan_to(b: &[u8], mut k: usize, stop: impl Fn(u8, &mut usize) -> bool) -> Option<usize> {
+    let mut parens = 0usize;
+    loop {
+        let c = *b.get(k)?;
+        if c == b'\\' && b.get(k + 1).is_some_and(|n| n.is_ascii_punctuation()) {
+            k += 2;
+            continue;
+        }
+        if matches!(c, b'[' | b']') {
+            return None;
+        }
+        if stop(c, &mut parens) {
+            return Some(k);
+        }
+        k += 1;
+    }
+}
+
+/// `[text](url "title")` from the `[` at `open`: the text's range, the url
+/// and where the link ends. None leaves the bracket as literal text.
+fn link_at(
+    s: &str,
+    open: usize,
+    closes: &mut HashMap<usize, Option<usize>>,
+) -> Option<(Range<usize>, String, usize)> {
+    let b = s.as_bytes();
+    let close = close_of(s, open, closes)?;
     if b.get(close + 1) != Some(&b'(') {
         return None;
     }
     let mut k = skip_space(b, close + 2);
     let url = if b.get(k) == Some(&b'<') {
-        let end = k + 1 + s[k + 1..].find(['>', '\n'])?;
+        let end = scan_to(b, k + 1, |c, _| matches!(c, b'>' | b'\n'))?;
         if b[end] != b'>' {
             return None;
         }
@@ -811,27 +875,24 @@ fn link_at(s: &str, open: usize) -> Option<(Range<usize>, String, usize)> {
         url
     } else {
         let from = k;
-        let mut parens = 0usize;
-        while let Some(&c) = b.get(k) {
-            match c {
-                b'\\' if b.get(k + 1).is_some_and(|n| n.is_ascii_punctuation()) => k += 1,
-                b'(' => parens += 1,
-                b')' if parens == 0 => break,
-                b')' => parens -= 1,
-                c if c.is_ascii_whitespace() => break,
-                _ => {}
+        k = scan_to(b, k, |c, parens| match c {
+            b'(' => {
+                *parens += 1;
+                false
             }
-            k += 1;
-        }
+            b')' if *parens == 0 => true,
+            b')' => {
+                *parens -= 1;
+                false
+            }
+            c => c.is_ascii_whitespace(),
+        })?;
         s[from..k].to_string()
     };
     k = skip_space(b, k);
     if let Some(&quote @ (b'"' | b'\'' | b'(')) = b.get(k) {
         let end = if quote == b'(' { b')' } else { quote };
-        k += 1;
-        while *b.get(k)? != end {
-            k += if b[k] == b'\\' { 2 } else { 1 };
-        }
+        k = scan_to(b, k + 1, |c, _| c == end)?;
         k = skip_space(b, k + 1);
     }
     if b.get(k) != Some(&b')') {
@@ -931,6 +992,11 @@ fn split_path(s: &str, in_text: bool) -> Option<(String, Option<u32>)> {
         }
     }
     let pb = p.as_bytes();
+    // `\\host\share` and `//host` reach out to another machine when opened,
+    // which a reply has no business making the UI do.
+    if pb.len() >= 2 && matches!(pb[0], b'/' | b'\\') && matches!(pb[1], b'/' | b'\\') {
+        return None;
+    }
     let drive = pb.len() > 2
         && pb[0].is_ascii_alphabetic()
         && pb[1] == b':'
@@ -1046,7 +1112,9 @@ fn emit(mut t: Toks, out: &mut Inline) {
                 if out.text.len() == start {
                     out.text.push_str(&url);
                 }
-                out.span(start, Style::Link(url));
+                if is_web_link(&url) {
+                    out.span(start, Style::Link(url));
+                }
             }
             Tok::Url(url) => {
                 out.text.push_str(&url);
@@ -1707,20 +1775,26 @@ mod tests {
 
     #[test]
     fn link_angle_destination() {
-        assert_eq!(links(&para("[a](<my file.md>)")), vec![("a", "my file.md")]);
+        assert_eq!(
+            links(&para("[a](<https://x.dev/a?b>)")),
+            vec![("a", "https://x.dev/a?b")]
+        );
     }
 
     #[test]
     fn link_with_bold_text() {
-        let p = para("[**big** link](u)");
+        let p = para("[**big** link](https://u.dev)");
         assert_eq!(p.text, "big link");
-        assert_eq!(links(&p), vec![("big link", "u")]);
+        assert_eq!(links(&p), vec![("big link", "https://u.dev")]);
         assert_eq!(under(&p, &Style::Bold), vec!["big"]);
     }
 
     #[test]
     fn link_with_brackets_in_text() {
-        assert_eq!(links(&para("[a [b] c](u)")), vec![("a [b] c", "u")]);
+        assert_eq!(
+            links(&para("[a [b] c](https://u.dev)")),
+            vec![("a [b] c", "https://u.dev")]
+        );
     }
 
     #[test]
@@ -1733,7 +1807,10 @@ mod tests {
 
     #[test]
     fn image_shows_as_link() {
-        assert_eq!(links(&para("![logo](a.png)")), vec![("logo", "a.png")]);
+        assert_eq!(
+            links(&para("![logo](https://x.dev/a.png)")),
+            vec![("logo", "https://x.dev/a.png")]
+        );
     }
 
     #[test]
@@ -1754,6 +1831,50 @@ mod tests {
     fn emphasis_does_not_cross_link() {
         let p = para("*a [b* c](u)");
         assert!(under(&p, &Style::Italic).is_empty());
+    }
+
+    #[test]
+    fn only_web_and_mail_links_link() {
+        for target in [
+            "C:\\x\\a.exe",
+            "\\\\host\\share\\y",
+            "ms-msdt:/id PCWDiagnostic",
+            "ms-settings:",
+            "file:///C:/x/a.exe",
+            "javascript:alert(1)",
+            "search-ms:query=x",
+            "a.exe",
+            "https:",
+            "http://",
+            "<https://a b>",
+        ] {
+            let p = para(&format!("[docs]({target})"));
+            assert!(links(&p).is_empty(), "{target}");
+        }
+        let p = para("[x](C:\\x\\a.exe) after");
+        assert_eq!(p.text, "x after");
+        assert!(p.spans.is_empty());
+        for target in ["https://a.dev", "HTTP://a.dev", "mailto:me@a.dev"] {
+            assert_eq!(links(&para(&format!("[t]({target})")))[0].1, target);
+        }
+    }
+
+    #[test]
+    fn web_link_check() {
+        assert!(is_web_link("https://a.dev/x"));
+        assert!(is_web_link("Mailto:a@b.c"));
+        for url in [
+            "https://",
+            "ms-msdt:x",
+            "C:\\a.exe",
+            "\\\\h\\s",
+            "https://a.dev/\u{0}",
+            "https://a b",
+            " https://a.dev",
+            "xhttps://a.dev",
+        ] {
+            assert!(!is_web_link(url), "{url}");
+        }
     }
 
     // Autolinks
@@ -1916,6 +2037,21 @@ mod tests {
         ] {
             assert!(paths(&para(text)).is_empty(), "{text}");
         }
+    }
+
+    #[test]
+    fn share_paths_are_not_paths() {
+        for text in [
+            "`\\\\host\\share\\a.rs`",
+            "`//host/share/a.rs`",
+            "`\\/host/a.rs`",
+            "`\\\\?\\C:\\a.rs`",
+            "see //host/share/a.rs:3 now",
+            "see \\\\\\\\host\\\\a.rs:3 now",
+        ] {
+            assert!(paths(&para(text)).is_empty(), "{text}");
+        }
+        assert_eq!(paths(&para("`/etc/a.rs`"))[0].1, "/etc/a.rs");
     }
 
     // Quotes
@@ -2273,6 +2409,45 @@ mod tests {
         check_all("1234567890. x");
         check_all("\r");
         check_all("\t-\tx\n\t\t-\ty");
+    }
+
+    /// Each input would take seconds if every bracket rescanned the rest.
+    #[test]
+    fn unmatched_brackets_parse_in_linear_time() {
+        let n = 200_000;
+        let inputs = [
+            "[".repeat(n),
+            "[a".repeat(n / 2),
+            "[a](".repeat(n / 4),
+            "[](".repeat(n / 3),
+            "[a](b".repeat(n / 5),
+            "[a](b \"".repeat(n / 7),
+            "[a](<".repeat(n / 5),
+            "](".repeat(n / 2),
+            "[[a]".repeat(n / 4),
+            "[".repeat(n / 2) + &"]".repeat(n / 2),
+            "[x](".repeat(n / 8) + &")".repeat(n / 8),
+        ];
+        for src in &inputs {
+            let t = std::time::Instant::now();
+            check_all(src);
+            let took = t.elapsed();
+            assert!(
+                took < std::time::Duration::from_secs(2),
+                "{:?} took {took:?}",
+                &src[..8]
+            );
+        }
+    }
+
+    #[test]
+    fn brackets_still_match_after_unmatched_ones() {
+        let p = para("[[a](https://a.dev) [b [c](https://c.dev)");
+        assert_eq!(
+            links(&p),
+            vec![("a", "https://a.dev"), ("c", "https://c.dev")]
+        );
+        assert_eq!(p.text, "[a [b c");
     }
 
     #[test]
