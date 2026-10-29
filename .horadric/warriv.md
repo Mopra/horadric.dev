@@ -10,6 +10,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 "Tell running quests when main moves" stopped undone but waits on its own clippy, queued in heavy. No tell, noted it.
 - 2026-10-29 Round (landing, main at 088c162, "Find merge hotspot files" landed): held Ship Local, since "Land a quest while its session is still alive" landed red and its merge fix-up still runs. Nothing else to do.
 - 2026-10-29 "Land a quest while its session is still alive" landed red on the same checkpoint git-init temp flake as the worktree quest. Told its fix-up to cherry-pick and rerun only, and filed "Make checkpoint tests' git init not copy hook templates" (haiku, --template=).
 - 2026-10-29 Round (landing, main at b593561, "Catch duplicate scope" landed): gave Model lines to the three unstarted quests (Tell running quests: sonnet, Context panel: opus, Slim CLAUDE.md: sonnet). Held Ship Local: one landing, four quests in flight on runner and worktree code; ship once the merge fix-up and "Land a quest while its session is still alive" land.
