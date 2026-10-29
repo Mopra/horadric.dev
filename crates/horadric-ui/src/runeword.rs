@@ -891,6 +891,29 @@ impl App {
         out
     }
 
+    /// Why a ship stone of this label may not be cast in the project with
+    /// this key now: another ship session of it is open, other than `on`.
+    /// Warriv, a toast and a click on the stone all come through here, so
+    /// one ship at a time holds whoever asks.
+    fn ship_refused(&self, key: &str, label: &str, on: Option<&str>) -> Option<String> {
+        if label != ship::STONE && label != ship::PUBLIC {
+            return None;
+        }
+        let r = self.shared.registry.lock().ok()?;
+        let open = r.all().find(|s| {
+            project_key(s) == key
+                && Some(s.id.as_str()) != on
+                && (ship::is_ship_session(&s.id)
+                    || s.runeword
+                        .as_ref()
+                        .is_some_and(|w| w.name == ship::STONE || w.name == ship::PUBLIC))
+        })?;
+        Some(format!(
+            "{} is open already, and its build carries all of main. Close it to ship again.",
+            open.label()
+        ))
+    }
+
     /// Whether a stone can be cast on this session: one Horadric runs, not
     /// a plain terminal, a background session or a paused one.
     fn castable(&self, id: &str) -> bool {
@@ -944,6 +967,11 @@ impl App {
         let Some(stone) = self.stone(key, label) else {
             return;
         };
+        if let Some(why) = self.ship_refused(key, label, on) {
+            self.toasts
+                .show(Kind::Failed, &format!("Cannot cast {label}"), &why);
+            return;
+        }
         let runes = stone.runes().map(<[Rune]>::to_vec).unwrap_or_default();
         match on {
             Some(id) if self.runeword_of(id).is_some() && runeword::only_keys(&runes) => {
@@ -995,7 +1023,8 @@ impl App {
             .err()
             .or_else(|| {
                 (!self.has_stone(&key, label)).then(|| "the project has no such stone".into())
-            });
+            })
+            .or_else(|| self.ship_refused(&key, label, None));
         if let Some(why) = refused {
             eprintln!("horadric: not casting \"{label}\": {why}");
             self.toasts

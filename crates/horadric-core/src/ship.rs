@@ -14,6 +14,16 @@ pub const STONE: &str = "Ship Local";
 /// offered.
 pub const PUBLIC: &str = "Ship Public";
 
+/// Whether the session `id` is one a ship stone started, by the id a
+/// cast gives it. One ship carries everything on `main`, so while one is
+/// open, whether still building or waiting on the human, another cast
+/// only builds and reloads the same work again.
+pub fn is_ship_session(id: &str) -> bool {
+    [STONE, PUBLIC]
+        .iter()
+        .any(|stone| crate::session::made_from(id, &crate::tasks::slug(stone)))
+}
+
 /// Fewer landed quests are not worth a reload.
 pub const AT_LEAST: usize = 3;
 
@@ -288,6 +298,15 @@ pub fn fix_rollback(log: &str) -> FixUp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_ship_session_is_known_by_its_id() {
+        assert!(super::is_ship_session("ship-local-3600"));
+        assert!(super::is_ship_session("ship-local-3600-2"));
+        assert!(super::is_ship_session("ship-public-71"));
+        assert!(!super::is_ship_session("ship-local-docs-71"));
+        assert!(!super::is_ship_session("warriv-71"));
+    }
+
     use super::*;
 
     const KEY: &str = "c:/users/me/code/horadric.dev";
