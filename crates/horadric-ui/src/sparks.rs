@@ -33,8 +33,11 @@ pub const RUNE_RISE: Duration = Duration::from_millis(400);
 pub const RUNE_COOL: Duration = Duration::from_millis(2000);
 /// Every rune flaring as a turn ends, and cooling.
 pub const SEAL: Duration = Duration::from_millis(1600);
-/// A typed letter cooling from white hot to its own colour.
-pub const BURN: Duration = Duration::from_millis(850);
+/// A typed letter cooling from warm to its own colour. Short: a burn that
+/// lingers pulls the eye off the words being written.
+pub const BURN: Duration = Duration::from_millis(450);
+/// The most a typed letter's warmth covers its own colour.
+const BURN_COVER: f32 = 0.5;
 /// A typed letter's slices settling into its cell. Short: a letter still
 /// in pieces for long reads as a key that did not take.
 pub const GATHER: Duration = Duration::from_millis(240);
@@ -52,7 +55,7 @@ pub const SHARDS: usize = 6;
 /// Runes cut round the rim this far apart, in DIPs.
 const RUNE_GAP: f32 = 56.0;
 /// How faintly a rune shows while no light is on it.
-const RUNE_CUT: f32 = 0.16;
+const RUNE_CUT: f32 = 0.07;
 /// The ring coming and going as work starts and stops.
 const RING_FADE: Duration = Duration::from_millis(600);
 /// The summoning cube giving way to the agent's first screen.
@@ -367,15 +370,10 @@ impl Orbit {
     }
 }
 
-/// The colour of a letter `heat` from white hot down to cold, and how much
-/// of it covers the letter's own colour.
+/// The colour of a letter `heat` from warm gold down to cold, and how much
+/// of it covers the letter's own colour. Never white hot and never all of
+/// it: typing is read while it happens.
 pub fn heat_color(heat: f32) -> Color {
-    let white = Color {
-        r: 1.0,
-        g: 0.97,
-        b: 0.88,
-        a: 1.0,
-    };
     let gold = Color {
         r: 1.0,
         g: 0.74,
@@ -389,13 +387,10 @@ pub fn heat_color(heat: f32) -> Color {
         a: 1.0,
     };
     let h = heat.clamp(0.0, 1.0);
-    let c = if h > 0.6 {
-        gold.mix(white, (h - 0.6) / 0.4)
-    } else {
-        ember.mix(gold, h / 0.6)
-    };
     // The last of the heat lets the letter's own colour through.
-    c.with_alpha((h / 0.35).min(1.0))
+    ember
+        .mix(gold, h)
+        .with_alpha(BURN_COVER * (h / 0.35).min(1.0))
 }
 
 /// A slice of a falling apart letter: how far it has drifted, in cells,
@@ -414,13 +409,13 @@ pub fn shard(seed: u64, slice: usize, t: f32) -> (f32, f32, f32) {
 }
 
 /// A slice of a letter gathering, `k` of the way there: ash run backwards,
-/// from a little of the way it would have drifted. It starts most of the
-/// way there and solid enough to read, since this is typing.
+/// from a little of the way it would have drifted. It starts nearly in
+/// place and nearly solid, since this is typing.
 pub fn gather(seed: u64, slice: usize, k: f32) -> (f32, f32, f32) {
     let k = k.clamp(0.0, 1.0);
     let (dx, dy, _) = shard(seed, slice, 1.0);
-    let far = 0.45 * (1.0 - motion::ease_out(k));
-    (dx * far, dy * far, 0.4 + 0.6 * motion::ease_out(k))
+    let far = 0.15 * (1.0 - motion::ease_out(k));
+    (dx * far, dy * far, 0.7 + 0.3 * motion::ease_out(k))
 }
 
 /// The stretches of a run of `len` cells starting at `col` left to draw
@@ -973,12 +968,12 @@ mod tests {
     }
 
     #[test]
-    fn heat_runs_from_white_to_ember_and_lets_go() {
+    fn heat_runs_from_gold_to_ember_and_lets_go() {
         let hot = heat_color(1.0);
         let warm = heat_color(0.5);
         let cold = heat_color(0.0);
         assert!(hot.b > warm.b && warm.g > cold.g);
-        assert_eq!(hot.a, 1.0);
+        assert_eq!(hot.a, BURN_COVER);
         assert_eq!(cold.a, 0.0);
     }
 

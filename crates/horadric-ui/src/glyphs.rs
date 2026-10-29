@@ -1688,12 +1688,9 @@ impl GridTarget {
             Lit::Cast => p.unique,
             Lit::Seal => p.done,
         };
-        let white = Color {
-            r: 1.0,
-            g: 1.0,
-            b: 1.0,
-            a: 1.0,
-        };
+        // Faint and without a halo, so the runes read as carved into the
+        // glass rather than lit on top of it.
+        const STRENGTH: f32 = 0.45;
         let line = |a: (f32, f32), b: (f32, f32), c: Color, w: f32| {
             self.brush.SetColor(&render::color(c));
             self.rt.DrawLine(
@@ -1718,14 +1715,10 @@ impl GridTarget {
                 let across = u * RUNE_H;
                 (cx + nx * up + tx * across, cy + ny * up + ty * across)
             };
-            let ink = tint(lit).mix(white, ((heat - 0.6) / 0.4).clamp(0.0, 1.0) * 0.6);
+            let ink = tint(lit).with_alpha(STRENGTH * heat);
             for stroke in sparks::RUNES[c.rune] {
                 for seg in stroke.windows(2) {
-                    let (a, b) = (place(seg[0]), place(seg[1]));
-                    if heat > 0.2 {
-                        line(a, b, ink.with_alpha(0.30 * heat), 5.0);
-                    }
-                    line(a, b, ink.with_alpha(heat), 1.4);
+                    line(place(seg[0]), place(seg[1]), ink, 1.2);
                 }
             }
         }
