@@ -100,6 +100,16 @@ pub enum Ending {
     Failed,
 }
 
+/// How the human answers a permission ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reply<'a> {
+    Allow,
+    /// Allow, and add the ask's suggested rules so it is not asked again.
+    Always,
+    /// Deny, with what Claude should do instead; empty says only no.
+    Deny(&'a str),
+}
+
 /// Something the CLI says about the session between replies.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Notice {
@@ -194,6 +204,9 @@ pub enum Block {
         /// rather than every frame.
         shown: String,
         input: serde_json::Value,
+        /// The request's `permission_suggestions`: the rules an "always"
+        /// answer adds. Null when it has none.
+        suggestions: serde_json::Value,
         state: AskState,
     },
     /// AskUserQuestion, waiting until [`Folio::answer_question`].
@@ -599,10 +612,20 @@ impl Folio {
     /// Marks an ask answered and returns the `control_response` line to
     /// write to the CLI's stdin, or None if no such ask is pending.
     pub fn answer(&mut self, request_id: &str, allow: bool) -> Option<String> {
-        let input = self.blocks.iter_mut().find_map(|b| match b {
+        let reply = if allow { Reply::Allow } else { Reply::Deny("") };
+        self.reply(request_id, reply)
+    }
+
+    /// Answers an ask as the human chose: once, always (adding the rules
+    /// its `permission_suggestions` name), or no with what to do instead.
+    /// None if no such ask is pending.
+    pub fn reply(&mut self, request_id: &str, reply: Reply) -> Option<String> {
+        let allow = !matches!(reply, Reply::Deny(_));
+        let (input, suggestions) = self.blocks.iter_mut().find_map(|b| match b {
             Block::Ask {
                 request_id: r,
                 input,
+                suggestions,
                 state,
                 ..
             } if r == request_id && *state == AskState::Waiting => {
@@ -611,11 +634,25 @@ impl Folio {
                 } else {
                     AskState::Denied
                 };
-                Some(input.clone())
+                Some((input.clone(), suggestions.clone()))
             }
             _ => None,
         })?;
-        Some(control_response(request_id, allow, input))
+        Some(match reply {
+            Reply::Allow => control_response(request_id, true, input),
+            Reply::Always => {
+                let mut response = serde_json::json!({"behavior": "allow", "updatedInput": input});
+                if suggestions.as_array().is_some_and(|a| !a.is_empty()) {
+                    response["updatedPermissions"] = suggestions;
+                }
+                control_success(request_id, response)
+            }
+            Reply::Deny(reason) if !reason.trim().is_empty() => control_success(
+                request_id,
+                serde_json::json!({"behavior": "deny", "message": reason.trim()}),
+            ),
+            Reply::Deny(_) => control_response(request_id, false, input),
+        })
     }
 
     /// Answers an AskUserQuestion: per question, in order, the labels
@@ -1503,6 +1540,7 @@ impl Folio {
                     summary,
                     tool,
                     input,
+                    suggestions: request["permission_suggestions"].clone(),
                     state: AskState::Waiting,
                 });
             }
@@ -1833,6 +1871,36 @@ mod tests {
             replies(&f),
             ["The command was refused, so out2.txt was not written."]
         );
+    }
+
+    #[test]
+    fn always_adds_the_suggested_rules_and_a_reason_goes_with_a_deny() {
+        let rules = serde_json::json!([{"type": "addRules", "behavior": "allow",
+            "rules": [{"toolName": "Bash", "ruleContent": "echo:*"}],
+            "destination": "localSettings"}]);
+        let ask = |f: &mut Folio, id: &str| {
+            f.feed(
+                &serde_json::json!({"type": "control_request", "request_id": id,
+                    "request": {"subtype": "can_use_tool", "tool_name": "Bash",
+                        "input": {"command": "echo hi"}, "tool_use_id": "t",
+                        "permission_suggestions": rules}})
+                .to_string(),
+            );
+        };
+        let mut f = Folio::new();
+        ask(&mut f, "a");
+        let v: Value = serde_json::from_str(&f.reply("a", Reply::Always).unwrap()).unwrap();
+        let r = &v["response"]["response"];
+        assert_eq!(r["behavior"], "allow");
+        assert_eq!(r["updatedInput"]["command"], "echo hi");
+        assert_eq!(r["updatedPermissions"], rules);
+
+        ask(&mut f, "b");
+        let v: Value =
+            serde_json::from_str(&f.reply("b", Reply::Deny(" use ls ")).unwrap()).unwrap();
+        assert_eq!(v["response"]["response"]["behavior"], "deny");
+        assert_eq!(v["response"]["response"]["message"], "use ls");
+        assert!(f.reply("b", Reply::Allow).is_none(), "answered once only");
     }
 
     #[test]
