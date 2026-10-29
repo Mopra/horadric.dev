@@ -1,8 +1,11 @@
 //! A finished quest merging itself into `main` in auto mode: rebased on
 //! `main` in its own worktree, the project's checks run there, and `main`
-//! fast forwarded to it. What goes wrong becomes a fix-up quest instead of
-//! a question for the human, since a worker can resolve a conflict or make
-//! a check pass. This is the part that decides; the UI runs git.
+//! fast forwarded to it, all while the quest's session is still alive. A
+//! conflict or a red check goes back to that session, which knows what it
+//! meant; only when it is gone does it become a fix-up quest for a fresh
+//! one. Never a question for the human, since a worker can resolve a
+//! conflict or make a check pass. This is the part that decides; the UI
+//! runs git.
 
 use serde_json::Value;
 
@@ -115,6 +118,108 @@ pub fn conflicted(output: &str) -> Vec<String> {
 /// How many times a merge starts over when `main` moves under it.
 pub const TRIES: usize = 3;
 
+/// The title every fix-up quest starts with.
+const FIX_UP: &str = "Fix the merge of ";
+
+/// Whether the quest `title` is a fix-up, whose session holds its
+/// project's landings while it works, so `main` does not move under the
+/// merge it is mending.
+pub fn is_fix_up(title: &str) -> bool {
+    title.starts_with(FIX_UP)
+}
+
+/// What the other side of a failed landing did, so the session that
+/// mends it knows what `main` meant and does not undo it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Theirs {
+    /// The files the rebase stopped on.
+    pub files: Vec<String>,
+    /// The subjects of the commits `main` has that the branch lacked,
+    /// newest first: those that touched `files` when any did.
+    pub subjects: Vec<String>,
+}
+
+/// How many commit subjects of the other side are named.
+const SUBJECTS_MOST: usize = 10;
+
+/// The lines `git log --format=%s` or `git diff --name-only` printed.
+pub fn lines(out: &str) -> Vec<String> {
+    out.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// `theirs` said on one line, for a session to read: what conflicted and
+/// what `into` gained. Empty when there is nothing to say.
+fn other_side(into: &str, theirs: &Theirs) -> String {
+    let mut out = Vec::new();
+    if !theirs.files.is_empty() {
+        out.push(format!("It conflicts in {}.", quoted(&theirs.files)));
+    }
+    if !theirs.subjects.is_empty() {
+        let shown = &theirs.subjects[..theirs.subjects.len().min(SUBJECTS_MOST)];
+        let more = theirs.subjects.len() - shown.len();
+        let mut said = shown
+            .iter()
+            .map(|s| format!("\"{}\"", one_line(s)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if more > 0 {
+            said.push_str(&format!(" and {more} more"));
+        }
+        out.push(format!(
+            "`{into}` gained these commits meanwhile, so keep what they meant: {said}."
+        ));
+    }
+    out.join(" ")
+}
+
+fn quoted(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What the live session of a finished quest is told when its landing
+/// failed for `why`, on one line since it is typed into its terminal: what
+/// went wrong, what the other side meant, and how to land again. None for
+/// a failure it cannot fix from its branch.
+pub fn hand_back(
+    branch: &str,
+    into: &str,
+    why: &Failure,
+    theirs: &Theirs,
+    horadric: &str,
+) -> Option<String> {
+    let what = match why {
+        Failure::Conflict => format!(
+            "Your quest did not land: rebasing `{branch}` on `{into}` conflicts, and the \
+             rebase was undone. Run `git rebase {into}` here, resolve each conflict so both \
+             sides' work stays, and `git rebase --continue`."
+        ),
+        Failure::Red(c) => format!(
+            "Your quest did not land: `{branch}` is rebased on `{into}` now, and the check \
+             `{c}` fails on it. Run it here to see why and fix it."
+        ),
+        Failure::Moved | Failure::Refused => return None,
+    };
+    let side = other_side(into, theirs);
+    let side = if side.is_empty() {
+        String::new()
+    } else {
+        format!(" {side}")
+    };
+    Some(format!(
+        "{what}{side} Then make every check in `.horadric/config.json` pass, commit, and run \
+         `{horadric} quest done \"<one short line on what you achieved>\"` again. The \
+         project's other landings wait for yours."
+    ))
+}
+
 /// How many lines of a failure's output go into the fix-up quest's notes.
 const OUTPUT_LINES: usize = 40;
 /// How long a line of that output may be.
@@ -128,9 +233,16 @@ pub struct FixUp {
 }
 
 /// The quest that makes `branch`, the finished quest `title`'s, merge
-/// into `into` after `why` stopped it, with the end of what failed in its
-/// notes.
-pub fn fix_up(title: &str, branch: &str, into: &str, why: &Failure, output: &str) -> FixUp {
+/// into `into` after `why` stopped it, with what the other side did and
+/// the end of what failed in its notes.
+pub fn fix_up(
+    title: &str,
+    branch: &str,
+    into: &str,
+    why: &Failure,
+    output: &str,
+    theirs: &Theirs,
+) -> FixUp {
     let what = match why {
         Failure::Conflict => format!("rebasing it on `{into}` conflicts"),
         Failure::Red(c) => format!("the check `{c}` fails after rebasing it on `{into}`"),
@@ -152,6 +264,10 @@ pub fn fix_up(title: &str, branch: &str, into: &str, why: &Failure, output: &str
         ),
         "The quests after the finished one wait for this one too.".to_string(),
     ];
+    let side = other_side(into, theirs);
+    if !side.is_empty() {
+        notes.push(side);
+    }
     let tail = tail(output);
     if !tail.is_empty() {
         notes.push("What failed said:".to_string());
@@ -160,7 +276,7 @@ pub fn fix_up(title: &str, branch: &str, into: &str, why: &Failure, output: &str
         notes.push("```".to_string());
     }
     FixUp {
-        title: format!("Fix the merge of {branch}"),
+        title: format!("{FIX_UP}{branch}"),
         notes: notes.join("\n"),
     }
 }
@@ -338,6 +454,7 @@ error: could not apply e36bb84... Notify natively
             "main",
             &Failure::Red("cargo test".into()),
             "running 2 tests\r\n\ntest a ... FAILED\r\n",
+            &Theirs::default(),
         );
         assert_eq!(f.title, "Fix the merge of add-the-login");
         let lines: Vec<&str> = f.notes.lines().collect();
@@ -367,7 +484,14 @@ error: could not apply e36bb84... Notify natively
 
     #[test]
     fn a_conflict_fix_up_says_so_and_needs_no_output() {
-        let f = fix_up("T", "t", "trunk", &Failure::Conflict, "");
+        let f = fix_up(
+            "T",
+            "t",
+            "trunk",
+            &Failure::Conflict,
+            "",
+            &Theirs::default(),
+        );
         assert!(f
             .notes
             .lines()
@@ -375,6 +499,56 @@ error: could not apply e36bb84... Notify natively
             .unwrap()
             .ends_with("rebasing it on `trunk` conflicts."));
         assert!(!f.notes.contains("```"));
+    }
+
+    #[test]
+    fn a_fix_up_says_what_the_other_side_did() {
+        let theirs = Theirs {
+            files: vec!["a.rs".into()],
+            subjects: vec!["Rename the thing".into()],
+        };
+        let f = fix_up("T", "t", "main", &Failure::Conflict, "", &theirs);
+        assert_eq!(
+            f.notes.lines().nth(3).unwrap(),
+            "It conflicts in `a.rs`. `main` gained these commits meanwhile, so keep what they \
+             meant: \"Rename the thing\"."
+        );
+        assert!(is_fix_up(&f.title) && !is_fix_up("Fix the login"));
+    }
+
+    #[test]
+    fn a_live_session_is_handed_its_conflict_on_one_line() {
+        let theirs = Theirs {
+            files: vec!["a.rs".into(), "b.rs".into()],
+            subjects: (0..12).map(|i| format!("c{i}")).collect(),
+        };
+        let said = hand_back("q", "main", &Failure::Conflict, &theirs, "h").unwrap();
+        assert!(!said.contains('\n'), "{said}");
+        assert!(said.starts_with("Your quest did not land: rebasing `q` on `main` conflicts"));
+        assert!(said.contains("Run `git rebase main` here"));
+        assert!(said.contains("It conflicts in `a.rs`, `b.rs`."));
+        assert!(said.contains("\"c9\" and 2 more."));
+        assert!(said.contains("run `h quest done"));
+        let red = hand_back(
+            "q",
+            "main",
+            &Failure::Red("cargo test".into()),
+            &Theirs::default(),
+            "h",
+        )
+        .unwrap();
+        assert!(red.contains("the check `cargo test` fails on it."));
+        assert!(!red.contains("gained"));
+        assert_eq!(hand_back("q", "main", &Failure::Moved, &theirs, "h"), None);
+        assert_eq!(
+            hand_back("q", "main", &Failure::Refused, &theirs, "h"),
+            None
+        );
+    }
+
+    #[test]
+    fn git_lines_skip_blanks() {
+        assert_eq!(lines("a.rs\n\n b.rs \n"), ["a.rs", "b.rs"]);
     }
 
     #[test]

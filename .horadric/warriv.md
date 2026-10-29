@@ -1,15 +1,32 @@
 # Warriv's memory
 
 ## Rules
+- A landing that fails only with "Diverging branches can't be fast-forwarded" lost a race to a commit on main (often my memory commit): file a small haiku quest to cherry-pick the branch and land it, no human needed.
 - A landing red on checkpoint's git init in %TEMP% (template hook copy) is a test flake: tell the fix-up to rerun, never to change the quest's code.
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings. Ship Public runs all three first (RELEASING.md step 2) and Ship Local does too since 5170f91; both stop on red (lore #30).
 - Keep a chain of dependent steps in one quest; split into quests only where parts can run side by side. The human finds handovers slow (lore #34).
 - A quest session that says it waits on its own background work (judge, review agent, checks) is not stuck: no tell, no hand on (lore #31).
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 - A quest I file gets an After: line for every quest whose code it calls, not only the nearest: "Backup: the Settings section" named part 2 but needed part 1, started early and blocked itself (2026-10-16).
+- A quest blocked only to ask leave to rerun checks (killed, out of memory) gets "go" from me: reruns never need the human.
+- Quests that change the landing machinery (crates/horadric-ui/src/runner.rs, worktree.rs, horadric-core merge.rs) get an After: line on each other: four ran side by side on 2026-10-28/29 and cost two conflict fix-ups and four extra fix-up quests.
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Look back (10 done, 5 merged, 5 not, 17 Warriv wakes): conflicts were landing quests in runner.rs/worktree.rs side by side (new rule, the drift notice has landed); red tests were the checkpoint temp flake (quest running, told it of a second form); the 8 silent stops were sessions waiting on their own heavy checks, so filed "Sessions waiting on their own checks are not nudged or counted as stopped" (opus). The day gave 4 lore notes (#558 to #561, #561 replaces #30).
+- 2026-10-29 Round (landing, main at 918796d, slim CLAUDE.md landed): Ship Local at e9c4701 came up (reload.log). No ship for a docs only landing; waits for the checkpoint flake fix.
+- 2026-10-29 Round (landing, main at e9c4701, checks green): the worktree fix landed and the last ship came up, so cast "Ship Local" (5 quests since). The slim CLAUDE.md fix-up stopped undone waiting on its own checks in heavy: no tell, noted it.
+- 2026-10-29 "Fix the merge of land-the-worktree-fix-from-fix-the-merge" stopped undone: conflict resolved, its clippy and tests queued in heavy. Own work, no tell, noted it.
+- 2026-10-29 "Land the worktree fix..." ended with a real conflict in worktree.rs against 6576c9d. Gave its fix-up Model: sonnet and told it to keep both features, flake rerun only.
+- 2026-10-29 "Slim CLAUDE.md to under 120 lines" landed red on the checkpoint git-init temp flake (third time today), its branch is docs only. Gave the fix-up Model: haiku over the opus escalation and a note to cherry-pick 40f9f09 and rerun only.
+- 2026-10-29 Round (landing, main at 6576c9d, checks green): the land-a-quest merge fix-up landed, so cast "Ship Local" (4 quests since the last ship). Four quests still run.
+- 2026-10-29 "Fix the merge of fix-the-merge-of-land-a-quest-while-its" stopped undone: conflict resolved keeping both sides, its clippy queued in heavy. Own work, no tell, noted it.
+- 2026-10-29 Round (landing, main at 4e6cc40, "Tell running quests when main moves" landed): Ship Local still held, the land-a-quest second merge fix-up runs. "Land the worktree fix" stopped undone waiting on its own checks in heavy: no tell, noted it.
+- 2026-10-29 "Fix the merge of land-a-quest-while-its-session-is-still" finished but its rebase conflicted in runner.rs with the landed "Tell running quests when main moves". Gave the second fix-up Model: opus and told it to keep both features and treat the checkpoint git-init failure as a flake.
+- 2026-10-29 "Tell running quests when main moves" stopped undone a third time: clippy on its merged code runs, then it fast-forwards main. Own work, no tell, noted it.
+- 2026-10-29 "Fix the merge of start-a-quest-s-worktree..." finished green but could not fast-forward: my memory commit 0f551a6 landed between its rebase and merge. Filed "Land the worktree fix from fix-the-merge-of-start-a-quest-s-worktree" (haiku) to cherry-pick a5c28b5.
+- 2026-10-29 "Tell running quests when main moves" stopped undone again: clippy clean, tests running in the background. Own work, no tell, noted it.
+- 2026-10-29 "Blocked quests say why..." asked the human to say go for a rerun of tests killed for low memory. Told it go: rerun through heavy, merge on green.
 - 2026-10-29 "Fix the merge of land-a-quest-while-its-session-is-still" stopped undone but waits on its own clippy, queued in heavy. No tell, noted it.
 - 2026-10-29 Round (human left, main at eb2735d, only my memory since the last round): the land-a-quest merge fix-up still runs, so Ship Local stays held per Open. Four quests under way, three wait. Nothing to do.
 - 2026-10-29 "Tell running quests when main moves" stopped undone but waits on its own clippy, queued in heavy. No tell, noted it.
@@ -162,4 +179,5 @@
 - Check "Make checkpoint tests' git init not copy hook templates" lands; if the flake shows again after, look at %TEMP% itself (antivirus, locks).
 - "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Cast "Ship Local" once "Fix the merge of land-a-quest-while-its-session-is-still" lands green (the worktree fix-up is done).
+- Cast "Ship Local" once the checkpoint flake fix lands (or "Blocked quests say why" / the context panel, whichever lands first with code).
+- Check "Sessions waiting on their own checks..." lands; after it, the look back's silent stops count should drop.

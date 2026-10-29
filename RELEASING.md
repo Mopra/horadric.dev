@@ -239,7 +239,7 @@ install.
 ## 5. This machine
 
 The Horadric on this machine ships from the checkout with `horadric
-reload`, as CLAUDE.md says, and does not need the release. After a
+reload`, as section 7 says, and does not need the release. After a
 release it is at the same version, so its tray offers nothing. If it is
 behind, its tray offers the published release like any other install.
 
@@ -261,3 +261,67 @@ If there are unpushed commits or the live `CACHE` differs from the repo's,
 run `npm test`, then `sh deploy.sh`, then `git push`. Saying "ship" is the
 go ahead for this deploy, since the page only adds what the PC sends and
 still works against an older PC.
+
+## 7. Shipping from inside Horadric
+
+The agent working on Horadric runs in a terminal of the installed Horadric. It
+builds and tests dev instances as above and never touches the installed
+one, with one exception: shipping, and only when the human says to ship.
+There are two kinds, and the human's words pick one.
+
+- **"Ship" or "ship local"** updates only this machine. Nothing goes to
+  GitHub.
+- **"Ship public"** cuts a release every install is offered: bump the
+  version, sign, tag, push, draft the GitHub release with notes, try the
+  draft's build as a dev instance, publish it, then ship local. The steps
+  are in [RELEASING.md](RELEASING.md). Saying "ship public" is the
+  human's go ahead to publish, which is the moment every install sees
+  it, so the agent does not stop at the draft to ask again. It picks the
+  version (patch for fixes, minor for new features), writes the notes
+  for users from the commits since the last tag, and says both before
+  publishing.
+
+Two things besides the human's words are a go ahead. The first is the
+"Warriv drives" switch. Flipping it on is the human's go ahead for
+Warriv to ship local by itself: a round casts "Ship Local" when quests landed and the checks
+passed on `main`. "And ships public", the second switch, is the go
+ahead for public releases too, cast when the landed work is worth one
+to users. A build that rolled back, or checks red on two landings in a
+row, holds shipping ("shipping held" on the switch) until the fix-up
+quest Horadric files lands on green.
+
+The second is an errand. A stone with `"every"` runs only once the
+human has armed it in the Runetome, after reading its steps and its
+schedule. Arming an errand that publishes (a push, a release, a post,
+"ship public") is the human's standing go ahead for it: an errand session
+told to ship public does so without the human saying it that day. A
+stone whose steps or mode change is disarmed until the human arms it
+again, so that go ahead covers only what they read.
+
+Shipping local is merging into `main` as above. Then the three checks run on
+that merged code, once, each through `horadric heavy`: `horadric heavy -- cargo fmt
+--all --check`, `horadric heavy -- cargo clippy --workspace --all-targets --
+-D warnings`, and `horadric heavy -- cargo test --workspace`. A red check stops
+the ship. Do not build or reload. Report the failing output (in the quest's
+blocked line or the final message) so the human sees why. Checks that
+already passed on this exact commit (a ship public that just ran them,
+or a merge you just checked) are not run again. Only when all three
+are green, run `cargo build --release` from the merged code, then
+`target\release\horadric.exe reload`. Before `reload`, deploy the Town Portal page if it is behind
+(RELEASING.md, "The Town Portal page"), for ship local and ship public
+alike. The installed Horadric hands over to the new build at once, and
+the new build attaches to every session's host, including the agent's
+own, which keeps running through it. An installed Horadric from before
+session hosts waits until no session is mid turn and resumes them
+instead. Either way the agent says what it shipped before it runs
+`reload`, ends its turn, and does nothing after. A build that does not
+come up is rolled back to the old binaries by itself. What happened is in
+`%APPDATA%\Horadric\reload.log`.
+
+`reload` with `HORADRIC_DEV=1` restarts the dev instance the same way, from
+its own build, which is how to test a change to reloading itself.
+
+The first time, and whenever the installed Horadric is older than `reload`,
+it has to be installed by hand from a terminal outside Horadric: Quit from
+the tray (sessions pause), `cargo build --release`,
+`target\release\horadric.exe install`, then click each tile to resume.

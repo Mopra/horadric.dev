@@ -78,7 +78,7 @@ fn ask_main_tree(dir: &Path) -> Option<Place> {
 }
 
 /// Adds a worktree for a new session named `name` in `dir`, on a new
-/// branch from what the main tree has checked out, with a range of ports
+/// branch from the project's main branch (see [`main_branch`]), with a range of ports
 /// that `taken` does not use. None when the project does not want one and
 /// it was not `asked` for; an error when git refused, and the session then
 /// shares the main tree.
@@ -105,7 +105,12 @@ pub fn add(dir: &Path, name: &str, taken: &[Ports], asked: bool) -> Result<Optio
             .is_ok()
     });
     let path = worktree::folder(&place.top, &branch);
-    git(top, &["worktree", "add", "-b", &branch, &path])?;
+    let mut args = vec!["worktree", "add", "-b", &branch, &path];
+    let start = main_branch(top);
+    if let Some(start) = &start {
+        args.push(start);
+    }
+    git(top, &args)?;
     if horadric_hooks::dev() {
         mark_dev_made(Path::new(&path));
     }
@@ -214,12 +219,76 @@ pub fn diff(main: &Path, into: &str, branch: &str) -> String {
     git(main, &["diff", &format!("{into}...{branch}")]).unwrap_or_default()
 }
 
+/// The files `branch` changed since it left `into`. Empty when git can not
+/// say.
+pub fn changed_since(main: &Path, into: &str, branch: &str) -> Vec<String> {
+    git(
+        main,
+        &["diff", "--name-only", &format!("{into}...{branch}")],
+    )
+    .map(|out| out.lines().map(str::to_string).collect())
+    .unwrap_or_default()
+}
+
+/// Whether merging `branch` into `into` would conflict, tried in git's
+/// object store without touching any tree. True when git can not say (an
+/// old git has no `--write-tree`), so a session is told rather than left.
+pub fn would_conflict(main: &Path, into: &str, branch: &str) -> bool {
+    git(main, &["merge-tree", "--write-tree", into, branch]).is_err()
+}
+
 /// What the main tree has checked out, for saying where a merge goes.
 pub fn checked_out(main: &Path) -> Option<String> {
     git(main, &["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
         .map(|b| b.trim().to_string())
         .filter(|b| !b.is_empty() && b != "HEAD")
+}
+
+/// The branch a quest's worktree starts from: the one [`land`] merges it
+/// back into, what the main tree `main` has checked out. While the main
+/// tree is on no branch, as in the middle of a `pull --rebase`, its HEAD
+/// is some other commit, so then the remote's default branch, or `main`
+/// or `master`. None when there is none of those either.
+pub fn main_branch(main: &Path) -> Option<String> {
+    let remote = git(
+        main,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .ok();
+    let has = |b: &str| {
+        git(
+            main,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{b}"),
+            ],
+        )
+        .is_ok()
+    };
+    pick_main_branch(checked_out(main).as_deref(), remote.as_deref(), has)
+}
+
+/// [`main_branch`] from what git said: the branch `checked_out`, the
+/// remote's default as `origin/main`, and which local branches there are.
+fn pick_main_branch(
+    checked_out: Option<&str>,
+    remote: Option<&str>,
+    has: impl Fn(&str) -> bool,
+) -> Option<String> {
+    if let Some(b) = checked_out {
+        return Some(b.to_string());
+    }
+    let remote = remote
+        .map(str::trim)
+        .and_then(|r| r.strip_prefix("origin/"));
+    remote
+        .into_iter()
+        .chain(["main", "master"])
+        .find(|b| has(b))
+        .map(str::to_string)
 }
 
 /// The file `rel` as the last commit in `dir` has it, None where it has
@@ -544,26 +613,42 @@ pub enum Landing {
     /// the checks passed on, which `main` was left at, or empty when it
     /// held the branch already and none ran.
     Merged(String),
-    /// A step failed with this output. The branch stayed.
-    Failed(merge::Failure, String),
+    /// A step failed with this output, and the other side was this. The
+    /// branch stayed.
+    Failed(merge::Failure, String, merge::Theirs),
 }
 
 /// Merges the finished quest in worktree `w` into `into`, what the main
 /// tree has checked out: rebased on it in the worktree, `checks` run
 /// there, and `into` fast forwarded to it. Starts over when `into` moved
-/// meanwhile. Blocks for as long as the checks take, so it runs on a
-/// thread of its own.
-pub fn land(w: &Worktree, into: &str, checks: &[String]) -> Landing {
+/// meanwhile. `live` when the quest's session still runs, idle, in the
+/// worktree; else it was just ended. Blocks for as long as the checks
+/// take, so it runs on a thread of its own.
+pub fn land(w: &Worktree, into: &str, checks: &[String], live: bool) -> Landing {
     let main = Path::new(&w.main);
     let tree = Path::new(&w.path);
-    // The agent was just ended, and may hold its files for a moment.
-    std::thread::sleep(Duration::from_secs(1));
+    if !live {
+        // The agent was just ended, and may hold its files for a moment.
+        std::thread::sleep(Duration::from_secs(1));
+    }
     if git(main, &["merge-base", "--is-ancestor", &w.branch, into]).is_ok() {
         return Landing::Merged(String::new());
     }
-    let mut last = (merge::Failure::Moved, String::new());
+    let mut last = (
+        merge::Failure::Moved,
+        String::new(),
+        merge::Theirs::default(),
+    );
     for _ in 0..merge::TRIES {
         let mut moved = false;
+        // Asked before the rebase moves the branch onto them.
+        let gained = format!("HEAD..{into}");
+        let mut theirs = merge::Theirs {
+            files: Vec::new(),
+            subjects: git(tree, &["log", "--format=%s", &gained])
+                .map(|l| merge::lines(&l))
+                .unwrap_or_default(),
+        };
         for step in merge::plan(checks) {
             let done = match &step {
                 merge::Step::Rebase => git(tree, &["rebase", into]),
@@ -573,20 +658,45 @@ pub fn land(w: &Worktree, into: &str, checks: &[String]) -> Landing {
             let Err(out) = done else { continue };
             let why = merge::failed(&step, &out);
             if step == merge::Step::Rebase {
+                if why == merge::Failure::Conflict {
+                    theirs = conflict_side(tree, &w.branch, into, theirs.subjects);
+                }
                 let _ = git(tree, &["rebase", "--abort"]);
             }
             if why == merge::Failure::Moved {
-                last = (why, out);
+                last = (why, out, theirs);
                 moved = true;
                 break;
             }
-            return Landing::Failed(why, out);
+            return Landing::Failed(why, out, theirs);
         }
         if !moved {
             return Landing::Merged(head(tree).unwrap_or_default());
         }
     }
-    Landing::Failed(last.0, last.1)
+    Landing::Failed(last.0, last.1, last.2)
+}
+
+/// The other side of the rebase of `branch` stopped in `tree`: the files
+/// it stopped on, and of `all` that `into` gained, the commits that
+/// touched them when any did. Asked before the rebase is undone, while
+/// `branch` still points where it did before it.
+fn conflict_side(tree: &Path, branch: &str, into: &str, all: Vec<String>) -> merge::Theirs {
+    let files = git(tree, &["diff", "--name-only", "--diff-filter=U"])
+        .map(|f| merge::lines(&f))
+        .unwrap_or_default();
+    let range = format!("{branch}..{into}");
+    let mut args = vec!["log", "--format=%s", range.as_str(), "--"];
+    args.extend(files.iter().map(String::as_str));
+    let touched = git(tree, &args)
+        .ok()
+        .filter(|_| !files.is_empty())
+        .map(|l| merge::lines(&l))
+        .filter(|s| !s.is_empty());
+    merge::Theirs {
+        subjects: touched.unwrap_or(all),
+        files,
+    }
 }
 
 /// Runs `command` with `cmd /c` in `dir`, with no window: what it printed
@@ -647,6 +757,95 @@ mod tests {
 
     fn run(dir: &Path, args: &[&str]) {
         git(dir, args).unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    }
+
+    #[test]
+    fn a_conflicted_landing_names_the_files_and_the_other_side_and_is_undone() {
+        let base = std::env::temp_dir().join(format!("horadric-land-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let top = base.join("main");
+        std::fs::create_dir_all(&top).unwrap();
+        run(&top, &["init", "-q", "-b", "main"]);
+        run(&top, &["config", "user.email", "t@example.com"]);
+        run(&top, &["config", "user.name", "t"]);
+        std::fs::write(top.join("a.txt"), "one\n").unwrap();
+        std::fs::write(top.join("b.txt"), "b\n").unwrap();
+        run(&top, &["add", "."]);
+        run(&top, &["commit", "-q", "-m", "first"]);
+        let path = base.join("q").to_string_lossy().replace('\\', "/");
+        run(&top, &["worktree", "add", "-q", "-b", "q", &path]);
+        let tree = Path::new(&path);
+        std::fs::write(tree.join("a.txt"), "mine\n").unwrap();
+        run(tree, &["commit", "-q", "-am", "Mine"]);
+        std::fs::write(top.join("a.txt"), "theirs\n").unwrap();
+        run(&top, &["commit", "-q", "-am", "Theirs on a"]);
+        std::fs::write(top.join("b.txt"), "b2\n").unwrap();
+        run(&top, &["commit", "-q", "-am", "Theirs on b"]);
+
+        let w = Worktree {
+            path: path.clone(),
+            main: top.to_string_lossy().replace('\\', "/"),
+            branch: "q".into(),
+            ports: None,
+        };
+        let Landing::Failed(why, _, theirs) = land(&w, "main", &[], true) else {
+            panic!("it should conflict");
+        };
+        assert_eq!(why, merge::Failure::Conflict);
+        assert_eq!(theirs.files, ["a.txt"]);
+        assert_eq!(theirs.subjects, ["Theirs on a"]);
+        // Undone, so the session that mends it starts from its own work.
+        assert!(git(tree, &["status", "--porcelain"]).unwrap().is_empty());
+        let mine = std::fs::read_to_string(tree.join("a.txt")).unwrap();
+        assert_eq!(mine.trim_end(), "mine");
+        let _ = git(&top, &["worktree", "remove", "--force", &path]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_main_branch_is_what_is_checked_out_else_a_default() {
+        let has = |b: &str| ["main", "trunk"].contains(&b);
+        assert_eq!(
+            pick_main_branch(Some("dev"), None, has).as_deref(),
+            Some("dev")
+        );
+        assert_eq!(
+            pick_main_branch(None, Some("origin/trunk\n"), has).as_deref(),
+            Some("trunk")
+        );
+        assert_eq!(
+            pick_main_branch(None, Some("origin/gone"), has).as_deref(),
+            Some("main")
+        );
+        assert_eq!(pick_main_branch(None, None, |_| false), None);
+    }
+
+    #[test]
+    fn a_quest_starts_from_the_main_branch_not_a_detached_head() {
+        let top = std::env::temp_dir().join(format!("horadric-start-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&top);
+        std::fs::create_dir_all(&top).unwrap();
+        run(&top, &["init", "-q", "-b", "main"]);
+        run(&top, &["config", "user.email", "t@example.com"]);
+        run(&top, &["config", "user.name", "t"]);
+        run(&top, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        // As a `pull --rebase` leaves it midway: HEAD on a commit of its own.
+        run(&top, &["checkout", "-q", "--detach"]);
+        run(&top, &["commit", "-q", "--allow-empty", "-m", "stray"]);
+        assert_eq!(main_branch(&top).as_deref(), Some("main"));
+
+        let place = main_tree(&top).expect("a main tree");
+        let path = worktree::folder(&place.top, "quest");
+        let _ = std::fs::remove_dir_all(&path);
+        let start = main_branch(&top).unwrap();
+        run(
+            &top,
+            &["worktree", "add", "-q", "-b", "quest", &path, &start],
+        );
+        let log = git(Path::new(&path), &["log", "--format=%s"]).unwrap();
+        assert_eq!(log.trim(), "first");
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = std::fs::remove_dir_all(&top);
     }
 
     #[test]
