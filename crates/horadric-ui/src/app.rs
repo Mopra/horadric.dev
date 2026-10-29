@@ -6964,7 +6964,7 @@ impl App {
             return;
         };
         for _ in 0..n {
-            if let Err(e) = self.start(None, dir.clone(), Vec::new()) {
+            if let Err(e) = self.start_claude(dir.clone()) {
                 eprintln!("horadric: cannot start session: {e}");
                 return;
             }
