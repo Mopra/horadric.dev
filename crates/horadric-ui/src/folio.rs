@@ -1025,6 +1025,7 @@ impl View {
             }
             Block::Footer { .. } => FOOTER_H,
             Block::Raw(t) => laid(4, &raw_text(t), &gfx.italic, cw),
+            _ => 0.0,
         }
     }
 
@@ -1406,6 +1407,7 @@ impl View {
                 duration_ms,
                 cost_usd,
                 ending,
+                ..
             } => {
                 let ink = match ending {
                     Ending::Failed => theme::error().with_alpha(0.8),
@@ -1424,6 +1426,7 @@ impl View {
                     gfx.layout_at(&l, cx, y, pal.faint);
                 }
             }
+            _ => {}
         }
     }
 

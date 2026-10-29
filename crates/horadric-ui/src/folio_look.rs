@@ -299,6 +299,10 @@ mod tests {
                 Some(true) => StepState::Done,
                 Some(false) => StepState::Failed,
             },
+            input: serde_json::Value::Null,
+            edit: None,
+            lane: None,
+            output: String::new(),
         }
     }
 
