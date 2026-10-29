@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use horadric_core::folio::{Block, Folio};
+use horadric_core::folio::{AskState, Block, Ending, Folio, StepState};
 use horadric_pty::headless::Headless;
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -142,6 +142,9 @@ struct Chat {
     open: HashSet<usize>,
     busy_was: bool,
     busy_since: Instant,
+    /// What the pane's header was last told, so it is told again only
+    /// when that changes.
+    header: String,
 }
 
 impl Chat {
@@ -165,6 +168,7 @@ impl Chat {
             busy_was: false,
             // Long ago, so a Folio opened at rest starts cold.
             busy_since: Instant::now() - look::COOL,
+            header: String::new(),
         }
     }
 
@@ -177,6 +181,44 @@ impl Chat {
 
     fn heat(&self) -> f32 {
         look::heat(self.folio.busy, self.busy_since.elapsed())
+    }
+
+    fn detail(&self) -> String {
+        let state = if self.error.is_some() || self.ended {
+            "ended"
+        } else if self.folio.busy {
+            "working"
+        } else {
+            "experimental"
+        };
+        match &self.folio.model {
+            Some(m) => format!("{state} \u{b7} {m}"),
+            None => state.to_string(),
+        }
+    }
+
+    /// Whether the header says something new since it was last told.
+    fn header_moved(&mut self) -> bool {
+        let now = self.detail();
+        if now == self.header {
+            return false;
+        }
+        self.header = now;
+        true
+    }
+
+    /// Writes what the model queued for the CLI, such as the answer to a
+    /// request it cannot serve.
+    fn flush(&mut self) {
+        let lines = self.folio.take_outbox();
+        let Some(h) = &self.headless else {
+            return;
+        };
+        for line in lines {
+            if let Err(e) = h.send_line(&line) {
+                eprintln!("horadric: folio could not answer the CLI: {e}");
+            }
+        }
     }
 }
 
@@ -235,20 +277,7 @@ pub fn close_all() {
 
 /// What the pane's header says beside its name.
 pub fn detail(key: &str) -> String {
-    with(key, |c| {
-        let state = if c.error.is_some() || c.ended {
-            "ended"
-        } else if c.folio.busy {
-            "working"
-        } else {
-            "experimental"
-        };
-        match &c.folio.model {
-            Some(m) => format!("{state} \u{b7} {m}"),
-            None => state.to_string(),
-        }
-    })
-    .unwrap_or_default()
+    with(key, |c| c.detail()).unwrap_or_default()
 }
 
 /// The window lines are routed through to the UI thread, made on first
@@ -305,7 +334,7 @@ unsafe extern "system" fn router_proc(
 /// Feeds every Folio the lines its reader left, and redraws the ones that
 /// changed.
 fn drain() {
-    let mut changed: Vec<HWND> = Vec::new();
+    let mut changed: Vec<(HWND, bool)> = Vec::new();
     let busy = CHATS.with(|c| {
         let Ok(mut chats) = c.try_borrow_mut() else {
             return true;
@@ -325,15 +354,21 @@ fn drain() {
                 match line {
                     Some(l) => moved |= chat.folio.feed(&l),
                     None => {
+                        chat.folio.end();
+                        // Before any init, nothing ran: stderr says why.
+                        if chat.folio.session_id.is_none() && chat.error.is_none() {
+                            chat.error = Some(start_failure(chat.headless.as_ref()));
+                        }
                         chat.ended = true;
-                        chat.folio.busy = false;
                         moved = true;
                     }
                 }
             }
+            chat.flush();
             chat.note_busy();
-            if let (true, Some(v)) = (moved, chat.view) {
-                changed.push(v);
+            let header = chat.header_moved();
+            if let (true, Some(v)) = (moved || header, chat.view) {
+                changed.push((v, header));
             }
         }
         false
@@ -349,25 +384,42 @@ fn drain() {
             );
         }
     }
-    for v in changed {
-        refresh(v);
+    for (v, header) in changed {
+        refresh(v, header);
     }
 }
 
-/// Redraws the conversation and tells its pane its header may have
-/// changed.
-fn refresh(view: HWND) {
+/// What the error line says when claude.exe ended before it started, with
+/// the last of what it wrote to stderr.
+fn start_failure(h: Option<&Headless>) -> String {
+    let tail = h.map(Headless::stderr_tail).unwrap_or_default();
+    let last: Vec<&str> = (tail.iter().rev())
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .take(3)
+        .collect();
+    if last.is_empty() {
+        return "Claude ended before it started.".to_string();
+    }
+    let said: Vec<&str> = last.into_iter().rev().collect();
+    format!("Claude ended before it started: {}", said.join(" "))
+}
+
+/// Redraws the conversation, and tells its pane when its header changed.
+fn refresh(view: HWND, header: bool) {
     unsafe {
         let _ = InvalidateRect(Some(view), None, false);
-        if let Ok(pane) = GetParent(view) {
-            let _ = PostMessageW(Some(pane), WM_FOLIO_REFRESH, WPARAM(0), LPARAM(0));
+        if header {
+            if let Ok(pane) = GetParent(view) {
+                let _ = PostMessageW(Some(pane), WM_FOLIO_REFRESH, WPARAM(0), LPARAM(0));
+            }
         }
     }
 }
 
 fn redraw(key: &str) {
-    if let Some(Some(v)) = with(key, |c| c.view) {
-        refresh(v);
+    if let Some((Some(v), header)) = with(key, |c| (c.view, c.header_moved())) {
+        refresh(v, header);
     }
 }
 
@@ -566,6 +618,8 @@ fn send_prompt(key: &str) {
         c.folio.push_prompt(&text);
         if let Err(e) = h.send_prompt(&text) {
             c.error = Some(format!("The prompt did not reach Claude: {e}"));
+            // No turn started, so none will end with a result.
+            c.folio.end();
         }
         c.composer = Field::new("", true, COMPOSER_MAX);
         c.composer_scroll = 0.0;
@@ -618,6 +672,9 @@ struct Laid {
 
 struct Gfx {
     rt: ID2D1HwndRenderTarget,
+    /// The window's DPI the target draws at. Moving to another monitor
+    /// changes the window's, and the target is told.
+    dpi: u32,
     brush: ID2D1SolidColorBrush,
     glow: ID2D1RadialGradientBrush,
     shade: ID2D1LinearGradientBrush,
@@ -719,7 +776,8 @@ impl Gfx {
     unsafe fn new(gpu: &Gpu, hwnd: HWND, key: &str) -> Result<Gfx> {
         let mut r = RECT::default();
         let _ = GetClientRect(hwnd, &mut r);
-        let rt = render::hwnd_target(gpu, hwnd, r.right as u32, r.bottom as u32, dpi(hwnd), false)?;
+        let dpi = dpi(hwnd);
+        let rt = render::hwnd_target(gpu, hwnd, r.right as u32, r.bottom as u32, dpi, false)?;
         let brush = rt.CreateSolidColorBrush(&color(theme::palette().term_fg), None)?;
         let accent = theme::accent(key);
         let stops = |a: Color, b: Color| {
@@ -777,6 +835,7 @@ impl Gfx {
         big.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         Ok(Gfx {
             rt,
+            dpi,
             brush,
             glow,
             shade,
@@ -960,8 +1019,8 @@ impl View {
             Block::Thinking(_) => LINE_H,
             Block::Tools(steps) if open => LINE_H + steps.len() as f32 * STEP_H,
             Block::Tools(_) => LINE_H,
-            Block::Ask { .. } => {
-                let shown = laid(3, &ask_text(b), &gfx.mono, cw - 2.0 * CARD_PAD).min(ASK_MAX_H);
+            Block::Ask { shown, .. } => {
+                let shown = laid(3, shown, &gfx.mono, cw - 2.0 * CARD_PAD).min(ASK_MAX_H);
                 CARD_PAD + 20.0 + 6.0 + shown + 12.0 + BUTTON_H + CARD_PAD
             }
             Block::Footer { .. } => FOOTER_H,
@@ -985,9 +1044,15 @@ impl View {
                 }
             }
         }
-        let Some(gfx) = slot.as_ref() else {
+        let Some(gfx) = slot.as_mut() else {
             return;
         };
+        let now = dpi(hwnd);
+        if gfx.dpi != now {
+            unsafe { gfx.rt.SetDpi(now as f32, now as f32) };
+            gfx.dpi = now;
+        }
+        let gfx = &*gfx;
         let ok = CHATS.with(|c| {
             let Ok(mut chats) = c.try_borrow_mut() else {
                 return true;
@@ -1036,7 +1101,9 @@ impl View {
         self.background(gfx, &pal, w, h, t, heat);
 
         // The composer first, since the conversation ends above it.
-        let composer = self.composer(gfx, chat, &pal, cx, cw, h, &mut hits);
+        // Its hits go last, so they win over a block's under the composer.
+        let mut composer_hits: Vec<(Rect, Hit)> = Vec::new();
+        let composer = self.composer(gfx, chat, &pal, cx, cw, h, &mut composer_hits);
         let area = Rect::new(0.0, 0.0, w, (composer.y - 10.0).max(0.0));
 
         // Measure, then follow the end or keep the scroll in bounds.
@@ -1074,7 +1141,13 @@ impl View {
             }
             if y + bh >= 0.0 && y <= area.bottom() {
                 let open = chat.open.contains(&i);
-                self.block(gfx, &pal, i, b, open, cx, cw, y, bh, &mut hits);
+                let mut mine = Vec::new();
+                self.block(gfx, &pal, i, b, open, cx, cw, y, bh, &mut mine);
+                // Drawing is clipped to the area; what is hidden must not
+                // take clicks either.
+                hits.extend(
+                    (mine.into_iter()).filter_map(|(r, hit)| Some((look::clip(&r, &area)?, hit))),
+                );
             }
             y += bh + gap_after(b);
         }
@@ -1114,6 +1187,7 @@ impl View {
         gfx.shade.SetEndPoint(Vector2 { X: 0.0, Y: 9.0 });
         rt.FillRectangle(&d2d(&Rect::new(0.0, 0.0, w, 9.0)), &gfx.shade);
 
+        hits.extend(composer_hits);
         *self.hits.borrow_mut() = hits;
         rt.EndDraw(None, None).is_ok()
     }
@@ -1236,6 +1310,10 @@ impl View {
                         text.push_str(" \u{2026}");
                         pal.dim
                     }
+                    RunState::Stopped => {
+                        text.push_str(" \u{b7} stopped");
+                        pal.faint
+                    }
                     RunState::Done(0) => pal.dim,
                     RunState::Done(n) => {
                         text.push_str(&format!(" \u{b7} {n} failed"));
@@ -1248,10 +1326,11 @@ impl View {
                 if open {
                     for (k, s) in steps.iter().enumerate() {
                         let sy = y + LINE_H + k as f32 * STEP_H;
-                        let mark = match s.ok {
-                            None => pal.faint,
-                            Some(true) => theme::done().with_alpha(0.8),
-                            Some(false) => theme::error(),
+                        let mark = match s.state {
+                            StepState::Running => pal.faint,
+                            StepState::Stopped => pal.faint.with_alpha(0.2),
+                            StepState::Done => theme::done().with_alpha(0.8),
+                            StepState::Failed => theme::error(),
                         };
                         gfx.fill_round(
                             &Rect::new(cx + 6.0, sy + STEP_H / 2.0 - 2.5, 5.0, 5.0),
@@ -1275,21 +1354,22 @@ impl View {
             Block::Ask {
                 request_id,
                 tool,
-                answered,
+                shown,
+                state,
                 ..
             } => {
                 let card = Rect::new(cx, y, cw, bh);
                 gfx.fill_round(&card, 12.0, pal.bg.mix(pal.fg, 0.05));
-                let edge = match answered {
-                    None => theme::waiting().with_alpha(0.75),
-                    Some(_) => pal.faint.with_alpha(0.3),
+                let edge = match state {
+                    AskState::Waiting => theme::waiting().with_alpha(0.75),
+                    _ => pal.faint.with_alpha(0.3),
                 };
                 gfx.stroke_round(&card, 12.0, edge, 1.2);
                 let inner = cw - 2.0 * CARD_PAD;
                 let title = Rect::new(cx + CARD_PAD, y + CARD_PAD, inner, 20.0);
                 gfx.text_in(&look::ask_title(tool), &gfx.title, &title, pal.fg);
                 let top = title.bottom() + 6.0;
-                if let Some((l, _, lh)) = self.laid(gfx, i, 3, &ask_text(b), &gfx.mono, inner) {
+                if let Some((l, _, lh)) = self.laid(gfx, i, 3, shown, &gfx.mono, inner) {
                     let shown = Rect::new(
                         cx + CARD_PAD - 2.0,
                         top - 2.0,
@@ -1304,8 +1384,8 @@ impl View {
                 }
                 let by = card.bottom() - CARD_PAD - BUTTON_H;
                 let right = card.right() - CARD_PAD;
-                match answered {
-                    None => {
+                match state {
+                    AskState::Waiting => {
                         let allow = Rect::new(right - BUTTON_W, by, BUTTON_W, BUTTON_H);
                         let deny = Rect::new(allow.x - 8.0 - BUTTON_W, by, BUTTON_W, BUTTON_H);
                         gfx.fill_round(&allow, 8.0, pal.fg.with_alpha(0.92));
@@ -1315,8 +1395,8 @@ impl View {
                         hits.push((allow, Hit::Answer(request_id.clone(), true)));
                         hits.push((deny, Hit::Answer(request_id.clone(), false)));
                     }
-                    Some(allowed) => {
-                        let said = if *allowed { "Allowed" } else { "Denied" };
+                    _ => {
+                        let said = look::ask_said(*state);
                         let r = Rect::new(cx + CARD_PAD, by, inner, BUTTON_H);
                         gfx.text_in(said, &gfx.line, &r, pal.dim);
                     }
@@ -1325,14 +1405,13 @@ impl View {
             Block::Footer {
                 duration_ms,
                 cost_usd,
-                is_error,
+                ending,
             } => {
-                let ink = if *is_error {
-                    theme::error().with_alpha(0.8)
-                } else {
-                    pal.faint
+                let ink = match ending {
+                    Ending::Failed => theme::error().with_alpha(0.8),
+                    Ending::Done | Ending::Stopped => pal.faint,
                 };
-                let line = look::footer_line(*duration_ms, *cost_usd, *is_error);
+                let line = look::footer_line(*duration_ms, *cost_usd, *ending);
                 gfx.text_in(&line, &gfx.small, &Rect::new(cx, y, cw, FOOTER_H), ink);
                 // A short rule under the turn, in the project's colour.
                 gfx.fill(
@@ -1683,26 +1762,6 @@ fn gap_after(b: &Block) -> f32 {
         Block::Thinking(_) | Block::Tools(_) => GAP / 2.0,
         _ => GAP,
     }
-}
-
-/// What an ask's card shows of what Claude wants to do.
-fn ask_text(b: &Block) -> String {
-    let Block::Ask { summary, input, .. } = b else {
-        return String::new();
-    };
-    if !summary.trim().is_empty() {
-        return summary.clone();
-    }
-    let mut s = serde_json::to_string_pretty(input).unwrap_or_default();
-    if s.len() > 1200 {
-        let cut = (0..=1200)
-            .rev()
-            .find(|&i| s.is_char_boundary(i))
-            .unwrap_or(0);
-        s.truncate(cut);
-        s.push('\u{2026}');
-    }
-    s
 }
 
 fn raw_text(t: &str) -> String {

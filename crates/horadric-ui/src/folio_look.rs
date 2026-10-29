@@ -7,7 +7,9 @@ use std::f32::consts::{PI, TAU};
 use std::path::Path;
 use std::time::Duration;
 
-use horadric_core::folio::Step;
+use horadric_core::folio::{AskState, Ending, Step, StepState};
+
+use crate::layout::Rect;
 
 /// The widest the conversation reads. Wider lines are hard to follow.
 pub const COLUMN_MAX: f32 = 760.0;
@@ -33,15 +35,22 @@ pub fn column(width: f32) -> (f32, f32) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunState {
     Running,
+    /// Its turn ended with a step still running.
+    Stopped,
     /// Every step done, this many of them failed.
     Done(usize),
 }
 
 pub fn run_state(steps: &[Step]) -> RunState {
-    if steps.iter().any(|s| s.ok.is_none()) {
+    let any = |state| steps.iter().any(|s| s.state == state);
+    if any(StepState::Running) {
         return RunState::Running;
     }
-    RunState::Done(steps.iter().filter(|s| s.ok == Some(false)).count())
+    if any(StepState::Stopped) {
+        return RunState::Stopped;
+    }
+    let failed = steps.iter().filter(|s| s.state == StepState::Failed);
+    RunState::Done(failed.count())
 }
 
 /// What kind of work a tool does, for counting a run's steps together.
@@ -140,8 +149,8 @@ pub fn run_summary(steps: &[Step]) -> String {
     parts.join(" \u{b7} ")
 }
 
-/// A turn's footer: how long it took and what it cost.
-pub fn footer_line(duration_ms: u64, cost_usd: f64, is_error: bool) -> String {
+/// A turn's footer: how it ended, how long it took and what it cost.
+pub fn footer_line(duration_ms: u64, cost_usd: f64, ending: Ending) -> String {
     let secs = duration_ms as f64 / 1000.0;
     let time = if secs < 60.0 {
         format!("{secs:.1} s")
@@ -154,11 +163,28 @@ pub fn footer_line(duration_ms: u64, cost_usd: f64, is_error: bool) -> String {
     } else {
         String::new()
     };
-    if is_error {
-        format!("Ended with an error \u{b7} {time}{cost}")
-    } else {
-        format!("{time}{cost}")
+    match ending {
+        Ending::Done => format!("{time}{cost}"),
+        Ending::Stopped => format!("Stopped \u{b7} {time}{cost}"),
+        Ending::Failed => format!("Ended with an error \u{b7} {time}{cost}"),
     }
+}
+
+/// What an answered or lapsed ask's card says where its buttons were.
+pub fn ask_said(state: AskState) -> &'static str {
+    match state {
+        AskState::Waiting => "",
+        AskState::Allowed => "Allowed",
+        AskState::Denied => "Denied",
+        AskState::NotNeeded => "Not needed",
+    }
+}
+
+/// The part of `r` inside `to`, or None when none of it is.
+pub fn clip(r: &Rect, to: &Rect) -> Option<Rect> {
+    let (x, y) = (r.x.max(to.x), r.y.max(to.y));
+    let (right, bottom) = (r.right().min(to.right()), r.bottom().min(to.bottom()));
+    (right > x && bottom > y).then(|| Rect::new(x, y, right - x, bottom - y))
 }
 
 /// Thinking folded to one line: its first words that say anything.
@@ -268,7 +294,11 @@ mod tests {
             id: format!("{tool}{summary}"),
             tool: tool.to_string(),
             summary: summary.to_string(),
-            ok,
+            state: match ok {
+                None => StepState::Running,
+                Some(true) => StepState::Done,
+                Some(false) => StepState::Failed,
+            },
         }
     }
 
@@ -314,17 +344,43 @@ mod tests {
     fn a_run_is_running_until_every_step_is_done_and_counts_failures() {
         let mut steps = vec![step("Bash", "x", Some(false)), step("Read", "y", None)];
         assert_eq!(run_state(&steps), RunState::Running);
-        steps[1].ok = Some(true);
+        steps[1].state = StepState::Stopped;
+        assert_eq!(run_state(&steps), RunState::Stopped);
+        steps[1].state = StepState::Done;
         assert_eq!(run_state(&steps), RunState::Done(1));
     }
 
     #[test]
+    fn a_hit_is_cut_to_what_shows_and_gone_when_hidden() {
+        let area = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let half = clip(&Rect::new(10.0, 280.0, 80.0, 30.0), &area).unwrap();
+        assert_eq!((half.y, half.h), (280.0, 20.0));
+        assert!(clip(&Rect::new(10.0, 300.0, 80.0, 30.0), &area).is_none());
+        assert!(clip(&Rect::new(10.0, -40.0, 80.0, 30.0), &area).is_none());
+        let inside = Rect::new(10.0, 10.0, 80.0, 30.0);
+        assert_eq!(clip(&inside, &area), Some(inside));
+    }
+
+    #[test]
+    fn a_lapsed_ask_says_it_is_not_needed() {
+        assert_eq!(ask_said(AskState::NotNeeded), "Not needed");
+        assert_eq!(ask_said(AskState::Allowed), "Allowed");
+    }
+
+    #[test]
     fn the_footer_says_time_and_cost() {
-        assert_eq!(footer_line(4321, 0.01234, false), "4.3 s \u{b7} $0.0123");
-        assert_eq!(footer_line(125_000, 0.0, false), "2 min 5 s");
         assert_eq!(
-            footer_line(900, 0.5, true),
+            footer_line(4321, 0.01234, Ending::Done),
+            "4.3 s \u{b7} $0.0123"
+        );
+        assert_eq!(footer_line(125_000, 0.0, Ending::Done), "2 min 5 s");
+        assert_eq!(
+            footer_line(900, 0.5, Ending::Failed),
             "Ended with an error \u{b7} 0.9 s \u{b7} $0.5000"
+        );
+        assert_eq!(
+            footer_line(5180, 0.0, Ending::Stopped),
+            "Stopped \u{b7} 5.2 s"
         );
     }
 

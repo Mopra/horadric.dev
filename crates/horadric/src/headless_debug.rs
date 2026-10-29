@@ -11,13 +11,15 @@ use std::time::{Duration, Instant};
 use horadric_pty::headless::{Headless, Options};
 
 const USAGE: &str = "usage: horadric headless-debug [--cwd DIR] [--resume ID] [--deny] \
-[--init] [--arg FLAG]... [--interrupt-after MS] [--then PROMPT] [--out FILE] [--timeout SECS] PROMPT";
+[--init] [--leave-asks] [--arg FLAG]... [--interrupt-after MS] [--then PROMPT] [--out FILE] [--timeout SECS] PROMPT";
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {
     cwd: Option<PathBuf>,
     resume: Option<String>,
     deny: bool,
+    /// Asks go unanswered, so an interrupt can come while one waits.
+    leave_asks: bool,
     init: bool,
     interrupt_after: Option<u64>,
     then: Option<String>,
@@ -43,6 +45,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--resume" => out.resume = Some(value()?),
             "--deny" => out.deny = true,
             "--init" => out.init = true,
+            "--leave-asks" => out.leave_asks = true,
             "--interrupt-after" => {
                 out.interrupt_after = Some(value()?.parse().map_err(|_| "bad milliseconds")?)
             }
@@ -135,7 +138,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        if v["type"] == "control_request" && v["request"]["subtype"] == "can_use_tool" {
+        if v["type"] == "control_request"
+            && v["request"]["subtype"] == "can_use_tool"
+            && !args.leave_asks
+        {
             let id = v["request_id"].as_str().unwrap_or_default();
             let input = v["request"]["input"].clone();
             let allow = if args.deny {
