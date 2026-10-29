@@ -13,6 +13,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (06:11, human left, main at b5c7e03): the 06:01 Ship Local reloaded fine at 06:11. The unowned session.rs edit (Stop with background work stays Working, tested) still lingered after 5 hours, so filed "Land the stray session.rs edit..." (sonnet, Assumed) instead of asking. Spike waits on the human.
 - 2026-10-29 Round (06:01, landing, main at b1693f1): the context panel landed. The 9b90bd5 Ship Local never reloaded (release exe still 05:21, no cargo, heavy idle), so cast "Ship Local" for the panel and the checkpoint fix. session.rs holds a stale uncommitted edit from 01:18 (Stop with background work stays Working), shipped before too. Spike waits on the human.
 - 2026-10-29 Round (landing, main at 9b90bd5): the checkpoint git-init fix landed and the 0b12636 ship reloaded, so cast "Ship Local". Context panel still runs, spike waits on the human.
 - 2026-10-29 Round (landing, main at 0b12636): "Sessions waiting on their own checks..." landed (edd8483), so cast "Ship Local" as Open said. Context panel and checkpoint fix still run, spike waits on the human.
@@ -186,6 +187,5 @@
 - The checkpoint git-init fix landed (9b90bd5): if the flake shows again, look at %TEMP% itself (antivirus, locks).
 - "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Check the 06:01 Ship Local (main at b1693f1) reloads; the 9b90bd5 one did not. If this one fails too, read its stone session for why (red checks?).
-- Uncommitted session.rs (01:18, no quest owns it) rides every ship from the shared tree: if it lingers, ask the human whose it is.
+- "Land the stray session.rs edit..." filed: when it lands, cast "Ship Local" and check session.rs in the main checkout is clean.
 - "Sessions waiting on their own checks..." landed: the next look back's silent stops count should drop.
