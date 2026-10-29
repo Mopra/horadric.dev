@@ -293,6 +293,9 @@ impl App {
     /// One look at a project's events with Warriv on. True when its
     /// session closed, which the clusters have to hear.
     pub(super) fn orchestrate(&mut self, key: &str, b: &Board) -> bool {
+        // Before Warriv's own look, since the human is asked whether or
+        // not it is on.
+        self.ask_stale(key, b);
         let drive = self.drives.get(key).cloned();
         if !warriv::orchestrates(b.orchestrator, drive.is_some()) {
             self.shared.warriv_line.borrow_mut().remove(key);
@@ -612,6 +615,7 @@ impl App {
                     event: Some(e.clone()),
                     notes: t.map(|t| t.notes.clone()).unwrap_or_default(),
                     last_turn,
+                    ask: t.and_then(|t| t.ask.clone()),
                     aims: match e.kind {
                         Kind::Dry => b.aims.clone(),
                         _ => Vec::new(),
@@ -807,6 +811,35 @@ impl App {
         }
         self.record_wake(key, &id, woke(&id, &given));
         Some(Awake::new(id, given, b))
+    }
+
+    /// Asks the human, once, whether each quest that has waited on them
+    /// for days still matters: a line under it says they were asked, and
+    /// a toast asks. Answered, it goes on as any blocked quest does; or
+    /// they drop it with `quest drop`.
+    fn ask_stale(&mut self, key: &str, b: &Board) {
+        let now = unix_now();
+        // Quiet shows no toast, so asking now would mark it asked unheard.
+        if self.quiet || !b.tasks.iter().any(|t| t.stale(now)) {
+            return;
+        }
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        let mut asked = Vec::new();
+        let written = file::update(&dir, |log| {
+            let (new, stale) = warriv::ask_stale(log, now);
+            asked = stale;
+            Some(new)
+        });
+        if let Err(e) = written {
+            eprintln!("horadric: cannot note the stale quests asked about: {e}");
+            return;
+        }
+        for t in &asked {
+            let (title, text) = warriv::still_needed(t, now);
+            self.toasts.show(Toast::Waiting, &title, &text);
+        }
     }
 
     /// Warriv woke for the aims three times in a row and filed nothing,

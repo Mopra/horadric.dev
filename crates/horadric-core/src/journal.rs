@@ -654,6 +654,8 @@ mod tests {
             holder: holder.map(str::to_string),
             reason: (mark == Mark::Blocked).then(|| "needs keys".to_string()),
             wait: None,
+            since: None,
+            ask: None,
             notes: Vec::new(),
         };
         let old = [

@@ -469,6 +469,8 @@ mod tests {
             holder: None,
             reason: None,
             wait: None,
+            since: None,
+            ask: None,
             notes: notes.iter().map(|s| s.to_string()).collect(),
         }
     }
