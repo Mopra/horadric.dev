@@ -431,6 +431,34 @@ fn exits_zero(program: &str, args: &[String], dir: &Path) -> bool {
     }
 }
 
+/// The claude.ai connectors the sessions of project `key` load, as the
+/// project's newest transcript lists them. Reading the transcripts takes
+/// seconds, so a miss starts the read on a thread of its own and says
+/// None, and the next quest of the project to start finds it. Kept for the
+/// app's life: an account gains a connector seldom, and a lean quest that
+/// names what it keeps never needs one it has not named.
+fn known_connectors(key: &str) -> Option<Vec<String>> {
+    static KNOWN: Mutex<Option<HashMap<String, Option<Vec<String>>>>> = Mutex::new(None);
+    let mut known = KNOWN.lock().ok()?;
+    let map = known.get_or_insert_with(HashMap::new);
+    if let Some(found) = map.get(key) {
+        return found.clone();
+    }
+    map.insert(key.to_string(), None);
+    let key = key.to_string();
+    std::thread::spawn(move || {
+        let inv = crate::inventory::gather(Path::new(&key));
+        let items: Vec<_> = inv.lines.into_iter().map(|l| l.item).collect();
+        let found = horadric_core::context::connectors(&items);
+        if let Ok(mut known) = KNOWN.lock() {
+            known
+                .get_or_insert_with(HashMap::new)
+                .insert(key, Some(found));
+        }
+    });
+    None
+}
+
 fn horadric_command() -> String {
     std::env::current_exe()
         .map(|p| command_for(&p.to_string_lossy()))
@@ -664,6 +692,36 @@ impl App {
             .flat_map(|b| &b.tasks)
             .find(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
             .map(|t| t.title.clone())
+    }
+
+    /// The settings that keep a quest's session lean: its claude.ai
+    /// connectors off but those its `Connectors:` lines ask for. None for a
+    /// session that works no quest, or is Warriv's, a reviewer or an
+    /// errand, which keep what the human gave every session.
+    pub(super) fn quest_lean(&self, id: &str) -> Option<serde_json::Value> {
+        if horadric_core::warriv::is_reviewer(id)
+            || horadric_core::warriv::is_warriv(id)
+            || horadric_core::runeword::is_errand(id)
+        {
+            return None;
+        }
+        let (key, wanted) = self.shared.boards.borrow().iter().find_map(|(key, b)| {
+            b.tasks
+                .iter()
+                .find(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+                .map(|t| (key.clone(), t.connectors()))
+        })?;
+        let some = !wanted.is_empty() && !wanted.iter().any(|w| w.eq_ignore_ascii_case("all"));
+        if !some {
+            return Some(horadric_core::context::lean(&[], &wanted));
+        }
+        // Naming the ones to keep means denying the rest by name, which
+        // takes the project's list. Until it is read, keep them all rather
+        // than guess which to deny.
+        Some(match known_connectors(&key) {
+            Some(known) => horadric_core::context::lean(&known, &wanted),
+            None => serde_json::json!({}),
+        })
     }
 
     /// What a Claude Code session started with `args` is given for its

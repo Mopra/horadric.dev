@@ -18,6 +18,8 @@ mod bench;
 #[cfg(not(target_os = "macos"))]
 mod code;
 mod console;
+#[cfg(not(target_os = "linux"))]
+mod context;
 #[cfg(windows)]
 mod google;
 #[cfg(windows)]
@@ -87,6 +89,11 @@ Usage:
                                the project's quest log (.horadric/quests.md).
                                `horadric task` is the same, from before the rename
                                `quest add|list --project NAME` works on another project
+  horadric context [off NAME|on NAME|--all]
+                               What every session of this project carries before it
+                               works (connectors, plugins, skills) and what it costs a
+                               turn, what went unused in 30 days, and the switch for
+                               each; turn one off or on; or one line per project
   horadric found <name>          Make a project from the town: folder, git, README, first session
   horadric projects              Every known project: folder, sessions, open quests, last commit
   horadric node [install|--stdio]
@@ -193,6 +200,8 @@ fn main() -> ExitCode {
         Some("quest" | "task") => task::run(&args[1..]),
         #[cfg(not(target_os = "linux"))]
         Some("projects") => task::projects(),
+        #[cfg(not(target_os = "linux"))]
+        Some("context") => context::run(&args[1..]),
         #[cfg(not(target_os = "linux"))]
         Some("found") => run::found(&args[1..]),
         #[cfg(target_os = "linux")]

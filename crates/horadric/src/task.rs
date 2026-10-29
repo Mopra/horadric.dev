@@ -962,6 +962,10 @@ fn start(cwd: &Path) -> Result<(), String> {
     pieces.extend(plugin_skills(&home.join(".claude")));
     pieces.retain(|(_, n)| *n > 0);
     print!("{}", horadric_core::spend::start_table(&pieces, median));
+    println!(
+        "`horadric context` measures each connector, plugin and skill from a real session, \
+         says which went unused, and turns them off."
+    );
     if median == 0 {
         println!(
             "No quest of this project has a window recorded yet; run `horadric quest spend` first."

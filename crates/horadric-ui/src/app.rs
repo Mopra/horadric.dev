@@ -5061,9 +5061,20 @@ impl App {
                 .defaults_of(Agent::Claude)
                 .flags_for(Agent::Claude, &own, bypass);
         extra.extend(model);
-        if let (Some(path), false) = (&self.status_settings, has_flag(args, "--settings")) {
-            extra.push("--settings".into());
-            extra.push(path.to_string_lossy().into_owned());
+        if !has_flag(args, "--settings") {
+            // A quest's session starts without the claude.ai connectors its
+            // notes do not ask for, in the one file `--settings` takes.
+            let settings = match self.quest_lean(id).filter(|l| l != &serde_json::json!({})) {
+                Some(lean) => {
+                    store::write_session_settings(id, self.status_settings.as_deref(), &lean)
+                        .or_else(|| self.status_settings.clone())
+                }
+                None => self.status_settings.clone(),
+            };
+            if let Some(path) = settings {
+                extra.push("--settings".into());
+                extra.push(path.to_string_lossy().into_owned());
+            }
         }
         let config = self.mcp_config.as_ref().map(|p| p.to_string_lossy());
         extra.extend(Agent::Claude.mcp_args("", config.as_deref()));

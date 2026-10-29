@@ -84,6 +84,61 @@ fn status_settings(exe: &Path, dir: &Path) -> serde_json::Value {
     })
 }
 
+/// `extra` laid over `base`: objects merge key by key, lists add up and
+/// anything else in `extra` wins. Claude Code takes one `--settings`, so
+/// what a session needs beyond the status settings goes into one file.
+pub fn merge_settings(base: &serde_json::Value, extra: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match (base, extra) {
+        (Value::Object(b), Value::Object(e)) => {
+            let mut out = b.clone();
+            for (k, v) in e {
+                let merged = match out.get(k) {
+                    Some(old) => merge_settings(old, v),
+                    None => v.clone(),
+                };
+                out.insert(k.clone(), merged);
+            }
+            Value::Object(out)
+        }
+        (Value::Array(b), Value::Array(e)) => {
+            let mut out = b.clone();
+            out.extend(e.iter().filter(|v| !b.contains(v)).cloned());
+            Value::Array(out)
+        }
+        (_, e) => e.clone(),
+    }
+}
+
+/// Writes the settings of one session that needs more than the status
+/// settings at `base` (a lean quest's connectors), as one file of its own,
+/// and says where. Rewritten on every start, as the status settings are.
+pub fn write_session_settings(
+    id: &str,
+    base: Option<&Path>,
+    extra: &serde_json::Value,
+) -> Option<PathBuf> {
+    let base = base
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let dir = dir()?.join("session-settings");
+    fs::create_dir_all(&dir).ok()?;
+    let name: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let path = dir.join(format!("{name}.json"));
+    fs::write(&path, merge_settings(&base, extra).to_string()).ok()?;
+    Some(path)
+}
+
 /// Writes the MCP config Horadric hands each `claude` it starts with
 /// `--mcp-config`: `horadric mcp`, run from `exe`, whose tools drive the
 /// project's browser pane. It finds its session by the environment it
@@ -279,6 +334,30 @@ mod tests {
         assert!(!allow.iter().any(|r| r
             .as_str()
             .is_some_and(|r| r.starts_with("Edit") && r.contains("portal-attach"))));
+    }
+
+    #[test]
+    fn a_lean_quest_keeps_its_status_line_and_adds_its_switches() {
+        let base = serde_json::json!({
+            "statusLine": {"type": "command", "command": "h status"},
+            "permissions": {"allow": ["Read(a)"]},
+            "deniedMcpServers": [{"serverName": "x"}]
+        });
+        let extra = serde_json::json!({
+            "disableClaudeAiConnectors": true,
+            "deniedMcpServers": [{"serverName": "x"}, {"serverName": "claude.ai Slack"}],
+            "permissions": {"allow": ["Read(b)"]}
+        });
+        assert_eq!(
+            merge_settings(&base, &extra),
+            serde_json::json!({
+                "statusLine": {"type": "command", "command": "h status"},
+                "permissions": {"allow": ["Read(a)", "Read(b)"]},
+                "deniedMcpServers": [{"serverName": "x"}, {"serverName": "claude.ai Slack"}],
+                "disableClaudeAiConnectors": true
+            })
+        );
+        assert_eq!(merge_settings(&base, &serde_json::json!({})), base);
     }
 
     #[test]

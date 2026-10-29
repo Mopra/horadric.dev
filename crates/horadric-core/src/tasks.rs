@@ -141,6 +141,20 @@ impl Task {
         }
     }
 
+    /// The claude.ai connectors its `Connectors:` notes lines ask for, by
+    /// name, or `all`. A quest's session starts without the others, since
+    /// most quests never call one and each costs every turn.
+    pub fn connectors(&self) -> Vec<String> {
+        self.notes
+            .iter()
+            .filter_map(|n| connectors_line(n))
+            .flat_map(|l| l.split(','))
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
     /// What it waited on, for its session told to go on and the toast
     /// that says so. Empty for an item that waits on nothing.
     pub fn over(&self) -> String {
@@ -202,6 +216,13 @@ pub fn part_line(note: &str) -> Option<&str> {
     let head = note.get(..5)?;
     let part = note[5..].trim();
     (head.eq_ignore_ascii_case("part:") && !part.is_empty()).then_some(part)
+}
+
+/// What a `Connectors: <names, or all>` notes line names, read in any case.
+pub fn connectors_line(note: &str) -> Option<&str> {
+    let head = note.get(..11)?;
+    let names = note[11..].trim();
+    (head.eq_ignore_ascii_case("connectors:") && !names.is_empty()).then_some(names)
 }
 
 /// The notes line that says a quest waits for `title`.
@@ -1441,13 +1462,14 @@ pub fn split(task: &Task) -> String {
 }
 
 /// What memory is asked of a quest as it starts: its title and its
-/// notes, without the `After:`, `Model:`, `Escalated:` and `Outcome:`
-/// lines, which say how it is run and not what it is about.
+/// notes, without the `After:`, `Model:`, `Connectors:`, `Escalated:` and
+/// `Outcome:` lines, which say how it is run and not what it is about.
 pub fn recall_query(task: &Task) -> String {
     let mut out = task.title.clone();
     for n in &task.notes {
         if after_line(n).is_none()
             && model_line(n).is_none()
+            && connectors_line(n).is_none()
             && crate::escalate::escalated_line(n).is_none()
             && crate::escalate::Run::read(n).is_none()
         {
@@ -1503,7 +1525,9 @@ pub fn system_prompt(horadric: &str, file: &str, list: Option<&str>) -> String {
          of doing it now, adding `--after \"<other title>\"` when it can only start \
          once another quest is done. Quests in {file} are lines like `- [ ] Title`, in the order they \
          should be done, with notes indented under them; a notes line `After: \
-         <title>` holds a quest back until that one is done. When your item is to \
+         <title>` holds a quest back until that one is done, and a quest's session \
+         starts without the claude.ai connectors unless a notes line `Connectors: \
+         <names, or all>` asks for them. When your item is to \
          plan work, write the items you decide on into the file below your own \
          line: {PLAN_WIDE}"
     );
@@ -2599,6 +2623,27 @@ mod tests {
         assert!(!system_prompt("hx", QUESTS_FILE, Some("C:/p/q.md")).contains("  "));
         assert!(nudge("hx").contains(report));
         assert!(go_on("hx").contains(report));
+    }
+
+    #[test]
+    fn a_connectors_line_names_what_a_quest_keeps() {
+        assert_eq!(
+            connectors_line("Connectors: monday, Slack"),
+            Some("monday, Slack")
+        );
+        assert_eq!(connectors_line("connectors:all"), Some("all"));
+        assert_eq!(connectors_line("Connectors:  "), None);
+        assert_eq!(connectors_line("Connector: x"), None);
+        assert_eq!(connectors_line("æøå"), None);
+        let mut t = parse("- [ ] Sweep the inbox").remove(0);
+        assert!(t.connectors().is_empty());
+        t.notes = vec![
+            "Connectors: monday.com, Microsoft 365,".into(),
+            "Some note.".into(),
+            "CONNECTORS: Slack".into(),
+        ];
+        assert_eq!(t.connectors(), ["monday.com", "Microsoft 365", "Slack"]);
+        assert!(system_prompt("hx", "q.md", None).contains("`Connectors: <names, or all>`"));
     }
 
     #[test]
