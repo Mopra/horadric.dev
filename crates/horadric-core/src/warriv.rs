@@ -162,6 +162,9 @@ pub enum Kind {
     Tangled,
     /// A finished quest did not merge into `main` by itself.
     Merge,
+    /// A quest just filed covers ground another open, running or recently
+    /// done quest covers.
+    Overlap,
     /// The log runs in auto mode, nothing is in hand, and every quest left
     /// waits.
     Stalled,
@@ -189,6 +192,7 @@ impl Kind {
             Kind::Asks => "stopped without saying it is completed",
             Kind::Tangled => "can not start: its After: lines are tangled",
             Kind::Merge => "is completed, but did not merge into main by itself",
+            Kind::Overlap => "was just filed, and may cover the same ground as another quest",
             Kind::Stalled | Kind::Dry | Kind::Round | Kind::LookBack => "",
         }
     }
@@ -419,10 +423,13 @@ impl Desk {
         let keys: BTreeSet<String> = now.iter().map(Event::key).collect();
         self.seen.retain(|k| keys.contains(k));
         self.human.retain(|k| keys.contains(k));
-        // A failed merge, a round and a look back are not in the log: they
-        // hold until told.
+        // A failed merge, an overlap, a round and a look back are not in
+        // the log: they hold until told.
         self.queue.retain(|e| {
-            matches!(e.kind, Kind::Merge | Kind::Round | Kind::LookBack) || keys.contains(&e.key())
+            matches!(
+                e.kind,
+                Kind::Merge | Kind::Overlap | Kind::Round | Kind::LookBack
+            ) || keys.contains(&e.key())
         });
         for e in now {
             if !self.seen.insert(e.key()) {
@@ -437,7 +444,8 @@ impl Desk {
         }
     }
 
-    /// An event that is not in the log, a failed merge, heard once.
+    /// An event that is not in the log, a failed merge or an overlap, heard
+    /// once.
     pub fn push(&mut self, e: Event) {
         if !self.queue.contains(&e) {
             self.queue.push(e);
@@ -2544,6 +2552,19 @@ mod tests {
         d.push(merge.clone());
         d.hear(vec![], true);
         assert_eq!(d.wake(0), Wake::Go(vec![merge]));
+    }
+
+    #[test]
+    fn an_overlap_waits_until_told_even_though_the_log_does_not_hold_it() {
+        let mut d = Desk::default();
+        let overlap = Event {
+            kind: Kind::Overlap,
+            title: "B".into(),
+            detail: "Shares crates/api with A.".into(),
+        };
+        d.push(overlap.clone());
+        d.hear(vec![], false);
+        assert_eq!(d.wake(0), Wake::Go(vec![overlap]));
     }
 
     #[test]

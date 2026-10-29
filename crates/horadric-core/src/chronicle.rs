@@ -109,7 +109,13 @@ pub enum Happened {
         checked: String,
     },
     /// The quest's branch did not merge by itself, for `failure`.
-    NotMerged { branch: String, failure: Failure },
+    NotMerged {
+        branch: String,
+        failure: Failure,
+        /// The files a conflict stopped on, for the look back's hotspots.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
+    },
     /// The project's "Ship Local" stone was cast. It names no quest.
     Shipped,
     /// Warriv woke, the session `wake`, and was given these events. Given
@@ -825,6 +831,7 @@ fn wake_line(w: &WarrivWake) -> AwayLine {
                 Kind::Asks => format!("{} stopped", quoted(&e.quest)),
                 Kind::Tangled => format!("{} tangled", quoted(&e.quest)),
                 Kind::Merge => format!("{} not merged", quoted(&e.quest)),
+                Kind::Overlap => format!("{} may overlap", quoted(&e.quest)),
             };
             if !woke.contains(&s) {
                 woke.push(s);

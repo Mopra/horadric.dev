@@ -2003,7 +2003,7 @@ impl App {
                 titles.retain(|(t, _)| *t != l.title);
             }
             // The day's look back counts these, to see what keeps failing.
-            if let Landing::Failed(why, _) = &l.landing {
+            if let Landing::Failed(why, output) = &l.landing {
                 store::chronicle(&chronicle::Record {
                     at: unix_now(),
                     project: l.key.clone(),
@@ -2012,6 +2012,10 @@ impl App {
                     what: Happened::NotMerged {
                         branch: l.w.branch.clone(),
                         failure: why.clone(),
+                        files: match why {
+                            merge::Failure::Conflict => merge::conflicted(output),
+                            _ => Vec::new(),
+                        },
                     },
                 });
             }

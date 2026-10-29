@@ -35,6 +35,106 @@ pub enum Pattern {
     Silent { times: usize, quests: Vec<String> },
     /// The quest `quest` came back from review `times` times.
     SentBack { quest: String, times: usize },
+    /// The file `file` stopped merges `times` times in all, and its
+    /// `shape` says what makes it stop.
+    Hotspot {
+        file: String,
+        times: usize,
+        shape: Shape,
+    },
+}
+
+/// What kind of file keeps conflicting, which says what ends it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    /// A log quests append to: `merge=union` keeps both sides' lines.
+    Log,
+    /// Code every feature adds an entry to, such as routes, env or a
+    /// catalog: one file per feature, gathered by the shared one.
+    Registry,
+    /// Other prose: union if it is only appended to, else split.
+    Doc,
+}
+
+/// How many hotspots a look back names at most, the worst first.
+const HOTSPOTS: usize = 8;
+
+/// The words in a file's name that make it a log.
+const LOGS: [&str; 13] = [
+    "plan",
+    "log",
+    "changelog",
+    "changes",
+    "history",
+    "journal",
+    "tracker",
+    "progress",
+    "notes",
+    "decisions",
+    "tasks",
+    "todo",
+    "status",
+];
+
+/// The shape of the file at `path`, from its name.
+pub fn shape(path: &str) -> Shape {
+    let name = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_lowercase();
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((&name, ""));
+    // Whole words, so `catalog.md` or `explanation.md` is no log: union
+    // would garble a document edited in place.
+    let log = || stem.split(['-', '_', '.', ' ']).any(|w| LOGS.contains(&w));
+    if !matches!(ext, "md" | "markdown" | "txt" | "") {
+        Shape::Registry
+    } else if log() {
+        Shape::Log
+    } else {
+        Shape::Doc
+    }
+}
+
+/// Whether `path` is a lockfile, which a conflict regenerates rather
+/// than splits, so it is never a hotspot.
+fn generated(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.ends_with(".lock") || name.ends_with("-lock.json") || name.ends_with("-lock.yaml")
+}
+
+/// Whether the project's `.gitattributes` text already merges `file` by
+/// union, so naming it again would only repeat the fix. The last line
+/// that sets `merge` for the file wins, as in git.
+pub fn unioned(attributes: &str, file: &str) -> bool {
+    let name = file.rsplit('/').next().unwrap_or(file);
+    let mut union = false;
+    for line in attributes.lines() {
+        let mut words = line.split_whitespace();
+        let Some(pattern) = words.next().filter(|p| !p.starts_with('#')) else {
+            continue;
+        };
+        let matches = match pattern.strip_prefix('/') {
+            // Anchored: only the path from the root.
+            Some(anchored) => anchored == file,
+            None if pattern.contains('/') => pattern == file,
+            None => match pattern.strip_prefix('*') {
+                Some(tail) => name.ends_with(tail),
+                None => pattern == name,
+            },
+        };
+        if !matches {
+            continue;
+        }
+        for w in words {
+            if w == "merge=union" {
+                union = true;
+            } else if w.starts_with("merge=") || w == "-merge" || w == "!merge" || w == "merge" {
+                union = false;
+            }
+        }
+    }
+    union
 }
 
 impl Pattern {
@@ -64,6 +164,33 @@ impl Pattern {
                 "\"{}\" came back from review {times} times: its quest says too little of \
                  what done means, or the work is harder than it looks.",
                 one_line(quest)
+            ),
+            Pattern::Hotspot {
+                file,
+                times,
+                shape: Shape::Log,
+            } => format!(
+                "`{file}` stopped {times} merges: it is a log quests append to. Add \
+                 `{file} merge=union` to `.gitattributes` and commit it, so both sides' \
+                 lines are kept."
+            ),
+            Pattern::Hotspot {
+                file,
+                times,
+                shape: Shape::Registry,
+            } => format!(
+                "`{file}` stopped {times} merges: every feature adds its entry to it. File a \
+                 quest in this project to split it into one file per feature, which the \
+                 shared file only gathers, so parallel quests stop touching the same lines."
+            ),
+            Pattern::Hotspot {
+                file,
+                times,
+                shape: Shape::Doc,
+            } => format!(
+                "`{file}` stopped {times} merges. If quests only append to it, add \
+                 `{file} merge=union` to `.gitattributes`; if they edit it in place, file a \
+                 quest to split it into one file per part."
             ),
         }
     }
@@ -111,8 +238,9 @@ pub fn since(records: &[Record], project: &str, now: u64) -> u64 {
 }
 
 /// The patterns in the project's chronicle from `since` on: what happened
-/// twice or more.
-pub fn patterns(records: &[Record], project: &str, since: u64) -> Vec<Pattern> {
+/// twice or more. `attributes` is the project's `.gitattributes`, so a
+/// file it already merges by union is no hotspot.
+pub fn patterns(records: &[Record], project: &str, since: u64, attributes: &str) -> Vec<Pattern> {
     let mine: Vec<&Record> = records.iter().filter(|r| r.project == project).collect();
     let recent = || mine.iter().copied().filter(|r| r.at >= since);
     let mut out = Vec::new();
@@ -160,7 +288,43 @@ pub fn patterns(records: &[Record], project: &str, since: u64) -> Vec<Pattern> {
     for (quest, times) in sent_back(&mine, since) {
         out.push(Pattern::SentBack { quest, times });
     }
+    out.extend(hotspots(&mine, since, attributes));
     out
+}
+
+/// The files that stopped two merges or more over the project's whole
+/// story, the last of them since `since`: a hotspot shows slowly, a day
+/// is too short to see it, and it stays one until its shape changes.
+fn hotspots(mine: &[&Record], since: u64, attributes: &str) -> Vec<Pattern> {
+    // Per file: how often, when last, and on which quests. One quest
+    // landing twice on the same file is no hotspot, two quests are.
+    let mut seen: BTreeMap<&str, (usize, u64, Vec<&str>)> = BTreeMap::new();
+    for r in mine {
+        if let Happened::NotMerged { files, .. } = &r.what {
+            for f in files.iter().filter(|f| !generated(f)) {
+                let e = seen.entry(f.as_str()).or_default();
+                e.0 += 1;
+                e.1 = e.1.max(r.at);
+                if !e.2.contains(&r.title.as_str()) {
+                    e.2.push(&r.title);
+                }
+            }
+        }
+    }
+    let mut hot: Vec<(&str, usize)> = seen
+        .into_iter()
+        .filter(|(f, (_, at, quests))| quests.len() >= 2 && *at >= since && !unioned(attributes, f))
+        .map(|(f, (times, ..))| (f, times))
+        .collect();
+    hot.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    hot.into_iter()
+        .take(HOTSPOTS)
+        .map(|(f, times)| Pattern::Hotspot {
+            file: f.to_string(),
+            times,
+            shape: shape(f),
+        })
+        .collect()
 }
 
 /// How often each quest came back from review, over its whole story, for
@@ -310,6 +474,19 @@ mod tests {
             Happened::NotMerged {
                 branch: title.into(),
                 failure,
+                files: Vec::new(),
+            },
+        )
+    }
+
+    fn conflicted(at: u64, title: &str, files: &[&str]) -> Record {
+        rec(
+            at,
+            title,
+            Happened::NotMerged {
+                branch: title.into(),
+                failure: Failure::Conflict,
+                files: files.iter().map(|f| f.to_string()).collect(),
             },
         )
     }
@@ -393,7 +570,7 @@ mod tests {
             woke(12, &[(Kind::Asks, "C")]),
             fix(13, "D"),
         ];
-        assert!(patterns(&records, "p", 0).is_empty());
+        assert!(patterns(&records, "p", 0, "").is_empty());
     }
 
     #[test]
@@ -408,7 +585,7 @@ mod tests {
             not_merged(16, "F", Failure::Refused),
         ];
         assert_eq!(
-            patterns(&records, "p", 0),
+            patterns(&records, "p", 0, ""),
             vec![
                 Pattern::Conflicts {
                     times: 3,
@@ -432,8 +609,8 @@ mod tests {
             not_merged(20, "A", Failure::Conflict),
             other,
         ];
-        assert!(patterns(&records, "p", 10).is_empty());
-        assert_eq!(patterns(&records, "p", 0).len(), 1);
+        assert!(patterns(&records, "p", 10, "").is_empty());
+        assert_eq!(patterns(&records, "p", 0, "").len(), 1);
     }
 
     #[test]
@@ -443,7 +620,7 @@ mod tests {
             woke(20, &[(Kind::Asks, "B")]),
         ];
         assert_eq!(
-            patterns(&records, "p", 0),
+            patterns(&records, "p", 0, ""),
             vec![Pattern::Silent {
                 times: 2,
                 quests: vec!["A".into(), "B".into()]
@@ -471,15 +648,15 @@ mod tests {
             accepted(21, "C"),
         ];
         assert_eq!(
-            patterns(&records, "p", 0),
+            patterns(&records, "p", 0, ""),
             vec![Pattern::SentBack {
                 quest: "A".into(),
                 times: 2
             }]
         );
         // Sent back before and once since still counts both.
-        assert_eq!(patterns(&records, "p", 13).len(), 1);
-        assert!(patterns(&records, "p", 16).is_empty());
+        assert_eq!(patterns(&records, "p", 13, "").len(), 1);
+        assert!(patterns(&records, "p", 16, "").is_empty());
     }
 
     #[test]
@@ -491,12 +668,96 @@ mod tests {
             accepted(13, "A"),
         ];
         assert_eq!(
-            patterns(&records, "p", 0),
+            patterns(&records, "p", 0, ""),
             vec![Pattern::SentBack {
                 quest: "A".into(),
                 times: 2
             }]
         );
+    }
+
+    #[test]
+    fn files_that_keep_conflicting_are_hotspots() {
+        let records = [
+            conflicted(1, "A", &["docs/PLAN.md", "src/env.ts", "docs/SPEC.md"]),
+            conflicted(2, "B", &["docs/PLAN.md", "src/env.ts"]),
+            conflicted(3, "C", &["src/env.ts", "docs/SPEC.md", "once.ts"]),
+            // An old pair that never came back is no hotspot today.
+            conflicted(1, "D", &["old.ts"]),
+            conflicted(1, "E", &["old.ts"]),
+        ];
+        let hot = |since: u64, attributes: &str| -> Vec<Pattern> {
+            patterns(&records, "p", since, attributes)
+                .into_iter()
+                .filter(|p| matches!(p, Pattern::Hotspot { .. }))
+                .collect()
+        };
+        let spot = |file: &str, times, shape| Pattern::Hotspot {
+            file: file.into(),
+            times,
+            shape,
+        };
+        assert_eq!(
+            hot(2, ""),
+            [
+                spot("src/env.ts", 3, Shape::Registry),
+                spot("docs/PLAN.md", 2, Shape::Log),
+                spot("docs/SPEC.md", 2, Shape::Doc),
+            ]
+        );
+        assert_eq!(
+            hot(2, "docs/PLAN.md merge=union\n*.ts text=auto\n"),
+            [
+                spot("src/env.ts", 3, Shape::Registry),
+                spot("docs/SPEC.md", 2, Shape::Doc),
+            ]
+        );
+        assert_eq!(hot(4, ""), []);
+        assert_eq!(
+            hot(2, "docs/PLAN.md merge=union\ndocs/PLAN.md -merge\n").len(),
+            3,
+            "the last line wins"
+        );
+        // One quest twice, or a lockfile, is no hotspot.
+        let records = [
+            conflicted(1, "A", &["src/a.ts", "Cargo.lock"]),
+            conflicted(2, "A", &["src/a.ts"]),
+            conflicted(3, "B", &["Cargo.lock"]),
+        ];
+        assert!(!patterns(&records, "p", 0, "")
+            .iter()
+            .any(|p| matches!(p, Pattern::Hotspot { .. })));
+        assert!(spot("docs/PLAN.md", 2, Shape::Log)
+            .line()
+            .contains("`docs/PLAN.md merge=union`"));
+    }
+
+    #[test]
+    fn a_files_shape_comes_from_its_name() {
+        assert_eq!(shape("docs/PLAN.md"), Shape::Log);
+        assert_eq!(shape("LOG.md"), Shape::Log);
+        assert_eq!(shape("CHANGELOG.md"), Shape::Log);
+        assert_eq!(shape("docs/bug-tracker.md"), Shape::Log);
+        assert_eq!(shape("docs/SPEC.md"), Shape::Doc);
+        assert_eq!(shape("docs/catalog.md"), Shape::Doc);
+        assert_eq!(shape("explanation.md"), Shape::Doc);
+        assert_eq!(shape("apps/server/src/env.ts"), Shape::Registry);
+        assert_eq!(shape("content/pages/modules.ts"), Shape::Registry);
+        assert_eq!(shape("src\\Footer.tsx"), Shape::Registry);
+    }
+
+    #[test]
+    fn union_in_gitattributes_by_path_name_or_glob() {
+        let attributes = "# logs\n/docs/PLAN.md merge=union\nLOG.md merge=union\n\
+                          *.log merge=union\nSPEC.md text\n";
+        assert!(unioned(attributes, "docs/PLAN.md"));
+        assert!(!unioned("/PLAN.md merge=union", "docs/PLAN.md"), "anchored");
+        assert!(unioned("/PLAN.md merge=union", "PLAN.md"));
+        assert!(!unioned(attributes, "other/PLAN.md"));
+        assert!(unioned(attributes, "a/b/LOG.md"));
+        assert!(unioned(attributes, "build.log"));
+        assert!(!unioned(attributes, "docs/SPEC.md"));
+        assert!(!unioned("", "docs/PLAN.md"));
     }
 
     #[test]

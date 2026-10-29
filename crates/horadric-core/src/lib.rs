@@ -61,6 +61,7 @@ pub mod runeword;
 pub mod said;
 pub mod sanctuary;
 pub mod saved;
+pub mod scope;
 pub mod serving;
 pub mod session;
 pub mod ship;

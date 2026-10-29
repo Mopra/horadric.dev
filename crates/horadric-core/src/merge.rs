@@ -84,6 +84,34 @@ pub fn failed(step: &Step, output: &str) -> Failure {
     }
 }
 
+/// The files a stopped rebase's `output` says conflicted, in order, each
+/// once, so the look back can tell which files keep conflicting.
+pub fn conflicted(output: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in output.lines() {
+        let Some(rest) = line.trim().strip_prefix("CONFLICT (") else {
+            continue;
+        };
+        let file = match rest.split_once("Merge conflict in ") {
+            Some((_, file)) => file,
+            // These name the file first: "x.rs deleted in ...". Other
+            // kinds start with a word, not a path, and are left out.
+            None => match rest.split_once("): ") {
+                Some((
+                    "modify/delete" | "rename/delete" | "rename/rename" | "file location",
+                    after,
+                )) => after.split(' ').next().unwrap_or(""),
+                _ => "",
+            },
+        };
+        let file = file.trim();
+        if !file.is_empty() && !out.iter().any(|f| f == file) {
+            out.push(file.to_string());
+        }
+    }
+    out
+}
+
 /// How many times a merge starts over when `main` moves under it.
 pub const TRIES: usize = 3;
 
@@ -220,6 +248,28 @@ pub fn add_fix_up(text: &str, finished: &str, fix: &FixUp) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_files_a_conflict_names() {
+        let output = "Auto-merging apps/desktop/src/preload/index.ts
+CONFLICT (content): Merge conflict in apps/desktop/src/preload/index.ts
+Auto-merging docs/SPEC.md
+CONFLICT (content): Merge conflict in docs/SPEC.md
+CONFLICT (add/add): Merge conflict in docs/SPEC.md
+CONFLICT (modify/delete): src/old.rs deleted in HEAD and modified in abc123.
+CONFLICT (file/directory): directory in the way of src/x from HEAD; moving it to src/x~HEAD.
+error: could not apply e36bb84... Notify natively
+";
+        assert_eq!(
+            conflicted(output),
+            [
+                "apps/desktop/src/preload/index.ts",
+                "docs/SPEC.md",
+                "src/old.rs"
+            ]
+        );
+        assert!(conflicted("fatal: not a git repository").is_empty());
+    }
 
     #[test]
     fn checks_come_from_the_config_as_a_list_or_one_string() {

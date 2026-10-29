@@ -144,9 +144,11 @@ fn looked(key: &str, live: Vec<String>) -> Looked {
     let since = lookback::since(&records, key, now);
     let mut skip = lookback::warriv_talk(&records, key);
     skip.extend(live);
+    let attributes =
+        std::fs::read_to_string(Path::new(key).join(".gitattributes")).unwrap_or_default();
     Looked {
         day: lookback::day(&records, key, since),
-        patterns: lookback::patterns(&records, key, since)
+        patterns: lookback::patterns(&records, key, since, &attributes)
             .iter()
             .map(lookback::Pattern::line)
             .collect(),
@@ -1103,6 +1105,18 @@ impl App {
 
     /// A finished quest that did not merge by itself, for Warriv to hear.
     pub(super) fn merge_event(&mut self, dir: &Path, title: &str, detail: String) {
+        self.unlogged_event(dir, Kind::Merge, title, detail);
+    }
+
+    /// A quest just filed that may cover another's ground, for Warriv to
+    /// hear before two sessions do the same work.
+    pub(in crate::app) fn overlap_event(&mut self, dir: &Path, title: &str, detail: String) {
+        self.unlogged_event(dir, Kind::Overlap, title, detail);
+    }
+
+    /// An event the quest log does not hold, so nothing else would put it
+    /// on the desk of the project's Warriv.
+    fn unlogged_event(&mut self, dir: &Path, kind: Kind, title: &str, detail: String) {
         let key = folder_key(&dir.to_string_lossy());
         if !warriv::orchestrates(file::orchestrator(dir), self.drives.contains_key(&key)) {
             return;
@@ -1114,11 +1128,12 @@ impl App {
             .or_default()
             .desk
             .push(Event {
-                kind: Kind::Merge,
+                kind,
                 title: title.to_string(),
                 detail,
             });
     }
+
     /// One look at a project's reviews. In "Warriv reviews" mode a quest
     /// going `[?]` queues, and one reviewer a project reads them in turn,
     /// a fresh session each, which closes once its turn ends. True when a

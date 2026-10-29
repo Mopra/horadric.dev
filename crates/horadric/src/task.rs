@@ -15,7 +15,7 @@ use horadric_core::chronicle::{self, Command, Happened, Record};
 use horadric_core::pack::{self, Touched};
 use horadric_core::spend::{uptake, Sitting};
 use horadric_core::tasks::{self, Mark, Wait};
-use horadric_core::{aim, runeword, tombs, warriv};
+use horadric_core::{aim, runeword, scope, tombs, warriv};
 use horadric_hooks::listener::TasksChanged;
 use horadric_hooks::{
     client, lore, tasks as file, transcript, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, STATE_HEADER,
@@ -66,6 +66,10 @@ usage: horadric quest done [\"summary\"]  The quest this session works is comple
                                         by piece, before it has done anything";
 
 /// What the errors call the list, which may still be the old file.
+/// Set to `0`, `quest add` does not ask a model about a quest that reads
+/// like another, and says what the words found.
+const SCOPE_MODEL_ENV: &str = "HORADRIC_SCOPE_MODEL";
+
 const NO_LOG: &str = "no quest log (.horadric/quests.md or .horadric/tasks.md) above here";
 
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -551,6 +555,7 @@ fn add(
     };
     let done = file::read_done(&project);
     let mut chain = None;
+    let mut found = Vec::new();
     write(&project, |text| {
         let log = tasks::parse(text);
         // An `After:` line naming either of two quests alike would match
@@ -562,6 +567,7 @@ fn add(
         }
         let notes = &tasks::drop_done_after(notes, &log, &done);
         chain = tasks::chain_warning(&log, notes);
+        found = scope::near(title, notes, &log, &done);
         match below {
             None => Ok(tasks::append_with_notes(text, title, notes)),
             Some(b) => warriv::add_below(text, b, title, notes),
@@ -585,8 +591,91 @@ fn add(
     if let Some(chain) = chain {
         println!("{chain}");
     }
+    overlap(&project, title, notes, found);
     Ok(())
 }
+
+/// Says when the quest just filed covers ground another one covers: to
+/// the filer here, and to Warriv as an event unless Warriv filed it,
+/// since it reads this. A model weighs what the words found first, so
+/// two quests that only touch one area say nothing.
+fn overlap(project: &Path, title: &str, notes: &str, found: Vec<scope::Near>) {
+    if found.is_empty() {
+        return;
+    }
+    let verdicts = judge(project, title, notes, &found);
+    let judged: Vec<(scope::Near, Option<scope::Verdict>)> = match verdicts {
+        Some(v) => found.into_iter().zip(v.into_iter().map(Some)).collect(),
+        None => found.into_iter().map(|n| (n, None)).collect(),
+    };
+    let me = std::env::current_exe()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| "horadric".into());
+    if let Some(w) = scope::warning(&me, title, &judged) {
+        println!("{w}");
+    }
+    if session().is_some_and(|id| warriv::is_warriv(&id)) {
+        return;
+    }
+    if let Some(detail) = scope::event_detail(&judged) {
+        post_app(&TasksChanged {
+            dir: project.to_string_lossy().into_owned(),
+            quest: Some(title.to_string()),
+            overlap: Some(detail),
+            by: session(),
+            ..TasksChanged::default()
+        });
+    }
+}
+
+/// Asks a small model which of the quests found are the same work. None
+/// when it can not be asked or did not answer, and the words alone speak.
+/// It runs with no tools, hooks or MCP servers, so it is no session.
+fn judge(
+    project: &Path,
+    title: &str,
+    notes: &str,
+    found: &[scope::Near],
+) -> Option<Vec<scope::Verdict>> {
+    if std::env::var(SCOPE_MODEL_ENV).is_ok_and(|v| v == "0") {
+        return None;
+    }
+    let mut c = std::process::Command::new("claude");
+    c.current_dir(project)
+        .arg("-p")
+        .arg(scope::judge_prompt(title, notes, found))
+        .args(["--model", "haiku", "--tools", "", "--strict-mcp-config"])
+        .arg("--no-session-persistence")
+        .args(["--settings", r#"{"disableAllHooks":true}"#])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    for (k, _) in std::env::vars() {
+        if k.starts_with("HORADRIC_") {
+            c.env_remove(k);
+        }
+    }
+    let mut child = c.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut s);
+        s
+    });
+    let deadline = std::time::Instant::now() + JUDGE_LONGEST;
+    while child.try_wait().ok()?.is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    scope::verdicts(&reader.join().ok()?, found.len())
+}
+
+/// How long `quest add` waits for the model before the words alone speak.
+const JUDGE_LONGEST: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Changes the log with `change`, which says what is wrong when it can
 /// not.
