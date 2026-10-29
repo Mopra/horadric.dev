@@ -455,7 +455,13 @@ impl Session {
                     self.last_line = first_line(m);
                     self.last_turn = Some(m.clone());
                 }
-                Some(Phase::Done)
+                // A background shell or agent it started still runs and will
+                // wake it: the turn ended, the work did not.
+                if self.loot.waiting_on_own_work() {
+                    Some(Phase::Working)
+                } else {
+                    Some(Phase::Done)
+                }
             }
             "StopFailure" => {
                 let kind = event.error_type.clone().unwrap_or_else(|| "unknown".into());
@@ -1188,6 +1194,28 @@ mod tests {
         assert!(!s.unseen);
         s.apply(&ev("Stop"), now());
         assert!(s.unread());
+    }
+
+    #[test]
+    fn a_stop_with_a_background_shell_running_is_not_done() {
+        let mut s = Session::new("g1", "fix-login", "C:/repo");
+        s.apply(&ev("UserPromptSubmit"), now());
+        let mut bg = ev("PostToolUse");
+        bg.tool_name = Some("Bash".into());
+        bg.tool_input =
+            Some(serde_json::json!({ "command": "cargo test", "run_in_background": true }));
+        s.apply(&bg, now());
+        let mut stop = ev("Stop");
+        stop.last_assistant_message = Some("Waiting on the tests.".into());
+        s.apply(&stop, now());
+        assert_eq!(s.phase, Phase::Working);
+        assert_eq!(s.last_line, "Waiting on the tests.");
+        let mut wake = ev("UserPromptSubmit");
+        wake.user_prompt =
+            Some("<task-notification><status>completed</status></task-notification>".into());
+        s.apply(&wake, now());
+        s.apply(&ev("Stop"), now());
+        assert_eq!(s.phase, Phase::Done);
     }
 
     #[test]
