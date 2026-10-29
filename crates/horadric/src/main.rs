@@ -24,6 +24,8 @@ mod context;
 mod google;
 #[cfg(windows)]
 mod guard;
+#[cfg(windows)]
+mod headless_debug;
 mod heavy;
 mod hook;
 #[cfg(windows)]
@@ -189,6 +191,9 @@ fn main() -> ExitCode {
         Some("new") => run::new(&args[1..]),
         Some("run") => run::run(&args[1..]),
         Some("heavy") => heavy::run(&args[1..]),
+        // Hidden: for checking the headless protocol against the real CLI.
+        #[cfg(windows)]
+        Some("headless-debug") => headless_debug::run(&args[1..]),
         #[cfg(windows)]
         Some("guard") => guard::run(&args[1..]),
         #[cfg(windows)]
