@@ -107,6 +107,16 @@ impl Menu {
         }
     }
 
+    /// Scrolls the list `rows` down (up when negative), as the wheel
+    /// does, taking the pick along so Enter never picks what is hidden.
+    pub fn scroll(&mut self, rows: isize) {
+        let most = self.items.len().saturating_sub(SHOWN);
+        self.top = self.top.saturating_add_signed(rows).min(most);
+        self.selected = self
+            .selected
+            .clamp(self.top, (self.top + SHOWN).saturating_sub(1));
+    }
+
     pub fn picked(&self) -> Option<&Item> {
         self.items.get(self.selected)
     }
@@ -389,5 +399,23 @@ mod tests {
             },
         ];
         assert_eq!(Menu::new(MenuKind::Model, items, 0).selected, 1);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_a_menu_and_takes_the_pick_along() {
+        let items: Vec<Item> = (0..20)
+            .map(|i| Item {
+                label: i.to_string(),
+                ..Default::default()
+            })
+            .collect();
+        let mut m = Menu::new(MenuKind::Slash, items, 0);
+        m.scroll(3);
+        assert_eq!((m.top, m.selected), (3, 3));
+        m.scroll(100);
+        assert_eq!(m.top, 20 - SHOWN);
+        m.scroll(-100);
+        assert_eq!(m.top, 0);
+        assert_eq!(m.selected, SHOWN - 1);
     }
 }

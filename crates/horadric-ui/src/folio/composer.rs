@@ -169,6 +169,8 @@ pub(super) struct Input {
     /// Where the pickers' controls were last drawn, to open their menus
     /// under them.
     anchors: [f32; 4],
+    /// Where the open menu was last drawn, for the wheel over it.
+    pub(super) menu_at: Option<Rect>,
     ime: Option<[i32; 4]>,
 }
 
@@ -198,7 +200,15 @@ impl Input {
             saved_at: Instant::now(),
             top: 0.0,
             anchors: [0.0; 4],
+            menu_at: None,
             ime: None,
+        }
+    }
+
+    /// Scrolls the open menu by `rows`, as the wheel over it does.
+    pub(super) fn scroll_menu(&mut self, rows: isize) {
+        if let Some(m) = &mut self.menu {
+            m.scroll(rows);
         }
     }
 
@@ -1467,6 +1477,7 @@ impl View {
             chat.input.menu = None;
             follow_menu(chat);
         }
+        chat.input.menu_at = None;
         let Some(menu) = &chat.input.menu else {
             return;
         };
@@ -1491,6 +1502,8 @@ impl View {
         let rows = menu.items.len().clamp(1, picker::SHOWN);
         let mh = rows as f32 * MENU_ROW + 8.0;
         let r = Rect::new(x, chat.input.top - 6.0 - mh, w, mh);
+        chat.input.menu_at = Some(r);
+        let menu = chat.input.menu.as_ref().expect("checked above");
         gfx.fill_round(&r, 12.0, pal.bg.mix(pal.fg, 0.1));
         gfx.stroke_round(&r, 12.0, pal.fg.with_alpha(0.16), 1.0);
         hits.push((r, Hit::Input(Act::Text)));

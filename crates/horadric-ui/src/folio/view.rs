@@ -194,7 +194,28 @@ pub fn key(key: &str, vk: u16, mods: Mods) -> bool {
 
 /// The wheel, from the pane, in Windows' units of 120 a notch.
 pub fn wheel(key: &str, delta: i32) {
-    scroll_by(key, -delta as f32 / 120.0 * NOTCH);
+    // Over an open menu the wheel scrolls the menu, not the conversation.
+    let on_menu = with(key, |c| {
+        let (Some(at), Some(view)) = (c.input.menu_at, c.view) else {
+            return false;
+        };
+        let mut p = POINT::default();
+        let s = dpi(view) as f32 / 96.0;
+        let inside = unsafe {
+            GetCursorPos(&mut p).is_ok()
+                && ScreenToClient(view, &mut p).as_bool()
+                && at.contains(p.x as f32 / s, p.y as f32 / s)
+        };
+        if inside {
+            let rows = -(delta as f32 / 120.0 * 3.0).round() as isize;
+            c.input.scroll_menu(rows);
+        }
+        inside
+    })
+    .unwrap_or(false);
+    if !on_menu {
+        scroll_by(key, -delta as f32 / 120.0 * NOTCH);
+    }
     redraw(key);
 }
 
