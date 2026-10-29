@@ -13,6 +13,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (landing, main at 9b90bd5): the checkpoint git-init fix landed and the 0b12636 ship reloaded, so cast "Ship Local". Context panel still runs, spike waits on the human.
 - 2026-10-29 Round (landing, main at 0b12636): "Sessions waiting on their own checks..." landed (edd8483), so cast "Ship Local" as Open said. Context panel and checkpoint fix still run, spike waits on the human.
 - 2026-10-29 Round (human left, main at c6c1007, only my memory since 8f6e4c3): the 8f6e4c3 Ship Local reloaded fine at 05:21. Three quests still run, spike waits on the human. Nothing to do.
 - 2026-10-29 "Sessions waiting on their own checks..." stopped undone a third time: landing part green, its heavy agent still runs. Own work, no tell, noted it.
@@ -181,9 +182,9 @@
 - 2026-10-06 to 2026-10-10 Mostly idle rounds (no quests, no aim). Settings window series landed 10-07 and shipped public as v0.16.0; Mac quests shipped as v0.17.0; v0.18.0 and v0.19.0 were cut by hand.
 
 ## Open
-- Check "Make checkpoint tests' git init not copy hook templates" lands; if the flake shows again after, look at %TEMP% itself (antivirus, locks).
+- The checkpoint git-init fix landed (9b90bd5): if the flake shows again, look at %TEMP% itself (antivirus, locks).
 - "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Check the 0b12636 Ship Local reloads; cast again once the context panel or the checkpoint fix lands.
+- Check the 9b90bd5 Ship Local reloads; cast again once the context panel lands.
 - Check the context panel lands after my go; if it blocks on memory again, the heavy memory fix (edd8483, now on main) should help.
 - "Sessions waiting on their own checks..." landed: the next look back's silent stops count should drop.
