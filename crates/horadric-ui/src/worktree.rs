@@ -562,26 +562,42 @@ pub enum Landing {
     /// the checks passed on, which `main` was left at, or empty when it
     /// held the branch already and none ran.
     Merged(String),
-    /// A step failed with this output. The branch stayed.
-    Failed(merge::Failure, String),
+    /// A step failed with this output, and the other side was this. The
+    /// branch stayed.
+    Failed(merge::Failure, String, merge::Theirs),
 }
 
 /// Merges the finished quest in worktree `w` into `into`, what the main
 /// tree has checked out: rebased on it in the worktree, `checks` run
 /// there, and `into` fast forwarded to it. Starts over when `into` moved
-/// meanwhile. Blocks for as long as the checks take, so it runs on a
-/// thread of its own.
-pub fn land(w: &Worktree, into: &str, checks: &[String]) -> Landing {
+/// meanwhile. `live` when the quest's session still runs, idle, in the
+/// worktree; else it was just ended. Blocks for as long as the checks
+/// take, so it runs on a thread of its own.
+pub fn land(w: &Worktree, into: &str, checks: &[String], live: bool) -> Landing {
     let main = Path::new(&w.main);
     let tree = Path::new(&w.path);
-    // The agent was just ended, and may hold its files for a moment.
-    std::thread::sleep(Duration::from_secs(1));
+    if !live {
+        // The agent was just ended, and may hold its files for a moment.
+        std::thread::sleep(Duration::from_secs(1));
+    }
     if git(main, &["merge-base", "--is-ancestor", &w.branch, into]).is_ok() {
         return Landing::Merged(String::new());
     }
-    let mut last = (merge::Failure::Moved, String::new());
+    let mut last = (
+        merge::Failure::Moved,
+        String::new(),
+        merge::Theirs::default(),
+    );
     for _ in 0..merge::TRIES {
         let mut moved = false;
+        // Asked before the rebase moves the branch onto them.
+        let gained = format!("HEAD..{into}");
+        let mut theirs = merge::Theirs {
+            files: Vec::new(),
+            subjects: git(tree, &["log", "--format=%s", &gained])
+                .map(|l| merge::lines(&l))
+                .unwrap_or_default(),
+        };
         for step in merge::plan(checks) {
             let done = match &step {
                 merge::Step::Rebase => git(tree, &["rebase", into]),
@@ -591,20 +607,45 @@ pub fn land(w: &Worktree, into: &str, checks: &[String]) -> Landing {
             let Err(out) = done else { continue };
             let why = merge::failed(&step, &out);
             if step == merge::Step::Rebase {
+                if why == merge::Failure::Conflict {
+                    theirs = conflict_side(tree, &w.branch, into, theirs.subjects);
+                }
                 let _ = git(tree, &["rebase", "--abort"]);
             }
             if why == merge::Failure::Moved {
-                last = (why, out);
+                last = (why, out, theirs);
                 moved = true;
                 break;
             }
-            return Landing::Failed(why, out);
+            return Landing::Failed(why, out, theirs);
         }
         if !moved {
             return Landing::Merged(head(tree).unwrap_or_default());
         }
     }
-    Landing::Failed(last.0, last.1)
+    Landing::Failed(last.0, last.1, last.2)
+}
+
+/// The other side of the rebase of `branch` stopped in `tree`: the files
+/// it stopped on, and of `all` that `into` gained, the commits that
+/// touched them when any did. Asked before the rebase is undone, while
+/// `branch` still points where it did before it.
+fn conflict_side(tree: &Path, branch: &str, into: &str, all: Vec<String>) -> merge::Theirs {
+    let files = git(tree, &["diff", "--name-only", "--diff-filter=U"])
+        .map(|f| merge::lines(&f))
+        .unwrap_or_default();
+    let range = format!("{branch}..{into}");
+    let mut args = vec!["log", "--format=%s", range.as_str(), "--"];
+    args.extend(files.iter().map(String::as_str));
+    let touched = git(tree, &args)
+        .ok()
+        .filter(|_| !files.is_empty())
+        .map(|l| merge::lines(&l))
+        .filter(|s| !s.is_empty());
+    merge::Theirs {
+        subjects: touched.unwrap_or(all),
+        files,
+    }
 }
 
 /// Runs `command` with `cmd /c` in `dir`, with no window: what it printed
@@ -665,6 +706,49 @@ mod tests {
 
     fn run(dir: &Path, args: &[&str]) {
         git(dir, args).unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    }
+
+    #[test]
+    fn a_conflicted_landing_names_the_files_and_the_other_side_and_is_undone() {
+        let base = std::env::temp_dir().join(format!("horadric-land-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let top = base.join("main");
+        std::fs::create_dir_all(&top).unwrap();
+        run(&top, &["init", "-q", "-b", "main"]);
+        run(&top, &["config", "user.email", "t@example.com"]);
+        run(&top, &["config", "user.name", "t"]);
+        std::fs::write(top.join("a.txt"), "one\n").unwrap();
+        std::fs::write(top.join("b.txt"), "b\n").unwrap();
+        run(&top, &["add", "."]);
+        run(&top, &["commit", "-q", "-m", "first"]);
+        let path = base.join("q").to_string_lossy().replace('\\', "/");
+        run(&top, &["worktree", "add", "-q", "-b", "q", &path]);
+        let tree = Path::new(&path);
+        std::fs::write(tree.join("a.txt"), "mine\n").unwrap();
+        run(tree, &["commit", "-q", "-am", "Mine"]);
+        std::fs::write(top.join("a.txt"), "theirs\n").unwrap();
+        run(&top, &["commit", "-q", "-am", "Theirs on a"]);
+        std::fs::write(top.join("b.txt"), "b2\n").unwrap();
+        run(&top, &["commit", "-q", "-am", "Theirs on b"]);
+
+        let w = Worktree {
+            path: path.clone(),
+            main: top.to_string_lossy().replace('\\', "/"),
+            branch: "q".into(),
+            ports: None,
+        };
+        let Landing::Failed(why, _, theirs) = land(&w, "main", &[], true) else {
+            panic!("it should conflict");
+        };
+        assert_eq!(why, merge::Failure::Conflict);
+        assert_eq!(theirs.files, ["a.txt"]);
+        assert_eq!(theirs.subjects, ["Theirs on a"]);
+        // Undone, so the session that mends it starts from its own work.
+        assert!(git(tree, &["status", "--porcelain"]).unwrap().is_empty());
+        let mine = std::fs::read_to_string(tree.join("a.txt")).unwrap();
+        assert_eq!(mine.trim_end(), "mine");
+        let _ = git(&top, &["worktree", "remove", "--force", &path]);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

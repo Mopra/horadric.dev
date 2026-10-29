@@ -75,6 +75,13 @@ const GONE_FOR: Duration = Duration::from_secs(180);
 /// How often a dev instance reads again which projects the installed
 /// Horadric knows.
 const INSTALLED_EVERY: Duration = Duration::from_secs(30);
+/// How long a session mending a landing handed back to it holds its
+/// project's other landings, so one that never lands does not hold them
+/// for ever.
+const HOLDS_LANDINGS_FOR: Duration = Duration::from_secs(60 * 60);
+/// How many times a landing goes back to its session before a fix-up
+/// quest for a fresh one takes it over.
+const HAND_BACKS: u32 = 3;
 
 /// What the app keeps for the task lists.
 #[derive(Default)]
@@ -131,6 +138,16 @@ pub(super) struct State {
     /// The done quests whose merge has not come out yet, by project, each
     /// with the session that held it.
     landing: HashMap<String, Vec<(String, String)>>,
+    /// The worktrees landing while their session still runs, by path, and
+    /// whether the session ended meanwhile: the landing removes the tree,
+    /// not the session's end.
+    owned: HashMap<String, bool>,
+    /// The worktrees whose landing already dealt with them, by path, so
+    /// their session's end later does not land them again.
+    handled: HashSet<String>,
+    /// Failed landings handed back to the session that finished the quest,
+    /// by its worktree's path, until it lands or ends.
+    resolving: HashMap<String, Resolving>,
     /// The limit last journaled, by when it resets, so each is written once.
     limit_journaled: Option<u64>,
     /// What the waits that need git or a command last came to, by project
@@ -276,6 +293,25 @@ struct Landed {
     /// What the main tree has checked out, merged into.
     into: String,
     landing: crate::worktree::Landing,
+    /// The session that finished the quest, when it still ran as the
+    /// landing started.
+    live: Option<String>,
+}
+
+/// A failed landing its own session is mending.
+struct Resolving {
+    key: String,
+    dir: PathBuf,
+    holder: String,
+    title: String,
+    w: Worktree,
+    into: String,
+    why: merge::Failure,
+    out: String,
+    theirs: merge::Theirs,
+    since: Instant,
+    /// How many times it went back.
+    tries: u32,
 }
 
 /// A finished item's branch, still to merge into the main tree.
@@ -1396,7 +1432,7 @@ impl App {
             // Closing a quest may start its merge, which this pass's copy
             // of the list does not know of yet, so nothing starts beside it
             // until the next pass.
-            let just_closed = self.close_finished(b);
+            let just_closed = self.close_finished(key, b);
             if just_closed {
                 closed = true;
                 if b.mode.runs() {
@@ -1572,19 +1608,76 @@ impl App {
 
     /// Ends the sessions whose items are done, once they are not mid turn:
     /// the agent reports done from inside its turn, and gets to finish it.
-    fn close_finished(&mut self, b: &Board) -> bool {
-        let finished: Vec<String> = b
+    /// Where finished quests land, a session in a worktree of its own stays
+    /// while its branch lands, so a conflict or a red check can go back to
+    /// the one that knows what the work meant. That waits while another
+    /// session of the project mends a landing.
+    fn close_finished(&mut self, key: &str, b: &Board) -> bool {
+        let finished: Vec<Task> = b
             .tasks
             .iter()
             .filter(|t| t.mark == Mark::Done)
-            .filter_map(|t| t.holder.clone())
-            .filter(|h| self.live(h) && self.phase_of(h).is_some_and(|p| !p.mid_turn()))
+            .filter(|t| {
+                t.holder.as_deref().is_some_and(|h| {
+                    self.live(h) && self.phase_of(h).is_some_and(|p| !p.mid_turn())
+                })
+            })
+            .cloned()
             .collect();
-        for h in &finished {
-            self.forget(h);
-            self.tasks.nudged.remove(h);
+        let mut closed = false;
+        for t in finished {
+            let h = t.holder.clone().unwrap_or_default();
+            let lands = b
+                .mode
+                .lands()
+                .then(|| self.tree_of(&h))
+                .flatten()
+                .and_then(|w| {
+                    let into = crate::worktree::checked_out(Path::new(&w.main))?;
+                    Some((self.project_dir(key)?, w, into))
+                });
+            if let Some((dir, w, into)) = lands {
+                if self.landings_held(key, b, &h, &t.title) {
+                    continue;
+                }
+                self.tasks.owned.insert(w.path.clone(), false);
+                self.land(key.to_string(), dir, w, t, into, true);
+            } else {
+                self.forget(&h);
+                self.tasks.nudged.remove(&h);
+            }
+            closed = true;
         }
-        !finished.is_empty()
+        closed
+    }
+
+    /// The worktree session `id` works in, None when it shares the main
+    /// tree.
+    fn tree_of(&self, id: &str) -> Option<Worktree> {
+        self.shared.registry.lock().ok()?.get(id)?.worktree.clone()
+    }
+
+    /// Whether a session other than `h`, done with the quest `title`, holds
+    /// the landings of the project `key`, so `main` does not move under the
+    /// merge it mends: one a failed landing went back to, or one working a
+    /// fix-up quest. One mending a landing itself passes, or two would wait
+    /// on each other.
+    fn landings_held(&self, key: &str, b: &Board, h: &str, title: &str) -> bool {
+        if merge::is_fix_up(title) || self.tasks.resolving.values().any(|r| r.holder == h) {
+            return false;
+        }
+        let mending = self.tasks.resolving.values().any(|r| {
+            r.key == key
+                && r.holder != h
+                && self.live(&r.holder)
+                && r.since.elapsed() < HOLDS_LANDINGS_FOR
+        });
+        mending
+            || b.tasks.iter().any(|t| {
+                t.mark == Mark::Working
+                    && merge::is_fix_up(&t.title)
+                    && t.holder.as_deref().is_some_and(|f| f != h && self.live(f))
+            })
     }
 
     /// Asks a session whose turn ended without a report whether it is
@@ -1606,7 +1699,9 @@ impl App {
                 None => vec![holder],
             };
             for h in ids {
+                // A landing session waits on its landing, not on itself.
                 if self.tasks.nudged.contains_key(&h)
+                    || self.tasks.landing.values().flatten().any(|(_, l)| *l == h)
                     || self.phase_of(&h) != Some(Phase::Done)
                     || self.reported(&h)
                     || self.waiting_on_own_work(&h)
@@ -1807,8 +1902,20 @@ impl App {
     /// stayed, so a finished item's branch can be offered for merging. In
     /// auto mode a finished item's branch merges by itself first.
     pub(super) fn remove_tree(&mut self, key: String, w: Worktree) {
+        if let Some(ended) = self.tasks.owned.get_mut(&w.path) {
+            *ended = true;
+            return;
+        }
+        if self.tasks.handled.remove(&w.path) {
+            return;
+        }
+        if let Some(r) = self.tasks.resolving.remove(&w.path) {
+            if self.resolver_gone(r) {
+                return;
+            }
+        }
         if let Some((dir, quest, into)) = self.to_land(&key, &w) {
-            self.land(key, dir, w, quest, into);
+            self.land(key, dir, w, quest, into, false);
             return;
         }
         let kept = Arc::clone(&self.tasks.kept);
@@ -1971,14 +2078,25 @@ impl App {
     }
 
     /// Merges a finished item's branch on a thread of its own, one at a
-    /// time per project, and has the app hear how it came out.
-    fn land(&mut self, key: String, dir: PathBuf, w: Worktree, quest: Task, into: String) {
+    /// time per project, and has the app hear how it came out. `live` when
+    /// the quest's session still runs.
+    fn land(
+        &mut self,
+        key: String,
+        dir: PathBuf,
+        w: Worktree,
+        quest: Task,
+        into: String,
+        live: bool,
+    ) {
         let title = quest.title;
+        let holder = quest.holder.unwrap_or_default();
+        let live = live.then(|| holder.clone());
         self.tasks
             .landing
             .entry(key.clone())
             .or_default()
-            .push((title.clone(), quest.holder.unwrap_or_default()));
+            .push((title.clone(), holder));
         let one = Arc::clone(self.tasks.merging.entry(key.clone()).or_default());
         let landed = Arc::clone(&self.tasks.landed);
         let notify = self.notify.0 as isize;
@@ -1987,7 +2105,7 @@ impl App {
             let files = crate::worktree::changed_since(Path::new(&w.main), &into, &w.branch);
             let landing = {
                 let _one = one.lock();
-                crate::worktree::land(&w, &into, &checks)
+                crate::worktree::land(&w, &into, &checks, live.is_some())
             };
             if let Ok(mut l) = landed.lock() {
                 l.push(Landed {
@@ -1998,6 +2116,7 @@ impl App {
                     title,
                     into,
                     landing,
+                    live,
                 });
             }
             post(notify, WM_HORADRIC_KEPT, 0);
@@ -2005,9 +2124,10 @@ impl App {
     }
 
     /// What came of the merges by themselves: a merged branch goes with its
-    /// worktree, one a worker can fix gets a fix-up quest right below its
-    /// own that the quests after it wait for, and anything else is left to
-    /// the human's click.
+    /// worktree and its session, one a worker can fix goes back to the
+    /// session that finished it while that still runs, else gets a fix-up
+    /// quest right below its own that the quests after it wait for, and
+    /// anything else is left to the human's click.
     fn after_landing(&mut self) {
         let landed = self
             .tasks
@@ -2023,8 +2143,17 @@ impl App {
                 }
                 titles.retain(|(t, _)| *t != l.title);
             }
+            let ended = self.tasks.owned.remove(&l.w.path).unwrap_or(true);
+            let session = l.live.clone().filter(|h| !ended && self.live(h));
+            let tries = self.tasks.resolving.get(&l.w.path).map_or(0, |r| r.tries);
+            let said = match (&l.landing, &session) {
+                (Landing::Failed(why, _, theirs), Some(_)) if tries < HAND_BACKS => {
+                    merge::hand_back(&l.w.branch, &l.into, why, theirs, &horadric_command())
+                }
+                _ => None,
+            };
             // The day's look back counts these, to see what keeps failing.
-            if let Landing::Failed(why, output) = &l.landing {
+            if let Landing::Failed(why, output, _) = &l.landing {
                 store::chronicle(&chronicle::Record {
                     at: unix_now(),
                     project: l.key.clone(),
@@ -2040,11 +2169,13 @@ impl App {
                     },
                 });
             }
+            // A landing that went back to its session ends this run as it
+            // failed, and the run that mends it gets an outcome of its own.
             let ending = match &l.landing {
                 Landing::Merged(checked) if checked.is_empty() => Some(escalate::Ending::Landed),
                 Landing::Merged(_) => Some(escalate::Ending::Green),
-                Landing::Failed(merge::Failure::Red(_), _) => Some(escalate::Ending::Red),
-                Landing::Failed(merge::Failure::Conflict, _) => Some(escalate::Ending::Conflict),
+                Landing::Failed(merge::Failure::Red(_), ..) => Some(escalate::Ending::Red),
+                Landing::Failed(merge::Failure::Conflict, ..) => Some(escalate::Ending::Conflict),
                 // Left to the human's merge, which says nothing of the work.
                 Landing::Failed(..) => None,
             };
@@ -2053,7 +2184,7 @@ impl App {
             let mut fix_model = None;
             if let Some(ending) = ending {
                 let run = run_of(&store::chronicle_all(), &l.key, &holder, ending, unix_now());
-                if let Landing::Failed(merge::Failure::Red(check), _) = &l.landing {
+                if let Landing::Failed(merge::Failure::Red(check), ..) = &l.landing {
                     let red = escalate::Struggle::Red(check.clone());
                     fix_model = tasks::parse(&file::read(&l.dir))
                         .into_iter()
@@ -2062,6 +2193,20 @@ impl App {
                 }
                 write_run(&l.dir, &l.title, Some(&run));
             }
+            if let (Some(said), Some(h)) = (said, &session) {
+                self.give_back(l, h, said, tries + 1);
+                continue;
+            }
+            let mended = self.tasks.resolving.remove(&l.w.path).is_some();
+            // Its session's end, now or when one that exited by itself is
+            // tidied away, leaves the tree to this landing.
+            if l.live.is_some() && !ended {
+                self.tasks.handled.insert(l.w.path.clone());
+            }
+            if let Some(h) = &session {
+                self.forget(h);
+                self.tasks.nudged.remove(h);
+            }
             let main = PathBuf::from(&l.w.main);
             let branch = l.w.branch.clone();
             crate::worktree::remove(l.w);
@@ -2069,42 +2214,21 @@ impl App {
                 Landing::Merged(checked) => {
                     self.warn_drifted(&main, &branch, &l.into, l.files);
                     self.count_red(&l.key, false, None);
+                    if mended {
+                        self.merge_event(
+                            &l.dir,
+                            &l.title,
+                            format!("{branch} landed after its own session mended it."),
+                        );
+                    }
                     self.merged(&main, &branch, &l.title, &l.into, &checked)
                 }
-                Landing::Failed(why, out) if why.fixable() => {
-                    eprintln!("horadric: cannot merge {branch}: {why:?}");
-                    let mut fix = merge::fix_up(&l.title, &branch, &l.into, &why, &out);
-                    if let Some(up) = fix_model.take() {
-                        fix.notes.push('\n');
-                        fix.notes.push_str(&up);
-                    }
-                    // A conflict says nothing of the checks either way.
-                    if matches!(why, merge::Failure::Red(_)) {
-                        self.count_red(&l.key, true, Some(&fix.title));
-                    }
-                    self.merge_event(
-                        &l.dir,
-                        &l.title,
-                        format!(
-                            "{:?} on {branch}. Added the fix-up quest \"{}\" below it.",
-                            why, fix.title
-                        ),
+                Landing::Failed(why, out, theirs) if why.fixable() => {
+                    self.file_merge_fix_up(
+                        &l.key, &l.dir, &l.title, &branch, &l.into, &why, &out, &theirs, fix_model,
                     );
-                    let added =
-                        file::update(&l.dir, |text| merge::add_fix_up(text, &l.title, &fix));
-                    if let Err(e) = added {
-                        eprintln!("horadric: cannot add \"{}\": {e}", fix.title);
-                    }
-                    self.tasks.merge_for = None;
-                    self.tasks.ship_for = None;
-                    self.toasts.show(
-                        Kind::Failed,
-                        &format!("Cannot merge {branch}"),
-                        &format!("Added the quest \"{}\" below it.", fix.title),
-                    );
-                    self.refresh_boards(false);
                 }
-                Landing::Failed(_, out) => {
+                Landing::Failed(_, out, _) => {
                     eprintln!("horadric: cannot merge {branch} by itself: {out}");
                     self.merge_event(
                         &l.dir,
@@ -2198,6 +2322,145 @@ impl App {
                 self.tasks.nudged.remove(&d.session);
             }
         }
+    }
+
+    /// Files the fix-up quest for `branch`, the finished quest `title`'s,
+    /// whose landing failed for `why` with no session to hand it back to,
+    /// right below the quest. `model` is the fix-up's `Model:` line, when
+    /// it climbs.
+    #[allow(clippy::too_many_arguments)]
+    fn file_merge_fix_up(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        title: &str,
+        branch: &str,
+        into: &str,
+        why: &merge::Failure,
+        out: &str,
+        theirs: &merge::Theirs,
+        model: Option<String>,
+    ) {
+        eprintln!("horadric: cannot merge {branch}: {why:?}");
+        let mut fix = merge::fix_up(title, branch, into, why, out, theirs);
+        if let Some(up) = model {
+            fix.notes.push('\n');
+            fix.notes.push_str(&up);
+        }
+        // A conflict says nothing of the checks either way.
+        if matches!(why, merge::Failure::Red(_)) {
+            self.count_red(key, true, Some(&fix.title));
+        }
+        self.merge_event(
+            dir,
+            title,
+            format!(
+                "{:?} on {branch}. Added the fix-up quest \"{}\" below it.",
+                why, fix.title
+            ),
+        );
+        let added = file::update(dir, |text| merge::add_fix_up(text, title, &fix));
+        if let Err(e) = added {
+            eprintln!("horadric: cannot add \"{}\": {e}", fix.title);
+        }
+        self.tasks.merge_for = None;
+        self.tasks.ship_for = None;
+        self.toasts.show(
+            Kind::Failed,
+            &format!("Cannot merge {branch}"),
+            &format!("Added the quest \"{}\" below it.", fix.title),
+        );
+        self.refresh_boards(false);
+    }
+
+    /// Hands a failed landing back to `h`, the session that finished its
+    /// quest: the quest is in its hands again, it is told `said`, what went
+    /// wrong and what the other side meant, and it holds the project's
+    /// landings until it lands or ends. Its worktree stays.
+    fn give_back(&mut self, l: Landed, h: &str, said: String, tries: u32) {
+        let Landing::Failed(why, out, theirs) = l.landing else {
+            return;
+        };
+        let branch = l.w.branch.clone();
+        eprintln!("horadric: {why:?} on {branch}, handed back to its session");
+        if matches!(why, merge::Failure::Red(_)) {
+            // Counted, but no hold names the quest: if its session ends
+            // before it lands, a fix-up of another title takes it over.
+            self.count_red(&l.key, true, None);
+        }
+        self.merge_event(
+            &l.dir,
+            &l.title,
+            format!("{why:?} on {branch}. Handed back to its own session to mend."),
+        );
+        let reopened = file::update(&l.dir, |text| {
+            let t = tasks::parse(text)
+                .into_iter()
+                .find(|t| t.title == l.title && t.mark == Mark::Done)?;
+            tasks::set_mark(text, t.line, &l.title, Mark::Working)
+        });
+        if let Err(e) = reopened {
+            eprintln!("horadric: cannot hand \"{}\" back: {e}", l.title);
+        }
+        if let Some(c) = self.consoles.get(h) {
+            c.write(said.into_bytes());
+            self.tasks.enters.push((h.to_string(), Instant::now()));
+        }
+        self.tasks.nudged.remove(h);
+        self.toasts.show(
+            Kind::Failed,
+            &format!("{branch} did not land"),
+            "Handed back to its session to mend.",
+        );
+        self.tasks.resolving.insert(
+            l.w.path.clone(),
+            Resolving {
+                key: l.key,
+                dir: l.dir,
+                holder: h.to_string(),
+                title: l.title,
+                w: l.w,
+                into: l.into,
+                why,
+                out,
+                theirs,
+                since: Instant::now(),
+                tries,
+            },
+        );
+        self.refresh_boards(false);
+    }
+
+    /// The session a failed landing went back to ended before it said
+    /// done again: its quest is done as it was, and the fix-up a fresh
+    /// session takes goes below it. False when there is nothing to mend
+    /// any more, such as when it said done and its landing is still to
+    /// come, so its end goes the usual way.
+    fn resolver_gone(&mut self, r: Resolving) -> bool {
+        let done = file::update(&r.dir, |text| {
+            let t = tasks::parse(text).into_iter().find(|t| {
+                t.title == r.title
+                    && t.mark == Mark::Working
+                    && t.holder.as_deref() == Some(r.holder.as_str())
+            })?;
+            tasks::set_mark(text, t.line, &r.title, Mark::Done)
+        });
+        if !matches!(done, Ok(true)) {
+            return false;
+        }
+        self.file_merge_fix_up(
+            &r.key,
+            &r.dir,
+            &r.title,
+            &r.w.branch,
+            &r.into,
+            &r.why,
+            &r.out,
+            &r.theirs,
+            None,
+        );
+        crate::worktree::remove(r.w);
+        true
     }
 
     /// Gilds every session that worked on `branch` of the repository at
