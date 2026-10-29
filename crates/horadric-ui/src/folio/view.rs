@@ -605,6 +605,18 @@ impl View {
         let composer = self.composer(gfx, chat, &pal, cx, cw, h, &mut composer_hits);
         let area = Rect::new(0.0, 0.0, w, (composer.y - 10.0).max(0.0));
         self.transcript(gfx, &pal, chat, cx, cw, &area, t, &mut hits);
+        // What scrolls up is hidden under the top edge, where the Terminal
+        // button sits, and fades in below it, so the two never overlap.
+        // At the top nothing is under there: the first block starts lower.
+        if chat.scroll > 0.0 {
+            const SOLID: f32 = 22.0;
+            const FADE: f32 = 18.0;
+            gfx.fill(&Rect::new(0.0, 0.0, w, SOLID), pal.bg);
+            for i in 0..6 {
+                let band = Rect::new(0.0, SOLID + FADE * i as f32 / 6.0, w, FADE / 6.0);
+                gfx.fill(&band, pal.bg.with_alpha(1.0 - (i as f32 + 0.5) / 6.0));
+            }
+        }
 
         // The glass is sunk into the plate, so its top edge is in shade.
         gfx.shade.SetStartPoint(Vector2 { X: 0.0, Y: 0.0 });
@@ -628,18 +640,6 @@ impl View {
         chat: &Chat,
         w: f32,
         hits: &mut Vec<(Rect, Hit)>,
-        // What scrolls up is hidden under the top edge, where the Terminal
-        // button sits, and fades in below it, so the two never overlap.
-        // At the top nothing is under there: the first block starts lower.
-        if chat.scroll > 0.0 {
-            const SOLID: f32 = 22.0;
-            const FADE: f32 = 18.0;
-            gfx.fill(&Rect::new(0.0, 0.0, w, SOLID), pal.bg);
-            for i in 0..6 {
-                let band = Rect::new(0.0, SOLID + FADE * i as f32 / 6.0, w, FADE / 6.0);
-                gfx.fill(&band, pal.bg.with_alpha(1.0 - (i as f32 + 0.5) / 6.0));
-            }
-        }
     ) {
         let ready = !chat.folio.busy
             && !chat.ended
