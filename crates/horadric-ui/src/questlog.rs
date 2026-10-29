@@ -1626,7 +1626,7 @@ impl QuestLog {
 }
 
 /// The hit test answer for an edge.
-fn ht(e: Edge) -> u32 {
+pub(crate) fn ht(e: Edge) -> u32 {
     match e {
         Edge::Left => HTLEFT,
         Edge::Right => HTRIGHT,
@@ -1756,6 +1756,12 @@ fn detail_of(q: &Quest, quests: &[Quest], now: u64, offset: i64) -> QuestDetail 
 /// Where the window first opens: in the middle of the screen the cursor is
 /// on, at its first size or as much of it as the screen has room for.
 fn first_place() -> RECT {
+    place_for(FIRST_SIZE)
+}
+
+/// A window `size` DIPs big in the middle of the screen the cursor is on,
+/// smaller if the screen has no room for it.
+pub(crate) fn place_for(size: (f32, f32)) -> RECT {
     let mut cursor = POINT::default();
     unsafe {
         let _ = GetCursorPos(&mut cursor);
@@ -1783,8 +1789,8 @@ fn first_place() -> RECT {
         }
     };
     let room = 48;
-    let w = ((FIRST_SIZE.0 * s) as i32).min(work.right - work.left - room);
-    let h = ((FIRST_SIZE.1 * s) as i32).min(work.bottom - work.top - room);
+    let w = ((size.0 * s) as i32).min(work.right - work.left - room);
+    let h = ((size.1 * s) as i32).min(work.bottom - work.top - room);
     let x = work.left + (work.right - work.left - w) / 2;
     let y = work.top + (work.bottom - work.top - h) / 2;
     RECT {
@@ -1795,7 +1801,7 @@ fn first_place() -> RECT {
     }
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())

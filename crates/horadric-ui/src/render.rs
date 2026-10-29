@@ -77,6 +77,9 @@ pub(crate) use stone::{StoneLook, StoneState};
 mod questlog;
 pub(crate) use questlog::{DetailList, QuestDetail, QuestLogScene, QuestRowLook, WakeLook};
 
+mod context;
+pub(crate) use context::ContextScene;
+
 const FONT: PCWSTR = w!("Segoe UI Variable Text");
 /// For the project's name: the optical size cut for larger text.
 const FONT_DISPLAY: PCWSTR = w!("Segoe UI Variable Display");

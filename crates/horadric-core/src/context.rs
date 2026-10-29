@@ -94,12 +94,19 @@ pub fn key_of_tool(tool: &str) -> String {
     format!("mcp:{server}")
 }
 
+/// A connector's name as its tools spell it: `monday.com` is `monday_com`.
+fn squash(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
 /// The item an MCP server's display name belongs to, as the instructions
 /// and the failed list name them: `claude.ai Slack`, `plugin:figma:figma`,
 /// `horadric`.
 pub fn key_of_server(name: &str) -> String {
     if let Some(c) = name.strip_prefix("claude.ai ") {
-        return format!("connector:{}", c.replace(' ', "_"));
+        return format!("connector:{}", squash(c));
     }
     if let Some(p) = name.strip_prefix("plugin:") {
         return format!("plugin:{}", p.split(':').next().unwrap_or(p));
@@ -144,15 +151,10 @@ fn listed(text: &str) -> Vec<(&str, u64)> {
         let len = line.len() as u64 + 1;
         match line.strip_prefix("- ") {
             Some(rest) => {
-                let name = rest.split(':').next().unwrap_or(rest);
-                // A plugin's skill keeps its prefix: `vercel:deploy: ...`.
-                let name = match rest.splitn(3, ':').collect::<Vec<_>>()[..] {
-                    [p, n, _] if !n.contains(' ') && !p.contains(' ') => {
-                        &rest[..p.len() + 1 + n.len()]
-                    }
-                    _ => name,
-                };
-                out.push((name, len));
+                // A plugin's skill keeps its prefix (`vercel:deploy: ...`),
+                // and a skill with no description is its name alone.
+                let name = rest.split_once(": ").map_or(rest, |(n, _)| n);
+                out.push((name.trim(), len));
             }
             // A description running onto more lines stays with its skill.
             None => {
@@ -382,11 +384,44 @@ pub enum Switch {
 /// true wins, so a project can opt out but never back in.
 pub const NO_CONNECTORS: &str = "disableClaudeAiConnectors";
 
+/// Every settings key a switch writes.
+pub const SWITCH_KEYS: [&str; 4] = [
+    "enabledPlugins",
+    "deniedMcpServers",
+    "skillOverrides",
+    NO_CONNECTORS,
+];
+
+/// The name Claude Code gives the connector `key`, from `servers`, the
+/// names it has connected (`claudeAiMcpEverConnected` in `.claude.json`);
+/// failing that, guessed from the key, which loses a dot.
+pub fn connector_name(key: &str, servers: &[String]) -> Option<String> {
+    let c = key.strip_prefix("connector:")?;
+    Some(
+        servers
+            .iter()
+            .find(|s| key_of_server(s) == key)
+            .cloned()
+            .unwrap_or_else(|| format!("claude.ai {}", c.replace('_', " "))),
+    )
+}
+
+/// Names the connectors among `items` as Claude Code does, see
+/// [`connector_name`].
+pub fn name_connectors(items: &mut [Item], servers: &[String]) {
+    for i in items {
+        if let Some(n) = connector_name(&i.key, servers) {
+            i.name = n;
+        }
+    }
+}
+
 /// How `key` is turned off. `plugins` are the plugin ids the user's
-/// settings know (`figma@claude-plugins-official`).
-pub fn switch_of(key: &str, plugins: &[String]) -> Switch {
+/// settings know (`figma@claude-plugins-official`), `servers` the
+/// connector names, see [`connector_name`].
+pub fn switch_of(key: &str, plugins: &[String], servers: &[String]) -> Switch {
     match key.split_once(':') {
-        Some(("connector", c)) => Switch::Server(format!("claude.ai {}", c.replace('_', " "))),
+        Some(("connector", _)) => Switch::Server(connector_name(key, servers).unwrap_or_default()),
         Some(("plugin", p)) => plugins
             .iter()
             .find(|id| id.split('@').next() == Some(p))
@@ -485,12 +520,16 @@ pub fn set(settings: &mut Value, switch: &Switch, on: bool) {
         }
         Switch::None => {}
     }
-    // Leave no empty objects behind for the user to wonder about.
+    // Leave no empty switch behind for the user to wonder about, and
+    // never touch a key the switches do not own.
     if let Some(o) = settings.as_object_mut() {
-        o.retain(|_, v| match v {
-            Value::Object(m) => !m.is_empty(),
-            Value::Array(a) => !a.is_empty(),
-            _ => true,
+        o.retain(|k, v| {
+            !SWITCH_KEYS.contains(&k.as_str())
+                || match v {
+                    Value::Object(m) => !m.is_empty(),
+                    Value::Array(a) => !a.is_empty(),
+                    _ => true,
+                }
         });
     }
 }
@@ -560,6 +599,23 @@ mod tests {
         assert_eq!(key_of_skill("vercel:deploy"), "plugin:vercel");
         assert_eq!(key_of_skill("wrangler"), "skill:wrangler");
         assert_eq!(name_of("connector:Read_AI"), "claude.ai Read AI");
+        assert_eq!(
+            key_of_server("claude.ai monday.com"),
+            "connector:monday_com"
+        );
+        let servers = vec!["claude.ai monday.com".to_string()];
+        assert_eq!(
+            switch_of("connector:monday_com", &[], &servers),
+            Switch::Server("claude.ai monday.com".into())
+        );
+        assert_eq!(
+            listed(
+                "- monday-com:board-setup
+- a:b: c d
+"
+            ),
+            [("monday-com:board-setup", 25), ("a:b", 11)]
+        );
     }
 
     #[test]
@@ -667,14 +723,14 @@ mod tests {
     #[test]
     fn switches_write_the_real_settings_and_undo_cleanly() {
         let plugins = vec!["figma@claude-plugins-official".to_string()];
-        let figma = switch_of("plugin:figma", &plugins);
-        let read_ai = switch_of("connector:Read_AI", &plugins);
+        let figma = switch_of("plugin:figma", &plugins, &[]);
+        let read_ai = switch_of("connector:Read_AI", &plugins, &[]);
         assert_eq!(read_ai, Switch::Server("claude.ai Read AI".into()));
-        let wrangler = switch_of("skill:wrangler", &plugins);
-        assert_eq!(switch_of("plugin:gone", &plugins), Switch::None);
-        assert_eq!(switch_of("hook:Stop", &plugins), Switch::None);
+        let wrangler = switch_of("skill:wrangler", &plugins, &[]);
+        assert_eq!(switch_of("plugin:gone", &plugins, &[]), Switch::None);
+        assert_eq!(switch_of("hook:Stop", &plugins, &[]), Switch::None);
 
-        let mut s = json!({"permissions": {"allow": ["Bash"]}});
+        let mut s = json!({"permissions": {"allow": ["Bash"]}, "env": {}});
         for sw in [&figma, &read_ai, &wrangler] {
             assert!(is_on(&s, sw));
             set(&mut s, sw, false);
@@ -682,7 +738,7 @@ mod tests {
         }
         assert_eq!(
             s,
-            json!({"permissions": {"allow": ["Bash"]},
+            json!({"permissions": {"allow": ["Bash"]}, "env": {},
                    "enabledPlugins": {"figma@claude-plugins-official": false},
                    "deniedMcpServers": [{"serverName": "claude.ai Read AI"}],
                    "skillOverrides": {"wrangler": "off"}})
@@ -691,7 +747,7 @@ mod tests {
             set(&mut s, sw, true);
             assert!(is_on(&s, sw));
         }
-        assert_eq!(s, json!({"permissions": {"allow": ["Bash"]}}));
+        assert_eq!(s, json!({"permissions": {"allow": ["Bash"]}, "env": {}}));
     }
 
     #[test]

@@ -431,32 +431,13 @@ fn exits_zero(program: &str, args: &[String], dir: &Path) -> bool {
     }
 }
 
-/// The claude.ai connectors the sessions of project `key` load, as the
-/// project's newest transcript lists them. Reading the transcripts takes
-/// seconds, so a miss starts the read on a thread of its own and says
-/// None, and the next quest of the project to start finds it. Kept for the
-/// app's life: an account gains a connector seldom, and a lean quest that
-/// names what it keeps never needs one it has not named.
-fn known_connectors(key: &str) -> Option<Vec<String>> {
-    static KNOWN: Mutex<Option<HashMap<String, Option<Vec<String>>>>> = Mutex::new(None);
-    let mut known = KNOWN.lock().ok()?;
-    let map = known.get_or_insert_with(HashMap::new);
-    if let Some(found) = map.get(key) {
-        return found.clone();
-    }
-    map.insert(key.to_string(), None);
-    let key = key.to_string();
-    std::thread::spawn(move || {
-        let inv = crate::inventory::gather(Path::new(&key));
-        let items: Vec<_> = inv.lines.into_iter().map(|l| l.item).collect();
-        let found = horadric_core::context::connectors(&items);
-        if let Ok(mut known) = KNOWN.lock() {
-            known
-                .get_or_insert_with(HashMap::new)
-                .insert(key, Some(found));
-        }
-    });
-    None
+/// The claude.ai connectors of the account, by the names Claude Code
+/// gives them, which a lean quest denies by name. Read from Claude Code's
+/// own list rather than a transcript, since a lean quest's transcript has
+/// none of them.
+fn known_connectors() -> Option<Vec<String>> {
+    let known = crate::inventory::servers(&crate::inventory::claude_dir());
+    (!known.is_empty()).then_some(known)
 }
 
 fn horadric_command() -> String {
@@ -712,16 +693,21 @@ impl App {
                 .map(|t| (key.clone(), t.connectors()))
         })?;
         let some = !wanted.is_empty() && !wanted.iter().any(|w| w.eq_ignore_ascii_case("all"));
-        if !some {
-            return Some(horadric_core::context::lean(&[], &wanted));
-        }
-        // Naming the ones to keep means denying the rest by name, which
-        // takes the project's list. Until it is read, keep them all rather
-        // than guess which to deny.
-        Some(match known_connectors(&key) {
-            Some(known) => horadric_core::context::lean(&known, &wanted),
-            None => serde_json::json!({}),
-        })
+        let lean = if !some {
+            horadric_core::context::lean(&[], &wanted)
+        } else {
+            // Naming the ones to keep means denying the rest by name, which
+            // takes the account's list. Without it, keep them all rather
+            // than guess which to deny.
+            match known_connectors() {
+                Some(known) => horadric_core::context::lean(&known, &wanted),
+                None => serde_json::json!({}),
+            }
+        };
+        // The quest's worktree has no copy of the project's settings when
+        // they are not committed, so the project's switches go with it.
+        let own = crate::inventory::switches(std::path::Path::new(&key));
+        Some(crate::store::merge_settings(&own, &lean))
     }
 
     /// What a Claude Code session started with `args` is given for its

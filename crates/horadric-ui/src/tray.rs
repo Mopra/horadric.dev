@@ -64,6 +64,9 @@ pub enum Choice {
     /// Open the quest log of this recent project, the way back to its
     /// quests and its conversations.
     QuestLog(String),
+    /// Open the Context window on every project: what each one's turns
+    /// load and cost.
+    Context,
     /// Put every cluster back in the auto layout.
     Tidy,
     /// Bring every cluster in front of the other windows.
@@ -287,6 +290,7 @@ pub fn menu(
     const SIGN_OUT: usize = 17;
     const ADD_NODE: usize = 18;
     const SHOW_HIDDEN: usize = 19;
+    const CONTEXT: usize = 20;
     const RECENT: usize = 100;
     let mut items = Vec::new();
     if let Some(xp) = xp {
@@ -315,6 +319,7 @@ pub fn menu(
         .collect();
     if !logs.is_empty() {
         items.push(Item::Submenu("Quest log".into(), logs));
+        items.push(Item::action(CONTEXT, "Context\u{2026}"));
     }
     items.push(Item::Separator);
     let with_key = |label: &str, key: Option<&str>| match key {
@@ -436,6 +441,7 @@ pub fn menu(
         NEW => Some(Choice::New),
         QUIT => Some(Choice::Quit),
         SETTINGS => Some(Choice::Settings),
+        CONTEXT => Some(Choice::Context),
         TIDY => Some(Choice::Tidy),
         NEXT => Some(Choice::NextWaiting),
         LISTEN => Some(Choice::Listen),

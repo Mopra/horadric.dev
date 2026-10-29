@@ -109,6 +109,7 @@ use crate::caption;
 use crate::catchup::{self, Away, Catchup};
 use crate::columns::{self, Columns};
 use crate::console::{self, Console, Launch};
+use crate::contextpanel::{self, ContextPanel};
 use crate::cube::{self as cube_window, CubeWindow};
 use crate::dialog::{self, Dialog, Tone};
 use crate::dropdown::{self, Dropdown, Whose};
@@ -148,6 +149,9 @@ mod drive;
 
 #[path = "chronicler.rs"]
 mod chronicler;
+
+#[path = "contexting.rs"]
+mod contexting;
 
 #[path = "spectating.rs"]
 mod spectating;
@@ -257,6 +261,8 @@ const WM_HORADRIC_PORTAL_KEY: u32 = WM_APP + 41;
 /// Undoing a session's last turn has finished on its thread, into the
 /// app's `undone`.
 const WM_HORADRIC_UNDONE: u32 = WM_APP + 47;
+/// A project's context was read on its thread, into `contextpanel::take`.
+const WM_HORADRIC_CONTEXT: u32 = WM_APP + 60;
 
 /// What the list of a row of the Settings window offers.
 struct SettingsList {
@@ -527,6 +533,8 @@ pub(crate) enum Input {
     GiveQuests(String),
     /// The quest log asks, or is asked for.
     QuestLog(questlog::Ask),
+    /// The Context window asks, or is asked for.
+    Context(contextpanel::Ask),
     /// A stone of the Runetome of the project with this key clicked, by
     /// its label: cast it, or stop it while it is cast. None is the empty
     /// stone, which starts the Runesmith.
@@ -637,6 +645,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     catchup::register_class()?;
     away::register_class()?;
     questlog::register_class()?;
+    contextpanel::register_class()?;
     start::register_class()?;
     terminal::register_class()?;
     let notify = create_app_window()?;
@@ -924,6 +933,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             catchup: None,
             away_card: None,
             quest_log: None,
+            context_panel: None,
             journaled: HashMap::new(),
             next_serial: 1,
             requests,
@@ -1404,6 +1414,7 @@ unsafe extern "system" fn app_proc(
             | WM_HORADRIC_UPDATE
             | WM_HORADRIC_BACKUP
             | WM_HORADRIC_UNDONE
+            | WM_HORADRIC_CONTEXT
             | WM_HORADRIC_DOWNLOADED
             | WM_HORADRIC_KEPT
             | WM_HORADRIC_PORTAL
@@ -1468,6 +1479,7 @@ fn tray_menu(hwnd: HWND) {
         Some(Choice::QuestLog(path)) => {
             push(Input::QuestLog(questlog::Ask::Open(folder_key(&path))))
         }
+        Some(Choice::Context) => push(Input::Context(contextpanel::Ask::Overview)),
         Some(Choice::Tidy) => {
             with_app(App::tidy);
         }
@@ -2545,6 +2557,7 @@ fn project_menu(key: &str) {
     const BROWSE: usize = 14;
     const SANCTUARY: usize = 16;
     const QUESTS: usize = 15;
+    const CONTEXT: usize = 17;
     const CODE: usize = 7;
     const EXPLORE: usize = 8;
     const SETTINGS: usize = 9;
@@ -2609,6 +2622,7 @@ fn project_menu(key: &str) {
     items.extend([
         Item::Submenu("History".into(), history_items(&past, PAST)),
         Item::action(QUESTS, "Quest log..."),
+        Item::action(CONTEXT, "Context..."),
         Item::action(START_BATCH, format!("Start {BATCH} sessions")),
         Item::action(START_OVER, format!("Start over with {BATCH} sessions")),
         Item::Separator,
@@ -2662,6 +2676,7 @@ fn project_menu(key: &str) {
     match (picked, &dir) {
         (Some(SSH_FIND), Some(_)) => return ssh_to(key, &hosts, &devices),
         (Some(QUESTS), _) => return push(Input::QuestLog(questlog::Ask::Open(key.into()))),
+        (Some(CONTEXT), _) => return push(Input::Context(contextpanel::Ask::Open(key.into()))),
         (Some(SETTINGS), _) => return open_settings(Some(key.to_string())),
         _ => {}
     }
@@ -3562,6 +3577,8 @@ struct App {
     away_card: Option<Box<AwayCard>>,
     /// The quest log, while it is open.
     quest_log: Option<Box<QuestLog>>,
+    /// The Context window, while it is open.
+    context_panel: Option<Box<ContextPanel>>,
     /// Each session's phase as last journaled, with its project and name,
     /// by session id, so only a change is written, and a session that
     /// vanishes can still be named.
@@ -3830,6 +3847,7 @@ impl App {
             }
             WM_HORADRIC_BACKUP => self.take_backup(),
             WM_HORADRIC_UNDONE => self.take_undone(),
+            WM_HORADRIC_CONTEXT => self.take_context(),
             WM_HORADRIC_DOWNLOADED => self.take_download(),
             WM_HORADRIC_KEPT => self.offer_merges(),
             WM_HORADRIC_INPUT => self.apply_input(),
@@ -8875,6 +8893,7 @@ impl App {
                 Input::TaskAdd(key) => runner::ask_for(self, runner::Menu::Add(key)),
                 Input::GiveQuests(key) => self.give_quests(&key),
                 Input::QuestLog(ask) => self.quest_log_asks(ask),
+                Input::Context(ask) => self.context_asks(ask),
                 Input::Stone(key, None) => self.start_runesmith(&key, None),
                 Input::Stone(key, Some(label)) => {
                     self.stone_for = Some((key, label));

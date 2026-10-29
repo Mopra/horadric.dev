@@ -121,6 +121,41 @@ fn plugin_ids(claude: &Path) -> Vec<String> {
     ids
 }
 
+/// The claude.ai connectors Claude Code has connected, by the names it
+/// gives them, which the switches must match.
+pub fn servers(claude: &Path) -> Vec<String> {
+    // `.claude.json` runs to megabytes and a switch is clicked on the UI
+    // thread, so it is parsed again only when it changed.
+    type Kept = Option<(PathBuf, SystemTime, u64, Vec<String>)>;
+    static KEPT: std::sync::Mutex<Kept> = std::sync::Mutex::new(None);
+    let config = claude
+        .parent()
+        .filter(|_| claude.ends_with(".claude"))
+        .map_or_else(|| claude.join(".claude.json"), |h| h.join(".claude.json"));
+    let stamp = std::fs::metadata(&config)
+        .ok()
+        .and_then(|m| Some((m.modified().ok()?, m.len())));
+    let same = KEPT.lock().ok().and_then(|kept| {
+        let (p, a, l, names) = kept.as_ref()?;
+        (Some((*a, *l)) == stamp && *p == config).then(|| names.clone())
+    });
+    if let Some(names) = same {
+        return names;
+    }
+    let names: Vec<String> = json(&config)
+        .get("claudeAiMcpEverConnected")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    if let (Ok(mut kept), Some((at, len))) = (KEPT.lock(), stamp) {
+        *kept = Some((config, at, len, names.clone()));
+    }
+    names
+}
+
 /// The working directory a transcript folder's sessions ran in, from the
 /// first lines of one of its transcripts.
 fn cwd_of(folder: &Path) -> Option<String> {
@@ -154,18 +189,30 @@ fn belongs(main: &str, cwd: &str) -> bool {
     if !cwd_n.starts_with(&format!("{main}.")) && !cwd_n.starts_with(&format!("{main}-")) {
         return false;
     }
-    !Path::new(cwd).join(".git").is_dir()
+    // Gone, it was a quest's worktree. Still there, its `.git` file names
+    // the repository it is a worktree of.
+    let git = Path::new(cwd).join(".git");
+    if git.is_dir() {
+        return false;
+    }
+    match std::fs::read_to_string(&git) {
+        Ok(link) => norm(link.trim()).contains(&format!("{main}/.git/")),
+        Err(_) => !git.exists(),
+    }
+}
+
+/// The folder name Claude Code gives a working directory.
+fn folder_name(dir: &str) -> String {
+    dir.trim_end_matches(['\\', '/'])
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// The transcript folders of the project at `main`.
 fn folders(root: &Path, main: &Path) -> Vec<PathBuf> {
     let main_s = main.to_string_lossy();
-    let prefix: String = main_s
-        .trim_end_matches(['\\', '/'])
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .to_lowercase();
+    let prefix = folder_name(&main_s).to_lowercase();
     std::fs::read_dir(root)
         .into_iter()
         .flatten()
@@ -181,12 +228,30 @@ fn folders(root: &Path, main: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// What the sessions of the project at `main` load, and what they used.
-pub fn gather(main: &Path) -> Inventory {
-    let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
+/// Claude Code's own folder: `CLAUDE_CONFIG_DIR`, or `~/.claude`.
+pub fn claude_dir() -> PathBuf {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| home().join(".claude"));
+        .unwrap_or_else(|| home().join(".claude"))
+}
+
+/// The switches a project's settings hold, alone, to hand a quest whose
+/// worktree has no copy of the file (it is often not committed).
+pub fn switches(main: &Path) -> Value {
+    let settings = json(&settings_path(main));
+    let mut out = serde_json::Map::new();
+    for key in context::SWITCH_KEYS {
+        if let Some(v) = settings.get(key) {
+            out.insert(key.to_string(), v.clone());
+        }
+    }
+    Value::Object(out)
+}
+
+/// What the sessions of the project at `main` load, and what they used.
+pub fn gather(main: &Path) -> Inventory {
+    let claude = claude_dir();
     let Some(root) = horadric_hooks::transcript::projects() else {
         return Inventory::default();
     };
@@ -202,10 +267,20 @@ pub fn gather(main: &Path) -> Inventory {
     files.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
 
     // The newest session that started fresh carries the whole listing; a
-    // resumed one only what changed since.
+    // resumed one only what changed since. One in the main folder first:
+    // a quest's ran lean, without the connectors the project has.
+    let main_folder = folder_name(&main.to_string_lossy());
+    let in_main = |p: &Path| {
+        p.parent()
+            .and_then(Path::file_name)
+            .is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(&main_folder))
+    };
+    let paths = || files.iter().map(|(_, p)| p);
+    let mut ordered: Vec<&PathBuf> = paths().filter(|p| in_main(p)).take(20).collect();
+    ordered.extend(paths().filter(|p| !in_main(p)).take(20));
     let mut measured = None;
     let mut items = Vec::new();
-    for (_, path) in files.iter().take(20) {
+    for path in ordered {
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
@@ -229,10 +304,12 @@ pub fn gather(main: &Path) -> Inventory {
     }
     let settings = json(&settings_path(main));
     let plugins = plugin_ids(&claude);
+    let servers = servers(&claude);
+    context::name_connectors(&mut items, &servers);
     let lines = items
         .into_iter()
         .map(|item| {
-            let switch = context::switch_of(&item.key, &plugins);
+            let switch = context::switch_of(&item.key, &plugins, &servers);
             Line {
                 on: context::is_on(&settings, &switch),
                 used: uses.get(&item.key).cloned(),
@@ -252,11 +329,8 @@ pub fn gather(main: &Path) -> Inventory {
 /// `.claude/settings.json`. New sessions see it; running ones keep what
 /// they started with.
 pub fn toggle(main: &Path, key: &str, on: bool) -> Result<Switch, String> {
-    let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| home().join(".claude"));
-    let switch = context::switch_of(key, &plugin_ids(&claude));
+    let claude = claude_dir();
+    let switch = context::switch_of(key, &plugin_ids(&claude), &servers(&claude));
     if switch == Switch::None {
         return Err(format!(
             "{key} is not something a project's settings turn off"
@@ -266,7 +340,10 @@ pub fn toggle(main: &Path, key: &str, on: bool) -> Result<Switch, String> {
     let mut settings = match std::fs::read_to_string(&path) {
         Ok(s) => serde_json::from_str(&s)
             .map_err(|e| format!("{} is not JSON ({e}); fix it first", path.display()))?,
-        Err(_) => serde_json::json!({}),
+        // Only a file that is not there starts empty: one that cannot be
+        // read (UTF-16, locked) would lose the user's settings.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(format!("{} cannot be read ({e})", path.display())),
     };
     context::set(&mut settings, &switch, on);
     if let Some(dir) = path.parent() {
@@ -290,5 +367,6 @@ mod tests {
         ));
         assert!(!belongs("C:/G/horadric.dev", "C:/G/horadric"));
         assert!(!belongs("C:/G/mrr", "C:/G/mrrx"));
+        assert_eq!(folder_name("C:\\G\\horadric.dev\\"), "C--G-horadric-dev");
     }
 }

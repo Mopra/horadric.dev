@@ -124,6 +124,20 @@ pub fn write_session_settings(
         .unwrap_or_else(|| serde_json::json!({}));
     let dir = dir()?.join("session-settings");
     fs::create_dir_all(&dir).ok()?;
+    // A session reads its file once, at start; a week on, none still needs
+    // it, and a resume writes its own again.
+    let week = std::time::Duration::from_secs(7 * 86_400);
+    for old in fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let stale = old
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age > week);
+        if stale {
+            let _ = fs::remove_file(old.path());
+        }
+    }
     let name: String = id
         .chars()
         .map(|c| {

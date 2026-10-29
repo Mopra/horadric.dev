@@ -113,6 +113,8 @@ mod catchup;
 #[cfg(windows)]
 mod clipboard;
 #[cfg(windows)]
+mod contextpanel;
+#[cfg(windows)]
 pub mod explorer;
 // The Mac has no file views or browser panes yet, which use the rest.
 #[cfg(any(windows, target_os = "macos"))]
