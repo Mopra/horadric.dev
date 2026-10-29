@@ -328,7 +328,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("horadric-parts-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        git(&dir, &["init", "-q"]);
+        git(&dir, &["init", "-q", "--template="]);
         let then = "fn paint(x)\nfn other()\n";
         fs::write(dir.join("a.rs"), then).unwrap();
         fs::write(dir.join("b.md"), "words").unwrap();
@@ -426,7 +426,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("horadric-crlf-git-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        git(&dir, &["init", "-q"]);
+        git(&dir, &["init", "-q", "--template="]);
         fs::write(dir.join("a.rs"), "fn paint(x)\nfn other()\n").unwrap();
         git(&dir, &["add", "."]);
         git(&dir, &["commit", "-q", "-m", "one"]);
