@@ -11,6 +11,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 "Tell running quests when main moves" stopped undone again: clippy clean, tests running in the background. Own work, no tell, noted it.
 - 2026-10-29 "Blocked quests say why..." asked the human to say go for a rerun of tests killed for low memory. Told it go: rerun through heavy, merge on green.
 - 2026-10-29 "Fix the merge of land-a-quest-while-its-session-is-still" stopped undone but waits on its own clippy, queued in heavy. No tell, noted it.
 - 2026-10-29 Round (human left, main at eb2735d, only my memory since the last round): the land-a-quest merge fix-up still runs, so Ship Local stays held per Open. Four quests under way, three wait. Nothing to do.
