@@ -12,6 +12,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (landing, main at 6576c9d, checks green): the land-a-quest merge fix-up landed, so cast "Ship Local" (4 quests since the last ship). Four quests still run.
 - 2026-10-29 "Fix the merge of fix-the-merge-of-land-a-quest-while-its" stopped undone: conflict resolved keeping both sides, its clippy queued in heavy. Own work, no tell, noted it.
 - 2026-10-29 Round (landing, main at 4e6cc40, "Tell running quests when main moves" landed): Ship Local still held, the land-a-quest second merge fix-up runs. "Land the worktree fix" stopped undone waiting on its own checks in heavy: no tell, noted it.
 - 2026-10-29 "Fix the merge of land-a-quest-while-its-session-is-still" finished but its rebase conflicted in runner.rs with the landed "Tell running quests when main moves". Gave the second fix-up Model: opus and told it to keep both features and treat the checkpoint git-init failure as a flake.
@@ -172,4 +173,4 @@
 - Check "Make checkpoint tests' git init not copy hook templates" lands; if the flake shows again after, look at %TEMP% itself (antivirus, locks).
 - "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Cast "Ship Local" once "Fix the merge of land-a-quest-while-its-session-is-still" lands green (the worktree fix-up is done).
+- Check the Ship Local cast at 6576c9d came up (reload.log); ship again once the worktree fix and checkpoint flake fix land.
