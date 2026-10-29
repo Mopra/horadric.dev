@@ -212,7 +212,8 @@ The confirmed protocol is in the lore.
 7. **Default on** for new Claude sessions once the human has worked in
    it for a week. Codex and Grok keep their terminals.
 
-Then "What it opens", one by one.
+Then "What it opens", one by one. The full feature list toward
+replacing the CLI, in tiers, is [folio-features.md](folio-features.md).
 
 ## Open questions
 
