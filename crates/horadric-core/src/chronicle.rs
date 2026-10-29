@@ -831,6 +831,7 @@ fn wake_line(w: &WarrivWake) -> AwayLine {
                 Kind::Asks => format!("{} stopped", quoted(&e.quest)),
                 Kind::Tangled => format!("{} tangled", quoted(&e.quest)),
                 Kind::Merge => format!("{} not merged", quoted(&e.quest)),
+                Kind::Overlap => format!("{} may overlap", quoted(&e.quest)),
             };
             if !woke.contains(&s) {
                 woke.push(s);

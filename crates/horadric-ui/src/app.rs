@@ -3862,6 +3862,9 @@ impl App {
                             if let (Some(quest), Some(fix)) = (&t.quest, &t.fix) {
                                 self.hear_fix(&t.dir, quest, fix);
                             }
+                            if let (Some(quest), Some(overlap)) = (&t.quest, &t.overlap) {
+                                self.overlap_event(Path::new(&t.dir), quest, overlap.clone());
+                            }
                             if let Some(label) = &t.cast {
                                 self.cast_from_shell(&t.dir, label, t.by.as_deref());
                             }
