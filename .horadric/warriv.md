@@ -13,6 +13,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (hourly, main at 377cf51, only my memory since the ddc6c34 ship): no aim, log done. Nothing to do.
 - 2026-10-29 Round (human left, main at d102033, only my memory since the ddc6c34 ship): no aim, log done. Nothing to do.
 - 2026-10-29 Round (hourly, main at 72999b3, only my memory since the ddc6c34 ship): no aim, log done. Nothing to do.
 - 2026-10-29 Round (human left, main at 6a02ab0): the ddc6c34 Ship Local reloaded at 15:27, so main is shipped. No aim, log done. Nothing to do.
