@@ -124,6 +124,10 @@ struct Chat {
     live: bool,
     /// The session goes on in a terminal once claude.exe has ended.
     to_terminal: bool,
+    /// Waits for the human to trust its folder, with what starts it then.
+    /// Claude Code asks before it runs a folder's hooks and MCP servers,
+    /// but not headless, so the Folio asks for it.
+    pending: Option<(Tag, Options)>,
     /// The transcript's own state and what it keeps between frames.
     tr: transcript::Ui,
 }
@@ -167,6 +171,7 @@ impl Chat {
             header: String::new(),
             told: None,
             live: false,
+            pending: None,
             to_terminal: false,
             tr: transcript::Ui::default(),
         }
@@ -281,7 +286,9 @@ fn history(dir: &Path, conversation: &str, limit: Option<u64>) -> Option<String>
 
 /// Starts session `id`, a headless Claude in `dir` in a host of its own,
 /// resuming the conversation `tag.resume` when it names one. `options`
-/// carry the flags and the environment its hooks find it by.
+/// carry the flags and the environment its hooks find it by. In a folder
+/// Claude Code has not been told to trust, it waits for the human to say
+/// so in its pane first.
 pub fn open(id: &str, dir: &Path, mut tag: Tag, options: &Options) -> Result<(), String> {
     if CHATS.with(|c| c.borrow().contains_key(id)) {
         return Ok(());
@@ -295,13 +302,25 @@ pub fn open(id: &str, dir: &Path, mut tag: Tag, options: &Options) -> Result<(),
             chat.folio.replay_transcript(&text);
         }
     }
-    let tag_json = serde_json::to_string(&tag).map_err(|e| e.to_string())?;
+    if !crate::accounts::trusted(dir) {
+        chat.pending = Some((tag, options.clone()));
+        CHATS.with(|c| c.borrow_mut().insert(id.to_string(), chat));
+        return Ok(());
+    }
+    start_host(id, &mut chat, &tag, options)?;
+    CHATS.with(|c| c.borrow_mut().insert(id.to_string(), chat));
+    Ok(())
+}
+
+/// Starts the host that runs `chat`'s claude.exe.
+fn start_host(id: &str, chat: &mut Chat, tag: &Tag, options: &Options) -> Result<(), String> {
+    let tag_json = serde_json::to_string(tag).map_err(|e| e.to_string())?;
     let events = on_event(Arc::clone(&chat.inbox), Arc::clone(&chat.posted));
     let hosted = Hosted::start(
         &crate::console::host_program(),
         &horadric_hooks::instance(),
         id,
-        dir,
+        &chat.dir,
         tag.resume.as_deref(),
         options,
         &tag_json,
@@ -309,8 +328,27 @@ pub fn open(id: &str, dir: &Path, mut tag: Tag, options: &Options) -> Result<(),
     )
     .map_err(|e| format!("Claude did not start: {e}"))?;
     chat.hosted = Some(hosted);
-    CHATS.with(|c| c.borrow_mut().insert(id.to_string(), chat));
     Ok(())
+}
+
+/// The human trusts the folder of session `id`, which waits for it: the
+/// trust is recorded where Claude Code keeps its own, and the session
+/// starts.
+fn trust_folder(id: &str) {
+    with(id, |c| {
+        let Some((tag, options)) = c.pending.take() else {
+            return;
+        };
+        if let Err(e) = crate::accounts::trust(&c.dir) {
+            c.error = Some(format!("Could not record that you trust this folder: {e}"));
+            c.pending = Some((tag, options));
+            return;
+        }
+        if let Err(e) = start_host(id, c, &tag, &options) {
+            c.error = Some(e);
+            c.ended = true;
+        }
+    });
 }
 
 /// A session found running in its host after a reload, a crash or a Quit

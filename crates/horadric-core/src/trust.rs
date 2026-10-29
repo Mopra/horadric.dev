@@ -46,20 +46,25 @@ pub fn trusted(config: &Value, key: &str) -> bool {
     }
 }
 
+/// Whether the trust dialog was accepted for `key` itself, which is what
+/// spares a session in it the dialog (see [`trust`]).
+pub fn accepted(config: &Value, key: &str) -> bool {
+    config
+        .get("projects")
+        .and_then(Value::as_object)
+        .is_some_and(|p| {
+            p.iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case(key) && v["hasTrustDialogAccepted"] == true)
+        })
+}
+
 /// Marks `key` trusted in `.claude.json`'s contents, the rest left as it
 /// was. False when it was trusted already, so nothing needs writing. Only
 /// the folder itself counts here: Claude Code 2.1.3 asked again in a
 /// worktree whose parent (or home folder) was trusted, on Windows and on
 /// Linux alike.
 pub fn trust(config: &mut Value, key: &str) -> bool {
-    let accepted = config
-        .get("projects")
-        .and_then(Value::as_object)
-        .is_some_and(|p| {
-            p.iter()
-                .any(|(k, v)| k.eq_ignore_ascii_case(key) && v["hasTrustDialogAccepted"] == true)
-        });
-    if accepted {
+    if accepted(config, key) {
         return false;
     }
     if !config.is_object() {
@@ -143,6 +148,15 @@ mod tests {
             c["projects"]["/home/agent/repo.main-2"]["hasTrustDialogAccepted"],
             true
         );
+    }
+
+    #[test]
+    fn only_the_folder_itself_is_accepted() {
+        let c = json!({"projects": {"C:/a": {"hasTrustDialogAccepted": true}}});
+        assert!(accepted(&c, "C:/a"));
+        assert!(accepted(&c, "c:/A"));
+        assert!(!accepted(&c, "C:/a/b"));
+        assert!(!accepted(&Value::Null, "C:/a"));
     }
 
     #[test]

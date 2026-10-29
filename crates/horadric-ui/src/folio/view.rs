@@ -235,6 +235,8 @@ pub(super) enum Hit {
     Input(Act),
     /// Opens the session in a terminal.
     Terminal,
+    /// Trusts the folder and starts the session, or not and closes it.
+    Trust(bool),
     /// The transcript's own buttons and links.
     Tr(transcript::Act),
 }
@@ -644,6 +646,9 @@ impl View {
         gfx.shade.SetEndPoint(Vector2 { X: 0.0, Y: 9.0 });
         rt.FillRectangle(&d2d(&Rect::new(0.0, 0.0, w, 9.0)), &gfx.shade);
         self.terminal_button(gfx, &pal, chat, w, &mut composer_hits);
+        if chat.pending.is_some() {
+            self.trust_card(gfx, &pal, chat, cx, cw, &area, &mut composer_hits);
+        }
         self.composer_menu(gfx, chat, &pal, cx, cw, &mut composer_hits);
 
         hits.extend(composer_hits);
@@ -679,6 +684,72 @@ impl View {
         let label = Rect::new(r.x + 28.0, r.y, r.w - 34.0, r.h);
         gfx.text_in("Terminal", &gfx.small, &label, pal.dim);
         hits.push((r, Hit::Terminal));
+    }
+
+    /// Asks whether to trust the folder, as Claude Code does before its
+    /// first session in one, in the middle of the glass.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn trust_card(
+        &self,
+        gfx: &Gfx,
+        pal: &Palette,
+        chat: &Chat,
+        cx: f32,
+        cw: f32,
+        area: &Rect,
+        hits: &mut Vec<(Rect, Hit)>,
+    ) {
+        let w = cw.min(480.0);
+        let h = 150.0;
+        let x = cx + (cw - w) / 2.0;
+        let y = area.y + ((area.h - h) / 2.0).max(16.0);
+        let card = Rect::new(x, y, w, h);
+        gfx.fill_round(&card, 12.0, pal.bg.mix(pal.fg, 0.06));
+        gfx.stroke_round(&card, 12.0, pal.accent.with_alpha(0.45), 1.0);
+        let inner = x + 20.0;
+        let iw = w - 40.0;
+        gfx.text_in(
+            "Trust this folder?",
+            &gfx.title,
+            &Rect::new(inner, y + 16.0, iw, 22.0),
+            pal.fg,
+        );
+        gfx.text_in(
+            "Claude will run its hooks and MCP servers.",
+            &gfx.small,
+            &Rect::new(inner, y + 42.0, iw, 18.0),
+            pal.dim,
+        );
+        gfx.text_in(
+            &chat.dir.to_string_lossy(),
+            &gfx.small,
+            &Rect::new(inner, y + 62.0, iw, 18.0),
+            pal.faint,
+        );
+        let by = y + h - 50.0;
+        let trust = Rect::new(inner, by, 92.0, 30.0);
+        let lit = |r: &Rect| {
+            let mut p = POINT::default();
+            let _ = GetCursorPos(&mut p);
+            let _ = ScreenToClient(self.hwnd(), &mut p);
+            let s = self.scale();
+            r.contains(p.x as f32 / s, p.y as f32 / s)
+        };
+        let fill = if lit(&trust) {
+            pal.accent.mix(pal.fg, 0.2)
+        } else {
+            pal.accent
+        };
+        gfx.fill_round(&trust, 15.0, fill);
+        gfx.text_in("Trust", &gfx.button, &trust, pal.bg);
+        hits.push((trust, Hit::Trust(true)));
+        let cancel = Rect::new(trust.right() + 10.0, by, 92.0, 30.0);
+        if lit(&cancel) {
+            gfx.fill_round(&cancel, 15.0, pal.fg.with_alpha(0.08));
+        }
+        gfx.stroke_round(&cancel, 15.0, pal.fg.with_alpha(0.2), 1.0);
+        gfx.text_in("Cancel", &gfx.button, &cancel, pal.dim);
+        hits.push((cancel, Hit::Trust(false)));
     }
 
     /// Whether the keyboard is in the pane this conversation is laid in.
@@ -732,6 +803,8 @@ impl View {
                 interrupt(&key);
             }
             Some(Hit::Terminal) => app::push(Input::FolioToTerminal(key.clone())),
+            Some(Hit::Trust(true)) => super::trust_folder(&key),
+            Some(Hit::Trust(false)) => app::push(Input::CloseFolio(key.clone())),
             Some(Hit::Input(act)) => {
                 let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
                 self.press_input(act, x, y, double, shift);

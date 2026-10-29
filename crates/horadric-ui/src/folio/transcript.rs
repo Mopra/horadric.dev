@@ -1106,7 +1106,8 @@ impl View {
         st.area = area;
 
         rt.PushAxisAlignedClip(&d2d(&area), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        if chat.folio.blocks.is_empty() && chat.error.is_none() && !chat.ended {
+        let waits = chat.pending.is_some();
+        if chat.folio.blocks.is_empty() && chat.error.is_none() && !chat.ended && !waits {
             self.empty(gfx, pal, &chat.dir, &area);
         }
         let origin = area.y - chat.scroll;

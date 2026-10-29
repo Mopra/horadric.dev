@@ -101,20 +101,50 @@ fn write_json(path: &Path, value: &Value) -> io::Result<()> {
 
 /// Tells Claude Code it may trust `dir`, so a session started where no one
 /// sits at the PC does not wait on its trust prompt.
+///
+/// claude.exe writes the same file whenever it likes, so what was read is
+/// read again just before the rename: if it changed meanwhile, the change
+/// is taken in and the key set again, so nothing of claude.exe's is lost
+/// and the window stays the few microseconds of a rename.
 pub fn trust(dir: &Path) -> io::Result<()> {
     let path =
         config_path().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no home folder"))?;
-    let mut config = match read_json(&path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Value::Null,
-        // A file being written is not ours to replace with less.
-        Err(e) => return Err(e),
-    };
     let key = trust::project_key(&dir.to_string_lossy());
-    match trust::trust(&mut config, &key) {
-        true => write_json(&path, &config),
-        false => Ok(()),
+    for _ in 0..5 {
+        let before = match fs::read(&path) {
+            Ok(b) => Some(b),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        let mut config = match &before {
+            Some(b) => serde_json::from_slice(b)
+                // A file being written is not ours to replace with less.
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+            None => Value::Null,
+        };
+        if !trust::trust(&mut config, &key) {
+            return Ok(());
+        }
+        let tmp = path.with_extension("json.horadric-tmp");
+        let mut text = serde_json::to_string_pretty(&config)?;
+        text.push('\n');
+        fs::write(&tmp, text)?;
+        if fs::read(&path).ok() != before {
+            let _ = fs::remove_file(&tmp);
+            continue;
+        }
+        return fs::rename(&tmp, &path);
     }
+    Err(io::Error::other("Claude Code kept writing its settings"))
+}
+
+/// Whether Claude Code would start in `dir` without asking whether to
+/// trust it.
+pub fn trusted(dir: &Path) -> bool {
+    let key = trust::project_key(&dir.to_string_lossy());
+    config_path()
+        .and_then(|p| read_json(&p).ok())
+        .is_some_and(|c| trust::accepted(&c, &key))
 }
 
 /// Who `agent` is logged in as now, by id. Claude's from `.claude.json`
