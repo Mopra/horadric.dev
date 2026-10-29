@@ -71,8 +71,11 @@ Pointers, read when your work touches them: [the brotherhood](docs/plan/the-brot
   file you did not change. A worktree only when the human asks for one.
 - When you are in a worktree anyway (you were asked, or it is a tomb or
   a parallel task), finish by merging it into `main`: merge `main` into
-  the branch first if it has moved, run the three checks again, then
-  `git -C <main checkout> merge --ff-only <branch>`. No branch is left
+  the branch first if it has moved, then
+  `git -C <main checkout> merge --ff-only <branch>`. Run the three
+  checks again only when what came in from `main` touches a file the
+  branch changed; if `main` moves again meanwhile, merge again under the
+  same rule rather than starting the checks over. No branch is left
   with work `main` lacks.
 
 ## Verifying UI code

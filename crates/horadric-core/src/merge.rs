@@ -118,6 +118,21 @@ pub fn conflicted(output: &str) -> Vec<String> {
 /// How many times a merge starts over when `main` moves under it.
 pub const TRIES: usize = 3;
 
+/// How many times a merge may start over without the checks, when what
+/// `main` gained touches nothing of the branch's. Each such try is only a
+/// rebase and a fast forward, so a busy `main` gets more of them than
+/// `TRIES`, but not without end.
+pub const QUIET_TRIES: usize = 10;
+
+/// Whether the checks must run again after `main` moved under a branch
+/// they passed on: `ours` are the files the branch changed, `theirs` the
+/// files `main` changed since the commit the checks ran on. Only when the
+/// two share a file can the new `main` change what the checks said; a
+/// rerun for every move kept a quest from landing while others landed.
+pub fn recheck(ours: &[String], theirs: &[String]) -> bool {
+    ours.iter().any(|f| theirs.contains(f))
+}
+
 /// The title every fix-up quest starts with.
 const FIX_UP: &str = "Fix the merge of ";
 
@@ -364,6 +379,17 @@ pub fn add_fix_up(text: &str, finished: &str, fix: &FixUp) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checks_rerun_only_when_main_touched_a_file_the_branch_changed() {
+        let v = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let ours = v(&["crates/a/src/x.rs", "docs/x.md"]);
+        assert!(!recheck(&ours, &v(&["crates/b/src/y.rs"])));
+        assert!(recheck(&ours, &v(&["crates/b/src/y.rs", "docs/x.md"])));
+        // Nothing gained, or nothing of ours, never needs a rerun.
+        assert!(!recheck(&ours, &[]));
+        assert!(!recheck(&[], &v(&["docs/x.md"])));
+    }
 
     #[test]
     fn the_files_a_conflict_names() {

@@ -621,8 +621,9 @@ pub enum Landing {
 /// Merges the finished quest in worktree `w` into `into`, what the main
 /// tree has checked out: rebased on it in the worktree, `checks` run
 /// there, and `into` fast forwarded to it. Starts over when `into` moved
-/// meanwhile. `live` when the quest's session still runs, idle, in the
-/// worktree; else it was just ended. Blocks for as long as the checks
+/// meanwhile, without the checks when what it gained touches no file the
+/// branch changed. `live` when the quest's session still runs, idle, in
+/// the worktree; else it was just ended. Blocks for as long as the checks
 /// take, so it runs on a thread of its own.
 pub fn land(w: &Worktree, into: &str, checks: &[String], live: bool) -> Landing {
     let main = Path::new(&w.main);
@@ -639,7 +640,23 @@ pub fn land(w: &Worktree, into: &str, checks: &[String], live: bool) -> Landing 
         String::new(),
         merge::Theirs::default(),
     );
-    for _ in 0..merge::TRIES {
+    // The commit of `into` the checks last passed on, so a later move of
+    // `into` is weighed against it.
+    let mut checked_on: Option<String> = None;
+    let (mut full, mut quiet) = (0, 0);
+    loop {
+        let rerun = checked_on
+            .as_deref()
+            .is_none_or(|on| needs_checks(tree, on, into));
+        let (tries, most) = if rerun {
+            (&mut full, merge::TRIES)
+        } else {
+            (&mut quiet, merge::QUIET_TRIES)
+        };
+        if *tries == most {
+            break;
+        }
+        *tries += 1;
         let mut moved = false;
         // Asked before the rebase moves the branch onto them.
         let gained = format!("HEAD..{into}");
@@ -649,7 +666,7 @@ pub fn land(w: &Worktree, into: &str, checks: &[String], live: bool) -> Landing 
                 .map(|l| merge::lines(&l))
                 .unwrap_or_default(),
         };
-        for step in merge::plan(checks) {
+        for step in merge::plan(if rerun { checks } else { &[] }) {
             let done = match &step {
                 merge::Step::Rebase => git(tree, &["rebase", into]),
                 merge::Step::Check(c) => shell(tree, c),
@@ -664,6 +681,11 @@ pub fn land(w: &Worktree, into: &str, checks: &[String], live: bool) -> Landing 
                 let _ = git(tree, &["rebase", "--abort"]);
             }
             if why == merge::Failure::Moved {
+                if rerun {
+                    checked_on = git(tree, &["merge-base", "HEAD", into])
+                        .ok()
+                        .map(|b| b.trim().to_string());
+                }
                 last = (why, out, theirs);
                 moved = true;
                 break;
@@ -675,6 +697,23 @@ pub fn land(w: &Worktree, into: &str, checks: &[String], live: bool) -> Landing 
         }
     }
     Landing::Failed(last.0, last.1, last.2)
+}
+
+/// Whether `into` moved since `on`, the commit the checks passed on, in
+/// a way that needs them again: it changed a file the branch checked out
+/// in `tree` changed. When git cannot tell, they run again.
+fn needs_checks(tree: &Path, on: &str, into: &str) -> bool {
+    let changed = |from: &str, to: &str| {
+        // Without renames, so a moved file counts on both of its paths.
+        git(tree, &["diff", "--name-only", "--no-renames", from, to]).map(|l| merge::lines(&l))
+    };
+    let base = git(tree, &["merge-base", "HEAD", into]).map(|b| b.trim().to_string());
+    let ours = base.and_then(|b| changed(&b, "HEAD"));
+    let theirs = changed(on, into);
+    match (ours, theirs) {
+        (Ok(ours), Ok(theirs)) => merge::recheck(&ours, &theirs),
+        _ => true,
+    }
 }
 
 /// The other side of the rebase of `branch` stopped in `tree`: the files
@@ -798,6 +837,39 @@ mod tests {
         assert!(git(tree, &["status", "--porcelain"]).unwrap().is_empty());
         let mine = std::fs::read_to_string(tree.join("a.txt")).unwrap();
         assert_eq!(mine.trim_end(), "mine");
+        let _ = git(&top, &["worktree", "remove", "--force", &path]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_move_of_main_needs_the_checks_only_when_it_touched_a_file_of_ours() {
+        let base = std::env::temp_dir().join(format!("horadric-recheck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let top = base.join("main");
+        std::fs::create_dir_all(&top).unwrap();
+        run(&top, &["init", "-q", "-b", "main"]);
+        run(&top, &["config", "user.email", "t@example.com"]);
+        run(&top, &["config", "user.name", "t"]);
+        for f in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(top.join(f), "one\n").unwrap();
+        }
+        run(&top, &["add", "."]);
+        run(&top, &["commit", "-q", "-m", "first"]);
+        let on = head(&top).unwrap();
+        let path = base.join("q").to_string_lossy().replace('\\', "/");
+        run(&top, &["worktree", "add", "-q", "-b", "q", &path]);
+        let tree = Path::new(&path);
+        std::fs::write(tree.join("a.txt"), "mine\n").unwrap();
+        run(tree, &["commit", "-q", "-am", "Mine"]);
+
+        std::fs::write(top.join("b.txt"), "theirs\n").unwrap();
+        run(&top, &["commit", "-q", "-am", "Theirs on b"]);
+        assert!(!needs_checks(tree, &on, "main"));
+        std::fs::write(top.join("a.txt"), "theirs\n").unwrap();
+        run(&top, &["commit", "-q", "-am", "Theirs on a"]);
+        assert!(needs_checks(tree, &on, "main"));
+        // A commit git does not know cannot be weighed, so the checks run.
+        assert!(needs_checks(tree, "0123456789abcdef", "main"));
         let _ = git(&top, &["worktree", "remove", "--force", &path]);
         let _ = std::fs::remove_dir_all(&base);
     }

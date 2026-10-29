@@ -46,6 +46,14 @@ pub struct HookEvent {
     /// `command`. Kept whole, since each tool gives its own shape.
     #[serde(default)]
     pub tool_input: Option<Value>,
+    /// Tool events only: Claude Code's id for the call, which the
+    /// `<task-notification>` of background work quotes back.
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
+    /// `PostToolUse` only: what the tool gave back. A shell command that
+    /// ran past its timeout carries a `backgroundTaskId` here.
+    #[serde(default)]
+    pub tool_response: Option<Value>,
     /// `PermissionRequest` only: the rules Claude Code offers to add so it
     /// stops asking. Present means the prompt has an "always" choice.
     #[serde(default)]
