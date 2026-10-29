@@ -25,12 +25,18 @@ use horadric_hooks::{
 const USAGE: &str = "\
 usage: horadric quest done [\"summary\"]  The quest this session works is completed,
                                         with one line on what it achieved
-       horadric quest blocked \"why\"     It can not go on without the human
+       horadric quest blocked \"why\" --you \"what the human would do\"
+                                        It can not go on without the human, who
+                                        reads one plain line of what to do
              [--on \"title\"]           or until another quest is done,
              [--on-main <ref>]         a commit or branch is on main,
              [--on-file <path>]        a file exists,
              [--on-cmd \"command\"]     a command (cmd.exe) exits 0,
              [--until <+30m|UTC time>] or a time comes: then it goes on
+             [--on-outside \"what\"]    or something outside nothing here checks
+       horadric quest ask \"title\" \"what the human would do\"
+                                        Say it for a quest blocked on the human
+       horadric quest drop \"title\" \"why\"  The human dropped a blocked quest: it closes
        horadric quest add \"title\"       Add a quest to the end of the log
              [--notes \"text\"]          with notes for the agent under it,
              [--after \"title\"]         to start once that quest is done,
@@ -84,12 +90,38 @@ pub fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("done") => report(&cwd, None, &args[1..].join(" ")),
         Some("blocked") => {
-            let (quest, rest) = quest_flag(&args[1..])?;
+            let (you, rest) = you_flag(&args[1..])?;
+            let (quest, rest) = quest_flag(&rest)?;
             let (why, wait) = why_and_wait(&rest, unix_now())?;
-            match quest {
-                Some(title) => hand_on(&cwd, &title, &why),
-                None => report(&cwd, Some((&why, wait)), ""),
+            match (quest, &wait, you) {
+                (Some(_), _, Some(_)) => {
+                    Err("a quest handed on asks its question, so --quest takes no --you".into())
+                }
+                (Some(title), _, None) => hand_on(&cwd, &title, &why),
+                (None, Some(On::Quest(_)), Some(_)) => Err(
+                    "a quest waiting on another quest does not wait on the human, so --on \
+                     takes no --you"
+                        .into(),
+                ),
+                (None, _, you) => {
+                    // A session started before --you was asked for still
+                    // blocks; Warriv writes the line when it is missing.
+                    let missing = wait.is_none() && you.is_none();
+                    report(&cwd, Some((&why, wait, you.as_deref())), "")?;
+                    if missing {
+                        println!("{NO_YOU}");
+                    }
+                    Ok(())
+                }
             }
+        }
+        Some("ask") => {
+            let (title, text) = title_and_text(&args[1..], "ask")?;
+            ask(&cwd, &title, &text)
+        }
+        Some("drop") => {
+            let (title, why) = title_and_text(&args[1..], "drop")?;
+            drop_quest(&cwd, &title, &why)
         }
         Some("add") => {
             let (title, notes, below) = title_and_notes(&args[1..])?;
@@ -150,6 +182,7 @@ fn project_flag(args: &[String]) -> Result<(Option<String>, Vec<String>), String
 pub fn projects() -> Result<(), String> {
     let saved = horadric_ui::town::saved_sessions();
     let mut all = Vec::new();
+    let mut logs = Vec::new();
     for dir in horadric_ui::town::known_dirs() {
         let path = Path::new(&dir);
         let key = horadric_ui::folder_key(&dir);
@@ -160,13 +193,15 @@ pub fn projects() -> Result<(), String> {
             .collect();
         let (mut open, mut working) = (0, 0);
         if file::file(path).is_file() {
-            for t in tasks::parse(&file::read(path)) {
+            let log = tasks::parse(&file::read(path));
+            for t in &log {
                 match t.mark {
                     Mark::Open => open += 1,
                     Mark::Working => working += 1,
                     _ => {}
                 }
             }
+            logs.push((horadric_ui::project_name(&key), log));
         }
         all.push(horadric_ui::town::Overview {
             name: horadric_ui::project_name(&key),
@@ -178,6 +213,10 @@ pub fn projects() -> Result<(), String> {
         });
     }
     print!("{}", horadric_ui::town::overview(&all));
+    let blocked = horadric_ui::town::needs_you(&logs, unix_now());
+    if !blocked.is_empty() {
+        print!("\n{blocked}");
+    }
     Ok(())
 }
 
@@ -217,6 +256,34 @@ fn quest_flag(args: &[String]) -> Result<(Option<String>, Vec<String>), String> 
         );
     }
     Ok((Some(title), rest))
+}
+
+/// What `quest blocked` says when a quest waits on the human and does not
+/// say what they would do. The why may run long; this line is what they
+/// act on, so it is asked for rather than left for them to work out. A
+/// nudge, not a refusal, since sessions started before it still block.
+const NO_YOU: &str = "Next time, say what the human would do in one plain line: horadric quest \
+     blocked \"why\" --you \"Say go or drop on clip 1 at ~/Downloads/clip-1.mp4\". For this \
+     one, run horadric quest ask \"<title>\" \"<that line>\".";
+
+/// `--you "line"` taken out of `quest blocked`'s words: what the human
+/// would do to free it.
+fn you_flag(args: &[String]) -> Result<(Option<String>, Vec<String>), String> {
+    let Some(at) = args.iter().position(|a| a == "--you") else {
+        return Ok((None, args.to_vec()));
+    };
+    let tail = &args[at + 1..];
+    let end = tail
+        .iter()
+        .position(|a| a.starts_with("--"))
+        .unwrap_or(tail.len());
+    let you = tasks::you_line(&tail[..end].join(" "));
+    if you.is_empty() {
+        return Err("say what the human would do: --you \"line\"".into());
+    }
+    let mut rest = args[..at].to_vec();
+    rest.extend_from_slice(&tail[end..]);
+    Ok((Some(you), rest))
 }
 
 /// The quest and the words of `quest note` and `quest tell`.
@@ -277,6 +344,7 @@ fn why_and_wait(args: &[String], now: u64) -> Result<(String, Option<On>), Strin
                 "--on-main" => On::Check(Wait::Main(value)),
                 "--on-file" => On::Check(Wait::File(value)),
                 "--on-cmd" => On::Check(Wait::Cmd(value)),
+                "--on-outside" => On::Check(Wait::Outside(tasks::you_line(&value))),
                 "--until" => On::Check(Wait::Until(tasks::parse_when(&value, now).ok_or(
                     format!(
                         "--until takes +30m (or s, h, d), Unix seconds or a UTC time like \
@@ -300,11 +368,17 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// The agent's item is done, or blocked with why and what it waits on,
-/// and what the agent says it achieved, for the chronicle.
-fn report(cwd: &Path, blocked: Option<(&str, Option<On>)>, summary: &str) -> Result<(), String> {
-    let why = blocked.as_ref().map(|(w, _)| *w);
-    let wait = blocked.and_then(|(_, w)| w);
+/// What `quest blocked` reports: why, what it waits on, and what the human
+/// would do.
+type Blocked<'a> = (&'a str, Option<On>, Option<&'a str>);
+
+/// The agent's item is done, or blocked with why, what it waits on and
+/// what the human would do, and what the agent says it achieved, for the
+/// chronicle.
+fn report(cwd: &Path, blocked: Option<Blocked>, summary: &str) -> Result<(), String> {
+    let why = blocked.as_ref().map(|(w, _, _)| *w);
+    let you = blocked.as_ref().and_then(|(_, _, y)| *y);
+    let wait = blocked.and_then(|(_, w, _)| w);
     let id = session().ok_or("this is not a Horadric session, so there is no item to report on")?;
     if let Some((batch, _)) = tombs::of(&id) {
         let project = held(cwd, batch).ok_or(format!("{NO_LOG} has a quest held by {batch}"))?;
@@ -323,10 +397,11 @@ fn report(cwd: &Path, blocked: Option<(&str, Option<On>)>, summary: &str) -> Res
         Some(_) => Mark::Blocked,
         None => mode.finished(),
     };
+    let since = why.map(|_| unix_now());
     let changed = file::update(&project, |text| match &wait {
-        Some(On::Quest(title)) => tasks::block_after(text, &id, why, title),
-        Some(On::Check(w)) => tasks::set_held(text, &id, mark, why, Some(w)),
-        None => tasks::set_held(text, &id, mark, why, None),
+        Some(On::Quest(title)) => tasks::block_after(text, &id, why, title, unix_now()),
+        Some(On::Check(w)) => tasks::set_held(text, &id, mark, why, Some(w), since, you),
+        None => tasks::set_held(text, &id, mark, why, None, since, you),
     })
     .map_err(|e| format!("{}: {e}", file::file(&project).display()))?;
     if !changed {
@@ -658,10 +733,52 @@ fn move_quest(cwd: &Path, title: &str, to: &str, above: bool) -> Result<(), Stri
 /// Hands a quest a session holds to the human, with the question.
 fn hand_on(cwd: &Path, title: &str, question: &str) -> Result<(), String> {
     let project = log_of(cwd)?;
-    write(&project, |log| warriv::hand_on(log, title, question))?;
+    write(&project, |log| {
+        warriv::hand_on(log, title, question, unix_now())
+    })?;
     warriv_ran(&project, Command::Blocked, title, question);
     tell_app(&project);
     println!("Handed to the human. The quest waits for their answer.");
+    Ok(())
+}
+
+/// The blocked quest `title` in the log, by its line.
+fn blocked_quest(log: &str, title: &str) -> Result<tasks::Task, String> {
+    let list = tasks::parse(log);
+    let t = match tasks::find(&list, title) {
+        Ok(i) => list[i].clone(),
+        Err(0) => return Err(format!("no quest is called \"{title}\"")),
+        Err(_) => return Err(format!("\"{title}\" matches more than one quest")),
+    };
+    if t.mark != Mark::Blocked {
+        return Err(format!("\"{}\" is not blocked", t.title));
+    }
+    Ok(t)
+}
+
+/// Says what the human would do for a quest blocked on them, the one line
+/// they act on.
+fn ask(cwd: &Path, title: &str, text: &str) -> Result<(), String> {
+    let project = log_of(cwd)?;
+    write(&project, |log| {
+        let t = blocked_quest(log, title)?;
+        tasks::set_ask(log, t.line, &t.title, text).ok_or_else(|| "the log changed".to_string())
+    })?;
+    warriv_ran(&project, Command::Note, title, text);
+    tell_app(&project);
+    println!("Said what the human would do.");
+    Ok(())
+}
+
+/// Closes a blocked quest the human no longer wants, with why under it.
+fn drop_quest(cwd: &Path, title: &str, why: &str) -> Result<(), String> {
+    let project = log_of(cwd)?;
+    write(&project, |log| {
+        let t = blocked_quest(log, title)?;
+        tasks::drop_quest(log, t.line, &t.title, why).ok_or_else(|| "the log changed".to_string())
+    })?;
+    tell_app(&project);
+    println!("Dropped. It is closed with why under it.");
     Ok(())
 }
 
@@ -1353,6 +1470,30 @@ mod tests {
         assert!(w(&["x", "--on"]).is_err());
         assert!(w(&["x", "--until", "soon"]).is_err());
         assert!(w(&["x", "--on-moon", "y"]).is_err());
+        assert_eq!(
+            w(&["x", "--on-outside", "the", "reply"]),
+            Ok(("x".into(), check(Wait::Outside("the reply".into()))))
+        );
+    }
+
+    #[test]
+    fn you_takes_its_words_up_to_the_next_flag() {
+        assert_eq!(
+            you_flag(&words(&[
+                "why",
+                "--you",
+                "Say go",
+                "{or} drop",
+                "--on",
+                "B"
+            ])),
+            Ok((
+                Some("Say go (or) drop".into()),
+                words(&["why", "--on", "B"])
+            ))
+        );
+        assert_eq!(you_flag(&words(&["why"])), Ok((None, words(&["why"]))));
+        assert!(you_flag(&words(&["why", "--you"])).is_err());
     }
 
     #[test]

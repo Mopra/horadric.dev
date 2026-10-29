@@ -324,6 +324,9 @@ struct Item {
     finish: Option<f32>,
     /// The session that has it.
     holder: Option<String>,
+    /// What hovering a blocked row says beside the title: what the human
+    /// would do, else why it is blocked.
+    why: Option<String>,
 }
 
 struct Drag {
@@ -627,8 +630,8 @@ impl Cluster {
         }
     }
 
-    /// The project's items that get a row, in list order, with how each
-    /// reads. None for a project with no folder, which gets no tile.
+    /// The project's items that get a row, blocked ones first as the board
+    /// orders them, with how each reads. None for a project with no folder, which gets no tile.
     fn items(&self) -> Option<Vec<Item>> {
         self.dir.as_ref()?;
         let boards = self.shared.boards.borrow();
@@ -645,20 +648,20 @@ impl Cluster {
         let warriv = self.shared.warriv.borrow();
         let with_warriv = |title: &str| warriv.get(&self.key).is_some_and(|w| w.contains(title));
         let mut items: Vec<Item> = b
-            .shown()
+            .rows()
             .into_iter()
             .map(|i| {
                 let t = &b.tasks[i];
+                let state =
+                    board::with_warriv(board::gated(state(t), &ready[i]), with_warriv(&t.title));
                 Item {
                     line: t.line,
                     title: t.title.clone(),
-                    state: board::with_warriv(
-                        board::gated(state(t), &ready[i]),
-                        with_warriv(&t.title),
-                    ),
-                    note: board::note(t, &ready[i], now),
+                    state,
+                    note: board::row_note(t, &ready[i], state, now),
                     finish: None,
                     holder: t.holder.clone(),
+                    why: board::why(t).map(str::to_string),
                 }
             })
             .collect();
@@ -684,6 +687,7 @@ impl Cluster {
                 note: None,
                 finish: Some(p),
                 holder: None,
+                why: None,
             };
             items.insert(at.min(items.len()), item);
         }
@@ -1578,7 +1582,7 @@ impl Cluster {
                 .map(|s| Cow::Owned(s.tip)),
             Hit::Task(i) => self
                 .item_at(i)
-                .map(|item| Cow::Owned(tip::quest(&item.title))),
+                .map(|item| Cow::Owned(tip::quest(&item.title, item.why.as_deref()))),
             _ => tip::cluster(hot).map(Cow::Borrowed),
         };
         tip::over_line(&self.shared, self.hwnd, line);

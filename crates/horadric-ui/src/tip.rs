@@ -200,9 +200,14 @@ const QUEST: &str =
     "Read this quest before taking it on, or show the session doing it. Right click for more";
 
 /// What hovering a quest says: its whole title first, since the row cuts
-/// a long one short, then apart from it what a click does.
-pub fn quest(title: &str) -> String {
-    format!("{}\n\n{QUEST}", title.trim())
+/// a long one short, then for a blocked one what the human would do or
+/// why, which the row has no room for, then apart from it what a click
+/// does.
+pub fn quest(title: &str, why: Option<&str>) -> String {
+    match why.map(str::trim).filter(|w| !w.is_empty()) {
+        Some(w) => format!("{}\n{w}\n\n{QUEST}", title.trim()),
+        None => format!("{}\n\n{QUEST}", title.trim()),
+    }
 }
 
 /// What a part of the cube does.
@@ -642,9 +647,13 @@ mod tests {
     #[test]
     fn a_quest_says_its_whole_title_before_what_a_click_does() {
         let title = "Recheck Google index status around 2026-10-15 (python tools/gsc.py inspect each sitemap URL)";
-        let tip = quest(&format!(" {title} "));
+        let tip = quest(&format!(" {title} "), None);
         let lines: Vec<&str> = tip.lines().collect();
         assert_eq!(lines, [title, "", QUEST]);
+        let tip = quest(title, Some(" Pick a name "));
+        let lines: Vec<&str> = tip.lines().collect();
+        assert_eq!(lines, [title, "Pick a name", "", QUEST]);
+        assert_eq!(quest(title, Some(" ")), quest(title, None));
     }
 
     #[test]

@@ -9,9 +9,14 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 - A quest I file gets an After: line for every quest whose code it calls, not only the nearest: "Backup: the Settings section" named part 2 but needed part 1, started early and blocked itself (2026-10-16).
 - A quest blocked only to ask leave to rerun checks (killed, out of memory) gets "go" from me: reruns never need the human.
+- Quests that change the landing machinery (crates/horadric-ui/src/runner.rs, worktree.rs, horadric-core merge.rs) get an After: line on each other: four ran side by side on 2026-10-28/29 and cost two conflict fix-ups and four extra fix-up quests.
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (landing, main at 8f6e4c3, "Blocked quests say why" landed): cast "Ship Local" as Open said (7 quests since the last ship). Told the blocked context panel go to rerun its memory-killed checks and ff-merge. "Sessions waiting on their own checks" stopped undone again, still on its own agents: no tell.
+- 2026-10-29 "Sessions waiting on their own checks are not nudged..." stopped undone while two of its own agents run (the bug it fixes). Own work, no tell, noted it.
+- 2026-10-29 Look back (10 done, 5 merged, 5 not, 17 Warriv wakes): conflicts were landing quests in runner.rs/worktree.rs side by side (new rule, the drift notice has landed); red tests were the checkpoint temp flake (quest running, told it of a second form); the 8 silent stops were sessions waiting on their own heavy checks, so filed "Sessions waiting on their own checks are not nudged or counted as stopped" (opus). The day gave 4 lore notes (#558 to #561, #561 replaces #30).
+- 2026-10-29 Round (landing, main at 918796d, slim CLAUDE.md landed): Ship Local at e9c4701 came up (reload.log). No ship for a docs only landing; waits for the checkpoint flake fix.
 - 2026-10-29 Round (landing, main at e9c4701, checks green): the worktree fix landed and the last ship came up, so cast "Ship Local" (5 quests since). The slim CLAUDE.md fix-up stopped undone waiting on its own checks in heavy: no tell, noted it.
 - 2026-10-29 "Fix the merge of land-the-worktree-fix-from-fix-the-merge" stopped undone: conflict resolved, its clippy and tests queued in heavy. Own work, no tell, noted it.
 - 2026-10-29 "Land the worktree fix..." ended with a real conflict in worktree.rs against 6576c9d. Gave its fix-up Model: sonnet and told it to keep both features, flake rerun only.
@@ -176,4 +181,6 @@
 - Check "Make checkpoint tests' git init not copy hook templates" lands; if the flake shows again after, look at %TEMP% itself (antivirus, locks).
 - "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Check the Ship Local cast at e9c4701 came up (reload.log); ship again once the checkpoint flake fix and the slim CLAUDE.md fix-up land.
+- Check the Ship Local cast at 8f6e4c3 came up; cast again once the context panel or the checkpoint fix lands.
+- Check the context panel lands after my go; if it blocks on memory again, the heavy memory fix in "Sessions waiting..." should help.
+- Check "Sessions waiting on their own checks..." lands; after it, the look back's silent stops count should drop.

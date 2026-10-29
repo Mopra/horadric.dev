@@ -6,6 +6,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use horadric_core::tasks::{self, Task, Waits};
+
 /// What the town's cluster is called, in place of its folder's name.
 pub const NAME: &str = "Tristram";
 
@@ -245,6 +247,77 @@ pub fn overview(projects: &[Overview]) -> String {
     out
 }
 
+/// The blocked quests of every project, so the human sees in one place
+/// what waits on them: those that need them, oldest first across projects,
+/// each with what they would do (else why it is blocked), then a short list
+/// of those waiting on something else. `projects` is each project's name
+/// and its quest log. Nothing when no quest is blocked.
+pub fn needs_you(projects: &[(String, Vec<Task>)], now: u64) -> String {
+    let mut yours: Vec<(&str, &Task)> = Vec::new();
+    let mut waiting: Vec<(&str, &Task)> = Vec::new();
+    for (name, log) in projects {
+        for i in tasks::by_need(log) {
+            let t = &log[i];
+            match t.waits() {
+                Some(Waits::Human) => yours.push((name, t)),
+                _ => waiting.push((name, t)),
+            }
+        }
+    }
+    // A line with no time was written before lines had one: the oldest.
+    yours.sort_by_key(|(_, t)| t.since.unwrap_or(0));
+    waiting.sort_by_key(|(_, t)| (t.waits(), t.since.unwrap_or(0)));
+    let age = |t: &Task| t.since.map(|s| format!(" ({})", tasks::age(s, now)));
+    let mut out = String::new();
+    if !yours.is_empty() {
+        out.push_str(&format!(
+            "{} ({})
+",
+            Waits::Human.group(),
+            yours.len()
+        ));
+    }
+    for (name, t) in &yours {
+        let title = tasks::one_line(&t.title);
+        out.push_str(&format!(
+            "  {name}: {title}{}
+",
+            age(t).unwrap_or_default()
+        ));
+        let why = t
+            .ask
+            .as_deref()
+            .or(t.reason.as_deref())
+            .map(tasks::one_line);
+        if let Some(w) = why.filter(|w| !w.is_empty()) {
+            out.push_str(&format!(
+                "    {w}
+"
+            ));
+        }
+    }
+    if !waiting.is_empty() {
+        out.push_str(&format!(
+            "Waiting ({})
+",
+            waiting.len()
+        ));
+    }
+    for (name, t) in &waiting {
+        let title = tasks::one_line(&t.title);
+        let on = match &t.wait {
+            Some(w) => w.label(now),
+            None => String::new(),
+        };
+        let age = age(t).unwrap_or_default();
+        out.push_str(&format!(
+            "  {name}: {title}, {on}{age}
+"
+        ));
+    }
+    out
+}
+
 /// Why a project can not be called this, or none when it can. The name is a
 /// folder, so what a Windows folder refuses is refused here.
 pub fn check_name(name: &str) -> Option<String> {
@@ -341,6 +414,61 @@ pub fn found(name: &str, parent: &Path, summary: &str) -> Result<PathBuf, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn needs_you_lists_what_waits_on_the_human_oldest_first_across_projects() {
+        let day = 86_400;
+        let at = |d: u64| tasks::utc(100 * day - d * day);
+        let a = tasks::parse(&format!(
+            concat!(
+                "- [!] Name it @a-1: a long why {{you: Pick a name}} {{since: {}}}
+",
+                "- [!] Later @a-2: when the window opens {{until: {}}} {{since: {}}}
+",
+                "- [/] Busy @a-3
+",
+            ),
+            at(2),
+            tasks::utc(103 * day),
+            at(1),
+        ));
+        let b = tasks::parse(&format!(
+            "- [!] Key @b-1: needs the API key {{since: {}}}
+- [!] Old @b-2: from before
+",
+            at(5)
+        ));
+        let out = needs_you(&[("a".into(), a), ("b".into(), b)], 100 * day);
+        assert_eq!(
+            out,
+            concat!(
+                "Needs you (3)
+",
+                "  b: Old
+",
+                "    from before
+",
+                "  b: Key (5d)
+",
+                "    needs the API key
+",
+                "  a: Name it (2d)
+",
+                "    Pick a name
+",
+                "Waiting (1)
+",
+                "  a: Later, in 3 d 0 h (1d)
+",
+            )
+        );
+        let calm = tasks::parse(
+            "- [ ] A
+- [/] B @b-1
+",
+        );
+        assert_eq!(needs_you(&[("a".into(), calm)], 0), "");
+    }
 
     #[test]
     fn the_town_lives_beside_the_state_it_belongs_to() {
