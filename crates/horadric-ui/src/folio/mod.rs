@@ -717,6 +717,10 @@ fn redraw(id: &str) {
     }
 }
 
+fn send_prompt(id: &str) {
+    with(id, |c| composer::send(c, false));
+}
+
 fn answer(id: &str, request_id: &str, allow: bool) {
     answer_with(id, |f| f.answer(request_id, allow));
 }
