@@ -353,6 +353,7 @@ impl<E: Embed> Keeper<E> {
         let mut found = recall::rank(ask, &cands, &meaning, |i| {
             !recall::stale(&cands[i], files).is_empty()
         });
+        let offering = unasked.is_some();
         if let Some(u) = unasked {
             found = recall::offered(
                 &found,
@@ -373,7 +374,12 @@ impl<E: Embed> Keeper<E> {
             .iter()
             .map(|&(i, _)| recall::id_of(&cands[i]))
             .collect();
-        let hits = recall::hits(&cands, &found, ask.now, files);
+        let mut hits = recall::hits(&cands, &found, ask.now, files);
+        if offering {
+            for h in &mut hits {
+                h.text = recall::clip_offered(&h.text);
+            }
+        }
         let plain = || Answer {
             text: horadrim::plain(&hits),
             given: Vec::new(),

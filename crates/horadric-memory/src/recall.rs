@@ -47,6 +47,26 @@ pub const OFFER_BAR: f32 = 0.45;
 /// skip, not a recall's whole answer.
 pub const MOST_OFFERED: usize = 3;
 
+/// The most of one hit's text put before an agent unasked. The hint stays
+/// in the window for every call after, and a hit that bears on the prompt
+/// is worth its id: `lore_recall` with unroll gives the rest (measured
+/// 2026-10-29: about 1.8k characters a prompt in a busy project, most of
+/// it dialogue the agent passed by).
+pub const OFFERED_CHARS: usize = 480;
+
+/// `text` cut to [`OFFERED_CHARS`] at a word, saying it was cut.
+pub fn clip_offered(text: &str) -> String {
+    if text.len() <= OFFERED_CHARS {
+        return text.to_string();
+    }
+    let mut end = OFFERED_CHARS;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = text[..end].rfind(char::is_whitespace).unwrap_or(end);
+    format!("{} (cut; unroll for the rest)", text[..cut].trim_end())
+}
+
 /// The least fused score of a hit worth showing an agent that did not ask
 /// (part 9): about the first three places of two rankings at once, by
 /// words and by meaning or by files. The first place of both is
@@ -566,6 +586,16 @@ mod tests {
 
     const NOW: u64 = 1_792_152_000;
     const DAY: u64 = 86_400;
+
+    #[test]
+    fn an_offered_hit_is_cut_at_a_word_and_says_so() {
+        assert_eq!(clip_offered("short"), "short");
+        let cut = clip_offered(&"word ".repeat(200));
+        assert!(cut.len() < OFFERED_CHARS + 40);
+        assert!(cut.ends_with("word (cut; unroll for the rest)"));
+        let wide = clip_offered(&"\u{e9}".repeat(400));
+        assert!(wide.starts_with('\u{e9}') && wide.ends_with("rest)"));
+    }
 
     fn note(id: u64, text: &str, files: &[&str], at: u64) -> Note {
         Note {
