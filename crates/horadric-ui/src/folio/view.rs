@@ -10,11 +10,10 @@ use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_GRADIENT_STOP, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1RadialGradientBrush,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
-    D2D1_LINE_JOIN_ROUND, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
+    ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT,
     D2D1_STROKE_STYLE_PROPERTIES,
 };
 use windows::Win32::Graphics::DirectWrite::{
@@ -247,7 +246,6 @@ pub(super) struct Gfx {
     /// changes the window's, and the target is told.
     pub(super) dpi: u32,
     pub(super) brush: ID2D1SolidColorBrush,
-    pub(super) glow: ID2D1RadialGradientBrush,
     pub(super) shade: ID2D1LinearGradientBrush,
     pub(super) round: ID2D1StrokeStyle,
     pub(super) accent: Color,
@@ -362,16 +360,6 @@ impl Gfx {
                 },
             ]
         };
-        let glow_stops = rt.CreateGradientStopCollection(
-            &stops(accent, accent.with_alpha(0.0)),
-            D2D1_GAMMA_2_2,
-            D2D1_EXTEND_MODE_CLAMP,
-        )?;
-        let glow = rt.CreateRadialGradientBrush(
-            &D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES::default(),
-            None,
-            &glow_stops,
-        )?;
         let black = Color::rgb(0);
         let shade_stops = rt.CreateGradientStopCollection(
             &stops(black.with_alpha(0.5), black.with_alpha(0.0)),
@@ -407,7 +395,6 @@ impl Gfx {
             rt,
             dpi,
             brush,
-            glow,
             shade,
             round,
             accent,
@@ -600,7 +587,7 @@ impl View {
                 .last
                 .replace(Some(now))
                 .map_or(0.0, |t| now.duration_since(t).as_secs_f32().min(0.1));
-            self.clock.set(self.clock.get() + dt);
+            self.clock.set(self.clock.get() + dt * look::pace(heat));
         }
         self.clock(moving);
         let t = self.clock.get();

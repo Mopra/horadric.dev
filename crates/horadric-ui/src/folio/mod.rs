@@ -17,8 +17,8 @@
 //! Events come on the client's reader thread and reach the UI thread
 //! through a message only window.
 //!
-//! Behind the conversation runes drift up through a glow in the project's
-//! colour. They warm while Claude works and cool to rest when it stops,
+//! Behind the conversation runes drift up in the project's colour. They
+//! warm while Claude works and cool to rest when it stops,
 //! and at rest, or hidden, nothing redraws.
 //!
 //! Here is the session: its registry by session id, its lifecycle and
@@ -96,7 +96,7 @@ pub struct Tag {
 
 /// One Folio and the session behind it.
 struct Chat {
-    /// The project's key, whose colour it glows in.
+    /// The project's key, whose colour its runes take.
     key: String,
     dir: PathBuf,
     folio: Folio,
@@ -186,7 +186,7 @@ impl Chat {
     }
 
     /// Claude works and waits on no one. An ask that waits is at rest for
-    /// the glow, so nothing redraws while the human reads it.
+    /// the runes, so nothing redraws while the human reads it.
     fn working(&self) -> bool {
         self.folio.busy && self.folio.pending_asks().is_empty()
     }
@@ -715,10 +715,6 @@ fn redraw(id: &str) {
     if let Some((Some(v), header)) = with(id, |c| (c.view, c.header_moved())) {
         refresh(v, header);
     }
-}
-
-fn send_prompt(id: &str) {
-    with(id, |c| composer::send(c, false));
 }
 
 fn answer(id: &str, request_id: &str, allow: bool) {

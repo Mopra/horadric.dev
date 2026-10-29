@@ -19,8 +19,13 @@ pub const COLUMN_MARGIN: f32 = 22.0;
 pub const WARM: Duration = Duration::from_millis(1200);
 /// And to cool after it ends, after which nothing moves and nothing draws.
 pub const COOL: Duration = Duration::from_millis(2400);
-/// How many runes drift behind the conversation.
+/// How many runes drift behind the conversation at rest.
 pub const EMBERS: usize = 16;
+/// How many more join them while Claude works, so a turn running reads
+/// from across the room without a glow to say it.
+pub const BUSY_EMBERS: usize = 12;
+/// How much faster the runes' clock runs while Claude works.
+pub const BUSY_PACE: f32 = 1.8;
 /// Room above and below the glass an ember is born and dies in, so it
 /// never pops in or out where it can be seen.
 const EMBER_MARGIN: f32 = 30.0;
@@ -241,6 +246,12 @@ pub fn heat(busy: bool, since: Duration) -> f32 {
     }
 }
 
+/// How fast the runes' clock runs at `heat`, eased in and out with it so
+/// no rune jumps when a turn starts or ends.
+pub fn pace(heat: f32) -> f32 {
+    1.0 + (BUSY_PACE - 1.0) * heat
+}
+
 /// One rune drifting up behind the conversation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Ember {
@@ -269,8 +280,10 @@ fn unit(i: usize, salt: u64) -> f32 {
 /// Ember `i` at `t` seconds of the background's own clock, in a view `w`
 /// by `h`, with `runes` to pick from. A function of the time alone, so the
 /// view keeps no particles. Warmth makes it brighter, not faster: a speed
-/// that changed would jump every ember along its path.
+/// that changed would jump every ember along its path, so the pace is the
+/// clock's to change instead. Those past [`EMBERS`] show only while warm.
 pub fn ember(i: usize, t: f32, w: f32, h: f32, heat: f32, runes: usize) -> Ember {
+    let share = if i < EMBERS { 1.0 } else { heat };
     let speed = 7.0 + 9.0 * unit(i, 1);
     let travel = h + 2.0 * EMBER_MARGIN;
     let p = (unit(i, 2) * travel + t * speed).rem_euclid(travel);
@@ -280,7 +293,7 @@ pub fn ember(i: usize, t: f32, w: f32, h: f32, heat: f32, runes: usize) -> Ember
         x: unit(i, 5) * w + sway,
         y: h + EMBER_MARGIN - p,
         size: 9.0 + 9.0 * unit(i, 6),
-        alpha: life * (0.07 + 0.06 * unit(i, 7)) * (1.0 + 1.6 * heat),
+        alpha: life * (0.07 + 0.06 * unit(i, 7)) * (1.0 + 2.2 * heat) * share,
         rune: (hash(&[i as u64, 8]) % runes.max(1) as u64) as usize,
     }
 }
@@ -450,5 +463,23 @@ mod tests {
             let b = ember(i, 10.5, w, h, 0.0, 12);
             assert!(b.y < a.y || b.y > h);
         }
+    }
+
+    #[test]
+    fn more_runes_join_only_while_warm() {
+        let (w, h) = (600.0, 400.0);
+        for i in EMBERS..EMBERS + BUSY_EMBERS {
+            for t in [0.0, 3.3, 47.0, 1234.5] {
+                assert_eq!(ember(i, t, w, h, 0.0, 12).alpha, 0.0);
+            }
+            assert!((0..40).any(|t| ember(i, t as f32, w, h, 1.0, 12).alpha > 0.05));
+        }
+    }
+
+    #[test]
+    fn busy_clock_runs_faster() {
+        assert_eq!(pace(0.0), 1.0);
+        assert_eq!(pace(1.0), BUSY_PACE);
+        assert!(pace(0.5) > 1.0 && pace(0.5) < BUSY_PACE);
     }
 }
