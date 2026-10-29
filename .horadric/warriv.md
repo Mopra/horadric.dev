@@ -7,9 +7,11 @@
 - A quest session that says it waits on its own background work (judge, review agent, checks) is not stuck: no tell, no hand on (lore #31).
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 - A quest I file gets an After: line for every quest whose code it calls, not only the nearest: "Backup: the Settings section" named part 2 but needed part 1, started early and blocked itself (2026-10-16).
+- A quest blocked only to ask leave to rerun checks (killed, out of memory) gets "go" from me: reruns never need the human.
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 "Blocked quests say why..." asked the human to say go for a rerun of tests killed for low memory. Told it go: rerun through heavy, merge on green.
 - 2026-10-29 "Fix the merge of land-a-quest-while-its-session-is-still" stopped undone but waits on its own clippy, queued in heavy. No tell, noted it.
 - 2026-10-29 Round (human left, main at eb2735d, only my memory since the last round): the land-a-quest merge fix-up still runs, so Ship Local stays held per Open. Four quests under way, three wait. Nothing to do.
 - 2026-10-29 "Tell running quests when main moves" stopped undone but waits on its own clippy, queued in heavy. No tell, noted it.
