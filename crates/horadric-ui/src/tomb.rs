@@ -234,6 +234,8 @@ impl App {
             holder: Some(batch.to_string()),
             reason: None,
             wait: None,
+            since: None,
+            ask: None,
             notes: Vec::new(),
         };
         self.row_state(&task)

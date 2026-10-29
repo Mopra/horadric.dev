@@ -19,8 +19,9 @@ use crate::merge::{add_fix_up, FixUp};
 use crate::runeword::{describe, due, Armed, Every};
 use crate::session::made_from;
 use crate::tasks::{
-    end_of, find, insert_note, insert_with_notes, item_line, move_item, one_line, parse, readiness,
-    replace_line, set_mark, Mark, Mode, Ready, Task, ASSUMED, PLAN_WIDE,
+    age, asked_note, blocked_line, end_of, find, insert_note, insert_with_notes, move_item,
+    one_line, parse, readiness, replace_line, set_mark, Mark, Mode, Ready, Task, ASSUMED,
+    PLAN_WIDE,
 };
 
 /// What a blocked quest's reason starts with when Warriv handed it to the
@@ -646,6 +647,9 @@ pub struct Brief {
     pub event: Option<Event>,
     pub notes: Vec<String>,
     pub last_turn: Option<String>,
+    /// What the human would do to free a blocked quest, its `{you: ...}`
+    /// tag, so Warriv writes one where it is missing.
+    pub ask: Option<String>,
     /// The open aims, for a dry log.
     pub aims: Vec<String>,
     /// The whole project, for a round.
@@ -730,7 +734,12 @@ pub fn system_prompt(horadric: &str, file: &str) -> String {
          model, pick from that rather than from habit.\n\
          - Hand a quest to the human when only the human can settle it: `{horadric} quest \
          blocked \"<question>\" --quest \"<title>\"`. Word the question so it can be \
-         answered in one line, and say what you tried in a note first.\n\
+         answered in one line, and say what you tried in a note first. The question \
+         is then what the human reads first, so put the choice in it.\n\
+         - Say what the human would do, on a quest left to them that does not say it yet: \
+         `{horadric} quest ask \"<title>\" \"<one plain line>\"`, such as \"Say go or drop \
+         on clip 1 at ~/Downloads/clip-1.mp4\". The why can run long; this line is what the \
+         human reads first.\n\
          - Read anything: the log, `{horadric} quest list`, the code, git.\n\n\
          The human may write where the work is going as `Aim:` lines at the top of {file}. \
          When the log runs dry with an aim open, you plan ahead:\n\
@@ -889,6 +898,9 @@ fn brief(b: &Brief) -> String {
             } else {
                 s.push_str(&format!(": {}\n", e.detail.trim()));
             }
+            if k == Kind::Blocked {
+                s.push_str(&ask_line(&e.title, b.ask.as_deref()));
+            }
             s
         }
     };
@@ -910,6 +922,21 @@ fn brief(b: &Brief) -> String {
         ));
     }
     out
+}
+
+/// What a blocked quest's brief says of what the human would do: the line
+/// it has, or, with none, to write one should the human be left with it,
+/// since a why can run long and the human should not have to read it to
+/// know what is wanted of them.
+fn ask_line(title: &str, ask: Option<&str>) -> String {
+    match ask.map(one_line).filter(|a| !a.is_empty()) {
+        Some(a) => format!("  What the human would do: {a}\n"),
+        None => format!(
+            "  It does not say what the human would do. If you leave it to the human, first \
+             write that in one plain line: `quest ask \"{}\" \"<what the human would do>\"`.\n",
+            one_line(title)
+        ),
+    }
 }
 
 /// How `main` stands, for a round's picture: `head`, the commit it is at,
@@ -1193,10 +1220,11 @@ pub fn add_note(text: &str, name: &str, line: &str) -> Result<String, String> {
     Ok(insert_note(text, end_of(text, t.line), line))
 }
 
-/// `text` with the quest `name` handed to the human: blocked, its holder
-/// kept, with the question as its reason. Only a quest a session holds
-/// can wait on the human that way.
-pub fn hand_on(text: &str, name: &str, question: &str) -> Result<String, String> {
+/// `text` with the quest `name` handed to the human at `now`: blocked,
+/// its holder kept, with the question as its reason and as what the human
+/// would do. Only a quest a session holds can wait on the human that way.
+/// One blocked already keeps when it was, so its age is the human's wait.
+pub fn hand_on(text: &str, name: &str, question: &str, now: u64) -> Result<String, String> {
     let t = quest(text, name)?;
     let holder = match (t.mark, t.holder.as_deref()) {
         (Mark::Done, _) => return Err(format!("\"{}\" is completed", t.title)),
@@ -1215,14 +1243,74 @@ pub fn hand_on(text: &str, name: &str, question: &str) -> Result<String, String>
             one_line(&t.title)
         ));
     }
-    let line = item_line(
+    let since = t.since.filter(|_| t.mark == Mark::Blocked).unwrap_or(now);
+    let line = blocked_line(
         Mark::Blocked,
         &t.title,
         Some(holder),
         Some(&handed(question)),
         None,
+        Some(since),
+        Some(question),
     );
     replace_line(text, t.line, &line).ok_or_else(|| "the log changed".to_string())
+}
+
+/// What the human is told of a quest blocked on them, as a title and a
+/// text: what they would do first, then why, when that says more, since
+/// a why can run long and the ask is what they act on.
+pub fn for_human(t: &Task) -> (String, String) {
+    let reason = t.reason.as_deref().unwrap_or_default();
+    let (title, why) = match question(reason) {
+        Some(q) => (format!("Warriv asks: {}", t.title), q),
+        None => (format!("Blocked: {}", t.title), reason),
+    };
+    let ask = t.ask.as_deref().map(one_line).unwrap_or_default();
+    let why = one_line(why);
+    let text = match (ask.is_empty(), why.is_empty() || why == ask) {
+        (true, _) => why,
+        (false, true) => ask,
+        (false, false) => format!("{ask}\n{why}"),
+    };
+    (title, text)
+}
+
+/// `text` with the line that says the human was asked under each quest
+/// that has waited on them for [`STALE`](crate::tasks::STALE), and those
+/// quests as they were, so each is asked once whether it still matters.
+pub fn ask_stale(text: &str, now: u64) -> (String, Vec<Task>) {
+    let stale: Vec<Task> = parse(text).into_iter().filter(|t| t.stale(now)).collect();
+    let mut out = text.to_string();
+    // From the bottom up, so the lines above keep their numbers.
+    for t in stale.iter().rev() {
+        out = insert_note(&out, end_of(&out, t.line), &asked_note(now));
+    }
+    (out, stale)
+}
+
+/// What the human is asked of a quest that has waited on them too long:
+/// whether it still matters, with what it waits for.
+pub fn still_needed(t: &Task, now: u64) -> (String, String) {
+    let on = match &t.wait {
+        Some(crate::tasks::Wait::Outside(o)) => one_line(o),
+        _ => "you".to_string(),
+    };
+    let waited = match t.since {
+        Some(s) => format!("Waiting {} on {on}", age(s, now)),
+        None => format!("Waiting on {on}"),
+    };
+    let (_, what) = for_human(t);
+    let mut what = match what.lines().next() {
+        Some(w) => format!("{waited}: {w}"),
+        None => waited,
+    };
+    if !what.ends_with(['.', '?', '!']) {
+        what.push('.');
+    }
+    (
+        format!("Still needed? {}", t.title),
+        format!("{what} Answer it to go on, or drop it."),
+    )
 }
 
 /// `text` with a new open quest and its notes right under the quest
@@ -2611,6 +2699,7 @@ mod tests {
                     "Warriv: tried".into(),
                 ],
                 last_turn: Some("I built it.\nWhich port should it listen on?".into()),
+                ask: Some("Pick the port".into()),
                 aims: Vec::new(),
                 picture: None,
                 looked: None,
@@ -2628,6 +2717,7 @@ mod tests {
             p,
             "Horadric woke you for this:\n\n\
              - The quest \"Serve the API\" is blocked: which port?\n\
+             \x20 What the human would do: Pick the port\n\
              \x20 Its notes:\n\
              \x20   The port is in docs/PORTS.md.\n\
              \x20   Warriv: tried\n\
@@ -2646,6 +2736,7 @@ mod tests {
             event: Some(blocked("A", "")),
             notes: Vec::new(),
             last_turn: Some(long),
+            ask: Some("Pick a port".into()),
             aims: Vec::new(),
             picture: None,
             looked: None,
@@ -2662,6 +2753,7 @@ mod tests {
             event: Some(blocked("A", "x")),
             notes: vec!["n".into()],
             last_turn: Some("a\nb".into()),
+            ask: None,
             aims: Vec::new(),
             picture: None,
             looked: None,
@@ -2680,6 +2772,7 @@ mod tests {
             "--below \"<title>\"",
             "--after \"<title>\"",
             "hx quest blocked \"<question>\" --quest \"<title>\"",
+            "hx quest ask \"<title>\" \"<one plain line>\"",
             "hx quest aim done \"<the aim>\"",
             "--notes \"Filed by Warriv for: <the aim>\"",
             "hx quest note \"<title>\" \"Model: <name>\"",
@@ -2786,9 +2879,10 @@ not green."
 - [ ] Open
 - [x] Old @o-1
 ";
+        let now = crate::tasks::parse_utc("2026-10-28T10:05Z").unwrap();
         assert_eq!(
-            hand_on(text, "Pay for it", "Which card pays?").unwrap(),
-            "- [!] Pay for it @p-1: Warriv asks: Which card pays?
+            hand_on(text, "Pay for it", "Which card pays?", now).unwrap(),
+            "- [!] Pay for it @p-1: Warriv asks: Which card pays? {you: Which card pays?} {since: 2026-10-28T10:05Z}
   n
   Warriv: no card in the docs
 - [/] Work @w-1
@@ -2797,22 +2891,134 @@ not green."
 - [x] Old @o-1
 "
         );
-        assert!(hand_on(text, "Work", "?").unwrap().contains(
-            "- [!] Work @w-1: Warriv asks: ?
+        assert!(hand_on(text, "Work", "?", now).unwrap().contains(
+            "- [!] Work @w-1: Warriv asks: ? {you: ?} {since: 2026-10-28T10:05Z}
 "
         ));
-        assert!(hand_on(text, "Open", "?").is_err());
-        assert!(hand_on(text, "Old", "?").is_err());
+        assert!(hand_on(text, "Open", "?", now).is_err());
+        assert!(hand_on(text, "Old", "?", now).is_err());
+        // Asked again, it keeps when it was first blocked, so its age is
+        // how long the human has been waited on.
+        let again = hand_on(text, "Pay for it", "Which card?", now).unwrap();
+        let later = hand_on(&again, "Pay for it", "Visa or Amex?", now + 3600).unwrap();
+        let t = parse(&later).into_iter().next().unwrap();
+        assert_eq!(
+            (t.since, t.ask.as_deref()),
+            (Some(now), Some("Visa or Amex?"))
+        );
         // Not before the notes say what Warriv tried.
         let untried = "- [!] Pay @p-1: which card?
   n
 ";
-        assert!(hand_on(untried, "Pay", "?")
+        assert!(hand_on(untried, "Pay", "?", now)
             .unwrap_err()
             .starts_with("say what you tried first"));
         // Handed on, it no longer wakes Warriv.
-        let handed = hand_on(text, "Pay", "Which card?").unwrap();
+        let handed = hand_on(text, "Pay", "Which card?", now).unwrap();
         assert!(events(&parse(&handed), Mode::Manual, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn the_human_reads_what_they_would_do_before_why() {
+        let t = |line: &str| parse(line).into_iter().next().unwrap();
+        assert_eq!(
+            for_human(&t(
+                "- [!] Cut @c-1: three clips, the first is long {you: Say go or drop on clip 1}\n"
+            )),
+            (
+                "Blocked: Cut".to_string(),
+                "Say go or drop on clip 1\nthree clips, the first is long".to_string()
+            )
+        );
+        // Handed on, the question is the ask, said once.
+        assert_eq!(
+            for_human(&t(
+                "- [!] Pay @p-1: Warriv asks: Which card? {you: Which card?}\n"
+            )),
+            ("Warriv asks: Pay".to_string(), "Which card?".to_string())
+        );
+        // A line from before asks were written says why alone.
+        assert_eq!(
+            for_human(&t("- [!] Key @k-1: needs a key\n")).1,
+            "needs a key"
+        );
+    }
+
+    #[test]
+    fn a_quest_waiting_days_on_the_human_is_asked_once_whether_it_still_matters() {
+        let at = crate::tasks::parse_utc("2026-10-20T09:00Z").unwrap();
+        let now = at + crate::tasks::STALE;
+        let text = "- [!] Cut @c-1: long {you: Say go on clip 1} {since: 2026-10-20T09:00Z}\n  n\n\
+                    - [!] Mail @m-1: waits {on outside: the reply} {since: 2026-10-20T09:00Z}\n\
+                    - [!] Soon @s-1: new {since: 2026-10-28T09:00Z}\n\
+                    - [!] Later @l-1: x {until: 2026-10-01T00:00Z} {since: 2026-10-20T09:00Z}\n";
+        let (out, stale) = ask_stale(text, now);
+        let titles: Vec<&str> = stale.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, vec!["Cut", "Mail"]);
+        let asked = format!("  {}\n", asked_note(now));
+        assert_eq!(
+            out,
+            format!(
+                "- [!] Cut @c-1: long {{you: Say go on clip 1}} {{since: 2026-10-20T09:00Z}}\n  n\n{asked}\
+                 - [!] Mail @m-1: waits {{on outside: the reply}} {{since: 2026-10-20T09:00Z}}\n{asked}\
+                 - [!] Soon @s-1: new {{since: 2026-10-28T09:00Z}}\n\
+                 - [!] Later @l-1: x {{until: 2026-10-01T00:00Z}} {{since: 2026-10-20T09:00Z}}\n"
+            )
+        );
+        // Asked once: the next look finds nothing.
+        let (again, none) = ask_stale(&out, now + 86_400);
+        assert!(none.is_empty());
+        assert_eq!(again, out);
+        // A day short of it, nothing yet.
+        assert!(ask_stale(text, now - 86_400).1.is_empty());
+    }
+
+    #[test]
+    fn a_stale_quest_is_asked_with_its_age_and_what_it_waits_for() {
+        let at = crate::tasks::parse_utc("2026-10-20T09:00Z").unwrap();
+        let t =
+            parse("- [!] Cut @c-1: long why {you: Say go on clip 1} {since: 2026-10-20T09:00Z}\n")
+                .remove(0);
+        assert_eq!(
+            still_needed(&t, at + 6 * 86_400),
+            (
+                "Still needed? Cut".to_string(),
+                "Waiting 6d on you: Say go on clip 1. Answer it to go on, or drop it.".to_string()
+            )
+        );
+        let q = parse("- [!] Pay @p-1: Warriv asks: Which card?\n").remove(0);
+        assert_eq!(
+            still_needed(&q, at).1,
+            "Waiting on you: Which card? Answer it to go on, or drop it."
+        );
+    }
+
+    #[test]
+    fn a_blocked_brief_says_what_the_human_would_do_or_asks_for_it() {
+        let with = prompt(&[Brief {
+            event: Some(blocked("Cut", "three clips")),
+            ask: Some("Say go or drop on clip 1".into()),
+            ..Brief::default()
+        }]);
+        assert!(with.contains(
+            "- The quest \"Cut\" is blocked: three clips\n\
+             \x20 What the human would do: Say go or drop on clip 1\n"
+        ));
+        let without = prompt(&[Brief {
+            event: Some(blocked("Cut", "three clips")),
+            ..Brief::default()
+        }]);
+        assert!(without.contains("`quest ask \"Cut\" \"<what the human would do>\"`"));
+        // Only a blocked quest is asked for one.
+        let stalled = prompt(&[Brief {
+            event: Some(Event {
+                kind: Kind::Asks,
+                title: "Cut".into(),
+                detail: String::new(),
+            }),
+            ..Brief::default()
+        }]);
+        assert!(!stalled.contains("quest ask"));
     }
 
     #[test]

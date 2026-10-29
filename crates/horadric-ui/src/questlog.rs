@@ -1708,6 +1708,9 @@ fn detail_of(q: &Quest, quests: &[Quest], now: u64, offset: i64) -> QuestDetail 
         }
         _ => {}
     }
+    if q.outcome == Outcome::Blocked && !q.ask.trim().is_empty() {
+        facts.push(("Needs you", one_line(&q.ask)));
+    }
     if !q.name.is_empty() {
         facts.push(("Session", q.name.clone()));
     }
@@ -1839,6 +1842,7 @@ mod tests {
             ended,
             outcome,
             reason: String::new(),
+            ask: String::new(),
             summary: String::new(),
             last: String::new(),
             conversation: None,
@@ -2005,6 +2009,25 @@ mod tests {
             session_doc(t, "## You\n\nHi\n"),
             "# T\n\n# The conversation\n\n## You\n\nHi\n"
         );
+    }
+
+    #[test]
+    fn a_quest_blocked_on_you_says_what_you_would_do() {
+        let mut q = quest("a", 100, Some(200), Outcome::Blocked);
+        let needs = |q: &Quest| {
+            detail_of(q, &[], 300, 0)
+                .facts
+                .into_iter()
+                .find(|(k, _)| *k == "Needs you")
+                .map(|(_, v)| v)
+        };
+        assert_eq!(needs(&q), None);
+        q.ask = "Pick a
+name"
+            .into();
+        assert_eq!(needs(&q).as_deref(), Some("Pick a name"));
+        q.outcome = Outcome::Done;
+        assert_eq!(needs(&q), None);
     }
 
     #[test]

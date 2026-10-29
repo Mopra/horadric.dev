@@ -2,7 +2,7 @@
 //! how each item reads on a row, given how the session holding it is doing.
 
 use horadric_core::registry::Registry;
-use horadric_core::tasks::{Mark, Mode, Ready, Task};
+use horadric_core::tasks::{self, Mark, Mode, Ready, Task, Waits};
 use horadric_core::{tombs, Phase};
 
 use crate::theme::{self, Color};
@@ -34,6 +34,25 @@ impl Board {
             .filter(|(_, t)| t.mark != Mark::Done && !t.title.trim().is_empty())
             .map(|(i, _)| i)
             .collect()
+    }
+
+    /// The rows of the tile, by index, in the order they show: blocked
+    /// quests first as [`tasks::by_need`] orders them, those that need the
+    /// human at the top and each kind oldest first, then the rest in list
+    /// order. A row stands for its task by line and title, never by its
+    /// place, so the order is free to differ from the log's.
+    pub fn rows(&self) -> Vec<usize> {
+        let shown = self.shown();
+        let mut out: Vec<usize> = tasks::by_need(&self.tasks)
+            .into_iter()
+            .filter(|i| shown.contains(i))
+            .collect();
+        out.extend(
+            shown
+                .into_iter()
+                .filter(|&i| self.tasks[i].waits().is_none()),
+        );
+        out
     }
 
     /// What the header says about the whole list: how many are left, the
@@ -71,6 +90,38 @@ pub fn note(task: &Task, ready: &Ready, now: u64) -> Option<String> {
         .as_ref()
         .filter(|_| task.mark == Mark::Blocked)
         .map(|w| w.label(now))
+}
+
+/// What the right end of a row says, given how it reads: [`note`], and
+/// for a blocked quest that says since when, how long it has waited, so a
+/// question left standing for days shows it.
+pub fn row_note(task: &Task, ready: &Ready, state: RowState, now: u64) -> Option<String> {
+    let base = note(task, ready, now);
+    let age = task
+        .since
+        .filter(|_| task.mark == Mark::Blocked)
+        .map(|s| tasks::age(s, now));
+    match (base, age) {
+        (Some(b), Some(a)) => Some(format!("{b}, {a}")),
+        (None, Some(a)) if state.label().is_empty() => Some(a),
+        (None, Some(a)) => Some(format!("{} {a}", state.label())),
+        (b, None) => b,
+    }
+}
+
+/// What a blocked quest's row says on hover beside its title: what the
+/// human would do when it waits on them, else why it is blocked.
+pub fn why(task: &Task) -> Option<&str> {
+    if task.mark != Mark::Blocked {
+        return None;
+    }
+    let ask = task
+        .ask
+        .as_deref()
+        .filter(|_| task.waits() == Some(Waits::Human));
+    ask.or(task.reason.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 /// How a row reads once what the quest waits for in the log is known: an
@@ -298,6 +349,96 @@ mod tests {
         assert_eq!(board("- [x] A\n").summary(), "");
         assert_eq!(board("- [ ] A\n- [ ] B\n").summary(), "2");
         assert_eq!(board("").summary(), "");
+    }
+
+    #[test]
+    fn blocked_rows_come_first_those_that_need_you_at_the_top_oldest_first() {
+        let b = board(concat!(
+            "- [ ] Open
+",
+            "- [!] Late @a-1: why {since: 2026-10-20T00:00Z}
+",
+            "- [/] Doing @b-1
+",
+            "- [!] Timed @c-1: later {until: 2027-01-01T00:00Z}
+",
+            "- [x] Done
+",
+            "- [!] Early @d-1: why {since: 2026-10-01T00:00Z}
+",
+            "- [?] Look @e-1
+",
+        ));
+        assert_eq!(b.rows(), [5, 1, 3, 0, 2, 6]);
+        // The same rows as the header counts, only in another order.
+        let mut sorted = b.rows();
+        sorted.sort();
+        assert_eq!(sorted, b.shown());
+        assert_eq!(
+            board(
+                "- [ ] A
+- [ ] B
+"
+            )
+            .rows(),
+            [0, 1]
+        );
+    }
+
+    #[test]
+    fn a_blocked_row_says_how_long_it_has_waited() {
+        let t = &parse(
+            "- [!] A @a-1: why {since: 2026-10-01T00:00Z}
+",
+        )[0];
+        let since = t.since.unwrap();
+        let now = since + 3 * 86_400 + 5;
+        let blocked = RowState::Blocked;
+        assert_eq!(
+            row_note(t, &Ready::Yes, blocked, now).as_deref(),
+            Some("blocked 3d")
+        );
+        assert_eq!(
+            row_note(t, &Ready::Yes, RowState::Warriv, now).as_deref(),
+            Some("Warriv 3d")
+        );
+        let t = &parse(
+            "- [!] A @a-1: why {on outside: a reply} {since: 2026-10-01T00:00Z}
+",
+        )[0];
+        assert_eq!(
+            row_note(t, &Ready::Yes, RowState::Waits, since + 7200).as_deref(),
+            Some("on a reply, 2h")
+        );
+        // A line from before blocked lines had a time reads as it did.
+        let t = &parse(
+            "- [!] A @a-1: why
+",
+        )[0];
+        assert_eq!(row_note(t, &Ready::Yes, blocked, now), None);
+        let t = &parse(
+            "- [ ] A
+",
+        )[0];
+        assert_eq!(row_note(t, &Ready::Yes, RowState::Open, now), None);
+    }
+
+    #[test]
+    fn a_blocked_row_tells_what_you_would_do_else_why() {
+        let t = parse(concat!(
+            "- [!] A @a-1: a long why {you: Pick a name}
+",
+            "- [!] B @b-1: just why
+",
+            "- [!] C @c-1: later {you: Not this} {until: 2027-01-01T00:00Z}
+",
+            "- [/] D @d-1
+",
+        ));
+        assert_eq!(why(&t[0]), Some("Pick a name"));
+        assert_eq!(why(&t[1]), Some("just why"));
+        assert_eq!(why(&t[2]), Some("later"));
+        assert_eq!(why(&t[3]), None);
     }
 
     #[test]
