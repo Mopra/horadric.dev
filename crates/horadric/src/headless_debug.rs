@@ -8,10 +8,11 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use horadric_core::folio;
 use horadric_pty::headless::{Headless, Options};
 
 const USAGE: &str = "usage: horadric headless-debug [--cwd DIR] [--resume ID] [--deny] \
-[--init] [--leave-asks] [--arg FLAG]... [--interrupt-after MS] [--then PROMPT] [--out FILE] [--timeout SECS] PROMPT";
+[--init] [--leave-asks] [--arg FLAG]... [--permission-mode MODE] [--image FILE]... [--reply JSON] [--reply-raw JSON] [--pick N] [--send MS LINE]... [--at-result LINE]... [--midturn LINE]... [--linger MS] [--env K=V]... [--interrupt-after MS] [--then PROMPT] [--out FILE] [--timeout SECS] PROMPT";
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {
@@ -27,7 +28,31 @@ struct Args {
     timeout: Option<u64>,
     /// Passed on to claude.exe, such as `--permission-mode=default`.
     extra: Vec<String>,
+    /// Image files sent with the first prompt.
+    images: Vec<PathBuf>,
+    /// Merged into the input echoed back as `updatedInput` when an ask is
+    /// allowed, such as `{"answers":{...}}` for AskUserQuestion.
+    reply: Option<serde_json::Value>,
+    /// Answers every AskUserQuestion with each question's option N.
+    pick: Option<usize>,
+    /// Fields laid over every ask's `response`, such as
+    /// `{"updatedPermissions":[...]}`; a `"behavior":"deny"` drops the input.
+    reply_raw: Option<serde_json::Value>,
+    /// Lines written to stdin this many milliseconds after the start.
+    sends: Vec<(u64, String)>,
+    /// Lines written to stdin at the first streamed text, mid turn.
+    midturn: Vec<String>,
+    /// Lines written to stdin after the first result.
+    at_result: Vec<String>,
+    /// Set for claude.exe, such as a dead `ANTHROPIC_BASE_URL` to see retries.
+    env: Vec<(String, String)>,
+    /// How long to keep reading after the last result.
+    linger: Option<u64>,
     prompt: String,
+}
+
+fn json_value(text: &str) -> Result<serde_json::Value, String> {
+    serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -50,6 +75,23 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 out.interrupt_after = Some(value()?.parse().map_err(|_| "bad milliseconds")?)
             }
             "--arg" => out.extra.push(value()?),
+            "--permission-mode" => out.extra.push(format!("--permission-mode={}", value()?)),
+            "--image" => out.images.push(value()?.into()),
+            "--reply" => out.reply = Some(json_value(&value()?)?),
+            "--pick" => out.pick = Some(value()?.parse().map_err(|_| "bad option number")?),
+            "--reply-raw" => out.reply_raw = Some(json_value(&value()?)?),
+            "--send" => {
+                let ms = value()?.parse().map_err(|_| "bad milliseconds")?;
+                out.sends.push((ms, value()?));
+            }
+            "--env" => {
+                let kv = value()?;
+                let (k, v) = kv.split_once('=').ok_or("--env needs K=V")?;
+                out.env.push((k.into(), v.into()));
+            }
+            "--midturn" => out.midturn.push(value()?),
+            "--at-result" => out.at_result.push(value()?),
+            "--linger" => out.linger = Some(value()?.parse().map_err(|_| "bad milliseconds")?),
             "--then" => out.then = Some(value()?),
             "--out" => out.out = Some(value()?.into()),
             "--timeout" => out.timeout = Some(value()?.parse().map_err(|_| "bad seconds")?),
@@ -82,6 +124,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             horadric_hooks::OWNER_ENV.into(),
         ],
         args: args.extra.clone(),
+        env_set: args.env.clone(),
         ..Options::default()
     };
     let (tx, rx) = mpsc::channel::<Option<String>>();
@@ -100,17 +143,46 @@ pub fn run(args: &[String]) -> Result<(), String> {
             r#"{"type":"control_request","request_id":"init_1","request":{"subtype":"initialize"}}"#,
         )?;
     }
-    session
-        .send_prompt(&args.prompt)
-        .map_err(|e| e.to_string())?;
-    eprintln!(">> prompt: {}", args.prompt);
+    if args.images.is_empty() {
+        session
+            .send_prompt(&args.prompt)
+            .map_err(|e| e.to_string())?;
+        eprintln!(">> prompt: {}", args.prompt);
+    } else {
+        let mut images = Vec::new();
+        for p in &args.images {
+            let bytes = std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()))?;
+            images.push(
+                folio::ImageData::from_bytes(&bytes)
+                    .ok_or_else(|| format!("{}: not an image the API takes", p.display()))?,
+            );
+        }
+        eprintln!(">> prompt with {} image(s): {}", images.len(), args.prompt);
+        session
+            .send_line(&folio::prompt_line_with_images(&args.prompt, &images))
+            .map_err(|e| e.to_string())?;
+    }
 
     let started = Instant::now();
     let deadline = started + Duration::from_secs(args.timeout.unwrap_or(180));
     let mut interrupted = false;
     let mut then = args.then.clone();
+    let mut sends = args.sends.clone();
+    let mut at_result = args.at_result.clone();
+    let mut midturn = args.midturn.clone();
+    let mut ended: Option<Instant> = None;
     let stdin = std::io::stdin();
     loop {
+        sends.retain(|(ms, line)| {
+            if started.elapsed() < Duration::from_millis(*ms) {
+                return true;
+            }
+            let _ = send(line);
+            false
+        });
+        if ended.is_some_and(|t| t.elapsed() >= Duration::from_millis(args.linger.unwrap_or(0))) {
+            break;
+        }
         if let Some(ms) = args.interrupt_after {
             if !interrupted && started.elapsed() >= Duration::from_millis(ms) {
                 eprintln!(">> interrupt");
@@ -146,6 +218,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let input = v["request"]["input"].clone();
             let allow = if args.deny {
                 false
+            } else if args.reply.is_some() || args.reply_raw.is_some() || args.pick.is_some() {
+                true
             } else {
                 eprint!(
                     "?? allow {} {}? [y/n] ",
@@ -156,23 +230,63 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 let _ = stdin.lock().read_line(&mut answer);
                 answer.trim().eq_ignore_ascii_case("y")
             };
-            let response = if allow {
+            let mut response = if allow {
+                let mut input = input;
+                if let Some(n) = args.pick {
+                    let mut answers = serde_json::Map::new();
+                    for q in input["questions"].as_array().into_iter().flatten() {
+                        if let (Some(text), Some(label)) =
+                            (q["question"].as_str(), q["options"][n]["label"].as_str())
+                        {
+                            answers.insert(text.into(), label.into());
+                        }
+                    }
+                    input["answers"] = answers.into();
+                }
+                if let (Some(i), Some(r)) = (
+                    input.as_object_mut(),
+                    args.reply.as_ref().and_then(|r| r.as_object()),
+                ) {
+                    for (k, v) in r {
+                        i.insert(k.clone(), v.clone());
+                    }
+                }
                 serde_json::json!({"behavior": "allow", "updatedInput": input})
             } else {
                 serde_json::json!({"behavior": "deny", "message": "The user said no."})
             };
+            if let (Some(r), Some(raw)) = (
+                response.as_object_mut(),
+                args.reply_raw.as_ref().and_then(|r| r.as_object()),
+            ) {
+                for (k, v) in raw {
+                    r.insert(k.clone(), v.clone());
+                }
+                if r["behavior"] == "deny" {
+                    r.remove("updatedInput");
+                }
+            }
             let line = serde_json::json!({
                 "type": "control_response",
                 "response": {"subtype": "success", "request_id": id, "response": response},
             });
             send(&line.to_string())?;
         }
+        if v["event"]["delta"]["type"] == "text_delta" {
+            for line in midturn.drain(..) {
+                send(&line)?;
+            }
+        }
         if v["type"] == "result" {
+            for line in at_result.drain(..) {
+                send(&line)?;
+            }
             match then.take() {
                 Some(next) => {
                     eprintln!(">> prompt: {next}");
                     session.send_prompt(&next).map_err(|e| e.to_string())?;
                 }
+                None if args.linger.is_some() => ended = Some(Instant::now()),
                 None => break,
             }
         }
