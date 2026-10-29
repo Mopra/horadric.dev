@@ -226,6 +226,43 @@ pub fn trunk_prompt(top: &str, branch: Option<&str>) -> String {
     )
 }
 
+/// The files in both lists, in the order of `landed`, with the slashes git
+/// prints. A session that edits a file a landing changed will conflict on it
+/// sooner or later.
+pub fn overlap(landed: &[String], mine: &[String]) -> Vec<String> {
+    let same = |a: &str, b: &str| a.replace('\\', "/") == b.replace('\\', "/");
+    let mut out: Vec<String> = Vec::new();
+    for f in landed {
+        if mine.iter().any(|m| same(f, m)) && !out.iter().any(|o| same(o, f)) {
+            out.push(f.replace('\\', "/"));
+        }
+    }
+    out
+}
+
+/// How many overlapping files the notice names before it says "and more".
+const NAMED_FILES: usize = 6;
+
+/// What the session in a worktree is told when `into` moved under files it
+/// changed too: rebase now, while the conflict is small.
+pub fn main_moved(into: &str, files: &[String]) -> String {
+    let shown: Vec<String> = files
+        .iter()
+        .take(NAMED_FILES)
+        .map(|f| format!("`{f}`"))
+        .collect();
+    let more = match files.len().saturating_sub(NAMED_FILES) {
+        0 => String::new(),
+        n => format!(" and {n} more"),
+    };
+    format!(
+        "Horadric: `{into}` moved. A merged quest changed files you changed too: {}{more}. \
+         Run `git rebase {into}` now and resolve any conflict while it is small, then go on \
+         with your work.",
+        shown.join(", ")
+    )
+}
+
 /// Which of `unmerged`, the branches not merged into the main tree yet,
 /// hold finished items, each with its item's title. A done item's branch is
 /// named from its title, with 2, 3 and on after it when that name was
@@ -544,6 +581,28 @@ mod tests {
         assert!(p.contains("shared working tree at C:/Code/app on `main`, and"));
         assert!(p.contains("never `git add -A`"));
         assert!(trunk_prompt("C:/Code/app", None).contains("at C:/Code/app, and"));
+    }
+
+    #[test]
+    fn only_the_files_both_changed_overlap() {
+        let s = |v: &[&str]| v.iter().map(|f| f.to_string()).collect::<Vec<_>>();
+        let landed = s(&["a.rs", "src/b.rs", "c.rs"]);
+        assert_eq!(
+            overlap(&landed, &s(&["src\\b.rs", "x.rs", "a.rs"])),
+            ["a.rs", "src/b.rs"]
+        );
+        assert!(overlap(&landed, &s(&["x.rs"])).is_empty());
+        assert!(overlap(&landed, &[]).is_empty());
+    }
+
+    #[test]
+    fn the_moved_notice_names_the_files_and_the_rebase() {
+        let few = main_moved("main", &["a.rs".to_string()]);
+        assert!(few.contains("`a.rs`") && few.contains("git rebase main"));
+        assert!(!few.contains("more"));
+        let many: Vec<String> = (0..9).map(|n| format!("f{n}.rs")).collect();
+        let p = main_moved("main", &many);
+        assert!(p.contains("`f5.rs` and 3 more") && !p.contains("f6.rs"));
     }
 
     #[test]
