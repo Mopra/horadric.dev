@@ -13,6 +13,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 Round (human left, main at c6c1007, only my memory since 8f6e4c3): the 8f6e4c3 Ship Local reloaded fine at 05:21. Three quests still run, spike waits on the human. Nothing to do.
 - 2026-10-29 "Sessions waiting on their own checks..." stopped undone a third time: landing part green, its heavy agent still runs. Own work, no tell, noted it.
 - 2026-10-29 Round (landing, main at 8f6e4c3, "Blocked quests say why" landed): cast "Ship Local" as Open said (7 quests since the last ship). Told the blocked context panel go to rerun its memory-killed checks and ff-merge. "Sessions waiting on their own checks" stopped undone again, still on its own agents: no tell.
 - 2026-10-29 "Sessions waiting on their own checks are not nudged..." stopped undone while two of its own agents run (the bug it fixes). Own work, no tell, noted it.
@@ -182,6 +183,6 @@
 - Check "Make checkpoint tests' git init not copy hook templates" lands; if the flake shows again after, look at %TEMP% itself (antivirus, locks).
 - "Headless sessions: the spike" waits on the human's go; when they give it, nothing for me to do but watch it run.
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Check the Ship Local cast at 8f6e4c3 came up; cast again once the context panel or the checkpoint fix lands.
+- Cast Ship Local again once the context panel, the checkpoint fix or "Sessions waiting..." lands (8f6e4c3 is shipped).
 - Check the context panel lands after my go; if it blocks on memory again, the heavy memory fix in "Sessions waiting..." should help.
 - Check "Sessions waiting on their own checks..." lands; after it, the look back's silent stops count should drop.
