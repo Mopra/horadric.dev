@@ -10,6 +10,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-29 "Fix the merge of land-a-quest-while-its-session-is-still" stopped undone but waits on its own clippy, queued in heavy. No tell, noted it.
 - 2026-10-29 Round (human left, main at eb2735d, only my memory since the last round): the land-a-quest merge fix-up still runs, so Ship Local stays held per Open. Four quests under way, three wait. Nothing to do.
 - 2026-10-29 "Tell running quests when main moves" stopped undone but waits on its own clippy, queued in heavy. No tell, noted it.
 - 2026-10-29 Round (landing, main at 088c162, "Find merge hotspot files" landed): held Ship Local, since "Land a quest while its session is still alive" landed red and its merge fix-up still runs. Nothing else to do.
