@@ -138,9 +138,11 @@ const RUNE_SETTLE: f32 = 2.0;
 const RUNE_H: f32 = 7.0;
 const RUNE_STROKE: f32 = 1.1;
 
-/// The Folio's button, a chat bubble. Its tooltip says it is an
-/// experiment.
+/// The Folio's button, a chat bubble.
 const FOLIO_ICON: char = '\u{E8F2}';
+/// The button that starts a Claude session as a terminal, code brackets,
+/// so it does not read as the shell's prompt beside it.
+const CLI_ICON: char = '\u{E943}';
 
 /// How many shapes make one soft edge. Fewer shows as bands.
 const BLUR_STEPS: usize = 8;
@@ -1201,17 +1203,14 @@ impl Painter<'_> {
         self.beams(scene);
         self.flights(scene);
         if let Some(add) = &scene.layout.add {
-            if scene.town && scene.sessions.is_empty() {
-                self.add_labelled(gpu, m, add, scene.button(Hit::Add), "New session");
-            } else {
-                self.add(gpu, m, add, scene.button(Hit::Add), '\u{E710}');
-            }
+            self.add(gpu, m, add, scene.button(Hit::Add), CLI_ICON);
         }
         if let Some(shell) = &scene.layout.shell {
             self.add(gpu, m, shell, scene.button(Hit::Shell), theme::SHELL_ICON);
         }
         if let Some(folio) = &scene.layout.folio {
-            self.add(gpu, m, folio, scene.button(Hit::Folio), FOLIO_ICON);
+            let b = scene.button(Hit::Folio);
+            self.add_labelled(gpu, m, folio, b, FOLIO_ICON, "New chat");
         }
         if let (Some(l), Some(t)) = (&scene.layout.tasks, &scene.tasks) {
             self.tasks(gpu, m, scene, l, t);
@@ -4000,23 +3999,30 @@ impl Painter<'_> {
         self.icon(&gpu.icon_small, ink, glyph, *r);
     }
 
-    /// The plus with words beside it, the pair centred in the bay. An
-    /// empty town has nothing else in it, and a bare plus there does not
-    /// say what it makes.
-    unsafe fn add_labelled(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Button, label: &str) {
+    /// A glyph with words beside it, the pair centred in the bay, for the
+    /// button that should say what it makes.
+    unsafe fn add_labelled(
+        &self,
+        gpu: &Gpu,
+        m: &Metrics,
+        r: &Rect,
+        b: Button,
+        glyph: char,
+        label: &str,
+    ) {
         let (_, ink) = theme::button_look(b);
         self.slot(gpu, m, r, b);
-        let plus_w = 12.0;
+        let glyph_w = 12.0;
         let gap = 6.0;
         let label_w = self.measure(gpu, &gpu.small, label);
-        let x = r.x + ((r.w - plus_w - gap - label_w) / 2.0).max(0.0);
+        let x = r.x + ((r.w - glyph_w - gap - label_w) / 2.0).max(0.0);
         self.icon(
             &gpu.icon_small,
             ink,
-            '\u{E710}',
-            Rect::new(x, r.y, plus_w, r.h),
+            glyph,
+            Rect::new(x, r.y, glyph_w, r.h),
         );
-        let text_x = x + plus_w + gap;
+        let text_x = x + glyph_w + gap;
         let text = Rect::new(text_x, r.y, (r.x + r.w - text_x).max(0.0), r.h);
         self.text(&gpu.small, ink, label, text);
     }

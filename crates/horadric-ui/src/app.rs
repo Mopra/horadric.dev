@@ -9016,9 +9016,11 @@ impl App {
                     post(self.notify.0 as isize, WM_HORADRIC_PICK, 0);
                 }
                 Input::Add(key) => {
+                    // The chat has a button of its own, so this one is
+                    // always the terminal, whatever Settings says.
                     if self.far_start(&key) {
                     } else if let Some(dir) = self.project_dir(&key) {
-                        if let Err(e) = self.start_claude(dir) {
+                        if let Err(e) = self.start(None, dir, Vec::new()) {
                             eprintln!("horadric: cannot start session: {e}");
                         }
                     }

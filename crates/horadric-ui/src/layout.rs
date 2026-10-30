@@ -154,14 +154,15 @@ pub struct ClusterLayout {
     /// One rect per browser tab shown as a tile, below the sessions' tiles.
     /// Only Tristram has them. Empty when collapsed.
     pub pages: Vec<Rect>,
-    /// The wide button below the last tile that starts another session in
-    /// this project at once. None when collapsed.
+    /// The small button that starts another Claude session in this project
+    /// as a terminal. On macOS, which has no Folio yet, it is the wide one.
+    /// None when collapsed.
     pub add: Option<Rect>,
-    /// The small button at its right that opens a plain terminal in the
+    /// The small button at the right that opens a plain terminal in the
     /// project. None when collapsed.
     pub shell: Option<Rect>,
-    /// The small button between the two that opens the project's Folio,
-    /// the experimental headless chat. None when collapsed.
+    /// The wide button below the last tile that opens a new Folio, a chat,
+    /// the way most sessions start. None when collapsed.
     pub folio: Option<Rect>,
     /// The tasks tile, between the plus and the files. None when the
     /// cluster is collapsed or its project has no folder.
@@ -288,8 +289,14 @@ pub fn cluster(
             y += m.tile_h + m.gap;
         }
         let wide = full - 2.0 * (m.shell_w + m.gap);
-        add = Some(Rect::new(m.pad, y, wide, m.add_h));
-        folio = Some(Rect::new(m.pad + wide + m.gap, y, m.shell_w, m.add_h));
+        let first = Rect::new(m.pad, y, wide, m.add_h);
+        let second = Rect::new(m.pad + wide + m.gap, y, m.shell_w, m.add_h);
+        // The chat is the default way in, so it gets the wide button.
+        if cfg!(target_os = "macos") {
+            (add, folio) = (Some(first), Some(second));
+        } else {
+            (add, folio) = (Some(second), Some(first));
+        }
         shell = Some(Rect::new(m.pad + full - m.shell_w, y, m.shell_w, m.add_h));
         y += m.add_h + m.gap;
         if let Some((approve, warriv)) = tasks {
@@ -2912,20 +2919,25 @@ mod tests {
         let l = cluster(&m, 3, 0, false, None, None, None);
         assert_eq!(l.tiles.len(), 3);
         assert_eq!(l.tiles[1].y - l.tiles[0].bottom(), m.gap);
-        let add = l.add.unwrap();
+        let (add, folio) = (l.add.unwrap(), l.folio.unwrap());
         let shell = l.shell.unwrap();
-        let folio = l.folio.unwrap();
-        assert_eq!(add.y - l.tiles[2].bottom(), m.gap);
-        // Side by side, together as wide as a tile, the Folio between.
-        assert_eq!(shell.y, add.y);
-        assert_eq!(folio.y, add.y);
-        assert_eq!(folio.x - add.right(), m.gap);
-        assert_eq!(shell.x - folio.right(), m.gap);
+        let (wide, small, wide_hit) = if cfg!(target_os = "macos") {
+            (add, folio, Hit::Add)
+        } else {
+            (folio, add, Hit::Folio)
+        };
+        assert_eq!(wide.y - l.tiles[2].bottom(), m.gap);
+        // Side by side, together as wide as a tile, the small one between.
+        assert_eq!(shell.y, wide.y);
+        assert_eq!(small.y, wide.y);
+        assert_eq!(small.x - wide.right(), m.gap);
+        assert_eq!(shell.x - small.right(), m.gap);
         assert_eq!(shell.right(), l.tiles[2].right());
-        assert_eq!(add.x, l.tiles[2].x);
-        assert_eq!(l.size.1, add.bottom() + m.pad);
+        assert_eq!(wide.x, l.tiles[2].x);
+        assert_eq!(l.size.1, wide.bottom() + m.pad);
         assert_eq!(hit(&l, 40.0, l.tiles[2].y + 1.0), Hit::Tile(2));
-        assert_eq!(hit(&l, 20.0, add.y + 1.0), Hit::Add);
+        assert_eq!(hit(&l, 20.0, wide.y + 1.0), wide_hit);
+        assert_eq!(hit(&l, add.x + 2.0, add.y + 1.0), Hit::Add);
         assert_eq!(hit(&l, shell.x + 2.0, shell.y + 1.0), Hit::Shell);
         assert_eq!(hit(&l, folio.x + 2.0, folio.y + 1.0), Hit::Folio);
         assert_eq!(hit(&l, 20.0, m.pad + 1.0), Hit::Header);
