@@ -284,7 +284,11 @@ unsafe fn device_name(device: &IMMDevice) -> Option<String> {
         fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
         pid: 14,
     };
-    let value = device.OpenPropertyStore(STGM_READ).ok()?.GetValue(&key).ok()?;
+    let value = device
+        .OpenPropertyStore(STGM_READ)
+        .ok()?
+        .GetValue(&key)
+        .ok()?;
     let text = PropVariantToStringAlloc(&value).ok()?;
     let s = text.to_string().ok();
     CoTaskMemFree(Some(text.0 as *const c_void));
@@ -632,7 +636,11 @@ fn listen(id: u64, pane: isize, stop: &AtomicBool, keep: &AtomicBool) {
             send(Job::Phrase {
                 id,
                 pane,
-                pcm: if ear.spoke { pcm[rest].to_vec() } else { Vec::new() },
+                pcm: if ear.spoke {
+                    pcm[rest].to_vec()
+                } else {
+                    Vec::new()
+                },
                 last: Some(why),
             });
         }
@@ -753,7 +761,11 @@ impl Take {
     /// What Whisper is told came before the next phrase: the hints and
     /// the last phrase or so, which keeps the sentence going across a cut.
     fn prompt(&self) -> String {
-        format!("{} {}", self.hints, tail(&self.said, 100).trim_start_matches('…'))
+        format!(
+            "{} {}",
+            self.hints,
+            tail(&self.said, 100).trim_start_matches('…')
+        )
     }
 
     fn with(&self, more: &str) -> String {
@@ -991,7 +1003,11 @@ mod tests {
     #[test]
     fn a_pause_ends_a_phrase() {
         let mut ear = Ear::default();
-        let (cuts, end) = hear(&mut ear, 0, &[(0.001, 1.0), (0.1, 2.0), (0.001, 1.0), (0.1, 1.0)]);
+        let (cuts, end) = hear(
+            &mut ear,
+            0,
+            &[(0.001, 1.0), (0.1, 2.0), (0.001, 1.0), (0.1, 1.0)],
+        );
         assert_eq!(cuts.len(), 1);
         // The silence before it is kept short, and a little after it.
         assert_eq!(cuts[0].start, ms(1000) - LEAD);
@@ -1023,14 +1039,18 @@ mod tests {
         let mut ear = Ear::default();
         hear(&mut ear, 0, &[(0.004, 3.0)]);
         assert!(!ear.spoke);
-        assert!(ear.why_nothing("Mic").is_some_and(|w| w.starts_with("Heard no speech")));
+        assert!(ear
+            .why_nothing("Mic")
+            .is_some_and(|w| w.starts_with("Heard no speech")));
     }
 
     #[test]
     fn a_dead_line_is_told_from_a_quiet_room() {
         let mut ear = Ear::default();
         hear(&mut ear, 0, &[(0.0, 2.0)]);
-        assert!(ear.why_nothing("Line In").is_some_and(|w| w.starts_with("No sound came from Line In")));
+        assert!(ear
+            .why_nothing("Line In")
+            .is_some_and(|w| w.starts_with("No sound came from Line In")));
     }
 
     #[test]

@@ -84,7 +84,11 @@ pub fn shine(
         return light;
     };
     for f in all.get(project).into_iter().flatten() {
-        let hits: Vec<usize> = f.ids.iter().filter_map(|id| index.get(id).copied()).collect();
+        let hits: Vec<usize> = f
+            .ids
+            .iter()
+            .filter_map(|id| index.get(id).copied())
+            .collect();
         thought(&hits, next, now - f.at, &mut light);
     }
     light

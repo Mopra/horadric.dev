@@ -114,9 +114,7 @@ impl Hireling {
     /// Its lot as it stands at `now`: one that nothing has ever said the
     /// end of is taken as done once quiet for [`QUIET`].
     pub fn lot_at(&self, now: SystemTime) -> Lot {
-        let quiet = now
-            .duration_since(self.heard)
-            .is_ok_and(|d| d >= QUIET);
+        let quiet = now.duration_since(self.heard).is_ok_and(|d| d >= QUIET);
         if self.lot == Lot::Working && !self.told && quiet && self.tool.is_none() {
             Lot::Done
         } else {
@@ -324,7 +322,11 @@ impl Band {
             }
             "SessionStart" | "SessionEnd" | HookEvent::REGISTER | HookEvent::PAUSE => {
                 // The process is gone, and its hirelings with it.
-                for h in self.hirelings.iter_mut().filter(|h| h.lot_at(now).at_work()) {
+                for h in self
+                    .hirelings
+                    .iter_mut()
+                    .filter(|h| h.lot_at(now).at_work())
+                {
                     h.end(Lot::Failed, now);
                 }
                 if name != "SessionEnd" {
@@ -604,9 +606,7 @@ pub fn craft(name: &str) -> Craft {
         "Bash" | "PowerShell" | "BashOutput" | "KillShell" | "Monitor" => Craft::Shell,
         "WebFetch" | "WebSearch" => Craft::Web,
         "Agent" | "Task" | "TaskStop" | "SendMessage" => Craft::Agent,
-        t if t.starts_with("browser_") || t.contains("fetch") || t.contains("search") => {
-            Craft::Web
-        }
+        t if t.starts_with("browser_") || t.contains("fetch") || t.contains("search") => Craft::Web,
         _ => Craft::Other,
     }
 }
@@ -688,7 +688,10 @@ mod tests {
         main.tool_name = Some("Read".into());
         b.hear(&main, t(2));
         let h = &b.hirelings[0];
-        assert_eq!((h.kind.as_str(), h.task.as_str()), ("Explore", "find hooks"));
+        assert_eq!(
+            (h.kind.as_str(), h.task.as_str()),
+            ("Explore", "find hooks")
+        );
         assert_eq!(h.tool.as_deref(), Some("Grep"));
         assert_eq!(b.main.len(), 1);
         assert_eq!(b.main[0].tool, "Read");
@@ -804,7 +807,10 @@ mod tests {
         assert_eq!(craft("Grep"), Craft::Read);
         assert_eq!(craft("Write"), Craft::Edit);
         assert_eq!(craft("PowerShell"), Craft::Shell);
-        assert_eq!(craft("mcp__claude_ai_Slack__slack_search_public"), Craft::Web);
+        assert_eq!(
+            craft("mcp__claude_ai_Slack__slack_search_public"),
+            Craft::Web
+        );
         assert_eq!(craft("Agent"), Craft::Agent);
         assert_eq!(craft("TodoWrite"), Craft::Other);
     }

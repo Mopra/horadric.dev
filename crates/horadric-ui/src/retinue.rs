@@ -33,12 +33,11 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, GetParent, GetWindowLongPtrW,
-    LoadCursorW, PostMessageW, RegisterClassW, SetCursor, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, CREATESTRUCTW, GWLP_USERDATA, HWND_TOP, IDC_HAND, SWP_NOACTIVATE,
-    SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_ERASEBKGND, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_USER,
-    WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS,
+    CreateWindowExW, DefWindowProcW, GetClientRect, GetParent, GetWindowLongPtrW, LoadCursorW,
+    PostMessageW, RegisterClassW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    CREATESTRUCTW, GWLP_USERDATA, HWND_TOP, IDC_HAND, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA,
+    WINDOW_EX_STYLE, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY,
+    WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS,
 };
 
 use crate::app::{self, Input};
@@ -227,10 +226,16 @@ impl Retinue {
             self.tell_pane();
         }
         if self.table.get() {
-            *self.ids.borrow_mut() = table_order(&band, now).iter().map(|h| h.id.clone()).collect();
+            *self.ids.borrow_mut() = table_order(&band, now)
+                .iter()
+                .map(|h| h.id.clone())
+                .collect();
         }
         // A waiting rune beats, so it wants the fast beat as a carving one.
-        let carving = band.shown(now, false).iter().any(|h| h.lot_at(now).at_work())
+        let carving = band
+            .shown(now, false)
+            .iter()
+            .any(|h| h.lot_at(now).at_work())
             || (self.table.get() && band.turn_end.is_none() && band.turn.is_some());
         let beat = if carving { FAST_MS } else { SLOW_MS };
         if self.beat.replace(beat) != beat {
@@ -264,7 +269,10 @@ impl Retinue {
                 lot: h.lot_at(now),
                 age: since(h.started),
                 waited: since(h.heard),
-                tool: h.tool.as_deref().map(|t| craft_ink(hireling::craft(t), accent)),
+                tool: h
+                    .tool
+                    .as_deref()
+                    .map(|t| craft_ink(hireling::craft(t), accent)),
                 ticks: h.marks[h.marks.len().saturating_sub(TICKS)..]
                     .iter()
                     .map(|m| match m.failed {
@@ -316,10 +324,15 @@ impl Retinue {
                 span,
                 title: &title,
                 // Track 0 is the main loop's; the hot ids are hirelings'.
-                hot: self.hot.get().map(|i| if i == usize::MAX { i } else { i + 1 }),
+                hot: self
+                    .hot
+                    .get()
+                    .map(|i| if i == usize::MAX { i } else { i + 1 }),
                 size,
                 accent: self.accent.get(),
-                age: now.duration_since(band.turn.unwrap_or(now)).unwrap_or_default(),
+                age: now
+                    .duration_since(band.turn.unwrap_or(now))
+                    .unwrap_or_default(),
             };
             t.draw_table(&self.shared.gpu, &scene)
         } else {
@@ -391,7 +404,10 @@ impl Retinue {
                 .clone();
             let now = SystemTime::now();
             if self.table.get() {
-                let text = format!("{}\n\nShow its conversation beside this session", h.summary(now));
+                let text = format!(
+                    "{}\n\nShow its conversation beside this session",
+                    h.summary(now)
+                );
                 return Some(text.into());
             }
             // A portrait shows only a rune, so its tip says the rest a line
@@ -438,7 +454,10 @@ impl Retinue {
             }
             WM_ERASEBKGND => Some(LRESULT(1)),
             WM_SIZE => {
-                let (w, h) = ((lparam.0 & 0xffff) as u32, ((lparam.0 >> 16) & 0xffff) as u32);
+                let (w, h) = (
+                    (lparam.0 & 0xffff) as u32,
+                    ((lparam.0 >> 16) & 0xffff) as u32,
+                );
                 if let Some(t) = self.target.borrow().as_ref() {
                     let _ = t.resize(w, h);
                 }
@@ -555,7 +574,12 @@ fn tracks(band: &Band, now: SystemTime, accent: Color) -> (Vec<TableTrack>, f32)
             .iter()
             .map(|m| {
                 let to = m.end.map_or(end, secs);
-                (secs(m.start), to, craft_ink(hireling::craft(&m.tool), accent), m.failed)
+                (
+                    secs(m.start),
+                    to,
+                    craft_ink(hireling::craft(&m.tool), accent),
+                    m.failed,
+                )
             })
             .collect()
     };
@@ -565,7 +589,11 @@ fn tracks(band: &Band, now: SystemTime, accent: Color) -> (Vec<TableTrack>, f32)
         label: "main loop".to_string(),
         start: 0.0,
         end: main_end,
-        lot: if band.turn_end.is_some() { Lot::Done } else { Lot::Working },
+        lot: if band.turn_end.is_some() {
+            Lot::Done
+        } else {
+            Lot::Working
+        },
         marks: marks(&band.main, main_end),
     }];
     for h in hirelings {

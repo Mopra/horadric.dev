@@ -55,7 +55,8 @@ pub struct Step {
 /// Told to every Folio's agent, since a Folio is where the human hands
 /// over many tasks at once and watches its subagents work as hirelings,
 /// and left to itself Claude does nearly everything in its own context.
-pub const SUBAGENT_PROMPT: &str = "Work subagent first. The human often gives you several tasks in \
+pub const SUBAGENT_PROMPT: &str =
+    "Work subagent first. The human often gives you several tasks in \
 one message, or one task with independent parts, and wants them done in parallel by subagents, \
 without having to ask for that. Your own role is to plan, delegate, review and integrate. Split \
 the work into independent pieces and start one subagent per piece with the Agent tool, sending \
@@ -1457,10 +1458,14 @@ impl Folio {
         if task_id.is_empty() {
             return None;
         }
-        self.blocks.iter().enumerate().rev().find_map(|(i, b)| match b {
-            Block::Tools(steps) => Some((i, path(steps, task_id)?)),
-            _ => None,
-        })
+        self.blocks
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, b)| match b {
+                Block::Tools(steps) => Some((i, path(steps, task_id)?)),
+                _ => None,
+            })
     }
 
     /// The lane of the Agent step `tool_use`, made if it has none.
@@ -3016,8 +3021,13 @@ mod tests {
         let notified = (lines.iter())
             .position(|l| l.contains("\"subtype\":\"task_notification\""))
             .unwrap();
-        let f = play("p", &lines[..notified].join("
-"));
+        let f = play(
+            "p",
+            &lines[..notified].join(
+                "
+",
+            ),
+        );
         let agent = steps(&f).into_iter().find(|s| s.tool == "Agent").unwrap();
         assert_eq!(agent.state, StepState::Done, "launched is done");
         let lane = agent.lane.as_ref().unwrap();

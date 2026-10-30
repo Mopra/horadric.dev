@@ -487,7 +487,14 @@ impl Ctx<'_> {
         s.fill(lip, 0.0, self.pal.fg.with_alpha(0.08));
         let ink = self.pal.accent.mix(self.pal.fg, 0.5);
         let top = PLATE_Y + 2.0;
-        (s.items).push(Item::Rune(3, r.x + PLATE_X + 4.0, top + 5.0, 15.0, ink.with_alpha(0.75), 1.5));
+        (s.items).push(Item::Rune(
+            3,
+            r.x + PLATE_X + 4.0,
+            top + 5.0,
+            15.0,
+            ink.with_alpha(0.75),
+            1.5,
+        ));
         let text = self.pal.fg.mix(self.pal.accent, 0.18).with_alpha(0.95);
         s.unit(&l, r.x + PLATE_X + RUNE_W, top, text, t);
         s.h = r.h;
@@ -1096,7 +1103,10 @@ impl View {
         let rt = &gfx.rt;
         let Ui { state: st, cache } = &mut chat.tr;
         super::select::refind_in(st, cache);
-        let made_for = (gfx.win.as_raw() as usize, [key_of(pal.fg), key_of(pal.accent)]);
+        let made_for = (
+            gfx.win.as_raw() as usize,
+            [key_of(pal.fg), key_of(pal.accent)],
+        );
         if cache.made_for != made_for {
             // Brushes and bitmaps belong to a render target.
             let fonts = cache.fonts.take();

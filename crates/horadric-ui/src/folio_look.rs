@@ -489,10 +489,7 @@ mod tests {
     fn an_mcp_tool_goes_by_its_own_name() {
         let steps = [step("mcp__horadric__lore_recall", "", Some(true))];
         assert_eq!(run_summary(&steps), "Used lore_recall");
-        assert_eq!(
-            ask_title("mcp__horadric__lore_note"),
-            "Use lore_note?"
-        );
+        assert_eq!(ask_title("mcp__horadric__lore_note"), "Use lore_note?");
         assert_eq!(ask_title("Bash"), "Run a command?");
     }
 

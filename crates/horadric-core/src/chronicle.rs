@@ -406,9 +406,7 @@ pub fn launched(records: &[Record], project: &str, id: &str) -> Option<(String, 
 /// When the quest `id` of `project` was last taken.
 pub fn taken_at(records: &[Record], project: &str, id: &str) -> Option<u64> {
     records.iter().rev().find_map(|r| match &r.what {
-        Happened::Accepted { .. } if r.project == project && r.quest == id => {
-            Some(r.at)
-        }
+        Happened::Accepted { .. } if r.project == project && r.quest == id => Some(r.at),
         _ => None,
     })
 }
@@ -2396,7 +2394,12 @@ mod tests {
     #[test]
     fn the_fold_counts_the_rest_and_leaves_out_what_is_none() {
         let mut a = Away {
-            landed: vec![away_line("A"), away_line("B"), away_line("C"), away_line("D")],
+            landed: vec![
+                away_line("A"),
+                away_line("B"),
+                away_line("C"),
+                away_line("D"),
+            ],
             filed: vec![away_line("Feedback"), away_line("Clean")],
             ..Away::default()
         };
@@ -2431,7 +2434,10 @@ mod tests {
             away_summary("3 h away", &[&landed, &asks]),
             "3 h away \u{00B7} 3 landed \u{00B7} 1 needs you"
         );
-        assert_eq!(away_summary("3 h away", &[&landed]), "3 h away \u{00B7} 2 landed");
+        assert_eq!(
+            away_summary("3 h away", &[&landed]),
+            "3 h away \u{00B7} 2 landed"
+        );
         let only_errands = Away {
             filed: vec![away_line("Feedback")],
             ..Away::default()

@@ -335,8 +335,8 @@ impl Store {
     /// edit, left most of the store forgotten and still held in memory.
     fn let_go(&mut self, ids: &[ChunkId]) {
         for id in ids {
-            if let Some(c) = (self.segments.get_mut(&id.month))
-                .and_then(|seg| seg.chunks.get_mut(id.n as usize))
+            if let Some(c) =
+                (self.segments.get_mut(&id.month)).and_then(|seg| seg.chunks.get_mut(id.n as usize))
             {
                 *c = None;
             }
@@ -638,7 +638,10 @@ impl Store {
             let mut by_month: BTreeMap<Month, Vec<(u32, Vec<i8>)>> = BTreeMap::new();
             for (from, to) in pairs {
                 if let Some(row) = model.rows.get(from) {
-                    by_month.entry(to.month).or_default().push((to.n, row.clone()));
+                    by_month
+                        .entry(to.month)
+                        .or_default()
+                        .push((to.n, row.clone()));
                 }
             }
             for (month, rows) in by_month {

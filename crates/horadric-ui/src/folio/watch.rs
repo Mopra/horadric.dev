@@ -116,11 +116,9 @@ fn look(id: &str) {
     let touched = meta.and_then(|m| m.modified().ok());
     let working = match finished(&path) {
         Some(done) => !done,
-        None => touched.is_some_and(|t| {
-            SystemTime::now()
-                .duration_since(t)
-                .is_ok_and(|d| d < STILL)
-        }),
+        None => {
+            touched.is_some_and(|t| SystemTime::now().duration_since(t).is_ok_and(|d| d < STILL))
+        }
     };
     let grew = with(id, |c| c.watch.as_ref().is_some_and(|w| w.len != len)).unwrap_or(false);
     let text = if grew {

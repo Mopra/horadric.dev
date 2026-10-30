@@ -708,8 +708,14 @@ mod tests {
         )
         .unwrap();
         let l = Limits::from_rate_limit_event(&v).unwrap();
-        assert_eq!(l.five_hour.map(|l| (l.used.round(), l.resets_at)), Some((5.0, Some(100))));
-        assert_eq!(l.seven_day.map(|l| (l.used.round(), l.resets_at)), Some((68.0, Some(900))));
+        assert_eq!(
+            l.five_hour.map(|l| (l.used.round(), l.resets_at)),
+            Some((5.0, Some(100)))
+        );
+        assert_eq!(
+            l.seven_day.map(|l| (l.used.round(), l.resets_at)),
+            Some((68.0, Some(900)))
+        );
         let old: Value = serde_json::from_str(
             r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"}}"#,
         )

@@ -14,7 +14,9 @@ use std::time::{Instant, SystemTime};
 
 use horadric_core::chronicle::{self, Happened, Woken};
 use horadric_core::tasks::{self, Mark, Mode, Task};
-use horadric_core::warriv::{self, Brief, Desk, Dried, Drive, Event, Heard, Kind, Review, Reviews, Wake};
+use horadric_core::warriv::{
+    self, Brief, Desk, Dried, Drive, Event, Heard, Kind, Review, Reviews, Wake,
+};
 use horadric_core::{escalate, ship, Agent, Phase};
 use horadric_hooks::tasks as file;
 
@@ -1090,10 +1092,7 @@ impl App {
         let Some(t) = t.filter(|t| t.mark == Mark::Review) else {
             return;
         };
-        let live = t
-            .holder
-            .as_deref()
-            .is_some_and(|h| self.live(h));
+        let live = t.holder.as_deref().is_some_and(|h| self.live(h));
         if !live {
             self.file_fix_up(&key, &t, what);
             return;

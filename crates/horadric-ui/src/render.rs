@@ -62,9 +62,9 @@ use crate::board::{Ink, RowState};
 use crate::files::{Row, Tree};
 use crate::layout::{
     self, AskLayout, Button, CaptionHit, CaptionLayout, CatchupLayout, CatchupRow, ClusterLayout,
-    DialogHit, DialogLayout, DropdownLayout, FilesLayout, Hit, MenuLayout,
-    Metrics, Rect, SettingRow, SettingsHit, SettingsLayout, StartHit, StartLayout,
-    SuggestLayout, TasksLayout, ToastLayout, TomeLayout, UsageHit, UsageLayout, KNOB_R,
+    DialogHit, DialogLayout, DropdownLayout, FilesLayout, Hit, MenuLayout, Metrics, Rect,
+    SettingRow, SettingsHit, SettingsLayout, StartHit, StartLayout, SuggestLayout, TasksLayout,
+    ToastLayout, TomeLayout, UsageHit, UsageLayout, KNOB_R,
 };
 use crate::motion::{self, ORBIT};
 use crate::portal_key::Look as PortalLook;
@@ -2984,11 +2984,19 @@ impl Painter<'_> {
             let (edge, ink, drawn) = match row.lot {
                 Lot::Working => {
                     let carve = motion::cycle(row.age, RUNE_CARVE);
-                    (scene.accent.with_alpha(0.6), scene.accent, (carve * 1.6).min(1.0))
+                    (
+                        scene.accent.with_alpha(0.6),
+                        scene.accent,
+                        (carve * 1.6).min(1.0),
+                    )
                 }
                 Lot::Waiting => {
                     let beat = motion::waiting_breath(row.waited);
-                    (theme::waiting(), theme::waiting().fade(0.4 + 0.6 * beat), 1.0)
+                    (
+                        theme::waiting(),
+                        theme::waiting().fade(0.4 + 0.6 * beat),
+                        1.0,
+                    )
                 }
                 Lot::Done => (gold, gold.with_alpha(0.7), 1.0),
                 Lot::Failed => (theme::error(), theme::error().with_alpha(0.6), 1.0),
@@ -3057,7 +3065,11 @@ impl Painter<'_> {
         let fg = p.term_fg;
         let head = Rect::new(14.0, 4.0, w - 28.0, TABLE_HEAD - 6.0);
         self.text(&gpu.name, scene.accent, scene.title, head);
-        let close = if scene.hot == Some(usize::MAX) { 0.9 } else { 0.45 };
+        let close = if scene.hot == Some(usize::MAX) {
+            0.9
+        } else {
+            0.45
+        };
         self.text(&gpu.small_right, fg.with_alpha(close), "Close  Esc", head);
         let x0 = TABLE_LABEL_W;
         let x1 = (w - 16.0).max(x0 + 10.0);
@@ -3065,10 +3077,12 @@ impl Painter<'_> {
         let at = |t: f32| x0 + (x1 - x0) * (t / span).clamp(0.0, 1.0);
         // The axis: a mark at every step that fits, its time under it.
         let axis_y = TABLE_HEAD + TABLE_AXIS - 4.0;
-        let step = [5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0]
-            .into_iter()
-            .find(|s| (x1 - x0) * s / span >= 64.0)
-            .unwrap_or(3600.0);
+        let step = [
+            5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0,
+        ]
+        .into_iter()
+        .find(|s| (x1 - x0) * s / span >= 64.0)
+        .unwrap_or(3600.0);
         let mut t = 0.0;
         while t <= span {
             let x = at(t);
@@ -3115,8 +3129,15 @@ impl Painter<'_> {
             }
             match tr.lot {
                 Lot::Working | Lot::Waiting => {
-                    let carve = motion::cycle(scene.age + Duration::from_millis(i as u64 * 300), RUNE_CARVE);
-                    let drawn = if tr.lot == Lot::Working { (carve * 1.6).min(1.0) } else { 1.0 };
+                    let carve = motion::cycle(
+                        scene.age + Duration::from_millis(i as u64 * 300),
+                        RUNE_CARVE,
+                    );
+                    let drawn = if tr.lot == Lot::Working {
+                        (carve * 1.6).min(1.0)
+                    } else {
+                        1.0
+                    };
                     self.rune(tr.rune.unwrap_or(0), (ex + 7.0, mid), 11.0, ink, drawn);
                 }
                 Lot::Failed => {
@@ -4016,12 +4037,7 @@ impl Painter<'_> {
         let gap = 6.0;
         let label_w = self.measure(gpu, &gpu.small, label);
         let x = r.x + ((r.w - glyph_w - gap - label_w) / 2.0).max(0.0);
-        self.icon(
-            &gpu.icon_small,
-            ink,
-            glyph,
-            Rect::new(x, r.y, glyph_w, r.h),
-        );
+        self.icon(&gpu.icon_small, ink, glyph, Rect::new(x, r.y, glyph_w, r.h));
         let text_x = x + glyph_w + gap;
         let text = Rect::new(text_x, r.y, (r.x + r.w - text_x).max(0.0), r.h);
         self.text(&gpu.small, ink, label, text);

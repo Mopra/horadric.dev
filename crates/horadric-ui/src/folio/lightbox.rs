@@ -93,7 +93,10 @@ impl Lightbox {
 
     fn room(&self) -> (f32, f32) {
         let (w, h) = self.size;
-        ((w - 2.0 * MARGIN).max(1.0), (h - 2.0 * MARGIN - CAPTION).max(1.0))
+        (
+            (w - 2.0 * MARGIN).max(1.0),
+            (h - 2.0 * MARGIN - CAPTION).max(1.0),
+        )
     }
 
     /// Where the image is centred when not panned.
@@ -278,7 +281,15 @@ pub(super) fn release(view: &View, x: f32, y: f32) -> bool {
                 l.zoom_at(fit, x, y);
             } else {
                 // Already at its own pixels or smaller: twice as big.
-                l.zoom_at(if fit < actual * 0.99 { actual } else { fit * 2.0 }, x, y);
+                l.zoom_at(
+                    if fit < actual * 0.99 {
+                        actual
+                    } else {
+                        fit * 2.0
+                    },
+                    x,
+                    y,
+                );
             }
         });
         kick(key);
@@ -330,7 +341,11 @@ pub(super) fn cursor(view: &View, x: f32, y: f32) -> Option<PCWSTR> {
         if !l.rect(l.shown).contains(x, y) {
             return Some(IDC_ARROW);
         }
-        Some(if l.zoom.is_some() { IDC_SIZEALL } else { IDC_HAND })
+        Some(if l.zoom.is_some() {
+            IDC_SIZEALL
+        } else {
+            IDC_HAND
+        })
     })
     .flatten()
 }
@@ -341,7 +356,8 @@ pub(super) unsafe fn draw(gfx: &Gfx, pal: &Palette, key: &str) {
     let gone = with(key, |l| {
         let size = gfx.rt.GetSize();
         l.size = (size.width, size.height);
-        let dt = (l.last.replace(now)).map_or(0.0, |t| now.duration_since(t).as_secs_f32().min(0.1));
+        let dt =
+            (l.last.replace(now)).map_or(0.0, |t| now.duration_since(t).as_secs_f32().min(0.1));
         l.dirty = false;
 
         let aim = l.aim();
@@ -352,7 +368,11 @@ pub(super) unsafe fn draw(gfx: &Gfx, pal: &Palette, key: &str) {
         l.shown = if l.settled() {
             (aim, pan.0, pan.1)
         } else {
-            (z + (aim - z) * k, px + (pan.0 - px) * k, py + (pan.1 - py) * k)
+            (
+                z + (aim - z) * k,
+                px + (pan.0 - px) * k,
+                py + (pan.1 - py) * k,
+            )
         };
 
         let grown = motion::ease_out(motion::progress(now.duration_since(l.opened), GROW));
@@ -364,7 +384,10 @@ pub(super) unsafe fn draw(gfx: &Gfx, pal: &Palette, key: &str) {
         }
         let t = grown * (1.0 - shrunk);
 
-        gfx.fill(&Rect::new(0.0, 0.0, size.width, size.height), pal.bg.with_alpha(0.88 * t));
+        gfx.fill(
+            &Rect::new(0.0, 0.0, size.width, size.height),
+            pal.bg.with_alpha(0.88 * t),
+        );
 
         let to = l.rect(l.shown);
         let at = match l.from {

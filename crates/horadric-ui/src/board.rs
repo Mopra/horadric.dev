@@ -488,5 +488,4 @@ mod tests {
         assert_eq!(state_in(&t[0], &r), RowState::Gone);
         assert_eq!(state_in(&t[1], &r), RowState::Gone);
     }
-
 }

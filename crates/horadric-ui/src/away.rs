@@ -252,7 +252,12 @@ pub fn rows(news: &[News], open: &[bool], sent: &[bool], now: u64) -> Vec<Row> {
             } else {
                 (Tone::Asks, String::new())
             };
-            out.push(line(tone, q.title.clone(), named(&n.name, &q.question), age));
+            out.push(line(
+                tone,
+                q.title.clone(),
+                named(&n.name, &q.question),
+                age,
+            ));
             out.push(field(slot));
             slot += 1;
         }
@@ -286,7 +291,8 @@ pub fn rows(news: &[News], open: &[bool], sent: &[bool], now: u64) -> Vec<Row> {
             slot += a.assumed.len();
             continue;
         }
-        let plain = |tone: Tone, l: &AwayLine| line(tone, l.text.clone(), l.detail.clone(), age(l.at));
+        let plain =
+            |tone: Tone, l: &AwayLine| line(tone, l.text.clone(), l.detail.clone(), age(l.at));
         out.extend(a.landed.iter().map(|l| plain(Tone::Landed, l)));
         out.extend(a.filed.iter().map(|l| plain(Tone::Filed, l)));
         for x in &a.assumed {
@@ -295,7 +301,12 @@ pub fn rows(news: &[News], open: &[bool], sent: &[bool], now: u64) -> Vec<Row> {
             } else {
                 (Tone::Assumed, age(x.at))
             };
-            out.push(line(tone, x.title.clone(), format!("assumed {}", x.text), when));
+            out.push(line(
+                tone,
+                x.title.clone(),
+                format!("assumed {}", x.text),
+                when,
+            ));
             out.push(field(slot));
             slot += 1;
         }
@@ -602,11 +613,15 @@ impl AwayCard {
             fields.push(FieldLook {
                 rect: *rect,
                 text,
-                placeholder: s.field.text.is_empty().then_some(match self.answers.get(i) {
-                    _ if s.sent => "",
-                    Some(a) if a.assumed.is_some() => "Leave it, or overrule it in one line",
-                    _ => "Answer, and Enter tells the quest",
-                }),
+                placeholder: s
+                    .field
+                    .text
+                    .is_empty()
+                    .then_some(match self.answers.get(i) {
+                        _ if s.sent => "",
+                        Some(a) if a.assumed.is_some() => "Leave it, or overrule it in one line",
+                        _ => "Answer, and Enter tells the quest",
+                    }),
                 multiline: false,
                 scroll: (s.scroll, 0.0),
                 selection: if focused {
@@ -715,10 +730,7 @@ impl AwayCard {
             layout::catchup(&kinds, self.width, self.max_h, first)
         };
         let s = self.scale;
-        let size = (
-            (l.size.0 * s).round() as i32,
-            (l.size.1 * s).round() as i32,
-        );
+        let size = ((l.size.0 * s).round() as i32, (l.size.1 * s).round() as i32);
         *self.rows.borrow_mut() = rows;
         *self.kinds.borrow_mut() = kinds;
         *self.layout.borrow_mut() = l;
@@ -1100,7 +1112,10 @@ mod tests {
     fn what_needs_you_comes_first_and_the_rest_is_one_folded_line() {
         let n = [news("app", app())];
         let rows = rows(&n, &[false], &[false, false], 100);
-        assert_eq!(tones(&rows), [Tone::Asks, Tone::Field, Tone::Failed, Tone::Fold]);
+        assert_eq!(
+            tones(&rows),
+            [Tone::Asks, Tone::Field, Tone::Failed, Tone::Fold]
+        );
         assert_eq!(rows[0].text, "Pick a port");
         assert_eq!(rows[0].detail, "Which port?", "one project, no name");
         assert_eq!(rows[1].slot, Some(0));

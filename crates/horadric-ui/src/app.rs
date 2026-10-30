@@ -1789,11 +1789,7 @@ fn tile_menu(id: &str) {
             if with_app(|app| app.is_claude_terminal(id)) == Some(true) {
                 items.push(Item::action(AS_CHAT, "Open as chat"));
             }
-            items.extend([
-                rename,
-                Item::Separator,
-                Item::action(END, "End session"),
-            ]);
+            items.extend([rename, Item::Separator, Item::action(END, "End session")]);
             items
         }
         (TileKind::Live, true) => vec![
@@ -2616,7 +2612,11 @@ fn project_menu(key: &str) {
         items.push(Item::action(SSH + i, format!("SSH to {host}")));
     }
     if !config_listed.is_empty() {
-        let label = if listed.is_empty() { "SSH to" } else { "Other SSH hosts" };
+        let label = if listed.is_empty() {
+            "SSH to"
+        } else {
+            "Other SSH hosts"
+        };
         let sub = config_listed
             .iter()
             .enumerate()
@@ -6435,9 +6435,7 @@ impl App {
             Field::BackupAccount | Field::BackupNow | Field::BackupRestore => {
                 self.backup_click(field);
             }
-            Field::BackupFolder
-            | Field::BackupPassphrase
-            | Field::BackupLast => {}
+            Field::BackupFolder | Field::BackupPassphrase | Field::BackupLast => {}
             Field::Hosts => {}
             Field::Notify => {
                 self.quiet = !self.quiet;
@@ -8359,9 +8357,7 @@ impl App {
         let mut columns = self.columns.clone();
         let recent: HashSet<String> = self.recent.iter().map(|p| folder_key(p)).collect();
         columns.forget(|k| {
-            k == columns::USAGE
-                || recent.contains(k)
-                || self.clusters.iter().any(|c| c.key == k)
+            k == columns::USAGE || recent.contains(k) || self.clusters.iter().any(|c| c.key == k)
         });
         SavedState {
             clusters,

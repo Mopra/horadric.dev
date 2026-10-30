@@ -139,10 +139,9 @@ pub fn glob_matches(pattern: &str, name: &str) -> bool {
             None => n.is_empty(),
             Some(('*', rest)) => (0..=n.len()).any(|i| go(rest, &n[i..])),
             Some(('?', rest)) => !n.is_empty() && go(rest, &n[1..]),
-            Some((c, rest)) => n
-                .first()
-                .is_some_and(|m| m.eq_ignore_ascii_case(c))
-                && go(rest, &n[1..]),
+            Some((c, rest)) => {
+                n.first().is_some_and(|m| m.eq_ignore_ascii_case(c)) && go(rest, &n[1..])
+            }
         }
     }
     let p: Vec<char> = pattern.chars().collect();

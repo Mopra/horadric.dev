@@ -370,7 +370,10 @@ fn glowing(sky: &Sky) -> bool {
         // Its wandering sparks never rest while it has synapses.
         return matches!(sky.state, State::Ready { .. })
             && (!sky.pairs.is_empty()
-                || sky.mind_key.as_deref().is_some_and(|k| crate::mind::firing(k, now)));
+                || sky
+                    .mind_key
+                    .as_deref()
+                    .is_some_and(|k| crate::mind::firing(k, now)));
     }
     match &sky.state {
         State::Town(town) => town.galaxies.iter().any(|g| moving(&g.key)),
@@ -418,7 +421,9 @@ pub fn frame(key: &str, hwnd: HWND, room: [f32; 4]) -> SkyFrame {
                 let view = view_of(sky.view, (sky.yaw, sky.pitch), points, room);
                 (sky.last, sky.room) = (Some(view), room);
                 // The picture may have turned under a still mouse.
-                let hover = sky.mouse.and_then(|at| sky::node_at(graph, points, &view, at));
+                let hover = sky
+                    .mouse
+                    .and_then(|at| sky::node_at(graph, points, &view, at));
                 sky.hover = hover;
                 sky::frame(graph, points, &view, hover, room, &light(sky))
             }
@@ -464,7 +469,10 @@ pub fn detail(key: &str) -> String {
                 .iter()
                 .filter(|n| n.kind == horadric_core::sanctuary::Kind::File)
                 .count();
-            format!("{files} files, {} links  \u{b7}  M for the mind", graph.links.len())
+            format!(
+                "{files} files, {} links  \u{b7}  M for the mind",
+                graph.links.len()
+            )
         }
         _ => String::new(),
     })
@@ -511,10 +519,7 @@ fn turn(sky: &mut Sky) {
     sky.pitch = (sky.pitch + sky.spin.1 * dt).clamp(-sky::PITCH_MOST, sky::PITCH_MOST);
     let ease = COAST.powf(dt);
     let rest = if drifts(sky) { DRIFT } else { 0.0 };
-    sky.spin = (
-        rest + (sky.spin.0 - rest) * ease,
-        sky.spin.1 * ease,
-    );
+    sky.spin = (rest + (sky.spin.0 - rest) * ease, sky.spin.1 * ease);
 }
 
 /// Moves the layout and the turn on a frame. Once the layout comes to
@@ -659,7 +664,6 @@ pub fn release(key: &str) -> bool {
     })
     .unwrap_or(false)
 }
-
 
 /// The press ended without a release, as when a menu took the capture:
 /// no click.

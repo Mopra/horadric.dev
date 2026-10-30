@@ -27,9 +27,8 @@ use windows::core::{w, Result, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, ExcludeClipRect, FillRect,
-    GradientFill, InvalidateRect, ScreenToClient, GRADIENT_FILL_RECT_V, GRADIENT_RECT, PAINTSTRUCT,
-    TRIVERTEX,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, ExcludeClipRect, FillRect, GradientFill,
+    InvalidateRect, ScreenToClient, GRADIENT_FILL_RECT_V, GRADIENT_RECT, PAINTSTRUCT, TRIVERTEX,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
@@ -1376,11 +1375,7 @@ impl TerminalWindow {
         // not send a pane home and back. Out of the stage, everything goes
         // home.
         let hit = layout::slot_at(&self.grid.borrow(), c.x, c.y);
-        let over = if inside {
-            hit.or(d.over)
-        } else {
-            None
-        };
+        let over = if inside { hit.or(d.over) } else { None };
         if over != d.over {
             d.over = over;
             self.drag.set(Some(d));

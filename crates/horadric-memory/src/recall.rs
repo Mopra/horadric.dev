@@ -696,7 +696,11 @@ mod tests {
             "nothing here",
         ];
         for q in ["rolls reload", "tiles", "stage windows", "absent", ""] {
-            assert_eq!(Bm25::asked(texts, q).rank(q), Bm25::new(texts).rank(q), "{q}");
+            assert_eq!(
+                Bm25::asked(texts, q).rank(q),
+                Bm25::new(texts).rank(q),
+                "{q}"
+            );
         }
     }
 

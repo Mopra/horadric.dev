@@ -41,8 +41,14 @@ mod tests {
 
     #[test]
     fn the_bar_says_what_it_found() {
-        assert_eq!(status("", false, false), "Search the history. Enter steps, Esc closes");
-        assert_eq!(status("", false, true), "Search the file. Enter steps, Esc closes");
+        assert_eq!(
+            status("", false, false),
+            "Search the history. Enter steps, Esc closes"
+        );
+        assert_eq!(
+            status("", false, true),
+            "Search the file. Enter steps, Esc closes"
+        );
         assert_eq!(status("x", true, true), "");
         assert_eq!(status("x", false, false), "No match");
     }

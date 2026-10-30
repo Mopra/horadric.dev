@@ -1630,7 +1630,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn warriv_casts_only_while_it_drives_and_public_only_when_it_ships_public() {
         let local = Drive::default();

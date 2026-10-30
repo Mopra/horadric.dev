@@ -767,7 +767,11 @@ mod tests {
         let pos: Vec<Point> = (0..n)
             .map(|i| {
                 let j = jitter(&i.to_string());
-                [j[0] * 500.0 + (i % 20) as f32 * 7.0, j[1] * 500.0, j[2] * 500.0]
+                [
+                    j[0] * 500.0 + (i % 20) as f32 * 7.0,
+                    j[1] * 500.0,
+                    j[2] * 500.0,
+                ]
             })
             .collect();
         let nodes: Vec<usize> = (0..n).collect();
@@ -854,10 +858,9 @@ mod tests {
     fn a_layout_has_depth() {
         let g = clusters();
         let at = layout(&g, &Positions::default());
-        let (lo, hi) = at
-            .at
-            .values()
-            .fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[2]), hi.max(p[2])));
+        let (lo, hi) = at.at.values().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+            (lo.min(p[2]), hi.max(p[2]))
+        });
         assert!(hi - lo > LENGTH, "only {} deep", hi - lo);
     }
 
@@ -866,5 +869,4 @@ mod tests {
         let flat = r#"{"at":{"src/a.rs":[1.5,-2.0]}}"#;
         assert!(serde_json::from_str::<Positions>(flat).is_err());
     }
-
 }

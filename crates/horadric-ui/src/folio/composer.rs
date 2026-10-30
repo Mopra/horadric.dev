@@ -82,7 +82,8 @@ const TOO_BIG: &str = "That image is too big to send whole (the most is 3.75 MB)
 /// History entries longer than this are not kept, so the file stays small.
 const HISTORY_ENTRY_MAX: usize = 20_000;
 
-const PLACEHOLDER: &str = "Write to the Horadrim. Shift+Enter for a new line, / for commands, @ for files";
+const PLACEHOLDER: &str =
+    "Write to the Horadrim. Shift+Enter for a new line, / for commands, @ for files";
 const PLACEHOLDER_BUSY: &str =
     "The Horadrim are at work. Enter steers them, Ctrl+Enter stops them and sends at once, Esc stops them";
 const PLACEHOLDER_ENDED: &str = "This session has ended.";
@@ -396,10 +397,7 @@ pub(super) fn tend(id: &str, chat: &mut Chat) {
     if !chat.folio.dropped.is_empty() {
         for q in std::mem::take(&mut chat.folio.dropped) {
             let images = (q.images.into_iter())
-                .map(|data| Attached {
-                    data,
-                    thumb: None,
-                })
+                .map(|data| Attached { data, thumb: None })
                 .collect();
             chat.input.queue.push(Waiting {
                 text: q.text,
@@ -1014,7 +1012,9 @@ fn paste(chat: &mut Chat) {
             chat.input.notice = Some(TOO_BIG.to_string());
             return;
         }
-        let added = std::fs::read(&path).ok().is_some_and(|bytes| attach(chat, &bytes));
+        let added = std::fs::read(&path)
+            .ok()
+            .is_some_and(|bytes| attach(chat, &bytes));
         if !added {
             chat.input.notice = Some("That image could not be read.".to_string());
         }
@@ -1474,7 +1474,10 @@ impl View {
         if !empty {
             let text = shown;
             for (a, b) in chat.input.ed.chips() {
-                let (a16, b16) = (field::utf16_at(text, past(a)), field::utf16_at(text, past(b)));
+                let (a16, b16) = (
+                    field::utf16_at(text, past(a)),
+                    field::utf16_at(text, past(b)),
+                );
                 for s in render::range_rects(&l, a16, b16 - a16) {
                     gfx.fill_round(
                         &Rect::new(ox + s.x - 2.0, sy + s.y + 1.0, s.w + 4.0, s.h - 2.0),
@@ -1484,7 +1487,10 @@ impl View {
                 }
             }
             let (a, b) = chat.input.ed.field.selection();
-            let (a16, b16) = (field::utf16_at(text, past(a)), field::utf16_at(text, past(b)));
+            let (a16, b16) = (
+                field::utf16_at(text, past(a)),
+                field::utf16_at(text, past(b)),
+            );
             for s in render::range_rects(&l, a16, b16 - a16) {
                 gfx.fill(
                     &Rect::new(ox + s.x, sy + s.y, s.w, s.h),
@@ -1575,7 +1581,13 @@ impl View {
         if ready {
             hits.push((b, Hit::Input(act)));
         }
-        self.mic_key(gfx, chat, pal, &Rect::new(b.x - KEY - 6.0, y, KEY, KEY), hits);
+        self.mic_key(
+            gfx,
+            chat,
+            pal,
+            &Rect::new(b.x - KEY - 6.0, y, KEY, KEY),
+            hits,
+        );
     }
 
     /// The microphone left of send: lit while it listens, dim while the
@@ -1727,7 +1739,11 @@ impl View {
             y -= 8.0;
             let track = Rect::new(inset, y + 2.0, w, 4.0);
             gfx.fill_round(&track, 2.0, pal.fg.with_alpha(0.08));
-            gfx.fill_round(&Rect::new(track.x, track.y, track.w * f, track.h), 2.0, pal.accent);
+            gfx.fill_round(
+                &Rect::new(track.x, track.y, track.w * f, track.h),
+                2.0,
+                pal.accent,
+            );
         }
         if let Some(n) = &chat.input.notice {
             y -= ROW_H;

@@ -202,7 +202,14 @@ mod tests {
         assert!(linked(0, 1));
         assert!(!linked(0, 2));
         assert_eq!(g.nodes[0].label, "first words");
-        assert_eq!(g.nodes[0].weight, g.links.iter().filter(|l| l.a == 0).map(|l| l.weight).sum::<u32>());
+        assert_eq!(
+            g.nodes[0].weight,
+            g.links
+                .iter()
+                .filter(|l| l.a == 0)
+                .map(|l| l.weight)
+                .sum::<u32>()
+        );
     }
 
     #[test]
@@ -213,7 +220,13 @@ mod tests {
         let g = graph(&[memory("a", &a), memory("b", &b), memory("c", &c)]);
         let ab = g.links.iter().filter(|l| (l.a, l.b) == (0, 1)).count();
         assert_eq!(ab, 1);
-        let w = |x, y| g.links.iter().find(|l| (l.a, l.b) == (x, y)).unwrap().weight;
+        let w = |x, y| {
+            g.links
+                .iter()
+                .find(|l| (l.a, l.b) == (x, y))
+                .unwrap()
+                .weight
+        };
         assert!(w(0, 1) > w(0, 2));
     }
 }

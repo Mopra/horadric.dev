@@ -418,14 +418,12 @@ impl Pane {
         });
         // A browser pane's page is a window inside it, which its own
         // drawing must leave alone.
-        let clip = if pane.console.web.is_some()
-            || pane.console.folio.is_some()
-            || pane.is_session()
-        {
-            WS_CLIPCHILDREN
-        } else {
-            WINDOW_STYLE(0)
-        };
+        let clip =
+            if pane.console.web.is_some() || pane.console.folio.is_some() || pane.is_session() {
+                WS_CLIPCHILDREN
+            } else {
+                WINDOW_STYLE(0)
+            };
         unsafe {
             let instance = GetModuleHandleW(None)?;
             let hwnd = CreateWindowExW(
@@ -451,7 +449,11 @@ impl Pane {
         }
         // A Folio session has hirelings as a terminal one does; a hireling's
         // own conversation, watched read only, has none of its own.
-        let folio_session = pane.console.folio.as_deref().is_some_and(|k| !folio::is_watch(k));
+        let folio_session = pane
+            .console
+            .folio
+            .as_deref()
+            .is_some_and(|k| !folio::is_watch(k));
         if pane.is_session() || folio_session {
             match Retinue::create(Rc::clone(&pane.shared), &pane.console.id, pane.hwnd) {
                 Ok(r) => *pane.retinue.borrow_mut() = Some(r),
@@ -1016,7 +1018,11 @@ impl Pane {
         let scale = self.dpi_now() as f32 / 96.0;
         let px = |v: f32| (v * scale).round() as i32;
         r.set_accent(self.accent.get());
-        let to = if r.table() { right - 1.0 } else { left + 1.0 + w };
+        let to = if r.table() {
+            right - 1.0
+        } else {
+            left + 1.0 + w
+        };
         r.place([px(left + 1.0), px(top + 1.0), px(to), px(bottom - 1.0)]);
         w
     }

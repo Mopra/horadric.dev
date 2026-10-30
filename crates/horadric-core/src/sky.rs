@@ -324,7 +324,6 @@ mod tests {
         let first = s.stars[a.stars.start].at;
         let c = [a.centre[0], a.centre[1], 0.0];
         assert!((crate::sanctuary::dist(first, c) - a.radius).abs() < 0.01);
-
     }
 
     #[test]

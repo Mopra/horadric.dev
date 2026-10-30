@@ -1398,12 +1398,18 @@ mod tests {
         assert_eq!(k.sync_code("p", &v1, NOW).unwrap(), 2);
         k.catch_up(10).unwrap();
         assert_eq!(embedded(&k), 2);
-        let v2 = [file(2, &["fn feed(cat: Cat, fish: Fish)", "fn walk(dog: Dog)"])];
+        let v2 = [file(
+            2,
+            &["fn feed(cat: Cat, fish: Fish)", "fn walk(dog: Dog)"],
+        )];
         assert_eq!(k.sync_code("p", &v2, NOW).unwrap(), 2);
         assert_eq!(k.catch_up(10).unwrap(), 1);
         assert_eq!(embedded(&k), 3);
         let texts: Vec<&str> = k.store().chunks().map(|(_, c)| c.text.as_str()).collect();
-        assert_eq!(texts, ["fn feed(cat: Cat, fish: Fish)", "fn walk(dog: Dog)"]);
+        assert_eq!(
+            texts,
+            ["fn feed(cat: Cat, fish: Fish)", "fn walk(dog: Dog)"]
+        );
         // The copied vector is the one the model made, and a reader that
         // opens the store after sees only the new version.
         let again = Store::open(&dir).unwrap();

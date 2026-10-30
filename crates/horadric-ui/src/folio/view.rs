@@ -16,9 +16,9 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_CAP_STYLE_ROUND,
     D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_ELLIPSE, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
-    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT,
-    D2D1_STROKE_STYLE_PROPERTIES,
+    D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
+    D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteTextFormat, IDWriteTextLayout, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
@@ -27,10 +27,10 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TRIMMING,
     DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
     CreateRoundRectRgn, GetUpdateRect, InvalidateRect, ScreenToClient, SetWindowRgn, ValidateRect,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -48,8 +48,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows_numerics::Vector2;
 
-use super::composer::{self, Act, STRIP_H};
 use super::banish::{self, Ghost};
+use super::composer::{self, Act, STRIP_H};
 use super::lightbox;
 use super::{answer, interrupt, redraw, select, transcript, with, Chat, CHATS};
 use crate::app::{self, Input};
@@ -901,8 +901,7 @@ impl View {
     fn advance(&self, chat: &mut Chat, now: Instant) -> (f32, f32) {
         chat.note_busy();
         let heat = chat.heat();
-        let moving =
-            chat.busy_was || heat > 0.0 || self.burning() || lightbox::moving(&self.key);
+        let moving = chat.busy_was || heat > 0.0 || self.burning() || lightbox::moving(&self.key);
         if moving {
             let dt = self
                 .last
@@ -1142,7 +1141,11 @@ impl View {
         let into = with(&self.key, |c| {
             let (at, len) = look::thumb(c.scroll, c.content_h, c.view_h, track.h)?;
             let into = y - track.y - at;
-            Some(if (0.0..=len).contains(&into) { into } else { len / 2.0 })
+            Some(if (0.0..=len).contains(&into) {
+                into
+            } else {
+                len / 2.0
+            })
         });
         let Some(Some(into)) = into else {
             return false;

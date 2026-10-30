@@ -55,7 +55,8 @@ impl View {
         {
             return 1.0;
         }
-        let area = |r: RECT| ((r.right - r.left).max(0) as f32) * ((r.bottom - r.top).max(0) as f32);
+        let area =
+            |r: RECT| ((r.right - r.left).max(0) as f32) * ((r.bottom - r.top).max(0) as f32);
         let screen = area(info.rcWork);
         if screen <= 0.0 {
             return 1.0;

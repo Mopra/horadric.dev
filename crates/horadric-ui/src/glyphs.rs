@@ -1212,7 +1212,8 @@ impl GridTarget {
         const FOG: f32 = 0.65;
         let mote = bg.mix(ink, 0.8);
         for m in &sky.motes {
-            self.brush.SetColor(&render::color(mote.with_alpha(m.alpha)));
+            self.brush
+                .SetColor(&render::color(mote.with_alpha(m.alpha)));
             self.rt.FillEllipse(
                 &D2D1_ELLIPSE {
                     point: Vector2 {

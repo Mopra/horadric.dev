@@ -595,7 +595,12 @@ mod tests {
 
     #[test]
     fn the_near_side_is_drawn_larger_and_in_front() {
-        let v = View::fit(&[[0.0, 0.0, -50.0], [0.0, 0.0, 50.0]], [0.0, 0.0, 400.0, 400.0], 0.0, 0.0);
+        let v = View::fit(
+            &[[0.0, 0.0, -50.0], [0.0, 0.0, 50.0]],
+            [0.0, 0.0, 400.0, 400.0],
+            0.0,
+            0.0,
+        );
         let (near, far) = (v.see([0.0, 0.0, -50.0]), v.see([0.0, 0.0, 50.0]));
         assert!(near.grow > 1.0 && far.grow < 1.0);
         assert!(near.depth < far.depth);
@@ -757,7 +762,14 @@ mod tests {
             [10.0, 10.0, 0.0],
         ];
         let v = flat(50.0, 50.0);
-        let f = frame(&g, &pts, &v, None, [0.0, 0.0, 100.0, 100.0], &Light::default());
+        let f = frame(
+            &g,
+            &pts,
+            &v,
+            None,
+            [0.0, 0.0, 100.0, 100.0],
+            &Light::default(),
+        );
         let depths: Vec<f32> = f.dots.iter().map(|d| d.depth).collect();
         assert!(depths.windows(2).all(|w| w[0] >= w[1]), "{depths:?}");
         assert_eq!(f.dots.last().unwrap().kind, Kind::File);

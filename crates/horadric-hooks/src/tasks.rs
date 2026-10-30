@@ -140,7 +140,11 @@ fn included(file: &str, home: &Path) -> Vec<PathBuf> {
         .flatten()
         .flatten()
         .filter(|e| e.path().is_file())
-        .filter(|e| e.file_name().to_str().is_some_and(|n| ssh::glob_matches(pattern, n)))
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| ssh::glob_matches(pattern, n))
+        })
         .map(|e| e.path())
         .collect();
     found.sort();
@@ -385,15 +389,31 @@ Host last *
 ",
         )
         .unwrap();
-        fs::write(ssh.join("config.d").join("b.conf"), "Host b
-").unwrap();
-        fs::write(ssh.join("config.d").join("a.conf"), "Host a first
-").unwrap();
-        fs::write(ssh.join("config.d").join("a.bak"), "Host not-me
-").unwrap();
-        fs::write(ssh.join("loop"), "Host looped
+        fs::write(
+            ssh.join("config.d").join("b.conf"),
+            "Host b
+",
+        )
+        .unwrap();
+        fs::write(
+            ssh.join("config.d").join("a.conf"),
+            "Host a first
+",
+        )
+        .unwrap();
+        fs::write(
+            ssh.join("config.d").join("a.bak"),
+            "Host not-me
+",
+        )
+        .unwrap();
+        fs::write(
+            ssh.join("loop"),
+            "Host looped
 Include loop
-").unwrap();
+",
+        )
+        .unwrap();
         assert_eq!(
             config_hosts_in(&home),
             vec!["first", "a", "b", "looped", "last"]

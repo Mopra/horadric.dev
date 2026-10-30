@@ -283,11 +283,7 @@ pub enum Theme {
 }
 
 impl Theme {
-    pub const ALL: [Theme; 3] = [
-        Theme::Skeuomorph,
-        Theme::Winamp,
-        Theme::Matrix,
-    ];
+    pub const ALL: [Theme; 3] = [Theme::Skeuomorph, Theme::Winamp, Theme::Matrix];
 
     pub fn palette(self) -> &'static Palette {
         match self {
