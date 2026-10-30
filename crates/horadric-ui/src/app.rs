@@ -6803,8 +6803,8 @@ impl App {
 
     /// Shows a session's terminal: resumes it when paused, otherwise puts
     /// its project on the stage and gives it the keyboard. With `toggle`,
-    /// a session that already has the keyboard in front collapses the
-    /// stage instead, which is what a second click on its tile means.
+    /// a session that already has the keyboard in front lets go of it
+    /// instead, which is what a second click on its tile means.
     fn reveal(&mut self, id: &str, toggle: bool) {
         // Asked for by name, a parked session comes back onto the stage.
         if self.shared.parked.borrow_mut().remove(id) {
@@ -6835,8 +6835,12 @@ impl App {
             return;
         };
         if let Some(stage) = self.stage_showing(serial) {
-            if toggle && stage.is_foreground() && stage.active().as_deref() == Some(id) {
-                self.close_stage();
+            if toggle
+                && stage.is_foreground()
+                && !stage.released()
+                && stage.active().as_deref() == Some(id)
+            {
+                stage.release();
             } else {
                 stage.focus_session(id);
             }

@@ -34,7 +34,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TME_NONCLIENT,
+    GetFocus, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TME_NONCLIENT,
     TRACKMOUSEEVENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -126,6 +126,8 @@ impl Growth {
 struct Drag {
     /// The pane whose header was pressed.
     serial: usize,
+    /// It had the keyboard before the press.
+    had: bool,
     start: POINT,
     /// Where in the pane it was taken, so it stays under the cursor there.
     grab: (i32, i32),
@@ -156,6 +158,9 @@ pub struct TerminalWindow {
     zoomed: Cell<bool>,
     /// The session that has, or last had, the keyboard.
     active: RefCell<Option<String>>,
+    /// The human let go of the active pane: none has the keyboard, none is
+    /// lit over the others, until a pane is picked again.
+    released: Cell<bool>,
     /// The agent's session that last had the keyboard: where a pick goes
     /// first, since the human picks in another pane.
     last_agent: RefCell<Option<String>>,
@@ -227,6 +232,7 @@ impl TerminalWindow {
             grid: RefCell::new(Vec::new()),
             zoomed: Cell::new(false),
             active: RefCell::new(None),
+            released: Cell::new(false),
             last_agent: RefCell::new(None),
             title: RefCell::new(String::new()),
             drag: Cell::new(None),
@@ -378,9 +384,13 @@ impl TerminalWindow {
     /// Lights the pane with the keyboard and steps the others back, and
     /// tells the tiles, so its key latches down.
     fn spotlight(&self) {
-        let active = self.active.borrow().clone();
+        let active = if self.released.get() {
+            None
+        } else {
+            self.active.borrow().clone()
+        };
         let panes = self.panes.borrow();
-        let many = panes.len() > 1;
+        let many = panes.len() > 1 && active.is_some();
         for p in panes.iter() {
             p.set_dimmed(many && Some(p.session()) != active.as_deref());
         }
@@ -721,6 +731,7 @@ impl TerminalWindow {
 
     /// Another session has the keyboard now. Zoomed, the stage shows it.
     fn set_active(&self, id: String) {
+        self.released.set(false);
         let changed = self.active.borrow().as_deref() != Some(id.as_str());
         let agent = self
             .panes
@@ -764,6 +775,9 @@ impl TerminalWindow {
 
     /// Gives the keyboard to the active session's pane.
     fn focus_active(&self) {
+        if self.released.get() {
+            return;
+        }
         let active = self.active.borrow().clone();
         let panes = self.panes.borrow();
         let pane = panes
@@ -780,6 +794,23 @@ impl TerminalWindow {
         self.set_active(id.to_string());
         self.bring_to_front();
         self.focus_active();
+    }
+
+    /// Lets go of the active pane: the stage keeps the keyboard itself, so
+    /// typing goes nowhere, and no pane or tile shows as picked.
+    pub fn release(&self) {
+        self.released.set(true);
+        unsafe {
+            let _ = SetFocus(Some(self.hwnd));
+        }
+        self.spotlight();
+        for p in self.panes.borrow().iter() {
+            p.invalidate();
+        }
+    }
+
+    pub fn released(&self) -> bool {
+        self.released.get()
     }
 
     /// Shows this session's pane as the active one without taking the
@@ -1249,7 +1280,7 @@ impl TerminalWindow {
     }
 
     /// A header was pressed. The stage takes the mouse until it is let go.
-    fn start_drag(&self, serial: usize) {
+    fn start_drag(&self, serial: usize, had: bool) {
         let mut start = POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut start);
@@ -1263,6 +1294,7 @@ impl TerminalWindow {
         let c = self.cursor();
         self.drag.set(Some(Drag {
             serial,
+            had,
             start,
             grab: (c.x - at.0, c.y - at.1),
             moved: false,
@@ -1400,6 +1432,8 @@ impl TerminalWindow {
         if d.moved {
             self.recentre(d.serial);
             self.layout_with(true);
+        } else if d.had {
+            self.release();
         }
     }
 
@@ -1736,7 +1770,7 @@ impl TerminalWindow {
                 Some(LRESULT(0))
             }
             WM_PANE_GRAB => {
-                self.start_drag(wparam.0);
+                self.start_drag(wparam.0, lparam.0 != 0);
                 Some(LRESULT(0))
             }
             WM_STAGE_LAYOUT => {

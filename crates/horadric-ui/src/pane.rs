@@ -48,7 +48,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, MapVirtualKeyW, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent,
+    GetFocus, GetKeyState, MapVirtualKeyW, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent,
     MAPVK_VK_TO_CHAR, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE,
     VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F12, VK_F3, VK_F4, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU,
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_UP,
@@ -154,7 +154,8 @@ const LINK: Rgb = Rgb {
 /// Sent to the stage when a pane gets the keyboard. `wparam` is its serial.
 pub const WM_PANE_FOCUS: u32 = WM_USER + 1;
 /// Sent to the stage when a pane's header is pressed, which may start a
-/// drag. `wparam` is its serial.
+/// drag. `wparam` is its serial, `lparam` 1 when the pane had the keyboard
+/// already, so a click that drags nothing lets go of it.
 pub const WM_PANE_GRAB: u32 = WM_USER + 2;
 /// Sent to the stage to zoom a pane in or out: its zoom button, a double
 /// click on its header, or Ctrl+Shift+Enter. `wparam` is its serial.
@@ -3087,6 +3088,25 @@ impl Pane {
         self.invalidate();
     }
 
+    /// Whether the keyboard is in this pane, or in its page.
+    fn has_keyboard(&self) -> bool {
+        let focus = unsafe { GetFocus() };
+        focus == self.hwnd || unsafe { IsChild(self.hwnd, focus) }.as_bool()
+    }
+
+    fn grab(&self, had: bool) {
+        unsafe {
+            if let Ok(parent) = GetParent(self.hwnd) {
+                SendMessageW(
+                    parent,
+                    WM_PANE_GRAB,
+                    Some(WPARAM(self.serial())),
+                    Some(LPARAM(had as isize)),
+                );
+            }
+        }
+    }
+
     fn tell_stage(&self, msg: u32) {
         unsafe {
             if let Ok(parent) = GetParent(self.hwnd) {
@@ -3390,6 +3410,7 @@ impl Pane {
                         return Some(LRESULT(0));
                     }
                 }
+                let had = self.has_keyboard();
                 self.focus();
                 if self.on_close(lparam) {
                     self.close();
@@ -3400,7 +3421,7 @@ impl Pane {
                     if msg == WM_LBUTTONDBLCLK && self.zoom.get().is_some() {
                         self.tell_stage(WM_PANE_ZOOM);
                     } else {
-                        self.tell_stage(WM_PANE_GRAB);
+                        self.grab(had);
                     }
                 } else if let Some(key) = &self.console.sky {
                     // A double click brings the whole picture back.
