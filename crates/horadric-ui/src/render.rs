@@ -1030,8 +1030,8 @@ impl Target {
         }
     }
 
-    /// Draws a pane's retinue, a row per hireling. `Err` means the target
-    /// must be recreated.
+    /// Draws a pane's retinue, a portrait per hireling. `Err` means the
+    /// target must be recreated.
     pub fn draw_retinue(&self, gpu: &Gpu, scene: &RetinueScene) -> Result<()> {
         unsafe {
             self.rt.BeginDraw();
@@ -1078,21 +1078,24 @@ fn brother_ink(name: &str) -> Color {
 }
 
 /// Draws on the window or on its kept layer, which share their brushes.
-/// One hireling's row in a pane's retinue, made ready to draw.
+/// One hireling's portrait in a pane's retinue, made ready to draw.
 pub struct RetinueRow {
     pub rune: usize,
-    pub kind: String,
-    pub task: String,
-    pub doing: String,
-    pub ran: String,
-    pub tokens: String,
     pub lot: horadric_core::hireling::Lot,
     /// How long it has run, for its rune's carving.
     pub age: Duration,
+    /// How long since it was last heard, for the beat of one waiting.
+    pub waited: Duration,
+    /// The colour of the craft of the tool it is in, while it works.
+    pub tool: Option<Color>,
+    /// Its latest tool calls, oldest first, in their craft's colour.
+    pub ticks: Vec<Color>,
+    /// How many hirelings of its own it has out, which get no portrait.
+    pub nested: usize,
 }
 
-/// A pane's retinue: its rows, the one under the cursor, and its size in
-/// DIPs.
+/// A pane's retinue: a portrait per hireling, the one under the cursor,
+/// and its size in DIPs.
 pub struct RetinueScene<'a> {
     pub rows: &'a [RetinueRow],
     pub hot: Option<usize>,
@@ -1100,13 +1103,24 @@ pub struct RetinueScene<'a> {
     pub accent: Color,
 }
 
-/// A row of the retinue, in DIPs.
-pub const RETINUE_ROW_H: f32 = 20.0;
-/// Above the first row: the line that parts it from the grid, and its
-/// heading with the war table's link.
-pub const RETINUE_TOP: f32 = 18.0;
-/// The war table's link at the right of the retinue's heading, as wide.
-pub const RETINUE_LINK_W: f32 = 150.0;
+/// The retinue's column at the glass's left, in DIPs: its width, the war
+/// table's glyph atop it, and the room each portrait takes.
+pub const RETINUE_W: f32 = 44.0;
+pub const RETINUE_HEAD: f32 = 22.0;
+pub const RETINUE_CELL: f32 = 48.0;
+/// A portrait's frame, square.
+const PORTRAIT: f32 = 34.0;
+
+/// How many of `n` portraits a column `h` DIPs tall shows. When they do
+/// not all fit the last place goes to a "+N" for the rest.
+pub fn retinue_fit(n: usize, h: f32) -> usize {
+    let room = ((h - RETINUE_HEAD) / RETINUE_CELL).floor().max(0.0) as usize;
+    if n <= room {
+        n
+    } else {
+        room.saturating_sub(1)
+    }
+}
 
 /// One track of the war table: the main loop's or a hireling's.
 pub struct TableTrack {
@@ -2882,6 +2896,19 @@ impl Painter<'_> {
     /// strokes cut so far, in the order a hand would cut them. Leaves the
     /// brush in `ink`.
     unsafe fn rune(&self, rune: usize, at: (f32, f32), h: f32, ink: Color, drawn: f32) {
+        self.rune_cut(rune, at, h, ink, drawn, RUNE_STROKE);
+    }
+
+    /// [`Self::rune`] cut `stroke` wide, for one drawn larger.
+    unsafe fn rune_cut(
+        &self,
+        rune: usize,
+        at: (f32, f32),
+        h: f32,
+        ink: Color,
+        drawn: f32,
+        stroke: f32,
+    ) {
         let strokes = crate::sparks::RUNES[rune % crate::sparks::RUNES.len()];
         let place = |(u, v): (f32, f32)| Vector2 {
             X: at.0 + u * h,
@@ -2906,77 +2933,116 @@ impl Painter<'_> {
                 seg[0].1 + (seg[1].1 - seg[0].1) * f,
             );
             self.rt
-                .DrawLine(place(seg[0]), place(end), self.brush, RUNE_STROKE, None);
+                .DrawLine(place(seg[0]), place(end), self.brush, stroke, None);
             left -= l;
         }
     }
 
-    /// The retinue: under a hairline, a row per hireling with its rune,
-    /// its kind in the project's colour, what it was asked, and at the
-    /// right what it is doing, how long it ran and its tokens. Waiting
-    /// and failed ones take their phase's colour.
+    /// The retinue: a column of portraits, the war table's glyph atop
+    /// it. A portrait is its hireling's rune in a frame, a track of its
+    /// latest tool calls under it, and in its corners the craft of the
+    /// tool it is in and how many hirelings of its own it sent. The rune
+    /// carves while it works and beats while it waits on a permission; a
+    /// finished one's frame turns gold with a check, a failed one's cracks.
     unsafe fn retinue(&self, gpu: &Gpu, scene: &RetinueScene) {
         use horadric_core::hireling::Lot;
         let (w, h) = scene.size;
         let p = theme::palette();
+        let fg = p.term_fg;
         self.rt.Clear(Some(&color(p.term_bg)));
-        self.fill_rounded(&Rect::new(8.0, 1.0, w - 16.0, 1.0), 0.0, p.term_fg.with_alpha(0.12));
-        let dim = p.term_fg.with_alpha(0.55);
-        let head = Rect::new(12.0, 3.0, w - 24.0, RETINUE_TOP - 4.0);
-        let working = scene.rows.iter().filter(|r| r.lot.at_work()).count();
-        let heading = format!("HIRELINGS  {working} working");
-        self.text(&gpu.small, p.term_fg.with_alpha(0.4), &heading, head);
-        let link = if scene.hot == Some(usize::MAX) {
-            p.term_fg.with_alpha(0.9)
-        } else {
-            scene.accent.with_alpha(0.8)
+        let parting = Rect::new(w - 1.0, 4.0, 1.0, (h - 8.0).max(0.0));
+        self.fill_rounded(&parting, 0.0, fg.with_alpha(0.1));
+        let line = |a: (f32, f32), b: (f32, f32), c: Color, width: f32| {
+            self.brush.SetColor(&color(c));
+            self.rt.DrawLine(
+                Vector2 { X: a.0, Y: a.1 },
+                Vector2 { X: b.0, Y: b.1 },
+                self.brush,
+                width,
+                None,
+            );
         };
-        self.text(&gpu.small_right, link, "War table  Ctrl+Shift+W", head);
-        for (i, row) in scene.rows.iter().enumerate() {
-            let y = RETINUE_TOP + i as f32 * RETINUE_ROW_H;
-            if y > h {
-                break;
-            }
-            let r = Rect::new(4.0, y, w - 8.0, RETINUE_ROW_H);
+        // The war table's glyph: a waterfall of three tracks.
+        let head_ink = if scene.hot == Some(usize::MAX) {
+            fg.with_alpha(0.9)
+        } else {
+            fg.with_alpha(0.4)
+        };
+        let mid = (w - 1.0) / 2.0;
+        for (x, y, len) in [(-7.0, 7.0, 8.0), (-3.0, 11.0, 10.0), (1.0, 15.0, 6.0)] {
+            self.fill_rounded(&Rect::new(mid + x, y, len, 2.0), 1.0, head_ink);
+        }
+        let fit = retinue_fit(scene.rows.len(), h);
+        let fx = mid - PORTRAIT / 2.0;
+        let gold = p.unique;
+        for (i, row) in scene.rows.iter().take(fit).enumerate() {
+            let y = RETINUE_HEAD + i as f32 * RETINUE_CELL;
             if scene.hot == Some(i) {
-                self.fill_rounded(&r, 4.0, p.term_fg.with_alpha(0.07));
+                let r = Rect::new(2.0, y - 1.0, w - 5.0, RETINUE_CELL - 3.0);
+                self.fill_rounded(&r, 4.0, fg.with_alpha(0.07));
             }
-            let (ink, drawn) = match row.lot {
+            let frame = Rect::new(fx, y + 2.0, PORTRAIT, PORTRAIT);
+            let (edge, ink, drawn) = match row.lot {
                 Lot::Working => {
                     let carve = motion::cycle(row.age, RUNE_CARVE);
-                    (scene.accent, (carve * 1.6).min(1.0))
+                    (scene.accent.with_alpha(0.6), scene.accent, (carve * 1.6).min(1.0))
                 }
-                Lot::Waiting => (theme::waiting(), 1.0),
-                Lot::Done => (theme::done().with_alpha(0.7), 1.0),
-                Lot::Failed => (theme::error(), 1.0),
-            };
-            let mid = y + RETINUE_ROW_H / 2.0;
-            self.rune(row.rune, (16.0, mid), 10.0, ink, drawn);
-            let text_r = |x: f32, w: f32| Rect::new(x, y + 2.0, w.max(0.0), RETINUE_ROW_H - 4.0);
-            let kind_ink = match row.lot {
-                Lot::Working => scene.accent,
-                Lot::Done => p.term_fg.with_alpha(0.6),
-                _ => ink,
-            };
-            let kind_w = self.measure(gpu, &gpu.small, &row.kind).min(120.0);
-            self.text(&gpu.small, kind_ink, &row.kind, text_r(30.0, kind_w + 2.0));
-            // The right hand columns, from the edge in.
-            let mut right = w - 12.0;
-            for (text, width) in [(&row.tokens, 40.0), (&row.ran, 56.0)] {
-                if !text.is_empty() {
-                    self.text_tabular(gpu, &gpu.small_right, dim, text, text_r(right - width, width));
+                Lot::Waiting => {
+                    let beat = motion::waiting_breath(row.waited);
+                    (theme::waiting(), theme::waiting().fade(0.4 + 0.6 * beat), 1.0)
                 }
-                right -= width + 6.0;
+                Lot::Done => (gold, gold.with_alpha(0.7), 1.0),
+                Lot::Failed => (theme::error(), theme::error().with_alpha(0.6), 1.0),
+            };
+            self.fill_rounded(&frame, 3.0, edge.with_alpha(0.08));
+            self.stroke_rounded(&frame.inset(0.5), 3.0, edge, 1.0);
+            let centre = (frame.x + PORTRAIT / 2.0, frame.y + PORTRAIT / 2.0);
+            self.rune_cut(row.rune, centre, 18.0, ink, drawn, 1.6);
+            let (l, t, r, b) = (frame.x, frame.y, frame.x + PORTRAIT, frame.y + PORTRAIT);
+            match row.lot {
+                Lot::Done => {
+                    line((r - 11.0, b - 7.0), (r - 8.0, b - 4.0), gold, 1.4);
+                    line((r - 8.0, b - 4.0), (r - 3.5, b - 10.0), gold, 1.4);
+                }
+                Lot::Failed => {
+                    // The frame broken where the crack starts, then the
+                    // crack down through the rune.
+                    let crack = [
+                        (l + 21.0, t),
+                        (l + 17.0, t + 9.0),
+                        (l + 22.0, t + 15.0),
+                        (l + 16.0, t + 24.0),
+                    ];
+                    line((l + 19.5, t), (l + 22.5, t), p.term_bg, 2.0);
+                    for seg in crack.windows(2) {
+                        line(seg[0], seg[1], theme::error(), 1.2);
+                    }
+                }
+                _ => {}
             }
-            let doing_w = self.measure(gpu, &gpu.small, &row.doing).min(140.0);
-            let doing_ink = match row.lot {
-                Lot::Working | Lot::Done => p.term_fg.with_alpha(0.8),
-                _ => ink,
-            };
-            let doing_x = right - doing_w;
-            self.text(&gpu.small_right, doing_ink, &row.doing, text_r(doing_x, doing_w + 2.0));
-            let task_x = 30.0 + kind_w + 10.0;
-            self.text(&gpu.small, dim, &row.task, text_r(task_x, doing_x - task_x - 12.0));
+            if let (true, Some(c)) = (row.lot.at_work(), row.tool) {
+                self.fill_rounded(&Rect::new(r - 8.0, t + 3.0, 5.0, 5.0), 1.0, c);
+            }
+            if row.nested > 0 {
+                let badge = Rect::new(l + 3.0, t + 1.0, 18.0, 12.0);
+                let n = format!("+{}", row.nested);
+                self.text(&gpu.small, fg.with_alpha(0.75), &n, badge);
+            }
+            // The track of its tool calls, newest at the right.
+            let track = Rect::new(fx, b + 4.0, PORTRAIT, 3.0);
+            self.fill_rounded(&track, 1.0, fg.with_alpha(0.08));
+            let room = ((PORTRAIT + 1.0) / 3.0).floor() as usize;
+            let shown = &row.ticks[row.ticks.len().saturating_sub(room)..];
+            for (k, &c) in shown.iter().rev().enumerate() {
+                let x = r - 2.0 - k as f32 * 3.0;
+                self.fill_rounded(&Rect::new(x, track.y, 2.0, track.h), 0.5, c);
+            }
+        }
+        if fit < scene.rows.len() {
+            let y = RETINUE_HEAD + fit as f32 * RETINUE_CELL;
+            let r = Rect::new(0.0, y + 4.0, w - 1.0, 16.0);
+            let more = format!("+{}", scene.rows.len() - fit);
+            self.text(&gpu.small_centre, fg.with_alpha(0.55), &more, r);
         }
     }
 

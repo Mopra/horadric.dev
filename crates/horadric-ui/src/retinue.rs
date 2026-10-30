@@ -1,18 +1,21 @@
-//! A pane's retinue: a row per hireling of its session along the bottom of
-//! the glass, under the grid. See docs/plan/hirelings.md.
+//! A pane's retinue: a portrait per hireling of its session, in a column
+//! at the glass's left, like the party frame in the games. See
+//! docs/plan/hirelings.md.
 //!
 //! A child window of the pane with its own render target, like the
 //! Folio's bar, so the grid's drawing is left alone: the pane only gives
-//! up the rows it needs. It reads the session's band from the registry
-//! on a timer of its own, fast while a rune carves and slow while all
-//! rest, and tells the pane when it needs more or fewer rows. A click on
-//! a row opens that hireling's conversation in a pane beside it.
+//! up the width it needs, and as the column is the pane's and not the
+//! scrollback's it stays in sight however long the conversation grows.
+//! It reads the session's band from the registry on a timer of its own,
+//! fast while a rune carves or beats and slow while all rest, and tells
+//! the pane when the column comes or goes. A click on a portrait opens
+//! that hireling's conversation in a pane beside it.
 //!
 //! The band only learns a hireling's tokens and tool count from its
-//! transcript, so the strip reads what each one's has grown by.
+//! transcript, so the column reads what each one's has grown by.
 //!
-//! Turned over (Ctrl+Shift+W, or the link in its heading) it is the war
-//! table: the same window over the whole glass, the turn drawn on one
+//! Turned over (Ctrl+Shift+W, or the glyph atop the column) it is the
+//! war table: the same window over the whole glass, the turn drawn on one
 //! axis of time, a track for the main loop and one per hireling. The
 //! grid under it keeps its size, so the program never redraws for it.
 
@@ -40,8 +43,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::app::{self, Input};
 use crate::render::{
-    RetinueRow, RetinueScene, TableScene, TableTrack, Target, RETINUE_LINK_W, RETINUE_ROW_H,
-    RETINUE_TOP, TABLE_AXIS, TABLE_HEAD, TABLE_ROW_H,
+    retinue_fit, RetinueRow, RetinueScene, TableScene, TableTrack, Target, RETINUE_CELL,
+    RETINUE_HEAD, RETINUE_W, TABLE_AXIS, TABLE_HEAD, TABLE_ROW_H,
 };
 use crate::theme::{self, Color};
 use crate::window::Shared;
@@ -53,17 +56,19 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 /// The beat while a rune carves, and while all rest.
 const FAST_MS: u32 = 50;
 const SLOW_MS: u32 = 700;
-/// More rows than this and the strip shows the first, most in need.
-pub const MAX_ROWS: usize = 4;
-/// Posted to the pane when the strip wants another number of rows.
-pub const WM_RETINUE_ROWS: u32 = WM_USER + 21;
+/// The latest tool calls a portrait's track is given.
+const TICKS: usize = 16;
+/// The war table's Close at the right of its heading, as wide, in DIPs.
+const CLOSE_W: f32 = 150.0;
+/// Posted to the pane when the column comes or goes.
+pub const WM_RETINUE_SHOWN: u32 = WM_USER + 21;
 
-/// How tall a strip of `rows` rows is, in DIPs. None takes nothing.
-pub fn height(rows: usize) -> f32 {
+/// How wide a column of `rows` portraits is, in DIPs. None takes nothing.
+pub fn width(rows: usize) -> f32 {
     if rows == 0 {
         0.0
     } else {
-        RETINUE_TOP + rows as f32 * RETINUE_ROW_H + 3.0
+        RETINUE_W
     }
 }
 
@@ -73,10 +78,11 @@ pub struct Retinue {
     /// The session whose hirelings it shows.
     session: String,
     target: RefCell<Option<Target>>,
-    /// What each row stands for, by hireling id, as last drawn.
+    /// What each portrait stands for, by hireling id, as last drawn.
     ids: RefCell<Vec<String>>,
     rows: Cell<usize>,
-    /// The row under the cursor; `usize::MAX` for the heading's link.
+    /// The portrait under the cursor; `usize::MAX` for the war table's
+    /// glyph, or its Close.
     hot: Cell<Option<usize>>,
     tracking: Cell<bool>,
     /// Turned over into the war table.
@@ -122,7 +128,7 @@ impl Retinue {
         Ok(r)
     }
 
-    /// How many rows it shows now.
+    /// How many portraits it has now, shown or behind the "+N".
     pub fn rows(&self) -> usize {
         self.rows.get()
     }
@@ -145,7 +151,7 @@ impl Retinue {
     fn tell_pane(&self) {
         unsafe {
             if let Ok(pane) = GetParent(self.hwnd.get()) {
-                let _ = PostMessageW(Some(pane), WM_RETINUE_ROWS, WPARAM(0), LPARAM(0));
+                let _ = PostMessageW(Some(pane), WM_RETINUE_SHOWN, WPARAM(0), LPARAM(0));
             }
         }
     }
@@ -156,7 +162,8 @@ impl Retinue {
         }
     }
 
-    /// Lays it along the bottom of the glass, `rect` in pixels of the pane.
+    /// Lays it down the glass's left, or over all of it as the war table,
+    /// `rect` in pixels of the pane.
     pub fn place(&self, rect: [i32; 4]) {
         let [l, t, r, b] = rect;
         let show = (self.rows.get() > 0 || self.table.get()) && r > l && b > t;
@@ -208,21 +215,22 @@ impl Retinue {
         Some(band.clone())
     }
 
-    /// Reads the band again, redraws, and tells the pane when the number
-    /// of rows changed. Sets the next beat.
+    /// Reads the band again, redraws, and tells the pane when the column
+    /// comes or goes. Sets the next beat.
     fn poll(&self) {
         let now = SystemTime::now();
         let band = self.band().unwrap_or_default();
-        let shown = band.shown(now, false);
-        let rows = shown.len().min(MAX_ROWS);
-        *self.ids.borrow_mut() = shown.iter().map(|h| h.id.clone()).collect();
-        if self.rows.replace(rows) != rows {
+        let shown = party(&band, now);
+        let rows = shown.len();
+        *self.ids.borrow_mut() = shown.iter().map(|(h, _)| h.id.clone()).collect();
+        if (self.rows.replace(rows) > 0) != (rows > 0) {
             self.tell_pane();
         }
         if self.table.get() {
             *self.ids.borrow_mut() = table_order(&band, now).iter().map(|h| h.id.clone()).collect();
         }
-        let carving = shown.iter().any(|h| h.lot_at(now) == Lot::Working)
+        // A waiting rune beats, so it wants the fast beat as a carving one.
+        let carving = band.shown(now, false).iter().any(|h| h.lot_at(now).at_work())
             || (self.table.get() && band.turn_end.is_none() && band.turn.is_some());
         let beat = if carving { FAST_MS } else { SLOW_MS };
         if self.beat.replace(beat) != beat {
@@ -247,21 +255,24 @@ impl Retinue {
                 Some((s.band.clone(), s.label().to_string()))
             })
             .unwrap_or_default();
-        let rows: Vec<RetinueRow> = band
-            .shown(now, false)
-            .iter()
-            .take(MAX_ROWS)
-            .map(|h| RetinueRow {
+        let accent = self.accent.get();
+        let since = |t: SystemTime| now.duration_since(t).unwrap_or_default();
+        let rows: Vec<RetinueRow> = party(&band, now)
+            .into_iter()
+            .map(|(h, nested)| RetinueRow {
                 rune: hireling::rune_of(&h.kind),
-                kind: h.kind.clone(),
-                task: h.task.clone(),
-                doing: h.doing(now),
-                ran: horadric_core::heavy::duration(h.ran(now).as_secs()),
-                tokens: (h.tokens > 0)
-                    .then(|| hireling::tokens(h.tokens))
-                    .unwrap_or_default(),
                 lot: h.lot_at(now),
-                age: now.duration_since(h.started).unwrap_or_default(),
+                age: since(h.started),
+                waited: since(h.heard),
+                tool: h.tool.as_deref().map(|t| craft_ink(hireling::craft(t), accent)),
+                ticks: h.marks[h.marks.len().saturating_sub(TICKS)..]
+                    .iter()
+                    .map(|m| match m.failed {
+                        true => theme::error(),
+                        false => craft_ink(hireling::craft(&m.tool), accent),
+                    })
+                    .collect(),
+                nested,
             })
             .collect();
         let hwnd = self.hwnd.get();
@@ -325,9 +336,9 @@ impl Retinue {
         }
     }
 
-    /// What is at `x`, `y` pixels in: a hireling's row by its place in
-    /// `ids`, `usize::MAX` for the heading's link (the war table's, or its
-    /// Close), or nothing.
+    /// What is at `x`, `y` pixels in: a hireling's portrait or track by
+    /// its place in `ids`, `usize::MAX` for the war table's glyph or its
+    /// Close, or nothing.
     fn row_at(&self, x: i32, y: i32) -> Option<usize> {
         let hwnd = self.hwnd.get();
         let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
@@ -337,17 +348,22 @@ impl Retinue {
         unsafe {
             let _ = GetClientRect(hwnd, &mut rc);
         }
-        let w = rc.right as f32 * k;
-        let (head, top, row_h) = if self.table.get() {
-            // Track 0 is the main loop's, which opens nothing.
-            (TABLE_HEAD, TABLE_HEAD + TABLE_AXIS + 6.0 + TABLE_ROW_H, TABLE_ROW_H)
-        } else {
-            (RETINUE_TOP, RETINUE_TOP, RETINUE_ROW_H)
-        };
-        if y < head {
-            return (x > w - RETINUE_LINK_W).then_some(usize::MAX);
+        let (w, h) = (rc.right as f32 * k, rc.bottom as f32 * k);
+        if !self.table.get() {
+            if y < RETINUE_HEAD {
+                return Some(usize::MAX);
+            }
+            // The "+N" past the last portrait that fits opens nothing.
+            let fit = retinue_fit(self.ids.borrow().len(), h);
+            let i = ((y - RETINUE_HEAD) / RETINUE_CELL).floor() as usize;
+            return (i < fit).then_some(i);
         }
-        let i = ((y - top) / row_h).floor();
+        if y < TABLE_HEAD {
+            return (x > w - CLOSE_W).then_some(usize::MAX);
+        }
+        // Track 0 is the main loop's, which opens nothing.
+        let top = TABLE_HEAD + TABLE_AXIS + 6.0 + TABLE_ROW_H;
+        let i = ((y - top) / TABLE_ROW_H).floor();
         (y >= top && (i as usize) < self.ids.borrow().len()).then_some(i as usize)
     }
 
@@ -374,7 +390,37 @@ impl Retinue {
                 .find(|h| h.id == id)?
                 .clone();
             let now = SystemTime::now();
-            Some(format!("{}\n\nShow its conversation beside this session", h.summary(now)).into())
+            if self.table.get() {
+                let text = format!("{}\n\nShow its conversation beside this session", h.summary(now));
+                return Some(text.into());
+            }
+            // A portrait shows only a rune, so its tip says the rest a line
+            // at a time.
+            let mut lines = vec![h.kind.clone()];
+            if !h.task.is_empty() {
+                lines.push(h.task.clone());
+            }
+            let mut stats = vec![
+                h.doing(now),
+                horadric_core::heavy::duration(h.ran(now).as_secs()),
+            ];
+            if h.tokens > 0 {
+                stats.push(hireling::tokens(h.tokens));
+            }
+            lines.push(stats.join(" \u{b7} "));
+            let nested = reg
+                .get(&self.session)
+                .map(|s| party(&s.band, now))
+                .and_then(|p| p.into_iter().find(|(p, _)| p.id == id).map(|(_, n)| n))
+                .unwrap_or(0);
+            match nested {
+                0 => {}
+                1 => lines.push("1 hireling of its own".to_string()),
+                n => lines.push(format!("{n} hirelings of its own")),
+            }
+            lines.push(String::new());
+            lines.push("Show its conversation beside this session".to_string());
+            Some(lines.join("\n").into())
         });
         tip::over_line(&self.shared, self.hwnd.get(), line);
     }
@@ -449,6 +495,40 @@ impl Retinue {
             _ => None,
         }
     }
+}
+
+/// The hirelings that get a portrait, most in need first, each with how
+/// many of those shown are its own, sent by it or by one of its own. One
+/// whose sender is no longer shown stands for itself.
+fn party(band: &Band, now: SystemTime) -> Vec<(&hireling::Hireling, usize)> {
+    let shown = band.shown(now, false);
+    let sender = |h: &hireling::Hireling| -> Option<usize> {
+        let up = h.parent.as_deref()?;
+        shown.iter().position(|s| s.id == up)
+    };
+    // Bounded, so a loop in what the band was told cannot hang the pane.
+    let heads: Vec<&str> = shown
+        .iter()
+        .map(|&h| {
+            let mut at = h;
+            for _ in 0..shown.len() {
+                match sender(at) {
+                    Some(i) => at = shown[i],
+                    None => break,
+                }
+            }
+            at.id.as_str()
+        })
+        .collect();
+    shown
+        .iter()
+        .zip(&heads)
+        .filter(|(h, top)| h.id == **top)
+        .map(|(h, _)| {
+            let own = heads.iter().filter(|&&t| t == h.id).count() - 1;
+            (*h, own)
+        })
+        .collect()
 }
 
 /// The war table's hirelings, in the order they started.

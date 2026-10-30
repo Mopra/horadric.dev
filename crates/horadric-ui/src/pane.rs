@@ -229,8 +229,11 @@ pub struct Pane {
     pub hwnd: HWND,
     console: Arc<Console>,
     shared: Rc<Shared>,
-    /// A session's hirelings, a row each under its grid.
+    /// A session's hirelings, a portrait each left of its grid.
     retinue: RefCell<Option<Box<Retinue>>>,
+    /// How far right the grid starts for the retinue's column, in DIPs,
+    /// as last fitted, so drawing and the mouse agree with the grid's size.
+    inset: Cell<f32>,
     /// The session's name, for the header.
     name: RefCell<String>,
     lifted: Cell<bool>,
@@ -370,6 +373,7 @@ impl Pane {
             console,
             shared,
             retinue: RefCell::new(None),
+            inset: Cell::new(0.0),
             name: RefCell::new(name),
             lifted: Cell::new(false),
             held: Cell::new(false),
@@ -983,7 +987,9 @@ impl Pane {
         let scale = self.dpi_now() as f32 / 96.0;
         let cell = self.cell();
         let (w, h) = glyphs::grid_room(r.right as f32 / scale, r.bottom as f32 / scale);
-        let h = h - self.place_retinue();
+        let inset = self.place_retinue();
+        self.inset.set(inset);
+        let w = w - inset;
         let cols = (w / cell.w).floor().max(2.0);
         let rows = (h / cell.h).floor().max(1.0);
         self.console.resize(GridSize {
@@ -992,28 +998,23 @@ impl Pane {
         });
     }
 
-    /// Lays the retinue along the bottom of the glass, or over all of it
-    /// while it is the war table, and says how much of the grid's height
-    /// it takes, in DIPs. The war table lies over the grid without
-    /// resizing it, so the program never redraws for a look.
+    /// Lays the retinue down the glass's left, or over all of it while it
+    /// is the war table, and says how much of the grid's width it takes,
+    /// in DIPs. The war table lies over the grid without resizing it, so
+    /// the program never redraws for a look.
     fn place_retinue(&self) -> f32 {
         let slot = self.retinue.borrow();
         let Some(r) = slot.as_ref() else {
             return 0.0;
         };
-        let h = retinue::height(r.rows());
+        let w = retinue::width(r.rows());
         let [left, top, right, bottom] = self.glass();
         let scale = self.dpi_now() as f32 / 96.0;
         let px = |v: f32| (v * scale).round() as i32;
         r.set_accent(self.accent.get());
-        let from = if r.table() { top + 1.0 } else { bottom - 1.0 - h };
-        r.place([
-            px(left + 1.0),
-            px(from),
-            px(right - 1.0),
-            px(bottom - 1.0),
-        ]);
-        h
+        let to = if r.table() { right - 1.0 } else { left + 1.0 + w };
+        r.place([px(left + 1.0), px(top + 1.0), px(to), px(bottom - 1.0)]);
+        w
     }
 
     /// Opens the war table, lays it down, or with None turns it over.
@@ -1220,6 +1221,7 @@ impl Pane {
             lifted: self.lifted.get(),
             close: true,
             zoom: self.zoom.get(),
+            inset: self.inset.get(),
             bar,
             places: self
                 .console
@@ -1281,7 +1283,11 @@ impl Pane {
             }
         }
         if let (true, Some((row, col))) = (self.focused.get(), at) {
-            let rect = glyphs::cell_rect(&cell, row, col, dpi as f32 / 96.0);
+            let scale = dpi as f32 / 96.0;
+            let mut rect = glyphs::cell_rect(&cell, row, col, scale);
+            let shift = (self.inset.get() * scale).round() as i32;
+            rect[0] += shift;
+            rect[2] += shift;
             if self.ime_at.replace(Some(rect)) != Some(rect) {
                 self.place_ime(rect);
             }
@@ -2815,6 +2821,7 @@ impl Pane {
         let cell = self.cell();
         let size = self.console.size();
         let (ox, oy) = glyphs::grid_origin();
+        let ox = ox + self.inset.get();
         let colf = ((x - ox) / cell.w).max(0.0);
         let col = (colf as usize).min(size.cols as usize - 1);
         let side = if colf.fract() < 0.5 && (colf as usize) < size.cols as usize {
@@ -3269,7 +3276,7 @@ impl Pane {
                 self.invalidate();
                 Some(LRESULT(0))
             }
-            retinue::WM_RETINUE_ROWS => {
+            retinue::WM_RETINUE_SHOWN => {
                 if !self.held.get() {
                     self.fit_grid();
                 }

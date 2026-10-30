@@ -7,14 +7,14 @@ is left is below; the research and the design follow it for the why.
 
 ## Left to do
 
-- **Keys into the retinue.** Alt+Down to the first row, arrows between
-  them, Enter to open. Only the mouse opens one now.
+- **Keys into the retinue.** Alt+Down to the first portrait, arrows
+  between them, Enter to open. Only the mouse opens one now.
 - **The count on the tile opens the war table.** Now only Ctrl+Shift+W in
-  the pane or the link in the retinue's heading do.
+  the pane or the glyph atop the retinue's column do.
 - **Hovering a tick** on the war table for its tool and what it was
-  given. A row's hover says only the hireling's summary.
-- **Checked on screen.** The runes' size on the lamp, the strip's columns
-  in a narrow pane, the table with ten tracks.
+  given. A track's hover says only the hireling's summary.
+- **Checked on screen.** The runes' size on the lamp, the portraits in
+  a short pane, the table with ten tracks.
 - `SubagentStart` and `SubagentStop` reach the settings on the next
   install, not from a dev instance, which refuses hook changes. Until
   then the band hears the mod and the tools' `agent_id`.
@@ -105,30 +105,33 @@ rune even when the main turn reports success.
 
 ### 2. On the stage: the retinue and stepping in
 
-A **retinue strip** along the bottom of a session's pane, just above
-the input, one row per hireling, like Claude Code's panel but always
-visible while there is anything to show:
+The **retinue**: party portraits, as Diablo's party frame has them, in
+a column about 44 DIPs wide down the left of a session's glass. The
+pane gives up that width only while there is anything to show. The
+column is the pane's, not the scrollback's, so it stays in sight however
+long the conversation grows. (It began as a strip of rows along the
+bottom, like Claude Code's panel; the human found it unhelpful.)
 
-```
- ᚱ Explore   find hook events in horadric-hooks   Grep        0:42   18k
- ᛟ Plan      design the hirelings view            Read        1:10   31k
- ᚦ general   research Codex subagent UI           ✓ 21 tools  1:46   71k
-```
+A portrait per first level hireling, most in need first: waiting, then
+failed, working, done. In its frame the rune of its kind: carving while
+it works, beating while it waits on a permission. A finished one's frame
+turns gold with a small check until the band lets it go; a failed or
+killed one's cracks, in the error colour. A corner holds the craft of
+the tool it is in, and another `+N` for the hirelings it sent itself,
+which get no portrait of their own. Under the frame a thin track of its
+latest tool calls as ticks in their craft's colour, a one line war
+table. When they do not all fit, a `+N` closes the column. Hover a
+portrait for its kind, task, what it does now, how long it ran and its
+tokens. A glyph atop the column opens the war table.
 
-Sorted by what needs you: waiting first, then failed, working, done.
-Done rows fold into one line after 30 s ("2 done"), failed stay. Nested
-ones indent under their parent (`parent_id`). It takes at most four
-rows and scrolls. A pane header shows `3 hirelings` when the strip is
-folded away.
-
-**Click a row** (or Alt+↓, then arrows) and the pane steps into that
+**Click a portrait** (or Alt+↓, then arrows) and the pane steps into that
 hireling: its transcript, read live from its `.jsonl` and drawn by the
 Folio's renderer, read only. The pane header becomes a breadcrumb,
 `session › Explore: find hook events`, the parent's terminal keeps
 running underneath. **Esc** or a click on the breadcrumb goes back. Stop
 is a button in the breadcrumb, as the tile menu does now.
 
-For a Folio session the same row opens the `Lane` it already has, full
+For a Folio session the same portrait opens the `Lane` it already has, full
 height, instead of reading a file.
 
 A permission prompt from a hireling, in either kind of session, names
@@ -137,7 +140,7 @@ it: `Explore wants to run Bash`.
 ### 3. The war table: the run over time
 
 The view nobody else has. Press Ctrl+Shift+W in a pane (a plain W would
-type into the terminal) or click the link in the retinue's heading, and
+type into the terminal) or click the glyph atop the retinue, and
 the pane turns into a waterfall of the turn, Jaeger style, on one time
 axis:
 
@@ -189,7 +192,7 @@ once their hooks say anything.
 
 1. Data: items 1 to 3 above, and the honest roll up on the tile.
 2. Runes per hireling on the tile, the count, the hover list.
-3. The retinue strip on the stage, from the roster and per agent tools.
+3. The retinue on the stage, from the roster and per agent tools.
 4. Transcript tailing, and stepping into a hireling with the
    breadcrumb. Folio sessions open their lane.
 5. The war table.
@@ -207,8 +210,8 @@ matches Claude Code; 5 is ours.
   Are they hirelings on the parent's tile or tiles of their own? Leaning
   to hirelings, with `teammate_id` to tell them apart.
 - **How far to nest.** A hireling that spawns hirelings: indent in the
-  strip and the war table, but only the first level gets runes on the
-  tile.
+  war table, a `+N` on the parent's portrait, and only the first level
+  gets runes on the tile.
 
 ## Sources
 

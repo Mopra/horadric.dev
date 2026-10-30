@@ -427,7 +427,7 @@ pub(crate) enum Input {
     Sanctuary,
     /// A sanctuary's cross: close the one of the project with this key.
     CloseSky(String),
-    /// A row of a pane's retinue: show the conversation of the hireling
+    /// A portrait in a pane's retinue: show the conversation of the hireling
     /// with the second id, of the session with the first, beside it.
     OpenHireling(String, String),
     /// A hireling's pane's cross or Esc, by its Folio's id.

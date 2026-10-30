@@ -132,6 +132,9 @@ pub struct Header<'a> {
     /// Has the button that zooms it, a square left of the cross, and
     /// whether it is zoomed now.
     pub zoom: Option<bool>,
+    /// How far right of [`grid_origin`] the grid starts, in DIPs: the
+    /// width of the hirelings' column at the glass's left.
+    pub inset: f32,
     /// A browser pane's back, forward and reload and its address, in
     /// place of the name.
     pub bar: Option<Bar<'a>>,
@@ -952,6 +955,7 @@ impl GridTarget {
         fx: &Fx,
     ) -> Result<()> {
         let (ox, oy) = grid_origin();
+        let ox = ox + header.inset;
         let x = |col: usize| ox + col as f32 * cell.w;
         let y = |row: usize| oy + row as f32 * cell.h;
         let rect = |row: usize, col: usize, cells: usize| D2D_RECT_F {
