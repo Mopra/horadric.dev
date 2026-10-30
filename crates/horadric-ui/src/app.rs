@@ -7740,6 +7740,18 @@ impl App {
         env_set.extend(defaults.env(Agent::Claude));
         let mut flags = defaults.flags_for(Agent::Claude, &own, false);
         flags.extend(own.iter().cloned());
+        // Claude Code takes one system prompt, so one the session brought
+        // gets this added to it rather than replaced.
+        let subagents = horadric_core::folio::SUBAGENT_PROMPT;
+        match flags.iter().position(|a| a == "--append-system-prompt") {
+            Some(i) if i + 1 < flags.len() => {
+                flags[i + 1] = format!("{}\n\n{subagents}", flags[i + 1]);
+            }
+            _ => {
+                flags.push("--append-system-prompt".into());
+                flags.push(subagents.into());
+            }
+        }
         let options = horadric_pty::headless::Options {
             args: flags,
             env_set,

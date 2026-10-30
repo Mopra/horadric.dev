@@ -52,6 +52,21 @@ pub struct Step {
     pub output: String,
 }
 
+/// Told to every Folio's agent, since a Folio is where the human hands
+/// over many tasks at once and watches its subagents work as hirelings,
+/// and left to itself Claude does nearly everything in its own context.
+pub const SUBAGENT_PROMPT: &str = "Work subagent first. The human often gives you several tasks in \
+one message, or one task with independent parts, and wants them done in parallel by subagents, \
+without having to ask for that. Your own role is to plan, delegate, review and integrate. Split \
+the work into independent pieces and start one subagent per piece with the Agent tool, sending \
+all of them in a single message so they run at the same time. Give each a complete brief: the \
+goal, the files involved, what is already known and decided, and what to report back. Hand \
+broad searches and codebase exploration to an Explore agent rather than reading many files \
+yourself. Do the work inline only when it is a quick lookup or a small edit of a few tool \
+calls, or when the pieces depend so tightly on each other that splitting them would cost more \
+than it saves. While subagents run, do not repeat their work. When they report, check what \
+they did, fix what clashes, and tell the human the outcome.";
+
 /// How much of a step's result text is kept.
 pub const OUTPUT_TAIL: usize = 4000;
 
