@@ -132,23 +132,50 @@ impl<E: Embed> Keeper<E> {
 
     /// Makes the store hold a chunk for each symbol of `files`, the
     /// project's code now: a file whose hash the store already has is left
-    /// as it is, one that changed gets new chunks (and the old ones stop
-    /// being answers), one that is gone drops out. The vectors come with
-    /// [`Keeper::catch_up`]. Says how many chunks it added.
+    /// as it is, one that changed gets new chunks and its older ones are
+    /// forgotten, one that is gone drops out. A symbol whose text did not
+    /// change keeps its vector; the rest come with [`Keeper::catch_up`].
+    /// Says how many chunks it added.
+    ///
+    /// Every edit made a file's symbols again, so the store was mostly old
+    /// versions of busy files, all held in memory, and the model embedded
+    /// each unchanged symbol anew.
     pub fn sync_code(&mut self, project: &str, files: &[CodeFile], now: u64) -> io::Result<usize> {
         self.store.refresh()?;
-        let have: HashSet<(&str, u64)> = self
-            .store
-            .chunks()
-            .filter(|(_, c)| c.kind == Kind::Code && c.project == project)
+        let hashes: HashMap<&str, u64> = files.iter().map(|f| (f.path.as_str(), f.hash)).collect();
+        let mine = |c: &Chunk| c.kind == Kind::Code && c.project == project;
+        let have: HashSet<(&str, u64)> = (self.store.chunks())
+            .filter(|(_, c)| mine(c))
             .filter_map(|(_, c)| c.files.first().map(|f| (f.path.as_str(), f.hash)))
             .collect();
-        let mut add = Vec::new();
-        for f in files
+        let fresh: Vec<&CodeFile> = files
             .iter()
             .filter(|f| !have.contains(&(f.path.as_str(), f.hash)))
-        {
+            .collect();
+        let changed: HashSet<&str> = fresh.iter().map(|f| f.path.as_str()).collect();
+        // A file that is gone is left alone: an index read half way, or
+        // a branch switched for a moment, would otherwise forget it all.
+        let mut old = Vec::new();
+        let mut before: HashMap<(String, u64), ChunkId> = HashMap::new();
+        for (id, c) in self.store.chunks().filter(|(_, c)| mine(c)) {
+            let Some(f) = c.files.first() else { continue };
+            let Some(&hash) = hashes.get(f.path.as_str()) else {
+                continue;
+            };
+            if f.hash != hash {
+                old.push(id);
+                if changed.contains(f.path.as_str()) {
+                    let text = horadric_core::lore::hash(c.text.as_bytes());
+                    before.entry((f.path.clone(), text)).or_insert(id);
+                }
+            }
+        }
+        let mut add = Vec::new();
+        let mut was = Vec::new();
+        for f in fresh {
             for text in &f.symbols {
+                let key = (f.path.clone(), horadric_core::lore::hash(text.as_bytes()));
+                was.push(before.get(&key).copied());
                 add.push(Chunk {
                     time: now,
                     project: project.to_string(),
@@ -165,13 +192,21 @@ impl<E: Embed> Keeper<E> {
                 });
             }
         }
-        let added = add.len();
-        self.store.add_all(&add, now)?;
+        let ids = self.store.add_all(&add, now)?;
+        let same: Vec<(ChunkId, ChunkId)> = (ids.iter().zip(&was).zip(&add))
+            .filter_map(|((&to, from), c)| {
+                let from = (*from)?;
+                (self.store.chunk(from)?.text == c.text).then_some((from, to))
+            })
+            .collect();
+        // Before forgetting, which lets go of the old vectors.
+        self.store.copy_vectors(&same)?;
+        self.store.hide(&old)?;
         self.code.insert(
             project.to_string(),
             files.iter().map(|f| (f.path.clone(), f.hash)).collect(),
         );
-        Ok(added)
+        Ok(add.len())
     }
 
     pub fn set_model(&mut self, model: E) {
@@ -1347,6 +1382,37 @@ mod tests {
                 hash: 3
             }]
         );
+    }
+
+    #[test]
+    fn an_edit_embeds_only_the_symbols_that_changed_and_forgets_the_old() {
+        let dir = temp("code-edit");
+        let mut k = keeper(&dir);
+        let file = |hash, symbols: &[&str]| CodeFile {
+            path: "src/pets.rs".into(),
+            hash,
+            symbols: symbols.iter().map(|s| s.to_string()).collect(),
+        };
+        let embedded = |k: &Keeper<Topics>| k.model.as_ref().unwrap().embedded.get();
+        let v1 = [file(1, &["fn feed(cat: Cat)", "fn walk(dog: Dog)"])];
+        assert_eq!(k.sync_code("p", &v1, NOW).unwrap(), 2);
+        k.catch_up(10).unwrap();
+        assert_eq!(embedded(&k), 2);
+        let v2 = [file(2, &["fn feed(cat: Cat, fish: Fish)", "fn walk(dog: Dog)"])];
+        assert_eq!(k.sync_code("p", &v2, NOW).unwrap(), 2);
+        assert_eq!(k.catch_up(10).unwrap(), 1);
+        assert_eq!(embedded(&k), 3);
+        let texts: Vec<&str> = k.store().chunks().map(|(_, c)| c.text.as_str()).collect();
+        assert_eq!(texts, ["fn feed(cat: Cat, fish: Fish)", "fn walk(dog: Dog)"]);
+        // The copied vector is the one the model made, and a reader that
+        // opens the store after sees only the new version.
+        let again = Store::open(&dir).unwrap();
+        assert_eq!(again.len(), 2);
+        assert_eq!(again.missing("topics"), Vec::new());
+        // A file that is gone keeps its chunks, it is only not an answer.
+        k.sync_code("p", &[], NOW).unwrap();
+        assert_eq!(k.store().len(), 2);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

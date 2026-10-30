@@ -321,10 +321,30 @@ impl Store {
         };
         let whole = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
         let text = String::from_utf8_lossy(&bytes[..whole]);
-        self.hidden
-            .extend(text.lines().filter_map(|l| ChunkId::parse(l.trim())));
+        let ids: Vec<ChunkId> = text
+            .lines()
+            .filter_map(|l| ChunkId::parse(l.trim()))
+            .collect();
+        self.let_go(&ids);
         self.hidden_read += whole as u64;
         Ok(())
+    }
+
+    /// Hides `ids` here and drops their text and vectors: nothing reads a
+    /// forgotten chunk again, and a project's code, replaced on every
+    /// edit, left most of the store forgotten and still held in memory.
+    fn let_go(&mut self, ids: &[ChunkId]) {
+        for id in ids {
+            if let Some(c) = (self.segments.get_mut(&id.month))
+                .and_then(|seg| seg.chunks.get_mut(id.n as usize))
+            {
+                *c = None;
+            }
+            for model in self.models.values_mut() {
+                model.rows.remove(id);
+            }
+        }
+        self.hidden.extend(ids.iter().copied());
     }
 
     /// Forgets the chunks `ids`: they stay in their segment, since a
@@ -350,7 +370,7 @@ impl Store {
         file.write_all(out.as_bytes())?;
         file.sync_data()?;
         self.hidden_read += out.len() as u64;
-        self.hidden.extend(ids.iter().copied());
+        self.let_go(ids);
         Ok(())
     }
 
@@ -364,6 +384,7 @@ impl Store {
 
     fn read_segment(&mut self, month: Month) -> io::Result<()> {
         let path = self.segment_path(month);
+        let hidden = &self.hidden;
         let seg = self.segments.entry(month).or_default();
         if seg.foreign {
             return Ok(());
@@ -385,7 +406,16 @@ impl Store {
                 seg.read_to += line.len() as u64 + 1;
                 continue;
             }
-            seg.chunks.push(serde_json::from_slice(line).ok());
+            let id = ChunkId {
+                month,
+                n: seg.chunks.len() as u32,
+            };
+            let chunk = if hidden.contains(&id) {
+                None
+            } else {
+                serde_json::from_slice(line).ok()
+            };
+            seg.chunks.push(chunk);
             seg.read_to += line.len() as u64 + 1;
         }
         Ok(())
@@ -467,8 +497,12 @@ impl Store {
         let model = self.models.get_mut(&tag).expect("model was just found");
         for row in bytes.chunks_exact(size) {
             let n = u32::from_le_bytes(row[..4].try_into().expect("four bytes"));
+            let id = ChunkId { month, n };
+            if self.hidden.contains(&id) {
+                continue;
+            }
             let v = row[4..].iter().map(|&b| b as i8).collect();
-            model.rows.insert(ChunkId { month, n }, v);
+            model.rows.insert(id, v);
         }
         let file = model.files.get_mut(&month).expect("file was just added");
         file.read_to = start + (bytes.len() / size * size) as u64;
@@ -585,26 +619,64 @@ impl Store {
         }
         let _lock = Lock::take(&self.dir.join("write.lock"))?;
         self.refresh()?;
-        let path = self.vector_path(id.month, tag);
-        if self.unreadable.contains(&(id.month, tag.to_string())) {
+        self.append(tag, id.month, v.len(), vec![(id.n, quantize(v))])
+    }
+
+    /// Gives each `to` the vectors every model made of its `from`, a chunk
+    /// with the same text: the model would make the same numbers again.
+    /// A `from` without a vector is left for [`Store::catch_up`].
+    pub fn copy_vectors(&mut self, pairs: &[(ChunkId, ChunkId)]) -> io::Result<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let _lock = Lock::take(&self.dir.join("write.lock"))?;
+        self.refresh()?;
+        let tags: Vec<String> = self.models.keys().cloned().collect();
+        for tag in tags {
+            let model = &self.models[&tag];
+            let dims = model.dims;
+            let mut by_month: BTreeMap<Month, Vec<(u32, Vec<i8>)>> = BTreeMap::new();
+            for (from, to) in pairs {
+                if let Some(row) = model.rows.get(from) {
+                    by_month.entry(to.month).or_default().push((to.n, row.clone()));
+                }
+            }
+            for (month, rows) in by_month {
+                self.append(&tag, month, dims, rows)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Appends `rows` of `dims` numbers to `tag`'s file for `month`, under
+    /// the write lock, after a refresh.
+    fn append(
+        &mut self,
+        tag: &str,
+        month: Month,
+        dims: usize,
+        rows: Vec<(u32, Vec<i8>)>,
+    ) -> io::Result<()> {
+        let path = self.vector_path(month, tag);
+        if self.unreadable.contains(&(month, tag.to_string())) {
             return Err(newer(&path));
         }
         let model = self.models.entry(tag.to_string()).or_insert_with(|| Model {
-            dims: v.len(),
+            dims,
             rows: HashMap::new(),
             files: BTreeMap::new(),
         });
         if model.dims == 0 {
             // Seen only in files a newer Horadric wrote.
-            model.dims = v.len();
+            model.dims = dims;
         }
-        if model.dims != v.len() {
+        if model.dims != dims {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
-                format!("{tag} has {} numbers, not {}", model.dims, v.len()),
+                format!("{tag} has {} numbers, not {dims}", model.dims),
             ));
         }
-        let file_state = model.files.entry(id.month).or_default();
+        let file_state = model.files.entry(month).or_default();
         if file_state.foreign {
             return Err(newer(&path));
         }
@@ -619,20 +691,23 @@ impl Store {
             file.set_len(0)?;
             out.extend_from_slice(VECTOR_MAGIC);
             out.push(VECTOR_VERSION);
-            out.extend_from_slice(&(v.len() as u16).to_le_bytes());
+            out.extend_from_slice(&(dims as u16).to_le_bytes());
             out.extend_from_slice(&(tag.len() as u16).to_le_bytes());
             out.extend_from_slice(tag.as_bytes());
         } else {
             file.set_len(file_state.read_to)?;
         }
         file.seek(SeekFrom::End(0))?;
-        let q = quantize(v);
-        out.extend_from_slice(&id.n.to_le_bytes());
-        out.extend(q.iter().map(|&x| x as u8));
+        for (n, q) in &rows {
+            out.extend_from_slice(&n.to_le_bytes());
+            out.extend(q.iter().map(|&x| x as u8));
+        }
         file.write_all(&out)?;
         file.sync_data()?;
         file_state.read_to += out.len() as u64;
-        model.rows.insert(id, q);
+        for (n, q) in rows {
+            model.rows.insert(ChunkId { month, n }, q);
+        }
         Ok(())
     }
 
