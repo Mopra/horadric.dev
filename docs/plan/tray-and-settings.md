@@ -1,7 +1,8 @@
 # The tray menu and Settings
 
-Steps 1 to 4 landed 2026-10-30; search, a resizable window and the DPI
-check are left. Where the build differs from the plan below: the tray
+Steps 1 to 5 landed 2026-10-30, with the resizable, scrolling window.
+Left: the human's look at 150% and 200% scaling and across two
+monitors. Where the build differs from the plan below: the tray
 keeps Accounts as a submenu (switching account is an action, done
 often), the machines submenu is called Other PCs, Discord sits in
 General and About holds only the version and updates. Proposed
