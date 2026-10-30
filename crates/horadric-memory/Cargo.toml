@@ -11,9 +11,13 @@ candle-nn = "0.11"
 candle-transformers = "0.11"
 horadric-core = { path = "../horadric-core" }
 horadric-hooks = { path = "../horadric-hooks" }
+rayon = "1.12"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_System_Threading"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows = { version = "0.62", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }

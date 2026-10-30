@@ -384,22 +384,24 @@ fn base(path: &str) -> &str {
 /// The words of `s` worth matching on: lowercase, split on anything not
 /// a letter, digit or underscore, without the short and the common.
 pub fn words(s: &str) -> Vec<String> {
+    // A set beside the list: recall runs this over every candidate, and
+    // a long transcript made the list's own lookup quadratic.
+    let mut seen = std::collections::HashSet::new();
+    s.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .map(str::to_lowercase)
+        .filter(|w| worth(w) && seen.insert(w.clone()))
+        .collect()
+}
+
+/// Whether a lowercase word is one [`words`] keeps.
+pub fn worth(w: &str) -> bool {
     const COMMON: &[&str] = &[
         "the", "and", "for", "are", "was", "with", "that", "this", "from", "into", "not", "but",
         "its", "has", "have", "does", "how", "what", "where", "which", "who", "why", "when", "can",
         "use", "used", "you", "all", "any", "one", "out", "get", "set", "there", "here", "then",
         "than", "them", "they", "will", "would", "should", "about",
     ];
-    let mut out: Vec<String> = Vec::new();
-    for w in s
-        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .map(str::to_lowercase)
-    {
-        if w.chars().count() >= 3 && !COMMON.contains(&w.as_str()) && !out.contains(&w) {
-            out.push(w);
-        }
-    }
-    out
+    w.chars().count() >= 3 && !COMMON.contains(&w)
 }
 
 /// FNV-1a: tiny, and the same on every run and build, unlike std's hasher.

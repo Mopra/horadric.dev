@@ -22,6 +22,7 @@ pub mod store;
 pub mod transcripts;
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use candle_core::{DType, Device, Tensor, D};
 use candle_nn::VarBuilder;
@@ -125,7 +126,40 @@ impl Embedder {
     }
 }
 
+/// The threads the embedding runs on. Left alone, candle's matrix work
+/// runs on rayon's global pool, a thread per logical core, and memory
+/// embeds whenever sessions write, so it kept a core or more busy beside
+/// them. Two threads below normal priority: the agents and the window
+/// come first. Whisper keeps the global pool, since a human waits on it.
+fn pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .thread_name(|i| format!("horadric-embed-{i}"))
+            .start_handler(|_| below_normal())
+            .build()
+            .expect("the embedding pool starts")
+    })
+}
+
+#[cfg(windows)]
+fn below_normal() {
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+    };
+    // SAFETY: the pseudo handle of the calling thread needs no closing.
+    let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) };
+}
+
+#[cfg(not(windows))]
+fn below_normal() {}
+
 fn mean_pooled(model: &BertModel, ids: &[u32]) -> candle_core::Result<Vec<f32>> {
+    pool().install(|| pooled_here(model, ids))
+}
+
+fn pooled_here(model: &BertModel, ids: &[u32]) -> candle_core::Result<Vec<f32>> {
     let dev = Device::Cpu;
     let input = Tensor::new(ids, &dev)?.unsqueeze(0)?;
     let types = input.zeros_like()?;

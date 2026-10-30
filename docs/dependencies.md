@@ -13,7 +13,9 @@ index (parsing languages is not the project either, and it finds the
 calls a regex outline misses), and in `horadric-memory` `candle-core`,
 `candle-nn` and `candle-transformers` with `tokenizers` (its `onig`
 feature only) to run the embedding model that finds memory by meaning, and Whisper
-for dictation (decided 2026-10-30, no new crate):
+for dictation (decided 2026-10-30, no new crate), with `rayon`, which
+candle already runs on, named so the embedding gets a small pool of its
+own at low priority instead of a thread per core (decided 2026-10-30):
 Hugging Face's pure Rust ML crates, no DLL to ship and no service that
 must be running, and the tokenizer is the one the models were trained
 with (writing either is not the project), and in `horadric-link`, for

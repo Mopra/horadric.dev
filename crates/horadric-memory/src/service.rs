@@ -60,8 +60,9 @@ const UNASKED_BUDGET: Duration = Duration::from_millis(500);
 const UNASKED_WAIT: Duration = Duration::from_millis(1500);
 
 /// How many chunks the background embeds between looks for a recall,
-/// and how long it rests after: the model takes every core while it runs,
-/// and sessions share them.
+/// and how long it rests after: the model's two threads are below normal
+/// priority, but a long catch up still warms the machine the sessions
+/// run on.
 const STEP: usize = 2;
 const REST: Duration = Duration::from_millis(100);
 

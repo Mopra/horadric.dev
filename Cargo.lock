@@ -991,6 +991,7 @@ dependencies = [
  "candle-transformers",
  "horadric-core",
  "horadric-hooks",
+ "rayon",
  "serde",
  "serde_json",
  "tokenizers",

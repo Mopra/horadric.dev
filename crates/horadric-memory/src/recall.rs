@@ -12,7 +12,7 @@
 //!
 //! Nothing here reads a file or runs the model, so all of it is tested.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use horadric_core::lore::{self, Note, Past, Piece};
@@ -229,17 +229,41 @@ pub struct Bm25 {
 
 impl Bm25 {
     pub fn new<'a>(texts: impl IntoIterator<Item = &'a str>) -> Bm25 {
+        Bm25::counting(texts, |_| true)
+    }
+
+    /// The same, counting only the words of `query`: all [`Bm25::rank`]
+    /// of it reads. Recall builds one per question over every candidate,
+    /// so the term counts of words nobody asked for are waste.
+    pub fn asked<'a>(texts: impl IntoIterator<Item = &'a str>, query: &str) -> Bm25 {
+        let asked: HashSet<String> = lore::words(query).into_iter().collect();
+        Bm25::counting(texts, |w| asked.contains(w))
+    }
+
+    fn counting<'a>(
+        texts: impl IntoIterator<Item = &'a str>,
+        counted: impl Fn(&str) -> bool,
+    ) -> Bm25 {
+        let mut lens = Vec::new();
         let docs: Vec<HashMap<String, f64>> = texts
             .into_iter()
             .map(|t| {
                 let mut tf = HashMap::new();
-                for w in all_words(t) {
-                    *tf.entry(w).or_insert(0.0) += 1.0;
+                let mut len = 0.0;
+                for w in t
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .map(str::to_lowercase)
+                    .filter(|w| lore::worth(w))
+                {
+                    len += 1.0;
+                    if counted(&w) {
+                        *tf.entry(w).or_insert(0.0) += 1.0;
+                    }
                 }
+                lens.push(len);
                 tf
             })
             .collect();
-        let lens: Vec<f64> = docs.iter().map(|d| d.values().sum()).collect();
         let avg = lens.iter().sum::<f64>() / lens.len().max(1) as f64;
         let mut df: HashMap<String, f64> = HashMap::new();
         for d in &docs {
@@ -282,15 +306,6 @@ impl Bm25 {
         s.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
         s.into_iter().map(|(_, i)| i).collect()
     }
-}
-
-/// Like [`lore::words`], but every time a word occurs, for term counts.
-fn all_words(s: &str) -> Vec<String> {
-    let keep = lore::words(s);
-    s.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .map(str::to_lowercase)
-        .filter(|w| keep.contains(w))
-        .collect()
 }
 
 /// Reciprocal rank fusion: each list gives the items in it `1 / (K +
@@ -365,7 +380,7 @@ pub fn rank(
     let mut lists: Vec<Vec<usize>> = Vec::new();
     if has_words {
         let texts: Vec<String> = cands.iter().map(Candidate::words).collect();
-        lists.push(Bm25::new(texts.iter().map(String::as_str)).rank(&ask.query));
+        lists.push(Bm25::asked(texts.iter().map(String::as_str), &ask.query).rank(&ask.query));
         lists.push(meaning.to_vec());
     }
     if !ask.files.is_empty() {
@@ -669,6 +684,20 @@ mod tests {
         assert_eq!(b.rank("tiles"), vec![2]);
         assert!(b.rank("absent").is_empty());
         assert!(Bm25::new([]).rank("x").is_empty());
+    }
+
+    #[test]
+    fn bm25_of_the_asked_words_ranks_as_the_whole() {
+        let texts = [
+            "the reload rolls back a failed build",
+            "reload reload reload",
+            "a long text about tiles and clusters and windows and the stage and reload",
+            "Tiles, tiles and the RELOAD",
+            "nothing here",
+        ];
+        for q in ["rolls reload", "tiles", "stage windows", "absent", ""] {
+            assert_eq!(Bm25::asked(texts, q).rank(q), Bm25::new(texts).rank(q), "{q}");
+        }
     }
 
     #[test]
