@@ -50,30 +50,32 @@ pub struct Layer {
 
 /// The depths, farthest first, the order they are drawn in.
 pub const LAYERS: [Layer; 3] = [
-    // A field of specks, almost lost in the dark.
+    // A field of specks sunk into the background. At rest they still
+    // have to read on a bright screen in daylight, so heat adds less on
+    // top: more of them and a faster drift tell a turn apart.
     Layer {
         count: 44,
         busy: 16,
         size: (4.0, 7.0),
         speed: (2.0, 4.5),
-        alpha: (0.07, 0.13),
-        burn: 1.4,
+        alpha: (0.16, 0.26),
+        burn: 0.7,
         warp: 0.6,
         sway: 4.0,
-        sunk: 0.45,
-        stroke: 0.16,
+        sunk: 0.3,
+        stroke: 0.18,
     },
     Layer {
         count: 16,
         busy: 12,
         size: (9.0, 18.0),
         speed: (7.0, 16.0),
-        alpha: (0.07, 0.13),
-        burn: 2.2,
+        alpha: (0.18, 0.3),
+        burn: 0.9,
         warp: 1.5,
         sway: 14.0,
-        sunk: 0.12,
-        stroke: 0.1,
+        sunk: 0.1,
+        stroke: 0.12,
     },
     // A few drifting past close by, big and faint so they never fight
     // the words.
@@ -82,12 +84,12 @@ pub const LAYERS: [Layer; 3] = [
         busy: 3,
         size: (30.0, 44.0),
         speed: (24.0, 36.0),
-        alpha: (0.03, 0.055),
-        burn: 1.3,
+        alpha: (0.08, 0.13),
+        burn: 0.8,
         warp: 3.5,
         sway: 26.0,
         sunk: 0.0,
-        stroke: 0.06,
+        stroke: 0.07,
     },
 ];
 
