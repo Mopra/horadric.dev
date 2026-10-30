@@ -29,7 +29,6 @@ pub mod fleet;
 pub mod folio;
 pub mod glow;
 pub mod google;
-pub mod guard;
 pub mod handing;
 pub mod handoff;
 pub mod heavy;

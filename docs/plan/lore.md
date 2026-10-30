@@ -5,15 +5,12 @@ the shorter quest log, the window measures and `horadric heavy`) is
 built. What was decided and measured is in the lore itself;
 ask `lore_recall`. This page holds only what is still not done.
 
+The read guard (`horadric guard`) was removed on 2026-10-30: the lore's
+wording alone moved Read's share of tool results from 71 % to about 7 %
+over 125 quests, so it had no job.
+
 ## Not done
 
-- **The read guard is built but off.** `horadric guard` turns down whole
-  reads of long files with the outline, and rewrites plain builds to run
-  through `heavy`. In the one measured run it never fired. Turn it on only if
-  `quest spend` shows the lore's wording (outline first, read ranges,
-  send many-file searches to a subagent) did not move Read's share of
-  results (71 %) or the Agent share (median 0 %) after about thirty
-  quests. That check has not been made.
 - **Compaction at the right moment.** A quest that ends at a 180k window
   could go on from a 40k summary after its exploration. Whether Horadric
   can ask Claude Code to compact then (after the pack is read, before the

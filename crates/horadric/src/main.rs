@@ -22,7 +22,6 @@ mod context;
 #[cfg(windows)]
 mod google;
 #[cfg(windows)]
-mod guard;
 #[cfg(windows)]
 mod headless_debug;
 #[cfg(windows)]
@@ -106,8 +105,6 @@ Usage:
                                stdout, as `ssh <host> horadric node --stdio` does
   horadric heavy -- COMMAND...    Run a test suite or build once no other session on this
                                machine runs one; alone, say who runs one now
-  horadric guard [read|shell]    The PreToolUse hook that turns whole reads of long files
-                               into outlines and runs builds and tests through heavy
   horadric sanctuary             Lay out this project's Arcane Sanctuary graph from where
                                it was left, keep it, and say how large it is
   horadric sky                   Chart every known project into Tristram's sky, each a
@@ -197,7 +194,6 @@ fn main() -> ExitCode {
         #[cfg(windows)]
         Some("headless-host-debug") => headless_host_debug::run(&args[1..]),
         #[cfg(windows)]
-        Some("guard") => guard::run(&args[1..]),
         #[cfg(windows)]
         Some("google") => google::run(&args[1..]),
         // `task` is how sessions started before the rename report back.
