@@ -84,7 +84,7 @@ const TOO_BIG: &str = "That image is too big to send whole (the most is 3.75 MB)
 const HISTORY_ENTRY_MAX: usize = 20_000;
 
 const PLACEHOLDER: &str = "Message Claude";
-const PLACEHOLDER_BUSY: &str = "Claude is working. Enter queues, Esc stops it.";
+const PLACEHOLDER_BUSY: &str = "Claude is working. Enter tells it now, Esc stops it.";
 const PLACEHOLDER_ENDED: &str = "This session has ended.";
 
 /// What a click on the composer does.
@@ -116,8 +116,8 @@ struct Thumb {
     pixels: Vec<u8>,
 }
 
-/// A prompt sent while Claude works, held here until the turn ends so it
-/// can still be taken back.
+/// A prompt held here until the turn ends, so it can still be taken back:
+/// `/effort` while Claude works, or what a reload kept.
 struct Waiting {
     text: String,
     images: Vec<Attached>,
@@ -389,7 +389,26 @@ pub(super) fn tend(id: &str, chat: &mut Chat) {
     // A replay's turns ended long ago: nothing is sent for them.
     if !chat.live || chat.loading.is_some() {
         chat.input.busy_was = chat.folio.busy;
+        // Taken back when it happened, and kept in the draft since.
+        chat.folio.dropped.clear();
         return;
+    }
+    // Stopped before the CLI took them up: what was typed comes back.
+    if !chat.folio.dropped.is_empty() {
+        for q in std::mem::take(&mut chat.folio.dropped) {
+            let images = (q.images.into_iter())
+                .map(|data| Attached {
+                    data,
+                    thumb: None,
+                    path: None,
+                })
+                .collect();
+            chat.input.queue.push(Waiting {
+                text: q.text,
+                images,
+            });
+        }
+        chat.input.fold_queue();
     }
     // Once per claude.exe: a reattach's replay says whether it went.
     if chat.live && !chat.folio.initialized {
@@ -450,8 +469,9 @@ fn deliver(chat: &mut Chat, text: &str, images: &[ImageData]) {
     chat.note_busy();
 }
 
-/// Sends what the composer holds. While Claude works it waits for the
-/// turn's end, or with `now` cuts in.
+/// Sends what the composer holds. While Claude works it goes to the CLI
+/// at once, which folds it into the turn at its next step, or with `now`
+/// stops the turn for it.
 pub(super) fn send(chat: &mut Chat, now: bool) {
     // While the history loads, a prompt would land above it.
     if chat.ended || chat.to_terminal || chat.hosted.is_none() || chat.loading.is_some() {
@@ -474,16 +494,15 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
     chat.input.menu = None;
     chat.input.notice = None;
     chat.input.save();
+    let data: Vec<ImageData> = images.into_iter().map(|a| a.data).collect();
     if !chat.folio.busy {
-        let data: Vec<ImageData> = images.into_iter().map(|a| a.data).collect();
         deliver(chat, &text, &data);
-    } else if now && images.is_empty() {
-        let line = chat.folio.queue_prompt(&text, Priority::Now);
+    } else {
+        // Held back until the turn's end, a correction would come too late.
+        let priority = if now { Priority::Now } else { Priority::Next };
+        let line = chat.folio.queue_prompt(&text, &data, priority);
         write(chat, &line);
         chat.follow = true;
-    } else {
-        chat.input.queue.push(Waiting { text, images });
-        chat.input.changed();
     }
 }
 

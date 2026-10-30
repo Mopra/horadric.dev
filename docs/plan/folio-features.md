@@ -23,7 +23,7 @@ means a message the SDK names but our fixtures have not confirmed.
 - A10 Composer basics: multi line, Up/Down history, image paste, file drop, big paste folded.
 - A11 Slash menu on `/`: commands, skills, agents from init.
 - A12 `@` file completion.
-- A13 Queue and steer: Enter while busy queues, Ctrl+Enter sends now.
+- A13 Steer: Enter while busy goes to the running turn at its next step, Ctrl+Enter stops the turn for it.
 - A14 Todo checklist above the composer.
 - A15 Context meter, compaction marker, `/clear` reset.
 - A16 Subagent lanes under the step that started them.

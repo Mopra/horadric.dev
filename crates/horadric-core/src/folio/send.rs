@@ -41,9 +41,10 @@ pub fn image_type(bytes: &[u8]) -> Option<&'static str> {
 /// treats it as `Next`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
-    /// Steers the turn running now, taken in at its next step.
+    /// Stops the turn running now and starts one with this prompt.
     Now,
-    /// Waits for the turn running now to end.
+    /// Steers the turn running now: the CLI folds it in after the next tool
+    /// step, or starts a turn with it if that turn ends with no more steps.
     Next,
     /// After everything else queued.
     Later,
@@ -82,8 +83,13 @@ pub fn prompt_line(text: &str) -> String {
 
 /// A prompt with images, the images first as the terminal sends them.
 pub fn prompt_line_with_images(text: &str, images: &[ImageData]) -> String {
+    user_line(content_of(text, images), None, None)
+}
+
+/// A prompt's content: plain text, or blocks when it has images.
+fn content_of(text: &str, images: &[ImageData]) -> Value {
     if images.is_empty() {
-        return prompt_line(text);
+        return json!(text);
     }
     let mut content: Vec<Value> = images
         .iter()
@@ -97,13 +103,18 @@ pub fn prompt_line_with_images(text: &str, images: &[ImageData]) -> String {
     if !text.is_empty() {
         content.push(json!({"type": "text", "text": text}));
     }
-    user_line(Value::Array(content), None, None)
+    Value::Array(content)
 }
 
 /// A prompt sent while a turn runs, with the uuid the Folio knows it by,
 /// so its pending block can be matched when the CLI takes it up.
-pub fn queued_prompt_line(text: &str, uuid: &str, priority: Priority) -> String {
-    user_line(json!(text), Some(uuid), Some(priority))
+pub fn queued_prompt_line(
+    text: &str,
+    images: &[ImageData],
+    uuid: &str,
+    priority: Priority,
+) -> String {
+    user_line(content_of(text, images), Some(uuid), Some(priority))
 }
 
 /// A `control_request` of `subtype` with `fields` beside it.
@@ -162,7 +173,7 @@ mod tests {
 
     #[test]
     fn a_queued_prompt_carries_its_uuid_and_priority() {
-        let v: Value = serde_json::from_str(&queued_prompt_line("x", "u1", Priority::Now)).unwrap();
+        let v: Value = serde_json::from_str(&queued_prompt_line("x", &[], "u1", Priority::Now)).unwrap();
         assert_eq!(v["uuid"], "u1");
         assert_eq!(v["priority"], "now");
     }

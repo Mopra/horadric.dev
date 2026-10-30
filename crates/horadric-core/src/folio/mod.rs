@@ -193,6 +193,7 @@ pub struct QueuedPrompt {
     /// The uuid it was sent with; the CLI names it in `command_lifecycle`.
     pub uuid: String,
     pub text: String,
+    pub images: Vec<ImageData>,
     pub priority: Priority,
 }
 
@@ -285,6 +286,9 @@ pub struct Folio {
     pub status: Option<String>,
     /// Prompts sent while busy that have not started yet, oldest first.
     pub queued: Vec<QueuedPrompt>,
+    /// Prompts the CLI dropped unstarted when the turn was stopped, for the
+    /// composer to take back so nothing typed is lost.
+    pub dropped: Vec<QueuedPrompt>,
     /// How many blocks came from a transcript, before this process's own.
     pub history: usize,
     /// The background tasks alive now (shells, monitors, agents), as the
@@ -453,18 +457,19 @@ impl Folio {
 
     /// The human sent a prompt, maybe while Claude works. Returns the line
     /// to write. While busy it waits in [`Folio::queued`] until the CLI
-    /// starts it: [`Priority::Next`] after the turn running now,
-    /// [`Priority::Now`] cutting that turn short (it ends Stopped).
-    pub fn queue_prompt(&mut self, text: &str, priority: Priority) -> String {
+    /// takes it up: [`Priority::Next`] folded into the turn running now at
+    /// its next step, [`Priority::Now`] cutting that turn short (it ends
+    /// Stopped).
+    pub fn queue_prompt(&mut self, text: &str, images: &[ImageData], priority: Priority) -> String {
         if !self.busy {
-            self.push_prompt(text);
-            return prompt_line(text);
+            return self.push_prompt_with_images(text, images);
         }
         let uuid = self.next_uuid();
-        let line = queued_prompt_line(text, &uuid, priority);
+        let line = queued_prompt_line(text, images, &uuid, priority);
         self.queued.push(QueuedPrompt {
             uuid,
             text: text.to_string(),
+            images: images.to_vec(),
             priority,
         });
         line
@@ -582,6 +587,7 @@ impl Folio {
             self.queued.push(QueuedPrompt {
                 uuid: uuid.to_string(),
                 text,
+                images,
                 priority,
             });
             return true;
@@ -1057,7 +1063,7 @@ impl Folio {
             return false;
         };
         let q = self.queued.remove(i);
-        self.push_prompt(&q.text);
+        self.push_prompt_with_images(&q.text, &q.images);
         true
     }
 
@@ -1069,7 +1075,11 @@ impl Folio {
         if let Some(still) = r["response"]["still_queued"].as_array() {
             let still = serde_json::to_string(still).unwrap_or_default();
             let before = self.queued.len();
-            self.queued.retain(|q| still.contains(&q.uuid));
+            let (kept, dropped) = std::mem::take(&mut self.queued)
+                .into_iter()
+                .partition(|q| still.contains(&q.uuid));
+            self.queued = kept;
+            self.dropped.extend::<Vec<_>>(dropped);
             if self.queued.len() != before && self.queued.is_empty() && self.turn_over() {
                 self.busy = false;
             }
@@ -1583,7 +1593,7 @@ impl Folio {
         // when the turn ends.
         if !self.queued.is_empty() && !self.info.has_capability("msg_lifecycle_v1") {
             let q = self.queued.remove(0);
-            self.push_prompt(&q.text);
+            self.push_prompt_with_images(&q.text, &q.images);
         }
         // The CLI sends the result before it starts what waits, so idle
         // here would let a local queue or a hand over slip in ahead of it.
@@ -1597,7 +1607,7 @@ impl Folio {
     /// turn left open is over. Returns whether anything changed.
     pub fn end(&mut self) -> bool {
         let was = self.busy || !self.queued.is_empty();
-        self.queued.clear();
+        self.dropped.append(&mut self.queued);
         self.settle_turn() || was
     }
 
@@ -2901,7 +2911,7 @@ mod tests {
         for line in stream.lines() {
             let mut v: Value = serde_json::from_str(line).unwrap();
             if uuid.is_none() && v["event"]["delta"]["type"] == "text_delta" {
-                let sent = f.queue_prompt("Reply with exactly: queued", priority);
+                let sent = f.queue_prompt("Reply with exactly: queued", &[], priority);
                 let l: Value = serde_json::from_str(&sent).unwrap();
                 let want = if priority == Priority::Now {
                     "now"
@@ -2992,6 +3002,34 @@ mod tests {
         assert!(f.busy && f.queued.len() == 1);
         f.feed(&answer(serde_json::json!([])));
         assert!(!f.busy && f.queued.is_empty());
+        assert_eq!(f.dropped[0].text, "Reply with exactly: queued");
+    }
+
+    #[test]
+    fn a_prompt_sent_next_is_folded_into_the_turn_running() {
+        let mut f = Folio::new();
+        f.push_prompt("Look around");
+        f.feed(r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#);
+        let sent: Value =
+            serde_json::from_str(&f.queue_prompt("Also check docs", &[], Priority::Next)).unwrap();
+        assert_eq!(sent["priority"], "next");
+        let uuid = sent["uuid"].as_str().unwrap().to_string();
+        assert_eq!(f.queued.len(), 1);
+        f.feed(r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"a"}]}}"#);
+        f.feed(&serde_json::json!({"type": "command_lifecycle", "command_uuid": uuid, "state": "started"}).to_string());
+        assert!(f.queued.is_empty() && f.busy);
+        f.feed(r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"Docs too"}]}}"#);
+        f.feed(r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":5,"total_cost_usd":0.1}"#);
+        let order: Vec<&str> = (f.blocks.iter())
+            .filter_map(|b| match b {
+                Block::Prompt(p) => Some(p.as_str()),
+                Block::Footer { .. } => Some("footer"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(order, ["Look around", "Also check docs", "footer"]);
+        assert_eq!(replies(&f).last(), Some(&"Docs too"));
+        assert!(!f.busy);
     }
 
     #[test]
@@ -3006,7 +3044,7 @@ mod tests {
     #[test]
     fn a_prompt_sent_while_idle_is_a_plain_prompt() {
         let mut f = Folio::new();
-        let v: Value = serde_json::from_str(&f.queue_prompt("hi", Priority::Now)).unwrap();
+        let v: Value = serde_json::from_str(&f.queue_prompt("hi", &[], Priority::Now)).unwrap();
         assert!(v.get("priority").is_none());
         assert!(f.busy && f.queued.is_empty());
     }

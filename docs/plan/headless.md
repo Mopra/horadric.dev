@@ -83,9 +83,10 @@ tests against them.
   `/compact`, `/clear`, `/model sonnet`, `/effort`. Pickers and
   `/login`, `/theme` do not exist headless.
 - **One process, many turns.** Stdin stays open for the session;
-  closing it ends it. A prompt sent mid turn is queued (`next`), or
-  steers at once (`now`). Stdout is read on its own thread so the pipe
-  never fills; lines can be large (tool results, images), so no 1 MB
+  closing it ends it. A prompt sent mid turn with `next` is folded
+  into the running turn after its next tool step (or starts the next
+  turn if none comes); `now` stops the turn and starts one with it.
+  Stdout is read on its own thread so the pipe never fills; lines can be large (tool results, images), so no 1 MB
   cap.
 
 The full research brief, with every source, is in the lore (note left
@@ -135,7 +136,8 @@ The conversation as pages, not a log.
 - **Each turn's footer:** time, cost, tokens, context left.
 - **The composer** at the bottom: multi line, slash commands and skills
   from init in a list as you type `/`, `@` for files, images pasted,
-  Esc interrupts, Enter while it works queues, Ctrl+Enter steers now.
+  Esc interrupts, Enter while it works steers (sent at once, `next`),
+  Ctrl+Enter stops the turn for it (`now`).
   Model and permission mode as controls on it, sent as control requests.
 
 The rune ring, the burning letters and the rest of the glass's light
