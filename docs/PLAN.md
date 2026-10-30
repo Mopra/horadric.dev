@@ -68,6 +68,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Dictation](plan/dictation.md): Ctrl+Space dictates with Whisper on the machine, the words shown live and a microphone picked in Settings; what is left: a bigger or faster model, cleanup, a personal dictionary, outside Horadric.
 - [Ghostty's terminal core](plan/ghostty.md): move the grid from `alacritty_terminal` to libghostty, after a trial.
 - [The Forge](plan/the-forge.md): files worked on with Claude beside the session (decks, artefacts, markdown, images), pinned, edited by hand, versioned and exported. Proposed.
+- [The hirelings](plan/hirelings.md): subagents as runes on the tile, a retinue strip on the stage to step into one live, and the war table, a waterfall of the run over time. Proposed.
 - [The tray menu and Settings](plan/tray-and-settings.md): a short grouped tray menu, and Settings as a resizable window of described cards with search. Proposed.
 
 ## Loose ends
