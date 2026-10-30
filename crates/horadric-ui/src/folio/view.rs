@@ -6,13 +6,17 @@ use std::ffi::c_void;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use windows::core::{w, Result, PCWSTR};
+use windows::core::{w, Interface, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_GRADIENT_STOP, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+};
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1SolidColorBrush, ID2D1StrokeStyle,
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
+    ID2D1BitmapRenderTarget, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1RenderTarget,
+    ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_CAP_STYLE_ROUND,
+    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_ELLIPSE, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT,
     D2D1_STROKE_STYLE_PROPERTIES,
 };
@@ -24,8 +28,9 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Gdi::{
-    CreateRoundRectRgn, InvalidateRect, ScreenToClient, SetWindowRgn, ValidateRect,
+    CreateRoundRectRgn, GetUpdateRect, InvalidateRect, ScreenToClient, SetWindowRgn, ValidateRect,
 };
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -140,6 +145,7 @@ fn make(key: &str, shared: &Rc<Shared>, parent: HWND, bar: bool) -> Option<HWND>
         track: Cell::new(None),
         grab: Cell::new(None),
         bar_lit: Cell::new(false),
+        dots: Cell::new(None),
     });
     let hwnd = unsafe {
         let Ok(instance) = GetModuleHandleW(None) else {
@@ -317,7 +323,13 @@ pub(super) enum Hit {
 }
 
 pub(super) struct Gfx {
-    pub(super) rt: ID2D1HwndRenderTarget,
+    pub(super) win: ID2D1HwndRenderTarget,
+    /// What the helpers draw on: the kept layer while the conversation is
+    /// drawn, the window while a frame is put together.
+    pub(super) rt: ID2D1RenderTarget,
+    /// The conversation as last drawn (see [`View::draw`]), with the
+    /// pixel size and DPI it was made for.
+    layer: Option<(ID2D1BitmapRenderTarget, (u32, u32), u32)>,
     /// The window's DPI the target draws at. Moving to another monitor
     /// changes the window's, and the target is told.
     pub(super) dpi: u32,
@@ -366,6 +378,10 @@ pub(super) struct View {
     pub(super) grab: Cell<Option<f32>>,
     /// The mouse is over the scroll bar.
     pub(super) bar_lit: Cell<bool>,
+    /// Where the dots that pulse while Claude works go, and the area they
+    /// are clipped to: they move on every frame, so they are not in the
+    /// kept layer.
+    pub(super) dots: Cell<Option<(Vector2, Rect)>>,
 }
 
 pub(super) fn view_of(key: &str) -> Option<&'static View> {
@@ -452,7 +468,8 @@ impl Gfx {
         let mut r = RECT::default();
         let _ = GetClientRect(hwnd, &mut r);
         let dpi = dpi(hwnd);
-        let rt = render::hwnd_target(gpu, hwnd, r.right as u32, r.bottom as u32, dpi, false)?;
+        let win = render::hwnd_target(gpu, hwnd, r.right as u32, r.bottom as u32, dpi, false)?;
+        let rt: ID2D1RenderTarget = win.cast()?;
         let brush = rt.CreateSolidColorBrush(&color(theme::palette().term_fg), None)?;
         let accent = theme::accent(key);
         let stops = |a: Color, b: Color| {
@@ -499,7 +516,9 @@ impl Gfx {
         let big = text_format(gpu, FONT, 20.0, semi, false, true)?;
         big.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         Ok(Gfx {
+            win,
             rt,
+            layer: None,
             dpi,
             brush,
             shade,
@@ -515,6 +534,38 @@ impl Gfx {
             icon,
             big,
         })
+    }
+
+    /// The layer the conversation is drawn into, made again when the
+    /// window's size or DPI changed.
+    unsafe fn layer(&mut self, gpu: &Gpu) -> Result<ID2D1BitmapRenderTarget> {
+        if let Some(l) = self.kept() {
+            return Ok(l.clone());
+        }
+        let px = self.win.GetPixelSize();
+        let format = D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        };
+        let l = self.win.CreateCompatibleRenderTarget(
+            None,
+            None,
+            Some(&format),
+            D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+        )?;
+        l.SetTextRenderingParams(&gpu.text_params);
+        // ClearType needs an opaque target, and the layer is see-through
+        // so the runes show behind the conversation.
+        l.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        self.layer = Some((l.clone(), (px.width, px.height), self.dpi));
+        Ok(l)
+    }
+
+    /// The kept layer, if it still fits the window.
+    unsafe fn kept(&self) -> Option<&ID2D1BitmapRenderTarget> {
+        let px = self.win.GetPixelSize();
+        let (l, size, dpi) = self.layer.as_ref()?;
+        (*size == (px.width, px.height) && *dpi == self.dpi).then_some(l)
     }
 
     pub(super) unsafe fn fill(&self, r: &Rect, c: Color) {
@@ -716,10 +767,9 @@ impl View {
         };
         let now = dpi(hwnd);
         if gfx.dpi != now {
-            unsafe { gfx.rt.SetDpi(now as f32, now as f32) };
+            unsafe { gfx.win.SetDpi(now as f32, now as f32) };
             gfx.dpi = now;
         }
-        let gfx = &*gfx;
         let ok = CHATS.with(|c| {
             let Ok(mut chats) = c.try_borrow_mut() else {
                 return true;
@@ -734,14 +784,44 @@ impl View {
         }
     }
 
-    /// Draws one frame. False when the target was lost.
-    pub(super) unsafe fn draw(&self, gfx: &Gfx, chat: &mut Chat) -> bool {
-        if self.bar {
-            return self.draw_bar(gfx, chat);
+    /// A frame for a tick of the runes' clock: the kept layer over runes
+    /// moved on, nothing of the conversation drawn again. False when it
+    /// cannot be, and the window has to be painted.
+    fn tick(&self) -> bool {
+        unsafe {
+            // A paint is owed anyway, and draws the runes with the rest.
+            if GetUpdateRect(self.hwnd(), None, false).as_bool() {
+                return true;
+            }
         }
-        let now = Instant::now();
-        chat.tr.state.keys = self.has_keyboard();
-        chat.tr.state.caret_lit = self.blink(chat, now);
+        let Ok(mut slot) = self.gfx.try_borrow_mut() else {
+            return false;
+        };
+        let Some(gfx) = slot.as_mut() else {
+            return false;
+        };
+        if unsafe { gfx.kept() }.is_none() {
+            return false;
+        }
+        let ok = CHATS.with(|c| {
+            let Ok(mut chats) = c.try_borrow_mut() else {
+                return true;
+            };
+            let Some(chat) = chats.get_mut(&self.key) else {
+                return true;
+            };
+            let (t, heat) = self.advance(chat, Instant::now());
+            unsafe { self.frame(gfx, t, heat) }
+        });
+        if !ok {
+            *slot = None;
+        }
+        true
+    }
+
+    /// Moves the runes' clocks on while they move, and starts or stops the
+    /// frame clock. The clock and the heat.
+    fn advance(&self, chat: &mut Chat, now: Instant) -> (f32, f32) {
         chat.note_busy();
         let heat = chat.heat();
         let moving = chat.busy_was || heat > 0.0;
@@ -754,32 +834,62 @@ impl View {
             self.warp.set(self.warp.get() + dt * heat);
         }
         self.clock(moving);
-        let t = self.clock.get();
-        let rt = &gfx.rt;
-        let size = rt.GetSize();
-        let (w, h) = (size.width, size.height);
+        (self.clock.get(), heat)
+    }
+
+    fn palette(gfx: &Gfx) -> Palette {
         let p = theme::palette();
-        let pal = Palette {
+        Palette {
             bg: p.term_bg,
             fg: p.term_fg,
             dim: p.term_fg.with_alpha(0.68),
             faint: p.term_fg.with_alpha(0.46),
             accent: gfx.accent,
+        }
+    }
+
+    /// Draws one frame. False when the target was lost.
+    ///
+    /// The conversation is drawn into a layer kept between frames, and the
+    /// window gets the runes with the layer over them. A tick of the runes'
+    /// clock only puts those together again ([`View::tick`]): while Claude
+    /// works the runes move 25 times a second, and drawing every block in
+    /// view that often took a fifth of the UI thread.
+    pub(super) unsafe fn draw(&self, gfx: &mut Gfx, chat: &mut Chat) -> bool {
+        if self.bar {
+            return self.draw_bar(gfx, chat);
+        }
+        let now = Instant::now();
+        chat.tr.state.keys = self.has_keyboard();
+        chat.tr.state.caret_lit = self.blink(chat, now);
+        let (t, heat) = self.advance(chat, now);
+        let Some(layer) = gfx.layer(&self.shared.gpu).ok().and_then(|l| l.cast().ok()) else {
+            return false;
         };
+        gfx.rt = layer;
+        self.still(gfx, chat) && self.frame(gfx, t, heat)
+    }
+
+    /// The conversation and the composer, into the kept layer.
+    unsafe fn still(&self, gfx: &Gfx, chat: &mut Chat) -> bool {
+        let rt = &gfx.rt;
+        let size = rt.GetSize();
+        let (w, h) = (size.width, size.height);
+        let pal = Self::palette(gfx);
         let (cx, cw) = look::column(w);
         let mut hits: Vec<(Rect, Hit)> = Vec::new();
+        self.dots.set(None);
 
         rt.BeginDraw();
         rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        rt.Clear(Some(&color(pal.bg)));
-        self.background(gfx, &pal, (w, h), (t, self.warp.get()), heat);
+        rt.Clear(Some(&color(pal.bg.with_alpha(0.0))));
 
         // The composer first, since the conversation ends above it.
         // Its hits go last, so they win over a block's under the composer.
         let mut composer_hits: Vec<(Rect, Hit)> = Vec::new();
         let composer = self.composer(gfx, chat, &pal, cx, cw, h, &mut composer_hits);
         let area = Rect::new(0.0, 0.0, w, (composer.y - 10.0).max(0.0));
-        self.transcript(gfx, &pal, chat, cx, cw, &area, t, &mut hits);
+        self.transcript(gfx, &pal, chat, cx, cw, &area, &mut hits);
         // What scrolls up fades out into the glass's top edge, not cut.
         if chat.scroll > 0.0 {
             const FADE: f32 = 24.0;
@@ -801,6 +911,55 @@ impl View {
 
         hits.extend(composer_hits);
         *self.hits.borrow_mut() = hits;
+        rt.EndDraw(None, None).is_ok()
+    }
+
+    /// The window: the runes at clock `t`, the kept layer over them, and
+    /// the dots that pulse while Claude works.
+    unsafe fn frame(&self, gfx: &mut Gfx, t: f32, heat: f32) -> bool {
+        let Some(still) = gfx.kept().and_then(|l| l.GetBitmap().ok()) else {
+            return false;
+        };
+        let Ok(win) = gfx.win.cast() else {
+            return false;
+        };
+        gfx.rt = win;
+        let gfx = &*gfx;
+        let rt = &gfx.rt;
+        let size = rt.GetSize();
+        let pal = Self::palette(gfx);
+        rt.BeginDraw();
+        rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        rt.Clear(Some(&color(pal.bg)));
+        let view = (size.width, size.height);
+        self.background(gfx, &pal, view, (t, self.warp.get()), heat);
+        rt.DrawBitmap(
+            &still,
+            None,
+            1.0,
+            D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+            None,
+        );
+        if let Some((at, area)) = self.dots.get() {
+            rt.PushAxisAlignedClip(&d2d(&area), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            for k in 0..3 {
+                let pulse = ((t * 4.0 - k as f32 * 0.7).sin() * 0.5 + 0.5).powf(1.5);
+                gfx.brush.SetColor(&color(
+                    pal.accent.mix(pal.fg, 0.3).with_alpha(0.25 + 0.75 * pulse),
+                ));
+                let point = Vector2 {
+                    X: at.X + k as f32 * 12.0,
+                    Y: at.Y,
+                };
+                let dot = D2D1_ELLIPSE {
+                    point,
+                    radiusX: 3.2,
+                    radiusY: 3.2,
+                };
+                rt.FillEllipse(&dot, &gfx.brush);
+            }
+            rt.PopAxisAlignedClip();
+        }
         rt.EndDraw(None, None).is_ok()
     }
 
@@ -1109,7 +1268,7 @@ impl View {
                 let w = (lparam.0 & 0xffff) as u32;
                 let h = ((lparam.0 >> 16) & 0xffff) as u32;
                 if let Some(g) = self.gfx.borrow().as_ref() {
-                    let _ = render::resize_target(&g.rt, w, h);
+                    let _ = render::resize_target(&g.win, w, h);
                 }
                 unsafe {
                     let _ = InvalidateRect(Some(self.hwnd()), None, false);
@@ -1126,8 +1285,10 @@ impl View {
             }
             WM_TIMER if wparam.0 == TICK => {
                 if self.seen() {
-                    unsafe {
-                        let _ = InvalidateRect(Some(self.hwnd()), None, false);
+                    if !self.tick() {
+                        unsafe {
+                            let _ = InvalidateRect(Some(self.hwnd()), None, false);
+                        }
                     }
                 } else {
                     self.clock(false);
