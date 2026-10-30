@@ -52,11 +52,13 @@ const FAMILIES: [&str; 2] = ["Cascadia Mono", "Consolas"];
 /// Space between the grid and the edge of the glass, in DIPs.
 pub const PAD: f32 = 14.0;
 
-/// The plate between the glass and the pane's edge, in DIPs.
-pub const BEZEL: f32 = 6.0;
+/// The plate between the glass and the pane's edge, in DIPs. None: the
+/// glass runs to the pane's edge, so a pane is its header and its glass
+/// and nothing round them.
+pub const BEZEL: f32 = 0.0;
 
 /// The glass's corners, in DIPs.
-const SCREEN_RADIUS: f32 = 8.0;
+const SCREEN_RADIUS: f32 = 6.0;
 
 /// The pane's own corners, round the glass's at the bezel's distance so
 /// the two curves run parallel.
@@ -64,10 +66,10 @@ const PANE_RADIUS: f32 = SCREEN_RADIUS + BEZEL;
 
 /// Height of a pane's header, in DIPs: the plate above the glass that the
 /// name is printed on.
-pub const HEADER_H: f32 = 26.0;
+pub const HEADER_H: f32 = 22.0;
 
 /// Where a header's name starts, after its lamp.
-pub const NAME_LEFT: f32 = BEZEL + 4.0;
+pub const NAME_LEFT: f32 = BEZEL + 8.0;
 
 /// How wide `name` is printed in a header, never more than `max`.
 pub fn name_width(gpu: &Gpu, name: &str, max: f32) -> f32 {
@@ -2093,50 +2095,19 @@ impl GridTarget {
         };
         self.rt.FillRectangle(&all, &self.plate);
         self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        // A groove cut round the pane, as round a cluster, is what shows
-        // its corners: outside it the plate runs on into the stage's.
-        let groove = D2D_RECT_F {
-            left: 0.5,
-            top: 0.5,
-            right: size.width - 0.5,
-            bottom: size.height - 1.5,
-        };
-        let lit = D2D_RECT_F {
-            top: groove.top + 1.0,
-            bottom: groove.bottom + 1.0,
-            ..groove
-        };
-        self.brush.SetColor(&render::color(theme::engrave_light()));
-        self.rt
-            .DrawRoundedRectangle(&rounded(&lit, PANE_RADIUS), &self.brush, 1.0, None);
-        self.brush.SetColor(&render::color(theme::engrave_dark()));
-        self.rt
-            .DrawRoundedRectangle(&rounded(&groove, PANE_RADIUS), &self.brush, 1.0, None);
-        let lip = D2D_RECT_F {
-            left: screen.left - 0.5,
-            top: screen.top + 0.5,
-            right: screen.right + 0.5,
-            bottom: screen.bottom + 1.5,
-        };
-        self.brush
-            .SetColor(&render::color(theme::engrave_light().fade(1.6)));
-        self.rt
-            .FillRoundedRectangle(&rounded(&lip, SCREEN_RADIUS + 0.5), &self.brush);
         self.brush.SetColor(&color(glass));
         self.rt
             .FillRoundedRectangle(&rounded(screen, SCREEN_RADIUS), &self.brush);
     }
 
-    /// What makes the glass look sunk: shade falling from its top edge,
-    /// and its rim, lit in the project's colour on the pane with the
-    /// keyboard.
+    /// The glass's rim, a hairline in the project's colour on the pane
+    /// with the keyboard and nothing on the others, so the stage stays
+    /// flat and the eye finds the one in use.
     unsafe fn glass(&self, screen: &D2D_RECT_F, header: &Header) {
-        self.sink(screen, SCREEN_RADIUS, 10.0);
-        let rim = if header.active && !header.lifted {
-            header.accent.with_alpha(0.55)
-        } else {
-            theme::engrave_dark()
-        };
+        if !header.active || header.lifted {
+            return;
+        }
+        let rim = header.accent.with_alpha(0.45);
         let edge = D2D_RECT_F {
             left: screen.left + 0.5,
             top: screen.top + 0.5,
@@ -2759,7 +2730,7 @@ mod tests {
         assert_eq!(tab_hit(&l, cross + 1.0), Some(TabHit::Close(2)));
         assert_eq!(tab_hit(&l, l.new + 1.0), Some(TabHit::New));
         assert_eq!(tab_hit(&l, l.new + TAB_NEW + 1.0), None);
-        assert_eq!(tab_hit(&l, 0.0), None);
+        assert_eq!(tab_hit(&l, l.tabs[0].0 - 1.0), None);
     }
 
     #[test]
