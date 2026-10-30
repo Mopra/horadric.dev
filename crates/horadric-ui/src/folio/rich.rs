@@ -775,3 +775,48 @@ pub(super) fn thumbnail(gfx: &Gfx, base64: &str) -> Option<(ID2D1Bitmap, u32, u3
         Some((bitmap, tw, th))
     }
 }
+
+/// Opens an image in the system's viewer: the file it came from while it
+/// is still there, else its bytes written to the temp folder, named by
+/// what they hold so a second click opens the same copy.
+pub(super) fn open_image(path: Option<&std::path::Path>, media_type: &str, base64: &str) {
+    use std::hash::{Hash, Hasher};
+    use std::os::windows::ffi::OsStrExt;
+
+    let path = match path.filter(|p| p.is_file()) {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let Some(bytes) = horadric_core::release::base64_decode(base64) else {
+                return;
+            };
+            let ext = match media_type {
+                "image/jpeg" => "jpg",
+                "image/gif" => "gif",
+                "image/webp" => "webp",
+                _ => "png",
+            };
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            base64.hash(&mut h);
+            // Pasted images are kept here too, and go after a day.
+            let dir = std::env::temp_dir().join("Horadric");
+            let path = dir.join(format!("image-{:016x}.{ext}", h.finish()));
+            if !path.is_file()
+                && (std::fs::create_dir_all(&dir).is_err() || std::fs::write(&path, bytes).is_err())
+            {
+                return;
+            }
+            path
+        }
+    };
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    unsafe {
+        windows::Win32::UI::Shell::ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            PCWSTR(wide.as_ptr()),
+            None,
+            None,
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        );
+    }
+}

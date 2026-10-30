@@ -70,6 +70,8 @@ pub(super) enum Act {
     Link(String),
     /// A file named in a reply, to the file viewer.
     Path(String, Option<u32>),
+    /// A prompt's image by block and place, to the system's viewer.
+    Image(usize, usize),
     /// A step opened or closed, by its tool use id.
     Step(String),
     /// All of a step's output or diff, or back to its end.
@@ -469,6 +471,7 @@ impl Ctx<'_> {
                     }
                 }
                 s.stroke(r, 6.0, self.pal.fg.with_alpha(0.15), 1.0);
+                s.hit(r, Hit::Tr(Act::Image(i, k)));
                 x += w + 8.0;
                 rh = rh.max(*h);
             }

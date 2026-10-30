@@ -95,6 +95,8 @@ pub(super) enum Act {
     Send,
     Settings,
     Pick(usize),
+    /// An image waiting to go, to the system's viewer.
+    Open(usize),
     Unattach(usize),
     Unqueue(usize),
 }
@@ -103,6 +105,8 @@ pub(super) enum Act {
 struct Attached {
     data: ImageData,
     thumb: Option<Thumb>,
+    /// The file it was read from, opened when the thumbnail is clicked.
+    path: Option<PathBuf>,
 }
 
 struct Thumb {
@@ -247,6 +251,7 @@ impl Input {
                         .map(|(media_type, base64)| Attached {
                             data: ImageData { media_type, base64 },
                             thumb: None,
+                            path: None,
                         })
                         .collect(),
                 })
@@ -963,7 +968,7 @@ fn paste(chat: &mut Chat) {
         }
         let added = std::fs::read(&path)
             .ok()
-            .is_some_and(|bytes| attach(chat, &bytes));
+            .is_some_and(|bytes| attach(chat, &bytes, &path));
         if !added {
             chat.input.notice = Some("That image could not be read.".to_string());
         }
@@ -986,12 +991,16 @@ fn small_enough(path: &Path) -> bool {
 
 /// Adds an image from a file's bytes. False when it is not one the API
 /// takes.
-fn attach(chat: &mut Chat, bytes: &[u8]) -> bool {
+fn attach(chat: &mut Chat, bytes: &[u8], path: &Path) -> bool {
     let Some(data) = ImageData::from_bytes(bytes) else {
         return false;
     };
     let thumb = unsafe { decode_thumb(bytes) };
-    chat.input.images.push(Attached { data, thumb });
+    chat.input.images.push(Attached {
+        data,
+        thumb,
+        path: Some(path.to_path_buf()),
+    });
     true
 }
 
@@ -1010,7 +1019,7 @@ fn add_paths(chat: &mut Chat, paths: &[PathBuf]) {
         // One too big to send goes as its path, for Claude to read.
         if image && !small_enough(p) {
             too_big = true;
-        } else if image && std::fs::read(p).ok().is_some_and(|b| attach(chat, &b)) {
+        } else if image && std::fs::read(p).ok().is_some_and(|b| attach(chat, &b, p)) {
             continue;
         }
         let shown = p
@@ -1312,6 +1321,7 @@ impl View {
                 );
                 self.bitmap(gfx, t, &at);
             }
+            hits.push((tile, Hit::Input(Act::Open(i))));
             let close = Rect::new(tile.right() - 18.0, tile.y + 2.0, 16.0, 16.0);
             let hot = chat.input.hover == Some(Act::Unattach(i));
             gfx.fill_round(
@@ -1751,6 +1761,8 @@ impl View {
     pub(super) fn press_input(&self, act: Act, x: f32, y: f32, double: bool, shift: bool) {
         let key = self.key.clone();
         let mut select = false;
+        // Opened outside the borrow: the shell may pump messages back here.
+        let mut open = None;
         with(&key, |chat| {
             if !matches!(act, Act::Pick(_) | Act::Settings | Act::Text) {
                 chat.input.menu = None;
@@ -1778,6 +1790,9 @@ impl View {
                     }
                     pick(chat, How::Click);
                 }
+                Act::Open(i) => {
+                    open = (chat.input.images.get(i)).map(|a| (a.path.clone(), a.data.clone()));
+                }
                 Act::Unattach(i) => {
                     if i < chat.input.images.len() {
                         chat.input.images.remove(i);
@@ -1797,6 +1812,9 @@ impl View {
                 }
             }
         });
+        if let Some((path, d)) = open {
+            super::rich::open_image(path.as_deref(), &d.media_type, &d.base64);
+        }
         if select {
             if let Some(at) = self.composer_at(x, y) {
                 with(&key, |c| {

@@ -36,6 +36,16 @@ pub(super) fn act(key: &str, a: Act) {
                 }
             }
         }
+        Act::Image(block, k) => {
+            let image = with(key, |c| match c.folio.blocks.get(block) {
+                Some(Block::Images(v)) => v.get(k).cloned(),
+                _ => None,
+            })
+            .flatten();
+            if let Some(img) = image {
+                super::rich::open_image(None, &img.media_type, &img.base64);
+            }
+        }
         Act::Always(id) => answer_with(key, |f| f.reply(&id, Reply::Always)),
         Act::Deny(id) => {
             let field = deny_field(&id);
