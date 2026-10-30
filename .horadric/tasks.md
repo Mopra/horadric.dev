@@ -3,209 +3,19 @@
 The order is the work order. Each item points at its section of
 docs/PLAN.md, which has the reasoning; read it before starting.
 
-## SSH hosts
-
-- [x] SSH: read hosts from config.json and open an SSH terminal from the project menu @ssh-read-hosts-from-config-json-and-open-53027
-  See "SSH hosts" in docs/PLAN.md. `"hosts": [...]` in `.horadric/config.json`, each anything `ssh` takes.
-  "SSH to <host>" in the project menu, one entry a host, starts a plain terminal running the Windows `ssh <host>`.
-  Own glyph, host as the second line until the remote sets a title. Exit 0 closes it; 255 keeps the pane with the error and pauses the tile, a click reconnects.
-  Pure and tested: reading hosts, the command line, the exit code rule. Verify on screen against localhost or a real server.
-- [x] SSH: tell every session in a project with hosts about them @ssh-tell-every-session-in-a-project-with-53408
-  See "Telling the agent" in docs/PLAN.md. Through `--append-system-prompt` on start and resume, joined with the task list's prompt into one.
-  Say to use `ssh <host> '<command>'` with `-o BatchMode=yes`. Check on screen which `ssh` the agent's Git Bash runs and whether it reaches the Windows ssh-agent; say which to use in the prompt if it matters.
-  Verify with `horadric run -- -p "Run uptime on <host>" --model claude-haiku-4-5-20251001`.
-- [x] SSH: "Add host" in the project menu with suggestions from ~/.ssh/config @ssh-add-host-in-the-project-menu-with-53612
-  Asks with the app themed input (see the task list item), and offers the `Host` names in `~/.ssh/config` that have no wildcard (skip `Match` blocks). The parser is pure and tested.
-
-## The task list
-
-- [x] Replace the Win32 text dialog with an app themed input @replace-the-win32-text-dialog-with-an-app-53837
-  `ask::text` in `crates/horadric-ui/src/ask.rs` is a stock Win32 dialog (system font, system chrome, OK and Cancel), and it looks nothing like the rest of Horadric. The tasks tile's plus uses it for a new task, and the tile menu uses it to rename a session.
-  Draw our own in Direct2D and DirectWrite with the theme's colours and font: an input in place (in the tasks tile for a new item, on the tile for a rename) or a small borderless popup beside it. Enter confirms, Esc cancels, clicking outside cancels.
-  A new task can take notes as well as a title, since the notes go to the agent. Build it once and use it everywhere `ask::text` is called, including "Add host" from the SSH items. Verify on screen in dark and light.
-- [x] Show a project's tasks tile when it has a list but no session @show-a-project-s-tasks-tile-when-it-has-a-54571
-  Today the tile only exists while the project has a cluster, so a list with nothing running is invisible and its runner does not run. See "The task list", Not done yet.
-- [x] Let the runner wait for the five hour limit to reset and go on @let-the-runner-wait-for-the-five-hour-54875
-  The usage window already knows the limit. When it runs out mid list, hold the runner and start the next item after the reset instead of stopping.
-
-## Step 4: worktrees and the git glance
-
-- [x] Resolve the project key to the parent repository @resolve-the-project-key-to-the-parent-55611
-  The key is the working directory today, so every worktree would become its own cluster. Use `git rev-parse --git-common-dir`. Sessions outside a repo keep working. This comes before worktrees.
-- [x] Give each session its own git worktree, optional per project @give-each-session-its-own-git-worktree-55753
-  See "Step 4" in docs/PLAN.md. Branch named from the session name. `setup` commands in `.horadric/config.json` run in each new worktree (gitignored files do not come along), and a port range per worktree so dev servers do not collide.
-  A project can turn it off and keep the shared working tree.
-- [x] Show changed files with plus and minus counts per worktree @show-changed-files-with-plus-and-minus-56503
-  `git diff --numstat`, uncommitted versus committed, plus a button that opens the worktree in VS Code.
-- [x] Let the runner hold several items at once, one worktree each @let-the-runner-hold-several-items-at-once-57140
-  `parallel` in `config.json`. The list then lives in the main working tree only. Keep the fuses: at most one start per project every 10 seconds, never resume a paused session.
-
-## Before daily use
-
-- [x] Find claude.cmd from an npm install, not only claude.exe @find-claude-cmd-from-an-npm-install-not-57557
-  Needs `cmd.exe /c` and its own quoting rules. See "Not in any step yet" in docs/PLAN.md.
-- [x] Propose how sessions can survive Horadric quitting or crashing @propose-how-sessions-can-survive-horadric-57680
-  The consoles live in the Horadric process, so a crash ends every agent. Surviving it means the consoles in a separate process, which is a real decision.
-  Do not build it. Write the options and a recommendation into docs/PLAN.md, then report blocked so the human decides.
-- [x] Resume the running sessions after a crash @resume-the-running-sessions-after-a-crash-73061
-  Option A in "Sessions that outlive Horadric" in docs/PLAN.md. Keep `running` in state.json all the time, and on a start after an unclean exit resume those sessions as `app --reload` does. Keep the fuses: once each, never a session already live.
-- [x] Run each session's console in its own host process @run-each-session-s-console-in-its-own-73278
-  Option B in "Sessions that outlive Horadric" in docs/PLAN.md, with every point listed there: named pipe per session, output ring and replay, versioned five message protocol, breakaway job, orphans, dev pipe names, and reload that no longer waits.
-  Tray Quit asks whether to keep sessions running, "keep running" the default when any is mid turn. Verify on screen: kill the dev UI, start it again, every session is where it was. Count `claude.exe` processes after.
-- [x] Hear commits when the repository root is above the project folder @hear-commits-when-the-repository-root-is-74668
-  A session started in a subfolder of a repo does not see commits, since the index is outside what the files tile watches. See "The files tile", Not done yet.
-- [x] Let the columns stand on a monitor other than the primary one @let-the-columns-stand-on-a-monitor-other-74815
-  They use `SPI_GETWORKAREA` of the primary screen. Needs a way to pick the screen, kept in state.json.
-
-## Terminal and viewer
-
-- [x] Place the IME composition window at the terminal cursor @place-the-ime-composition-window-at-the-75048
-- [x] Mouse reporting to programs in the terminal @mouse-reporting-to-programs-in-the-75357
-- [x] Cursor blink and a configurable font family in the terminal @cursor-blink-and-a-configurable-font-75607
-- [x] Diff gutter and search in the file viewer @diff-gutter-and-search-in-the-file-viewer-76121
-  Mark the changed lines of a modified file in the gutter, and a search like the terminal's Ctrl+Shift+F. See "The file viewer", Not done yet.
-
-## Step 5
-
-- [x] Start with Windows from the tray, and a way to show collapsed terminals @start-with-windows-from-the-tray-and-a-76703
-  Autostart must stay off for dev instances.
-- [x] Signed updater, lifted from Purrch @signed-updater-lifted-from-purrch-76788
-  See `../purrch.fun/src-tauri`. Plan it against the existing `reload` hand over before building.
-- [x] Updater: sign and verify a release manifest with CNG P-256 @updater-sign-and-verify-a-release-76903
-  See "The updater" in docs/PLAN.md. `latest.json` with version, notes, a SHA-256 per binary and one signature over canonical bytes. `BCryptHash` and `BCryptVerifySignature` through the `windows` crate, no new dependency.
-  `horadric release keygen` and `horadric release sign <dir>`. Tests: manifest bytes, a good signature passes, a flipped byte or a changed version fails, an older version is not an update. Tests use a key made in the test, never the real one.
-- [x] Updater: generate the real key and have the human back it up @updater-generate-the-real-key-and-have-77187
-  Run `horadric release keygen`, put the public half into the source, commit. Then report blocked: the human must back up `%USERPROFILE%\.horadric\updater.key` before any build with that public key ships, since losing it strands every install.
-- [x] Updater: check for a newer release over WinHTTP and offer it in the tray @updater-check-for-a-newer-release-over-77448
-  See "The check" in docs/PLAN.md. On start, daily, and a tray item "Check for updates". Verified manifest, newer version, then a tray item "Update to <version>". Failures logged, said only when the check came from the tray. Dev instances check `HORADRIC_UPDATE_URL` only.
-- [x] Updater: download, verify the hashes, and hand over through reload @updater-download-verify-the-hashes-and-77909
-  See "The install" in docs/PLAN.md. Into `%LOCALAPPDATA%\Horadric\updates\<version>\`, both hashes checked before anything runs, then the same `Reload` request `horadric reload` posts.
-  Verify with the fake install folder from the reload test and a local server serving a release signed by a test key (`HORADRIC_UPDATE_KEY`, debug builds only). Check the rollback too, and count `claude.exe` after.
-- [x] Updater: publish the first release and write RELEASING.md @updater-publish-the-first-release-and-78563
-  Bump the workspace version, `cargo build --release`, `horadric release sign`, `gh release create v<version> --draft` with the three files. Write RELEASING.md like Purrch's: the key, cutting a release, publishing is shipping. Report blocked for the human to publish the draft.
-
-## Ship
-
-- [x] Commit everything to main and ship a new build @commit-everything-to-main-and-ship-a-new-79061
-  Always the last item. Merge every finished branch and worktree into main, and commit anything left in the working tree that belongs there. Leave nothing half done on main: if an item's work is not finished, say so and report blocked instead of shipping.
-  Run `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`. All three must pass. Push main to origin.
-  Then ship as CLAUDE.md says, under "Developing Horadric from inside Horadric": `cargo build --release`, say what is being shipped, run `horadric task done`, and run `target\release\horadric.exe reload` as the very last command. Do nothing after it. Afterwards, `%APPDATA%\Horadric\reload.log` says whether the new build came up.
-- [x] Skip a UTF-8 BOM when reading tasks.md and config.json (PowerShell 5 writes one, and the first item and the mode are lost) @skip-a-utf-8-bom-when-reading-tasks-md-79250
-- [x] Offer to merge a finished parallel item's branch into main @offer-to-merge-a-finished-parallel-item-s-79399
-- [x] Check the tray Quit question on screen: Yes keeps the hosts running, No stops them, Enter picks keep only when a session is mid turn @check-the-tray-quit-question-on-screen-80560
-- [x] Check "Tiles on screen" in the tray menu on screen: picking each screen moves the columns, and the stage stays unless covered @check-tiles-on-screen-in-the-tray-menu-on-80944
-- [x] Check Show terminal in the tray menu on screen: close the stage with its cross, pick it, the same project comes back @check-show-terminal-in-the-tray-menu-on-81134
-- [x] Keep a fake install (own APPDATA, LOCALAPPDATA and port) from pointing the real Start with Windows value at itself on its first start @keep-a-fake-install-own-appdata-81272
-- [x] Merge release-0.2.0 into main before shipping: it already merges every finished branch (conflicts resolved) and bumps to 0.2.0 @merge-release-0-2-0-into-main-before-81393
-- [x] Stay a while and listen: a catch-up of what happened while you were away (see "Stay a while and listen" in docs/PLAN.md) @stay-a-while-and-listen-a-catch-up-of-50523
-
 ## Animations
 
 The small niceties that make the app feel alive, worked by one session in
 order. Each one respects Windows' animation setting, costs nothing at rest,
 and is written up under "The look", Motion, in docs/PLAN.md.
 
-- [x] A finished turn lands with weight: the key bounces once and a loot beam rises from it
-  "Loot drops" in docs/IDEAS.md. The beam is light rising off the key, fading as it goes, once per finished turn. It pairs with Identify: the lamp stays lit until read, the beam is the moment it lands. No sound yet.
-- [x] A waiting tile grows more urgent the longer it waits: the breath quickens after 1, 5 and 15 minutes
-  The breath's period shortens in steps, never faster than a calm pulse. Pure and tested.
-- [x] A resumed tile wakes up: its key unlatches and rises, its lamp warms from dark glass to its colour
-- [x] An ending session powers down: its lamp goes out like a CRT, its key sinks and fades, the tiles below close the gap
-  A tile that leaves stays drawn as a ghost until it has gone, and the cluster keeps its height until then.
-- [x] Subagents as sparks orbiting the working lamp, one per running subagent
-  Count SubagentStart and SubagentStop per session (not saved). The state machine still ignores them for the phase.
-- [x] The tool icon turns over when the tool changes
-- [x] The activity trace scrolls smoothly instead of stepping
-- [x] The context bar fills like liquid, with a shimmer past 75 %
-- [x] A finished task strikes through left to right, then its row folds away
-- [x] A task taken by a session sends a light from its row to the new tile
-- [x] A cluster's accent glows faintly while any of its sessions works
-- [x] A new cluster rises into place and fades in
-- [x] While a cluster is dragged, the others in its column make room for it @horadric.dev-42672
-- [x] Keep a dev instance from sweeping worktrees it did not make (a test session in a worktree of horadric.dev removed other agents' clean merged worktrees) @keep-a-dev-instance-from-sweeping-52869
-
-
-## Leftovers from the plan
-
-- [x] Scroll the file viewer sideways instead of wrapping long lines @scroll-the-file-viewer-sideways-instead-57720
-  See "The file viewer" in docs/PLAN.md, "Not done yet". Shift+wheel and a horizontal wheel scroll; the diff gutter and search marks stay in place. Verify on screen.
-- [x] Round the stage's panes themselves, not only the glass inside them @round-the-stage-s-panes-themselves-not-58381
-  See "The look" in docs/PLAN.md, "Not done". Panes are square child windows today. Verify on screen in dark and light, and that nothing clips the terminal text.
-- [x] Stay a while and listen: list commits made under a finished item @stay-a-while-and-listen-list-commits-made-58738
-  See "Stay a while and listen" in docs/PLAN.md, "Not done yet". The journal does not hear them today.
-- [x] Stay a while and listen: a mark of its own for a background session's lines, and scrolling past "and N more" @stay-a-while-and-listen-a-mark-of-its-own-59170
-  Same section as above. Both small; the scroll works like the tasks tile's wheel.
-- [x] Kitty keyboard protocol in the terminal @kitty-keyboard-protocol-in-the-terminal-59815
-  See "Not in any step yet" in docs/PLAN.md. Progressive enhancement flags, at least disambiguate and report event types. Check what alacritty_terminal already parses before writing any of it. Pure encoding, tested.
-
 ## Ideas
 
 Everything in docs/IDEAS.md not yet built, asked for by the human. For each one: write its design into docs/PLAN.md first (a section under Next, with the reasoning), change its entry in IDEAS.md to say it is planned, then build it. The rule in IDEAS.md holds: the theme earns its place by making something clearer or quicker.
 
-- [x] Item rarity colours: the key's name shows how a session ended @item-rarity-colours-the-key-s-name-shows-60762
-  "Item rarity colours" in docs/IDEAS.md. White changed nothing, blue changed files, yellow changed files and tests passed, gold landed on main, green for a batch. Must not read as a phase: phase is light, project is accent. Pure rules for the rarity, tested.
-- [x] Loot drop sounds: a short sound with the beam, a higher chime when work lands on main @loot-drop-sounds-a-short-sound-with-the-61500
-  "Loot drops" in docs/IDEAS.md. Our own sounds, never Blizzard's: synthesise them, no new dependency. Off by default or a tray toggle, silent under Windows' focus assist.
-- [x] The stash: a three by three grid for sessions kept for later @the-stash-a-three-by-three-grid-for-62201
-  "The stash" in docs/IDEAS.md. A stashed session is paused and out of the columns; a click brings it back as it was. Kept in state.json.
-- [x] Tal Rasha's tombs: start one task in several worktrees at once and pick the winner @tal-rasha-s-tombs-start-one-task-in-63068
-  "Tal Rasha's tombs" in docs/IDEAS.md. Builds on parallel items and worktrees in Step 4. Picking one merges or keeps its branch; the others fade out and their worktrees are removed. Keep the runner's fuses: never more than 8, one start per 10 seconds.
-- [x] Transmute: the cube and its first recipes @transmute-the-cube-and-its-first-recipes-64088
-  "Transmute" in docs/IDEAS.md. Drop tiles on a cube in the column or stage. Recipes: two finished sessions start a reviewer on both diffs; a session and main merges its branch; three idle sessions close with a one-line summary each. Recipes are small named actions, pure matching and tested.
-- [x] The transmute animation: tiles swirl into the cube and something comes out @the-transmute-animation-tiles-swirl-into-65627
-  "The transmute animation" in docs/IDEAS.md. Respects Windows' animation setting, costs nothing at rest, like the other motion in "The look".
-- [x] Runewords: named sequences a session can be given, such as test, review, merge @runewords-named-sequences-a-session-can-66193
-  "Runewords" in docs/IDEAS.md. Decide in the plan whether recipes and runewords are one system, and build on Transmute.
-- [x] Experience: XP per merged commit and a level in the tray menu @experience-xp-per-merged-commit-and-a-67192
-  "Experience" in docs/IDEAS.md. Counted from git, not kept by hand, so it survives a reinstall. Pure and tested.
-- [x] The Cow Level: a hidden easter egg @the-cow-level-a-hidden-easter-egg-67499
-  "The Cow Level" in docs/IDEAS.md. A hidden way in and a portal that opens. It must never start agents or get in the way of reading a tile.
-- [x] Quests: rename Tasks to Quests, with the old names still read @quests-rename-tasks-to-quests-with-the-67925
-  "Quests" in docs/IDEAS.md. The tile, the command (`horadric quest done`, with `task` still accepted) and the file (`.horadric/quests.md`, with `tasks.md` still read). Last of the ideas, since every item above runs from this list: make sure the list that is running keeps working through the rename.
-- [x] Play the transmute animation when a batch closes @play-the-transmute-animation-when-a-batch-68131
-- [x] Check a runeword with a real claude: test and review runes, the reviewer writing its file, and a merge that conflicts @check-a-runeword-with-a-real-claude-test-68350
-- [x] Let a session read its review without a permission prompt: allow the reviews folder in the settings Horadric passes (Read for the session, Write for the reviewer) @let-a-session-read-its-review-without-a-69740
-- [x] Keep state.json when it fails to parse: set the bad file aside and drop only what is bad, instead of losing every session and overwriting it @keep-state-json-when-it-fails-to-parse-69853
-- [x] A told rune whose turn the human interrupts never ends: decide whether the runeword waits, re-tells, or stops (see Runewords in docs/PLAN.md) @a-told-rune-whose-turn-the-human-69943
-
 ## Codex and Grok Build
 
 ChatGPT and xAI subscriptions used from Horadric like a Claude one. See "Codex and Grok Build beside Claude Code" under Next in docs/PLAN.md, which has the table of what each agent gives and the reasoning; read it before starting. Claude sessions must behave exactly as before at every step.
-
-- [x] Spike: install the Codex CLI and answer the plan's open questions about Codex and Grok Build @spike-install-the-codex-cli-and-answer-72784
-  Step 1 of the plan. Test with a dev instance. Answer: does a Codex command hook see `HORADRIC_SESSION` from the parent; does Codex read `auth.json` again while running and write it back on refresh; does `codex resume <id>` take a session started elsewhere; does a Grok `http` hook expand `$HORADRIC_SESSION` in its URL on Windows; which Grok event means waiting on you, and does `Stop` come at every turn's end.
-  Also check what the installed Horadric receives from Grok today: Grok reads the hooks in `~/.claude/settings.json`, so every `grok` already posts to the Claude hook. Does it send the header?
-  Never switch or copy the real logins in `~/.codex` or `~/.grok`: read them, do not write them. Write the answers into the plan's table and steps, and change the steps below if an answer calls for it. No code beyond throwaway scripts.
-- [x] Add an Agent to the core model: Claude, Codex or Grok, saved on every session @add-an-agent-to-the-core-model-claude-73414
-  The seam in "The shape". Missing reads as Claude, so old state loads. It answers the program, resume arguments and default flags per agent; the registry, phases, tiles and journal keep working on `HookEvent` and never learn the agent's name. Pure and tested. Nothing changes for Claude.
-- [x] Sign in to Codex and Grok again, then finish the spike's live checks @sign-in-to-codex-and-grok-again-then-73593
-  Needs the human: both logins here have expired. Run `codex login`, then `grok update` (0.2.22 is installed, 1.0.44 is out) and `grok login`. Then, with throwaway hooks and `-p` or `exec` turns: Codex's `Stop`, `PermissionRequest` and `Interrupt` on real turns; whether Grok 1.x still refuses an `http` hook to 127.0.0.1; which Grok event means waiting on you; whether `stop` comes at every turn's end; whether Grok reads a changed `auth.json` without a restart. Write the answers into the plan's table and step 1.
-- [x] `horadric hook`: the command hook Codex and Grok both post through @horadric-hook-the-command-hook-codex-and-16517
-  Step 2. Neither can post over HTTP: Codex has command hooks only and Grok refuses loopback URLs. The command reads the event on stdin and posts it with the tag from its environment and the agent's name, like `horadric status`. It is the one process per event Horadric spawns, so it starts fast, has a short timeout, fails open, and does nothing without `HORADRIC_SESSION`. Turns a Codex or Grok payload into a `HookEvent`. Pure and tested.
-- [x] Codex: pass its hooks on the command line and read its events @codex-pass-its-hooks-on-the-command-line-16670
-  Step 3. `-c hooks.<Event>=[...]` for each event plus `--dangerously-bypass-hook-trust` when Horadric starts `codex`, so `~/.codex` is never written and a `codex` outside Horadric runs no Horadric hook. `PermissionRequest` is waiting, `Stop` done, `Interrupt` idle, a `SessionEnd` after a turn with no `Stop` is a failed turn. Pure and tested.
-- [x] Codex: start, resume and pick defaults for a Codex session @codex-start-resume-and-pick-defaults-for-16984
-  Step 5 for Codex. `codex resume <id>` for a paused tile (it takes Codex Desktop sessions too), `-m` and `-c model_reasoning_effort=` for the defaults, History from `~/.codex/sessions`. Verify on screen with a real `codex`, and count its processes.
-- [x] Grok: install its command hook and read its events @grok-install-its-command-hook-and-read-17542
-  Step 4. `~/.grok/hooks/horadric.json`, a `command` hook calling `horadric hook`, added by `install` and removed by `uninstall`, never by a dev instance. Phases from the live checks above. If Grok 1.x accepts a loopback URL after all, the listener drops a Grok payload that arrives on the Claude path by its shape. Pure and tested.
-- [x] Grok: start, resume and pick defaults for a Grok session @grok-start-resume-and-pick-defaults-for-a-17845
-  Step 5 for Grok. The plus button and `horadric new --agent grok` start it when `grok` is found, `--resume <id>` carries a paused tile on, the model and effort defaults pass as `-m` and `--effort`, a tile shows a small mark for its agent, and History lists Grok's own conversations from `~/.grok/sessions`. Verify on screen with a real `grok`, and count its processes after any change to how sessions start.
-- [x] Limits per provider in the usage window, Codex's from its transcripts @limits-per-provider-in-the-usage-window-18547
-  Step 6. A named screen per provider in use (Claude, ChatGPT, Grok). Codex's limits from the newest `token_count` in the transcript its hooks point at, read on each `Stop`: `rate_limits.primary` and `secondary`, `used_percent` and `resets_at`. The settings follow the agent, each with its own models and efforts. Grok shows no limits until a source turns up. Verify on screen.
-- [x] Switch ChatGPT and xAI accounts the way Claude accounts switch @switch-chatgpt-and-xai-accounts-the-way-19232
-  Step 7, built on "Accounts" in docs/PLAN.md. Codex: the whole `auth.json` is the login, `account_id` the account, the email from the `id_token`; force the file store, and stop and resume its sessions, since a running Codex treats another account on disk as a permanent error. Grok: its `auth.json` entry is the login, and Grok reads it again by itself, so a switch is only the write. A switch touches one provider's sessions. Test with a fake `CODEX_HOME` and `GROK_HOME`, never the real logins.
-- [x] Resume Claude sessions without resending the prompt they were started with @resume-claude-sessions-without-resending-20088
-- [x] Keep Grok from showing an SSRF error for the Claude hook it borrows @keep-grok-from-showing-an-ssrf-error-for-20174
-  Grok runs the `http` hooks in `~/.claude/settings.json` and prints "blocked by SSRF protection" in its TUI at every event. `[compat.claude] hooks = false` in Grok's config stops it, but that is the user's file; look for a flag or environment variable Horadric can pass when it starts `grok` instead.
-- [x] Mouse-over tooltips @mouse-over-tooltips-42172
-  Mouse-over for all items in Horadric, describing what they do.
-- [x] Tooltips on a pane's header: stash, zoom, close, the browser bar and its tabs, through tip.rs once the browser tabs work in pane.rs is committed @tooltips-on-a-pane-s-header-stash-zoom-71623
-- [x] Quest Log @quest-log-43924
-  Quests my ikke auto-start når du venstre-klikke på dem i listen, man skal se quest loggen først for at få en ide om hvad questen går ud på inden man accepter den.
-- [x] Quest Giver @quest-giver-43923
-  Knap ved Tasks listen der selv giver bud på hvad der kunne laves af tasks for det aktuelle projekt.
-- [x] Ship public: release everything on main to every install @ship-public-release-everything-on-main-to-20289
-  Always the last item. Everything finished on main goes out, not only the Codex and Grok work. Follow RELEASING.md and "Ship public" in CLAUDE.md.
 
 ## Discord Activity
 
@@ -213,99 +23,302 @@ Rust was installed on this machine after Horadric started, so a session's shell 
 
 Horadric on the human's Discord profile through Rich Presence. See "Discord Activity" under Next in docs/PLAN.md, which has the protocol, the rules and the reasoning; read it before starting. The first four run side by side in the shared tree, so commit small, stage only your own files, and keep to your own new files where you can. Only the tray quest runs a dev instance on 43118; the others test with `cargo test` or a small check of their own, never a second dev instance.
 
-- [x] Discord: a client for the Rich Presence pipe @discord-pipe-56616
-  The frame codec (opcode and length, little endian, then JSON), the handshake, `SET_ACTIVITY` and clearing, all pure and tested, in a module of their own. Then the client on its own thread: try `\.\pipe\discord-ipc-0` to `-9`, handshake and wait for `READY`, keep only the latest presence, retry every 30 s while Discord is closed and say nothing about it, at most one update every 4 s, never send an unchanged one, clear before closing.
-  Its interface is a handle the app keeps with `set(Option<Activity>)` and a `stop` that clears; the `Activity` type is shared with the presence quest, so define it first, commit it at once, and say in its doc comment that the other quest builds on it.
-  The client id is the constant `1555242626897416212` (the human's "Horadric" application), overridden by `HORADRIC_DISCORD_CLIENT_ID`. Discord runs on this machine: check it against the real client with a small example or test binary that sets and clears an activity.
-- [x] Discord: what the presence says @discord-presence-56628
-  The pure function from the sessions and the setting to an `Option<Activity>`, as "What it says" in the plan: the counts, the project only when names are allowed, the small image by the most urgent state, a start time that holds while any session works, None with nothing running. Tested for each. Wait for the client quest's `Activity` type to be on main (`git log`), or agree on it by reading its commit; do not make a second one.
-- [x] Discord: the art for the presence @discord-art-56640
-  First find out whether Rich Presence takes an `https` URL for `large_image` and `small_image` today; if it does, they live in the repository and the keys are their URLs. Make the large image (Horadric's own mark) and one small image per state (waits, working, idle) in the lamps' colours, 512 by 512 PNG, drawn the way the app draws them so they match. Put them in `docs/discord/` with a short note of the key for each, and the steps for the human to upload them if URLs do not work.
-- [x] Discord: the "Show on Discord" setting in the tray @discord-tray-56652
-  Off (the default), "Without project names", "With project names", checked as chosen, kept with the other app settings so a dev instance has its own. Nothing is sent yet: expose the choice where the wiring quest can read it and hear it change. Verify the menu on screen with a dev instance.
-- [x] Discord: wire the presence into the app @discord-wire-57355
-  Needs the four above on main. Keep a client while the setting is on, hand it the presence whenever the registry or the setting changes (it drops what did not change), and clear on Off, quit and reload as the plan says. Count that the UI thread never waits on the pipe. Check with a real Discord and a dev instance, the installed one left off.
-- [x] Discord: check it on screen with a real Discord and write it into the README @discord-check-57759
-  With a dev instance: each setting, a session working, waiting and done, the elapsed time holding across turns, names hidden and shown, quit and reload clearing it. Screenshot the profile. Add a short part to README.md and mark the plan section done.
-- [x] Discord: keep the clock of a run of work through a reload @discord-keep-the-clock-of-a-run-of-work-71634
-- [x] Performance pass two: the leftovers in the plan @performance-pass-two-the-leftovers-in-the-71878
-  See Performance in docs/PLAN.md, 'Left for later'. Each pane paint makes a new layer and geometry for its glass (glyphs.rs); characters missing from the terminal font get a DrawText each; the pane caption repaints on every spinner frame of the title; each cluster paint clones its sessions twice. Measure the UI thread on a dev instance before and after, as the first pass did.
-- [x] Keep the browser page through a reload of Horadric @keep-the-browser-page-through-a-reload-of-72055
-  See Browser pane in docs/PLAN.md: the page outlives its pane but is not yet kept over a reload, so every ship drops open pages. Save each project's address (and history position if WebView2 allows) before the handover and open them again in the new build. Verify with reload under HORADRIC_DEV=1.
-- [x] Give Grok sessions the browser tools @give-grok-sessions-the-browser-tools-72801
-  Claude gets horadric mcp through --mcp-config and Codex through -c mcp_servers; Grok has none because it keeps MCP servers in its own config (see Browser pane in docs/PLAN.md). Find a per-session way in (flag, env var, a config it reads), or else an entry Horadric owns in Grok's config. Check with a real grok session that the browser_* tools reach its project's pane.
-
 ## The Runetome
 
 Runewords as rune stones in a tile of their own. See "The Runetome" under Next in docs/PLAN.md, which has the reasoning; read it and "Runewords" under Done before starting. The two quests at the top build in parallel; the tile needs both on main.
-
-- [x] Runetome engine: say, keys and run steps, stones that need no session, and the global file @runetome-engine-say-keys-and-run-steps-73961
-  See "The Runetome" in docs/PLAN.md: Steps, Casting, Where stones live. In `horadric_core::runeword`: the object form `{"steps": [...]}` beside today's list form, `say`, `keys` (with `runeword::keys` parsing `"Esc"`, `"Ctrl+C"`, `"/clear{Enter}"`), `run` (with `"show": true`) and the three runes; `%APPDATA%\Horadric\runewords.json` read beside `.horadric/config.json`, both read again when they change; a stone that does not parse kept with its reason. Casting: `keys` written into the session's terminal and done at once, `run` by `cmd /c` in the project folder or the session's worktree, a non zero exit stopping it with a toast of its last line, and a runeword of only `run` steps cast on the project with no session, saved in `state.json` beside the sessions so it goes on through a reload. Leave the tile menu's Runeword submenu working until the tome replaces it. Pure and tested; check a `keys` and a `run` step on a dev instance with `cmd.exe` as the agent.
-- [x] Rune stones and the Runesmith's pieces: the carved glyph, the generated name, the smith prompt and `horadric runeword list` @rune-stones-and-the-runesmith-s-pieces-73971
-  See "The Runetome" in docs/PLAN.md: A stone, The empty stone. `runeword::name` (two to four of the 33 rune names from a hash of the label) and `runeword::carve` (glyph strokes from the same hash), pure and tested. A function in horadric-ui that draws one stone in Direct2D at a given size: a rough rounded slab lit from the top left like the cube, the glyph cut into it, a gold glow while it runs, cracked when it does not parse, and an empty stone. `runeword::smith_prompt` (tested), saying what a stone is, the step kinds, both files and their shape, and to ask the human what it should do and for which projects, then check with `horadric runeword list`. The `horadric runeword list` command printing every stone a project has, with its name, label, steps and any parse error. No tile yet: check the drawing on screen however is quickest, in dark and light.
-- [x] The Runetome tile: stones in a project's cluster, cast by click or drag, and the empty stone starting a Runesmith @the-runetome-tile-stones-in-a-project-s-73981
-  Needs the two quests above on main. If either is not there yet, mark this one blocked naming which, so it can be accepted again once it is. See "The Runetome" in docs/PLAN.md. A tile in each project's cluster beside the quest log, built in stones first, then the project's, then the global ones, then the empty stone. Tooltip (tip.rs) with the runeword name and the steps. A click casts on the focused stage session when it is this project's, else asks which session; a stone of only `run` steps casts at once; dragging a stone onto a tile or pane casts on that one. While running the stone glows with its step and a click offers Stop. The empty stone starts a session named "Runesmith" on the stage with the smith prompt, as the quest giver does. The changed since last cast mark on project stones. Drop the tile menu's Runeword submenu, keep its Stop. Check on screen with a dev instance: each step kind, a sessionless stone, a drag, and a real `claude` Runesmith (Haiku) making a stone that appears on the tile. Count `claude.exe` processes after. Then add the Runetome to README.md and mark the plan section built.
-- [x] Point horadric runeword list at runeword::parse @point-horadric-runeword-list-at-runeword-77455
-  Once the Runetome engine is on main, have crates/horadric/src/runeword.rs list stones through the engine's runeword::parse (and its global file path) instead of its own reading of the two forms, so the list and the tile always agree on what cracks.
-- [x] Blocked quests resume by themselves once what blocked them is resolved @blocked-quests-resume-by-themselves-once-75845
-  Today a [!] quest waits on the human forever, and the runner stops the whole list at it (Next::Stuck in tasks.rs). Let a blocked quest say what it waits on, in a form Horadric can check, and have the runner check it on each look. Kinds worth having: another quest done (by title, the common case, see the Runetome tile quest), a commit or branch on main, a file existing, a command exiting 0, a time. Something like horadric quest blocked "why" --on-quest "title" | --on-file path | --on-cmd "..." | --until time, kept on the item line or in its notes so the file stays the state. When the condition holds: if the holding session is alive, send it a go on message the way go_on does after a usage limit reset and mark the quest [/] again; if the session is gone, start the quest again (start_again). A blocked quest whose condition is not met yet should not stop the list: the runner skips past it to the next open quest, but only for machine checkable waits; a plain why with no condition still needs the human and still stops the list. Update the system prompt so agents use the conditional form when they can, and the board row to show what it waits on. Tests for the parsing, the condition check and the runner choice (pure parts in horadric-core). Check on screen with a dev instance: block one fake quest on another, finish the other, watch the first resume. Count claude.exe after, since this starts agents by itself.
-- [x] Let a stone of only keys be cast on a session that is casting another runeword, so a permission prompt can be answered from the tome without stopping it @let-a-stone-of-only-keys-be-cast-on-a-77466
 
 ## Runetome feedback
 
 From the human on 2026-10-01, after using the tome.
 
-- [x] Remove a stone by right click on it @horadric.dev-78569
-  Today there is no way to remove a runeword short of editing the JSON. A right click on a project or global stone offers "Remove <label>" (with a confirm), which deletes it from `.horadric/config.json` or `runewords.json`, keeping the rest of either file as it was. Built in stones cannot be removed, so the menu says so or leaves the item out.
-- [x] Better built in stones that show what a stone can do @horadric.dev-78569
-  "Test, merge", "Test, review, merge" and "Review, merge" are not useful. Replace them with a few that each show off a step kind and are worth a click on day one: keys, say chains, a run command.
-- [x] Ask before casting, with "Do not ask again" @horadric.dev-78569
-  A click on a stone asks whether to cast it, showing what it will do, with a "Do not ask again" check kept in state.json.
-- [x] Review the runeword and Runetome implementation for other quality of life fixes @horadric.dev-78569
-  Read the tile, casting and the engine end to end and fix what gets in the way. List what was found and done in the plan.
-
 ## Orchestration
 
 An orchestrator so quests run by the dozen without the human. See "Orchestration" in docs/PLAN.md, and read its "Decided on 2026-10-05" part before starting. The first four quests build in parallel, each in its own worktree; they touch the same files (tasks.rs, runner.rs), so merge main into your branch before you merge it back. Every quest that changes how sessions start counts claude.exe after its dev instance test.
 
-- [x] After: dependencies in the quest log, and the runner starting only ready quests @after-dependencies-in-the-quest-log-and-60905
-  Step 1 of "Orchestration" in docs/PLAN.md. In `horadric_core::tasks`: read `After: <title>` notes lines, match by exact title or unique start, ready only when every named quest is `[x]`, a name that matches nothing or several makes the quest not ready and the row says which, cycles are not ready and stop the list. `tasks::next` passes quests that are not ready and takes the first ready open one. `quest add "title" --after "other"` writes the line; `quest blocked "why" --on "title"` writes the same line, replacing `--on-quest` and its `{on quest: ...}` form (keep reading the old form). Board row reads "after <title>", dim, no lamp. Quest giver prompt says to add After: lines. Pure and tested; on screen with a dev instance and cmd.exe: two quests, the second after the first, auto mode, `quest done` on the first starts the second. Mark step 1 built in the plan.
-- [x] Finished quests merge themselves into main when the checks pass @finished-quests-merge-themselves-into-60916
-  Step 4 of "Orchestration" in docs/PLAN.md. In auto mode, when a quest in its own worktree is done: rebase on main, run the `"checks"` commands from `.horadric/config.json` in the worktree (none means no checks), fast forward main, then the worktree and branch go as today. One merge at a time per project. A conflict or a red check leaves the branch and adds a fix-up quest right below with the failing output in its notes and `After:` handled so quests after the finished one also wait for the fix-up (if After: is not on main yet, put the fix-up first in the list instead and leave a note). Review mode keeps today's click. Pure parts tested (the merge plan, the fix-up quest text); on screen with a dev instance on a scratch repository: one clean merge, one conflict, one failing check. Add `"checks"` for this repository's config (fmt, clippy, test). Mark step 4 built in the plan.
-- [x] Up to 16 quests at once, paced by usage @up-to-16-quests-at-once-paced-by-usage-60926
-  Step 5 of "Orchestration" in docs/PLAN.md. `MOST_PARALLEL` from 8 to 16; the mode menu offers one at a time, 2, 4, 8 and 16. The runner starts nothing while the fullest limit the status line last reported is at 90 % or more (pure, tested, next to `Limits::out_until`), with a toast once when it holds for that reason. Every other fuse stays, including one start per project every 10 s. Check on screen with a dev instance, cmd.exe and faked limits: 8 starts 10 s apart, and a limit at 92 % holds the next one. Mark step 5 built in the plan.
-- [x] Quests in their own worktree run with permission prompts bypassed @quests-in-their-own-worktree-run-with-60936
-  Step 6 of "Orchestration" in docs/PLAN.md. A quest session started by the runner or a click in its own worktree gets the agent's bypass permission mode (for claude, `--dangerously-skip-permissions` or `--permission-mode bypassPermissions`, whichever this codebase already uses for modes; Codex and Grok their equivalent, or the project's mode if none). Sessions in the main tree, the quest giver and Warriv keep the project's mode. Pure choice tested; on screen with a dev instance and a real claude on Haiku in a scratch repository: a worktree quest runs a shell command with no prompt, a main tree session still prompts. Count claude.exe after. Mark step 6 built in the plan.
-- [x] Warriv: an orchestrator session woken by events, planning for the human @warriv-an-orchestrator-session-woken-by-62791
-  Step 2 of "Orchestration" in docs/PLAN.md, as a full planner per "Decided on 2026-10-05". Needs the After: quest and the merge quest above on main. If either is not there yet, mark this one blocked with `--on-quest` (or `--on` once it exists) naming which, so it starts again when it lands. Events, fresh session per wake, the queued events, notes lines as memory, `quest tell "title" "message"`, the fuses (one per project, six wakes an hour, never woken by itself), `"orchestrator": true` to turn it on. Pure and tested: which events wake it, the budget, the first prompt, the queue. On screen with a dev instance: a fake quest blocked with a question its notes answer, Warriv wakes, tells the session, the quest goes on. Count claude.exe after. Mark step 2 built in the plan and add Warriv to README.md.
-- [x] The human hears only what Warriv could not settle @the-human-hears-only-what-warriv-could-64366
-  Step 3 of "Orchestration" in docs/PLAN.md. Needs the Warriv quest on main; if it is not, mark this blocked on it. With Warriv on, a quest shows red only when Warriv handed it on, its reason is that question, "N quests need you" counts only those, and the notes say what Warriv tried. Tested where pure, checked on screen with a dev instance. Mark step 3 built in the plan.
-- [x] quest done from a worktree marks the worktree's copy of the log @quest-done-from-a-worktree-marks-the-64376
-  held() in crates/horadric/src/task.rs looks above cwd before HORADRIC_TASKS, so a worktree whose committed tasks.md has the holder line gets marked instead of the main tree's log, and the quest stays [/]. Prefer the main tree when HORADRIC_TASKS is set. Seen on the Warriv quest.
+## The caravan moves on its own
+
+Make the app run itself when nothing is wrong and nobody watches. See "The caravan moves on its own" in docs/PLAN.md and read it whole before starting. Several of these touch crates/horadric-ui/src/warriv.rs and crates/horadric-core/src/warriv.rs, so merge main into your branch before you merge back. Every quest that starts agents counts claude.exe after its dev instance test.
+
+## Warriv drives
+
+Warriv runs the project alone while the human is away, and ships. See "Warriv drives" in docs/PLAN.md and read it whole, with "The caravan moves on its own" above it, before starting. No caps on quests, spend or usage: do not add any. Merge main into your branch before you merge back; these touch the same Warriv files. Every quest that starts agents counts claude.exe after its dev instance test.
 
 ## macOS
 
 Horadric on a Mac, public and downloadable. See "macOS" in docs/PLAN.md and read it whole first. Mac code is checked here with `cargo clippy --workspace --all-targets --target aarch64-apple-darwin -- -D warnings` and tested on a real Mac in CI's macos job.
 
-- [x] Mac: the workspace builds and its tests pass on a Mac in CI
-  cfg gates so every crate compiles for macOS, the state folder under Application Support, a macos job in ci.yml running clippy and the tests.
-- [x] Mac: session hosts on a POSIX pseudo terminal
-  `horadric-pty` gets a unix half: `forkpty`, a Unix socket under /tmp/horadric-<uid>, the same wire protocol. A test runs /bin/sh in a real pty through a host.
-- [x] Mac: the command line
-  `horadric`, `app`, `new`, `run`, `hooks`, `status`, `quest`, `serve`, `reload` on a Mac. The login shell's PATH for finding agents.
-- [x] Mac: the app, the menu bar and the tiles
-  NSApplication, NSStatusItem menu, one NSPanel a project drawn with Core Graphics from the shared layout, columns down the left.
-- [x] Mac: the stage and its terminals
-  One window, a pane a session, the grid drawn with Core Text, keys, IME, selection, copy, paste, scroll, resize.
-- [x] Mac: sessions start, resume, end and survive the app
-  Start in a folder, plain terminals, rename and end from the tile menu, attach to running hosts at start, resume saved sessions, Quit asks.
-- [x] Mac: a smoke run in CI with snapshots of every window
-  HORADRIC_SNAPSHOT draws each window to a PNG; CI posts fake sessions, starts a shell session and uploads the PNGs.
-- [x] Mac: Horadric.app, install and uninstall
-  Universal app bundle with an icon, signed ad hoc. `horadric install` copies it to ~/Applications, links the command, a LaunchAgent, the hooks. install.sh for curl.
-- [x] Mac: the updater
-  latest-macos.json signed on Windows, checked with the Security framework, the bundle swapped and the app reloaded.
-- [x] Mac: release builds in CI and a public release
-  A tag builds Horadric-macos.tar.gz; RELEASING.md says how it is signed and attached. Ship public.
-- [x] Mac: the site and the README offer the Mac download
-  install.sh served from horadric.dev, a Mac download beside Windows, the xattr line for browser downloads.
+- [x] Headless sessions: the spike (step 1 of the Folio plan): waiting for the human to say go
+  Start the plan in docs/plan/headless.md (read it whole first; the decisions there are made, do not reopen them). Do step 1 only, the spike, and stop there.
+  Decided by the human: Claude sessions go headless, driving the installed unmodified claude.exe over stream-json on pipes, NO Agent SDK and no Node or Python. The terms' grey zone is accepted. Terminal sessions stay working beside headless ones. Markdown will be our own small parser (no pulldown-cmark), not part of this step.
+  Protocol facts and sources: lore note #504 (lore_recall headless Claude protocol). The control protocol is undocumented SDK internals; confirm everything against the real CLI.
+  What the spike must deliver:
+  1. A way to start headless claude.exe from Rust with pipes (CreateProcess, never claude.cmd), env without CLAUDECODE, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, flags: --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio. Find out whether -p is needed.
+  2. A hidden debug command (for example `horadric folio-spike --cwd DIR prompt`) that sends prompts, prints every stream line, and answers can_use_tool from the console.
+  3. Confirm and write down: init shows apiKeySource none (subscription login); Horadric's hooks still fire and a dev instance tile follows the phase; a Bash permission ask arrives as can_use_tool and allow/deny work (always echo updatedInput); AskUserQuestion and ExitPlanMode arrive and can be answered; interrupt works mid turn; a prompt sent mid turn queues; --resume of a session started in a terminal works, and a headless session resumes in a terminal.
+  4. Record each of those runs as NDJSON fixtures under crates/horadric-core/tests/fixtures/headless/ for step 2's tests. Strip anything personal from them.
+  5. Update docs/plan/headless.md: replace guesses in The protocol with what you found, mark step 1 done, and leave lore notes on the traps.
+  Use a cheap model for test prompts (--model claude-haiku-4-5-20251001). Test only as a dev instance, never touch the installed Horadric, count claude.exe afterwards. Commit with `git commit -- <your files>`: the index is shared and a bare commit sweeps in other sessions' staged work.
+  Warriv: Left for the human: the title gates it on their go, and no session has run it yet, so there is nothing to answer. Model: opus, since it is an undocumented protocol spike that spans the code.
+  Warriv: Model: opus
+  Warriv: The human's own session has done the spike outside the log: 97a9e62 contract, 5c5ce9d headless host, 4f26b71 Folio model, f6257aa plain Folio, 8482f58 plan says what it confirmed. This quest is likely done; left for the human to close or drop.
+  Dropped: Done in a master session on 2026-10-29: spike, model and a plain Folio landed (5c5ce9d to ddc6c34)
+- [x] Start a quest's worktree from main, not from whatever the main tree has checked out @start-a-quest-s-worktree-from-main-not-82610
+  ui/worktree.rs:108 runs git worktree add -b <branch> <path> with no start point, so a quest branches from the main tree's current HEAD. On optipeople.website 2026-10-26 'Fresh 1.5x captures' carried another quest's commit (5ab5fe8) and conflicted only because of it, costing two fix-ups. Pass the project's main branch (the one land() rebases into) as the start point. Add a test.
+  Assumed: the start point is the branch the main tree has checked out (what land() rebases into), by name rather than HEAD; while the main tree is on no branch (mid pull --rebase, the likely cause of 5ab5fe8) it falls back to origin/HEAD, then main, then master. land() itself is unchanged, since its fast forward runs in the main tree and must target its checked-out branch.
+  Outcome: claude-opus-5-5, 43m, red, 1.9M tokens
+- [x] Fix the merge of start-a-quest-s-worktree-from-main-not @fix-the-merge-of-start-a-quest-s-worktree-85808
+  "Start a quest's worktree from main, not from whatever the main tree has checked out" is done on the branch `start-a-quest-s-worktree-from-main-not` but did not merge into `main`: the check `cargo test --workspace` fails after rebasing it on `main`.
+  Take its commits onto your branch with `git cherry-pick main..start-a-quest-s-worktree-from-main-not`, resolve each conflict and `git cherry-pick --continue`, make every check in `.horadric/config.json` pass, and commit. Then delete it with `git branch -D start-a-quest-s-worktree-from-main-not`. Your branch merges like any finished quest and carries its work.
+  The quests after the finished one wait for this one too.
+  What failed said:
+  ```
+  test tasks::tests::the_mode_is_kept_in_the_config ... ok
+  test tend::tests::a_crowded_file_brings_its_oldest_notes_a_handful_at_most ... ok
+  test tend::tests::nothing_stale_or_crowded_asks_nothing ... ok
+  test tend::tests::stale_notes_on_changed_files_come_first ... ok
+  test tests::a_dev_instance_drops_an_owner_that_is_not_itself ... ok
+  test tests::a_refusal_names_the_owner_and_the_caller ... ok
+  test tests::dev_is_any_value_but_empty_or_zero ... ok
+  test tests::dev_moves_the_default_port_but_not_an_explicit_one ... ok
+  test tests::state_must_match_when_both_sides_know_it ... ok
+  test transcript::tests::a_missing_file_has_no_title ... ok
+  test transcript::tests::a_transcript_is_found_by_its_folder_or_else_anywhere ... ok
+  test transcript::tests::codex_limits_are_read_from_the_rollouts_end ... ok
+  test listener::tests::event_owned_here_or_by_nobody_stays ... ok
+  test transcript::tests::folder_names_match_claude_codes ... ok
+  test transcript::tests::history_is_newest_first_titled_and_skips_the_open_ones ... ok
+  test transcript::tests::the_config_dir_beats_home ... ok
+  test transcript::tests::finds_a_title_far_behind_a_huge_tool_result ... ok
+  test listener::tests::new_session_request_is_forwarded ... ok
+  test listener::tests::new_session_without_the_app_is_unavailable ... ok
+  test listener::tests::a_recall_needs_its_header_and_no_origin ... ok
+  test listener::tests::tagged_post_is_forwarded ... ok
+  test listener::tests::the_mod_is_answered_what_the_app_knows_of_its_session ... ok
+  test listener::tests::wrong_path_is_404 ... ok
+  test listener::tests::reload_needs_its_own_header_and_no_origin ... ok
+  test listener::tests::status_is_forwarded_as_an_event ... ok
+  test listener::tests::the_mod_must_name_its_session_and_not_be_a_web_page ... ok
+  test listener::tests::an_event_from_another_agent_is_read_in_its_shape ... ok
+  test listener::tests::event_owned_elsewhere_is_passed_on ... ok
+  test checkpoint::tests::a_failed_write_leaves_the_file_another_session_made ... ok
+  test listener::tests::a_browser_call_given_up_on_is_no_longer_wanted ... ok
+  test checkpoint::tests::an_interrupted_turn_leaves_a_hand_edit_alone ... ok
+  failures:
+  ---- checkpoint::tests::a_turn_is_snapshotted_and_undone_in_a_real_repository stdout ----
+  thread 'checkpoint::tests::a_turn_is_snapshotted_and_undone_in_a_real_repository' (26932) panicked at crates\horadric-hooks\src\checkpoint.rs:708:47:
+  called `Result::unwrap()` on an `Err` value: "git init: fatal: cannot copy 'C:/Program Files/Git/ucrt64/share/git-core/templates/hooks/pre-push.sample' to 'C:/Users/morte/AppData/Local/Temp/horadric-c...
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  failures:
+  checkpoint::tests::a_turn_is_snapshotted_and_undone_in_a_real_repository
+  test result: FAILED. 98 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.68s
+  error: test failed, to rerun pass `-p horadric-hooks --lib`
+  ```
+  Warriv: Model: sonnet
+  Warriv: The red test is checkpoint's git init failing to copy a template hook into %TEMP%, a file system flake unrelated to worktree.rs. Cherry-pick, rerun the checks; if that test fails again, look at it on main before touching the quest's code. Sonnet, since there is no conflict to design around.
+  Warriv: The work was green; the merge failed only because my memory commit 0f551a6 landed on main between its rebase and its fast-forward. Filed 'Land the worktree fix from fix-the-merge-of-start-a-quest-s-worktree' (haiku) to cherry-pick a5c28b5 and land it.
+- [x] Land the worktree fix from fix-the-merge-of-start-a-quest-s-worktree @land-the-worktree-fix-from-fix-the-merge-5576
+  Model: haiku
+  The branch fix-the-merge-of-start-a-quest-s-worktree holds one finished commit (a5c28b5, crates/horadric-ui/src/worktree.rs) that could not fast-forward only because a Warriv memory commit (.horadric/warriv.md) landed on main after it rebased. No conflict is expected. Run git cherry-pick main..fix-the-merge-of-start-a-quest-s-worktree, run every check in .horadric/config.json through horadric heavy, commit, then git branch -D fix-the-merge-of-start-a-quest-s-worktree. If checkpoint's git init into %TEMP% fails copying a template hook, that is a known flake: rerun, do not change code for it.
+  Filed by Warriv: carries the work so the quests after it can go on.
+  Warriv: Stopped undone while its own clippy and tests run in heavy. Own work, no tell.
+  Outcome: haiku, 53m, conflict, 1.0M tokens
+- [x] Fix the merge of land-the-worktree-fix-from-fix-the-merge @fix-the-merge-of-land-the-worktree-fix-8799
+  "Land the worktree fix from fix-the-merge-of-start-a-quest-s-worktree" is done on the branch `land-the-worktree-fix-from-fix-the-merge` but did not merge into `main`: rebasing it on `main` conflicts.
+  Take its commits onto your branch with `git cherry-pick main..land-the-worktree-fix-from-fix-the-merge`, resolve each conflict and `git cherry-pick --continue`, make every check in `.horadric/config.json` pass, and commit. Then delete it with `git branch -D land-the-worktree-fix-from-fix-the-merge`. Your branch merges like any finished quest and carries its work.
+  The quests after the finished one wait for this one too.
+  What failed said:
+  ```
+  Auto-merging crates/horadric-ui/src/worktree.rs
+  CONFLICT (content): Merge conflict in crates/horadric-ui/src/worktree.rs
+  error: could not apply e1195f5... Start a quest's worktree from the main branch, not the main tree's HEAD
+  hint: Resolve all conflicts manually, mark them as resolved with
+  hint: "git add/rm <conflicted_files>", then run "git rebase --continue".
+  hint: You can instead skip this commit: run "git rebase --skip".
+  hint: To abort and get back to the state before "git rebase", run "git rebase --abort".
+  hint: Disable this message with "git config set advice.mergeConflict false"
+  Could not apply e1195f5... # Start a quest's worktree from the main branch, not the main tree's HEAD
+  ```
+  Warriv: Model: sonnet
+  Warriv: Its parent landed with a real conflict in worktree.rs against 6576c9d. Told it to keep both features and treat the checkpoint git-init failure as a flake. Sonnet: one file, both intents are written down.
+  Warriv: Stopped undone but waits on its own clippy and tests, queued in heavy, conflict already resolved. Own work, no tell.
+  Outcome: claude-opus-5-5, 30m, green, 758k tokens
+- [x] Land a quest while its session is still alive, and hand a conflict back to that session @land-a-quest-while-its-session-is-still-84614
+  After: Fix the merge of start-a-quest-s-worktree-from-main-not
+  Root cause of most merge pain (Tristram review 2026-10-28, chronicle.jsonl: 51 conflict events in 7 projects, all found only at landing). Today close_finished ends the session first (ui/runner.rs:1560-1573, 1794-1798), then land() rebases (ui/worktree.rs:556-590), and on conflict aborts and files 'Fix the merge of X' for a fresh session with no context (core/merge.rs:105-138). Fix-ups then chase a moving main: nvoke desktop chained 'fix-the-merge-of-fix-the-merge-of...' 4 deep, and nooni's Dots merge resolved against the human's ruling. Change: on quest done, rebase onto main and run checks BEFORE ending the session. On conflict or red, leave the rebase stopped (or redo it in the worktree) and tell the live session what conflicted, with the other side's commit subjects so it knows the intent, and let it resolve, run checks and call quest done again. Only when the session is gone fall back to today's fix-up quest. A fix-up or a resolving session should hold the project's landing lock so main cannot move under it again. Keep the Outcome line honest (conflict, then resolved).
+  After: Start a quest's worktree from main, not from whatever the main tree has checked out
+  Assumed: a failed rebase is undone and the session redoes it, rather than leaving it stopped, so a session that dies leaves a clean tree. The landing hold covers landings that start from close_finished only; a session ended by hand still lands at once. Up to 3 hand-backs, then a fix-up quest.
+  Outcome: claude-opus-5-5, 78m, red, 7.3M tokens
+  Warriv: Landed red on the checkpoint git-init temp flake (second time today), not its code. Told the fix-up to cherry-pick and rerun without touching the code, and filed "Make checkpoint tests' git init not copy hook templates" (haiku) to end the flake.
+- [x] Fix the merge of land-a-quest-while-its-session-is-still @fix-the-merge-of-land-a-quest-while-its-2954
+  "Land a quest while its session is still alive, and hand a conflict back to that session" is done on the branch `land-a-quest-while-its-session-is-still` but did not merge into `main`: the check `cargo test --workspace` fails after rebasing it on `main`.
+  Take its commits onto your branch with `git cherry-pick main..land-a-quest-while-its-session-is-still`, resolve each conflict and `git cherry-pick --continue`, make every check in `.horadric/config.json` pass, and commit. Then delete it with `git branch -D land-a-quest-while-its-session-is-still`. Your branch merges like any finished quest and carries its work.
+  The quests after the finished one wait for this one too.
+  What failed said:
+  ```
+  test tasks::tests::the_mode_is_kept_in_the_config ... ok
+  test tend::tests::a_crowded_file_brings_its_oldest_notes_a_handful_at_most ... ok
+  test tend::tests::nothing_stale_or_crowded_asks_nothing ... ok
+  test tend::tests::stale_notes_on_changed_files_come_first ... ok
+  test tests::a_dev_instance_drops_an_owner_that_is_not_itself ... ok
+  test tests::a_refusal_names_the_owner_and_the_caller ... ok
+  test tests::dev_is_any_value_but_empty_or_zero ... ok
+  test tests::dev_moves_the_default_port_but_not_an_explicit_one ... ok
+  test tests::state_must_match_when_both_sides_know_it ... ok
+  test transcript::tests::a_missing_file_has_no_title ... ok
+  test tasks::tests::the_list_is_found_from_a_folder_inside_the_project ... ok
+  test transcript::tests::a_transcript_is_found_by_its_folder_or_else_anywhere ... ok
+  test transcript::tests::codex_limits_are_read_from_the_rollouts_end ... ok
+  test transcript::tests::folder_names_match_claude_codes ... ok
+  test listener::tests::reload_request_is_forwarded ... ok
+  test transcript::tests::the_config_dir_beats_home ... ok
+  test transcript::tests::history_is_newest_first_titled_and_skips_the_open_ones ... ok
+  test transcript::tests::finds_a_title_far_behind_a_huge_tool_result ... ok
+  test listener::tests::new_session_needs_the_header_and_no_origin ... ok
+  test listener::tests::tagged_post_is_forwarded ... ok
+  test listener::tests::an_event_from_another_agent_is_read_in_its_shape ... ok
+  test listener::tests::the_mod_is_answered_what_the_app_knows_of_its_session ... ok
+  test listener::tests::reload_needs_its_own_header_and_no_origin ... ok
+  test listener::tests::untagged_post_is_passed_on_without_a_tag ... ok
+  test listener::tests::status_is_forwarded_as_an_event ... ok
+  test listener::tests::the_mod_must_name_its_session_and_not_be_a_web_page ... ok
+  test listener::tests::event_owned_elsewhere_is_passed_on ... ok
+  test listener::tests::wrong_path_is_404 ... ok
+  test checkpoint::tests::an_interrupted_turn_leaves_a_hand_edit_alone ... ok
+  test listener::tests::a_browser_call_given_up_on_is_no_longer_wanted ... ok
+  test checkpoint::tests::a_turn_is_snapshotted_and_undone_in_a_real_repository ... ok
+  failures:
+  ---- checkpoint::tests::a_failed_write_leaves_the_file_another_session_made stdout ----
+  thread 'checkpoint::tests::a_failed_write_leaves_the_file_another_session_made' (30452) panicked at crates\horadric-hooks\src\checkpoint.rs:708:47:
+  called `Result::unwrap()` on an `Err` value: "git init: fatal: cannot copy 'C:/Program Files/Git/ucrt64/share/git-core/templates/hooks/pre-push.sample' to 'C:/Users/morte/AppData/Local/Temp/horadric-c...
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  failures:
+  checkpoint::tests::a_failed_write_leaves_the_file_another_session_made
+  test result: FAILED. 98 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.83s
+  error: test failed, to rerun pass `-p horadric-hooks --lib`
+  ```
+  Warriv: Stopped undone but waits on its own clippy, queued in heavy, then its tests. Not stuck: no tell.
+  Outcome: claude-opus-5-5, 51m, conflict, 1.1M tokens
+- [x] Fix the merge of fix-the-merge-of-land-a-quest-while-its @fix-the-merge-of-fix-the-merge-of-land-a-6055
+  "Fix the merge of land-a-quest-while-its-session-is-still" is done on the branch `fix-the-merge-of-land-a-quest-while-its` but did not merge into `main`: rebasing it on `main` conflicts.
+  Take its commits onto your branch with `git cherry-pick main..fix-the-merge-of-land-a-quest-while-its`, resolve each conflict and `git cherry-pick --continue`, make every check in `.horadric/config.json` pass, and commit. Then delete it with `git branch -D fix-the-merge-of-land-a-quest-while-its`. Your branch merges like any finished quest and carries its work.
+  The quests after the finished one wait for this one too.
+  What failed said:
+  ```
+  Auto-merging crates/horadric-ui/src/runner.rs
+  CONFLICT (content): Merge conflict in crates/horadric-ui/src/runner.rs
+  Auto-merging crates/horadric-ui/src/worktree.rs
+  error: could not apply 381eee3... Land a quest while its session is still alive, and hand a conflict back to it
+  hint: Resolve all conflicts manually, mark them as resolved with
+  hint: "git add/rm <conflicted_files>", then run "git rebase --continue".
+  hint: You can instead skip this commit: run "git rebase --skip".
+  hint: To abort and get back to the state before "git rebase", run "git rebase --abort".
+  hint: Disable this message with "git config set advice.mergeConflict false"
+  Could not apply 381eee3... # Land a quest while its session is still alive, and hand a conflict back to it
+  ```
+  Warriv: Model: opus. The conflict in runner.rs is with 'Tell running quests when main moves', which landed meanwhile and also changed runner.rs: keep both features. A red checkpoint test on git init in %TEMP% (hook template copy) is a known flake, rerun it, do not change code for it.
+  Warriv: Stopped undone but waits on its own clippy, queued in heavy behind another session's tests; conflict already resolved keeping both sides. Own work, no tell.
+  Outcome: claude-opus-5-5, 35m, green, 1.2M tokens
+- [x] Tell running quests when main moves under the files they touch @tell-running-quests-when-main-moves-under-2455
+  After: Fix the merge of fix-the-merge-of-land-a-quest-while-its
+  After: Fix the merge of land-a-quest-while-its-session-is-still
+  Nothing refreshes a quest from main while it runs (core/worktree.rs:190-210). Evidence: the replays quest on optipeople.website started 16:40, the other side landed 16:43 to 16:46, the conflict surfaced at 17:24; horadric.dev 'Settings window' conflicted 225 minutes after the overlapping section quests landed; nvoke 'search across every lead' was 303 minutes behind with 14 merges in between. Change: after each landing, compare the files it changed with each running worktree's changed files (git diff main...branch --name-only). Where they overlap, tell that session between turns: main moved, these files overlap yours, rebase now (git rebase main) and resolve while it is small. Optionally do a quiet trial merge (git merge-tree) and only tell when it really conflicts. No overlap, no message, no tokens.
+  After: Land a quest while its session is still alive, and hand a conflict back to that session
+  Warriv: Model: sonnet
+  Warriv: Stopped while its clippy run waits in the heavy queue behind another session's check. Waiting on its own work, not stuck: no tell, no hand on.
+  Warriv: Stopped again, now with clippy clean and its tests running in the background. Waiting on its own work: no tell, no hand on.
+  Warriv: Stopped a third time, now waiting on clippy over the merged code before it fast-forwards main. Own work, not stuck: no tell, no hand on.
+  Assumed: a session is told only when its branch overlaps the landed files AND git merge-tree says it would really conflict, to save tokens; a clean overlap stays quiet.
+  Outcome: sonnet, 59m, landed, 2.9M tokens
+- [x] Catch duplicate scope when a quest is filed @catch-duplicate-scope-when-a-quest-is-82622
+  horadric.dev 'Settings window' was effectively filed twice: four 'Settings: ... section' quests built the same thing, and its fix-up 'dropped a duplicate Settings window build main already had' (about 20M tokens thrown away). When a quest is added (quest add, Warriv, aims), compare its title and notes with open, running and recently done quests in the same project, and say so when it overlaps: to the filer on the CLI, to Warriv as an event. Suggest --after or a merge of the two. Do not block silently, and keep false positives low (cheap word overlap first; only ask a model when the overlap is real). Serialize only real overlap; parallelism otherwise stays.
+  Outcome: claude-opus-5-5, 53m, landed, 8.0M tokens
+- [x] Find merge hotspot files and make them conflict-free @find-merge-hotspot-files-and-make-them-82634
+  About two thirds of 51 conflicts were mechanical: two quests appending to the same log or adding entries to the same registry. Proven fixes: mrr 'PLAN.md merge=union' in .gitattributes (bf0678a) ended its log conflicts; nvoke desktop 'one file per feature for the IPC contract, preload' (17661b4) took ipc/contract.ts from 14 conflict events to zero. Build it into Horadric: the look-back (core/lookback.rs:44-47) already counts conflicts per file. Have it name the hotspot files per project, and for append-only logs (PLAN.md, LOG.md, trackers) propose merge=union; for registries (route lists, env lists, nav, catalogs) file a quest in that project to split them per feature. Current hotspots to seed: nvoke apps/server/src/env.ts, api/app.ts, packages/shared/src/catalog.ts, apps/server/src/cli.ts, docs/SPEC.md; optipeople.website components/templates/standard-page.tsx, content/pages/modules.ts, content/shared/types.ts; nooni Footer.tsx, seo.ts, llms.ts, product-meta.ts.
+  Warriv: Woke on a stop without done: the session waits on its own queued test run and a review agent, then commits. Not stuck, no tell (rule: waiting on own background work). Model: sonnet
+  Outcome: claude-opus-5-5, 112m, landed, 8.7M tokens
+- [x] Blocked quests say why, what the human must do, and how old they are @blocked-quests-say-why-what-the-human-82646
+  The owner loses track of [!] quests: they do not know why one is blocked, whether it still matters, or if it is stale. Today the log stores a free-text reason and an optional wait (core/tasks.rs:11-21, 390-479) but no blocked-since time; age shows only in the Quest Log window via the chronicle (ui/questlog.rs:404-413), not on the board (ui/board.rs:61-74). Change: 1) store blocked-since on the line. 2) Classify what it waits on: the human, a time, another quest, a file/command, or an outside thing. 3) Require (or have Warriv write) one plain line of 'what you would do' when it waits on the human, e.g. 'Say go or drop on clip 1 at ~/Downloads/nvoke-clip-1-emails.mp4'. 4) Board and a cross-project view: group 'Needs you' first, sorted by age, then 'Waiting on time/other quest'. 5) After about 5 days waiting on the human, ask once: still relevant? resume or drop, and dropping closes it with a note. Example of today's confusion: nvoke '[!] Company index: measure Common Crawl hits' carries several paragraphs and a Warriv note but no age or single action.
+  Outcome: claude-opus-5-5, 124m, blocked, 24.3M tokens
+  Warriv: Told it to rerun the tests through heavy and merge on green: rerunning killed checks is reversible and needs no human.
+  Outcome: claude-opus-5-5, 156m, landed, 5.6M tokens
+- [x] Context panel: see and toggle every connector, plugin and skill a project's sessions load @context-panel-see-and-toggle-every-3750
+  The owner was surprised to learn every session carries about 52k tokens before doing any work, re-read on every turn. Measured on an mrr inbox-sweep session (121 turns): deferred tool names about 9k tokens (mostly claude.ai connectors: monday, Microsoft 365, Atlassian, Slack, Read AI, Google Drive), skill listing about 9k (Figma, Vercel, Cloudflare, Supabase, monday plugins), MCP server instructions about 3k (Optipeople Demo pastes a large system-context JSON), hook output about 9k (includes Horadric's own lore recall and the timeforing hook). An inbox sweep uses almost none of it. Want: a per-project panel in Horadric (and a cross-project overview) listing each thing that loads, where it comes from (claude.ai account connector, user/project MCP, plugin, skill, hook, CLAUDE.md), and its token cost, building on 'horadric quest start' which already itemises a first call. Each line gets a toggle that writes the real setting into the project's .claude/settings.json: enabledPlugins for plugins, env ENABLE_CLAUDEAI_MCP_SERVERS=false for claude.ai connectors (both confirmed present in the installed Claude Code; verify whether connectors can be turned off one by one or only all together, and say so in the panel), disabledMcpjsonServers / project MCP config for others. Flag likely waste: a connector or skill no session in this project has called in N days (count from transcripts). Also let quests run lean by default with a per-quest opt-in for a connector (e.g. Zoho errands need the browser, not monday). Measure Horadric's own hook output and trim it if large. Show the before/after tokens per turn.
+  Warriv: Model: opus
+  Warriv: Warriv: blocked only to rerun checks killed for low memory. Told it go: rerun through heavy, ff-merge on green.
+  Outcome: opus, 76m, landed, 5.9M tokens
+- [x] Slim CLAUDE.md to under 120 lines @slim-claude-md-to-under-120-lines-7672
+  Run /slim-claude-md. The human approved this plan (200 to ~110 lines). Stale: lines 3 and 18 say Windows-only/Win32, but there is a macOS port (horadric-ui/src/mac/, mac_keys.rs, install_mac.rs, objc2 crates, mac workflows). Dependency list misses libc and the objc2-* crates. Moves: dependency paragraph to new docs/dependencies.md (one-line pointer stays). 'Verifying Windows code' and 'Testing against a real agent' to new docs/dev-instance.md, but keep the kill command and the host warning in CLAUDE.md. Merge Warriv switches, errands, heavy-check sequence, reload and first install from 'Developing from inside Horadric' into RELEASING.md; keep the ship-local vs ship-public trigger words. Cut the em dash rule to one line (global CLAUDE.md has it). Add: a 7-crate map (horadric, core, hooks, link, memory, pty, ui) and one-line pointers to docs/plan/the-brotherhood.md, brotherhood-ownership.md, one-portal.md, lore.md, memory.md, macos.md; mention Warriv and the browser pane. Lint: cargo fmt --all, cargo clippy --workspace --all-targets -- -D warnings. Commit only touched files.
+  Warriv: Model: sonnet
+  Outcome: sonnet, 18m, red, 919k tokens
+- [x] Fix the merge of slim-claude-md-to-under-120-lines @fix-the-merge-of-slim-claude-md-to-under-10131
+  "Slim CLAUDE.md to under 120 lines" is done on the branch `slim-claude-md-to-under-120-lines` but did not merge into `main`: the check `cargo test --workspace` fails after rebasing it on `main`.
+  Take its commits onto your branch with `git cherry-pick main..slim-claude-md-to-under-120-lines`, resolve each conflict and `git cherry-pick --continue`, make every check in `.horadric/config.json` pass, and commit. Then delete it with `git branch -D slim-claude-md-to-under-120-lines`. Your branch merges like any finished quest and carries its work.
+  The quests after the finished one wait for this one too.
+  What failed said:
+  ```
+  test tend::tests::stale_notes_on_changed_files_come_first ... ok
+  test tests::a_dev_instance_drops_an_owner_that_is_not_itself ... ok
+  test tests::a_refusal_names_the_owner_and_the_caller ... ok
+  test tests::dev_is_any_value_but_empty_or_zero ... ok
+  test tests::dev_moves_the_default_port_but_not_an_explicit_one ... ok
+  test tests::state_must_match_when_both_sides_know_it ... ok
+  test transcript::tests::a_missing_file_has_no_title ... ok
+  test transcript::tests::a_transcript_is_found_by_its_folder_or_else_anywhere ... ok
+  test transcript::tests::codex_limits_are_read_from_the_rollouts_end ... ok
+  test transcript::tests::finds_a_title_far_behind_a_huge_tool_result ... ok
+  test transcript::tests::folder_names_match_claude_codes ... ok
+  test transcript::tests::history_is_newest_first_titled_and_skips_the_open_ones ... ok
+  test transcript::tests::the_config_dir_beats_home ... ok
+  test listener::tests::new_session_request_is_forwarded ... ok
+  test listener::tests::new_session_without_the_app_is_unavailable ... ok
+  test listener::tests::reload_request_is_forwarded ... ok
+  test listener::tests::new_session_needs_the_header_and_no_origin ... ok
+  test listener::tests::tagged_post_is_forwarded ... ok
+  test listener::tests::the_mod_is_answered_what_the_app_knows_of_its_session ... ok
+  test listener::tests::an_event_from_another_agent_is_read_in_its_shape ... ok
+  test listener::tests::untagged_post_is_passed_on_without_a_tag ... ok
+  test listener::tests::wrong_path_is_404 ... ok
+  test listener::tests::status_is_forwarded_as_an_event ... ok
+  test listener::tests::the_mod_must_name_its_session_and_not_be_a_web_page ... ok
+  test listener::tests::event_owned_elsewhere_is_passed_on ... ok
+  test checkpoint::tests::an_interrupted_turn_leaves_a_hand_edit_alone ... ok
+  test listener::tests::a_browser_call_given_up_on_is_no_longer_wanted ... ok
+  test checkpoint::tests::a_turn_is_snapshotted_and_undone_in_a_real_repository ... ok
+  failures:
+  ---- checkpoint::tests::a_failed_write_leaves_the_file_another_session_made stdout ----
+  horadric: no checkpoint for undo-test-3: git for-each-ref: fatal: not a git repository (or any of the parent directories): .git
+  thread 'checkpoint::tests::a_failed_write_leaves_the_file_another_session_made' (836) panicked at crates\horadric-hooks\src\checkpoint.rs:847:9:
+  assertion `left == right` failed
+  left: Failed("git for-each-ref: fatal: not a git repository (or any of the parent directories): .git")
+  right: NotOwned(["x.rs"])
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  failures:
+  checkpoint::tests::a_failed_write_leaves_the_file_another_session_made
+  test result: FAILED. 98 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.86s
+  error: test failed, to rerun pass `-p horadric-hooks --lib`
+  ```
+  Escalated: opus, from sonnet: checks red on `cargo test --workspace`
+  Warriv: Model: haiku
+  Warriv: The red was the checkpoint git-init temp flake (a_failed_write_leaves_the_file_another_session_made, not a git repository), not this branch: it only touches CLAUDE.md, RELEASING.md and two new docs. Cherry-pick 40f9f09 and rerun the checks through heavy; change no code. If the flake repeats, rerun once more. Haiku, since it is a docs cherry-pick.
+  Warriv: Stopped undone but waits on its own clippy and tests in heavy, commit cherry-picked. Own work, no tell.
+  Outcome: haiku, 33m, green, 1.0M tokens
+- [x] Make checkpoint tests' git init not copy hook templates @make-checkpoint-tests-git-init-not-copy-8247
+  Model: haiku
+  Two landings went red today on the same flake: repo() in crates/horadric-hooks/src/checkpoint.rs (tests, near line 708) runs git init -q in %TEMP%, and git fails copying ucrt64/share/git-core/templates/hooks/pre-push.sample. Pass --template= (empty) so git copies no templates, in this helper and any other test helper that runs git init in a temp dir (grep the workspace for "init" in tests). Check: cargo test -p horadric-hooks a few times in a row stays green.
+  Filed by Warriv: the flake turned two landings red on 2026-10-29.
+  Outcome: haiku, 143m, landed, 2.9M tokens
+- [x] Sessions waiting on their own checks are not nudged or counted as stopped @sessions-waiting-on-their-own-checks-are-12436
+  Model: opus
+  Seen 2026-10-29: 8 quest sessions counted as stopped without done or blocked, and several nudged with 'If you are finished...', while they waited on their own cargo checks queued in horadric heavy (run_in_background, often with Monitor). Loot::waiting_on_own_work in crates/horadric-core/src/rarity.rs (since e81cbca) should cover this, so find where it leaks: a task notification from a Monitor event or an earlier task may lower outstanding to 0 while the check still runs (ended_tasks), Monitor's waiting flag is cleared by any prompt, and the look back's stop count may not ask waiting_on_own_work at all. Fix each leak with a test.
+  Part: heavy and the session prompt, in crates/horadric/src (heavy command): sessions passed --timeout to heavy twice today and lost a whole queued run; accept and ignore it, or say in one line that the Bash tool's timeout is the one to set. Test runs were also killed for low memory three times on 'Blocked quests say why'; heavy should wait for free memory before cargo test, or rerun once by itself when killed.
+  Part: chasing main, in crates/horadric-ui/src/runner.rs and worktree.rs: 'Blocked quests say why' merged main and reran all three checks five times because main moved during each run. When what came in from main touches no file the branch changed, landing should not need the session to rerun everything. Read lore on land-while-alive (6576c9d) first, which may already do this for quests started after it.
+  Filed by Warriv from the 2026-10-29 look back.
+  Warriv: Stopped undone while two of its own background agents (heavy fix, landing without rerun) still run, the very leak it fixes. Own work, no tell.
+  Assumed: after a land whose main move touched none of the branch's files, land() reports the new main commit as the one the checks passed on (they ran on the commit before it); also changed the CLAUDE.md worktree rule to rerun checks only when main's new changes overlap the branch's files.
+  Warriv: Warriv: stopped undone again, landing part green, still waiting on its own heavy agent. Own work, no tell.
+  Outcome: opus, 55m, landed, 7.7M tokens
+- [x] Land the stray session.rs edit: a Stop with background work stays Working @land-the-stray-session-rs-edit-a-stop-18725
+  Model: sonnet
+  Since 01:18 on 2026-10-29 the main checkout holds an uncommitted edit to crates/horadric-core/src/session.rs that no quest owns (see it with: git -C C:/Users/morte/Documents/Github/horadric.dev diff crates/horadric-core/src/session.rs). On Stop it keeps the phase Working while self.loot.outstanding > 0, with the test a_stop_with_a_background_shell_running_is_not_done. It has ridden every Ship Local since. Apply that diff in your worktree, check it fits what edd8483 (sessions waiting on their own background work) already does, keep it if it does, run the three checks and land it. Do not touch or revert the file in the main checkout; once yours lands, its copy there matches main.
+  Assumed by Warriv: committing a tested, already shipped edit is easier to undo than letting it ride unowned.
+  Outcome: sonnet, 10m, landed, 482k tokens
