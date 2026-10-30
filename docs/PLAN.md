@@ -67,6 +67,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Small local models](plan/local-models.md): static embeddings as memory's first pass, and a small model for the sentence per session.
 - [Dictation](plan/dictation.md): Ctrl+Space dictates into a session with Whisper on the machine; what is left: speed, a rune, cleanup, outside Horadric.
 - [Ghostty's terminal core](plan/ghostty.md): move the grid from `alacritty_terminal` to libghostty, after a trial.
+- [The tray menu and Settings](plan/tray-and-settings.md): a short grouped tray menu, and Settings as a resizable window of described cards with search. Proposed.
 
 ## Loose ends
 
