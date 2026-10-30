@@ -10,9 +10,12 @@
 - A quest I file gets an After: line for every quest whose code it calls, not only the nearest: "Backup: the Settings section" named part 2 but needed part 1, started early and blocked itself (2026-10-16).
 - A quest blocked only to ask leave to rerun checks (killed, out of memory) gets "go" from me: reruns never need the human.
 - Quests that change the landing machinery (crates/horadric-ui/src/runner.rs, worktree.rs, horadric-core merge.rs) get an After: line on each other: four ran side by side on 2026-10-28/29 and cost two conflict fix-ups and four extra fix-up quests.
+- A ship cast is refused while any ship session of the project is still open, even a finished one (lore #588): if a cast is refused, hand "close the old ship panes" to the human, never cast again in a loop.
+- Since 9e5d10f quests land on `cargo check` only (lore #590): do not tell sessions to run fmt, clippy and the full tests, and write "cargo check -p <crate>" as the check in quests I file.
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-30 Look back (5 done, 5 merged, 31 Warriv sessions): the two silent stops were "Sessions waiting on their own checks..." waiting on its own agents, the bug it fixed and landed, so no new quest. The human cut checks to cargo check for quests and none for ship local, added a one-ship guard, and built the Folio by hand (v0.36.0). The day gave 5 lore notes (#588 to #592, #592 replaces #542); two new rules. Round: main at 859368e, only my memory since the 998570d ship, no aim, log done. Nothing else to do.
 - 2026-10-30 Round (hourly, main at 07dc332, only my memory since the 998570d ship): no aim, log done. Nothing to do.
 - 2026-10-30 Round (hourly, main at a5e5a8c, only my memory since the 998570d ship): no aim, log done. Nothing to do.
 - 2026-10-30 Round (01:38, human left, main at 0e10fce): the 01:35 Ship Local built the release at 01:37, carrying df15717 and 998570d. No aim, log done. Nothing to do.
@@ -65,4 +68,5 @@
 - The checkpoint git-init fix landed (9b90bd5): if the flake shows again, look at %TEMP% itself (antivirus, locks).
 - "Headless sessions: the spike" was done by the human's session outside the log (noted on the quest); it stays [!] until they close it.
 - Once quests run with a pack, the pack comparison resumes by itself.
-- "Sessions waiting on their own checks..." landed: the next look back's silent stops count should drop.
+- "Sessions waiting on their own checks..." landed (edd8483, before this day's count): the next look back's silent stops count should drop.
+- Town Portal v20 is live from uncommitted work in ../horadric.portal (lore #592); the human was asked by that ship session whether to roll back. Watch for a quest or answer.
