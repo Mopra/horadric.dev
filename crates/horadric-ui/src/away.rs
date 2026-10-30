@@ -1,22 +1,24 @@
-//! While you were away: one card on the stage when the human comes back
-//! after a long absence, built from the chronicle. Quests that landed, a
-//! line for each wake of Warriv, the errands that filed or failed, what
-//! was assumed while Warriv drove, and last the questions only the human
-//! can answer. An assumption and a
-//! question each have a one line field. Enter on a question does what
-//! `quest tell` does for its quest; on an assumption it overrules it.
+//! While you were away: the one screen that says what happened, opened on
+//! coming back after a while, from the tray menu and from a hotkey.
 //!
-//! It is drawn as the catch-up is, a plate of its own, but stands over the
-//! stage and stays there while the human looks elsewhere: answering often
-//! means reading a session first. Esc or the cross closes it, and it does
-//! not come back until the next absence.
+//! It is read in a glance. One line on top says how long, how much landed
+//! and how much needs you. Under it, in full, only what needs you: the
+//! questions only you can answer, each with a one line field (Enter does
+//! what `quest tell` does), and the errands that failed. Everything else is
+//! one line a project, which a click unfolds into what landed, what the
+//! errands filed and what was assumed, each assumption with a field to
+//! overrule it.
+//!
+//! It stands over the stage and stays there while the human looks
+//! elsewhere: answering often means reading a session first. Esc or the
+//! cross closes it. With nothing to tell it says so and goes by itself.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 use std::time::Duration;
 
-use horadric_core::chronicle::{Away, AwayLine};
+use horadric_core::chronicle::{self, Away, AwayLine};
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::DirectWrite::IDWriteTextLayout;
@@ -37,10 +39,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCaretBlinkTime, GetWindowLongPtrW,
     GetWindowRect, IsIconic, IsWindowVisible, KillTimer, LoadCursorW, RegisterClassW, SetCursor,
-    SetForegroundWindow, SetTimer, SetWindowLongPtrW, ShowWindow, CREATESTRUCTW, GWLP_USERDATA,
-    IDC_ARROW, IDC_IBEAM, SW_HIDE, SW_SHOW, WM_CHAR, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR,
-    WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW,
+    GWLP_USERDATA, IDC_ARROW, IDC_HAND, IDC_IBEAM, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    WM_CHAR, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW,
+    WS_POPUP,
 };
 
 use crate::app::{self, Input};
@@ -54,11 +57,10 @@ use crate::window::Shared;
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricAway");
 
-pub const TITLE: &str = "While you were away";
-
-/// No input for this long, and then input, opens the card in place of the
-/// catch-up, in seconds.
-pub const AWAY_FOR: u64 = 30 * 60;
+/// No real input for this long counts as away, in seconds.
+pub const AWAY_AFTER: u64 = 15 * 60;
+/// Input this recent counts as being back, in seconds.
+const BACK_WITHIN: u64 = 5;
 /// The widest it gets, in DIPs; a narrow stage gets a narrower card.
 const MOST_W: f32 = 520.0;
 const LEAST_W: f32 = 300.0;
@@ -67,17 +69,96 @@ const MARGIN: f32 = 24.0;
 /// An answer is one line typed into a terminal.
 const MAX_ANSWER: usize = 600;
 const BLINK: usize = 1;
+/// "Nothing new" stays this long, in milliseconds, and goes.
+const QUIET: usize = 2;
+const QUIET_FOR: u32 = 1600;
+
+/// Whether you are away, from how long since the last input and whether
+/// the screen is locked.
+#[derive(Debug, Default)]
+pub struct Absence {
+    /// Since when, in Unix seconds, while away.
+    since: Option<u64>,
+    locked: bool,
+}
+
+impl Absence {
+    /// Since when you have been away, in Unix seconds, while you are.
+    pub fn since(&self) -> Option<u64> {
+        self.since
+    }
+
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
+    pub fn lock(&mut self, now: u64) {
+        self.locked = true;
+        self.since.get_or_insert(now);
+    }
+
+    /// Unlocking is coming back. Returns since when you were away.
+    pub fn unlock(&mut self) -> Option<u64> {
+        self.locked = false;
+        self.since.take()
+    }
+
+    /// A look at the input clock, `idle` seconds since the last input.
+    /// Returns since when you were away, once, as you come back. Input on
+    /// the lock screen is not coming back: unlocking is.
+    pub fn idle(&mut self, idle: u64, now: u64) -> Option<u64> {
+        if self.locked {
+            return None;
+        }
+        if idle >= AWAY_AFTER {
+            self.since.get_or_insert(now.saturating_sub(idle));
+            None
+        } else if idle <= BACK_WITHIN {
+            self.since.take()
+        } else {
+            None
+        }
+    }
+}
+
+/// The local time of day at `at`, as "09:05", from the seconds since local
+/// midnight `local` at `now`.
+pub fn clock(local: u64, now: u64, at: u64) -> String {
+    let secs = (local as i64 - (now as i64 - at as i64)).rem_euclid(86_400);
+    format!("{:02}:{:02}", secs / 3600, secs % 3600 / 60)
+}
+
+/// What the summary starts with: how long you were away, when you were,
+/// else since when it tells.
+pub fn lead(away_for: Option<u64>, since_clock: &str) -> String {
+    match away_for {
+        Some(secs) => format!("{} away", chronicle::short_span(secs)),
+        None => format!("Since {since_clock}"),
+    }
+}
+
+/// One project's news.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct News {
+    pub name: String,
+    /// Its folder, where an answer goes.
+    pub dir: String,
+    pub away: Away,
+}
 
 /// What a row is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
-    Heading,
+    /// A question only the human can answer.
+    Asks,
+    Failed,
+    /// A project's folded line.
+    Fold,
     Landed,
-    Warriv,
-    Question,
+    Filed,
     /// A choice made while the human was away, for them to overrule.
     Assumed,
-    /// A question answered.
+    /// A question answered or an assumption overruled.
     Told,
     Field,
 }
@@ -90,6 +171,10 @@ pub struct Row {
     pub text: String,
     pub detail: String,
     pub age: String,
+    /// The project a click on it unfolds or folds.
+    pub fold: Option<usize>,
+    /// The answer a field is for.
+    pub slot: Option<usize>,
 }
 
 /// A question's answer, for the project at `dir`, or the human's word
@@ -101,105 +186,121 @@ pub struct Answer {
     pub assumed: Option<String>,
 }
 
-/// The rows for each project's news, `name` its name and `dir` its folder,
-/// with the answers the fields stand for, in order.
-pub fn rows(projects: &[(String, String, Away)], now: u64) -> (Vec<Row>, Vec<Answer>) {
-    let age = |at: u64| horadric_core::format_age(Duration::from_secs(now.saturating_sub(at)));
-    let mut out = Vec::new();
-    let mut answers = Vec::new();
-    let heading = |out: &mut Vec<Row>, name: &str, what: &str| {
-        out.push(Row {
-            kind: CatchupKind::Heading,
-            tone: Tone::Heading,
-            text: format!("{name} \u{00B7} {what}"),
-            detail: String::new(),
-            age: String::new(),
-        });
-    };
-    let line = |out: &mut Vec<Row>, tone: Tone, l: &AwayLine| {
-        out.push(Row {
-            kind: CatchupKind::Line {
-                detail: !l.detail.is_empty(),
-            },
-            tone,
-            text: l.text.clone(),
-            detail: l.detail.clone(),
-            age: age(l.at),
-        });
-    };
-    let field = |out: &mut Vec<Row>| {
-        out.push(Row {
-            kind: CatchupKind::Field,
-            tone: Tone::Field,
-            text: String::new(),
-            detail: String::new(),
-            age: String::new(),
-        });
-    };
-    for (name, dir, a) in projects {
-        if !a.landed.is_empty() {
-            heading(&mut out, name, "landed");
-            for l in &a.landed {
-                line(&mut out, Tone::Landed, l);
-            }
-        }
-        if !a.wakes.is_empty() {
-            heading(&mut out, name, "Warriv");
-            for l in &a.wakes {
-                line(&mut out, Tone::Warriv, l);
-            }
-        }
-        if !a.errands.is_empty() {
-            heading(&mut out, name, "errands");
-            for l in &a.errands {
-                line(&mut out, Tone::Warriv, l);
-            }
-        }
-        if !a.assumed.is_empty() {
-            heading(&mut out, name, "assumed");
-            for x in &a.assumed {
-                out.push(Row {
-                    kind: CatchupKind::Line { detail: true },
-                    tone: Tone::Assumed,
-                    text: x.title.clone(),
-                    detail: x.text.clone(),
-                    age: age(x.at),
-                });
-                field(&mut out);
-                answers.push(Answer {
-                    dir: dir.clone(),
-                    title: x.title.clone(),
-                    assumed: Some(x.text.clone()),
-                });
-            }
-        }
-        if !a.questions.is_empty() {
-            heading(&mut out, name, "asks you");
-            for q in &a.questions {
-                out.push(Row {
-                    kind: CatchupKind::Line {
-                        detail: !q.question.is_empty(),
-                    },
-                    tone: Tone::Question,
-                    text: q.title.clone(),
-                    detail: q.question.clone(),
-                    age: String::new(),
-                });
-                field(&mut out);
-                answers.push(Answer {
-                    dir: dir.clone(),
-                    title: q.title.clone(),
-                    assumed: None,
-                });
-            }
-        }
-    }
-    (out, answers)
+/// The answers the fields stand for: every question first, then every
+/// assumption, each in the projects' order. [`rows`] numbers its fields
+/// the same way, so a field keeps its answer as projects fold.
+pub fn answers(news: &[News]) -> Vec<Answer> {
+    let questions = news.iter().flat_map(|n| {
+        n.away.questions.iter().map(|q| Answer {
+            dir: n.dir.clone(),
+            title: q.title.clone(),
+            assumed: None,
+        })
+    });
+    let assumed = news.iter().flat_map(|n| {
+        n.away.assumed.iter().map(|x| Answer {
+            dir: n.dir.clone(),
+            title: x.title.clone(),
+            assumed: Some(x.text.clone()),
+        })
+    });
+    questions.chain(assumed).collect()
 }
 
-/// What the card says under its title, for an absence `secs` long.
-pub fn gone(secs: u64) -> String {
-    format!("You were gone {}", horadric_core::usage::format_until(secs))
+/// The rows for `news`: what needs you in full, then a line a project for
+/// the rest, unfolded where `open` says. `sent` says which answers went,
+/// by slot.
+pub fn rows(news: &[News], open: &[bool], sent: &[bool], now: u64) -> Vec<Row> {
+    let age = |at: u64| horadric_core::format_age(Duration::from_secs(now.saturating_sub(at)));
+    // With one project its name would only repeat.
+    let named = |name: &str, what: &str| {
+        if news.len() > 1 && !what.is_empty() {
+            format!("{name} \u{00B7} {what}")
+        } else if news.len() > 1 {
+            name.to_string()
+        } else {
+            what.to_string()
+        }
+    };
+    let told = |slot: usize| sent.get(slot).copied().unwrap_or(false);
+    let mut out = Vec::new();
+    let line = |tone: Tone, text: String, detail: String, age: String| Row {
+        kind: CatchupKind::Line {
+            detail: !detail.is_empty(),
+        },
+        tone,
+        text,
+        detail,
+        age,
+        fold: None,
+        slot: None,
+    };
+    let field = |slot: usize| Row {
+        kind: CatchupKind::Field,
+        tone: Tone::Field,
+        text: String::new(),
+        detail: String::new(),
+        age: String::new(),
+        fold: None,
+        slot: Some(slot),
+    };
+    let mut slot = 0;
+    for n in news {
+        for q in &n.away.questions {
+            let (tone, age) = if told(slot) {
+                (Tone::Told, "told".to_string())
+            } else {
+                (Tone::Asks, String::new())
+            };
+            out.push(line(tone, q.title.clone(), named(&n.name, &q.question), age));
+            out.push(field(slot));
+            slot += 1;
+        }
+    }
+    for n in news {
+        for l in &n.away.failed {
+            out.push(line(
+                Tone::Failed,
+                l.text.clone(),
+                named(&n.name, &l.detail),
+                age(l.at),
+            ));
+        }
+    }
+    for (p, n) in news.iter().enumerate() {
+        let a = &n.away;
+        let fold = a.fold();
+        let unfolded = open.get(p).copied().unwrap_or(false);
+        if !fold.is_empty() {
+            out.push(Row {
+                fold: Some(p),
+                ..line(
+                    Tone::Fold,
+                    format!("{} \u{00B7} {fold}", n.name),
+                    String::new(),
+                    if unfolded { "hide" } else { "show" }.to_string(),
+                )
+            });
+        }
+        if fold.is_empty() || !unfolded {
+            slot += a.assumed.len();
+            continue;
+        }
+        let plain = |tone: Tone, l: &AwayLine| line(tone, l.text.clone(), l.detail.clone(), age(l.at));
+        out.extend(a.landed.iter().map(|l| plain(Tone::Landed, l)));
+        out.extend(a.filed.iter().map(|l| plain(Tone::Filed, l)));
+        for x in &a.assumed {
+            let (tone, when) = if told(slot) {
+                (Tone::Told, "overruled".to_string())
+            } else {
+                (Tone::Assumed, age(x.at))
+            };
+            out.push(line(tone, x.title.clone(), format!("assumed {}", x.text), when));
+            out.push(field(slot));
+            slot += 1;
+        }
+    }
+    out
 }
 
 /// How wide the card is over something `room` DIPs wide.
@@ -207,10 +308,10 @@ pub fn width(room: f32) -> f32 {
     (room - 2.0 * MARGIN).clamp(LEAST_W, MOST_W)
 }
 
-/// The next field from `from` that still waits for an answer, going
-/// forward or back and round, if any does.
-pub fn next_open(sent: &[bool], from: usize, forward: bool) -> Option<usize> {
-    let n = sent.len();
+/// The next field from `from` that can take an answer, going forward or
+/// back and round, if any can.
+pub fn next_open(open: &[bool], from: usize, forward: bool) -> Option<usize> {
+    let n = open.len();
     (1..=n)
         .map(|k| {
             if forward {
@@ -219,16 +320,26 @@ pub fn next_open(sent: &[bool], from: usize, forward: bool) -> Option<usize> {
                 (from + n * 2 - k) % n
             }
         })
-        .find(|&i| !sent[i])
+        .find(|&i| open[i])
+}
+
+/// What the last line says about the lines that do not show: how many
+/// are under it while any are, else how many are above.
+pub fn more(above: usize, below: usize) -> String {
+    if below > 0 || above == 0 {
+        format!("and {below} more")
+    } else {
+        format!("{above} more above")
+    }
 }
 
 fn tone(t: Tone) -> Option<Color> {
     match t {
+        Tone::Asks | Tone::Failed => Some(theme::error()),
         Tone::Landed => Some(theme::done()),
-        Tone::Warriv => Some(theme::quest()),
-        Tone::Question => Some(theme::error()),
+        Tone::Filed => Some(theme::quest()),
         Tone::Assumed => Some(theme::waiting()),
-        Tone::Heading | Tone::Told | Tone::Field => None,
+        Tone::Fold | Tone::Told | Tone::Field => None,
     }
 }
 
@@ -260,9 +371,15 @@ pub struct AwayCard {
     layout: RefCell<CatchupLayout>,
     width: f32,
     max_h: f32,
-    kinds: Vec<CatchupKind>,
+    /// What it stands over, in screen pixels, which it stays inside as it
+    /// grows.
+    over: [i32; 4],
+    kinds: RefCell<Vec<CatchupKind>>,
     scale: f32,
-    sub: String,
+    title: String,
+    now: u64,
+    news: Vec<News>,
+    open: RefCell<Vec<bool>>,
     rows: RefCell<Vec<Row>>,
     answers: Vec<Answer>,
     slots: RefCell<Vec<Slot>>,
@@ -270,6 +387,9 @@ pub struct AwayCard {
     lit: Cell<bool>,
     /// The first half of a surrogate pair typed.
     high: Cell<Option<u16>>,
+    /// The fold line under the mouse, as an index into the rows placed.
+    hot: Cell<Option<usize>>,
+    pressed: Cell<Option<usize>>,
     close_hot: Cell<bool>,
     pressed_close: Cell<bool>,
     closed: Cell<bool>,
@@ -277,13 +397,13 @@ pub struct AwayCard {
 
 impl AwayCard {
     /// Opens over `stage` when it shows, else in the middle of the primary
-    /// screen.
+    /// screen. With no `news` it says "Nothing new" and goes by itself.
     pub fn open(
         shared: Rc<Shared>,
         stage: Option<HWND>,
-        sub: String,
-        rows: Vec<Row>,
-        answers: Vec<Answer>,
+        title: String,
+        news: Vec<News>,
+        now: u64,
     ) -> Result<Box<Self>> {
         let stage =
             stage.filter(|&h| unsafe { IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() });
@@ -315,6 +435,10 @@ impl AwayCard {
         };
         let width = width((over[2] - over[0]) as f32 / s);
         let max_h = ((over[3] - over[1]) as f32 / s - 2.0 * MARGIN).max(200.0);
+        let answers = answers(&news);
+        let open = vec![false; news.len()];
+        let sent = vec![false; answers.len()];
+        let rows = rows(&news, &open, &sent, now);
         let kinds: Vec<CatchupKind> = rows.iter().map(|r| r.kind).collect();
         let layout = layout::catchup(&kinds, width, max_h, 0);
         let size = (
@@ -330,6 +454,7 @@ impl AwayCard {
                 sent: false,
             })
             .collect();
+        let quiet = rows.is_empty();
         let mut win = Box::new(AwayCard {
             hwnd: HWND::default(),
             shared,
@@ -337,15 +462,21 @@ impl AwayCard {
             layout: RefCell::new(layout),
             width,
             max_h,
-            kinds,
+            over,
+            kinds: RefCell::new(kinds),
             scale: s,
-            sub,
+            title,
+            now,
+            news,
+            open: RefCell::new(open),
             rows: RefCell::new(rows),
             answers,
             slots: RefCell::new(slots),
             focus: Cell::new(0),
             lit: Cell::new(true),
             high: Cell::new(None),
+            hot: Cell::new(None),
+            pressed: Cell::new(None),
             close_hot: Cell::new(false),
             pressed_close: Cell::new(false),
             closed: Cell::new(false),
@@ -379,6 +510,12 @@ impl AwayCard {
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
             SetTimer(Some(hwnd), BLINK, GetCaretBlinkTime(), None);
+            if quiet {
+                SetTimer(Some(hwnd), QUIET, QUIET_FOR, None);
+            }
+        }
+        if let Some(i) = next_open(&win.open_slots(), win.answers.len().saturating_sub(1), true) {
+            win.focus.set(i);
         }
         Ok(win)
     }
@@ -395,16 +532,24 @@ impl AwayCard {
         }
     }
 
+    /// Which fields can take an answer: shown, and not answered yet.
+    fn open_slots(&self) -> Vec<bool> {
+        let rows = self.rows.borrow();
+        let slots = self.slots.borrow();
+        (0..slots.len())
+            .map(|i| !slots[i].sent && rows.iter().any(|r| r.slot == Some(i)))
+            .collect()
+    }
+
+    /// The index among the rows of field `i`, when it is one of them.
+    fn field_row(&self, i: usize) -> Option<usize> {
+        self.rows.borrow().iter().position(|r| r.slot == Some(i))
+    }
+
     /// The well of field `i`, when it shows.
     fn field_rect(&self, i: usize) -> Option<Rect> {
+        let index = self.field_row(i)?;
         let l = self.layout.borrow();
-        let rows = self.rows.borrow();
-        let index = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.tone == Tone::Field)
-            .nth(i)?
-            .0;
         match l.rows.get(index.checked_sub(l.first)?) {
             Some(CatchupRow::Field(r)) => Some(*r),
             _ => None,
@@ -437,11 +582,15 @@ impl AwayCard {
             .zip(&rects)
             .map(|(s, r)| r.and_then(|r| self.text_layout(&s.field, &r)))
             .collect();
+        // The fields in the order they stand, as the scene wants them.
+        let mut order: Vec<usize> = (0..slots.len()).filter(|&i| rects[i].is_some()).collect();
+        order.sort_by_key(|&i| self.field_row(i));
         let mut fields = Vec::new();
-        for (i, ((s, rect), text)) in slots.iter_mut().zip(&rects).zip(&texts).enumerate() {
-            let (Some(rect), Some(text)) = (rect, text) else {
+        for i in order {
+            let (Some(rect), Some(text)) = (&rects[i], &texts[i]) else {
                 continue;
             };
+            let s = &mut slots[i];
             let inner = layout::ask_inner(rect);
             let f = &s.field;
             let caret = render::caret_at(text, field::utf16_at(&f.text, f.caret));
@@ -453,7 +602,7 @@ impl AwayCard {
             fields.push(FieldLook {
                 rect: *rect,
                 text,
-                placeholder: f.text.is_empty().then_some(match self.answers.get(i) {
+                placeholder: s.field.text.is_empty().then_some(match self.answers.get(i) {
                     _ if s.sent => "",
                     Some(a) if a.assumed.is_some() => "Leave it, or overrule it in one line",
                     _ => "Answer, and Enter tells the quest",
@@ -472,7 +621,7 @@ impl AwayCard {
         let layout = self.layout.borrow();
         let rows = self.rows.borrow();
         let more = more_of(&rows, &layout);
-        let looks: Vec<CatchupLook> = rows[layout.first..]
+        let looks: Vec<CatchupLook> = rows[layout.first.min(rows.len())..]
             .iter()
             .map(|r| CatchupLook {
                 text: &r.text,
@@ -484,11 +633,11 @@ impl AwayCard {
             .collect();
         let scene = CatchupScene {
             layout: &layout,
-            title: TITLE,
-            sub: &self.sub,
+            title: &self.title,
+            sub: "",
             rows: &looks,
             more: &more,
-            hot: None,
+            hot: self.hot.get(),
             close_hot: self.close_hot.get(),
             fields,
         };
@@ -512,6 +661,15 @@ impl AwayCard {
         self.layout.borrow().close.contains(x, y)
     }
 
+    /// The fold line under a point, as an index into the rows placed.
+    fn fold_at(&self, lparam: LPARAM) -> Option<usize> {
+        let (x, y) = self.point(lparam);
+        let l = self.layout.borrow();
+        let i = layout::catchup_hit(&l, x, y)?;
+        let rows = self.rows.borrow();
+        rows.get(l.first + i)?.fold.map(|_| i)
+    }
+
     /// The field under a point, if one is.
     fn field_at(&self, lparam: LPARAM) -> Option<usize> {
         let (x, y) = self.point(lparam);
@@ -522,12 +680,77 @@ impl AwayCard {
     fn wheel(&self, wparam: WPARAM) {
         let notches = ((wparam.0 >> 16) & 0xffff) as i16 as i32 / 120;
         let first = self.layout.borrow().first;
-        let to = layout::catchup_scroll(&self.kinds, self.width, self.max_h, first, notches);
+        let kinds = self.kinds.borrow();
+        let to = layout::catchup_scroll(&kinds, self.width, self.max_h, first, notches);
         if to == first {
             return;
         }
-        *self.layout.borrow_mut() = layout::catchup(&self.kinds, self.width, self.max_h, to);
+        *self.layout.borrow_mut() = layout::catchup(&kinds, self.width, self.max_h, to);
+        self.hot.set(None);
         self.invalidate();
+    }
+
+    /// A project's line clicked: it unfolds, or folds back, and the card
+    /// grows or shrinks to fit, staying inside what it stands over.
+    fn toggle(&self, placed: usize) {
+        let Some(p) = self
+            .rows
+            .borrow()
+            .get(self.layout.borrow().first + placed)
+            .and_then(|r| r.fold)
+        else {
+            return;
+        };
+        if let Some(o) = self.open.borrow_mut().get_mut(p) {
+            *o = !*o;
+        }
+        let sent: Vec<bool> = self.slots.borrow().iter().map(|s| s.sent).collect();
+        let rows = rows(&self.news, &self.open.borrow(), &sent, self.now);
+        let kinds: Vec<CatchupKind> = rows.iter().map(|r| r.kind).collect();
+        let all = layout::catchup(&kinds, self.width, self.max_h, 0);
+        let l = if all.more.is_none() {
+            all
+        } else {
+            let first = self.layout.borrow().first.min(kinds.len());
+            layout::catchup(&kinds, self.width, self.max_h, first)
+        };
+        let s = self.scale;
+        let size = (
+            (l.size.0 * s).round() as i32,
+            (l.size.1 * s).round() as i32,
+        );
+        *self.rows.borrow_mut() = rows;
+        *self.kinds.borrow_mut() = kinds;
+        *self.layout.borrow_mut() = l;
+        self.hot.set(None);
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetWindowRect(self.hwnd, &mut r);
+        }
+        let top = r.top.min(self.over[3] - size.1).max(self.over[1]);
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                r.left,
+                top,
+                size.0,
+                size.1,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        if let Some(t) = self.target.borrow().as_ref() {
+            if t.resize(size.0 as u32, size.1 as u32).is_err() {
+                *self.target.borrow_mut() = None;
+            }
+        }
+        let open = self.open_slots();
+        if !open.get(self.focus.get()).copied().unwrap_or(false) {
+            if let Some(n) = next_open(&open, self.focus.get(), true) {
+                self.focus.set(n);
+            }
+        }
+        self.changed();
     }
 
     /// Something changed: the caret shows at once and starts its blink
@@ -542,7 +765,10 @@ impl AwayCard {
 
     fn edit(&self, f: impl FnOnce(&mut Field)) {
         let i = self.focus.get();
-        if let Some(s) = self.slots.borrow_mut().get_mut(i).filter(|s| !s.sent) {
+        if !self.open_slots().get(i).copied().unwrap_or(false) {
+            return;
+        }
+        if let Some(s) = self.slots.borrow_mut().get_mut(i) {
             f(&mut s.field);
         }
         self.changed();
@@ -552,18 +778,12 @@ impl AwayCard {
     fn focus_on(&self, i: usize) {
         self.focus.set(i);
         if self.field_rect(i).is_none() {
-            let rows = self.rows.borrow();
-            let index = rows
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| r.tone == Tone::Field)
-                .nth(i)
-                .map_or(0, |(k, _)| k);
-            drop(rows);
-            // Down until the field shows, its question above it.
+            let index = self.field_row(i).unwrap_or(0);
+            let kinds = self.kinds.borrow();
+            // Down until the field shows, its line above it.
             let mut first = self.layout.borrow().first.min(index.saturating_sub(1));
             loop {
-                let l = layout::catchup(&self.kinds, self.width, self.max_h, first);
+                let l = layout::catchup(&kinds, self.width, self.max_h, first);
                 let shows = l.first <= index && index < l.first + l.rows.len();
                 if shows || first >= index {
                     *self.layout.borrow_mut() = l;
@@ -576,25 +796,17 @@ impl AwayCard {
     }
 
     /// Enter: the answer goes to its quest's session as `quest tell` would
-    /// send it, and the keyboard moves to the next question.
+    /// send it, and the keyboard moves to the next field.
     fn send(&self) {
         let i = self.focus.get();
-        let text = {
-            let slots = self.slots.borrow();
-            match slots.get(i) {
-                Some(s) if !s.sent => s.field.text.trim().to_string(),
-                _ => return,
-            }
-        };
+        if !self.open_slots().get(i).copied().unwrap_or(false) {
+            return;
+        }
+        let text = self.slots.borrow()[i].field.text.trim().to_string();
         if text.is_empty() {
             return;
         }
         let Some(a) = self.answers.get(i) else { return };
-        let told = if a.assumed.is_some() {
-            "overruled"
-        } else {
-            "told"
-        };
         app::push(Input::Answered {
             dir: a.dir.clone(),
             title: a.title.clone(),
@@ -602,25 +814,19 @@ impl AwayCard {
             text,
         });
         self.slots.borrow_mut()[i].sent = true;
-        {
-            // Its question reads as told, the lamp out.
-            let mut rows = self.rows.borrow_mut();
-            let at = rows
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| r.tone == Tone::Field)
-                .nth(i)
-                .map(|(k, _)| k);
-            if let Some(q) = at
-                .and_then(|k| k.checked_sub(1))
-                .and_then(|k| rows.get_mut(k))
-            {
-                q.tone = Tone::Told;
-                q.age = told.to_string();
+        // Its line reads as told, the lamp out.
+        let told = if a.assumed.is_some() {
+            "overruled"
+        } else {
+            "told"
+        };
+        if let Some(k) = self.field_row(i).and_then(|k| k.checked_sub(1)) {
+            if let Some(r) = self.rows.borrow_mut().get_mut(k) {
+                r.tone = Tone::Told;
+                r.age = told.to_string();
             }
         }
-        let sent: Vec<bool> = self.slots.borrow().iter().map(|s| s.sent).collect();
-        match next_open(&sent, i, true) {
+        match next_open(&self.open_slots(), i, true) {
             Some(n) => self.focus_on(n),
             None => self.changed(),
         }
@@ -629,9 +835,9 @@ impl AwayCard {
     fn key(&self, vk: u16) {
         let down = |k: VIRTUAL_KEY| unsafe { GetKeyState(k.0 as i32) } < 0;
         let (ctrl, shift) = (down(VK_CONTROL), down(VK_SHIFT));
-        let sent: Vec<bool> = self.slots.borrow().iter().map(|s| s.sent).collect();
+        let open = self.open_slots();
         let step = |forward: bool| {
-            if let Some(n) = next_open(&sent, self.focus.get(), forward) {
+            if let Some(n) = next_open(&open, self.focus.get(), forward) {
                 self.focus_on(n);
             }
         };
@@ -699,6 +905,7 @@ impl AwayCard {
         }
         unsafe {
             let _ = KillTimer(Some(self.hwnd), BLINK);
+            let _ = KillTimer(Some(self.hwnd), QUIET);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         app::push(Input::AwayClosed);
@@ -719,6 +926,10 @@ impl AwayCard {
                 self.invalidate();
                 Some(LRESULT(0))
             }
+            WM_TIMER if wparam.0 == QUIET => {
+                self.close();
+                Some(LRESULT(0))
+            }
             WM_SETCURSOR => {
                 let mut p = POINT::default();
                 unsafe {
@@ -728,6 +939,8 @@ impl AwayCard {
                 let at = LPARAM(((p.y as u16 as isize) << 16) | p.x as u16 as isize);
                 let cursor = if self.field_at(at).is_some() {
                     IDC_IBEAM
+                } else if self.fold_at(at).is_some() {
+                    IDC_HAND
                 } else {
                     IDC_ARROW
                 };
@@ -740,7 +953,8 @@ impl AwayCard {
             }
             WM_MOUSEMOVE => {
                 let close = self.on_close(lparam);
-                if self.close_hot.replace(close) != close {
+                let hot = self.fold_at(lparam);
+                if self.close_hot.replace(close) != close || self.hot.replace(hot) != hot {
                     self.invalidate();
                 }
                 Some(LRESULT(0))
@@ -750,8 +964,9 @@ impl AwayCard {
                     let _ = SetFocus(Some(self.hwnd));
                 }
                 self.pressed_close.set(self.on_close(lparam));
+                self.pressed.set(self.fold_at(lparam));
                 if let Some(i) = self.field_at(lparam) {
-                    if !self.slots.borrow()[i].sent {
+                    if self.open_slots().get(i).copied().unwrap_or(false) {
                         self.focus.set(i);
                         self.changed();
                     }
@@ -759,8 +974,13 @@ impl AwayCard {
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
+                let pressed = self.pressed.take();
                 if self.pressed_close.take() && self.on_close(lparam) {
                     self.close();
+                } else if let (Some(p), Some(h)) = (pressed, self.fold_at(lparam)) {
+                    if p == h {
+                        self.toggle(h);
+                    }
                 }
                 Some(LRESULT(0))
             }
@@ -788,7 +1008,7 @@ fn more_of(rows: &[Row], layout: &CatchupLayout) -> String {
             .filter(|r| matches!(r.kind, CatchupKind::Line { .. }))
             .count()
     };
-    crate::catchup::more(
+    more(
         lines(&rows[..layout.first.min(rows.len())]),
         lines(&rows[layout.below(rows.len())]),
     )
@@ -846,12 +1066,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn landed_then_warriv_then_errands_then_assumed_then_questions_each_with_a_field() {
-        let a = Away {
+    fn news(name: &str, away: Away) -> News {
+        News {
+            name: name.into(),
+            dir: format!("c:/code/{name}"),
+            away,
+        }
+    }
+
+    fn app() -> Away {
+        Away {
             landed: vec![line(40, "Serve the API", "Served on 4100")],
-            wakes: vec![line(50, "Told \u{201C}A\u{201D}", "")],
-            errands: vec![line(60, "Feedback", "filed \u{201C}B\u{201D}")],
+            filed: vec![line(60, "Feedback", "filed \u{201C}B\u{201D}")],
+            failed: vec![line(50, "Clean", "failed: exit 1")],
             questions: vec![Question {
                 title: "Pick a port".into(),
                 question: "Which port?".into(),
@@ -862,66 +1089,111 @@ mod tests {
                 title: "Serve the API".into(),
                 text: "port 4100".into(),
             }],
-        };
-        let (rows, answers) = rows(&[("app".into(), "c:/code/app".into(), a)], 100);
-        let tones: Vec<Tone> = rows.iter().map(|r| r.tone).collect();
+        }
+    }
+
+    fn tones(rows: &[Row]) -> Vec<Tone> {
+        rows.iter().map(|r| r.tone).collect()
+    }
+
+    #[test]
+    fn what_needs_you_comes_first_and_the_rest_is_one_folded_line() {
+        let n = [news("app", app())];
+        let rows = rows(&n, &[false], &[false, false], 100);
+        assert_eq!(tones(&rows), [Tone::Asks, Tone::Field, Tone::Failed, Tone::Fold]);
+        assert_eq!(rows[0].text, "Pick a port");
+        assert_eq!(rows[0].detail, "Which port?", "one project, no name");
+        assert_eq!(rows[1].slot, Some(0));
+        assert_eq!(rows[2].age, "50 s");
+        assert_eq!(rows[3].text, "app \u{00B7} 1 landed, 1 errand, 1 assumed");
+        assert_eq!(rows[3].fold, Some(0));
+        assert_eq!(rows[3].age, "show");
+        assert_eq!(rows[3].kind, CatchupKind::Line { detail: false });
+    }
+
+    #[test]
+    fn an_unfolded_project_shows_its_lines_and_a_field_for_each_assumption() {
+        let n = [news("app", app())];
+        let rows = rows(&n, &[true], &[false, false], 100);
         assert_eq!(
-            tones,
+            tones(&rows),
             [
-                Tone::Heading,
+                Tone::Asks,
+                Tone::Field,
+                Tone::Failed,
+                Tone::Fold,
                 Tone::Landed,
-                Tone::Heading,
-                Tone::Warriv,
-                Tone::Heading,
-                Tone::Warriv,
-                Tone::Heading,
+                Tone::Filed,
                 Tone::Assumed,
                 Tone::Field,
-                Tone::Heading,
-                Tone::Question,
-                Tone::Field,
             ]
         );
-        assert_eq!(rows[4].text, "app \u{00B7} errands");
-        assert_eq!(rows[5].detail, "filed \u{201C}B\u{201D}");
-        assert_eq!(rows[6].text, "app \u{00B7} assumed");
-        assert_eq!(rows[7].detail, "port 4100");
-        assert_eq!(rows[0].text, "app \u{00B7} landed");
-        assert_eq!(rows[1].kind, CatchupKind::Line { detail: true });
-        assert_eq!(rows[3].kind, CatchupKind::Line { detail: false });
-        assert_eq!(rows[1].age, "1 min");
-        assert_eq!(rows[11].kind, CatchupKind::Field);
-        assert_eq!(
-            answers,
-            [
-                Answer {
-                    dir: "c:/code/app".into(),
-                    title: "Serve the API".into(),
-                    assumed: Some("port 4100".into()),
-                },
-                Answer {
-                    dir: "c:/code/app".into(),
-                    title: "Pick a port".into(),
-                    assumed: None,
-                }
-            ]
-        );
+        assert_eq!(rows[3].age, "hide");
+        assert_eq!(rows[6].detail, "assumed port 4100");
+        assert_eq!(rows[7].slot, Some(1));
     }
 
     #[test]
-    fn an_empty_part_has_no_heading() {
-        let a = Away {
-            landed: vec![line(40, "Done", "")],
+    fn with_more_than_one_project_each_line_names_its_own() {
+        let quiet = Away {
+            questions: vec![Question {
+                title: "Name it".into(),
+                question: String::new(),
+                new: false,
+            }],
+            assumed: vec![Assumption {
+                at: 1,
+                title: "X".into(),
+                text: "y".into(),
+            }],
             ..Away::default()
         };
-        let (rows, answers) = rows(&[("app".into(), "d".into(), a)], 100);
-        assert_eq!(rows.len(), 2);
-        assert!(answers.is_empty());
+        let n = [news("app", app()), news("web", quiet)];
+        let answers = answers(&n);
+        let got: Vec<(&str, bool)> = answers
+            .iter()
+            .map(|a| (a.title.as_str(), a.assumed.is_some()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("Pick a port", false),
+                ("Name it", false),
+                ("Serve the API", true),
+                ("X", true)
+            ]
+        );
+        assert_eq!(answers[1].dir, "c:/code/web");
+        let rows = rows(&n, &[false, true], &[false; 4], 100);
+        assert_eq!(rows[0].detail, "app \u{00B7} Which port?");
+        assert_eq!(rows[2].detail, "web", "no question, just the name");
+        assert_eq!(rows[3].slot, Some(1));
+        // The first project folded, its assumption keeps slot 2 and the
+        // second's is slot 3.
+        let last = rows.iter().rev().find(|r| r.slot.is_some()).unwrap();
+        assert_eq!(last.slot, Some(3));
     }
 
     #[test]
-    fn it_says_how_long_you_were_gone() {
-        assert_eq!(gone(2 * 3600 + 300), "You were gone 2 h 05 min");
+    fn an_answer_sent_reads_as_told() {
+        let n = [news("app", app())];
+        let rows = rows(&n, &[true], &[true, true], 100);
+        assert_eq!(rows[0].tone, Tone::Told);
+        assert_eq!(rows[0].age, "told");
+        assert_eq!(rows[6].tone, Tone::Told);
+        assert_eq!(rows[6].age, "overruled");
+    }
+
+    #[test]
+    fn nothing_to_tell_is_no_rows() {
+        assert!(rows(&[], &[], &[], 100).is_empty());
+        assert!(rows(&[news("app", Away::default())], &[false], &[], 100).is_empty());
+    }
+
+    #[test]
+    fn the_lead_says_how_long_you_were_away_or_since_when() {
+        assert_eq!(lead(Some(3 * 3600 + 300), "09:00"), "3 h away");
+        assert_eq!(lead(None, "08:00"), "Since 08:00");
     }
 
     #[test]
@@ -932,12 +1204,49 @@ mod tests {
     }
 
     #[test]
-    fn the_keyboard_goes_round_the_questions_not_yet_told() {
-        assert_eq!(next_open(&[false, true, false], 0, true), Some(2));
-        assert_eq!(next_open(&[false, true, false], 2, true), Some(0));
-        assert_eq!(next_open(&[false, true, false], 0, false), Some(2));
-        assert_eq!(next_open(&[true, true, false], 2, true), Some(2));
-        assert_eq!(next_open(&[true, true], 0, true), None);
+    fn the_keyboard_goes_round_the_fields_that_can_take_an_answer() {
+        assert_eq!(next_open(&[true, false, true], 0, true), Some(2));
+        assert_eq!(next_open(&[true, false, true], 2, true), Some(0));
+        assert_eq!(next_open(&[true, false, true], 0, false), Some(2));
+        assert_eq!(next_open(&[false, false, true], 2, true), Some(2));
+        assert_eq!(next_open(&[false, false], 0, true), None);
         assert_eq!(next_open(&[], 0, true), None);
+    }
+
+    #[test]
+    fn idling_long_enough_is_away_and_input_after_it_is_back() {
+        let mut a = Absence::default();
+        assert_eq!(a.idle(60, 1000), None);
+        assert_eq!(a.idle(0, 1000), None, "never away, nothing to tell");
+        assert_eq!(a.idle(AWAY_AFTER, 5000), None);
+        assert_eq!(a.idle(AWAY_AFTER + 600, 5600), None);
+        assert_eq!(a.idle(1, 5700), Some(5000 - AWAY_AFTER));
+        assert_eq!(a.idle(1, 5701), None, "said once");
+    }
+
+    #[test]
+    fn a_locked_screen_is_away_until_it_unlocks() {
+        let mut a = Absence::default();
+        a.lock(100);
+        assert_eq!(a.idle(0, 200), None, "typing the password");
+        assert_eq!(a.idle(AWAY_AFTER + 10, 2000), None);
+        assert_eq!(a.unlock(), Some(100));
+        assert_eq!(a.unlock(), None);
+    }
+
+    #[test]
+    fn the_last_line_counts_what_is_under_it_then_what_is_above() {
+        assert_eq!(more(0, 4), "and 4 more");
+        assert_eq!(more(3, 4), "and 4 more");
+        assert_eq!(more(7, 0), "7 more above");
+    }
+
+    #[test]
+    fn the_clock_gives_the_local_time_of_a_moment() {
+        // 10:30 local now; an hour and a quarter ago was 09:15.
+        let now = 1_000_000;
+        assert_eq!(clock(10 * 3600 + 1800, now, now - 4500), "09:15");
+        // Before midnight wraps to the day before.
+        assert_eq!(clock(600, now, now - 1200), "23:50");
     }
 }

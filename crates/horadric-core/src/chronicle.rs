@@ -576,17 +576,18 @@ pub fn lane(wakes: Vec<WarrivWake>) -> Vec<WarrivWake> {
         .collect()
 }
 
-/// What happened in a project while the human was away, for the card that
-/// greets them when they come back.
+//// What happened in a project while the human was away, for the screen
+/// that greets them when they come back. What needs them (a question, a
+/// failed errand) is shown in full; the rest folds into one line.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Away {
     /// Quests completed, oldest first.
     pub landed: Vec<AwayLine>,
-    /// One line a wake of Warriv: what it decided, and why.
-    pub wakes: Vec<AwayLine>,
-    /// One line an errand's cast that found something or failed: what it
-    /// filed, or why it failed. A cast that found nothing is no news.
-    pub errands: Vec<AwayLine>,
+    /// One line an errand's cast that filed something: what it filed.
+    pub filed: Vec<AwayLine>,
+    /// One line an errand's cast that failed, and why. A run of failures
+    /// alike is one line.
+    pub failed: Vec<AwayLine>,
     /// The quests only the human can move on, in the log's order.
     pub questions: Vec<Question>,
     /// What was assumed, oldest first, for the human to overrule.
@@ -601,7 +602,7 @@ pub struct Assumption {
     pub text: String,
 }
 
-/// A line of the card, with a fainter one under it.
+/// A line of the screen, with a fainter one under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwayLine {
     pub at: u64,
@@ -620,14 +621,71 @@ pub struct Question {
 }
 
 impl Away {
-    /// Whether anything happened, which is what opens the card. A question
-    /// left from before is no news, though the card asks it again.
+    /// Whether anything happened, which is what opens the screen on coming
+    /// back. A question left from before is no news, though the screen
+    /// asks it again.
     pub fn happened(&self) -> bool {
         !self.landed.is_empty()
-            || !self.wakes.is_empty()
-            || !self.errands.is_empty()
+            || !self.filed.is_empty()
+            || !self.failed.is_empty()
             || !self.assumed.is_empty()
             || self.questions.iter().any(|q| q.new)
+    }
+
+    /// How many lines only the human can act on: questions to answer and
+    /// errands that failed.
+    pub fn needs_you(&self) -> usize {
+        self.questions.len() + self.failed.len()
+    }
+
+    /// What the rest comes to in a few words, as "4 landed, 2 errands",
+    /// empty when there is no rest.
+    pub fn fold(&self) -> String {
+        let errands = if self.filed.len() == 1 {
+            "errand"
+        } else {
+            "errands"
+        };
+        [
+            (self.landed.len(), "landed"),
+            (self.filed.len(), errands),
+            (self.assumed.len(), "assumed"),
+        ]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+    }
+}
+
+/// The one line over the screen: `lead` (how long you were away, or since
+/// when), then how much landed and how much needs you, leaving out what is
+/// none. "Nothing new" when nothing needs you and nothing folds.
+pub fn away_summary(lead: &str, projects: &[&Away]) -> String {
+    let landed: usize = projects.iter().map(|a| a.landed.len()).sum();
+    let needs: usize = projects.iter().map(|a| a.needs_you()).sum();
+    if needs == 0 && projects.iter().all(|a| a.fold().is_empty()) {
+        return "Nothing new".to_string();
+    }
+    let mut parts = vec![lead.to_string()];
+    if landed > 0 {
+        parts.push(format!("{landed} landed"));
+    }
+    if needs > 0 {
+        parts.push(format!("{needs} needs you"));
+    }
+    parts.retain(|p| !p.is_empty());
+    parts.join(" \u{00B7} ")
+}
+
+/// A span read at a glance: minutes under an hour, else the nearest whole
+/// hour.
+pub fn short_span(secs: u64) -> String {
+    if secs < 3600 {
+        format!("{} min", (secs / 60).max(1))
+    } else {
+        format!("{} h", (secs + 1800) / 3600)
     }
 }
 
@@ -693,12 +751,22 @@ pub fn away(
             _ => {}
         }
     }
-    let (casts, wakes): (Vec<WarrivWake>, Vec<WarrivWake>) = wakes(records, project)
+    // Warriv's own wakes are left out: what they came to shows in what
+    // landed and what was assumed, and a line each was noise.
+    let casts: Vec<WarrivWake> = wakes(records, project)
         .into_iter()
+        .filter(|w| !w.errand.is_empty())
         .filter(|w| w.woke >= since || w.slept.is_some_and(|s| s >= since))
-        .partition(|w| !w.errand.is_empty());
-    let wakes = wakes.iter().map(wake_line).collect();
-    let errands = lane(casts).iter().filter_map(errand_line).collect();
+        .collect();
+    let mut filed = Vec::new();
+    let mut failed = Vec::new();
+    for w in lane(casts) {
+        match errand_line(&w) {
+            Some((true, l)) => failed.push(l),
+            Some((false, l)) => filed.push(l),
+            None => {}
+        }
+    }
     let questions = list
         .iter()
         .filter(|t| {
@@ -721,125 +789,39 @@ pub fn away(
         .collect();
     Away {
         landed,
-        wakes,
-        errands,
+        filed,
+        failed,
         questions,
         assumed,
     }
 }
 
 /// An errand's cast in one line, its label over what it filed or why it
-/// failed. None for one that found nothing or is still going.
-fn errand_line(w: &WarrivWake) -> Option<AwayLine> {
+/// failed, and whether it failed. None for one that found nothing or is
+/// still going.
+fn errand_line(w: &WarrivWake) -> Option<(bool, AwayLine)> {
     let filed = w.filed();
-    let detail = match w.end {
-        Some(WakeEnd::Failed) if w.why.is_empty() => "failed".to_string(),
-        Some(WakeEnd::Failed) => format!("failed: {}", w.why),
+    let (failed, detail) = match w.end {
+        Some(WakeEnd::Failed) if w.why.is_empty() => (true, "failed".to_string()),
+        Some(WakeEnd::Failed) => (true, format!("failed: {}", w.why)),
         _ if filed.is_empty() => return None,
         _ => {
             let titles: Vec<String> = filed
                 .iter()
                 .map(|t| format!("\u{201C}{}\u{201D}", crate::tasks::one_line(t)))
                 .collect();
-            format!("filed {}", titles.join(", "))
+            (false, format!("filed {}", titles.join(", ")))
         }
     };
-    Some(AwayLine {
+    let line = AwayLine {
         at: w.slept.unwrap_or(w.woke),
         text: w.errand.clone(),
         detail,
-    })
+    };
+    Some((failed, line))
 }
 
-/// A wake in one line: what Warriv did, then why, in its own words, or
-/// what woke it when it said nothing.
-fn wake_line(w: &WarrivWake) -> AwayLine {
-    let quoted = |t: &str| format!("\u{201C}{}\u{201D}", crate::tasks::one_line(t));
-    let mut did: Vec<String> = w
-        .commands
-        .iter()
-        .map(|(_, command, title, _)| {
-            let t = quoted(title);
-            match command {
-                Command::Tell => format!("told {t}"),
-                Command::Note => format!("noted on {t}"),
-                Command::Add => format!("added {t}"),
-                Command::Blocked => format!("handed {t} to you"),
-                Command::Fix => format!("sent {t} back"),
-                Command::Move => format!("moved {t}"),
-            }
-        })
-        .collect();
-    did.dedup();
-    let handed_itself = |h: &str| {
-        w.commands
-            .iter()
-            .any(|(_, c, t, _)| *c == Command::Blocked && t == h)
-    };
-    did.extend(
-        w.handed
-            .iter()
-            .filter(|h| !handed_itself(h))
-            .map(|h| format!("left {} to you", quoted(h))),
-    );
-    // No end yet is a wake still going: one cut short by a crash reads
-    // the same, and is rare.
-    let mut text = match (did.is_empty(), w.end) {
-        (true, Some(WakeEnd::CutShort)) => "cut short before it did anything".to_string(),
-        (true, None) => "awake, nothing done yet".to_string(),
-        (true, _) => "settled it without a command".to_string(),
-        (false, _) => did.join(", "),
-    };
-    match (did.is_empty(), w.end) {
-        (false, Some(WakeEnd::CutShort)) => text.push_str(", then was cut short"),
-        (false, None) => text.push_str(", still awake"),
-        _ => {}
-    }
-    let mut chars = text.chars();
-    let text = chars
-        .next()
-        .map(|c| c.to_uppercase().chain(chars).collect())
-        .unwrap_or_default();
-    let why: Vec<String> = w
-        .commands
-        .iter()
-        .map(|(_, _, _, t)| crate::tasks::one_line(t).trim().to_string())
-        .filter(|t| !t.is_empty())
-        .collect();
-    let detail = if why.is_empty() {
-        let mut woke: Vec<String> = Vec::new();
-        for e in &w.events {
-            let s = match e.kind {
-                Kind::Stalled => "the log stalled".to_string(),
-                Kind::Dry => "the log ran dry".to_string(),
-                Kind::Round => "a round".to_string(),
-                Kind::LookBack => "the day's look back".to_string(),
-                Kind::Blocked => format!("{} blocked", quoted(&e.quest)),
-                Kind::Asks => format!("{} stopped", quoted(&e.quest)),
-                Kind::Tangled => format!("{} tangled", quoted(&e.quest)),
-                Kind::Merge => format!("{} not merged", quoted(&e.quest)),
-                Kind::Overlap => format!("{} may overlap", quoted(&e.quest)),
-            };
-            if !woke.contains(&s) {
-                woke.push(s);
-            }
-        }
-        if woke.is_empty() {
-            String::new()
-        } else {
-            format!("Woke for {}", woke.join(", "))
-        }
-    } else {
-        why.join(" \u{00B7} ")
-    };
-    AwayLine {
-        at: w.woke,
-        text,
-        detail,
-    }
-}
-
-/// One quest, as the window shows it.
+// One quest, as the window shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Quest {
     /// Its holder, which is how records find it.
@@ -1624,7 +1606,7 @@ mod tests {
     }
 
     #[test]
-    fn away_tells_the_errands_that_filed_or_failed_apart_from_the_wakes() {
+    fn away_tells_the_errands_that_filed_apart_from_those_that_failed() {
         let records = [
             cast(10, "errand-1", "Feedback"),
             ran(12, "errand-1", Command::Add, "Fix the toast", ""),
@@ -1637,21 +1619,24 @@ mod tests {
             cast_ended(31, "Clean", WakeEnd::Failed, "it ran past 30m"),
         ];
         let a = away(&records, "p", &[], &Default::default(), 0);
-        assert!(a.wakes.is_empty());
-        let lines: Vec<(&str, &str)> = a
-            .errands
-            .iter()
-            .map(|l| (l.text.as_str(), l.detail.as_str()))
-            .collect();
+        let lines = |l: &[AwayLine]| -> Vec<(String, String)> {
+            l.iter()
+                .map(|l| (l.text.clone(), l.detail.clone()))
+                .collect()
+        };
         assert_eq!(
-            lines,
-            [
-                ("Feedback", "filed \u{201C}Fix the toast\u{201D}"),
-                ("Clean", "failed: it ran past 30m"),
-            ]
+            lines(&a.filed),
+            [(
+                "Feedback".to_string(),
+                "filed \u{201C}Fix the toast\u{201D}".to_string()
+            )]
+        );
+        assert_eq!(
+            lines(&a.failed),
+            [("Clean".to_string(), "failed: it ran past 30m".to_string())]
         );
         assert!(a.happened());
-        assert_eq!(a.errands[1].at, 31, "a run of failures alike is one line");
+        assert_eq!(a.failed[0].at, 31, "a run of failures alike is one line");
         // A cast that found nothing is no news.
         let quiet = away(&records[3..5], "p", &[], &Default::default(), 0);
         assert!(!quiet.happened());
@@ -2251,20 +2236,6 @@ mod tests {
         }
     }
 
-    fn slept(at: u64, wake: &str, cut_short: bool, handed: &[&str]) -> Record {
-        rec(
-            at,
-            "",
-            "",
-            Happened::slept(
-                wake,
-                "",
-                cut_short,
-                handed.iter().map(|h| h.to_string()).collect(),
-            ),
-        )
-    }
-
     #[test]
     fn away_tells_what_landed_since_with_its_summary() {
         let records = [
@@ -2359,53 +2330,86 @@ mod tests {
         assert_eq!(a.questions[0].question, "Which port?", "the prefix goes");
     }
 
-    #[test]
-    fn a_wake_is_one_line_of_what_it_did_and_why() {
-        let records = [
-            woke(1, "warriv-1", "Old"),
-            slept(2, "warriv-1", false, &[]),
-            woke(10, "warriv-1", "A"),
-            ran(11, "warriv-1", Command::Tell, "A", "Use port\n4100."),
-            ran(12, "warriv-1", Command::Add, "Fix B", ""),
-            ran(13, "warriv-1", Command::Blocked, "C", "Which colour?"),
-            slept(14, "warriv-1", false, &["C", "D"]),
-        ];
-        let a = away(&records, "p", &[], &Default::default(), 5);
-        assert_eq!(a.wakes.len(), 1, "the wake before you left is not told");
-        assert_eq!(
-            a.wakes[0].text,
-            "Told \u{201C}A\u{201D}, added \u{201C}Fix B\u{201D}, handed \u{201C}C\u{201D} to you, \
-             left \u{201C}D\u{201D} to you"
-        );
-        assert_eq!(a.wakes[0].detail, "Use port 4100. \u{00B7} Which colour?");
-        assert_eq!(a.wakes[0].at, 10);
+    fn away_line(text: &str) -> AwayLine {
+        AwayLine {
+            at: 1,
+            text: text.into(),
+            detail: String::new(),
+        }
     }
 
     #[test]
-    fn a_silent_wake_says_what_woke_it() {
-        let records = [
-            woke(10, "warriv-1", "A"),
-            slept(14, "warriv-1", false, &[]),
-            woke(20, "warriv-2", "B"),
-            slept(21, "warriv-2", true, &[]),
-            woke(30, "warriv-3", "C"),
-            ran(31, "warriv-3", Command::Note, "C", ""),
-            woke(40, "warriv-4", "D"),
-            ran(41, "warriv-4", Command::Note, "D", ""),
-            slept(42, "warriv-4", true, &[]),
-        ];
-        let a = away(&records, "p", &[], &Default::default(), 0);
-        let texts: Vec<&str> = a.wakes.iter().map(|w| w.text.as_str()).collect();
+    fn what_needs_you_is_the_questions_and_the_failures() {
+        let a = Away {
+            landed: vec![away_line("A"), away_line("B")],
+            filed: vec![away_line("Feedback")],
+            failed: vec![away_line("Clean")],
+            questions: vec![Question {
+                title: "Pick a port".into(),
+                question: "Which port?".into(),
+                new: false,
+            }],
+            assumed: vec![],
+        };
+        assert_eq!(a.needs_you(), 2);
+        assert_eq!(Away::default().needs_you(), 0);
+    }
+
+    #[test]
+    fn the_fold_counts_the_rest_and_leaves_out_what_is_none() {
+        let mut a = Away {
+            landed: vec![away_line("A"), away_line("B"), away_line("C"), away_line("D")],
+            filed: vec![away_line("Feedback"), away_line("Clean")],
+            ..Away::default()
+        };
+        assert_eq!(a.fold(), "4 landed, 2 errands");
+        a.filed.pop();
+        a.assumed.push(Assumption {
+            at: 1,
+            title: "A".into(),
+            text: "port 4100".into(),
+        });
+        assert_eq!(a.fold(), "4 landed, 1 errand, 1 assumed");
+        // What needs you is not the rest.
+        let needs = Away {
+            failed: vec![away_line("Clean")],
+            ..Away::default()
+        };
+        assert_eq!(needs.fold(), "");
+    }
+
+    #[test]
+    fn the_summary_says_how_long_what_landed_and_what_needs_you() {
+        let landed = Away {
+            landed: vec![away_line("A"), away_line("B")],
+            ..Away::default()
+        };
+        let asks = Away {
+            landed: vec![away_line("C")],
+            failed: vec![away_line("Clean")],
+            ..Away::default()
+        };
         assert_eq!(
-            texts,
-            [
-                "Settled it without a command",
-                "Cut short before it did anything",
-                "Noted on \u{201C}C\u{201D}, still awake",
-                "Noted on \u{201C}D\u{201D}, then was cut short",
-            ]
+            away_summary("3 h away", &[&landed, &asks]),
+            "3 h away \u{00B7} 3 landed \u{00B7} 1 needs you"
         );
-        assert_eq!(a.wakes[0].detail, "Woke for \u{201C}A\u{201D} blocked");
+        assert_eq!(away_summary("3 h away", &[&landed]), "3 h away \u{00B7} 2 landed");
+        let only_errands = Away {
+            filed: vec![away_line("Feedback")],
+            ..Away::default()
+        };
+        assert_eq!(away_summary("Since 09:15", &[&only_errands]), "Since 09:15");
+        assert_eq!(away_summary("3 h away", &[]), "Nothing new");
+        assert_eq!(away_summary("3 h away", &[&Away::default()]), "Nothing new");
+    }
+
+    #[test]
+    fn a_span_reads_in_minutes_then_whole_hours() {
+        assert_eq!(short_span(10), "1 min");
+        assert_eq!(short_span(45 * 60), "45 min");
+        assert_eq!(short_span(3600 + 20 * 60), "1 h");
+        assert_eq!(short_span(3600 + 40 * 60), "2 h");
+        assert_eq!(short_span(3 * 3600), "3 h");
     }
 
     #[test]

@@ -264,7 +264,7 @@ pub struct Driven {
 }
 
 /// The tray menu. `hotkeys` are the shortcuts for the next waiting
-/// session, the catch-up and stopping Warriv, where they have one.
+/// session, the away card and stopping Warriv, where they have one.
 /// `update` is a newer release's version, when a check found one. `xp` is
 /// the experience counted from git, None until the first count is back.
 /// `logins` are the accounts to switch between, a click away. `sessions`

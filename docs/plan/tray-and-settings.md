@@ -105,6 +105,7 @@ Where the rest goes:
 
 - **Quest log, Context, Stay a while and listen:** onto the project's own
   menu on its tiles, where the project is already known. Stay a while
+  (the away card, the one screen for what happened since you last looked)
   keeps its hotkey.
 - **Account switching:** Settings, Sessions. Agent logins are settings.
 - **Can control this PC, Keeps my sessions, Take over after 10 minutes:**

@@ -11,7 +11,7 @@
 pub enum Action {
     /// Brings up the session that has waited on you longest.
     Next,
-    /// The catch-up on demand, "Stay a while and listen".
+    /// The away card on demand, "Stay a while and listen".
     Listen,
     /// Stops every drive of Warriv's at once.
     Stop,

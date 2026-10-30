@@ -53,7 +53,7 @@ use horadric_core::checkpoint;
 use horadric_core::chronicle;
 use horadric_core::diff::{self as changes, Diff, FileDiff, Recount};
 use horadric_core::fleet::{self, Device};
-use horadric_core::journal::{self, Entry, What};
+use horadric_core::journal::{Entry, What};
 use horadric_core::overlap::Overlap;
 use horadric_core::presence;
 use horadric_core::release::{self, Manifest};
@@ -104,9 +104,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::accounts;
 use crate::agents;
 use crate::appear;
-use crate::away::{self, AwayCard};
+use crate::away::{self, Absence, AwayCard};
 use crate::caption;
-use crate::catchup::{self, Away, Catchup};
 use crate::columns::{self, Columns};
 use crate::console::{self, Console, Launch};
 use crate::contextpanel::{self, ContextPanel};
@@ -329,8 +328,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
 const WTS_SESSION_LOCK: usize = 7;
 const WTS_SESSION_UNLOCK: usize = 8;
-/// How far back the catch-up on demand looks at least, in seconds: since
-/// this morning, or the last eight hours early in the day.
+/// How far back the away card on demand looks at least, before it was
+/// ever seen, in seconds: since this morning, or the last eight hours
+/// early in the day.
 const LISTEN_BACK: u64 = 8 * 3600;
 /// The app window's timer that moves the ages on and saves.
 const TICK_TIMER: usize = 1;
@@ -500,9 +500,6 @@ pub(crate) enum Input {
     SettingsPress(Press),
     /// A slider in the usage window let go at a new value.
     SetDefault(Agent, Setting, Option<String>),
-    /// The catch-up closed, with the session of the line clicked, if one
-    /// was.
-    Listened(Option<String>),
     /// An answer typed on the away card, for the quest `title` in the
     /// project at `dir`: to its question, or against what was `assumed`.
     Answered {
@@ -630,7 +627,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     crate::folio::register_class()?;
     dialog::register_class()?;
     toast::register_class()?;
-    catchup::register_class()?;
     away::register_class()?;
     questlog::register_class()?;
     contextpanel::register_class()?;
@@ -923,10 +919,10 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             drives: saved.drives.clone(),
             tasks: runner::State::after(&saved.warriv_heard),
             stopped: saved.stopped.iter().cloned().collect(),
-            away: Away::default(),
+            away: Absence::default(),
             spectating: Default::default(),
-            catchup: None,
             away_card: None,
+            away_seen: None,
             quest_log: None,
             context_panel: None,
             journaled: HashMap::new(),
@@ -3509,22 +3505,22 @@ struct App {
     /// The projects whose drive was stopped: their runner starts nothing
     /// until the human picks a mode or lets Warriv drive again.
     stopped: HashSet<String>,
-    /// Whether you are away, for the catch-up when you come back.
-    away: Away,
+    /// Whether you are away, for the away card when you come back.
+    away: Absence,
     /// Spectator mode: the stage following the work while you are away.
     spectating: spectating::Spectating,
-    /// The catch-up, while it is open.
-    catchup: Option<Box<Catchup>>,
     /// What happened while you were away, while it is open.
     away_card: Option<Box<AwayCard>>,
+    /// When the away card last closed, which is where the next one asked
+    /// for starts.
+    away_seen: Option<u64>,
     /// The quest log, while it is open.
     quest_log: Option<Box<QuestLog>>,
     /// The Context window, while it is open.
     context_panel: Option<Box<ContextPanel>>,
-    /// Each session's phase as last journaled, with its project and name,
-    /// by session id, so only a change is written, and a session that
-    /// vanishes can still be named.
-    journaled: HashMap<String, (Phase, String, String)>,
+    /// Each session's phase as last journaled, by session id, so only a
+    /// change is written.
+    journaled: HashMap<String, Phase>,
     next_serial: usize,
     requests: Arc<Mutex<Vec<Command>>>,
     notify: HWND,
@@ -8551,8 +8547,8 @@ impl App {
         }
     }
 
-    /// Writes a line for each session whose phase became one worth telling:
-    /// waiting, done, or ended, which a session that vanishes did too.
+    /// Writes a line for each session whose turn finished, and the
+    /// chronicle's record of a quest's turn when one finished or ended.
     fn journal_phases(&mut self) {
         let now = unix_now();
         let mut lines = Vec::new();
@@ -8569,67 +8565,35 @@ impl App {
                     continue;
                 }
                 seen.insert(s.id.clone());
-                let (project, name) = (project_key(s), s.label().to_string());
-                let before = self.journaled.insert(
-                    s.id.clone(),
-                    (s.phase.clone(), project.clone(), name.clone()),
-                );
+                let before = self.journaled.insert(s.id.clone(), s.phase.clone());
                 // A session first seen here, at a start or a reload, has
                 // told nothing new yet.
-                let Some((before, _, _)) = before else {
-                    continue;
-                };
-                if before == s.phase {
+                if before.is_none_or(|b| b == s.phase) {
                     continue;
                 }
-                let what = match &s.phase {
-                    Phase::Waiting(_) => What::Waiting {
-                        line: s.last_line.clone(),
-                    },
-                    Phase::Done => {
-                        dropped = true;
-                        What::Done {
+                if !matches!(s.phase, Phase::Done | Phase::Ended) {
+                    continue;
+                }
+                let project = project_key(s);
+                turns.extend(self.quest_turn(s, &project, now));
+                if s.phase == Phase::Done {
+                    dropped = true;
+                    lines.push(Entry {
+                        at: now,
+                        session: s.id.clone(),
+                        name: s.label().to_string(),
+                        project,
+                        what: What::Done {
                             line: s.last_line.clone(),
-                        }
-                    }
-                    Phase::Ended => What::Ended,
-                    _ => continue,
-                };
-                if matches!(s.phase, Phase::Done | Phase::Ended) {
-                    turns.extend(self.quest_turn(s, &project, now));
+                        },
+                    });
                 }
-                lines.push(Entry {
-                    at: now,
-                    session: s.id.clone(),
-                    name,
-                    project,
-                    what,
-                });
             }
         }
         if let Ok(r) = self.shared.registry.lock() {
             self.far.phases.retain(|id, _| r.get(id).is_some());
         }
-        let gone: Vec<String> = self
-            .journaled
-            .keys()
-            .filter(|id| !seen.contains(*id))
-            .cloned()
-            .collect();
-        for id in gone {
-            let Some((phase, project, name)) = self.journaled.remove(&id) else {
-                continue;
-            };
-            if phase != Phase::Ended && !self.frozen {
-                lines.push(Entry {
-                    at: now,
-                    session: id,
-                    name,
-                    project,
-                    what: What::Ended,
-                });
-            }
-        }
+        self.journaled.retain(|id, _| seen.contains(id));
         for e in &lines {
             store::journal(e);
         }
@@ -8721,21 +8685,33 @@ impl App {
     /// You came back after being away since `since`: say what happened, if
     /// anything did.
     fn welcome_back(&mut self, since: u64) {
-        if unix_now().saturating_sub(since) >= away::AWAY_FOR && self.tell_away(since) {
-            return;
-        }
-        self.listen(since, Some(since), false);
+        self.tell_away(since, true, false);
     }
 
-    /// Opens the away card if anything happened in a quest log since
-    /// `since`, in place of the catch-up. True when it opened.
-    fn tell_away(&mut self, since: u64) -> bool {
+    /// The away card from the tray or its hotkey: what happened since it
+    /// was last seen, else since this morning.
+    fn listen_on_demand(&mut self) {
+        let now = unix_now();
+        let since = self.away_seen.unwrap_or_else(|| {
+            now.saturating_sub(local_secs())
+                .min(now.saturating_sub(LISTEN_BACK))
+        });
+        self.tell_away(since, false, true);
+    }
+
+    /// Opens the away card with what happened in the quest logs since
+    /// `since`, `away` when that is when you left. On coming back it opens
+    /// only if something happened; asked for, it opens anyway, to say
+    /// nothing did.
+    fn tell_away(&mut self, since: u64, away: bool, asked: bool) {
+        // Coming back to a full screen game or a presentation is not the
+        // moment; the tray and the hotkey still open it.
         let state = unsafe { SHQueryUserNotificationState() }.map_or(5, |s| s.0);
-        if toast::hold_back(state) {
-            return false;
+        if !asked && toast::hold_back(state) {
+            return;
         }
         let records = store::chronicle_all();
-        let news: Vec<(String, String, chronicle::Away)> = {
+        let news: Vec<away::News> = {
             let boards = self.shared.boards.borrow();
             let warriv = self.shared.warriv.borrow();
             let mut keys: Vec<&String> = boards.keys().collect();
@@ -8746,97 +8722,32 @@ impl App {
                     let has = warriv.get(key).cloned().unwrap_or_default();
                     let a = chronicle::away(&records, key, &b.tasks, &has, since);
                     let dir = self.project_dir(key)?;
-                    a.happened()
-                        .then(|| (project_name(key), dir.to_string_lossy().into_owned(), a))
+                    // A question from before is asked again, but is no news.
+                    (a.happened() || !a.questions.is_empty()).then(|| away::News {
+                        name: project_name(key),
+                        dir: dir.to_string_lossy().into_owned(),
+                        away: a,
+                    })
                 })
                 .collect()
         };
-        if news.is_empty() {
-            return false;
+        if !asked && !news.iter().any(|n| n.away.happened()) {
+            return;
         }
         if let Some(c) = self.away_card.take() {
             c.destroy();
         }
         let now = unix_now();
-        let (rows, answers) = away::rows(&news, now);
-        let sub = away::gone(now.saturating_sub(since));
+        let lead = away::lead(
+            away.then(|| now.saturating_sub(since)),
+            &away::clock(local_secs(), now, since),
+        );
+        let all: Vec<&chronicle::Away> = news.iter().map(|n| &n.away).collect();
+        let title = chronicle::away_summary(&lead, &all);
         let stage = self.stage.as_ref().map(|s| s.hwnd);
-        match AwayCard::open(Rc::clone(&self.shared), stage, sub, rows, answers) {
-            Ok(c) => {
-                self.away_card = Some(c);
-                true
-            }
-            Err(e) => {
-                eprintln!("horadric: cannot open the away card: {e}");
-                false
-            }
-        }
-    }
-
-    /// The catch-up from the tray or its hotkey: since this morning.
-    fn listen_on_demand(&mut self) {
-        let now = unix_now();
-        let since = now
-            .saturating_sub(local_secs())
-            .min(now.saturating_sub(LISTEN_BACK));
-        self.listen(since, None, true);
-    }
-
-    /// Opens the catch-up with what happened since `since`, `away` being
-    /// when you left if that is why. Asked for, it opens even with nothing
-    /// to tell, to say so; on coming back it stays shut.
-    fn listen(&mut self, since: u64, away: Option<u64>, asked: bool) {
-        if let Some(c) = self.catchup.take() {
-            c.destroy();
-        }
-        let now = unix_now();
-        let entries = store::journal_since(since);
-        let groups = {
-            let Ok(r) = self.shared.registry.lock() else {
-                return;
-            };
-            let boards = self.shared.boards.borrow();
-            let item_is = |e: &Entry, mark: horadric_core::tasks::Mark, title: &str| {
-                boards
-                    .get(&e.project)
-                    .is_some_and(|b| b.tasks.iter().any(|t| t.mark == mark && t.title == title))
-            };
-            journal::summary(&entries, since, now, |e| match &e.what {
-                What::Waiting { .. } => r.get(&e.session).is_some_and(|s| s.phase.is_waiting()),
-                What::Done { .. } => r.get(&e.session).is_some_and(Session::unread),
-                What::Review { title } => item_is(e, horadric_core::tasks::Mark::Review, title),
-                What::Blocked { title, .. } => {
-                    item_is(e, horadric_core::tasks::Mark::Blocked, title)
-                }
-                _ => false,
-            })
-        };
-        if groups.is_empty() && !asked {
-            return;
-        }
-        // Coming back to a full screen game or a presentation is not the
-        // moment; the tray and the hotkey still open it.
-        let state = unsafe { SHQueryUserNotificationState() }.map_or(5, |s| s.0);
-        if !asked && toast::hold_back(state) {
-            return;
-        }
-        let mut rows = catchup::rows(&groups, now, project_name);
-        if rows.is_empty() {
-            rows.push(catchup::Row {
-                kind: layout::CatchupKind::Line { detail: false },
-                text: "Nothing happened".to_string(),
-                detail: String::new(),
-                age: String::new(),
-                section: None,
-                session: String::new(),
-                background: false,
-            });
-        }
-        let clock = catchup::clock(local_secs(), now, since);
-        let sub = catchup::covers(away, since, now, &clock);
-        match Catchup::open(Rc::clone(&self.shared), sub, rows) {
-            Ok(c) => self.catchup = Some(c),
-            Err(e) => eprintln!("horadric: cannot open the catch-up: {e}"),
+        match AwayCard::open(Rc::clone(&self.shared), stage, title, news, now) {
+            Ok(c) => self.away_card = Some(c),
+            Err(e) => eprintln!("horadric: cannot open the away card: {e}"),
         }
     }
 
@@ -9056,21 +8967,7 @@ impl App {
                     if let Some(c) = self.away_card.take() {
                         c.destroy();
                     }
-                }
-                Input::Listened(session) => {
-                    if let Some(c) = self.catchup.take() {
-                        c.destroy();
-                    }
-                    if let Some(id) = session {
-                        let known = self
-                            .shared
-                            .registry
-                            .lock()
-                            .is_ok_and(|r| r.get(&id).is_some());
-                        if known {
-                            self.reveal(&id, false);
-                        }
-                    }
+                    self.away_seen = Some(unix_now());
                 }
                 Input::Pick => {
                     // A new project most likely sits beside the last one.
