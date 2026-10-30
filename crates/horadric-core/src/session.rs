@@ -192,6 +192,11 @@ pub struct Session {
     /// roster that long unheard is not believed, see [`ROSTER_STALE`].
     #[serde(skip)]
     pub heard_at: Option<SystemTime>,
+    /// For a headless session, the agents its stream says work in the
+    /// background, by id with their type: what the tile goes by where the
+    /// mod's roster says nothing.
+    #[serde(skip)]
+    pub stream_agents: Option<Vec<(String, String)>>,
     /// When the last prompt went in. Anything typed into the terminal
     /// after it may still sit in the prompt box as a draft.
     #[serde(skip)]
@@ -275,6 +280,7 @@ impl Session {
             agent_types: Vec::new(),
             roster: None,
             heard_at: None,
+            stream_agents: None,
             prompted_at: None,
             last_prompt: None,
             hooked: None,
@@ -637,6 +643,7 @@ impl Session {
                 self.agents.clear();
                 self.agent_types.clear();
                 self.roster = None;
+                self.stream_agents = None;
             }
             HookEvent::AGENTS => self.roster = event.agents.clone(),
             _ => {}
@@ -689,7 +696,8 @@ impl Session {
     /// the mod's roster, the ones it says are running; without it (or for
     /// one the roster has not caught up with), those heard from within
     /// [`SUBAGENT_QUIET`], since no hook says a subagent finished. A type
-    /// not known is "agent".
+    /// not known is "agent". A headless session's stream says which run in
+    /// the background where the roster is silent; the roster wins.
     pub fn subagent_types(&self, now: SystemTime) -> Vec<String> {
         let known = |id: &str| {
             self.agent_types
@@ -714,11 +722,16 @@ impl Session {
                 });
             }
         }
+        let streamed = self.stream_agents.as_ref().filter(|_| self.roster.is_none());
+        for (id, t) in streamed.into_iter().flatten() {
+            out.push(if t.is_empty() { known(id) } else { t.clone() });
+        }
         for (id, t) in &self.agents {
             let listed = self
                 .roster
                 .as_ref()
-                .is_some_and(|r| r.iter().any(|a| a.agent_id == *id));
+                .is_some_and(|r| r.iter().any(|a| a.agent_id == *id))
+                || streamed.is_some_and(|s| s.iter().any(|(a, _)| a == id));
             let quiet = now.duration_since(*t).is_ok_and(|d| d < SUBAGENT_QUIET);
             if !listed && quiet {
                 out.push(known(id));
@@ -1177,6 +1190,37 @@ mod tests {
         s.apply(&ev("UserPromptSubmit"), later);
         assert_eq!(s.agents_alone(later), 0);
         assert_eq!(s.subagents(later), 1);
+    }
+
+    #[test]
+    fn a_headless_stream_speaks_for_its_agents_where_the_mod_does_not() {
+        let mut s = Session::new("t", "t", "C:/repo");
+        let t0 = now();
+        s.apply(&ev("UserPromptSubmit"), t0);
+        // A subagent's hook and the stream's set name the same agent once.
+        s.apply(
+            &HookEvent {
+                agent_id: Some("a1".into()),
+                ..ev("PreToolUse")
+            },
+            t0,
+        );
+        s.stream_agents = Some(vec![("a1".into(), "Explore".into())]);
+        s.apply(&ev("Stop"), t0);
+        assert_eq!(s.subagent_types(t0), vec!["Explore"]);
+        assert_eq!(s.agents_alone(t0), 1);
+        // The mod's roster, once it speaks, wins.
+        s.apply(
+            &HookEvent {
+                agents: Some(vec![]),
+                ..ev(HookEvent::AGENTS)
+            },
+            t0,
+        );
+        assert_eq!(s.agents_alone(t0), 0);
+        // And the process going forgets both.
+        s.apply(&ev("SessionEnd"), t0);
+        assert!(s.stream_agents.is_none());
     }
 
     #[test]

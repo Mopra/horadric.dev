@@ -8081,6 +8081,7 @@ impl App {
         if state.background == Some(0) {
             session.loot.outstanding.clear();
         }
+        session.stream_agents = state.agents.clone();
         let phase = session.phase.clone();
         let now = SystemTime::now();
         // A reattached tile starts Idle; once its replay is in, a turn that

@@ -154,7 +154,7 @@ struct Chat {
 }
 
 /// What the app hears of a Folio, for its tile's phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub busy: bool,
     /// An ask waits on the human.
@@ -166,6 +166,9 @@ pub struct State {
     pub finished: bool,
     /// How many background tasks run, once the CLI has said.
     pub background: Option<usize>,
+    /// The agents among them, by id with their type, once the CLI has
+    /// said: the tile's sparks where the mod's roster is silent.
+    pub agents: Option<Vec<(String, String)>>,
 }
 
 impl Chat {
@@ -244,6 +247,12 @@ impl Chat {
             live: self.live,
             finished: self.folio.turn_finished(),
             background: (self.folio.background_heard).then_some(self.folio.background.len()),
+            agents: (self.folio.background_heard).then(|| {
+                (self.folio.background.iter())
+                    .filter(|t| t.is_agent())
+                    .map(|t| (t.task_id.clone(), t.agent_type.clone()))
+                    .collect()
+            }),
         }
     }
 
@@ -686,7 +695,8 @@ fn drain() {
             composer::tend(id, chat);
             chat.note_busy();
             let now = chat.state();
-            if chat.told.replace(now) != Some(now) {
+            if chat.told.as_ref() != Some(&now) {
+                chat.told = Some(now.clone());
                 tell.push(Input::FolioState(id.clone(), now));
             }
             let header = chat.header_moved();

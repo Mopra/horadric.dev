@@ -149,6 +149,8 @@ pub struct BackgroundTask {
     /// Such as `local_bash`, `local_agent` or `monitor`.
     pub task_type: String,
     pub description: String,
+    /// A local agent's type, such as `Explore`; empty for other tasks.
+    pub agent_type: String,
     /// Housekeeping the CLI asks hosts to leave out of anything that
     /// shows activity, such as a watcher it started itself.
     pub ambient: bool,
@@ -983,6 +985,7 @@ impl Folio {
                         task_id: t["task_id"].as_str().unwrap_or_default().to_string(),
                         task_type: t["task_type"].as_str().unwrap_or_default().to_string(),
                         description: t["description"].as_str().unwrap_or_default().to_string(),
+                        agent_type: t["subagent_type"].as_str().unwrap_or_default().to_string(),
                         ambient: t["ambient"].as_bool().unwrap_or_default(),
                     })
                     .collect();
