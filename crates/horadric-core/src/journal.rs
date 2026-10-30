@@ -1,17 +1,11 @@
-//! What happened while nobody watched, for the catch-up ("Stay a while and
-//! listen"). The registry only knows the present, so the app appends a line
-//! to `journal.jsonl` for each thing worth telling, and this turns the lines
-//! since a time into what the catch-up says.
-//!
-//! Only the last word on a session or an item counts: a session that waited,
-//! was answered and finished its turn is one line, not three. What asks
-//! something of you (waiting, a review, an unread turn, a block) is told
-//! only while it still holds, which the caller knows and this does not.
+//! What happened to sessions and items, for the quest log's window to fill
+//! in what the chronicle never heard of. The app appends a line to
+//! `journal.jsonl` for a turn finished and an item taken, sent for
+//! review, blocked, finished or merged.
 
 use serde::{Deserialize, Serialize};
 
 use crate::tasks::{Mark, Task};
-use crate::usage::format_until;
 
 /// The file, beside `state.json`.
 pub const FILE: &str = "journal.jsonl";
@@ -40,21 +34,8 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "what", rename_all = "snake_case")]
 pub enum What {
-    /// The session started waiting on you, and why.
-    Waiting {
-        #[serde(default)]
-        line: String,
-    },
     /// The session finished its turn, and its last message.
     Done {
-        #[serde(default)]
-        line: String,
-    },
-    /// The session's process ended.
-    Ended,
-    /// The session was closed with the one line it left. Only the cube
-    /// closed sessions this way; the variant stays so old journals read.
-    Closed {
         #[serde(default)]
         line: String,
     },
@@ -76,8 +57,6 @@ pub enum What {
     },
     /// A finished item's branch went into the main tree.
     Merged { branch: String, title: String },
-    /// A usage limit ran out, until then in Unix seconds.
-    Limit { until: u64 },
 }
 
 impl Entry {
@@ -86,24 +65,6 @@ impl Entry {
         let mut s = serde_json::to_string(self).unwrap_or_default();
         s.push('\n');
         s
-    }
-
-    /// The task item it is about, if it is about one.
-    fn item(&self) -> Option<&str> {
-        match &self.what {
-            What::Started { title }
-            | What::Review { title }
-            | What::Blocked { title, .. }
-            | What::Finished { title, .. } => Some(title),
-            _ => None,
-        }
-    }
-
-    fn phase(&self) -> bool {
-        matches!(
-            self.what,
-            What::Waiting { .. } | What::Done { .. } | What::Ended | What::Closed { .. }
-        )
     }
 }
 
@@ -167,24 +128,6 @@ pub fn started_at(entries: &[Entry], project: &str, title: &str) -> Option<u64> 
         .map(|e| e.at)
 }
 
-/// What a finished item's line says of its commits: the one, or how many
-/// and their subjects, newest first.
-fn commits_detail(commits: &[Commit]) -> String {
-    match commits {
-        [] => String::new(),
-        [c] => format!("{} {}", c.hash, c.subject),
-        _ => format!(
-            "{} commits: {}",
-            commits.len(),
-            commits
-                .iter()
-                .map(|c| c.subject.as_str())
-                .collect::<Vec<_>>()
-                .join(" \u{b7} ")
-        ),
-    }
-}
-
 /// The lines for what changed between two reads of a project's task list:
 /// an item taken, sent for review, blocked or finished. Items are matched
 /// by title, since lines move as the list is edited.
@@ -224,158 +167,6 @@ pub fn marks(project: &str, old: &[Task], new: &[Task], now: u64) -> Vec<Entry> 
         .collect()
 }
 
-/// Where a line goes in the catch-up, in the order you act on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Section {
-    Waiting,
-    Review,
-    Unread,
-    Blocked,
-    /// What simply happened and asks nothing.
-    Happened,
-}
-
-/// One line of the catch-up.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Line {
-    pub section: Section,
-    pub at: u64,
-    /// The session a click on it shows, empty for none.
-    pub session: String,
-    pub text: String,
-    /// Fainter, after the text.
-    pub detail: String,
-}
-
-/// A project's lines.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Group {
-    /// The project key, empty for the account's lines.
-    pub project: String,
-    pub lines: Vec<Line>,
-}
-
-/// What happened since `since`, grouped by project. `still` says whether
-/// what an entry asks of you still holds: the session still waits, the
-/// turn is still unread, the item is still in review or blocked. Empty
-/// when nothing happened worth telling.
-pub fn summary(
-    entries: &[Entry],
-    since: u64,
-    now: u64,
-    still: impl Fn(&Entry) -> bool,
-) -> Vec<Group> {
-    let recent: Vec<&Entry> = entries.iter().filter(|e| e.at >= since).collect();
-    let last = |i: usize, same: &dyn Fn(&Entry) -> bool| !recent[i + 1..].iter().any(|e| same(e));
-    let mut lines: Vec<(String, Line)> = Vec::new();
-    for (i, e) in recent.iter().enumerate() {
-        let line = if e.phase() {
-            if !last(i, &|o| o.phase() && o.session == e.session) {
-                continue;
-            }
-            phase_line(e, &still)
-        } else if let Some(title) = e.item() {
-            if !last(i, &|o| o.project == e.project && o.item() == Some(title)) {
-                continue;
-            }
-            item_line(e, title, &still)
-        } else {
-            match &e.what {
-                What::Merged { branch, title } => Some(Line {
-                    section: Section::Happened,
-                    at: e.at,
-                    session: String::new(),
-                    text: format!("Merged {branch}"),
-                    detail: crate::tasks::one_line(title),
-                }),
-                What::Limit { until } => {
-                    if !last(i, &|o| o.what == e.what) {
-                        continue;
-                    }
-                    let detail = if *until <= now {
-                        format!("reset {} ago", format_until(now - until))
-                    } else {
-                        format!("resets in {}", format_until(until - now))
-                    };
-                    Some(Line {
-                        section: Section::Happened,
-                        at: e.at,
-                        session: String::new(),
-                        text: "Usage limit reached".to_string(),
-                        detail,
-                    })
-                }
-                _ => None,
-            }
-        };
-        if let Some(l) = line {
-            lines.push((e.project.clone(), l));
-        }
-    }
-    let mut groups: Vec<Group> = Vec::new();
-    for (project, line) in lines {
-        match groups.iter_mut().find(|g| g.project == project) {
-            Some(g) => g.lines.push(line),
-            None => groups.push(Group {
-                project,
-                lines: vec![line],
-            }),
-        }
-    }
-    for g in &mut groups {
-        g.lines.sort_by_key(|l| (l.section, l.at));
-    }
-    // The project with the most pressing line first, and of two equally
-    // pressing, the one that has waited longer.
-    groups.sort_by_key(|g| g.lines.first().map(|l| (l.section, l.at)));
-    groups
-}
-
-fn phase_line(e: &Entry, still: &impl Fn(&Entry) -> bool) -> Option<Line> {
-    let (section, detail) = match &e.what {
-        What::Waiting { line } if still(e) => (Section::Waiting, line.clone()),
-        What::Done { line } if still(e) => (Section::Unread, line.clone()),
-        What::Ended => (Section::Happened, "ended".to_string()),
-        What::Closed { line } if line.is_empty() => (Section::Happened, "closed".to_string()),
-        What::Closed { line } => (Section::Happened, format!("closed: {line}")),
-        _ => return None,
-    };
-    Some(Line {
-        section,
-        at: e.at,
-        session: e.session.clone(),
-        text: e.name.clone(),
-        detail: crate::tasks::one_line(&detail),
-    })
-}
-
-fn item_line(e: &Entry, title: &str, still: &impl Fn(&Entry) -> bool) -> Option<Line> {
-    let (section, text, detail) = match &e.what {
-        What::Review { .. } if still(e) => (Section::Review, title.to_string(), String::new()),
-        What::Blocked { reason, .. } if still(e) => {
-            (Section::Blocked, title.to_string(), reason.clone())
-        }
-        What::Finished { commits, .. } => (
-            Section::Happened,
-            format!("Finished: {title}"),
-            commits_detail(commits),
-        ),
-        What::Started { .. } => (
-            Section::Happened,
-            format!("Started: {title}"),
-            String::new(),
-        ),
-        _ => return None,
-    };
-    Some(Line {
-        section,
-        at: e.at,
-        session: e.session.clone(),
-        text: crate::tasks::one_line(&text),
-        detail: crate::tasks::one_line(&detail),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,260 +181,46 @@ mod tests {
         }
     }
 
-    fn waiting(line: &str) -> What {
-        What::Waiting {
-            line: line.to_string(),
-        }
-    }
-
-    fn done(line: &str) -> What {
-        What::Done {
-            line: line.to_string(),
-        }
-    }
-
-    fn texts(groups: &[Group]) -> Vec<(String, Vec<(Section, String)>)> {
-        groups
-            .iter()
-            .map(|g| {
-                (
-                    g.project.clone(),
-                    g.lines
-                        .iter()
-                        .map(|l| (l.section, l.text.clone()))
-                        .collect(),
-                )
-            })
-            .collect()
-    }
-
     #[test]
     fn a_line_reads_back_and_a_torn_one_is_left_out() {
-        let e = entry(5, "a", "c:/p", waiting("allow Bash?"));
+        let done = What::Done {
+            line: "All green.".into(),
+        };
+        let e = entry(5, "a", "c:/p", done);
         let text = format!("{}{{\"at\":6,\"wha", e.line());
         assert_eq!(parse(&text), vec![e]);
-        let limit = entry(7, "", "", What::Limit { until: 99 });
-        assert!(!limit.line().contains("session"));
-        assert_eq!(parse(&limit.line()), vec![limit]);
+        let merged = What::Merged {
+            branch: "add-x".into(),
+            title: "Add x".into(),
+        };
+        let merged = entry(7, "", "p", merged);
+        assert!(!merged.line().contains("session"));
+        assert_eq!(parse(&merged.line()), vec![merged]);
+        let commit = Commit {
+            hash: "1".into(),
+            subject: "Add x".into(),
+        };
+        let finished = |commits: Vec<Commit>| What::Finished {
+            title: "Add x".into(),
+            commits,
+        };
+        let e = entry(1, "a", "p", finished(vec![commit]));
+        assert_eq!(parse(&e.line()), vec![e]);
+        assert!(!entry(1, "a", "p", finished(Vec::new()))
+            .line()
+            .contains("commits"));
     }
 
     #[test]
     fn trimming_drops_the_lines_older_than_a_week() {
         let now = KEEP + 100;
-        let old = entry(50, "a", "p", What::Ended);
-        let new = entry(150, "b", "p", What::Ended);
+        let started = What::Started { title: "A".into() };
+        let old = entry(50, "a", "p", started.clone());
+        let new = entry(150, "b", "p", started);
         let text = old.line() + &new.line();
         assert_eq!(trimmed(&text, now), Some(new.line()));
         assert_eq!(trimmed(&new.line(), now), None);
         assert_eq!(trimmed(&(new.line() + "{torn"), now), Some(new.line()));
-    }
-
-    #[test]
-    fn only_a_sessions_last_word_counts() {
-        let entries = [
-            entry(10, "a", "p", waiting("allow Bash?")),
-            entry(20, "a", "p", done("All green.")),
-        ];
-        let groups = summary(&entries, 0, 30, |_| true);
-        assert_eq!(
-            texts(&groups),
-            [("p".into(), vec![(Section::Unread, "A".into())])]
-        );
-        assert_eq!(groups[0].lines[0].detail, "All green.");
-    }
-
-    #[test]
-    fn a_session_closed_in_the_cube_is_told_with_its_line() {
-        let closed = |line: &str| What::Closed {
-            line: line.to_string(),
-        };
-        let entries = [
-            entry(10, "a", "p", done("Fixed the login.")),
-            entry(20, "a", "p", closed("Fixed the login.")),
-            entry(30, "b", "p", closed("")),
-        ];
-        let groups = summary(&entries, 0, 40, |_| true);
-        let lines = &groups[0].lines;
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].section, Section::Happened);
-        assert_eq!(lines[0].detail, "closed: Fixed the login.");
-        assert_eq!(lines[1].detail, "closed");
-        assert_eq!(parse(&entries[1].line()), vec![entries[1].clone()]);
-    }
-
-    #[test]
-    fn what_no_longer_holds_is_not_told() {
-        let entries = [
-            entry(10, "a", "p", waiting("allow Bash?")),
-            entry(20, "b", "p", done("Done.")),
-        ];
-        assert!(summary(&entries, 0, 30, |_| false).is_empty());
-        let only_b = summary(&entries, 0, 30, |e| e.session == "b");
-        assert_eq!(
-            texts(&only_b),
-            [("p".into(), vec![(Section::Unread, "B".into())])]
-        );
-    }
-
-    #[test]
-    fn lines_before_the_time_are_left_out() {
-        let entries = [
-            entry(10, "a", "p", What::Ended),
-            entry(20, "b", "p", What::Ended),
-        ];
-        let groups = summary(&entries, 15, 30, |_| true);
-        assert_eq!(
-            texts(&groups),
-            [("p".into(), vec![(Section::Happened, "B".into())])]
-        );
-    }
-
-    #[test]
-    fn lines_go_in_the_order_you_act_on_them_and_waiting_oldest_first() {
-        let item = |t: &str| t.to_string();
-        let entries = [
-            entry(1, "a", "p", What::Ended),
-            entry(2, "b", "p", done("ok")),
-            entry(3, "c", "p", waiting("question")),
-            entry(
-                4,
-                "d",
-                "p",
-                What::Blocked {
-                    title: item("Four"),
-                    reason: "keys".into(),
-                },
-            ),
-            entry(
-                5,
-                "e",
-                "p",
-                What::Review {
-                    title: item("Five"),
-                },
-            ),
-            entry(6, "f", "p", waiting("permission")),
-        ];
-        let groups = summary(&entries, 0, 10, |_| true);
-        assert_eq!(
-            texts(&groups),
-            [(
-                "p".into(),
-                vec![
-                    (Section::Waiting, "C".into()),
-                    (Section::Waiting, "F".into()),
-                    (Section::Review, "Five".into()),
-                    (Section::Unread, "B".into()),
-                    (Section::Blocked, "Four".into()),
-                    (Section::Happened, "A".into()),
-                ]
-            )]
-        );
-        assert_eq!(groups[0].lines[4].detail, "keys");
-    }
-
-    #[test]
-    fn an_item_is_told_once_as_it_ended_up() {
-        let t = || "Add the thing".to_string();
-        let entries = [
-            entry(1, "a", "p", What::Started { title: t() }),
-            entry(2, "a", "p", What::Review { title: t() }),
-            entry(
-                3,
-                "a",
-                "p",
-                What::Finished {
-                    title: t(),
-                    commits: Vec::new(),
-                },
-            ),
-            entry(
-                4,
-                "b",
-                "p",
-                What::Started {
-                    title: "Other".into(),
-                },
-            ),
-        ];
-        let groups = summary(&entries, 0, 10, |_| true);
-        assert_eq!(
-            texts(&groups),
-            [(
-                "p".into(),
-                vec![
-                    (Section::Happened, "Finished: Add the thing".into()),
-                    (Section::Happened, "Started: Other".into()),
-                ]
-            )]
-        );
-    }
-
-    #[test]
-    fn the_same_title_in_two_projects_is_two_items() {
-        let entries = [
-            entry(
-                1,
-                "a",
-                "p",
-                What::Finished {
-                    title: "Ship".into(),
-                    commits: Vec::new(),
-                },
-            ),
-            entry(
-                2,
-                "b",
-                "q",
-                What::Finished {
-                    title: "Ship".into(),
-                    commits: Vec::new(),
-                },
-            ),
-        ];
-        assert_eq!(summary(&entries, 0, 10, |_| true).len(), 2);
-    }
-
-    #[test]
-    fn the_most_pressing_project_comes_first() {
-        let entries = [
-            entry(1, "a", "calm", What::Ended),
-            entry(2, "b", "urgent", waiting("question")),
-        ];
-        let groups = summary(&entries, 0, 10, |_| true);
-        let order: Vec<&str> = groups.iter().map(|g| g.project.as_str()).collect();
-        assert_eq!(order, ["urgent", "calm"]);
-    }
-
-    #[test]
-    fn a_limit_says_when_it_reset_or_resets() {
-        let entries = [
-            entry(1, "", "", What::Limit { until: 3601 }),
-            entry(2, "", "", What::Limit { until: 3601 }),
-        ];
-        let before = summary(&entries, 0, 1, |_| true);
-        assert_eq!(before[0].lines.len(), 1);
-        assert_eq!(before[0].lines[0].detail, "resets in 1 h 00 min");
-        let after = summary(&entries, 0, 3601 + 120, |_| true);
-        assert_eq!(after[0].lines[0].detail, "reset 2 min ago");
-    }
-
-    #[test]
-    fn a_merge_names_the_branch_and_the_item() {
-        let entries = [entry(
-            1,
-            "",
-            "p",
-            What::Merged {
-                branch: "add-x".into(),
-                title: "Add x".into(),
-            },
-        )];
-        let l = &summary(&entries, 0, 10, |_| true)[0].lines[0];
-        assert_eq!(
-            (l.text.as_str(), l.detail.as_str()),
-            ("Merged add-x", "Add x")
-        );
     }
 
     #[test]
@@ -735,35 +312,5 @@ mod tests {
         assert_eq!(started_at(&entries, "p", "One"), Some(4));
         assert_eq!(started_at(&entries, "q", "One"), Some(2));
         assert_eq!(started_at(&entries, "p", "Three"), None);
-    }
-
-    #[test]
-    fn a_finished_item_tells_its_commits() {
-        let c = |hash: &str, subject: &str| Commit {
-            hash: hash.into(),
-            subject: subject.into(),
-        };
-        let finished = |commits: Vec<Commit>| What::Finished {
-            title: "Add x".into(),
-            commits,
-        };
-        let detail = |what: What| {
-            summary(&[entry(1, "a", "p", what)], 0, 10, |_| true)[0].lines[0]
-                .detail
-                .clone()
-        };
-        assert_eq!(detail(finished(Vec::new())), "");
-        assert_eq!(
-            detail(finished(vec![c("abc1234", "Add x")])),
-            "abc1234 Add x"
-        );
-        assert_eq!(
-            detail(finished(vec![c("2", "Test x"), c("1", "Add x")])),
-            "2 commits: Test x \u{b7} Add x"
-        );
-        let e = entry(1, "a", "p", finished(vec![c("1", "Add x")]));
-        assert_eq!(parse(&e.line()), vec![e]);
-        let bare = entry(1, "a", "p", finished(Vec::new()));
-        assert!(!bare.line().contains("commits"));
     }
 }

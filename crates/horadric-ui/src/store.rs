@@ -221,7 +221,7 @@ pub fn save_history(h: &History) {
     }
 }
 
-/// Adds a line to the journal the catch-up reads.
+/// Adds a line to the journal the quest log reads.
 pub fn journal(e: &Entry) {
     append(journal::FILE, &e.line());
 }

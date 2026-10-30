@@ -141,8 +141,6 @@ pub(super) struct State {
     /// Failed landings handed back to the session that finished the quest,
     /// by its worktree's path, until it lands or ends.
     resolving: HashMap<String, Resolving>,
-    /// The limit last journaled, by when it resets, so each is written once.
-    limit_journaled: Option<u64>,
     /// What the waits that need git or a command last came to, by project
     /// and wait, filled in by the threads that look.
     checks: Arc<Mutex<HashMap<(String, String), Check>>>,
@@ -1470,15 +1468,6 @@ impl App {
             }
         }
         if let (Some(at), true) = (held, waiting) {
-            if self.tasks.limit_journaled.replace(at) != Some(at) {
-                store::journal(&Entry {
-                    at: now,
-                    session: String::new(),
-                    name: String::new(),
-                    project: String::new(),
-                    what: What::Limit { until: at },
-                });
-            }
             said.push((
                 format!("limit:{at}"),
                 "Usage limit reached".to_string(),
