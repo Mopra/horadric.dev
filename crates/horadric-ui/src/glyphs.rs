@@ -166,6 +166,8 @@ pub struct Bar<'a> {
     pub badges: &'a [Option<TabBadge>],
     /// Each tab's site's picture, where it has one.
     pub icons: &'a [Option<Rc<Favicon>>],
+    /// The tab being carried to a new place and how far, in DIPs.
+    pub carried: Option<(usize, f32)>,
 }
 
 /// The mark on a tab an agent works in: its session's initial on a disc
@@ -266,6 +268,52 @@ pub fn tab_hit(l: &TabLayout, x: f32) -> Option<TabHit> {
         Some(c) if x >= c => Some(TabHit::Close(i)),
         _ => Some(TabHit::Tab(i)),
     }
+}
+
+/// How far apart two tabs' places are. Every tab is as wide, so this is
+/// one step along the strip.
+fn tab_step(l: &TabLayout) -> f32 {
+    match l.tabs.first() {
+        Some(&(first, _)) => (l.new - first) / l.tabs.len() as f32,
+        None => 0.0,
+    }
+}
+
+/// The place the tab `from` drops into, carried `dx` DIPs along the strip:
+/// the one its middle is nearest, never past either end.
+pub fn tab_slot(l: &TabLayout, from: usize, dx: f32) -> usize {
+    let step = tab_step(l);
+    let last = l.tabs.len().saturating_sub(1);
+    if step <= 0.0 || from > last {
+        return from.min(last);
+    }
+    (from as f32 + dx / step).round().clamp(0.0, last as f32) as usize
+}
+
+/// How far each tab is drawn from its place while the tab `from` is
+/// carried `dx` DIPs: it under the pointer, kept to the strip, and the
+/// ones between its place and where it would drop a step over to open
+/// the gap for it.
+pub fn tab_offsets(l: &TabLayout, from: usize, dx: f32) -> Vec<f32> {
+    let step = tab_step(l);
+    let count = l.tabs.len();
+    if from >= count {
+        return vec![0.0; count];
+    }
+    let to = tab_slot(l, from, dx);
+    (0..count)
+        .map(|i| {
+            if i == from {
+                dx.clamp(-(from as f32) * step, (count - 1 - from) as f32 * step)
+            } else if from < i && i <= to {
+                -step
+            } else if to <= i && i < from {
+                step
+            } else {
+                0.0
+            }
+        })
+        .collect()
 }
 
 /// A browser pane's page laid out at a size of its own: a rim round it,
@@ -1294,7 +1342,18 @@ impl GridTarget {
                 DWRITE_MEASURING_MODE_NATURAL,
             );
         };
-        for (i, (name, &(left, right))) in bar.tabs.iter().zip(&l.tabs).enumerate() {
+        let offsets = match bar.carried {
+            Some((from, dx)) => tab_offsets(&l, from, dx),
+            None => vec![0.0; l.tabs.len()],
+        };
+        // The carried tab last, so it rides over the ones making way.
+        let carried = bar.carried.map(|(from, _)| from).filter(|&c| c < l.tabs.len());
+        let order = (0..l.tabs.len()).filter(|&i| Some(i) != carried).chain(carried);
+        for i in order {
+            let Some(name) = bar.tabs.get(i) else {
+                continue;
+            };
+            let (left, right) = (l.tabs[i].0 + offsets[i], l.tabs[i].1 + offsets[i]);
             let shown = i == bar.tab;
             let key = D2D_RECT_F {
                 left,
@@ -1312,7 +1371,7 @@ impl GridTarget {
                 let lit = shown.then_some(accent);
                 self.tab_lamp(left + 10.0, (top + bottom) / 2.0, lit);
             }
-            let cross = l.crosses[i];
+            let cross = l.crosses[i].map(|c| c + offsets[i]);
             let mut text_left = left + if wide { 19.0 } else { 6.0 };
             if let Some(b) = bar.badges.get(i).copied().flatten().filter(|_| wide) {
                 self.tab_badge(gpu, b, text_left + BADGE_R, (top + bottom) / 2.0);
@@ -2677,5 +2736,32 @@ mod tests {
         assert_eq!(tab_hit(&l, l.new + 1.0), Some(TabHit::New));
         assert_eq!(tab_hit(&l, l.new + TAB_NEW + 1.0), None);
         assert_eq!(tab_hit(&l, 0.0), None);
+    }
+
+    #[test]
+    fn a_carried_tab_drops_where_its_middle_is() {
+        let l = tab_layout(1000.0, 4);
+        let step = l.tabs[1].0 - l.tabs[0].0;
+        assert_eq!(tab_slot(&l, 1, 0.0), 1);
+        assert_eq!(tab_slot(&l, 1, step * 0.4), 1);
+        assert_eq!(tab_slot(&l, 1, step * 0.6), 2);
+        assert_eq!(tab_slot(&l, 1, -step * 0.6), 0);
+        assert_eq!(tab_slot(&l, 1, step * 10.0), 3);
+        assert_eq!(tab_slot(&l, 1, -step * 10.0), 0);
+        assert_eq!(tab_slot(&tab_layout(1000.0, 1), 0, 500.0), 0);
+        assert_eq!(tab_slot(&tab_layout(1000.0, 0), 0, 500.0), 0);
+    }
+
+    #[test]
+    fn the_tabs_between_make_way_for_the_carried_one() {
+        let l = tab_layout(1000.0, 4);
+        let step = l.tabs[1].0 - l.tabs[0].0;
+        // Tab 0 carried past tabs 1 and 2: they each move a step left.
+        assert_eq!(tab_offsets(&l, 0, step * 2.1), vec![step * 2.1, -step, -step, 0.0]);
+        // Tab 3 carried back to the front: the rest move a step right.
+        assert_eq!(tab_offsets(&l, 3, -step * 3.0), vec![step, step, step, -step * 3.0]);
+        // Held past the end, it stays on the strip.
+        assert_eq!(tab_offsets(&l, 2, step * 5.0), vec![0.0, 0.0, step, -step]);
+        assert_eq!(tab_offsets(&l, 1, 0.0), vec![0.0; 4]);
     }
 }

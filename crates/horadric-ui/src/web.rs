@@ -840,6 +840,10 @@ pub enum TabStep {
     Select(usize),
     Next,
     Previous,
+    /// The tab at the first place dragged to the second. A tab is known by
+    /// its id everywhere else, agents' tabs too, so only the strip's order
+    /// changes.
+    Move(usize, usize),
 }
 
 /// Changes the project's tabs. Closing its last tab closes the browser.
@@ -855,6 +859,14 @@ pub fn tab(key: &str, step: TabStep) {
         let len = web.tabs.len();
         match step {
             TabStep::New => None,
+            TabStep::Move(from, to) => {
+                if from < len && to < len {
+                    let tab = web.tabs.remove(from);
+                    web.tabs.insert(to, tab);
+                    web.active = after_move(web.active, from, to);
+                }
+                None
+            }
             TabStep::Select(i) => {
                 web.active = i.min(len.saturating_sub(1));
                 None
@@ -908,6 +920,21 @@ pub fn after_close(active: usize, closed: usize, len: usize) -> usize {
         active - 1
     } else if closed == active {
         active.min(len.saturating_sub(2))
+    } else {
+        active
+    }
+}
+
+/// Which place the shown tab, at `active`, has after the tab at `from`
+/// moves to `to`: the moved one's new place when it is that one, else a
+/// step over when the move crossed it.
+pub fn after_move(active: usize, from: usize, to: usize) -> usize {
+    if active == from {
+        to
+    } else if from < active && active <= to {
+        active - 1
+    } else if to <= active && active < from {
+        active + 1
     } else {
         active
     }
@@ -2283,6 +2310,22 @@ mod tests {
         assert!(!asks_to_leave(r#"{"message":"Sure?","type":"confirm"}"#));
         assert!(!asks_to_leave(r#"{"type":"alert"}"#));
         assert!(!asks_to_leave("not json"));
+    }
+
+    #[test]
+    fn the_shown_tab_stays_shown_through_a_move() {
+        let order = |from: usize, to: usize| {
+            let mut v = vec!['a', 'b', 'c', 'd'];
+            let t = v.remove(from);
+            v.insert(to, t);
+            v
+        };
+        for (from, to) in [(0, 3), (3, 0), (1, 2), (2, 1), (1, 1)] {
+            for active in 0..4 {
+                let was = ['a', 'b', 'c', 'd'][active];
+                assert_eq!(order(from, to)[after_move(active, from, to)], was);
+            }
+        }
     }
 
     #[test]

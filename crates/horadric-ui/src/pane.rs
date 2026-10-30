@@ -74,6 +74,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{IsChild, PostMessageW};
+use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXDRAG, SM_CYDRAG};
 
 use crate::app::{self, Input, PaneAsk};
 use crate::clipboard;
@@ -176,6 +177,22 @@ struct Search {
 
 /// A sized page's grip held down: where it was pressed in DIPs, and the
 /// size and zoom the page had then.
+/// A browser tab pressed, and once past the system's drag threshold
+/// carried along the strip to a new place.
+#[derive(Clone, Copy)]
+struct TabCarry {
+    from: usize,
+    /// How many tabs there were, since an agent opening or closing one
+    /// mid carry leaves `from` meaning another tab.
+    count: usize,
+    /// Where the press was, in client pixels for the threshold and in
+    /// DIPs for how far the tab has come.
+    press: (i32, i32),
+    press_x: f32,
+    dx: f32,
+    moved: bool,
+}
+
 #[derive(Clone, Copy)]
 struct Resize {
     grip: Grip,
@@ -279,6 +296,7 @@ pub struct Pane {
     typed: RefCell<String>,
     /// A sized page's grip, while it is held down.
     resizing: Cell<Option<Resize>>,
+    tab_carry: Cell<Option<TabCarry>>,
     /// The cells of the link under the mouse while Ctrl is held, drawn
     /// underlined.
     link: RefCell<Option<Vec<Point>>>,
@@ -376,6 +394,7 @@ impl Pane {
             suggest: RefCell::new(None),
             typed: RefCell::new(String::new()),
             resizing: Cell::new(None),
+            tab_carry: Cell::new(None),
             sky_ticking: Cell::new(false),
             glass_fx: RefCell::new(Glass::default()),
             fx_beat: Cell::new(None),
@@ -963,6 +982,11 @@ impl Pane {
                 tab,
                 badges: &badges,
                 icons: &icons,
+                carried: self
+                    .tab_carry
+                    .get()
+                    .filter(|c| c.moved)
+                    .map(|c| (c.from, c.dx)),
                 text: &shown,
                 edit: edit.as_ref().map(|f| {
                     let (a, b) = f.selection();
@@ -2041,11 +2065,77 @@ impl Pane {
             _ => return true,
         };
         web::tab(key, step);
+        if let (TabStep::Select(from), false) = (step, middle) {
+            // Held, the tab may be carried: the pane keeps the keyboard
+            // until it is let go so Esc can call the carry off.
+            self.tab_carry.set(Some(TabCarry {
+                from,
+                count: web::tabs(key).map_or(0, |(t, _)| t.len()),
+                press: (lparam.0 as i16 as i32, (lparam.0 >> 16) as i16 as i32),
+                press_x: self.dip(lparam).0,
+                dx: 0.0,
+                moved: false,
+            }));
+            unsafe {
+                let _ = SetFocus(Some(self.hwnd));
+                SetCapture(self.hwnd);
+            }
+            return true;
+        }
         // A new tab puts the keyboard in its address field instead.
         if step != TabStep::New {
             self.focus();
         }
         true
+    }
+
+    /// The pointer moved with a tab held: once past the drag threshold the
+    /// tab follows it along the strip.
+    fn carry_tab(&self, lparam: LPARAM) {
+        let Some(mut c) = self.tab_carry.get() else {
+            return;
+        };
+        let (x, y) = (lparam.0 as i16 as i32, (lparam.0 >> 16) as i16 as i32);
+        if !c.moved {
+            let (cx, cy) = unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
+            if (x - c.press.0).abs() <= cx && (y - c.press.1).abs() <= cy {
+                return;
+            }
+            c.moved = true;
+        }
+        c.dx = self.dip(lparam).0 - c.press_x;
+        self.tab_carry.set(Some(c));
+        self.invalidate();
+    }
+
+    /// A held tab let go: dropped where it was carried to, and the page
+    /// given the keyboard back. A click that never moved has already
+    /// shown its tab.
+    fn drop_tab(&self) {
+        let Some(c) = self.tab_carry.take() else {
+            return;
+        };
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        if let (true, Some(key)) = (c.moved, &self.console.web) {
+            let count = web::tabs(key).map_or(0, |(t, _)| t.len());
+            let to = glyphs::tab_slot(&glyphs::tab_layout(self.width_dip(), count), c.from, c.dx);
+            if to != c.from && count == c.count {
+                web::tab(key, TabStep::Move(c.from, to));
+            }
+        }
+        self.invalidate();
+        self.focus();
+    }
+
+    /// The client area's width, in DIPs.
+    fn width_dip(&self) -> f32 {
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut r);
+        }
+        r.right as f32 * 96.0 / self.dpi_now() as f32
     }
 
     /// A press on a browser pane's back, forward or reload, or in its
@@ -2997,6 +3087,18 @@ impl Pane {
                 self.on_char(wparam.0 as u16, mods);
                 Some(LRESULT(0))
             }
+            WM_KEYDOWN if self.tab_carry.get().is_some() => {
+                if wparam.0 == VK_ESCAPE.0 as usize {
+                    // Taken first, so losing the capture finds nothing to drop.
+                    self.tab_carry.set(None);
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                    self.invalidate();
+                    self.focus();
+                }
+                Some(LRESULT(0))
+            }
             WM_KEYDOWN | WM_SYSKEYDOWN => {
                 // Bit 30 is set when the key was already down.
                 let repeat = lparam.0 & (1 << 30) != 0;
@@ -3116,6 +3218,14 @@ impl Pane {
                 Some(LRESULT(0))
             }
             WM_RBUTTONUP if self.console.sky.is_some() => Some(LRESULT(0)),
+            WM_MOUSEMOVE if self.tab_carry.get().is_some() => {
+                self.carry_tab(lparam);
+                Some(LRESULT(0))
+            }
+            WM_LBUTTONUP if self.tab_carry.get().is_some() => {
+                self.drop_tab();
+                Some(LRESULT(0))
+            }
             WM_MOUSEMOVE if self.resizing.get().is_some() => {
                 self.drag_grip(lparam);
                 Some(LRESULT(0))
@@ -3193,6 +3303,10 @@ impl Pane {
                 Some(LRESULT(0))
             }
             WM_CAPTURECHANGED => {
+                // Lost mid carry, to a menu or Alt+Tab: the tab goes back.
+                if self.tab_carry.take().is_some() {
+                    self.invalidate();
+                }
                 if self.resizing.take().is_some() {
                     self.invalidate();
                 }
