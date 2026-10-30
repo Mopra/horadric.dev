@@ -20,7 +20,8 @@ and a paused tile already keeps a session for later.
 
 Tal Rasha's tombs, one quest started in several worktrees at once with
 the human picking the one to keep, were built and then removed
-(2026-10-30): nobody used them.
+(2026-10-30): nobody used them. So was `horadric bench`, one task run
+under different settings in throwaway clones to measure tokens.
 
 ## Driving a phone
 

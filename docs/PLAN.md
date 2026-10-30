@@ -55,7 +55,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [macOS](plan/macos.md): what is left of Horadric on a Mac: the browser pane, quests and Warriv, files, usage, Discord, Settings.
 - [Orchestration](plan/orchestration.md): a Warriv session restored after a restart, and which model Warriv runs on.
 - [Claude Code 2.1.287 to 2.1.296](plan/claude-code-2-1-287-to-2-1-296.md): cloud session tiles, waiting on `claude agents --json`.
-- [Lore](plan/lore.md): the read guard, compaction at the right moment, the bench still to run.
+- [Lore](plan/lore.md): the read guard and compaction at the right moment.
 - [Memory](plan/memory.md): the small gaps left in long term memory.
 - [Performance](plan/performance.md): what is left of the UI thread performance pass.
 - [The agent's cursor](plan/the-agent-s-cursor.md): agents testing without taking the human's mouse. Proposed.

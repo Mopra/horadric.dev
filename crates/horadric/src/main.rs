@@ -14,7 +14,6 @@
 #[cfg(windows)]
 mod backup;
 #[cfg(windows)]
-mod bench;
 #[cfg(not(target_os = "macos"))]
 mod code;
 mod console;
@@ -109,8 +108,6 @@ Usage:
                                machine runs one; alone, say who runs one now
   horadric guard [read|shell]    The PreToolUse hook that turns whole reads of long files
                                into outlines and runs builds and tests through heavy
-  horadric bench SPEC.json       Run tasks under variants in throwaway clones and report
-                               what each spent beside the first
   horadric sanctuary             Lay out this project's Arcane Sanctuary graph from where
                                it was left, keep it, and say how large it is
   horadric sky                   Chart every known project into Tristram's sky, each a
@@ -201,8 +198,6 @@ fn main() -> ExitCode {
         Some("headless-host-debug") => headless_host_debug::run(&args[1..]),
         #[cfg(windows)]
         Some("guard") => guard::run(&args[1..]),
-        #[cfg(windows)]
-        Some("bench") => bench::run(&args[1..]),
         #[cfg(windows)]
         Some("google") => google::run(&args[1..]),
         // `task` is how sessions started before the rename report back.

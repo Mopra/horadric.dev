@@ -11,7 +11,6 @@ pub mod agent;
 pub mod aim;
 pub mod ask;
 pub mod background;
-pub mod bench;
 pub mod brotherhood;
 #[cfg(test)]
 mod brotherhood_sim;
