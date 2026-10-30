@@ -165,6 +165,7 @@ mod tests {
             task_id: "b1".into(),
             task_type: "local_bash".into(),
             description: "npm run dev\nmore".into(),
+            ambient: false,
         };
         assert_eq!(task_label(&t), "npm run dev");
     }

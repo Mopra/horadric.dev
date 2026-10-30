@@ -19,6 +19,10 @@ pub const COLUMN_MARGIN: f32 = 22.0;
 pub const WARM: Duration = Duration::from_millis(1200);
 /// And to cool after it ends, after which nothing moves and nothing draws.
 pub const COOL: Duration = Duration::from_millis(2400);
+/// The heat while only background agents work and Claude itself waits for
+/// them: the runes keep moving, but calmer than a turn's full burn, so
+/// work is seen to go on without reading as Claude at it.
+pub const AGENTS_HEAT: f32 = 0.35;
 /// One depth of runes behind the conversation. Nearer is bigger, faster,
 /// and less sunk into the background, which is what makes the eye read
 /// the three as depth and not as runes of three sizes.
@@ -296,13 +300,12 @@ pub fn at_bottom(scroll: f32, content: f32, view: f32) -> bool {
 }
 
 /// How warm the background is, from 0 at rest to 1 while a turn runs,
-/// `since` the turn started or ended.
-pub fn heat(busy: bool, since: Duration) -> f32 {
-    if busy {
-        (since.as_secs_f32() / WARM.as_secs_f32()).min(1.0)
-    } else {
-        (1.0 - since.as_secs_f32() / COOL.as_secs_f32()).max(0.0)
-    }
+/// on its way from `from` to `to` for `since`: warming takes [`WARM`],
+/// cooling [`COOL`].
+pub fn heat(from: f32, to: f32, since: Duration) -> f32 {
+    let span = if to > from { WARM } else { COOL };
+    let k = (since.as_secs_f32() / span.as_secs_f32()).min(1.0);
+    from + (to - from) * k
 }
 
 /// One rune drifting up behind the conversation.
@@ -509,11 +512,13 @@ mod tests {
 
     #[test]
     fn the_background_warms_with_a_turn_and_cools_to_rest() {
-        assert_eq!(heat(true, Duration::ZERO), 0.0);
-        assert_eq!(heat(true, WARM * 2), 1.0);
-        assert_eq!(heat(false, Duration::ZERO), 1.0);
-        assert_eq!(heat(false, COOL), 0.0);
-        assert!(heat(false, COOL / 2) > 0.0);
+        assert_eq!(heat(0.0, 1.0, Duration::ZERO), 0.0);
+        assert_eq!(heat(0.0, 1.0, WARM * 2), 1.0);
+        assert_eq!(heat(1.0, 0.0, Duration::ZERO), 1.0);
+        assert_eq!(heat(1.0, 0.0, COOL), 0.0);
+        assert!(heat(1.0, 0.0, COOL / 2) > 0.0);
+        // A turn's end with agents still at work settles calmer, not cold.
+        assert!((heat(1.0, AGENTS_HEAT, COOL * 2) - AGENTS_HEAT).abs() < 1e-6);
     }
 
     #[test]

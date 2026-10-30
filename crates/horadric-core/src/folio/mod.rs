@@ -149,6 +149,21 @@ pub struct BackgroundTask {
     /// Such as `local_bash`, `local_agent` or `monitor`.
     pub task_type: String,
     pub description: String,
+    /// Housekeeping the CLI asks hosts to leave out of anything that
+    /// shows activity, such as a watcher it started itself.
+    pub ambient: bool,
+}
+
+impl BackgroundTask {
+    /// Whether it is an agent at work, rather than a shell or monitor that
+    /// may sit there all day.
+    pub fn is_agent(&self) -> bool {
+        !self.ambient
+            && matches!(
+                self.task_type.as_str(),
+                "local_agent" | "remote_agent" | "in_process_teammate" | "local_workflow"
+            )
+    }
 }
 
 /// An image sent with a prompt, for its thumbnail.
@@ -961,18 +976,29 @@ impl Folio {
                 lane.tool_uses = u["tool_uses"].as_u64().unwrap_or(lane.tool_uses);
                 true
             }
+            // The whole set each time, so a missed line heals at the next.
             "background_tasks_changed" => {
                 let tasks: Vec<BackgroundTask> = (v["tasks"].as_array().into_iter().flatten())
                     .map(|t| BackgroundTask {
                         task_id: t["task_id"].as_str().unwrap_or_default().to_string(),
                         task_type: t["task_type"].as_str().unwrap_or_default().to_string(),
                         description: t["description"].as_str().unwrap_or_default().to_string(),
+                        ambient: t["ambient"].as_bool().unwrap_or_default(),
                     })
                     .collect();
                 let changed = tasks != self.background;
                 self.background = tasks;
                 self.background_heard = true;
                 changed
+            }
+            // A finished task leaves the set by the next
+            // background_tasks_changed; dropping it here as well means one
+            // lost line cannot keep it running.
+            "task_notification" => {
+                let id = v["task_id"].as_str().unwrap_or_default();
+                let before = self.background.len();
+                self.background.retain(|t| t.task_id != id);
+                before != self.background.len()
             }
             "commands_changed" => {
                 self.info.read_commands(&v["commands"]);
@@ -1004,7 +1030,6 @@ impl Folio {
             | "hook_response"
             | "thinking_tokens"
             | "task_updated"
-            | "task_notification"
             | "task_summary"
             | "stop_hook_summary"
             | "session_state_changed"
@@ -1588,9 +1613,19 @@ impl Folio {
     /// The stream ended: claude.exe exited or its pipe broke. Whatever the
     /// turn left open is over. Returns whether anything changed.
     pub fn end(&mut self) -> bool {
-        let was = self.busy || !self.queued.is_empty();
+        let was = self.busy || !self.queued.is_empty() || !self.background.is_empty();
         self.dropped.append(&mut self.queued);
+        // The CLI's background tasks die with it, and a new process says
+        // nothing of them until its set first changes.
+        self.background.clear();
         self.settle_turn() || was
+    }
+
+    /// How many agents work in the background, such as subagents started
+    /// with run_in_background: they go on after the turn's result, until
+    /// the CLI wakes Claude with what they found.
+    pub fn agents_at_work(&self) -> usize {
+        self.background.iter().filter(|t| t.is_agent()).count()
     }
 
     /// Ends what a turn left open: asks no one can answer now, steps whose
@@ -2381,6 +2416,41 @@ mod tests {
         assert!(f.feed(r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#));
         assert!(f.background.is_empty());
         assert!(f.blocks.is_empty());
+    }
+
+    #[test]
+    fn background_agents_work_past_the_turn_s_result() {
+        let mut f = play("p", PLAIN);
+        assert!(!f.busy);
+        assert_eq!(f.agents_at_work(), 0);
+        let set = |tasks: &str| {
+            format!(r#"{{"type":"system","subtype":"background_tasks_changed","tasks":[{tasks}]}}"#)
+        };
+        let agent = r#"{"task_id":"a1","task_type":"local_agent","description":"Review"}"#;
+        let shell = r#"{"task_id":"b1","task_type":"local_bash","description":"npm run dev"}"#;
+        let ambient = r#"{"task_id":"w1","task_type":"local_agent","description":"w","ambient":true}"#;
+        f.feed(&set(&[agent, shell, ambient].join(",")));
+        assert_eq!(f.agents_at_work(), 1, "a shell or ambient task is not an agent at work");
+        f.feed(&set(shell));
+        assert_eq!(f.agents_at_work(), 0, "the set replaces, it does not add");
+        assert_eq!(f.background.len(), 1);
+    }
+
+    #[test]
+    fn a_missed_set_cannot_keep_an_agent_at_work() {
+        let set = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a1","task_type":"local_agent","description":"Review"}]}"#;
+        let done = r#"{"type":"system","subtype":"task_notification","task_id":"a1","status":"completed","summary":"s"}"#;
+        let mut f = Folio::new();
+        f.feed(set);
+        assert!(f.feed(done), "its notification ends it");
+        assert_eq!(f.agents_at_work(), 0);
+        assert!(f.blocks.is_empty());
+
+        let mut f = Folio::new();
+        f.feed(set);
+        assert!(f.end(), "the CLI ending ends its tasks");
+        assert_eq!(f.agents_at_work(), 0);
+        assert!(!f.end());
     }
 
     #[test]

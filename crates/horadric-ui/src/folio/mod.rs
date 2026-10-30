@@ -125,8 +125,13 @@ struct Chat {
     view_h: f32,
     /// Blocks unfolded by a click, by index.
     open: HashSet<usize>,
+    /// The runes move toward a heat above rest.
     busy_was: bool,
+    /// The heat the runes move toward, see [`Chat::aim`], since when, and
+    /// the heat they had then.
+    aim: f32,
     busy_since: Instant,
+    heat_from: f32,
     /// What the pane's header was last told, so it is told again only
     /// when that changes.
     header: String,
@@ -184,8 +189,9 @@ impl Chat {
             view_h: 0.0,
             open: HashSet::new(),
             busy_was: false,
-            // Long ago, so a Folio opened at rest starts cold.
-            busy_since: Instant::now() - look::COOL,
+            aim: 0.0,
+            busy_since: Instant::now(),
+            heat_from: 0.0,
             header: String::new(),
             told: None,
             live: false,
@@ -202,16 +208,31 @@ impl Chat {
         self.folio.busy && self.folio.pending_asks().is_empty()
     }
 
+    /// The heat the runes move toward: a turn's full burn while Claude
+    /// works, a calmer one while only its background agents do, so the
+    /// human sees work going on that is not Claude's own.
+    fn aim(&self) -> f32 {
+        if self.working() {
+            1.0
+        } else if !self.ended && self.folio.agents_at_work() > 0 {
+            look::AGENTS_HEAT
+        } else {
+            0.0
+        }
+    }
+
     fn note_busy(&mut self) {
-        let working = self.working();
-        if working != self.busy_was {
-            self.busy_was = working;
+        let aim = self.aim();
+        if aim != self.aim {
+            self.heat_from = self.heat();
+            self.aim = aim;
+            self.busy_was = aim > 0.0;
             self.busy_since = Instant::now();
         }
     }
 
     fn heat(&self) -> f32 {
-        look::heat(self.busy_was, self.busy_since.elapsed())
+        look::heat(self.heat_from, self.aim, self.busy_since.elapsed())
     }
 
     fn state(&self) -> State {
@@ -226,18 +247,21 @@ impl Chat {
     }
 
     fn detail(&self) -> String {
+        let agents = self.folio.agents_at_work();
         let state = if self.to_terminal {
-            "opening in a terminal"
+            "opening in a terminal".to_string()
         } else if self.error.is_some() || self.ended {
-            "ended"
+            "ended".to_string()
         } else if self.folio.busy {
-            "working"
+            "working".to_string()
+        } else if agents > 0 {
+            format!("{agents} agent{} working", if agents == 1 { "" } else { "s" })
         } else {
-            "chat, experimental"
+            "chat, experimental".to_string()
         };
         match &self.folio.model {
             Some(m) => format!("{state} \u{b7} {m}"),
-            None => state.to_string(),
+            None => state,
         }
     }
 
