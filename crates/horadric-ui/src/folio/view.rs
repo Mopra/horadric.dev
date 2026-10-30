@@ -651,11 +651,6 @@ pub(super) struct Palette {
 }
 
 impl Palette {
-    /// The rim of the one field with the keyboard, whichever it is.
-    pub(super) fn keys_rim(&self) -> Color {
-        self.accent.with_alpha(0.6)
-    }
-
     pub(super) fn caret(&self) -> Color {
         self.accent.mix(self.fg, 0.4)
     }

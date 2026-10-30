@@ -1401,12 +1401,7 @@ impl View {
         let r = Rect::new(cx + cw - w, area.y + 14.0, w, 34.0);
         gfx.fill_round(&r, 10.0, pal.bg.mix(pal.fg, 0.1));
         let focused = st.keys && st.focus.as_deref() == Some(FIND_FIELD);
-        let edge = if focused {
-            pal.keys_rim()
-        } else {
-            pal.fg.with_alpha(0.15)
-        };
-        gfx.stroke_round(&r, 10.0, edge, 1.0);
+        gfx.stroke_round(&r, 10.0, pal.fg.with_alpha(0.15), 1.0);
         let count = if f.field.text.is_empty() {
             String::new()
         } else if f.hits.is_empty() {
