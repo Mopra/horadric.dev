@@ -79,6 +79,8 @@ pub(super) enum Act {
     Image(usize, usize),
     /// A step opened or closed, by its tool use id.
     Step(String),
+    /// A folded run's agent at work: the run and that step opened.
+    Agent(usize, String),
     /// All of a step's output or diff, or back to its end.
     All(String),
     /// Ask: allow, and add its suggested rules.
@@ -154,6 +156,8 @@ pub(super) struct State {
     pub(super) dragging: bool,
     pub(super) mouse: Option<(f32, f32)>,
     pub(super) find: Option<Find>,
+    /// A block to bring to the top of the view once it is measured.
+    pub(super) reveal: Option<usize>,
     /// The first block shown, None until the first frame picks one.
     pub(super) from: Option<usize>,
     /// From the last frame: each block's top in the content, the prompts'
@@ -262,7 +266,7 @@ fn hash_lane(h: &mut DefaultHasher, l: &Lane, st: &State) {
     hash_str(h, &l.agent_type);
     l.text.len().hash(h);
     hash_str(h, &l.progress);
-    (l.tokens, l.tool_uses).hash(h);
+    (l.tokens, l.tool_uses, l.working).hash(h);
     for s in &l.steps {
         hash_step(h, s, st);
     }
@@ -375,6 +379,30 @@ fn has_detail(s: &Step) -> bool {
 
 fn is_shell(tool: &str) -> bool {
     matches!(tool, "Bash" | "PowerShell" | "BashOutput")
+}
+
+/// Opens the steps of `path` in `steps`, each in the lane of the one
+/// before, leaving open what already is.
+pub(super) fn open_path(st: &mut State, steps: &[Step], path: &[String]) {
+    let mut level = steps;
+    for id in path {
+        let Some(s) = level.iter().find(|s| &s.id == id) else {
+            return;
+        };
+        if !step_open(s, st) && !st.flipped.remove(id) {
+            st.flipped.insert(id.clone());
+        }
+        let Some(lane) = &s.lane else {
+            return;
+        };
+        level = &lane.steps;
+    }
+}
+
+/// Whether a subagent still works: its step runs, or its task, which goes
+/// on after a background agent's step is done.
+fn at_work(step: &Step, lane: &Lane) -> bool {
+    step.state == StepState::Running || lane.working
 }
 
 /// Whether a step shows its detail: a failed one does until closed.
@@ -599,18 +627,15 @@ impl Ctx<'_> {
             for step in steps {
                 y = self.step(&mut s, step, 0.0, y, cw, st);
             }
-        } else if let Some(lane) = (steps.iter())
-            .filter(|s| s.state == StepState::Running)
-            .find_map(|s| s.lane.as_ref())
+        } else if let Some((id, lane)) = (steps.iter())
+            .filter_map(|s| Some((&s.id, s.lane.as_ref().filter(|l| at_work(s, l))?)))
+            .next()
         {
             // A subagent at work says what it is doing even folded.
             let line = flow::lane_line(lane, true);
-            s.line(
-                line,
-                F::Small,
-                Rect::new(NEST, y, cw - NEST, 18.0),
-                self.pal.faint,
-            );
+            let r = Rect::new(NEST, y, cw - NEST, 18.0);
+            s.line(line, F::Small, r, self.pal.faint);
+            s.hit(r, Hit::Tr(Act::Agent(i, id.clone())));
             y += 18.0;
         }
         s.h = y;
@@ -685,11 +710,7 @@ impl Ctx<'_> {
         }
         let mut y = y + STEP_H;
         if !open {
-            if let Some(lane) = step
-                .lane
-                .as_ref()
-                .filter(|_| step.state == StepState::Running)
-            {
+            if let Some(lane) = step.lane.as_ref().filter(|l| at_work(step, l)) {
                 let line = flow::lane_line(lane, true);
                 s.line(
                     line,
@@ -891,7 +912,7 @@ impl Ctx<'_> {
         st: &State,
     ) -> f32 {
         let top = y;
-        let running = step.state == StepState::Running;
+        let running = at_work(step, lane);
         let w = cw - x;
         s.line(
             flow::lane_line(lane, running),
@@ -1180,6 +1201,10 @@ impl View {
         } else {
             look::clamp_scroll(chat.scroll, content, area.h)
         };
+        if let Some(top) = st.reveal.take().and_then(|i| st.tops.get(i)) {
+            chat.scroll = look::clamp_scroll(top - 12.0, content, area.h);
+            chat.follow = false;
+        }
         st.area = area;
 
         rt.PushAxisAlignedClip(&d2d(&area), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);

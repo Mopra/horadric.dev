@@ -67,6 +67,11 @@ pub struct Lane {
     pub progress: String,
     pub tokens: u64,
     pub tool_uses: u64,
+    /// The CLI's id for it as a task, from `task_started`.
+    pub task_id: String,
+    /// Its task is alive. A background agent's step is done the moment
+    /// it starts, so the step's state cannot say.
+    pub working: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -970,6 +975,10 @@ impl Folio {
                 if let Some(t) = v["subagent_type"].as_str() {
                     lane.agent_type = t.to_string();
                 }
+                if let Some(id) = v["task_id"].as_str() {
+                    lane.task_id = id.to_string();
+                }
+                lane.working = true;
                 if let Some(d) = v["description"].as_str() {
                     lane.progress = d.to_string();
                 }
@@ -989,9 +998,13 @@ impl Folio {
                         ambient: t["ambient"].as_bool().unwrap_or_default(),
                     })
                     .collect();
-                let changed = tasks != self.background;
+                let mut changed = tasks != self.background;
                 self.background = tasks;
                 self.background_heard = true;
+                let alive: HashSet<String> = (self.background.iter())
+                    .map(|t| t.task_id.clone())
+                    .collect();
+                changed |= self.rest_lanes(|l| !alive.contains(&l.task_id));
                 changed
             }
             // A finished task leaves the set by the next
@@ -1001,7 +1014,8 @@ impl Folio {
                 let id = v["task_id"].as_str().unwrap_or_default();
                 let before = self.background.len();
                 self.background.retain(|t| t.task_id != id);
-                before != self.background.len()
+                let rested = self.rest_lanes(|l| l.task_id == id);
+                rested || before != self.background.len()
             }
             "commands_changed" => {
                 self.info.read_commands(&v["commands"]);
@@ -1366,6 +1380,54 @@ impl Folio {
         })
     }
 
+    /// Marks the working lanes `done` picks as no longer working.
+    /// Returns whether one changed.
+    fn rest_lanes(&mut self, done: impl Fn(&Lane) -> bool) -> bool {
+        fn rest(steps: &mut [Step], done: &dyn Fn(&Lane) -> bool) -> bool {
+            let mut changed = false;
+            for s in steps {
+                if let Some(lane) = s.lane.as_mut() {
+                    if lane.working && done(lane) {
+                        lane.working = false;
+                        changed = true;
+                    }
+                    changed |= rest(&mut lane.steps, done);
+                }
+            }
+            changed
+        }
+        let mut changed = false;
+        for b in &mut self.blocks {
+            if let Block::Tools(steps) = b {
+                changed |= rest(steps, &done);
+            }
+        }
+        changed
+    }
+
+    /// Where the agent of task `task_id` is: its block, and the ids of the
+    /// steps down to the one that started it, outermost first.
+    pub fn find_task(&self, task_id: &str) -> Option<(usize, Vec<String>)> {
+        fn path(steps: &[Step], task_id: &str) -> Option<Vec<String>> {
+            steps.iter().find_map(|s| {
+                let lane = s.lane.as_ref()?;
+                if lane.task_id == task_id {
+                    return Some(vec![s.id.clone()]);
+                }
+                let mut p = path(&lane.steps, task_id)?;
+                p.insert(0, s.id.clone());
+                Some(p)
+            })
+        }
+        if task_id.is_empty() {
+            return None;
+        }
+        self.blocks.iter().enumerate().rev().find_map(|(i, b)| match b {
+            Block::Tools(steps) => Some((i, path(steps, task_id)?)),
+            _ => None,
+        })
+    }
+
     /// The lane of the Agent step `tool_use`, made if it has none.
     fn lane_mut(&mut self, tool_use: &str) -> Option<&mut Lane> {
         let step = self.step_mut(tool_use)?;
@@ -1621,7 +1683,8 @@ impl Folio {
         // The CLI's background tasks die with it, and a new process says
         // nothing of them until its set first changes.
         self.background.clear();
-        self.settle_turn() || was
+        let rested = self.rest_lanes(|_| true);
+        self.settle_turn() || was || rested
     }
 
     /// How many agents work in the background, such as subagents started
@@ -2591,6 +2654,8 @@ mod tests {
         include_str!("../../tests/fixtures/headless/transcript_edits.jsonl");
     const TRANSCRIPT_IMAGE: &str =
         include_str!("../../tests/fixtures/headless/transcript_image.jsonl");
+    const BACKGROUND_AGENT: &str =
+        include_str!("../../tests/fixtures/headless/background_agent.jsonl");
     const TRANSCRIPT_SUBAGENT: &str =
         include_str!("../../tests/fixtures/headless/transcript_subagent.jsonl");
 
@@ -2905,6 +2970,30 @@ mod tests {
             .unwrap()
             .starts_with("The subagent found"));
         assert!(!f.blocks.iter().any(|b| matches!(b, Block::Raw(_))));
+    }
+
+    #[test]
+    fn a_background_agent_works_on_after_its_step_is_done() {
+        let lines: Vec<&str> = BACKGROUND_AGENT.lines().collect();
+        let notified = (lines.iter())
+            .position(|l| l.contains("\"subtype\":\"task_notification\""))
+            .unwrap();
+        let f = play("p", &lines[..notified].join("
+"));
+        let agent = steps(&f).into_iter().find(|s| s.tool == "Agent").unwrap();
+        assert_eq!(agent.state, StepState::Done, "launched is done");
+        let lane = agent.lane.as_ref().unwrap();
+        assert!(lane.working);
+        assert_eq!(lane.task_id, "a7548526e7c37b501");
+        assert_eq!(lane.steps[0].tool, "Read");
+        let (i, path) = f.find_task("a7548526e7c37b501").unwrap();
+        assert!(matches!(f.blocks[i], Block::Tools(_)));
+        assert_eq!(path, [agent.id.clone()]);
+        assert!(f.find_task("").is_none());
+
+        let f = play("p", BACKGROUND_AGENT);
+        let agent = steps(&f).into_iter().find(|s| s.tool == "Agent").unwrap();
+        assert!(!agent.lane.as_ref().unwrap().working);
     }
 
     fn red() -> ImageData {

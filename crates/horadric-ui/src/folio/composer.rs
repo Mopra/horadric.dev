@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use horadric_core::folio::{effort_line, prompt_line, ImageData, Priority};
+use horadric_core::folio::{effort_line, prompt_line, Block, ImageData, Priority};
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -711,7 +711,7 @@ fn pick(chat: &mut Chat, how: How) -> bool {
             }
         }
         MenuKind::Effort => set_effort(chat, &item.value),
-        MenuKind::Tasks => {}
+        MenuKind::Tasks => show_task(chat, &item.value),
         MenuKind::Settings => match item.value.as_str() {
             "mode" => open_picker(chat, MenuKind::Mode),
             "model" => open_picker(chat, MenuKind::Model),
@@ -825,6 +825,29 @@ fn settings_items(chat: &Chat) -> Vec<Item> {
         ));
     }
     items
+}
+
+/// Opens the step that started an agent's task down to its lane, and
+/// scrolls to it, as Claude Code opens a subagent picked from its list.
+fn show_task(chat: &mut Chat, task_id: &str) {
+    let Some((i, path)) = chat.folio.find_task(task_id) else {
+        return;
+    };
+    chat.open.insert(i);
+    let st = &mut chat.tr.state;
+    if let Block::Tools(steps) = &chat.folio.blocks[i] {
+        super::transcript::open_path(st, steps, &path);
+    }
+    let turns: Vec<usize> = (chat.folio.blocks.iter().enumerate())
+        .filter(|(_, b)| matches!(b, Block::Prompt(_)))
+        .map(|(i, _)| i)
+        .collect();
+    let from = st.from.unwrap_or(0);
+    if i < from {
+        st.from = Some(turns.iter().rev().find(|&&p| p <= i).copied().unwrap_or(0));
+    }
+    st.reveal = Some(i);
+    chat.follow = false;
 }
 
 /// Opens one of the pickers under the header's button, or closes it when

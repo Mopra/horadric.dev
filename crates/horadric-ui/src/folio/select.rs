@@ -110,6 +110,15 @@ pub(super) fn act(key: &str, a: Act) {
         Act::Step(id) => {
             with(key, |c| toggle(&mut c.tr.state.flipped, id));
         }
+        Act::Agent(i, id) => {
+            with(key, |c| {
+                c.open.insert(i);
+                if let Some(Block::Tools(steps)) = c.folio.blocks.get(i) {
+                    super::transcript::open_path(&mut c.tr.state, steps, &[id]);
+                }
+                c.follow = false;
+            });
+        }
         Act::All(id) => {
             with(key, |c| toggle(&mut c.tr.state.all, id));
         }
