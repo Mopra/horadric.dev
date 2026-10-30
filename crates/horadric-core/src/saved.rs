@@ -78,6 +78,11 @@ pub struct SavedState {
     /// where it is not in it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub page_docks: BTreeMap<String, Dock>,
+    /// The browsers popped out of the stage into windows of their own,
+    /// by project key, each window as left, top, right, bottom in physical
+    /// pixels.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub page_windows: BTreeMap<String, [i32; 4]>,
     /// Where each project's Arcane Sanctuary stands beside the stage's
     /// grid, where it is not in it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

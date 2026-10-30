@@ -451,6 +451,9 @@ pub(crate) enum Input {
     Link(String),
     /// A browser pane's cross: close the page of the project with this key.
     CloseWeb(String),
+    /// A browser pane's pop out button: its project's browser into a window
+    /// of its own with true, back onto the stage with false.
+    PopWeb(String, bool),
     /// The town's browser tabs changed, and with them its tiles.
     Pages(String),
     /// A browser tab's tile clicked: show that tab of the project's
@@ -661,6 +664,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     contextpanel::register_class()?;
     start::register_class()?;
     terminal::register_class()?;
+    crate::web_window::register_class()?;
     let notify = create_app_window()?;
     let notify_id = notify.0 as isize;
     APP_WINDOW.with(|w| w.set(notify_id));
@@ -830,6 +834,12 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     } else {
         BTreeMap::new()
     };
+    let page_windows: HashMap<String, [i32; 4]> = saved
+        .page_windows
+        .iter()
+        .filter(|(_, r)| on_screen(r[0], r[1]))
+        .map(|(k, &r)| (k.clone(), r))
+        .collect();
 
     theme::set(Theme::from_key(saved.theme.as_deref()));
     let gpu = Gpu::new()?;
@@ -926,6 +936,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             far: far::Far::new(notify),
             views: HashMap::new(),
             webs: HashMap::new(),
+            web_windows: HashMap::new(),
+            web_rects: page_windows,
             skies: HashMap::new(),
             folios: HashMap::new(),
             to_folio: HashSet::new(),
@@ -2551,6 +2563,7 @@ fn web_menu(key: &str) {
     const CLOSE_TAB: usize = 8;
     const FIND: usize = 9;
     const DOWNLOADS: usize = 10;
+    const POP: usize = 11;
     const SIZE: usize = 100;
     const PICK: usize = 200;
     let agents = stage_agents(Some(key));
@@ -2566,6 +2579,14 @@ fn web_menu(key: &str) {
         Item::action(FIND, "Find in page...\tCtrl+F"),
         Item::action(DOWNLOADS, "Downloads\tCtrl+J"),
         Item::Submenu("Size and place".into(), size_items(key, SIZE)),
+        Item::action(
+            POP,
+            if web::is_popped(key) {
+                "Back on the stage"
+            } else {
+                "Pop out into a window"
+            },
+        ),
         Item::action(OUTSIDE, "Open in your browser"),
         Item::Separator,
     ];
@@ -2581,6 +2602,7 @@ fn web_menu(key: &str) {
         Some(RELOAD) => web::go(key, web::Step::Reload),
         Some(FIND) => ask_find(key),
         Some(DOWNLOADS) => web::downloads(key),
+        Some(POP) => push(Input::PopWeb(key.to_string(), !web::is_popped(key))),
         Some(OUTSIDE) => {
             if let Some((_, url)) = web::label(key).filter(|(_, u)| u.starts_with("http")) {
                 watch::open_link(&crate::links::Target::Web(url), None);
@@ -3589,6 +3611,12 @@ struct App {
     /// Browser panes, at most one per project, by project key. The page
     /// itself is `web`'s and outlives its pane.
     webs: HashMap<String, Arc<Console>>,
+    /// The browsers popped out of the stage into windows of their own, by
+    /// project key.
+    web_windows: HashMap<String, Box<crate::web_window::WebWindow>>,
+    /// Where each project's browser window was last left, so popping it
+    /// out again puts it there. Saved for the ones still popped out.
+    web_rects: HashMap<String, [i32; 4]>,
     /// Arcane Sanctuaries, at most one per project, by project key. What
     /// they show is `sanctuary`'s and outlives the pane.
     skies: HashMap<String, Arc<Console>>,
@@ -7218,7 +7246,7 @@ impl App {
         if let Some(view) = self.views.get(key) {
             ids.push(view.id.clone());
         }
-        if let Some(page) = self.webs.get(key) {
+        if let Some(page) = self.webs.get(key).filter(|_| !web::is_popped(key)) {
             ids.push(page.id.clone());
         }
         if let Some(sky) = self.skies.get(key) {
@@ -7743,7 +7771,9 @@ impl App {
             self.webs.insert(key.to_string(), page);
         }
         web::open(key, url);
-        if self.fill_stage(key) {
+        if let Some(w) = self.web_windows.get(key) {
+            w.front();
+        } else if self.fill_stage(key) {
             if let Some(stage) = &self.stage {
                 stage.focus_session(&id);
             }
@@ -7763,6 +7793,7 @@ impl App {
 
     /// Opens the browsers left open before a reload or a crash, each in
     /// its project's grid, as an agent's would be: no stage, no keyboard.
+    /// One that stood in a window of its own does again.
     fn restore_webs(&mut self, pages: &BTreeMap<String, horadric_core::saved::SavedPages>) {
         for (key, saved) in pages {
             let serial = self.next_serial;
@@ -7771,12 +7802,74 @@ impl App {
             self.webs.insert(key.clone(), page);
             web::restore(key, saved);
         }
+        let popped: Vec<String> = self
+            .web_rects
+            .keys()
+            .filter(|k| self.webs.contains_key(*k))
+            .cloned()
+            .collect();
+        for key in popped {
+            self.pop_web(&key, true);
+        }
     }
 
     fn close_web(&mut self, key: &str) {
+        self.drop_web_window(key);
         self.webs.remove(key);
         self.sync_stage();
         web::close(key);
+    }
+
+    /// Takes the project's browser off the stage into a window of its own,
+    /// or puts it back with `out` false, its pages as they are. The stage
+    /// keeps the project's sessions either way.
+    fn pop_web(&mut self, key: &str, out: bool) {
+        let Some(page) = self.webs.get(key).cloned() else {
+            return;
+        };
+        if !out {
+            if self.drop_web_window(key) {
+                self.open_web(key, None);
+            }
+            return;
+        }
+        if let Some(w) = self.web_windows.get(key) {
+            w.front();
+            return;
+        }
+        // Where it stood last time, or a little off where it stands now on
+        // the stage, so it is seen to come out.
+        let rect = self.web_rects.get(key).copied().or_else(|| {
+            let r = web::pane_rect(key)?;
+            let step = self.px(32);
+            Some([r.left + step, r.top + step, r.right + step, r.bottom + step])
+        });
+        web::set_popped(key, true);
+        match crate::web_window::WebWindow::open(Rc::clone(&self.shared), page, key, rect) {
+            Ok(w) => {
+                self.web_windows.insert(key.to_string(), w);
+            }
+            Err(e) => {
+                eprintln!("horadric: cannot pop the browser out: {e}");
+                web::set_popped(key, false);
+            }
+        }
+        // The stage's pane goes now that the page has a window to be in.
+        self.sync_stage();
+    }
+
+    /// Ends the project's browser window, when it has one, remembering
+    /// where it stood. Its pages go back to waiting for a pane.
+    fn drop_web_window(&mut self, key: &str) -> bool {
+        let Some(w) = self.web_windows.remove(key) else {
+            return false;
+        };
+        if let Some(r) = w.rect() {
+            self.web_rects.insert(key.to_string(), r);
+        }
+        web::set_popped(key, false);
+        w.destroy();
+        true
     }
 
     /// Shows the project's Arcane Sanctuary on the stage beside its
@@ -8499,6 +8592,11 @@ impl App {
             page_sizes: web::sizes(),
             accents: theme::accents(),
             page_docks: web::docks(),
+            page_windows: self
+                .web_windows
+                .iter()
+                .filter_map(|(k, w)| Some((k.clone(), w.rect().or(self.web_rects.get(k).copied())?)))
+                .collect(),
             sky_docks: sanctuary::docks(),
             pages: web::pages(),
             runewords: self.tome.projects.clone(),
@@ -9228,6 +9326,7 @@ impl App {
                     _ => watch::open_link(&crate::links::Target::Web(url), None),
                 },
                 Input::CloseWeb(key) => self.close_web(&key),
+                Input::PopWeb(key, out) => self.pop_web(&key, out),
                 Input::Pages(key) => {
                     for c in self.clusters.iter().filter(|c| c.key == key) {
                         relayout |= c.update();

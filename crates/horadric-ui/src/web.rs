@@ -237,6 +237,10 @@ thread_local! {
     /// Where each project's browser pane stands beside the stage's grid,
     /// where it is not in it.
     static DOCKS: RefCell<HashMap<String, Dock>> = RefCell::new(HashMap::new());
+    /// The projects whose browser stands in a window of its own, not on
+    /// the stage. See [`crate::web_window`].
+    static POPPED: RefCell<std::collections::HashSet<String>> =
+        RefCell::new(std::collections::HashSet::new());
     /// The app's hidden window, where a page not on the stage waits.
     static PARK: Cell<isize> = const { Cell::new(0) };
     /// The pages the user went to, read from its file when first needed.
@@ -596,6 +600,33 @@ fn settle(
 /// Whether the project has a page, open or still being made.
 pub fn is_open(key: &str) -> bool {
     WEBS.with(|w| w.borrow().contains_key(key))
+}
+
+/// Whether the project's browser stands in a window of its own.
+pub fn is_popped(key: &str) -> bool {
+    POPPED.with(|p| p.borrow().contains(key))
+}
+
+/// Takes the project's browser off the stage into a window of its own,
+/// or back. Only the app, which makes and ends the window, says so.
+pub fn set_popped(key: &str, on: bool) {
+    POPPED.with(|p| {
+        let mut p = p.borrow_mut();
+        if on {
+            p.insert(key.to_string());
+        } else {
+            p.remove(key);
+        }
+    });
+}
+
+/// Where the pane showing the project's page is on screen, in physical
+/// pixels, while one does.
+pub fn pane_rect(key: &str) -> Option<RECT> {
+    let pane = WEBS.with(|w| w.borrow().get(key).and_then(|w| w.pane))?;
+    let mut r = RECT::default();
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(pane, &mut r) }.ok()?;
+    Some(r)
 }
 
 /// Whether a pane on the stage shows the project's page.

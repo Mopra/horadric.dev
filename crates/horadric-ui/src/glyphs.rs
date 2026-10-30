@@ -156,6 +156,8 @@ pub struct Bar<'a> {
     /// The side the pane stands on beside the grid, whose place button is
     /// lit. None in the grid.
     pub dock: Option<Side>,
+    /// It stands in a window of its own, so the pop out button is lit.
+    pub popped: bool,
     /// What each tab is called, in the strip along the glass's top.
     pub tabs: &'a [String],
     /// The tab shown.
@@ -296,6 +298,9 @@ pub struct BarLayout {
     /// The buttons that stand the pane on the left, on top and on the
     /// right of the stage, [`PLACE_W`] wide each.
     pub places: [(Side, f32); 3],
+    /// The button that pops the browser out into a window of its own, or
+    /// back onto the stage, [`PLACE_W`] wide.
+    pub pop: f32,
     /// The field's left and right edges.
     pub field: (f32, f32),
 }
@@ -307,6 +312,7 @@ pub enum BarHit {
     Reload,
     Size,
     Place(Side),
+    Pop,
     Field,
 }
 
@@ -321,7 +327,8 @@ const BAR_MARGIN: f32 = 3.0;
 const BAR_ZOOM_W: f32 = 40.0;
 
 /// Back, forward, reload and size after the lamp, one square each, the
-/// three place buttons, then the field up to the zoom button or the cross.
+/// three place buttons and the pop out button, then the field up to the
+/// zoom button or the cross.
 pub fn bar_layout(width: f32, zoom: bool, close: bool) -> BarLayout {
     let back = BEZEL + 14.0;
     let forward = back + HEADER_H;
@@ -331,13 +338,15 @@ pub fn bar_layout(width: f32, zoom: bool, close: bool) -> BarLayout {
     let first = size + HEADER_H + 2.0;
     let places = [Side::Left, Side::Top, Side::Right];
     let places = std::array::from_fn(|i| (places[i], first + i as f32 * PLACE_W));
-    let left = first + 3.0 * PLACE_W + 6.0;
+    let pop = first + 3.0 * PLACE_W;
+    let left = pop + PLACE_W + 6.0;
     BarLayout {
         back,
         forward,
         reload,
         size,
         places,
+        pop,
         field: (left, (end - 4.0).max(left)),
     }
 }
@@ -371,6 +380,8 @@ pub fn bar_hit(l: &BarLayout, x: f32) -> Option<BarHit> {
         Some(BarHit::Size)
     } else if let Some(side) = place_hit(&l.places, x) {
         Some(BarHit::Place(side))
+    } else if x >= l.pop && x < l.pop + PLACE_W {
+        Some(BarHit::Pop)
     } else if x >= l.field.0 && x < l.field.1 {
         Some(BarHit::Field)
     } else {
@@ -1527,6 +1538,31 @@ impl GridTarget {
         self.rt.FillRectangle(&part, &self.brush);
     }
 
+    /// A window in outline with a smaller one lifted out of its top right
+    /// corner, for a browser that stands on its own. Solid when it does.
+    unsafe fn pop_icon(&self, at: f32, ink: Color, on: bool) {
+        let (w, h) = (13.0, 10.0);
+        let l = (at + (PLACE_W - w) / 2.0).round() + 0.5;
+        let t = ((HEADER_H - h) / 2.0).round() + 0.5;
+        let frame = D2D_RECT_F {
+            left: l,
+            top: t + 3.0,
+            right: l + w - 4.0,
+            bottom: t + h,
+        };
+        let lifted = D2D_RECT_F {
+            left: l + w - 7.0,
+            top: t,
+            right: l + w,
+            bottom: t + 5.0,
+        };
+        self.brush.SetColor(&render::color(ink));
+        self.rt.DrawRectangle(&frame, &self.brush, 1.0, None);
+        let fill = if on { ink } else { ink.with_alpha(0.55) };
+        self.brush.SetColor(&render::color(fill));
+        self.rt.FillRectangle(&lifted, &self.brush);
+    }
+
     /// A rim round a sized page, a grip in the middle of its right and
     /// bottom edges and one at the corner, and its size under it. The page
     /// is a window over the glass, so all of this is drawn round it.
@@ -2220,6 +2256,12 @@ impl GridTarget {
             };
             self.place_icon(side, at, ink, bar.dock == Some(side));
         }
+        let ink = if bar.popped {
+            accent.mix(theme::text(), 0.35)
+        } else {
+            theme::text_dim()
+        };
+        self.pop_icon(l.pop, ink, bar.popped);
 
         let field = D2D_RECT_F {
             left: l.field.0,
@@ -2558,6 +2600,8 @@ mod tests {
             assert_eq!(bar_hit(&l, at + PLACE_W - 1.0), Some(BarHit::Place(side)));
         }
         assert_eq!(l.places.map(|p| p.0), [Side::Left, Side::Top, Side::Right]);
+        assert_eq!(bar_hit(&l, l.pop + 1.0), Some(BarHit::Pop));
+        assert_eq!(bar_hit(&l, l.pop + PLACE_W - 1.0), Some(BarHit::Pop));
         assert_eq!(bar_hit(&l, l.field.0 + 50.0), Some(BarHit::Field));
         assert_eq!(bar_hit(&l, 2.0), None, "the lamp is for dragging");
         assert_eq!(bar_hit(&l, l.field.1 + 1.0), None);

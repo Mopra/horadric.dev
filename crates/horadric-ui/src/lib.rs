@@ -228,6 +228,8 @@ mod web;
 #[cfg(windows)]
 pub use web::AGENT_PROMPT;
 #[cfg(windows)]
+mod web_window;
+#[cfg(windows)]
 mod window;
 #[cfg(windows)]
 pub mod workos;

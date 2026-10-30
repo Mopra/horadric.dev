@@ -317,7 +317,20 @@ pub fn bar(hit: BarHit, docked: Option<Side>) -> Option<&'static str> {
         BarHit::Place(Side::Left) => "Stand the browser on the left of the stage",
         BarHit::Place(Side::Top) => "Stand the browser along the top of the stage",
         BarHit::Place(Side::Right) => "Stand the browser on the right of the stage",
+        BarHit::Pop => "Pop the browser out into a window of its own",
         BarHit::Field => return None,
+    })
+}
+
+/// What a button of the address bar does while the browser stands in a
+/// window of its own: the pop and place buttons take it back to the stage.
+pub fn popped_bar(hit: BarHit) -> Option<&'static str> {
+    Some(match hit {
+        BarHit::Pop => "Put the browser back on the stage",
+        BarHit::Place(Side::Left) => "Put the browser back on the stage, on its left",
+        BarHit::Place(Side::Top) => "Put the browser back on the stage, along its top",
+        BarHit::Place(Side::Right) => "Put the browser back on the stage, on its right",
+        _ => return bar(hit, None),
     })
 }
 

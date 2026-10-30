@@ -975,7 +975,10 @@ impl Pane {
                 forward,
                 sized: web::size(key).is_some(),
                 zoom: web::zoom_percent(key),
-                dock: web::dock(key).map(|d| d.side),
+                dock: web::dock(key)
+                    .map(|d| d.side)
+                    .filter(|_| !web::is_popped(key)),
+                popped: web::is_popped(key),
             }
         });
         let sized = self.page_fit().and_then(|(fit, size)| Some((fit, size?)));
@@ -2062,8 +2065,21 @@ impl Pane {
                 }
                 return true;
             }
+            // A browser in a window of its own goes back to the stage, on
+            // the side picked.
+            Some(BarHit::Place(side)) if web::is_popped(key) => {
+                if web::dock(key).map(|d| d.side) != Some(side) {
+                    web::toggle_dock(key, side);
+                }
+                app::push(Input::PopWeb(key.clone(), false));
+                return true;
+            }
             Some(BarHit::Place(side)) => {
                 web::toggle_dock(key, side);
+                return true;
+            }
+            Some(BarHit::Pop) => {
+                app::push(Input::PopWeb(key.clone(), !web::is_popped(key)));
                 return true;
             }
             Some(BarHit::Size) => {
@@ -2501,6 +2517,9 @@ impl Pane {
     /// point, in the order a press there is taken.
     fn tip_at(&self, lparam: LPARAM) -> Option<&'static str> {
         if let Some(hit) = self.bar_at(lparam) {
+            if self.console.web.as_deref().is_some_and(web::is_popped) {
+                return tip::popped_bar(hit);
+            }
             let docked = self.console.web.as_deref().and_then(web::dock);
             return tip::bar(hit, docked.map(|d| d.side));
         }
@@ -3229,6 +3248,14 @@ impl Pane {
                 // The page's size may be what changed.
                 self.fit_grid();
                 self.invalidate();
+                // A window of its own is called what its page is.
+                if self.console.web.as_deref().is_some_and(web::is_popped) {
+                    unsafe {
+                        if let Ok(parent) = GetParent(self.hwnd) {
+                            let _ = PostMessageW(Some(parent), msg, wparam, lparam);
+                        }
+                    }
+                }
                 Some(LRESULT(0))
             }
             web::WM_WEB_EDIT if wparam.0 == RETAKE => {
