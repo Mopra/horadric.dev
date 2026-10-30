@@ -20,7 +20,8 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
     D2D1_BITMAP_PROPERTIES,
 };
 use windows::Win32::Graphics::DirectWrite::IDWriteTextFormat;
@@ -41,11 +42,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_RIGHT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetParent;
+use windows_numerics::Vector2;
 
 use super::controls;
 use super::editor::{Editor, History};
 use super::picker::{self, Item, Menu, MenuKind};
-use super::view::{d2d, scroll_by, view_of, Gfx, Hit, Palette, View};
+use super::view::{d2d, rounded, scroll_by, view_of, Gfx, Hit, Palette, View};
 use super::{redraw, with, Chat};
 use crate::clipboard;
 use crate::field;
@@ -56,9 +58,13 @@ use crate::render::{self, Gpu};
 const PAD: f32 = 16.0;
 const BOTTOM: f32 = 16.0;
 const LINES: f32 = 8.0;
-/// The strip of settings at the top of the glass, level with the
-/// Terminal button.
-pub(super) const STRIP_Y: f32 = 4.0;
+/// The composer's plate and the field sunk into it, which sits this far
+/// inside, so the text stays `PAD` from the plate's edge.
+const PLATE_R: f32 = 14.0;
+const WELL_INSET: f32 = 6.0;
+const WELL_R: f32 = PLATE_R - WELL_INSET;
+/// The height of a setting in the pane's header row, and of the
+/// Terminal button beside them.
 pub(super) const STRIP_H: f32 = 22.0;
 const THUMB: f32 = 52.0;
 const ROW_H: f32 = 26.0;
@@ -1103,6 +1109,59 @@ unsafe fn decode_thumb(bytes: &[u8]) -> Option<Thumb> {
 }
 
 /// How wide `s` is set in `fmt`.
+/// The composer as the rest of the app is built: a plate standing off the
+/// glass, lit along its top and casting its shadow down, with the field
+/// the text is written in sunk into it like the pane's own glass, its rim
+/// lit in the project's colour while it has the keys.
+unsafe fn faceplate(gfx: &Gfx, r: &Rect, pal: &Palette, focused: bool) {
+    let p = crate::theme::palette();
+    let black = crate::theme::Color::rgb(0);
+    let white = crate::theme::Color::rgb(0xFFFFFF);
+    for i in 1..=4 {
+        let s = i as f32 * 1.5;
+        let fall = Rect::new(r.x - s, r.y + 2.0 + s, r.w + 2.0 * s, r.h);
+        gfx.fill_round(&fall, PLATE_R + s, p.cast.fade(0.12));
+    }
+    let side = Rect::new(r.x, r.y + 2.0, r.w, r.h);
+    gfx.fill_round(&side, PLATE_R, p.surface.mix(black, 0.6));
+    gfx.fill_round(r, PLATE_R, p.surface.mix(white, 0.02));
+    let half = r.h / 2.0;
+    edge(gfx, r, (r.y - 1.0, r.y + half), p.bevel_light);
+    edge(gfx, r, (r.y + half, r.bottom() + 1.0), p.bevel_shade.fade(0.6));
+
+    let well = r.inset(WELL_INSET);
+    let lip = Rect::new(well.x - 0.5, well.y + 0.5, well.w + 1.0, well.h + 1.0);
+    gfx.stroke_round(&lip, WELL_R + 0.5, p.engrave_light.fade(1.6), 1.0);
+    gfx.fill_round(&well, WELL_R, pal.bg);
+    gfx.shade.SetStartPoint(Vector2 { X: 0.0, Y: well.y });
+    gfx.shade.SetEndPoint(Vector2 {
+        X: 0.0,
+        Y: well.y + 10.0,
+    });
+    let band = Rect::new(well.x - 1.0, well.y - 1.0, well.w + 2.0, 11.0);
+    gfx.rt
+        .PushAxisAlignedClip(&d2d(&band), D2D1_ANTIALIAS_MODE_ALIASED);
+    gfx.rt
+        .FillRoundedRectangle(&rounded(&well, WELL_R), &gfx.shade);
+    gfx.rt.PopAxisAlignedClip();
+    let rim = if focused {
+        pal.accent.with_alpha(0.55)
+    } else {
+        p.engrave_dark
+    };
+    gfx.stroke_round(&well, WELL_R, rim, 1.0);
+}
+
+/// The outline of `r` between `ys` only: a bevel's lit top or shaded
+/// bottom.
+unsafe fn edge(gfx: &Gfx, r: &Rect, (top, bottom): (f32, f32), c: crate::theme::Color) {
+    let band = Rect::new(r.x - 1.0, top, r.w + 2.0, bottom - top);
+    gfx.rt
+        .PushAxisAlignedClip(&d2d(&band), D2D1_ANTIALIAS_MODE_ALIASED);
+    gfx.stroke_round(r, PLATE_R, c, 1.0);
+    gfx.rt.PopAxisAlignedClip();
+}
+
 fn width_of(gpu: &Gpu, fmt: &IDWriteTextFormat, s: &str) -> f32 {
     render::wrapped(gpu, fmt, s, 10_000.0)
         .map(|l| render::text_size(&l).0)
@@ -1158,13 +1217,7 @@ impl View {
         // A card's field or the find bar may have the keys instead: one
         // caret on the glass, never two.
         let focused = self.has_keyboard() && chat.tr.state.focus.is_none();
-        gfx.fill_round(&r, 16.0, pal.bg.mix(pal.fg, 0.07).with_alpha(0.96));
-        let edge = if focused {
-            pal.accent.with_alpha(0.6)
-        } else {
-            pal.fg.with_alpha(0.14)
-        };
-        gfx.stroke_round(&r, 16.0, edge, 1.0);
+        faceplate(gfx, &r, pal, focused);
         hits.push((r, Hit::Input(Act::Text)));
 
         // Images waiting to go, each with a cross to take it back.
@@ -1270,22 +1323,20 @@ impl View {
         Rect::new(cx, top, cw, r.bottom() - top)
     }
 
-    /// The quiet row at the top right of the glass, so the composer holds
-    /// only the text: from the right, stop while Claude works, effort,
-    /// model and mode, then the context meter and the background tasks.
-    /// It runs from `right` leftwards, never past `left`.
-    #[allow(clippy::too_many_arguments)]
+    /// The quiet row in the pane's header, so the composer holds only the
+    /// text: from the right, stop while Claude works, effort, model and
+    /// mode, then the context meter and the background tasks. It runs
+    /// from `right` leftwards, never past `left`, at `cy`.
     pub(super) unsafe fn strip(
         &self,
         gfx: &Gfx,
         chat: &mut Chat,
         pal: &Palette,
-        left: f32,
-        right: f32,
+        (left, right): (f32, f32),
+        cy: f32,
         hits: &mut Vec<(Rect, Hit)>,
     ) {
         let gpu = &self.shared.gpu;
-        let cy = STRIP_Y;
         let mut right = right;
         let hover = chat.input.hover;
         let open = chat.input.menu.as_ref().map(|m| m.kind);
@@ -1438,6 +1489,10 @@ impl View {
                 chat.input.anchors[3] = b.x;
             }
         }
+        // The menus open on the glass, so the anchors are in its DIPs.
+        for a in &mut chat.input.anchors {
+            *a += chat.bar_shift;
+        }
     }
 
     /// The notice and the queued prompts, stacked up from `bottom`.
@@ -1561,7 +1616,7 @@ impl View {
         let rows = menu.items.len().clamp(1, picker::SHOWN);
         let mh = rows as f32 * MENU_ROW + 8.0;
         let y = if picker {
-            STRIP_Y + STRIP_H + 6.0
+            6.0
         } else {
             chat.input.top - 6.0 - mh
         };

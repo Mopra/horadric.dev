@@ -32,7 +32,7 @@ use crate::layout::Rect;
 use crate::render::{self, color};
 use crate::theme::{self, Color};
 
-const TOP: f32 = 34.0;
+const TOP: f32 = 18.0;
 const GAP: f32 = 18.0;
 const LINE_H: f32 = 26.0;
 const STEP_H: f32 = 26.0;
@@ -1356,8 +1356,7 @@ impl View {
             return;
         };
         let w = FIND_W.min(cw);
-        // Below the Terminal button at the top right.
-        let r = Rect::new(cx + cw - w, area.y + 44.0, w, 34.0);
+        let r = Rect::new(cx + cw - w, area.y + 14.0, w, 34.0);
         gfx.fill_round(&r, 10.0, pal.bg.mix(pal.fg, 0.1));
         let focused = st.focus.as_deref() == Some(FIND_FIELD);
         let edge = if focused {

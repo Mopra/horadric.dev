@@ -918,7 +918,10 @@ impl Pane {
             detail = sanctuary::detail(key);
         }
         if let Some(key) = &self.console.folio {
-            detail = folio::detail(key);
+            // The Folio's settings stand where the detail would, and its
+            // runes already say whether Claude works.
+            detail = String::new();
+            self.place_folio_bar(key, &name, r.right, dpi);
         }
         let (session_phase, cast) = self
             .shared
@@ -1278,6 +1281,28 @@ impl Pane {
 
     /// Where the pane's top is in the stage and how tall the stage is, in
     /// DIPs, for the faceplate's light to run across every pane as one.
+    /// Lays a Folio's settings into the header row, from after the name
+    /// to the header's buttons.
+    fn place_folio_bar(&self, key: &str, name: &str, width_px: i32, dpi: u32) {
+        let scale = dpi as f32 / 96.0;
+        let width = width_px as f32 / scale;
+        let at = glyphs::header_buttons(width, self.stashes(), self.zoom.get().is_some(), true);
+        let right = at.start(width) - 4.0;
+        let max = right - glyphs::NAME_LEFT;
+        let left = (glyphs::NAME_LEFT + glyphs::name_width(&self.shared.gpu, name, max) + 12.0)
+            .min(right);
+        let px = |v: f32| (v * scale).round() as i32;
+        let r = RECT {
+            left: px(left),
+            top: 0,
+            right: px(right),
+            bottom: px(glyphs::HEADER_H),
+        };
+        // The conversation starts a pixel inside the glass's rim.
+        let shift = left - (self.glass()[0] + 1.0);
+        folio::place_bar(key, r, shift, self.place_in_stage());
+    }
+
     fn place_in_stage(&self) -> (f32, f32) {
         let scale = self.dpi_now() as f32 / 96.0;
         unsafe {

@@ -63,7 +63,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::app::{self, Input};
 use crate::folio_look as look;
 
-pub use view::{attach, char, key, place, register_class, wheel};
+pub use view::{attach, char, key, place, place_bar, register_class, wheel};
 /// Posted to the pane a Folio is in when what its header says may have
 /// changed.
 pub const WM_FOLIO_REFRESH: u32 = WM_USER + 9;
@@ -109,6 +109,14 @@ struct Chat {
     ended: bool,
     error: Option<String>,
     view: Option<HWND>,
+    /// The settings in the pane's header row, a window of their own on
+    /// the plate beside the name, so the glass holds only the talk.
+    bar: Option<HWND>,
+    /// Where the bar sits: DIPs from its left to the glass's, for the
+    /// menus it opens there, and the pane's place on the stage, for the
+    /// plate's light to run on across it.
+    bar_shift: f32,
+    plate: (f32, f32),
     input: composer::Input,
     scroll: f32,
     /// Keeps the end in view as it streams, until scrolled away from.
@@ -166,6 +174,9 @@ impl Chat {
             ended: false,
             error: None,
             view: None,
+            bar: None,
+            bar_shift: 0.0,
+            plate: (0.0, 1.0),
             input: composer::Input::new(),
             scroll: 0.0,
             follow: true,
@@ -494,11 +505,6 @@ pub fn close_all() {
     }
 }
 
-/// What the pane's header says beside its name.
-pub fn detail(id: &str) -> String {
-    with(id, |c| c.detail()).unwrap_or_default()
-}
-
 /// Whether claude.exe still runs for session `id`.
 pub fn running(id: &str) -> bool {
     with(id, |c| {
@@ -662,6 +668,9 @@ fn drain() {
             if let (true, Some(v)) = (moved || header, chat.view) {
                 changed.push((v, header));
             }
+            if let (true, Some(b)) = (moved || header, chat.bar) {
+                changed.push((b, false));
+            }
         }
         false
     });
@@ -712,7 +721,13 @@ fn refresh(view: HWND, header: bool) {
 }
 
 fn redraw(id: &str) {
-    if let Some((Some(v), header)) = with(id, |c| (c.view, c.header_moved())) {
+    let Some((view, bar, header)) = with(id, |c| (c.view, c.bar, c.header_moved())) else {
+        return;
+    };
+    if let Some(b) = bar {
+        refresh(b, false);
+    }
+    if let Some(v) = view {
         refresh(v, header);
     }
 }

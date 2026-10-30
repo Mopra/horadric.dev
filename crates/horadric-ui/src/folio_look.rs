@@ -19,16 +19,77 @@ pub const COLUMN_MARGIN: f32 = 22.0;
 pub const WARM: Duration = Duration::from_millis(1200);
 /// And to cool after it ends, after which nothing moves and nothing draws.
 pub const COOL: Duration = Duration::from_millis(2400);
-/// How many runes drift behind the conversation at rest.
-pub const EMBERS: usize = 16;
-/// How many more join them while Claude works, so a turn running reads
-/// from across the room without a glow to say it.
-pub const BUSY_EMBERS: usize = 12;
-/// How much faster the runes' clock runs while Claude works.
-pub const BUSY_PACE: f32 = 1.8;
-/// Room above and below the glass an ember is born and dies in, so it
-/// never pops in or out where it can be seen.
-const EMBER_MARGIN: f32 = 30.0;
+/// One depth of runes behind the conversation. Nearer is bigger, faster,
+/// and less sunk into the background, which is what makes the eye read
+/// the three as depth and not as runes of three sizes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Layer {
+    /// How many drift at rest.
+    pub count: usize,
+    /// How many more join them while Claude works, so a turn running
+    /// reads from across the room.
+    pub busy: usize,
+    /// Smallest and largest height, in DIPs.
+    pub size: (f32, f32),
+    /// Slowest and fastest rise, in DIPs a second.
+    pub speed: (f32, f32),
+    /// Faintest and strongest at rest.
+    pub alpha: (f32, f32),
+    /// How much stronger at full heat.
+    pub burn: f32,
+    /// How many times its rest speed it gains at full heat. Near layers
+    /// gain far more than far ones, so a turn feels like moving forward.
+    pub warp: f32,
+    /// How far it swings side to side.
+    pub sway: f32,
+    /// How far its colour is sunk toward the background, 0 to 1.
+    pub sunk: f32,
+    /// Its stroke as a share of its height.
+    pub stroke: f32,
+}
+
+/// The depths, farthest first, the order they are drawn in.
+pub const LAYERS: [Layer; 3] = [
+    // A field of specks, almost lost in the dark.
+    Layer {
+        count: 44,
+        busy: 16,
+        size: (4.0, 7.0),
+        speed: (2.0, 4.5),
+        alpha: (0.07, 0.13),
+        burn: 1.4,
+        warp: 0.6,
+        sway: 4.0,
+        sunk: 0.45,
+        stroke: 0.16,
+    },
+    Layer {
+        count: 16,
+        busy: 12,
+        size: (9.0, 18.0),
+        speed: (7.0, 16.0),
+        alpha: (0.07, 0.13),
+        burn: 2.2,
+        warp: 1.5,
+        sway: 14.0,
+        sunk: 0.12,
+        stroke: 0.1,
+    },
+    // A few drifting past close by, big and faint so they never fight
+    // the words.
+    Layer {
+        count: 4,
+        busy: 3,
+        size: (30.0, 44.0),
+        speed: (24.0, 36.0),
+        alpha: (0.03, 0.055),
+        burn: 1.3,
+        warp: 3.5,
+        sway: 26.0,
+        sunk: 0.0,
+        stroke: 0.06,
+    },
+];
 
 /// Where the column starts and how wide it is, in a view `width` wide.
 pub fn column(width: f32) -> (f32, f32) {
@@ -246,12 +307,6 @@ pub fn heat(busy: bool, since: Duration) -> f32 {
     }
 }
 
-/// How fast the runes' clock runs at `heat`, eased in and out with it so
-/// no rune jumps when a turn starts or ends.
-pub fn pace(heat: f32) -> f32 {
-    1.0 + (BUSY_PACE - 1.0) * heat
-}
-
 /// One rune drifting up behind the conversation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Ember {
@@ -262,6 +317,10 @@ pub struct Ember {
     pub alpha: f32,
     /// Which of the `runes` it is.
     pub rune: usize,
+    /// How far its colour is sunk toward the background.
+    pub sunk: f32,
+    /// Its stroke width, in DIPs.
+    pub stroke: f32,
 }
 
 /// FNV-1a over the words, stable across runs and builds.
@@ -273,29 +332,47 @@ fn hash(words: &[u64]) -> u64 {
     })
 }
 
-fn unit(i: usize, salt: u64) -> f32 {
-    (hash(&[i as u64, salt]) % 10_000) as f32 / 10_000.0
-}
-
-/// Ember `i` at `t` seconds of the background's own clock, in a view `w`
-/// by `h`, with `runes` to pick from. A function of the time alone, so the
-/// view keeps no particles. Warmth makes it brighter, not faster: a speed
-/// that changed would jump every ember along its path, so the pace is the
-/// clock's to change instead. Those past [`EMBERS`] show only while warm.
-pub fn ember(i: usize, t: f32, w: f32, h: f32, heat: f32, runes: usize) -> Ember {
-    let share = if i < EMBERS { 1.0 } else { heat };
-    let speed = 7.0 + 9.0 * unit(i, 1);
-    let travel = h + 2.0 * EMBER_MARGIN;
-    let p = (unit(i, 2) * travel + t * speed).rem_euclid(travel);
-    let sway = (t * (0.2 + 0.2 * unit(i, 3)) + unit(i, 4) * TAU).sin() * 14.0;
+/// Ember `i` of `layer` at `t` seconds of the background's own clock,
+/// with `warp` the seconds of it spent warm (each weighed by the heat), in
+/// a view `w` by `h`, with `runes` to pick from. A function of the time
+/// alone, so the view keeps no particles. Its speed never changes: the
+/// heat moves it along through `warp`, which only ever grows smoothly, so
+/// no rune jumps when a turn starts or ends. Those past the layer's count
+/// show only while warm.
+pub fn ember(
+    layer: usize,
+    i: usize,
+    (t, warp): (f32, f32),
+    (w, h): (f32, f32),
+    heat: f32,
+    runes: usize,
+) -> Ember {
+    let l = &LAYERS[layer];
+    let u = |salt: u64| (hash(&[i as u64, salt, layer as u64]) % 10_000) as f32 / 10_000.0;
+    let share = if i < l.count { 1.0 } else { heat };
+    let span = |(lo, hi): (f32, f32), k: f32| lo + (hi - lo) * k;
+    let size = span(l.size, u(6));
+    let speed = span(l.speed, u(1));
+    let margin = margin(l);
+    let travel = h + 2.0 * margin;
+    let p = (u(2) * travel + (t + l.warp * warp) * speed).rem_euclid(travel);
+    let sway = (t * (0.2 + 0.2 * u(3)) + u(4) * TAU).sin() * l.sway;
     let life = (PI * p / travel).sin();
     Ember {
-        x: unit(i, 5) * w + sway,
-        y: h + EMBER_MARGIN - p,
-        size: 9.0 + 9.0 * unit(i, 6),
-        alpha: life * (0.07 + 0.06 * unit(i, 7)) * (1.0 + 2.2 * heat) * share,
-        rune: (hash(&[i as u64, 8]) % runes.max(1) as u64) as usize,
+        x: u(5) * w + sway - size / 2.0,
+        y: h + margin - p,
+        size,
+        alpha: life * span(l.alpha, u(7)) * (1.0 + l.burn * heat) * share,
+        rune: (hash(&[i as u64, 8, layer as u64]) % runes.max(1) as u64) as usize,
+        sunk: l.sunk,
+        stroke: (size * l.stroke).max(0.8),
     }
+}
+
+/// Room above and below the glass an ember of `l` is born and dies in, so
+/// it never pops in or out where it can be seen.
+fn margin(l: &Layer) -> f32 {
+    l.size.1 + 12.0
 }
 
 #[cfg(test)]
@@ -446,40 +523,61 @@ mod tests {
 
     #[test]
     fn embers_rise_within_the_glass_and_burn_brighter_while_warm() {
-        let (w, h) = (600.0, 400.0);
-        for i in 0..EMBERS {
-            for t in [0.0, 3.3, 47.0, 1234.5] {
-                let e = ember(i, t, w, h, 0.0, 12);
-                assert!(e.y >= -EMBER_MARGIN && e.y <= h + EMBER_MARGIN);
-                assert!(e.x >= -15.0 && e.x <= w + 15.0);
-                assert!(e.alpha >= 0.0 && e.alpha < 0.14);
-                assert!(e.rune < 12);
-                let warm = ember(i, t, w, h, 1.0, 12);
-                assert!(warm.alpha >= e.alpha);
-                assert_eq!((warm.x, warm.y), (e.x, e.y));
+        let view = (600.0, 400.0);
+        for (k, l) in LAYERS.iter().enumerate() {
+            let m = margin(l);
+            for i in 0..l.count {
+                for t in [0.0, 3.3, 47.0, 1234.5] {
+                    let e = ember(k, i, (t, 0.0), view, 0.0, 12);
+                    assert!(e.y >= -m && e.y <= view.1 + m);
+                    assert!(e.x >= -m && e.x <= view.0 + m);
+                    assert!(e.alpha >= 0.0 && e.alpha <= l.alpha.1);
+                    assert!(e.rune < 12);
+                    let warm = ember(k, i, (t, 0.0), view, 1.0, 12);
+                    assert!(warm.alpha >= e.alpha);
+                    assert_eq!((warm.x, warm.y), (e.x, e.y));
+                }
+                // Later, it is higher up, unless it went round.
+                let a = ember(k, i, (10.0, 0.0), view, 0.0, 12);
+                let b = ember(k, i, (10.5, 0.0), view, 0.0, 12);
+                assert!(b.y < a.y || b.y > view.1);
             }
-            // Later, it is higher up, unless it went round.
-            let a = ember(i, 10.0, w, h, 0.0, 12);
-            let b = ember(i, 10.5, w, h, 0.0, 12);
-            assert!(b.y < a.y || b.y > h);
         }
     }
 
     #[test]
     fn more_runes_join_only_while_warm() {
-        let (w, h) = (600.0, 400.0);
-        for i in EMBERS..EMBERS + BUSY_EMBERS {
-            for t in [0.0, 3.3, 47.0, 1234.5] {
-                assert_eq!(ember(i, t, w, h, 0.0, 12).alpha, 0.0);
+        let view = (600.0, 400.0);
+        for (k, l) in LAYERS.iter().enumerate() {
+            for i in l.count..l.count + l.busy {
+                for t in [0.0, 3.3, 47.0, 1234.5] {
+                    assert_eq!(ember(k, i, (t, 0.0), view, 0.0, 12).alpha, 0.0);
+                }
+                let lit = (0..80).any(|t| ember(k, i, (t as f32, 0.0), view, 1.0, 12).alpha > 0.0);
+                assert!(lit);
             }
-            assert!((0..40).any(|t| ember(i, t as f32, w, h, 1.0, 12).alpha > 0.05));
         }
     }
 
     #[test]
-    fn busy_clock_runs_faster() {
-        assert_eq!(pace(0.0), 1.0);
-        assert_eq!(pace(1.0), BUSY_PACE);
-        assert!(pace(0.5) > 1.0 && pace(0.5) < BUSY_PACE);
+    fn nearer_is_bigger_faster_and_less_sunk() {
+        for pair in LAYERS.windows(2) {
+            let (far, near) = (pair[0], pair[1]);
+            assert!(near.size.0 > far.size.1);
+            assert!(near.speed.0 > far.speed.1);
+            assert!(near.warp > far.warp);
+            assert!(near.sunk < far.sunk);
+        }
+    }
+
+    #[test]
+    fn warmth_carries_near_runes_further_than_far_ones() {
+        let view = (600.0, 400.0);
+        let moved = |k: usize| {
+            let a = ember(k, 0, (10.0, 0.0), view, 1.0, 12).y;
+            let b = ember(k, 0, (10.0, 0.1), view, 1.0, 12).y;
+            (a - b).rem_euclid(view.1 + 2.0 * margin(&LAYERS[k]))
+        };
+        assert!(moved(2) > moved(1) && moved(1) > moved(0));
     }
 }

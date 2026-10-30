@@ -43,7 +43,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows_numerics::Vector2;
 
-use super::composer::{self, Act, STRIP_H, STRIP_Y};
+use super::composer::{self, Act, STRIP_H};
 use super::{answer, interrupt, redraw, select, transcript, with, Chat, CHATS};
 use crate::app::{self, Input};
 use crate::clipboard;
@@ -97,9 +97,22 @@ pub fn register_class() -> Result<()> {
 }
 
 /// Lays the conversation of project `key` over the glass of the pane
-/// `parent`. It is placed by [`place`] and goes with the pane.
+/// `parent`, and its settings into the pane's header row. They are placed
+/// by [`place`] and [`place_bar`] and go with the pane.
 pub fn attach(key: &str, shared: &Rc<Shared>, parent: HWND) {
+    if let Some(hwnd) = make(key, shared, parent, false) {
+        // Files dropped on the conversation go into the composer.
+        unsafe { DragAcceptFiles(hwnd, true) };
+        with(key, |c| c.view = Some(hwnd));
+    }
+    if let Some(hwnd) = make(key, shared, parent, true) {
+        with(key, |c| c.bar = Some(hwnd));
+    }
+}
+
+fn make(key: &str, shared: &Rc<Shared>, parent: HWND, bar: bool) -> Option<HWND> {
     let view = Box::new(View {
+        bar,
         hwnd: Cell::new(HWND::default()),
         key: key.to_string(),
         shared: Rc::clone(shared),
@@ -109,11 +122,12 @@ pub fn attach(key: &str, shared: &Rc<Shared>, parent: HWND) {
         ticking: Cell::new(false),
         last: Cell::new(None),
         clock: Cell::new(0.0),
+        warp: Cell::new(0.0),
         selecting: Cell::new(false),
     });
     let hwnd = unsafe {
         let Ok(instance) = GetModuleHandleW(None) else {
-            return;
+            return None;
         };
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -130,10 +144,36 @@ pub fn attach(key: &str, shared: &Rc<Shared>, parent: HWND) {
             Some(Box::into_raw(view) as *const c_void),
         )
     };
-    if let Ok(hwnd) = hwnd {
-        // Files dropped on the conversation go into the composer.
-        unsafe { DragAcceptFiles(hwnd, true) };
-        with(key, |c| c.view = Some(hwnd));
+    hwnd.ok()
+}
+
+/// Puts the settings at `r` in the pane's header row, in the pane's
+/// pixels. `shift` is DIPs from its left to the glass's, and `plate` the
+/// pane's place on the stage, so the plate's light runs on across it.
+pub fn place_bar(key: &str, r: RECT, shift: f32, plate: (f32, f32)) {
+    let Some((Some(bar), moved)) = with(key, |c| {
+        let moved = c.bar_shift != shift || c.plate != plate;
+        c.bar_shift = shift;
+        c.plate = plate;
+        (c.bar, moved)
+    }) else {
+        return;
+    };
+    unsafe {
+        let mut now = RECT::default();
+        let _ = GetClientRect(bar, &mut now);
+        let mut at = POINT::default();
+        let _ = windows::Win32::Graphics::Gdi::MapWindowPoints(
+            Some(bar),
+            GetParent(bar).ok(),
+            std::slice::from_mut(&mut at),
+        );
+        let (w, h) = ((r.right - r.left).max(0), (r.bottom - r.top).max(0));
+        if (at.x, at.y, now.right, now.bottom) != (r.left, r.top, w, h) {
+            let _ = SetWindowPos(bar, None, r.left, r.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        } else if moved {
+            let _ = InvalidateRect(Some(bar), None, false);
+        }
     }
 }
 
@@ -268,6 +308,8 @@ pub(super) struct Gfx {
 
 pub(super) struct View {
     pub(super) hwnd: Cell<HWND>,
+    /// The settings in the header row, not the conversation.
+    pub(super) bar: bool,
     pub(super) key: String,
     pub(super) shared: Rc<Shared>,
     pub(super) gfx: RefCell<Option<Gfx>>,
@@ -280,6 +322,9 @@ pub(super) struct View {
     /// The background's own time, in seconds. It runs only while it moves,
     /// so warming again picks up where it stopped.
     pub(super) clock: Cell<f32>,
+    /// The clock's seconds each weighed by the heat, which carries the
+    /// runes on faster while Claude works without any of them jumping.
+    pub(super) warp: Cell<f32>,
     pub(super) selecting: Cell<bool>,
 }
 
@@ -600,6 +645,9 @@ impl View {
 
     /// Draws one frame. False when the target was lost.
     pub(super) unsafe fn draw(&self, gfx: &Gfx, chat: &mut Chat) -> bool {
+        if self.bar {
+            return self.draw_bar(gfx, chat);
+        }
         let now = Instant::now();
         chat.note_busy();
         let heat = chat.heat();
@@ -609,7 +657,8 @@ impl View {
                 .last
                 .replace(Some(now))
                 .map_or(0.0, |t| now.duration_since(t).as_secs_f32().min(0.1));
-            self.clock.set(self.clock.get() + dt * look::pace(heat));
+            self.clock.set(self.clock.get() + dt);
+            self.warp.set(self.warp.get() + dt * heat);
         }
         self.clock(moving);
         let t = self.clock.get();
@@ -630,7 +679,7 @@ impl View {
         rt.BeginDraw();
         rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         rt.Clear(Some(&color(pal.bg)));
-        self.background(gfx, &pal, w, h, t, heat);
+        self.background(gfx, &pal, (w, h), (t, self.warp.get()), heat);
 
         // The composer first, since the conversation ends above it.
         // Its hits go last, so they win over a block's under the composer.
@@ -638,15 +687,11 @@ impl View {
         let composer = self.composer(gfx, chat, &pal, cx, cw, h, &mut composer_hits);
         let area = Rect::new(0.0, 0.0, w, (composer.y - 10.0).max(0.0));
         self.transcript(gfx, &pal, chat, cx, cw, &area, t, &mut hits);
-        // What scrolls up is hidden under the top edge, where the Terminal
-        // button sits, and fades in below it, so the two never overlap.
-        // At the top nothing is under there: the first block starts lower.
+        // What scrolls up fades out into the glass's top edge, not cut.
         if chat.scroll > 0.0 {
-            const SOLID: f32 = 30.0;
-            const FADE: f32 = 18.0;
-            gfx.fill(&Rect::new(0.0, 0.0, w, SOLID), pal.bg);
+            const FADE: f32 = 24.0;
             for i in 0..6 {
-                let band = Rect::new(0.0, SOLID + FADE * i as f32 / 6.0, w, FADE / 6.0);
+                let band = Rect::new(0.0, FADE * i as f32 / 6.0, w, FADE / 6.0);
                 gfx.fill(&band, pal.bg.with_alpha(1.0 - (i as f32 + 0.5) / 6.0));
             }
         }
@@ -655,14 +700,66 @@ impl View {
         gfx.shade.SetStartPoint(Vector2 { X: 0.0, Y: 0.0 });
         gfx.shade.SetEndPoint(Vector2 { X: 0.0, Y: 9.0 });
         rt.FillRectangle(&d2d(&Rect::new(0.0, 0.0, w, 9.0)), &gfx.shade);
-        let right = self.terminal_button(gfx, &pal, chat, w, &mut composer_hits);
-        self.strip(gfx, chat, &pal, 8.0, right, &mut composer_hits);
         if chat.pending.is_some() {
             self.trust_card(gfx, &pal, chat, cx, cw, &area, &mut composer_hits);
         }
         self.composer_menu(gfx, chat, &pal, cx, cw, &mut composer_hits);
 
         hits.extend(composer_hits);
+        *self.hits.borrow_mut() = hits;
+        rt.EndDraw(None, None).is_ok()
+    }
+
+    /// The settings in the pane's header row, printed on the plate as its
+    /// name is: from the right the Terminal button, then the strip.
+    unsafe fn draw_bar(&self, gfx: &Gfx, chat: &mut Chat) -> bool {
+        let rt = &gfx.rt;
+        let size = rt.GetSize();
+        let (w, h) = (size.width, size.height);
+        let p = theme::palette();
+        let pal = Palette {
+            bg: p.plate_top,
+            fg: p.text,
+            dim: p.text_dim,
+            faint: p.text_dim,
+            accent: gfx.accent,
+        };
+        let mut hits: Vec<(Rect, Hit)> = Vec::new();
+        rt.BeginDraw();
+        rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        rt.Clear(Some(&color(p.plate_top)));
+        let (offset, stage_h) = chat.plate;
+        let stops = [
+            D2D1_GRADIENT_STOP {
+                position: 0.0,
+                color: color(p.plate_top),
+            },
+            D2D1_GRADIENT_STOP {
+                position: 1.0,
+                color: color(p.plate_bottom),
+            },
+        ];
+        if let Ok(b) = rt
+            .CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
+            .and_then(|c| {
+                rt.CreateLinearGradientBrush(
+                    &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                        startPoint: Vector2 { X: 0.0, Y: -offset },
+                        endPoint: Vector2 {
+                            X: 0.0,
+                            Y: stage_h - offset,
+                        },
+                    },
+                    None,
+                    &c,
+                )
+            })
+        {
+            rt.FillRectangle(&d2d(&Rect::new(0.0, 0.0, w, h)), &b);
+        }
+        let y = ((h - STRIP_H) / 2.0).round();
+        let right = self.terminal_button(gfx, &pal, chat, w, y, &mut hits);
+        self.strip(gfx, chat, &pal, (0.0, right), y, &mut hits);
         *self.hits.borrow_mut() = hits;
         rt.EndDraw(None, None).is_ok()
     }
@@ -677,6 +774,7 @@ impl View {
         pal: &Palette,
         chat: &Chat,
         w: f32,
+        y: f32,
         hits: &mut Vec<(Rect, Hit)>,
     ) -> f32 {
         let ready = !chat.folio.busy
@@ -685,10 +783,9 @@ impl View {
             && chat.folio.session_id.is_some()
             && chat.folio.pending_asks().is_empty();
         if !ready {
-            return w - 8.0;
+            return w;
         }
-        // Above where the first block starts, so at the top it covers nothing.
-        let r = Rect::new(w - TERMINAL_W - 8.0, STRIP_Y, TERMINAL_W, STRIP_H);
+        let r = Rect::new(w - TERMINAL_W, y, TERMINAL_W, STRIP_H);
         gfx.fill_round(&r, r.h / 2.0, pal.bg.mix(pal.fg, 0.07).with_alpha(0.9));
         gfx.stroke_round(&r, r.h / 2.0, pal.fg.with_alpha(0.14), 1.0);
         let icon = Rect::new(r.x + 8.0, r.y, 16.0, r.h);
@@ -799,6 +896,10 @@ impl View {
         let (x, y) = self.dip(lparam);
         let key = self.key.clone();
         let hit = self.hit_at(x, y);
+        // The bar has nothing to select.
+        if self.bar && hit.is_none() {
+            return;
+        }
         // A double click's first press already did what a button does; its
         // second only selects a word in text.
         if double && !matches!(hit, None | Some(Hit::Input(Act::Text))) {
@@ -837,7 +938,7 @@ impl View {
 
     pub(super) fn on_drag(&self, lparam: LPARAM) {
         let (x, y) = self.dip(lparam);
-        if select::moved(self, x, y) {
+        if !self.bar && select::moved(self, x, y) {
             return;
         }
         self.hover_input(x, y);
@@ -853,7 +954,7 @@ impl View {
         let id = match self.hit_at(p.x as f32 / s, p.y as f32 / s) {
             Some(Hit::Input(Act::Text)) => IDC_IBEAM,
             Some(_) => IDC_HAND,
-            None if select::over_text(&self.key, p.x as f32 / s, p.y as f32 / s) => IDC_IBEAM,
+            None if !self.bar && select::over_text(&self.key, p.x as f32 / s, p.y as f32 / s) => IDC_IBEAM,
             None => IDC_ARROW,
         };
         unsafe {
@@ -913,7 +1014,9 @@ impl View {
                 Some(LRESULT(0))
             }
             WM_MOUSELEAVE => {
-                select::left(&self.key);
+                if !self.bar {
+                    select::left(&self.key);
+                }
                 self.leave_input();
                 Some(LRESULT(0))
             }
@@ -937,6 +1040,9 @@ impl View {
                 with(&self.key, |c| {
                     if c.view == Some(hwnd) {
                         c.view = None;
+                    }
+                    if c.bar == Some(hwnd) {
+                        c.bar = None;
                     }
                 });
                 None

@@ -66,6 +66,24 @@ const PANE_RADIUS: f32 = SCREEN_RADIUS + BEZEL;
 /// name is printed on.
 pub const HEADER_H: f32 = 26.0;
 
+/// Where a header's name starts, after its lamp.
+pub const NAME_LEFT: f32 = BEZEL + 16.0;
+
+/// How wide `name` is printed in a header, never more than `max`.
+pub fn name_width(gpu: &Gpu, name: &str, max: f32) -> f32 {
+    let name: Vec<u16> = name.encode_utf16().collect();
+    unsafe {
+        gpu.dw
+            .CreateTextLayout(&name, &gpu.title, max.max(0.0), HEADER_H)
+            .and_then(|l| {
+                let mut m = Default::default();
+                l.GetMetrics(&mut m)
+                    .map(|_| m.widthIncludingTrailingWhitespace)
+            })
+            .unwrap_or(max)
+    }
+}
+
 /// Where the glass starts, below the header.
 pub const SCREEN_TOP: f32 = HEADER_H;
 
@@ -2086,7 +2104,7 @@ impl GridTarget {
             }
         }
 
-        let left = BEZEL + 16.0;
+        let left = NAME_LEFT;
         let at = header_buttons(width, h.stash, h.zoom.is_some(), h.close);
         let mut right = if at == Buttons::default() {
             width - 8.0
@@ -2143,15 +2161,7 @@ impl GridTarget {
             return;
         }
         let name: Vec<u16> = h.name.encode_utf16().collect();
-        let name_w = gpu
-            .dw
-            .CreateTextLayout(&name, &gpu.title, (right - left).max(0.0), HEADER_H)
-            .and_then(|l| {
-                let mut m = Default::default();
-                l.GetMetrics(&mut m)
-                    .map(|_| m.widthIncludingTrailingWhitespace)
-            })
-            .unwrap_or(right - left);
+        let name_w = name_width(gpu, h.name, right - left);
         let text = if h.active {
             theme::text()
         } else {
