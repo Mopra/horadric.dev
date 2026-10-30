@@ -50,7 +50,7 @@ fn button(
 #[allow(clippy::too_many_arguments)]
 fn field(cx: &Ctx, s: &mut Scene, st: &State, id: &str, hint: &str, x: f32, y: f32, w: f32) -> f32 {
     let text = st.text(id);
-    let focused = st.focus.as_deref() == Some(id);
+    let focused = st.keys && st.focus.as_deref() == Some(id);
     let inner = w - 20.0;
     let shown = if text.is_empty() { hint } else { text };
     let Some(l) = cx.layout(&cx.fonts.body, shown, inner) else {

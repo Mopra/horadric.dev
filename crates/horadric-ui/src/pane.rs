@@ -2738,6 +2738,9 @@ impl Pane {
     fn set_focus(&self, focused: bool) {
         self.focused.set(focused);
         self.caret_since.set(Instant::now());
+        if let Some(key) = &self.console.folio {
+            folio::keyboard_moved(key);
+        }
         let mode = self.mode();
         if let Ok(mut s) = self.console.screen.lock() {
             s.term.is_focused = focused;

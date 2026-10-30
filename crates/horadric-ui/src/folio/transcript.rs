@@ -134,6 +134,9 @@ pub(super) struct State {
     pub(super) fields: HashMap<String, Field>,
     /// The field with the keyboard, the composer's when None.
     pub(super) focus: Option<String>,
+    /// Whether the pane has the keyboard at all: without it no field
+    /// shows a caret or a lit rim, whichever one `focus` names.
+    pub(super) keys: bool,
     /// Asks whose deny reason is open, plans whose feedback is.
     pub(super) denying: HashSet<String>,
     pub(super) keeping: HashSet<String>,
@@ -258,7 +261,7 @@ fn hash_field(h: &mut DefaultHasher, st: &State, id: &str) {
         hash_str(h, &f.text);
         (f.caret, f.anchor).hash(h);
     }
-    (st.focus.as_deref() == Some(id)).hash(h);
+    (st.keys && st.focus.as_deref() == Some(id)).hash(h);
 }
 
 /// What block `b` is built from: when this changes, it is built again.
@@ -1365,7 +1368,7 @@ impl View {
         let w = FIND_W.min(cw);
         let r = Rect::new(cx + cw - w, area.y + 14.0, w, 34.0);
         gfx.fill_round(&r, 10.0, pal.bg.mix(pal.fg, 0.1));
-        let focused = st.focus.as_deref() == Some(FIND_FIELD);
+        let focused = st.keys && st.focus.as_deref() == Some(FIND_FIELD);
         let edge = if focused {
             pal.accent.with_alpha(0.7)
         } else {

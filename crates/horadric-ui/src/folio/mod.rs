@@ -63,7 +63,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::app::{self, Input};
 use crate::folio_look as look;
 
-pub use view::{attach, char, key, place, place_bar, register_class, wheel};
+pub use view::{attach, char, key, keyboard_moved, place, place_bar, register_class, wheel};
 /// Posted to the pane a Folio is in when what its header says may have
 /// changed.
 pub const WM_FOLIO_REFRESH: u32 = WM_USER + 9;

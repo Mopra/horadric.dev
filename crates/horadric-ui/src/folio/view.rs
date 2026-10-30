@@ -203,6 +203,14 @@ pub(super) fn dpi(hwnd: HWND) -> u32 {
     unsafe { GetDpiForWindow(hwnd) }.max(96)
 }
 
+/// The pane gained or lost the keyboard. The conversation is a child
+/// window the pane's own repaint does not reach, and unless Claude is
+/// working nothing else would redraw it, so its caret and rims would
+/// keep showing the keyboard where it no longer is.
+pub fn keyboard_moved(key: &str) {
+    super::redraw(key);
+}
+
 /// A key that makes a character, from the pane: the composer's.
 pub fn char(key: &str, c: char, mods: Mods) {
     if select::char(key, c, mods) {
@@ -645,6 +653,7 @@ impl View {
             return self.draw_bar(gfx, chat);
         }
         let now = Instant::now();
+        chat.tr.state.keys = self.has_keyboard();
         chat.note_busy();
         let heat = chat.heat();
         let moving = chat.busy_was || heat > 0.0;
