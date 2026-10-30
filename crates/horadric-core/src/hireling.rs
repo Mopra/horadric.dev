@@ -74,6 +74,8 @@ pub struct Hireling {
     /// Whose word on its lot to believe: a roster's or a stop's beats the
     /// quiet guess.
     told: bool,
+    /// Whether its own `SubagentStop` came, which no roster overrules.
+    stopped: bool,
     pub tools: u32,
     pub tokens: u64,
     /// Its own transcript, once known.
@@ -99,6 +101,7 @@ impl Hireling {
             heard: now,
             tool: None,
             told: false,
+            stopped: false,
             tools: 0,
             tokens: 0,
             transcript: None,
@@ -121,9 +124,14 @@ impl Hireling {
         }
     }
 
-    /// How long it has run, or ran.
+    /// How long it has run, or ran. One taken as done for going quiet
+    /// ran until it was last heard.
     pub fn ran(&self, now: SystemTime) -> Duration {
-        let end = self.ended.unwrap_or(now);
+        let end = self.ended.unwrap_or(if self.lot_at(now).at_work() {
+            now
+        } else {
+            self.heard
+        });
         end.duration_since(self.started).unwrap_or_default()
     }
 
@@ -265,6 +273,7 @@ impl Band {
                         Lot::Done
                     };
                     h.end(lot, now);
+                    h.stopped = true;
                 }
                 _ => {}
             }
@@ -274,6 +283,7 @@ impl Band {
             "UserPromptSubmit" => {
                 // A new turn: what finished is history, what still works
                 // stays on the table.
+                self.cut_off(now);
                 self.hirelings.retain(|h| h.lot_at(now).at_work());
                 self.main.clear();
                 self.turn = Some(now);
@@ -306,6 +316,7 @@ impl Band {
                 }
             }
             "Stop" | "StopFailure" | "Interrupt" | "StopCancelled" => {
+                self.cut_off(now);
                 self.turn_end = Some(now);
                 for m in self.main.iter_mut().filter(|m| m.end.is_none()) {
                     m.end = Some(now);
@@ -313,7 +324,7 @@ impl Band {
             }
             "SessionStart" | "SessionEnd" | HookEvent::REGISTER | HookEvent::PAUSE => {
                 // The process is gone, and its hirelings with it.
-                for h in self.hirelings.iter_mut().filter(|h| h.lot.at_work()) {
+                for h in self.hirelings.iter_mut().filter(|h| h.lot_at(now).at_work()) {
                     h.end(Lot::Failed, now);
                 }
                 if name != "SessionEnd" {
@@ -343,12 +354,38 @@ impl Band {
         }
         match Lot::from_status(&a.status) {
             Some(l @ (Lot::Done | Lot::Failed)) if h.lot.at_work() || !h.told => h.end(l, now),
+            // A roster read before its SubagentStop and sent after it.
+            Some(Lot::Working | Lot::Waiting) if h.stopped => {}
             Some(l @ (Lot::Working | Lot::Waiting)) => {
                 h.lot = l;
                 h.told = true;
                 h.ended = None;
             }
             _ => {}
+        }
+    }
+
+    /// Ends the hirelings the main loop still waited on when its turn
+    /// ended or was cut off. A foreground hireling lives inside the main
+    /// loop's Agent call, so one sent since the earliest Agent call still
+    /// open is foreground. One sent to the background returned its call at
+    /// once and works on, so it is left to its own stop or the quiet rule.
+    /// Claude Code's Esc sends no hook, and a call left open shows it at
+    /// the next prompt.
+    fn cut_off(&mut self, now: SystemTime) {
+        let Some(open) = self
+            .main
+            .iter()
+            .filter(|m| m.end.is_none() && matches!(m.tool.as_str(), "Agent" | "Task"))
+            .map(|m| m.start)
+            .min()
+        else {
+            return;
+        };
+        for h in self.hirelings.iter_mut() {
+            if h.started >= open && h.lot_at(now).at_work() {
+                h.end(Lot::Done, now);
+            }
         }
     }
 
@@ -612,7 +649,7 @@ pub fn parse_time(s: &str) -> Option<SystemTime> {
 pub fn tokens(n: u64) -> String {
     match n {
         0..=999 => n.to_string(),
-        1_000..=999_999 => format!("{}k", (n + 500) / 1000),
+        1_000..=999_499 => format!("{}k", (n + 500) / 1000),
         _ => format!("{:.1}M", n as f64 / 1e6),
     }
 }
@@ -777,5 +814,74 @@ mod tests {
         assert_eq!(tokens(850), "850");
         assert_eq!(tokens(18_400), "18k");
         assert_eq!(tokens(1_240_000), "1.2M");
+        assert_eq!(tokens(999_499), "999k");
+        assert_eq!(tokens(999_500), "1.0M");
+    }
+
+    #[test]
+    fn a_quiet_one_ran_until_last_heard() {
+        let mut b = Band::default();
+        b.hear(&sub("PostToolUse", "a1"), t(0));
+        b.hear(&sub("PostToolUse", "a1"), t(10));
+        assert_eq!(b.hirelings[0].ran(t(500)), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_session_end_does_not_fail_one_already_done_by_quiet() {
+        let mut b = Band::default();
+        b.hear(&sub("PostToolUse", "a1"), t(0));
+        let mut pre = sub("PreToolUse", "a2");
+        pre.tool_name = Some("Bash".into());
+        b.hear(&pre, t(0));
+        b.hear(&ev("SessionEnd"), t(60));
+        assert_eq!(b.hirelings[0].lot_at(t(60)), Lot::Done);
+        assert_eq!(b.hirelings[1].lot, Lot::Failed);
+    }
+
+    #[test]
+    fn a_cut_off_turn_ends_its_foreground_ones_but_not_the_background() {
+        let mut b = Band::default();
+        b.hear(&ev("UserPromptSubmit"), t(0));
+        let mut agent = ev("PreToolUse");
+        agent.tool_name = Some("Agent".into());
+        b.hear(&agent, t(1));
+        let mut post = ev("PostToolUse");
+        post.tool_name = Some("Agent".into());
+        let mut ask = sub("PermissionRequest", "bg");
+        ask.tool_name = Some("Bash".into());
+        b.hear(&ask, t(2));
+        b.hear(&post, t(2));
+        b.hear(&agent, t(3));
+        b.hear(&ask, t(3));
+        b.hear(&sub("PermissionRequest", "fg"), t(4));
+        b.hear(&ev("Interrupt"), t(5));
+        assert_eq!(b.hirelings[0].lot, Lot::Waiting);
+        assert_eq!(b.hirelings[1].lot, Lot::Done);
+        assert!(!b.any_failed());
+
+        // Claude Code's Esc says nothing; the next prompt finds the call open.
+        let mut b = Band::default();
+        b.hear(&ev("UserPromptSubmit"), t(0));
+        b.hear(&agent, t(1));
+        let mut pre = sub("PreToolUse", "fg");
+        pre.tool_name = Some("Bash".into());
+        b.hear(&pre, t(2));
+        b.hear(&ev("UserPromptSubmit"), t(9));
+        assert!(b.hirelings.is_empty());
+    }
+
+    #[test]
+    fn a_stale_roster_does_not_revive_a_stopped_one() {
+        let mut b = Band::default();
+        b.hear(&sub("SubagentStop", "a1"), t(0));
+        let mut r = ev(HookEvent::AGENTS);
+        r.agents = Some(vec![ModAgent {
+            agent_id: "a1".into(),
+            status: "running".into(),
+            ..Default::default()
+        }]);
+        b.hear(&r, t(1));
+        let h = &b.hirelings[0];
+        assert_eq!((h.lot, h.ended), (Lot::Done, Some(t(0))));
     }
 }

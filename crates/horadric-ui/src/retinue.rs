@@ -491,7 +491,7 @@ fn tracks(band: &Band, now: SystemTime, accent: Color) -> (Vec<TableTrack>, f32)
     for h in hirelings {
         let lot = h.lot_at(now);
         let end = match (lot.at_work(), h.ended) {
-            (true, _) | (false, None) => secs(now.min(h.ended.unwrap_or(now))),
+            (true, _) | (false, None) => secs(h.started + h.ran(now)),
             (false, Some(t)) => secs(t),
         };
         let label = match h.task.as_str() {
