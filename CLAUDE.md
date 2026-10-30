@@ -109,6 +109,8 @@ covers testing against a real agent. The rules that must not be lost:
   ones when done: `Get-Process horadric-host* | ? Path -like
   '*\Horadric-dev\hosts\*' | Stop-Process -Force`. The installed Horadric's
   hosts are in `Horadric\hosts`; leave them alone, one of them runs you.
+- A test leaves no tiles behind. Copy `%APPDATA%\Horadric-dev\state.json`
+  aside before the test and put it back after stopping the dev instance.
 
 ## Shipping
 
