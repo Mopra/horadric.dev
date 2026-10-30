@@ -304,7 +304,7 @@ pub(super) unsafe fn question(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene 
                 s.line(
                     "\u{E73E}",
                     F::Icon,
-                    Rect::new(PAD, y, 16.0, 20.0),
+                    Rect::new(PAD, y, 16.0, super::rich::first_line(&l).unwrap_or(20.0)),
                     theme::done(),
                 );
                 s.unit(&l, PAD + 22.0, y, cx.pal.dim, said);
