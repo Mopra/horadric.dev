@@ -13,7 +13,6 @@
 
 #[cfg(windows)]
 mod backup;
-#[cfg(windows)]
 #[cfg(not(target_os = "macos"))]
 mod code;
 mod console;
@@ -21,7 +20,6 @@ mod console;
 mod context;
 #[cfg(windows)]
 mod google;
-#[cfg(windows)]
 #[cfg(windows)]
 mod headless_debug;
 #[cfg(windows)]

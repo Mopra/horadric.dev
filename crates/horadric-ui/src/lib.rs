@@ -122,7 +122,6 @@ mod console;
 #[cfg(windows)]
 pub mod credential;
 #[cfg(windows)]
-#[cfg(windows)]
 mod dialog;
 #[cfg(windows)]
 mod dictate;
