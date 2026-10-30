@@ -65,7 +65,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Identities](plan/identities.md): each project's gh, git, npm and Vercel logins, so no session switches another's account.
 - [Signals](plan/signals.md): what is left of the status line JSON, OpenTelemetry export, and OSC 9;4 progress from the agents.
 - [Small local models](plan/local-models.md): static embeddings as memory's first pass, and a small model for the sentence per session.
-- [Dictation](plan/dictation.md): Ctrl+Space dictates into a session with Whisper on the machine; what is left: speed, a rune, cleanup, outside Horadric.
+- [Dictation](plan/dictation.md): Ctrl+Space dictates with Whisper on the machine, the words shown live and a microphone picked in Settings; what is left: a bigger or faster model, cleanup, a personal dictionary, outside Horadric.
 - [Ghostty's terminal core](plan/ghostty.md): move the grid from `alacritty_terminal` to libghostty, after a trial.
 - [The Forge](plan/the-forge.md): files worked on with Claude beside the session (decks, artefacts, markdown, images), pinned, edited by hand, versioned and exported. Proposed.
 - [The tray menu and Settings](plan/tray-and-settings.md): a short grouped tray menu, and Settings as a resizable window of described cards with search. Proposed.

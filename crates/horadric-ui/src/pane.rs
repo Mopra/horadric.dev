@@ -1782,7 +1782,11 @@ impl Pane {
         }
         self.drop_char();
         if !repeat {
-            dictate::press(self.hwnd);
+            let before = match &self.console.folio {
+                Some(key) => folio::before_caret(key),
+                None => String::new(),
+            };
+            dictate::press(self.hwnd, self.console.cwd.as_deref(), &before);
         }
         true
     }
@@ -1792,7 +1796,7 @@ impl Pane {
     fn on_dictate(&self) {
         let done = dictate::take(self.hwnd);
         if let Some(key) = &self.console.folio {
-            folio::dictation(key, dictate::status(self.hwnd));
+            folio::dictation(key, dictate::notice(self.hwnd));
         }
         match done {
             Some(Ok(text)) if !text.is_empty() => match &self.console.folio {

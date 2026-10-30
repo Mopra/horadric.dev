@@ -23,7 +23,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
 };
-use windows::Win32::Graphics::DirectWrite::IDWriteTextFormat;
+use windows::Win32::Graphics::DirectWrite::{IDWriteTextFormat, DWRITE_TEXT_RANGE};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{InvalidateRect, MapWindowPoints, LOGFONTW};
 use windows::Win32::Graphics::Imaging::{
@@ -1105,6 +1105,17 @@ pub fn dictated(key: &str, text: &str) {
     redraw(key);
 }
 
+/// The text ahead of the caret, which dictation gives Whisper to read so
+/// the speech goes on from it.
+pub fn before_caret(key: &str) -> String {
+    with(key, |chat| {
+        chat.input.ensure(key);
+        let f = &chat.input.ed.field;
+        f.text[..f.caret].to_string()
+    })
+    .unwrap_or_default()
+}
+
 /// What dictation says above the composer while it listens, None once
 /// it is done.
 pub fn dictation(key: &str, notice: Option<String>) {
@@ -1359,8 +1370,30 @@ impl View {
         // The text stops short of the keys at the right.
         let keys = if chat.ended { KEY } else { 2.0 * KEY + 6.0 };
         let inner_w = (cw - 2.0 * PAD - keys - 8.0).max(10.0);
-        let empty = chat.input.ed.is_empty();
-        let shown = if empty { "M" } else { chat.input.ed.text() };
+        // Words being dictated stand at the caret, dimmed, until they are
+        // final and typed in for real.
+        let draft = crate::dictate::draft(self.pane()).map(|d| {
+            let f = &chat.input.ed.field;
+            let joins = f.text[..f.caret]
+                .chars()
+                .next_back()
+                .is_some_and(|c| !c.is_whitespace());
+            (f.caret, if joins { format!(" {d}") } else { d })
+        });
+        let empty = chat.input.ed.is_empty() && draft.is_none();
+        let text_shown = match &draft {
+            Some((at, d)) => {
+                let t = chat.input.ed.text();
+                format!("{}{d}{}", &t[..*at], &t[*at..])
+            }
+            None => chat.input.ed.text().to_string(),
+        };
+        // A place in the field's text as a place in what is shown.
+        let past = |i: usize| match &draft {
+            Some((at, d)) if i >= *at => i + d.len(),
+            _ => i,
+        };
+        let shown = if empty { "M" } else { text_shown.as_str() };
         let Ok(l) = render::wrapped(gpu, &gfx.text, shown, inner_w) else {
             return Rect::new(cx, h, cw, 0.0);
         };
@@ -1432,16 +1465,16 @@ impl View {
             chat.input.scroll = 0.0;
         } else {
             let f = &chat.input.ed.field;
-            let caret = render::caret_at(&l, field::utf16_at(&f.text, f.caret));
+            let caret = render::caret_at(&l, field::utf16_at(shown, past(f.caret)));
             chat.input.scroll = field::follow(chat.input.scroll, caret.y, caret.h, view_h, th);
         }
         let sy = oy - chat.input.scroll;
         gfx.rt
             .PushAxisAlignedClip(&d2d(&text_box), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         if !empty {
-            let text = chat.input.ed.text();
+            let text = shown;
             for (a, b) in chat.input.ed.chips() {
-                let (a16, b16) = (field::utf16_at(text, a), field::utf16_at(text, b));
+                let (a16, b16) = (field::utf16_at(text, past(a)), field::utf16_at(text, past(b)));
                 for s in render::range_rects(&l, a16, b16 - a16) {
                     gfx.fill_round(
                         &Rect::new(ox + s.x - 2.0, sy + s.y + 1.0, s.w + 4.0, s.h - 2.0),
@@ -1451,12 +1484,25 @@ impl View {
                 }
             }
             let (a, b) = chat.input.ed.field.selection();
-            let (a16, b16) = (field::utf16_at(text, a), field::utf16_at(text, b));
+            let (a16, b16) = (field::utf16_at(text, past(a)), field::utf16_at(text, past(b)));
             for s in render::range_rects(&l, a16, b16 - a16) {
                 gfx.fill(
                     &Rect::new(ox + s.x, sy + s.y, s.w, s.h),
                     pal.accent.with_alpha(0.35),
                 );
+            }
+            if let Some((at, d)) = &draft {
+                let from = field::utf16_at(text, *at);
+                let to = field::utf16_at(text, at + d.len());
+                if let Ok(dim) = gfx.rt.CreateSolidColorBrush(&render::color(pal.dim), None) {
+                    let _ = l.SetDrawingEffect(
+                        &dim,
+                        DWRITE_TEXT_RANGE {
+                            startPosition: from,
+                            length: to - from,
+                        },
+                    );
+                }
             }
             gfx.layout_at(&l, ox, sy, pal.fg);
         }
@@ -1467,7 +1513,7 @@ impl View {
                 if empty {
                     0
                 } else {
-                    field::utf16_at(&f.text, f.caret)
+                    field::utf16_at(shown, past(f.caret))
                 },
             )
         };
@@ -1481,7 +1527,8 @@ impl View {
         if focused {
             self.place_ime(chat, ox + caret.x, sy + caret.y, caret.h);
         }
-        *self.composer.borrow_mut() = (!empty).then_some((l, ox, sy));
+        // A click lands on the field's text, which the draft has moved.
+        *self.composer.borrow_mut() = (!empty && draft.is_none()).then_some((l, ox, sy));
         self.send_key(gfx, chat, pal, &r, line_h, empty, hits);
 
         let top = self.above(gfx, chat, pal, cx, cw, r.y, hits);
@@ -1543,8 +1590,17 @@ impl View {
     ) {
         let hot = chat.input.hover == Some(Act::Dictate);
         let ink = match crate::dictate::shown(self.pane()) {
-            Some(crate::dictate::Shown::Listening) => {
-                gfx.fill_round(b, KEY / 2.0, pal.accent.with_alpha(0.22));
+            Some(crate::dictate::Shown::Listening(level)) => {
+                gfx.fill_round(b, KEY / 2.0, pal.accent.with_alpha(0.14));
+                // The voice's loudness, a disc that swells and falls inside
+                // the key, so a dead microphone shows before any words.
+                let r = KEY / 2.0 * (0.4 + 0.6 * level);
+                let c = (b.x + KEY / 2.0, b.y + KEY / 2.0);
+                gfx.fill_round(
+                    &Rect::new(c.0 - r, c.1 - r, 2.0 * r, 2.0 * r),
+                    r,
+                    pal.accent.with_alpha(0.3),
+                );
                 pal.accent
             }
             Some(_) => {
@@ -1887,7 +1943,8 @@ impl View {
         let key = self.key.clone();
         let mut select = false;
         if act == Act::Dictate {
-            crate::dictate::press(self.pane());
+            let dir = with(&key, |c| c.dir.clone());
+            crate::dictate::press(self.pane(), dir.as_deref(), &before_caret(&key));
             redraw(&key);
             return;
         }

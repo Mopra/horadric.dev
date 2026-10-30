@@ -92,11 +92,22 @@ const TAIL: usize = 200;
 /// Whisper given silence makes something up, "Thank you." most often.
 const SILENCE: f32 = 0.004;
 
+/// The most tokens of prompt given ahead of the speech, its end kept.
+/// Whisper takes up to half its context, but distil-whisper given 64 or
+/// more loops on a phrase or drops a sentence of the speech.
+const MOST_PROMPT: usize = 40;
+
+/// Tokens a second of speech can take at most, and a few over: a fast
+/// talker says about four. More than this and Whisper is looping.
+const TOKENS_A_SECOND: usize = 10;
+
 pub struct Listener {
     model: Whisper,
     tokenizer: Tokenizer,
     filters: Vec<f32>,
     sot: u32,
+    /// Starts the prompt: text Whisper reads as what came before.
+    prev: Option<u32>,
     no_timestamps: u32,
     eot: u32,
     /// Tokens never written: the config's list and every special token
@@ -128,6 +139,7 @@ impl Listener {
         let mut suppress = config.suppress_tokens.clone();
         suppress.extend(eot + 1..config.vocab_size as u32);
         let begin_suppress = vec![id("Ġ").unwrap_or(220), eot];
+        let prev = id("<|startofprev|>").ok();
         let filters = mel_filters(config.num_mel_bins, w::N_FFT, w::SAMPLE_RATE);
         // SAFETY: the file is only read, and nothing writes it while the
         // model is loaded.
@@ -145,6 +157,7 @@ impl Listener {
             tokenizer,
             filters,
             sot,
+            prev,
             no_timestamps,
             eot,
             suppress,
@@ -153,7 +166,9 @@ impl Listener {
     }
 
     /// What was said in `pcm`: mono samples at 16 kHz, from -1 to 1.
-    pub fn transcribe(&mut self, pcm: &[f32]) -> Result<String, String> {
+    /// `prompt` is read as what came before it: the words said earlier
+    /// and names the speech may use, so they are spelled the same.
+    pub fn transcribe(&mut self, pcm: &[f32], prompt: &str) -> Result<String, String> {
         if is_silent(pcm) {
             return Ok(String::new());
         }
@@ -163,6 +178,9 @@ impl Listener {
         let frames = mel.len() / bins;
         let mel = Tensor::from_vec(mel, (1, bins, frames), &Device::Cpu).map_err(err)?;
         let spoken = pcm.len() / w::HOP_LENGTH;
+        let bare = [self.sot, self.no_timestamps];
+        let mut prefix = self.prompt(prompt);
+        prefix.extend(bare);
         let mut text = String::new();
         let mut seek = 0;
         while seek < spoken {
@@ -172,7 +190,21 @@ impl Listener {
             // the same. Even, since the encoder halves it.
             let frames = (spoken - seek + TAIL).min(w::N_FRAMES) & !1;
             let window = mel.narrow(2, seek, frames).map_err(err)?;
-            let part = self.window(&window).map_err(err)?;
+            let most = (frames / 100 * TOKENS_A_SECOND + 16).min(MOST_TOKENS);
+            // A prompt sometimes sends Whisper round in a loop; without
+            // one it seldom does, and a loop left anyway is cut off.
+            let mut said = self.window(&window, &prefix, most).map_err(err)?;
+            if said.1 && prefix.len() > bare.len() {
+                said = self.window(&window, &bare, most).map_err(err)?;
+            }
+            let (mut tokens, looped) = said;
+            if looped {
+                tokens.truncate(loop_start(&tokens));
+            }
+            let part = self
+                .tokenizer
+                .decode(&tokens, true)
+                .map_err(|e| e.to_string())?;
             let part = part.trim();
             if !part.is_empty() {
                 if !text.is_empty() {
@@ -185,7 +217,29 @@ impl Listener {
         Ok(text)
     }
 
-    fn window(&mut self, mel: &Tensor) -> candle_core::Result<String> {
+    /// The prompt's tokens, its last [`MOST_PROMPT`], behind the token
+    /// that marks them as earlier text. None when the tokenizer lacks it.
+    fn prompt(&self, prompt: &str) -> Vec<u32> {
+        let (Some(prev), false) = (self.prev, prompt.trim().is_empty()) else {
+            return Vec::new();
+        };
+        let Ok(enc) = self.tokenizer.encode(format!(" {}", prompt.trim()), false) else {
+            return Vec::new();
+        };
+        let ids = enc.get_ids();
+        let mut out = vec![prev];
+        out.extend_from_slice(&ids[ids.len().saturating_sub(MOST_PROMPT)..]);
+        out
+    }
+
+    /// The tokens Whisper writes for `mel` after `prompt`, at most `most`,
+    /// and whether it went round in a loop or ran past `most` doing so.
+    fn window(
+        &mut self,
+        mel: &Tensor,
+        prompt: &[u32],
+        most: usize,
+    ) -> candle_core::Result<(Vec<u32>, bool)> {
         let features = self.model.encoder.forward(mel, true)?;
         let vocab = self.model.config.vocab_size;
         let mut mask = vec![0f32; vocab];
@@ -200,9 +254,8 @@ impl Listener {
             begin[t as usize] = f32::NEG_INFINITY;
         }
         let begin = Tensor::new(begin.as_slice(), &Device::Cpu)?;
-        let prompt = [self.sot, self.no_timestamps];
         let mut tokens = prompt.to_vec();
-        for i in 0..MOST_TOKENS {
+        for i in 0..most {
             let input = Tensor::new(tokens.as_slice(), &Device::Cpu)?.unsqueeze(0)?;
             let ys = self.model.decoder.forward(&input, &features, i == 0)?;
             let (_, len, _) = ys.dims3()?;
@@ -218,13 +271,43 @@ impl Listener {
             }
             let next = logits.argmax(D::Minus1)?.to_scalar::<u32>()?;
             if next == self.eot {
-                break;
+                return Ok((tokens.split_off(prompt.len()), false));
             }
             tokens.push(next);
+            if loops(&tokens[prompt.len()..]) {
+                return Ok((tokens.split_off(prompt.len()), true));
+            }
         }
-        self.tokenizer
-            .decode(&tokens[prompt.len()..], true)
-            .map_err(|e| candle_core::Error::Msg(e.to_string()))
+        Ok((tokens.split_off(prompt.len()), true))
+    }
+}
+
+/// The loop `tokens` end in, the way Whisper loops: one token said five
+/// times over, or a run of two to twelve said three times. Its length
+/// and how many rounds of it there are.
+fn the_loop(tokens: &[u32]) -> Option<(usize, usize)> {
+    let len = tokens.len();
+    (1..=12).find_map(|n| {
+        let mut rounds = 1;
+        while len >= n * (rounds + 1)
+            && tokens[len - n * (rounds + 1)..len - n * rounds] == tokens[len - n..]
+        {
+            rounds += 1;
+        }
+        (rounds >= if n == 1 { 5 } else { 3 }).then_some((n, rounds))
+    })
+}
+
+fn loops(tokens: &[u32]) -> bool {
+    the_loop(tokens).is_some()
+}
+
+/// How many of `tokens` to keep: up to the end of the loop's first round,
+/// or all of them when they do not loop.
+fn loop_start(tokens: &[u32]) -> usize {
+    match the_loop(tokens) {
+        Some((n, rounds)) => tokens.len() - n * (rounds - 1),
+        None => tokens.len(),
     }
 }
 
@@ -234,7 +317,8 @@ pub fn is_silent(pcm: &[f32]) -> bool {
     loudness(pcm) < SILENCE
 }
 
-fn loudness(pcm: &[f32]) -> f32 {
+/// The RMS of `pcm`, 0 for none.
+pub fn loudness(pcm: &[f32]) -> f32 {
     if pcm.is_empty() {
         return 0.0;
     }
@@ -313,6 +397,16 @@ mod tests {
             assert!(!lit.is_empty());
             assert_eq!(lit.last().unwrap() - lit[0] + 1, lit.len());
         }
+    }
+
+    #[test]
+    fn a_loop_is_seen_and_cut_after_its_first_round() {
+        assert!(!loops(&[1, 2, 3, 4, 5]));
+        assert!(!loops(&[7, 7, 7, 7]));
+        assert!(loops(&[7, 7, 7, 7, 7]));
+        assert!(loops(&[1, 8, 9, 8, 9, 8, 9]));
+        let t = [1, 2, 8, 9, 8, 9, 8, 9];
+        assert_eq!(&t[..loop_start(&t)], &[1, 2, 8, 9]);
     }
 
     #[test]

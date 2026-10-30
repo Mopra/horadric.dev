@@ -1,5 +1,5 @@
 //! Transcribes a WAV file with the dictation model, to try it without the
-//! app: `cargo run --release -p horadric-memory --example dictate -- <models dir> <file.wav>`.
+//! app: `cargo run --release -p horadric-memory --example dictate -- <models dir> <file.wav> [prompt]`.
 //! The file is 16 bit mono at 16 kHz, as Windows' Sound Recorder or
 //! `System.Speech` can write it.
 
@@ -9,9 +9,13 @@ use horadric_memory::speech::{self, Listener};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [models, wav] = args.as_slice() else {
-        eprintln!("usage: dictate <models dir> <file.wav>");
-        std::process::exit(2);
+    let (models, wav, prompt) = match args.as_slice() {
+        [m, w] => (m, w, ""),
+        [m, w, p] => (m, w, p.as_str()),
+        _ => {
+            eprintln!("usage: dictate <models dir> <file.wav> [prompt]");
+            std::process::exit(2);
+        }
     };
     let pcm = read_wav(&std::fs::read(wav).expect("read the wav"));
     let dir = speech::ensure(models.as_ref(), curl).expect("fetch the model");
@@ -19,7 +23,7 @@ fn main() {
     let mut listener = Listener::load(&dir).expect("load");
     println!("loaded in {:?}", at.elapsed());
     let at = Instant::now();
-    let text = listener.transcribe(&pcm).expect("transcribe");
+    let text = listener.transcribe(&pcm, prompt).expect("transcribe");
     println!(
         "{:.1} s of sound in {:?}: {text}",
         pcm.len() as f32 / 16000.0,
