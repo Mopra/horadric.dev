@@ -21,9 +21,10 @@ holds only what is still not done.
 - **Compaction of old code chunks.** A code chunk of a file that changed
   or went is no longer an answer, but it stays in the store and is still
   embedded. A compaction should drop them.
-- **An over-long day loses its older passages for good.** The look back
-  hands Warriv the newest 160,000 characters of a day, and the next look
-  back starts after this one's mark, so the rest is never read.
+- **Nothing distills the day's dialogue any more.** Warriv's daily look
+  back handed it each day's passages to keep as notes; it went with the
+  rounds (2026-10-30). A note names passages as sources only when a
+  session chooses to.
 - **The yardstick has no validity questions.** Nothing measures recall
   of replaced notes, `history`, or "what is true now" against "what was
   said then".

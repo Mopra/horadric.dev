@@ -14,14 +14,9 @@ use std::time::{Instant, SystemTime};
 
 use horadric_core::chronicle::{self, Happened, Woken};
 use horadric_core::tasks::{self, Mark, Mode, Task};
-use horadric_core::warriv::{
-    self, Brief, Desk, Dried, Drive, Event, Heard, Kind, Looked, Picture, Review, Reviews, Said,
-    Wake, Why,
-};
-use horadric_core::{escalate, lookback, lore, runeword, ship, Agent, Phase};
+use horadric_core::warriv::{self, Brief, Desk, Dried, Drive, Event, Heard, Kind, Review, Reviews, Wake};
+use horadric_core::{escalate, ship, Agent, Phase};
 use horadric_hooks::tasks as file;
-use horadric_memory::distill;
-use horadric_memory::store::ChunkId;
 
 use super::{horadric_command, Board};
 use crate::app::{unix_now, App, Run};
@@ -131,83 +126,6 @@ impl Camp {
         handed.dedup();
         (handed, stuck)
     }
-}
-
-/// What the day's look back is given: the chronicle since the last one,
-/// read for what happened more than once, and the dialogue stored since,
-/// to distill into notes. `live` are the conversations of the project's
-/// Warriv and errand sessions running now, whose talk is left out too
-/// though the chronicle may not name them yet.
-fn looked(key: &str, live: Vec<String>) -> Looked {
-    let records = store::chronicle_all();
-    let now = unix_now();
-    let since = lookback::since(&records, key, now);
-    let mut skip = lookback::warriv_talk(&records, key);
-    skip.extend(live);
-    let attributes =
-        std::fs::read_to_string(Path::new(key).join(".gitattributes")).unwrap_or_default();
-    Looked {
-        day: lookback::day(&records, key, since),
-        patterns: lookback::patterns(&records, key, since, &attributes)
-            .iter()
-            .map(lookback::Pattern::line)
-            .collect(),
-        said: said(key, since, &skip, now),
-    }
-}
-
-/// Where the day's dialogue is written for the look back, and beside it
-/// how far the store was read: `.next` for the look back being told,
-/// `.mark` once it was.
-fn day_file(key: &str, ext: &str) -> Option<PathBuf> {
-    let dir = horadric_hooks::state_dir()?.join("memory").join("day");
-    Some(dir.join(lore::file_name(key)).with_extension(ext))
-}
-
-/// The look back was told, so the next one starts reading the store where
-/// this one stopped.
-fn day_read(key: &str) {
-    let (Some(next), Some(mark)) = (day_file(key, "next"), day_file(key, "mark")) else {
-        return;
-    };
-    if next.exists() {
-        if let Err(e) = std::fs::rename(&next, &mark) {
-            eprintln!("horadric: {} could not be kept: {e}", mark.display());
-        }
-    }
-}
-
-/// The project's dialogue the look back has not read, written to a file
-/// in the memory's folder for it to read: a day of it is too long for the
-/// prompt. None when there is none, or it could not be written.
-fn said(key: &str, since: u64, skip: &[String], now: u64) -> Option<Said> {
-    let memory = horadric_hooks::state_dir()?.join("memory");
-    let after = day_file(key, "mark")
-        .and_then(|m| std::fs::read_to_string(m).ok())
-        .and_then(|t| ChunkId::parse(t.trim()));
-    let day = distill::day(&memory, key, after, since, skip, now)
-        .map_err(|e| eprintln!("horadric: the day's dialogue could not be read: {e}"))
-        .ok()?;
-    let path = day_file(key, "md")?;
-    let next = day_file(key, "next")?;
-    if let Some(end) = day.end.filter(|e| Some(*e) != after) {
-        let kept = std::fs::create_dir_all(memory.join("day"))
-            .and_then(|()| std::fs::write(&next, end.to_string()));
-        if let Err(e) = kept {
-            eprintln!("horadric: {} could not be written: {e}", next.display());
-        }
-    }
-    if day.passages == 0 {
-        return None;
-    }
-    std::fs::write(&path, &day.text)
-        .map_err(|e| eprintln!("horadric: {} could not be written: {e}", path.display()))
-        .ok()?;
-    Some(Said {
-        path: path.display().to_string(),
-        passages: day.passages,
-        left_out: day.left_out,
-    })
 }
 
 /// The line for a wake given `events`.
@@ -323,11 +241,6 @@ impl App {
             self.ask_aims(key, b, stuck);
         }
         camp.desk.drive(drive.is_some());
-        camp.desk.hourly(unix_now());
-        camp.desk.look_back(|| {
-            let offset = crate::questlog::utc_offset(unix_now());
-            lookback::due(&store::chronicle_all(), key, unix_now(), offset)
-        });
         camp.desk.hear(now.clone(), camp.awake.is_some());
         let mut closed = self.wake(key, b, &mut camp, &now);
         let holding = camp.desk.holding(&now);
@@ -392,10 +305,7 @@ impl App {
                 None => false,
             },
             Wake::Go(events) => {
-                if events.iter().any(|e| e.kind == Kind::Round) {
-                    self.ship_rails(key);
-                }
-                let briefs = self.briefs(key, b, &events);
+                let briefs = self.briefs(b, &events);
                 match &mut camp.awake {
                     Some(a) => {
                         let Some(c) = self.consoles.get(&a.id) else {
@@ -559,11 +469,6 @@ impl App {
     /// A line of the wake's story, with its conversation once the session
     /// has one.
     fn record_wake(&self, key: &str, id: &str, mut what: Happened) {
-        if let Happened::WarrivWoke { events, .. } = &what {
-            if events.iter().any(|e| e.kind == Kind::LookBack) {
-                day_read(key);
-            }
-        }
         let known = self
             .shared
             .registry
@@ -586,21 +491,8 @@ impl App {
         });
     }
 
-    /// The conversations of the project's Warriv, reviewer and errand
-    /// sessions running now.
-    fn live_talk(&self, key: &str) -> Vec<String> {
-        let Ok(r) = self.shared.registry.lock() else {
-            return Vec::new();
-        };
-        r.all()
-            .filter(|s| warriv::is_warriv(&s.id) || runeword::is_errand(&s.id))
-            .filter(|s| folder_key(&s.cwd) == key)
-            .filter_map(|s| s.claude_session_id.clone())
-            .collect()
-    }
-
     /// Each event with its quest's notes and its session's last turn.
-    fn briefs(&self, key: &str, b: &Board, events: &[Event]) -> Vec<Brief> {
+    fn briefs(&self, b: &Board, events: &[Event]) -> Vec<Brief> {
         events
             .iter()
             .map(|e| {
@@ -620,63 +512,16 @@ impl App {
                         Kind::Dry => b.aims.clone(),
                         _ => Vec::new(),
                     },
-                    picture: (e.kind == Kind::Round).then(|| self.picture(key, b)),
-                    looked: (e.kind == Kind::LookBack).then(|| looked(key, self.live_talk(key))),
                 }
             })
             .collect()
     }
 
-    /// The whole project as a round sees it, beside the memory it reads
-    /// itself: the log, the aims, how `main` stands, the armed errands and
-    /// the stones it may cast.
-    fn picture(&self, key: &str, b: &Board) -> Picture {
-        let stones = self.stones_of(key);
-        let drive = self.drives.get(key);
-        let (checks, ship) = self.project_dir(key).map_or_else(Default::default, |main| {
-            let records = store::chronicle_all();
-            let log = reload_log();
-            let head = crate::worktree::head(&main).unwrap_or_default();
-            let landed = ship::landed_since(key, &records, ship::last(key, &log, &records));
-            let checked = ship::checked(key, &records, &head);
-            let held = drive.and_then(|d| d.held.as_ref());
-            let ship = drive
-                .filter(|_| stones.iter().any(|s| s.label == ship::STONE))
-                .and_then(|d| {
-                    let busy = ship::under_way(key, &log, &records, unix_now());
-                    let due = ship::due(landed, checked, held.is_some(), busy);
-                    ship::brief(due, d.ships_public, held)
-                });
-            (warriv::main_line(&head, checked, landed), ship)
-        });
-        let offset = crate::questlog::utc_offset(unix_now());
-        let errands = stones
-            .iter()
-            .filter_map(|s| {
-                let every = s.errand.as_ref()?.every;
-                let armed = self.armed(key, s)?;
-                Some(warriv::errand_line(&s.label, every, armed, offset))
-            })
-            .collect();
-        Picture {
-            tasks: b.tasks.clone(),
-            aims: b.aims.clone(),
-            checks,
-            errands,
-            stones: stones
-                .into_iter()
-                .filter(|s| s.source != runeword::Source::BuiltIn && s.steps.is_ok())
-                .map(|s| s.label)
-                .collect(),
-            ship,
-        }
-    }
-
-    /// The rails, read as a round is told in a project Warriv drives: a
-    /// reload of its build that rolled back since the last round holds
-    /// shipping and files a quest with the log, and a hold whose quest
-    /// landed on green is lifted.
-    fn ship_rails(&mut self, key: &str) {
+    /// The rails, read on each landing in a project Warriv drives: a
+    /// reload of its build that rolled back since they were last read
+    /// holds shipping and files a quest with the log, and a hold whose
+    /// quest landed on green is lifted.
+    pub(in crate::app) fn ship_rails(&mut self, key: &str) {
         let Some(main) = self.project_dir(key) else {
             return;
         };
@@ -765,23 +610,6 @@ impl App {
         }
     }
 
-    /// A landing in the project `key`, or with None the human leaving,
-    /// brings a round in each project it concerns that Warriv drives.
-    pub(in crate::app) fn round_for(&mut self, key: Option<&str>, why: Why) {
-        let now = unix_now();
-        let driven: Vec<String> = self
-            .drives
-            .keys()
-            .filter(|k| key.is_none_or(|key| key == k.as_str()))
-            .cloned()
-            .collect();
-        for k in driven {
-            let camp = self.tasks.warriv.camps.entry(k).or_default();
-            camp.desk.drive(true);
-            camp.desk.round(why, now);
-        }
-    }
-
     /// A fresh Warriv session in the project's main tree, with the events
     /// as its first prompt.
     fn start_warriv(
@@ -854,22 +682,13 @@ impl App {
         }
     }
 
-    /// The flags a Warriv session starts with: the folder of the day's
-    /// dialogue, which lies outside the project and is read without
-    /// asking only as a folder of its own, and the one command it may run
+    /// The flags a Warriv session starts with: the one command it may run
     /// without asking, before its system prompt, which ends that list.
     pub(super) fn warriv_args(&self, cwd: &Path) -> (Vec<String>, String) {
         let horadric = horadric_command();
         let key = folder_key(&cwd.to_string_lossy());
         let mut prompt = warriv::system_prompt(&horadric, file::rel(Path::new(&key)));
-        let mut tools = Vec::new();
-        if let Some(day) = day_file(&key, "md").and_then(|f| Some(f.parent()?.to_path_buf())) {
-            if std::fs::create_dir_all(&day).is_ok() {
-                tools.push("--add-dir".to_string());
-                tools.push(day.display().to_string());
-            }
-        }
-        tools.extend(memory_tools(&horadric));
+        let mut tools = memory_tools(&horadric);
         if self.drives.contains_key(&key) {
             prompt.push_str("\n\n");
             prompt.push_str(&warriv::driven_prompt(&horadric));
