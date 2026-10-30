@@ -1246,7 +1246,13 @@ unsafe extern "system" fn app_proc(
         // are handled rather than bounced.
         WM_HORADRIC_TRAY => {
             let mouse = lparam.0 as u32;
-            if mouse == WM_LBUTTONUP || mouse == WM_RBUTTONUP {
+            // Left click shows what is most wanted, the sessions; with
+            // none to show, it opens the menu as right click does.
+            if mouse == WM_LBUTTONUP {
+                if !with_app(App::show_all).unwrap_or(false) {
+                    tray_menu(hwnd);
+                }
+            } else if mouse == WM_RBUTTONUP {
                 tray_menu(hwnd);
             } else if mouse == NIN_BALLOONUSERCLICK {
                 match with_app(App::take_update_click).flatten() {
@@ -1475,11 +1481,18 @@ pub(crate) fn tiles_hidden() -> bool {
 }
 
 fn tray_menu(hwnd: HWND) {
-    let (recent, hotkeys, terminal, update, xp) = with_app(|app| {
+    let (recent, sessions, hotkeys, terminal, update, xp) = with_app(|app| {
         let xp = app.experience.lock().ok().and_then(|e| *e);
         app.count_experience();
+        let sessions = app
+            .shared
+            .registry
+            .lock()
+            .map(|r| (r.len(), r.waiting().len()))
+            .unwrap_or_default();
         (
             app.recent.clone(),
+            sessions,
             app.key_names(),
             !app.consoles.is_empty(),
             app.update.as_ref().map(|m| m.version.clone()),
@@ -1496,6 +1509,7 @@ fn tray_menu(hwnd: HWND) {
     let hotkeys = hotkeys.each_ref().map(Option::as_deref);
     let menu = tray::menu(
         &projects,
+        sessions,
         hotkeys,
         &driven,
         &logins,
@@ -1587,7 +1601,7 @@ fn tray_menu(hwnd: HWND) {
                         Kind::Done,
                         &format!("Joined {name}"),
                         "Dialling it over ssh. Its sessions show here once it answers; \
-                         the tray's Linux nodes menu says how the link stands.",
+                         Other PCs, Linux nodes in the tray menu says how the link stands.",
                     )
                 });
             }
@@ -8349,6 +8363,17 @@ impl App {
                 return;
             }
         }
+    }
+
+    /// The tray's left click: the terminal and every tile in front.
+    /// False when there is nothing to show.
+    fn show_all(&mut self) -> bool {
+        if self.consoles.is_empty() && self.clusters.is_empty() {
+            return false;
+        }
+        self.raise();
+        self.show_stage();
+        true
     }
 
     fn fit_stage(&mut self) {

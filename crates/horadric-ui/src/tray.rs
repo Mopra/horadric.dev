@@ -1,8 +1,11 @@
 //! The notification area icon: the one piece of Horadric that is always on
-//! screen, even with no sessions and so no tiles. Its menu starts sessions,
-//! opens the Settings window and quits the app. It holds actions, not
-//! settings, with one exception: Warriv drives, the go ahead to ship, which
-//! should be one click and in plain sight.
+//! screen, even with no sessions and so no tiles. Left click brings the
+//! sessions to the front; right click opens the menu, which starts
+//! sessions, opens the Settings window and quits the app. The menu is
+//! status first, then a few short groups, every rarer thing a submenu
+//! down (docs/plan/tray-and-settings.md). It holds actions, not settings,
+//! with one exception: Warriv drives, the go ahead to ship, which should
+//! be one click and in plain sight.
 
 use std::ffi::c_void;
 use std::time::Duration;
@@ -264,9 +267,11 @@ pub struct Driven {
 /// session, the catch-up and stopping Warriv, where they have one.
 /// `update` is a newer release's version, when a check found one. `xp` is
 /// the experience counted from git, None until the first count is back.
-/// `logins` are the accounts to switch between, a click away.
+/// `logins` are the accounts to switch between, a click away. `sessions`
+/// is how many there are and how many wait on you.
 pub fn menu(
     recent_projects: &[String],
+    sessions: (usize, usize),
     hotkeys: [Option<&str>; hotkey::COUNT],
     driven: &[Driven],
     logins: &[Logins],
@@ -293,47 +298,68 @@ pub fn menu(
     const CONTEXT: usize = 20;
     const RECENT: usize = 100;
     let mut items = Vec::new();
-    if let Some(xp) = xp {
-        items.push(Item::Disabled(experience::label(xp)));
-        items.push(Item::Separator);
+    // What the icon is for, status, comes first. The level rides along
+    // on the same line rather than taking one of its own.
+    let status = match sessions {
+        (0, _) => "No sessions".to_string(),
+        (1, 0) => "1 session".to_string(),
+        (t, 0) => format!("{t} sessions"),
+        (t, w) => format!("{t} session{}, {w} waiting", if t == 1 { "" } else { "s" }),
+    };
+    items.push(Item::Disabled(match xp {
+        Some(xp) => format!("{status}\tLevel {}", experience::level(xp)),
+        None => status,
+    }));
+    let with_key = |label: &str, key: Option<&str>| match key {
+        Some(key) => format!("{label}\t{key}"),
+        None => label.to_string(),
+    };
+    // A closed terminal leaves only its tiles, and a tile click shows one
+    // project. This is the way back without picking one.
+    if terminal {
+        items.push(Item::action(STAGE, "Show terminal"));
     }
-    items.push(Item::action(NEW, "New session\u{2026}"));
+    if sessions.1 > 0 {
+        items.push(Item::action(
+            NEXT,
+            with_key("Next waiting session", hotkeys[0]),
+        ));
+    }
+    items.push(Item::action(
+        LISTEN,
+        with_key("Stay a while and listen", hotkeys[1]),
+    ));
     items.push(Item::Separator);
-    if recent_projects.is_empty() {
-        items.push(Item::Disabled("No recent projects".into()));
-    }
+
     // A tab right aligns the rest.
     let label = |path: &str| {
         let (name, place) = recent::label(path);
         format!("{name}\t{place}")
     };
-    for (i, path) in recent_projects.iter().enumerate() {
-        items.push(Item::action(RECENT + i, label(path)));
-    }
-    // The way back to a project with no tiles left, whose menu went with
-    // its cluster.
-    let logs: Vec<Item> = recent_projects
+    let mut start: Vec<Item> = recent_projects
         .iter()
         .enumerate()
-        .map(|(i, path)| Item::action(QUEST_LOG + i, label(path)))
+        .map(|(i, path)| Item::action(RECENT + i, label(path)))
         .collect();
-    if !logs.is_empty() {
+    if !start.is_empty() {
+        start.push(Item::Separator);
+    }
+    start.push(Item::action(NEW, "Choose a folder\u{2026}"));
+    items.push(Item::Submenu("New session".into(), start));
+    // The way back to a project with no tiles left, whose menu went with
+    // its cluster.
+    if !recent_projects.is_empty() {
+        let mut logs: Vec<Item> = recent_projects
+            .iter()
+            .enumerate()
+            .map(|(i, path)| Item::action(QUEST_LOG + i, label(path)))
+            .collect();
+        logs.push(Item::Separator);
+        logs.push(Item::action(CONTEXT, "Context and cost of all\u{2026}"));
         items.push(Item::Submenu("Quest log".into(), logs));
-        items.push(Item::action(CONTEXT, "Context\u{2026}"));
     }
     items.push(Item::Separator);
-    let with_key = |label: &str, key: Option<&str>| match key {
-        Some(key) => format!("{label}\t{key}"),
-        None => label.to_string(),
-    };
-    items.push(Item::action(
-        NEXT,
-        with_key("Next waiting session", hotkeys[0]),
-    ));
-    items.push(Item::action(
-        LISTEN,
-        with_key("Stay a while and listen", hotkeys[1]),
-    ));
+
     if !driven.is_empty() {
         let mut lines: Vec<Item> = driven
             .iter()
@@ -341,7 +367,7 @@ pub fn menu(
             .map(|(i, d)| Item::Action {
                 id: DRIVE + i,
                 label: match d.drive.as_ref().and_then(|d| d.held.as_ref()) {
-                    Some(_) => format!("{}, shipping held", d.name),
+                    Some(_) => format!("{}\tshipping held", d.name),
                     None => d.name.clone(),
                 },
                 checked: d.drive.is_some(),
@@ -358,37 +384,34 @@ pub fn menu(
                 })
             })
             .collect();
+        lines.insert(0, Item::Disabled("Drives while you are away".into()));
         if !public.is_empty() {
             lines.push(Item::Separator);
-            lines.push(Item::Disabled("And ships public".into()));
+            lines.push(Item::Disabled("May ship a public release".into()));
             lines.extend(public);
         }
-        items.push(Item::Submenu("Warriv drives".into(), lines));
-        let stop = with_key("Stop Warriv", hotkeys[2]);
         if driven.iter().any(|d| d.drive.is_some()) {
-            items.push(Item::action(STOP, stop));
-        } else {
-            items.push(Item::Disabled(stop));
+            lines.push(Item::Separator);
+            lines.push(Item::action(STOP, with_key("Stop Warriv", hotkeys[2])));
         }
+        items.push(Item::Submenu("Warriv".into(), lines));
     }
-    // A closed terminal leaves only its tiles, and a tile click shows one
-    // project. This is the way back without picking one.
-    if terminal {
-        items.push(Item::action(STAGE, "Show terminal"));
-    } else {
-        items.push(Item::Disabled("Show terminal".into()));
-    }
-    items.push(Item::action(RAISE, "Bring tiles to front"));
-    items.push(Item::action(ARRANGE, "Fit terminal beside tiles"));
-    items.push(Item::action(TIDY, "Tidy up tiles"));
+    let mut arrange = vec![
+        Item::action(RAISE, "Bring tiles to front"),
+        Item::action(ARRANGE, "Fit terminal beside tiles"),
+        Item::action(TIDY, "Put tiles back in place"),
+    ];
     // A hidden tile has no menu of its own to bring it back by.
     if crate::app::tiles_hidden() {
-        items.push(Item::action(SHOW_HIDDEN, "Show hidden tiles"));
+        arrange.push(Item::action(SHOW_HIDDEN, "Show hidden tiles"));
     }
-    items.push(Item::Separator);
+    items.push(Item::Submenu("Arrange".into(), arrange));
     if !logins.is_empty() {
-        items.push(Item::Submenu("Account".into(), account_items(logins)));
+        items.push(Item::Submenu("Accounts".into(), account_items(logins)));
     }
+
+    // Every other PC, and every way of linking to one, under one line.
+    let mut machines = Vec::new();
     let mut brothers = Vec::new();
     let keeping = crate::app::keeping_tray();
     let standing = horadric_hooks::state_dir()
@@ -399,20 +422,24 @@ pub fn menu(
         .iter()
         .map(|(id, name)| (id.clone(), name.clone(), standing.controls(id)))
         .collect();
-    match crate::workos::user() {
-        Some(user) => {
-            items.push(Item::Disabled(format!("Signed in as {}", user.email)));
-            let listed = crate::brothers::listed();
-            items.push(Item::Submenu(
-                "Brothers".into(),
-                brother_items(listed.as_deref(), &joined, &crate::far_node::folded_ids()),
-            ));
-            brothers = listed.unwrap_or_default();
-            items.extend(crate::app::leaving_menu());
-            items.extend(keeping_items(&keeping));
-            items.push(Item::action(SIGN_OUT, "Sign out"));
+    let user = crate::workos::user();
+    if let Some(user) = &user {
+        machines.push(Item::Disabled(format!("Signed in as {}", user.email)));
+        machines.push(Item::Separator);
+        let listed = crate::brothers::listed();
+        machines.extend(brother_items(
+            listed.as_deref(),
+            &joined,
+            &crate::far_node::folded_ids(),
+        ));
+        brothers = listed.unwrap_or_default();
+        let mut handing: Vec<Item> = crate::app::leaving_menu().into_iter().collect();
+        handing.extend(keeping_items(&keeping));
+        if !handing.is_empty() {
+            machines.push(Item::Separator);
+            machines.extend(handing);
         }
-        None => items.push(Item::action(SIGN_IN, "Sign in\u{2026}")),
+        machines.push(Item::Separator);
     }
     let nodes = horadric_hooks::state_dir()
         .map(|d| crate::far_node::load(&d))
@@ -425,16 +452,24 @@ pub fn menu(
             (n.name.clone(), crate::far_node::status(&n.name), brother)
         })
         .collect();
-    items.push(Item::Submenu(
+    machines.push(Item::Submenu(
         "Linux nodes".into(),
         node_items(&lines, ADD_NODE),
     ));
+    machines.push(match user {
+        Some(_) => Item::action(SIGN_OUT, "Sign out"),
+        None => Item::action(SIGN_IN, "Sign in to find your other PCs\u{2026}"),
+    });
+    items.push(Item::Submenu("Other PCs".into(), machines));
+    items.push(Item::Separator);
+
     items.push(Item::action(SETTINGS, "Settings\u{2026}"));
     if let Some(version) = update {
         items.push(Item::action(UPDATE, format!("Update to {version}\u{2026}")));
     }
-    items.push(Item::Separator);
-    items.push(Item::action(END_ALL, "End all sessions"));
+    if sessions.0 > 0 {
+        items.push(Item::action(END_ALL, "End all sessions\u{2026}"));
+    }
     items.push(Item::action(QUIT, "Quit Horadric"));
 
     match menu::popup(&items)? {
