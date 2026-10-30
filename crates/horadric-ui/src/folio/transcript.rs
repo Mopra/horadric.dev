@@ -1246,7 +1246,7 @@ impl View {
         } else if chat.ended {
             let r = Rect::new(cx, y, cw, LINE_H);
             gfx.text_in(
-                "Claude ended. Close the Folio to start again.",
+                "The session ended. Close the Folio to start again.",
                 &gfx.line,
                 &r,
                 pal.dim,
@@ -1465,11 +1465,11 @@ impl View {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let title = format!("Ask Claude about {name}");
+        let title = format!("Ask about {name}");
         let r = Rect::new(area.x + 20.0, mid - 22.0, area.w - 40.0, 30.0);
         gfx.text_in(&title, &gfx.big, &r, pal.fg.with_alpha(0.85));
         let r = Rect::new(area.x + 20.0, mid + 10.0, area.w - 40.0, 20.0);
-        let note = "Experimental. A headless Claude Code session, drawn by Horadric.";
+        let note = "Experimental. Drawn by Horadric.";
         let mut centred = gfx.button.clone();
         if let Ok(f) = text_format(
             &self.shared.gpu,

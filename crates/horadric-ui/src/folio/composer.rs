@@ -82,9 +82,9 @@ const TOO_BIG: &str = "That image is too big to send whole (the most is 3.75 MB)
 /// History entries longer than this are not kept, so the file stays small.
 const HISTORY_ENTRY_MAX: usize = 20_000;
 
-const PLACEHOLDER: &str = "Message Claude. Shift+Enter for a new line, / for commands, @ for files";
+const PLACEHOLDER: &str = "Write to the Horadrim. Shift+Enter for a new line, / for commands, @ for files";
 const PLACEHOLDER_BUSY: &str =
-    "Claude is working. Enter steers it, Ctrl+Enter stops it and sends at once, Esc stops it";
+    "The Horadrim are at work. Enter steers them, Ctrl+Enter stops them and sends at once, Esc stops them";
 const PLACEHOLDER_ENDED: &str = "This session has ended.";
 
 /// What a click on the composer does.
@@ -374,7 +374,7 @@ fn write(chat: &mut Chat, line: &str) -> bool {
     match h.send_line(line) {
         Ok(()) => true,
         Err(e) => {
-            chat.error = Some(format!("Claude did not get that: {e}"));
+            chat.error = Some(format!("That did not go through: {e}"));
             false
         }
     }
@@ -521,7 +521,7 @@ fn to_terminal(chat: &mut Chat, command: &str) {
         }
         _ => {
             chat.input.notice = Some(format!(
-                "{command} runs in the terminal. Open it there once Claude rests."
+                "{command} runs in the terminal. Open it there once the work rests."
             ));
         }
     }

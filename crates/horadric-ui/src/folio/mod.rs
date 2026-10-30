@@ -419,7 +419,7 @@ fn start_host(id: &str, chat: &mut Chat, tag: &Tag, options: &Options) -> Result
         &tag_json,
         events,
     )
-    .map_err(|e| format!("Claude did not start: {e}"))?;
+    .map_err(|e| format!("The session did not start: {e}"))?;
     chat.hosted = Some(hosted);
     Ok(())
 }
@@ -740,10 +740,10 @@ fn start_failure(tail: &[String]) -> String {
         .take(3)
         .collect();
     if last.is_empty() {
-        return "Claude ended before it started.".to_string();
+        return "The session ended before it started.".to_string();
     }
     let said: Vec<&str> = last.into_iter().rev().collect();
-    format!("Claude ended before it started: {}", said.join(" "))
+    format!("The session ended before it started: {}", said.join(" "))
 }
 
 /// Redraws the conversation, and tells its pane when its header changed.
@@ -782,7 +782,7 @@ fn answer_with(id: &str, make: impl FnOnce(&mut Folio) -> Option<String>) {
         };
         if let Some(h) = &c.hosted {
             if let Err(e) = h.send_line(&line) {
-                c.error = Some(format!("The answer did not reach Claude: {e}"));
+                c.error = Some(format!("The answer did not arrive: {e}"));
             }
         }
         select::release_lapsed(c);
@@ -804,11 +804,11 @@ mod tests {
 
     #[test]
     fn start_failure_quotes_the_last_lines_of_stderr() {
-        assert_eq!(start_failure(&[]), "Claude ended before it started.");
+        assert_eq!(start_failure(&[]), "The session ended before it started.");
         let tail: Vec<String> = ["a", "", "b", "c", "d  "].map(String::from).to_vec();
         assert_eq!(
             start_failure(&tail),
-            "Claude ended before it started: b c d"
+            "The session ended before it started: b c d"
         );
     }
 

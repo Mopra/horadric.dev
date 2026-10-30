@@ -1107,7 +1107,7 @@ impl View {
             pal.fg,
         );
         gfx.text_in(
-            "Claude will run its hooks and MCP servers.",
+            "Its hooks and MCP servers will run.",
             &gfx.small,
             &Rect::new(inner, y + 42.0, iw, 18.0),
             pal.dim,
