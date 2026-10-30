@@ -13,6 +13,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-30 Round (01:35, human left, main at 998570d): v0.36.0 cut 00:07, installed reloaded 01:17, but df15717 and 998570d (chat titles, stage lamps) came after. Tree clean, no cargo, so cast "Ship Local". No aim, log done.
 - 2026-10-29 Round (23:21, human left, main at 4962f34): same picture as the hourly round a minute before, Folio files still uncommitted, so held "Ship Local". Nothing to do.
 - 2026-10-29 Round (23:21, hourly, main at 4962f34): many Folio commits since the ddc6c34 ship, but a live session is editing folio edits.rs, mod.rs and tools.rs this minute, so held "Ship Local". No aim, log done.
 - 2026-10-29 Round (22:21, hourly, main at abcd80d): Folio commits since the ddc6c34 ship, but a live session edited six Folio files minutes ago (composer, session.rs and more), so held "Ship Local". No aim, log done.
