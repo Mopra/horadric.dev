@@ -3311,6 +3311,20 @@ mod tests {
     }
 
     #[test]
+    fn a_subagents_own_transcript_reads_with_its_task_first() {
+        let jsonl = concat!(
+            r#"{"isSidechain":true,"type":"user","message":{"role":"user","content":"Find the hook events"}}"#,
+            "
+",
+            r#"{"isSidechain":true,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Found them"}]}}"#,
+        );
+        assert!(Folio::from_transcript(jsonl).blocks.is_empty());
+        let f = Folio::from_sidechain(jsonl);
+        assert!(matches!(&f.blocks[0], Block::Prompt(p) if p == "Find the hook events"));
+        assert_eq!(replies(&f), ["Found them"]);
+    }
+
+    #[test]
     fn a_transcript_keeps_images_and_subagents() {
         let f = Folio::from_transcript(TRANSCRIPT_IMAGE);
         assert!(matches!(&f.blocks[0], Block::Prompt(p) if p.starts_with("What color")));

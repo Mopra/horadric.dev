@@ -22,15 +22,28 @@ impl Folio {
         f
     }
 
+    /// A subagent's own transcript as a Folio, its task the first
+    /// prompt. Every line of it is marked as a sidechain, which a
+    /// session's replay leaves out.
+    pub fn from_sidechain(jsonl: &str) -> Folio {
+        let mut f = Folio::new();
+        f.replay(jsonl, true);
+        f
+    }
+
     /// Adds a transcript's conversation to the blocks and marks it as
     /// history ([`Folio::history`]). Its turns have no footers: the
     /// transcript keeps no per turn cost.
     pub fn replay_transcript(&mut self, jsonl: &str) {
+        self.replay(jsonl, false);
+    }
+
+    fn replay(&mut self, jsonl: &str, sidechain: bool) {
         for line in jsonl.lines() {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
-            if v["isSidechain"] == true {
+            if v["isSidechain"] == true && !sidechain {
                 continue;
             }
             match v["type"].as_str().unwrap_or_default() {

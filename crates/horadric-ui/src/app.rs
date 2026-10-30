@@ -359,6 +359,8 @@ const VIEW: &str = "view:";
 pub(crate) const WEB: &str = "web:";
 /// The start of an Arcane Sanctuary's id, before its project key.
 const SKY: &str = "sky:";
+/// The start of a hireling's pane's id, before its project key.
+const HIRE: &str = "hire:";
 pub(crate) const MARGIN_DIP: i32 = 12;
 pub(crate) const GAP_DIP: i32 = 12;
 /// The narrowest the stage gets when it gives way to a new column.
@@ -425,6 +427,11 @@ pub(crate) enum Input {
     Sanctuary,
     /// A sanctuary's cross: close the one of the project with this key.
     CloseSky(String),
+    /// A row of a pane's retinue: show the conversation of the hireling
+    /// with the second id, of the session with the first, beside it.
+    OpenHireling(String, String),
+    /// A hireling's pane's cross or Esc, by its Folio's id.
+    CloseWatch(String),
     /// The chat button under a project's tiles: a new Folio, a headless
     /// Claude drawn as a chat, in the project with this key.
     Folio(String),
@@ -918,6 +925,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             web_windows: HashMap::new(),
             web_rects: page_windows,
             skies: HashMap::new(),
+            watches: HashMap::new(),
             folios: HashMap::new(),
             to_folio: HashSet::new(),
             folio_args: HashMap::new(),
@@ -3505,6 +3513,9 @@ struct App {
     /// Arcane Sanctuaries, at most one per project, by project key. What
     /// they show is `sanctuary`'s and outlives the pane.
     skies: HashMap<String, Arc<Console>>,
+    /// A hireling's conversation, at most one per project, by project key:
+    /// a read only Folio beside the session that sent it.
+    watches: HashMap<String, Arc<Console>>,
     /// Folios, the experimental headless chats, by session id: each a
     /// session with a tile like a terminal one, its pane's console with no
     /// program. The session behind each is `folio`'s.
@@ -3963,6 +3974,7 @@ impl App {
             .values()
             .chain(self.views.values())
             .chain(self.folios.values())
+            .chain(self.watches.values())
             .chain(self.far.consoles.values())
             .find(|c| c.serial == serial)
     }
@@ -3974,6 +3986,7 @@ impl App {
             .or_else(|| self.views.values().find(|v| v.id == id))
             .or_else(|| self.webs.values().find(|v| v.id == id))
             .or_else(|| self.skies.values().find(|v| v.id == id))
+            .or_else(|| self.watches.values().find(|v| v.id == id))
             .or_else(|| self.folios.get(id))
             .or_else(|| self.far.consoles.get(id))
     }
@@ -7023,6 +7036,9 @@ impl App {
         if let Some(sky) = self.skies.get(key) {
             ids.push(sky.id.clone());
         }
+        if let Some(watch) = self.watches.get(key) {
+            ids.push(watch.id.clone());
+        }
         ids
     }
 
@@ -7490,6 +7506,7 @@ impl App {
             .lock()
             .ok()
             .and_then(|r| r.get(id).map(|s| s.label().to_string()))
+            .or_else(|| crate::folio::watch_title(id))
             .or_else(|| {
                 let path = self.console_of(id)?.path()?;
                 Some(path.file_name()?.to_string_lossy().into_owned())
@@ -7993,6 +8010,45 @@ impl App {
     fn close_folio(&mut self, id: &str) {
         self.forget(id);
         self.reconcile(false);
+        self.sync_stage();
+    }
+
+    /// Shows hireling `agent` of session `session` beside it on the stage,
+    /// its conversation read from its transcript as it writes it. It
+    /// takes the place of the hireling shown in the project before.
+    fn open_hireling(&mut self, session: &str, agent: &str) {
+        let found = self.shared.registry.lock().ok().and_then(|r| {
+            let s = r.get(session)?;
+            let h = s.band.hirelings.iter().find(|h| h.id == agent)?;
+            let path = s.band.transcript_of(h)?;
+            let title = match h.task.as_str() {
+                "" => format!("{} \u{203a} {}", s.label(), h.kind),
+                task => format!("{} \u{203a} {}: {task}", s.label(), h.kind),
+            };
+            Some((project_key(s), PathBuf::from(&s.cwd), path, title))
+        });
+        // The stage names the pane from the watch when it fills.
+        let Some((key, dir, path, title)) = found else {
+            return;
+        };
+        let id = format!("{HIRE}{key}");
+        crate::folio::watch(&id, &key, &dir, Path::new(&path), &title);
+        if !self.watches.contains_key(&key) {
+            let serial = self.next_serial;
+            self.next_serial += 1;
+            self.watches
+                .insert(key.clone(), Console::folio(id.clone(), serial, id.clone()));
+        }
+        if self.fill_stage(&key) {
+            if let Some(stage) = &self.stage {
+                stage.focus_session(&id);
+            }
+        }
+    }
+
+    fn close_watch(&mut self, id: &str) {
+        self.watches.retain(|_, w| w.id != id);
+        crate::folio::close(id);
         self.sync_stage();
     }
 
@@ -9030,6 +9086,8 @@ impl App {
                     }
                 }
                 Input::CloseSky(key) => self.close_sky(&key),
+                Input::OpenHireling(session, agent) => self.open_hireling(&session, &agent),
+                Input::CloseWatch(id) => self.close_watch(&id),
                 Input::Folio(key) => self.open_folio(&key),
                 Input::CloseFolio(id) => self.close_folio(&id),
                 Input::Limits(limits) => self.hear_limits(&limits),

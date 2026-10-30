@@ -39,6 +39,7 @@ mod rich;
 mod select;
 mod transcript;
 mod view;
+mod watch;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -67,6 +68,7 @@ use crate::folio_look as look;
 
 pub use composer::{before_caret, dictated, dictation};
 pub use view::{attach, char, key, keyboard_moved, place, place_bar, register_class, wheel};
+pub use watch::{is_watch, watch, watch_detail, watch_title};
 /// Posted to the pane a Folio is in when what its header says may have
 /// changed.
 pub const WM_FOLIO_REFRESH: u32 = WM_USER + 9;
@@ -153,6 +155,8 @@ struct Chat {
     loading: Option<Arc<Mutex<Option<Folio>>>>,
     /// The transcript's own state and what it keeps between frames.
     tr: transcript::Ui,
+    /// A hireling's conversation, read only, rather than a session.
+    watch: Option<watch::Watch>,
 }
 
 /// What the app hears of a Folio, for its tile's phase.
@@ -205,6 +209,7 @@ impl Chat {
             loading: None,
             to_terminal: false,
             tr: transcript::Ui::default(),
+            watch: None,
         }
     }
 
@@ -603,6 +608,10 @@ unsafe extern "system" fn router_proc(
 ) -> LRESULT {
     if msg == WM_FOLIO_LINES {
         drain();
+        return LRESULT(0);
+    }
+    if msg == WM_TIMER && wparam.0 == watch::WATCH_TIMER {
+        watch::tick(hwnd);
         return LRESULT(0);
     }
     if msg == WM_TIMER && wparam.0 == SAVE_TIMER {

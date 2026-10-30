@@ -1021,6 +1021,16 @@ impl Target {
         }
     }
 
+    /// Draws a pane's retinue, a row per hireling. `Err` means the target
+    /// must be recreated.
+    pub fn draw_retinue(&self, gpu: &Gpu, scene: &RetinueScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.painter(&self.rt).retinue(gpu, scene);
+            self.rt.EndDraw(None, None)
+        }
+    }
+
     /// Fades the window into its plate at the edges the column cuts it
     /// at, so a tile scrolling past one dissolves rather than is sliced.
     unsafe fn fade_cut(&self) {
@@ -1059,6 +1069,33 @@ fn brother_ink(name: &str) -> Color {
 }
 
 /// Draws on the window or on its kept layer, which share their brushes.
+/// One hireling's row in a pane's retinue, made ready to draw.
+pub struct RetinueRow {
+    pub rune: usize,
+    pub kind: String,
+    pub task: String,
+    pub doing: String,
+    pub ran: String,
+    pub tokens: String,
+    pub lot: horadric_core::hireling::Lot,
+    /// How long it has run, for its rune's carving.
+    pub age: Duration,
+}
+
+/// A pane's retinue: its rows, the one under the cursor, and its size in
+/// DIPs.
+pub struct RetinueScene<'a> {
+    pub rows: &'a [RetinueRow],
+    pub hot: Option<usize>,
+    pub size: (f32, f32),
+    pub accent: Color,
+}
+
+/// A row of the retinue, in DIPs.
+pub const RETINUE_ROW_H: f32 = 20.0;
+/// Above the first row, where the line that parts it from the grid runs.
+pub const RETINUE_TOP: f32 = 5.0;
+
 struct Painter<'a> {
     rt: &'a ID2D1RenderTarget,
     brush: &'a ID2D1SolidColorBrush,
@@ -2826,6 +2863,65 @@ impl Painter<'_> {
             self.rt
                 .DrawLine(place(seg[0]), place(end), self.brush, RUNE_STROKE, None);
             left -= l;
+        }
+    }
+
+    /// The retinue: under a hairline, a row per hireling with its rune,
+    /// its kind in the project's colour, what it was asked, and at the
+    /// right what it is doing, how long it ran and its tokens. Waiting
+    /// and failed ones take their phase's colour.
+    unsafe fn retinue(&self, gpu: &Gpu, scene: &RetinueScene) {
+        use horadric_core::hireling::Lot;
+        let (w, h) = scene.size;
+        let p = theme::palette();
+        self.rt.Clear(Some(&color(p.term_bg)));
+        self.fill_rounded(&Rect::new(8.0, 1.0, w - 16.0, 1.0), 0.0, p.term_fg.with_alpha(0.12));
+        let dim = p.term_fg.with_alpha(0.55);
+        for (i, row) in scene.rows.iter().enumerate() {
+            let y = RETINUE_TOP + i as f32 * RETINUE_ROW_H;
+            if y > h {
+                break;
+            }
+            let r = Rect::new(4.0, y, w - 8.0, RETINUE_ROW_H);
+            if scene.hot == Some(i) {
+                self.fill_rounded(&r, 4.0, p.term_fg.with_alpha(0.07));
+            }
+            let (ink, drawn) = match row.lot {
+                Lot::Working => {
+                    let carve = motion::cycle(row.age, RUNE_CARVE);
+                    (scene.accent, (carve * 1.6).min(1.0))
+                }
+                Lot::Waiting => (theme::waiting(), 1.0),
+                Lot::Done => (theme::done().with_alpha(0.7), 1.0),
+                Lot::Failed => (theme::error(), 1.0),
+            };
+            let mid = y + RETINUE_ROW_H / 2.0;
+            self.rune(row.rune, (16.0, mid), 10.0, ink, drawn);
+            let text_r = |x: f32, w: f32| Rect::new(x, y + 2.0, w.max(0.0), RETINUE_ROW_H - 4.0);
+            let kind_ink = match row.lot {
+                Lot::Working => scene.accent,
+                Lot::Done => p.term_fg.with_alpha(0.6),
+                _ => ink,
+            };
+            let kind_w = self.measure(gpu, &gpu.small, &row.kind).min(120.0);
+            self.text(&gpu.small, kind_ink, &row.kind, text_r(30.0, kind_w + 2.0));
+            // The right hand columns, from the edge in.
+            let mut right = w - 12.0;
+            for (text, width) in [(&row.tokens, 40.0), (&row.ran, 56.0)] {
+                if !text.is_empty() {
+                    self.text_tabular(gpu, &gpu.small_right, dim, text, text_r(right - width, width));
+                }
+                right -= width + 6.0;
+            }
+            let doing_w = self.measure(gpu, &gpu.small, &row.doing).min(140.0);
+            let doing_ink = match row.lot {
+                Lot::Working | Lot::Done => p.term_fg.with_alpha(0.8),
+                _ => ink,
+            };
+            let doing_x = right - doing_w;
+            self.text(&gpu.small_right, doing_ink, &row.doing, text_r(doing_x, doing_w + 2.0));
+            let task_x = 30.0 + kind_w + 10.0;
+            self.text(&gpu.small, dim, &row.task, text_r(task_x, doing_x - task_x - 12.0));
         }
     }
 

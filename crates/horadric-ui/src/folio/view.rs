@@ -283,7 +283,7 @@ pub(super) fn banish(key: &str) {
 
 /// A key that makes a character, from the pane: the composer's.
 pub fn char(key: &str, c: char, mods: Mods) {
-    if select::char(key, c, mods) {
+    if select::char(key, c, mods) || super::is_watch(key) {
         return;
     }
     composer::on_char(key, c, mods);
@@ -309,6 +309,8 @@ pub fn key(key: &str, vk: u16, mods: Mods) -> bool {
             scroll_by(key, page);
             true
         }
+        // A hireling's conversation has no composer to type into.
+        _ if super::is_watch(key) => false,
         _ => return composer::on_key(key, vk, mods),
     };
     if done {
@@ -957,7 +959,11 @@ impl View {
         // The composer first, since the conversation ends above it.
         // Its hits go last, so they win over a block's under the composer.
         let mut composer_hits: Vec<(Rect, Hit)> = Vec::new();
-        let composer = self.composer(gfx, chat, &pal, cx, cw, h, &mut composer_hits);
+        let composer = if chat.watch.is_some() {
+            Rect::new(cx, h, cw, 0.0)
+        } else {
+            self.composer(gfx, chat, &pal, cx, cw, h, &mut composer_hits)
+        };
         let area = Rect::new(0.0, 0.0, w, (composer.y - 10.0).max(0.0));
         self.transcript(gfx, &pal, chat, cx, cw, &area, &mut hits);
         // What scrolls up fades out into the glass's top edge, not cut.
@@ -977,7 +983,9 @@ impl View {
         if chat.pending.is_some() {
             self.trust_card(gfx, &pal, chat, cx, cw, &area, &mut composer_hits);
         }
-        self.composer_menu(gfx, chat, &pal, cx, cw, &mut composer_hits);
+        if chat.watch.is_none() {
+            self.composer_menu(gfx, chat, &pal, cx, cw, &mut composer_hits);
+        }
 
         hits.extend(composer_hits);
         *self.hits.borrow_mut() = hits;

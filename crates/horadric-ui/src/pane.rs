@@ -96,6 +96,7 @@ use crate::links::{self, Target};
 use crate::motion::{self, REVEAL, SPOTLIGHT};
 use crate::new_tab;
 use crate::paste::{self, Source};
+use crate::retinue::{self, Retinue};
 use crate::sanctuary;
 use crate::sparks::{self, Fx, Glass, Seen};
 use crate::suggest::{self, Suggest};
@@ -228,6 +229,8 @@ pub struct Pane {
     pub hwnd: HWND,
     console: Arc<Console>,
     shared: Rc<Shared>,
+    /// A session's hirelings, a row each under its grid.
+    retinue: RefCell<Option<Box<Retinue>>>,
     /// The session's name, for the header.
     name: RefCell<String>,
     lifted: Cell<bool>,
@@ -366,6 +369,7 @@ impl Pane {
             hwnd: HWND::default(),
             console,
             shared,
+            retinue: RefCell::new(None),
             name: RefCell::new(name),
             lifted: Cell::new(false),
             held: Cell::new(false),
@@ -410,7 +414,10 @@ impl Pane {
         });
         // A browser pane's page is a window inside it, which its own
         // drawing must leave alone.
-        let clip = if pane.console.web.is_some() || pane.console.folio.is_some() {
+        let clip = if pane.console.web.is_some()
+            || pane.console.folio.is_some()
+            || pane.is_session()
+        {
             WS_CLIPCHILDREN
         } else {
             WINDOW_STYLE(0)
@@ -437,6 +444,12 @@ impl Pane {
         }
         if let Some(key) = &pane.console.folio {
             folio::attach(key, &pane.shared, pane.hwnd);
+        }
+        if pane.is_session() {
+            match Retinue::create(Rc::clone(&pane.shared), &pane.console.id, pane.hwnd) {
+                Ok(r) => *pane.retinue.borrow_mut() = Some(r),
+                Err(e) => eprintln!("horadric: no retinue for a pane: {e}"),
+            }
         }
         if let Some(key) = &pane.console.web {
             let (bounds, zoom) = pane.page_place();
@@ -970,12 +983,34 @@ impl Pane {
         let scale = self.dpi_now() as f32 / 96.0;
         let cell = self.cell();
         let (w, h) = glyphs::grid_room(r.right as f32 / scale, r.bottom as f32 / scale);
+        let h = h - self.place_retinue();
         let cols = (w / cell.w).floor().max(2.0);
         let rows = (h / cell.h).floor().max(1.0);
         self.console.resize(GridSize {
             cols: cols as u16,
             rows: rows as u16,
         });
+    }
+
+    /// Lays the retinue along the bottom of the glass, and says how much
+    /// of the grid's height it takes, in DIPs.
+    fn place_retinue(&self) -> f32 {
+        let slot = self.retinue.borrow();
+        let Some(r) = slot.as_ref() else {
+            return 0.0;
+        };
+        let h = retinue::height(r.rows());
+        let [left, _, right, bottom] = self.glass();
+        let scale = self.dpi_now() as f32 / 96.0;
+        let px = |v: f32| (v * scale).round() as i32;
+        r.set_accent(self.accent.get());
+        r.place([
+            px(left + 1.0),
+            px(bottom - 1.0 - h),
+            px(right - 1.0),
+            px(bottom - 1.0),
+        ]);
+        h
     }
 
     fn paint(&self) {
@@ -1050,7 +1085,9 @@ impl Pane {
         if let Some(key) = &self.console.sky {
             detail = sanctuary::detail(key);
         }
-        if let Some(key) = &self.console.folio {
+        if let Some(key) = self.console.folio.as_deref().filter(|k| folio::is_watch(k)) {
+            detail = folio::watch_detail(key);
+        } else if let Some(key) = &self.console.folio {
             // The Folio's settings stand where the detail would, and its
             // runes already say whether Claude works.
             detail = String::new();
@@ -1833,6 +1870,13 @@ impl Pane {
         if mods.alt && vk == VK_F4 {
             return false;
         }
+        if let Some(key) = self.console.folio.as_deref().filter(|k| folio::is_watch(k)) {
+            if vk == VK_ESCAPE && !mods.ctrl && !mods.alt && !mods.shift {
+                self.close();
+                return true;
+            }
+            return folio::key(key, vk.0, mods);
+        }
         if let Some(key) = &self.console.folio {
             return folio::key(key, vk.0, mods);
         }
@@ -1920,6 +1964,10 @@ impl Pane {
 
     /// The cross: a file view or a browser pane closes, a session ends.
     fn close(&self) {
+        if let Some(key) = self.console.folio.as_deref().filter(|k| folio::is_watch(k)) {
+            app::push(Input::CloseWatch(key.to_string()));
+            return;
+        }
         if let Some(key) = &self.console.folio {
             app::push(Input::CloseFolio(key.clone()));
             return;
@@ -3201,6 +3249,13 @@ impl Pane {
                 Some(LRESULT(0))
             }
             folio::WM_FOLIO_REFRESH => {
+                self.invalidate();
+                Some(LRESULT(0))
+            }
+            retinue::WM_RETINUE_ROWS => {
+                if !self.held.get() {
+                    self.fit_grid();
+                }
                 self.invalidate();
                 Some(LRESULT(0))
             }

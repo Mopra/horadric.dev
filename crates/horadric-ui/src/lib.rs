@@ -190,6 +190,8 @@ mod recent;
 #[cfg(windows)]
 mod render;
 #[cfg(windows)]
+mod retinue;
+#[cfg(windows)]
 pub mod sanctuary;
 #[cfg(windows)]
 mod settings;
