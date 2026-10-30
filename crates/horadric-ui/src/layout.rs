@@ -1497,11 +1497,10 @@ const CAPTION_KEY_H: f32 = 28.0;
 /// Town Portal's key is wider than the window's: art and a word.
 const PORTAL_KEY_W: f32 = 112.0;
 
-/// The geometry of the stage's caption: the project's lamp and title on
-/// the left, Town Portal's key and the window's three keys on the right.
+/// The geometry of the stage's caption: the project's title on the left,
+/// Town Portal's key and the window's three keys on the right.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptionLayout {
-    pub lamp: (f32, f32),
     pub title: Rect,
     pub portal: Rect,
     pub min: Rect,
@@ -1548,10 +1547,8 @@ pub fn caption(width: f32) -> CaptionLayout {
         PORTAL_KEY_W,
         CAPTION_KEY_H,
     );
-    let lamp = (20.0, CAPTION_H / 2.0 + 1.0);
-    let x = 32.0;
+    let x = 16.0;
     CaptionLayout {
-        lamp,
         title: Rect::new(x, 1.0, (portal.x - 16.0 - x).max(0.0), CAPTION_H),
         portal,
         min,

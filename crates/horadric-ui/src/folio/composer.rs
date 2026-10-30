@@ -183,9 +183,6 @@ pub(super) struct Input {
     dirty: bool,
     /// Where the box's top was last drawn, for the menu above it.
     top: f32,
-    /// Where the header's button was last drawn, to open its menus under
-    /// it.
-    anchor: f32,
     /// Where the open menu was last drawn, for the wheel over it.
     pub(super) menu_at: Option<Rect>,
     ime: Option<[i32; 4]>,
@@ -215,7 +212,6 @@ impl Input {
             restored: false,
             dirty: false,
             top: 0.0,
-            anchor: 0.0,
             menu_at: None,
             ime: None,
         }
@@ -1474,8 +1470,6 @@ impl View {
         };
         gfx.text_in("\u{E712}", &gfx.icon, &b, ink);
         hits.push((b, Hit::Input(Act::Settings)));
-        // The menus open on the glass, so the anchor is in its DIPs.
-        chat.input.anchor = b.x + chat.bar_shift;
     }
 
     /// The notice and the queued prompts, stacked up from `bottom`.
@@ -1581,13 +1575,16 @@ impl View {
         let gpu = &self.shared.gpu;
         let picker = menu.kind.is_picker();
         let (x, w) = if picker {
-            let a = chat.input.anchor;
-            let w = match menu.kind {
+            // Down from the top right of the conversation, under the
+            // header's button.
+            let glass_w = gfx.rt.GetSize().width;
+            let w: f32 = match menu.kind {
                 MenuKind::Model | MenuKind::Tasks => 340.0,
                 MenuKind::Settings => 280.0,
                 _ => 220.0,
             };
-            (a.min(cx + cw - w).max(cx), w.min(cw))
+            let w = w.min(glass_w - 16.0);
+            ((glass_w - w - 8.0).max(8.0), w)
         } else {
             (cx, cw)
         };

@@ -190,7 +190,6 @@ struct Shown {
     frame: frame::Frame,
     name: String,
     detail: String,
-    phase: Option<Color>,
     accent: Color,
     active: bool,
     lifted: bool,
@@ -933,9 +932,6 @@ impl Pane {
                     .map(|s| (Some(s.phase.clone()), s.activity.last().copied()))
             })
             .unwrap_or_default();
-        let phase = session_phase
-            .as_ref()
-            .and_then(|p| (theme::edge_strength(p) > 0.0).then(|| theme::phase_color(p)));
         let edit = self.address.borrow().clone();
         let shown = match &edit {
             Some(f) => f.text.clone(),
@@ -994,7 +990,6 @@ impl Pane {
         let header = Header {
             name: &name,
             detail: &detail,
-            phase,
             accent: self.accent.get(),
             active: self.focused.get(),
             lifted: self.lifted.get(),
@@ -1076,7 +1071,6 @@ impl Pane {
             frame,
             name: name.clone(),
             detail: detail.clone(),
-            phase,
             accent: header.accent,
             active: header.active,
             lifted: header.lifted,

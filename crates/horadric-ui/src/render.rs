@@ -544,7 +544,6 @@ pub struct CaptionScene<'a> {
     pub project: &'a str,
     /// The session with the keyboard and what its agent is doing.
     pub detail: &'a str,
-    pub accent: Color,
     /// The window is in front. Behind, the caption goes quiet.
     pub active: bool,
     pub maximized: bool,
@@ -2065,7 +2064,6 @@ impl Painter<'_> {
 
         let l = scene.layout;
         let quiet = |c: Color| if scene.active { c } else { c.fade(0.6) };
-        self.led(l.lamp.0, l.lamp.1, quiet(scene.accent));
         let name_w = self
             .layout(gpu, &gpu.name, scene.project, l.title)
             .map(|t| text_size(&t).0.ceil())
@@ -2073,7 +2071,8 @@ impl Painter<'_> {
             .min(l.title.w);
         let name = Rect::new(l.title.x, l.title.y, name_w, l.title.h);
         self.text(&gpu.name, quiet(theme::text()), scene.project, name);
-        if !scene.detail.is_empty() {
+        // A session named after the folder says nothing the name does not.
+        if !scene.detail.is_empty() && scene.detail != scene.project {
             let x = name.right() + 12.0;
             let rest = Rect::new(x, l.title.y, l.title.right() - x, l.title.h);
             self.text(&gpu.small, quiet(theme::text_dim()), scene.detail, rest);

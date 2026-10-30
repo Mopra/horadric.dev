@@ -292,7 +292,6 @@ impl Caption {
             seam: self.seam,
             project: &project,
             detail: &detail,
-            accent: self.accent.get(),
             active: self.active.get(),
             maximized: self.maximized.get(),
             hot: self.hot.get(),

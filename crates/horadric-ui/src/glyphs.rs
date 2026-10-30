@@ -67,7 +67,7 @@ const PANE_RADIUS: f32 = SCREEN_RADIUS + BEZEL;
 pub const HEADER_H: f32 = 26.0;
 
 /// Where a header's name starts, after its lamp.
-pub const NAME_LEFT: f32 = BEZEL + 16.0;
+pub const NAME_LEFT: f32 = BEZEL + 4.0;
 
 /// How wide `name` is printed in a header, never more than `max`.
 pub fn name_width(gpu: &Gpu, name: &str, max: f32) -> f32 {
@@ -119,9 +119,6 @@ pub struct Header<'a> {
     pub name: &'a str,
     /// What the agent says it is doing, dimmer, after the name.
     pub detail: &'a str,
-    /// The session's phase, as the colour of its dot and of the line along
-    /// the top. None for a session doing nothing, which gets neither.
-    pub phase: Option<Color>,
     /// The project's colour, under the header of the pane with the keyboard.
     pub accent: Color,
     /// Has the keyboard.
@@ -2051,8 +2048,7 @@ impl GridTarget {
         self.rt.PopAxisAlignedClip();
     }
 
-    /// The session's name printed on the plate above the glass, after its
-    /// lamp: lit in its phase's colour, dark glass when it does nothing.
+    /// The session's name printed on the plate above the glass.
     unsafe fn header(&self, gpu: &Gpu, h: &Header) {
         let width = self.rt.GetSize().width;
         if h.lifted {
@@ -2080,30 +2076,6 @@ impl GridTarget {
             );
             self.rt.PopAxisAlignedClip();
         }
-        let (lx, ly) = (BEZEL + 6.0, HEADER_H / 2.0);
-        let dot = |r: f32, c: Color| {
-            self.brush.SetColor(&render::color(c));
-            self.rt.FillEllipse(
-                &D2D1_ELLIPSE {
-                    point: Vector2 { X: lx, Y: ly },
-                    radiusX: r,
-                    radiusY: r,
-                },
-                &self.brush,
-            );
-        };
-        match h.phase {
-            Some(c) => {
-                dot(6.0, c.with_alpha(0.12));
-                dot(4.0, c.with_alpha(0.25));
-                dot(2.5, c.mix(Color::rgb(0xFFFFFF), 0.3));
-            }
-            None => {
-                dot(3.5, Color::rgb(0).with_alpha(0.55));
-                dot(2.5, theme::lamp_off());
-            }
-        }
-
         let left = NAME_LEFT;
         let at = header_buttons(width, h.stash, h.zoom.is_some(), h.close);
         let mut right = if at == Buttons::default() {
