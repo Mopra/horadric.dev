@@ -1727,7 +1727,6 @@ fn tile_menu(id: &str) {
     const OPEN: usize = 1;
     const END: usize = 2;
     const RENAME: usize = 3;
-    const PICK: usize = 5;
     const STOP_RUNEWORD: usize = 6;
     const FOUND: usize = 7;
     const TAKE_OVER: usize = 8;
@@ -1841,10 +1840,6 @@ fn tile_menu(id: &str) {
         items.insert(0, Item::action(FOUND, "Found a project\u{2026}"));
         items.insert(1, Item::Separator);
     }
-    if with_app(|app| app.can_pick(id)) == Some(true) {
-        items.insert(0, Item::action(PICK, "Pick this tomb\u{2026}"));
-        items.insert(1, Item::Separator);
-    }
     if let (Some(hand), Some(at)) = (
         with_app(|app| app.handoff_menu(id)).flatten(),
         items.iter().rposition(|i| matches!(i, Item::Separator)),
@@ -1913,7 +1908,6 @@ fn tile_menu(id: &str) {
             with_app(|app| app.end(id));
         }
         Some(RENAME) => rename_session(id),
-        Some(PICK) => runner::tomb::ask_pick(id),
         Some(FOUND) => found_project(id),
         Some(STOP_RUNEWORD) => {
             with_app(|app| app.stop_runeword(id));
@@ -3817,9 +3811,6 @@ impl App {
                         }
                         Command::Reload(r) => self.begin_reload(r),
                         Command::Tasks(t) => {
-                            if let Some(tomb) = &t.tomb {
-                                self.tomb_reported(tomb, t.why.as_deref());
-                            }
                             if let (Some(quest), Some(tell)) = (&t.quest, &t.tell) {
                                 self.hear_tell(&t.dir, quest, tell, t.by.as_deref());
                             }
@@ -8653,8 +8644,7 @@ impl App {
 
     /// The chronicle's record of a turn that ended, when the session works
     /// a quest of its project's list: what it said last, and its
-    /// conversation, which the quest log reads or carries on later. Kept
-    /// under the session's own id, so each tomb's word stays its own.
+    /// conversation, which the quest log reads or carries on later.
     fn quest_turn(&self, s: &Session, project: &str, now: u64) -> Option<chronicle::Record> {
         let boards = self.shared.boards.borrow();
         let task = chronicle::worked_by(&boards.get(project)?.tasks, &s.id)?;

@@ -4,7 +4,7 @@
 //! A project works in one of two modes. In trunk mode, the default, every
 //! session shares the main working tree and commits on what it has checked
 //! out, and a worktree is made only when asked for: a session started in
-//! one, tombs, or task items run side by side. With a branch per session,
+//! one, or task items run side by side. With a branch per session,
 //! each new session in a repository gets a branch and a folder of its own
 //! beside the repository, so sessions never edit the same files under each
 //! other. Gitignored files do not come along to a new worktree, so a

@@ -7,10 +7,10 @@
 //! diagram the window draws.
 //!
 //! A quest is known by its holder, the `@id` the list gives it, which is
-//! the id of the session that worked it (or of its batch of tombs). A quest
-//! added by a session working another quest is that quest's child; one
-//! added by any other session, or by the human, grows from the trunk, the
-//! project's main line, which every quest converges back into once done.
+//! the id of the session that worked it. A quest added by a session
+//! working another quest is that quest's child; one added by any other
+//! session, or by the human, grows from the trunk, the project's main
+//! line, which every quest converges back into once done.
 
 use std::collections::HashMap;
 
@@ -22,7 +22,7 @@ use crate::pack::Touched;
 use crate::spend::{self, Sitting, Spend};
 use crate::tasks::{Mark, Task};
 use crate::warriv::Kind;
-use crate::{tombs, Agent};
+use crate::Agent;
 
 /// The file, beside `state.json`.
 pub const FILE: &str = "chronicle.jsonl";
@@ -296,27 +296,18 @@ pub fn parse(text: &str) -> Vec<Record> {
         .collect()
 }
 
-/// The quest a session id belongs to: a tomb's is its batch's.
-pub fn quest_of(session: &str) -> &str {
-    tombs::of(session).map_or(session, |(batch, _)| batch)
-}
-
-/// The item of `list` the session works, if it works one. A tomb's item
-/// is held by its batch until the human picks, and by the winner after.
+/// The item of `list` the session works, if it works one.
 pub fn worked_by<'a>(list: &'a [Task], session: &str) -> Option<&'a Task> {
-    let quest = quest_of(session);
-    list.iter()
-        .find(|t| t.holder.as_deref().is_some_and(|h| quest_of(h) == quest))
+    list.iter().find(|t| t.holder.as_deref() == Some(session))
 }
 
 /// The conversations the chronicle saw a turn of under the quest `id`
-/// of `project`, or a tomb of its batch, each with the folder it ran in,
-/// in the order they first showed up.
+/// of `project`, each with the folder it ran in, in the order they first
+/// showed up.
 pub fn conversations(records: &[Record], project: &str, id: &str) -> Vec<(String, String)> {
-    let quest = quest_of(id);
     let mut out: Vec<(String, String)> = Vec::new();
     for r in records {
-        if r.project != project || quest_of(&r.quest) != quest {
+        if r.project != project || r.quest != id {
             continue;
         }
         if let Happened::Turn {
@@ -335,10 +326,9 @@ pub fn conversations(records: &[Record], project: &str, id: &str) -> Vec<(String
 /// last taken. `horadric quest done` keeps it before it marks the quest,
 /// so a quest marked done any other way is one that has not.
 pub fn spent_since_taken(records: &[Record], project: &str, id: &str) -> bool {
-    let quest = quest_of(id);
     let mut spent = false;
     for r in records {
-        if r.project != project || quest_of(&r.quest) != quest {
+        if r.project != project || r.quest != id {
             continue;
         }
         match r.what {
@@ -356,10 +346,9 @@ pub fn spent_since_taken(records: &[Record], project: &str, id: &str) -> bool {
 /// again. None when nothing was reported in this run, as for a quest
 /// blocked or done by someone other than its own session.
 pub fn run_tokens(records: &[Record], project: &str, id: &str) -> Option<u64> {
-    let quest = quest_of(id);
     let (mut before, mut now) = (None, None);
     for r in records {
-        if r.project != project || quest_of(&r.quest) != quest {
+        if r.project != project || r.quest != id {
             continue;
         }
         match &r.what {
@@ -375,8 +364,7 @@ pub fn run_tokens(records: &[Record], project: &str, id: &str) -> Option<u64> {
 /// whether an escalation chose it. From before launches were kept, the
 /// model its notes named when it was taken. None for a quest never taken.
 pub fn launched(records: &[Record], project: &str, id: &str) -> Option<(String, bool)> {
-    let quest = quest_of(id);
-    let ours = |r: &&Record| r.project == project && quest_of(&r.quest) == quest;
+    let ours = |r: &&Record| r.project == project && r.quest == id;
     let launch = records
         .iter()
         .rev()
@@ -404,9 +392,8 @@ pub fn launched(records: &[Record], project: &str, id: &str) -> Option<(String, 
 
 /// When the quest `id` of `project` was last taken.
 pub fn taken_at(records: &[Record], project: &str, id: &str) -> Option<u64> {
-    let quest = quest_of(id);
     records.iter().rev().find_map(|r| match &r.what {
-        Happened::Accepted { .. } if r.project == project && quest_of(&r.quest) == quest => {
+        Happened::Accepted { .. } if r.project == project && r.quest == id => {
             Some(r.at)
         }
         _ => None,
@@ -659,7 +646,7 @@ pub fn away(
     let mut titles: HashMap<&str, &str> = HashMap::new();
     let mut summaries: HashMap<&str, &str> = HashMap::new();
     for r in &mine {
-        let quest = quest_of(&r.quest);
+        let quest = r.quest.as_str();
         if !r.title.is_empty() && !quest.is_empty() {
             titles.insert(quest, &r.title);
         }
@@ -684,7 +671,7 @@ pub fn away(
         let Happened::Marked { mark, .. } = &r.what else {
             continue;
         };
-        let quest = quest_of(&r.quest);
+        let quest = r.quest.as_str();
         let title = if r.title.is_empty() {
             titles.get(quest).copied().unwrap_or_default()
         } else {
@@ -963,7 +950,7 @@ pub fn quests(
         if r.quest.is_empty() {
             continue;
         }
-        let quest = quest_of(&r.quest).to_string();
+        let quest = r.quest.clone();
         let i = find(&mut out, &mut index, &quest, &r.title);
         let q = &mut out[i];
         if !r.title.is_empty() {
@@ -1028,9 +1015,6 @@ pub fn quests(
         let (Some(holder), true) = (&t.holder, t.mark != Mark::Open) else {
             continue;
         };
-        // A picked tomb's winner holds the item, but its records are
-        // under the batch.
-        let holder = quest_of(holder);
         let known = index.contains_key(holder);
         let i = find(&mut out, &mut index, holder, &t.title);
         let q = &mut out[i];
@@ -1071,7 +1055,7 @@ fn find(out: &mut Vec<Quest>, index: &mut HashMap<String, usize>, id: &str, titl
 fn from_journal(q: &mut Quest, journal: &[journal::Entry], project: &str) {
     use journal::What;
     for e in journal {
-        let ours = e.project == project && quest_of(&e.session) == q.id;
+        let ours = e.project == project && e.session == q.id;
         let titled = |t: &str| e.project == project && t == q.title;
         match &e.what {
             What::Started { title } if titled(title) => {
@@ -1104,7 +1088,6 @@ fn link(quests: &mut [Quest]) {
         let Some(by) = quests[i].added_by.clone() else {
             continue;
         };
-        let by = quest_of(&by);
         if let Some(p) = quests[..i].iter().position(|q| q.id == by) {
             quests[i].parent = Some(p);
             quests[i].added_by = None;
@@ -1846,7 +1829,7 @@ mod tests {
     }
 
     #[test]
-    fn a_quests_conversations_are_its_tombs_turns_once_each() {
+    fn a_quests_conversations_are_its_turns_once_each() {
         let turn = |at, quest: &str, conversation: &str, cwd: &str| {
             rec(
                 at,
@@ -1860,34 +1843,34 @@ mod tests {
                 },
             )
         };
-        let mut other = turn(5, "a-1.x2", "c9", "elsewhere");
+        let mut other = turn(5, "a-1", "c9", "elsewhere");
         other.project = "q".into();
         let records = [
-            turn(1, "a-1.x2.1", "c1", "w1"),
-            turn(2, "a-1.x2.2", "c2", "w2"),
-            turn(3, "a-1.x2.1", "c1", "w1"),
+            turn(1, "a-1", "c1", "w1"),
+            turn(2, "a-1", "c2", "w2"),
+            turn(3, "a-1", "c1", "w1"),
             turn(4, "b-1", "c3", "w3"),
-            turn(6, "a-1.x2", "", "w"),
+            turn(6, "a-1", "", "w"),
             other,
         ];
         assert_eq!(
-            conversations(&records, "p", "a-1.x2"),
+            conversations(&records, "p", "a-1"),
             vec![("c1".into(), "w1".into()), ("c2".into(), "w2".into())]
         );
-        assert_eq!(conversations(&records, "p", "a-1.x2.2").len(), 2);
+        assert_eq!(conversations(&records, "p", "b-1").len(), 1);
     }
 
     #[test]
     fn a_spend_counts_only_until_the_quest_is_taken_again() {
         let spent = |at, quest: &str| rec(at, quest, "", Happened::Spent { sittings: vec![] });
-        let mut records = vec![accepted(1, "a-1.x2", "A")];
-        assert!(!spent_since_taken(&records, "p", "a-1.x2"));
-        records.push(spent(2, "a-1.x2.1"));
-        records.push(marked(3, "a-1.x2", Outcome::Done));
-        assert!(spent_since_taken(&records, "p", "a-1.x2"));
+        let mut records = vec![accepted(1, "a-1", "A")];
+        assert!(!spent_since_taken(&records, "p", "a-1"));
+        records.push(spent(2, "a-1"));
+        records.push(marked(3, "a-1", Outcome::Done));
+        assert!(spent_since_taken(&records, "p", "a-1"));
         assert!(!spent_since_taken(&records, "p", "b-1"));
-        records.push(accepted(4, "a-1.x2", "A"));
-        assert!(!spent_since_taken(&records, "p", "a-1.x2"));
+        records.push(accepted(4, "a-1", "A"));
+        assert!(!spent_since_taken(&records, "p", "a-1"));
     }
 
     #[test]
@@ -1959,17 +1942,11 @@ mod tests {
         let list = [
             task(0, Mark::Open, "A", None),
             task(1, Mark::Working, "B", Some("b-1")),
-            task(2, Mark::Working, "C", Some("c-1.x3")),
-            task(3, Mark::Done, "D", Some("d-1.x2.2")),
+            task(2, Mark::Done, "D", Some("d-1")),
         ];
         let title = |s: &str| worked_by(&list, s).map(|t| t.title.as_str());
         assert_eq!(title("b-1"), Some("B"));
-        assert_eq!(title("c-1.x3.3"), Some("C"));
-        assert_eq!(
-            title("d-1.x2.1"),
-            Some("D"),
-            "a losing tomb is still its batch's"
-        );
+        assert_eq!(title("d-1"), Some("D"));
         assert_eq!(title("b-11"), None);
         assert_eq!(title("quest-giver-5"), None);
     }
@@ -2037,13 +2014,13 @@ mod tests {
                 },
             ),
             marked(13, "a-1", Outcome::Done),
-            accepted(14, "b-1.x2", "B"),
+            accepted(14, "b-1", "B"),
             rec(
                 15,
-                "b-1.x2.2",
+                "b-1",
                 "",
                 Happened::Turn {
-                    line: "Tomb two".into(),
+                    line: "Did B".into(),
                     conversation: "c2".into(),
                     cwd: "C:/w".into(),
                     name: String::new(),
@@ -2056,9 +2033,9 @@ mod tests {
         assert_eq!(q[0].result(), "Did A");
         assert_eq!(q[0].outcome, Outcome::Done);
         assert_eq!(q[0].ended, Some(13));
-        assert_eq!(q[1].id, "b-1.x2");
+        assert_eq!(q[1].id, "b-1");
         assert_eq!(q[1].parent, Some(0));
-        assert_eq!(q[1].result(), "Tomb two");
+        assert_eq!(q[1].result(), "Did B");
         assert_eq!(q[1].conversation, Some(("c2".into(), "C:/w".into())));
         assert!(quests(&records, &[], "other", &[]).is_empty());
     }
@@ -2120,18 +2097,6 @@ mod tests {
         blocked.wait = Some(crate::tasks::Wait::Until(99));
         let q = quests(&records, &[], "p", &[blocked]);
         assert_eq!((q[0].ended, q[0].ask.as_str()), (Some(40), ""));
-    }
-
-    #[test]
-    fn a_picked_tomb_is_one_quest_under_its_batch() {
-        let records = [
-            accepted(1, "c-1.x3", "C"),
-            marked(5, "c-1.x3", Outcome::Done),
-        ];
-        let list = [task(0, Mark::Done, "C", Some("c-1.x3.2"))];
-        let q = quests(&records, &[], "p", &list);
-        assert_eq!(q.len(), 1);
-        assert_eq!((q[0].accepted, q[0].outcome), (Some(1), Outcome::Done));
     }
 
     fn quest(id: &str, accepted: u64, ended: Option<u64>, outcome: Outcome) -> Quest {

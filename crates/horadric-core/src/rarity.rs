@@ -46,10 +46,6 @@ pub struct Loot {
     /// Started by the runner as one of several items held at once.
     #[serde(default)]
     pub batch: bool,
-    /// Its agent said its item is done. Kept for a tomb, whose item stays
-    /// open until the human picks one of the tombs.
-    #[serde(default)]
-    pub finished: bool,
     /// The tool use ids of background Bash, PowerShell, Agent and Monitor
     /// calls whose ending `<task-notification>` has not come back in a
     /// prompt yet, empty for a call whose hook gave none. Kept across
@@ -528,6 +524,9 @@ mod tests {
     fn a_count_saved_by_the_old_build_still_loads() {
         let l: Loot = serde_json::from_str(r#"{ "changed": true, "outstanding": 2 }"#).unwrap();
         assert!(l.changed && l.outstanding.is_empty());
+        // A tomb's `finished`, from before the tombs were removed.
+        let l: Loot = serde_json::from_str(r#"{ "batch": true, "finished": true }"#).unwrap();
+        assert!(l.batch);
     }
 
     #[test]

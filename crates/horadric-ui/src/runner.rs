@@ -35,7 +35,7 @@ use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
 use horadric_core::usage::{self, format_until};
 use horadric_core::worktree::{self, Worktree};
-use horadric_core::{fleet, merge, pack, ship, ssh, tombs, Agent, Phase, SavedState, Setting};
+use horadric_core::{fleet, merge, pack, ship, ssh, Agent, Phase, SavedState, Setting};
 use horadric_hooks::tasks as file;
 
 use super::{post, push, unix_now, with_app, App, Input, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
@@ -50,8 +50,6 @@ use crate::{ask, store, watch};
 
 #[path = "runeword.rs"]
 pub(super) mod runeword;
-#[path = "tomb.rs"]
-pub(super) mod tomb;
 #[path = "warriv.rs"]
 pub(super) mod warriv;
 
@@ -101,9 +99,6 @@ pub(super) struct State {
     ran: HashSet<String>,
     /// When the runner last started a session, by project.
     started: HashMap<String, Instant>,
-    /// The tombs started of each item in tombs, by batch, so one the human
-    /// ended is not started again.
-    tombs: HashMap<String, HashSet<usize>>,
     /// Sessions holding an item that a usage limit stopped mid turn.
     refused: HashMap<String, Refused>,
     /// Menus and dialogs waiting for the app's window to show them.
@@ -661,14 +656,13 @@ impl App {
         if chronicle::spent_since_taken(&records, key, session) {
             return;
         }
-        let quest = chronicle::quest_of(session);
         let live: Vec<(String, String)> = self
             .shared
             .registry
             .lock()
             .map(|r| {
                 r.all()
-                    .filter(|s| chronicle::quest_of(&s.id) == quest)
+                    .filter(|s| s.id == session)
                     .filter_map(|s| Some((s.claude_session_id.clone()?, s.cwd.clone())))
                     .collect()
             })
@@ -687,9 +681,6 @@ impl App {
         if self.tasks.landing.values().flatten().any(|(_, h)| h == id) {
             return Holder::Live;
         }
-        if tombs::count(id).is_some() {
-            return self.batch_holder(id);
-        }
         match self.phase_of(id) {
             None => Holder::Gone,
             Some(Phase::Paused) => Holder::Paused,
@@ -703,19 +694,19 @@ impl App {
             .is_some_and(|c| c.exit_code().is_none())
     }
 
-    /// Whether session `id` holds an item of a list, alone or in a tomb.
+    /// Whether session `id` holds an item of a list.
     pub(super) fn holds_quest(&self, id: &str) -> bool {
         self.held_quest(id).is_some()
     }
 
-    /// The title of the item session `id` holds, alone or in a tomb.
+    /// The title of the item session `id` holds.
     pub(super) fn held_quest(&self, id: &str) -> Option<String> {
         self.shared
             .boards
             .borrow()
             .values()
             .flat_map(|b| &b.tasks)
-            .find(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+            .find(|t| t.mark.held() && t.holder.as_deref() == Some(id))
             .map(|t| t.title.clone())
     }
 
@@ -733,7 +724,7 @@ impl App {
         let (key, wanted) = self.shared.boards.borrow().iter().find_map(|(key, b)| {
             b.tasks
                 .iter()
-                .find(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+                .find(|t| t.mark.held() && t.holder.as_deref() == Some(id))
                 .map(|t| (key.clone(), t.connectors()))
         })?;
         let some = !wanted.is_empty() && !wanted.iter().any(|w| w.eq_ignore_ascii_case("all"));
@@ -766,7 +757,7 @@ impl App {
             .borrow()
             .values()
             .flat_map(|b| &b.tasks)
-            .find(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+            .find(|t| t.mark.held() && t.holder.as_deref() == Some(id))
             .map(|t| t.model_args(Agent::Claude))
             .unwrap_or_default()
     }
@@ -798,7 +789,7 @@ impl App {
         let held = self.shared.boards.borrow().iter().find_map(|(key, b)| {
             b.tasks
                 .iter()
-                .find(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+                .find(|t| t.mark.held() && t.holder.as_deref() == Some(id))
                 .map(|t| (key.clone(), t.clone()))
         });
         let Some((key, task)) = held else {
@@ -876,9 +867,6 @@ impl App {
             ));
             if self.drives.contains_key(&main) {
                 system.push(tasks::driven_prompt(&horadric_command()));
-            }
-            if let Some((batch, n)) = tombs::of(id) {
-                system.push(tombs::system_prompt(n, tombs::weight(batch)));
             }
         } else if !special {
             let main = folder_key(&cwd.to_string_lossy());
@@ -1069,19 +1057,15 @@ impl App {
     /// quest log's Carry on does: a quest waiting on review ended in it.
     fn carry_on_held(&self, key: &str, task: &Task) {
         if let Some(h) = task.holder.as_deref() {
-            let quest = chronicle::quest_of(h).to_string();
-            push(Input::QuestLog(Ask::Carry(key.to_string(), quest)));
+            push(Input::QuestLog(Ask::Carry(key.to_string(), h.to_string())));
         }
     }
 
-    /// The session to show for an item: its holder's, or a tomb's, none
-    /// when that session is gone.
+    /// The session to show for an item: its holder's, none when that
+    /// session is gone.
     fn held_session(&self, task: &Task) -> Option<String> {
         let h = task.holder.as_deref()?;
-        if self.holder(h) == Holder::Gone {
-            return None;
-        }
-        self.shown_for(h)
+        (self.holder(h) != Holder::Gone).then(|| h.to_string())
     }
 
     /// An item accepted: an open one starts, and one whose session is
@@ -1103,16 +1087,8 @@ impl App {
         }
     }
 
-    /// The session a row shows: its holder, or an item in tombs' first.
-    fn shown_for(&self, holder: &str) -> Option<String> {
-        match tombs::count(holder) {
-            Some(_) => self.tombs_of(holder).into_iter().next(),
-            None => Some(holder.to_string()),
-        }
-    }
-
-    /// Starts an item whose session is gone again, in as many tombs as it
-    /// had. With `show`, its project comes onto the stage.
+    /// Starts an item whose session is gone again. With `show`, its
+    /// project comes onto the stage.
     fn start_again(
         &mut self,
         key: &str,
@@ -1120,14 +1096,8 @@ impl App {
         title: &str,
         show: bool,
     ) -> Result<(), String> {
-        let tombs = self
-            .task_at(key, line, title)
-            .and_then(|t| tombs::count(t.holder.as_deref()?));
         self.set_task(key, line, title, Mark::Open);
-        match tombs {
-            Some(n) => self.take_tombs(key, line, title, n),
-            None => self.take_task(key, line, title, show).map(drop),
-        }
+        self.take_task(key, line, title, show).map(drop)
     }
 
     /// Whether what the blocked `t` of project `key` waits on is over. The
@@ -1263,15 +1233,7 @@ impl App {
     fn put_back(&mut self, key: &str, line: usize, title: &str) {
         let holder = self.task_at(key, line, title).and_then(|t| t.holder);
         if let Some(h) = holder {
-            match tombs::count(&h) {
-                Some(_) => {
-                    for id in self.tombs_of(&h) {
-                        self.end(&id);
-                    }
-                    self.tasks.tombs.remove(&h);
-                }
-                None => self.end(&h),
-            }
+            self.end(&h);
         }
         self.set_task(key, line, title, Mark::Open);
     }
@@ -1488,9 +1450,7 @@ impl App {
                 continue;
             }
             if held.is_none() && paced.is_none() {
-                if !self.start_tombs(key, b) {
-                    self.start_next(key, b);
-                }
+                self.start_next(key, b);
             } else if b.mode.runs() {
                 waiting |= matches!(
                     tasks::next(
@@ -1566,10 +1526,6 @@ impl App {
             .flat_map(|(_, b)| &b.tasks)
             .filter(|t| t.mark == Mark::Working)
             .filter_map(|t| t.holder.clone())
-            .flat_map(|h| match tombs::count(&h) {
-                Some(_) => self.tombs_of(&h),
-                None => vec![h],
-            })
             .collect();
         let stopped: HashMap<String, SystemTime> = {
             let Ok(r) = self.shared.registry.lock() else {
@@ -1730,29 +1686,21 @@ impl App {
             .filter(|t| t.mark == Mark::Working)
             .filter_map(|t| t.holder.clone())
             .collect();
-        for holder in holders {
-            // Each tomb is asked for itself, until it said it is done.
-            let ids = match tombs::count(&holder) {
-                Some(_) => self.tombs_of(&holder),
-                None => vec![holder],
-            };
-            for h in ids {
-                // A landing session waits on its landing, not on itself.
-                if self.tasks.nudged.contains_key(&h)
-                    || self.tasks.landing.values().flatten().any(|(_, l)| *l == h)
-                    || self.phase_of(&h) != Some(Phase::Done)
-                    || self.reported(&h)
-                    || self.waiting_on_own_work(&h)
-                {
-                    continue;
-                }
-                let Some(c) = self.consoles.get(&h).filter(|c| c.exit_code().is_none()) else {
-                    continue;
-                };
-                c.write(tasks::nudge(&horadric_command()).into_bytes());
-                self.tasks.enters.push((h.clone(), Instant::now()));
-                self.tasks.nudged.insert(h, SystemTime::now());
+        for h in holders {
+            // A landing session waits on its landing, not on itself.
+            if self.tasks.nudged.contains_key(&h)
+                || self.tasks.landing.values().flatten().any(|(_, l)| *l == h)
+                || self.phase_of(&h) != Some(Phase::Done)
+                || self.waiting_on_own_work(&h)
+            {
+                continue;
             }
+            let Some(c) = self.consoles.get(&h).filter(|c| c.exit_code().is_none()) else {
+                continue;
+            };
+            c.write(tasks::nudge(&horadric_command()).into_bytes());
+            self.tasks.enters.push((h.clone(), Instant::now()));
+            self.tasks.nudged.insert(h, SystemTime::now());
         }
     }
 
@@ -1763,14 +1711,6 @@ impl App {
             .registry
             .lock()
             .is_ok_and(|r| r.get(id).is_some_and(|s| s.loot.waiting_on_own_work()))
-    }
-
-    /// A tomb that already said it is done.
-    fn reported(&self, id: &str) -> bool {
-        self.shared
-            .registry
-            .lock()
-            .is_ok_and(|r| r.get(id).is_some_and(|s| s.loot.finished))
     }
 
     /// The session was nudged and stopped again after that without a
@@ -1812,15 +1752,6 @@ impl App {
                 continue;
             }
             match t.mark {
-                Mark::Working if tombs::count(h).is_some() => {
-                    if self.ready_to_pick(h) {
-                        out.push((
-                            format!("pick:{h}"),
-                            format!("Tombs finished: {}", t.title),
-                            "Pick the one to keep from a tomb's menu.".to_string(),
-                        ));
-                    }
-                }
                 // The reviewer has it, and says what it can not settle.
                 Mark::Review if b.mode == Mode::Warriv && self.reviewing(key, &t.title) => {}
                 Mark::Review => out.push((
@@ -2628,21 +2559,16 @@ fn item_menu(key: &str, line: usize, title: &str) {
     const DOWN: usize = 9;
     const DELETE: usize = 10;
     const LOG: usize = 11;
-    // Beyond the ids of `tombs::MOST` tombs.
-    const TOMBS: usize = 100;
-    const PICK: usize = 200;
-    let Some((state, t, own_trees, pickable, (first, last))) = with_app(|app| {
+    let Some((state, t, (first, last))) = with_app(|app| {
         let t = app.task_at(key, line, title)?;
         let boards = app.shared.boards.borrow();
         let board = boards.get(key)?;
-        let own_trees = board.own_trees;
         let ends = (
             board.tasks.first().is_some_and(|f| f.line == line),
             board.tasks.last().is_some_and(|l| l.line == line),
         );
         drop(boards);
-        let pickable = t.holder.as_deref().and_then(|h| app.pickable(h));
-        Some((app.row_state(&t), t, own_trees, pickable, ends))
+        Some((app.row_state(&t), t, ends))
     })
     .flatten() else {
         return;
@@ -2654,28 +2580,10 @@ fn item_menu(key: &str, line: usize, title: &str) {
         RowState::Gone => items.push(Item::action(START, "Accept again")),
         _ => items.push(Item::action(SHOW, "Show session")),
     }
-    if state == RowState::Open && own_trees {
-        let counts = (tombs::LEAST..=tombs::MOST)
-            .map(|n| Item::action(TOMBS + n, format!("{n} tombs")))
-            .collect();
-        items.push(Item::Submenu(
-            "Start in tombs, pick the best".into(),
-            counts,
-        ));
-    }
-    match (&pickable, state) {
-        (Some(tombs), _) if !tombs.is_empty() => {
-            let each = tombs
-                .iter()
-                .enumerate()
-                .map(|(i, (_, name))| Item::action(PICK + i, name.clone()))
-                .collect();
-            items.push(Item::Submenu("Pick the one to keep".into(), each));
-        }
-        // Done without a pick would leave its tombs running.
-        (Some(_), _) | (None, RowState::Open) => {}
-        (None, RowState::Review) => items.push(Item::action(APPROVE, "Approve")),
-        (None, _) => items.push(Item::action(DONE, "Mark completed")),
+    match state {
+        RowState::Open => {}
+        RowState::Review => items.push(Item::action(APPROVE, "Approve")),
+        _ => items.push(Item::action(DONE, "Mark completed")),
     }
     if holder.is_some() {
         items.push(Item::action(BACK, "Put back in the log"));
@@ -2696,12 +2604,6 @@ fn item_menu(key: &str, line: usize, title: &str) {
     items.push(Item::action(LOG, "Quest log..."));
     // Outside the app's borrow: the menu's loop dispatches its messages.
     let picked = menu::popup(&items);
-    if let Some(i) = picked.filter(|i| *i >= PICK) {
-        if let Some((id, _)) = pickable.as_ref().and_then(|p| p.get(i - PICK)) {
-            tomb::ask_pick(id);
-        }
-        return;
-    }
     match picked {
         Some(REWRITE) => return rewrite(key, &t),
         Some(LOG) => return push(Input::QuestLog(Ask::Open(key.to_string()))),
@@ -2710,11 +2612,6 @@ fn item_menu(key: &str, line: usize, title: &str) {
     }
     with_app(|app| match picked {
         Some(START) => app.accept_task(key, line, title),
-        Some(n) if n > TOMBS && n < PICK => {
-            if let Err(e) = app.take_tombs(key, line, title, n - TOMBS) {
-                eprintln!("horadric: cannot start the tombs: {e}");
-            }
-        }
         Some(SHOW) => app.show_quest(key, &t),
         Some(APPROVE | DONE) => app.set_task(key, line, title, Mark::Done),
         Some(BACK) => app.put_back(key, line, title),

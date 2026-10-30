@@ -1354,16 +1354,11 @@ pub fn is_reviewer(id: &str) -> bool {
 const DIFF: usize = 20_000;
 
 /// The quests waiting for a review: completed by their session, `[?]`,
-/// in list order. A quest in tombs is the human's pick, not a review.
+/// in list order.
 pub fn to_review(tasks: &[Task]) -> Vec<String> {
     tasks
         .iter()
         .filter(|t| t.mark == Mark::Review && !t.title.trim().is_empty())
-        .filter(|t| {
-            t.holder
-                .as_deref()
-                .is_none_or(|h| crate::tombs::count(h).is_none())
-        })
         .map(|t| t.title.clone())
         .collect()
 }
@@ -3109,8 +3104,8 @@ not green."
     }
 
     #[test]
-    fn a_quest_going_to_review_is_one_to_read_but_tombs_are_not() {
-        let t = list("- [?] A @a-1\n- [/] B @b-1\n- [?] C @c-1.x3\n- [x] D @d-1\n- [?] E @e-1\n");
+    fn a_quest_going_to_review_is_one_to_read() {
+        let t = list("- [?] A @a-1\n- [/] B @b-1\n- [x] D @d-1\n- [?] E @e-1\n");
         assert_eq!(to_review(&t), ["A", "E"]);
     }
 

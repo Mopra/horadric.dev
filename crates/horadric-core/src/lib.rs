@@ -73,7 +73,6 @@ pub mod ssh;
 pub mod standing;
 pub mod tasks;
 pub mod title;
-pub mod tombs;
 pub mod trust;
 pub mod usage;
 pub mod warriv;

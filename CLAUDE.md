@@ -68,8 +68,8 @@ Pointers, read when your work touches them: [the brotherhood](docs/plan/the-brot
   staging only their own files by name. Other agents may be editing
   beside you, so never `git add -A`, `git stash` or `git checkout --` a
   file you did not change. A worktree only when the human asks for one.
-- When you are in a worktree anyway (you were asked, or it is a tomb or
-  a parallel task), finish by merging it into `main`: merge `main` into
+- When you are in a worktree anyway (you were asked, or it is a
+  parallel task), finish by merging it into `main`: merge `main` into
   the branch first if it has moved, then
   `git -C <main checkout> merge --ff-only <branch>`. After resolving a
   conflict, `cargo check` is enough. No branch is left

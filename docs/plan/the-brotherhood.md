@@ -295,7 +295,7 @@ key set up from every PC and cannot reach a home server behind a router.
 - **Where it lands.** The receiver finds the project by the repository's
   remote URL, or by its first commit when it has none. Absent, it asks:
   clone it, or pick a folder. The session gets a worktree of its own
-  there (as tombs and parallel quests do), so a handoff never disturbs
+  there (as parallel quests do), so a handoff never disturbs
   the receiver's own checkout. Without git, the bundle is a plain copy
   of the folder's changed files into a folder the human picks.
 - **The transcript is filed under the new path.** Claude Code keeps

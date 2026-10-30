@@ -168,8 +168,8 @@ pub fn remove_then(w: Worktree, kept: impl FnOnce(Worktree) + Send + 'static) {
     remove_with(w, false, kept);
 }
 
-/// Removes a worktree and its branch with whatever is in them. Only for a
-/// tomb the human did not pick, whose work is thrown away on purpose.
+/// Removes a worktree and its branch with whatever is in them. Only for
+/// work thrown away on purpose.
 pub fn discard(w: Worktree) {
     remove_with(w, true, |_| ());
 }

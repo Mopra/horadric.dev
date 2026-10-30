@@ -11,13 +11,16 @@ something clearer or quicker. A joke that gets in the way of reading a
 tile is out.
 
 Built ideas are gone from this page (2026-10-19). What was decided about
-them is in the lore: ask `lore_recall` about identify, the tombs,
-rarity colours, loot drops, runewords, quests, experience or Town
-Portal.
+them is in the lore: ask `lore_recall` about identify, rarity colours,
+loot drops, runewords, quests, experience or Town Portal.
 
 The cube and the stash were built and then removed (2026-10-30): nobody
 used either. The cube's recipes mostly repeated what a tile's menu does,
 and a paused tile already keeps a session for later.
+
+Tal Rasha's tombs, one quest started in several worktrees at once with
+the human picking the one to keep, were built and then removed
+(2026-10-30): nobody used them.
 
 ## Driving a phone
 

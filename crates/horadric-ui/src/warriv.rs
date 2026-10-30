@@ -18,7 +18,7 @@ use horadric_core::warriv::{
     self, Brief, Desk, Dried, Drive, Event, Heard, Kind, Looked, Picture, Review, Reviews, Said,
     Wake, Why,
 };
-use horadric_core::{escalate, lookback, lore, runeword, ship, tombs, Agent, Phase};
+use horadric_core::{escalate, lookback, lore, runeword, ship, Agent, Phase};
 use horadric_hooks::tasks as file;
 use horadric_memory::distill;
 use horadric_memory::store::ChunkId;
@@ -309,7 +309,7 @@ impl App {
             .filter(|t| {
                 t.holder
                     .as_deref()
-                    .is_some_and(|h| tombs::count(h).is_none() && self.stopped_after_nudge(h))
+                    .is_some_and(|h| self.stopped_after_nudge(h))
             })
             .map(|t| t.title.clone())
             .collect();
@@ -1026,7 +1026,7 @@ impl App {
 
     /// True once the tell is done with, typed or kept as a note.
     fn type_tell(&mut self, tell: &Tell, t: &Task) -> bool {
-        let Some(h) = t.holder.clone().filter(|h| tombs::count(h).is_none()) else {
+        let Some(h) = t.holder.clone() else {
             return true;
         };
         if !self.live(&h) {
@@ -1274,7 +1274,7 @@ impl App {
         let live = t
             .holder
             .as_deref()
-            .is_some_and(|h| tombs::count(h).is_none() && self.live(h));
+            .is_some_and(|h| self.live(h));
         if !live {
             self.file_fix_up(&key, &t, what);
             return;

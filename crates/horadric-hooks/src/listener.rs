@@ -109,15 +109,10 @@ impl Reload {
     }
 }
 
-/// `horadric quest` changed the task list of the project in this folder,
-/// or a tomb reported on its item, which leaves the list as it is.
+/// `horadric quest` changed the task list of the project in this folder.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TasksChanged {
     pub dir: String,
-    /// The tomb that reported, done or blocked.
-    pub tomb: Option<String>,
-    /// Why the tomb is blocked, none when it is done.
-    pub why: Option<String>,
     /// The quest whose session Warriv answers, with `tell`.
     pub quest: Option<String>,
     /// What Warriv tells that quest's session, typed in between turns.
@@ -136,8 +131,6 @@ impl TasksChanged {
     pub fn to_json(&self) -> String {
         json!({
             "dir": self.dir,
-            "tomb": self.tomb,
-            "why": self.why,
             "quest": self.quest,
             "tell": self.tell,
             "fix": self.fix,
@@ -153,8 +146,6 @@ impl TasksChanged {
         let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
         Some(TasksChanged {
             dir: v.get("dir")?.as_str()?.to_string(),
-            tomb: text("tomb"),
-            why: text("why"),
             quest: text("quest"),
             tell: text("tell"),
             fix: text("fix"),
@@ -1116,8 +1107,6 @@ X-Horadric-Port: {dev}
         let (port, rx) = start_with_new();
         let want = TasksChanged {
             dir: "C:/dev/app".into(),
-            tomb: Some("fix-1.x3.2".into()),
-            why: None,
             quest: Some("Serve the API".into()),
             tell: Some("Use port 4100.".into()),
             fix: Some("No tests.".into()),
@@ -1390,9 +1379,12 @@ Origin: https://a.b
     }
 
     #[test]
-    fn a_task_list_change_from_an_older_build_has_no_tomb() {
+    fn a_task_list_change_from_an_older_build_still_reads() {
         let t = TasksChanged::from_json(br#"{"dir":"C:/dev/app"}"#).unwrap();
-        assert_eq!((t.tomb, t.why, t.tell), (None, None, None));
+        assert_eq!((t.quest, t.tell), (None, None));
+        // A tomb's report, from before the tombs were removed.
+        let t = TasksChanged::from_json(br#"{"dir":"C:/dev/app","tomb":"a-1.x2.1","why":"x"}"#);
+        assert_eq!(t.map(|t| t.dir).as_deref(), Some("C:/dev/app"));
     }
 
     #[test]

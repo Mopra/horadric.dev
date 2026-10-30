@@ -3,7 +3,7 @@
 
 use horadric_core::registry::Registry;
 use horadric_core::tasks::{self, Mark, Mode, Ready, Task, Waits};
-use horadric_core::{tombs, Phase};
+use horadric_core::Phase;
 
 use crate::theme::{self, Color};
 
@@ -16,7 +16,7 @@ pub struct Board {
     /// its own. One outside a repository.
     pub parallel: usize,
     /// The project is a repository's main tree, so an item can get a
-    /// worktree of its own, to run beside others or in tombs.
+    /// worktree of its own, to run beside others.
     pub own_trees: bool,
     /// Warriv is on: what needs judgment wakes it before the human.
     pub orchestrator: bool,
@@ -181,50 +181,14 @@ pub enum RowState {
     /// Names a quest that is not there, several that are, or itself by a
     /// chain: no quest finishing frees it, so it needs the human.
     Tangled,
-    /// Its tombs are at it.
-    Tombs,
     /// Blocked or tangled, and Warriv is at it before the human hears.
     Warriv,
-    /// Every tomb still there says it is done: the human picks one.
-    Pick,
 }
 
-/// How `task` reads, from the sessions in `r`: its holder's phase, or,
-/// for an item in tombs, what its tombs are doing between them.
+/// How `task` reads, from its holder's phase among the sessions in `r`.
 pub fn state_in(task: &Task, r: &Registry) -> RowState {
-    let holder = task.holder.as_deref();
-    match holder.filter(|h| task.mark == Mark::Working && tombs::count(h).is_some()) {
-        Some(batch) => {
-            let of_batch = |id: &str| tombs::of(id).is_some_and(|(b, _)| b == batch);
-            let found: Vec<(Phase, bool)> = r
-                .all()
-                .filter(|s| of_batch(&s.id))
-                .map(|s| (s.phase.clone(), s.loot.finished))
-                .collect();
-            tombs_row(&found)
-        }
-        None => row_state(task, holder.and_then(|h| r.get(h)).map(|s| &s.phase)),
-    }
-}
-
-/// How an item in tombs reads, from each tomb's phase and whether it said
-/// it is done.
-pub fn tombs_row(tombs: &[(Phase, bool)]) -> RowState {
-    let there: Vec<&(Phase, bool)> = tombs.iter().filter(|(p, _)| *p != Phase::Ended).collect();
-    if there.is_empty() {
-        RowState::Gone
-    } else if there.iter().any(|(p, _)| *p == Phase::Paused) {
-        RowState::Paused
-    } else if there.iter().all(|(_, done)| *done) {
-        RowState::Pick
-    } else if there
-        .iter()
-        .any(|(p, done)| !done && matches!(p, Phase::Waiting(_) | Phase::Done))
-    {
-        RowState::Asks
-    } else {
-        RowState::Tombs
-    }
+    let holder = task.holder.as_deref().and_then(|h| r.get(h));
+    row_state(task, holder.map(|s| &s.phase))
 }
 
 /// How `task` reads, given the phase of the session that holds it, none
@@ -258,8 +222,6 @@ impl RowState {
             RowState::Waits => "waits",
             RowState::After => "after",
             RowState::Tangled => "tangled",
-            RowState::Tombs => "tombs",
-            RowState::Pick => "pick one",
             RowState::Warriv => "Warriv",
         }
     }
@@ -276,8 +238,6 @@ impl RowState {
             RowState::Blocked => '\u{E7BA}',
             RowState::Waits | RowState::After => '\u{E823}',
             RowState::Tangled => '\u{E7BA}',
-            RowState::Tombs => '\u{E716}',
-            RowState::Pick => '\u{E734}',
             RowState::Warriv => '\u{E99A}',
         }
     }
@@ -287,8 +247,8 @@ impl RowState {
     pub fn color(self) -> Color {
         match self {
             RowState::Open | RowState::After => theme::text_dim(),
-            RowState::Working | RowState::Tombs | RowState::Warriv => theme::working(),
-            RowState::Asks | RowState::Review | RowState::Pick => theme::waiting(),
+            RowState::Working | RowState::Warriv => theme::working(),
+            RowState::Asks | RowState::Review => theme::waiting(),
             RowState::Blocked | RowState::Tangled => theme::error(),
             RowState::Paused | RowState::Gone | RowState::Waits => theme::idle(),
         }
@@ -302,7 +262,6 @@ impl RowState {
                 | RowState::Review
                 | RowState::Blocked
                 | RowState::Gone
-                | RowState::Pick
                 | RowState::Tangled
         )
     }
@@ -503,34 +462,6 @@ mod tests {
     }
 
     #[test]
-    fn tombs_read_as_they_are_doing_between_them() {
-        let working = (Phase::Working, false);
-        let finished = (Phase::Done, true);
-        let asks = (Phase::Waiting(WaitReason::Permission), false);
-        let ended = (Phase::Ended, false);
-        assert_eq!(
-            tombs_row(&[working.clone(), finished.clone()]),
-            RowState::Tombs
-        );
-        assert_eq!(tombs_row(&[finished.clone(), asks]), RowState::Asks);
-        // A turn that ended without a report asks too.
-        assert_eq!(tombs_row(&[(Phase::Done, false)]), RowState::Asks);
-        assert_eq!(
-            tombs_row(&[finished.clone(), finished.clone()]),
-            RowState::Pick
-        );
-        // A tomb the human ended does not count.
-        assert_eq!(tombs_row(&[finished, ended.clone()]), RowState::Pick);
-        assert_eq!(tombs_row(&[ended]), RowState::Gone);
-        assert_eq!(tombs_row(&[]), RowState::Gone);
-        assert_eq!(
-            tombs_row(&[(Phase::Paused, true), working]),
-            RowState::Paused
-        );
-        assert!(RowState::Pick.needs_you() && !RowState::Tombs.needs_you());
-    }
-
-    #[test]
     fn a_quest_warriv_has_is_not_red_until_it_hands_it_on() {
         for s in [RowState::Blocked, RowState::Tangled] {
             assert_eq!(with_warriv(s, true), RowState::Warriv);
@@ -552,6 +483,7 @@ mod tests {
     #[test]
     fn with_no_sessions_every_held_item_is_gone() {
         let r = Registry::default();
+        // B's holder is a batch of tombs, from before they were removed.
         let t = parse("- [/] A @a-1\n- [/] B @b-1.x3\n");
         assert_eq!(state_in(&t[0], &r), RowState::Gone);
         assert_eq!(state_in(&t[1], &r), RowState::Gone);

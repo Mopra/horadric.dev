@@ -28,7 +28,6 @@
 
 use serde_json::{Map, Value};
 
-use crate::tombs;
 use crate::usage::format_until;
 
 /// Where the list lives, from the project folder.
@@ -992,17 +991,6 @@ pub fn set_held(
     replace_line(text, task.line, &line)
 }
 
-/// Hands the item held by the tombs `batch` to the one tomb that won,
-/// `winner`, and marks it done: the human picking is the review. None when
-/// no item not done is held by the batch.
-pub fn pick(text: &str, batch: &str, winner: &str) -> Option<String> {
-    let task = parse(text)
-        .into_iter()
-        .find(|t| t.holder.as_deref() == Some(batch) && t.mark != Mark::Done)?;
-    let line = item_line(Mark::Done, &task.title, Some(winner), None, None);
-    replace_line(text, task.line, &line)
-}
-
 /// Gives the open item on `line` titled `title` to `holder`. None when that
 /// line no longer holds that open item, because the file changed under us.
 pub fn take(text: &str, line: usize, title: &str, holder: &str) -> Option<String> {
@@ -1572,15 +1560,13 @@ pub fn next(
         return Next::Off;
     }
     let of = |t: &Task| t.holder.as_deref().map_or(Holder::Gone, &holder);
-    let in_hand: Vec<(Holder, usize)> = tasks
+    let in_hand: Vec<Holder> = tasks
         .iter()
         .filter(|t| matches!(t.mark, Mark::Working | Mark::Review))
-        .map(|t| (of(t), t.holder.as_deref().map_or(1, tombs::weight)))
-        .filter(|(h, _)| *h != Holder::Gone)
+        .map(of)
+        .filter(|h| *h != Holder::Gone)
         .collect();
-    // An item in tombs takes a place for each of its sessions.
-    let places: usize = in_hand.iter().map(|(_, w)| w).sum();
-    if in_hand.iter().any(|(h, _)| *h == Holder::Paused) || places >= parallel.max(1) {
+    if in_hand.contains(&Holder::Paused) || in_hand.len() >= parallel.max(1) {
         return Next::Wait;
     }
     let ready = readiness(tasks);
@@ -2131,45 +2117,21 @@ mod tests {
     }
 
     #[test]
-    fn picking_a_tomb_hands_it_the_item_as_done() {
-        let text = "- [/] Fix it @fix-1.x3
-  A note.
-- [ ] Next
-";
-        let out = pick(text, "fix-1.x3", "fix-1.x3.2").unwrap();
-        assert_eq!(
-            out,
-            "- [x] Fix it @fix-1.x3.2
-  A note.
-- [ ] Next
-"
-        );
-        assert_eq!(pick(&out, "fix-1.x3", "fix-1.x3.1"), None);
-    }
-
-    #[test]
-    fn an_item_in_tombs_takes_a_place_for_each_tomb() {
+    fn an_old_tomb_batch_holder_is_one_place_and_starts_again_when_gone() {
+        // Lists written while Tal Rasha's tombs existed may still hold one.
         let list = parse(
             "- [/] A @a-1.x3
 - [ ] B
 ",
         );
-        assert_eq!(
-            next(&list, Mode::Auto, 3, false, |_| Holder::Live, unmet),
-            Next::Wait
-        );
-        assert_eq!(
-            next(&list, Mode::Auto, 4, false, |_| Holder::Live, unmet),
-            Next::Start(1)
-        );
-        let list = parse(
-            "- [/] A @a-1
-- [ ] B
-",
-        );
+        assert_eq!(list[0].holder.as_deref(), Some("a-1.x3"));
         assert_eq!(
             next(&list, Mode::Auto, 2, false, |_| Holder::Live, unmet),
             Next::Start(1)
+        );
+        assert_eq!(
+            next(&list, Mode::Auto, 2, false, |_| Holder::Gone, unmet),
+            Next::Stuck(0)
         );
     }
 

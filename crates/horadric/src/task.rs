@@ -15,7 +15,7 @@ use horadric_core::chronicle::{self, Command, Happened, Record};
 use horadric_core::pack::{self, Touched};
 use horadric_core::spend::{uptake, Sitting};
 use horadric_core::tasks::{self, Mark, Wait};
-use horadric_core::{aim, runeword, scope, tombs, warriv};
+use horadric_core::{aim, runeword, scope, warriv};
 use horadric_hooks::listener::TasksChanged;
 use horadric_hooks::{
     client, lore, tasks as file, transcript, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, STATE_HEADER,
@@ -380,12 +380,6 @@ fn report(cwd: &Path, blocked: Option<Blocked>, summary: &str) -> Result<(), Str
     let you = blocked.as_ref().and_then(|(_, _, y)| *y);
     let wait = blocked.and_then(|(_, w, _)| w);
     let id = session().ok_or("this is not a Horadric session, so there is no item to report on")?;
-    if let Some((batch, _)) = tombs::of(&id) {
-        let project = held(cwd, batch).ok_or(format!("{NO_LOG} has a quest held by {batch}"))?;
-        record_summary(&project, &id, summary);
-        record_spend(&project, &id, cwd);
-        return report_tomb(&project, &id, why);
-    }
     let project = held(cwd, &id).ok_or(format!("{NO_LOG} has a quest held by {id}"))?;
     record_summary(&project, &id, summary);
     record_spend(&project, &id, cwd);
@@ -468,9 +462,7 @@ fn sweep(project: &Path) {
     let mut last: HashMap<String, u64> = HashMap::new();
     for r in horadric_ui::chronicle_all() {
         if r.project == key && !r.quest.is_empty() {
-            let at = last
-                .entry(chronicle::quest_of(&r.quest).to_string())
-                .or_default();
+            let at = last.entry(r.quest.clone()).or_default();
             *at = (*at).max(r.at);
         }
     }
@@ -478,28 +470,9 @@ fn sweep(project: &Path) {
     let _ = file::sweep_done(project, |t| {
         t.holder
             .as_deref()
-            .and_then(|h| last.get(chronicle::quest_of(h)))
+            .and_then(|h| last.get(h))
             .is_none_or(|&at| at < before)
     });
-}
-
-/// A tomb's report leaves the list alone, since the item is the batch's
-/// until the human picks. Only the app keeps it, so it has to hear.
-fn report_tomb(project: &Path, id: &str, why: Option<&str>) -> Result<(), String> {
-    let heard = post_app(&TasksChanged {
-        dir: project.to_string_lossy().into_owned(),
-        tomb: Some(id.to_string()),
-        why: why.map(str::to_string),
-        ..TasksChanged::default()
-    });
-    if heard != Some(200) {
-        return Err("Horadric did not hear the report. Tell the human you are finished.".into());
-    }
-    match why {
-        Some(_) => println!("Told the human you are blocked. Say what you need, then wait."),
-        None => println!("Marked done. The human compares the tombs and picks one; stop here."),
-    }
-    Ok(())
 }
 
 /// The title and the notes of `quest add`: the words before the first flag
@@ -1246,7 +1219,7 @@ fn record_spend(project: &Path, id: &str, cwd: &Path) {
 
 /// The conversations of a quest, each with the folder it ran in: this
 /// one, whose last turn has not ended yet, and every one the chronicle
-/// saw a turn of, under this quest or a tomb of its batch.
+/// saw a turn of under this quest.
 fn conversations(project: &Path, id: &str, cwd: &Path) -> Vec<(String, String)> {
     let key = horadric_ui::folder_key(&project.to_string_lossy());
     let mut seen: Vec<(String, String)> = Vec::new();
