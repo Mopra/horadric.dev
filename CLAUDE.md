@@ -21,8 +21,9 @@ Do not reopen these without asking. They were argued through and chosen.
   macOS, AppKit through the `objc2` crates).
   Performance is the reason and so is control: the window manager fight
   is the whole project, and a layer in between makes it unwinnable. The
-  one web view is the browser pane, which shows web pages, not Horadric
-  (decided 2026-09-29, the lore has why).
+  one web view is the browser pane, which shows web pages and the files
+  worked on with Claude in the Forge, not Horadric (decided 2026-09-29,
+  the lore has why; files allowed 2026-10-30).
 - **One window per project cluster, not per tile.** Tiles are drawn inside
   the cluster window. Forty tiles must not mean forty windows.
 - **One terminal window for all sessions, the stage.** It shows one
