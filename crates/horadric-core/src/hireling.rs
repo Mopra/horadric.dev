@@ -127,6 +127,34 @@ impl Hireling {
         end.duration_since(self.started).unwrap_or_default()
     }
 
+    /// What it is doing in a word: its tool, "waiting", "done" or
+    /// "failed".
+    pub fn doing(&self, now: SystemTime) -> String {
+        match self.lot_at(now) {
+            Lot::Waiting => match &self.tool {
+                Some(t) => format!("waits on {t}"),
+                None => "waiting".to_string(),
+            },
+            Lot::Working => self.tool.clone().unwrap_or_else(|| "thinking".to_string()),
+            Lot::Done => format!("done, {} tools", self.tools),
+            Lot::Failed => "failed".to_string(),
+        }
+    }
+
+    /// One line on it: "Explore · find hooks · Grep · 42 s · 18k".
+    pub fn summary(&self, now: SystemTime) -> String {
+        let mut parts = vec![self.kind.clone()];
+        if !self.task.is_empty() {
+            parts.push(self.task.clone());
+        }
+        parts.push(self.doing(now));
+        parts.push(crate::heavy::duration(self.ran(now).as_secs()));
+        if self.tokens > 0 {
+            parts.push(tokens(self.tokens));
+        }
+        parts.join(" \u{b7} ")
+    }
+
     fn end(&mut self, lot: Lot, now: SystemTime) {
         self.lot = lot;
         self.told = true;
@@ -384,6 +412,44 @@ impl Band {
         self.hirelings.iter().find(|h| h.lot == Lot::Waiting)
     }
 
+    /// The tile's line about them, if there is anything to say: the kinds
+    /// at work, with how many of the turn's are left when some are done,
+    /// "2/3 · Explore x2", or the one that failed.
+    pub fn line(&self, now: SystemTime) -> Option<String> {
+        let shown = self.shown(now, false);
+        let working: Vec<String> = shown
+            .iter()
+            .filter(|h| h.lot_at(now).at_work())
+            .map(|h| h.kind.clone())
+            .collect();
+        if working.is_empty() {
+            return shown
+                .iter()
+                .find(|h| h.lot_at(now) == Lot::Failed)
+                .map(|h| match h.task.as_str() {
+                    "" => format!("{} failed", h.kind),
+                    task => format!("{} failed: {task}", h.kind),
+                });
+        }
+        let kinds = crate::session::subagent_line(&working);
+        let total = self.hirelings.len();
+        Some(if total > working.len() {
+            format!("{}/{total} \u{b7} {kinds}", working.len())
+        } else {
+            kinds
+        })
+    }
+
+    /// A line per hireling shown, for hovering the tile: its kind, task,
+    /// what it is doing, how long it ran and its tokens.
+    pub fn list(&self, now: SystemTime) -> String {
+        self.shown(now, false)
+            .iter()
+            .map(|h| h.summary(now))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Where a hireling's transcript is: what `SubagentStop` said, or
     /// beside the session's own, `<id>/subagents/agent-<agent>.jsonl`.
     pub fn transcript_of(&self, h: &Hireling) -> Option<String> {
@@ -474,6 +540,25 @@ fn push(marks: &mut Vec<Mark>, m: Mark) {
         marks.remove(0);
     }
     marks.push(m);
+}
+
+/// Which of the twelve runes stands for a kind of hireling: the common
+/// ones chosen, the rest by a hash of the name, so a kind keeps its rune.
+pub fn rune_of(kind: &str) -> usize {
+    match kind {
+        // Raidho, the journey.
+        "Explore" => 4,
+        // Ansuz, the word.
+        "Plan" => 3,
+        // Fehu, the hired hand.
+        "general-purpose" | "agent" => 0,
+        _ => {
+            let h = kind.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+            });
+            (h % 12) as usize
+        }
+    }
 }
 
 /// `2026-10-30T22:02:05.761Z` as a time.
@@ -616,6 +701,33 @@ mod tests {
             b.transcript_of(&b.hirelings[0]).as_deref(),
             Some("C:/p/abc/subagents/agent-x9.jsonl")
         );
+    }
+
+    #[test]
+    fn the_tiles_line_counts_whats_left_and_names_a_failure() {
+        let mut b = Band::default();
+        for id in ["a1", "a2", "a3"] {
+            let mut s = sub(HookEvent::SPAWN, id);
+            s.agent_type = Some("Explore".into());
+            b.hear(&s, t(0));
+        }
+        let mut stop = sub("SubagentStop", "a3");
+        stop.agent_type = Some("Explore".into());
+        b.hear(&stop, t(1));
+        assert_eq!(b.line(t(2)).as_deref(), Some("2/3 \u{b7} Explore x2"));
+        let mut r = ev(HookEvent::AGENTS);
+        r.agents = Some(
+            ["a1", "a2"]
+                .map(|id| ModAgent {
+                    agent_id: id.into(),
+                    status: "failed".into(),
+                    description: "look".into(),
+                    ..Default::default()
+                })
+                .to_vec(),
+        );
+        b.hear(&r, t(3));
+        assert_eq!(b.line(t(4)).as_deref(), Some("Explore failed: look"));
     }
 
     #[test]

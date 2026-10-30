@@ -1576,6 +1576,19 @@ impl Cluster {
             Hit::Task(i) => self
                 .item_at(i)
                 .map(|item| Cow::Owned(tip::quest(&item.title, item.why.as_deref()))),
+            Hit::Tile(i) => {
+                let now = std::time::SystemTime::now();
+                let hirelings = self
+                    .sessions()
+                    .into_iter()
+                    .nth(i)
+                    .map(|s| s.band.list(now))
+                    .filter(|l| !l.is_empty());
+                match hirelings {
+                    Some(l) => tip::cluster(hot).map(|t| Cow::Owned(format!("{l}\n\n{t}"))),
+                    None => tip::cluster(hot).map(Cow::Borrowed),
+                }
+            }
             _ => tip::cluster(hot).map(Cow::Borrowed),
         };
         tip::over_line(&self.shared, self.hwnd, line);

@@ -126,6 +126,17 @@ const AGENTS_ALONE: f32 = 0.45;
 const SPARK_REACH: f32 = 7.0;
 /// A spark going once round the lamp.
 const SPARK_ORBIT: Duration = Duration::from_millis(2400);
+/// A hireling's rune going once round the lamp: slower than a spark, so
+/// its strokes can be read.
+const HIRELING_ORBIT: Duration = Duration::from_millis(4800);
+/// A working hireling cutting its rune and holding it, over and over.
+const RUNE_CARVE: Duration = Duration::from_millis(1800);
+/// How long a finished hireling's rune takes to settle into the lamp, in
+/// seconds.
+const RUNE_SETTLE: f32 = 2.0;
+/// A hireling's rune on the tile, DIPs tall, and its cut.
+const RUNE_H: f32 = 7.0;
+const RUNE_STROKE: f32 = 1.1;
 
 /// The Folio's button, a chat bubble. Its tooltip says it is an
 /// experiment.
@@ -2284,18 +2295,22 @@ impl Painter<'_> {
                         self.shimmer(&track, look.context, t, theme::fullness_color(c));
                     }
                     let n = s.subagents(scene.now).min(MAX_SPARKS);
-                    self.sparks(&lamp_rect(&r), c, n, look.phase_age, look.enter);
+                    let lamp = lamp_rect(&r);
+                    self.hirelings(&lamp, s, scene.now, c, n, look.phase_age, look.enter);
                 }
                 Phase::Waiting(_) => {
                     let breath = motion::waiting_breath(look.phase_age);
                     self.halo(&r, radius, c, (0.3 + 0.4 * breath) * look.enter);
                     let level = (0.55 + 0.45 * breath) * look.enter;
                     self.lamp(&lamp_rect(&r), c, level);
+                    let c = theme::phase_color(&Phase::Working);
+                    let lamp = lamp_rect(&r);
+                    self.hirelings(&lamp, s, scene.now, c, 0, look.phase_age, look.enter);
                 }
                 _ => {
                     let n = s.agents_alone(scene.now).min(MAX_SPARKS);
                     let (c, age) = (theme::phase_color(&Phase::Working), look.phase_age / 2);
-                    self.sparks(&lamp_rect(&r), c, n, age, AGENTS_ALONE);
+                    self.hirelings(&lamp_rect(&r), s, scene.now, c, n, age, AGENTS_ALONE);
                 }
             }
         }
@@ -2701,6 +2716,117 @@ impl Painter<'_> {
         self.fill_rounded(r, round, theme::lamp_off().mix(c, level));
         let hot = c.mix(Color::rgb(0xFFFFFF), 0.45).fade(level);
         self.fill_rounded(&r.inset(1.0), (round - 1.0).max(0.5), hot);
+    }
+
+    /// A rune for each hireling, circling the lamp: carving itself while
+    /// it works, held still at the top and beating while it waits on a
+    /// permission, settling into the lamp as it finishes, and cracked in
+    /// the error colour where it failed. A session the band knows nothing
+    /// of (a mod too old, a headless stream) keeps the `n` plain sparks.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn hirelings(
+        &self,
+        r: &Rect,
+        s: &Session,
+        now: SystemTime,
+        c: Color,
+        n: usize,
+        age: Duration,
+        strength: f32,
+    ) {
+        use horadric_core::hireling::{rune_of, Lot};
+        if s.band.hirelings.is_empty() {
+            self.sparks(r, c, n, age, strength);
+            return;
+        }
+        let shown = s.band.shown(now, false);
+        let shown = &shown[..shown.len().min(MAX_SPARKS)];
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let (rx, ry) = (SPARK_REACH + 1.0, r.h / 2.0 + 3.0);
+        let turn = motion::cycle(age, HIRELING_ORBIT);
+        let count = shown.len().max(1) as f32;
+        let since = |t: SystemTime| now.duration_since(t).unwrap_or_default();
+        for (k, h) in shown.iter().enumerate() {
+            let spot = k as f32 / count;
+            let around = |turn: f32| {
+                let a = std::f32::consts::TAU * (turn + spot);
+                (cx + rx * a.cos(), cy + ry * a.sin())
+            };
+            let (at, ink, drawn) = match h.lot_at(now) {
+                Lot::Working => {
+                    let carve = motion::cycle(since(h.started), RUNE_CARVE);
+                    (around(turn), c.fade(strength), (carve * 1.6).min(1.0))
+                }
+                Lot::Waiting => {
+                    let beat = motion::waiting_breath(since(h.heard));
+                    let ink = theme::waiting().fade((0.5 + 0.5 * beat) * strength.max(0.6));
+                    ((cx, cy - ry), ink, 1.0)
+                }
+                Lot::Done => {
+                    let t = since(h.ended.unwrap_or(h.heard)).as_secs_f32() / RUNE_SETTLE;
+                    if t >= 1.0 {
+                        continue;
+                    }
+                    let (x, y) = around(turn);
+                    let ease = motion::ease_out(t);
+                    let at = (x + (cx - x) * ease, y + (cy - y) * ease);
+                    let ink = theme::done().fade((1.0 - t) * strength.max(0.6));
+                    (at, ink, 1.0)
+                }
+                // Stopped where it fell, which is its own spot, not moving.
+                Lot::Failed => (around(0.0), theme::error().fade(0.9), 1.0),
+            };
+            self.rune(rune_of(&h.kind), at, RUNE_H, ink, drawn);
+            if h.lot_at(now) == Lot::Failed {
+                let half = RUNE_H / 2.0;
+                self.rt.DrawLine(
+                    Vector2 {
+                        X: at.0 - half * 0.6,
+                        Y: at.1 - half,
+                    },
+                    Vector2 {
+                        X: at.0 + half * 0.6,
+                        Y: at.1 + half,
+                    },
+                    self.brush,
+                    RUNE_STROKE,
+                    None,
+                );
+            }
+        }
+    }
+
+    /// One of the twelve runes, `h` tall, centred on `at`, `drawn` of its
+    /// strokes cut so far, in the order a hand would cut them. Leaves the
+    /// brush in `ink`.
+    unsafe fn rune(&self, rune: usize, at: (f32, f32), h: f32, ink: Color, drawn: f32) {
+        let strokes = crate::sparks::RUNES[rune % crate::sparks::RUNES.len()];
+        let place = |(u, v): (f32, f32)| Vector2 {
+            X: at.0 + u * h,
+            Y: at.1 + (v - 0.5) * h,
+        };
+        let len = |a: (f32, f32), b: (f32, f32)| (b.0 - a.0).hypot(b.1 - a.1);
+        let total: f32 = strokes
+            .iter()
+            .flat_map(|s| s.windows(2))
+            .map(|w| len(w[0], w[1]))
+            .sum();
+        let mut left = total * drawn.clamp(0.0, 1.0);
+        self.brush.SetColor(&color(ink));
+        for seg in strokes.iter().flat_map(|s| s.windows(2)) {
+            if left <= 0.0 {
+                break;
+            }
+            let l = len(seg[0], seg[1]);
+            let f = (left / l).min(1.0);
+            let end = (
+                seg[0].0 + (seg[1].0 - seg[0].0) * f,
+                seg[0].1 + (seg[1].1 - seg[0].1) * f,
+            );
+            self.rt
+                .DrawLine(place(seg[0]), place(end), self.brush, RUNE_STROKE, None);
+            left -= l;
+        }
     }
 
     /// A spark for each subagent at work, circling the lamp, spaced evenly
@@ -3353,7 +3479,9 @@ impl Painter<'_> {
         self.text_tabular(gpu, &gpu.small_right, age_c.fade(presence), &age, top);
 
         // Last line, and what the agent did lately beside it.
-        let at_work = if phase == &Phase::Working || s.agents_alone(scene.now) > 0 {
+        let at_work = if !s.band.hirelings.is_empty() {
+            s.band.line(scene.now).unwrap_or_default()
+        } else if phase == &Phase::Working || s.agents_alone(scene.now) > 0 {
             horadric_core::session::subagent_line(&s.subagent_types(scene.now))
         } else {
             String::new()
