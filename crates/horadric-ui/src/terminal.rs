@@ -27,8 +27,8 @@ use windows::core::{w, Result, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FrameRect, GradientFill, InvalidateRect,
-    ScreenToClient, GRADIENT_FILL_RECT_V, GRADIENT_RECT, PAINTSTRUCT, TRIVERTEX,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, ExcludeClipRect, FillRect, FrameRect,
+    GradientFill, InvalidateRect, ScreenToClient, GRADIENT_FILL_RECT_V, GRADIENT_RECT, PAINTSTRUCT, TRIVERTEX,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
@@ -39,7 +39,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
     GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsChild, IsIconic,
-    IsZoomed, LoadCursorW, LoadIconW, RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow,
+    IsWindowVisible, IsZoomed, LoadCursorW, LoadIconW, RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CW_USEDEFAULT,
     GWLP_USERDATA, HICON, HTCAPTION, HTCLIENT, HTCLOSE, HTHELP, HTMAXBUTTON, HTMINBUTTON, HTTOP,
     HTTOPLEFT, HTTOPRIGHT, ICON_BIG, IDC_ARROW, IDC_SIZEALL, IDC_SIZENS, IDC_SIZEWE,
@@ -70,7 +70,7 @@ use crate::menu::{self, Item};
 use crate::pane::{self, Pane, DIRS, WM_PANE_FOCUS, WM_PANE_GRAB, WM_PANE_MOVE, WM_PANE_ZOOM};
 use crate::tip;
 use crate::window::Shared;
-use crate::{layout, sanctuary, snapping, theme, web};
+use crate::{layout, motion, sanctuary, snapping, theme, web};
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricTerminal");
 /// Between panes, and around them, in DIPs. Each pane has a bezel of its
@@ -82,6 +82,8 @@ const SEAM_DIP: f32 = 4.0;
 const GLIDE_TIMER: usize = 1;
 /// Carries a dragged pane on the display's frames.
 const DRAG_TIMER: usize = 2;
+/// Runs while a pane grows out to fill the stage or back into its cell.
+const GROW_TIMER: usize = 3;
 /// How far a header has to move before a press becomes a drag.
 const DRAG_THRESHOLD: i32 = 4;
 /// The least a docked pane and the grid beside it each keep, in
@@ -98,6 +100,25 @@ pub enum Place {
     Rect([i32; 4]),
     /// These visible edges (see [`TerminalWindow::set_visible_rect`]).
     Visible([i32; 4]),
+}
+
+/// A pane growing out to fill the stage, or back into its cell. The panes
+/// take their new sizes once, before it begins, and stay hidden while the
+/// faceplate draws plain plates in their places: a terminal or a page
+/// resized every frame would reflow every frame.
+struct Growth {
+    from: [i32; 4],
+    to: [i32; 4],
+    start: Instant,
+    fill: theme::Color,
+    /// The other panes' cells and fills, held while the grid comes back.
+    rest: Vec<([i32; 4], theme::Color)>,
+}
+
+impl Growth {
+    fn now(&self) -> [i32; 4] {
+        motion::grow(self.from, self.to, self.start.elapsed(), motion::GROW)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -167,6 +188,7 @@ pub struct TerminalWindow {
     /// A seam is being dragged: its pane, and how far into it the cursor
     /// took it.
     seam_drag: Cell<Option<(usize, i32)>>,
+    growth: RefCell<Option<Growth>>,
 }
 
 pub fn register_class() -> Result<()> {
@@ -218,6 +240,7 @@ impl TerminalWindow {
             seams: RefCell::new(Vec::new()),
             seam_drag: Cell::new(None),
             glided: Cell::new(None),
+            growth: RefCell::new(None),
         });
         unsafe {
             let instance = GetModuleHandleW(None)?;
@@ -379,6 +402,8 @@ impl TerminalWindow {
     /// While a pane is dragged it is left to the mouse, and the pane whose
     /// cell it is over takes the cell it came from.
     fn layout_with(&self, glide: bool) {
+        // Anything that lays the stage out mid growth wants the panes back.
+        self.stop_growth();
         let glide = glide && crate::backdrop::animations_on();
         let mut r = RECT::default();
         unsafe {
@@ -569,11 +594,115 @@ impl TerminalWindow {
             .map(|p| p.session().to_string());
         let Some(id) = id else { return };
         *self.active.borrow_mut() = Some(id);
+        let from = self.growing_at().or_else(|| self.pane_rect(serial));
         self.zoomed.set(!self.zoomed.get());
-        self.layout_with(true);
+        self.layout();
+        self.grow_from(serial, from);
         self.focus_active();
         self.spotlight();
         self.refresh_title();
+    }
+
+    /// Where a pane is in the stage's client area, while it is shown.
+    fn pane_rect(&self, serial: usize) -> Option<[i32; 4]> {
+        let panes = self.panes.borrow();
+        let p = panes.iter().find(|p| p.serial() == serial)?;
+        unsafe { IsWindowVisible(p.hwnd) }
+            .as_bool()
+            .then(|| self.child_rect(p.hwnd))
+    }
+
+    fn child_rect(&self, child: HWND) -> [i32; 4] {
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetWindowRect(child, &mut r);
+        }
+        let (x, y) = self.child_at(child);
+        [x, y, x + r.right - r.left, y + r.bottom - r.top]
+    }
+
+    /// Where the growing plate is now, while a pane grows.
+    fn growing_at(&self) -> Option<[i32; 4]> {
+        self.growth.borrow().as_ref().map(Growth::now)
+    }
+
+    /// Grows the pane with this serial from `from` to where the layout
+    /// just put it, its plate drawn on the faceplate with the panes hidden.
+    /// Without animations it is already there.
+    fn grow_from(&self, serial: usize, from: Option<[i32; 4]>) {
+        let Some(from) = from.filter(|_| backdrop::animations_on()) else {
+            return;
+        };
+        let panes = self.panes.borrow();
+        let Some(pane) = panes.iter().find(|p| p.serial() == serial) else {
+            return;
+        };
+        let to = self.child_rect(pane.hwnd);
+        if to == from {
+            return;
+        }
+        let fill = |p: &Pane| {
+            if p.console().web.is_some() {
+                theme::well()
+            } else {
+                theme::palette().term_bg
+            }
+        };
+        let rest = panes
+            .iter()
+            .filter(|p| p.serial() != serial && unsafe { IsWindowVisible(p.hwnd) }.as_bool())
+            .map(|p| (self.child_rect(p.hwnd), fill(p)))
+            .collect();
+        *self.growth.borrow_mut() = Some(Growth {
+            from,
+            to,
+            start: Instant::now(),
+            fill: fill(pane),
+            rest,
+        });
+        for p in panes.iter() {
+            p.set_visible(false);
+        }
+        crate::vsync::start(self.hwnd, GROW_TIMER);
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+        }
+    }
+
+    /// A frame of a growth. At its end the panes come back, fading in
+    /// over their plates.
+    fn grow(&self) {
+        let done = self
+            .growth
+            .borrow()
+            .as_ref()
+            .is_none_or(|g| g.start.elapsed() >= motion::GROW);
+        if !done {
+            unsafe {
+                let _ = InvalidateRect(Some(self.hwnd), None, false);
+            }
+            return;
+        }
+        self.layout();
+        for p in self.panes.borrow().iter() {
+            if unsafe { IsWindowVisible(p.hwnd) }.as_bool() {
+                p.reveal();
+            }
+        }
+        // The keyboard went to a hidden pane, which a page does not take.
+        if self.is_foreground() {
+            self.focus_active();
+        }
+    }
+
+    /// Ends a growth where it is, leaving the panes to the layout.
+    fn stop_growth(&self) {
+        if self.growth.borrow_mut().take().is_some() {
+            crate::vsync::stop(self.hwnd, GROW_TIMER);
+            unsafe {
+                let _ = InvalidateRect(Some(self.hwnd), None, false);
+            }
+        }
     }
 
     /// Moves the keyboard from the pane with this serial to the one beside
@@ -934,6 +1063,27 @@ impl TerminalWindow {
             let hdc = BeginPaint(self.hwnd, &mut ps);
             let mut r = RECT::default();
             let _ = GetClientRect(self.hwnd, &mut r);
+            // A growing pane's plate over the others', each cut out of what
+            // is painted after it, so no pixel is painted twice.
+            if let Some(g) = self.growth.borrow().as_ref() {
+                let edge = theme::window_bg().mix(theme::accent(&self.project.borrow()), 0.35);
+                let edge = CreateSolidBrush(colorref(edge));
+                let plates = std::iter::once((g.now(), g.fill)).chain(g.rest.iter().copied());
+                for ([left, top, right, bottom], fill) in plates {
+                    let plate = RECT {
+                        left,
+                        top,
+                        right,
+                        bottom,
+                    };
+                    let brush = CreateSolidBrush(colorref(fill));
+                    FillRect(hdc, &plate, brush);
+                    FrameRect(hdc, &plate, edge);
+                    let _ = DeleteObject(brush.into());
+                    ExcludeClipRect(hdc, left, top, right, bottom);
+                }
+                let _ = DeleteObject(edge.into());
+            }
             let verts = [
                 vertex(0, 0, theme::plate_top()),
                 vertex(r.right, r.bottom, theme::plate_bottom()),
@@ -1420,6 +1570,11 @@ impl TerminalWindow {
             WM_TIMER if wparam.0 == DRAG_TIMER => {
                 crate::vsync::took(self.hwnd, DRAG_TIMER);
                 self.carry();
+                Some(LRESULT(0))
+            }
+            WM_TIMER if wparam.0 == GROW_TIMER => {
+                crate::vsync::took(self.hwnd, GROW_TIMER);
+                self.grow();
                 Some(LRESULT(0))
             }
             WM_TIMER if wparam.0 == GLIDE_TIMER => {

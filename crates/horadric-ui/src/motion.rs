@@ -38,6 +38,8 @@ pub const BREATH: Duration = Duration::from_millis(1800);
 pub const REVEAL: Duration = Duration::from_millis(220);
 /// The panes without the keyboard dimming back.
 pub const SPOTLIGHT: Duration = Duration::from_millis(160);
+/// A stage pane growing out to fill the stage, or back into its cell.
+pub const GROW: Duration = Duration::from_millis(180);
 
 /// A cursor blinks this long after it last moved, then stays lit. Blinking
 /// on would repaint an idle pane twice a second for no one.
@@ -85,6 +87,13 @@ pub fn progress(elapsed: Duration, length: Duration) -> f32 {
 pub fn ease_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     1.0 - (1.0 - t).powi(3)
+}
+
+/// Where a rect growing from `from` to `to` is, `elapsed` into an animation
+/// of `length`, eased out. Edges as left, top, right, bottom.
+pub fn grow(from: [i32; 4], to: [i32; 4], elapsed: Duration, length: Duration) -> [i32; 4] {
+    let t = ease_out(progress(elapsed, length));
+    std::array::from_fn(|i| from[i] + ((to[i] - from[i]) as f32 * t).round() as i32)
 }
 
 /// A finished turn's key jumping and settling.
@@ -579,5 +588,20 @@ mod tests {
         assert_eq!(fade(1.0, 0.0, ms(60), ms(120)), 0.5);
         assert_eq!(fade(0.9, 1.0, ms(60), ms(120)), 1.0);
         assert_eq!(fade(0.4, 0.4, ms(60), ms(120)), 0.4);
+    }
+
+    #[test]
+    fn a_pane_grows_from_its_cell_to_the_stage_fast_then_soft() {
+        let ms = Duration::from_millis;
+        let cell = [100, 100, 300, 200];
+        let full = [0, 0, 1000, 600];
+        assert_eq!(grow(cell, full, ms(0), GROW), cell);
+        assert_eq!(grow(cell, full, GROW, GROW), full);
+        assert_eq!(grow(cell, full, ms(1000), GROW), full);
+        assert_eq!(grow(full, cell, GROW, GROW), cell);
+        // Eased out: past halfway at the halfway mark.
+        let mid = grow(cell, full, GROW / 2, GROW);
+        assert!(mid[2] > 650 && mid[2] < 1000, "{mid:?}");
+        assert!(mid[0] < 50 && mid[0] > 0, "{mid:?}");
     }
 }
