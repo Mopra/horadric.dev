@@ -88,7 +88,7 @@ pub fn ensure(
     Ok(dir)
 }
 
-fn fill(
+pub(crate) fn fill(
     pinned: &Pinned,
     dir: &Path,
     fetch: impl Fn(&str, usize) -> Result<Vec<u8>, String>,

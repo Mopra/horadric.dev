@@ -79,6 +79,7 @@ use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXDRAG, SM_CY
 use crate::app::{self, Input, PaneAsk};
 use crate::clipboard;
 use crate::console::{Console, GridSize};
+use crate::dictate;
 use crate::field::{self, Field};
 use crate::folio;
 use crate::frame::{Decoration, Stroke};
@@ -1060,6 +1061,8 @@ impl Pane {
             // runes already say whether Claude works.
             detail = String::new();
             self.place_folio_bar(key, &name, r.right, dpi);
+        } else if let Some(said) = dictate::status(self.hwnd) {
+            detail = said;
         }
         let (session_phase, cast) = self
             .shared
@@ -1764,6 +1767,51 @@ impl Pane {
             CharAction::Browse => app::push(Input::Browse),
             CharAction::Sanctuary => app::push(Input::Sanctuary),
         }
+    }
+
+    /// Ctrl+Space dictates into the session, and Esc drops what is being
+    /// heard. The chord types nothing, so it is the stage's in every
+    /// program.
+    fn dictate_key(&self, vk: VIRTUAL_KEY, repeat: bool) -> bool {
+        let mods = Self::mods();
+        if vk == VK_ESCAPE && dictate::cancel(self.hwnd) {
+            self.drop_char();
+            self.on_dictate();
+            return true;
+        }
+        let ours = self.is_session() || self.console.folio.is_some();
+        if vk != VK_SPACE || !mods.ctrl || mods.alt || mods.shift || !ours {
+            return false;
+        }
+        self.drop_char();
+        if !repeat {
+            dictate::press(self.hwnd);
+        }
+        true
+    }
+
+    /// The dictation moved on: what it says is shown, and the words, once
+    /// written down, are typed where the keyboard is. Never sent.
+    fn on_dictate(&self) {
+        let done = dictate::take(self.hwnd);
+        if let Some(key) = &self.console.folio {
+            folio::dictation(key, dictate::status(self.hwnd));
+        }
+        match done {
+            Some(Ok(text)) if !text.is_empty() => match &self.console.folio {
+                Some(key) => folio::dictated(key, &text),
+                None => self.paste_text(&text),
+            },
+            Some(Ok(_)) => {}
+            Some(Err(e)) => {
+                eprintln!("horadric: dictation: {e}");
+                if let Some(key) = &self.console.folio {
+                    folio::dictation(key, Some(e));
+                }
+            }
+            None => {}
+        }
+        self.invalidate();
     }
 
     /// Keys that make no character. Returns false to let Windows have it.
@@ -3130,6 +3178,10 @@ impl Pane {
                 self.invalidate();
                 Some(LRESULT(0))
             }
+            dictate::WM_DICTATE => {
+                self.on_dictate();
+                Some(LRESULT(0))
+            }
             folio::WM_FOLIO_REFRESH => {
                 self.invalidate();
                 Some(LRESULT(0))
@@ -3304,7 +3356,8 @@ impl Pane {
                 if wparam.0 == VK_CONTROL.0 as usize && !repeat {
                     self.hover(self.mouse_here());
                 }
-                if self.web_tab_key(VIRTUAL_KEY(wparam.0 as u16))
+                if self.dictate_key(VIRTUAL_KEY(wparam.0 as u16), repeat)
+                    || self.web_tab_key(VIRTUAL_KEY(wparam.0 as u16))
                     || self.bar_key(VIRTUAL_KEY(wparam.0 as u16), Self::mods())
                     || self.on_key(wparam.0 as u16, Self::mods(), repeat)
                 {
@@ -3316,6 +3369,9 @@ impl Pane {
             WM_KEYUP | WM_SYSKEYUP => {
                 if wparam.0 == VK_CONTROL.0 as usize {
                     self.hover(None);
+                }
+                if wparam.0 == VK_CONTROL.0 as usize || wparam.0 == VK_SPACE.0 as usize {
+                    dictate::release(self.hwnd);
                 }
                 self.on_key_up(wparam.0 as u16, Self::mods());
                 None

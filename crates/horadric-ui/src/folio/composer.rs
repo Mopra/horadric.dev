@@ -1060,6 +1060,35 @@ fn add_paths(chat: &mut Chat, paths: &[PathBuf]) {
     }
 }
 
+/// Words dictated in the pane, typed at the caret as if by hand, with a
+/// space before them when they would run into a word.
+pub fn dictated(key: &str, text: &str) {
+    with(key, |chat| {
+        chat.input.ensure(key);
+        let f = &chat.input.ed.field;
+        let joins = f.text[..f.caret]
+            .chars()
+            .next_back()
+            .is_some_and(|c| !c.is_whitespace());
+        let text = if joins {
+            format!(" {text}")
+        } else {
+            text.to_string()
+        };
+        chat.input.ed.type_str(&text);
+        chat.input.edited();
+        follow_menu(chat);
+    });
+    redraw(key);
+}
+
+/// What dictation says above the composer while it listens, None once
+/// it is done.
+pub fn dictation(key: &str, notice: Option<String>) {
+    with(key, |chat| chat.input.notice = notice);
+    redraw(key);
+}
+
 /// Files dropped on the conversation.
 pub(super) fn drop_files(key: &str, paths: Vec<String>) {
     with(key, |chat| {

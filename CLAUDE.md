@@ -43,7 +43,7 @@ Do not reopen these without asking. They were argued through and chosen.
 - `horadric-core`: the pure logic, state, quests, merging. Most tests live here.
 - `horadric-hooks`: the hook events agents post and how they are read.
 - `horadric-link`: the relay and the crypto for linked machines.
-- `horadric-memory`: the embedding model that finds memory by meaning.
+- `horadric-memory`: the embedding model that finds memory by meaning, and Whisper for dictation.
 - `horadric-pty`: the pseudo console and the session hosts.
 - `horadric-ui`: windows, tiles, the stage, the browser pane (`src/mac/` for macOS).
 

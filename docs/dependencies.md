@@ -12,7 +12,8 @@ language (Rust, TypeScript and JavaScript, Python) for the lore's code
 index (parsing languages is not the project either, and it finds the
 calls a regex outline misses), and in `horadric-memory` `candle-core`,
 `candle-nn` and `candle-transformers` with `tokenizers` (its `onig`
-feature only) to run the embedding model that finds memory by meaning:
+feature only) to run the embedding model that finds memory by meaning, and Whisper
+for dictation (decided 2026-10-30, no new crate):
 Hugging Face's pure Rust ML crates, no DLL to ship and no service that
 must be running, and the tokenizer is the one the models were trained
 with (writing either is not the project), and in `horadric-link`, for

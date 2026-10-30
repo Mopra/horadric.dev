@@ -63,6 +63,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::app::{self, Input};
 use crate::folio_look as look;
 
+pub use composer::{dictated, dictation};
 pub use view::{attach, char, key, keyboard_moved, place, place_bar, register_class, wheel};
 /// Posted to the pane a Folio is in when what its header says may have
 /// changed.

@@ -18,6 +18,7 @@ pub mod recall;
 pub mod service;
 pub mod share;
 pub mod sharing;
+pub mod speech;
 pub mod store;
 pub mod transcripts;
 
