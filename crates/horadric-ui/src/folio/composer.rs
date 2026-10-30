@@ -47,7 +47,7 @@ use windows_numerics::Vector2;
 use super::controls;
 use super::editor::{Editor, History};
 use super::picker::{self, Item, Menu, MenuKind};
-use super::view::{d2d, rounded, scroll_by, view_of, Gfx, Hit, Palette, View};
+use super::view::{d2d, rounded, scroll_by, view_of, Gfx, Hit, Palette, View, CARET_W};
 use super::{redraw, with, Chat};
 use crate::clipboard;
 use crate::field;
@@ -1231,7 +1231,7 @@ unsafe fn faceplate(gfx: &Gfx, r: &Rect, pal: &Palette, focused: bool) {
         .FillRoundedRectangle(&rounded(&well, WELL_R), &gfx.shade);
     gfx.rt.PopAxisAlignedClip();
     let rim = if focused {
-        pal.accent.with_alpha(0.55)
+        pal.keys_rim()
     } else {
         p.engrave_dark
     };
@@ -1412,10 +1412,10 @@ impl View {
                 },
             )
         };
-        if focused {
+        if focused && chat.tr.state.caret_lit {
             gfx.fill(
-                &Rect::new(ox + caret.x, sy + caret.y, 1.5, caret.h),
-                pal.accent.mix(pal.fg, 0.4),
+                &Rect::new(ox + caret.x, sy + caret.y, CARET_W, caret.h),
+                pal.caret(),
             );
         }
         gfx.rt.PopAxisAlignedClip();

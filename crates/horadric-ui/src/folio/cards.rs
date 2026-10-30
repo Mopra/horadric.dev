@@ -9,7 +9,7 @@ use windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_EMERGENCY_BREAK;
 use super::flow;
 use super::rich::{Ctx, Scene, F};
 use super::transcript::{deny_field, keep_field, other_field, Act, State};
-use super::view::Hit;
+use super::view::{Hit, CARET_W};
 use crate::field::utf16_at;
 use crate::folio_look as look;
 use crate::layout::Rect;
@@ -60,7 +60,7 @@ fn field(cx: &Ctx, s: &mut Scene, st: &State, id: &str, hint: &str, x: f32, y: f
     let r = Rect::new(x, y, w, th.max(20.0) + 14.0);
     s.fill(r, 8.0, Color::rgb(0).with_alpha(0.25));
     let edge = if focused {
-        cx.pal.accent.with_alpha(0.75)
+        cx.pal.keys_rim()
     } else {
         cx.pal.fg.with_alpha(0.18)
     };
@@ -71,7 +71,7 @@ fn field(cx: &Ctx, s: &mut Scene, st: &State, id: &str, hint: &str, x: f32, y: f
         cx.pal.fg
     };
     s.text(&l, x + 10.0, y + 7.0, ink);
-    if focused {
+    if focused && st.caret_lit {
         let f = st.fields.get(id);
         let at = f.map_or(0, |f| utf16_at(&f.text, f.caret));
         let c = if text.is_empty() {
@@ -80,9 +80,9 @@ fn field(cx: &Ctx, s: &mut Scene, st: &State, id: &str, hint: &str, x: f32, y: f
             render::caret_at(&l, at)
         };
         s.fill(
-            Rect::new(x + 10.0 + c.x, y + 7.0 + c.y, 1.3, c.h),
+            Rect::new(x + 10.0 + c.x, y + 7.0 + c.y, CARET_W, c.h),
             0.0,
-            cx.pal.fg,
+            cx.pal.caret(),
         );
     }
     s.hit(r, Hit::Tr(Act::Field(id.to_string())));

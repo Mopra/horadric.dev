@@ -4,7 +4,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -50,6 +50,7 @@ use crate::clipboard;
 use crate::folio_look as look;
 use crate::keys::Mods;
 use crate::layout::Rect;
+use crate::motion;
 use crate::render::{self, color, Gpu};
 use crate::sparks::RUNES;
 use crate::theme::{self, Color};
@@ -57,6 +58,10 @@ use crate::window::Shared;
 
 const CLASS: PCWSTR = w!("HoradricFolio");
 const TICK: usize = 1;
+/// Turns the caret on or off, at the system's blink rate.
+const BLINK: usize = 2;
+/// The caret in every field that can hold the keys.
+pub(super) const CARET_W: f32 = 1.5;
 /// Between frames while the background moves. It drifts slowly, so this is
 /// smooth enough and costs a third of the display's rate.
 const FRAME_MS: u32 = 40;
@@ -118,6 +123,8 @@ fn make(key: &str, shared: &Rc<Shared>, parent: HWND, bar: bool) -> Option<HWND>
         hits: RefCell::new(Vec::new()),
         composer: RefCell::new(None),
         ticking: Cell::new(false),
+        caret_since: Cell::new(Instant::now()),
+        caret_was: Cell::new(0),
         last: Cell::new(None),
         clock: Cell::new(0.0),
         warp: Cell::new(0.0),
@@ -322,6 +329,10 @@ pub(super) struct View {
     /// placing the caret by a click or an arrow.
     pub(super) composer: RefCell<Option<(IDWriteTextLayout, f32, f32)>>,
     pub(super) ticking: Cell<bool>,
+    /// When the caret last moved or the keyboard came, which restarts its
+    /// blink lit, and what it was then.
+    pub(super) caret_since: Cell<Instant>,
+    pub(super) caret_was: Cell<u64>,
     pub(super) last: Cell<Option<Instant>>,
     /// The background's own time, in seconds. It runs only while it moves,
     /// so warming again picks up where it stopped.
@@ -563,6 +574,17 @@ pub(super) struct Palette {
     pub(super) accent: Color,
 }
 
+impl Palette {
+    /// The rim of the one field with the keyboard, whichever it is.
+    pub(super) fn keys_rim(&self) -> Color {
+        self.accent.with_alpha(0.6)
+    }
+
+    pub(super) fn caret(&self) -> Color {
+        self.accent.mix(self.fg, 0.4)
+    }
+}
+
 impl View {
     pub(super) fn hwnd(&self) -> HWND {
         self.hwnd.get()
@@ -586,6 +608,46 @@ impl View {
             IsWindowVisible(self.hwnd()).as_bool()
                 && !IsIconic(GetAncestor(self.hwnd(), GA_ROOT)).as_bool()
         }
+    }
+
+    /// Whether the caret shows this frame. It blinks as a terminal pane's
+    /// does, lit again whenever it moves or the keyboard comes back, and
+    /// only while the pane has the keys.
+    fn blink(&self, chat: &Chat, now: Instant) -> bool {
+        use std::hash::{Hash, Hasher};
+        let st = &chat.tr.state;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        st.keys.hash(&mut h);
+        st.focus.hash(&mut h);
+        let f = &chat.input.ed.field;
+        (f.caret, f.text.len()).hash(&mut h);
+        if let Some(f) = st.focus.as_deref().and_then(|id| st.fields.get(id)) {
+            (f.caret, f.text.len()).hash(&mut h);
+        }
+        if let Some(f) = &st.find {
+            (f.field.caret, f.field.text.len()).hash(&mut h);
+        }
+        if self.caret_was.replace(h.finish()) != h.finish() {
+            self.caret_since.set(now);
+        }
+        // INFINITE when blinking is off in Settings, zero on failure.
+        let half = match unsafe { windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime() } {
+            u32::MAX => Duration::ZERO,
+            ms => Duration::from_millis(ms as u64),
+        };
+        let elapsed = now.duration_since(self.caret_since.get());
+        let next = motion::caret_turns(elapsed, half).filter(|_| st.keys);
+        unsafe {
+            match next {
+                Some(wait) => {
+                    SetTimer(Some(self.hwnd()), BLINK, wait.as_millis() as u32 + 1, None);
+                }
+                None => {
+                    let _ = KillTimer(Some(self.hwnd()), BLINK);
+                }
+            }
+        }
+        st.keys && motion::caret_lit(elapsed, half)
     }
 
     /// Runs the frame clock while the background moves and it is seen,
@@ -654,6 +716,7 @@ impl View {
         }
         let now = Instant::now();
         chat.tr.state.keys = self.has_keyboard();
+        chat.tr.state.caret_lit = self.blink(chat, now);
         chat.note_busy();
         let heat = chat.heat();
         let moving = chat.busy_was || heat > 0.0;
@@ -952,6 +1015,13 @@ impl View {
                     let _ = render::resize_target(&g.rt, w, h);
                 }
                 unsafe {
+                    let _ = InvalidateRect(Some(self.hwnd()), None, false);
+                }
+                Some(LRESULT(0))
+            }
+            WM_TIMER if wparam.0 == BLINK => {
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd()), BLINK);
                     let _ = InvalidateRect(Some(self.hwnd()), None, false);
                 }
                 Some(LRESULT(0))

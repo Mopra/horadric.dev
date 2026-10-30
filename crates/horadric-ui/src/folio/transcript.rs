@@ -24,7 +24,7 @@ use windows_numerics::Vector2;
 use super::cards;
 use super::flow::{self, Pos, Pos2};
 use super::rich::{self, Ctx, Fonts, Scene, F, MONO_LINE};
-use super::view::{d2d, text_format, Gfx, Hit, Palette, View, FONT};
+use super::view::{d2d, text_format, Gfx, Hit, Palette, View, CARET_W, FONT};
 use super::Chat;
 use crate::field::Field;
 use crate::folio_look::{self as look, RunState};
@@ -137,6 +137,8 @@ pub(super) struct State {
     /// Whether the pane has the keyboard at all: without it no field
     /// shows a caret or a lit rim, whichever one `focus` names.
     pub(super) keys: bool,
+    /// The caret's half of its blink this frame: shown or not.
+    pub(super) caret_lit: bool,
     /// Asks whose deny reason is open, plans whose feedback is.
     pub(super) denying: HashSet<String>,
     pub(super) keeping: HashSet<String>,
@@ -261,7 +263,8 @@ fn hash_field(h: &mut DefaultHasher, st: &State, id: &str) {
         hash_str(h, &f.text);
         (f.caret, f.anchor).hash(h);
     }
-    (st.keys && st.focus.as_deref() == Some(id)).hash(h);
+    let focused = st.keys && st.focus.as_deref() == Some(id);
+    (focused, focused && st.caret_lit).hash(h);
 }
 
 /// What block `b` is built from: when this changes, it is built again.
@@ -1370,7 +1373,7 @@ impl View {
         gfx.fill_round(&r, 10.0, pal.bg.mix(pal.fg, 0.1));
         let focused = st.keys && st.focus.as_deref() == Some(FIND_FIELD);
         let edge = if focused {
-            pal.accent.with_alpha(0.7)
+            pal.keys_rim()
         } else {
             pal.fg.with_alpha(0.15)
         };
@@ -1391,13 +1394,13 @@ impl View {
         } else {
             gfx.text_in(&f.field.text, &gfx.line, &text_r, pal.fg);
         }
-        if focused {
+        if focused && st.caret_lit {
             if let Ok(l) = render::wrapped(&self.shared.gpu, &gfx.line, &f.field.text, 10_000.0) {
                 let at = crate::field::utf16_at(&f.field.text, f.field.caret);
                 let c = render::caret_at(&l, at);
                 let (_, lh) = render::text_size(&l);
                 let x = text_r.x + c.x.min(text_r.w);
-                gfx.fill(&Rect::new(x, r.y + (r.h - lh) / 2.0, 1.2, lh), pal.fg);
+                gfx.fill(&Rect::new(x, r.y + (r.h - lh) / 2.0, CARET_W, lh), pal.caret());
             }
         }
         let cr = Rect::new(text_r.right() + 4.0, r.y, count_w, r.h);
