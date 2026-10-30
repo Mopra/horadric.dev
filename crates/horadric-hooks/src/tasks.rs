@@ -84,13 +84,67 @@ pub fn add_host(project: &Path, host: &str) -> io::Result<bool> {
     }
 }
 
-/// The plain host names in the user's `~/.ssh/config`, none without one.
+/// The plain host names in the user's `~/.ssh/config` and the files it
+/// includes, in the order OpenSSH reads them, none without one.
 pub fn ssh_config_hosts() -> Vec<String> {
     let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
         return Vec::new();
     };
-    let path = Path::new(&home).join(".ssh").join("config");
-    ssh::config_hosts(&read_text(&path))
+    config_hosts_in(Path::new(&home))
+}
+
+/// OpenSSH stops at this depth too, so a file that includes itself ends.
+const INCLUDE_DEPTH: usize = 16;
+
+fn config_hosts_in(home: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    read_ssh_config(&home.join(".ssh").join("config"), home, 0, &mut out);
+    out
+}
+
+fn read_ssh_config(path: &Path, home: &Path, depth: usize, out: &mut Vec<String>) {
+    for line in ssh::config_lines(&read_text(path)) {
+        match line {
+            ssh::ConfigLine::Host(name) if !out.contains(&name) => out.push(name),
+            ssh::ConfigLine::Include(file) if depth < INCLUDE_DEPTH => {
+                for f in included(&file, home) {
+                    read_ssh_config(&f, home, depth + 1, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The files an `Include` names. A relative path is from `~/.ssh`, as it
+/// is for the user's own config. A wildcard is matched in the last part of
+/// the path only, which is how includes are written in practice
+/// (`config.d/*`), and the matches are read in name order as OpenSSH does.
+fn included(file: &str, home: &Path) -> Vec<PathBuf> {
+    let path = match file.strip_prefix("~/").or_else(|| file.strip_prefix("~\\")) {
+        Some(rest) => home.join(rest),
+        None if Path::new(file).is_absolute() => PathBuf::from(file),
+        None => home.join(".ssh").join(file),
+    };
+    let Some(pattern) = path.file_name().and_then(|n| n.to_str()) else {
+        return Vec::new();
+    };
+    if !pattern.contains(['*', '?']) {
+        return vec![path];
+    }
+    let Some(dir) = path.parent() else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter(|e| e.file_name().to_str().is_some_and(|n| ssh::glob_matches(pattern, n)))
+        .map(|e| e.path())
+        .collect();
+    found.sort();
+    found
 }
 
 /// Every stone the project's Runetome holds, those that do not parse too.
@@ -315,6 +369,36 @@ mod tests {
         write(&config_file(&dir), "{\"tasks\":{\"parallel\":3}}").unwrap();
         assert_eq!(parallel(&dir), 3);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ssh_config_hosts_follow_includes_in_place() {
+        let home = scratch("sshconf");
+        assert!(config_hosts_in(&home).is_empty());
+        let ssh = home.join(".ssh");
+        fs::create_dir_all(ssh.join("config.d")).unwrap();
+        fs::write(
+            ssh.join("config"),
+            "Host first
+Include config.d/*.conf ~/.ssh/loop
+Host last *
+",
+        )
+        .unwrap();
+        fs::write(ssh.join("config.d").join("b.conf"), "Host b
+").unwrap();
+        fs::write(ssh.join("config.d").join("a.conf"), "Host a first
+").unwrap();
+        fs::write(ssh.join("config.d").join("a.bak"), "Host not-me
+").unwrap();
+        fs::write(ssh.join("loop"), "Host looped
+Include loop
+").unwrap();
+        assert_eq!(
+            config_hosts_in(&home),
+            vec!["first", "a", "b", "looped", "last"]
+        );
+        fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]

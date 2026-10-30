@@ -705,9 +705,27 @@ impl Cluster {
         )
     }
 
-    /// What the quests tile says of Warriv, and its ink.
+    /// What the quests tile says of Warriv, and its ink. Driving is told
+    /// by the mode key in gold, so the line keeps only what follows
+    /// "Warriv drives", and is gone when nothing does.
     fn warriv_line(&self) -> Option<(String, board::Ink)> {
-        self.shared.warriv_line.borrow().get(&self.key).cloned()
+        let (words, ink) = self.shared.warriv_line.borrow().get(&self.key).cloned()?;
+        if ink != board::Ink::Drives {
+            return Some((words, ink));
+        }
+        let rest = words.strip_prefix("Warriv drives").unwrap_or(&words);
+        let rest = rest.trim_start_matches([',', ' ']);
+        let rest = rest.strip_prefix("and ").unwrap_or(rest);
+        (!rest.is_empty()).then(|| (rest.to_string(), board::Ink::Quiet))
+    }
+
+    /// Whether Warriv drives the project, for the mode key's gold.
+    fn drives(&self) -> bool {
+        self.shared
+            .warriv_line
+            .borrow()
+            .get(&self.key)
+            .is_some_and(|(_, ink)| *ink == board::Ink::Drives)
     }
 
     /// The item on the `i`th row showing, counted from the top.
@@ -1003,6 +1021,7 @@ impl Cluster {
                 summary: b.map_or_else(String::new, Board::summary),
                 mode: b.map_or_else(|| Mode::default().label().into(), Board::mode_key),
                 warriv: self.warriv_line(),
+                drives: self.drives(),
                 collapsed: t.collapsed,
                 astir: self.shared.astir.borrow().contains(&self.key),
             }

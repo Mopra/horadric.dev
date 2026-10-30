@@ -11,7 +11,6 @@ pub mod agent;
 pub mod aim;
 pub mod ask;
 pub mod background;
-pub mod bench;
 pub mod brotherhood;
 #[cfg(test)]
 mod brotherhood_sim;
@@ -30,7 +29,6 @@ pub mod fleet;
 pub mod folio;
 pub mod glow;
 pub mod google;
-pub mod guard;
 pub mod handing;
 pub mod handoff;
 pub mod heavy;

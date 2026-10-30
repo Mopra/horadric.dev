@@ -20,8 +20,8 @@ pub fn pattern(query: &str) -> String {
 /// What the bar says after the query, in a terminal or a file view.
 pub fn status(query: &str, found: bool, file: bool) -> &'static str {
     match (query.is_empty(), found) {
-        (true, _) if file => "Search the file",
-        (true, _) => "Search the history",
+        (true, _) if file => "Search the file. Enter steps, Esc closes",
+        (true, _) => "Search the history. Enter steps, Esc closes",
         (false, true) => "",
         (false, false) => "No match",
     }
@@ -41,8 +41,8 @@ mod tests {
 
     #[test]
     fn the_bar_says_what_it_found() {
-        assert_eq!(status("", false, false), "Search the history");
-        assert_eq!(status("", false, true), "Search the file");
+        assert_eq!(status("", false, false), "Search the history. Enter steps, Esc closes");
+        assert_eq!(status("", false, true), "Search the file. Enter steps, Esc closes");
         assert_eq!(status("x", true, true), "");
         assert_eq!(status("x", false, false), "No match");
     }

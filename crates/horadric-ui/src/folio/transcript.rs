@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use horadric_core::folio::{Block, Ending, Lane, Step, StepState, TodoStatus};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1Bitmap, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE,
+    ID2D1Bitmap, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
 };
 use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_TRAILING;
 use windows::Win32::UI::WindowsAndMessaging::SetTimer;
@@ -31,7 +31,7 @@ use super::Chat;
 use crate::field::Field;
 use crate::folio_look::{self as look, RunState};
 use crate::layout::Rect;
-use crate::render::{self, color};
+use crate::render;
 use crate::theme::{self, Color};
 
 const TOP: f32 = 18.0;
@@ -1045,13 +1045,12 @@ impl View {
         cx: f32,
         cw: f32,
         area: &Rect,
-        t: f32,
         hits: &mut Vec<(Rect, Hit)>,
     ) {
         let rt = &gfx.rt;
         let Ui { state: st, cache } = &mut chat.tr;
         super::select::refind_in(st, cache);
-        let made_for = (rt.as_raw() as usize, [key_of(pal.fg), key_of(pal.accent)]);
+        let made_for = (gfx.win.as_raw() as usize, [key_of(pal.fg), key_of(pal.accent)]);
         if cache.made_for != made_for {
             // Brushes and bitmaps belong to a render target.
             let fonts = cache.fonts.take();
@@ -1235,21 +1234,11 @@ impl View {
         self.marks(gfx, pal, st, cache_units(blocks), &area);
         let mut y = origin + content - tail - 8.0;
         if chat.folio.busy {
-            for k in 0..3 {
-                let pulse = ((t * 4.0 - k as f32 * 0.7).sin() * 0.5 + 0.5).powf(1.5);
-                let x = cx + 6.0 + k as f32 * 12.0;
-                gfx.brush.SetColor(&color(
-                    pal.accent.mix(pal.fg, 0.3).with_alpha(0.25 + 0.75 * pulse),
-                ));
-                rt.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: Vector2 { X: x, Y: y + 10.0 },
-                        radiusX: 3.2,
-                        radiusY: 3.2,
-                    },
-                    &gfx.brush,
-                );
-            }
+            let at = Vector2 {
+                X: cx + 6.0,
+                Y: y + 10.0,
+            };
+            self.dots.set(Some((at, area)));
             y += 28.0;
         }
         if let Some(e) = &chat.error {
@@ -1412,12 +1401,7 @@ impl View {
         let r = Rect::new(cx + cw - w, area.y + 14.0, w, 34.0);
         gfx.fill_round(&r, 10.0, pal.bg.mix(pal.fg, 0.1));
         let focused = st.keys && st.focus.as_deref() == Some(FIND_FIELD);
-        let edge = if focused {
-            pal.keys_rim()
-        } else {
-            pal.fg.with_alpha(0.15)
-        };
-        gfx.stroke_round(&r, 10.0, edge, 1.0);
+        gfx.stroke_round(&r, 10.0, pal.fg.with_alpha(0.15), 1.0);
         let count = if f.field.text.is_empty() {
             String::new()
         } else if f.hits.is_empty() {
@@ -1430,7 +1414,12 @@ impl View {
         let text_r = Rect::new(r.x + 12.0, r.y, r.w - buttons - count_w - 16.0, r.h);
         hits.push((text_r, Hit::Tr(Act::Field(FIND_FIELD.to_string()))));
         if f.field.text.is_empty() {
-            gfx.text_in("Find in the conversation", &gfx.line, &text_r, pal.faint);
+            gfx.text_in(
+                "Find in the conversation. Enter steps, Esc closes",
+                &gfx.line,
+                &text_r,
+                pal.faint,
+            );
         } else {
             gfx.text_in(&f.field.text, &gfx.line, &text_r, pal.fg);
         }

@@ -354,6 +354,8 @@ pub struct TasksScene {
     pub mode: String,
     /// What the line under the header says of Warriv, and its ink.
     pub warriv: Option<(String, Ink)>,
+    /// Warriv drives the project, and the mode key reads in its gold.
+    pub drives: bool,
     pub collapsed: bool,
     /// Warriv, a reviewer or an errand is at work in the project, and the
     /// tile's edge breathes in Warriv's gold.
@@ -462,9 +464,14 @@ pub struct SettingsScene<'a> {
     pub layout: &'a SettingsLayout,
     /// The sections' names, down the left.
     pub sections: &'a [&'a str],
-    /// The one picked, whose rows show.
-    pub section: usize,
+    /// The one picked, whose rows show. None while a search shows what
+    /// it found instead.
+    pub section: Option<usize>,
     pub heading: &'a str,
+    /// What is typed in the search field.
+    pub search: &'a str,
+    /// The search field has the keyboard.
+    pub typing: bool,
     pub rows: &'a [SettingsLook],
     /// The row the keyboard is on.
     pub focus: Option<usize>,
@@ -1495,7 +1502,7 @@ impl Painter<'_> {
 
         for (i, (r, name)) in l.sections.iter().zip(scene.sections).enumerate() {
             let r = r.inset(2.0);
-            let picked = i == scene.section;
+            let picked = Some(i) == scene.section;
             let b = scene.button(SettingsHit::Section(i));
             // Lit as well as latched: a theme with no depth shows only the
             // fill.
@@ -1514,10 +1521,36 @@ impl Painter<'_> {
             self.text(&gpu.small, ink, name, label);
         }
 
+        let f = &l.search;
+        self.sunk(gpu, f, 8.0, theme::well());
+        let inner = Rect::new(f.x + 30.0, f.y, f.w - 40.0, f.h);
+        self.icon(
+            &gpu.icon_small,
+            theme::text_dim(),
+            '\u{E721}',
+            Rect::new(f.x + 8.0, f.y + 1.0, 16.0, f.h),
+        );
+        if scene.search.is_empty() && !scene.typing {
+            self.text(&gpu.small, theme::legend(), "Search", inner);
+            self.text(&gpu.small_right, theme::legend(), "Ctrl+F", inner);
+        } else {
+            self.text(&gpu.small, theme::text(), scene.search, inner);
+        }
+        if scene.typing {
+            let x = inner.x + self.measure(gpu, &gpu.small, scene.search) + 1.0;
+            let caret = Rect::new(x.min(inner.right()), f.y + 8.0, 1.5, f.h - 16.0);
+            self.fill_rounded(&caret, 0.5, theme::text());
+        }
+
         let h = &l.heading;
         let heading = Rect::new(h.x + 4.0, h.y, h.w - 8.0, h.h);
         self.text(&gpu.small, theme::legend(), scene.heading, heading);
         self.group(&l.group, m.tile_radius);
+        // Rows scrolled past the box's edges are cut off at them.
+        self.rt.PushAxisAlignedClip(
+            &rect(&l.group.inset(1.0)),
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+        );
         for (i, (row, look)) in l.rows.iter().zip(scene.rows).enumerate() {
             if i > 0 {
                 let r = &row.rect;
@@ -1564,6 +1597,17 @@ impl Painter<'_> {
                     self.fill_rounded(&dot, 2.5, theme::lamp_off().mix(theme::text_dim(), 0.3));
                 }
             }
+        }
+        self.rt.PopAxisAlignedClip();
+        // Rows that do not fit: a thin thumb says how far down they are.
+        if let (Some(first), true) = (l.rows.first(), l.overflow > 0.0) {
+            let g = &l.group;
+            let scrolled = (g.y + 4.0 - first.rect.y).clamp(0.0, l.overflow);
+            let track = g.h - 12.0;
+            let thumb = (track * g.h / (g.h + l.overflow)).max(24.0);
+            let y = g.y + 6.0 + (track - thumb) * scrolled / l.overflow;
+            let bar = Rect::new(g.right() - 6.0, y, 3.0, thumb);
+            self.fill_rounded(&bar, 1.5, theme::text_dim().fade(0.5));
         }
     }
 
@@ -3624,6 +3668,12 @@ impl Painter<'_> {
             5.0,
             fill.unwrap_or(theme::surface().with_alpha(0.6)),
         );
+        let ink = if t.drives {
+            self.stroke_rounded(&l.mode, 5.0, theme::warriv().with_alpha(0.55), 1.0);
+            theme::warriv()
+        } else {
+            ink
+        };
         let word_w = self.measure(gpu, &gpu.chip, &t.mode);
         let (caret_gap, caret_w) = (3.0, 10.0);
         let x = l.mode.x + (l.mode.w - word_w - caret_gap - caret_w) / 2.0;

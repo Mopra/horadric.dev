@@ -1236,9 +1236,9 @@ unsafe fn decode_thumb(bytes: &[u8]) -> Option<Thumb> {
 /// How wide `s` is set in `fmt`.
 /// The composer as the rest of the app is built: a plate standing off the
 /// glass, lit along its top and casting its shadow down, with the field
-/// the text is written in sunk into it like the pane's own glass, its rim
-/// lit in the project's colour while it has the keys.
-unsafe fn faceplate(gfx: &Gfx, r: &Rect, pal: &Palette, focused: bool) {
+/// the text is written in sunk into it like the pane's own glass. Nothing
+/// lights up when it has the keys: a real field shows that by its caret.
+unsafe fn faceplate(gfx: &Gfx, r: &Rect, pal: &Palette) {
     let p = crate::theme::palette();
     let black = crate::theme::Color::rgb(0);
     let white = crate::theme::Color::rgb(0xFFFFFF);
@@ -1275,12 +1275,7 @@ unsafe fn faceplate(gfx: &Gfx, r: &Rect, pal: &Palette, focused: bool) {
     gfx.rt
         .FillRoundedRectangle(&rounded(&well, WELL_R), &gfx.shade);
     gfx.rt.PopAxisAlignedClip();
-    let rim = if focused {
-        pal.keys_rim()
-    } else {
-        p.engrave_dark
-    };
-    gfx.stroke_round(&well, WELL_R, rim, 1.0);
+    gfx.stroke_round(&well, WELL_R, p.engrave_dark, 1.0);
 }
 
 /// The outline of `r` between `ys` only: a bevel's lit top or shaded
@@ -1372,7 +1367,7 @@ impl View {
         // A card's field or the find bar may have the keys instead: one
         // caret on the glass, never two.
         let focused = self.has_keyboard() && chat.tr.state.focus.is_none();
-        faceplate(gfx, &r, pal, focused);
+        faceplate(gfx, &r, pal);
         hits.push((r, Hit::Input(Act::Text)));
 
         // Images waiting to go, each with a cross to take it back.
@@ -1481,8 +1476,9 @@ impl View {
     }
 
     /// The key at the right of the field, level with the last line: stop
-    /// while Claude works, else send, its arrow only lit once there is
-    /// something to send.
+    /// while Claude works, else send. Its glyph is printed on the key like
+    /// a keycap's legend, plain ink rather than the project's colour, and
+    /// only faded while there is nothing to send.
     #[allow(clippy::too_many_arguments)]
     unsafe fn send_key(
         &self,
@@ -1507,8 +1503,8 @@ impl View {
         round_key(gfx, &b, lit);
         let ink = match (ready, lit) {
             (false, _) => pal.faint.fade(0.45),
-            (true, true) => pal.accent.mix(pal.fg, 0.25),
-            (true, false) => pal.accent,
+            (true, true) => pal.fg,
+            (true, false) => pal.fg.fade(0.8),
         };
         if busy {
             let sq = Rect::new(b.x + KEY / 2.0 - 4.5, b.y + KEY / 2.0 - 4.5, 9.0, 9.0);

@@ -59,12 +59,7 @@ fn field(cx: &Ctx, s: &mut Scene, st: &State, id: &str, hint: &str, x: f32, y: f
     let (_, th) = render::text_size(&l);
     let r = Rect::new(x, y, w, th.max(20.0) + 14.0);
     s.fill(r, 8.0, Color::rgb(0).with_alpha(0.25));
-    let edge = if focused {
-        cx.pal.keys_rim()
-    } else {
-        cx.pal.fg.with_alpha(0.18)
-    };
-    s.stroke(r, 8.0, edge, 1.0);
+    s.stroke(r, 8.0, cx.pal.fg.with_alpha(0.18), 1.0);
     let ink = if text.is_empty() {
         cx.pal.faint
     } else {

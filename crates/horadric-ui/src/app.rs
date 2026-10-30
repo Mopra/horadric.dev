@@ -2508,6 +2508,8 @@ fn project_menu(key: &str) {
     const HIDE_TOWN: usize = 13;
     const SSH: usize = 20;
     const SSH_END: usize = 200;
+    const SSH_CONFIG: usize = 200;
+    const SSH_CONFIG_END: usize = 300;
     const MERGE: usize = 300;
     const MERGE_END: usize = 400;
     const ADD_AGENT: usize = 500;
@@ -2537,10 +2539,23 @@ fn project_menu(key: &str) {
         .map(horadric_hooks::tasks::hosts)
         .unwrap_or_default();
     let inventory = dir.as_deref().and_then(horadric_hooks::tasks::fleet);
+    // Every project offers the hosts in ~/.ssh/config after its own, since
+    // that is where the human's servers already are and few of them are
+    // ever typed into a project.
+    let mut config_hosts = horadric_hooks::tasks::ssh_config_hosts();
+    config_hosts.retain(|h| !hosts.contains(h));
     // A fleet, or more hosts than a menu reads well, is found by name.
-    let finding = inventory.is_some() || hosts.len() > MENU_HOSTS;
-    let devices = fleet::with_hosts(&hosts, inventory.map(|(_, d)| d).unwrap_or_default());
+    let finding = inventory.is_some()
+        || hosts.len() > MENU_HOSTS
+        || config_hosts.len() > SSH_CONFIG_END - SSH_CONFIG;
+    let mut devices = fleet::with_hosts(&hosts, inventory.map(|(_, d)| d).unwrap_or_default());
+    for h in &config_hosts {
+        if !devices.iter().any(|d| &d.name == h) {
+            devices.extend(fleet::with_hosts(std::slice::from_ref(h), Vec::new()));
+        }
+    }
     let listed: &[String] = if finding { &[] } else { &hosts };
+    let config_listed: &[String] = if finding { &[] } else { &config_hosts };
     merges.truncate(MERGE_END - MERGE);
     let mut items = vec![Item::action(ADD, "New session")];
     // In trunk mode a worktree is had by asking for one.
@@ -2573,6 +2588,15 @@ fn project_menu(key: &str) {
     ]);
     for (i, host) in listed.iter().enumerate() {
         items.push(Item::action(SSH + i, format!("SSH to {host}")));
+    }
+    if !config_listed.is_empty() {
+        let label = if listed.is_empty() { "SSH to" } else { "Other SSH hosts" };
+        let sub = config_listed
+            .iter()
+            .enumerate()
+            .map(|(i, host)| Item::action(SSH_CONFIG + i, host.clone()))
+            .collect();
+        items.push(Item::Submenu(label.into(), sub));
     }
     if finding {
         items.push(Item::action(SSH_FIND, "SSH to..."));
@@ -2656,6 +2680,11 @@ fn project_menu(key: &str) {
         Some(BROWSE) => app.open_web(key, None),
         Some(SANCTUARY) => app.open_sky(key),
         Some(i) if (SSH..SSH_END).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
+        // Not one of the project's own, so its terminal says which it is.
+        Some(i) if (SSH_CONFIG..SSH_CONFIG_END).contains(&i) => {
+            let host = &config_listed[i - SSH_CONFIG];
+            app.open_ssh(key, host, Some(host));
+        }
         Some(i) if (MERGE..MERGE_END).contains(&i) => {
             app.merge(&merges[i - MERGE]);
         }

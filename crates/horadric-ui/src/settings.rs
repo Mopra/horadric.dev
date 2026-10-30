@@ -41,9 +41,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ShowWindow, UnhookWindowsHookEx, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HHOOK,
     HICON, HTCAPTION, HTCLIENT, ICON_BIG, ICON_SMALL, IDC_ARROW, KBDLLHOOKSTRUCT, SWP_NOACTIVATE,
     SWP_NOZORDER, SW_RESTORE, SW_SHOW, WH_KEYBOARD_LL, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCHAR,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+    WM_CHAR, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCDESTROY,
+    WM_NCHITTEST, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WNDCLASSW, WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, MINMAXINFO,
 };
 
 use crate::app::{self, Input};
@@ -720,6 +721,31 @@ fn backup_lines(b: &Backup) -> Vec<Line> {
     rows
 }
 
+/// Every row, in any section, whose name, help or section has `query` in
+/// it, case aside. Notes and rows with no name are not settings to find.
+pub fn search(query: &str, v: &Values) -> Vec<Line> {
+    let q = query.trim().to_lowercase();
+    let has = |text: &str| text.to_lowercase().contains(&q);
+    Section::ALL
+        .iter()
+        .flat_map(|s| lines(*s, v).into_iter().map(move |l| (*s, l)))
+        .filter(|(s, l)| {
+            l.control != Control::Note
+                && !l.label.is_empty()
+                && (has(l.label) || has(l.help) || has(s.label()))
+        })
+        .map(|(_, l)| l)
+        .collect()
+}
+
+/// The heading over search results.
+fn found(query: &str, n: usize) -> String {
+    match n {
+        0 => format!("Nothing matches \u{201c}{}\u{201d}", query.trim()),
+        _ => format!("Settings matching \u{201c}{}\u{201d}", query.trim()),
+    }
+}
+
 /// How tall the rows of `section` stand together.
 fn height(section: Section, v: &Values) -> f32 {
     lines(section, v).iter().map(Line::height).sum()
@@ -745,10 +771,16 @@ fn tallest(v: &Values) -> f32 {
         .fold(project, f32::max)
 }
 
-/// The heights of the rows of `section`, for the layout.
-fn heights(section: Section, v: &Values) -> Vec<f32> {
-    lines(section, v).iter().map(Line::height).collect()
+thread_local! {
+    /// The size the window was last left at, in DIPs, which it opens at
+    /// again.
+    static LAST_SIZE: Cell<Option<(f32, f32)>> = const { Cell::new(None) };
 }
+
+/// How far one notch of the wheel scrolls the rows, in DIPs.
+const WHEEL_STEP: f32 = 60.0;
+/// The band at the window's edge that sizes it, in DIPs.
+const EDGE: f32 = 6.0;
 
 /// The row the keyboard moves to from `at`, `step` rows on, skipping
 /// rows that only say: round at either end, and from none the first or
@@ -889,6 +921,15 @@ pub struct SettingsWindow {
     open: Cell<Option<Field>>,
     /// The row the keyboard is on, ringed. None while the mouse is used.
     focus: Cell<Option<usize>>,
+    /// The window's size in DIPs, as the user left it.
+    size: Cell<(f32, f32)>,
+    /// How far the rows are scrolled down, in DIPs.
+    scroll: Cell<f32>,
+    /// What is typed in the search field. While it holds anything, the
+    /// rows are the settings it finds, from every section.
+    query: RefCell<String>,
+    /// The search field has the keyboard: a caret shows in it.
+    typing: Cell<bool>,
 }
 
 impl SettingsWindow {
@@ -901,12 +942,7 @@ impl SettingsWindow {
         section: Section,
         icon: HICON,
     ) -> Result<Box<Self>> {
-        let l = layout::settings(
-            &shared.metrics,
-            Section::ALL.len(),
-            &heights(section, &values),
-            tallest(&values),
-        );
+        let natural = layout::settings_size(&shared.metrics, Section::ALL.len(), tallest(&values));
         let mut cursor = POINT::default();
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -923,7 +959,23 @@ impl SettingsWindow {
         // after it is made has been seen not to paint.
         let work = info.rcWork;
         let s = dpi.max(96) as f32 / 96.0;
-        let (w, h) = ((l.size.0 * s).round() as i32, (l.size.1 * s).round() as i32);
+        // As it was left, or as tall as its tallest section, but never
+        // taller than the screen: what does not fit scrolls.
+        let (mw, mh) = layout::settings_min(&shared.metrics, Section::ALL.len());
+        let room = (work.bottom - work.top) as f32 / s - 40.0;
+        let (sw, sh) = LAST_SIZE.with(Cell::get).unwrap_or(natural);
+        let size = (sw.max(mw), sh.min(room).max(mh.min(room)));
+        let l = layout::settings(
+            &shared.metrics,
+            Section::ALL.len(),
+            &lines(section, &values)
+                .iter()
+                .map(Line::height)
+                .collect::<Vec<_>>(),
+            size,
+            0.0,
+        );
+        let (w, h) = ((size.0 * s).round() as i32, (size.1 * s).round() as i32);
         let x = work.left + (work.right - work.left - w) / 2;
         let y = work.top + (work.bottom - work.top - h) / 2;
         let mut win = Box::new(SettingsWindow {
@@ -938,13 +990,17 @@ impl SettingsWindow {
             tracking: Cell::new(false),
             open: Cell::new(None),
             focus: Cell::new(None),
+            size: Cell::new(size),
+            scroll: Cell::new(0.0),
+            query: RefCell::new(String::new()),
+            typing: Cell::new(false),
         });
         unsafe {
             let hwnd = CreateWindowExW(
                 WS_EX_APPWINDOW,
                 CLASS,
                 w!("Horadric settings"),
-                WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX,
+                WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX,
                 x,
                 y,
                 w,
@@ -978,6 +1034,7 @@ impl SettingsWindow {
     }
 
     pub fn destroy(&self) {
+        LAST_SIZE.with(|c| c.set(Some(self.size.get())));
         hook(self.hwnd, false);
         unsafe {
             let _ = DestroyWindow(self.hwnd);
@@ -1015,31 +1072,42 @@ impl SettingsWindow {
         }
     }
 
+    /// The rows shown: the section's, or while searching what it finds.
     fn lines(&self) -> Vec<Line> {
-        lines(self.section.get(), &self.values.borrow())
+        let q = self.query.borrow();
+        if q.trim().is_empty() {
+            lines(self.section.get(), &self.values.borrow())
+        } else {
+            search(&q, &self.values.borrow())
+        }
+    }
+
+    fn searching(&self) -> bool {
+        !self.query.borrow().trim().is_empty()
     }
 
     /// Lays out again for the section shown. The window keeps its size,
     /// which is the tallest section's.
     fn relayout(&self) {
-        let v = self.values.borrow();
+        let rows = self.lines();
+        let heights: Vec<f32> = rows.iter().map(Line::height).collect();
         let l = layout::settings(
             &self.shared.metrics,
             Section::ALL.len(),
-            &heights(self.section.get(), &v),
-            tallest(&v),
+            &heights,
+            self.size.get(),
+            self.scroll.get(),
         );
+        self.scroll.set(self.scroll.get().clamp(0.0, l.overflow));
         // A row that stopped doing anything, a button gone quiet while
         // it works, keeps no ring.
         let live = |i: usize| {
-            lines(self.section.get(), &v)
-                .get(i)
+            rows.get(i)
                 .is_some_and(|l| !matches!(l.control, Control::Fixed | Control::Note))
         };
         if self.focus.get().is_some_and(|i| !live(i)) {
             self.focus.set(None);
         }
-        drop(v);
         *self.layout.borrow_mut() = l;
         self.refresh_hover();
         self.invalidate();
@@ -1052,7 +1120,16 @@ impl SettingsWindow {
 
     fn pick_section(&self, section: Section) {
         self.focus.set(None);
+        self.typing.set(false);
+        if self.searching() {
+            self.query.borrow_mut().clear();
+            self.section.set(section);
+            self.scroll.set(0.0);
+            self.relayout();
+            return;
+        }
         if self.section.replace(section) != section {
+            self.scroll.set(0.0);
             // Leaving the keys stops listening for one.
             if self.listening() {
                 app::push(Input::SettingsPress(Press::Keep));
@@ -1091,14 +1168,20 @@ impl SettingsWindow {
                 help: line.help,
             })
             .collect();
+        let query = self.query.borrow().clone();
+        let (section, heading) = if self.searching() {
+            (None, found(&query, rows.len()))
+        } else {
+            let at = Section::ALL.iter().position(|x| *x == self.section.get());
+            (at, self.section.get().label().to_string())
+        };
         let scene = SettingsScene {
             layout: &l,
             sections: &Section::ALL.map(Section::label),
-            section: Section::ALL
-                .iter()
-                .position(|x| *x == self.section.get())
-                .unwrap_or(0),
-            heading: self.section.get().label(),
+            section,
+            heading: &heading,
+            search: &query,
+            typing: self.typing.get(),
             rows: &rows,
             focus: self.focus.get(),
             hot: self.hot.get(),
@@ -1162,9 +1245,62 @@ impl SettingsWindow {
         self.hover(self.hit_at(p.x, p.y));
     }
 
+    /// Scrolls the rows by `dy` DIPs, down for more.
+    fn scroll_by(&self, dy: f32) {
+        let overflow = self.layout.borrow().overflow;
+        let to = (self.scroll.get() + dy).clamp(0.0, overflow);
+        if to != self.scroll.get() {
+            self.scroll.set(to);
+            self.relayout();
+        }
+    }
+
+    /// Rings row `to` and scrolls it into the box if it is out of it.
+    fn focus_on(&self, to: Option<usize>) {
+        self.focus.set(to);
+        self.typing.set(false);
+        let l = self.layout.borrow();
+        let dy = match to.and_then(|i| l.rows.get(i)) {
+            Some(r) if r.rect.y < l.group.y => r.rect.y - l.group.y - 4.0,
+            Some(r) if r.rect.bottom() > l.group.bottom() => {
+                r.rect.bottom() - l.group.bottom() + 4.0
+            }
+            _ => 0.0,
+        };
+        drop(l);
+        self.scroll_by(dy);
+        self.invalidate();
+    }
+
+    /// Takes a character typed while the window has the keyboard, into
+    /// the search field.
+    fn type_char(&self, c: char) {
+        {
+            let mut q = self.query.borrow_mut();
+            match c {
+                '\u{8}' => {
+                    q.pop();
+                }
+                c if c.is_control() => return,
+                // Space works a ringed row instead.
+                ' ' if self.focus.get().is_some() => return,
+                c => q.push(c),
+            }
+        }
+        self.focus.set(None);
+        self.typing.set(true);
+        self.scroll.set(0.0);
+        self.relayout();
+    }
+
     fn click(&self, hit: SettingsHit) {
         match hit {
             SettingsHit::Close => app::push(Input::SettingsClosed),
+            SettingsHit::Search => {
+                self.focus.set(None);
+                self.typing.set(true);
+                self.invalidate();
+            }
             SettingsHit::Section(i) => {
                 if let Some(s) = Section::ALL.get(i) {
                     self.pick_section(*s);
@@ -1212,8 +1348,32 @@ impl SettingsWindow {
                 Some(LRESULT(0))
             }
             WM_ERASEBKGND => Some(LRESULT(1)),
+            // The sizing frame stays, for its edges, but the client is the
+            // whole window: the plate draws its own edge.
+            WM_NCCALCSIZE if wparam.0 != 0 => Some(LRESULT(0)),
+            WM_GETMINMAXINFO => {
+                let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
+                let s = self.scale();
+                let (w, h) = layout::settings_min(&self.shared.metrics, Section::ALL.len());
+                info.ptMinTrackSize = POINT {
+                    x: (w * s).round() as i32,
+                    y: (h * s).round() as i32,
+                };
+                Some(LRESULT(0))
+            }
+            WM_MOUSEWHEEL => {
+                let notches = ((wparam.0 >> 16) & 0xffff) as i16 as f32 / 120.0;
+                self.scroll_by(-notches * WHEEL_STEP);
+                Some(LRESULT(0))
+            }
+            WM_CHAR if !self.listening() => {
+                if let Some(c) = char::from_u32(wparam.0 as u32) {
+                    self.type_char(c);
+                }
+                Some(LRESULT(0))
+            }
             // The title bar moves the window the way a caption does, snap
-            // and all, with nothing of ours to get wrong.
+            // and all, with nothing of ours to get wrong. Its edges size it.
             WM_NCHITTEST => {
                 let mut p = POINT {
                     x: (lparam.0 & 0xffff) as i16 as i32,
@@ -1221,6 +1381,12 @@ impl SettingsWindow {
                 };
                 unsafe {
                     let _ = ScreenToClient(self.hwnd, &mut p);
+                }
+                let s = self.scale();
+                let (w, h) = self.size.get();
+                let (x, y) = (p.x as f32 / s, p.y as f32 / s);
+                if let Some(e) = crate::questlog::edge(x, y, w, h, EDGE) {
+                    return Some(LRESULT(crate::questlog::ht(e) as isize));
                 }
                 let at = if self.hit_at(p.x, p.y) == SettingsHit::Title {
                     HTCAPTION
@@ -1238,6 +1404,12 @@ impl SettingsWindow {
                 let h = ((lparam.0 >> 16) & 0xffff) as u32;
                 if let Some(t) = self.target.borrow().as_ref() {
                     let _ = t.resize(w, h);
+                }
+                let s = self.scale();
+                // Not while it is being made: its DPI is not known yet.
+                if w > 0 && h > 0 && !self.hwnd.is_invalid() {
+                    self.size.set((w as f32 / s, h as f32 / s));
+                    self.relayout();
                 }
                 Some(LRESULT(0))
             }
@@ -1275,12 +1447,17 @@ impl SettingsWindow {
             // the sections until then, and Left goes back to them.
             WM_KEYDOWN => {
                 let focus = self.focus.get();
-                let to = |step: isize| {
-                    self.focus.set(focus_step(&self.lines(), focus, step));
-                    self.invalidate();
-                };
+                let to = |step: isize| self.focus_on(focus_step(&self.lines(), focus, step));
                 match wparam.0 as u16 {
+                    // Esc empties the search first, then closes.
+                    k if k == VK_ESCAPE.0 && self.searching() => {
+                        self.query.borrow_mut().clear();
+                        self.typing.set(false);
+                        self.focus.set(None);
+                        self.relayout();
+                    }
                     k if k == VK_ESCAPE.0 => app::push(Input::SettingsClosed),
+                    k if k == u16::from(b'F') && held().ctrl => self.click(SettingsHit::Search),
                     k if k == VK_TAB.0 => to(if held().shift { -1 } else { 1 }),
                     k if focus.is_some() && k == VK_UP.0 => to(-1),
                     k if focus.is_some() && k == VK_DOWN.0 => to(1),
@@ -1288,6 +1465,9 @@ impl SettingsWindow {
                         self.focus.set(None);
                         self.invalidate();
                     }
+                    // Searching, the arrows walk what it found.
+                    k if self.searching() && k == VK_UP.0 => to(-1),
+                    k if self.searching() && k == VK_DOWN.0 => to(1),
                     k if k == VK_UP.0 => self.pick_section(step(self.section.get(), -1)),
                     k if k == VK_DOWN.0 => self.pick_section(step(self.section.get(), 1)),
                     // Held down, a key repeats: one flip per press.
@@ -1302,7 +1482,7 @@ impl SettingsWindow {
                 Some(LRESULT(0))
             }
             WM_LBUTTONDOWN => {
-                if self.focus.take().is_some() {
+                if self.focus.take().is_some() | self.typing.replace(false) {
                     self.invalidate();
                 }
                 unsafe {
@@ -1774,6 +1954,22 @@ mod tests {
         let keys = lines(Section::Keys, &v);
         assert_eq!(keys[1].value, "Ctrl+Alt+Home, taken");
         assert_eq!(keys[4].value, "Ctrl+Alt+Home is taken by another program");
+    }
+
+    #[test]
+    fn a_search_finds_rows_by_name_help_and_section_from_every_section() {
+        let v = values();
+        let found = |q: &str| search(q, &v).iter().map(|l| l.field).collect::<Vec<_>>();
+        // By name, whatever the case.
+        assert_eq!(found("THEME"), [Field::Theme]);
+        // By what the help says: Tristram's row is about work in no project.
+        assert!(found("no project").contains(&Field::Town));
+        // By section: every Backup row.
+        assert_eq!(found("backup"), fields(Section::Backup, &v));
+        // A note is no setting to find.
+        assert!(!found("click a shortcut").contains(&Field::KeysNote));
+        assert!(found("zzz").is_empty());
+        assert_eq!(found("  theme "), [Field::Theme]);
     }
 
     #[test]

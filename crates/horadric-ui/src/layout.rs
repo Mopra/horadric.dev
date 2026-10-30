@@ -906,21 +906,26 @@ pub fn suggest_hit(l: &SuggestLayout, x: f32, y: f32) -> Option<usize> {
 }
 
 /// The geometry of the Settings window: a title bar with its cross, the
-/// sections down the left, and the rows of the one picked on the right,
-/// drawn as the usage window draws its settings. It is as tall as the
-/// longest section needs, so picking another never resizes it.
+/// search field and the sections down the left, and the rows of the one
+/// picked on the right, drawn as the usage window draws its settings. The
+/// window can be sized; the rows scroll inside their box when they do not
+/// fit it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsLayout {
     pub size: (f32, f32),
     /// The bar the window is dragged by, the cross included.
     pub title: Rect,
     pub close: Rect,
+    /// The field a search is typed in, over the sections.
+    pub search: Rect,
     pub sections: Vec<Rect>,
     /// The picked section's name, over its rows.
     pub heading: Rect,
-    /// The box round the rows.
+    /// The box round the rows, which they are clipped to.
     pub group: Rect,
     pub rows: Vec<SettingRow>,
+    /// How far the rows can scroll: their height past the box's.
+    pub overflow: f32,
 }
 
 const SETTINGS_TITLE_H: f32 = 40.0;
@@ -928,34 +933,79 @@ const SETTINGS_SIDE_W: f32 = 176.0;
 const SETTINGS_PANE_W: f32 = 460.0;
 const SETTINGS_SECTION_H: f32 = 34.0;
 const SETTINGS_HEADING_H: f32 = 26.0;
+const SETTINGS_SEARCH_H: f32 = 32.0;
+/// Between the box's edge and the rows in it.
+const SETTINGS_INNER: f32 = 4.0;
 
-/// Lays out the Settings window with `sections` sections, rows of these
-/// `heights` in the one shown, and room for `tallest`, the most any
-/// section's rows stand. A row taller than one line has its name and
-/// value in a line at its top and room under it for what it does.
-pub fn settings(m: &Metrics, sections: usize, heights: &[f32], tallest: f32) -> SettingsLayout {
-    let inner = 4.0;
+/// Where the box round the rows starts, down from the top.
+fn settings_group_top() -> f32 {
+    SETTINGS_TITLE_H + 4.0 + SETTINGS_HEADING_H + 6.0
+}
+
+/// Where the sections start, under the search field.
+fn settings_sections_top() -> f32 {
+    SETTINGS_TITLE_H + 4.0 + SETTINGS_SEARCH_H + 8.0
+}
+
+/// The size the Settings window opens at: room for `sections` down the
+/// left and for `tallest`, the most any section's rows stand.
+pub fn settings_size(m: &Metrics, sections: usize, tallest: f32) -> (f32, f32) {
     let width = m.pad + SETTINGS_SIDE_W + m.gap + SETTINGS_PANE_W + m.pad;
+    let group = settings_group_top() + 2.0 * SETTINGS_INNER + tallest.max(m.setting_row_h);
+    let side = settings_sections_top() + sections as f32 * SETTINGS_SECTION_H;
+    (width, group.max(side) + m.pad)
+}
+
+/// The smallest the Settings window may be made: the sections all show,
+/// and a few rows.
+pub fn settings_min(m: &Metrics, sections: usize) -> (f32, f32) {
+    let (width, _) = settings_size(m, sections, 0.0);
+    let side = settings_sections_top() + sections as f32 * SETTINGS_SECTION_H + m.pad;
+    (width, side.max(settings_group_top() + 3.0 * 52.0 + m.pad))
+}
+
+/// Lays out the Settings window at `size`, with `sections` sections and
+/// rows of these `heights` in the one shown, scrolled down by `scroll`.
+/// A row taller than one line has its name and value in a line at its
+/// top and room under it for what it does.
+pub fn settings(
+    m: &Metrics,
+    sections: usize,
+    heights: &[f32],
+    size: (f32, f32),
+    scroll: f32,
+) -> SettingsLayout {
+    let width = size.0;
     let title = Rect::new(0.0, 0.0, width, SETTINGS_TITLE_H);
     let close = Rect::new(width - m.pad - 32.0, 6.0, 32.0, SETTINGS_TITLE_H - 12.0);
     let top = title.bottom() + 4.0;
+    let search = Rect::new(m.pad, top, SETTINGS_SIDE_W, SETTINGS_SEARCH_H);
     let sections: Vec<Rect> = (0..sections)
         .map(|i| {
-            let y = top + i as f32 * SETTINGS_SECTION_H;
+            let y = settings_sections_top() + i as f32 * SETTINGS_SECTION_H;
             Rect::new(m.pad, y, SETTINGS_SIDE_W, SETTINGS_SECTION_H)
         })
         .collect();
     let x = m.pad + SETTINGS_SIDE_W + m.gap;
-    let heading = Rect::new(x, top, SETTINGS_PANE_W, SETTINGS_HEADING_H);
-    let group_top = heading.bottom() + 6.0;
-    let mut y = group_top + inner;
+    let pane_w = (width - x - m.pad).max(SETTINGS_PANE_W / 2.0);
+    let heading = Rect::new(x, top, pane_w, SETTINGS_HEADING_H);
+    let group_top = settings_group_top();
+    let group = Rect::new(
+        x,
+        group_top,
+        pane_w,
+        (size.1 - m.pad - group_top).max(m.setting_row_h),
+    );
+    let content: f32 = heights.iter().sum::<f32>() + 2.0 * SETTINGS_INNER;
+    let overflow = (content - group.h).max(0.0);
+    let mut y = group_top + SETTINGS_INNER - scroll.clamp(0.0, overflow);
     let rows = heights
         .iter()
         .map(|h| {
-            let rect = Rect::new(x, y, SETTINGS_PANE_W, *h);
+            let rect = Rect::new(x, y, pane_w, *h);
             y += h;
             let line = if *h > m.setting_row_h + 8.0 {
-                Rect::new(x, rect.y + 6.0, SETTINGS_PANE_W, 24.0)
+                Rect::new(x, rect.y + 6.0, pane_w, 24.0)
             } else {
                 rect
             };
@@ -966,18 +1016,16 @@ pub fn settings(m: &Metrics, sections: usize, heights: &[f32], tallest: f32) -> 
             }
         })
         .collect();
-    let group_h = 2.0 * inner + tallest.max(m.setting_row_h);
-    let group = Rect::new(x, group_top, SETTINGS_PANE_W, group_h);
-    let side_bottom = sections.last().map_or(top, |r| r.bottom());
-    let height = group.bottom().max(side_bottom) + m.pad;
     SettingsLayout {
-        size: (width, height),
+        size,
         title,
         close,
+        search,
         sections,
         heading,
         group,
         rows,
+        overflow,
     }
 }
 
@@ -987,6 +1035,7 @@ pub enum SettingsHit {
     Close,
     /// The rest of the title bar, which moves the window.
     Title,
+    Search,
     Section(usize),
     Row(usize),
     Nothing,
@@ -999,8 +1048,15 @@ pub fn settings_hit(l: &SettingsLayout, x: f32, y: f32) -> SettingsHit {
     if l.title.contains(x, y) {
         return SettingsHit::Title;
     }
+    if l.search.contains(x, y) {
+        return SettingsHit::Search;
+    }
     if let Some(i) = l.sections.iter().position(|r| r.contains(x, y)) {
         return SettingsHit::Section(i);
+    }
+    // A row scrolled out of the box is not there to click.
+    if !l.group.contains(x, y) {
+        return SettingsHit::Nothing;
     }
     match l.rows.iter().position(|r| r.rect.contains(x, y)) {
         Some(i) => SettingsHit::Row(i),
@@ -3688,12 +3744,12 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_window_keeps_its_size_whichever_section_shows() {
+    fn the_settings_window_opens_tall_enough_for_its_tallest_section() {
         let m = Metrics::default();
-        let few = settings(&m, 4, &[52.0], 140.0);
-        let most = settings(&m, 4, &[52.0, 38.0, 50.0], 140.0);
-        assert_eq!(few.size, most.size);
-        assert_eq!(most.rows.len(), 3);
+        let size = settings_size(&m, 4, 142.0);
+        let most = settings(&m, 4, &[52.0, 38.0, 52.0], size, 0.0);
+        assert_eq!(most.size, size);
+        assert_eq!(most.overflow, 0.0);
         assert!(most
             .rows
             .iter()
@@ -3704,23 +3760,48 @@ mod tests {
         // A row with help has its name at the top, the help below it.
         assert!(most.rows[0].line.h < most.rows[0].rect.h);
         assert_eq!(most.rows[1].line, most.rows[1].rect);
-        // The sections stand left of the rows, both under the title bar.
+        // The search and the sections stand left of the rows, all under
+        // the title bar.
         let side = most.sections[0];
         assert!(side.right() < most.group.x);
-        assert!(side.y >= most.title.bottom() && most.heading.y >= most.title.bottom());
-        assert!(most.size.1 >= most.group.bottom());
+        assert!(most.search.bottom() <= side.y);
+        assert!(most.search.y >= most.title.bottom() && most.heading.y >= most.title.bottom());
         assert!(most.size.1 >= most.sections[3].bottom());
         // More sections than rows: the list down the left sets the height.
-        let tall = settings(&m, 9, &[38.0], 38.0);
+        let size = settings_size(&m, 9, 38.0);
+        let tall = settings(&m, 9, &[38.0], size, 0.0);
         assert_eq!(tall.size.1, tall.sections[8].bottom() + m.pad);
+    }
+
+    #[test]
+    fn rows_that_do_not_fit_scroll_and_widen_with_the_window() {
+        let m = Metrics::default();
+        let heights = [52.0; 10];
+        let size = settings_min(&m, 8);
+        let l = settings(&m, 8, &heights, size, 0.0);
+        assert!(l.overflow > 0.0);
+        let down = settings(&m, 8, &heights, size, 1e6);
+        // Scrolled as far as it goes: the last row sits on the box's floor.
+        let last = down.rows.last().unwrap().rect;
+        assert!((last.bottom() + SETTINGS_INNER - down.group.bottom()).abs() < 0.01);
+        assert_eq!(down.rows[0].rect.y, l.rows[0].rect.y - l.overflow);
+        // A row scrolled out of the box is not clicked.
+        let first = down.rows[0].rect;
+        assert_eq!(
+            settings_hit(&down, first.x + 5.0, first.y + 5.0),
+            SettingsHit::Nothing
+        );
+        let wide = settings(&m, 8, &heights, (size.0 + 200.0, size.1), 0.0);
+        assert_eq!(wide.group.w, l.group.w + 200.0);
     }
 
     #[test]
     fn a_point_in_the_settings_window_finds_its_part() {
         let m = Metrics::default();
-        let l = settings(&m, 4, &[38.0, 52.0], 140.0);
+        let l = settings(&m, 4, &[38.0, 52.0], settings_size(&m, 4, 142.0), 0.0);
         let at = |r: Rect| settings_hit(&l, r.x + 5.0, r.y + 5.0);
         assert_eq!(at(l.close), SettingsHit::Close);
+        assert_eq!(at(l.search), SettingsHit::Search);
         assert_eq!(settings_hit(&l, 30.0, 10.0), SettingsHit::Title);
         assert_eq!(at(l.sections[2]), SettingsHit::Section(2));
         assert_eq!(at(l.rows[1].rect), SettingsHit::Row(1));
