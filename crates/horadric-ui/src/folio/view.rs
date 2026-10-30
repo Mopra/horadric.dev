@@ -49,6 +49,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_numerics::Vector2;
 
 use super::composer::{self, Act, STRIP_H};
+use super::banish::{self, Ghost};
+use super::lightbox;
 use super::{answer, interrupt, redraw, select, transcript, with, Chat, CHATS};
 use crate::app::{self, Input};
 use crate::clipboard;
@@ -73,6 +75,8 @@ pub(super) const CARET_W: f32 = 1.5;
 /// Between frames while the background moves. It drifts slowly, so this is
 /// smooth enough and costs a third of the display's rate.
 const FRAME_MS: u32 = 40;
+/// Between frames while a cleared page burns away, which moves fast.
+const BANISH_MS: u32 = 16;
 /// The glass's corner, less the line of its rim the conversation leaves.
 const CORNER: f32 = 7.0;
 
@@ -135,7 +139,8 @@ fn make(key: &str, shared: &Rc<Shared>, parent: HWND, bar: bool) -> Option<HWND>
         gfx: RefCell::new(None),
         hits: RefCell::new(Vec::new()),
         composer: RefCell::new(None),
-        ticking: Cell::new(false),
+        ticking: Cell::new(0),
+        banished: Cell::new(None),
         caret_since: Cell::new(Instant::now()),
         caret_was: Cell::new(0),
         last: Cell::new(None),
@@ -243,6 +248,39 @@ pub fn keyboard_moved(key: &str) {
     super::redraw(key);
 }
 
+/// `/clear` emptied the conversation of session `key`: the page as last
+/// drawn burns away over the empty one. Called before the repaint that
+/// draws the empty page, while the kept layer still holds the old.
+pub(super) fn banish(key: &str) {
+    let Some(view) = view_of(key) else {
+        return;
+    };
+    let Some(bottom) = with(key, |c| c.tr.state.area.bottom()) else {
+        return;
+    };
+    let Ok(mut slot) = view.gfx.try_borrow_mut() else {
+        return;
+    };
+    let Some(gfx) = slot.as_mut() else {
+        return;
+    };
+    unsafe {
+        let Some(page) = gfx.kept().and_then(|l| l.GetBitmap().ok()) else {
+            return;
+        };
+        let w = gfx.win.GetSize().width;
+        // The next frame draws the empty page into a layer of its own.
+        gfx.layer = None;
+        gfx.ghost = Some(Ghost {
+            page,
+            area: Rect::new(0.0, 0.0, w, bottom),
+            since: Instant::now(),
+        });
+    }
+    view.banished.set(Some(Instant::now()));
+    view.clock(true);
+}
+
 /// A key that makes a character, from the pane: the composer's.
 pub fn char(key: &str, c: char, mods: Mods) {
     if select::char(key, c, mods) {
@@ -254,6 +292,10 @@ pub fn char(key: &str, c: char, mods: Mods) {
 /// A key that makes no character, from the pane. False leaves it to the
 /// pane.
 pub fn key(key: &str, vk: u16, mods: Mods) -> bool {
+    // Before the composer, whose Esc would stop Claude.
+    if lightbox::key(key, vk) {
+        return true;
+    }
     if select::key(key, vk, mods) {
         return true;
     }
@@ -277,6 +319,9 @@ pub fn key(key: &str, vk: u16, mods: Mods) -> bool {
 
 /// The wheel, from the pane, in Windows' units of 120 a notch.
 pub fn wheel(key: &str, delta: i32) {
+    if lightbox::wheel(key, delta) {
+        return;
+    }
     // Over an open menu the wheel scrolls the menu, not the conversation.
     let on_menu = with(key, |c| {
         let (Some(at), Some(view)) = (c.input.menu_at, c.view) else {
@@ -330,6 +375,8 @@ pub(super) struct Gfx {
     /// The conversation as last drawn (see [`View::draw`]), with the
     /// pixel size and DPI it was made for.
     layer: Option<(ID2D1BitmapRenderTarget, (u32, u32), u32)>,
+    /// The page before a `/clear`, burning away over the new one.
+    ghost: Option<Ghost>,
     /// The window's DPI the target draws at. Moving to another monitor
     /// changes the window's, and the target is told.
     pub(super) dpi: u32,
@@ -359,7 +406,11 @@ pub(super) struct View {
     /// The composer's text laid out and where it was drawn, in DIPs, for
     /// placing the caret by a click or an arrow.
     pub(super) composer: RefCell<Option<(IDWriteTextLayout, f32, f32)>>,
-    pub(super) ticking: Cell<bool>,
+    /// The frame clock's interval in ms, 0 while it is stopped.
+    pub(super) ticking: Cell<u32>,
+    /// When the page was last cleared, for the clock to run fast while
+    /// it burns.
+    pub(super) banished: Cell<Option<Instant>>,
     /// When the caret last moved or the keyboard came, which restarts its
     /// blink lit, and what it was then.
     pub(super) caret_since: Cell<Instant>,
@@ -519,6 +570,7 @@ impl Gfx {
             win,
             rt,
             layer: None,
+            ghost: None,
             dpi,
             brush,
             shade,
@@ -725,10 +777,16 @@ impl View {
     /// and stops it otherwise.
     pub(super) fn clock(&self, moving: bool) {
         let on = moving && self.seen();
-        if self.ticking.replace(on) != on {
+        let fast = self.burning() || lightbox::moving(&self.key);
+        let rate = match (on, fast) {
+            (false, _) => 0,
+            (true, true) => BANISH_MS,
+            (true, false) => FRAME_MS,
+        };
+        if self.ticking.replace(rate) != rate {
             unsafe {
-                if on {
-                    SetTimer(Some(self.hwnd()), TICK, FRAME_MS, None);
+                if rate > 0 {
+                    SetTimer(Some(self.hwnd()), TICK, rate, None);
                 } else {
                     let _ = KillTimer(Some(self.hwnd()), TICK);
                 }
@@ -825,12 +883,18 @@ impl View {
         }
     }
 
+    /// A cleared page is still burning away.
+    fn burning(&self) -> bool {
+        (self.banished.get()).is_some_and(|t| t.elapsed().as_secs_f32() < banish::LENGTH)
+    }
+
     /// Moves the runes' clocks on while they move, and starts or stops the
     /// frame clock. The clock and the heat.
     fn advance(&self, chat: &mut Chat, now: Instant) -> (f32, f32) {
         chat.note_busy();
         let heat = chat.heat();
-        let moving = chat.busy_was || heat > 0.0;
+        let moving =
+            chat.busy_was || heat > 0.0 || self.burning() || lightbox::moving(&self.key);
         if moving {
             let dt = self
                 .last
@@ -926,6 +990,9 @@ impl View {
         let Some(still) = gfx.kept().and_then(|l| l.GetBitmap().ok()) else {
             return false;
         };
+        if gfx.ghost.as_ref().is_some_and(Ghost::over) {
+            gfx.ghost = None;
+        }
         let Ok(win) = gfx.win.cast() else {
             return false;
         };
@@ -939,13 +1006,16 @@ impl View {
         rt.Clear(Some(&color(pal.bg)));
         let view = (size.width, size.height);
         self.background(gfx, &pal, view, (t, self.warp.get()), heat);
-        rt.DrawBitmap(
-            &still,
-            None,
-            1.0,
-            D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-            None,
-        );
+        match &gfx.ghost {
+            Some(g) => banish::draw(gfx, &pal, &still, g),
+            None => rt.DrawBitmap(
+                &still,
+                None,
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                None,
+            ),
+        }
         if let Some((at, area)) = self.dots.get() {
             rt.PushAxisAlignedClip(&d2d(&area), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             for k in 0..3 {
@@ -966,6 +1036,7 @@ impl View {
             }
             rt.PopAxisAlignedClip();
         }
+        lightbox::draw(gfx, &pal, &self.key);
         rt.EndDraw(None, None).is_ok()
     }
 
@@ -1176,6 +1247,9 @@ impl View {
             }
         }
         let (x, y) = self.dip(lparam);
+        if !self.bar && lightbox::press(self, x, y) {
+            return;
+        }
         if !self.bar && self.grab_bar(x, y) {
             return;
         }
@@ -1222,6 +1296,9 @@ impl View {
 
     pub(super) fn on_drag(&self, lparam: LPARAM) {
         let (x, y) = self.dip(lparam);
+        if !self.bar && lightbox::drag(self, x, y) {
+            return;
+        }
         if self.grab.get().is_some() {
             self.drag_bar(y);
             return;
@@ -1243,7 +1320,11 @@ impl View {
             let _ = ScreenToClient(self.hwnd(), &mut p);
         }
         let s = self.scale();
+        let boxed = (!self.bar)
+            .then(|| lightbox::cursor(self, p.x as f32 / s, p.y as f32 / s))
+            .flatten();
         let id = match self.hit_at(p.x as f32 / s, p.y as f32 / s) {
+            _ if boxed.is_some() => boxed.unwrap_or(IDC_ARROW),
             _ if self.over_bar(p.x as f32 / s, p.y as f32 / s) => IDC_ARROW,
             Some(Hit::Input(Act::Text)) => IDC_IBEAM,
             Some(_) => IDC_HAND,
@@ -1310,6 +1391,10 @@ impl View {
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
+                let (x, y) = self.dip(lparam);
+                if !self.bar && lightbox::release(self, x, y) {
+                    return Some(LRESULT(0));
+                }
                 if self.grab.take().is_some() {
                     unsafe {
                         let _ = ReleaseCapture();
@@ -1342,6 +1427,7 @@ impl View {
                 Some(LRESULT(0))
             }
             WM_CAPTURECHANGED => {
+                lightbox::lost_capture(&self.key);
                 self.selecting.set(false);
                 self.grab.set(None);
                 Some(LRESULT(0))

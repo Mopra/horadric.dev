@@ -43,7 +43,7 @@ pub(super) fn act(key: &str, a: Act) {
             })
             .flatten();
             if let Some(img) = image {
-                super::rich::open_image(None, &img.media_type, &img.base64);
+                super::lightbox::open(key, &img.base64);
             }
         }
         Act::Always(id) => answer_with(key, |f| f.reply(&id, Reply::Always)),

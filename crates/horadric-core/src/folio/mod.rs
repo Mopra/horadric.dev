@@ -126,8 +126,6 @@ pub enum Notice {
         pre_tokens: u64,
         post_tokens: Option<u64>,
     },
-    /// `/clear` started a new conversation; what is above is not in it.
-    Cleared,
     /// An API call failed and is tried again; a later retry of the same
     /// call replaces this one.
     Retrying {
@@ -317,6 +315,8 @@ pub struct Folio {
     /// Whether the CLI has listed its background tasks at all, so an empty
     /// list means none run rather than a CLI that never says.
     pub background_heard: bool,
+    /// How many times `/clear` emptied it, for the view to see one happen.
+    pub cleared: u32,
     /// The blocks of the message streaming now, by content index.
     open: HashMap<u64, Open>,
     /// The id of the message streaming now.
@@ -524,10 +524,7 @@ impl Folio {
             "control_cancel_request" => self.cancel(v["request_id"].as_str().unwrap_or_default()),
             "control_response" => self.control_response(&v),
             "command_lifecycle" => self.lifecycle(&v),
-            "conversation_reset" => {
-                self.todos.clear();
-                self.notice(Notice::Cleared)
-            }
+            "conversation_reset" => self.reset(),
             "rate_limit_event" => false,
             "system" => self.system(&v, line),
             _ => self.raw(line),
@@ -912,6 +909,20 @@ impl Folio {
             return false;
         }
         self.notice(n)
+    }
+
+    /// `/clear` started a new conversation: nothing of the old one is in
+    /// it, so nothing of it stays on the page either.
+    fn reset(&mut self) -> bool {
+        self.blocks.clear();
+        self.history = 0;
+        self.todos.clear();
+        self.context = None;
+        self.open.clear();
+        self.streamed.clear();
+        self.hidden.clear();
+        self.cleared += 1;
+        true
     }
 
     fn notice(&mut self, n: Notice) -> bool {
@@ -1653,11 +1664,14 @@ impl Folio {
         }
         self.settle_turn();
         self.status = None;
-        self.blocks.push(Block::Footer {
-            duration_ms: v["duration_ms"].as_u64().unwrap_or_default(),
-            ending,
-            usage,
-        });
+        // The `/clear` turn's own result: a page just emptied stays empty.
+        if !self.blocks.is_empty() {
+            self.blocks.push(Block::Footer {
+                duration_ms: v["duration_ms"].as_u64().unwrap_or_default(),
+                ending,
+                usage,
+            });
+        }
         if let Some(id) = v["session_id"].as_str() {
             self.session_id = Some(id.to_string());
         }
@@ -3168,7 +3182,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_and_clear_are_notices() {
+    fn compact_is_a_notice_and_clear_empties_the_page() {
         let f = play_two(COMPACT, |v| v);
         let n = notices(&f);
         assert!(
@@ -3183,7 +3197,8 @@ mod tests {
         assert!(!f.blocks.iter().any(|b| matches!(b, Block::Raw(_))));
 
         let f = play_two(CLEAR, |v| v);
-        assert_eq!(notices(&f), [&Notice::Cleared]);
+        assert!(f.blocks.is_empty(), "{:#?}", f.blocks);
+        assert_eq!(f.cleared, 1);
         assert_eq!(
             f.session_id.as_deref(),
             Some("1fa7444a-1827-43b3-9f5c-c648973cfe3f"),

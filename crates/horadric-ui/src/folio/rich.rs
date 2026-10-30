@@ -17,7 +17,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1Bitmap, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    ID2D1Bitmap, ID2D1RenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
 };
 use windows::Win32::Graphics::DirectWrite::{
@@ -76,6 +76,8 @@ pub(super) enum Item {
     Text(IDWriteTextLayout, f32, f32, Color),
     Line(String, F, Rect, Color),
     Image(ID2D1Bitmap, Rect),
+    /// A rune of the rim's: which, its centre x, its top, height, ink, stroke.
+    Rune(usize, f32, f32, f32, Color, f32),
     Clip(Rect),
     Unclip,
 }
@@ -88,6 +90,7 @@ impl Clone for Item {
             Item::Text(l, x, y, c) => Item::Text(l.clone(), *x, *y, *c),
             Item::Line(s, f, r, c) => Item::Line(s.clone(), *f, *r, *c),
             Item::Image(b, r) => Item::Image(b.clone(), *r),
+            Item::Rune(n, x, y, h, c, w) => Item::Rune(*n, *x, *y, *h, *c, *w),
             Item::Clip(r) => Item::Clip(*r),
             Item::Unclip => Item::Unclip,
         }
@@ -132,6 +135,7 @@ impl Item {
             Item::Text(l, x, y, c) => Item::Text(l.clone(), x + dx, y + dy, *c),
             Item::Line(s, f, r, c) => Item::Line(s.clone(), *f, shift(r, dx, dy), *c),
             Item::Image(b, r) => Item::Image(b.clone(), shift(r, dx, dy)),
+            Item::Rune(n, x, y, h, c, w) => Item::Rune(*n, x + dx, y + dy, *h, *c, *w),
             Item::Clip(r) => Item::Clip(shift(r, dx, dy)),
             Item::Unclip => Item::Unclip,
         }
@@ -697,6 +701,7 @@ pub(super) unsafe fn draw(gfx: &Gfx, fonts: &Fonts, s: &Scene, ox: f32, oy: f32,
                     None,
                 );
             }
+            Item::Rune(n, x, y, h, c, w) => gfx.rune(*n, ox + x, oy + y, *h, *c, *w),
             Item::Clip(r) => gfx
                 .rt
                 .PushAxisAlignedClip(&d2d(&shift(r, ox, oy)), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE),
@@ -712,6 +717,13 @@ const THUMB_PX: u32 = 360;
 /// A prompt's image, base64 PNG, JPEG, GIF or WebP, decoded by WIC and
 /// made a bitmap of the frame's, with its size in pixels once scaled.
 pub(super) fn thumbnail(gfx: &Gfx, base64: &str) -> Option<(ID2D1Bitmap, u32, u32)> {
+    let (pixels, w, h) = decode(base64, THUMB_PX)?;
+    Some((bitmap(&gfx.rt, &pixels, w, h)?, w, h))
+}
+
+/// An image's premultiplied BGRA pixels and size, scaled down so its
+/// longest side is at most `max` pixels.
+pub(super) fn decode(base64: &str, max: u32) -> Option<(Vec<u8>, u32, u32)> {
     let bytes = horadric_core::release::base64_decode(base64)?;
     unsafe {
         let factory: IWICImagingFactory =
@@ -727,7 +739,7 @@ pub(super) fn thumbnail(gfx: &Gfx, base64: &str) -> Option<(ID2D1Bitmap, u32, u3
         if w == 0 || h == 0 {
             return None;
         }
-        let k = (THUMB_PX as f32 / w.max(h) as f32).min(1.0);
+        let k = (max as f32 / w.max(h) as f32).min(1.0);
         let (tw, th) = (
             ((w as f32 * k).round() as u32).max(1),
             ((h as f32 * k).round() as u32).max(1),
@@ -751,6 +763,13 @@ pub(super) fn thumbnail(gfx: &Gfx, base64: &str) -> Option<(ID2D1Bitmap, u32, u3
         converter
             .CopyPixels(std::ptr::null(), tw * 4, &mut pixels)
             .ok()?;
+        Some((pixels, tw, th))
+    }
+}
+
+/// Premultiplied BGRA pixels made a bitmap of target `rt`'s.
+pub(super) fn bitmap(rt: &ID2D1RenderTarget, pixels: &[u8], w: u32, h: u32) -> Option<ID2D1Bitmap> {
+    unsafe {
         let props = D2D1_BITMAP_PROPERTIES {
             pixelFormat: D2D1_PIXEL_FORMAT {
                 format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -760,63 +779,15 @@ pub(super) fn thumbnail(gfx: &Gfx, base64: &str) -> Option<(ID2D1Bitmap, u32, u3
             dpiY: 96.0,
         };
         let size = D2D_SIZE_U {
-            width: tw,
-            height: th,
+            width: w,
+            height: h,
         };
-        let bitmap = gfx
-            .rt
-            .CreateBitmap(
-                size,
-                Some(pixels.as_ptr() as *const std::ffi::c_void),
-                tw * 4,
-                &props,
-            )
-            .ok()?;
-        Some((bitmap, tw, th))
-    }
-}
-
-/// Opens an image in the system's viewer: the file it came from while it
-/// is still there, else its bytes written to the temp folder, named by
-/// what they hold so a second click opens the same copy.
-pub(super) fn open_image(path: Option<&std::path::Path>, media_type: &str, base64: &str) {
-    use std::hash::{Hash, Hasher};
-    use std::os::windows::ffi::OsStrExt;
-
-    let path = match path.filter(|p| p.is_file()) {
-        Some(p) => p.to_path_buf(),
-        None => {
-            let Some(bytes) = horadric_core::release::base64_decode(base64) else {
-                return;
-            };
-            let ext = match media_type {
-                "image/jpeg" => "jpg",
-                "image/gif" => "gif",
-                "image/webp" => "webp",
-                _ => "png",
-            };
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            base64.hash(&mut h);
-            // Pasted images are kept here too, and go after a day.
-            let dir = std::env::temp_dir().join("Horadric");
-            let path = dir.join(format!("image-{:016x}.{ext}", h.finish()));
-            if !path.is_file()
-                && (std::fs::create_dir_all(&dir).is_err() || std::fs::write(&path, bytes).is_err())
-            {
-                return;
-            }
-            path
-        }
-    };
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-    unsafe {
-        windows::Win32::UI::Shell::ShellExecuteW(
-            None,
-            windows::core::w!("open"),
-            PCWSTR(wide.as_ptr()),
-            None,
-            None,
-            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-        );
+        rt.CreateBitmap(
+            size,
+            Some(pixels.as_ptr() as *const std::ffi::c_void),
+            w * 4,
+            &props,
+        )
+        .ok()
     }
 }

@@ -25,7 +25,7 @@ use windows_numerics::Vector2;
 
 use super::cards;
 use super::flow::{self, Pos, Pos2};
-use super::rich::{self, Ctx, Fonts, Scene, F, MONO_LINE};
+use super::rich::{self, Ctx, Fonts, Item, Scene, F, MONO_LINE};
 use super::view::{self, d2d, text_format, Gfx, Hit, Palette, View, CARET_W, FONT};
 use super::Chat;
 use crate::field::Field;
@@ -41,8 +41,8 @@ const STEP_H: f32 = 26.0;
 const FOOTER_H: f32 = 18.0;
 /// A prompt's plate: the room around its text, and how much of the
 /// column it may take, so the human's turn always sits off to the right.
-const PLATE_X: f32 = 14.0;
-const PLATE_Y: f32 = 9.0;
+const PLATE_X: f32 = 20.0;
+const PLATE_Y: f32 = 14.0;
 const PLATE_SHARE: f32 = 0.72;
 /// How far a step's detail and a lane sit in from their line.
 const NEST: f32 = 22.0;
@@ -235,6 +235,24 @@ impl Cache {
 pub(super) struct Ui {
     pub(super) state: State,
     pub(super) cache: Cache,
+}
+
+impl Ui {
+    /// The conversation was emptied: nothing kept by block, step or field
+    /// applies to what comes next.
+    pub(super) fn forget(&mut self) {
+        let st = &self.state;
+        self.state = State {
+            keys: st.keys,
+            caret_lit: st.caret_lit,
+            mouse: st.mouse,
+            area: st.area,
+            todos_open: st.todos_open,
+            ..State::default()
+        };
+        self.cache.blocks.clear();
+        self.cache.thumbs.clear();
+    }
 }
 
 fn key_of(c: Color) -> u32 {
@@ -443,28 +461,35 @@ impl Ctx<'_> {
         );
     }
 
-    /// The human's turn: off to the right, where position alone tells it
-    /// from the reply, in the reply's type on a quiet neutral plate. The
-    /// plate is the glass moved a few steps toward the text, so it holds
-    /// in light themes as in dark, and the project's colour is only a
-    /// hairline: a saturated fill read as a chat app.
+    /// The human's turn, cut into the glass rather than floating on it.
+    /// It keeps the chat convention, off to the right where position alone
+    /// tells it from the reply, but square, a shade darker than the glass,
+    /// shadowed under its top edge with a catch of light along its bottom.
+    /// Ansuz (the spoken word) is cut in at its left, and the text is the
+    /// reply's type, a little toward the accent.
     unsafe fn prompt(&self, t: &str, cw: f32) -> Scene {
+        const RUNE_W: f32 = 20.0;
         let mut s = Scene::default();
-        let max = cw * PLATE_SHARE - 2.0 * PLATE_X;
+        let max = cw * PLATE_SHARE - 2.0 * PLATE_X - RUNE_W;
         let Some(l) = self.layout(&self.fonts.body, t, max) else {
             return s;
         };
         let (tw, th) = render::text_size(&l);
-        let pw = tw.min(max) + 2.0 * PLATE_X;
-        let r = Rect::new(cw - pw, 0.0, pw, th + 2.0 * PLATE_Y);
-        s.fill(r, 8.0, self.pal.bg.mix(self.pal.fg, 0.07));
-        s.stroke(
-            r,
-            8.0,
-            self.pal.accent.mix(self.pal.fg, 0.4).with_alpha(0.22),
-            1.0,
-        );
-        s.unit(&l, r.x + PLATE_X, PLATE_Y, self.pal.fg.with_alpha(0.92), t);
+        let pw = tw.min(max) + 2.0 * PLATE_X + RUNE_W;
+        let r = Rect::new(cw - pw, 0.0, pw, th + 2.0 * PLATE_Y + 2.0);
+        let black = Color::rgb(0);
+        s.fill(r, 2.0, self.pal.bg.mix(black, 0.18));
+        for i in 0..5 {
+            let band = Rect::new(r.x, r.y + i as f32, r.w, 1.0);
+            s.fill(band, 0.0, black.with_alpha(0.28 * (1.0 - i as f32 / 5.0)));
+        }
+        let lip = Rect::new(r.x, r.bottom() - 1.0, r.w, 1.0);
+        s.fill(lip, 0.0, self.pal.fg.with_alpha(0.08));
+        let ink = self.pal.accent.mix(self.pal.fg, 0.5);
+        let top = PLATE_Y + 2.0;
+        (s.items).push(Item::Rune(3, r.x + PLATE_X + 4.0, top + 5.0, 15.0, ink.with_alpha(0.75), 1.5));
+        let text = self.pal.fg.mix(self.pal.accent, 0.18).with_alpha(0.95);
+        s.unit(&l, r.x + PLATE_X + RUNE_W, top, text, t);
         s.h = r.h;
         s
     }

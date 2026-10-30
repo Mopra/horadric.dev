@@ -27,11 +27,13 @@
 //! box and its buttons, and [`backdrop`] the background.
 
 mod backdrop;
+mod banish;
 mod cards;
 mod composer;
 mod controls;
 mod editor;
 mod flow;
+mod lightbox;
 mod picker;
 mod rich;
 mod select;
@@ -643,6 +645,7 @@ fn save_soon() {
 fn drain() {
     let mut changed: Vec<(HWND, bool)> = Vec::new();
     let mut tell: Vec<Input> = Vec::new();
+    let mut banished: Vec<String> = Vec::new();
     let busy = CHATS.with(|c| {
         let Ok(mut chats) = c.try_borrow_mut() else {
             return true;
@@ -668,6 +671,7 @@ fn drain() {
             if events.is_empty() && !moved {
                 continue;
             }
+            let (cleared, live) = (chat.folio.cleared, chat.live);
             for event in events {
                 match event {
                     Event::Out(l) => moved |= chat.folio.feed(&l),
@@ -693,10 +697,26 @@ fn drain() {
                     }
                 }
             }
+            if chat.folio.cleared != cleared {
+                chat.open.clear();
+                chat.tr.forget();
+                chat.scroll = 0.0;
+                chat.follow = true;
+                // A replay only catches up: the page burns for a clear
+                // the human sees happen.
+                if live {
+                    banished.push(id.clone());
+                }
+            }
             chat.flush();
             select::release_lapsed(chat);
             composer::tend(id, chat);
             chat.note_busy();
+            if banished.last() == Some(id) {
+                // The runes behind flare up as the page burns, and cool.
+                chat.heat_from = chat.heat().max(1.0);
+                chat.busy_since = Instant::now();
+            }
             let now = chat.state();
             if chat.told.as_ref() != Some(&now) {
                 chat.told = Some(now.clone());
@@ -722,6 +742,10 @@ fn drain() {
                 LPARAM(0),
             );
         }
+    }
+    // Before the repaint, which draws over the page that burns.
+    for id in banished {
+        view::banish(&id);
     }
     for (v, header) in changed {
         refresh(v, header);

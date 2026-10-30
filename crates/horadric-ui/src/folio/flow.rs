@@ -445,7 +445,6 @@ pub fn notice(n: &Notice) -> String {
                 None => format!("{how}, from {} tokens", tokens(*pre_tokens)),
             }
         }
-        Notice::Cleared => "Context cleared, a new conversation starts here".to_string(),
         Notice::Retrying {
             attempt,
             max_retries,
