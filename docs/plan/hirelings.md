@@ -136,9 +136,10 @@ it: `Explore wants to run Bash`.
 
 ### 3. The war table: the run over time
 
-The view nobody else has. Press `W` on a pane (or click the count on
-the tile) and the pane turns into a waterfall of the turn, Jaeger style,
-on one time axis:
+The view nobody else has. Press Ctrl+Shift+W in a pane (a plain W would
+type into the terminal) or click the link in the retinue's heading, and
+the pane turns into a waterfall of the turn, Jaeger style, on one time
+axis:
 
 ```
  main      ████▌·················································████
