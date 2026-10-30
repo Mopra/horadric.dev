@@ -29,7 +29,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetFocus, VK_NEXT, VK_PRIOR, VK_SHIFT,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_NEXT, VK_PRIOR, VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -85,6 +85,12 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 
 /// A wheel notch, in DIPs.
 const NOTCH: f32 = 54.0;
+/// The scroll bar's reach at the glass's right edge, wider than the thumb
+/// drawn in it so it is easy to grab, and what it keeps clear of the
+/// glass's top and bottom.
+const BAR_W: f32 = 14.0;
+const BAR_INSET: f32 = 8.0;
+
 pub fn register_class() -> Result<()> {
     unsafe {
         let instance = GetModuleHandleW(None)?;
@@ -131,6 +137,9 @@ fn make(key: &str, shared: &Rc<Shared>, parent: HWND, bar: bool) -> Option<HWND>
         clock: Cell::new(0.0),
         warp: Cell::new(0.0),
         selecting: Cell::new(false),
+        track: Cell::new(None),
+        grab: Cell::new(None),
+        bar_lit: Cell::new(false),
     });
     let hwnd = unsafe {
         let Ok(instance) = GetModuleHandleW(None) else {
@@ -351,6 +360,12 @@ pub(super) struct View {
     /// runes on faster while Claude works without any of them jumping.
     pub(super) warp: Cell<f32>,
     pub(super) selecting: Cell<bool>,
+    /// Where the scroll bar was drawn, None when everything fits.
+    pub(super) track: Cell<Option<Rect>>,
+    /// How far into the thumb it was grabbed, while it is dragged.
+    pub(super) grab: Cell<Option<f32>>,
+    /// The mouse is over the scroll bar.
+    pub(super) bar_lit: Cell<bool>,
 }
 
 pub(super) fn view_of(key: &str) -> Option<&'static View> {
@@ -778,6 +793,7 @@ impl View {
         gfx.shade.SetStartPoint(Vector2 { X: 0.0, Y: 0.0 });
         gfx.shade.SetEndPoint(Vector2 { X: 0.0, Y: 9.0 });
         rt.FillRectangle(&d2d(&Rect::new(0.0, 0.0, w, 9.0)), &gfx.shade);
+        self.scroll_bar(gfx, &pal, chat);
         if chat.pending.is_some() {
             self.trust_card(gfx, &pal, chat, cx, cw, &area, &mut composer_hits);
         }
@@ -838,6 +854,63 @@ impl View {
         self.strip(gfx, chat, &pal, w, y, &mut hits);
         *self.hits.borrow_mut() = hits;
         rt.EndDraw(None, None).is_ok()
+    }
+
+    /// A slim thumb at the glass's right edge: how far along the
+    /// conversation the view is, and a way to drag there.
+    unsafe fn scroll_bar(&self, gfx: &Gfx, pal: &Palette, chat: &Chat) {
+        let area = chat.tr.state.area;
+        let track = Rect::new(
+            area.right() - BAR_W,
+            area.y + BAR_INSET,
+            BAR_W,
+            area.h - 2.0 * BAR_INSET,
+        );
+        let thumb = look::thumb(chat.scroll, chat.content_h, chat.view_h, track.h);
+        self.track.set(thumb.map(|_| track));
+        let Some((at, len)) = thumb else {
+            return;
+        };
+        let lit = self.grab.get().is_some() || self.bar_lit.get();
+        let w = if lit { 6.0 } else { 4.0 };
+        let r = Rect::new(track.right() - 4.0 - w, track.y + at, w, len);
+        let alpha = if lit { 0.42 } else { 0.2 };
+        gfx.fill_round(&r, w / 2.0, pal.fg.with_alpha(alpha));
+    }
+
+    fn over_bar(&self, x: f32, y: f32) -> bool {
+        self.track.get().is_some_and(|t| t.contains(x, y))
+    }
+
+    /// A press on the scroll bar takes the thumb; beside it, brings the
+    /// thumb's middle there first. False when the press missed the bar.
+    fn grab_bar(&self, x: f32, y: f32) -> bool {
+        let Some(track) = self.track.get().filter(|t| t.contains(x, y)) else {
+            return false;
+        };
+        let into = with(&self.key, |c| {
+            let (at, len) = look::thumb(c.scroll, c.content_h, c.view_h, track.h)?;
+            let into = y - track.y - at;
+            Some(if (0.0..=len).contains(&into) { into } else { len / 2.0 })
+        });
+        let Some(Some(into)) = into else {
+            return false;
+        };
+        self.grab.set(Some(into));
+        unsafe { SetCapture(self.hwnd()) };
+        self.drag_bar(y);
+        true
+    }
+
+    fn drag_bar(&self, y: f32) {
+        let (Some(track), Some(into)) = (self.track.get(), self.grab.get()) else {
+            return;
+        };
+        with(&self.key, |c| {
+            c.scroll = look::scroll_at(y - track.y - into, c.content_h, c.view_h, track.h);
+            c.follow = look::at_bottom(c.scroll, c.content_h, c.view_h);
+        });
+        redraw(&self.key);
     }
 
     /// Asks whether to trust the folder, as Claude Code does before its
@@ -938,6 +1011,9 @@ impl View {
             }
         }
         let (x, y) = self.dip(lparam);
+        if !self.bar && self.grab_bar(x, y) {
+            return;
+        }
         let key = self.key.clone();
         let hit = self.hit_at(x, y);
         // The bar has nothing to select.
@@ -981,6 +1057,14 @@ impl View {
 
     pub(super) fn on_drag(&self, lparam: LPARAM) {
         let (x, y) = self.dip(lparam);
+        if self.grab.get().is_some() {
+            self.drag_bar(y);
+            return;
+        }
+        let over = self.over_bar(x, y);
+        if self.bar_lit.replace(over) != over {
+            redraw(&self.key);
+        }
         if !self.bar && select::moved(self, x, y) {
             return;
         }
@@ -995,6 +1079,7 @@ impl View {
         }
         let s = self.scale();
         let id = match self.hit_at(p.x as f32 / s, p.y as f32 / s) {
+            _ if self.over_bar(p.x as f32 / s, p.y as f32 / s) => IDC_ARROW,
             Some(Hit::Input(Act::Text)) => IDC_IBEAM,
             Some(_) => IDC_HAND,
             None if !self.bar && select::over_text(&self.key, p.x as f32 / s, p.y as f32 / s) => {
@@ -1058,6 +1143,12 @@ impl View {
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
+                if self.grab.take().is_some() {
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                    redraw(&self.key);
+                }
                 select::release(&self.key);
                 if self.selecting.replace(false) {
                     unsafe {
@@ -1069,6 +1160,9 @@ impl View {
             WM_MOUSELEAVE => {
                 if !self.bar {
                     select::left(&self.key);
+                }
+                if self.bar_lit.replace(false) {
+                    redraw(&self.key);
                 }
                 self.leave_input();
                 Some(LRESULT(0))
@@ -1082,6 +1176,7 @@ impl View {
             }
             WM_CAPTURECHANGED => {
                 self.selecting.set(false);
+                self.grab.set(None);
                 Some(LRESULT(0))
             }
             WM_SETCURSOR if (lparam.0 & 0xffff) as u32 == HTCLIENT => {

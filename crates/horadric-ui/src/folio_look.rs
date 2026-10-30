@@ -299,6 +299,34 @@ pub fn at_bottom(scroll: f32, content: f32, view: f32) -> bool {
     scroll >= (content - view).max(0.0) - 2.0
 }
 
+/// The shortest the scroll bar's thumb gets, so a long session's is still
+/// there to grab.
+const THUMB_MIN: f32 = 28.0;
+
+fn thumb_len(content: f32, view: f32, track: f32) -> f32 {
+    (track * view / content).clamp(THUMB_MIN.min(track), track)
+}
+
+/// The scroll bar's thumb along a track `track` long: where it starts and
+/// how long it is. None when everything fits and there is no bar.
+pub fn thumb(scroll: f32, content: f32, view: f32, track: f32) -> Option<(f32, f32)> {
+    let most = content - view;
+    if most <= 1.0 || track <= 0.0 {
+        return None;
+    }
+    let len = thumb_len(content, view, track);
+    Some(((track - len) * scroll.clamp(0.0, most) / most, len))
+}
+
+/// The scroll that puts the thumb's start `at` along the track.
+pub fn scroll_at(at: f32, content: f32, view: f32, track: f32) -> f32 {
+    let room = track - thumb_len(content, view, track);
+    if room <= 0.0 {
+        return 0.0;
+    }
+    clamp_scroll(at / room * (content - view), content, view)
+}
+
 /// How warm the background is, from 0 at rest to 1 while a turn runs,
 /// on its way from `from` to `to` for `since`: warming takes [`WARM`],
 /// cooling [`COOL`].
@@ -505,6 +533,19 @@ mod tests {
         assert!(at_bottom(600.0, 1000.0, 400.0));
         assert!(!at_bottom(500.0, 1000.0, 400.0));
         assert!(at_bottom(0.0, 300.0, 400.0));
+    }
+
+    #[test]
+    fn the_thumb_shows_the_view_and_dragging_it_scrolls_back() {
+        assert_eq!(thumb(0.0, 300.0, 400.0, 400.0), None);
+        assert_eq!(thumb(0.0, 1000.0, 400.0, 400.0), Some((0.0, 160.0)));
+        assert_eq!(thumb(600.0, 1000.0, 400.0, 400.0), Some((240.0, 160.0)));
+        // A long session's thumb stays big enough to grab.
+        assert_eq!(thumb(0.0, 100_000.0, 400.0, 400.0).unwrap().1, THUMB_MIN);
+        assert_eq!(scroll_at(240.0, 1000.0, 400.0, 400.0), 600.0);
+        assert_eq!(scroll_at(120.0, 1000.0, 400.0, 400.0), 300.0);
+        assert_eq!(scroll_at(-50.0, 1000.0, 400.0, 400.0), 0.0);
+        assert_eq!(scroll_at(999.0, 1000.0, 400.0, 400.0), 600.0);
     }
 
     #[test]
