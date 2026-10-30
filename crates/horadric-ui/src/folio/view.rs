@@ -72,8 +72,6 @@ const LEADING: f32 = 1.6;
 const MONO: PCWSTR = w!("Cascadia Mono");
 const ICONS: PCWSTR = w!("Segoe Fluent Icons");
 
-/// The width of the button that opens the session in a terminal.
-const TERMINAL_W: f32 = 88.0;
 
 /// Not in the windows crate's WindowsAndMessaging.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -278,8 +276,6 @@ pub(super) enum Hit {
     Fold(usize),
     /// The composer and its controls.
     Input(Act),
-    /// Opens the session in a terminal.
-    Terminal,
     /// Trusts the folder and starts the session, or not and closes it.
     Trust(bool),
     /// The transcript's own buttons and links.
@@ -710,8 +706,7 @@ impl View {
         rt.EndDraw(None, None).is_ok()
     }
 
-    /// The settings in the pane's header row, printed on the plate as its
-    /// name is: from the right the Terminal button, then the strip.
+    /// The pane's header row, printed on the plate as its name is.
     unsafe fn draw_bar(&self, gfx: &Gfx, chat: &mut Chat) -> bool {
         let rt = &gfx.rt;
         let size = rt.GetSize();
@@ -758,42 +753,9 @@ impl View {
             rt.FillRectangle(&d2d(&Rect::new(0.0, 0.0, w, h)), &b);
         }
         let y = ((h - STRIP_H) / 2.0).round();
-        let right = self.terminal_button(gfx, &pal, chat, w, y, &mut hits);
-        self.strip(gfx, chat, &pal, (0.0, right), y, &mut hits);
+        self.strip(gfx, chat, &pal, w, y, &mut hits);
         *self.hits.borrow_mut() = hits;
         rt.EndDraw(None, None).is_ok()
-    }
-
-    /// "Terminal" at the top right: the session goes on in a terminal pane,
-    /// for what only the CLI does. Only between turns, since claude.exe
-    /// ends first, and only once there is a conversation to resume.
-    /// Returns where the settings strip to its left may end.
-    unsafe fn terminal_button(
-        &self,
-        gfx: &Gfx,
-        pal: &Palette,
-        chat: &Chat,
-        w: f32,
-        y: f32,
-        hits: &mut Vec<(Rect, Hit)>,
-    ) -> f32 {
-        let ready = !chat.folio.busy
-            && !chat.ended
-            && !chat.to_terminal
-            && chat.folio.session_id.is_some()
-            && chat.folio.pending_asks().is_empty();
-        if !ready {
-            return w;
-        }
-        let r = Rect::new(w - TERMINAL_W, y, TERMINAL_W, STRIP_H);
-        gfx.fill_round(&r, r.h / 2.0, pal.bg.mix(pal.fg, 0.07).with_alpha(0.9));
-        gfx.stroke_round(&r, r.h / 2.0, pal.fg.with_alpha(0.14), 1.0);
-        let icon = Rect::new(r.x + 8.0, r.y, 16.0, r.h);
-        gfx.text_in("\u{E756}", &gfx.icon, &icon, pal.dim);
-        let label = Rect::new(r.x + 28.0, r.y, r.w - 34.0, r.h);
-        gfx.text_in("Terminal", &gfx.small, &label, pal.dim);
-        hits.push((r, Hit::Terminal));
-        r.x - 6.0
     }
 
     /// Asks whether to trust the folder, as Claude Code does before its
@@ -921,7 +883,6 @@ impl View {
                 with(&key, composer::hold);
                 interrupt(&key);
             }
-            Some(Hit::Terminal) => app::push(Input::FolioToTerminal(key.clone())),
             Some(Hit::Trust(true)) => super::trust_folder(&key),
             Some(Hit::Trust(false)) => app::push(Input::CloseFolio(key.clone())),
             Some(Hit::Input(act)) => {

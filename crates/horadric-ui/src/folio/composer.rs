@@ -63,8 +63,7 @@ const LINES: f32 = 8.0;
 const PLATE_R: f32 = 14.0;
 const WELL_INSET: f32 = 6.0;
 const WELL_R: f32 = PLATE_R - WELL_INSET;
-/// The height of a setting in the pane's header row, and of the
-/// Terminal button beside them.
+/// The height of the buttons in the pane's header row.
 pub(super) const STRIP_H: f32 = 22.0;
 const THUMB: f32 = 52.0;
 const ROW_H: f32 = 26.0;
@@ -91,11 +90,7 @@ const PLACEHOLDER_ENDED: &str = "This session has ended.";
 pub(super) enum Act {
     Text,
     Stop,
-    Mode,
-    Model,
-    Effort,
-    Meter,
-    Tasks,
+    Settings,
     Pick(usize),
     Unattach(usize),
     Unqueue(usize),
@@ -185,9 +180,9 @@ pub(super) struct Input {
     dirty: bool,
     /// Where the box's top was last drawn, for the menu above it.
     top: f32,
-    /// Where the pickers' controls were last drawn, to open their menus
-    /// under them.
-    anchors: [f32; 4],
+    /// Where the header's button was last drawn, to open its menus under
+    /// it.
+    anchor: f32,
     /// Where the open menu was last drawn, for the wheel over it.
     pub(super) menu_at: Option<Rect>,
     ime: Option<[i32; 4]>,
@@ -217,7 +212,7 @@ impl Input {
             restored: false,
             dirty: false,
             top: 0.0,
-            anchors: [0.0; 4],
+            anchor: 0.0,
             menu_at: None,
             ime: None,
         }
@@ -692,6 +687,22 @@ fn pick(chat: &mut Chat, how: How) -> bool {
         }
         MenuKind::Effort => set_effort(chat, &item.value),
         MenuKind::Tasks => {}
+        MenuKind::Settings => match item.value.as_str() {
+            "mode" => open_picker(chat, MenuKind::Mode),
+            "model" => open_picker(chat, MenuKind::Model),
+            "effort" => open_picker(chat, MenuKind::Effort),
+            "tasks" => open_picker(chat, MenuKind::Tasks),
+            "context" => {
+                let line = chat.folio.get_context_usage();
+                write(chat, &line);
+            }
+            "terminal" => {
+                if let Some(id) = chat.input.key.clone() {
+                    crate::app::push(crate::app::Input::FolioToTerminal(id));
+                }
+            }
+            _ => {}
+        },
     }
     true
 }
@@ -737,7 +748,54 @@ fn effort_levels(chat: &Chat) -> Vec<String> {
     m.map(|m| m.effort_levels.clone()).unwrap_or_default()
 }
 
-/// Opens one of the pickers under the controls, or closes it when open.
+/// Whether the session can go on in a terminal now: only between turns,
+/// since claude.exe ends first, and once there is a conversation to resume.
+fn terminal_ready(chat: &Chat) -> bool {
+    !chat.folio.busy
+        && !chat.ended
+        && !chat.to_terminal
+        && chat.folio.session_id.is_some()
+        && chat.folio.pending_asks().is_empty()
+}
+
+/// The header's menu: a row per setting with what it is now.
+fn settings_items(chat: &Chat) -> Vec<Item> {
+    let row = |value: &str, label: &str, detail: String| Item {
+        label: label.to_string(),
+        detail,
+        value: value.to_string(),
+        ..Default::default()
+    };
+    let mode = chat.folio.permission_mode();
+    let mode = if mode.is_empty() { "default" } else { mode };
+    let model = controls::model_label(
+        chat.folio.model.as_deref(),
+        chat.input.model.as_deref(),
+        &chat.folio.info.models,
+    );
+    let mut items = vec![
+        row("mode", "Mode", controls::mode_label(mode).to_string()),
+        row("model", "Model", model),
+    ];
+    if !effort_levels(chat).is_empty() {
+        let effort = chat.input.effort.clone().unwrap_or("Default".to_string());
+        items.push(row("effort", "Effort", effort));
+    }
+    if let Some(ctx) = chat.folio.context.as_ref().filter(|c| c.limit > 0) {
+        items.push(row("context", "Context", controls::meter(ctx.used, ctx.limit).1));
+    }
+    let tasks = chat.folio.background.len();
+    if tasks > 0 {
+        items.push(row("tasks", "Tasks", controls::tasks_line(tasks)));
+    }
+    if terminal_ready(chat) {
+        items.push(row("terminal", "Terminal", "Go on in a terminal".to_string()));
+    }
+    items
+}
+
+/// Opens one of the pickers under the header's button, or closes it when
+/// open.
 fn open_picker(chat: &mut Chat, kind: MenuKind) {
     if chat.input.menu.as_ref().is_some_and(|m| m.kind == kind) {
         chat.input.menu = None;
@@ -779,6 +837,7 @@ fn open_picker(chat: &mut Chat, kind: MenuKind) {
                 })
                 .collect()
         }
+        MenuKind::Settings => settings_items(chat),
         MenuKind::Tasks => (chat.folio.background.iter())
             .map(|t| Item {
                 label: controls::task_kind(&t.task_type).to_string(),
@@ -1168,15 +1227,6 @@ fn width_of(gpu: &Gpu, fmt: &IDWriteTextFormat, s: &str) -> f32 {
         .unwrap_or(0.0)
 }
 
-fn mode_icon(mode: &str) -> char {
-    match mode {
-        "acceptEdits" => '\u{E70F}',
-        "plan" => '\u{E9D5}',
-        "auto" => '\u{E945}',
-        "bypassPermissions" => '\u{E7BA}',
-        _ => '\u{E72E}',
-    }
-}
 
 impl View {
     /// The composer at the bottom: queued prompts and a notice above it,
@@ -1323,175 +1373,48 @@ impl View {
         Rect::new(cx, top, cw, r.bottom() - top)
     }
 
-    /// The quiet row in the pane's header, so the composer holds only the
-    /// text: from the right, stop while Claude works, effort, model and
-    /// mode, then the context meter and the background tasks. It runs
-    /// from `right` leftwards, never past `left`, at `cy`.
+    /// The pane's header, kept to one button that opens the settings
+    /// (mode, model, effort, context, tasks, Terminal) as a menu, and Stop
+    /// beside it while Claude works. Laid leftwards from `right` at `cy`.
     pub(super) unsafe fn strip(
         &self,
         gfx: &Gfx,
         chat: &mut Chat,
         pal: &Palette,
-        (left, right): (f32, f32),
+        right: f32,
         cy: f32,
         hits: &mut Vec<(Rect, Hit)>,
     ) {
-        let gpu = &self.shared.gpu;
-        let mut right = right;
         let hover = chat.input.hover;
-        let open = chat.input.menu.as_ref().map(|m| m.kind);
-        chat.input.anchors = [right; 4];
+        let open = chat.input.menu.as_ref().is_some_and(|m| m.kind.is_picker());
+        let b = Rect::new(right - STRIP_H - 4.0, cy, STRIP_H + 4.0, STRIP_H);
+        let lit = open || hover == Some(Act::Settings);
+        if lit {
+            gfx.fill_round(&b, STRIP_H / 2.0, pal.fg.with_alpha(0.08));
+        }
+        // The one setting that still shows: a mode that asks for nothing,
+        // or one that only plans, tints the button.
+        let ink = match chat.folio.permission_mode() {
+            "bypassPermissions" => crate::theme::Color::rgb(0xE0_8A_3C),
+            "plan" => pal.accent,
+            _ if lit => pal.fg,
+            _ => pal.faint,
+        };
+        gfx.text_in("\u{E712}", &gfx.icon, &b, ink);
+        hits.push((b, Hit::Input(Act::Settings)));
+        // The menus open on the glass, so the anchor is in its DIPs.
+        chat.input.anchor = b.x + chat.bar_shift;
 
         if chat.folio.busy {
-            let b = Rect::new(right - STRIP_H, cy, STRIP_H, STRIP_H);
+            let s = Rect::new(b.x - 6.0 - STRIP_H, cy, STRIP_H, STRIP_H);
             let hot = hover == Some(Act::Stop);
             gfx.fill_round(
-                &b,
+                &s,
                 STRIP_H / 2.0,
                 pal.fg.with_alpha(if hot { 0.9 } else { 0.7 }),
             );
-            gfx.text_in("\u{E71A}", &gfx.icon, &b, pal.bg);
-            hits.push((b, Hit::Input(Act::Stop)));
-            right = b.x - 6.0;
-        }
-
-        // Laid right to left, so each piece is measured before it is placed.
-        let mut pill = |label: &str,
-                        icon: Option<char>,
-                        act: Act,
-                        hot: bool,
-                        tint: Option<crate::theme::Color>|
-         -> Option<f32> {
-            let tw = width_of(gpu, &gfx.small, label).ceil();
-            let iw = if icon.is_some() { 18.0 } else { 0.0 };
-            let w = tw + iw + 16.0;
-            let b = Rect::new(right - w, cy, w, STRIP_H);
-            if b.x < left {
-                return None;
-            }
-            let lit = hover == Some(act) || hot;
-            if lit {
-                gfx.fill_round(&b, STRIP_H / 2.0, pal.fg.with_alpha(0.08));
-            }
-            let ink = tint.unwrap_or(if lit { pal.fg } else { pal.faint });
-            if let Some(ic) = icon {
-                gfx.text_in(
-                    &ic.to_string(),
-                    &gfx.icon,
-                    &Rect::new(b.x + 8.0, cy, 14.0, STRIP_H),
-                    ink,
-                );
-            }
-            gfx.text_in(
-                label,
-                &gfx.small,
-                &Rect::new(b.x + 8.0 + iw, cy, tw + 2.0, STRIP_H),
-                ink,
-            );
-            hits.push((b, Hit::Input(act)));
-            right = b.x;
-            Some(b.x)
-        };
-
-        if !effort_levels(chat).is_empty() {
-            let label = match &chat.input.effort {
-                Some(e) => format!("Effort {e}"),
-                None => "Effort".to_string(),
-            };
-            let hot = open == Some(MenuKind::Effort);
-            if let Some(a) = pill(&label, None, Act::Effort, hot, None) {
-                chat.input.anchors[2] = a;
-            }
-        }
-        let model = controls::model_label(
-            chat.folio.model.as_deref(),
-            chat.input.model.as_deref(),
-            &chat.folio.info.models,
-        );
-        let hot = open == Some(MenuKind::Model);
-        if let Some(a) = pill(&model, None, Act::Model, hot, None) {
-            chat.input.anchors[1] = a;
-        }
-        let mode = chat.folio.permission_mode().to_string();
-        let shown_mode = if mode.is_empty() {
-            "default"
-        } else {
-            mode.as_str()
-        };
-        let tint = match shown_mode {
-            "plan" => Some(pal.accent),
-            "bypassPermissions" => Some(crate::theme::Color::rgb(0xE0_8A_3C)),
-            _ => None,
-        };
-        let hot = open == Some(MenuKind::Mode);
-        let label = controls::mode_label(shown_mode);
-        if let Some(a) = pill(label, Some(mode_icon(shown_mode)), Act::Mode, hot, tint) {
-            chat.input.anchors[0] = a;
-        }
-
-        // The context meter, when the CLI has said how full it is.
-        if let Some(ctx) = chat.folio.context.as_ref().filter(|c| c.limit > 0) {
-            let (full, words) = controls::meter(ctx.used, ctx.limit);
-            let tw = width_of(gpu, &gfx.small, &words).ceil();
-            let bar_w = 28.0;
-            let w = tw + bar_w + 22.0;
-            let m = Rect::new(right - w - 4.0, cy, w, STRIP_H);
-            if m.x >= left {
-                if hover == Some(Act::Meter) {
-                    gfx.fill_round(&m, STRIP_H / 2.0, pal.fg.with_alpha(0.08));
-                }
-                let bar = Rect::new(m.x + 8.0, cy + STRIP_H / 2.0 - 2.0, bar_w, 4.0);
-                gfx.fill_round(&bar, 2.0, pal.fg.with_alpha(0.14));
-                let warm = if full > 0.85 {
-                    crate::theme::Color::rgb(0xE0_8A_3C)
-                } else {
-                    pal.accent
-                };
-                gfx.fill_round(
-                    &Rect::new(bar.x, bar.y, (bar_w * full).max(4.0), 4.0),
-                    2.0,
-                    warm,
-                );
-                gfx.text_in(
-                    &words,
-                    &gfx.small,
-                    &Rect::new(bar.right() + 6.0, cy, tw + 2.0, STRIP_H),
-                    pal.faint,
-                );
-                hits.push((m, Hit::Input(Act::Meter)));
-                right = m.x;
-            }
-        }
-
-        // The background tasks, when any run.
-        let tasks = chat.folio.background.len();
-        if tasks > 0 {
-            let words = controls::tasks_line(tasks);
-            let tw = width_of(gpu, &gfx.small, &words).ceil();
-            let b = Rect::new(right - tw - 34.0, cy, tw + 30.0, STRIP_H);
-            if b.x >= left {
-                if hover == Some(Act::Tasks) || open == Some(MenuKind::Tasks) {
-                    gfx.fill_round(&b, STRIP_H / 2.0, pal.fg.with_alpha(0.08));
-                }
-                gfx.text_in(
-                    "\u{E9F5}",
-                    &gfx.icon,
-                    &Rect::new(b.x + 8.0, cy, 14.0, STRIP_H),
-                    pal.accent,
-                );
-                gfx.text_in(
-                    &words,
-                    &gfx.small,
-                    &Rect::new(b.x + 26.0, cy, tw + 2.0, STRIP_H),
-                    pal.faint,
-                );
-                hits.push((b, Hit::Input(Act::Tasks)));
-                chat.input.anchors[3] = b.x;
-            }
-        }
-        // The menus open on the glass, so the anchors are in its DIPs.
-        for a in &mut chat.input.anchors {
-            *a += chat.bar_shift;
+            gfx.text_in("\u{E71A}", &gfx.icon, &s, pal.bg);
+            hits.push((s, Hit::Input(Act::Stop)));
         }
     }
 
@@ -1598,16 +1521,11 @@ impl View {
         let gpu = &self.shared.gpu;
         let picker = menu.kind.is_picker();
         let (x, w) = if picker {
-            let a = match menu.kind {
-                MenuKind::Mode => chat.input.anchors[0],
-                MenuKind::Model => chat.input.anchors[1],
-                MenuKind::Tasks => chat.input.anchors[3],
-                _ => chat.input.anchors[2],
-            };
-            let w = if matches!(menu.kind, MenuKind::Model | MenuKind::Tasks) {
-                340.0
-            } else {
-                220.0
+            let a = chat.input.anchor;
+            let w = match menu.kind {
+                MenuKind::Model | MenuKind::Tasks => 340.0,
+                MenuKind::Settings => 280.0,
+                _ => 220.0,
             };
             (a.min(cx + cw - w).max(cx), w.min(cw))
         } else {
@@ -1777,10 +1695,7 @@ impl View {
         let key = self.key.clone();
         let mut select = false;
         with(&key, |chat| {
-            if !matches!(
-                act,
-                Act::Pick(_) | Act::Mode | Act::Model | Act::Effort | Act::Tasks | Act::Text
-            ) {
+            if !matches!(act, Act::Pick(_) | Act::Settings | Act::Text) {
                 chat.input.menu = None;
             }
             match act {
@@ -1790,13 +1705,14 @@ impl View {
                         let _ = h.interrupt();
                     }
                 }
-                Act::Mode => open_picker(chat, MenuKind::Mode),
-                Act::Model => open_picker(chat, MenuKind::Model),
-                Act::Effort => open_picker(chat, MenuKind::Effort),
-                Act::Tasks => open_picker(chat, MenuKind::Tasks),
-                Act::Meter => {
-                    let line = chat.folio.get_context_usage();
-                    write(chat, &line);
+                // A second click closes whichever picker it led to.
+                Act::Settings => {
+                    if chat.input.menu.as_ref().is_some_and(|m| m.kind.is_picker()) {
+                        chat.input.menu = None;
+                    } else {
+                        chat.input.ensure(&key);
+                        open_picker(chat, MenuKind::Settings);
+                    }
                 }
                 Act::Pick(i) => {
                     if let Some(m) = &mut chat.input.menu {

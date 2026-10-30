@@ -34,15 +34,14 @@ pub enum MenuKind {
     Mode,
     /// The background tasks running now; picking one does nothing.
     Tasks,
+    /// The header's one button: each row opens a picker or does a thing.
+    Settings,
 }
 
 impl MenuKind {
-    /// Opened from a pill under the text rather than by typing.
+    /// Opened from the header's button rather than by typing.
     pub fn is_picker(self) -> bool {
-        matches!(
-            self,
-            MenuKind::Model | MenuKind::Effort | MenuKind::Mode | MenuKind::Tasks
-        )
+        !matches!(self, MenuKind::Slash | MenuKind::Files)
     }
 }
 
