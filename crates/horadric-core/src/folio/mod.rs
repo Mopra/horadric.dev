@@ -249,8 +249,6 @@ pub enum Block {
     /// The end of a turn, from the `result` message.
     Footer {
         duration_ms: u64,
-        /// What this turn cost, not the session so far.
-        cost_usd: f64,
         ending: Ending,
         usage: TurnUsage,
     },
@@ -312,9 +310,6 @@ pub struct Folio {
     /// The input of each AskUserQuestion and ExitPlanMode ask, by request
     /// id, for the answer to echo back whether or not it named its tool use.
     ask_inputs: HashMap<String, Value>,
-    /// The process's `total_cost_usd` at the last result, for a turn's own
-    /// cost when the result does not say it.
-    total_cost: f64,
     /// The tool use each ask was about, by request id.
     asked: HashMap<String, String>,
     /// Tool uses whose ask the CLI withdrew. Their result comes back as a
@@ -1552,18 +1547,6 @@ impl Folio {
     }
 
     fn result(&mut self, v: &Value) -> bool {
-        let total = v["total_cost_usd"].as_f64().unwrap_or_default();
-        // The CLI's own count for the turn, one entry per model. Older ones
-        // only give the process's total so far.
-        let cost_usd = match v["model_usage_since_last_result"].as_object() {
-            Some(models) => models.values().filter_map(|m| m["costUSD"].as_f64()).sum(),
-            None => (total - self.total_cost).max(0.0),
-        };
-        // An interrupted turn reports a total of 0, which is not the
-        // process starting over.
-        if total > self.total_cost {
-            self.total_cost = total;
-        }
         let aborted = v["terminal_reason"]
             .as_str()
             .is_some_and(|r| r.starts_with("aborted"));
@@ -1582,7 +1565,6 @@ impl Folio {
         self.status = None;
         self.blocks.push(Block::Footer {
             duration_ms: v["duration_ms"].as_u64().unwrap_or_default(),
-            cost_usd,
             ending,
             usage,
         });
@@ -1879,7 +1861,6 @@ mod tests {
     const BASH_ALLOW: &str = include_str!("../../tests/fixtures/headless/bash_allow.jsonl");
     const BASH_DENY: &str = include_str!("../../tests/fixtures/headless/bash_deny.jsonl");
     const INTERRUPT: &str = include_str!("../../tests/fixtures/headless/interrupt.jsonl");
-    const TWO_TURNS: &str = include_str!("../../tests/fixtures/headless/two_turns.jsonl");
     const ASK_INTERRUPT: &str = include_str!("../../tests/fixtures/headless/ask_interrupt.jsonl");
 
     /// Feeds lines until `stop` says so, returning the rest.
@@ -1943,12 +1924,10 @@ mod tests {
         match f.blocks[2] {
             Block::Footer {
                 duration_ms,
-                cost_usd,
                 ending,
                 ..
             } => {
                 assert_eq!(duration_ms, 2691);
-                assert!(cost_usd > 0.0);
                 assert_eq!(ending, Ending::Done);
             }
             ref b => panic!("{b:?}"),
@@ -2143,13 +2122,11 @@ mod tests {
         assert_eq!(prompts, 2);
     }
 
-    fn footers(f: &Folio) -> Vec<(f64, Ending)> {
+    fn footers(f: &Folio) -> Vec<Ending> {
         f.blocks
             .iter()
             .filter_map(|b| match b {
-                Block::Footer {
-                    cost_usd, ending, ..
-                } => Some((*cost_usd, *ending)),
+                Block::Footer { ending, .. } => Some(*ending),
                 _ => None,
             })
             .collect()
@@ -2170,32 +2147,6 @@ mod tests {
             }
         }
         f
-    }
-
-    #[test]
-    fn each_footer_has_its_own_turn_s_cost() {
-        let f = play_two(TWO_TURNS, |v| v);
-        let costs: Vec<f64> = footers(&f).iter().map(|c| c.0).collect();
-        assert_eq!(costs.len(), 2);
-        assert!((costs[0] - 0.2945875).abs() < 1e-9, "{costs:?}");
-        // The process's total after two turns is 0.75464275.
-        assert!((costs[1] - 0.46005525).abs() < 1e-9, "{costs:?}");
-    }
-
-    #[test]
-    fn without_the_turn_s_usage_its_cost_is_the_growth_of_the_total() {
-        let f = play_two(TWO_TURNS, |mut v| {
-            if let Some(o) = v.as_object_mut() {
-                o.remove("model_usage_since_last_result");
-            }
-            v
-        });
-        let costs: Vec<f64> = footers(&f).iter().map(|c| c.0).collect();
-        assert!((costs[0] - 0.2945875).abs() < 1e-9, "{costs:?}");
-        assert!(
-            (costs[1] - (0.75464275 - 0.2945875)).abs() < 1e-9,
-            "{costs:?}"
-        );
     }
 
     #[test]
@@ -2223,14 +2174,14 @@ mod tests {
             }
         )));
         assert_eq!(runs(&f)[0][0].state, StepState::Stopped);
-        assert_eq!(footers(&f)[0].1, Ending::Stopped);
+        assert_eq!(footers(&f)[0], Ending::Stopped);
 
         f.push_prompt("Reply with exactly: still here");
         for line in lines {
             f.feed(line);
         }
         assert_eq!(replies(&f).last(), Some(&"still here"));
-        assert_eq!(footers(&f)[1].1, Ending::Done);
+        assert_eq!(footers(&f)[1], Ending::Done);
     }
 
     #[test]
@@ -2254,7 +2205,7 @@ mod tests {
         feed_until(&mut f, &mut lines, |v| v["type"] == "control_request");
         f.feed(r#"{"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":10}"#);
         assert!(f.pending_asks().is_empty());
-        assert_eq!(footers(&f)[0].1, Ending::Failed);
+        assert_eq!(footers(&f)[0], Ending::Failed);
     }
 
     #[test]
@@ -2947,7 +2898,7 @@ mod tests {
             .collect();
         assert_eq!(order, ["prompt", "footer", "prompt", "footer"]);
         assert_eq!(replies(&f).last(), Some(&"queued"));
-        assert_eq!(footers(&f)[0].1, Ending::Done);
+        assert_eq!(footers(&f)[0], Ending::Done);
         assert!(!f.busy);
     }
 
@@ -3035,7 +2986,7 @@ mod tests {
     #[test]
     fn a_prompt_sent_now_cuts_the_turn_short() {
         let (f, _, _) = play_queued(QUEUED_NOW, Priority::Now);
-        let endings: Vec<Ending> = footers(&f).iter().map(|e| e.1).collect();
+        let endings: Vec<Ending> = footers(&f);
         assert_eq!(endings, [Ending::Stopped, Ending::Done]);
         assert_eq!(replies(&f).last(), Some(&"queued"));
         assert!(f.queued.is_empty());

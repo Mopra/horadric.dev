@@ -217,8 +217,9 @@ pub fn run_summary(steps: &[Step]) -> String {
     parts.join(" \u{b7} ")
 }
 
-/// A turn's footer: how it ended, how long it took and what it cost.
-pub fn footer_line(duration_ms: u64, cost_usd: f64, ending: Ending) -> String {
+/// A turn's footer: how it ended and how long it took. No dollars: on a
+/// subscription the API price is not what the human pays.
+pub fn footer_line(duration_ms: u64, ending: Ending) -> String {
     let secs = duration_ms as f64 / 1000.0;
     let time = if secs < 60.0 {
         format!("{secs:.1} s")
@@ -226,15 +227,10 @@ pub fn footer_line(duration_ms: u64, cost_usd: f64, ending: Ending) -> String {
         let whole = secs.round() as u64;
         format!("{} min {} s", whole / 60, whole % 60)
     };
-    let cost = if cost_usd > 0.0 {
-        format!(" \u{b7} ${cost_usd:.4}")
-    } else {
-        String::new()
-    };
     match ending {
-        Ending::Done => format!("{time}{cost}"),
-        Ending::Stopped => format!("Stopped \u{b7} {time}{cost}"),
-        Ending::Failed => format!("Ended with an error \u{b7} {time}{cost}"),
+        Ending::Done => time,
+        Ending::Stopped => format!("Stopped \u{b7} {time}"),
+        Ending::Failed => format!("Ended with an error \u{b7} {time}"),
     }
 }
 
@@ -464,18 +460,15 @@ mod tests {
     }
 
     #[test]
-    fn the_footer_says_time_and_cost() {
+    fn the_footer_says_how_it_ended_and_the_time() {
+        assert_eq!(footer_line(4321, Ending::Done), "4.3 s");
+        assert_eq!(footer_line(125_000, Ending::Done), "2 min 5 s");
         assert_eq!(
-            footer_line(4321, 0.01234, Ending::Done),
-            "4.3 s \u{b7} $0.0123"
-        );
-        assert_eq!(footer_line(125_000, 0.0, Ending::Done), "2 min 5 s");
-        assert_eq!(
-            footer_line(900, 0.5, Ending::Failed),
-            "Ended with an error \u{b7} 0.9 s \u{b7} $0.5000"
+            footer_line(900, Ending::Failed),
+            "Ended with an error \u{b7} 0.9 s"
         );
         assert_eq!(
-            footer_line(5180, 0.0, Ending::Stopped),
+            footer_line(5180, Ending::Stopped),
             "Stopped \u{b7} 5.2 s"
         );
     }

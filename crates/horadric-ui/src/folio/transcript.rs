@@ -934,7 +934,6 @@ impl Ctx<'_> {
         let mut s = Scene::default();
         let Block::Footer {
             duration_ms,
-            cost_usd,
             ending,
             usage,
         } = b
@@ -945,7 +944,7 @@ impl Ctx<'_> {
             Ending::Failed => theme::error().with_alpha(0.8),
             Ending::Done | Ending::Stopped => self.pal.faint,
         };
-        let line = flow::footer(*duration_ms, *cost_usd, *ending, usage);
+        let line = flow::footer(*duration_ms, *ending, usage);
         s.line(line, F::Small, Rect::new(0.0, 0.0, cw, FOOTER_H), ink);
         // A short rule under the turn, in the project's colour.
         s.fill(

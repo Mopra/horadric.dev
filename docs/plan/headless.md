@@ -111,7 +111,7 @@ on 2026-10-24).
   scrolls, selects and copies, finds text, and opens files and diffs in
   the file viewer.
 - **The phase** still comes from hooks. The stream adds what hooks never
-  carried: tokens as they come, cost per turn, context used, the plan.
+  carried: tokens as they come, context used, the plan.
 
 ## The Folio
 
@@ -133,7 +133,9 @@ The conversation as pages, not a log.
 - **Asks** as cards with buttons: allow once, always, deny with a
   reason; questions as their options; a plan as a page to approve or
   send back. The phone's Town Portal answers the same pending request.
-- **Each turn's footer:** time, cost, tokens, context left.
+- **Each turn's footer:** time, tokens, context left. No dollar cost:
+  on a subscription the API-price figure is not what the human pays,
+  so it was dropped.
 - **The composer** at the bottom: multi line, slash commands and skills
   from init in a list as you type `/`, `@` for files, images pasted,
   Esc interrupts, Enter while it works steers (sent at once, `next`),

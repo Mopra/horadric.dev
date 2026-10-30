@@ -406,10 +406,10 @@ pub fn tokens(n: u64) -> String {
     }
 }
 
-/// A turn's footer: how it ended, its time and cost, the tokens it read
-/// and wrote, and the context left when known.
-pub fn footer(duration_ms: u64, cost_usd: f64, ending: Ending, usage: &TurnUsage) -> String {
-    let mut s = crate::folio_look::footer_line(duration_ms, cost_usd, ending);
+/// A turn's footer: how it ended, its time, the tokens it read and wrote,
+/// and the context left when known.
+pub fn footer(duration_ms: u64, ending: Ending, usage: &TurnUsage) -> String {
+    let mut s = crate::folio_look::footer_line(duration_ms, ending);
     let read = usage.input_tokens + usage.cache_read_tokens + usage.cache_creation_tokens;
     if read + usage.output_tokens > 0 {
         s.push_str(&format!(
@@ -945,12 +945,12 @@ mod tests {
             context_used: Some(50_000),
             context_limit: Some(200_000),
         };
-        let s = footer(2_500, 0.0123, Ending::Done, &usage);
+        let s = footer(2_500, Ending::Done, &usage);
         assert_eq!(
             s,
-            "2.5 s \u{b7} $0.0123 \u{b7} 2k in \u{b7} 300 out \u{b7} 75% context left"
+            "2.5 s \u{b7} 2k in \u{b7} 300 out \u{b7} 75% context left"
         );
-        let plain = footer(1_000, 0.0, Ending::Done, &TurnUsage::default());
+        let plain = footer(1_000, Ending::Done, &TurnUsage::default());
         assert_eq!(plain, "1.0 s");
     }
 
