@@ -11,10 +11,11 @@ use horadric_core::folio::{AskState, Ending, Step, StepState};
 
 use crate::layout::Rect;
 
-/// The widest the conversation reads: about 70 characters at the reading
-/// size. Past 75 the eye loses its place on the way back to the next
-/// line's start.
-pub const COLUMN_MAX: f32 = 600.0;
+/// The widest the conversation reads: about 80 characters at the reading
+/// size. 600 (about 70) followed the reading research to the letter and
+/// felt cramped; much past 80 the eye loses its place on the way back to
+/// the next line's start.
+pub const COLUMN_MAX: f32 = 680.0;
 /// The least room either side of the column.
 pub const COLUMN_MARGIN: f32 = 22.0;
 /// How much of its strength a rune keeps behind the words. Moving shapes
