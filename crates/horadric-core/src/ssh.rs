@@ -72,31 +72,82 @@ pub fn with_host(config: &str, host: &str) -> Option<String> {
     Some(out)
 }
 
-/// The hosts an `~/.ssh/config` names, in its order, each once: every
-/// `Host` pattern that is a plain name. A wildcard or a negation matches
-/// many hosts and names none, so it is left out. `Match` lines are
-/// conditions, not names, and the `Host` lines after them are read as
-/// usual since a `Host` line ends a `Match` block.
-pub fn config_hosts(ssh_config: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+/// A line of an `~/.ssh/config` that matters to Horadric, in file order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigLine {
+    /// A plain host name from a `Host` line.
+    Host(String),
+    /// A file named by `Include`, as written: `~`, a relative path or a
+    /// wildcard are the reader's to resolve, since that touches the disk.
+    Include(String),
+}
+
+/// The `Host` names and `Include` files of an `~/.ssh/config`, in its
+/// order, so a reader can put an included file's hosts where OpenSSH reads
+/// them. Keywords are matched in any case, as OpenSSH does, and take an
+/// `=` as well as a space. A wildcard or a negation matches many hosts and
+/// names none, so it is left out. `Match` lines are conditions, not names,
+/// and the `Host` lines after them are read as usual since a `Host` line
+/// ends a `Match` block.
+pub fn config_lines(ssh_config: &str) -> Vec<ConfigLine> {
+    let mut out = Vec::new();
     for line in ssh_config.lines() {
         let line = line.trim();
         let Some((keyword, rest)) = line.split_once(|c: char| c.is_whitespace() || c == '=') else {
             continue;
         };
-        if !keyword.eq_ignore_ascii_case("host") {
-            continue;
-        }
         let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '=');
         let rest = rest.split('#').next().unwrap_or_default();
-        for name in rest.split_whitespace().map(|n| n.trim_matches('"')) {
-            let plain = !name.contains(['*', '?', '!']);
-            if plain && usable(name) && !out.iter().any(|o| o == name) {
-                out.push(name.to_string());
+        let words = rest.split_whitespace().map(|n| n.trim_matches('"'));
+        if keyword.eq_ignore_ascii_case("host") {
+            out.extend(
+                words
+                    .filter(|n| !n.contains(['*', '?', '!']) && usable(n))
+                    .map(|n| ConfigLine::Host(n.to_string())),
+            );
+        } else if keyword.eq_ignore_ascii_case("include") {
+            out.extend(
+                words
+                    .filter(|n| !n.is_empty())
+                    .map(|n| ConfigLine::Include(n.to_string())),
+            );
+        }
+    }
+    out
+}
+
+/// The hosts an `~/.ssh/config` names, in its order, each once, its
+/// `Include` lines not followed.
+pub fn config_hosts(ssh_config: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in config_lines(ssh_config) {
+        if let ConfigLine::Host(name) = line {
+            if !out.contains(&name) {
+                out.push(name);
             }
         }
     }
     out
+}
+
+/// Whether a file `name` matches an `Include` wildcard `pattern`, where
+/// `*` is any run of characters and `?` any one. Case is ignored, as
+/// Windows does for file names.
+pub fn glob_matches(pattern: &str, name: &str) -> bool {
+    fn go(p: &[char], n: &[char]) -> bool {
+        match p.split_first() {
+            None => n.is_empty(),
+            Some(('*', rest)) => (0..=n.len()).any(|i| go(rest, &n[i..])),
+            Some(('?', rest)) => !n.is_empty() && go(rest, &n[1..]),
+            Some((c, rest)) => n
+                .first()
+                .is_some_and(|m| m.eq_ignore_ascii_case(c))
+                && go(rest, &n[1..]),
+        }
+    }
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    go(&p, &n)
 }
 
 /// What `ssh` is started with to open a shell on `host`. The `--` ends the
@@ -249,6 +300,35 @@ Host myvps
             config_hosts(config),
             vec!["myvps", "web1", "web2", "db", "quoted", "after-match"]
         );
+    }
+
+    #[test]
+    fn keywords_are_read_in_any_case_and_includes_kept_in_place() {
+        let config = "HOST One
+include conf.d/*.conf ~/.ssh/extra
+  Host two
+INCLUDE=extra.conf
+";
+        assert_eq!(
+            config_lines(config),
+            vec![
+                ConfigLine::Host("One".into()),
+                ConfigLine::Include("conf.d/*.conf".into()),
+                ConfigLine::Include("~/.ssh/extra".into()),
+                ConfigLine::Host("two".into()),
+                ConfigLine::Include("extra.conf".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn include_wildcards_match_file_names() {
+        assert!(glob_matches("*.conf", "work.conf"));
+        assert!(glob_matches("*.conf", "WORK.CONF"));
+        assert!(glob_matches("host-?", "host-1"));
+        assert!(!glob_matches("host-?", "host-12"));
+        assert!(!glob_matches("*.conf", "work.conf.bak"));
+        assert!(glob_matches("exact", "exact"));
     }
 
     #[test]
