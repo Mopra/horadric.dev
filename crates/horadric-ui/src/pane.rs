@@ -992,25 +992,36 @@ impl Pane {
         });
     }
 
-    /// Lays the retinue along the bottom of the glass, and says how much
-    /// of the grid's height it takes, in DIPs.
+    /// Lays the retinue along the bottom of the glass, or over all of it
+    /// while it is the war table, and says how much of the grid's height
+    /// it takes, in DIPs. The war table lies over the grid without
+    /// resizing it, so the program never redraws for a look.
     fn place_retinue(&self) -> f32 {
         let slot = self.retinue.borrow();
         let Some(r) = slot.as_ref() else {
             return 0.0;
         };
         let h = retinue::height(r.rows());
-        let [left, _, right, bottom] = self.glass();
+        let [left, top, right, bottom] = self.glass();
         let scale = self.dpi_now() as f32 / 96.0;
         let px = |v: f32| (v * scale).round() as i32;
         r.set_accent(self.accent.get());
+        let from = if r.table() { top + 1.0 } else { bottom - 1.0 - h };
         r.place([
             px(left + 1.0),
-            px(bottom - 1.0 - h),
+            px(from),
             px(right - 1.0),
             px(bottom - 1.0),
         ]);
         h
+    }
+
+    /// Opens the war table, lays it down, or with None turns it over.
+    fn war_table(&self, open: Option<bool>) {
+        if let Some(r) = self.retinue.borrow().as_ref() {
+            r.set_table(open.unwrap_or(!r.table()));
+        }
+        self.place_retinue();
     }
 
     fn paint(&self) {
@@ -1862,7 +1873,13 @@ impl Pane {
                 Chord::Font(step) => app::push(Input::Font(step)),
                 Chord::Find if self.console.sky.is_some() || self.console.folio.is_some() => {}
                 Chord::Find => self.open_search(),
+                Chord::WarTable => self.war_table(None),
             }
+            return true;
+        }
+        // Esc lays the war table down before the program hears it.
+        if vk == VK_ESCAPE.0 && self.retinue.borrow().as_ref().is_some_and(|r| r.table()) {
+            self.war_table(Some(false));
             return true;
         }
         let vk = VIRTUAL_KEY(vk);

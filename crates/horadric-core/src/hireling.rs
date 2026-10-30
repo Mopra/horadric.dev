@@ -542,6 +542,38 @@ fn push(marks: &mut Vec<Mark>, m: Mark) {
     marks.push(m);
 }
 
+/// What kind of work a tool does, for the war table's colours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Craft {
+    Read,
+    Edit,
+    Shell,
+    Web,
+    /// Sending a hireling, or waiting on one.
+    Agent,
+    Other,
+}
+
+/// The kind of work tool `name` does. An MCP tool is judged by its own
+/// name, past `mcp__server__`.
+pub fn craft(name: &str) -> Craft {
+    let own = name
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .map_or(name, |(_, t)| t);
+    match own {
+        "Read" | "Glob" | "Grep" | "LS" | "NotebookRead" | "LSP" => Craft::Read,
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => Craft::Edit,
+        "Bash" | "PowerShell" | "BashOutput" | "KillShell" | "Monitor" => Craft::Shell,
+        "WebFetch" | "WebSearch" => Craft::Web,
+        "Agent" | "Task" | "TaskStop" | "SendMessage" => Craft::Agent,
+        t if t.starts_with("browser_") || t.contains("fetch") || t.contains("search") => {
+            Craft::Web
+        }
+        _ => Craft::Other,
+    }
+}
+
 /// Which of the twelve runes stands for a kind of hireling: the common
 /// ones chosen, the rest by a hash of the name, so a kind keeps its rune.
 pub fn rune_of(kind: &str) -> usize {
@@ -728,6 +760,16 @@ mod tests {
         );
         b.hear(&r, t(3));
         assert_eq!(b.line(t(4)).as_deref(), Some("Explore failed: look"));
+    }
+
+    #[test]
+    fn tools_are_sorted_by_their_craft() {
+        assert_eq!(craft("Grep"), Craft::Read);
+        assert_eq!(craft("Write"), Craft::Edit);
+        assert_eq!(craft("PowerShell"), Craft::Shell);
+        assert_eq!(craft("mcp__claude_ai_Slack__slack_search_public"), Craft::Web);
+        assert_eq!(craft("Agent"), Craft::Agent);
+        assert_eq!(craft("TodoWrite"), Craft::Other);
     }
 
     #[test]

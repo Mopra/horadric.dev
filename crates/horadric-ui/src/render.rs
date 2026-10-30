@@ -1021,6 +1021,15 @@ impl Target {
         }
     }
 
+    /// Draws a pane's war table. `Err` means the target must be recreated.
+    pub fn draw_table(&self, gpu: &Gpu, scene: &TableScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.painter(&self.rt).table(gpu, scene);
+            self.rt.EndDraw(None, None)
+        }
+    }
+
     /// Draws a pane's retinue, a row per hireling. `Err` means the target
     /// must be recreated.
     pub fn draw_retinue(&self, gpu: &Gpu, scene: &RetinueScene) -> Result<()> {
@@ -1093,8 +1102,44 @@ pub struct RetinueScene<'a> {
 
 /// A row of the retinue, in DIPs.
 pub const RETINUE_ROW_H: f32 = 20.0;
-/// Above the first row, where the line that parts it from the grid runs.
-pub const RETINUE_TOP: f32 = 5.0;
+/// Above the first row: the line that parts it from the grid, and its
+/// heading with the war table's link.
+pub const RETINUE_TOP: f32 = 18.0;
+/// The war table's link at the right of the retinue's heading, as wide.
+pub const RETINUE_LINK_W: f32 = 150.0;
+
+/// One track of the war table: the main loop's or a hireling's.
+pub struct TableTrack {
+    /// None for the main loop, which has no rune.
+    pub rune: Option<usize>,
+    pub label: String,
+    /// Seconds from the table's left edge.
+    pub start: f32,
+    pub end: f32,
+    pub lot: horadric_core::hireling::Lot,
+    /// Each tool call: from, to, its colour, and whether it failed.
+    pub marks: Vec<(f32, f32, Color, bool)>,
+}
+
+/// The war table: the turn over time, a track per hireling under the
+/// main loop's, on one axis of `span` seconds.
+pub struct TableScene<'a> {
+    pub tracks: &'a [TableTrack],
+    pub span: f32,
+    pub title: &'a str,
+    pub hot: Option<usize>,
+    pub size: (f32, f32),
+    pub accent: Color,
+    /// For the runes' carving.
+    pub age: Duration,
+}
+
+/// The war table's heading, its axis under it, and a track, in DIPs.
+pub const TABLE_HEAD: f32 = 26.0;
+pub const TABLE_AXIS: f32 = 18.0;
+pub const TABLE_ROW_H: f32 = 24.0;
+/// The column of names left of the tracks.
+pub const TABLE_LABEL_W: f32 = 170.0;
 
 struct Painter<'a> {
     rt: &'a ID2D1RenderTarget,
@@ -2877,6 +2922,16 @@ impl Painter<'_> {
         self.rt.Clear(Some(&color(p.term_bg)));
         self.fill_rounded(&Rect::new(8.0, 1.0, w - 16.0, 1.0), 0.0, p.term_fg.with_alpha(0.12));
         let dim = p.term_fg.with_alpha(0.55);
+        let head = Rect::new(12.0, 3.0, w - 24.0, RETINUE_TOP - 4.0);
+        let working = scene.rows.iter().filter(|r| r.lot.at_work()).count();
+        let heading = format!("HIRELINGS  {working} working");
+        self.text(&gpu.small, p.term_fg.with_alpha(0.4), &heading, head);
+        let link = if scene.hot == Some(usize::MAX) {
+            p.term_fg.with_alpha(0.9)
+        } else {
+            scene.accent.with_alpha(0.8)
+        };
+        self.text(&gpu.small_right, link, "War table  Ctrl+Shift+W", head);
         for (i, row) in scene.rows.iter().enumerate() {
             let y = RETINUE_TOP + i as f32 * RETINUE_ROW_H;
             if y > h {
@@ -2922,6 +2977,105 @@ impl Painter<'_> {
             self.text(&gpu.small_right, doing_ink, &row.doing, text_r(doing_x, doing_w + 2.0));
             let task_x = 30.0 + kind_w + 10.0;
             self.text(&gpu.small, dim, &row.task, text_r(task_x, doing_x - task_x - 12.0));
+        }
+    }
+
+    /// The war table: a heading, an axis of time, and a track per worker
+    /// on it, the main loop first. A track is a faint bar from its start
+    /// to its end, its tool calls as ticks in their craft's colour over
+    /// it, and while it works a rune carving itself at its front edge.
+    unsafe fn table(&self, gpu: &Gpu, scene: &TableScene) {
+        use horadric_core::hireling::Lot;
+        let (w, h) = scene.size;
+        let p = theme::palette();
+        self.rt.Clear(Some(&color(p.term_bg)));
+        let fg = p.term_fg;
+        let head = Rect::new(14.0, 4.0, w - 28.0, TABLE_HEAD - 6.0);
+        self.text(&gpu.name, scene.accent, scene.title, head);
+        let close = if scene.hot == Some(usize::MAX) { 0.9 } else { 0.45 };
+        self.text(&gpu.small_right, fg.with_alpha(close), "Close  Esc", head);
+        let x0 = TABLE_LABEL_W;
+        let x1 = (w - 16.0).max(x0 + 10.0);
+        let span = scene.span.max(1.0);
+        let at = |t: f32| x0 + (x1 - x0) * (t / span).clamp(0.0, 1.0);
+        // The axis: a mark at every step that fits, its time under it.
+        let axis_y = TABLE_HEAD + TABLE_AXIS - 4.0;
+        let step = [5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0]
+            .into_iter()
+            .find(|s| (x1 - x0) * s / span >= 64.0)
+            .unwrap_or(3600.0);
+        let mut t = 0.0;
+        while t <= span {
+            let x = at(t);
+            self.fill_rounded(&Rect::new(x, axis_y, 1.0, 4.0), 0.0, fg.with_alpha(0.3));
+            let rows_h = scene.tracks.len() as f32 * TABLE_ROW_H;
+            let guide = Rect::new(x, axis_y + 6.0, 1.0, rows_h.min(h - axis_y - 6.0).max(0.0));
+            self.fill_rounded(&guide, 0.0, fg.with_alpha(0.04));
+            let secs = t as u64;
+            let label = format!("{}:{:02}", secs / 60, secs % 60);
+            let r = Rect::new(x - 30.0, TABLE_HEAD, 60.0, TABLE_AXIS - 4.0);
+            self.text(&gpu.small_centre, fg.with_alpha(0.4), &label, r);
+            t += step;
+        }
+        let top = TABLE_HEAD + TABLE_AXIS + 6.0;
+        for (i, tr) in scene.tracks.iter().enumerate() {
+            let y = top + i as f32 * TABLE_ROW_H;
+            if y + TABLE_ROW_H > h {
+                break;
+            }
+            let row = Rect::new(4.0, y, w - 8.0, TABLE_ROW_H);
+            if scene.hot == Some(i) {
+                self.fill_rounded(&row, 4.0, fg.with_alpha(0.06));
+            }
+            let mid = y + TABLE_ROW_H / 2.0;
+            let ink = match tr.lot {
+                Lot::Working => scene.accent,
+                Lot::Waiting => theme::waiting(),
+                Lot::Done => fg.with_alpha(0.7),
+                Lot::Failed => theme::error(),
+            };
+            if let Some(rune) = tr.rune {
+                self.rune(rune, (18.0, mid), 11.0, ink, 1.0);
+            }
+            let label_r = Rect::new(30.0, y + 3.0, x0 - 40.0, TABLE_ROW_H - 6.0);
+            self.text(&gpu.small, ink, &tr.label, label_r);
+            // The track itself, then its ticks.
+            let (sx, ex) = (at(tr.start), at(tr.end).max(at(tr.start) + 2.0));
+            let lane = Rect::new(sx, mid - 3.0, ex - sx, 6.0);
+            self.fill_rounded(&lane, 3.0, ink.with_alpha(0.16));
+            for &(from, to, c, failed) in &tr.marks {
+                let (a, b) = (at(from), at(to).max(at(from) + 2.0));
+                let tick = Rect::new(a, mid - 5.0, b - a, 10.0);
+                self.fill_rounded(&tick, 1.5, if failed { theme::error() } else { c });
+            }
+            match tr.lot {
+                Lot::Working | Lot::Waiting => {
+                    let carve = motion::cycle(scene.age + Duration::from_millis(i as u64 * 300), RUNE_CARVE);
+                    let drawn = if tr.lot == Lot::Working { (carve * 1.6).min(1.0) } else { 1.0 };
+                    self.rune(tr.rune.unwrap_or(0), (ex + 7.0, mid), 11.0, ink, drawn);
+                }
+                Lot::Failed => {
+                    self.rune(tr.rune.unwrap_or(0), (ex + 7.0, mid), 11.0, ink, 1.0);
+                }
+                Lot::Done => {}
+            }
+        }
+        // The legend, along the foot.
+        let crafts = [
+            ("read", theme::git_modified()),
+            ("edit", theme::git_added()),
+            ("shell", theme::waiting()),
+            ("web", theme::git_untracked()),
+            ("agent", scene.accent),
+            ("other", fg.with_alpha(0.5)),
+        ];
+        let mut x = x0;
+        let y = h - 18.0;
+        for (name, c) in crafts {
+            self.fill_rounded(&Rect::new(x, y + 4.0, 8.0, 8.0), 1.5, c);
+            let r = Rect::new(x + 12.0, y, 60.0, 16.0);
+            self.text(&gpu.small, fg.with_alpha(0.5), name, r);
+            x += 12.0 + self.measure(gpu, &gpu.small, name) + 18.0;
         }
     }
 

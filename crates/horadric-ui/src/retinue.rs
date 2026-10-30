@@ -10,6 +10,11 @@
 //!
 //! The band only learns a hireling's tokens and tool count from its
 //! transcript, so the strip reads what each one's has grown by.
+//!
+//! Turned over (Ctrl+Shift+W, or the link in its heading) it is the war
+//! table: the same window over the whole glass, the turn drawn on one
+//! axis of time, a track for the main loop and one per hireling. The
+//! grid under it keeps its size, so the program never redraws for it.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -17,7 +22,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use horadric_core::hireling::{self, Band, Lot};
+use horadric_core::hireling::{self, Band, Craft, Lot, Mark};
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{InvalidateRect, ValidateRect};
@@ -34,7 +39,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::app::{self, Input};
-use crate::render::{RetinueRow, RetinueScene, Target, RETINUE_ROW_H, RETINUE_TOP};
+use crate::render::{
+    RetinueRow, RetinueScene, TableScene, TableTrack, Target, RETINUE_LINK_W, RETINUE_ROW_H,
+    RETINUE_TOP, TABLE_AXIS, TABLE_HEAD, TABLE_ROW_H,
+};
 use crate::theme::{self, Color};
 use crate::window::Shared;
 use crate::{tip, tip::Line};
@@ -68,8 +76,11 @@ pub struct Retinue {
     /// What each row stands for, by hireling id, as last drawn.
     ids: RefCell<Vec<String>>,
     rows: Cell<usize>,
+    /// The row under the cursor; `usize::MAX` for the heading's link.
     hot: Cell<Option<usize>>,
     tracking: Cell<bool>,
+    /// Turned over into the war table.
+    table: Cell<bool>,
     beat: Cell<u32>,
     accent: Cell<Color>,
 }
@@ -86,6 +97,7 @@ impl Retinue {
             rows: Cell::new(0),
             hot: Cell::new(None),
             tracking: Cell::new(false),
+            table: Cell::new(false),
             beat: Cell::new(0),
             accent: Cell::new(theme::ACCENTS[0].0),
         });
@@ -115,6 +127,29 @@ impl Retinue {
         self.rows.get()
     }
 
+    /// Whether it is the war table.
+    pub fn table(&self) -> bool {
+        self.table.get()
+    }
+
+    /// Turns it into the war table or back. The pane places it after.
+    pub fn set_table(&self, on: bool) {
+        if self.table.replace(on) != on {
+            self.hot.set(None);
+            self.poll();
+            self.invalidate();
+        }
+    }
+
+    /// Asks the pane to lay it out again.
+    fn tell_pane(&self) {
+        unsafe {
+            if let Ok(pane) = GetParent(self.hwnd.get()) {
+                let _ = PostMessageW(Some(pane), WM_RETINUE_ROWS, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+
     pub fn set_accent(&self, c: Color) {
         if self.accent.replace(c) != c {
             self.invalidate();
@@ -124,7 +159,7 @@ impl Retinue {
     /// Lays it along the bottom of the glass, `rect` in pixels of the pane.
     pub fn place(&self, rect: [i32; 4]) {
         let [l, t, r, b] = rect;
-        let show = self.rows.get() > 0 && r > l && b > t;
+        let show = (self.rows.get() > 0 || self.table.get()) && r > l && b > t;
         unsafe {
             let _ = SetWindowPos(
                 self.hwnd.get(),
@@ -152,7 +187,7 @@ impl Retinue {
         let reading: Vec<(String, String, u64)> = {
             let reg = self.shared.registry.lock().ok()?;
             let band = &reg.get(&self.session)?.band;
-            band.shown(now, false)
+            band.shown(now, self.table.get())
                 .iter()
                 .filter_map(|h| Some((h.id.clone(), band.transcript_of(h)?, h.read)))
                 .collect()
@@ -182,32 +217,35 @@ impl Retinue {
         let rows = shown.len().min(MAX_ROWS);
         *self.ids.borrow_mut() = shown.iter().map(|h| h.id.clone()).collect();
         if self.rows.replace(rows) != rows {
-            unsafe {
-                if let Ok(pane) = GetParent(self.hwnd.get()) {
-                    let _ = PostMessageW(Some(pane), WM_RETINUE_ROWS, WPARAM(0), LPARAM(0));
-                }
-            }
+            self.tell_pane();
         }
-        let carving = shown.iter().any(|h| h.lot_at(now) == Lot::Working);
+        if self.table.get() {
+            *self.ids.borrow_mut() = table_order(&band, now).iter().map(|h| h.id.clone()).collect();
+        }
+        let carving = shown.iter().any(|h| h.lot_at(now) == Lot::Working)
+            || (self.table.get() && band.turn_end.is_none() && band.turn.is_some());
         let beat = if carving { FAST_MS } else { SLOW_MS };
         if self.beat.replace(beat) != beat {
             unsafe {
                 SetTimer(Some(self.hwnd.get()), TIMER, beat, None);
             }
         }
-        if rows > 0 {
+        if rows > 0 || self.table.get() {
             self.invalidate();
         }
     }
 
     fn paint(&self) {
         let now = SystemTime::now();
-        let band = self
+        let (band, label) = self
             .shared
             .registry
             .lock()
             .ok()
-            .and_then(|r| r.get(&self.session).map(|s| s.band.clone()))
+            .and_then(|r| {
+                let s = r.get(&self.session)?;
+                Some((s.band.clone(), s.label().to_string()))
+            })
             .unwrap_or_default();
         let rows: Vec<RetinueRow> = band
             .shown(now, false)
@@ -253,23 +291,64 @@ impl Retinue {
             return;
         };
         t.set_dpi(dpi);
-        let scene = RetinueScene {
-            rows: &rows,
-            hot: self.hot.get(),
-            size: (rc.right as f32 / scale, rc.bottom as f32 / scale),
-            accent: self.accent.get(),
+        let size = (rc.right as f32 / scale, rc.bottom as f32 / scale);
+        let drawn = if self.table.get() {
+            let (tracks, span) = tracks(&band, now, self.accent.get());
+            let title = format!(
+                "War table \u{b7} {label} \u{b7} {} hireling{} \u{b7} {}",
+                tracks.len() - 1,
+                if tracks.len() == 2 { "" } else { "s" },
+                horadric_core::heavy::duration(span as u64)
+            );
+            let scene = TableScene {
+                tracks: &tracks,
+                span,
+                title: &title,
+                // Track 0 is the main loop's; the hot ids are hirelings'.
+                hot: self.hot.get().map(|i| if i == usize::MAX { i } else { i + 1 }),
+                size,
+                accent: self.accent.get(),
+                age: now.duration_since(band.turn.unwrap_or(now)).unwrap_or_default(),
+            };
+            t.draw_table(&self.shared.gpu, &scene)
+        } else {
+            let scene = RetinueScene {
+                rows: &rows,
+                hot: self.hot.get(),
+                size,
+                accent: self.accent.get(),
+            };
+            t.draw_retinue(&self.shared.gpu, &scene)
         };
-        if t.draw_retinue(&self.shared.gpu, &scene).is_err() {
+        if drawn.is_err() {
             *slot = None;
         }
     }
 
-    /// The row at `y` pixels down, if any.
-    fn row_at(&self, y: i32) -> Option<usize> {
-        let dpi = unsafe { GetDpiForWindow(self.hwnd.get()) }.max(96);
-        let y = y as f32 * 96.0 / dpi as f32 - RETINUE_TOP;
-        let i = (y / RETINUE_ROW_H).floor();
-        (y >= 0.0 && (i as usize) < self.rows.get()).then_some(i as usize)
+    /// What is at `x`, `y` pixels in: a hireling's row by its place in
+    /// `ids`, `usize::MAX` for the heading's link (the war table's, or its
+    /// Close), or nothing.
+    fn row_at(&self, x: i32, y: i32) -> Option<usize> {
+        let hwnd = self.hwnd.get();
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+        let k = 96.0 / dpi as f32;
+        let (x, y) = (x as f32 * k, y as f32 * k);
+        let mut rc = Default::default();
+        unsafe {
+            let _ = GetClientRect(hwnd, &mut rc);
+        }
+        let w = rc.right as f32 * k;
+        let (head, top, row_h) = if self.table.get() {
+            // Track 0 is the main loop's, which opens nothing.
+            (TABLE_HEAD, TABLE_HEAD + TABLE_AXIS + 6.0 + TABLE_ROW_H, TABLE_ROW_H)
+        } else {
+            (RETINUE_TOP, RETINUE_TOP, RETINUE_ROW_H)
+        };
+        if y < head {
+            return (x > w - RETINUE_LINK_W).then_some(usize::MAX);
+        }
+        let i = ((y - top) / row_h).floor();
+        (y >= top && (i as usize) < self.ids.borrow().len()).then_some(i as usize)
     }
 
     fn hover(&self, row: Option<usize>) {
@@ -277,6 +356,14 @@ impl Retinue {
             self.invalidate();
         }
         let line: Option<Line> = row.and_then(|i| {
+            if i == usize::MAX {
+                let what = if self.table.get() {
+                    "Back to the terminal (Esc)"
+                } else {
+                    "The war table: this turn and its hirelings over time (Ctrl+Shift+W)"
+                };
+                return Some(what.into());
+            }
             let id = self.ids.borrow().get(i)?.clone();
             let reg = self.shared.registry.lock().ok()?;
             let h = reg
@@ -293,6 +380,7 @@ impl Retinue {
     }
 
     fn handle(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        let x = (lparam.0 & 0xffff) as i16 as i32;
         let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
         match msg {
             WM_PAINT => {
@@ -326,7 +414,7 @@ impl Retinue {
                         let _ = TrackMouseEvent(&mut t);
                     }
                 }
-                self.hover(self.row_at(y));
+                self.hover(self.row_at(x, y));
                 Some(LRESULT(0))
             }
             WM_MOUSELEAVE => {
@@ -346,7 +434,13 @@ impl Retinue {
             }
             WM_LBUTTONUP => {
                 tip::press(self.hwnd.get());
-                let id = self.row_at(y).and_then(|i| self.ids.borrow().get(i).cloned());
+                let at = self.row_at(x, y);
+                if at == Some(usize::MAX) {
+                    self.set_table(!self.table.get());
+                    self.tell_pane();
+                    return Some(LRESULT(0));
+                }
+                let id = at.and_then(|i| self.ids.borrow().get(i).cloned());
                 if let Some(agent) = id {
                     app::push(Input::OpenHireling(self.session.clone(), agent));
                 }
@@ -354,6 +448,78 @@ impl Retinue {
             }
             _ => None,
         }
+    }
+}
+
+/// The war table's hirelings, in the order they started.
+fn table_order(band: &Band, now: SystemTime) -> Vec<&hireling::Hireling> {
+    let mut all = band.shown(now, true);
+    all.sort_by_key(|h| h.started);
+    all
+}
+
+/// The war table's tracks, the main loop's first, in seconds from the
+/// turn's start, and how many seconds the table spans.
+fn tracks(band: &Band, now: SystemTime, accent: Color) -> (Vec<TableTrack>, f32) {
+    let hirelings = table_order(band, now);
+    let origin = band
+        .turn
+        .into_iter()
+        .chain(hirelings.iter().map(|h| h.started))
+        .chain(band.main.iter().map(|m| m.start))
+        .min()
+        .unwrap_or(now);
+    let secs = |t: SystemTime| t.duration_since(origin).unwrap_or_default().as_secs_f32();
+    let marks = |marks: &[Mark], end: f32| -> Vec<(f32, f32, Color, bool)> {
+        marks
+            .iter()
+            .map(|m| {
+                let to = m.end.map_or(end, secs);
+                (secs(m.start), to, craft_ink(hireling::craft(&m.tool), accent), m.failed)
+            })
+            .collect()
+    };
+    let main_end = band.turn_end.map_or(secs(now), secs);
+    let mut out = vec![TableTrack {
+        rune: None,
+        label: "main loop".to_string(),
+        start: 0.0,
+        end: main_end,
+        lot: if band.turn_end.is_some() { Lot::Done } else { Lot::Working },
+        marks: marks(&band.main, main_end),
+    }];
+    for h in hirelings {
+        let lot = h.lot_at(now);
+        let end = match (lot.at_work(), h.ended) {
+            (true, _) | (false, None) => secs(now.min(h.ended.unwrap_or(now))),
+            (false, Some(t)) => secs(t),
+        };
+        let label = match h.task.as_str() {
+            "" => h.kind.clone(),
+            t => format!("{}: {t}", h.kind),
+        };
+        out.push(TableTrack {
+            rune: Some(hireling::rune_of(&h.kind)),
+            label,
+            start: secs(h.started),
+            end,
+            lot,
+            marks: marks(&h.marks, end),
+        });
+    }
+    let span = out.iter().map(|t| t.end).fold(1.0, f32::max);
+    (out, span)
+}
+
+/// The colour of a tool's craft on the war table.
+fn craft_ink(c: Craft, accent: Color) -> Color {
+    match c {
+        Craft::Read => theme::git_modified(),
+        Craft::Edit => theme::git_added(),
+        Craft::Shell => theme::waiting(),
+        Craft::Web => theme::git_untracked(),
+        Craft::Agent => accent,
+        Craft::Other => theme::palette().term_fg.with_alpha(0.5),
     }
 }
 

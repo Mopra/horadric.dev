@@ -319,6 +319,9 @@ pub enum Chord {
     Font(FontStep),
     /// Ctrl+Shift+F: search the history, as in Windows Terminal.
     Find,
+    /// Ctrl+Shift+W: the war table, the session's turn and its hirelings
+    /// over time, or the grid back.
+    WarTable,
 }
 
 // Virtual key codes, which Windows has kept the same since forever.
@@ -329,6 +332,7 @@ const VK_RIGHT: u16 = 0x27;
 const VK_DOWN: u16 = 0x28;
 const VK_0: u16 = 0x30;
 const VK_F: u16 = 0x46;
+const VK_W: u16 = 0x57;
 const VK_NUMPAD0: u16 = 0x60;
 const VK_ADD: u16 = 0x6B;
 const VK_SUBTRACT: u16 = 0x6D;
@@ -346,6 +350,7 @@ pub fn chord(vk: u16, mods: Mods) -> Option<Chord> {
     let chord = match vk {
         VK_RETURN if shift && !alt => Chord::Zoom,
         VK_F if shift && !alt => Chord::Find,
+        VK_W if shift && !alt => Chord::WarTable,
         VK_LEFT if alt && !shift => Chord::Focus(Dir::Left),
         VK_RIGHT if alt && !shift => Chord::Focus(Dir::Right),
         VK_UP if alt && !shift => Chord::Focus(Dir::Up),
