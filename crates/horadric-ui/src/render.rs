@@ -354,6 +354,8 @@ pub struct TasksScene {
     pub mode: String,
     /// What the line under the header says of Warriv, and its ink.
     pub warriv: Option<(String, Ink)>,
+    /// Warriv drives the project, and the mode key reads in its gold.
+    pub drives: bool,
     pub collapsed: bool,
     /// Warriv, a reviewer or an errand is at work in the project, and the
     /// tile's edge breathes in Warriv's gold.
@@ -3666,6 +3668,12 @@ impl Painter<'_> {
             5.0,
             fill.unwrap_or(theme::surface().with_alpha(0.6)),
         );
+        let ink = if t.drives {
+            self.stroke_rounded(&l.mode, 5.0, theme::warriv().with_alpha(0.55), 1.0);
+            theme::warriv()
+        } else {
+            ink
+        };
         let word_w = self.measure(gpu, &gpu.chip, &t.mode);
         let (caret_gap, caret_w) = (3.0, 10.0);
         let x = l.mode.x + (l.mode.w - word_w - caret_gap - caret_w) / 2.0;
