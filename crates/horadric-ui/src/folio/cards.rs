@@ -158,7 +158,7 @@ pub(super) unsafe fn ask(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
     match state {
         AskState::Waiting if st.denying.contains(request_id) => {
             let id = deny_field(request_id);
-            let hint = "What should Claude do instead? (optional)";
+            let hint = "What should be done instead? (optional)";
             y = field(cx, &mut s, st, &id, hint, PAD, y, inner) + 10.0;
             let x = button(
                 cx,
@@ -276,9 +276,9 @@ pub(super) unsafe fn question(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene 
     let inner = w - 2.0 * PAD;
     let waiting = *state == AskState::Waiting;
     let title = if questions.len() == 1 {
-        "Claude asks"
+        "A question"
     } else {
-        "Claude asks a few things"
+        "A few questions"
     };
     s.line(title, F::Title, Rect::new(PAD, PAD, inner, 20.0), cx.pal.fg);
     let mut y = PAD + 28.0;
@@ -411,7 +411,7 @@ pub(super) unsafe fn plan(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
         cx.pal.accent.mix(cx.pal.fg, 0.4),
     );
     s.line(
-        "Claude's plan",
+        "The plan",
         F::Title,
         Rect::new(PAD + 24.0, PAD, inner, 20.0),
         cx.pal.fg,

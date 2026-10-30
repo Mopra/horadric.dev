@@ -23,7 +23,10 @@ the human picking the one to keep, were built and then removed
 (2026-10-30): nobody used them. So was `horadric bench`, one task run
 under different settings in throwaway clones to measure tokens, and
 `horadric guard`, the hook that turned whole reads of long files into
-outlines: the lore's wording did its job without it.
+outlines: the lore's wording did its job without it. Warriv's rounds
+went too (2026-10-30), its hourly look at the whole project and the
+daily look back: a session popping up out of nowhere to look at
+everything was noise. Warriv wakes only for an event now.
 
 ## Driving a phone
 

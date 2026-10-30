@@ -4,8 +4,8 @@ Asked for on 2026-10-11: projects that run on their own stop at
 authentication. A quest that has to push to GitHub, call an API or deploy
 needs a token, and today it either sits in a plain `.env` file, gets pasted
 into the conversation, or the quest blocks until the human comes. A place
-Horadric keeps them, and a way for agents to use them, makes Warriv's
-rounds and errands go further without the human.
+Horadric keeps them, and a way for agents to use them, makes Warriv
+and errands go further without the human.
 
 **The danger is the agent, not the disk.** Whatever text an agent sees it
 can repeat: into a commit, a log, a web form, or to a page in the browser
@@ -55,7 +55,7 @@ Horadric hands the value to the one program that needs it.
   since it can do anything with the value, printing it in a form the mask
   does not know included.
 - **Unattended.** A secret already allowed for that program just works,
-  so Warriv's rounds and armed errands run. One that would need a
+  so Warriv and armed errands run. One that would need a
   question does not wait on a tile nobody watches: `secret run` fails at
   once and says why, and the agent blocks its quest with `horadric quest
   blocked --on-secret GITHUB_TOKEN` (a new kind for Waits a blocked quest

@@ -1,8 +1,8 @@
 //! When to propose shipping local: enough quests have landed on `main`
 //! since the last ship, and the checks passed on `main` as it stands, so
 //! the human is asked once whether to put that work on this machine.
-//! While Warriv drives: when a round ships by itself, and the rails that
-//! hold it, a build that rolled back or checks red twice in a row.
+//! While Warriv drives: the rails that hold shipping, a build that
+//! rolled back or checks red twice in a row.
 
 use crate::chronicle::{Happened, Record};
 use crate::merge::FixUp;
@@ -41,28 +41,6 @@ pub fn last(key: &str, log: &str, records: &[Record]) -> Option<u64> {
         .filter(|r| r.project == key && r.what == Happened::Shipped)
         .map(|r| r.at)
         .max()
-}
-
-/// How long a cast ship counts as under way without a reload to show for
-/// it: a release build, the checks and the reload fit well inside, and a
-/// cast that never reloaded must not hold shipping for good.
-pub const UNDER_WAY: u64 = 30 * 60;
-
-/// Whether a ship of the project at `key` is under way at `now`: a ship
-/// stone was cast less than [`UNDER_WAY`] ago, and no reload has finished
-/// since. Until it has, the last ship is still the one before, so every
-/// round would be told to ship again.
-pub fn under_way(key: &str, log: &str, records: &[Record], now: u64) -> bool {
-    let Some(cast) = records
-        .iter()
-        .filter(|r| r.project == key && r.what == Happened::Shipped)
-        .map(|r| r.at)
-        .max()
-    else {
-        return false;
-    };
-    let reloaded_since = newest(log).is_some_and(|at| at >= cast) && came_up(log).is_some();
-    !reloaded_since && now.saturating_sub(cast) < UNDER_WAY
 }
 
 /// Whether the reload `reload.log` tells of is over: None while it is
@@ -218,7 +196,7 @@ pub fn red_after(red: u32, failed: bool) -> u32 {
 }
 
 /// Whether a rail holds shipping: a rollback at `rolled` newer than the
-/// reload a round read last, at `judged`, or `red` landings in a row.
+/// reload the rails read last, at `judged`, or `red` landings in a row.
 pub fn holds(red: u32, rolled: Option<u64>, judged: u64) -> Option<Hold> {
     if rolled.is_some_and(|at| at > judged) {
         return Some(Hold::RolledBack);
@@ -235,47 +213,11 @@ pub fn resumes(held: &Held, records: &[Record], checked: bool) -> bool {
         })
 }
 
-/// Whether a round of a driven project ships: quests landed since the last
-/// ship, the checks passed on `main`, no rail holds it, and no ship is
-/// already under way.
-pub fn due(landed: usize, checked: bool, held: bool, under_way: bool) -> bool {
-    landed > 0 && checked && !held && !under_way
-}
-
-/// What a round is told of shipping, None when there is nothing to say:
-/// cast a ship stone when one is `due`, and with `public` choose which;
-/// or that shipping is held, and until when.
-pub fn brief(due: bool, public: bool, held: Option<&Held>) -> Option<String> {
-    if let Some(h) = held {
-        return Some(format!(
-            "Shipping is held: {}. Cast neither \"{STONE}\" nor \"{PUBLIC}\": Horadric goes \
-             on shipping by itself once the quest \"{}\" lands and the checks pass.",
-            h.why, h.quest
-        ));
-    }
-    if !due {
-        return None;
-    }
-    Some(if public {
-        format!(
-            "Ship now, it is yours to do: quests landed since the last ship and the checks \
-             passed. If what landed since the last release is worth one to users (a feature \
-             or a fix a user would notice), cast \"{PUBLIC}\", which picks the version, writes \
-             the notes and ships local too. Else cast \"{STONE}\"."
-        )
-    } else {
-        format!(
-            "Ship now, it is yours to do: quests landed since the last ship and the checks \
-             passed. Cast \"{STONE}\"."
-        )
-    })
-}
-
 /// The quest a rollback files, with what `reload.log` said in its notes.
 pub fn fix_rollback(log: &str) -> FixUp {
     let mut notes = vec![
-        "Warriv shipped local and the new build did not come up, so the old one was put \
-         back. Shipping waits for this quest."
+        "A ship local's new build did not come up, so the old one was put back. Shipping \
+         waits for this quest."
             .to_string(),
         "Find why it did not come up (the log below, then the build on a dev instance), \
          fix it and make every check pass."
@@ -493,50 +435,6 @@ mod tests {
         assert!(!resumes(&held, std::slice::from_ref(&fix), false));
         assert!(!resumes(&held, &[old], true));
         assert!(!resumes(&held, &[merged(60, "abc")], true));
-    }
-
-    #[test]
-    fn a_round_ships_when_quests_landed_on_green_and_nothing_holds() {
-        assert!(due(1, true, false, false));
-        assert!(!due(0, true, false, false));
-        assert!(!due(1, false, false, false));
-        assert!(!due(1, true, true, false));
-        assert!(!due(1, true, false, true));
-    }
-
-    #[test]
-    fn a_cast_ship_is_under_way_until_a_reload_after_it_is_over() {
-        let cast = [rec(200, KEY, Happened::Shipped)];
-        assert!(under_way(KEY, LOG, &cast, 300));
-        assert!(!under_way("c:/elsewhere", LOG, &cast, 300));
-        assert!(!under_way(KEY, LOG, &[], 300));
-        let busy = "210 installing C:\\x into C:\\y\n";
-        assert!(under_way(KEY, busy, &cast, 300));
-        let done = format!("{busy}215 reloaded\n");
-        assert!(!under_way(KEY, &done, &cast, 300));
-        let rolled = format!("{busy}215 rolled back\n");
-        assert!(!under_way(KEY, &rolled, &cast, 300));
-        // A cast that never reloaded stops holding after a while.
-        assert!(!under_way(KEY, LOG, &cast, 200 + UNDER_WAY));
-    }
-
-    #[test]
-    fn a_round_is_told_to_ship_or_that_shipping_is_held() {
-        assert_eq!(brief(false, true, None), None);
-        let local = brief(true, false, None).unwrap();
-        assert!(local.contains("Cast \"Ship Local\"."));
-        assert!(!local.contains(PUBLIC));
-        let public = brief(true, true, None).unwrap();
-        assert!(public.contains("cast \"Ship Public\""));
-        assert!(public.contains("Else cast \"Ship Local\""));
-        let held = Held {
-            why: Hold::Red.says().into(),
-            quest: "Fix x".into(),
-            at: 1,
-        };
-        let told = brief(true, true, Some(&held)).unwrap();
-        assert!(told.starts_with("Shipping is held: the checks failed on two landings"));
-        assert!(told.contains("the quest \"Fix x\" lands"));
     }
 
     #[test]

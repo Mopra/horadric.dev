@@ -1429,9 +1429,9 @@ pub fn dialog_place(size: (i32, i32), work: [i32; 4]) -> (i32, i32) {
 }
 
 /// How tall the stage's caption is, in DIPs.
-pub const CAPTION_H: f32 = 38.0;
+pub const CAPTION_H: f32 = 30.0;
 const CAPTION_KEY_W: f32 = 42.0;
-const CAPTION_KEY_H: f32 = 28.0;
+const CAPTION_KEY_H: f32 = 24.0;
 /// Town Portal's key is wider than the window's: art and a word.
 const PORTAL_KEY_W: f32 = 112.0;
 

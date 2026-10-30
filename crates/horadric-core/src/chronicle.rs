@@ -112,7 +112,7 @@ pub enum Happened {
     NotMerged {
         branch: String,
         failure: Failure,
-        /// The files a conflict stopped on, for the look back's hotspots.
+        /// The files a conflict stopped on.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<String>,
     },
@@ -125,6 +125,7 @@ pub enum Happened {
         wake: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         conversation: String,
+        #[serde(deserialize_with = "known_events")]
         events: Vec<Woken>,
     },
     /// Warriv ran a `quest` command about the quest `title`, from the
@@ -178,6 +179,18 @@ pub enum Happened {
 
 fn is_false(b: &bool) -> bool {
     !b
+}
+
+/// The events of a wake whose kind still exists. Wakes written before
+/// Warriv's rounds were removed name `round` and `look_back`: those
+/// events are left out rather than the whole line, so the wake still
+/// reads.
+fn known_events<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Woken>, D::Error> {
+    let all = Vec::<serde_json::Value>::deserialize(d)?;
+    Ok(all
+        .into_iter()
+        .filter_map(|e| serde_json::from_value(e).ok())
+        .collect())
 }
 
 /// An event that woke Warriv: its kind and the quest it is about, empty
@@ -821,7 +834,7 @@ fn errand_line(w: &WarrivWake) -> Option<(bool, AwayLine)> {
     Some((failed, line))
 }
 
-// One quest, as the window shows it.
+/// One quest, as the window shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Quest {
     /// Its holder, which is how records find it.
@@ -1920,6 +1933,31 @@ mod tests {
         );
         let text = format!("{}{{\"at\":", r.line());
         assert_eq!(parse(&text), vec![r]);
+    }
+
+    #[test]
+    fn a_wake_from_before_rounds_were_removed_still_reads() {
+        let r = rec(
+            5,
+            "",
+            "",
+            Happened::WarrivWoke {
+                wake: "warriv-1".into(),
+                conversation: String::new(),
+                events: vec![Woken {
+                    kind: Kind::Blocked,
+                    quest: "A".into(),
+                }],
+            },
+        );
+        let blocked = r#"{"kind":"blocked","quest":"A"}"#;
+        let line = r.line();
+        assert!(line.contains(blocked), "{line}");
+        let old = line.replace(
+            blocked,
+            &format!(r#"{{"kind":"round"}},{blocked},{{"kind":"look_back"}}"#),
+        );
+        assert_eq!(parse(&old), vec![r]);
     }
 
     #[test]

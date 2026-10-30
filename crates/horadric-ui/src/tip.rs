@@ -181,7 +181,7 @@ pub fn cluster(hit: Hit) -> Option<&'static str> {
         Hit::Page(_) => "Show this tab on the stage",
         Hit::Add => "Start another session in this project",
         Hit::Shell => "Open a terminal in this project (Ctrl+Shift+T on the stage)",
-        Hit::Folio => "A new chat with Claude in this project. Experimental: a headless session drawn as a chat",
+        Hit::Folio => "A new chat in this project. Experimental: a headless session drawn as a chat",
         Hit::FilesHeader => "Fold or unfold the changed files",
         Hit::File(_) => "Open on the stage, or with Ctrl in your editor. A folder opens or closes",
         Hit::TasksHeader => "Fold or unfold the quest log. Right click to pick how quests run",

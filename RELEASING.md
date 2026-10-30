@@ -240,10 +240,11 @@ There are two kinds, and the human's words pick one.
 
 Two things besides the human's words are a go ahead. The first is the
 "Warriv drives" switch. Flipping it on is the human's go ahead for
-Warriv to ship local by itself: a round casts "Ship Local" when quests landed and the checks
-passed on `main`. "And ships public", the second switch, is the go
-ahead for public releases too, cast when the landed work is worth one
-to users. A build that rolled back, or checks red on two landings in a
+Warriv to cast "Ship Local" itself. "And ships public", the second
+switch, is the go ahead for public releases too. Since Warriv's rounds
+were removed (2026-10-30) nothing tells it when shipping is due, so a
+driven project ships when the human or an armed errand casts the stone.
+A build that rolled back, or checks red on two landings in a
 row, holds shipping ("shipping held" on the switch) until the fix-up
 quest Horadric files lands on green.
 

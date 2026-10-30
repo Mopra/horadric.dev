@@ -27,7 +27,7 @@ use windows::core::{w, Result, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, ExcludeClipRect, FillRect, FrameRect,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, ExcludeClipRect, FillRect,
     GradientFill, InvalidateRect, ScreenToClient, GRADIENT_FILL_RECT_V, GRADIENT_RECT, PAINTSTRUCT,
     TRIVERTEX,
 };
@@ -76,7 +76,7 @@ use crate::{layout, motion, sanctuary, snapping, theme, web};
 pub(crate) const CLASS: PCWSTR = w!("HoradricTerminal");
 /// Between panes, and around them, in DIPs. Each pane has a bezel of its
 /// own inside this, so the glass of two panes is this plus two bezels apart.
-const PANE_GAP_DIP: f32 = 8.0;
+const PANE_GAP_DIP: f32 = 4.0;
 /// The seam cut round the stage's faceplate, in from its edge, in DIPs.
 const SEAM_DIP: f32 = 4.0;
 /// Runs while a pane glides to its new place in the grid.
@@ -1038,7 +1038,8 @@ impl TerminalWindow {
     }
 
     /// The faceplate behind the panes, the same as a cluster's: lighter at
-    /// the top where the light falls, a seam cut round it. The panes paint
+    /// the top where the light falls, and no seam, so the stage reads as
+    /// near frameless. The panes paint
     /// their own bezels with the same light, placed by where they sit.
     fn paint_plate(&self) {
         let channel = |v: f32| (v.clamp(0.0, 1.0) * 65535.0).round() as u16;
@@ -1101,28 +1102,6 @@ impl TerminalWindow {
                 1,
                 GRADIENT_FILL_RECT_V,
             );
-            // GDI has no alpha, so the groove's colours are the plate's own
-            // mixed toward black and white, as the clusters' blend comes out.
-            let inset = (SEAM_DIP * self.dpi() as f32 / 96.0).round() as i32;
-            let seam = RECT {
-                left: inset,
-                top: inset,
-                right: r.right - inset,
-                bottom: r.bottom - inset,
-            };
-            let lit = RECT {
-                top: seam.top + 1,
-                bottom: seam.bottom + 1,
-                ..seam
-            };
-            let black = theme::Color::rgb(0);
-            let white = theme::Color::rgb(0xFFFFFF);
-            let light = CreateSolidBrush(colorref(theme::window_bg().mix(white, 0.05)));
-            let dark = CreateSolidBrush(colorref(theme::window_bg().mix(black, 0.5)));
-            FrameRect(hdc, &lit, light);
-            FrameRect(hdc, &seam, dark);
-            let _ = DeleteObject(light.into());
-            let _ = DeleteObject(dark.into());
             let _ = EndPaint(self.hwnd, &ps);
         }
     }

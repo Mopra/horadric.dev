@@ -1,7 +1,7 @@
 //! `horadric runeword list`: every stone a project's Runetome has, so the
 //! Runesmith, or anyone, can check a stone it wrote parses before the
 //! human looks for it on the tile. `horadric runeword cast` has the app
-//! cast one, which is how Warriv's rounds use the tome.
+//! cast one, which is how a Warriv that drives uses the tome.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

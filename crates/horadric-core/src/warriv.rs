@@ -16,7 +16,6 @@ use std::collections::{BTreeSet, VecDeque};
 use serde_json::Value;
 
 use crate::merge::{add_fix_up, FixUp};
-use crate::runeword::{describe, due, Armed, Every};
 use crate::session::made_from;
 use crate::tasks::{
     age, asked_note, blocked_line, end_of, find, insert_note, insert_with_notes, move_item,
@@ -47,13 +46,6 @@ pub const WAKES_AN_HOUR: usize = 6;
 
 /// The span the wakes are counted in, in seconds.
 pub const HOUR: u64 = 60 * 60;
-
-/// How long a round brought by landings waits for the next one, so quests
-/// landing close together share a wake instead of one each.
-pub const SETTLE: u64 = 3 * 60;
-
-/// The longest a landing's round waits while landings keep coming.
-pub const SETTLE_MOST: u64 = 10 * 60;
 
 /// At most this many quests filed for the aims a wake.
 pub const FILE_AT_MOST: usize = 8;
@@ -93,7 +85,7 @@ pub struct Drive {
     /// Landings in a row whose checks failed.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub red: u32,
-    /// The unix time of the newest reload a round has read in
+    /// The unix time of the newest reload the rails have read in
     /// `reload.log`, so one rollback holds shipping once.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub judged: u64,
@@ -171,12 +163,6 @@ pub enum Kind {
     /// The same with an aim open, even with no quest left: Warriv files the
     /// next quests toward it.
     Dry,
-    /// While it drives: time to look at the whole project, by the clock,
-    /// after a landing or as the human leaves. No quest is its cause.
-    Round,
-    /// The first round after 04:00 also looks back at the day for what
-    /// keeps going wrong. Told beside that round.
-    LookBack,
 }
 
 impl Kind {
@@ -193,7 +179,7 @@ impl Kind {
             Kind::Tangled => "can not start: its After: lines are tangled",
             Kind::Merge => "is completed, but did not merge into main by itself",
             Kind::Overlap => "was just filed, and may cover the same ground as another quest",
-            Kind::Stalled | Kind::Dry | Kind::Round | Kind::LookBack => "",
+            Kind::Stalled | Kind::Dry => "",
         }
     }
 }
@@ -321,33 +307,6 @@ pub struct Desk {
     dry: usize,
     /// Warriv drives the project, which lifts the budget on its wakes.
     driving: bool,
-    /// When the last round was due, while it drives: the next by the
-    /// clock is [`HOUR`] after.
-    round_at: Option<u64>,
-    /// The first and the latest landing of a round that waits for
-    /// landings only, while it settles ([`SETTLE`]).
-    settling: Option<(u64, u64)>,
-}
-
-/// Why a round is due.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Why {
-    /// An hour has passed since the last.
-    Hour,
-    /// A quest landed on `main`.
-    Landed,
-    /// The human left.
-    Left,
-}
-
-impl Why {
-    fn says(self) -> &'static str {
-        match self {
-            Why::Hour => "an hour has passed since the last round",
-            Why::Landed => "a quest landed on main",
-            Why::Left => "the human left",
-        }
-    }
 }
 
 /// How a wake given the dry log ended.
@@ -423,14 +382,10 @@ impl Desk {
         let keys: BTreeSet<String> = now.iter().map(Event::key).collect();
         self.seen.retain(|k| keys.contains(k));
         self.human.retain(|k| keys.contains(k));
-        // A failed merge, an overlap, a round and a look back are not in
-        // the log: they hold until told.
-        self.queue.retain(|e| {
-            matches!(
-                e.kind,
-                Kind::Merge | Kind::Overlap | Kind::Round | Kind::LookBack
-            ) || keys.contains(&e.key())
-        });
+        // A failed merge and an overlap are not in the log: they hold
+        // until told.
+        self.queue
+            .retain(|e| matches!(e.kind, Kind::Merge | Kind::Overlap) || keys.contains(&e.key()));
         for e in now {
             if !self.seen.insert(e.key()) {
                 continue;
@@ -493,67 +448,6 @@ impl Desk {
     /// event is heard once and its own doing never wakes it.
     pub fn drive(&mut self, on: bool) {
         self.driving = on;
-        if !on {
-            self.round_at = None;
-            self.settling = None;
-            self.queue
-                .retain(|e| !matches!(e.kind, Kind::Round | Kind::LookBack));
-        }
-    }
-
-    /// The day's look back joins the round waiting, while Warriv drives,
-    /// when `due` says none was told since 04:00. `due` reads the
-    /// chronicle, so it is asked only then.
-    pub fn look_back(&mut self, due: impl FnOnce() -> bool) {
-        let round = self.queue.iter().any(|e| e.kind == Kind::Round);
-        let there = self.queue.iter().any(|e| e.kind == Kind::LookBack);
-        if self.driving && round && !there && due() {
-            self.queue.push(Event {
-                kind: Kind::LookBack,
-                title: String::new(),
-                detail: String::new(),
-            });
-        }
-    }
-
-    /// A round is due at `now` for `why`, while Warriv drives. One waiting
-    /// already takes the reason too, so rounds never pile up, and one due
-    /// while Warriv is awake is told at its next stop, as any event is.
-    /// The clock's hour starts again from here.
-    pub fn round(&mut self, why: Why, now: u64) {
-        if !self.driving {
-            return;
-        }
-        self.round_at = Some(now);
-        let waits = self.queue.iter().any(|e| e.kind == Kind::Round);
-        self.settling = match (why, self.settling) {
-            (Why::Landed, Some((first, _))) => Some((first, now)),
-            (Why::Landed, None) if !waits => Some((now, now)),
-            _ => None,
-        };
-        let says = why.says();
-        match self.queue.iter_mut().find(|e| e.kind == Kind::Round) {
-            Some(e) if e.detail.split("; ").any(|d| d == says) => {}
-            Some(e) => e.detail = format!("{}; {says}", e.detail),
-            None => self.queue.push(Event {
-                kind: Kind::Round,
-                title: String::new(),
-                detail: says.to_string(),
-            }),
-        }
-    }
-
-    /// The clock's round, [`HOUR`] after the last one was due. The first
-    /// look while driving, after the switch or a reload, starts the hour.
-    pub fn hourly(&mut self, now: u64) {
-        if !self.driving {
-            return;
-        }
-        match self.round_at {
-            None => self.round_at = Some(now),
-            Some(at) if now >= at + HOUR => self.round(Why::Hour, now),
-            Some(_) => {}
-        }
     }
 
     /// Whether events wait.
@@ -562,22 +456,11 @@ impl Desk {
     }
 
     /// Takes every waiting event, as one wake at `now` when the budget
-    /// allows, else for the human. A round brought only by landings waits
-    /// while they settle, unless something else wakes Warriv anyway.
+    /// allows, else for the human.
     pub fn wake(&mut self, now: u64) -> Wake {
         if self.queue.is_empty() {
             return Wake::Nothing;
         }
-        let only_rounds = self
-            .queue
-            .iter()
-            .all(|e| matches!(e.kind, Kind::Round | Kind::LookBack));
-        if let Some((first, last)) = self.settling {
-            if only_rounds && now < (last + SETTLE).min(first + SETTLE_MOST) {
-                return Wake::Nothing;
-            }
-        }
-        self.settling = None;
         let events = std::mem::take(&mut self.queue);
         self.wakes.retain(|&at| at + HOUR > now);
         if self.wakes.len() >= WAKES_AN_HOUR && !self.driving {
@@ -660,50 +543,7 @@ pub struct Brief {
     pub ask: Option<String>,
     /// The open aims, for a dry log.
     pub aims: Vec<String>,
-    /// The whole project, for a round.
-    pub picture: Option<Picture>,
-    /// What the chronicle shows since the last look back, for one.
-    pub looked: Option<Looked>,
 }
-
-/// What a look back is given: the day in a line, what happened more than
-/// once, and where the day's dialogue was written for it to distill.
-#[derive(Debug, Clone, Default)]
-pub struct Looked {
-    pub day: String,
-    pub patterns: Vec<String>,
-    pub said: Option<Said>,
-}
-
-/// The day's dialogue, written to a file for the look back to read.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Said {
-    pub path: String,
-    pub passages: usize,
-    /// Older passages that did not fit.
-    pub left_out: usize,
-}
-
-/// What a round sees of the project beside its memory, as the app finds
-/// it when the round is told.
-#[derive(Debug, Clone, Default)]
-pub struct Picture {
-    /// The log's quests as they stand.
-    pub tasks: Vec<Task>,
-    pub aims: Vec<String>,
-    /// How `main`'s checks stand, a line.
-    pub checks: String,
-    /// Each armed errand, a line with when it goes next.
-    pub errands: Vec<String>,
-    /// The stones the project has, by label.
-    pub stones: Vec<String>,
-    /// Whether to ship, or that shipping is held ([`crate::ship::brief`]).
-    pub ship: Option<String>,
-}
-
-/// At most this many quests not done are listed in a round's prompt, the
-/// first in the log's order, since a first prompt goes on a command line.
-const ROUND_QUESTS: usize = 40;
 
 /// What Warriv is told beside its first prompt, every time it starts: who
 /// it is, what it may do, and how. `horadric` is how to run this Horadric
@@ -779,16 +619,12 @@ pub fn driven_prompt(horadric: &str) -> String {
          the human only for a choice that can not be undone (deleting data, \
          publishing, spending money, an account) or that only the human can know. A \
          quest handed on no longer stops the list: the rest of the caravan moves.\n\n\
-         While you drive, Horadric also wakes you for rounds: every hour, after a quest \
-         lands and when the human leaves. A round is for judgment, not one event: read \
-         the whole picture it gives you and your memory, then do what moves the project \
-         on. That may be anything a wake does, and also casting one of the project's \
-         stones, which runs its steps in a session of its own: `{horadric} runeword cast \
-         \"<stone>\"`. Cast a stone only when the picture calls for it. A round may also \
-         reorder the log when its order no longer fits the picture: `{horadric} quest move \
-         \"<title>\" --below \"<title>\"`, or `--above`, moves a quest and its notes, and its \
-         `After:` lines still hold it back wherever it stands. When a round finds nothing \
-         to do, write one line to Lately in your memory and stop."
+         While you drive you may also cast one of the project's stones, which runs its \
+         steps in a session of its own: `{horadric} runeword cast \"<stone>\"`, only when \
+         what you were woken for calls for it. And you may reorder the log when its order \
+         no longer fits: `{horadric} quest move \"<title>\" --below \"<title>\"`, or \
+         `--above`, moves a quest and its notes, and its `After:` lines still hold it back \
+         wherever it stands."
     )
 }
 
@@ -880,8 +716,6 @@ fn brief(b: &Brief) -> String {
     };
     let mut out = match e.kind {
         Kind::Stalled => format!("- The log is stalled. {}\n", e.detail),
-        Kind::Round => round(&e.detail, b.picture.as_ref()),
-        Kind::LookBack => look_back(b.looked.as_ref()),
         Kind::Dry => {
             let mut s = format!(
                 "- The log has run dry: nothing is in hand and nothing is ready to start. {}\n  \
@@ -944,195 +778,6 @@ fn ask_line(title: &str, ask: Option<&str>) -> String {
              write that in one plain line: `quest ask \"{}\" \"<what the human would do>\"`.\n",
             one_line(title)
         ),
-    }
-}
-
-/// How `main` stands, for a round's picture: `head`, the commit it is at,
-/// whether the checks passed there, and how many quests landed since the
-/// last ship.
-pub fn main_line(head: &str, checked: bool, landed: usize) -> String {
-    let at = head.get(..7).unwrap_or(head);
-    let checks = match (at.is_empty(), checked) {
-        (true, _) => "its commit could not be read".to_string(),
-        (false, true) => format!("at {at}, where the checks passed"),
-        (false, false) => format!("at {at}, where nobody has run the checks yet"),
-    };
-    let landed = match landed {
-        0 => "no quest landed since the last ship".to_string(),
-        1 => "1 quest landed since the last ship".to_string(),
-        n => format!("{n} quests landed since the last ship"),
-    };
-    format!("{checks}; {landed}.")
-}
-
-/// An armed errand, for a round's picture: when it goes, and how its last
-/// cast went. `offset` is how far the local clock is ahead of UTC.
-pub fn errand_line(label: &str, every: Every, armed: &Armed, offset: i64) -> String {
-    let mut out = format!("\"{label}\": {}", describe(every));
-    if armed.running {
-        out.push_str(", running now");
-    } else if armed.fired.is_some() {
-        out.push_str(", due now");
-    } else {
-        let next = due(every, armed.last, offset);
-        if next != u64::MAX {
-            let local = (next as i64 + offset).rem_euclid(86_400);
-            out.push_str(&format!(
-                ", next at {:02}:{:02}",
-                local / 3600,
-                local % 3600 / 60
-            ));
-        }
-    }
-    if armed.failed {
-        out.push_str(", and its last cast failed");
-    }
-    out
-}
-
-/// A round's brief: why it is due, then the whole project as it stands.
-fn round(why: &str, p: Option<&Picture>) -> String {
-    // Haiku read "what moves it on" as leave to build the next quest itself.
-    let mut out = format!(
-        "- A round is due: {why}. Look at the whole project and decide what moves it on, \
-         with quest commands, your memory and the stones. You still build nothing yourself: \
-         a quest not done is a session's work.\n"
-    );
-    let Some(p) = p else {
-        return out;
-    };
-    let open: Vec<&Task> = p
-        .tasks
-        .iter()
-        .filter(|t| t.mark != Mark::Done && !t.title.trim().is_empty())
-        .collect();
-    let done = p.tasks.iter().filter(|t| t.mark == Mark::Done).count();
-    out.push_str(&format!(
-        "  The log: {done} quests done, {} not.\n",
-        open.len()
-    ));
-    for t in open.iter().take(ROUND_QUESTS) {
-        out.push_str(&format!("    [{}] {}", t.mark.char(), one_line(&t.title)));
-        if let (Mark::Blocked, Some(r)) = (t.mark, t.reason.as_deref()) {
-            match question(r) {
-                Some(q) => out.push_str(&format!(" (asks the human: {})", one_line(q))),
-                None => out.push_str(&format!(" (blocked: {})", one_line(r))),
-            }
-        }
-        out.push('\n');
-    }
-    if open.len() > ROUND_QUESTS {
-        out.push_str(&format!(
-            "    and {} more: read the log for them.\n",
-            open.len() - ROUND_QUESTS
-        ));
-    }
-    if p.aims.is_empty() {
-        out.push_str("  No aim is open.\n");
-    } else {
-        out.push_str("  The aims still open, in order:\n");
-        for a in &p.aims {
-            out.push_str(&format!("    Aim: {}\n", one_line(a)));
-        }
-    }
-    if !p.checks.is_empty() {
-        out.push_str(&format!("  Main: {}\n", one_line(&p.checks)));
-    }
-    if p.errands.is_empty() {
-        out.push_str("  No errand is armed.\n");
-    } else {
-        out.push_str("  Errands armed:\n");
-        for e in &p.errands {
-            out.push_str(&format!("    {}\n", one_line(e)));
-        }
-    }
-    if !p.stones.is_empty() {
-        let names: Vec<String> = p.stones.iter().map(|s| format!("\"{s}\"")).collect();
-        out.push_str(&format!("  Stones: {}.\n", names.join(", ")));
-    }
-    if let Some(ship) = &p.ship {
-        out.push_str(&format!("  {}\n", one_line(ship)));
-    }
-    out.push_str(
-        "  Read the Open part of your memory for what you were waiting to see. If nothing \
-         needs doing, write one line to Lately saying so, and stop.\n",
-    );
-    out
-}
-
-/// The day's look back, told beside the first round after 04:00: what
-/// keeps going wrong becomes a quest, and what was learned a rule.
-fn look_back(l: Option<&Looked>) -> String {
-    let mut out = String::from(
-        "- It is the first round after 04:00, so look back at the day too, for what keeps \
-         going wrong rather than what went wrong once.\n",
-    );
-    let Some(l) = l else {
-        return out;
-    };
-    if !l.day.is_empty() {
-        out.push_str(&format!(
-            "  Since the last look back, a day at most: {}.\n",
-            one_line(&l.day)
-        ));
-    }
-    if let Some(s) = l.said.as_ref().filter(|s| s.passages > 0) {
-        out.push_str(&distill(s));
-    }
-    if l.patterns.is_empty() {
-        out.push_str(
-            "  The chronicle shows nothing that happened twice. Write one line to Lately \
-             saying the day was clean.\n",
-        );
-        return out;
-    }
-    out.push_str("  What happened more than once:\n");
-    for p in &l.patterns {
-        out.push_str(&format!("    - {}\n", one_line(p)));
-    }
-    out.push_str(
-        "  File one quest for each of these that moves the project past it, unless a quest \
-         in the log already does, with what was seen in its notes. Where one teaches how \
-         this project wants things done, write that as a rule in your memory's Rules, so it \
-         holds from now on. Write the look back to Lately in one line.\n",
-    );
-    out
-}
-
-/// What the look back is asked to make of the day's dialogue: the
-/// decisions and lessons in it as notes, which is how the memory keeps
-/// what is true rather than only what was said. See docs/plan/memory.md,
-/// part 7.
-fn distill(s: &Said) -> String {
-    let mut out = format!(
-        "  The day's dialogue, {} of what the human and the sessions said, is in {}, each \
-         headed by its id.",
-        plural(s.passages, "passage"),
-        s.path
-    );
-    if s.left_out > 0 {
-        out.push_str(&format!(
-            " {} did not fit and are left out.",
-            plural(s.left_out, "older passage")
-        ));
-    }
-    out.push_str(
-        " Read it for what was decided and what was learned that the next session would \
-         otherwise have to find out again: a choice and its reason, a trap, how a part \
-         works or is run. Leave out what the code, the plan or git already say, and what \
-         was only tried on the way. For each, ask lore_recall first, then keep it with \
-         lore_note, one fact a note, naming the passages it came from in sources and the \
-         files it is about. Where it contradicts or outdates a note, name that note in \
-         replaces, so the old one is kept as history with when it stopped being true. \
-         Say in Lately how many notes the day gave.\n",
-    );
-    out
-}
-
-fn plural(n: usize, word: &str) -> String {
-    match n {
-        1 => format!("1 {word}"),
-        n => format!("{n} {word}s"),
     }
 }
 
@@ -1951,212 +1596,6 @@ mod tests {
         }
     }
 
-    fn a_round(detail: &str) -> Event {
-        Event {
-            kind: Kind::Round,
-            title: String::new(),
-            detail: detail.into(),
-        }
-    }
-
-    #[test]
-    fn a_round_comes_by_the_clock_only_while_driving() {
-        let mut d = Desk::default();
-        d.hourly(0);
-        d.round(Why::Landed, 0);
-        assert_eq!(d.wake(0), Wake::Nothing);
-        d.drive(true);
-        // The first look starts the hour; it does not go round at once.
-        d.hourly(100);
-        assert_eq!(d.wake(100), Wake::Nothing);
-        d.hourly(100 + HOUR - 1);
-        assert_eq!(d.wake(100 + HOUR - 1), Wake::Nothing);
-        d.hourly(100 + HOUR);
-        assert_eq!(
-            d.wake(100 + HOUR),
-            Wake::Go(vec![a_round("an hour has passed since the last round")])
-        );
-        // The next hour counts from that round.
-        d.hourly(100 + 2 * HOUR - 1);
-        assert_eq!(d.wake(100 + 2 * HOUR - 1), Wake::Nothing);
-    }
-
-    #[test]
-    fn a_landing_or_the_human_leaving_brings_a_round_and_restarts_the_hour() {
-        let mut d = Desk::default();
-        d.drive(true);
-        d.hourly(0);
-        d.round(Why::Landed, 1000);
-        d.round(Why::Left, 1001);
-        d.round(Why::Landed, 1002);
-        // Waiting rounds are one, with every reason once.
-        assert_eq!(
-            d.wake(1002),
-            Wake::Go(vec![a_round("a quest landed on main; the human left")])
-        );
-        d.hourly(HOUR + 500);
-        assert_eq!(d.wake(HOUR + 500), Wake::Nothing);
-        d.hourly(HOUR + 1002);
-        assert!(matches!(d.wake(HOUR + 1002), Wake::Go(_)));
-    }
-
-    #[test]
-    fn landings_close_together_share_one_round() {
-        let mut d = Desk::default();
-        d.drive(true);
-        d.hourly(0);
-        d.round(Why::Landed, 100);
-        assert_eq!(d.wake(100), Wake::Nothing);
-        d.round(Why::Landed, 100 + SETTLE - 1);
-        assert_eq!(d.wake(100 + SETTLE), Wake::Nothing);
-        assert_eq!(
-            d.wake(99 + 2 * SETTLE),
-            Wake::Go(vec![a_round("a quest landed on main")])
-        );
-        // Landings that never stop still bring a round in time.
-        let mut d = Desk::default();
-        d.drive(true);
-        let mut at = 0;
-        while at < SETTLE_MOST {
-            d.round(Why::Landed, at);
-            assert_eq!(d.wake(at), Wake::Nothing);
-            at += SETTLE / 2;
-        }
-        assert!(matches!(d.wake(SETTLE_MOST), Wake::Go(_)));
-        // Anything else waiting takes the round along at once.
-        let mut d = Desk::default();
-        d.drive(true);
-        d.round(Why::Landed, 0);
-        d.hear(vec![blocked("A", "x")], false);
-        assert!(matches!(d.wake(1), Wake::Go(_)));
-    }
-
-    #[test]
-    fn a_round_due_while_warriv_is_awake_folds_into_its_next_stop() {
-        let mut d = Desk::default();
-        d.drive(true);
-        d.hear(vec![blocked("A", "x")], false);
-        assert!(matches!(d.wake(0), Wake::Go(_)));
-        // Due mid turn: it waits for the stop, with what else happened.
-        d.round(Why::Landed, 10);
-        d.hear(vec![blocked("A", "x"), blocked("B", "y")], true);
-        d.hear(vec![blocked("A", "x"), blocked("B", "y")], true);
-        assert_eq!(
-            d.wake(20),
-            Wake::Go(vec![a_round("a quest landed on main"), blocked("B", "y")])
-        );
-        // Told as more, on one line, with the whole picture.
-        let m = more(&[Brief {
-            event: Some(a_round("a quest landed on main")),
-            picture: Some(Picture {
-                tasks: list("- [ ] C\n- [x] D\n"),
-                ..Picture::default()
-            }),
-            ..Brief::default()
-        }]);
-        assert!(!m.contains('\n'));
-        assert!(m.contains("A round is due: a quest landed on main."));
-        assert!(m.contains("[ ] C"));
-    }
-
-    #[test]
-    fn turning_the_drive_off_drops_the_round_waiting() {
-        let mut d = Desk::default();
-        d.drive(true);
-        d.round(Why::Left, 5);
-        d.drive(false);
-        assert_eq!(d.wake(6), Wake::Nothing);
-        // On again, the hour starts over.
-        d.drive(true);
-        d.hourly(7);
-        d.hourly(7 + HOUR - 1);
-        assert_eq!(d.wake(7 + HOUR - 1), Wake::Nothing);
-    }
-
-    #[test]
-    fn the_look_back_joins_a_round_once_it_is_due() {
-        let look = Event {
-            kind: Kind::LookBack,
-            title: String::new(),
-            detail: String::new(),
-        };
-        let mut d = Desk::default();
-        d.drive(true);
-        // No round waits: the chronicle is not even read.
-        d.look_back(|| panic!("read without a round"));
-        assert_eq!(d.wake(0), Wake::Nothing);
-        d.round(Why::Hour, 0);
-        d.look_back(|| false);
-        assert_eq!(d.wake(0), Wake::Go(vec![a_round(Why::Hour.says())]));
-        d.round(Why::Hour, 10);
-        d.look_back(|| true);
-        d.look_back(|| true);
-        // Kept through a look at the log, which never holds it.
-        d.hear(Vec::new(), false);
-        assert_eq!(
-            d.wake(10),
-            Wake::Go(vec![a_round(Why::Hour.says()), look.clone()])
-        );
-        // Not driving, there is none, and turning it off drops one.
-        d.round(Why::Hour, 20);
-        d.look_back(|| true);
-        d.drive(false);
-        assert_eq!(d.wake(20), Wake::Nothing);
-        d.look_back(|| true);
-        assert_eq!(d.wake(20), Wake::Nothing);
-    }
-
-    #[test]
-    fn the_look_back_carries_the_patterns_and_asks_for_quests_and_rules() {
-        let look = |looked| {
-            prompt(&[Brief {
-                event: Some(Event {
-                    kind: Kind::LookBack,
-                    title: String::new(),
-                    detail: String::new(),
-                }),
-                looked,
-                ..Brief::default()
-            }])
-        };
-        let p = look(Some(Looked {
-            day: "3 quests completed".into(),
-            patterns: vec!["2 merges stopped on a conflict".into()],
-            said: None,
-        }));
-        assert!(!p.contains("lore_note"));
-        assert!(p.contains("first round after 04:00"));
-        assert!(p.contains("Since the last look back, a day at most: 3 quests completed.\n"));
-        assert!(p.contains("    - 2 merges stopped on a conflict\n"));
-        assert!(p.contains(
-            "File one quest for each of these that moves the project past it, \
-                            unless a quest in the log already does"
-        ));
-        assert!(p.contains("as a rule in your memory's Rules"));
-        let clean = look(Some(Looked::default()));
-        assert!(clean.contains("nothing that happened twice"));
-        assert!(!clean.contains("File one quest"));
-        let talked = look(Some(Looked {
-            said: Some(Said {
-                path: "C:/state/memory/day/p.md".into(),
-                passages: 12,
-                left_out: 1,
-            }),
-            ..Looked::default()
-        }));
-        assert!(talked.contains(
-            "The day's dialogue, 12 passages of what the human and the sessions said, is in \
-             C:/state/memory/day/p.md, each headed by its id. 1 older passage did not fit"
-        ));
-        assert!(talked.contains("naming the passages it came from in sources"));
-        assert!(talked.contains("nothing that happened twice"));
-        let quiet = look(Some(Looked {
-            said: Some(Said::default()),
-            ..Looked::default()
-        }));
-        assert!(!quiet.contains("lore_note"));
-    }
-
     #[test]
     fn a_reload_wakes_warriv_only_for_what_it_never_heard() {
         let ev = |t: &str| Event {
@@ -2177,71 +1616,11 @@ mod tests {
     }
 
     #[test]
-    fn a_round_is_heard_by_nobody_but_warriv() {
-        let mut d = Desk::default();
-        d.drive(true);
-        d.round(Why::Hour, 0);
-        assert!(d.holding(&[]).is_empty());
-        assert_eq!(d.watch(None, 0), None);
-        assert!(!Kind::Round.can_be_own());
-    }
-
-    #[test]
-    fn the_round_prompt_is_the_whole_picture() {
-        let mut log = String::from(
-            "- [x] Done one\n- [/] Working @w-1\n- [!] Asking @a-1: Warriv asks: which key?\n\
-             - [!] Stuck @s-1: the build fails\n",
-        );
-        for i in 0..45 {
-            log.push_str(&format!("- [ ] Q{i}\n"));
-        }
-        let p = prompt(&[Brief {
-            event: Some(a_round("the human left")),
-            picture: Some(Picture {
-                tasks: list(&log),
-                aims: vec!["Ship the API".into()],
-                checks: "The checks passed on main at abc1234.".into(),
-                errands: vec!["\"Mail\": every day at 09:00, next at 09:00".into()],
-                stones: vec!["Ship Local".into(), "Mail".into()],
-                ship: Some("Ship now. Cast \"Ship Local\".".into()),
-            }),
-            ..Brief::default()
-        }]);
-        assert!(p.contains(
-            "- A round is due: the human left. Look at the whole project and decide what \
-             moves it on, with quest commands, your memory and the stones. You still build \
-             nothing yourself: a quest not done is a session's work.\n  \
-             The log: 1 quests done, 48 not.\n    [/] Working\n    \
-             [!] Asking (asks the human: which key?)\n    [!] Stuck (blocked: the build fails)\n"
-        ));
-        assert!(p.contains("    [ ] Q36\n    and 8 more: read the log for them.\n"));
-        assert!(!p.contains("Q37"));
-        assert!(!p.contains("Done one"));
-        assert!(p.contains("  The aims still open, in order:\n    Aim: Ship the API\n"));
-        assert!(p.contains("  Main: The checks passed on main at abc1234.\n"));
-        assert!(p.contains("  Errands armed:\n    \"Mail\": every day at 09:00"));
-        assert!(
-            p.contains("  Stones: \"Ship Local\", \"Mail\".\n  Ship now. Cast \"Ship Local\".\n")
-        );
-        assert!(p.contains("write one line to Lately"));
-        // Nothing armed, no aim: said, so the round does not go looking.
-        let bare = prompt(&[Brief {
-            event: Some(a_round("x")),
-            picture: Some(Picture::default()),
-            ..Brief::default()
-        }]);
-        assert!(bare.contains("  No aim is open.\n"));
-        assert!(bare.contains("  No errand is armed.\n"));
-        assert!(!bare.contains("Stones:"));
-    }
-
-    #[test]
-    fn a_driving_warriv_may_cast_a_stone_in_a_round() {
+    fn a_driving_warriv_may_cast_a_stone() {
         let p = driven_prompt("hx");
         assert!(p.contains("`hx runeword cast \"<stone>\"`"));
-        assert!(p.contains("every hour, after a quest lands and when the human leaves"));
-        assert!(p.contains("write one line to Lately"));
         assert!(p.contains("`hx quest move \"<title>\" --below \"<title>\"`"));
+        assert!(!p.contains("round"));
         assert_eq!(
             cast_tools("\"C:/h.exe\""),
             vec![
@@ -2251,67 +1630,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn mains_line_says_the_commit_the_checks_and_what_landed() {
-        assert_eq!(
-            main_line("abc1234def", true, 3),
-            "at abc1234, where the checks passed; 3 quests landed since the last ship."
-        );
-        assert_eq!(
-            main_line("abc", false, 1),
-            "at abc, where nobody has run the checks yet; 1 quest landed since the last ship."
-        );
-        assert_eq!(
-            main_line("", false, 0),
-            "its commit could not be read; no quest landed since the last ship."
-        );
-    }
-
-    #[test]
-    fn an_errands_line_says_when_it_goes_next() {
-        let armed = Armed {
-            steps: 0,
-            last: 0,
-            fired: None,
-            finished: None,
-            failed: false,
-            running: false,
-            session: None,
-            cast: None,
-            why: String::new(),
-        };
-        // Armed at midnight UTC, an hour ahead: 09:00 local is 08:00 UTC.
-        assert_eq!(
-            errand_line("Mail", Every::Day(9 * 60), &armed, 3600),
-            "\"Mail\": every day at 09:00, next at 09:00"
-        );
-        assert_eq!(
-            errand_line("Sweep", Every::Span(90 * 60), &armed, 0),
-            "\"Sweep\": every 1h30m, next at 01:30"
-        );
-        let on = Every::On(crate::runeword::Event::Landed);
-        assert_eq!(
-            errand_line("Post", on, &armed, 0),
-            "\"Post\": on each landing"
-        );
-        let fired = Armed {
-            fired: Some(5),
-            failed: true,
-            ..armed.clone()
-        };
-        assert_eq!(
-            errand_line("Post", on, &fired, 0),
-            "\"Post\": on each landing, due now, and its last cast failed"
-        );
-        let running = Armed {
-            running: true,
-            ..armed
-        };
-        assert_eq!(
-            errand_line("Mail", Every::Day(0), &running, 0),
-            "\"Mail\": every day at 00:00, running now"
-        );
-    }
 
     #[test]
     fn warriv_casts_only_while_it_drives_and_public_only_when_it_ships_public() {
@@ -2717,8 +2035,6 @@ mod tests {
                 last_turn: Some("I built it.\nWhich port should it listen on?".into()),
                 ask: Some("Pick the port".into()),
                 aims: Vec::new(),
-                picture: None,
-                looked: None,
             },
             Brief {
                 event: Some(Event {
@@ -2754,8 +2070,6 @@ mod tests {
             last_turn: Some(long),
             ask: Some("Pick a port".into()),
             aims: Vec::new(),
-            picture: None,
-            looked: None,
         }]);
         assert!(p.contains("- The quest \"A\" is blocked.\n"));
         assert!(p.contains("\u{2026}x"));
@@ -2771,8 +2085,6 @@ mod tests {
             last_turn: Some("a\nb".into()),
             ask: None,
             aims: Vec::new(),
-            picture: None,
-            looked: None,
         }]);
         assert!(!m.contains('\n'));
         assert!(m.starts_with("While you worked, more happened. - The quest \"A\" is blocked: x"));

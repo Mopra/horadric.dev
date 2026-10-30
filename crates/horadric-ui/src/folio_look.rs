@@ -272,12 +272,12 @@ pub fn thinking_line(text: &str) -> String {
 /// What an ask's card says Claude wants.
 pub fn ask_title(tool: &str) -> String {
     match kind(tool) {
-        Kind::Ran => "Claude wants to run a command".to_string(),
-        Kind::Edited => "Claude wants to change a file".to_string(),
-        Kind::Read => "Claude wants to read a file".to_string(),
-        Kind::Fetched => "Claude wants to go online".to_string(),
-        Kind::Other(name) => format!("Claude wants to use {name}"),
-        _ => format!("Claude wants to use {tool}"),
+        Kind::Ran => "Run a command?".to_string(),
+        Kind::Edited => "Change a file?".to_string(),
+        Kind::Read => "Read a file?".to_string(),
+        Kind::Fetched => "Go online?".to_string(),
+        Kind::Other(name) => format!("Use {name}?"),
+        _ => format!("Use {tool}?"),
     }
 }
 
@@ -458,9 +458,9 @@ mod tests {
         assert_eq!(run_summary(&steps), "Used lore_recall");
         assert_eq!(
             ask_title("mcp__horadric__lore_note"),
-            "Claude wants to use lore_note"
+            "Use lore_note?"
         );
-        assert_eq!(ask_title("Bash"), "Claude wants to run a command");
+        assert_eq!(ask_title("Bash"), "Run a command?");
     }
 
     #[test]

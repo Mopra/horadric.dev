@@ -93,13 +93,13 @@ impl App {
 
     /// The event errands with `"on"` are cast at happened, in the project
     /// with this key, or with None in every project. Each armed one that
-    /// hears it is due from now until it is cast. A landing and the human
-    /// leaving bring Warriv's round too, where it drives.
+    /// hears it is due from now until it is cast. A landing reads the
+    /// shipping rails too, where Warriv drives.
     pub(in crate::app) fn errand_event(&mut self, key: Option<&str>, event: Event) {
-        match event {
-            Event::Landed => self.round_for(key, warriv::Why::Landed),
-            Event::Away => self.round_for(key, warriv::Why::Left),
-            Event::Shipped | Event::Back => {}
+        if let (Event::Landed, Some(k)) = (event, key) {
+            if self.drives.contains_key(k) {
+                self.ship_rails(k);
+            }
         }
         let now = unix_now();
         let armed: Vec<String> = self
