@@ -23,6 +23,9 @@ const TRACE_GAP: f32 = 0.8;
 const TRACE_H: f32 = 11.0;
 const LAND_RISE: f32 = 3.0;
 const MAX_SPARKS: usize = 5;
+/// How bright the sparks circle a lamp whose turn is over while its
+/// background agents work on: calmer than a turn at work, and slower.
+const AGENTS_ALONE: f32 = 0.45;
 const SPARK_REACH: f32 = 7.0;
 const SPARK_ORBIT: Duration = Duration::from_millis(2400);
 const SHIMMER: Duration = Duration::from_millis(2600);
@@ -395,7 +398,11 @@ fn light(p: &Painter, m: &Metrics, s: &Scene) {
                 let level = (0.55 + 0.45 * breath) * look.enter;
                 lamp(p, &lamp_rect(&r), c, level);
             }
-            _ => {}
+            _ => {
+                let n = session.agents_alone(s.now).min(MAX_SPARKS);
+                let (c, age) = (theme::phase_color(&Phase::Working), look.phase_age / 2);
+                sparks(p, &lamp_rect(&r), c, n, age, AGENTS_ALONE);
+            }
         }
     }
 }

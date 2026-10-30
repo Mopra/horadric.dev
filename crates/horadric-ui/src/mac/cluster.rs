@@ -200,6 +200,9 @@ impl ClusterView {
         let phases: Vec<_> = s.sessions.iter().map(|x| &x.phase).collect();
         let targets: Vec<f32> = s.layout.tiles.iter().map(|r| r.y).collect();
         let next = Tiles::next_frame(&looks, &phases, &targets, s.ambient);
+        // Sparks circle a lamp whose turn is over while its agents work on.
+        let astir = s.ambient && s.sessions.iter().any(|x| x.agents_alone(s.now) > 0);
+        let next = crate::motion::sooner(next, astir.then_some(crate::motion::FRAME_ORBIT));
         s.looks = looks;
         look::draw(&p, &Metrics::default(), s);
         drop(scene);

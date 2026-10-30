@@ -1180,6 +1180,10 @@ impl Cluster {
         let beckoning = ambient
             && (refs.iter().zip(&parked)).any(|(s, &p)| anim::beckons(&s.phase, s.unread(), p));
         let next = motion::sooner(next, beckoning.then_some(motion::FRAME_BREATH));
+        // Sparks circle a lamp whose turn is over while its agents work on.
+        let now = SystemTime::now();
+        let astir = ambient && refs.iter().any(|s| s.agents_alone(now) > 0);
+        let next = motion::sooner(next, astir.then_some(motion::FRAME_ORBIT));
         self.schedule(if ghosts.is_empty() && !finishing {
             next
         } else {

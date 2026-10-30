@@ -182,11 +182,16 @@ pub struct Session {
     /// The type of each subagent the mod saw start, by id.
     #[serde(skip)]
     pub agent_types: Vec<(String, String)>,
-    /// The whole roster as the mod last reported it this turn. Where it is
-    /// present it says when a subagent ends, so the quiet guess is only
-    /// the fallback.
+    /// The whole roster as the mod last reported it. Where it is present
+    /// it says when a subagent ends, so the quiet guess is only the
+    /// fallback. It outlives the turn: a background subagent works on
+    /// after the primary's Stop, until its report wakes Claude again.
     #[serde(skip)]
     pub roster: Option<Vec<ModAgent>>,
+    /// When the session last sent any event, a subagent's included: a
+    /// roster that long unheard is not believed, see [`ROSTER_STALE`].
+    #[serde(skip)]
+    pub heard_at: Option<SystemTime>,
     /// When the last prompt went in. Anything typed into the terminal
     /// after it may still sit in the prompt box as a draft.
     #[serde(skip)]
@@ -225,6 +230,11 @@ pub const LOST_HOOK: Duration = Duration::from_secs(10);
 
 /// A subagent not heard from this long has finished.
 pub const SUBAGENT_QUIET: Duration = Duration::from_secs(30);
+/// A roster still listing agents at work while the session has sent
+/// nothing for this long is taken as left behind by a mod that died
+/// without a SessionEnd. Generous: a subagent fires a hook with every
+/// tool, so only one sitting in a long command is this quiet.
+pub const ROSTER_STALE: Duration = Duration::from_secs(30 * 60);
 /// How far back a session remembers what it did.
 pub const ACTIVITY_SPAN: Duration = Duration::from_secs(10 * 60);
 /// A busy agent fires a few hooks a second. More than this in the span says
@@ -264,6 +274,7 @@ impl Session {
             agents: Vec::new(),
             agent_types: Vec::new(),
             roster: None,
+            heard_at: None,
             prompted_at: None,
             last_prompt: None,
             hooked: None,
@@ -604,14 +615,22 @@ impl Session {
 
     /// Keeps the tool the turn is in and when the agent last did something.
     fn note(&mut self, event: &HookEvent, now: SystemTime) {
+        self.heard_at = Some(now);
         match event.hook_event_name.as_str() {
             "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PermissionRequest" => {
                 if let Some(t) = &event.tool_name {
                     self.tool = Some(t.clone());
                 }
             }
-            "UserPromptSubmit" | "Stop" | "StopFailure" | "SessionEnd" | "Interrupt"
-            | "StopCancelled"
+            "UserPromptSubmit" | "Stop" | "StopFailure" | "Interrupt" | "StopCancelled"
+                if !event.is_subagent() =>
+            {
+                self.tool = None;
+                self.agents.clear();
+            }
+            // The agents die with the process. A new one's mod lists them
+            // again within its first poll.
+            "SessionStart" | "SessionEnd" | HookEvent::REGISTER | HookEvent::PAUSE
                 if !event.is_subagent() =>
             {
                 self.tool = None;
@@ -680,7 +699,10 @@ impl Session {
                 .to_string()
         };
         let mut out = Vec::new();
-        if let Some(roster) = &self.roster {
+        let fresh = self
+            .heard_at
+            .is_none_or(|t| now.duration_since(t).is_ok_and(|d| d < ROSTER_STALE) || t > now);
+        if let Some(roster) = self.roster.as_ref().filter(|_| fresh) {
             for a in roster
                 .iter()
                 .filter(|a| matches!(a.status.as_str(), "pending" | "running" | "waiting"))
@@ -718,6 +740,16 @@ impl Session {
     /// How many subagents are at work, see [`Session::subagent_types`].
     pub fn subagents(&self, now: SystemTime) -> usize {
         self.subagent_types(now).len()
+    }
+
+    /// How many subagents work on while the primary does not: its turn
+    /// ended (or never began) with agents started in the background. The
+    /// tile shows them calmer than a turn at work.
+    pub fn agents_alone(&self, now: SystemTime) -> usize {
+        match self.phase {
+            Phase::Done | Phase::Idle => self.subagents(now),
+            _ => 0,
+        }
     }
 
     /// How much the agent did in each of `buckets` equal slices of the last
@@ -1105,9 +1137,81 @@ mod tests {
         // It ends when the mod says so, however recently it was heard.
         s.apply(&roster(vec![agent("a1", "Explore", "completed")]), later);
         assert_eq!(s.subagents(later), 0);
-        // A new turn forgets the roster and the types.
-        s.apply(&ev("Stop"), later);
+        // The process going forgets the roster and the types.
+        s.apply(&ev("SessionEnd"), later);
         assert!(s.roster.is_none() && s.agent_types.is_empty());
+    }
+
+    #[test]
+    fn background_agents_work_on_past_the_primary_s_stop() {
+        let mut s = Session::new("t", "t", "C:/repo");
+        let t0 = now();
+        let running = |id: &str| ModAgent {
+            agent_id: id.into(),
+            agent_type: "Explore".into(),
+            status: "running".into(),
+            ..Default::default()
+        };
+        s.apply(&ev("UserPromptSubmit"), t0);
+        s.apply(
+            &HookEvent {
+                agents: Some(vec![running("a1"), running("a2")]),
+                ..ev(HookEvent::AGENTS)
+            },
+            t0,
+        );
+        assert_eq!(s.agents_alone(t0), 0, "the primary works too");
+        s.apply(&ev("Stop"), t0);
+        assert_eq!(s.phase, Phase::Done);
+        let later = t0 + Duration::from_secs(300);
+        assert_eq!(s.agents_alone(later), 2, "the roster outlives the turn");
+        s.apply(
+            &HookEvent {
+                agents: Some(vec![running("a2")]),
+                ..ev(HookEvent::AGENTS)
+            },
+            later,
+        );
+        assert_eq!(s.agents_alone(later), 1);
+        // Woken by a2's report: the primary is at work again.
+        s.apply(&ev("UserPromptSubmit"), later);
+        assert_eq!(s.agents_alone(later), 0);
+        assert_eq!(s.subagents(later), 1);
+    }
+
+    #[test]
+    fn a_roster_left_behind_cannot_keep_agents_at_work() {
+        let roster = HookEvent {
+            agents: Some(vec![ModAgent {
+                agent_id: "a1".into(),
+                status: "running".into(),
+                ..Default::default()
+            }]),
+            ..ev(HookEvent::AGENTS)
+        };
+        let t0 = now();
+        // Nothing heard from the session for long: the mod went with it.
+        let mut s = Session::new("t", "t", "C:/repo");
+        s.apply(&roster, t0);
+        s.apply(&ev("Stop"), t0);
+        assert_eq!(s.agents_alone(t0 + ROSTER_STALE / 2), 1);
+        assert_eq!(s.agents_alone(t0 + ROSTER_STALE), 0);
+        // A subagent's hook keeps it believed.
+        s.apply(
+            &HookEvent {
+                agent_id: Some("a1".into()),
+                ..ev("PreToolUse")
+            },
+            t0 + ROSTER_STALE / 2,
+        );
+        assert_eq!(s.agents_alone(t0 + ROSTER_STALE), 1);
+        // A new process starts with none until its mod lists them.
+        for end in ["SessionStart", HookEvent::PAUSE] {
+            let mut s = Session::new("t", "t", "C:/repo");
+            s.apply(&roster, t0);
+            s.apply(&ev(end), t0);
+            assert_eq!(s.subagents(t0), 0, "{end}");
+        }
     }
 
     #[test]

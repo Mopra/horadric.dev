@@ -119,6 +119,9 @@ const WARRIV_BREATH: Duration = Duration::from_millis(3200);
 const SHIMMER: Duration = Duration::from_millis(2600);
 /// More subagents than this still draw this many sparks.
 const MAX_SPARKS: usize = 5;
+/// How bright the sparks circle a lamp whose turn is over while its
+/// background agents work on: calmer than a turn at work, and slower.
+const AGENTS_ALONE: f32 = 0.45;
 /// How far out from the lamp's middle the sparks circle, in DIPs.
 const SPARK_REACH: f32 = 7.0;
 /// A spark going once round the lamp.
@@ -2570,7 +2573,11 @@ impl Painter<'_> {
                     let level = (0.55 + 0.45 * breath) * look.enter;
                     self.lamp(&lamp_rect(&r), c, level);
                 }
-                _ => {}
+                _ => {
+                    let n = s.agents_alone(scene.now).min(MAX_SPARKS);
+                    let (c, age) = (theme::phase_color(&Phase::Working), look.phase_age / 2);
+                    self.sparks(&lamp_rect(&r), c, n, age, AGENTS_ALONE);
+                }
             }
         }
     }
@@ -3627,7 +3634,7 @@ impl Painter<'_> {
         self.text_tabular(gpu, &gpu.small_right, age_c.fade(presence), &age, top);
 
         // Last line, and what the agent did lately beside it.
-        let at_work = if phase == &Phase::Working {
+        let at_work = if phase == &Phase::Working || s.agents_alone(scene.now) > 0 {
             horadric_core::session::subagent_line(&s.subagent_types(scene.now))
         } else {
             String::new()
