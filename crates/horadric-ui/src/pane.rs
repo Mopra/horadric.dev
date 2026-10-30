@@ -449,7 +449,10 @@ impl Pane {
         if let Some(key) = &pane.console.folio {
             folio::attach(key, &pane.shared, pane.hwnd);
         }
-        if pane.is_session() {
+        // A Folio session has hirelings as a terminal one does; a hireling's
+        // own conversation, watched read only, has none of its own.
+        let folio_session = pane.console.folio.as_deref().is_some_and(|k| !folio::is_watch(k));
+        if pane.is_session() || folio_session {
             match Retinue::create(Rc::clone(&pane.shared), &pane.console.id, pane.hwnd) {
                 Ok(r) => *pane.retinue.borrow_mut() = Some(r),
                 Err(e) => eprintln!("horadric: no retinue for a pane: {e}"),
@@ -963,8 +966,9 @@ impl Pane {
             let [left, top, right, bottom] = self.glass();
             let scale = self.dpi_now() as f32 / 96.0;
             let px = |v: f32| (v * scale).round() as i32;
+            let inset = self.place_retinue();
             let glass = RECT {
-                left: px(left + 1.0),
+                left: px(left + 1.0 + inset),
                 top: px(top + 1.0),
                 right: px(right - 1.0),
                 bottom: px(bottom - 1.0),
