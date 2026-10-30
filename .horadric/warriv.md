@@ -15,6 +15,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-30 Round (hourly, main at 03fd6ee, only my memory since the v0.37.0 ship): no aim, log done. Nothing to do.
 - 2026-10-30 Round (human left, main at 353bb7e): the human cut v0.37.0 at 15:52, no code since, tree clean apart from tasks files. No aim, log done. Nothing to do.
 - 2026-10-30 Round (hourly, main at 647a4cf, only my memory since the 726750f ship): no aim, log done. Nothing to do.
 - 2026-10-30 Round (hourly, main at 726750f): the human's commits to 13:27 (Folio, browser tabs, dictation, sparks) were built and installed at 13:31, so main is shipped. No aim, log done. Nothing to do.
