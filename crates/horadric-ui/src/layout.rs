@@ -925,13 +925,15 @@ pub struct SettingsLayout {
 
 const SETTINGS_TITLE_H: f32 = 40.0;
 const SETTINGS_SIDE_W: f32 = 176.0;
-const SETTINGS_PANE_W: f32 = 380.0;
+const SETTINGS_PANE_W: f32 = 460.0;
 const SETTINGS_SECTION_H: f32 = 34.0;
 const SETTINGS_HEADING_H: f32 = 26.0;
 
-/// Lays out the Settings window with `sections` sections, `rows` rows in
-/// the one shown, and room for `tallest` rows, the most any section has.
-pub fn settings(m: &Metrics, sections: usize, rows: usize, tallest: usize) -> SettingsLayout {
+/// Lays out the Settings window with `sections` sections, rows of these
+/// `heights` in the one shown, and room for `tallest`, the most any
+/// section's rows stand. A row taller than one line has its name and
+/// value in a line at its top and room under it for what it does.
+pub fn settings(m: &Metrics, sections: usize, heights: &[f32], tallest: f32) -> SettingsLayout {
     let inner = 4.0;
     let width = m.pad + SETTINGS_SIDE_W + m.gap + SETTINGS_PANE_W + m.pad;
     let title = Rect::new(0.0, 0.0, width, SETTINGS_TITLE_H);
@@ -946,18 +948,25 @@ pub fn settings(m: &Metrics, sections: usize, rows: usize, tallest: usize) -> Se
     let x = m.pad + SETTINGS_SIDE_W + m.gap;
     let heading = Rect::new(x, top, SETTINGS_PANE_W, SETTINGS_HEADING_H);
     let group_top = heading.bottom() + 6.0;
-    let rows = (0..rows)
-        .map(|i| {
-            let y = group_top + inner + i as f32 * m.setting_row_h;
-            let line = Rect::new(x, y, SETTINGS_PANE_W, m.setting_row_h);
+    let mut y = group_top + inner;
+    let rows = heights
+        .iter()
+        .map(|h| {
+            let rect = Rect::new(x, y, SETTINGS_PANE_W, *h);
+            y += h;
+            let line = if *h > m.setting_row_h + 8.0 {
+                Rect::new(x, rect.y + 6.0, SETTINGS_PANE_W, 24.0)
+            } else {
+                rect
+            };
             SettingRow {
-                rect: line,
+                rect,
                 line,
                 track: None,
             }
         })
         .collect();
-    let group_h = 2.0 * inner + tallest.max(1) as f32 * m.setting_row_h;
+    let group_h = 2.0 * inner + tallest.max(m.setting_row_h);
     let group = Rect::new(x, group_top, SETTINGS_PANE_W, group_h);
     let side_bottom = sections.last().map_or(top, |r| r.bottom());
     let height = group.bottom().max(side_bottom) + m.pad;
@@ -3681,8 +3690,8 @@ mod tests {
     #[test]
     fn the_settings_window_keeps_its_size_whichever_section_shows() {
         let m = Metrics::default();
-        let few = settings(&m, 4, 1, 3);
-        let most = settings(&m, 4, 3, 3);
+        let few = settings(&m, 4, &[52.0], 140.0);
+        let most = settings(&m, 4, &[52.0, 38.0, 50.0], 140.0);
         assert_eq!(few.size, most.size);
         assert_eq!(most.rows.len(), 3);
         assert!(most
@@ -3692,6 +3701,9 @@ mod tests {
         for pair in most.rows.windows(2) {
             assert_eq!(pair[0].rect.bottom(), pair[1].rect.y);
         }
+        // A row with help has its name at the top, the help below it.
+        assert!(most.rows[0].line.h < most.rows[0].rect.h);
+        assert_eq!(most.rows[1].line, most.rows[1].rect);
         // The sections stand left of the rows, both under the title bar.
         let side = most.sections[0];
         assert!(side.right() < most.group.x);
@@ -3699,14 +3711,14 @@ mod tests {
         assert!(most.size.1 >= most.group.bottom());
         assert!(most.size.1 >= most.sections[3].bottom());
         // More sections than rows: the list down the left sets the height.
-        let tall = settings(&m, 9, 1, 1);
+        let tall = settings(&m, 9, &[38.0], 38.0);
         assert_eq!(tall.size.1, tall.sections[8].bottom() + m.pad);
     }
 
     #[test]
     fn a_point_in_the_settings_window_finds_its_part() {
         let m = Metrics::default();
-        let l = settings(&m, 4, 2, 3);
+        let l = settings(&m, 4, &[38.0, 52.0], 140.0);
         let at = |r: Rect| settings_hit(&l, r.x + 5.0, r.y + 5.0);
         assert_eq!(at(l.close), SettingsHit::Close);
         assert_eq!(settings_hit(&l, 30.0, 10.0), SettingsHit::Title);

@@ -1,6 +1,11 @@
 # The tray menu and Settings
 
-Proposed, 2026-10-30. Both have grown one item at a time and it shows.
+Steps 1 to 4 landed 2026-10-30; search, a resizable window and the DPI
+check are left. Where the build differs from the plan below: the tray
+keeps Accounts as a submenu (switching account is an action, done
+often), the machines submenu is called Other PCs, Discord sits in
+General and About holds only the version and updates. Proposed
+2026-10-30. Both have grown one item at a time and it shows.
 The tray menu reaches about 25 lines with no grouping, and Settings is a
 fixed box of unexplained rows. This page has the research, what is wrong,
 and the rewrite.

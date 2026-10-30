@@ -5797,7 +5797,7 @@ impl App {
         }
     }
 
-    /// What the Scroll section shows: the tongue's switch and the Lexicon
+    /// What the Memory section shows: the tongue's switch and the Lexicon
     /// of the project the Projects section has picked.
     fn scroll_values(&self) -> settings::Scroll {
         let Some(dir) = horadric_hooks::state_dir().map(|d| d.join("memory")) else {
@@ -6353,7 +6353,6 @@ impl App {
             }
             Field::BackupFolder
             | Field::BackupPassphrase
-            | Field::BackupNote
             | Field::BackupLast => {}
             Field::Hosts => {}
             Field::Notify => {
@@ -6415,7 +6414,7 @@ impl App {
                 post(self.notify.0 as isize, WM_HORADRIC_VERSION, 0);
             }
             Field::Updates => self.check_update(true),
-            Field::Version | Field::KeysNote => {}
+            Field::Version | Field::KeysNote | Field::Lexicon => {}
             Field::Ask => {
                 self.tome.ask = !self.tome.ask;
                 self.save();

@@ -1,5 +1,7 @@
 //! The Settings window: every setting of the app in one place, sections
-//! down the left and the rows of the one picked on the right.
+//! down the left and the rows of the one picked on the right. Each row
+//! says in a line under its name what it does, so a themed name never
+//! stands alone (docs/plan/tray-and-settings.md).
 //!
 //! A window of its own that closes, not a tile in the columns: settings
 //! are visited, not watched. Drawn like the usage window, its lists drop
@@ -29,7 +31,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
-    VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_UP,
+    VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN,
+    VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos,
@@ -59,44 +62,39 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Section {
     #[default]
+    General,
     Appearance,
-    Notifications,
     Sessions,
-    Keys,
-    Startup,
-    Privacy,
-    Backup,
-    Scroll,
-    Runetome,
     Projects,
+    Keys,
+    Memory,
+    Backup,
+    About,
 }
 
 impl Section {
-    pub const ALL: [Section; 10] = [
+    /// Most used first, About last, as Windows' own Settings has it.
+    pub const ALL: [Section; 8] = [
+        Section::General,
         Section::Appearance,
-        Section::Notifications,
         Section::Sessions,
-        Section::Keys,
-        Section::Startup,
-        Section::Privacy,
-        Section::Backup,
-        Section::Scroll,
-        Section::Runetome,
         Section::Projects,
+        Section::Keys,
+        Section::Memory,
+        Section::Backup,
+        Section::About,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
+            Section::General => "General",
             Section::Appearance => "Appearance",
-            Section::Notifications => "Notifications",
             Section::Sessions => "Sessions",
-            Section::Keys => "Keys",
-            Section::Startup => "Startup and updates",
-            Section::Privacy => "Privacy",
-            Section::Backup => "Backup",
-            Section::Scroll => "The Scroll",
-            Section::Runetome => "Runetome",
             Section::Projects => "Projects",
+            Section::Keys => "Keys",
+            Section::Memory => "Memory",
+            Section::Backup => "Backup",
+            Section::About => "About",
         }
     }
 }
@@ -141,8 +139,6 @@ pub enum Field {
     /// The folder a backup to a folder goes in.
     BackupFolder,
     BackupPassphrase,
-    /// What the Backup section has to say, as a line across the row.
-    BackupNote,
     BackupLast,
     BackupNow,
     BackupRestore,
@@ -152,6 +148,8 @@ pub enum Field {
     Ask,
     /// Brings back every built in stone put away.
     Hidden,
+    /// The tongue's sigils in the project shown, only said.
+    Lexicon,
     /// Which project the rows below it are about.
     Project,
     Colour,
@@ -168,6 +166,53 @@ pub enum Field {
 }
 
 impl Field {
+    /// The line under the row's name saying what it does, "" for rows
+    /// whose name says it all.
+    pub fn help(self) -> &'static str {
+        match self {
+            Field::Theme => "The colours of the tiles, the terminal and every window",
+            Field::Font => "The typeface sessions are drawn in",
+            Field::Screen => "The monitor the tiles stand on",
+            Field::Town => "The tile for work that belongs to no project",
+            Field::Animations => "Runes, breathing lights and moving tiles",
+            Field::Notify => "A Windows notification when a session needs you",
+            Field::Sounds => "A soft sound when a turn finishes or work lands",
+            Field::Agent => "The agent the defaults below are for",
+            Field::Default(Setting::Model) => "The model new sessions start on",
+            Field::Default(Setting::Effort) => "How long new sessions think before they answer",
+            Field::Default(Setting::Permissions) => "What new sessions may do without asking",
+            Field::Default(Setting::Workflow) => "The model of the agents a workflow starts",
+            Field::SwitchAccounts => "At a usage limit, go on with the account most left",
+            Field::ChatSessions => "A chat window in place of a terminal",
+            Field::Offered => "Offer this agent in each project's menu",
+            Field::Autostart => "Open Horadric when you sign in to Windows",
+            Field::Explorer => "Adds it to a folder's right-click menu",
+            Field::Updates => "Horadric also looks by itself now and then",
+            Field::Discord => "What your Discord status shows of your work",
+            Field::Recall => "Memory looks in your other projects' notes too",
+            Field::BackupTo => "Encrypted copies of the memory, kept off this PC",
+            Field::BackupAccount => "The Google Drive the backup goes to",
+            Field::BackupFolder => "The folder the backup goes to",
+            Field::BackupPassphrase => "Without it the backup cannot be read",
+            Field::BackupRestore => "Puts back the memory from the last backup",
+            Field::Horadrim => "Short sigils for long names in recall, fewer tokens",
+            Field::Ask => "Runetome: a click on a stone asks before it runs",
+            Field::Hidden => "Runetome's own stones you put away",
+            Field::Project => "Which project the settings below are for",
+            Field::Colour => "Its tiles' colour",
+            Field::WorkMode => "A branch and worktree per session, or all on main",
+            Field::Hosts => "Machines its sessions can run on",
+            Field::AddHost => "Another machine to reach over ssh",
+            Field::Drive => "Warriv works its quest log while you are away",
+            Field::ShipsPublic => "Warriv may also cut a public release",
+            Field::Key(Action::Next) => "Jumps to the session waiting longest",
+            Field::Key(Action::Listen) => "What happened while you were away",
+            Field::Key(Action::Stop) => "Stops Warriv in every project at once",
+            Field::Key(Action::Account) => "The accounts to switch to",
+            _ => "",
+        }
+    }
+
     /// A row of the Backup section that asks something before it acts.
     pub fn asks_backup(self) -> bool {
         matches!(
@@ -199,6 +244,19 @@ pub struct Line {
     pub label: &'static str,
     pub value: String,
     pub control: Control,
+    /// What it does, under its name.
+    pub help: &'static str,
+}
+
+impl Line {
+    /// How tall its row stands: a note is one line, a row with help two.
+    pub fn height(&self) -> f32 {
+        match self.control {
+            Control::Note => 30.0,
+            _ if self.help.is_empty() => 38.0,
+            _ => 52.0,
+        }
+    }
 }
 
 /// The settings as the app has them now, which is all the window shows.
@@ -282,10 +340,6 @@ pub struct Scroll {
     pub saved: i64,
 }
 
-/// How the yardstick scored recall's answers (`yardstick/judge.py`): right out of 65 questions, in the tongue and
-/// verbatim.
-const SCORE: &str = "59 of 65, verbatim 52";
-
 /// `n` with a comma between thousands.
 fn thousands(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
@@ -300,17 +354,6 @@ fn thousands(n: i64) -> String {
         out.insert(0, '-');
     }
     out
-}
-
-/// A sigil of the Lexicon in a note's room.
-fn sigil_line(sigil: &str, name: &str, uses: u64) -> String {
-    let name: String = if name.chars().count() > 34 {
-        let head: String = name.chars().take(33).collect();
-        format!("{head}\u{2026}")
-    } else {
-        name.to_string()
-    };
-    format!("{sigil}  {name}, used {uses}")
 }
 
 /// The settings of the project the Projects section shows.
@@ -371,11 +414,12 @@ fn keys_note(v: &Values) -> String {
 
 /// The rows of `section`, given the settings in `v`.
 pub fn lines(section: Section, v: &Values) -> Vec<Line> {
-    let line = |field, label, value: &str, control| Line {
+    let line = |field: Field, label, value: &str, control| Line {
         field,
         label,
         value: value.to_string(),
         control,
+        help: field.help(),
     };
     let switch = |on: bool| (if on { "On" } else { "Off" }, Control::Switch(on));
     match section {
@@ -396,12 +440,27 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                 line(Field::Animations, "Animations", moves, m),
             ]
         }
-        Section::Notifications => {
+        Section::General => {
+            let shown = |field, label, on: Option<bool>| match on {
+                Some(on) => {
+                    let (word, c) = switch(on);
+                    line(field, label, word, c)
+                }
+                None => line(field, label, "Not in a dev instance", Control::Fixed),
+            };
             let (notify, n) = switch(v.notify);
             let (sounds, s) = switch(v.sounds);
             vec![
+                shown(Field::Autostart, "Start with Windows", v.autostart),
+                shown(Field::Explorer, "Open in Horadric in Explorer", v.explorer),
                 line(Field::Notify, "Notify when a session waits", notify, n),
                 line(Field::Sounds, "Loot sounds", sounds, s),
+                line(
+                    Field::Discord,
+                    "Show on Discord",
+                    v.discord.label(),
+                    Control::List,
+                ),
             ]
         }
         Section::Sessions => {
@@ -450,48 +509,6 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
             }
             rows
         }
-        Section::Startup => {
-            let autostart = match v.autostart {
-                Some(on) => {
-                    let (word, c) = switch(on);
-                    line(Field::Autostart, "Start with Windows", word, c)
-                }
-                None => line(
-                    Field::Autostart,
-                    "Start with Windows",
-                    "Not in a dev instance",
-                    Control::Fixed,
-                ),
-            };
-            let explorer = match v.explorer {
-                Some(on) => {
-                    let (word, c) = switch(on);
-                    line(Field::Explorer, "Open in Horadric in Explorer", word, c)
-                }
-                None => line(
-                    Field::Explorer,
-                    "Open in Horadric in Explorer",
-                    "Not in a dev instance",
-                    Control::Fixed,
-                ),
-            };
-            let updates = match (&v.update, v.checking) {
-                (Some(version), _) => format!("Update to {version}"),
-                (None, true) => "Checking\u{2026}".to_string(),
-                (None, false) => "Check now".to_string(),
-            };
-            let control = if v.checking && v.update.is_none() {
-                Control::Fixed
-            } else {
-                Control::Button
-            };
-            vec![
-                autostart,
-                explorer,
-                line(Field::Updates, "Updates", &updates, control),
-                line(Field::Version, "Version", &v.version, Control::Fixed),
-            ]
-        }
         Section::Keys => {
             let mut rows: Vec<Line> = Action::ALL
                 .iter()
@@ -510,71 +527,61 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
             rows.push(line(Field::KeysNote, "", &keys_note(v), Control::Note));
             rows
         }
-        Section::Privacy => {
-            let (across, a) = switch(v.recall_across);
-            vec![
-                line(
-                    Field::Discord,
-                    "Show on Discord",
-                    v.discord.label(),
-                    Control::List,
-                ),
-                line(Field::Recall, "Recall across projects", across, a),
-            ]
-        }
         Section::Backup => backup_lines(&v.backup),
-        Section::Scroll => {
+        Section::Memory => {
             let sc = &v.scroll;
-            let (word, c) = switch(!sc.off);
+            let (across, a) = switch(v.recall_across);
+            let (tongue, t) = switch(!sc.off);
+            let (ask, k) = switch(v.ask);
             let lexicon = match (sc.project.as_str(), sc.sigils) {
                 ("", _) => "No project".to_string(),
                 (p, 0) => format!("{p}, no sigils yet"),
                 (p, n) => format!("{p}, {n} sigils"),
             };
-            let mut rows = vec![
-                line(
-                    Field::KeysNote,
-                    "",
-                    "Recall's hits are inscribed: long names bound to sigils.",
-                    Control::Note,
-                ),
-                line(Field::Project, "Lexicon", &lexicon, Control::Fixed),
-            ];
-            rows.extend(sc.top.iter().take(2).map(|(sigil, name, uses)| {
-                line(
-                    Field::KeysNote,
-                    "",
-                    &sigil_line(sigil, name, *uses),
-                    Control::Note,
-                )
-            }));
-            rows.push(line(
-                Field::Version,
-                "Saved this week",
-                &format!("{} tokens", thousands(sc.saved)),
-                Control::Fixed,
-            ));
-            rows.push(line(Field::Version, "Answers right", SCORE, Control::Fixed));
-            rows.push(line(Field::Horadrim, "The tongue", word, c));
-            rows
-        }
-        Section::Runetome => {
-            let (ask, a) = switch(v.ask);
             let hidden = match v.hidden {
-                0 => line(
-                    Field::Hidden,
-                    "Built in stones put away",
-                    "None",
-                    Control::Fixed,
-                ),
+                0 => line(Field::Hidden, "Stones put away", "None", Control::Fixed),
                 n => line(
                     Field::Hidden,
-                    "Built in stones put away",
+                    "Stones put away",
                     &format!("{n}, bring back"),
                     Control::Button,
                 ),
             };
-            vec![line(Field::Ask, "Ask before a click casts", ask, a), hidden]
+            vec![
+                line(Field::Recall, "Recall across projects", across, a),
+                line(Field::Horadrim, "The tongue", tongue, t),
+                Line {
+                    help: "The sigils the tongue has bound in this project",
+                    ..line(Field::Lexicon, "Lexicon", &lexicon, Control::Fixed)
+                },
+                Line {
+                    help: "Tokens the tongue kept out of turns",
+                    ..line(
+                        Field::Version,
+                        "Saved this week",
+                        &format!("{} tokens", thousands(sc.saved)),
+                        Control::Fixed,
+                    )
+                },
+                line(Field::Ask, "Ask before a click casts", ask, k),
+                hidden,
+            ]
+        }
+        Section::About => {
+            let updates = match (&v.update, v.checking) {
+                (Some(version), _) => format!("Update to {version}"),
+                (None, true) => "Checking\u{2026}".to_string(),
+                (None, false) => "Check now".to_string(),
+            };
+            let control = if v.checking && v.update.is_none() {
+                Control::Fixed
+            } else {
+                Control::Button
+            };
+            vec![
+                line(Field::Version, "Version", &v.version, Control::Fixed),
+                line(Field::Updates, "Updates", &updates, control),
+            ]
         }
         Section::Projects => {
             let Some(p) = &v.project else {
@@ -654,11 +661,12 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
 /// The Backup section's rows. The ones about a target show only when
 /// there is one, and the buttons rest while a job runs.
 fn backup_lines(b: &Backup) -> Vec<Line> {
-    let line = |field, label, value: &str, control| Line {
+    let line = |field: Field, label, value: &str, control| Line {
         field,
         label,
         value: value.to_string(),
         control,
+        help: field.help(),
     };
     let mut rows = vec![line(
         Field::BackupTo,
@@ -667,12 +675,6 @@ fn backup_lines(b: &Backup) -> Vec<Line> {
         Control::List,
     )];
     if b.to == To::Off {
-        rows.push(line(
-            Field::BackupNote,
-            "",
-            "Encrypted copies of the memory and the lore notes, kept off this PC.",
-            Control::Note,
-        ));
         return rows;
     }
     let idle = if b.busy.is_some() {
@@ -705,12 +707,6 @@ fn backup_lines(b: &Backup) -> Vec<Line> {
         passphrase,
         idle,
     ));
-    rows.push(line(
-        Field::BackupNote,
-        "",
-        "Without the passphrase the backup cannot be read.",
-        Control::Note,
-    ));
     let last = if b.last.is_empty() { "Never" } else { &b.last };
     rows.push(line(Field::BackupLast, "Last backup", last, Control::Fixed));
     let now = b.busy.as_deref().unwrap_or("Start");
@@ -724,24 +720,56 @@ fn backup_lines(b: &Backup) -> Vec<Line> {
     rows
 }
 
-/// The most rows any section has, which sets the window's height. The
-/// Sessions section counts with whichever agent has the most, so picking
-/// another does not leave the window a size its rows no longer fill.
-fn tallest(v: &Values) -> usize {
+/// How tall the rows of `section` stand together.
+fn height(section: Section, v: &Values) -> f32 {
+    lines(section, v).iter().map(Line::height).sum()
+}
+
+/// How tall the tallest section's rows stand, which sets the window's
+/// height. The Sessions section counts with whichever agent has the
+/// most, so picking another does not leave the window a size its rows no
+/// longer fill.
+fn tallest(v: &Values) -> f32 {
     let sessions = Agent::ALL.iter().map(|a| {
         let v = Values {
             agent: *a,
             ..v.clone()
         };
-        lines(Section::Sessions, &v).len()
+        height(Section::Sessions, &v)
     });
+    let project = PROJECT_ROWS as f32 * Line::height(&lines(Section::Projects, v)[0]);
     Section::ALL
         .iter()
-        .map(|s| lines(*s, v).len())
+        .map(|s| height(*s, v))
         .chain(sessions)
-        .max()
-        .unwrap_or(1)
-        .max(PROJECT_ROWS)
+        .fold(project, f32::max)
+}
+
+/// The heights of the rows of `section`, for the layout.
+fn heights(section: Section, v: &Values) -> Vec<f32> {
+    lines(section, v).iter().map(Line::height).collect()
+}
+
+/// The row the keyboard moves to from `at`, `step` rows on, skipping
+/// rows that only say: round at either end, and from none the first or
+/// the last. None when no row does anything.
+fn focus_step(rows: &[Line], at: Option<usize>, step: isize) -> Option<usize> {
+    let live: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !matches!(l.control, Control::Fixed | Control::Note))
+        .map(|(i, _)| i)
+        .collect();
+    let n = live.len() as isize;
+    if n == 0 {
+        return None;
+    }
+    let next = match at.and_then(|a| live.iter().position(|i| *i == a)) {
+        Some(p) => (p as isize + step).rem_euclid(n),
+        None if step < 0 => n - 1,
+        None => 0,
+    };
+    Some(live[next as usize])
 }
 
 /// The section `step` places after `at`, round at either end, for the
@@ -859,6 +887,8 @@ pub struct SettingsWindow {
     tracking: Cell<bool>,
     /// The row whose list is dropped down, set by the app.
     open: Cell<Option<Field>>,
+    /// The row the keyboard is on, ringed. None while the mouse is used.
+    focus: Cell<Option<usize>>,
 }
 
 impl SettingsWindow {
@@ -874,7 +904,7 @@ impl SettingsWindow {
         let l = layout::settings(
             &shared.metrics,
             Section::ALL.len(),
-            lines(section, &values).len(),
+            &heights(section, &values),
             tallest(&values),
         );
         let mut cursor = POINT::default();
@@ -907,6 +937,7 @@ impl SettingsWindow {
             pressed: Cell::new(None),
             tracking: Cell::new(false),
             open: Cell::new(None),
+            focus: Cell::new(None),
         });
         unsafe {
             let hwnd = CreateWindowExW(
@@ -995,9 +1026,19 @@ impl SettingsWindow {
         let l = layout::settings(
             &self.shared.metrics,
             Section::ALL.len(),
-            lines(self.section.get(), &v).len(),
+            &heights(self.section.get(), &v),
             tallest(&v),
         );
+        // A row that stopped doing anything, a button gone quiet while
+        // it works, keeps no ring.
+        let live = |i: usize| {
+            lines(self.section.get(), &v)
+                .get(i)
+                .is_some_and(|l| !matches!(l.control, Control::Fixed | Control::Note))
+        };
+        if self.focus.get().is_some_and(|i| !live(i)) {
+            self.focus.set(None);
+        }
         drop(v);
         *self.layout.borrow_mut() = l;
         self.refresh_hover();
@@ -1010,6 +1051,7 @@ impl SettingsWindow {
     }
 
     fn pick_section(&self, section: Section) {
+        self.focus.set(None);
         if self.section.replace(section) != section {
             // Leaving the keys stops listening for one.
             if self.listening() {
@@ -1046,6 +1088,7 @@ impl SettingsWindow {
                 label: line.label,
                 value: line.value,
                 control: line.control,
+                help: line.help,
             })
             .collect();
         let scene = SettingsScene {
@@ -1057,7 +1100,7 @@ impl SettingsWindow {
                 .unwrap_or(0),
             heading: self.section.get().label(),
             rows: &rows,
-            scroll: self.section.get() == Section::Scroll,
+            focus: self.focus.get(),
             hot: self.hot.get(),
             pressed: self.pressed.get(),
         };
@@ -1227,16 +1270,41 @@ impl SettingsWindow {
                 app::push(Input::SettingsPress(Press::Keep));
                 None
             }
+            // Tab walks the rows that do something, Space or Enter works
+            // the one ringed. The arrows walk the rows once one is ringed,
+            // the sections until then, and Left goes back to them.
             WM_KEYDOWN => {
+                let focus = self.focus.get();
+                let to = |step: isize| {
+                    self.focus.set(focus_step(&self.lines(), focus, step));
+                    self.invalidate();
+                };
                 match wparam.0 as u16 {
                     k if k == VK_ESCAPE.0 => app::push(Input::SettingsClosed),
+                    k if k == VK_TAB.0 => to(if held().shift { -1 } else { 1 }),
+                    k if focus.is_some() && k == VK_UP.0 => to(-1),
+                    k if focus.is_some() && k == VK_DOWN.0 => to(1),
+                    k if k == VK_LEFT.0 && focus.is_some() => {
+                        self.focus.set(None);
+                        self.invalidate();
+                    }
                     k if k == VK_UP.0 => self.pick_section(step(self.section.get(), -1)),
                     k if k == VK_DOWN.0 => self.pick_section(step(self.section.get(), 1)),
+                    // Held down, a key repeats: one flip per press.
+                    k if k == VK_SPACE.0 || k == VK_RETURN.0 => {
+                        let repeat = lparam.0 & (1 << 30) != 0;
+                        if let (Some(i), false) = (focus, repeat) {
+                            self.click(SettingsHit::Row(i));
+                        }
+                    }
                     _ => {}
                 }
                 Some(LRESULT(0))
             }
             WM_LBUTTONDOWN => {
+                if self.focus.take().is_some() {
+                    self.invalidate();
+                }
                 unsafe {
                     SetCapture(self.hwnd);
                 }
@@ -1361,7 +1429,7 @@ mod tests {
         let mut v = values();
         assert_eq!(
             fields(Section::Backup, &v),
-            [Field::BackupTo, Field::BackupNote]
+            [Field::BackupTo]
         );
         v.backup.to = To::Drive;
         assert_eq!(
@@ -1370,7 +1438,6 @@ mod tests {
                 Field::BackupTo,
                 Field::BackupAccount,
                 Field::BackupPassphrase,
-                Field::BackupNote,
                 Field::BackupLast,
                 Field::BackupNow,
                 Field::BackupRestore,
@@ -1412,17 +1479,18 @@ mod tests {
             ]
         );
         assert_eq!(
-            fields(Section::Notifications, &v),
-            [Field::Notify, Field::Sounds]
-        );
-        assert_eq!(
-            fields(Section::Startup, &v),
+            fields(Section::General, &v),
             [
                 Field::Autostart,
                 Field::Explorer,
-                Field::Updates,
-                Field::Version
+                Field::Notify,
+                Field::Sounds,
+                Field::Discord
             ]
+        );
+        assert_eq!(
+            fields(Section::About, &v),
+            [Field::Version, Field::Updates]
         );
         assert_eq!(
             fields(Section::Sessions, &v),
@@ -1438,18 +1506,14 @@ mod tests {
             ]
         );
         assert_eq!(
-            fields(Section::Privacy, &v),
-            [Field::Discord, Field::Recall]
-        );
-        assert_eq!(fields(Section::Runetome, &v), [Field::Ask, Field::Hidden]);
-        assert_eq!(
-            fields(Section::Scroll, &v),
+            fields(Section::Memory, &v),
             [
-                Field::KeysNote,
-                Field::Project,
+                Field::Recall,
+                Field::Horadrim,
+                Field::Lexicon,
                 Field::Version,
-                Field::Version,
-                Field::Horadrim
+                Field::Ask,
+                Field::Hidden
             ]
         );
         assert_eq!(
@@ -1475,11 +1539,25 @@ mod tests {
             ]
         );
         // Claude Code's Sessions rows, a row more than a project's.
-        assert_eq!(tallest(&v), PROJECT_ROWS + 1);
+        assert_eq!(tallest(&v), (PROJECT_ROWS + 1) as f32 * 52.0);
     }
 
     #[test]
-    fn the_scroll_reads_the_lexicon_and_its_switch() {
+    fn every_row_that_does_something_says_what() {
+        let v = values();
+        for section in Section::ALL {
+            for l in lines(section, &v) {
+                let quiet = matches!(
+                    l.field,
+                    Field::Version | Field::BackupLast | Field::BackupNow | Field::KeysNote
+                ) || matches!(l.control, Control::Note | Control::Fixed);
+                assert!(quiet || !l.help.is_empty(), "{} has no help", l.label);
+            }
+        }
+    }
+
+    #[test]
+    fn the_memory_section_reads_the_lexicon_and_the_tongue() {
         let mut v = values();
         v.scroll = Scroll {
             off: false,
@@ -1488,13 +1566,12 @@ mod tests {
             top: vec![("\u{a7}lore".into(), "horadric-memory".into(), 12)],
             saved: 12_345,
         };
-        let rows = lines(Section::Scroll, &v);
-        assert_eq!(rows[1].value, "app, 3 sigils");
-        assert_eq!(rows[2].value, "\u{a7}lore  horadric-memory, used 12");
+        let rows = lines(Section::Memory, &v);
+        assert_eq!(rows[2].value, "app, 3 sigils");
         assert_eq!(rows[3].value, "12,345 tokens");
-        assert_eq!(rows.last().unwrap().control, Control::Switch(true));
+        assert_eq!(rows[1].control, Control::Switch(true));
         v.scroll.off = true;
-        assert_eq!(lines(Section::Scroll, &v).last().unwrap().value, "Off");
+        assert_eq!(lines(Section::Memory, &v)[1].value, "Off");
     }
 
     #[test]
@@ -1539,7 +1616,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].control, Control::Fixed);
         // Claude Code's Sessions rows, a row more than a project's.
-        assert_eq!(tallest(&v), PROJECT_ROWS + 1);
+        assert_eq!(tallest(&v), (PROJECT_ROWS + 1) as f32 * 52.0);
     }
 
     #[test]
@@ -1557,14 +1634,11 @@ mod tests {
         assert_eq!(look[0].value, Theme::default().label());
         assert_eq!(look[1].value, "Cascadia Mono");
         assert_eq!(look[2].value, "Screen 2");
-        let n = lines(Section::Notifications, &v);
-        assert_eq!(n[0].control, Control::Switch(true));
-        assert_eq!(n[0].value, "On");
-        assert_eq!(n[1].control, Control::Switch(false));
-        assert_eq!(
-            lines(Section::Privacy, &v)[0].value,
-            "Without project names"
-        );
+        let n = lines(Section::General, &v);
+        assert_eq!(n[2].control, Control::Switch(true));
+        assert_eq!(n[2].value, "On");
+        assert_eq!(n[3].control, Control::Switch(false));
+        assert_eq!(n[4].value, "Without project names");
     }
 
     #[test]
@@ -1605,7 +1679,7 @@ mod tests {
             ]
         );
         assert_eq!(rows[1].value, "GPT-5.5");
-        assert!(tallest(&v) >= 6);
+        assert!(tallest(&v) >= 6.0 * 52.0);
         assert_eq!(rows[3].control, Control::Switch(false));
         v.offered = Some(None);
         let rows = lines(Section::Sessions, &v);
@@ -1632,7 +1706,7 @@ mod tests {
     fn the_updates_row_checks_then_offers_what_it_found() {
         let mut v = values();
         let row = |v: &Values| {
-            lines(Section::Startup, v)
+            lines(Section::About, v)
                 .into_iter()
                 .find(|l| l.field == Field::Updates)
                 .unwrap()
@@ -1651,7 +1725,7 @@ mod tests {
         let mut v = values();
         v.autostart = None;
         v.explorer = None;
-        let startup = lines(Section::Startup, &v);
+        let startup = lines(Section::General, &v);
         assert_eq!(startup[0].control, Control::Fixed);
         assert_eq!(startup[1].control, Control::Fixed);
     }
@@ -1680,7 +1754,7 @@ mod tests {
     #[test]
     fn put_away_stones_are_brought_back_only_when_there_are_some() {
         let mut v = values();
-        let row = |v: &Values| lines(Section::Runetome, v)[1].clone();
+        let row = |v: &Values| lines(Section::Memory, v)[5].clone();
         assert_eq!(
             (row(&v).value.as_str(), row(&v).control),
             ("None", Control::Fixed)
@@ -1690,10 +1764,7 @@ mod tests {
             (row(&v).value.as_str(), row(&v).control),
             ("2, bring back", Control::Button)
         );
-        assert_eq!(
-            lines(Section::Runetome, &v)[0].control,
-            Control::Switch(true)
-        );
+        assert_eq!(lines(Section::Memory, &v)[4].control, Control::Switch(true));
     }
 
     #[test]
@@ -1706,11 +1777,26 @@ mod tests {
     }
 
     #[test]
+    fn tab_walks_only_the_rows_that_do_something() {
+        let v = values();
+        let rows = lines(Section::About, &v);
+        // Version only says; Updates is the one row to land on.
+        assert_eq!(focus_step(&rows, None, 1), Some(1));
+        assert_eq!(focus_step(&rows, Some(1), 1), Some(1));
+        let rows = lines(Section::Projects, &v);
+        // "And ships public" only says while Warriv does not drive.
+        assert_eq!(focus_step(&rows, None, -1), Some(5));
+        // SSH hosts only says, so Tab steps over it.
+        assert_eq!(focus_step(&rows, Some(2), 1), Some(4));
+        assert_eq!(focus_step(&rows, Some(5), 1), Some(0));
+        assert_eq!(focus_step(&[], None, 1), None);
+    }
+
+    #[test]
     fn the_arrow_keys_go_round_the_sections() {
-        assert_eq!(step(Section::Appearance, 1), Section::Notifications);
-        assert_eq!(step(Section::Notifications, 1), Section::Sessions);
-        assert_eq!(step(Section::Runetome, 1), Section::Projects);
-        assert_eq!(step(Section::Appearance, -1), Section::Projects);
-        assert_eq!(step(Section::Projects, 1), Section::Appearance);
+        assert_eq!(step(Section::General, 1), Section::Appearance);
+        assert_eq!(step(Section::Sessions, 1), Section::Projects);
+        assert_eq!(step(Section::General, -1), Section::About);
+        assert_eq!(step(Section::About, 1), Section::General);
     }
 }

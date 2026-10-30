@@ -466,8 +466,8 @@ pub struct SettingsScene<'a> {
     pub section: usize,
     pub heading: &'a str,
     pub rows: &'a [SettingsLook],
-    /// The section is the Scroll, drawn on parchment.
-    pub scroll: bool,
+    /// The row the keyboard is on.
+    pub focus: Option<usize>,
     pub hot: SettingsHit,
     pub pressed: Option<SettingsHit>,
 }
@@ -477,6 +477,8 @@ pub struct SettingsLook {
     pub label: &'static str,
     pub value: String,
     pub control: Control,
+    /// What it does, drawn under its name.
+    pub help: &'static str,
     /// Its list is dropped down.
     pub open: bool,
 }
@@ -1516,17 +1518,14 @@ impl Painter<'_> {
         let heading = Rect::new(h.x + 4.0, h.y, h.w - 8.0, h.h);
         self.text(&gpu.small, theme::legend(), scene.heading, heading);
         self.group(&l.group, m.tile_radius);
-        if scene.scroll {
-            // Parchment over the group, a roll at each end: an unrolled scroll.
-            let g = &l.group;
-            let parchment = Color::rgb(0xd9c89a);
-            self.fill_rounded(g, m.tile_radius, parchment.with_alpha(0.14));
-            for y in [g.y - 1.0, g.bottom() - 5.0] {
-                let roll = Rect::new(g.x - 3.0, y, g.w + 6.0, 6.0);
-                self.fill_rounded(&roll, 3.0, parchment.with_alpha(0.55));
-            }
-        }
         for (i, (row, look)) in l.rows.iter().zip(scene.rows).enumerate() {
+            if i > 0 {
+                let r = &row.rect;
+                self.groove(r.x + m.setting_pad, r.right() - m.setting_pad, r.y);
+            }
+            if scene.focus == Some(i) {
+                self.stroke_rounded(&row.rect.inset(2.0), 8.0, theme::text_dim(), 1.5);
+            }
             if look.control == Control::Note {
                 let r = &row.line;
                 let inner = Rect::new(r.x + m.setting_pad, r.y, r.w - 2.0 * m.setting_pad, r.h);
@@ -1544,6 +1543,16 @@ impl Painter<'_> {
                 list: look.control == Control::List,
             };
             self.setting(gpu, m, row, &shown, b, look.open);
+            if !look.help.is_empty() && row.rect.h > row.line.h {
+                let r = &row.line;
+                let below = Rect::new(
+                    r.x + m.setting_pad,
+                    r.bottom(),
+                    r.w - 2.0 * m.setting_pad,
+                    row.rect.bottom() - r.bottom() - 6.0,
+                );
+                self.text(&gpu.small, theme::legend(), look.help, below);
+            }
             if let Control::Switch(on) = look.control {
                 let right = row.line.right() - m.setting_pad;
                 let x = right - self.measure(gpu, &gpu.small, &look.value) - 10.0;
