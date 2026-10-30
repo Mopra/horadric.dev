@@ -25,10 +25,35 @@ pub fn title(path: &str) -> Option<Title> {
     let mut file = File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     let found = read_from(&mut file, len.saturating_sub(TAIL)).and_then(|b| title::latest(&b));
-    if found.is_some() || len <= TAIL || len > WHOLE {
+    if found.is_some() {
         return found;
     }
-    read_from(&mut file, 0).and_then(|b| title::latest(&b))
+    // Claude Code never titles a conversation held over its SDK, as the
+    // Folio's are, so its first prompt names it, and the whole file is not
+    // read for a title that cannot be there.
+    let head = read_head(&mut file, TAIL)?;
+    let sdk = head
+        .windows(SDK.len())
+        .take(64 * 1024)
+        .any(|w| w == SDK);
+    if !sdk && len > TAIL && len <= WHOLE {
+        if let Some(t) = read_from(&mut file, 0).and_then(|b| title::latest(&b)) {
+            return Some(t);
+        }
+    }
+    title::first_prompt(&head).map(|text| Title {
+        text,
+        custom: false,
+    })
+}
+
+const SDK: &[u8] = br#""entrypoint":"sdk-cli""#;
+
+fn read_head(file: &mut File, most: u64) -> Option<Vec<u8>> {
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut buf = Vec::new();
+    file.by_ref().take(most).read_to_end(&mut buf).ok()?;
+    Some(buf)
 }
 
 /// Whether the conversation `id`, held in `cwd`, is in the middle of a

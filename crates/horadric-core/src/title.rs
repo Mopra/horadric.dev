@@ -120,6 +120,62 @@ pub fn last_reply(transcript: &[u8]) -> Option<String> {
     })
 }
 
+/// The longest a title made from a prompt runs, in characters.
+const PROMPT_TITLE: usize = 48;
+
+/// A title made from the first thing the human typed, for a conversation
+/// Claude Code never titles: one held over its SDK, as the Folio's are.
+/// Commands, their caveats and tool results are not typed and are skipped.
+/// Cut at a word, short enough for a pane's header.
+pub fn first_prompt(transcript: &[u8]) -> Option<String> {
+    transcript.split(|&b| b == b'\n').find_map(|line| {
+        if !contains(line, br#""type":"user""#) {
+            return None;
+        }
+        let v = serde_json::from_slice::<serde_json::Value>(line).ok()?;
+        if v["type"] != "user" || v["isMeta"] == true || v["isSidechain"] == true {
+            return None;
+        }
+        let content = &v["message"]["content"];
+        let text = match content.as_str() {
+            Some(t) => t.to_string(),
+            None => {
+                let blocks = content.as_array()?;
+                if blocks.iter().any(|b| b["type"] == "tool_result") {
+                    return None;
+                }
+                (blocks.iter())
+                    .filter(|b| b["type"] == "text")
+                    .filter_map(|b| b["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+        };
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() || text.starts_with('<') {
+            return None;
+        }
+        Some(shorten(&text, PROMPT_TITLE))
+    })
+}
+
+/// `text` cut to at most `most` characters at a word, with an ellipsis
+/// when anything was cut.
+fn shorten(text: &str, most: usize) -> String {
+    if text.chars().count() <= most {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(most).collect();
+    let at_word = match cut.rfind(' ') {
+        Some(i) if i > most / 2 => &cut[..i],
+        _ => cut.as_str(),
+    };
+    format!(
+        "{}\u{2026}",
+        at_word.trim_end_matches([' ', ',', '.', ':', ';'])
+    )
+}
+
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
@@ -127,6 +183,23 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_typed_prompt_names_an_untitled_conversation() {
+        let t = br#"{"type":"user","message":{"content":"<local-command-caveat>x</local-command-caveat>"},"isMeta":true}
+{"type":"user","message":{"content":"<command-name>/clear</command-name>"}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}
+{"type":"user","message":{"content":"Fix the   menu\nposition"}}
+{"type":"user","message":{"content":"Later"}}
+"#;
+        assert_eq!(first_prompt(t).as_deref(), Some("Fix the menu position"));
+        let long = br#"{"type":"user","message":{"content":[{"type":"text","text":"I don't feel like the chat input in Folio is living up to the theme"}]}}"#;
+        assert_eq!(
+            first_prompt(long).as_deref(),
+            Some("I don't feel like the chat input in Folio is\u{2026}")
+        );
+        assert_eq!(first_prompt(b"{\"type\":\"assistant\"}"), None);
+    }
 
     #[test]
     fn the_newest_ai_title_wins() {
