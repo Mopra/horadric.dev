@@ -310,10 +310,34 @@ fn visited(key: &str, id: u64, title_only: bool) {
         let changed = if title_only {
             h.retitle(&url, &title)
         } else {
-            h.visit(&url, &title, now())
+            h.visit(&url, &title, now()) | h.opened(key, &url)
         };
         ((), changed)
     });
+}
+
+/// The title and address of each page the project's browser went to
+/// lately, the latest first, for a new tab to list.
+pub fn recent(key: &str, max: usize) -> Vec<(String, String)> {
+    with_history(|h| {
+        let found = h
+            .recent(key, max)
+            .into_iter()
+            .map(|p| (p.title, p.url))
+            .collect();
+        (found, false)
+    })
+}
+
+/// Whether the pane shows the project's start page: the shown tab has no
+/// page and no agent works in it. Its WebView stays hidden meanwhile and
+/// the pane draws the page itself.
+pub fn shows_start(key: &str) -> bool {
+    read_tab(key, None, starts).unwrap_or(false)
+}
+
+fn starts(t: &Tab) -> bool {
+    t.driver.is_none() && t.opener.is_none() && is_blank(&t.url, t.pending.as_deref())
 }
 
 /// Where a page not on the stage waits: the app's hidden window.
@@ -483,8 +507,9 @@ pub fn agent_tab(key: &str, session: &str, live: impl Fn(&str) -> bool, make: bo
     });
     match picked {
         Ok(Some((id, claimed))) => {
+            // A blank tab an agent takes is its page, not the start page.
             if claimed {
-                changed(key, None, |_| {});
+                show(key);
             }
             Some(id)
         }
@@ -909,7 +934,10 @@ pub fn tab(key: &str, step: TabStep) {
         None => {}
     }
     show(key);
-    focus(key);
+    // A tab with no page shows the start page, whose field takes the keys.
+    if !(shows_start(key) && edit(key)) {
+        focus(key);
+    }
 }
 
 /// Which tab is shown after `closed` of `len` is closed while `active` was:
@@ -1269,6 +1297,9 @@ fn show(key: &str) {
         controller: ICoreWebView2Controller,
         shown: bool,
         driven: bool,
+        /// Shown, but with no page: the pane draws the start page over
+        /// where it is, so it stays out of sight until it has one.
+        start: bool,
         zoom: Option<f64>,
     }
     let state = WEBS.with(|w| {
@@ -1288,6 +1319,7 @@ fn show(key: &str) {
                     controller: t.controller.clone()?,
                     shown,
                     driven: t.driven > 0,
+                    start: starts(t),
                     zoom,
                 })
             })
@@ -1321,7 +1353,7 @@ fn show(key: &str) {
             rouse(&view);
         }
         unsafe {
-            let _ = p.controller.SetIsVisible(true);
+            let _ = p.controller.SetIsVisible(!p.start);
         }
     }
     if let Some(p) = pane {
@@ -1804,6 +1836,7 @@ fn listen(key: &str, id: u64, view: &ICoreWebView2) {
     let source = SourceChangedEventHandler::create(Box::new(move |view, args| {
         if let Some(v) = view {
             let u = read(|p| unsafe { v.Source(p) });
+            let was = read_tab(&owned, Some(id), starts);
             // The picture kept for the site shows until the page sends its own.
             changed(&owned, Some(id), |w| {
                 if history::host(&w.url) != history::host(&u) {
@@ -1811,6 +1844,10 @@ fn listen(key: &str, id: u64, view: &ICoreWebView2) {
                 }
                 w.url = u;
             });
+            // Off the start page, or back on it: the page shows, or hides.
+            if read_tab(&owned, Some(id), starts) != was {
+                show(&owned);
+            }
         }
         // A move within the page, a fragment or a pushed state, has no
         // load to wait for.

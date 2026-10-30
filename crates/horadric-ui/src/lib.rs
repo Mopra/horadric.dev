@@ -168,6 +168,8 @@ mod menu;
 #[cfg(windows)]
 mod net;
 #[cfg(windows)]
+mod new_tab;
+#[cfg(windows)]
 mod pane;
 #[cfg(windows)]
 mod picker;

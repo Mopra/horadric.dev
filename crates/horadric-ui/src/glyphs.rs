@@ -949,6 +949,7 @@ impl GridTarget {
         header: &Header,
         find: Option<&FindBar>,
         page: Option<&PageFrame>,
+        start: Option<&crate::new_tab::Start>,
         veil: f32,
         plate: (f32, f32),
         rain: Option<(u64, f32)>,
@@ -1149,6 +1150,12 @@ impl GridTarget {
                 self.rt
                     .PushAxisAlignedClip(&screen, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
                 self.sky(gpu, sky, frame.background, header.accent, &screen);
+                self.rt.PopAxisAlignedClip();
+            }
+            if let Some(s) = start {
+                self.rt
+                    .PushAxisAlignedClip(&screen, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                crate::new_tab::draw(&self.rt, &self.brush, gpu, s);
                 self.rt.PopAxisAlignedClip();
             }
             self.glass(&screen, header);

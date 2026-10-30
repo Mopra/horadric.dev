@@ -93,6 +93,7 @@ use crate::keys::{
 use crate::layout::Dir;
 use crate::links::{self, Target};
 use crate::motion::{self, REVEAL, SPOTLIGHT};
+use crate::new_tab;
 use crate::paste::{self, Source};
 use crate::sanctuary;
 use crate::sparks::{self, Fx, Glass, Seen};
@@ -309,6 +310,10 @@ pub struct Pane {
     fx_beat: Cell<Option<Duration>>,
     /// When a key last went to the program, so the cursor glides after it.
     keyed: Cell<Option<Instant>>,
+    /// On a browser pane's start page: the page listed under the mouse,
+    /// and the one the arrow keys are on.
+    start_hover: Cell<Option<usize>>,
+    start_pick: Cell<Option<usize>>,
 }
 
 /// The keys that make no character, which `WM_CHAR` never carries.
@@ -399,6 +404,8 @@ impl Pane {
             glass_fx: RefCell::new(Glass::default()),
             fx_beat: Cell::new(None),
             keyed: Cell::new(None),
+            start_hover: Cell::new(None),
+            start_pick: Cell::new(None),
         });
         // A browser pane's page is a window inside it, which its own
         // drawing must leave alone.
@@ -669,11 +676,124 @@ impl Pane {
     }
 
     pub fn focus(&self) {
+        // A start page's field takes the keyboard, never its hidden page.
+        if self.start_key().is_some() {
+            if self.address.borrow().is_none() {
+                self.edit_address();
+            } else {
+                unsafe {
+                    let _ = SetFocus(Some(self.hwnd));
+                }
+            }
+            return;
+        }
+        self.focus_page();
+    }
+
+    fn focus_page(&self) {
         unsafe {
             let _ = SetFocus(Some(self.hwnd));
         }
         if let Some(key) = &self.console.web {
             web::focus(key);
+        }
+    }
+
+    /// The project, while this browser pane shows its start page.
+    fn start_key(&self) -> Option<&str> {
+        self.console.web.as_deref().filter(|k| web::shows_start(k))
+    }
+
+    /// Where the start page puts its parts, and the pages it lists, while
+    /// it is shown.
+    fn start_page(&self) -> Option<(new_tab::Layout, Vec<(String, String)>)> {
+        let rows = web::recent(self.start_key()?, new_tab::ROWS);
+        let l = new_tab::layout(self.page_glass(), rows.len());
+        Some((l, rows))
+    }
+
+    /// The arrow keys on the start page walk its list, the field showing
+    /// the address of the page they are on, or what was typed past either
+    /// end.
+    fn start_step(&self, by: i32) -> bool {
+        let Some((l, rows)) = self.start_page() else {
+            return false;
+        };
+        let n = l.rows.len() as i32;
+        if n == 0 {
+            return false;
+        }
+        let next = self.start_pick.get().map_or(-1, |i| i as i32) + by;
+        let pick = match next {
+            i if i < -1 => Some(n as usize - 1),
+            i if i >= n || i == -1 => None,
+            i => Some(i as usize),
+        };
+        self.start_pick.set(pick);
+        let text = match pick {
+            Some(i) => rows[i].1.clone(),
+            None => self.typed.borrow().clone(),
+        };
+        if let Some(f) = self.address.borrow_mut().as_mut() {
+            *f = Field::new(&text, false, MAX_ADDRESS);
+            f.anchor = f.caret;
+        }
+        self.invalidate();
+        true
+    }
+
+    /// A press on the start page's glass: a page listed opens in the tab,
+    /// a press in the field places the caret, and anywhere else the field
+    /// keeps the keyboard. False off the start page.
+    fn on_start(&self, lparam: LPARAM, double: bool) -> bool {
+        let Some((l, rows)) = self.start_page() else {
+            return false;
+        };
+        let (x, y) = self.dip(lparam);
+        if y < self.page_glass()[1] {
+            return false;
+        }
+        if let (Some(i), Some(key)) = (new_tab::row_at(&l, x, y), &self.console.web) {
+            self.address.take();
+            self.start_pick.set(None);
+            self.start_hover.set(None);
+            web::open(key, Some(&rows[i].1));
+            self.focus_page();
+            self.invalidate();
+            return true;
+        }
+        if new_tab::in_field(&l, x, y) && self.address.borrow().is_some() {
+            if let Some(f) = self.address.borrow_mut().as_mut() {
+                if double {
+                    f.select_all();
+                } else {
+                    let caret = field::utf16_at(&f.text, f.caret);
+                    let at = new_tab::offset_at(&self.shared.gpu, &l, &f.text, caret, x);
+                    f.set_caret(field::byte_at(&f.text, at), Self::mods().shift);
+                }
+            }
+            unsafe {
+                let _ = SetFocus(Some(self.hwnd));
+            }
+            self.invalidate();
+            return true;
+        }
+        self.focus();
+        true
+    }
+
+    /// The page listed under the mouse on the start page, lit.
+    fn start_hover_at(&self, at: Option<LPARAM>) {
+        let row = at.and_then(|p| {
+            let (l, _) = self.start_page()?;
+            let (x, y) = self.dip(p);
+            new_tab::row_at(&l, x, y)
+        });
+        if self.start_hover.replace(row) != row {
+            if row.is_some() {
+                self.track();
+            }
+            self.invalidate();
         }
     }
 
@@ -952,6 +1072,12 @@ impl Pane {
             })
             .unwrap_or_default();
         let edit = self.address.borrow().clone();
+        // On the start page the field is on the glass, not in the header.
+        let start_key = self.start_key().map(str::to_string);
+        let (edit, start_edit) = match start_key {
+            Some(_) => (None, edit),
+            None => (edit, None),
+        };
         let shown = match &edit {
             Some(f) => f.text.clone(),
             None if detail == "about:blank" => String::new(),
@@ -1004,6 +1130,33 @@ impl Pane {
                     .filter(|_| !web::is_popped(key)),
                 popped: web::is_popped(key),
             }
+        });
+        let start_rows: Vec<new_tab::Row> = start_key
+            .as_deref()
+            .map(|k| {
+                web::recent(k, new_tab::ROWS)
+                    .iter()
+                    .map(|(title, url)| new_tab::Row::new(title, url))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let start = start_key.as_ref().map(|_| new_tab::Start {
+            layout: new_tab::layout(self.page_glass(), start_rows.len()),
+            text: start_edit.as_ref().map_or("", |f| f.text.as_str()),
+            edit: start_edit.as_ref().map(|f| {
+                let (a, b) = f.selection();
+                BarEdit {
+                    caret: field::utf16_at(&f.text, f.caret),
+                    selection: (field::utf16_at(&f.text, a), field::utf16_at(&f.text, b)),
+                }
+            }),
+            rows: &start_rows,
+            lit: self
+                .start_pick
+                .get()
+                .filter(|_| start_edit.is_some())
+                .or(self.start_hover.get()),
+            accent: self.accent.get(),
         });
         let sized = self.page_fit().and_then(|(fit, size)| Some((fit, size?)));
         let label = sized.map(|(fit, size)| viewport::label(size, fit.zoom));
@@ -1139,6 +1292,7 @@ impl Pane {
                 &header,
                 find.as_ref(),
                 page.as_ref(),
+                start.as_ref(),
                 veil,
                 plate,
                 rain,
@@ -2222,6 +2376,7 @@ impl Pane {
                     .unwrap_or_default();
                 *slot = Some(Field::new(&url, false, MAX_ADDRESS));
                 drop(slot);
+                self.start_pick.set(None);
                 // A new tab lists the latest sites before anything is typed.
                 if url.is_empty() {
                     self.suggest_for("");
@@ -2238,6 +2393,15 @@ impl Pane {
     /// the list when none do.
     fn suggest_for(&self, typed: &str) {
         *self.typed.borrow_mut() = typed.to_string();
+        // The start page lists its project's pages itself while nothing is
+        // typed, and typing leaves its list.
+        if self.start_key().is_some() {
+            self.start_pick.set(None);
+            if typed.trim().is_empty() {
+                self.suggest.take();
+                return;
+            }
+        }
         let rows = web::suggestions(typed, suggest::MAX_ROWS);
         let mut slot = self.suggest.borrow_mut();
         let kept = slot.as_ref().is_some_and(|s| s.set_rows(rows.clone()));
@@ -2249,8 +2413,19 @@ impl Pane {
     /// Where the suggestions hang, under the address field: its left edge
     /// and the header's bottom on screen, and its width, in pixels.
     fn suggest_at(&self) -> (i32, i32, i32) {
-        let l = self.bar_layout();
         let s = self.dpi_now() as f32 / 96.0;
+        if let Some((l, _)) = self.start_page() {
+            let [left, _, right, bottom] = l.field;
+            let mut p = POINT {
+                x: ((left + 12.0) * s).round() as i32,
+                y: ((bottom + 2.0) * s).round() as i32,
+            };
+            unsafe {
+                let _ = ClientToScreen(self.hwnd, &mut p);
+            }
+            return (p.x, p.y, ((right - left - 24.0).max(0.0) * s).round() as i32);
+        }
+        let l = self.bar_layout();
         let mut p = POINT {
             x: (l.field.0 * s).round() as i32,
             y: (HEADER_H * s).round() as i32,
@@ -2348,12 +2523,17 @@ impl Pane {
             return;
         };
         self.invalidate();
+        // Nothing to go to on the start page: the field keeps the keyboard.
+        if go && self.start_key().is_some() && web::address(&f.text).is_none() {
+            *self.address.borrow_mut() = Some(f);
+            return;
+        }
         if let (true, Some(key)) = (go, &self.console.web) {
             if let Some(url) = web::address(&f.text) {
                 web::open(key, Some(&url));
             }
         }
-        self.focus();
+        self.focus_page();
     }
 
     /// A key while the address field has the keyboard. False for what it
@@ -2377,6 +2557,12 @@ impl Pane {
                 self.suggest.take();
                 return true;
             }
+            // The start page has no page to go back to: Esc empties the
+            // field instead.
+            VK_ESCAPE if self.start_key().is_some() => {
+                *f = Field::new("", false, MAX_ADDRESS);
+                edited = true;
+            }
             VK_RETURN | VK_ESCAPE => {
                 drop(slot);
                 self.drop_char();
@@ -2387,7 +2573,7 @@ impl Pane {
                 drop(slot);
                 self.drop_char();
                 let by = if vk == VK_UP { -1 } else { 1 };
-                if !self.suggest_step(by) {
+                if !self.suggest_step(by) && !self.start_step(by) {
                     // Down with no list open lists what fits the field.
                     let text = self.address.borrow().as_ref().map(|f| f.text.clone());
                     if let (Some(t), false) = (text, vk == VK_UP) {
@@ -3047,6 +3233,19 @@ impl Pane {
                         SetCursor(LoadCursorW(None, IDC_HAND).ok());
                     }
                     Some(LRESULT(1))
+                } else if let Some((l, _)) = self.start_page() {
+                    let (x, y) = self.dip(at);
+                    let cursor = if new_tab::row_at(&l, x, y).is_some() {
+                        IDC_HAND
+                    } else if new_tab::in_field(&l, x, y) {
+                        IDC_IBEAM
+                    } else {
+                        IDC_ARROW
+                    };
+                    unsafe {
+                        SetCursor(LoadCursorW(None, cursor).ok());
+                    }
+                    Some(LRESULT(1))
                 } else if let Some(key) = &self.console.sky {
                     let cursor = if sanctuary::dragging(key) {
                         IDC_SIZEALL
@@ -3128,6 +3327,9 @@ impl Pane {
                 if self.on_tabs(lparam, false) {
                     return Some(LRESULT(0));
                 }
+                if self.on_start(lparam, msg == WM_LBUTTONDBLCLK) {
+                    return Some(LRESULT(0));
+                }
                 if let (Some(grip), Some(key)) = (self.grip_at(lparam), &self.console.web) {
                     if let (Some((fit, _)), Some(size)) = (self.page_fit(), web::size(key)) {
                         self.resizing.set(Some(Resize {
@@ -3182,6 +3384,7 @@ impl Pane {
                 self.tracking.set(false);
                 tip::away(self.hwnd);
                 self.hover(None);
+                self.start_hover_at(None);
                 if let Some(key) = &self.console.sky {
                     if sanctuary::hover(key, None) {
                         self.invalidate();
@@ -3231,6 +3434,7 @@ impl Pane {
                 Some(LRESULT(0))
             }
             WM_MOUSEMOVE => {
+                self.start_hover_at(Some(lparam));
                 let line = (!self.selecting.get())
                     .then(|| self.tip_at(lparam))
                     .flatten();
