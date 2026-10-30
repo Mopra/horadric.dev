@@ -1,10 +1,24 @@
 # The hirelings: seeing subagents work
 
-Proposed 2026-10-30. A session that sends out subagents should show
-them the way Claude Code's agent panel does, and better: each one at a
-glance on the tile, a row per subagent on the stage you can step into
-and read live, and one view that shows the whole run over time. Named
-for the hirelings of Act II, who fight beside you on your errand.
+Proposed and built 2026-10-30: the band in `horadric-core/src/hireling.rs`,
+the runes on the tile in `render.rs`, the retinue and the war table in
+`horadric-ui/src/retinue.rs`, a hireling's pane in `folio/watch.rs`. What
+is left is below; the research and the design follow it for the why.
+
+## Left to do
+
+- **Keys into the retinue.** Alt+Down to the first row, arrows between
+  them, Enter to open. Only the mouse opens one now.
+- **The count on the tile opens the war table.** Now only Ctrl+Shift+W in
+  the pane or the link in the retinue's heading do.
+- **Hovering a tick** on the war table for its tool and what it was
+  given. A row's hover says only the hireling's summary.
+- **Checked on screen.** The runes' size on the lamp, the strip's columns
+  in a narrow pane, the table with ten tracks.
+- `SubagentStart` and `SubagentStop` reach the settings on the next
+  install, not from a dev instance, which refuses hook changes. Until
+  then the band hears the mod and the tools' `agent_id`.
+- The open questions at the end.
 
 ## What the others do
 
