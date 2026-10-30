@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::time::{Duration, Instant};
 
 use horadric_core::folio::{Block, Ending, Lane, Step, StepState, TodoStatus};
 use windows::core::Interface;
@@ -19,12 +20,13 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1Bitmap, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE,
 };
 use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_TRAILING;
+use windows::Win32::UI::WindowsAndMessaging::SetTimer;
 use windows_numerics::Vector2;
 
 use super::cards;
 use super::flow::{self, Pos, Pos2};
 use super::rich::{self, Ctx, Fonts, Scene, F, MONO_LINE};
-use super::view::{d2d, text_format, Gfx, Hit, Palette, View, CARET_W, FONT};
+use super::view::{self, d2d, text_format, Gfx, Hit, Palette, View, CARET_W, FONT};
 use super::Chat;
 use crate::field::Field;
 use crate::folio_look::{self as look, RunState};
@@ -58,6 +60,9 @@ const FIND_W: f32 = 320.0;
 /// About how many blocks a transcript shows, and lays out, at a time; the
 /// rest wait behind "Show earlier messages".
 pub(super) const SHOWN: usize = 300;
+/// How long the column's width must hold before the conversation is laid
+/// out at it again.
+const SETTLE_AFTER: Duration = Duration::from_millis(120);
 /// Room for that line at the top.
 const EARLIER_H: f32 = 30.0;
 
@@ -186,8 +191,13 @@ type Thumbs = HashMap<(usize, usize), Option<(ID2D1Bitmap, u32, u32)>>;
 /// What is kept between frames for drawing.
 #[derive(Default)]
 pub(super) struct Cache {
-    /// The render target, width and colours the scenes were built for.
-    made_for: (usize, u32, [u32; 2]),
+    /// The render target and colours the scenes were built for.
+    made_for: (usize, [u32; 2]),
+    /// The column width the scenes were built at, and the last one asked
+    /// for with when it changed, to tell a drag from a settled size.
+    built_w: f32,
+    asked_w: f32,
+    asked_at: Option<Instant>,
     fonts: Option<Fonts>,
     brushes: RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
     blocks: Vec<Option<Built>>,
@@ -995,6 +1005,32 @@ impl Ctx<'_> {
 }
 
 impl View {
+    /// The width to lay the conversation out at. A new width lays out
+    /// every block shown again, which on a long chat takes far longer than
+    /// a frame, and a seam or window edge being dragged asks for a new one
+    /// at every step. So while the width keeps changing the blocks keep
+    /// the one they were built at, and are built again once it holds.
+    unsafe fn layout_width(&self, cache: &mut Cache, cw: f32) -> f32 {
+        let now = Instant::now();
+        if cache.asked_w.to_bits() != cw.to_bits() {
+            cache.asked_w = cw;
+            cache.asked_at = Some(now);
+        }
+        if cache.built_w.to_bits() == cw.to_bits() {
+            return cw;
+        }
+        let built = cache.blocks.iter().any(Option::is_some);
+        let held = cache.asked_at.map_or(SETTLE_AFTER, |t| now.duration_since(t));
+        if built && held < SETTLE_AFTER {
+            let wait = (SETTLE_AFTER - held).as_millis() as u32 + 1;
+            SetTimer(Some(self.hwnd()), view::SETTLE, wait, None);
+            return cache.built_w;
+        }
+        cache.blocks.clear();
+        cache.built_w = cw;
+        cw
+    }
+
     /// The conversation in `area`, above the composer: built where it
     /// changed, measured, scrolled to follow the end or kept in bounds,
     /// then drawn where it is in view.
@@ -1013,14 +1049,9 @@ impl View {
         let rt = &gfx.rt;
         let Ui { state: st, cache } = &mut chat.tr;
         super::select::refind_in(st, cache);
-        let made_for = (
-            rt.as_raw() as usize,
-            cw.to_bits(),
-            [key_of(pal.fg), key_of(pal.accent)],
-        );
+        let made_for = (rt.as_raw() as usize, [key_of(pal.fg), key_of(pal.accent)]);
         if cache.made_for != made_for {
-            // Brushes and bitmaps belong to a render target, and every
-            // layout to a width.
+            // Brushes and bitmaps belong to a render target.
             let fonts = cache.fonts.take();
             *cache = Cache {
                 made_for,
@@ -1028,6 +1059,7 @@ impl View {
                 ..Cache::default()
             };
         }
+        let lw = self.layout_width(cache, cw);
         if cache.fonts.is_none() {
             cache.fonts = Fonts::new(&self.shared.gpu).ok();
         }
@@ -1094,22 +1126,22 @@ impl View {
             let old = blocks[i].take().map(|b| b.paras).unwrap_or_default();
             let mut paras = Vec::new();
             let scene = match b {
-                Block::Prompt(t) => ctx.prompt(t, cw),
-                Block::Images(v) => ctx.images(i, v, thumbs, cw),
+                Block::Prompt(t) => ctx.prompt(t, lw),
+                Block::Images(v) => ctx.images(i, v, thumbs, lw),
                 Block::Reply(t) if t.trim().is_empty() => Scene::default(),
                 Block::Reply(t) => {
-                    let (s, p) = ctx.reply(t, cw, old);
+                    let (s, p) = ctx.reply(t, lw, old);
                     paras = p;
                     s
                 }
-                Block::Thinking(t) => ctx.thinking(i, t, open, cw),
-                Block::Tools(steps) => ctx.tools(i, steps, open, st, cw),
-                Block::Ask { .. } => cards::ask(&ctx, b, st, cw),
-                Block::Question { .. } => cards::question(&ctx, b, st, cw),
-                Block::Plan { .. } => cards::plan(&ctx, b, st, cw),
-                Block::Footer { .. } => ctx.footer(b, cw),
-                Block::Notice(n) => ctx.notice(n, cw),
-                Block::Raw(t) => ctx.raw(i, t, open, cw),
+                Block::Thinking(t) => ctx.thinking(i, t, open, lw),
+                Block::Tools(steps) => ctx.tools(i, steps, open, st, lw),
+                Block::Ask { .. } => cards::ask(&ctx, b, st, lw),
+                Block::Question { .. } => cards::question(&ctx, b, st, lw),
+                Block::Plan { .. } => cards::plan(&ctx, b, st, lw),
+                Block::Footer { .. } => ctx.footer(b, lw),
+                Block::Notice(n) => ctx.notice(n, lw),
+                Block::Raw(t) => ctx.raw(i, t, open, lw),
             };
             blocks[i] = Some(Built {
                 stamp,

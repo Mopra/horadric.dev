@@ -60,6 +60,9 @@ const CLASS: PCWSTR = w!("HoradricFolio");
 const TICK: usize = 1;
 /// Turns the caret on or off, at the system's blink rate.
 const BLINK: usize = 2;
+/// Lays the conversation out again once its width stops changing. See
+/// [`transcript`](super::transcript) for why it waits.
+pub(super) const SETTLE: usize = 3;
 /// The caret in every field that can hold the keys.
 pub(super) const CARET_W: f32 = 1.5;
 /// Between frames while the background moves. It drifts slowly, so this is
@@ -1019,9 +1022,10 @@ impl View {
                 }
                 Some(LRESULT(0))
             }
-            WM_TIMER if wparam.0 == BLINK => {
+            WM_TIMER if wparam.0 == BLINK || wparam.0 == SETTLE => {
+                let id = wparam.0;
                 unsafe {
-                    let _ = KillTimer(Some(self.hwnd()), BLINK);
+                    let _ = KillTimer(Some(self.hwnd()), id);
                     let _ = InvalidateRect(Some(self.hwnd()), None, false);
                 }
                 Some(LRESULT(0))
