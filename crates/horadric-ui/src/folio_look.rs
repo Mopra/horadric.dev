@@ -106,6 +106,20 @@ pub const LAYERS: [Layer; 3] = [
     },
 ];
 
+/// The share of the screen a pane takes that still shows every rune: one
+/// of two side by side. Smaller panes show fewer, so a grid of four or six
+/// fields of runes reads as calm as one or two do, not as a swarm.
+const ROOMY: f32 = 0.4;
+
+/// Which embers of `l` a pane taking `share` of its screen shows, the
+/// first ones of the rest and the busy alike so a pane growing or
+/// shrinking only adds or drops a few.
+pub fn shown(l: &Layer, share: f32) -> impl Iterator<Item = usize> {
+    let k = (share / ROOMY).clamp(0.0, 1.0);
+    let n = |c: usize| (c as f32 * k).ceil() as usize;
+    (0..n(l.count)).chain(l.count..l.count + n(l.busy))
+}
+
 /// Where the column starts and how wide it is, in a view `width` wide.
 pub fn column(width: f32) -> (f32, f32) {
     let w = (width - 2.0 * COLUMN_MARGIN).clamp(0.0, COLUMN_MAX);
@@ -611,6 +625,16 @@ mod tests {
                 assert!(b.y < a.y || b.y > view.1);
             }
         }
+    }
+
+    #[test]
+    fn small_panes_show_fewer_runes() {
+        let l = &LAYERS[0];
+        assert_eq!(shown(l, 0.9).count(), l.count + l.busy);
+        assert_eq!(shown(l, ROOMY).count(), l.count + l.busy);
+        let quarter: Vec<_> = shown(l, 0.2).collect();
+        assert_eq!(quarter.len(), l.count / 2 + l.busy / 2);
+        assert!(quarter.contains(&l.count), "the busy ones still join");
     }
 
     #[test]
