@@ -37,6 +37,11 @@ Tests cannot tell you a window looks right. The loop that works:
    horadric-host* | ? Path -like '*\Horadric-dev\hosts\*' | Stop-Process
    -Force`. The installed Horadric's hosts are in `Horadric\hosts`; leave
    them alone, one of them runs you.
+   A test also leaves no tiles behind. Before starting the dev instance,
+   copy `%APPDATA%\Horadric-dev\state.json` to `state.json.before-test`.
+   When done, stop the dev instance and its hosts, then copy it back.
+   The human opens the dev instance too, and forty leftover test
+   projects bury what they came to look at.
 6. Screenshot the top right corner with PowerShell and `CopyFromScreen`, then
    read the image. For a window that is behind another, `PrintWindow` with
    flag 2 captures it anyway.
