@@ -183,183 +183,6 @@ const SKEUOMORPH: Palette = Palette {
     term_selection: Color::rgb(0x1E3A5C),
 };
 
-/// Flat design, the Swiss way: white paper, no light and no depth, every
-/// edge said by a change of tone alone, and lamps in strong pure colour.
-const FLAT: Palette = Palette {
-    window_bg: Color::rgb(0xF4F5F7),
-    plate_top: Color::rgb(0xF4F5F7),
-    plate_bottom: Color::rgb(0xF4F5F7),
-    surface: Color::rgb(0xFFFFFF),
-    well: Color::rgb(0xE3E6EB),
-    screen: Color::rgb(0xFFFFFF),
-    lamp_off: Color::rgb(0xD5D9E0),
-    text: Color::rgb(0x111318),
-    text_dim: Color::rgb(0x5B6270),
-    legend: Color::rgb(0x7A818E),
-    cast: BLACK.with_alpha(0.0),
-    bevel_light: WHITE.with_alpha(0.0),
-    bevel_shade: BLACK.with_alpha(0.0),
-    hollow_shade: BLACK.with_alpha(0.0),
-    hollow_light: WHITE.with_alpha(0.0),
-    engrave_dark: BLACK.with_alpha(0.1),
-    engrave_light: WHITE.with_alpha(0.0),
-    hover_fill: BLACK.with_alpha(0.06),
-    press_fill: BLACK.with_alpha(0.03),
-    working: Color::rgb(0x0A6CFF),
-    waiting: Color::rgb(0xF08C00),
-    error: Color::rgb(0xE5243B),
-    done: Color::rgb(0x0E9F5A),
-    idle: Color::rgb(0x8A8F9C),
-    quest: Color::rgb(0xD9A400),
-    warriv: Color::rgb(0xA8801C),
-    git_modified: Color::rgb(0x895503),
-    git_added: Color::rgb(0x587C0C),
-    git_untracked: Color::rgb(0x007100),
-    git_deleted: Color::rgb(0xAD0707),
-    git_conflict: Color::rgb(0x6C6CC4),
-    magic: Color::rgb(0x3F44D6),
-    rare: Color::rgb(0x9A7A00),
-    set: Color::rgb(0x2F7D14),
-    unique: Color::rgb(0xA0522D),
-    term_bg: Color::rgb(0x111318),
-    term_fg: Color::rgb(0xECEEF2),
-    term_cursor: Color::rgb(0xFFFFFF),
-    term_selection: Color::rgb(0x1D3D6E),
-};
-
-/// Neumorphism, soft UI: one grey clay for plate and keys alike, every
-/// shape pressed out of it or into it by a pale light from the top left
-/// and a soft shade under it. No colour but the lamps.
-const NEUMORPH: Palette = Palette {
-    window_bg: Color::rgb(0xE4E8EE),
-    plate_top: Color::rgb(0xE7EBF1),
-    plate_bottom: Color::rgb(0xE0E5EC),
-    surface: Color::rgb(0xE6EAF0),
-    well: Color::rgb(0xD9DEE6),
-    screen: Color::rgb(0xDDE2E9),
-    lamp_off: Color::rgb(0xC9D0DA),
-    text: Color::rgb(0x3B4454),
-    text_dim: Color::rgb(0x6F7889),
-    legend: Color::rgb(0x8A93A3),
-    cast: Color::rgb(0x8B9AB2).with_alpha(0.5),
-    bevel_light: WHITE.with_alpha(0.95),
-    bevel_shade: Color::rgb(0x8B9AB2).with_alpha(0.35),
-    hollow_shade: Color::rgb(0x8B9AB2).with_alpha(0.45),
-    hollow_light: WHITE.with_alpha(0.9),
-    engrave_dark: Color::rgb(0x8B9AB2).with_alpha(0.35),
-    engrave_light: WHITE.with_alpha(0.9),
-    hover_fill: WHITE.with_alpha(0.45),
-    press_fill: Color::rgb(0x8B9AB2).with_alpha(0.12),
-    working: Color::rgb(0x4A7CF0),
-    waiting: Color::rgb(0xE8930C),
-    error: Color::rgb(0xE5485F),
-    done: Color::rgb(0x23A876),
-    idle: Color::rgb(0x9AA2B1),
-    quest: Color::rgb(0xC99A00),
-    warriv: Color::rgb(0xA07A1E),
-    git_modified: Color::rgb(0x895503),
-    git_added: Color::rgb(0x587C0C),
-    git_untracked: Color::rgb(0x007100),
-    git_deleted: Color::rgb(0xAD0707),
-    git_conflict: Color::rgb(0x6C6CC4),
-    magic: Color::rgb(0x4247C9),
-    rare: Color::rgb(0x8F7400),
-    set: Color::rgb(0x3B7F24),
-    unique: Color::rgb(0xA0522D),
-    term_bg: Color::rgb(0x2A303B),
-    term_fg: Color::rgb(0xE6EAF0),
-    term_cursor: Color::rgb(0xFFFFFF),
-    term_selection: Color::rgb(0x46546E),
-};
-
-/// Brutalism: the raw material and nothing to soften it. Pure black, pure
-/// white, hard grooves, no gradient, and lamps at full saturation.
-const BRUTAL: Palette = Palette {
-    window_bg: Color::rgb(0x000000),
-    plate_top: Color::rgb(0x000000),
-    plate_bottom: Color::rgb(0x000000),
-    surface: Color::rgb(0x1A1A1A),
-    well: Color::rgb(0x000000),
-    screen: Color::rgb(0x000000),
-    lamp_off: Color::rgb(0x333333),
-    text: Color::rgb(0xFFFFFF),
-    text_dim: Color::rgb(0xB0B0B0),
-    legend: Color::rgb(0x8C8C8C),
-    cast: BLACK.with_alpha(0.0),
-    bevel_light: WHITE.with_alpha(0.35),
-    bevel_shade: BLACK.with_alpha(0.0),
-    hollow_shade: BLACK.with_alpha(0.0),
-    hollow_light: WHITE.with_alpha(0.35),
-    engrave_dark: WHITE.with_alpha(0.3),
-    engrave_light: WHITE.with_alpha(0.0),
-    hover_fill: WHITE.with_alpha(0.14),
-    press_fill: WHITE.with_alpha(0.07),
-    working: Color::rgb(0x00A3FF),
-    waiting: Color::rgb(0xFFE600),
-    error: Color::rgb(0xFF1F1F),
-    done: Color::rgb(0x00FF66),
-    idle: Color::rgb(0x8C8C8C),
-    quest: Color::rgb(0xFF9900),
-    warriv: Color::rgb(0xC8A050),
-    git_modified: Color::rgb(0xE2C08D),
-    git_added: Color::rgb(0x81B88B),
-    git_untracked: Color::rgb(0x73C991),
-    git_deleted: Color::rgb(0xC74E39),
-    git_conflict: Color::rgb(0xE4676B),
-    magic: Color::rgb(0x8A8CFF),
-    rare: Color::rgb(0xFFF59A),
-    set: Color::rgb(0x9BE06A),
-    unique: Color::rgb(0xD9A35B),
-    term_bg: Color::rgb(0x000000),
-    term_fg: Color::rgb(0xFFFFFF),
-    term_cursor: Color::rgb(0xFFFFFF),
-    term_selection: Color::rgb(0x2A2A2A),
-};
-
-/// Glassmorphism: frosted panes over a deep night sky, their faces a pale
-/// wash of the light behind them, with bright rims where the glass is cut.
-const GLASS: Palette = Palette {
-    window_bg: Color::rgb(0x111A33),
-    plate_top: Color::rgb(0x18234A),
-    plate_bottom: Color::rgb(0x0D1328),
-    surface: Color::rgb(0x26335C),
-    well: Color::rgb(0x0B1124),
-    screen: Color::rgb(0x0A1020),
-    lamp_off: Color::rgb(0x34416B),
-    text: Color::rgb(0xF0F4FF),
-    text_dim: Color::rgb(0xA3B0D6),
-    legend: Color::rgb(0x7F8DB8),
-    cast: Color::rgb(0x02040C).with_alpha(0.55),
-    bevel_light: WHITE.with_alpha(0.28),
-    bevel_shade: WHITE.with_alpha(0.04),
-    hollow_shade: BLACK.with_alpha(0.4),
-    hollow_light: WHITE.with_alpha(0.14),
-    engrave_dark: WHITE.with_alpha(0.08),
-    engrave_light: WHITE.with_alpha(0.08),
-    hover_fill: WHITE.with_alpha(0.1),
-    press_fill: WHITE.with_alpha(0.05),
-    working: Color::rgb(0x5CD0FF),
-    waiting: Color::rgb(0xFFB547),
-    error: Color::rgb(0xFF6B81),
-    done: Color::rgb(0x4CE6A8),
-    idle: Color::rgb(0x8890B5),
-    quest: Color::rgb(0xFFD84D),
-    warriv: Color::rgb(0xD8B870),
-    git_modified: Color::rgb(0xE2C08D),
-    git_added: Color::rgb(0x81B88B),
-    git_untracked: Color::rgb(0x73C991),
-    git_deleted: Color::rgb(0xC74E39),
-    git_conflict: Color::rgb(0xE4676B),
-    magic: Color::rgb(0xA9AAFF),
-    rare: Color::rgb(0xF2E27A),
-    set: Color::rgb(0xA6E07A),
-    unique: Color::rgb(0xD8B57A),
-    term_bg: Color::rgb(0x0A1020),
-    term_fg: Color::rgb(0xF0F4FF),
-    term_cursor: Color::rgb(0xFFFFFF),
-    term_selection: Color::rgb(0x2B4580),
-};
-
 /// Winamp's classic skin: brushed grey-blue chrome with hard bevels like
 /// a Windows 95 button, a black LCD with green text, a gold title bar for
 /// the legends, and lamps in the colours of the spectrum analyser.
@@ -455,21 +278,13 @@ const MATRIX: Palette = Palette {
 pub enum Theme {
     #[default]
     Skeuomorph,
-    Flat,
-    Neumorph,
-    Brutal,
-    Glass,
     Winamp,
     Matrix,
 }
 
 impl Theme {
-    pub const ALL: [Theme; 7] = [
+    pub const ALL: [Theme; 3] = [
         Theme::Skeuomorph,
-        Theme::Flat,
-        Theme::Neumorph,
-        Theme::Brutal,
-        Theme::Glass,
         Theme::Winamp,
         Theme::Matrix,
     ];
@@ -477,10 +292,6 @@ impl Theme {
     pub fn palette(self) -> &'static Palette {
         match self {
             Theme::Skeuomorph => &SKEUOMORPH,
-            Theme::Flat => &FLAT,
-            Theme::Neumorph => &NEUMORPH,
-            Theme::Brutal => &BRUTAL,
-            Theme::Glass => &GLASS,
             Theme::Winamp => &WINAMP,
             Theme::Matrix => &MATRIX,
         }
@@ -490,10 +301,6 @@ impl Theme {
     pub fn label(self) -> &'static str {
         match self {
             Theme::Skeuomorph => "Skeuomorphism",
-            Theme::Flat => "Flat",
-            Theme::Neumorph => "Neumorphism",
-            Theme::Brutal => "Brutalism",
-            Theme::Glass => "Glass",
             Theme::Winamp => "Winamp",
             Theme::Matrix => "The Matrix",
         }
@@ -503,10 +310,6 @@ impl Theme {
     pub fn key(self) -> &'static str {
         match self {
             Theme::Skeuomorph => "skeuomorph",
-            Theme::Flat => "flat",
-            Theme::Neumorph => "neumorph",
-            Theme::Brutal => "brutal",
-            Theme::Glass => "glass",
             Theme::Winamp => "winamp",
             Theme::Matrix => "matrix",
         }
@@ -971,7 +774,8 @@ mod tests {
         assert_eq!(Theme::Skeuomorph.saved(), None);
         assert_eq!(Theme::from_key(None), Theme::Skeuomorph);
         assert_eq!(Theme::from_key(Some("vaporwave")), Theme::Skeuomorph);
-        assert_eq!(Theme::from_key(Some("glass")), Theme::Glass);
+        assert_eq!(Theme::from_key(Some("glass")), Theme::Skeuomorph);
+        assert_eq!(Theme::from_key(Some("winamp")), Theme::Winamp);
     }
 
     #[test]
