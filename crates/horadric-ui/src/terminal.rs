@@ -683,12 +683,9 @@ impl TerminalWindow {
             }
             return;
         }
+        // No fade in: a revealed pane's glass starts as the background,
+        // which flashed between the dark plate and the dark glass.
         self.layout();
-        for p in self.panes.borrow().iter() {
-            if unsafe { IsWindowVisible(p.hwnd) }.as_bool() {
-                p.reveal();
-            }
-        }
         // The keyboard went to a hidden pane, which a page does not take.
         if self.is_foreground() {
             self.focus_active();
@@ -1063,26 +1060,32 @@ impl TerminalWindow {
             let hdc = BeginPaint(self.hwnd, &mut ps);
             let mut r = RECT::default();
             let _ = GetClientRect(self.hwnd, &mut r);
-            // A growing pane's plate over the others', each cut out of what
-            // is painted after it, so no pixel is painted twice.
+            // A growing pane's glass over the others', each cut out of what
+            // is painted after it, so no pixel is painted twice. Only the
+            // glass: the pane's bezel and header are the faceplate's colour,
+            // so filling the whole pane drew it a bezel wider than it lands.
             if let Some(g) = self.growth.borrow().as_ref() {
-                let edge = theme::window_bg().mix(theme::accent(&self.project.borrow()), 0.35);
-                let edge = CreateSolidBrush(colorref(edge));
+                let px = |dip: f32| (dip * self.dpi() as f32 / 96.0).round() as i32;
+                let inset = [
+                    px(crate::glyphs::BEZEL),
+                    px(crate::glyphs::SCREEN_TOP),
+                    px(crate::glyphs::BEZEL),
+                    px(crate::glyphs::BEZEL),
+                ];
                 let plates = std::iter::once((g.now(), g.fill)).chain(g.rest.iter().copied());
-                for ([left, top, right, bottom], fill) in plates {
-                    let plate = RECT {
+                for (pane, fill) in plates {
+                    let [left, top, right, bottom] = motion::glass(pane, inset);
+                    let glass = RECT {
                         left,
                         top,
                         right,
                         bottom,
                     };
                     let brush = CreateSolidBrush(colorref(fill));
-                    FillRect(hdc, &plate, brush);
-                    FrameRect(hdc, &plate, edge);
+                    FillRect(hdc, &glass, brush);
                     let _ = DeleteObject(brush.into());
                     ExcludeClipRect(hdc, left, top, right, bottom);
                 }
-                let _ = DeleteObject(edge.into());
             }
             let verts = [
                 vertex(0, 0, theme::plate_top()),

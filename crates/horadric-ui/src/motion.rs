@@ -39,7 +39,7 @@ pub const REVEAL: Duration = Duration::from_millis(220);
 /// The panes without the keyboard dimming back.
 pub const SPOTLIGHT: Duration = Duration::from_millis(160);
 /// A stage pane growing out to fill the stage, or back into its cell.
-pub const GROW: Duration = Duration::from_millis(180);
+pub const GROW: Duration = Duration::from_millis(300);
 
 /// A cursor blinks this long after it last moved, then stays lit. Blinking
 /// on would repaint an idle pane twice a second for no one.
@@ -94,6 +94,19 @@ pub fn ease_out(t: f32) -> f32 {
 pub fn grow(from: [i32; 4], to: [i32; 4], elapsed: Duration, length: Duration) -> [i32; 4] {
     let t = ease_out(progress(elapsed, length));
     std::array::from_fn(|i| from[i] + ((to[i] - from[i]) as f32 * t).round() as i32)
+}
+
+/// The glass inside a pane's rect, `inset` in from each edge as left, top,
+/// right, bottom, never turned inside out.
+pub fn glass(pane: [i32; 4], inset: [i32; 4]) -> [i32; 4] {
+    let left = pane[0] + inset[0];
+    let top = pane[1] + inset[1];
+    [
+        left,
+        top,
+        (pane[2] - inset[2]).max(left),
+        (pane[3] - inset[3]).max(top),
+    ]
 }
 
 /// A finished turn's key jumping and settling.
@@ -603,5 +616,27 @@ mod tests {
         let mid = grow(cell, full, GROW / 2, GROW);
         assert!(mid[2] > 650 && mid[2] < 1000, "{mid:?}");
         assert!(mid[0] < 50 && mid[0] > 0, "{mid:?}");
+    }
+
+    #[test]
+    fn a_growing_pane_never_passes_where_it_lands_either_way() {
+        let cell = [100, 100, 300, 200];
+        let full = [0, 0, 1000, 600];
+        let inside = |r: [i32; 4], o: [i32; 4]| {
+            r[0] >= o[0] && r[1] >= o[1] && r[2] <= o[2] && r[3] <= o[3]
+        };
+        for ms in 0..=400 {
+            let at = Duration::from_millis(ms);
+            let out = grow(cell, full, at, GROW);
+            assert!(inside(out, full) && inside(cell, out), "{ms} {out:?}");
+            let back = grow(full, cell, at, GROW);
+            assert!(inside(back, full) && inside(cell, back), "{ms} {back:?}");
+        }
+    }
+
+    #[test]
+    fn the_glass_sits_inside_the_pane_and_never_turns_inside_out() {
+        assert_eq!(glass([0, 0, 100, 80], [6, 26, 6, 6]), [6, 26, 94, 74]);
+        assert_eq!(glass([0, 0, 10, 10], [6, 26, 6, 6]), [6, 26, 6, 26]);
     }
 }
