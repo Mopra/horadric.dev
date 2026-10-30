@@ -15,6 +15,9 @@ pub const FILE: &str = "browser-history.json";
 /// The most pages kept. Past it the one longest unvisited goes.
 pub const KEEP: usize = 5000;
 
+/// The most pages a project's new tab lists as opened lately.
+pub const RECENT: usize = 12;
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct History {
     #[serde(default)]
@@ -23,6 +26,12 @@ pub struct History {
     /// at 100% has none.
     #[serde(default)]
     pub zooms: BTreeMap<String, f64>,
+    /// The pages each project's browser went to lately, by project, the
+    /// latest first and each once, for its new tab to list. The history
+    /// above is every project's, and a new tab in one project is not
+    /// about the sites another one works on.
+    #[serde(default)]
+    pub recent: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -94,11 +103,57 @@ impl History {
         }
     }
 
-    /// Takes a page out of the history.
+    /// Takes a page out of the history, and out of every project's list.
     pub fn forget(&mut self, url: &str) -> bool {
         let before = self.pages.len();
         self.pages.retain(|p| p.url != url);
-        self.pages.len() != before
+        let mut changed = self.pages.len() != before;
+        for list in self.recent.values_mut() {
+            let before = list.len();
+            list.retain(|u| u != url);
+            changed |= list.len() != before;
+        }
+        changed
+    }
+
+    /// The project's browser went to `url`: it heads the project's list,
+    /// once, and the oldest past [`RECENT`] goes. A search's results are
+    /// left out, since the page found is what is worth going back to.
+    /// False when nothing changed.
+    pub fn opened(&mut self, project: &str, url: &str) -> bool {
+        if !kept(url) || is_search(url) {
+            return false;
+        }
+        let url = without_fragment(url);
+        let list = self.recent.entry(project.to_string()).or_default();
+        if list.first().is_some_and(|u| u == url) {
+            return false;
+        }
+        list.retain(|u| u != url);
+        list.insert(0, url.to_string());
+        list.truncate(RECENT);
+        true
+    }
+
+    /// The pages the project's browser went to lately, the latest first,
+    /// at most `max`, each with the title the history has for it.
+    pub fn recent(&self, project: &str, max: usize) -> Vec<Page> {
+        let Some(list) = self.recent.get(project) else {
+            return Vec::new();
+        };
+        list.iter()
+            .take(max)
+            .map(|url| {
+                self.pages
+                    .iter()
+                    .find(|p| &p.url == url)
+                    .cloned()
+                    .unwrap_or_else(|| Page {
+                        url: url.clone(),
+                        ..Page::default()
+                    })
+            })
+            .collect()
     }
 
     /// The pages that fit what was typed, best first, at most `max`. Every
@@ -240,6 +295,19 @@ pub fn host(rest: &str) -> &str {
     rest.split(['/', '?', '#']).next().unwrap_or(rest)
 }
 
+/// Whether `url` is a search engine's page of results.
+fn is_search(url: &str) -> bool {
+    let h = host(url).to_ascii_lowercase();
+    let path = &after_scheme(url)[host(url).len()..];
+    let engine = h == "google.com"
+        || h.ends_with(".google.com")
+        || h.starts_with("google.")
+        || h.contains(".google.")
+        || h.ends_with("bing.com")
+        || h.ends_with("duckduckgo.com");
+    engine && (path.starts_with("/search") || path.starts_with("/?q=") || path.starts_with("/html"))
+}
+
 fn without_fragment(url: &str) -> &str {
     url.split_once('#').map_or(url, |(u, _)| u)
 }
@@ -272,7 +340,61 @@ mod tests {
                 })
                 .collect(),
             zooms: BTreeMap::new(),
+            recent: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn a_projects_recent_pages_are_the_latest_once_each() {
+        let mut h = History::default();
+        assert!(h.opened("p", "https://a.com/"));
+        assert!(h.opened("p", "https://b.com/x#part"));
+        // The same page again heads the list, not a second time.
+        assert!(h.opened("p", "https://a.com/"));
+        assert!(!h.opened("p", "https://a.com/#top"));
+        assert_eq!(h.recent["p"], ["https://a.com/", "https://b.com/x"]);
+        // Another project keeps a list of its own.
+        assert!(h.opened("q", "https://c.com/"));
+        assert_eq!(h.recent["p"].len(), 2);
+        assert_eq!(h.recent["q"], ["https://c.com/"]);
+    }
+
+    #[test]
+    fn a_projects_recent_list_keeps_only_the_latest() {
+        let mut h = History::default();
+        for i in 0..RECENT + 3 {
+            h.opened("p", &format!("https://a.com/{i}"));
+        }
+        let list = &h.recent["p"];
+        assert_eq!(list.len(), RECENT);
+        assert_eq!(list[0], format!("https://a.com/{}", RECENT + 2));
+        assert!(!list.contains(&"https://a.com/0".to_string()));
+    }
+
+    #[test]
+    fn blank_pages_and_searches_are_not_recent() {
+        let mut h = History::default();
+        assert!(!h.opened("p", "about:blank"));
+        assert!(!h.opened("p", "https://www.google.com/search?q=rust"));
+        assert!(!h.opened("p", "https://www.bing.com/search?q=rust"));
+        assert!(!h.opened("p", "https://duckduckgo.com/?q=rust"));
+        assert!(h.opened("p", "https://www.google.com/maps"));
+        assert!(h.opened("p", "https://example.com/search"));
+        assert_eq!(h.recent["p"].len(), 2);
+    }
+
+    #[test]
+    fn recent_pages_carry_their_titles_and_go_when_forgotten() {
+        let mut h = History::default();
+        h.visit("https://a.com/", "A", 1);
+        h.opened("p", "https://a.com/");
+        h.opened("p", "https://b.com/");
+        let titles: Vec<String> = h.recent("p", 8).into_iter().map(|p| p.title).collect();
+        assert_eq!(titles, ["", "A"]);
+        assert_eq!(h.recent("p", 1).len(), 1);
+        assert!(h.recent("none", 8).is_empty());
+        assert!(h.forget("https://b.com/"));
+        assert_eq!(h.recent["p"], ["https://a.com/"]);
     }
 
     #[test]
