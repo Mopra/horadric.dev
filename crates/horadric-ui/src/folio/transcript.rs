@@ -37,9 +37,11 @@ const GAP: f32 = 18.0;
 const LINE_H: f32 = 26.0;
 const STEP_H: f32 = 26.0;
 const FOOTER_H: f32 = 18.0;
-const BUBBLE_X: f32 = 16.0;
-const BUBBLE_Y: f32 = 11.0;
-const BUBBLE_SHARE: f32 = 0.82;
+/// A prompt sits this far in from the rule on its left, and its images
+/// with it.
+const PROMPT_IN: f32 = 14.0;
+/// The room above and below a prompt's text, so its rule overhangs it.
+const PROMPT_PAD: f32 = 3.0;
 /// How far a step's detail and a lane sit in from their line.
 const NEST: f32 = 22.0;
 /// Shell output shows its last lines until "show all".
@@ -329,7 +331,9 @@ fn gap_after(b: &Block) -> f32 {
     match b {
         Block::Footer { .. } => GAP + 16.0,
         Block::Thinking(_) | Block::Tools(_) | Block::Notice(_) | Block::Raw(_) => GAP / 2.0,
-        Block::Prompt(_) => GAP / 2.0,
+        // Now that the prompt and the reply share a left edge, the reply
+        // needs the full gap to read as a new voice.
+        Block::Prompt(_) => GAP,
         _ => GAP,
     }
 }
@@ -393,23 +397,25 @@ impl Ctx<'_> {
         );
     }
 
+    /// The human's turn, in the reply's own type rather than a chat
+    /// bubble: a thin rule in the project's colour down its left edge and
+    /// the text a touch toward that colour, so it reads as the other voice
+    /// without a plate to compete with the reply.
     unsafe fn prompt(&self, t: &str, cw: f32) -> Scene {
         let mut s = Scene::default();
-        let max = cw * BUBBLE_SHARE - 2.0 * BUBBLE_X;
-        let Some(l) = self.layout(&self.fonts.body, t, max) else {
+        let Some(l) = self.layout(&self.fonts.body, t, cw - PROMPT_IN) else {
             return s;
         };
-        let (tw, th) = render::text_size(&l);
-        let bw = tw.min(max) + 2.0 * BUBBLE_X;
-        let r = Rect::new(cw - bw, 0.0, bw, th + 2.0 * BUBBLE_Y);
+        let (_, th) = render::text_size(&l);
+        let h = th + 2.0 * PROMPT_PAD;
         s.fill(
-            r,
-            14.0,
-            self.pal.bg.mix(self.pal.accent, 0.2).mix(self.pal.fg, 0.04),
+            Rect::new(0.0, 0.0, 2.0, h),
+            1.0,
+            self.pal.accent.mix(self.pal.fg, 0.2).with_alpha(0.85),
         );
-        s.stroke(r, 14.0, self.pal.accent.with_alpha(0.28), 1.0);
-        s.unit(&l, r.x + BUBBLE_X, BUBBLE_Y, self.pal.fg, t);
-        s.h = r.h;
+        let ink = self.pal.fg.mix(self.pal.accent, 0.18);
+        s.unit(&l, PROMPT_IN, PROMPT_PAD, ink, t);
+        s.h = h;
         s
     }
 
@@ -435,11 +441,11 @@ impl Ctx<'_> {
                 }
             })
             .collect();
-        // Right aligned under the prompt, in rows.
+        // In line with the prompt's text, in rows.
         let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
         let mut used = 0.0;
         for (k, (w, _, _)) in sizes.iter().enumerate() {
-            if used + w > cw && !rows.last().is_some_and(Vec::is_empty) {
+            if used + w > cw - PROMPT_IN && !rows.last().is_some_and(Vec::is_empty) {
                 rows.push(Vec::new());
                 used = 0.0;
             }
@@ -450,8 +456,7 @@ impl Ctx<'_> {
         }
         let mut y = 4.0;
         for row in rows {
-            let width: f32 = row.iter().map(|&k| sizes[k].0 + 8.0).sum::<f32>() - 8.0;
-            let mut x = cw - width;
+            let mut x = PROMPT_IN;
             let mut rh: f32 = 0.0;
             for k in row {
                 let (w, h, b) = &sizes[k];
