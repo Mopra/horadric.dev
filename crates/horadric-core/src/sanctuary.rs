@@ -300,8 +300,8 @@ impl Layout {
         let tree = Tree::build(&self.moving, &self.pos);
         for &i in &self.moving {
             let f = tree.force(i, self.pos[i]);
-            for k in 0..3 {
-                self.vel[i][k] += f[k] * alpha - self.pos[i][k] * GRAVITY * alpha;
+            for (k, fk) in f.iter().enumerate() {
+                self.vel[i][k] += fk * alpha - self.pos[i][k] * GRAVITY * alpha;
             }
         }
         for &i in &self.moving {

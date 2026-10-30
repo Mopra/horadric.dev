@@ -587,7 +587,7 @@ pub fn lane(wakes: Vec<WarrivWake>) -> Vec<WarrivWake> {
         .collect()
 }
 
-//// What happened in a project while the human was away, for the screen
+/// What happened in a project while the human was away, for the screen
 /// that greets them when they come back. What needs them (a question, a
 /// failed errand) is shown in full; the rest folds into one line.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

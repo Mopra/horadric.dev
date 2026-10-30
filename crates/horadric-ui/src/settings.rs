@@ -1674,6 +1674,7 @@ mod tests {
                 Field::Explorer,
                 Field::Notify,
                 Field::Sounds,
+                Field::Microphone,
                 Field::Discord
             ]
         );
@@ -1824,7 +1825,7 @@ mod tests {
         assert_eq!(n[2].control, Control::Switch(true));
         assert_eq!(n[2].value, "On");
         assert_eq!(n[3].control, Control::Switch(false));
-        assert_eq!(n[4].value, "Without project names");
+        assert_eq!(n[5].value, "Without project names");
     }
 
     #[test]
