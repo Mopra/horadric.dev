@@ -1,10 +1,12 @@
 //! The Arcane Sanctuary's graph and its layout, the pure part
 //! Files, lore notes and done quests
 //! are the nodes; calls between files, the files a note names and the
-//! files a quest touched are the links. The layout is a force simulation:
-//! links pull, every node pushes every other (Barnes Hut, so a few
-//! thousand nodes stay cheap), and a weak pull holds it to the middle.
-//! Nodes with no link are left out of it and set on a ring outside.
+//! files a quest touched are the links. The layout is a force simulation
+//! in three dimensions, so the pane can turn it and show its depth:
+//! links pull, every node pushes every other (Barnes Hut over an octree,
+//! so a few thousand nodes stay cheap), and a weak pull holds it to the
+//! middle. Nodes with no link are left out of it and set on shells
+//! outside.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -135,12 +137,16 @@ impl Graph {
     }
 }
 
+/// A point of the layout.
+pub type Point = [f32; 3];
+
 /// Where each node was, by its id, as kept per project in the state
-/// folder so the picture does not reshuffle on every open.
+/// folder so the picture does not reshuffle on every open. A file kept
+/// by a flat build does not read, so the layout starts afresh in depth.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Positions {
     #[serde(default)]
-    pub at: BTreeMap<String, [f32; 2]>,
+    pub at: BTreeMap<String, Point>,
 }
 
 /// The rest length of a link, in layout units. The pane scales to fit, so
@@ -162,9 +168,9 @@ const COOL: f32 = 0.0228;
 /// A layout in progress, stepped until it is still. The pane steps it on
 /// the vsync clock while it settles and keeps the result once still.
 pub struct Layout {
-    pos: Vec<[f32; 2]>,
-    vel: Vec<[f32; 2]>,
-    /// The linked nodes, which move; the rest sit on the ring.
+    pos: Vec<Point>,
+    vel: Vec<Point>,
+    /// The linked nodes, which move; the rest sit on the shells.
     moving: Vec<usize>,
     links: Vec<(usize, usize, f32, f32)>,
     alpha: f32,
@@ -184,7 +190,7 @@ impl Layout {
             next[l.a].push(l.b);
             next[l.b].push(l.a);
         }
-        let mut pos: Vec<Option<[f32; 2]>> = g
+        let mut pos: Vec<Option<Point>> = g
             .nodes
             .iter()
             .map(|nd| old.at.get(&nd.id).copied())
@@ -199,8 +205,8 @@ impl Layout {
                     continue;
                 }
                 if let Some(p) = next[i].iter().find_map(|&j| pos[j]) {
-                    let [dx, dy] = jitter(&g.nodes[i].id);
-                    pos[i] = Some([p[0] + dx * LENGTH, p[1] + dy * LENGTH]);
+                    let d = jitter(&g.nodes[i].id);
+                    pos[i] = Some(std::array::from_fn(|k| p[k] + d[k] * LENGTH));
                     placed = true;
                 }
             }
@@ -208,17 +214,19 @@ impl Layout {
                 break;
             }
         }
-        // What is left has no placed neighbour at all: a sunflower's
-        // spiral, as d3 starts its nodes.
+        // What is left has no placed neighbour at all: a spiral through a
+        // ball, as d3-force-3d starts its nodes.
         let mut k = 0;
-        let pos: Vec<[f32; 2]> = pos
+        let roll = std::f32::consts::PI * (3.0 - 5f32.sqrt());
+        let yaw = std::f32::consts::PI * 20.0 / (9.0 + 221f32.sqrt());
+        let pos: Vec<Point> = pos
             .into_iter()
             .map(|p| {
                 p.unwrap_or_else(|| {
                     k += 1;
-                    let r = LENGTH * 0.5 * (k as f32 + 0.5).sqrt();
-                    let a = k as f32 * std::f32::consts::PI * (3.0 - 5f32.sqrt());
-                    [r * a.cos(), r * a.sin()]
+                    let r = LENGTH * 0.5 * (k as f32 + 0.5).cbrt();
+                    let (a, b) = (k as f32 * roll, k as f32 * yaw);
+                    [r * a.sin() * b.cos(), r * a.cos(), r * a.sin() * b.sin()]
                 })
             })
             .collect();
@@ -244,7 +252,7 @@ impl Layout {
             0.0
         };
         let mut l = Layout {
-            vel: vec![[0.0; 2]; n],
+            vel: vec![[0.0; 3]; n],
             moving: (0..n).filter(|&i| degree[i] > 0).collect(),
             pos,
             links,
@@ -260,7 +268,7 @@ impl Layout {
     }
 
     /// Each node's position, in the graph's order.
-    pub fn positions(&self) -> &[[f32; 2]] {
+    pub fn positions(&self) -> &[Point] {
         &self.pos
     }
 
@@ -273,27 +281,29 @@ impl Layout {
         for &(a, b, s, bias) in &self.links {
             let pa = add(self.pos[a], self.vel[a]);
             let pb = add(self.pos[b], self.vel[b]);
-            let mut d = [pb[0] - pa[0], pb[1] - pa[1]];
-            if d == [0.0, 0.0] {
+            let mut d: Point = std::array::from_fn(|k| pb[k] - pa[k]);
+            if d == [0.0; 3] {
                 d = jitter_by(a * 31 + b);
             }
-            let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
+            let len = norm(d);
             let k = (len - LENGTH) / len * alpha * s;
-            let f = [d[0] * k, d[1] * k];
-            self.vel[b][0] -= f[0] * bias;
-            self.vel[b][1] -= f[1] * bias;
-            self.vel[a][0] += f[0] * (1.0 - bias);
-            self.vel[a][1] += f[1] * (1.0 - bias);
+            for (x, dx) in d.iter().enumerate() {
+                let f = dx * k;
+                self.vel[b][x] -= f * bias;
+                self.vel[a][x] += f * (1.0 - bias);
+            }
         }
         let tree = Tree::build(&self.moving, &self.pos);
         for &i in &self.moving {
             let f = tree.force(i, self.pos[i]);
-            self.vel[i][0] += f[0] * alpha - self.pos[i][0] * GRAVITY * alpha;
-            self.vel[i][1] += f[1] * alpha - self.pos[i][1] * GRAVITY * alpha;
+            for k in 0..3 {
+                self.vel[i][k] += f[k] * alpha - self.pos[i][k] * GRAVITY * alpha;
+            }
         }
         for &i in &self.moving {
-            self.vel[i][0] *= KEEP;
-            self.vel[i][1] *= KEEP;
+            for v in &mut self.vel[i] {
+                *v *= KEEP;
+            }
             self.pos[i] = add(self.pos[i], self.vel[i]);
         }
         self.alpha *= 1.0 - COOL;
@@ -301,9 +311,9 @@ impl Layout {
         !self.still()
     }
 
-    /// Sets the orphans in a band of rings just outside the linked nodes,
+    /// Sets the orphans on a few shells just outside the linked nodes,
     /// around their middle, as Obsidian leaves its orphans drifting at the
-    /// edge rather than in the middle. One wide ring for hundreds of
+    /// edge rather than in the middle. One wide shell for hundreds of
     /// orphans would sit so far out that the linked part, the picture
     /// worth seeing, shrank to a speck when the pane fits it all.
     fn ring(&mut self) {
@@ -325,19 +335,27 @@ impl Layout {
         let mut r = reach + LENGTH;
         let mut left = &orphans[..];
         let mut turn = 0.0;
+        let golden = std::f32::consts::PI * (3.0 - 5f32.sqrt());
         while !left.is_empty() {
-            let fits = ((std::f32::consts::TAU * r / gap) as usize).max(1);
+            let fits = ((4.0 * std::f32::consts::PI * r * r / (gap * gap)) as usize).max(1);
             let (these, rest) = left.split_at(fits.min(left.len()));
+            // Spread over the shell on a Fibonacci spiral, pole to pole.
             for (k, &i) in these.iter().enumerate() {
-                let a = turn + k as f32 / these.len() as f32 * std::f32::consts::TAU;
-                self.pos[i] = [c[0] + r * a.cos(), c[1] + r * a.sin()];
-                self.vel[i] = [0.0; 2];
+                let y = 1.0 - 2.0 * (k as f32 + 0.5) / these.len() as f32;
+                let ring = (1.0 - y * y).max(0.0).sqrt();
+                let a = turn + k as f32 * golden;
+                self.pos[i] = [
+                    c[0] + r * ring * a.cos(),
+                    c[1] + r * y,
+                    c[2] + r * ring * a.sin(),
+                ];
+                self.vel[i] = [0.0; 3];
             }
             left = rest;
             r += gap;
-            // Each ring turned against the last, so the dots do not line
+            // Each shell turned against the last, so the dots do not line
             // up in spokes.
-            turn += std::f32::consts::PI * (3.0 - 5f32.sqrt());
+            turn += golden;
         }
     }
 
@@ -371,57 +389,61 @@ pub fn layout(g: &Graph, old: &Positions) -> Positions {
     l.kept(g)
 }
 
-fn add(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
-    [a[0] + b[0], a[1] + b[1]]
+fn add(a: Point, b: Point) -> Point {
+    std::array::from_fn(|k| a[k] + b[k])
+}
+
+fn norm(d: Point) -> f32 {
+    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
 }
 
 /// The mean of `points`, or the origin when there are none.
-fn middle(points: impl Iterator<Item = [f32; 2]>) -> [f32; 2] {
-    let (mut sum, mut n) = ([0.0f32; 2], 0.0f32);
+pub fn middle(points: impl Iterator<Item = Point>) -> Point {
+    let (mut sum, mut n) = ([0.0f32; 3], 0.0f32);
     for p in points {
-        sum[0] += p[0];
-        sum[1] += p[1];
+        sum = add(sum, p);
         n += 1.0;
     }
     if n == 0.0 {
-        [0.0; 2]
+        [0.0; 3]
     } else {
-        [sum[0] / n, sum[1] / n]
+        sum.map(|v| v / n)
     }
 }
 
-fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
-    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+pub fn dist(a: Point, b: Point) -> f32 {
+    norm(std::array::from_fn(|k| a[k] - b[k]))
 }
 
 /// A small offset that is the same for the same id every time, so a
 /// layout is the same for the same input.
-fn jitter(id: &str) -> [f32; 2] {
+fn jitter(id: &str) -> Point {
     let h = crate::lore::hash(id.as_bytes());
     let a = (h % 3600) as f32 / 3600.0 * std::f32::consts::TAU;
     let r = 0.5 + ((h >> 16) % 100) as f32 / 200.0;
-    [r * a.cos(), r * a.sin()]
+    let up = ((h >> 32) % 1000) as f32 / 500.0 - 1.0;
+    let ring = (1.0 - up * up).sqrt();
+    [r * ring * a.cos(), r * up, r * ring * a.sin()]
 }
 
-fn jitter_by(n: usize) -> [f32; 2] {
-    let j = jitter(&n.to_string());
-    [j[0] * 1e-3, j[1] * 1e-3]
+fn jitter_by(n: usize) -> Point {
+    jitter(&n.to_string()).map(|v| v * 1e-3)
 }
 
-/// A quadtree over the moving nodes, each cell knowing how many nodes it
+/// An octree over the moving nodes, each cell knowing how many nodes it
 /// holds and their middle, so a far cell pushes as one.
 struct Tree {
     cells: Vec<Cell>,
 }
 
 struct Cell {
-    /// The middle of the square and half its side.
-    mid: [f32; 2],
+    /// The middle of the cube and half its side.
+    mid: Point,
     half: f32,
     count: f32,
-    sum: [f32; 2],
-    /// The four quarters, 0 for none (the root is never a child).
-    kids: [u32; 4],
+    sum: Point,
+    /// The eight octants, 0 for none (the root is never a child).
+    kids: [u32; 8],
     /// A leaf's one node, or the first of several at the same spot.
     node: Option<usize>,
 }
@@ -431,17 +453,18 @@ struct Cell {
 const SMALLEST: f32 = 1e-3;
 
 impl Tree {
-    fn build(nodes: &[usize], pos: &[[f32; 2]]) -> Tree {
-        let mut lo = [f32::MAX; 2];
-        let mut hi = [f32::MIN; 2];
+    fn build(nodes: &[usize], pos: &[Point]) -> Tree {
+        let mut lo = [f32::MAX; 3];
+        let mut hi = [f32::MIN; 3];
         for &i in nodes {
-            for d in 0..2 {
+            for d in 0..3 {
                 lo[d] = lo[d].min(pos[i][d]);
                 hi[d] = hi[d].max(pos[i][d]);
             }
         }
-        let half = ((hi[0] - lo[0]).max(hi[1] - lo[1]) / 2.0).max(1.0) * 1.01;
-        let mid = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+        let side = (0..3).map(|d| hi[d] - lo[d]).fold(0.0, f32::max);
+        let half = (side / 2.0).max(1.0) * 1.01;
+        let mid = std::array::from_fn(|d| (lo[d] + hi[d]) / 2.0);
         let mut t = Tree {
             cells: Vec::with_capacity(nodes.len() * 2),
         };
@@ -452,14 +475,13 @@ impl Tree {
         t
     }
 
-    fn insert(&mut self, mut c: usize, i: usize, pos: &[[f32; 2]]) {
+    fn insert(&mut self, mut c: usize, i: usize, pos: &[Point]) {
         let p = pos[i];
         loop {
             let cell = &mut self.cells[c];
             cell.count += 1.0;
-            cell.sum[0] += p[0];
-            cell.sum[1] += p[1];
-            let leaf = cell.kids == [0; 4];
+            cell.sum = add(cell.sum, p);
+            let leaf = cell.kids == [0; 8];
             if leaf && cell.node.is_none() && cell.count == 1.0 {
                 cell.node = Some(i);
                 return;
@@ -475,8 +497,7 @@ impl Tree {
                     let k = self.child(c, q);
                     let kid = &mut self.cells[k];
                     kid.count += 1.0;
-                    kid.sum[0] += pos[j][0];
-                    kid.sum[1] += pos[j][1];
+                    kid.sum = add(kid.sum, pos[j]);
                     kid.node = Some(j);
                 }
             }
@@ -485,9 +506,9 @@ impl Tree {
         }
     }
 
-    fn quarter(&self, c: usize, p: [f32; 2]) -> usize {
+    fn quarter(&self, c: usize, p: Point) -> usize {
         let m = self.cells[c].mid;
-        (p[0] >= m[0]) as usize + 2 * (p[1] >= m[1]) as usize
+        (p[0] >= m[0]) as usize + 2 * (p[1] >= m[1]) as usize + 4 * (p[2] >= m[2]) as usize
     }
 
     fn child(&mut self, c: usize, q: usize) -> usize {
@@ -497,10 +518,7 @@ impl Tree {
         }
         let half = self.cells[c].half / 2.0;
         let m = self.cells[c].mid;
-        let mid = [
-            m[0] + if q & 1 == 1 { half } else { -half },
-            m[1] + if q & 2 == 2 { half } else { -half },
-        ];
+        let mid = std::array::from_fn(|d| m[d] + if q >> d & 1 == 1 { half } else { -half });
         let k = self.cells.len();
         self.cells.push(Cell::new(mid, half));
         self.cells[c].kids[q] = k as u32;
@@ -509,38 +527,37 @@ impl Tree {
 
     /// The push on node `i` at `p` from every other node, near ones one by
     /// one and far cells as one.
-    fn force(&self, i: usize, p: [f32; 2]) -> [f32; 2] {
-        let mut f = [0.0f32; 2];
+    fn force(&self, i: usize, p: Point) -> Point {
+        let mut f = [0.0f32; 3];
         let mut stack = vec![0usize];
         while let Some(c) = stack.pop() {
             let cell = &self.cells[c];
             if cell.count == 0.0 {
                 continue;
             }
-            let leaf = cell.kids == [0; 4];
+            let leaf = cell.kids == [0; 8];
             let own = leaf && cell.node == Some(i);
             let count = cell.count - if own { 1.0 } else { 0.0 };
             if count == 0.0 {
                 continue;
             }
-            let centre = if own {
-                [(cell.sum[0] - p[0]) / count, (cell.sum[1] - p[1]) / count]
+            let centre: Point = if own {
+                std::array::from_fn(|d| (cell.sum[d] - p[d]) / count)
             } else {
-                [cell.sum[0] / cell.count, cell.sum[1] / cell.count]
+                cell.sum.map(|v| v / cell.count)
             };
-            let d = [centre[0] - p[0], centre[1] - p[1]];
-            let mut l2 = d[0] * d[0] + d[1] * d[1];
+            let d: Point = std::array::from_fn(|k| centre[k] - p[k]);
+            let mut l2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
             // A cell the node is in is never taken whole, or the node
             // would push itself.
-            let inside =
-                (p[0] - cell.mid[0]).abs() <= cell.half && (p[1] - cell.mid[1]).abs() <= cell.half;
+            let inside = (0..3).all(|k| (p[k] - cell.mid[k]).abs() <= cell.half);
             let far = !inside && (2.0 * cell.half) * (2.0 * cell.half) < THETA * THETA * l2;
             if leaf || far {
                 let d = if l2 == 0.0 {
                     // Nodes on the same spot push each other apart a
                     // little, the same way every time.
                     let j = jitter_by(i);
-                    l2 = j[0] * j[0] + j[1] * j[1];
+                    l2 = j[0] * j[0] + j[1] * j[1] + j[2] * j[2];
                     j
                 } else {
                     d
@@ -549,8 +566,9 @@ impl Tree {
                 // not fling each other off the map.
                 let l2 = l2.max(LENGTH * LENGTH * 0.01);
                 let k = CHARGE * count / l2;
-                f[0] += d[0] * k;
-                f[1] += d[1] * k;
+                for x in 0..3 {
+                    f[x] += d[x] * k;
+                }
             } else {
                 stack.extend(cell.kids.iter().filter(|&&k| k != 0).map(|&k| k as usize));
             }
@@ -560,13 +578,13 @@ impl Tree {
 }
 
 impl Cell {
-    fn new(mid: [f32; 2], half: f32) -> Cell {
+    fn new(mid: Point, half: f32) -> Cell {
         Cell {
             mid,
             half,
             count: 0.0,
-            sum: [0.0; 2],
-            kids: [0; 4],
+            sum: [0.0; 3],
+            kids: [0; 8],
             node: None,
         }
     }
@@ -679,15 +697,7 @@ mod tests {
         let g = clusters();
         let at = layout(&g, &Positions::default());
         let p = |id: &str| at.at[id];
-        let mean = |c: usize| {
-            let mut m = [0.0; 2];
-            for i in 0..10 {
-                let q = p(&format!("{c}/{i}"));
-                m[0] += q[0] / 10.0;
-                m[1] += q[1] / 10.0;
-            }
-            m
-        };
+        let mean = |c: usize| middle((0..10).map(|i| p(&format!("{c}/{i}"))));
         let (m0, m1) = (mean(0), mean(1));
         let spread = (0..10)
             .map(|i| dist(p(&format!("0/{i}")), m0))
@@ -709,7 +719,7 @@ mod tests {
             assert!(r > reach, "orphan {i} at {r}, the rest within {reach}");
         }
         for v in at.at.values() {
-            assert!(v[0].is_finite() && v[1].is_finite());
+            assert!(v.iter().all(|x| x.is_finite()));
         }
     }
 
@@ -750,33 +760,36 @@ mod tests {
     #[test]
     fn barnes_hut_is_close_to_every_pair() {
         let n = 400;
-        let pos: Vec<[f32; 2]> = (0..n)
+        let pos: Vec<Point> = (0..n)
             .map(|i| {
                 let j = jitter(&i.to_string());
-                [j[0] * 500.0 + (i % 20) as f32 * 7.0, j[1] * 500.0]
+                [j[0] * 500.0 + (i % 20) as f32 * 7.0, j[1] * 500.0, j[2] * 500.0]
             })
             .collect();
         let nodes: Vec<usize> = (0..n).collect();
         let tree = Tree::build(&nodes, &pos);
         for i in (0..n).step_by(37) {
-            let mut exact = [0.0f32; 2];
+            let mut exact = [0.0f32; 3];
             let mut all = 0.0;
             for j in 0..n {
                 if j == i {
                     continue;
                 }
-                let d = [pos[j][0] - pos[i][0], pos[j][1] - pos[i][1]];
-                let l2 = (d[0] * d[0] + d[1] * d[1]).max(LENGTH * LENGTH * 0.01);
-                exact[0] += d[0] * CHARGE / l2;
-                exact[1] += d[1] * CHARGE / l2;
-                all += (d[0] * d[0] + d[1] * d[1]).sqrt() * -CHARGE / l2;
+                let d: Point = std::array::from_fn(|k| pos[j][k] - pos[i][k]);
+                let l2 = (norm(d) * norm(d)).max(LENGTH * LENGTH * 0.01);
+                for k in 0..3 {
+                    exact[k] += d[k] * CHARGE / l2;
+                }
+                all += norm(d) * -CHARGE / l2;
             }
             let got = tree.force(i, pos[i]);
             let err = dist(got, exact);
             // The pushes mostly cancel, so the error is measured against
-            // all of them, not against what is left.
+            // all of them, not against what is left. An octree cell holds
+            // more of the far nodes than a quadtree square, so a little more
+            // slack than in the plane.
             assert!(
-                err < 0.03 * all,
+                err < 0.05 * all,
                 "node {i}: {got:?} against {exact:?} of {all}"
             );
         }
@@ -792,7 +805,7 @@ mod tests {
         // Five kept on one spot, and a new one so the layout runs.
         let mut old = Positions::default();
         for n in &names[..5] {
-            old.at.insert(n.clone(), [3.0, 3.0]);
+            old.at.insert(n.clone(), [3.0, 3.0, 3.0]);
         }
         let at = layout(&g, &old);
         for a in 1..5 {
@@ -828,8 +841,26 @@ mod tests {
     #[test]
     fn positions_survive_being_written_and_read() {
         let mut p = Positions::default();
-        p.at.insert("src/a.rs".into(), [1.5, -2.0]);
+        p.at.insert("src/a.rs".into(), [1.5, -2.0, 0.25]);
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<Positions>(&s).unwrap(), p);
     }
+
+    #[test]
+    fn a_layout_has_depth() {
+        let g = clusters();
+        let at = layout(&g, &Positions::default());
+        let (lo, hi) = at
+            .at
+            .values()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[2]), hi.max(p[2])));
+        assert!(hi - lo > LENGTH, "only {} deep", hi - lo);
+    }
+
+    #[test]
+    fn a_flat_layout_kept_by_an_older_build_does_not_read() {
+        let flat = r#"{"at":{"src/a.rs":[1.5,-2.0]}}"#;
+        assert!(serde_json::from_str::<Positions>(flat).is_err());
+    }
+
 }

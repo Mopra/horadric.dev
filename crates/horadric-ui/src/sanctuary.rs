@@ -14,6 +14,10 @@
 //! app an event, the app redraws every sanctuary when the glows' stamp
 //! moved, and the pane keeps its vsync clock running while anything fades
 //! or travels.
+//!
+//! The picture is in depth: a drag turns it, a drag with Shift pans it, a
+//! flick lets it coast, and left alone it drifts slowly round, stopping
+//! while a node is under the mouse so its name can be read.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -21,11 +25,13 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::OnceLock;
+use std::time::Instant;
 
-use horadric_core::sanctuary::{Graph, Layout};
+use horadric_core::sanctuary::{Graph, Layout, Point};
 use horadric_core::saved::{Dock, Side};
 use horadric_hooks::lore::Place;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_USER};
 
 use crate::sky::{self, Label, Light, SkyFrame, View};
@@ -35,6 +41,15 @@ pub const WM_SKY_READY: u32 = WM_USER + 8;
 /// Layout steps per frame: the simulation cools in about 300, so a picture
 /// from nothing settles in under three seconds.
 const STEPS: usize = 2;
+/// How fast the picture drifts round when left alone, in radians a
+/// second: once round in a minute and a half.
+const DRIFT: f32 = 0.07;
+/// How far a drag turns the picture, in radians per DIP.
+const TURN: f32 = 0.006;
+/// How much of a flick's speed is left after a second of coasting.
+const COAST: f32 = 0.15;
+/// The tilt a picture first opens at, so its depth shows from the start.
+const TILT: f32 = 0.35;
 
 /// Builds a project's graph from a folder in it.
 pub type Source = fn(&Path) -> Result<Graph, String>;
@@ -52,13 +67,14 @@ pub fn set_source(f: Source) {
 /// points.
 pub struct Town {
     pub graph: Graph,
-    pub points: Vec<[f32; 2]>,
+    pub points: Vec<Point>,
     pub galaxies: Vec<Galaxy>,
 }
 
 pub struct Galaxy {
     pub key: String,
     pub name: String,
+    /// On the plane the galaxies are packed on, at depth 0.
     pub centre: [f32; 2],
     pub radius: f32,
     /// Its nodes' indices in the town's graph.
@@ -113,8 +129,20 @@ struct Sky {
     /// The view of the last frame, which a first drag or wheel starts from.
     last: Option<View>,
     hover: Option<usize>,
+    /// Where the mouse is over the glass, so a frame that turned the
+    /// picture under it finds what it is over now.
+    mouse: Option<(f32, f32)>,
     /// Where the mouse was pressed or last dragged to, in DIPs.
     grab: Option<(f32, f32)>,
+    /// When it was last dragged, to take a flick's speed from.
+    grabbed_at: Option<Instant>,
+    yaw: f32,
+    pitch: f32,
+    /// How fast it turns about the vertical and the horizontal, in
+    /// radians a second.
+    spin: (f32, f32),
+    /// The last frame the turn was stepped at.
+    tick: Option<Instant>,
 }
 
 thread_local! {
@@ -179,7 +207,13 @@ pub fn open(key: &str, dir: &Path) {
                 view: None,
                 last: None,
                 hover: None,
+                mouse: None,
                 grab: None,
+                grabbed_at: None,
+                yaw: 0.0,
+                pitch: TILT,
+                spin: (DRIFT, 0.0),
+                tick: None,
             });
     });
 }
@@ -283,6 +317,21 @@ fn glowing(sky: &Sky) -> bool {
     }
 }
 
+/// The view of `points` this frame: where the user panned and zoomed to,
+/// or fitted, turned as the picture is turned now.
+fn view_of(view: Option<View>, (yaw, pitch): (f32, f32), points: &[Point], room: [f32; 4]) -> View {
+    match view {
+        Some(v) => View {
+            yaw,
+            pitch,
+            x: (room[0] + room[2]) / 2.0,
+            y: (room[1] + room[3]) / 2.0,
+            ..v
+        },
+        None => View::fit(points, room, yaw, pitch),
+    }
+}
+
 /// What the pane draws in `room`, the glass in DIPs.
 pub fn frame(key: &str, hwnd: HWND, room: [f32; 4]) -> SkyFrame {
     with(key, |sky| {
@@ -300,24 +349,29 @@ pub fn frame(key: &str, hwnd: HWND, room: [f32; 4]) -> SkyFrame {
             State::Town(town) if town.graph.nodes.is_empty() => message("No projects charted yet"),
             State::Ready { graph, layout } => {
                 let points = layout.positions();
-                let view = sky.view.unwrap_or_else(|| View::fit(points, room));
-                sky.last = Some(view);
-                sky.room = room;
-                sky::frame(graph, points, &view, sky.hover, room, &light(sky))
+                let view = view_of(sky.view, (sky.yaw, sky.pitch), points, room);
+                (sky.last, sky.room) = (Some(view), room);
+                // The picture may have turned under a still mouse.
+                let hover = sky.mouse.and_then(|at| sky::node_at(graph, points, &view, at));
+                sky.hover = hover;
+                sky::frame(graph, points, &view, hover, room, &light(sky))
             }
             State::Town(town) => {
                 let points = &town.points;
-                let view = sky.view.unwrap_or_else(|| View::fit(points, room));
-                sky.last = Some(view);
-                sky.room = room;
+                let view = view_of(sky.view, (sky.yaw, sky.pitch), points, room);
+                (sky.last, sky.room) = (Some(view), room);
+                let hover = sky
+                    .mouse
+                    .and_then(|at| sky::node_at(&town.graph, points, &view, at));
+                sky.hover = hover;
                 let light = light(sky);
-                let mut f = sky::frame(&town.graph, points, &view, sky.hover, room, &light);
+                let mut f = sky::frame(&town.graph, points, &view, hover, room, &light);
                 // Out here a galaxy is named, not a project's hubs.
                 f.labels.retain(|l| l.hovered);
                 for g in &town.galaxies {
-                    let (x, y) = view.to_screen([g.centre[0], g.centre[1] - g.radius]);
+                    let s = view.see([g.centre[0], g.centre[1], 0.0]);
                     f.labels.push(Label {
-                        at: (x, y - 18.0),
+                        at: (s.at.0, s.at.1 - g.radius * view.scale * s.grow - 18.0),
                         text: g.name.clone(),
                         hovered: false,
                     });
@@ -346,19 +400,57 @@ pub fn detail(key: &str) -> String {
     .unwrap_or_default()
 }
 
-/// Whether the layout is still settling or a glow still fades, so the
-/// pane wants frames.
+/// Whether the layout is still settling, a glow still fades or the
+/// picture turns, so the pane wants frames.
 pub fn moving(key: &str) -> bool {
     with(key, |sky| {
-        matches!(&sky.state, State::Ready { layout, .. } if !layout.still()) || glowing(sky)
+        matches!(&sky.state, State::Ready { layout, .. } if !layout.still())
+            || glowing(sky)
+            || turning(sky)
     })
     .unwrap_or(false)
 }
 
-/// Moves the layout on a frame. Once it comes to rest, where it settled is
-/// kept, so the next open starts from there.
+/// Whether the picture turns on its own: drifting, or coasting from a
+/// flick, and not held by the mouse.
+fn turning(sky: &Sky) -> bool {
+    let shown = matches!(sky.state, State::Ready { .. } | State::Town(_));
+    shown && sky.grab.is_none() && (sky.spin.0.abs() + sky.spin.1.abs() > 1e-3 || drifts(sky))
+}
+
+/// Left alone it drifts; with a node under the mouse it holds still, so
+/// the name can be read and the node clicked.
+fn drifts(sky: &Sky) -> bool {
+    sky.hover.is_none()
+}
+
+/// Turns the picture by the time since the last frame: a flick's speed
+/// eases toward the drift, or toward still while a node is held.
+fn turn(sky: &mut Sky) {
+    let now = Instant::now();
+    // A frame after a pause turns as if no time passed in between.
+    let dt = sky
+        .tick
+        .replace(now)
+        .map_or(0.0, |t| (now - t).as_secs_f32().min(0.1));
+    if sky.grab.is_some() {
+        return;
+    }
+    sky.yaw = (sky.yaw + sky.spin.0 * dt) % std::f32::consts::TAU;
+    sky.pitch = (sky.pitch + sky.spin.1 * dt).clamp(-sky::PITCH_MOST, sky::PITCH_MOST);
+    let ease = COAST.powf(dt);
+    let rest = if drifts(sky) { DRIFT } else { 0.0 };
+    sky.spin = (
+        rest + (sky.spin.0 - rest) * ease,
+        sky.spin.1 * ease,
+    );
+}
+
+/// Moves the layout and the turn on a frame. Once the layout comes to
+/// rest, where it settled is kept, so the next open starts from there.
 pub fn step(key: &str) {
     with(key, |sky| {
+        turn(sky);
         let State::Ready { graph, layout } = &mut sky.state else {
             return;
         };
@@ -384,6 +476,7 @@ pub fn step(key: &str) {
 /// under it changed, so the pane draws again.
 pub fn hover(key: &str, at: Option<(f32, f32)>) -> bool {
     with(key, |sky| {
+        sky.mouse = at;
         let under = match (&sky.state, sky.last, at) {
             (State::Ready { graph, layout }, Some(view), Some(at)) => {
                 sky::node_at(graph, layout.positions(), &view, at)
@@ -402,12 +495,16 @@ pub fn hover(key: &str, at: Option<(f32, f32)>) -> bool {
 pub fn grab(key: &str, at: (f32, f32)) {
     with(key, |sky| {
         sky.grab = Some(at);
+        sky.grabbed_at = Some(Instant::now());
         sky.dragged = false;
+        sky.spin = (0.0, 0.0);
     });
 }
 
-/// A drag to `at` pans the picture with the mouse. True when it moved.
+/// A drag to `at` turns the picture with the mouse, or with Shift held
+/// pans it. True when it moved.
 pub fn drag(key: &str, at: (f32, f32)) -> bool {
+    let pan = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
     with(key, |sky| {
         let (Some(from), Some(view)) = (sky.grab, sky.view.or(sky.last)) else {
             return false;
@@ -415,36 +512,75 @@ pub fn drag(key: &str, at: (f32, f32)) -> bool {
         if at == from {
             return false;
         }
+        let (dx, dy) = (at.0 - from.0, at.1 - from.1);
+        let now = Instant::now();
+        let dt = sky
+            .grabbed_at
+            .replace(now)
+            .map_or(0.0, |t| (now - t).as_secs_f32());
         sky.grab = Some(at);
         sky.dragged = true;
-        sky.view = Some(view.panned(at.0 - from.0, at.1 - from.1));
+        if pan {
+            sky.view = Some(view.panned(dx, dy));
+            sky.spin = (0.0, 0.0);
+        } else {
+            sky.yaw += dx * TURN;
+            sky.pitch = (sky.pitch + dy * TURN).clamp(-sky::PITCH_MOST, sky::PITCH_MOST);
+            // The speed of the last stretch of the drag, which a let go
+            // keeps, so a flick coasts on.
+            if dt > 0.0 {
+                sky.spin = (dx * TURN / dt.max(0.008), dy * TURN / dt.max(0.008));
+            }
+        }
         true
     })
     .unwrap_or(false)
 }
 
-/// The mouse let go. In the town a click that did not drag goes into the
-/// galaxy under it, fitting the view to it. True when the view changed.
+/// The mouse let go. A drag that stopped before letting go does not
+/// coast. In the town a click that did not drag goes into the galaxy
+/// under it, fitting the view to it. True when the view changed.
 pub fn release(key: &str) -> bool {
     with(key, |sky| {
+        if sky
+            .grabbed_at
+            .is_some_and(|t| t.elapsed().as_secs_f32() > 0.08)
+        {
+            sky.spin = (0.0, 0.0);
+        }
+        sky.tick = None;
         let click = sky.grab.take().filter(|_| !sky.dragged);
         let (Some(at), Some(view), State::Town(town)) = (click, sky.last, &sky.state) else {
             return false;
         };
-        let p = view.to_layout(at);
-        let Some(g) = town.galaxies.iter().find(|g| {
-            let (dx, dy) = (p[0] - g.centre[0], p[1] - g.centre[1]);
-            dx * dx + dy * dy <= g.radius * g.radius
-        }) else {
+        // Of the galaxies whose disc on the glass holds the click, the
+        // nearest the camera.
+        let Some(g) = town
+            .galaxies
+            .iter()
+            .filter_map(|g| {
+                let s = view.see([g.centre[0], g.centre[1], 0.0]);
+                let d = ((s.at.0 - at.0).powi(2) + (s.at.1 - at.1).powi(2)).sqrt();
+                (d <= g.radius * view.scale * s.grow).then_some((g, s.depth))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(g, _)| g)
+        else {
             return false;
         };
         let [x, y] = g.centre;
-        let r = g.radius;
-        sky.view = Some(View::fit(&[[x - r, y - r], [x + r, y + r]], sky.room));
+        sky.view = Some(View::fit_ball(
+            [x, y, 0.0],
+            g.radius,
+            sky.room,
+            sky.yaw,
+            sky.pitch,
+        ));
         true
     })
     .unwrap_or(false)
 }
+
 
 /// The press ended without a release, as when a menu took the capture:
 /// no click.

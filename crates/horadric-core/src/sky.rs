@@ -1,6 +1,7 @@
 //! Tristram's sky, the pure part: every project's sanctuary, each laid out in its own coordinates,
 //! set apart as a galaxy in one picture so the town's pane can draw them
-//! all at once and a click can go into one.
+//! all at once and a click can go into one. The galaxies are packed on
+//! one plane, each a ball of stars around its centre on it.
 //!
 //! A galaxy's size grows with the fourth root of its node count, so a
 //! project of thousands of files is a few times larger than a small one
@@ -11,7 +12,7 @@
 
 use std::ops::Range;
 
-use crate::sanctuary::{Graph, Positions};
+use crate::sanctuary::{Graph, Point, Positions};
 
 /// The radius of a galaxy of one node, in sky units. Only ratios matter
 /// to a pane that scales to fit.
@@ -52,7 +53,7 @@ pub struct Star {
     pub galaxy: usize,
     /// The node's index in its project's graph.
     pub node: usize,
-    pub at: [f32; 2],
+    pub at: Point,
 }
 
 /// A link between two stars, by their index in `Sky::stars`.
@@ -82,11 +83,11 @@ impl Sky {
         let centres = pack(&order.iter().map(|p| p.key).collect::<Vec<_>>(), &radii);
         let mut sky = Sky::default();
         for (g, p) in order.iter().enumerate() {
-            let own: Vec<[f32; 2]> = p
+            let own: Vec<Point> = p
                 .graph
                 .nodes
                 .iter()
-                .map(|n| p.at.at.get(&n.id).copied().unwrap_or([0.0; 2]))
+                .map(|n| p.at.at.get(&n.id).copied().unwrap_or([0.0; 3]))
                 .collect();
             let (mid, extent) = extent(&own);
             let scale = radii[g] / extent;
@@ -98,6 +99,7 @@ impl Sky {
                     at: [
                         centres[g][0] + (q[0] - mid[0]) * scale,
                         centres[g][1] + (q[1] - mid[1]) * scale,
+                        (q[2] - mid[2]) * scale,
                     ],
                 }));
             let first_link = sky.links.len();
@@ -164,19 +166,22 @@ pub fn radius(n: usize) -> f32 {
 /// The middle of the box around `pts` and how far the furthest point is
 /// from it, never less than a small floor so one node does not divide by
 /// nothing.
-fn extent(pts: &[[f32; 2]]) -> ([f32; 2], f32) {
+fn extent(pts: &[Point]) -> (Point, f32) {
     if pts.is_empty() {
-        return ([0.0; 2], 1.0);
+        return ([0.0; 3], 1.0);
     }
-    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
     for p in pts {
-        for k in 0..2 {
+        for k in 0..3 {
             lo[k] = lo[k].min(p[k]);
             hi[k] = hi[k].max(p[k]);
         }
     }
-    let mid = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
-    let far = pts.iter().map(|p| dist(mid, *p)).fold(0.0, f32::max);
+    let mid = std::array::from_fn(|k| (lo[k] + hi[k]) / 2.0);
+    let far = pts
+        .iter()
+        .map(|p| crate::sanctuary::dist(mid, *p))
+        .fold(0.0, f32::max);
     (mid, far.max(1.0))
 }
 
@@ -259,7 +264,7 @@ mod tests {
         // A line far from the middle, so placing must move and scale it.
         let at = Positions {
             at: (0..n)
-                .map(|i| (format!("f{i}"), [500.0 + i as f32 * 10.0, -300.0]))
+                .map(|i| (format!("f{i}"), [500.0 + i as f32 * 10.0, -300.0, 40.0]))
                 .collect(),
         };
         (g, at)
@@ -311,12 +316,15 @@ mod tests {
         let s = sky(&[("a", 40), ("b", 3), ("c", 1)]);
         for st in &s.stars {
             let g = &s.galaxies[st.galaxy];
-            assert!(dist(st.at, g.centre) <= g.radius * 1.001);
+            let c = [g.centre[0], g.centre[1], 0.0];
+            assert!(crate::sanctuary::dist(st.at, c) <= g.radius * 1.001);
         }
-        // The line's ends reach the rim, so it fills its disc.
+        // The line's ends reach the rim, so it fills its ball.
         let a = &s.galaxies[0];
         let first = s.stars[a.stars.start].at;
-        assert!((dist(first, a.centre) - a.radius).abs() < 0.01);
+        let c = [a.centre[0], a.centre[1], 0.0];
+        assert!((crate::sanctuary::dist(first, c) - a.radius).abs() < 0.01);
+
     }
 
     #[test]
