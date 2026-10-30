@@ -176,11 +176,11 @@ pub fn cluster(hit: Hit) -> Option<&'static str> {
         Hit::Header => "Fold or unfold this project. Drag to move it, right click for its menu",
         Hit::Tile(_) => "Show this session on the stage. Right click for more",
         Hit::Lamp(_) => "Park this session off the stage, or bring it back. It keeps running",
-        Hit::Browser(_) => "Show this session's browser",
+        Hit::Browser(_) => "Show this session's browser (Ctrl+Shift+B on the stage)",
         Hit::Code(_) => "Open this session's worktree in VS Code",
         Hit::Page(_) => "Show this tab on the stage",
         Hit::Add => "Start another session in this project",
-        Hit::Shell => "Open a terminal in this project",
+        Hit::Shell => "Open a terminal in this project (Ctrl+Shift+T on the stage)",
         Hit::Folio => "A new chat with Claude in this project. Experimental: a headless session drawn as a chat",
         Hit::FilesHeader => "Fold or unfold the changed files",
         Hit::File(_) => "Open on the stage, or with Ctrl in your editor. A folder opens or closes",
@@ -283,11 +283,11 @@ pub enum Shows {
 /// stage.
 pub fn pane(key: Key, shows: Shows, zoomed: bool) -> &'static str {
     match (key, shows) {
-        (Key::Zoom, _) if zoomed => "Put this pane back beside the others",
-        (Key::Zoom, _) => "Fill the stage with this pane",
+        (Key::Zoom, _) if zoomed => "Put this pane back beside the others (Ctrl+Shift+Enter)",
+        (Key::Zoom, _) => "Fill the stage with this pane (Ctrl+Shift+Enter). Ctrl+Alt and an arrow moves to the next pane",
         (Key::Close, Shows::Agent) => "End this session for good",
         (Key::Close, Shows::Shell) => "Close this terminal",
-        (Key::Close, Shows::File) => "Close this file",
+        (Key::Close, Shows::File) => "Close this file (Esc)",
         (Key::Close, Shows::Browser) => "Close the browser",
         (Key::Close, Shows::Sanctuary) => "Close the Arcane Sanctuary",
     }
@@ -297,9 +297,9 @@ pub fn pane(key: Key, shows: Shows, zoomed: bool) -> &'static str {
 /// stage the browser stands on. The address field says so itself.
 pub fn bar(hit: BarHit, docked: Option<Side>) -> Option<&'static str> {
     Some(match hit {
-        BarHit::Back => "Back",
-        BarHit::Forward => "Forward",
-        BarHit::Reload => "Reload",
+        BarHit::Back => "Back (Alt+Left)",
+        BarHit::Forward => "Forward (Alt+Right)",
+        BarHit::Reload => "Reload (F5)",
         BarHit::Size => "Pick the size the page is laid out at",
         BarHit::Place(side) if docked == Some(side) => "Put the browser back in the grid",
         BarHit::Place(Side::Left) => "Stand the browser on the left of the stage",
@@ -336,9 +336,9 @@ pub fn sky_place(side: Side, docked: Option<Side>) -> &'static str {
 /// What a part of the browser's tab strip does.
 pub fn tab(hit: TabHit) -> &'static str {
     match hit {
-        TabHit::Tab(_) => "Show this tab. A middle click closes it",
-        TabHit::Close(_) => "Close this tab",
-        TabHit::New => "Open a new tab",
+        TabHit::Tab(_) => "Show this tab. A middle click closes it. Ctrl+Tab steps through the tabs, Ctrl+1 to 9 jumps to one",
+        TabHit::Close(_) => "Close this tab (Ctrl+W)",
+        TabHit::New => "Open a new tab (Ctrl+T)",
     }
 }
 

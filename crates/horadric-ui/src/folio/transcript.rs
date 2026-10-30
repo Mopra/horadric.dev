@@ -1430,7 +1430,12 @@ impl View {
         let text_r = Rect::new(r.x + 12.0, r.y, r.w - buttons - count_w - 16.0, r.h);
         hits.push((text_r, Hit::Tr(Act::Field(FIND_FIELD.to_string()))));
         if f.field.text.is_empty() {
-            gfx.text_in("Find in the conversation", &gfx.line, &text_r, pal.faint);
+            gfx.text_in(
+                "Find in the conversation. Enter steps, Esc closes",
+                &gfx.line,
+                &text_r,
+                pal.faint,
+            );
         } else {
             gfx.text_in(&f.field.text, &gfx.line, &text_r, pal.fg);
         }
