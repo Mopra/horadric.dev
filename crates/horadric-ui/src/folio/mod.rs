@@ -265,7 +265,10 @@ impl Chat {
         } else if self.folio.busy {
             "working".to_string()
         } else if agents > 0 {
-            format!("{agents} agent{} working", if agents == 1 { "" } else { "s" })
+            format!(
+                "{agents} agent{} working",
+                if agents == 1 { "" } else { "s" }
+            )
         } else {
             "chat, experimental".to_string()
         };

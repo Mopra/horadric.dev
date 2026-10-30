@@ -1020,7 +1020,9 @@ impl View {
             return cw;
         }
         let built = cache.blocks.iter().any(Option::is_some);
-        let held = cache.asked_at.map_or(SETTLE_AFTER, |t| now.duration_since(t));
+        let held = cache
+            .asked_at
+            .map_or(SETTLE_AFTER, |t| now.duration_since(t));
         if built && held < SETTLE_AFTER {
             let wait = (SETTLE_AFTER - held).as_millis() as u32 + 1;
             SetTimer(Some(self.hwnd()), view::SETTLE, wait, None);
@@ -1438,7 +1440,10 @@ impl View {
                 let c = render::caret_at(&l, at);
                 let (_, lh) = render::text_size(&l);
                 let x = text_r.x + c.x.min(text_r.w);
-                gfx.fill(&Rect::new(x, r.y + (r.h - lh) / 2.0, CARET_W, lh), pal.caret());
+                gfx.fill(
+                    &Rect::new(x, r.y + (r.h - lh) / 2.0, CARET_W, lh),
+                    pal.caret(),
+                );
             }
         }
         let cr = Rect::new(text_r.right() + 4.0, r.y, count_w, r.h);

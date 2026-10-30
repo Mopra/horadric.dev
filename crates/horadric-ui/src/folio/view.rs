@@ -80,7 +80,6 @@ const LEADING: f32 = 1.6;
 const MONO: PCWSTR = w!("Cascadia Mono");
 const ICONS: PCWSTR = w!("Segoe Fluent Icons");
 
-
 /// Not in the windows crate's WindowsAndMessaging.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
@@ -178,7 +177,15 @@ pub fn place_bar(key: &str, r: RECT, shift: f32, plate: (f32, f32)) {
         );
         let (w, h) = ((r.right - r.left).max(0), (r.bottom - r.top).max(0));
         if (at.x, at.y, now.right, now.bottom) != (r.left, r.top, w, h) {
-            let _ = SetWindowPos(bar, None, r.left, r.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = SetWindowPos(
+                bar,
+                None,
+                r.left,
+                r.top,
+                w,
+                h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
         } else if moved {
             let _ = InvalidateRect(Some(bar), None, false);
         }
@@ -990,7 +997,9 @@ impl View {
         let id = match self.hit_at(p.x as f32 / s, p.y as f32 / s) {
             Some(Hit::Input(Act::Text)) => IDC_IBEAM,
             Some(_) => IDC_HAND,
-            None if !self.bar && select::over_text(&self.key, p.x as f32 / s, p.y as f32 / s) => IDC_IBEAM,
+            None if !self.bar && select::over_text(&self.key, p.x as f32 / s, p.y as f32 / s) => {
+                IDC_IBEAM
+            }
             None => IDC_ARROW,
         };
         unsafe {

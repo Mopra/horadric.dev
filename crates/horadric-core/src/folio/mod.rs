@@ -2431,9 +2431,14 @@ mod tests {
         };
         let agent = r#"{"task_id":"a1","task_type":"local_agent","description":"Review"}"#;
         let shell = r#"{"task_id":"b1","task_type":"local_bash","description":"npm run dev"}"#;
-        let ambient = r#"{"task_id":"w1","task_type":"local_agent","description":"w","ambient":true}"#;
+        let ambient =
+            r#"{"task_id":"w1","task_type":"local_agent","description":"w","ambient":true}"#;
         f.feed(&set(&[agent, shell, ambient].join(",")));
-        assert_eq!(f.agents_at_work(), 1, "a shell or ambient task is not an agent at work");
+        assert_eq!(
+            f.agents_at_work(),
+            1,
+            "a shell or ambient task is not an agent at work"
+        );
         f.feed(&set(shell));
         assert_eq!(f.agents_at_work(), 0, "the set replaces, it does not add");
         assert_eq!(f.background.len(), 1);

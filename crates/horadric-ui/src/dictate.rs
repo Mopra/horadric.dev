@@ -24,9 +24,9 @@ use std::time::{Duration, Instant};
 use horadric_memory::speech::{self, Listener};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
-    MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
-    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX,
+    eCapture, eConsole, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
+    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
@@ -202,7 +202,9 @@ pub fn take(pane: HWND) -> Option<Result<String, String>> {
                     }
                 });
                 if let Err(e) = &r {
-                    FAILED.with(|f| *f.borrow_mut() = Some((pane.0 as isize, e.clone(), Instant::now())));
+                    FAILED.with(|f| {
+                        *f.borrow_mut() = Some((pane.0 as isize, e.clone(), Instant::now()))
+                    });
                 }
                 done = Some(r);
             }

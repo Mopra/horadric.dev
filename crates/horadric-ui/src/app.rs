@@ -8596,7 +8596,9 @@ impl App {
             page_windows: self
                 .web_windows
                 .iter()
-                .filter_map(|(k, w)| Some((k.clone(), w.rect().or(self.web_rects.get(k).copied())?)))
+                .filter_map(|(k, w)| {
+                    Some((k.clone(), w.rect().or(self.web_rects.get(k).copied())?))
+                })
                 .collect(),
             sky_docks: sanctuary::docks(),
             pages: web::pages(),

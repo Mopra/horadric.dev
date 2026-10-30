@@ -68,13 +68,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP,
     WM_TIMER, WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
+use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXDRAG, SM_CYDRAG};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, SetParent, GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, HWND_TOP, SWP_FRAMECHANGED,
     SWP_NOCOPYBITS, SWP_NOOWNERZORDER, SWP_NOREDRAW, SWP_NOSENDCHANGING, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{IsChild, PostMessageW};
-use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXDRAG, SM_CYDRAG};
 
 use crate::app::{self, Input, PaneAsk};
 use crate::clipboard;
@@ -1467,8 +1467,8 @@ impl Pane {
         let at = glyphs::header_buttons(width, self.stashes(), self.zoom.get().is_some(), true);
         let right = at.start(width) - 4.0;
         let max = right - glyphs::NAME_LEFT;
-        let left = (glyphs::NAME_LEFT + glyphs::name_width(&self.shared.gpu, name, max) + 12.0)
-            .min(right);
+        let left =
+            (glyphs::NAME_LEFT + glyphs::name_width(&self.shared.gpu, name, max) + 12.0).min(right);
         let px = |v: f32| (v * scale).round() as i32;
         let r = RECT {
             left: px(left),
@@ -2471,7 +2471,11 @@ impl Pane {
             unsafe {
                 let _ = ClientToScreen(self.hwnd, &mut p);
             }
-            return (p.x, p.y, ((right - left - 24.0).max(0.0) * s).round() as i32);
+            return (
+                p.x,
+                p.y,
+                ((right - left - 24.0).max(0.0) * s).round() as i32,
+            );
         }
         let l = self.bar_layout();
         let mut p = POINT {

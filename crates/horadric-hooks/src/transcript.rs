@@ -32,10 +32,7 @@ pub fn title(path: &str) -> Option<Title> {
     // Folio's are, so its first prompt names it, and the whole file is not
     // read for a title that cannot be there.
     let head = read_head(&mut file, TAIL)?;
-    let sdk = head
-        .windows(SDK.len())
-        .take(64 * 1024)
-        .any(|w| w == SDK);
+    let sdk = head.windows(SDK.len()).take(64 * 1024).any(|w| w == SDK);
     if !sdk && len > TAIL && len <= WHOLE {
         if let Some(t) = read_from(&mut file, 0).and_then(|b| title::latest(&b)) {
             return Some(t);

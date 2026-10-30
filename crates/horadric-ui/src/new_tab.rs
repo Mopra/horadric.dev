@@ -93,7 +93,9 @@ pub fn text_left(l: &Layout) -> f32 {
 pub fn text_layout(gpu: &Gpu, text: &str) -> windows::core::Result<IDWriteTextLayout> {
     let wide: Vec<u16> = text.encode_utf16().collect();
     unsafe {
-        let l = gpu.dw.CreateTextLayout(&wide, &gpu.body, 100_000.0, FIELD_H)?;
+        let l = gpu
+            .dw
+            .CreateTextLayout(&wide, &gpu.body, 100_000.0, FIELD_H)?;
         l.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
         Ok(l)
     }
@@ -172,7 +174,13 @@ pub unsafe fn draw(rt: &ID2D1HwndRenderTarget, brush: &ID2D1SolidColorBrush, gpu
     if l.field[2] - l.field[0] < TEXT_LEFT + TEXT_RIGHT {
         return;
     }
-    rune(rt, brush, (l.field[0] + l.field[2]) / 2.0, l.field[1] - 30.0, s.accent);
+    rune(
+        rt,
+        brush,
+        (l.field[0] + l.field[2]) / 2.0,
+        l.field[1] - 30.0,
+        s.accent,
+    );
     field(rt, brush, gpu, s);
     for (i, (row, at)) in s.rows.iter().zip(&l.rows).enumerate() {
         page(rt, brush, gpu, row, *at, s.lit == Some(i));
@@ -181,11 +189,20 @@ pub unsafe fn draw(rt: &ID2D1HwndRenderTarget, brush: &ID2D1SolidColorBrush, gpu
 
 /// A quiet mark over the field: a rune cut in the glass, a diamond with a
 /// stroke through it and the project's colour at its heart.
-unsafe fn rune(rt: &ID2D1HwndRenderTarget, brush: &ID2D1SolidColorBrush, x: f32, y: f32, accent: Color) {
+unsafe fn rune(
+    rt: &ID2D1HwndRenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    x: f32,
+    y: f32,
+    accent: Color,
+) {
     let ink = theme::text_dim().with_alpha(0.45);
     brush.SetColor(&render::color(ink));
     let (w, h) = (7.0, 11.0);
-    let p = |dx: f32, dy: f32| Vector2 { X: x + dx, Y: y + dy };
+    let p = |dx: f32, dy: f32| Vector2 {
+        X: x + dx,
+        Y: y + dy,
+    };
     let corners = [p(0.0, -h), p(w, 0.0), p(0.0, h), p(-w, 0.0)];
     for i in 0..4 {
         rt.DrawLine(corners[i], corners[(i + 1) % 4], brush, 1.0, None);
@@ -372,7 +389,13 @@ unsafe fn page(
     } else {
         theme::text().mix(theme::text_dim(), 0.3)
     };
-    text(&row.title, &gpu.body, text_left, host_left - 12.0, title_ink);
+    text(
+        &row.title,
+        &gpu.body,
+        text_left,
+        host_left - 12.0,
+        title_ink,
+    );
     text(
         &row.host,
         &gpu.small_right,

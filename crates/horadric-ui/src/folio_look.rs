@@ -470,10 +470,7 @@ mod tests {
             footer_line(900, Ending::Failed),
             "Ended with an error \u{b7} 0.9 s"
         );
-        assert_eq!(
-            footer_line(5180, Ending::Stopped),
-            "Stopped \u{b7} 5.2 s"
-        );
+        assert_eq!(footer_line(5180, Ending::Stopped), "Stopped \u{b7} 5.2 s");
     }
 
     #[test]

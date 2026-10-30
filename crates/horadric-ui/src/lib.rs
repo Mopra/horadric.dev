@@ -126,9 +126,9 @@ pub mod credential;
 #[cfg(windows)]
 mod cube;
 #[cfg(windows)]
-mod dictate;
-#[cfg(windows)]
 mod dialog;
+#[cfg(windows)]
+mod dictate;
 #[cfg(windows)]
 pub mod discord;
 #[cfg(windows)]

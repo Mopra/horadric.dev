@@ -622,9 +622,8 @@ mod tests {
     fn a_growing_pane_never_passes_where_it_lands_either_way() {
         let cell = [100, 100, 300, 200];
         let full = [0, 0, 1000, 600];
-        let inside = |r: [i32; 4], o: [i32; 4]| {
-            r[0] >= o[0] && r[1] >= o[1] && r[2] <= o[2] && r[3] <= o[3]
-        };
+        let inside =
+            |r: [i32; 4], o: [i32; 4]| r[0] >= o[0] && r[1] >= o[1] && r[2] <= o[2] && r[3] <= o[3];
         for ms in 0..=400 {
             let at = Duration::from_millis(ms);
             let out = grow(cell, full, at, GROW);

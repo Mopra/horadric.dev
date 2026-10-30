@@ -722,7 +722,10 @@ impl Session {
                 });
             }
         }
-        let streamed = self.stream_agents.as_ref().filter(|_| self.roster.is_none());
+        let streamed = self
+            .stream_agents
+            .as_ref()
+            .filter(|_| self.roster.is_none());
         for (id, t) in streamed.into_iter().flatten() {
             out.push(if t.is_empty() { known(id) } else { t.clone() });
         }

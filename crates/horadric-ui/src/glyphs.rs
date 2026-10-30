@@ -1354,8 +1354,13 @@ impl GridTarget {
             None => vec![0.0; l.tabs.len()],
         };
         // The carried tab last, so it rides over the ones making way.
-        let carried = bar.carried.map(|(from, _)| from).filter(|&c| c < l.tabs.len());
-        let order = (0..l.tabs.len()).filter(|&i| Some(i) != carried).chain(carried);
+        let carried = bar
+            .carried
+            .map(|(from, _)| from)
+            .filter(|&c| c < l.tabs.len());
+        let order = (0..l.tabs.len())
+            .filter(|&i| Some(i) != carried)
+            .chain(carried);
         for i in order {
             let Some(name) = bar.tabs.get(i) else {
                 continue;
@@ -2764,9 +2769,15 @@ mod tests {
         let l = tab_layout(1000.0, 4);
         let step = l.tabs[1].0 - l.tabs[0].0;
         // Tab 0 carried past tabs 1 and 2: they each move a step left.
-        assert_eq!(tab_offsets(&l, 0, step * 2.1), vec![step * 2.1, -step, -step, 0.0]);
+        assert_eq!(
+            tab_offsets(&l, 0, step * 2.1),
+            vec![step * 2.1, -step, -step, 0.0]
+        );
         // Tab 3 carried back to the front: the rest move a step right.
-        assert_eq!(tab_offsets(&l, 3, -step * 3.0), vec![step, step, step, -step * 3.0]);
+        assert_eq!(
+            tab_offsets(&l, 3, -step * 3.0),
+            vec![step, step, step, -step * 3.0]
+        );
         // Held past the end, it stays on the strip.
         assert_eq!(tab_offsets(&l, 2, step * 5.0), vec![0.0, 0.0, step, -step]);
         assert_eq!(tab_offsets(&l, 1, 0.0), vec![0.0; 4]);

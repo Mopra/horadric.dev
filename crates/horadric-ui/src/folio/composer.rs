@@ -21,8 +21,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-    D2D1_BITMAP_PROPERTIES,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
 };
 use windows::Win32::Graphics::DirectWrite::IDWriteTextFormat;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -805,14 +804,22 @@ fn settings_items(chat: &Chat) -> Vec<Item> {
         items.push(row("effort", "Effort", effort));
     }
     if let Some(ctx) = chat.folio.context.as_ref().filter(|c| c.limit > 0) {
-        items.push(row("context", "Context", controls::meter(ctx.used, ctx.limit).1));
+        items.push(row(
+            "context",
+            "Context",
+            controls::meter(ctx.used, ctx.limit).1,
+        ));
     }
     let tasks = chat.folio.background.len();
     if tasks > 0 {
         items.push(row("tasks", "Tasks", controls::tasks_line(tasks)));
     }
     if terminal_ready(chat) {
-        items.push(row("terminal", "Terminal", "Go on in a terminal".to_string()));
+        items.push(row(
+            "terminal",
+            "Terminal",
+            "Go on in a terminal".to_string(),
+        ));
     }
     items
 }
@@ -1242,7 +1249,13 @@ unsafe fn faceplate(gfx: &Gfx, r: &Rect, pal: &Palette, focused: bool) {
     gfx.fill_round(r, PLATE_R, p.surface.mix(white, 0.02));
     let half = r.h / 2.0;
     edge(gfx, r, PLATE_R, (r.y - 1.0, r.y + half), p.bevel_light);
-    edge(gfx, r, PLATE_R, (r.y + half, r.bottom() + 1.0), p.bevel_shade.fade(0.6));
+    edge(
+        gfx,
+        r,
+        PLATE_R,
+        (r.y + half, r.bottom() + 1.0),
+        p.bevel_shade.fade(0.6),
+    );
 
     let well = r.inset(WELL_INSET);
     let lip = Rect::new(well.x - 0.5, well.y + 0.5, well.w + 1.0, well.h + 1.0);
@@ -1300,7 +1313,13 @@ unsafe fn round_key(gfx: &Gfx, b: &Rect, lit: bool) {
     gfx.fill_round(b, rad, face);
     let half = b.h / 2.0;
     edge(gfx, b, rad, (b.y - 1.0, b.y + half), p.bevel_light);
-    edge(gfx, b, rad, (b.y + half, b.bottom() + 1.0), p.bevel_shade.fade(0.5));
+    edge(
+        gfx,
+        b,
+        rad,
+        (b.y + half, b.bottom() + 1.0),
+        p.bevel_shade.fade(0.5),
+    );
 }
 
 fn width_of(gpu: &Gpu, fmt: &IDWriteTextFormat, s: &str) -> f32 {
@@ -1308,7 +1327,6 @@ fn width_of(gpu: &Gpu, fmt: &IDWriteTextFormat, s: &str) -> f32 {
         .map(|l| render::text_size(&l).0)
         .unwrap_or(0.0)
 }
-
 
 impl View {
     /// The composer at the bottom: queued prompts and a notice above it,

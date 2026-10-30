@@ -173,7 +173,8 @@ mod tests {
 
     #[test]
     fn a_queued_prompt_carries_its_uuid_and_priority() {
-        let v: Value = serde_json::from_str(&queued_prompt_line("x", &[], "u1", Priority::Now)).unwrap();
+        let v: Value =
+            serde_json::from_str(&queued_prompt_line("x", &[], "u1", Priority::Now)).unwrap();
         assert_eq!(v["uuid"], "u1");
         assert_eq!(v["priority"], "now");
     }

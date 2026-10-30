@@ -22,21 +22,21 @@ use std::sync::Arc;
 
 use windows::core::{w, Result, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, PAINTSTRUCT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetCursorPos, PostMessageW, HTCAPTION, WM_NCLBUTTONDOWN, DestroyWindow, GetClientRect, GetWindowLongPtrW,
-    GetWindowRect, IsIconic, IsZoomed, LoadCursorW, LoadIconW, RegisterClassW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetWindowLongPtrW,
+    GetWindowRect, IsIconic, IsZoomed, LoadCursorW, LoadIconW, PostMessageW, RegisterClassW,
     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, SWP_NOACTIVATE, SWP_NOZORDER,
-    SW_RESTORE, SW_SHOWNORMAL, WINDOW_EX_STYLE, WM_CLOSE, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_MOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SIZE, WNDCLASSW,
-    WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
+    CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTCAPTION, IDC_ARROW, SWP_NOACTIVATE,
+    SWP_NOZORDER, SW_RESTORE, SW_SHOWNORMAL, WINDOW_EX_STYLE, WM_CLOSE, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_MOVE, WM_NCCREATE, WM_NCDESTROY, WM_NCLBUTTONDOWN, WM_PAINT, WM_SETFOCUS,
+    WM_SIZE, WNDCLASSW, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::app::{self, Input};
