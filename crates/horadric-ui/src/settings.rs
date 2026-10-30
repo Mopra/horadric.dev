@@ -113,6 +113,8 @@ pub enum Field {
     Animations,
     Notify,
     Sounds,
+    /// What Ctrl+Space dictation listens to.
+    Microphone,
     /// Whose session defaults the rows under it show.
     Agent,
     /// A default for the sessions Horadric starts, the same value the
@@ -178,6 +180,7 @@ impl Field {
             Field::Animations => "Runes, breathing lights and moving tiles",
             Field::Notify => "A Windows notification when a session needs you",
             Field::Sounds => "A soft sound when a turn finishes or work lands",
+            Field::Microphone => "What Ctrl+Space dictation listens to",
             Field::Agent => "The agent the defaults below are for",
             Field::Default(Setting::Model) => "The model new sessions start on",
             Field::Default(Setting::Effort) => "How long new sessions think before they answer",
@@ -271,6 +274,8 @@ pub struct Values {
     pub screen: Option<usize>,
     pub notify: bool,
     pub sounds: bool,
+    /// The microphone dictation listens to, by name.
+    pub microphone: String,
     /// Tristram's tile shows.
     pub town: bool,
     pub animations: bool,
@@ -456,6 +461,12 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                 shown(Field::Explorer, "Open in Horadric in Explorer", v.explorer),
                 line(Field::Notify, "Notify when a session waits", notify, n),
                 line(Field::Sounds, "Loot sounds", sounds, s),
+                line(
+                    Field::Microphone,
+                    "Microphone",
+                    &v.microphone,
+                    Control::List,
+                ),
                 line(
                     Field::Discord,
                     "Show on Discord",
@@ -1560,6 +1571,7 @@ mod tests {
             screen: Some(1),
             notify: true,
             sounds: false,
+            microphone: "Windows default".into(),
             town: true,
             animations: true,
             agent: Agent::Claude,

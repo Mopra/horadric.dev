@@ -154,7 +154,7 @@ impl Listener {
 
     /// What was said in `pcm`: mono samples at 16 kHz, from -1 to 1.
     pub fn transcribe(&mut self, pcm: &[f32]) -> Result<String, String> {
-        if loudness(pcm) < SILENCE {
+        if is_silent(pcm) {
             return Ok(String::new());
         }
         let err = |e: candle_core::Error| e.to_string();
@@ -226,6 +226,12 @@ impl Listener {
             .decode(&tokens[prompt.len()..], true)
             .map_err(|e| candle_core::Error::Msg(e.to_string()))
     }
+}
+
+/// Whether nothing was said in `pcm`, too quiet to be speech: a muted
+/// microphone, or the wrong one.
+pub fn is_silent(pcm: &[f32]) -> bool {
+    loudness(pcm) < SILENCE
 }
 
 fn loudness(pcm: &[f32]) -> f32 {

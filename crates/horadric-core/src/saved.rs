@@ -134,6 +134,10 @@ pub struct SavedState {
     /// turned on from the tray.
     #[serde(default)]
     pub sounds: bool,
+    /// The endpoint id of the microphone dictation listens to, picked in
+    /// Settings. None is Windows' default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone: Option<String>,
     /// Tristram's tile is hidden, from its header menu or the Settings
     /// window. It shows again while a session runs in the town.
     #[serde(default)]

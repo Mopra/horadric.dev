@@ -28,14 +28,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use horadric_memory::speech::{self, Listener};
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::core::{GUID, HSTRING};
+use windows::Win32::Foundation::{HWND, LPARAM, PROPERTYKEY, WPARAM};
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX,
+    eCapture, eConsole, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
+    MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+    DEVICE_STATE_ACTIVE, WAVEFORMATEX,
 };
+use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+    COINIT_MULTITHREADED, STGM_READ,
 };
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_USER};
 
@@ -77,6 +81,96 @@ struct Now {
 const AFTER_FOR: Duration = Duration::from_secs(8);
 
 const READY: &str = "Dictation is ready. Press Ctrl+Space and talk.";
+
+/// Shorter than this, a recording was two taps and not an attempt to
+/// talk, so its silence is not worth a word.
+const SHORTEST: usize = speech::SAMPLE_RATE / 2;
+
+/// The microphone picked in Settings, by its endpoint id. None, or one
+/// unplugged since, is the one Windows records from by default.
+static MIC: Mutex<Option<String>> = Mutex::new(None);
+
+/// A recording device plugged in now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Microphone {
+    pub id: String,
+    pub name: String,
+}
+
+/// Dictation listens to the microphone `id` from now on, None for
+/// Windows' default.
+pub fn use_microphone(id: Option<String>) {
+    if let Ok(mut m) = MIC.lock() {
+        *m = id;
+    }
+}
+
+/// The microphones plugged in, and which of them Windows records from by
+/// default. On a thread of its own, since COM there is ours to set up
+/// whatever the caller's thread has done with it.
+pub fn microphones() -> (Vec<Microphone>, Option<String>) {
+    thread::spawn(|| unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let found = list_microphones().unwrap_or_default();
+        CoUninitialize();
+        found
+    })
+    .join()
+    .unwrap_or_default()
+}
+
+unsafe fn list_microphones() -> windows::core::Result<(Vec<Microphone>, Option<String>)> {
+    let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+    let all = devices.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)?;
+    let mut mics = Vec::new();
+    for i in 0..all.GetCount()? {
+        let device = all.Item(i)?;
+        if let Some(id) = device_id(&device) {
+            mics.push(Microphone {
+                name: device_name(&device).unwrap_or_else(|| id.clone()),
+                id,
+            });
+        }
+    }
+    let default = devices
+        .GetDefaultAudioEndpoint(eCapture, eConsole)
+        .ok()
+        .and_then(|d| device_id(&d));
+    Ok((mics, default))
+}
+
+unsafe fn device_id(device: &IMMDevice) -> Option<String> {
+    let id = device.GetId().ok()?;
+    let s = id.to_string().ok();
+    CoTaskMemFree(Some(id.0 as *const c_void));
+    s
+}
+
+/// Its name as Windows' Sound settings show it, "Microphone (StreamCam)".
+unsafe fn device_name(device: &IMMDevice) -> Option<String> {
+    // PKEY_Device_FriendlyName.
+    let key = PROPERTYKEY {
+        fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
+        pid: 14,
+    };
+    let value = device.OpenPropertyStore(STGM_READ).ok()?.GetValue(&key).ok()?;
+    let text = PropVariantToStringAlloc(&value).ok()?;
+    let s = text.to_string().ok();
+    CoTaskMemFree(Some(text.0 as *const c_void));
+    s.filter(|s| !s.is_empty())
+}
+
+/// The microphone picked if it is still plugged in, else Windows' default.
+unsafe fn microphone(devices: &IMMDeviceEnumerator) -> windows::core::Result<IMMDevice> {
+    let picked = MIC.lock().ok().and_then(|m| m.clone());
+    let plugged = picked
+        .and_then(|id| devices.GetDevice(&HSTRING::from(id)).ok())
+        .filter(|d| d.GetState().is_ok_and(|s| s == DEVICE_STATE_ACTIVE));
+    match plugged {
+        Some(d) => Ok(d),
+        None => devices.GetDefaultAudioEndpoint(eCapture, eConsole),
+    }
+}
 
 thread_local! {
     static NOW: RefCell<Option<Now>> = const { RefCell::new(None) };
@@ -307,7 +401,16 @@ fn start(pane: isize) -> Now {
             return;
         }
         match heard {
-            Ok(pcm) => {
+            Ok((pcm, _)) if pcm.len() < SHORTEST => note(pane, Note::Done(Ok(String::new()))),
+            // Whisper would make words up out of it, and nothing typed
+            // with nothing said leaves the human wondering what broke.
+            Ok((pcm, mic)) if speech::is_silent(&pcm) => note(
+                pane,
+                Note::Done(Err(format!(
+                    "Heard nothing from {mic}. Pick your microphone in Settings, under General."
+                ))),
+            ),
+            Ok((pcm, _)) => {
                 note(pane, Note::Phase(Phase::Writing));
                 let _ = writer().send(Job::Write(pane, pcm));
             }
@@ -393,8 +496,9 @@ fn load(pane: isize) -> Result<Listener, String> {
     Listener::load(&dir)
 }
 
-/// The microphone's samples until `stop` is set, at [`RATE`], mono.
-fn record(stop: &AtomicBool) -> Result<Vec<f32>, String> {
+/// The microphone's samples until `stop` is set, at [`RATE`], mono, and
+/// its name.
+fn record(stop: &AtomicBool) -> Result<(Vec<f32>, String), String> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let heard = capture(stop).map_err(|e| format!("The microphone could not be read: {e}"));
@@ -403,9 +507,10 @@ fn record(stop: &AtomicBool) -> Result<Vec<f32>, String> {
     }
 }
 
-unsafe fn capture(stop: &AtomicBool) -> windows::core::Result<Vec<f32>> {
+unsafe fn capture(stop: &AtomicBool) -> windows::core::Result<(Vec<f32>, String)> {
     let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-    let mic = devices.GetDefaultAudioEndpoint(eCapture, eConsole)?;
+    let mic = microphone(&devices)?;
+    let name = device_name(&mic).unwrap_or_else(|| "the microphone".to_string());
     let client: IAudioClient = mic.Activate(CLSCTX_ALL, None)?;
     let format = WAVEFORMATEX {
         // WAVE_FORMAT_IEEE_FLOAT.
@@ -448,5 +553,5 @@ unsafe fn capture(stop: &AtomicBool) -> windows::core::Result<Vec<f32>> {
         }
     }
     let _ = client.Stop();
-    Ok(pcm)
+    Ok((pcm, name))
 }

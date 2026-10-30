@@ -860,6 +860,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     let mcp_config = store::write_mcp_config(&console::host_program());
     town::make();
     crate::backdrop::set_still(saved.still);
+    crate::dictate::use_microphone(saved.microphone.clone());
     let usage_window = match UsageWindow::create(
         Rc::clone(&shared),
         saved.usage_window.as_ref().is_some_and(|p| p.collapsed),
@@ -971,6 +972,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             explorer_offered,
             quiet: saved.quiet,
             sounds: saved.sounds,
+            microphone: saved.microphone.clone(),
             town_hidden: saved.town_hidden,
             still: saved.still,
             switch_accounts: saved.switch_accounts,
@@ -3655,6 +3657,8 @@ struct App {
     quiet: bool,
     /// Loot sounds, from the Settings window.
     sounds: bool,
+    /// The microphone dictation listens to, None for Windows' default.
+    microphone: Option<String>,
     /// Tristram's tile is hidden while no session runs in the town.
     town_hidden: bool,
     /// Horadric's own animations are off, from the Settings window.
@@ -5775,6 +5779,19 @@ impl App {
     }
 
     /// The settings as they are now, for the Settings window.
+    /// The microphone dictation listens to, by name, for its Settings row.
+    fn microphone_name(&self) -> String {
+        let (mics, default) = crate::dictate::microphones();
+        let name = |id: &String| mics.iter().find(|m| m.id == *id).map(|m| m.name.clone());
+        match &self.microphone {
+            Some(id) => name(id).unwrap_or_else(|| "Unplugged, Windows default for now".into()),
+            None => match default.as_ref().and_then(name) {
+                Some(n) => format!("Windows default, {n}"),
+                None => "Windows default".into(),
+            },
+        }
+    }
+
     fn settings_values(&self) -> settings::Values {
         let screens = monitors();
         let shown = screens::pick(&screens, self.screen.as_deref()).map(|s| s.name.clone());
@@ -5794,6 +5811,7 @@ impl App {
             screen: shown.and_then(|n| screens.iter().position(|s| s.name == n)),
             notify: !self.quiet,
             sounds: self.sounds,
+            microphone: self.microphone_name(),
             town: !self.town_hidden,
             animations: !self.still,
             switch_accounts: self.switch_accounts,
@@ -6285,6 +6303,26 @@ impl App {
                     at(screens.iter().position(|s| Some(&s.name) == shown)),
                 )
             }
+            Field::Microphone => {
+                let (mics, default) = crate::dictate::microphones();
+                let windows = default
+                    .and_then(|d| mics.iter().find(|m| m.id == d))
+                    .map_or("Windows default".to_string(), |m| {
+                        format!("Windows default, {}", m.name)
+                    });
+                let current = self
+                    .microphone
+                    .as_ref()
+                    .and_then(|id| mics.iter().position(|m| m.id == *id))
+                    .map_or(0, |i| i + 1);
+                list(
+                    "Ctrl+Space listens to it from now on",
+                    std::iter::once(windows)
+                        .chain(mics.into_iter().map(|m| m.name))
+                        .collect(),
+                    current,
+                )
+            }
             Field::Discord => list(
                 "What your Discord profile may show",
                 Discord::ALL.iter().map(|d| d.label().to_string()).collect(),
@@ -6353,6 +6391,7 @@ impl App {
             Field::Theme
             | Field::Font
             | Field::Screen
+            | Field::Microphone
             | Field::Discord
             | Field::Agent
             | Field::Default(_)
@@ -6501,6 +6540,23 @@ impl App {
             Field::Discord => {
                 if let Some(d) = Discord::ALL.get(i) {
                     self.set_discord(*d);
+                }
+            }
+            Field::Microphone => {
+                // The list is read again: a microphone plugged in or out
+                // while it was open moves the rows under the pick.
+                let picked = match i {
+                    0 => Some(None),
+                    i => crate::dictate::microphones()
+                        .0
+                        .into_iter()
+                        .nth(i - 1)
+                        .map(|m| Some(m.id)),
+                };
+                if let Some(id) = picked {
+                    crate::dictate::use_microphone(id.clone());
+                    self.microphone = id;
+                    self.save();
                 }
             }
             Field::BackupTo => {
@@ -8278,6 +8334,7 @@ impl App {
             font_size: Some(self.shared.font.size()).filter(|&s| s != keys::FONT_DEFAULT),
             quiet: self.quiet,
             sounds: self.sounds,
+            microphone: self.microphone.clone(),
             town_hidden: self.town_hidden,
             still: self.still,
             switch_accounts: self.switch_accounts,
