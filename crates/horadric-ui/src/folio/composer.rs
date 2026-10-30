@@ -65,6 +65,8 @@ const WELL_INSET: f32 = 6.0;
 const WELL_R: f32 = PLATE_R - WELL_INSET;
 /// The height of the buttons in the pane's header row.
 pub(super) const STRIP_H: f32 = 22.0;
+/// The round key at the right of the field that sends, or stops Claude.
+const KEY: f32 = 26.0;
 const THUMB: f32 = 52.0;
 const ROW_H: f32 = 26.0;
 const MENU_ROW: f32 = 30.0;
@@ -90,6 +92,7 @@ const PLACEHOLDER_ENDED: &str = "This session has ended.";
 pub(super) enum Act {
     Text,
     Stop,
+    Send,
     Settings,
     Pick(usize),
     Unattach(usize),
@@ -1185,8 +1188,8 @@ unsafe fn faceplate(gfx: &Gfx, r: &Rect, pal: &Palette, focused: bool) {
     gfx.fill_round(&side, PLATE_R, p.surface.mix(black, 0.6));
     gfx.fill_round(r, PLATE_R, p.surface.mix(white, 0.02));
     let half = r.h / 2.0;
-    edge(gfx, r, (r.y - 1.0, r.y + half), p.bevel_light);
-    edge(gfx, r, (r.y + half, r.bottom() + 1.0), p.bevel_shade.fade(0.6));
+    edge(gfx, r, PLATE_R, (r.y - 1.0, r.y + half), p.bevel_light);
+    edge(gfx, r, PLATE_R, (r.y + half, r.bottom() + 1.0), p.bevel_shade.fade(0.6));
 
     let well = r.inset(WELL_INSET);
     let lip = Rect::new(well.x - 0.5, well.y + 0.5, well.w + 1.0, well.h + 1.0);
@@ -1213,12 +1216,38 @@ unsafe fn faceplate(gfx: &Gfx, r: &Rect, pal: &Palette, focused: bool) {
 
 /// The outline of `r` between `ys` only: a bevel's lit top or shaded
 /// bottom.
-unsafe fn edge(gfx: &Gfx, r: &Rect, (top, bottom): (f32, f32), c: crate::theme::Color) {
+unsafe fn edge(
+    gfx: &Gfx,
+    r: &Rect,
+    radius: f32,
+    (top, bottom): (f32, f32),
+    c: crate::theme::Color,
+) {
     let band = Rect::new(r.x - 1.0, top, r.w + 2.0, bottom - top);
     gfx.rt
         .PushAxisAlignedClip(&d2d(&band), D2D1_ANTIALIAS_MODE_ALIASED);
-    gfx.stroke_round(r, PLATE_R, c, 1.0);
+    gfx.stroke_round(r, radius, c, 1.0);
     gfx.rt.PopAxisAlignedClip();
+}
+
+/// A small round key raised out of the field, cut from the same stuff as
+/// the plate: a soft cast below, a lit top rim and a shaded bottom one.
+/// Pressed while the mouse is on it, so it sinks a little.
+unsafe fn round_key(gfx: &Gfx, b: &Rect, lit: bool) {
+    let p = crate::theme::palette();
+    let white = crate::theme::Color::rgb(0xFFFFFF);
+    let rad = b.h / 2.0;
+    let drop = if lit { 0.5 } else { 1.5 };
+    for i in 1..=2 {
+        let s = i as f32;
+        let fall = Rect::new(b.x - s * 0.5, b.y + drop + s * 0.5, b.w + s, b.h);
+        gfx.fill_round(&fall, rad + s * 0.5, p.cast.fade(0.18));
+    }
+    let face = p.surface.mix(white, if lit { 0.09 } else { 0.05 });
+    gfx.fill_round(b, rad, face);
+    let half = b.h / 2.0;
+    edge(gfx, b, rad, (b.y - 1.0, b.y + half), p.bevel_light);
+    edge(gfx, b, rad, (b.y + half, b.bottom() + 1.0), p.bevel_shade.fade(0.5));
 }
 
 fn width_of(gpu: &Gpu, fmt: &IDWriteTextFormat, s: &str) -> f32 {
@@ -1245,7 +1274,8 @@ impl View {
     ) -> Rect {
         tend(&self.key, chat);
         let gpu = &self.shared.gpu;
-        let inner_w = (cw - 2.0 * PAD).max(10.0);
+        // The text stops short of the key at the right.
+        let inner_w = (cw - 2.0 * PAD - KEY - 8.0).max(10.0);
         let empty = chat.input.ed.is_empty();
         let shown = if empty { "M" } else { chat.input.ed.text() };
         let Ok(l) = render::wrapped(gpu, &gfx.text, shown, inner_w) else {
@@ -1368,14 +1398,56 @@ impl View {
             self.place_ime(chat, ox + caret.x, sy + caret.y, caret.h);
         }
         *self.composer.borrow_mut() = (!empty).then_some((l, ox, sy));
+        self.send_key(gfx, chat, pal, &r, line_h, empty, hits);
 
         let top = self.above(gfx, chat, pal, cx, cw, r.y, hits);
         Rect::new(cx, top, cw, r.bottom() - top)
     }
 
+    /// The key at the right of the field, level with the last line: stop
+    /// while Claude works, else send, its arrow only lit once there is
+    /// something to send.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn send_key(
+        &self,
+        gfx: &Gfx,
+        chat: &Chat,
+        pal: &Palette,
+        r: &Rect,
+        line_h: f32,
+        empty: bool,
+        hits: &mut Vec<(Rect, Hit)>,
+    ) {
+        if chat.ended {
+            return;
+        }
+        let y = (r.bottom() - PAD - line_h / 2.0 - KEY / 2.0).round();
+        let margin = r.bottom() - WELL_INSET - (y + KEY);
+        let b = Rect::new(r.right() - WELL_INSET - margin - KEY, y, KEY, KEY);
+        let busy = chat.folio.busy;
+        let act = if busy { Act::Stop } else { Act::Send };
+        let ready = busy || !empty || !chat.input.images.is_empty();
+        let lit = ready && chat.input.hover == Some(act);
+        round_key(gfx, &b, lit);
+        let ink = match (ready, lit) {
+            (false, _) => pal.faint.fade(0.45),
+            (true, true) => pal.accent.mix(pal.fg, 0.25),
+            (true, false) => pal.accent,
+        };
+        if busy {
+            let sq = Rect::new(b.x + KEY / 2.0 - 4.5, b.y + KEY / 2.0 - 4.5, 9.0, 9.0);
+            gfx.fill_round(&sq, 2.0, ink);
+        } else {
+            gfx.text_in("\u{E74A}", &gfx.icon, &b, ink);
+        }
+        if ready {
+            hits.push((b, Hit::Input(act)));
+        }
+    }
+
     /// The pane's header, kept to one button that opens the settings
-    /// (mode, model, effort, context, tasks, Terminal) as a menu, and Stop
-    /// beside it while Claude works. Laid leftwards from `right` at `cy`.
+    /// (mode, model, effort, context, tasks, Terminal) as a menu. Laid
+    /// leftwards from `right` at `cy`.
     pub(super) unsafe fn strip(
         &self,
         gfx: &Gfx,
@@ -1404,18 +1476,6 @@ impl View {
         hits.push((b, Hit::Input(Act::Settings)));
         // The menus open on the glass, so the anchor is in its DIPs.
         chat.input.anchor = b.x + chat.bar_shift;
-
-        if chat.folio.busy {
-            let s = Rect::new(b.x - 6.0 - STRIP_H, cy, STRIP_H, STRIP_H);
-            let hot = hover == Some(Act::Stop);
-            gfx.fill_round(
-                &s,
-                STRIP_H / 2.0,
-                pal.fg.with_alpha(if hot { 0.9 } else { 0.7 }),
-            );
-            gfx.text_in("\u{E71A}", &gfx.icon, &s, pal.bg);
-            hits.push((s, Hit::Input(Act::Stop)));
-        }
     }
 
     /// The notice and the queued prompts, stacked up from `bottom`.
@@ -1699,6 +1759,7 @@ impl View {
                 chat.input.menu = None;
             }
             match act {
+                Act::Send => send(chat, false),
                 Act::Stop => {
                     hold(chat);
                     if let Some(h) = &chat.hosted {
