@@ -110,7 +110,6 @@ use crate::catchup::{self, Away, Catchup};
 use crate::columns::{self, Columns};
 use crate::console::{self, Console, Launch};
 use crate::contextpanel::{self, ContextPanel};
-use crate::cube::{self as cube_window, CubeWindow};
 use crate::dialog::{self, Dialog, Tone};
 use crate::dropdown::{self, Dropdown, Whose};
 use crate::glide::Glides;
@@ -123,13 +122,12 @@ use crate::menu::{self, Item};
 use crate::pick;
 use crate::portal_key;
 use crate::questlog::{self, QuestLog};
-use crate::render::{Gpu, StashLook};
+use crate::render::Gpu;
 use crate::sanctuary;
 use crate::screens::{self, Screen};
 use crate::settings::{self, Field, SettingsWindow};
 use crate::sound;
 use crate::start::{self, StartWindow};
-use crate::stash::{self, StashWindow};
 use crate::terminal::{self, Place, TerminalWindow};
 use crate::theme::Theme;
 use crate::toast::{self, Kind, Toasts};
@@ -217,10 +215,6 @@ const WM_HORADRIC_UPDATE: u32 = WM_APP + 16;
 const WM_HORADRIC_DOWNLOADED: u32 = WM_APP + 17;
 /// A worktree went but its branch stayed, into the runner's `kept`.
 const WM_HORADRIC_KEPT: u32 = WM_APP + 18;
-/// Show the menu for the stashed session the app's `stash_menu_for` names.
-const WM_HORADRIC_STASH_MENU: u32 = WM_APP + 19;
-/// Show the usage window's own menu.
-const WM_HORADRIC_USAGE_MENU: u32 = WM_APP + 23;
 /// Show the list of an agent's accounts, from the usage window's Account
 /// row. The agent is the message's `wparam`, its place in `Agent::ALL`.
 const WM_HORADRIC_ACCOUNT_MENU: u32 = WM_APP + 24;
@@ -311,8 +305,6 @@ fn default_picked(agent: Agent, setting: Setting, i: usize) -> Option<Option<Str
 pub enum PaneAsk {
     /// The cross: end the session.
     End,
-    /// Put the session in the stash.
-    Stash,
     /// The pane's selection right clicked: copy it or hand it to an agent.
     Hand,
 }
@@ -469,8 +461,7 @@ pub(crate) enum Input {
     WebAsk(String, WebAsk),
     /// A file view's cross or Esc: close the view with this serial.
     CloseView(usize),
-    /// A session pane's cross or stash button, for the session with this
-    /// id.
+    /// A session pane's cross, for the session with this id.
     PaneAsk(String, PaneAsk),
     /// Ctrl and plus, minus, zero or the wheel in a pane: the terminal font
     /// for every pane.
@@ -486,8 +477,6 @@ pub(crate) enum Input {
     /// A list setting in the usage window clicked: drop its list under its
     /// row, given in screen pixels.
     SettingMenu(Agent, Setting, RECT),
-    /// The usage window right clicked: its own menu.
-    UsageMenu,
     /// Town Portal's key on the stage's caption clicked.
     PortalKey,
     /// The usage window's Account row clicked: the agent's accounts to
@@ -564,21 +553,6 @@ pub(crate) enum Input {
     /// for the empty stone or the tome's header: offer what can be done
     /// with it.
     StoneMenu(String, Option<String>),
-    /// A stashed session's slot clicked: bring it back.
-    Unstash(String),
-    /// A stashed session's slot right clicked.
-    StashMenu(String),
-    /// A tile or a pane let go over the cube, by its session's id.
-    ToCube(String),
-    /// A session's slot in the cube clicked: it comes out.
-    CubeOut(String),
-    /// The cube's `main` rune clicked: in, or out again.
-    CubeMain,
-    /// The cube's button: run the recipe.
-    Transmute,
-    /// The cube's transmute has played, so it may go if nothing is left
-    /// for it to hold.
-    CubeSettled,
     /// The stage came to the front, from the taskbar, alt-tab or a click:
     /// the tiles come with it, so Horadric shows as one app.
     StageActive,
@@ -647,8 +621,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     }
     window::register_class()?;
     usage::register_class()?;
-    stash::register_class()?;
-    cube_window::register_class()?;
     dropdown::register_class()?;
     crate::suggest::register_class()?;
     settings::register_class()?;
@@ -688,7 +660,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     for s in &saved.sessions {
         registry.add(s.to_session(now));
     }
-    registry.set_stash(&saved.stash);
     let registry = Arc::new(Mutex::new(registry));
     let usage = Arc::new(Mutex::new(saved.usage.clone()));
     let agent_usage = Arc::new(Mutex::new(saved.agent_usage.clone()));
@@ -867,7 +838,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             d
         }),
         boards: RefCell::new(HashMap::new()),
-        cube: Cell::new(None),
         tomes: RefCell::new(HashMap::new()),
         warriv: RefCell::new(HashMap::new()),
         astir: RefCell::new(HashSet::new()),
@@ -902,10 +872,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 .into_iter()
                 .filter(|a| console::agent_program(*a).is_some())
                 .collect(),
-            stash_window: None,
-            cube_window: None,
-            cube: Vec::new(),
-            cube_main: false,
             start_window: None,
             status_settings,
             mcp_config,
@@ -1007,7 +973,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             rich: None,
             run: presence::Run::from_saved(saved.run),
             tome: runner::runeword::Tome::new(&saved, reload),
-            cube_on: saved.cube,
             font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),
             update_told: saved.update_told.clone(),
@@ -1018,7 +983,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             menu_for: None,
             stone_for: None,
             stone_menu_for: None,
-            stash_menu_for: None,
             project_menu_for: None,
             recent_menu_for: None,
             reload: None,
@@ -1087,12 +1051,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             }
             if let Some(u) = &app.usage_window {
                 u.destroy();
-            }
-            if let Some(w) = &app.stash_window {
-                w.destroy();
-            }
-            if let Some(w) = &app.cube_window {
-                w.destroy();
             }
             if let Some(s) = &app.start_window {
                 s.destroy();
@@ -1312,16 +1270,6 @@ unsafe extern "system" fn app_proc(
             if let Some((key, label)) = with_app(|app| app.stone_menu_for.take()).flatten() {
                 runner::runeword::stone_menu(&key, label.as_deref());
             }
-            return LRESULT(0);
-        }
-        WM_HORADRIC_STASH_MENU => {
-            if let Some(id) = with_app(|app| app.stash_menu_for.take()).flatten() {
-                stash_menu(&id);
-            }
-            return LRESULT(0);
-        }
-        WM_HORADRIC_USAGE_MENU => {
-            usage_menu();
             return LRESULT(0);
         }
         WM_HORADRIC_PLACE => {
@@ -1779,7 +1727,6 @@ fn tile_menu(id: &str) {
     const OPEN: usize = 1;
     const END: usize = 2;
     const RENAME: usize = 3;
-    const STASH: usize = 4;
     const PICK: usize = 5;
     const STOP_RUNEWORD: usize = 6;
     const FOUND: usize = 7;
@@ -1814,11 +1761,6 @@ fn tile_menu(id: &str) {
         return;
     };
     let rename = Item::action(RENAME, "Rename\u{2026}");
-    let full = with_app(|app| app.shared.registry.lock().is_ok_and(|r| r.stash_full()));
-    let stash = match full {
-        Some(false) => Item::action(STASH, "Stash"),
-        _ => Item::Disabled("Stash is full".into()),
-    };
     let live = matches!(kind, TileKind::Live);
     let items = match (kind, shell) {
         (TileKind::Live, false) => {
@@ -1828,7 +1770,6 @@ fn tile_menu(id: &str) {
             }
             items.extend([
                 rename,
-                stash,
                 Item::Separator,
                 Item::action(END, "End session"),
             ]);
@@ -1843,7 +1784,6 @@ fn tile_menu(id: &str) {
         (TileKind::Paused, false) => vec![
             Item::action(OPEN, "Resume"),
             rename,
-            stash,
             Item::Separator,
             Item::action(END, "End session"),
         ],
@@ -1984,9 +1924,6 @@ fn tile_menu(id: &str) {
         Some(AS_CHAT) => {
             with_app(|app| app.terminal_to_folio(id));
         }
-        Some(STASH) if confirm_stash(id) => {
-            with_app(|app| app.stash(id));
-        }
         _ => {}
     }
 }
@@ -2053,46 +1990,14 @@ fn found_project(id: &str) {
     });
 }
 
-/// Asks before stashing a session mid turn, which stops the turn. One
-/// waiting or at its prompt loses nothing: it resumes to the same place.
-fn confirm_stash(id: &str) -> bool {
-    let busy = with_app(|app| {
-        app.consoles
-            .get(id)
-            .is_some_and(|c| c.exit_code().is_none())
-            && app
-                .shared
-                .registry
-                .lock()
-                .is_ok_and(|r| r.get(id).is_some_and(|s| s.phase.mid_turn()))
-    });
-    if busy != Some(true) {
-        return true;
-    }
-    let pressed = ask(&Dialog {
-        tone: Tone::Warning,
-        title: "Stash session",
-        text: "It is mid turn. Stashing stops it now, and the turn is cut short. A click \
-               on it in the stash resumes the conversation.",
-        buttons: &["Stash", "Cancel"],
-        default: 1,
-        check: None,
-    });
-    pressed == Some(0)
-}
-
-/// A session pane's cross or stash button. The cross ends at once, as the
-/// tile menu's End does; only a stash mid turn is asked about.
+/// A session pane's cross, which ends at once as the tile menu's End does,
+/// or its selection's menu.
 fn pane_ask(id: &str, what: PaneAsk) {
     match what {
         PaneAsk::End => {
             with_app(|app| app.end(id));
         }
-        PaneAsk::Stash if stash_has_room() && confirm_stash(id) => {
-            with_app(|app| app.stash(id));
-        }
         PaneAsk::Hand => hand_menu(id),
-        _ => {}
     }
 }
 
@@ -2204,49 +2109,6 @@ fn save_crop(answer: &str) -> Option<PathBuf> {
     let path = pick::new_path("png");
     std::fs::write(&path, png).ok()?;
     Some(path)
-}
-
-/// Says so when the stash is full, as the tile menu's greyed Stash does.
-fn stash_has_room() -> bool {
-    let full = with_app(|app| app.shared.registry.lock().is_ok_and(|r| r.stash_full()));
-    if full != Some(true) {
-        return true;
-    }
-    ask(&Dialog {
-        tone: Tone::Warning,
-        title: "Stash is full",
-        text: "End a stashed session or bring one back to make room.",
-        buttons: &["OK"],
-        default: 0,
-        check: None,
-    });
-    false
-}
-
-/// The menu for a stashed session: bring it back running or paused, or
-/// end it for good.
-fn stash_menu(id: &str) {
-    const BACK: usize = 1;
-    const PAUSED: usize = 2;
-    const END: usize = 3;
-    let items = vec![
-        Item::action(BACK, "Bring back"),
-        Item::action(PAUSED, "Bring back paused"),
-        Item::Separator,
-        Item::action(END, "End session"),
-    ];
-    match menu::popup(&items) {
-        Some(BACK) => {
-            with_app(|app| app.unstash(id, true));
-        }
-        Some(PAUSED) => {
-            with_app(|app| app.unstash(id, false));
-        }
-        Some(END) => {
-            with_app(|app| app.end_stashed(id));
-        }
-        _ => {}
-    }
 }
 
 /// Where the tile menu's changed files start: those not committed, then
@@ -3223,26 +3085,6 @@ fn portal_pair(dir: &std::path::Path) {
     with_app(|app| app.portal_soon());
 }
 
-/// The usage window's menu, for what the settings rows do not hold.
-fn usage_menu() {
-    const CUBE: usize = 1;
-    let on = with_app(|app| app.cube_on).unwrap_or_default();
-    let items = [Item::Action {
-        id: CUBE,
-        label: "Horadric Cube".into(),
-        checked: on,
-    }];
-    if menu::popup(&items) == Some(CUBE) {
-        with_app(|app| {
-            app.cube_on = !on;
-            app.save();
-            if app.sync_cube() {
-                app.arrange();
-            }
-        });
-    }
-}
-
 /// `agent`'s accounts: a pick switches to it, and Add account logs in to
 /// another.
 fn account_menu(agent: Agent) {
@@ -3545,14 +3387,6 @@ struct App {
     /// The agents besides Claude Code found installed when the app
     /// started, each with a screen in the usage window.
     agents_found: Vec<Agent>,
-    /// The sessions put away for later, there while it holds any.
-    stash_window: Option<Box<StashWindow>>,
-    /// The cube, there while there is anything to drop in it.
-    cube_window: Option<Box<CubeWindow>>,
-    /// The sessions in the cube, by id, in the order they went in.
-    cube: Vec<String>,
-    /// `main` is in the cube beside them.
-    cube_main: bool,
     /// Stands where the first project will go while none is open.
     start_window: Option<Box<StartWindow>>,
     /// The settings file that gives a session `horadric status` as its status
@@ -3761,8 +3595,6 @@ struct App {
     /// The stone whose menu is about to show, by project key and label,
     /// None for the empty stone.
     stone_menu_for: Option<(String, Option<String>)>,
-    /// The stashed session whose menu is about to show.
-    stash_menu_for: Option<String>,
     /// The project whose menu is about to show.
     project_menu_for: Option<String>,
     /// The recent project whose menu is about to show.
@@ -3814,8 +3646,6 @@ struct App {
     rich: Option<crate::discord::Discord>,
     /// When the current run of work began, which the profile counts from.
     run: presence::Run,
-    /// The cube is shown, from the usage window's menu.
-    cube_on: bool,
     /// The terminal font picked in the Settings window. Kept as picked, so a
     /// family that is uninstalled for a while comes back when it is not.
     font_family: Option<String>,
@@ -4603,10 +4433,6 @@ impl App {
                     std::iter::once(s.cwd.clone())
                         .chain(s.worktree.as_ref().map(|w| w.path.clone()))
                 })
-                .chain(r.stashed().iter().flat_map(|s| {
-                    std::iter::once(s.cwd.clone())
-                        .chain(s.worktree.as_ref().map(|w| w.path.clone()))
-                }))
                 .collect(),
             Err(_) => return,
         };
@@ -4875,21 +4701,7 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// The conversations the stash holds, which come back from there.
-    fn stashed_conversations(&self) -> Vec<String> {
-        self.shared
-            .registry
-            .lock()
-            .map(|r| {
-                r.stashed()
-                    .iter()
-                    .filter_map(|s| s.claude_session_id.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// The conversations tiles hold, running, paused or stashed, which a
+    /// The conversations tiles hold, running or paused, which a
     /// History menu leaves out: two agents on one would write over each
     /// other.
     fn held_conversations(&self) -> Vec<String> {
@@ -4899,11 +4711,6 @@ impl App {
             .map(|r| {
                 r.all()
                     .filter_map(|s| s.claude_session_id.clone())
-                    .chain(
-                        r.stashed()
-                            .iter()
-                            .filter_map(|s| s.claude_session_id.clone()),
-                    )
                     .collect()
             })
             .unwrap_or_default()
@@ -6727,140 +6534,6 @@ impl App {
         }
     }
 
-    /// Puts a session in the stash: its process stops, its tile and pane
-    /// go, and its conversation, arguments and worktree are kept for a
-    /// click to bring back.
-    fn stash(&mut self, id: &str) {
-        let args = match (self.paused.get(id), self.consoles.get(id)) {
-            (Some(p), _) => p.args.clone(),
-            (None, Some(c)) => c.args.clone(),
-            (None, None) => return,
-        };
-        let stashed = match self.shared.registry.lock() {
-            Ok(mut r) => {
-                let Some(s) = r.get(id).filter(|s| !s.shell && s.background.is_none()) else {
-                    return;
-                };
-                let saved = SavedSession {
-                    chat: self.paused.get(id).is_some_and(|p| p.chat),
-                    ..SavedSession::from_session(s, args, false)
-                };
-                r.stash(saved)
-            }
-            Err(_) => false,
-        };
-        if !stashed {
-            return;
-        }
-        // Out of the registry before the process goes, so its exit finds no
-        // session to pause and no console to report on.
-        if let Some(c) = self.consoles.remove(id) {
-            if c.exit_code().is_none() {
-                c.kill();
-            }
-        }
-        self.paused.remove(id);
-        self.journaled.remove(id);
-        self.browsers.retain(|&hwnd, b| {
-            let keep = b.session != id;
-            if !keep {
-                browsers::untrack(hwnd_of(hwnd));
-            }
-            keep
-        });
-        for order in self.shared.orders.borrow_mut().values_mut() {
-            order.retain(|s| s != id);
-        }
-        self.reconcile(false);
-    }
-
-    /// Takes a session out of the stash into its project's tiles, paused,
-    /// and with `run` resumes it on the stage as well.
-    fn unstash(&mut self, id: &str, run: bool) {
-        let saved = match self.shared.registry.lock() {
-            Ok(mut r) => r.unstash(id, SystemTime::now()),
-            Err(_) => None,
-        };
-        let Some(saved) = saved else {
-            return;
-        };
-        self.paused.insert(id.to_string(), saved);
-        self.reconcile(false);
-        if run {
-            if let Err(e) = self.resume(id, true) {
-                eprintln!("horadric: cannot resume {id}: {e}");
-            }
-        }
-    }
-
-    /// Ends a stashed session for good, its worktree with it.
-    fn end_stashed(&mut self, id: &str) {
-        let saved = match self.shared.registry.lock() {
-            Ok(mut r) => r.discard(id),
-            Err(_) => None,
-        };
-        let Some(saved) = saved else {
-            return;
-        };
-        if let Some(w) = saved.worktree.clone() {
-            let key = project_key(&saved.to_session(SystemTime::now()));
-            self.remove_tree(key, w);
-        }
-        self.reconcile(false);
-    }
-
-    /// Makes the stash window match the stash: there while it holds any,
-    /// under the usage window when it first comes, each slot's look.
-    fn sync_stash(&mut self) {
-        let now = SystemTime::now();
-        let items: Vec<(String, StashLook)> = match self.shared.registry.lock() {
-            Ok(r) => r
-                .stashed()
-                .iter()
-                .map(|saved| {
-                    let s = saved.to_session(now);
-                    let key = project_key(&s);
-                    let look = StashLook {
-                        name: s.label().to_string(),
-                        project: project_name(&key),
-                        accent: theme::accent(&key),
-                        ink: theme::rarity_color(s.rarity()),
-                        last: s.last_line.clone(),
-                        branch: s.worktree.as_ref().map(|w| w.branch.clone()),
-                    };
-                    (s.id.clone(), look)
-                })
-                .collect(),
-            Err(_) => return,
-        };
-        if items.is_empty() {
-            if let Some(w) = self.stash_window.take() {
-                self.glides.borrow_mut().forget(w.hwnd.0 as isize);
-                w.destroy();
-            }
-            return;
-        }
-        if self.stash_window.is_none() {
-            match StashWindow::create(Rc::clone(&self.shared), -10_000, -10_000) {
-                // Born under whatever else stands there.
-                Ok(w) => {
-                    w.raise();
-                    self.stash_window = Some(w);
-                }
-                Err(e) => {
-                    eprintln!("horadric: cannot create the stash: {e}");
-                    return;
-                }
-            }
-        }
-        if !self.columns.contains(columns::STASH) {
-            self.columns.add_under(columns::STASH, columns::USAGE);
-        }
-        if let Some(w) = &self.stash_window {
-            w.set_items(items);
-        }
-    }
-
     /// Ends a session for good: the process, the window, the tile, and its
     /// place in the saved state.
     fn end(&mut self, id: &str) {
@@ -6989,8 +6662,8 @@ impl App {
         self.end_all(Some(key));
     }
 
-    /// Paints the project in another colour: its cluster, its stash and
-    /// cube slots, and the stage while it shows the project.
+    /// Paints the project in another colour: its cluster, and the stage
+    /// while it shows the project.
     fn recolour(&mut self, key: &str, i: usize) {
         theme::set_accent(key, i);
         for c in self.clusters.iter().filter(|c| c.key == key) {
@@ -6999,8 +6672,6 @@ impl App {
         if self.stage.as_ref().is_some_and(|s| s.project() == key) {
             self.fill_stage(key);
         }
-        self.sync_stash();
-        self.sync_cube();
         self.save();
     }
 
@@ -7103,7 +6774,7 @@ impl App {
                     .shared
                     .registry
                     .lock()
-                    .map(|r| r.get(candidate).is_some() || r.is_stashed(candidate))
+                    .map(|r| r.get(candidate).is_some())
                     .unwrap_or(false)
         };
         if !taken(&id) {
@@ -7125,11 +6796,6 @@ impl App {
             self.refresh_parked();
         }
         if self.far_reveal(id) {
-            return;
-        }
-        let stashed = self.shared.registry.lock().is_ok_and(|r| r.is_stashed(id));
-        if stashed {
-            self.unstash(id, true);
             return;
         }
         if self.paused.contains_key(id) {
@@ -8323,17 +7989,10 @@ impl App {
             .usage_window
             .iter()
             .map(|u| (u.position(), u.size_px()));
-        let stash = self
-            .stash_window
-            .iter()
-            .map(|w| (w.position(), w.size_px()));
-        let cube = self.cube_window.iter().map(|w| (w.position(), w.size_px()));
         self.clusters
             .iter()
             .map(|c| (c.position(), c.size_px()))
             .chain(usage)
-            .chain(stash)
-            .chain(cube)
             .map(|((x, y), (w, h))| [x, y, x + w, y + h])
             .collect()
     }
@@ -8529,8 +8188,6 @@ impl App {
         let recent: HashSet<String> = self.recent.iter().map(|p| folder_key(p)).collect();
         columns.forget(|k| {
             k == columns::USAGE
-                || k == columns::STASH
-                || k == columns::CUBE
                 || recent.contains(k)
                 || self.clusters.iter().any(|c| c.key == k)
         });
@@ -8572,12 +8229,6 @@ impl App {
                 .filter(|(_, order)| !order.is_empty())
                 .collect(),
             sessions,
-            stash: self
-                .shared
-                .registry
-                .lock()
-                .map(|r| r.stashed().to_vec())
-                .unwrap_or_default(),
             defaults: self.shared.defaults_of(Agent::Claude),
             agents_off: self.agents_off.clone(),
             agent_defaults: self
@@ -8609,7 +8260,6 @@ impl App {
             discord: self.discord,
             recall_across: self.recall_across,
             run: self.run.saved(),
-            cube: self.cube_on,
             font_family: self.font_family.clone(),
             theme: theme::current().saved(),
             screen: self.screen.clone(),
@@ -8839,8 +8489,6 @@ impl App {
         for c in &self.clusters {
             c.update();
         }
-        self.sync_stash();
-        self.sync_cube();
         self.sync_start();
         // A status line can bring the first limits, which adds rows, and a
         // session of another agent its screen.
@@ -9263,26 +8911,7 @@ impl App {
                 }
                 Input::Expand(id) => self.reveal(&id, true),
                 Input::Park(id) => self.park(&id),
-                Input::Unstash(id) => self.unstash(&id, true),
-                Input::ToCube(id) => {
-                    self.put_in_cube(&id);
-                    relayout |= self.sync_cube();
-                }
-                Input::CubeOut(id) => {
-                    self.out_of_cube(&id);
-                    relayout |= self.sync_cube();
-                }
-                Input::CubeMain => {
-                    self.cube_main = !self.cube_main;
-                    relayout |= self.sync_cube();
-                }
-                Input::Transmute => self.transmute(),
-                Input::CubeSettled => relayout |= self.sync_cube(),
                 Input::StageActive => self.raise(),
-                Input::StashMenu(id) => {
-                    self.stash_menu_for = Some(id);
-                    post(self.notify.0 as isize, WM_HORADRIC_STASH_MENU, 0);
-                }
                 Input::TileMenu(id) => {
                     self.menu_for = Some(id);
                     post(self.notify.0 as isize, WM_HORADRIC_TILE_MENU, 0);
@@ -9389,7 +9018,6 @@ impl App {
                         c.invalidate();
                     }
                 }
-                Input::UsageMenu => post(self.notify.0 as isize, WM_HORADRIC_USAGE_MENU, 0),
                 Input::PortalKey => post(self.notify.0 as isize, WM_HORADRIC_PORTAL_KEY, 0),
                 Input::AccountMenu(a) => {
                     let i = Agent::ALL.iter().position(|x| *x == a).unwrap_or(0);
@@ -9571,12 +9199,6 @@ impl App {
         if let Some(u) = &self.usage_window {
             u.raise();
         }
-        if let Some(w) = &self.stash_window {
-            w.raise();
-        }
-        if let Some(w) = &self.cube_window {
-            w.raise();
-        }
         if let Some(s) = &self.start_window {
             s.raise();
         }
@@ -9627,8 +9249,6 @@ impl App {
             .iter()
             .map(|c| c.key.clone())
             .chain(self.usage_window.iter().map(|_| columns::USAGE.to_string()))
-            .chain(self.stash_window.iter().map(|_| columns::STASH.to_string()))
-            .chain(self.cube_window.iter().map(|_| columns::CUBE.to_string()))
             .collect()
     }
 
@@ -9641,12 +9261,6 @@ impl App {
             .filter_map(|k| {
                 if k == columns::USAGE {
                     return self.usage_window.as_deref().map(Tile::Usage);
-                }
-                if k == columns::STASH {
-                    return self.stash_window.as_deref().map(Tile::Stash);
-                }
-                if k == columns::CUBE {
-                    return self.cube_window.as_deref().map(Tile::Cube);
                 }
                 self.clusters
                     .iter()
@@ -9993,8 +9607,6 @@ impl Grid {
 /// A window that stands in the columns.
 enum Tile<'a> {
     Usage(&'a UsageWindow),
-    Stash(&'a StashWindow),
-    Cube(&'a CubeWindow),
     Start(&'a StartWindow),
     Cluster(&'a Cluster),
 }
@@ -10004,14 +9616,6 @@ impl Tile<'_> {
         match self {
             Tile::Usage(u) => columns::Stacked {
                 fixed: u.size_px().1,
-                files: None,
-            },
-            Tile::Stash(w) => columns::Stacked {
-                fixed: w.size_px().1,
-                files: None,
-            },
-            Tile::Cube(w) => columns::Stacked {
-                fixed: w.size_px().1,
                 files: None,
             },
             Tile::Start(s) => columns::Stacked {
@@ -10029,8 +9633,6 @@ impl Tile<'_> {
     fn key(&self) -> Option<&str> {
         match self {
             Tile::Usage(_) => Some(columns::USAGE),
-            Tile::Stash(_) => Some(columns::STASH),
-            Tile::Cube(_) => Some(columns::CUBE),
             Tile::Start(_) => None,
             Tile::Cluster(c) => Some(&c.key),
         }
@@ -10039,8 +9641,6 @@ impl Tile<'_> {
     fn hwnd(&self) -> HWND {
         match self {
             Tile::Usage(u) => u.hwnd,
-            Tile::Stash(w) => w.hwnd,
-            Tile::Cube(w) => w.hwnd,
             Tile::Start(s) => s.hwnd,
             Tile::Cluster(c) => c.hwnd,
         }
@@ -10049,8 +9649,6 @@ impl Tile<'_> {
     fn height(&self) -> i32 {
         match self {
             Tile::Usage(u) => u.size_px().1,
-            Tile::Stash(w) => w.size_px().1,
-            Tile::Cube(w) => w.size_px().1,
             Tile::Start(s) => s.size_px().1,
             Tile::Cluster(c) => c.size_px().1,
         }
@@ -10076,14 +9674,6 @@ impl Tile<'_> {
             Tile::Usage(u) => {
                 u.move_to(x, y);
                 u.invalidate();
-            }
-            Tile::Stash(w) => {
-                w.move_to(x, y);
-                w.invalidate();
-            }
-            Tile::Cube(w) => {
-                w.move_to(x, y);
-                w.invalidate();
             }
             Tile::Start(s) => {
                 s.move_to(x, y);

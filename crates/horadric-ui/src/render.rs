@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime};
 use horadric_core::diff::Diff;
 use horadric_core::rarity::Rarity;
 use horadric_core::usage::format_until;
-use horadric_core::{format_age, Limit, Phase, Session, Usage, STASH_SLOTS};
+use horadric_core::{format_age, Limit, Phase, Session, Usage};
 use windows::core::{w, Interface, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -62,8 +62,8 @@ use crate::board::{Ink, RowState};
 use crate::files::{Row, Tree};
 use crate::layout::{
     self, AskLayout, Button, CaptionHit, CaptionLayout, CatchupLayout, CatchupRow, ClusterLayout,
-    CubeHit, CubeLayout, DialogHit, DialogLayout, DropdownLayout, FilesLayout, Hit, MenuLayout,
-    Metrics, Rect, SettingRow, SettingsHit, SettingsLayout, StartHit, StartLayout, StashLayout,
+    DialogHit, DialogLayout, DropdownLayout, FilesLayout, Hit, MenuLayout,
+    Metrics, Rect, SettingRow, SettingsHit, SettingsLayout, StartHit, StartLayout,
     SuggestLayout, TasksLayout, ToastLayout, TomeLayout, UsageHit, UsageLayout, KNOB_R,
 };
 use crate::motion::{self, ORBIT};
@@ -657,72 +657,8 @@ impl UsageScene<'_> {
     }
 }
 
-/// Everything one frame of the stash needs.
-pub struct StashScene<'a> {
-    pub layout: &'a StashLayout,
-    /// The stashed sessions, one per slot from the first.
-    pub items: &'a [&'a StashLook],
-    pub hot: Option<usize>,
-    pub pressed: Option<Option<usize>>,
-}
-
-/// A stashed session as its slot shows it.
-pub struct StashLook {
-    pub name: String,
-    pub project: String,
-    /// Its project's accent, as its cluster wears it.
-    pub accent: Color,
-    /// How it ended, in item colours, as its tile's name was.
-    pub ink: Color,
-    /// The last thing it said or did, as its tile's line was.
-    pub last: String,
-    /// Its worktree's branch, when it has one of its own.
-    pub branch: Option<String>,
-}
-
-/// Something the cube held, swirling into it as a recipe runs: where its
-/// slot was and the colours it wore there.
-#[derive(Clone)]
-pub struct Flying {
-    pub from: Rect,
-    pub ink: Color,
-    pub accent: Color,
-}
-
-/// A transmute under way, as one frame of the cube draws it.
-pub struct TransmuteLook<'a> {
-    pub frame: motion::Transmuting,
-    pub flying: &'a [Flying],
-    /// What came of it, written on the key once the burst comes.
-    pub outcome: &'a str,
-    /// The secret recipe's portal, by how many seconds it has played, which
-    /// turns its swirl.
-    pub portal: Option<f32>,
-}
-
-/// The red of the portal to the cow level.
-const PORTAL_RED: Color = Color::rgb(0xE8323C);
 /// The blue of a town portal.
 const PORTAL_BLUE: Color = Color::rgb(0x3FA2FF);
-
-/// Everything one frame of the cube needs.
-pub struct CubeScene<'a> {
-    pub layout: &'a CubeLayout,
-    /// The sessions in it, one per slot from the first, as the stash shows
-    /// them.
-    pub items: &'a [&'a StashLook],
-    /// `main` went in beside them.
-    pub main: bool,
-    /// The recipe they make, by its button's word.
-    pub recipe: Option<&'a str>,
-    /// What is missing, when they make none.
-    pub hint: &'a str,
-    /// A tile is carried over it, so its lid lifts.
-    pub open: bool,
-    pub transmute: Option<TransmuteLook<'a>>,
-    pub hot: CubeHit,
-    pub pressed: Option<CubeHit>,
-}
 
 /// Everything one frame of the start window needs.
 pub struct StartScene<'a> {
@@ -950,26 +886,6 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).usage(gpu, m, scene);
-            self.fade_cut();
-            self.rt.EndDraw(None, None)
-        }
-    }
-
-    /// Draws the stash. `Err` means the target must be recreated.
-    pub fn draw_stash(&self, gpu: &Gpu, m: &Metrics, scene: &StashScene) -> Result<()> {
-        unsafe {
-            self.rt.BeginDraw();
-            self.painter(&self.rt).stash(gpu, m, scene);
-            self.fade_cut();
-            self.rt.EndDraw(None, None)
-        }
-    }
-
-    /// Draws the cube. `Err` means the target must be recreated.
-    pub fn draw_cube(&self, gpu: &Gpu, m: &Metrics, scene: &CubeScene) -> Result<()> {
-        unsafe {
-            self.rt.BeginDraw();
-            self.painter(&self.rt).cube(gpu, m, scene);
             self.fade_cut();
             self.rt.EndDraw(None, None)
         }
@@ -1371,194 +1287,6 @@ impl Painter<'_> {
         }
     }
 
-    /// The stash: its name and how full it is, then a well of a row per
-    /// stashed session, each a key with its name across the whole row and
-    /// under it its project's lamp, the project and what it last did. Keys
-    /// are latched further in than a tile's: put away, not at work.
-    unsafe fn stash(&self, gpu: &Gpu, m: &Metrics, scene: &StashScene) {
-        let l = scene.layout;
-        self.plate(m, l.size);
-        let h = &l.header;
-        let label = Rect::new(h.x + 4.0, h.y, h.w - 8.0, h.h);
-        self.text(&gpu.small, theme::text_dim(), "Stash", label);
-        let count = format!("{} of {}", scene.items.len(), STASH_SLOTS);
-        self.text_tabular(gpu, &gpu.small_right, theme::text_dim(), &count, label);
-        self.sunk(gpu, &l.well, m.tile_radius, theme::well());
-        let radius = m.tile_radius - 4.0;
-        for (i, r) in l.slots.iter().enumerate() {
-            let Some(item) = scene.items.get(i) else {
-                self.latched(gpu, r, radius, 0.5);
-                continue;
-            };
-            let b = layout::button(Some(i), scene.hot, scene.pressed);
-            let depth = match b {
-                Button::Hover => 0.9,
-                Button::Idle => 0.45,
-                Button::Pressed => 0.1,
-            };
-            self.key(gpu, r, radius, theme::surface(), depth, 1.0);
-            let pad = 10.0;
-            let line_h = (r.h - 6.0) / 2.0;
-            let name = Rect::new(r.x + pad, r.y + 3.0, r.w - 2.0 * pad, line_h);
-            self.text(&gpu.small, item.ink, &item.name, name);
-            let led_x = r.x + pad + 2.5;
-            let below = Rect::new(
-                led_x + 7.0,
-                name.bottom(),
-                r.right() - pad - led_x - 7.0,
-                line_h,
-            );
-            self.led(led_x, below.y + below.h / 2.0, item.accent);
-            let last = item.last.lines().next().unwrap_or("").trim();
-            let detail = if last.is_empty() {
-                item.project.clone()
-            } else {
-                format!("{}: {last}", item.project)
-            };
-            self.text(&gpu.small, theme::text_dim(), &detail, below);
-        }
-    }
-
-    /// The cube: the cube itself, a key that runs the recipe what it holds
-    /// makes, the rune that puts `main` in, and a well of three slots. With
-    /// no recipe the key is latched and says what is missing instead.
-    unsafe fn cube(&self, gpu: &Gpu, m: &Metrics, scene: &CubeScene) {
-        let l = scene.layout;
-        self.plate(m, l.size);
-        let gold = match &scene.transmute {
-            Some(t) if t.portal.is_some() => PORTAL_RED,
-            _ => theme::rarity_color(Rarity::Unique),
-        };
-        let lift = match &scene.transmute {
-            Some(t) => t.frame.lid,
-            None if scene.open => 1.0,
-            None => 0.0,
-        };
-        let ready = scene.recipe.is_some() || scene.transmute.is_some();
-        self.cube_art(gpu, &l.cube, lift, ready, gold);
-        let radius = m.tile_radius - 4.0;
-        let depth = |b: Button| match b {
-            Button::Hover => 0.9,
-            Button::Idle => 0.45,
-            Button::Pressed => 0.1,
-        };
-        let t = &l.transmute;
-        let inner = Rect::new(t.x + 8.0, t.y, t.w - 16.0, t.h);
-        match (&scene.transmute, scene.recipe) {
-            (Some(tr), _) => {
-                self.latched(gpu, t, radius, 0.5);
-                if tr.frame.swirl.is_none() {
-                    let lit = tr.frame.burst.1.max(0.35);
-                    let line = Rect::new(inner.x, inner.y, inner.w, inner.h);
-                    self.text(&gpu.small, gold.fade(lit), tr.outcome, line);
-                }
-            }
-            (None, Some(name)) => {
-                let b = layout::button(CubeHit::Transmute, scene.hot, scene.pressed);
-                self.key(gpu, t, radius, theme::surface(), depth(b), 1.0);
-                let half = inner.h / 2.0;
-                let line = Rect::new(inner.x, inner.y + 4.0, inner.w, half - 4.0);
-                self.text(&gpu.small, theme::text_dim(), "Transmute", line);
-                let below = Rect::new(inner.x, inner.y + half, inner.w, half - 4.0);
-                self.text(&gpu.small, gold, name, below);
-            }
-            (None, None) => {
-                self.latched(gpu, t, radius, 0.5);
-                if let Some(lay) = self.layout(gpu, &gpu.small, scene.hint, inner) {
-                    let _ = lay.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-                    let _ = lay.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                    self.draw_layout(&lay, theme::text_dim(), inner);
-                }
-            }
-        }
-        let r = &l.main;
-        let label = Rect::new(r.x, r.y + 18.0, r.w, r.h - 20.0);
-        if scene.main {
-            let b = layout::button(CubeHit::Main, scene.hot, scene.pressed);
-            self.key(gpu, r, radius, theme::surface(), depth(b), 1.0);
-            self.led(r.x + r.w / 2.0, r.y + 11.0, gold);
-            self.text(&gpu.small_centre, theme::text(), "main", label);
-        } else {
-            self.latched(gpu, r, radius, 0.5);
-            if scene.hot == CubeHit::Main {
-                self.fill_rounded(r, radius, theme::hover_fill());
-            }
-            self.text(&gpu.small_centre, theme::text_dim(), "main", label);
-        }
-        self.sunk(gpu, &l.well, m.tile_radius, theme::well());
-        for (i, r) in l.slots.iter().enumerate() {
-            let Some(item) = scene.items.get(i) else {
-                self.latched(gpu, r, radius, 0.5);
-                continue;
-            };
-            let b = layout::button(CubeHit::Slot(i), scene.hot, scene.pressed);
-            self.key(gpu, r, radius, theme::surface(), depth(b), 1.0);
-            let pad = 7.0;
-            let line_h = (r.h - 6.0) / 2.0;
-            let name = Rect::new(r.x + pad, r.y + 3.0, r.w - 2.0 * pad, line_h);
-            self.text(&gpu.small, item.ink, &item.name, name);
-            let led_x = r.x + pad + 2.5;
-            let w = r.right() - pad - led_x - 7.0;
-            let project = Rect::new(led_x + 7.0, name.bottom(), w, line_h);
-            self.led(led_x, project.y + project.h / 2.0, item.accent);
-            self.text(&gpu.small, theme::text_dim(), &item.project, project);
-        }
-        if let Some(tr) = &scene.transmute {
-            self.transmuting(&l.cube, tr, gold);
-        }
-    }
-
-    /// Over everything else: what the cube held swirling into its mouth,
-    /// each a small key trailing light, then the burst off its lid as the
-    /// recipe's work comes out.
-    unsafe fn transmuting(&self, cube: &Rect, tr: &TransmuteLook, gold: Color) {
-        let s = cube.w * 0.36;
-        let mouth = (cube.x + cube.w / 2.0, cube.y + cube.h / 2.0 + 3.0 - s * 0.5);
-        if let Some(t) = tr.frame.swirl {
-            for (i, f) in tr.flying.iter().enumerate() {
-                let lag = motion::stagger(i, tr.flying.len());
-                let own = ((t - lag) / (1.0 - lag).max(0.01)).clamp(0.0, 1.0);
-                let from = (f.from.x + f.from.w / 2.0, f.from.y + f.from.h / 2.0);
-                let (x, y, k) = motion::swirl(from, mouth, own);
-                let fade = 1.0 - own.powi(3);
-                self.glow_dot(x, y, 10.0 + 14.0 * own, gold, 0.5 * own * fade);
-                let (w, h) = (f.from.w * k, f.from.h * k);
-                let r = Rect::new(x - w / 2.0, y - h / 2.0, w, h);
-                let radius = (6.0 * k).max(1.5);
-                self.fill_rounded(&r, radius, theme::surface().mix(gold, 0.2 * own).fade(fade));
-                let bar = Rect::new(r.x + 3.0 * k, r.y + h * 0.3, (w - 6.0 * k) * 0.7, h * 0.14);
-                self.fill_rounded(&bar, bar.h / 2.0, f.ink.fade(fade));
-                self.led(r.x + 6.0 * k, r.y + h * 0.72, f.accent.fade(fade));
-            }
-            return;
-        }
-        let (spread, bright) = tr.frame.burst;
-        if bright <= 0.0 {
-            return;
-        }
-        if let Some(spin) = tr.portal {
-            self.portal(mouth, s, spread, bright, spin);
-            return;
-        }
-        self.glow_dot(mouth.0, mouth.1, s * (1.2 + 2.2 * spread), gold, bright);
-        // Sparks thrown off the lid, the gold of a unique drop.
-        for i in 0..8 {
-            let a = i as f32 * std::f32::consts::TAU / 8.0 + 0.3;
-            let d = s * (0.6 + 2.4 * spread);
-            let (x, y) = (mouth.0 + d * a.cos(), mouth.1 + d * a.sin() * 0.7);
-            self.glow_dot(x, y, 3.0 + 3.0 * (1.0 - spread), gold, bright);
-        }
-    }
-
-    /// The portal to the cow level standing over the cube's mouth, opened
-    /// `spread` of the way and `bright` still lit: a red oval, taller than
-    /// wide, with light turning inward on rings inside it.
-    unsafe fn portal(&self, mouth: (f32, f32), s: f32, spread: f32, bright: f32, spin: f32) {
-        let (cx, cy) = (mouth.0, mouth.1 - s * 0.6);
-        let (rx, ry) = (s * 0.7 * spread, s * 1.25 * spread);
-        self.portal_oval((cx, cy), (rx, ry), PORTAL_RED, bright, spin, 2.5);
-    }
-
     /// A portal of `c` centred on `at` with radii `r`: an oval with light
     /// turning inward on rings inside it, `speck` the size of that light.
     unsafe fn portal_oval(
@@ -1599,68 +1327,6 @@ impl Painter<'_> {
                 let (x, y) = (cx + rx * k * a.cos(), cy + ry * k * a.sin());
                 self.glow_dot(x, y, speck, c.mix(Color::rgb(0xFFFFFF), 0.4), bright);
             }
-        }
-    }
-
-    /// The cube itself, seen from above one corner: a lid and two sides,
-    /// lit from above. Its lid stands `lift` off, 1 while a tile is carried
-    /// over it, with the light inside showing, and a recipe ready glows in
-    /// it.
-    unsafe fn cube_art(&self, gpu: &Gpu, r: &Rect, lift: f32, ready: bool, gold: Color) {
-        let open = lift > 0.0;
-        let cx = r.x + r.w / 2.0;
-        let s = r.w * 0.36;
-        let (dx, dy) = (s * 0.866, s * 0.5);
-        let top = r.y + r.h / 2.0 + 3.0 - dy;
-        let bottom = top + s + dy;
-        let white = Color::rgb(0xFFFFFF);
-        let black = Color::rgb(0);
-        let face = theme::surface().mix(gold, 0.18);
-        let pt = |x: f32, y: f32| Vector2 { X: x, Y: y };
-        let lift = s * 0.45 * lift.clamp(0.0, 1.0);
-        let diamond = |up: f32| {
-            [
-                pt(cx, top - dy - up),
-                pt(cx + dx, top - up),
-                pt(cx, top + dy - up),
-                pt(cx - dx, top - up),
-            ]
-        };
-        let left = [
-            pt(cx - dx, top),
-            pt(cx, top + dy),
-            pt(cx, bottom),
-            pt(cx - dx, bottom - dy),
-        ];
-        let right = [
-            pt(cx, top + dy),
-            pt(cx + dx, top),
-            pt(cx + dx, bottom - dy),
-            pt(cx, bottom),
-        ];
-        self.glow_dot(cx, bottom + 1.0, s * 1.1, theme::cast(), 0.6);
-        self.polygon(gpu, &left, face.mix(black, 0.25));
-        self.polygon(gpu, &right, face.mix(black, 0.5));
-        if open {
-            // The mouth, lit from inside.
-            self.polygon(gpu, &diamond(0.0), theme::well());
-            self.glow_dot(cx, top - lift / 2.0, s * 1.2, gold, 0.9);
-        } else if ready {
-            self.glow_dot(cx, top, s * 1.2, gold, 0.4);
-        }
-        let lid = if ready && !open {
-            face.mix(gold, 0.25)
-        } else {
-            face.mix(white, 0.08)
-        };
-        self.polygon(gpu, &diamond(lift), lid);
-        // A rune cut in each side, lit once a recipe is ready.
-        let ink = if ready { gold } else { gold.mix(black, 0.45) };
-        for side in [left, right] {
-            let x = side.iter().map(|p| p.X).sum::<f32>() / 4.0;
-            let y = side.iter().map(|p| p.Y).sum::<f32>() / 4.0;
-            self.fill_rounded(&Rect::new(x - 1.0, y - s * 0.28, 2.0, s * 0.56), 1.0, ink);
-            self.fill_rounded(&Rect::new(x - s * 0.18, y - 1.0, s * 0.36, 2.0), 1.0, ink);
         }
     }
 

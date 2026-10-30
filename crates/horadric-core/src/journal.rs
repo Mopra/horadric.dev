@@ -52,7 +52,8 @@ pub enum What {
     },
     /// The session's process ended.
     Ended,
-    /// The session was closed in the cube, and the one line it left.
+    /// The session was closed with the one line it left. Only the cube
+    /// closed sessions this way; the variant stays so old journals read.
     Closed {
         #[serde(default)]
         line: String,

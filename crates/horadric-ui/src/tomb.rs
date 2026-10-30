@@ -25,7 +25,7 @@ use crate::toast::Kind;
 use crate::window::folder_key;
 
 impl App {
-    /// The tombs of `batch` there are, running, paused or stashed, by their
+    /// The tombs of `batch` there are, running or paused, by their
     /// number.
     pub(super) fn tombs_of(&self, batch: &str) -> Vec<String> {
         let Ok(r) = self.shared.registry.lock() else {
@@ -34,7 +34,6 @@ impl App {
         let mut ids: Vec<(usize, String)> = r
             .all()
             .map(|s| s.id.as_str())
-            .chain(r.stashed().iter().map(|s| s.id.as_str()))
             .filter_map(|id| match tombs::of(id) {
                 Some((b, n)) if b == batch => Some((n, id.to_string())),
                 _ => None,
@@ -313,7 +312,6 @@ impl App {
         else {
             return;
         };
-        self.play_batch_closing(&batch, winner, merge);
         for id in self.tombs_of(&batch).into_iter().filter(|id| id != winner) {
             self.discard_tomb(&id);
         }
@@ -339,28 +337,7 @@ impl App {
         self.run_tasks();
     }
 
-    /// The batch closing, played in the cube: every tomb with a tile
-    /// swirls in, `main` too when the winner merges, and what was kept
-    /// comes out. Before the losers end, so their tiles still say what
-    /// went in.
-    fn play_batch_closing(&self, batch: &str, winner: &str, merge: bool) {
-        let (Some(w), Some((_, n))) = (&self.cube_window, tombs::of(winner)) else {
-            return;
-        };
-        let looks: Vec<_> = {
-            let Ok(r) = self.shared.registry.lock() else {
-                return;
-            };
-            self.tombs_of(batch)
-                .iter()
-                .filter_map(|id| r.get(id))
-                .map(super::transmute::look)
-                .collect()
-        };
-        w.transmute_batch(&looks, merge, &batch_outcome(n, merge));
-    }
-
-    /// Ends a tomb that lost, stashed or not, and throws its worktree away.
+    /// Ends a tomb that lost and throws its worktree away.
     /// Taken off the session first, so the plain removal an ending starts,
     /// which keeps what it would lose, does not get to it.
     fn discard_tomb(&mut self, id: &str) {
@@ -369,10 +346,7 @@ impl App {
             .registry
             .lock()
             .ok()
-            .and_then(|mut r| match r.get_mut(id) {
-                Some(s) => s.worktree.take(),
-                None => r.discard(id)?.worktree,
-            });
+            .and_then(|mut r| r.get_mut(id)?.worktree.take());
         self.forget(id);
         if let Some(w) = tree {
             crate::worktree::discard(w);
@@ -416,15 +390,6 @@ pub(in crate::app) fn ask_pick(winner: &str) {
     }
 }
 
-/// What the key says came of a batch closing on tomb `n`.
-fn batch_outcome(n: usize, merged: bool) -> String {
-    if merged {
-        format!("Tomb {n} merged")
-    } else {
-        format!("Tomb {n} kept")
-    }
-}
-
 /// What to ask before keeping tomb `n` and throwing away the `others`.
 fn pick_question(n: usize, others: usize, title: &str, branch: &str, into: &str) -> String {
     let rest = match others {
@@ -447,12 +412,6 @@ fn pick_question(n: usize, others: usize, title: &str, branch: &str, into: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_closing_batch_says_which_tomb_it_kept() {
-        assert_eq!(batch_outcome(2, true), "Tomb 2 merged");
-        assert_eq!(batch_outcome(3, false), "Tomb 3 kept");
-    }
 
     #[test]
     fn the_pick_question_says_what_is_thrown_away() {

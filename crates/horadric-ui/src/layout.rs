@@ -3,7 +3,6 @@
 //! Pure functions so the geometry can be tested without a window. The
 //! renderer scales by DPI, this module never sees a physical pixel.
 
-use horadric_core::cube;
 use horadric_core::saved::Side;
 
 /// A rectangle in DIPs.
@@ -735,7 +734,7 @@ pub fn usage(
     let inner = 4.0;
     let mut y = m.pad;
     let header = header.then(|| {
-        let r = Rect::new(m.pad, y, full, STASH_HEADER_H);
+        let r = Rect::new(m.pad, y, full, USAGE_HEADER_H);
         y = r.bottom() + 6.0;
         r
     });
@@ -808,133 +807,7 @@ pub fn slider_stop(track: &Rect, n: usize, x: f32) -> usize {
     (t * (n - 1) as f32).round() as usize
 }
 
-/// The geometry of the stash: a line naming it, then one row per stashed
-/// session sunk into the plate, the oldest first. A row is the column's
-/// full width, so a name reads whole where a third of it did not, and the
-/// window grows with what it holds rather than standing at nine.
-#[derive(Debug, Clone, PartialEq)]
-pub struct StashLayout {
-    pub size: (f32, f32),
-    pub header: Rect,
-    /// The well the rows sit in.
-    pub well: Rect,
-    pub slots: Vec<Rect>,
-}
-
-const STASH_HEADER_H: f32 = 22.0;
-const STASH_ROW_H: f32 = 40.0;
-const STASH_SLOT_GAP: f32 = 8.0;
-const STASH_ROW_GAP: f32 = 6.0;
-const STASH_INNER: f32 = 8.0;
-
-/// The stash holding `n` sessions, at least one row so the well never
-/// collapses.
-pub fn stash(m: &Metrics, n: usize) -> StashLayout {
-    let n = n.max(1);
-    let full = m.width - 2.0 * m.pad;
-    let header = Rect::new(m.pad, m.pad, full, STASH_HEADER_H);
-    let top = header.bottom() + 6.0;
-    let slots = (0..n)
-        .map(|i| {
-            Rect::new(
-                m.pad + STASH_INNER,
-                top + STASH_INNER + i as f32 * (STASH_ROW_H + STASH_ROW_GAP),
-                full - 2.0 * STASH_INNER,
-                STASH_ROW_H,
-            )
-        })
-        .collect();
-    let rows = n as f32;
-    let h = 2.0 * STASH_INNER + rows * STASH_ROW_H + (rows - 1.0) * STASH_ROW_GAP;
-    let well = Rect::new(m.pad, top, full, h);
-    StashLayout {
-        size: (m.width, well.bottom() + m.pad),
-        header,
-        well,
-        slots,
-    }
-}
-
-/// The slot under a point, if any.
-pub fn stash_hit(l: &StashLayout, x: f32, y: f32) -> Option<usize> {
-    l.slots.iter().position(|r| r.contains(x, y))
-}
-
-/// The geometry of the cube: the cube itself beside the button that runs
-/// the recipe and the rune that puts `main` in, then a well of the three
-/// slots tiles are dropped into.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CubeLayout {
-    pub size: (f32, f32),
-    /// Where the cube is drawn.
-    pub cube: Rect,
-    pub transmute: Rect,
-    pub main: Rect,
-    pub well: Rect,
-    pub slots: Vec<Rect>,
-}
-
-const CUBE_TOP_H: f32 = 44.0;
-const CUBE_MAIN_W: f32 = 52.0;
-const CUBE_SLOT_H: f32 = 44.0;
-
-pub fn cube(m: &Metrics) -> CubeLayout {
-    let full = m.width - 2.0 * m.pad;
-    let top = m.pad + 2.0;
-    let cube = Rect::new(m.pad + 2.0, top, CUBE_TOP_H, CUBE_TOP_H);
-    let main = Rect::new(m.pad + full - CUBE_MAIN_W, top, CUBE_MAIN_W, CUBE_TOP_H);
-    let gap = STASH_SLOT_GAP;
-    let transmute = Rect::new(
-        cube.right() + gap,
-        top,
-        main.x - gap - cube.right() - gap,
-        CUBE_TOP_H,
-    );
-    let well_top = cube.bottom() + gap;
-    let side = cube::SLOTS as f32;
-    let slot_w = (full - 2.0 * STASH_INNER - (side - 1.0) * gap) / side;
-    let slots = (0..cube::SLOTS)
-        .map(|i| {
-            Rect::new(
-                m.pad + STASH_INNER + i as f32 * (slot_w + gap),
-                well_top + STASH_INNER,
-                slot_w,
-                CUBE_SLOT_H,
-            )
-        })
-        .collect();
-    let well = Rect::new(m.pad, well_top, full, 2.0 * STASH_INNER + CUBE_SLOT_H);
-    CubeLayout {
-        size: (m.width, well.bottom() + m.pad),
-        cube,
-        transmute,
-        main,
-        well,
-        slots,
-    }
-}
-
-/// Which part of the cube a point is on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CubeHit {
-    Slot(usize),
-    Main,
-    Transmute,
-    Nothing,
-}
-
-pub fn cube_hit(l: &CubeLayout, x: f32, y: f32) -> CubeHit {
-    if let Some(i) = l.slots.iter().position(|r| r.contains(x, y)) {
-        return CubeHit::Slot(i);
-    }
-    if l.main.contains(x, y) {
-        return CubeHit::Main;
-    }
-    if l.transmute.contains(x, y) {
-        return CubeHit::Transmute;
-    }
-    CubeHit::Nothing
-}
+const USAGE_HEADER_H: f32 = 22.0;
 
 /// Which part of the usage window a point is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3806,49 +3679,6 @@ mod tests {
     }
 
     #[test]
-    fn the_cube_has_a_row_of_parts_over_a_well_of_three() {
-        let m = Metrics::default();
-        let l = cube(&m);
-        assert_eq!(l.slots.len(), 3);
-        assert_eq!(l.size.0, m.width);
-        assert!(l.cube.right() < l.transmute.x);
-        assert!(l.transmute.right() < l.main.x);
-        assert!(l.main.right() <= m.width - m.pad + 0.01);
-        assert!(l.transmute.w > 80.0);
-        for r in &l.slots {
-            assert!(r.x >= l.well.x && r.right() <= l.well.right() + 0.01);
-            assert!(r.y >= l.well.y && r.bottom() <= l.well.bottom() + 0.01);
-        }
-        assert!(l.well.y > l.main.bottom());
-        assert!(l.well.bottom() < l.size.1);
-        let at = |r: &Rect| cube_hit(&l, r.x + 1.0, r.y + 1.0);
-        assert_eq!(at(&l.slots[2]), CubeHit::Slot(2));
-        assert_eq!(at(&l.main), CubeHit::Main);
-        assert_eq!(at(&l.transmute), CubeHit::Transmute);
-        assert_eq!(at(&l.cube), CubeHit::Nothing);
-    }
-
-    #[test]
-    fn the_stash_is_a_full_width_row_per_session_inside_its_well() {
-        let m = Metrics::default();
-        let l = stash(&m, 4);
-        assert_eq!(l.slots.len(), 4);
-        assert_eq!(l.size.0, m.width);
-        for r in &l.slots {
-            assert!(r.x >= l.well.x && r.right() <= l.well.right() + 0.01);
-            assert!(r.y >= l.well.y && r.bottom() <= l.well.bottom() + 0.01);
-            assert_eq!(r.w, l.slots[0].w);
-        }
-        assert!(l.well.bottom() < l.size.1);
-        // One under another, the oldest on top.
-        assert!(l.slots[1].y > l.slots[0].bottom());
-        assert_eq!(l.slots[1].x, l.slots[0].x);
-        let (x, y) = (l.slots[2].right() - 1.0, l.slots[2].y + 1.0);
-        assert_eq!(stash_hit(&l, x, y), Some(2));
-        assert_eq!(stash_hit(&l, l.header.x + 1.0, l.header.y + 1.0), None);
-    }
-
-    #[test]
     fn the_settings_window_keeps_its_size_whichever_section_shows() {
         let m = Metrics::default();
         let few = settings(&m, 4, 1, 3);
@@ -3889,12 +3719,5 @@ mod tests {
             settings_hit(&l, l.group.x + 5.0, below),
             SettingsHit::Nothing
         );
-    }
-
-    #[test]
-    fn the_stash_grows_with_what_it_holds_and_keeps_one_row_empty() {
-        let m = Metrics::default();
-        assert!(stash(&m, 5).size.1 > stash(&m, 2).size.1);
-        assert_eq!(stash(&m, 0), stash(&m, 1));
     }
 }

@@ -21,7 +21,6 @@ pub mod brothers;
 pub mod checkpoint;
 pub mod chronicle;
 pub mod context;
-pub mod cube;
 pub mod diff;
 pub mod discord;
 pub mod escalate;
@@ -84,7 +83,7 @@ pub mod worktree;
 
 pub use agent::Agent;
 pub use event::{HookEvent, ModAgent};
-pub use registry::{Registry, Route, STASH_SLOTS};
+pub use registry::{Registry, Route};
 pub use saved::{Carry, SavedCluster, SavedPanel, SavedSession, SavedState};
 pub use session::{format_age, session_id, Phase, Session, WaitReason};
 pub use title::Title;

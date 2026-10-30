@@ -52,8 +52,6 @@ use crate::{ask, store, watch};
 pub(super) mod runeword;
 #[path = "tomb.rs"]
 pub(super) mod tomb;
-#[path = "transmute.rs"]
-pub(super) mod transmute;
 #[path = "warriv.rs"]
 pub(super) mod warriv;
 
@@ -685,8 +683,6 @@ impl App {
         Some(self.shared.registry.lock().ok()?.get(id)?.phase.clone())
     }
 
-    /// A stashed session holds its item as a paused one does: kept for
-    /// later, and only a click brings it back.
     fn holder(&self, id: &str) -> Holder {
         if self.tasks.landing.values().flatten().any(|(_, h)| h == id) {
             return Holder::Live;
@@ -694,9 +690,7 @@ impl App {
         if tombs::count(id).is_some() {
             return self.batch_holder(id);
         }
-        let stashed = self.shared.registry.lock().is_ok_and(|r| r.is_stashed(id));
         match self.phase_of(id) {
-            None if stashed => Holder::Paused,
             None => Holder::Gone,
             Some(Phase::Paused) => Holder::Paused,
             Some(_) => Holder::Live,

@@ -127,8 +127,6 @@ pub struct Header<'a> {
     pub lifted: bool,
     /// Ends in a cross that closes it, a square [`HEADER_H`] wide.
     pub close: bool,
-    /// Has the button that stashes its session, left of the zoom button.
-    pub stash: bool,
     /// Has the button that zooms it, a square left of the cross, and
     /// whether it is zoomed now.
     pub zoom: Option<bool>,
@@ -382,7 +380,7 @@ pub fn bar_layout(width: f32, zoom: bool, close: bool) -> BarLayout {
     let forward = back + HEADER_H;
     let reload = forward + HEADER_H;
     let size = reload + HEADER_H;
-    let end = header_buttons(width, false, zoom, close).start(width);
+    let end = header_buttons(width, zoom, close).start(width);
     let first = size + HEADER_H + 2.0;
     let places = [Side::Left, Side::Top, Side::Right];
     let places = std::array::from_fn(|i| (places[i], first + i as f32 * PLACE_W));
@@ -401,8 +399,8 @@ pub fn bar_layout(width: f32, zoom: bool, close: bool) -> BarLayout {
 
 /// The sanctuary's place buttons, left, top and right, [`PLACE_W`] wide
 /// each and ending a little before the header's buttons.
-pub fn header_places(width: f32, stash: bool, zoom: bool, close: bool) -> [(Side, f32); 3] {
-    let first = header_buttons(width, stash, zoom, close).start(width) - 4.0 - 3.0 * PLACE_W;
+pub fn header_places(width: f32, zoom: bool, close: bool) -> [(Side, f32); 3] {
+    let first = header_buttons(width, zoom, close).start(width) - 4.0 - 3.0 * PLACE_W;
     let places = [Side::Left, Side::Top, Side::Right];
     std::array::from_fn(|i| (places[i], first + i as f32 * PLACE_W))
 }
@@ -464,7 +462,6 @@ pub fn bar_text(gpu: &Gpu, text: &str) -> Result<IDWriteTextLayout> {
 /// Where each of a header's buttons starts, from its left.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Buttons {
-    pub stash: Option<f32>,
     pub zoom: Option<f32>,
     pub close: Option<f32>,
 }
@@ -473,17 +470,14 @@ impl Buttons {
     /// Where the first button starts, or the glass's right edge when there
     /// is none: what the name or the address runs up to.
     pub fn start(&self, width: f32) -> f32 {
-        self.stash
-            .or(self.zoom)
-            .or(self.close)
-            .unwrap_or(width - BEZEL)
+        self.zoom.or(self.close).unwrap_or(width - BEZEL)
     }
 }
 
-/// Where a header's buttons start in a pane `width` DIPs wide: the stash
-/// button's, the zoom button's, then the cross's. They end over the
+/// Where a header's buttons start in a pane `width` DIPs wide: the zoom
+/// button's, then the cross's. They end over the
 /// glass's right edge.
-pub fn header_buttons(width: f32, stash: bool, zoom: bool, close: bool) -> Buttons {
+pub fn header_buttons(width: f32, zoom: bool, close: bool) -> Buttons {
     let mut end = width - BEZEL;
     let mut place = |on: bool| {
         on.then(|| {
@@ -493,8 +487,7 @@ pub fn header_buttons(width: f32, stash: bool, zoom: bool, close: bool) -> Butto
     };
     let close = place(close);
     let zoom = place(zoom);
-    let stash = place(stash);
-    Buttons { stash, zoom, close }
+    Buttons { zoom, close }
 }
 
 /// The search bar over a pane's top right corner, while it is open.
@@ -1205,13 +1198,35 @@ impl GridTarget {
             Kind::Quest => theme::quest(),
         };
         let thread = bg.mix(ink, 0.3);
+        // How far the far side sinks into the background, so the depth
+        // reads without any shading.
+        const FOG: f32 = 0.65;
+        let mote = bg.mix(ink, 0.8);
+        for m in &sky.motes {
+            self.brush.SetColor(&render::color(mote.with_alpha(m.alpha)));
+            self.rt.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2 {
+                        X: m.at.0,
+                        Y: m.at.1,
+                    },
+                    radiusX: m.r,
+                    radiusY: m.r,
+                },
+                &self.brush,
+            );
+        }
         // The lit links last, so they lie over the rest.
         let (lit, unlit): (Vec<_>, Vec<_>) = sky.lines.iter().partition(|l| l.lit);
         for l in unlit.into_iter().chain(lit) {
             let (c, width) = if l.lit {
                 (accent.with_alpha(0.85), 1.4)
             } else {
-                (thread.with_alpha(0.2 + 0.4 * l.strength), 0.8)
+                let near = 1.0 - FOG * l.depth;
+                (
+                    thread.with_alpha((0.2 + 0.4 * l.strength) * near),
+                    0.5 + 0.6 * near,
+                )
             };
             self.brush.SetColor(&render::color(c));
             self.rt.DrawLine(
@@ -1259,6 +1274,9 @@ impl GridTarget {
                 if !d.hovered {
                     c = c.mix(Color::rgb(rgb).mix(ink, 0.25), strength.min(1.0));
                 }
+            }
+            if !d.lit && d.glow.is_none() {
+                c = c.mix(bg, FOG * d.depth);
             }
             if d.fade < 1.0 {
                 c = c.with_alpha(d.fade.max(0.0));
@@ -2184,7 +2202,7 @@ impl GridTarget {
             self.rt.PopAxisAlignedClip();
         }
         let left = NAME_LEFT;
-        let at = header_buttons(width, h.stash, h.zoom.is_some(), h.close);
+        let at = header_buttons(width, h.zoom.is_some(), h.close);
         let mut right = if at == Buttons::default() {
             width - 8.0
         } else {
@@ -2214,11 +2232,8 @@ impl GridTarget {
         if let (Some(at), Some(zoomed)) = (at.zoom, h.zoom) {
             button(if zoomed { "\u{E73F}" } else { "\u{E740}" }, at);
         }
-        if let Some(at) = at.stash {
-            button("\u{E7B8}", at);
-        }
         if let Some(dock) = h.places {
-            let places = header_places(width, h.stash, h.zoom.is_some(), h.close);
+            let places = header_places(width, h.zoom.is_some(), h.close);
             for &(side, at) in &places {
                 let on = dock == Some(side);
                 let ink = if on {
@@ -2607,36 +2622,33 @@ mod tests {
     }
 
     #[test]
-    fn header_buttons_sit_at_the_end_stash_zoom_then_cross() {
+    fn header_buttons_sit_at_the_end_zoom_then_cross() {
         let end = 400.0 - BEZEL;
-        let none = header_buttons(400.0, false, false, false);
+        let none = header_buttons(400.0, false, false);
         assert_eq!(none, Buttons::default());
         assert_eq!(none.start(400.0), end);
-        let close = header_buttons(400.0, false, false, true);
+        let close = header_buttons(400.0, false, true);
         assert_eq!(close.close, Some(end - HEADER_H));
         assert_eq!(close.zoom, None);
         assert_eq!(
-            header_buttons(400.0, false, true, false).zoom,
+            header_buttons(400.0, true, false).zoom,
             Some(end - HEADER_H)
         );
-        let all = header_buttons(400.0, true, true, true);
+        let all = header_buttons(400.0, true, true);
         assert_eq!(
             all,
             Buttons {
-                stash: Some(end - 3.0 * HEADER_H),
                 zoom: Some(end - 2.0 * HEADER_H),
                 close: Some(end - HEADER_H),
             }
         );
-        assert_eq!(all.start(400.0), end - 3.0 * HEADER_H);
-        let no_zoom = header_buttons(400.0, true, false, true);
-        assert_eq!(no_zoom.stash, Some(end - 2.0 * HEADER_H), "closes the gap");
+        assert_eq!(all.start(400.0), end - 2.0 * HEADER_H);
     }
 
     #[test]
     fn the_sanctuary_places_end_before_the_header_buttons() {
-        let start = header_buttons(600.0, false, true, true).start(600.0);
-        let places = header_places(600.0, false, true, true);
+        let start = header_buttons(600.0, true, true).start(600.0);
+        let places = header_places(600.0, true, true);
         assert_eq!(places[2].1 + PLACE_W, start - 4.0);
         assert_eq!(place_hit(&places, places[0].1), Some(Side::Left));
         assert_eq!(place_hit(&places, places[1].1 + 1.0), Some(Side::Top));
@@ -2646,7 +2658,7 @@ mod tests {
     #[test]
     fn the_address_field_runs_from_the_buttons_to_the_cross() {
         let l = bar_layout(600.0, false, true);
-        let close = header_buttons(600.0, false, false, true).close;
+        let close = header_buttons(600.0, false, true).close;
         assert_eq!(l.forward, l.back + HEADER_H);
         assert_eq!(l.reload, l.forward + HEADER_H);
         assert_eq!(l.size, l.reload + HEADER_H);

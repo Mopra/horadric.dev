@@ -3,10 +3,8 @@
 //! given to a session tells it to test, has a reviewer read its work and
 //! tells it to answer the review, then merges its branch.
 //!
-//! Runes and the cube's recipes are one system. A rune is an action on a
-//! session; a recipe casts one on what the cube holds at once, a runeword
-//! casts several on one session over time. Review and merge are the same
-//! actions in both.
+//! A rune is an action on a session; a runeword casts several on one
+//! session over time.
 //!
 //! Which step comes next is decided here from the session's phase, and
 //! the reviewer's while one reads, so the app only carries it out.
@@ -21,7 +19,6 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::cube::{self, Subject};
 use crate::session::Phase;
 use crate::tasks::one_line;
 
@@ -842,6 +839,30 @@ pub fn test_prompt() -> String {
         .into()
 }
 
+/// A session a reviewer is sent to: its name, its folder and its branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subject {
+    pub name: String,
+    pub dir: String,
+    pub branch: Option<String>,
+}
+
+/// Where a session's diff is and how to read it: a branch against `base`
+/// and what it has not committed, or the shared tree against its HEAD.
+pub fn diff_of(s: &Subject, base: &str) -> String {
+    match &s.branch {
+        Some(br) => format!(
+            "\"{}\" on the branch {br} in {}: its commits are `git -C \"{}\" diff {base}...{br}` \
+             and what it has not committed is `git -C \"{}\" diff HEAD`.",
+            s.name, s.dir, s.dir, s.dir
+        ),
+        None => format!(
+            "\"{}\" in {}: `git -C \"{}\" diff HEAD`.",
+            s.name, s.dir, s.dir
+        ),
+    }
+}
+
 /// What the reviewer of one session is asked: to read its diff and write
 /// the review to `file`.
 pub fn review_prompt(subject: &Subject, base: &str, file: &str) -> String {
@@ -849,7 +870,7 @@ pub fn review_prompt(subject: &Subject, base: &str, file: &str) -> String {
         "Review the work of a session. {} Read the diff. Say what it does, what is wrong \
          or risky with file and line, and what is missing. Write your review to \"{file}\" \
          and change no other file.",
-        cube::diff_of(subject, base)
+        diff_of(subject, base)
     )
 }
 

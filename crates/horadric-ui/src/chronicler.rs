@@ -99,17 +99,15 @@ impl App {
     }
 
     /// The newest conversations held in the project's folder, leaving out
-    /// the quests' own and the stash's, which have their own way back.
+    /// the quests' own, which have their own way back.
     fn talks_of(&self, key: &str, quests: &[Quest]) -> Vec<Talk> {
         let Some(dir) = self.project_dir(key) else {
             return Vec::new();
         };
-        let mut skip = self.stashed_conversations();
-        skip.extend(
-            quests
-                .iter()
-                .filter_map(|q| q.conversation.as_ref().map(|(c, _)| c.clone())),
-        );
+        let skip: Vec<String> = quests
+            .iter()
+            .filter_map(|q| q.conversation.as_ref().map(|(c, _)| c.clone()))
+            .collect();
         let secs = |t: SystemTime| t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let cwd = dir.to_string_lossy().into_owned();
         past_in(&dir, &skip, TALKS)
@@ -250,9 +248,8 @@ impl App {
 
     /// Carries on the quest's conversation in a new tile, in the folder it
     /// was held in, or the project's when that is gone. A conversation a
-    /// session still holds is shown instead, or taken out of the stash if
-    /// it is there: two agents on one conversation would write over each
-    /// other.
+    /// session still holds is shown instead: two agents on one
+    /// conversation would write over each other.
     fn carry_on_quest(&mut self, key: &str, id: &str) {
         let Some(q) = self.quest(key, id) else {
             return;
@@ -261,28 +258,13 @@ impl App {
             return;
         };
         let holds = |c: &Option<String>| c.as_deref() == Some(conversation.as_str());
-        let (holder, stashed) = self
-            .shared
-            .registry
-            .lock()
-            .map(|r| {
-                (
-                    r.all()
-                        .find(|s| holds(&s.claude_session_id))
-                        .map(|s| s.id.clone()),
-                    r.stashed()
-                        .iter()
-                        .find(|s| holds(&s.claude_session_id))
-                        .map(|s| s.id.clone()),
-                )
-            })
-            .unwrap_or_default();
+        let holder = self.shared.registry.lock().ok().and_then(|r| {
+            r.all()
+                .find(|s| holds(&s.claude_session_id))
+                .map(|s| s.id.clone())
+        });
         if let Some(h) = holder {
             self.reveal(&h, false);
-            return;
-        }
-        if let Some(s) = stashed {
-            self.unstash(&s, true);
             return;
         }
         let dir = Some(PathBuf::from(&cwd))

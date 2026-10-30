@@ -39,7 +39,7 @@ use horadric_core::saved::Side;
 
 use crate::backdrop;
 use crate::glyphs::{BarHit, TabHit};
-use crate::layout::{CaptionHit, CubeHit, Hit, StartHit, UsageHit};
+use crate::layout::{CaptionHit, Hit, StartHit, UsageHit};
 use crate::render::{self, Target};
 use crate::window::Shared;
 
@@ -211,16 +211,6 @@ pub fn quest(title: &str, why: Option<&str>) -> String {
     }
 }
 
-/// What a part of the cube does.
-pub fn cube(hit: CubeHit) -> Option<&'static str> {
-    Some(match hit {
-        CubeHit::Slot(_) => "Take this session back out of the cube",
-        CubeHit::Main => "Put main in the cube, or take it out",
-        CubeHit::Transmute => "Run the recipe on what the cube holds",
-        CubeHit::Nothing => return None,
-    })
-}
-
 /// What a part of the start window does.
 pub fn start(hit: StartHit) -> Option<&'static str> {
     Some(match hit {
@@ -275,7 +265,6 @@ pub fn caption(hit: CaptionHit, zoomed: bool) -> Option<&'static str> {
 /// A key of a pane's header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
-    Stash,
     Zoom,
     Close,
 }
@@ -294,7 +283,6 @@ pub enum Shows {
 /// stage.
 pub fn pane(key: Key, shows: Shows, zoomed: bool) -> &'static str {
     match (key, shows) {
-        (Key::Stash, _) => "Stash this session. It stops, and its conversation waits in the stash",
         (Key::Zoom, _) if zoomed => "Put this pane back beside the others",
         (Key::Zoom, _) => "Fill the stage with this pane",
         (Key::Close, Shows::Agent) => "End this session for good",
@@ -352,30 +340,6 @@ pub fn tab(hit: TabHit) -> &'static str {
         TabHit::Close(_) => "Close this tab",
         TabHit::New => "Open a new tab",
     }
-}
-
-/// What a stashed session's row does.
-pub const STASHED: &str = "Click to bring it back to the stage. Right click for more";
-
-/// A stashed session's whole story, since its row has room for only a
-/// line of each: its name, where it worked, what it last did, then what
-/// a click does.
-pub fn stashed(name: &str, project: &str, branch: Option<&str>, last: &str) -> String {
-    let mut s = name.trim().to_string();
-    s.push('\n');
-    s.push_str(project);
-    if let Some(b) = branch.filter(|b| !b.is_empty()) {
-        s.push_str(", on ");
-        s.push_str(b);
-    }
-    let last = last.trim();
-    if !last.is_empty() {
-        s.push('\n');
-        s.push_str(last);
-    }
-    s.push_str("\n\n");
-    s.push_str(STASHED);
-    s
 }
 
 thread_local! {
@@ -809,9 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn the_cube_start_and_usage_windows_have_lines() {
-        assert!(cube(CubeHit::Transmute).is_some());
-        assert_eq!(cube(CubeHit::Nothing), None);
+    fn the_start_and_usage_windows_have_lines() {
         assert!(start(StartHit::Recent(2)).is_some());
         assert_eq!(start(StartHit::Nothing), None);
         assert!(usage(UsageHit::Setting(0), Some(Row::Account), false).is_some());
@@ -857,23 +819,11 @@ mod tests {
     }
 
     #[test]
-    fn a_stashed_line_says_name_place_and_last_words_before_the_click() {
-        let s = stashed(" fix login ", "shop", Some("fix-login"), "Ran the tests");
-        assert_eq!(
-            s,
-            format!("fix login\nshop, on fix-login\nRan the tests\n\n{STASHED}")
-        );
-        let bare = stashed("x", "shop", Some(""), "  ");
-        assert_eq!(bare, format!("x\nshop\n\n{STASHED}"));
-    }
-
-    #[test]
     fn no_line_uses_a_dash() {
         let mut lines: Vec<&str> = Vec::new();
         lines.extend(cluster(Hit::Tile(0)));
         lines.extend(cluster(Hit::File(0)));
-        lines.push(STASHED);
-        for k in [Key::Stash, Key::Zoom, Key::Close] {
+        for k in [Key::Zoom, Key::Close] {
             for s in [
                 Shows::Agent,
                 Shows::Shell,

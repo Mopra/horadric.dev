@@ -3,7 +3,7 @@
 //!
 //! The stage lays its panes out in a grid, one per session of the project
 //! it shows. Each pane has a header naming its session, with buttons to
-//! stash, zoom and end it, and dragging a header onto another pane swaps
+//! zoom and end it, and dragging a header onto another pane swaps
 //! the two. The drag itself is
 //! the stage's: a pane only says it was grabbed.
 //!
@@ -212,7 +212,6 @@ struct Shown {
     accent: Color,
     active: bool,
     lifted: bool,
-    stash: bool,
     zoom: Option<bool>,
     find: Option<(String, String)>,
     veil: f32,
@@ -906,12 +905,6 @@ impl Pane {
         }
     }
 
-    /// Has the button that stashes it: an agent's session, since a plain
-    /// shell has no conversation to bring back.
-    fn stashes(&self) -> bool {
-        self.is_session() && !self.console.shell
-    }
-
     /// The pane, or the stage it is on, moved: a browser pane's page is
     /// told, so it draws where the pane is now.
     pub fn moved(&self) {
@@ -1177,7 +1170,6 @@ impl Pane {
             active: self.focused.get(),
             lifted: self.lifted.get(),
             close: true,
-            stash: self.stashes(),
             zoom: self.zoom.get(),
             bar,
             places: self
@@ -1257,7 +1249,6 @@ impl Pane {
             accent: header.accent,
             active: header.active,
             lifted: header.lifted,
-            stash: header.stash,
             zoom: header.zoom,
             find: find
                 .as_ref()
@@ -1464,7 +1455,7 @@ impl Pane {
     fn place_folio_bar(&self, key: &str, name: &str, width_px: i32, dpi: u32) {
         let scale = dpi as f32 / 96.0;
         let width = width_px as f32 / scale;
-        let at = glyphs::header_buttons(width, self.stashes(), self.zoom.get().is_some(), true);
+        let at = glyphs::header_buttons(width, self.zoom.get().is_some(), true);
         let right = at.start(width) - 4.0;
         let max = right - glyphs::NAME_LEFT;
         let left =
@@ -2157,15 +2148,15 @@ impl Pane {
         self.dip(lparam).1 < HEADER_H
     }
 
-    /// Where the header's buttons start: the stash button's, the zoom
-    /// button's, then the cross's.
+    /// Where the header's buttons start: the zoom button's, then the
+    /// cross's.
     fn buttons(&self) -> Buttons {
         let mut r = RECT::default();
         unsafe {
             let _ = GetClientRect(self.hwnd, &mut r);
         }
         let width = r.right as f32 * 96.0 / self.dpi_now() as f32;
-        glyphs::header_buttons(width, self.stashes(), self.zoom.get().is_some(), true)
+        glyphs::header_buttons(width, self.zoom.get().is_some(), true)
     }
 
     fn on_button(&self, lparam: LPARAM, at: Option<f32>) -> bool {
@@ -2201,7 +2192,7 @@ impl Pane {
         }
         let width = r.right as f32 * 96.0 / self.dpi_now() as f32;
         let zoom = self.zoom.get().is_some();
-        let places = glyphs::header_places(width, self.stashes(), zoom, true);
+        let places = glyphs::header_places(width, zoom, true);
         glyphs::place_hit(&places, self.dip(lparam).0)
     }
 
@@ -2727,10 +2718,6 @@ impl Pane {
         self.on_button(lparam, self.buttons().zoom)
     }
 
-    fn on_stash(&self, lparam: LPARAM) -> bool {
-        self.on_button(lparam, self.buttons().stash)
-    }
-
     /// The cell under a client point, and which half of it.
     fn cell_at(&self, lparam: LPARAM) -> (Point, Side) {
         let (col, row, side) = self.screen_cell(lparam);
@@ -2860,8 +2847,6 @@ impl Pane {
         }
         let key = if self.on_close(lparam) {
             tip::Key::Close
-        } else if self.on_stash(lparam) {
-            tip::Key::Stash
         } else if self.on_zoom(lparam) {
             tip::Key::Zoom
         } else {
@@ -3408,8 +3393,6 @@ impl Pane {
                 self.focus();
                 if self.on_close(lparam) {
                     self.close();
-                } else if self.on_stash(lparam) {
-                    app::push(Input::PaneAsk(self.session().to_string(), PaneAsk::Stash));
                 } else if self.on_zoom(lparam) {
                     self.tell_stage(WM_PANE_ZOOM);
                 } else if self.in_header(lparam) {

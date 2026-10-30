@@ -190,8 +190,7 @@ pub enum RowState {
 }
 
 /// How `task` reads, from the sessions in `r`: its holder's phase, or,
-/// for an item in tombs, what its tombs are doing between them. A stashed
-/// tomb counts as paused.
+/// for an item in tombs, what its tombs are doing between them.
 pub fn state_in(task: &Task, r: &Registry) -> RowState {
     let holder = task.holder.as_deref();
     match holder.filter(|h| task.mark == Mark::Working && tombs::count(h).is_some()) {
@@ -201,25 +200,10 @@ pub fn state_in(task: &Task, r: &Registry) -> RowState {
                 .all()
                 .filter(|s| of_batch(&s.id))
                 .map(|s| (s.phase.clone(), s.loot.finished))
-                .chain(
-                    r.stashed()
-                        .iter()
-                        .filter(|s| of_batch(&s.id))
-                        .map(|s| (Phase::Paused, s.loot.finished)),
-                )
                 .collect();
             tombs_row(&found)
         }
-        // A stashed holder is kept for later, not gone: starting the item
-        // again would leave it behind.
-        None => row_state(
-            task,
-            holder.and_then(|h| match r.get(h) {
-                Some(s) => Some(&s.phase),
-                None if r.is_stashed(h) => Some(&Phase::Paused),
-                None => None,
-            }),
-        ),
+        None => row_state(task, holder.and_then(|h| r.get(h)).map(|s| &s.phase)),
     }
 }
 
@@ -573,15 +557,4 @@ mod tests {
         assert_eq!(state_in(&t[1], &r), RowState::Gone);
     }
 
-    #[test]
-    fn an_item_whose_session_is_stashed_reads_paused() {
-        let mut r = Registry::default();
-        let s = horadric_core::Session::new("a-1", "a", "C:/p");
-        let saved = horadric_core::SavedSession::from_session(&s, vec![], false);
-        r.add(s);
-        assert!(r.stash(saved));
-        let t = parse("- [/] A @a-1\n- [!] B @a-1\n");
-        assert_eq!(state_in(&t[0], &r), RowState::Paused);
-        assert_eq!(state_in(&t[1], &r), RowState::Blocked);
-    }
 }

@@ -2,7 +2,7 @@
 //! a project, and carrying out its steps one after another. What comes
 //! next is decided by `horadric_core::runeword`, pure and tested; this
 //! types to the session, writes its keystrokes, runs commands, starts its
-//! reviewer and merges its branch, the cube's own actions.
+//! reviewer and merges its branch.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::chronicle::{self, Happened};
 use horadric_core::runeword::{
-    self, Act, OnProject, Ran, Rune, Runeword, Seen, Source, Step, Stone,
+    self, Act, OnProject, Ran, Rune, Runeword, Seen, Source, Step, Stone, Subject,
 };
 use horadric_core::saved::SavedState;
 use horadric_core::ship;
@@ -22,7 +22,7 @@ use horadric_core::tasks::one_line;
 use horadric_core::Session;
 use windows::Win32::Foundation::POINT;
 
-use super::transmute::subject;
+use super::Merge;
 use crate::app::{self, unix_now, App, Input, Run};
 use crate::console;
 use crate::dialog::{Dialog, Tone};
@@ -1409,5 +1409,62 @@ fn remove(key: &str, label: &str, source: Source) {
 fn forget_files(file: &str) {
     for ext in ["exit", "log"] {
         let _ = std::fs::remove_file(format!("{file}.{ext}"));
+    }
+}
+
+/// A session as a reviewer is told of it.
+fn subject(s: &Session) -> Subject {
+    Subject {
+        name: s.label().to_string(),
+        dir: s
+            .worktree
+            .as_ref()
+            .map_or_else(|| s.cwd.clone(), |w| w.path.clone()),
+        branch: s.worktree.as_ref().map(|w| w.branch.clone()),
+    }
+}
+
+impl App {
+    /// Merges the branch of a session's own worktree, the merge rune. None
+    /// when it has no branch of its own.
+    fn merge_session(&mut self, s: &Session) -> Option<bool> {
+        let w = s.worktree.as_ref()?;
+        Some(self.merge(&Merge {
+            main: PathBuf::from(&w.main),
+            branch: w.branch.clone(),
+            title: s.label().to_string(),
+        }))
+    }
+
+    /// The main working tree of a session's repository, where a reviewer
+    /// of its work starts.
+    fn main_tree(&self, s: &Session) -> PathBuf {
+        s.worktree
+            .as_ref()
+            .map(|w| PathBuf::from(&w.main))
+            .or_else(|| self.project_dir(&project_key(s)))
+            .unwrap_or_else(|| PathBuf::from(&s.cwd))
+    }
+
+    /// Starts a reviewer named `name` in `main`, told `prompt`. Its id, or
+    /// None when it could not start, which a notification says.
+    fn start_reviewer(&mut self, name: &str, main: PathBuf, prompt: String) -> Option<String> {
+        let id = self.unique_id("review");
+        self.tasks.prompts.insert(id.clone(), prompt);
+        if let Err(e) = self.launch(
+            &id,
+            name,
+            main,
+            Vec::new(),
+            Run::Agent(horadric_core::Agent::Claude),
+            false,
+        ) {
+            self.tasks.prompts.remove(&id);
+            eprintln!("horadric: cannot start the reviewer: {e}");
+            self.toasts
+                .show(Kind::Failed, "Cannot start the reviewer", &e);
+            return None;
+        }
+        Some(id)
     }
 }

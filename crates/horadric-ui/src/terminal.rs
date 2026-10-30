@@ -65,7 +65,6 @@ use crate::app::{self, Input};
 use crate::backdrop;
 use crate::caption::Caption;
 use crate::console::Console;
-use crate::cube;
 use crate::glide::Glides;
 use crate::layout::CaptionHit;
 use crate::menu::{self, Item};
@@ -138,8 +137,6 @@ struct Drag {
     size: (i32, i32),
     /// The cursor, in client pixels, the last time the pane was carried.
     at: Option<(i32, i32)>,
-    /// Whether the cube was last told to lift its lid.
-    lid: bool,
 }
 
 pub struct TerminalWindow {
@@ -1293,7 +1290,6 @@ impl TerminalWindow {
             over: None,
             size: (0, 0),
             at: None,
-            lid: false,
         }));
         unsafe {
             SetCapture(self.hwnd);
@@ -1308,6 +1304,10 @@ impl TerminalWindow {
         let Some(mut d) = self.drag.get() else {
             return;
         };
+        // Zoomed, the pane fills the stage and has nowhere to go.
+        if !d.moved && self.zoomed.get() {
+            return;
+        }
         if !d.moved {
             let mut p = POINT::default();
             unsafe {
@@ -1342,17 +1342,7 @@ impl TerminalWindow {
             return;
         }
         d.at = Some((c.x, c.y));
-        let cube = cube::under_cursor(&self.shared);
-        if d.lid != cube {
-            d.lid = cube;
-            cube::lid(&self.shared, cube);
-        }
         self.drag.set(Some(d));
-        // Zoomed, the pane fills the stage and has nowhere to go but the
-        // cube.
-        if self.zoomed.get() {
-            return;
-        }
         let mut client = RECT::default();
         unsafe {
             let _ = GetClientRect(self.hwnd, &mut client);
@@ -1372,10 +1362,10 @@ impl TerminalWindow {
         }
         let inside = c.x >= 0 && c.y >= 0 && c.x < client.right && c.y < client.bottom;
         // In a gap between cells the swap shown stays, so crossing one does
-        // not send a pane home and back. Out of the stage, or over the
-        // cube, everything goes home.
+        // not send a pane home and back. Out of the stage, everything goes
+        // home.
         let hit = layout::slot_at(&self.grid.borrow(), c.x, c.y);
-        let over = if inside && !cube {
+        let over = if inside {
             hit.or(d.over)
         } else {
             None
@@ -1403,26 +1393,18 @@ impl TerminalWindow {
             }
             size = (r.right, r.bottom);
             self.glides.borrow_mut().halt(p.hwnd.0 as isize);
-            // Zoomed, it stays where it is and only the cube takes it.
-            if !self.zoomed.get() {
-                p.float(self.hwnd, true);
-            }
+            p.float(self.hwnd, true);
         }
         size
     }
 
-    /// Let go: over the cube the session goes in it, over another pane's
-    /// cell the two swap. Either way the dragged pane glides into its cell.
+    /// Let go: over another pane's cell the two swap. Either way the
+    /// dragged pane glides into its cell.
     fn drop_drag(&self) {
         let Some(d) = self.drag.take() else {
             return;
         };
-        if d.moved && cube::under_cursor(&self.shared) {
-            let panes = self.panes.borrow();
-            if let Some(p) = panes.iter().find(|p| p.serial() == d.serial) {
-                app::push(Input::ToCube(p.session().into()));
-            }
-        } else if let Some(over) = d.over {
+        if let Some(over) = d.over {
             let mut panes = self.panes.borrow_mut();
             let from = panes.iter().position(|p| p.serial() == d.serial);
             if let Some(from) = from.filter(|&f| f != over && over < panes.len()) {
@@ -1471,7 +1453,6 @@ impl TerminalWindow {
     /// Undoes what a drag changed, other than where the panes are.
     fn put_down(&self) {
         crate::vsync::stop(self.hwnd, DRAG_TIMER);
-        cube::lid(&self.shared, false);
         for p in self.panes.borrow().iter() {
             p.float(self.hwnd, false);
             p.set_lifted(false);

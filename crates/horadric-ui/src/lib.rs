@@ -124,7 +124,6 @@ mod console;
 #[cfg(windows)]
 pub mod credential;
 #[cfg(windows)]
-mod cube;
 #[cfg(windows)]
 mod dialog;
 #[cfg(windows)]
@@ -201,7 +200,6 @@ mod sound;
 #[cfg(windows)]
 mod start;
 #[cfg(windows)]
-mod stash;
 pub mod town;
 // The journal, the chronicle and the MCP config wait for the Mac's quest log
 // and browser pane.

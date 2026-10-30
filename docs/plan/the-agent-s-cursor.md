@@ -21,7 +21,7 @@ point.
 **Why that works fully for Horadric's own windows.** A posted
 `WM_LBUTTONDOWN` carries its point in `lParam`, and most handlers read it
 from there. Not all: a drag reads the screen point with `GetCursorPos`
-(a cluster moved, a tile lifted into the cube, the stash, the usage
+(a cluster moved, a tile lifted, the usage
 window's slider, a terminal selection), hover asks `GetCursorPos` after
 the fact, `SetCapture` only follows the real mouse, and the browser pane
 asks `GetAsyncKeyState` whether a button is down. About forty such reads
@@ -93,7 +93,7 @@ so other apps get less (step 5).
 2. Gestures and `/horadric/pointer`, with `horadric pointer` on the
    command line. Verified on a dev instance with the human's pointer
    parked in another corner: a tile click switches the stage, a cluster
-   dragged and dropped, a tile lifted into the cube, the usage slider
+   dragged and dropped, a tile lifted, the usage slider
    dragged, a terminal selection, a list picked, text typed into a
    pane. After each, the real `GetCursorPos` is where it was.
 3. The arrow: glide, press ring, drag line, fade, tag, kept out of

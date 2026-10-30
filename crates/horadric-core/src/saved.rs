@@ -30,8 +30,9 @@ pub struct SavedState {
     pub version: u32,
     #[serde(default)]
     pub sessions: Vec<SavedSession>,
-    /// The sessions put away in the stash, oldest first. Never running.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// What the stash held when there was one. Read only to give each
+    /// session its tile back, paused, and never written again.
+    #[serde(default, skip_serializing)]
     pub stash: Vec<SavedSession>,
     #[serde(default)]
     pub clusters: Vec<SavedCluster>,
@@ -151,10 +152,6 @@ pub struct SavedState {
     /// experimental.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub chat_sessions: bool,
-    /// The Horadric Cube is shown, off until turned on from the usage
-    /// window's menu.
-    #[serde(default)]
-    pub cube: bool,
     /// What the human's Discord profile shows, off until chosen in the
     /// tray. Kept per instance, so a dev one stays off on its own.
     #[serde(default, skip_serializing_if = "Discord::is_off")]
@@ -373,6 +370,16 @@ impl SavedState {
     /// or from a newer Horadric, reads as empty rather than half
     /// understood.
     pub fn read(bytes: &[u8]) -> (SavedState, bool) {
+        let (mut s, damaged) = Self::read_raw(bytes);
+        for stashed in std::mem::take(&mut s.stash) {
+            if !s.sessions.iter().any(|t| t.id == stashed.id) {
+                s.sessions.push(stashed);
+            }
+        }
+        (s, damaged)
+    }
+
+    fn read_raw(bytes: &[u8]) -> (SavedState, bool) {
         if let Ok(s) = serde_json::from_slice::<SavedState>(bytes) {
             return if s.version <= VERSION {
                 (s, false)
@@ -664,6 +671,25 @@ mod tests {
             let written = serde_json::to_string(&d).unwrap();
             assert_eq!(serde_json::from_str::<Dock>(&written).unwrap(), d);
         }
+    }
+
+    #[test]
+    fn a_stash_from_before_comes_back_as_tiles() {
+        let tile = saved(&[], true);
+        let stashed = SavedSession {
+            id: "old-1".into(),
+            running: false,
+            ..saved(&[], true)
+        };
+        let old = serde_json::json!({
+            "sessions": [tile],
+            "stash": [stashed, tile],
+        });
+        let (s, damaged) = SavedState::read(old.to_string().as_bytes());
+        assert!(!damaged);
+        let ids: Vec<&str> = s.sessions.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["fix-1", "old-1"]);
+        assert!(!serde_json::to_string(&s).unwrap().contains("stash"));
     }
 
     fn saved(args: &[&str], prompted: bool) -> SavedSession {
