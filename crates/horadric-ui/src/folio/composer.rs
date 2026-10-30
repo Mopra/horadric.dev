@@ -82,8 +82,9 @@ const TOO_BIG: &str = "That image is too big to send whole (the most is 3.75 MB)
 /// History entries longer than this are not kept, so the file stays small.
 const HISTORY_ENTRY_MAX: usize = 20_000;
 
-const PLACEHOLDER: &str = "Message Claude";
-const PLACEHOLDER_BUSY: &str = "Claude is working. Enter tells it now, Esc stops it.";
+const PLACEHOLDER: &str = "Message Claude. Shift+Enter for a new line, / for commands, @ for files";
+const PLACEHOLDER_BUSY: &str =
+    "Claude is working. Enter steers it, Ctrl+Enter stops it and sends at once, Esc stops it";
 const PLACEHOLDER_ENDED: &str = "This session has ended.";
 
 /// What a click on the composer does.
@@ -92,6 +93,8 @@ pub(super) enum Act {
     Text,
     Stop,
     Send,
+    /// The microphone: dictate, as Ctrl+Space does.
+    Dictate,
     Settings,
     Pick(usize),
     /// An image waiting to go, to the system's viewer.
@@ -1345,8 +1348,9 @@ impl View {
     ) -> Rect {
         tend(&self.key, chat);
         let gpu = &self.shared.gpu;
-        // The text stops short of the key at the right.
-        let inner_w = (cw - 2.0 * PAD - KEY - 8.0).max(10.0);
+        // The text stops short of the keys at the right.
+        let keys = if chat.ended { KEY } else { 2.0 * KEY + 6.0 };
+        let inner_w = (cw - 2.0 * PAD - keys - 8.0).max(10.0);
         let empty = chat.input.ed.is_empty();
         let shown = if empty { "M" } else { chat.input.ed.text() };
         let Ok(l) = render::wrapped(gpu, &gfx.text, shown, inner_w) else {
@@ -1515,6 +1519,45 @@ impl View {
         if ready {
             hits.push((b, Hit::Input(act)));
         }
+        self.mic_key(gfx, chat, pal, &Rect::new(b.x - KEY - 6.0, y, KEY, KEY), hits);
+    }
+
+    /// The microphone left of send: lit while it listens, dim while the
+    /// words are written down or the model is fetched.
+    unsafe fn mic_key(
+        &self,
+        gfx: &Gfx,
+        chat: &Chat,
+        pal: &Palette,
+        b: &Rect,
+        hits: &mut Vec<(Rect, Hit)>,
+    ) {
+        let hot = chat.input.hover == Some(Act::Dictate);
+        let ink = match crate::dictate::shown(self.pane()) {
+            Some(crate::dictate::Shown::Listening) => {
+                gfx.fill_round(b, KEY / 2.0, pal.accent.with_alpha(0.22));
+                pal.accent
+            }
+            Some(_) => {
+                round_key(gfx, b, false);
+                pal.faint
+            }
+            None => {
+                round_key(gfx, b, hot);
+                if hot {
+                    pal.fg
+                } else {
+                    pal.dim
+                }
+            }
+        };
+        gfx.text_in("\u{E720}", &gfx.icon, b, ink);
+        hits.push((*b, Hit::Input(Act::Dictate)));
+    }
+
+    /// The stage pane the Folio sits in, which dictation belongs to.
+    fn pane(&self) -> HWND {
+        unsafe { GetParent(self.hwnd()) }.unwrap_or_default()
     }
 
     /// The pane's header, kept to one button that opens the settings
@@ -1613,6 +1656,13 @@ impl View {
             }
             gfx.text_in("\u{E711}", &gfx.icon, &x, pal.dim);
             hits.push((x, Hit::Input(Act::Unqueue(i))));
+        }
+        // The speech model's first fetch, a thin bar under what it says.
+        if let Some(crate::dictate::Shown::Fetching(f)) = crate::dictate::shown(self.pane()) {
+            y -= 8.0;
+            let track = Rect::new(inset, y + 2.0, w, 4.0);
+            gfx.fill_round(&track, 2.0, pal.fg.with_alpha(0.08));
+            gfx.fill_round(&Rect::new(track.x, track.y, track.w * f, track.h), 2.0, pal.accent);
         }
         if let Some(n) = &chat.input.notice {
             y -= ROW_H;
@@ -1827,6 +1877,11 @@ impl View {
     pub(super) fn press_input(&self, act: Act, x: f32, y: f32, double: bool, shift: bool) {
         let key = self.key.clone();
         let mut select = false;
+        if act == Act::Dictate {
+            crate::dictate::press(self.pane());
+            redraw(&key);
+            return;
+        }
         // Opened outside the borrow: the shell may pump messages back here.
         let mut open = None;
         with(&key, |chat| {
@@ -1835,6 +1890,7 @@ impl View {
             }
             match act {
                 Act::Send => send(chat, false),
+                Act::Dictate => {}
                 Act::Stop => {
                     hold(chat);
                     if let Some(h) = &chat.hosted {

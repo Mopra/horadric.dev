@@ -11,7 +11,14 @@ listening. Tapped, it listens until the next Ctrl+Space. Held, it
 listens until it is let go. Esc drops what was heard. The words are
 typed where the caret is, never sent: the human reads them and presses
 Enter. A terminal's header says "Listening" where its title would be,
-the Folio says it in the composer's notice.
+the Folio says it in the composer's notice. The Folio's composer also
+has a microphone key left of send, which does what a tap does.
+
+The first press on a machine without the model does not listen: it
+fetches the model, says why in the notice (or the header) with the MB
+counting up and, in the Folio, a thin bar under it, then loads it and
+says "Dictation is ready" for eight seconds. Speech recorded before
+that would wait minutes for a 332 MB download, or be lost if it failed.
 
 - `horadric-memory/src/speech.rs`: Whisper through candle-transformers,
   which the memory already depends on, so no new crate. The model is

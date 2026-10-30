@@ -59,6 +59,18 @@ pub fn is_fetched(models: &Path) -> bool {
         .all(|f| std::fs::metadata(dir.join(f.name)).is_ok_and(|m| m.len() == f.size as u64))
 }
 
+/// How much of [`download_size`] is on disk already, so a fetch that
+/// broke off counts on from where it was.
+pub fn fetched_bytes(models: &Path) -> usize {
+    let dir = models.join(FOLDER);
+    MODEL
+        .files
+        .iter()
+        .filter(|f| std::fs::metadata(dir.join(f.name)).is_ok_and(|m| m.len() == f.size as u64))
+        .map(|f| f.size)
+        .sum()
+}
+
 /// The folder the model loads from, fetching whatever is missing.
 pub fn ensure(
     models: &Path,

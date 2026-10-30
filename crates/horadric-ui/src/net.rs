@@ -40,7 +40,13 @@ impl Drop for Handle {
 /// The body of `url`, which must answer 200 and send at most `limit`
 /// bytes.
 pub fn get(url: &str, limit: usize) -> Result<Vec<u8>, String> {
-    let answer = request("GET", url, &[], &[], limit)?;
+    get_counting(url, limit, &|_| {})
+}
+
+/// [`get`], telling `got` how many bytes have come so far as they come,
+/// for a download the human waits on.
+pub fn get_counting(url: &str, limit: usize, got: &dyn Fn(usize)) -> Result<Vec<u8>, String> {
+    let answer = exchange("GET", url, &[], &[], limit, got)?;
     if answer.status != 200 {
         return Err(format!("{url} answered {}", answer.status));
     }
@@ -65,6 +71,17 @@ pub fn request(
     headers: &[(&str, &str)],
     body: &[u8],
     limit: usize,
+) -> Result<Answer, String> {
+    exchange(method, url, headers, body, limit, &|_| {})
+}
+
+fn exchange(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    limit: usize,
+    got: &dyn Fn(usize),
 ) -> Result<Answer, String> {
     let parts = split_url(url).ok_or_else(|| format!("`{url}` is not an http or https URL"))?;
     let agent = format!("Horadric/{}", env!("CARGO_PKG_VERSION"));
@@ -181,6 +198,7 @@ pub fn request(
                 return Err(format!("{url} is larger than {limit} bytes"));
             }
             body.extend_from_slice(&chunk[..read as usize]);
+            got(body.len());
         }
     }
 }
