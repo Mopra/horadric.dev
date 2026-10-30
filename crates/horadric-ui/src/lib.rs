@@ -200,7 +200,7 @@ mod snapping;
 mod sound;
 #[cfg(windows)]
 mod start;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub mod town;
 // The journal, the chronicle and the MCP config wait for the Mac's quest log
 // and browser pane.

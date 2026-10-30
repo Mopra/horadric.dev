@@ -118,8 +118,6 @@ impl Known {
 /// A readable name for a project key. The town goes by its own name, not
 /// its folder's.
 pub fn project_name(key: &str) -> String {
-    // The Mac has no town yet.
-    #[cfg(windows)]
     if crate::town::is(key) {
         return crate::town::NAME.to_string();
     }
