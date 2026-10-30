@@ -142,13 +142,13 @@ const WHITE: Color = Color::rgb(0xFFFFFF);
 /// A hardware control panel in the dark: matte metal faceplates lit from
 /// above, keys that stand up off the plate, screens sunk into it.
 const SKEUOMORPH: Palette = Palette {
-    window_bg: Color::rgb(0x141518),
-    plate_top: Color::rgb(0x191A1E),
-    plate_bottom: Color::rgb(0x111214),
-    surface: Color::rgb(0x202227),
-    well: Color::rgb(0x0C0D0F),
-    screen: Color::rgb(0x08090B),
-    lamp_off: Color::rgb(0x2A2C32),
+    window_bg: Color::rgb(0x101114),
+    plate_top: Color::rgb(0x151619),
+    plate_bottom: Color::rgb(0x0E0F11),
+    surface: Color::rgb(0x1B1D21),
+    well: Color::rgb(0x090A0C),
+    screen: Color::rgb(0x060709),
+    lamp_off: Color::rgb(0x25272C),
     text: Color::rgb(0xE8E9ED),
     text_dim: Color::rgb(0x8F939E),
     legend: Color::rgb(0x6E727C),
