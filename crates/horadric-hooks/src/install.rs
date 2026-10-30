@@ -44,6 +44,10 @@ pub const EVENTS: &[&str] = &[
     "Stop",
     "StopFailure",
     "SessionEnd",
+    // A hireling's start, and its end with its transcript and last words,
+    // even where the mod is not loaded.
+    "SubagentStart",
+    "SubagentStop",
 ];
 
 /// `~/.claude/settings.json`.

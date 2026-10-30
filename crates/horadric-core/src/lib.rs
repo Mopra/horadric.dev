@@ -32,6 +32,7 @@ pub mod google;
 pub mod handing;
 pub mod handoff;
 pub mod heavy;
+pub mod hireling;
 pub mod history;
 pub mod joining;
 pub mod journal;

@@ -197,6 +197,10 @@ pub struct Session {
     /// mod's roster says nothing.
     #[serde(skip)]
     pub stream_agents: Option<Vec<(String, String)>>,
+    /// Its hirelings, each kept whole, and the main loop's tools this
+    /// turn: the retinue and the war table.
+    #[serde(skip)]
+    pub band: crate::hireling::Band,
     /// When the last prompt went in. Anything typed into the terminal
     /// after it may still sit in the prompt box as a draft.
     #[serde(skip)]
@@ -281,6 +285,7 @@ impl Session {
             roster: None,
             heard_at: None,
             stream_agents: None,
+            band: Default::default(),
             prompted_at: None,
             last_prompt: None,
             hooked: None,
@@ -622,8 +627,13 @@ impl Session {
     /// Keeps the tool the turn is in and when the agent last did something.
     fn note(&mut self, event: &HookEvent, now: SystemTime) {
         self.heard_at = Some(now);
+        self.band.hear(event, now);
         match event.hook_event_name.as_str() {
-            "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PermissionRequest" => {
+            // A hireling's tool is its own, in the band; the tile's is the
+            // main loop's.
+            "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PermissionRequest"
+                if !event.is_subagent() || self.tool.is_none() =>
+            {
                 if let Some(t) = &event.tool_name {
                     self.tool = Some(t.clone());
                 }
@@ -848,6 +858,10 @@ impl Session {
             (Some(t), _) if kind == "permission_prompt" => self.last_line = waiting_on(t),
             (_, Some(m)) => self.last_line = first_line(m),
             _ => {}
+        }
+        // A hireling's prompt shows in the parent's terminal: say whose it is.
+        if let Some(h) = self.band.asking().filter(|_| kind == "permission_prompt") {
+            self.last_line = format!("{} {}", h.kind, self.last_line);
         }
         // The `PermissionRequest` before it said more, and when it began.
         let asked = kind == "permission_prompt"

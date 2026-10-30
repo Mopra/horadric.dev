@@ -77,6 +77,20 @@ pub struct HookEvent {
     /// as `Explore`.
     #[serde(default)]
     pub agent_type: Option<String>,
+    /// [`HookEvent::SPAWN`] only: what the subagent was asked to do.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// [`HookEvent::SPAWN`] only: the model it runs on, when not the
+    /// session's.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// [`HookEvent::SPAWN`] only: the subagent that sent it, none when the
+    /// main loop did.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// `SubagentStop` only: the subagent's own transcript.
+    #[serde(default)]
+    pub agent_transcript_path: Option<String>,
     /// [`HookEvent::AGENTS`] only: every subagent and teammate the session
     /// has, as the mod last saw them.
     #[serde(default)]
