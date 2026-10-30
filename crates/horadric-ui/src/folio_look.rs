@@ -11,10 +11,19 @@ use horadric_core::folio::{AskState, Ending, Step, StepState};
 
 use crate::layout::Rect;
 
-/// The widest the conversation reads. Wider lines are hard to follow.
-pub const COLUMN_MAX: f32 = 760.0;
+/// The widest the conversation reads: about 70 characters at the reading
+/// size. Past 75 the eye loses its place on the way back to the next
+/// line's start.
+pub const COLUMN_MAX: f32 = 600.0;
 /// The least room either side of the column.
 pub const COLUMN_MARGIN: f32 = 22.0;
+/// How much of its strength a rune keeps behind the words. Moving shapes
+/// under text slow reading, so the runes stay lively in the margins and
+/// quiet where the eye reads.
+pub const CALM: f32 = 0.3;
+/// How far either side of the column the runes take to calm, so no edge
+/// shows where the column is.
+const CALM_EDGE: f32 = 60.0;
 /// How long the background takes to warm when a turn starts.
 pub const WARM: Duration = Duration::from_millis(1200);
 /// And to cool after it ends, after which nothing moves and nothing draws.
@@ -101,6 +110,15 @@ pub const LAYERS: [Layer; 3] = [
 pub fn column(width: f32) -> (f32, f32) {
     let w = (width - 2.0 * COLUMN_MARGIN).clamp(0.0, COLUMN_MAX);
     ((width - w) / 2.0, w)
+}
+
+/// How much of its strength a rune centred at `x` keeps, with the column
+/// at `cx` and `cw` wide: [`CALM`] over it, all of it well clear of it.
+pub fn calm(x: f32, (cx, cw): (f32, f32)) -> f32 {
+    let out = (cx - x).max(x - (cx + cw)).max(0.0);
+    let k = (out / CALM_EDGE).min(1.0);
+    let smooth = k * k * (3.0 - 2.0 * k);
+    CALM + (1.0 - CALM) * smooth
 }
 
 /// How a run of tool steps stands.
@@ -523,6 +541,18 @@ mod tests {
         assert_eq!(w, COLUMN_MAX);
         assert_eq!(x * 2.0 + w, 2000.0);
         assert_eq!(column(10.0).1, 0.0);
+    }
+
+    #[test]
+    fn runes_are_quiet_behind_the_words_and_whole_in_the_margins() {
+        let col = (200.0, 600.0);
+        assert_eq!(calm(500.0, col), CALM);
+        assert_eq!(calm(200.0, col), CALM);
+        assert_eq!(calm(800.0, col), CALM);
+        assert_eq!(calm(100.0, col), 1.0);
+        assert_eq!(calm(900.0, col), 1.0);
+        let near = calm(170.0, col);
+        assert!(near > CALM && near < 1.0);
     }
 
     #[test]

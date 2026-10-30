@@ -82,7 +82,13 @@ const CORNER: f32 = 7.0;
 
 pub(super) const FONT: PCWSTR = w!("Segoe UI Variable Text");
 /// The size prose is read in, in the conversation and the composer alike.
-pub(super) const READ: f32 = 16.0;
+/// On screens, text a little above the usual 16 reads faster and is
+/// understood better.
+pub(super) const READ: f32 = 17.0;
+/// How far the words' white is softened toward the background. Near white
+/// on near black glows at the strokes' edges, worst with astigmatism; a
+/// touch off white keeps the contrast well past what reading needs.
+const SOFTEN: f32 = 0.09;
 /// Prose lines this many times their size apart. DirectWrite's own spacing
 /// is set for interfaces and packs a long answer too tight to follow.
 const LEADING: f32 = 1.6;
@@ -911,11 +917,12 @@ impl View {
 
     fn palette(gfx: &Gfx) -> Palette {
         let p = theme::palette();
+        let fg = p.term_fg.mix(p.term_bg, SOFTEN);
         Palette {
             bg: p.term_bg,
-            fg: p.term_fg,
-            dim: p.term_fg.with_alpha(0.68),
-            faint: p.term_fg.with_alpha(0.46),
+            fg,
+            dim: fg.with_alpha(0.7),
+            faint: fg.with_alpha(0.5),
             accent: gfx.accent,
         }
     }

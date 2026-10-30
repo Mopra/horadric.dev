@@ -20,13 +20,15 @@ impl View {
         heat: f32,
     ) {
         let ink = pal.fg.mix(pal.accent, 0.35 + 0.5 * heat);
+        let column = look::column(view.0);
         for (k, l) in look::LAYERS.iter().enumerate() {
             for i in 0..l.count + l.busy {
                 let e = look::ember(k, i, clocks, view, heat, RUNES.len());
-                if e.alpha <= 0.004 {
+                let alpha = e.alpha * look::calm(e.x + e.size / 2.0, column);
+                if alpha <= 0.004 {
                     continue;
                 }
-                let c = ink.mix(pal.bg, e.sunk).with_alpha(e.alpha);
+                let c = ink.mix(pal.bg, e.sunk).with_alpha(alpha);
                 gfx.rune(e.rune, e.x, e.y, e.size, c, e.stroke);
             }
         }
