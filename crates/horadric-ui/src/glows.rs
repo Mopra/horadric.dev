@@ -36,6 +36,12 @@ pub fn stamp() -> u64 {
     STAMP.load(Ordering::Acquire)
 }
 
+/// Moves the stamp with nothing touched, for light from elsewhere (the
+/// mind's recalls) that the panes must draw.
+pub fn stir() {
+    STAMP.fetch_add(1, Ordering::AcqRel);
+}
+
 /// Reads the glow of the project `key`, None when nothing in it was
 /// touched since the app started.
 pub fn with<R>(key: &str, f: impl FnOnce(&Glow) -> R) -> Option<R> {

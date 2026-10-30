@@ -234,24 +234,41 @@ impl Place {
     /// Where the Arcane Sanctuary's nodes were left, none when it was never
     /// drawn or its file does not read: a fresh layout is no loss.
     pub fn positions(&self) -> Positions {
-        fs::read_to_string(self.sanctuary_store())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        read_positions(&self.sanctuary_store())
     }
 
     /// Keeps where the nodes settled. Only the app writes it, so no lock,
     /// but through a new file all the same so a crash leaves the old one.
     pub fn keep_positions(&self, p: &Positions) -> Result<(), String> {
-        let store = self.sanctuary_store();
-        if let Some(dir) = store.parent() {
-            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
-        let json = serde_json::to_string(p).map_err(|e| e.to_string())?;
-        let new = store.with_extension("new");
-        fs::write(&new, json).map_err(|e| e.to_string())?;
-        fs::rename(&new, &store).map_err(|e| e.to_string())
+        keep_positions_in(&self.sanctuary_store(), p)
     }
+
+    /// Where the mind's memories were left: the sanctuary of the memory,
+    /// kept apart so neither picture overwrites the other.
+    pub fn mind_positions(&self) -> Positions {
+        read_positions(&self.store.with_extension("mind.json"))
+    }
+
+    pub fn keep_mind_positions(&self, p: &Positions) -> Result<(), String> {
+        keep_positions_in(&self.store.with_extension("mind.json"), p)
+    }
+}
+
+fn read_positions(store: &Path) -> Positions {
+    fs::read_to_string(store)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn keep_positions_in(store: &Path, p: &Positions) -> Result<(), String> {
+    if let Some(dir) = store.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string(p).map_err(|e| e.to_string())?;
+    let new = store.with_extension("new");
+    fs::write(&new, json).map_err(|e| e.to_string())?;
+    fs::rename(&new, store).map_err(|e| e.to_string())
 }
 
 fn git(dir: &Path, args: &[&str]) -> Option<String> {

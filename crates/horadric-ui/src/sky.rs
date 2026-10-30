@@ -188,7 +188,7 @@ pub fn radius(kind: Kind, weight: u32) -> f32 {
     let r = 2.0 + (weight as f32).sqrt().min(12.0) * 0.9;
     match kind {
         Kind::File => r,
-        Kind::Note | Kind::Quest => r * 0.7,
+        Kind::Note | Kind::Quest | Kind::Dialogue | Kind::Code => r * 0.7,
     }
 }
 
@@ -231,7 +231,7 @@ pub fn hubs(g: &Graph, most: usize) -> Vec<usize> {
 pub fn short_label(kind: Kind, label: &str) -> String {
     match kind {
         Kind::File => cut(label.rsplit('/').next().unwrap_or(label)),
-        Kind::Note | Kind::Quest => cut(label),
+        Kind::Note | Kind::Quest | Kind::Dialogue | Kind::Code => cut(label),
     }
 }
 

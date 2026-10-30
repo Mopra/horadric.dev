@@ -1722,11 +1722,16 @@ impl Pane {
             }
             return;
         }
-        if self.console.sky.is_some() {
+        if let Some(key) = &self.console.sky {
             match keys::char_action(c, mods) {
                 CharAction::NewShell => app::push(Input::Shell(None)),
                 CharAction::Browse => app::push(Input::Browse),
                 CharAction::Sanctuary => app::push(Input::Sanctuary),
+                _ if matches!(c, 'm' | 'M') && !mods.ctrl && !mods.alt => {
+                    if sanctuary::toggle_mind(key) {
+                        self.invalidate();
+                    }
+                }
                 _ => {}
             }
             return;

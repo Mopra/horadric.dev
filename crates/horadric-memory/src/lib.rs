@@ -11,6 +11,7 @@ pub mod brethren;
 pub mod distill;
 pub mod horadrim;
 pub mod keeper;
+pub mod mind;
 pub mod models;
 pub mod parts;
 pub mod recall;

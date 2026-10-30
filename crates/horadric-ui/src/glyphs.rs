@@ -1198,6 +1198,9 @@ impl GridTarget {
             Kind::File => bg.mix(ink, 0.6),
             Kind::Note => theme::ACCENTS[4].0,
             Kind::Quest => theme::quest(),
+            // The mind's passages in a cool blue, its code as files are.
+            Kind::Dialogue => Color::rgb(0x7FB8E8).mix(bg, 0.15),
+            Kind::Code => bg.mix(ink, 0.5),
         };
         let thread = bg.mix(ink, 0.3);
         // How far the far side sinks into the background, so the depth

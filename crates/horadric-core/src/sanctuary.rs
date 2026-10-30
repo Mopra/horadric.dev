@@ -20,6 +20,10 @@ pub enum Kind {
     File,
     Note,
     Quest,
+    /// The mind's: a passage of what was said.
+    Dialogue,
+    /// The mind's: a piece of code as the memory keeps it.
+    Code,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -169,6 +169,36 @@ fn look_later(place: &Place) {
     });
 }
 
+/// Told what a recall found: the project asked in and the ids of the hits
+/// shown, so the mind's pane can light them.
+pub type Fired = fn(&str, &[String]);
+
+static FIRED: OnceLock<Fired> = OnceLock::new();
+
+pub fn set_fired(f: Fired) {
+    let _ = FIRED.set(f);
+}
+
+fn fired(project: &str, a: &Answer) {
+    if let Some(f) = FIRED.get() {
+        if !a.shown.is_empty() {
+            f(project, &a.shown);
+        }
+    }
+}
+
+/// The mind of the project `dir` is in: its memories that have a vector,
+/// each linked to its nearest in meaning, and the project's key the
+/// recalls are told by. Reads the whole store, so not on a window's
+/// thread.
+pub fn mind(dir: &Path) -> Result<(String, horadric_core::sanctuary::Graph), String> {
+    let place = Place::of(dir)?;
+    let state = horadric_hooks::state_dir().ok_or("no state folder")?;
+    let store = crate::store::Store::open(&state.join("memory")).map_err(|e| e.to_string())?;
+    let picked = crate::mind::pick(&store, MODEL.tag(), place.key(), crate::mind::MOST);
+    Ok((place.key().to_string(), crate::mind::graph(&picked)))
+}
+
 /// A transcript that has grown: a hook said so, with the folder the
 /// session is in.
 pub struct Keep {
@@ -653,6 +683,7 @@ fn answer(
         if !a.text.is_empty() {
             a.text = format!("{}\n\n{}", recall::OFFERED, a.text);
         }
+        fired(place.key(), &a);
         return Ok(a);
     }
     let known: Vec<String> = body["known"]
@@ -664,7 +695,7 @@ fn answer(
                 .collect()
         })
         .unwrap_or_default();
-    keeper.recall(
+    let a = keeper.recall(
         place.key(),
         &lore,
         &ask,
@@ -673,7 +704,9 @@ fn answer(
         &tree,
         &known,
         None,
-    )
+    )?;
+    fired(place.key(), &a);
+    Ok(a)
 }
 
 #[cfg(test)]

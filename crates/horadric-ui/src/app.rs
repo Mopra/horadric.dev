@@ -40,7 +40,7 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -577,6 +577,17 @@ fn keep_transcript(t: &Tagged) {
     crate::memory::keep_hooked(t);
 }
 
+/// The app's window, for the memory's thread to wake when a recall fires.
+static EVENT_WINDOW: AtomicIsize = AtomicIsize::new(0);
+
+/// A recall found `ids` in `project`: the mind lights them, and every
+/// sanctuary on the stage draws again.
+fn recalled(project: &str, ids: &[String]) {
+    crate::mind::fire(project, ids);
+    crate::glows::stir();
+    post(EVENT_WINDOW.load(Ordering::Acquire), WM_HORADRIC_EVENT, 0);
+}
+
 fn post_event(window: isize, phase: bool) {
     let flags = EVENTS_DUE | if phase { EVENTS_PHASE } else { 0 };
     if EVENTS.fetch_or(flags, Ordering::AcqRel) & EVENTS_DUE == 0 {
@@ -774,6 +785,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     // would point it at a build about to be replaced, and a fake install
     // with its own APPDATA has a first run of its own but shares the value.
     crate::memory::set_fetch(crate::net::get);
+    EVENT_WINDOW.store(notify_id, Ordering::Release);
+    crate::memory::set_fired(recalled);
     crate::memory::set_across(saved.recall_across);
     crate::memory::warm();
     let mut autostart_offered = saved.autostart_offered;

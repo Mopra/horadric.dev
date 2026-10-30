@@ -18,6 +18,10 @@
 //! The picture is in depth: a drag turns it, a drag with Shift pans it, a
 //! flick lets it coast, and left alone it drifts slowly round, stopping
 //! while a node is under the mouse so its name can be read.
+//!
+//! M turns a project's sanctuary into its mind and back: the memory's
+//! passages linked by meaning, lit by [`crate::mind`] as recalls find
+//! them. Each picture keeps its own state while the other is shown.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -96,6 +100,8 @@ pub fn set_town_source(f: TownSource) {
 enum Read {
     Project(Graph, Layout),
     Town(Town),
+    /// The mind, with the memory's key of the project.
+    Mind(String, Graph, Layout),
 }
 
 enum State {
@@ -111,10 +117,26 @@ enum State {
     Town(Town),
 }
 
+/// The picture not shown, code or mind, as it was left.
+struct Stashed {
+    state: State,
+    index: HashMap<String, usize>,
+    view: Option<View>,
+}
+
 struct Sky {
     dir: PathBuf,
     key: String,
     town: bool,
+    /// Showing the memory rather than the code.
+    mind: bool,
+    stash: Option<Stashed>,
+    /// The memory's key of the project, which recalls are told by, once
+    /// the mind is read.
+    mind_key: Option<String>,
+    /// The mind's synapses: each node's neighbours, and each pair once.
+    next: Vec<Vec<usize>>,
+    pairs: Vec<(usize, usize)>,
     /// Each node's index by its id, for the glow to find it.
     index: HashMap<String, usize>,
     /// The glass of the last frame, which a click into a galaxy fits to.
@@ -200,6 +222,11 @@ pub fn open(key: &str, dir: &Path) {
                 dir: dir.to_path_buf(),
                 key: key.to_string(),
                 town: crate::town::key() == Some(key),
+                mind: false,
+                stash: None,
+                mind_key: None,
+                next: Vec::new(),
+                pairs: Vec::new(),
                 index: HashMap::new(),
                 room: [0.0; 4],
                 dragged: false,
@@ -229,10 +256,16 @@ fn poll(sky: &mut Sky, hwnd: HWND) {
         State::Idle => {
             let (tx, rx) = mpsc::channel();
             let dir = sky.dir.clone();
-            let town = sky.town;
+            let (town, mind) = (sky.town, sky.mind);
             let wake = hwnd.0 as isize;
             std::thread::spawn(move || {
-                let read = if town { read_town() } else { read(&dir) };
+                let read = if town {
+                    read_town()
+                } else if mind {
+                    read_mind(&dir)
+                } else {
+                    read(&dir)
+                };
                 let _ = tx.send(read);
                 unsafe {
                     let _ = PostMessageW(
@@ -248,6 +281,17 @@ fn poll(sky: &mut Sky, hwnd: HWND) {
         State::Reading(rx) => match rx.try_recv() {
             Ok(Ok(Read::Project(graph, layout))) => {
                 sky.index = index(&graph);
+                sky.state = State::Ready { graph, layout };
+            }
+            Ok(Ok(Read::Mind(key, graph, layout))) => {
+                sky.index = index(&graph);
+                sky.next = vec![Vec::new(); graph.nodes.len()];
+                for l in &graph.links {
+                    sky.next[l.a].push(l.b);
+                    sky.next[l.b].push(l.a);
+                }
+                sky.pairs = graph.links.iter().map(|l| (l.a, l.b)).collect();
+                sky.mind_key = Some(key);
                 sky.state = State::Ready { graph, layout };
             }
             Ok(Ok(Read::Town(town))) => {
@@ -270,6 +314,12 @@ fn read(dir: &Path) -> Result<Read, String> {
     Ok(Read::Project(graph, layout))
 }
 
+fn read_mind(dir: &Path) -> Result<Read, String> {
+    let (key, graph) = crate::memory::mind(dir)?;
+    let layout = Layout::new(&graph, &Place::of(dir)?.mind_positions());
+    Ok(Read::Mind(key, graph, layout))
+}
+
 fn read_town() -> Result<Read, String> {
     let source = TOWN_SOURCE.get().ok_or("this build cannot read the sky")?;
     Ok(Read::Town(source()?))
@@ -288,6 +338,12 @@ fn index(g: &Graph) -> HashMap<String, usize> {
 fn light(sky: &Sky) -> Light {
     let mut light = Light::default();
     let now = crate::glows::now();
+    if sky.mind {
+        if let Some(key) = &sky.mind_key {
+            light = crate::mind::shine(key, &sky.index, &sky.next, &sky.pairs, now);
+        }
+        return light;
+    }
     match &sky.state {
         State::Town(town) => {
             for g in &town.galaxies {
@@ -310,6 +366,12 @@ fn light(sky: &Sky) -> Light {
 fn glowing(sky: &Sky) -> bool {
     let now = crate::glows::now();
     let moving = |key: &str| crate::glows::with(key, |glow| glow.moving(now)).unwrap_or(false);
+    if sky.mind {
+        // Its wandering sparks never rest while it has synapses.
+        return matches!(sky.state, State::Ready { .. })
+            && (!sky.pairs.is_empty()
+                || sky.mind_key.as_deref().is_some_and(|k| crate::mind::firing(k, now)));
+    }
     match &sky.state {
         State::Town(town) => town.galaxies.iter().any(|g| moving(&g.key)),
         State::Ready { .. } => moving(&sky.key),
@@ -341,8 +403,12 @@ pub fn frame(key: &str, hwnd: HWND, room: [f32; 4]) -> SkyFrame {
             ..SkyFrame::default()
         };
         match &sky.state {
+            State::Idle | State::Reading(_) if sky.mind => message("Waking the mind\u{2026}"),
             State::Idle | State::Reading(_) => message("Reading the project\u{2026}"),
             State::Failed(e) => message(e),
+            State::Ready { graph, .. } if sky.mind && graph.nodes.is_empty() => {
+                message("Nothing remembered with meaning here yet")
+            }
             State::Ready { graph, .. } if graph.nodes.is_empty() => {
                 message("No files here to draw")
             }
@@ -387,13 +453,18 @@ pub fn frame(key: &str, hwnd: HWND, room: [f32; 4]) -> SkyFrame {
 pub fn detail(key: &str) -> String {
     with(key, |sky| match &sky.state {
         State::Town(town) => format!("{} projects", town.galaxies.len()),
+        State::Ready { graph, .. } if sky.mind => format!(
+            "mind: {} memories, {} synapses  \u{b7}  M for code",
+            graph.nodes.len(),
+            graph.links.len()
+        ),
         State::Ready { graph, .. } => {
             let files = graph
                 .nodes
                 .iter()
                 .filter(|n| n.kind == horadric_core::sanctuary::Kind::File)
                 .count();
-            format!("{files} files, {} links", graph.links.len())
+            format!("{files} files, {} links  \u{b7}  M for the mind", graph.links.len())
         }
         _ => String::new(),
     })
@@ -463,8 +534,16 @@ pub fn step(key: &str) {
         if layout.still() {
             let kept = layout.kept(graph);
             let dir = sky.dir.clone();
+            let mind = sky.mind;
             std::thread::spawn(move || {
-                if let Err(e) = Place::of(&dir).and_then(|p| p.keep_positions(&kept)) {
+                let keep = |p: Place| {
+                    if mind {
+                        p.keep_mind_positions(&kept)
+                    } else {
+                        p.keep_positions(&kept)
+                    }
+                };
+                if let Err(e) = Place::of(&dir).and_then(keep) {
                     eprintln!("horadric: cannot keep the sanctuary's layout: {e}");
                 }
             });
@@ -599,6 +678,29 @@ pub fn wheel(key: &str, at: (f32, f32), delta: i32) {
             sky.view = Some(view.zoomed(at, sky::wheel_factor(delta)));
         }
     });
+}
+
+/// Turns a project's sanctuary from its code to its mind or back, keeping
+/// the picture left for when it comes back. The town has no mind. True
+/// when it turned.
+pub fn toggle_mind(key: &str) -> bool {
+    with(key, |sky| {
+        if sky.town {
+            return false;
+        }
+        let left = Stashed {
+            state: std::mem::replace(&mut sky.state, State::Idle),
+            index: std::mem::take(&mut sky.index),
+            view: sky.view.take(),
+        };
+        if let Some(back) = sky.stash.replace(left) {
+            (sky.state, sky.index, sky.view) = (back.state, back.index, back.view);
+        }
+        sky.mind = !sky.mind;
+        (sky.hover, sky.last) = (None, None);
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Back to the whole picture fitted to the pane, as at first.

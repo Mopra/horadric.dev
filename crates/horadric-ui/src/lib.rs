@@ -165,6 +165,8 @@ mod folio;
 #[cfg(windows)]
 mod menu;
 #[cfg(windows)]
+mod mind;
+#[cfg(windows)]
 mod net;
 #[cfg(windows)]
 mod new_tab;

@@ -791,6 +791,12 @@ impl Store {
         scored
     }
 
+    /// Chunk `id`'s `tag` vector as kept, a number in 127ths each, None
+    /// when it has none yet.
+    pub fn vector(&self, tag: &str, id: ChunkId) -> Option<&[i8]> {
+        self.models.get(tag)?.rows.get(&id).map(Vec::as_slice)
+    }
+
     /// The cosine of chunk `id`'s `tag` vector and `query`, None when it
     /// has none yet.
     pub fn cosine(&self, tag: &str, id: ChunkId, query: &[f32]) -> Option<f32> {
