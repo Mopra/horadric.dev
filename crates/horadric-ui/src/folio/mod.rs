@@ -697,6 +697,10 @@ fn drain() {
                     }
                 }
             }
+            // A replay's limits are old news, and the bars already had them.
+            if let Some(limits) = chat.folio.limits.take().filter(|_| chat.live) {
+                tell.push(Input::Limits(limits));
+            }
             if chat.folio.cleared != cleared {
                 chat.open.clear();
                 chat.tr.forget();

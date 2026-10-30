@@ -59,7 +59,7 @@ use horadric_core::presence;
 use horadric_core::release::{self, Manifest};
 use horadric_core::saved::{Discord, Side};
 use horadric_core::ssh;
-use horadric_core::usage::has_flag;
+use horadric_core::usage::{has_flag, Limits};
 use horadric_core::worktree::{self as tree, Worktree};
 use horadric_core::{
     session_id, Carry, HookEvent, Phase, Registry, Route, SavedCluster, SavedPanel, SavedSession,
@@ -430,6 +430,9 @@ pub(crate) enum Input {
     Folio(String),
     /// A Folio's cross: end the session with this id.
     CloseFolio(String),
+    /// The Claude account's limits as a Folio's CLI told them, which runs
+    /// no status line to post them.
+    Limits(Limits),
     /// A Folio's session changed what its tile should say.
     FolioState(String, crate::folio::State),
     /// A Folio's "Terminal": end it between turns and carry the session on
@@ -7827,6 +7830,26 @@ impl App {
     /// A Folio's tile follows what its stream says, where its hooks say
     /// nothing: an ask, which headless never posts as a hook, and where a
     /// turn stands after a reattach, since hooks went nowhere meanwhile.
+    /// Takes in limits heard outside the listener, as its feeder thread
+    /// takes in a status line's.
+    fn hear_limits(&mut self, limits: &Limits) {
+        let now = unix_now();
+        if let Ok(mut u) = self.shared.usage.lock() {
+            *u = Some(Usage {
+                limits: u
+                    .as_ref()
+                    .map_or(limits.clone(), |h| h.limits.merge(limits, now)),
+                at: now,
+            });
+        }
+        if let Some(u) = &self.usage_window {
+            u.invalidate();
+            if u.fit() {
+                self.arrange();
+            }
+        }
+    }
+
     fn folio_state(&mut self, id: &str, state: crate::folio::State) {
         // A reattached tile knows its conversation only from its replay,
         // and History must not offer it while this one runs.
@@ -8997,6 +9020,7 @@ impl App {
                 Input::CloseSky(key) => self.close_sky(&key),
                 Input::Folio(key) => self.open_folio(&key),
                 Input::CloseFolio(id) => self.close_folio(&id),
+                Input::Limits(limits) => self.hear_limits(&limits),
                 Input::FolioState(id, state) => self.folio_state(&id, state),
                 Input::FolioToTerminal(id) => self.folio_to_terminal(&id),
                 Input::FolioHandedOver(id) => self.folio_handed_over(&id),

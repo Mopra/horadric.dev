@@ -164,6 +164,27 @@ impl Limits {
         })
     }
 
+    /// The limits in a headless CLI's `rate_limit_event`, from its
+    /// `unifiedWindows`, where use is a fraction and not a percent. An
+    /// older CLI's event names only which limit applies, and tells nothing.
+    pub fn from_rate_limit_event(v: &Value) -> Option<Limits> {
+        let windows = v.pointer("/rate_limit_info/unifiedWindows")?;
+        let limit = |name: &str| {
+            let w = windows.get(name)?;
+            Some(Limit {
+                used: (w.get("utilization")?.as_f64()? * 100.0) as f32,
+                resets_at: w.get("resetsAt").and_then(Value::as_u64),
+                minutes: None,
+            })
+        };
+        let limits = Limits {
+            five_hour: limit("five_hour"),
+            seven_day: limit("seven_day"),
+            spend: None,
+        };
+        (!limits.is_empty()).then_some(limits)
+    }
+
     /// When the account can work again, in Unix seconds, if a limit is
     /// used up at `now`: the latest reset among the full ones, since
     /// nothing runs until every one of them starts over. With `hit`, a
@@ -675,6 +696,25 @@ mod tests {
             None
         );
         assert_eq!(Limits::from_codex(""), None);
+    }
+
+    #[test]
+    fn a_headless_rate_limit_event_tells_the_limits() {
+        let v: Value = serde_json::from_str(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed",
+            "unifiedWindows":{"five_hour":{"utilization":0.05,"resetsAt":100},
+            "seven_day":{"utilization":0.68,"resetsAt":900},
+            "seven_day_overage_included":{"utilization":0.02,"resetsAt":900}}}}"#,
+        )
+        .unwrap();
+        let l = Limits::from_rate_limit_event(&v).unwrap();
+        assert_eq!(l.five_hour.map(|l| (l.used.round(), l.resets_at)), Some((5.0, Some(100))));
+        assert_eq!(l.seven_day.map(|l| (l.used.round(), l.resets_at)), Some((68.0, Some(900))));
+        let old: Value = serde_json::from_str(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"}}"#,
+        )
+        .unwrap();
+        assert_eq!(Limits::from_rate_limit_event(&old), None);
     }
 
     #[test]

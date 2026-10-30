@@ -317,6 +317,10 @@ pub struct Folio {
     pub background_heard: bool,
     /// How many times `/clear` emptied it, for the view to see one happen.
     pub cleared: u32,
+    /// The account's limits as the last `rate_limit_event` told them, not
+    /// yet taken by the app. A headless CLI runs no status line, so this is
+    /// the only way a Folio's work reaches the usage bars.
+    pub limits: Option<crate::usage::Limits>,
     /// The blocks of the message streaming now, by content index.
     open: HashMap<u64, Open>,
     /// The id of the message streaming now.
@@ -525,7 +529,12 @@ impl Folio {
             "control_response" => self.control_response(&v),
             "command_lifecycle" => self.lifecycle(&v),
             "conversation_reset" => self.reset(),
-            "rate_limit_event" => false,
+            "rate_limit_event" => {
+                if let Some(l) = crate::usage::Limits::from_rate_limit_event(&v) {
+                    self.limits = Some(l);
+                }
+                false
+            }
             "system" => self.system(&v, line),
             _ => self.raw(line),
         }
