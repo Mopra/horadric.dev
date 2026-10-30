@@ -9,7 +9,6 @@
 
 pub mod brethren;
 pub mod distill;
-mod gemma;
 pub mod horadrim;
 pub mod keeper;
 pub mod models;
@@ -29,15 +28,10 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config as BertConfig};
 use tokenizers::Tokenizer;
 
-/// The models Horadric can embed with.
+/// The model Horadric embeds with. One today; the kind still names the
+/// folder and the tag, so a new model means new vectors, not mixed ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// google/embeddinggemma-300m: 768 numbers, multilingual, cut to 256
-    /// or 128 by keeping the first ones (it was trained for that).
-    EmbeddingGemma,
-    /// BAAI/bge-small-en-v1.5: 384 numbers, English, pooled on the first
-    /// token.
-    BgeSmall,
     /// sentence-transformers/all-MiniLM-L6-v2: 384 numbers, English,
     /// mean pooled, six layers.
     MiniLm,
@@ -47,59 +41,31 @@ impl Kind {
     /// The model's folder name, under the state folder's `models\`.
     pub fn folder(self) -> &'static str {
         match self {
-            Kind::EmbeddingGemma => "embeddinggemma-300m",
-            Kind::BgeSmall => "bge-small-en-v1.5",
             Kind::MiniLm => "all-MiniLM-L6-v2",
         }
     }
 
     /// The name a vector made by this model is kept under: the model and
-    /// the weights' commit where one is pinned. A new one means the kept
-    /// text is embedded again.
+    /// the weights' commit. A new one means the kept text is embedded
+    /// again.
     pub fn tag(self) -> &'static str {
         match self {
-            Kind::EmbeddingGemma => "embeddinggemma-300m",
-            Kind::BgeSmall => "bge-small-en-v1.5",
             Kind::MiniLm => "all-MiniLM-L6-v2@1110a243",
         }
     }
 
-    /// What a question is prefixed with: the models were trained with
-    /// these, and recall drops without them.
-    fn query_prompt(self) -> &'static str {
-        match self {
-            Kind::EmbeddingGemma => "task: search result | query: ",
-            Kind::BgeSmall => "Represent this sentence for searching relevant passages: ",
-            Kind::MiniLm => "",
-        }
-    }
-
-    /// The longest input read, in tokens: what each model was trained to
+    /// The longest input read, in tokens: what the model was trained to
     /// read, as sentence-transformers cuts it.
     pub fn most_tokens(self) -> usize {
         match self {
-            Kind::EmbeddingGemma => gemma::MOST_TOKENS,
-            Kind::BgeSmall => 512,
             Kind::MiniLm => 256,
         }
     }
-
-    fn document_prompt(self) -> &'static str {
-        match self {
-            Kind::EmbeddingGemma => "title: none | text: ",
-            Kind::BgeSmall | Kind::MiniLm => "",
-        }
-    }
-}
-
-enum Net {
-    Gemma(gemma::Gemma),
-    Bert { model: BertModel, mean: bool },
 }
 
 pub struct Embedder {
     kind: Kind,
-    net: Net,
+    model: BertModel,
     tokenizer: Tokenizer,
 }
 
@@ -113,32 +79,23 @@ impl Embedder {
         tokenizer.with_padding(None);
         tokenizer.with_truncation(None).map_err(|e| e.to_string())?;
         let err = |e: candle_core::Error| e.to_string();
-        let net = match kind {
-            Kind::EmbeddingGemma => Net::Gemma(gemma::Gemma::load(dir, true).map_err(err)?),
-            Kind::BgeSmall | Kind::MiniLm => {
-                let cfg: BertConfig = serde_json::from_slice(
-                    &std::fs::read(dir.join("config.json")).map_err(|e| e.to_string())?,
-                )
-                .map_err(|e| e.to_string())?;
-                // SAFETY: the file is only read, and nothing writes it
-                // while a model is loaded.
-                let vb = unsafe {
-                    VarBuilder::from_mmaped_safetensors(
-                        &[dir.join("model.safetensors")],
-                        DType::F32,
-                        &Device::Cpu,
-                    )
-                    .map_err(err)?
-                };
-                Net::Bert {
-                    model: BertModel::load(vb, &cfg).map_err(err)?,
-                    mean: kind == Kind::MiniLm,
-                }
-            }
+        let cfg: BertConfig = serde_json::from_slice(
+            &std::fs::read(dir.join("config.json")).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        // SAFETY: the file is only read, and nothing writes it while a
+        // model is loaded.
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(
+                &[dir.join("model.safetensors")],
+                DType::F32,
+                &Device::Cpu,
+            )
+            .map_err(err)?
         };
         Ok(Embedder {
             kind,
-            net,
+            model: BertModel::load(vb, &cfg).map_err(err)?,
             tokenizer,
         })
     }
@@ -147,14 +104,15 @@ impl Embedder {
         self.kind
     }
 
-    /// The vector for a question.
+    /// The vector for a question. MiniLM was trained without prompts, so
+    /// a question and a passage are embedded alike.
     pub fn query(&self, text: &str) -> Result<Vec<f32>, String> {
-        self.embed(&format!("{}{text}", self.kind.query_prompt()))
+        self.embed(text)
     }
 
     /// The vector for a passage that may answer one.
     pub fn document(&self, text: &str) -> Result<Vec<f32>, String> {
-        self.embed(&format!("{}{text}", self.kind.document_prompt()))
+        self.embed(text)
     }
 
     fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
@@ -163,24 +121,16 @@ impl Embedder {
             .encode(text, true)
             .map_err(|e| e.to_string())?;
         let ids = keep_ends(enc.get_ids(), self.kind.most_tokens());
-        let err = |e: candle_core::Error| e.to_string();
-        match &self.net {
-            Net::Gemma(g) => g.embed(&ids).map_err(err),
-            Net::Bert { model, mean } => bert(model, &ids, *mean).map_err(err),
-        }
+        mean_pooled(&self.model, &ids).map_err(|e| e.to_string())
     }
 }
 
-fn bert(model: &BertModel, ids: &[u32], mean: bool) -> candle_core::Result<Vec<f32>> {
+fn mean_pooled(model: &BertModel, ids: &[u32]) -> candle_core::Result<Vec<f32>> {
     let dev = Device::Cpu;
     let input = Tensor::new(ids, &dev)?.unsqueeze(0)?;
     let types = input.zeros_like()?;
     let out = model.forward(&input, &types, None)?;
-    let pooled = if mean {
-        out.mean(1)?
-    } else {
-        out.narrow(1, 0, 1)?.squeeze(1)?
-    };
+    let pooled = out.mean(1)?;
     let unit = pooled.broadcast_div(&pooled.sqr()?.sum_keepdim(D::Minus1)?.sqrt()?)?;
     unit.squeeze(0)?.to_vec1()
 }
@@ -196,17 +146,6 @@ fn keep_ends(ids: &[u32], most: usize) -> Vec<u32> {
     out
 }
 
-/// The first `dims` numbers of `v`, made a unit vector again. Matryoshka
-/// models put the most meaning first, so this is how they are made small.
-pub fn truncate(v: &[f32], dims: usize) -> Vec<f32> {
-    let v = &v[..dims.min(v.len())];
-    let len = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if len == 0.0 {
-        return v.to_vec();
-    }
-    v.iter().map(|x| x / len).collect()
-}
-
 /// The cosine of two unit vectors.
 pub fn similarity(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
@@ -220,12 +159,5 @@ mod tests {
     fn a_long_input_keeps_its_end_token() {
         assert_eq!(keep_ends(&[2, 5, 6, 7, 1], 3), vec![2, 5, 1]);
         assert_eq!(keep_ends(&[2, 5, 1], 3), vec![2, 5, 1]);
-    }
-
-    #[test]
-    fn truncating_keeps_the_start_and_unit_length() {
-        let t = truncate(&[3.0, 4.0, 12.0], 2);
-        assert!((t[0] - 0.6).abs() < 1e-6 && (t[1] - 0.8).abs() < 1e-6);
-        assert!((similarity(&t, &t) - 1.0).abs() < 1e-6);
     }
 }

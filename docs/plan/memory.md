@@ -32,6 +32,5 @@ holds only what is still not done.
   falls back to its own folder, so its dialogue is not found under the
   main project.
 - **The model choice may reopen.** EmbeddingGemma beat MiniLM on dialogue
-  alone (81.8 % against 72.7 %), the part that grows most. A larger
-  yardstick with more dialogue questions should decide whether to switch
-  (one background re-embed).
+  alone (81.8 % against 72.7 %); its code was removed, so a switch means
+  writing it again.

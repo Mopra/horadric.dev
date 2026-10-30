@@ -3,8 +3,7 @@
 From the research pass of 2026-10-24. Two jobs want a model on the
 machine that costs next to nothing: embedding everything the lore and
 memory keep, and the "Stay a while and listen" sentence per session.
-Today `horadric-memory` runs EmbeddingGemma, BGE small or MiniLM through
-candle, which is a full transformer pass for every piece of text.
+Today `horadric-memory` runs MiniLM through candle, which is a full transformer pass for every piece of text.
 
 ## Static embeddings for the first pass
 

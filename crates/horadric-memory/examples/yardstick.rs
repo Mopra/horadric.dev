@@ -1,18 +1,16 @@
 //! Measures recall against the yardstick in `yardstick/`: for each
 //! question, is a passage that answers it among the first five found?
-//! Words only (as the lore matches today), BM25, each model, and each
-//! model fused with words, plus the time per chunk and the memory taken.
+//! Words only (as the lore matches today), BM25, MiniLM, and MiniLM
+//! fused with words, plus the time per chunk and the memory taken.
 //! Then the recall `lore_recall` answers with: words only (as when the
-//! app is down) and with each model's meaning, cut as the keeper cuts it,
-//! and with MiniLM where the bar of a recall nobody asked for sits,
+//! app is down) and with MiniLM's meaning, cut as the keeper cuts it,
+//! where the bar of a recall nobody asked for sits,
 //! and what a prompt recall offers at each cosine bar, on the questions
 //! and on `chatter.jsonl`, prompts it has nothing for.
 //!
-//! `cargo run --release -p horadric-memory --example yardstick [model...]`
-//! with models from `gemma`, `bge`, `minilm` (all when none are named).
-//! The models are read from `%APPDATA%\Horadric-dev\models\<folder>`;
-//! MiniLM is fetched there and checked by hash when it is missing, the
-//! others are fetched by hand.
+//! `cargo run --release -p horadric-memory --example yardstick`
+//! The model is read from `%APPDATA%\Horadric-dev\models\<folder>`, and
+//! fetched there and checked by hash when it is missing.
 //! Vectors are cached in `target\yardstick`, so a second run only scores.
 
 use std::collections::HashMap;
@@ -23,7 +21,7 @@ use horadric_core::lore::words;
 use horadric_memory::horadrim::{self, Lexicon};
 use horadric_memory::recall::{self, Ask, Bm25, Candidate};
 use horadric_memory::store::{self, ChunkId, Month};
-use horadric_memory::{similarity, truncate, Embedder, Kind};
+use horadric_memory::{similarity, Embedder, Kind};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -134,156 +132,129 @@ fn main() {
         &recall_with(&vec![Vec::new(); questions.len()]),
     );
 
-    let wanted: Vec<String> = std::env::args().skip(1).collect();
-    let kinds = [
-        ("minilm", Kind::MiniLm),
-        ("bge", Kind::BgeSmall),
-        ("gemma", Kind::EmbeddingGemma),
-    ];
+    let (name, kind) = ("minilm", Kind::MiniLm);
     let models =
         PathBuf::from(std::env::var("APPDATA").expect("APPDATA")).join("Horadric-dev/models");
     let cache = here.join("../../target/yardstick");
     std::fs::create_dir_all(&cache).expect("cache folder");
     // The code that makes the vectors is part of the key, so a change to
-    // a model's layers or prompts is never scored on stale vectors.
-    let mut keyed = std::fs::read(set.join("corpus.jsonl")).expect("corpus");
-    keyed.extend(include_str!("../src/lib.rs").bytes());
-    keyed.extend(include_str!("../src/gemma.rs").bytes());
-    for (name, kind) in kinds {
-        if !wanted.is_empty() && !wanted.iter().any(|w| w == name) {
-            continue;
+    // how the model is run is never scored on stale vectors.
+    let mut key = std::fs::read(set.join("corpus.jsonl")).expect("corpus");
+    key.extend(include_str!("../src/lib.rs").bytes());
+
+    let before = memory_mb();
+    let t = Instant::now();
+    horadric_memory::models::ensure(kind, &models, curl).expect("fetch");
+    let e = Embedder::load(kind, &models.join(kind.folder())).expect("model");
+    println!(
+        "{name}: loaded in {:.1?}, memory {:.0} MB more",
+        t.elapsed(),
+        memory_mb() - before
+    );
+    let weights = std::fs::metadata(models.join(kind.folder()).join("model.safetensors"))
+        .map_or(0, |m| m.len());
+    key.extend(weights.to_le_bytes());
+    let stamp = horadric_core::lore::hash(&key);
+    let file = cache.join(format!("{name}-{stamp:x}.json"));
+    let docs: Vec<Vec<f32>> = match std::fs::read(&file) {
+        Ok(b) => serde_json::from_slice(&b).expect("cached vectors"),
+        Err(_) => {
+            let t = Instant::now();
+            let v: Vec<Vec<f32>> = corpus
+                .iter()
+                .map(|c| e.document(&c.text).expect("embed"))
+                .collect();
+            let chars: usize = corpus.iter().map(|c| c.text.chars().count()).sum();
+            println!(
+                "{name}: {:.1} ms a chunk ({} chars on average), peak memory {:.0} MB",
+                t.elapsed().as_secs_f64() * 1000.0 / corpus.len() as f64,
+                chars / corpus.len(),
+                peak_mb()
+            );
+            std::fs::write(&file, serde_json::to_vec(&v).expect("json")).expect("cache");
+            v
         }
-        println!();
-        let before = memory_mb();
-        let t = Instant::now();
-        if kind.pinned().is_some() {
-            horadric_memory::models::ensure(kind, &models, curl).expect("fetch");
-        }
-        let e = Embedder::load(kind, &models.join(kind.folder())).expect("model");
-        println!(
-            "{name}: loaded in {:.1?}, memory {:.0} MB more",
-            t.elapsed(),
-            memory_mb() - before
-        );
-        let weights = std::fs::metadata(models.join(kind.folder()).join("model.safetensors"))
-            .map_or(0, |m| m.len());
-        let mut key = keyed.clone();
-        key.extend(weights.to_le_bytes());
-        let stamp = horadric_core::lore::hash(&key);
-        let file = cache.join(format!("{name}-{stamp:x}.json"));
-        let docs: Vec<Vec<f32>> = match std::fs::read(&file) {
-            Ok(b) => serde_json::from_slice(&b).expect("cached vectors"),
-            Err(_) => {
-                let t = Instant::now();
-                let v: Vec<Vec<f32>> = corpus
-                    .iter()
-                    .map(|c| e.document(&c.text).expect("embed"))
-                    .collect();
-                let chars: usize = corpus.iter().map(|c| c.text.chars().count()).sum();
-                println!(
-                    "{name}: {:.1} ms a chunk ({} chars on average), peak memory {:.0} MB",
-                    t.elapsed().as_secs_f64() * 1000.0 / corpus.len() as f64,
-                    chars / corpus.len(),
-                    peak_mb()
-                );
-                std::fs::write(&file, serde_json::to_vec(&v).expect("json")).expect("cache");
-                v
-            }
-        };
-        let t = Instant::now();
-        let qs: Vec<Vec<f32>> = questions
+    };
+    let t = Instant::now();
+    let qs: Vec<Vec<f32>> = questions
+        .iter()
+        .map(|q| e.query(&q.q).expect("embed"))
+        .collect();
+    println!(
+        "{name}: {:.1} ms a question",
+        t.elapsed().as_secs_f64() * 1000.0 / questions.len() as f64
+    );
+    let scored: Vec<Vec<(f32, usize)>> = qs
+        .iter()
+        .map(|q| {
+            let mut s: Vec<(f32, usize)> = docs
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (similarity(q, v), i))
+                .collect();
+            s.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            s
+        })
+        .collect();
+    let meaning: Ranking = scored
+        .iter()
+        .map(|s| s.iter().map(|(_, i)| *i).collect())
+        .collect();
+    report(name, &meaning);
+    report(&format!("{name} + words"), &fuse(&meaning, &lore));
+    report(&format!("{name} + bm25"), &fuse(&meaning, &bm25));
+    // Cut as the keeper cuts it, then once without the floor, so what
+    // the floor costs shows.
+    let cut = |floor: f32| -> Ranking {
+        scored
             .iter()
-            .map(|q| e.query(&q.q).expect("embed"))
-            .collect();
-        println!(
-            "{name}: {:.1} ms a question",
-            t.elapsed().as_secs_f64() * 1000.0 / questions.len() as f64
-        );
-        let full = docs[0].len();
-        let mut dims = vec![full];
-        if kind == Kind::EmbeddingGemma {
-            dims.extend([256, 128]);
-        }
-        for d in dims {
-            let docs: Vec<Vec<f32>> = docs.iter().map(|v| truncate(v, d)).collect();
-            let scored: Vec<Vec<(f32, usize)>> = qs
+            .map(|s| {
+                s.iter()
+                    .filter(|(cos, _)| *cos >= floor)
+                    .take(recall::MOST_BY_MEANING)
+                    .map(|(_, i)| *i)
+                    .collect()
+            })
+            .collect()
+    };
+    let found = recall_with(&cut(recall::LEAST_COSINE));
+    report(&format!("{name} recall"), &found);
+    report(
+        &format!("{name} recall, no floor"),
+        &recall_with(&cut(f32::NEG_INFINITY)),
+    );
+    strong(&cands, &cut(recall::LEAST_COSINE), &questions, &answers);
+    let chatter: Vec<Question> = lines::<Chatter>(&set.join("chatter.jsonl"))
+        .into_iter()
+        .map(|c| Question {
+            q: c.q,
+            answers: Vec::new(),
+            from: "chatter".into(),
+        })
+        .collect();
+    let idle: Vec<Vec<(f32, usize)>> = chatter
+        .iter()
+        .map(|c| {
+            let q = e.query(&c.q).expect("embed");
+            let mut s: Vec<(f32, usize)> = docs
                 .iter()
-                .map(|q| {
-                    let q = truncate(q, d);
-                    let mut s: Vec<(f32, usize)> = docs
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| (similarity(&q, v), i))
-                        .collect();
-                    s.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-                    s
-                })
+                .enumerate()
+                .map(|(i, v)| (similarity(&q, v), i))
                 .collect();
-            let meaning: Ranking = scored
-                .iter()
-                .map(|s| s.iter().map(|(_, i)| *i).collect())
-                .collect();
-            report(&format!("{name} {d}"), &meaning);
-            report(&format!("{name} {d} + words"), &fuse(&meaning, &lore));
-            report(&format!("{name} {d} + bm25"), &fuse(&meaning, &bm25));
-            if d == full {
-                // Cut as the keeper cuts it, then once without the floor,
-                // so what the floor costs shows.
-                let cut = |floor: f32| -> Ranking {
-                    scored
-                        .iter()
-                        .map(|s| {
-                            s.iter()
-                                .filter(|(cos, _)| *cos >= floor)
-                                .take(recall::MOST_BY_MEANING)
-                                .map(|(_, i)| *i)
-                                .collect()
-                        })
-                        .collect()
-                };
-                let found = recall_with(&cut(recall::LEAST_COSINE));
-                report(&format!("{name} {d} recall"), &found);
-                report(
-                    &format!("{name} {d} recall, no floor"),
-                    &recall_with(&cut(f32::NEG_INFINITY)),
-                );
-                if kind == Kind::MiniLm {
-                    strong(&cands, &cut(recall::LEAST_COSINE), &questions, &answers);
-                    let chatter: Vec<Question> = lines::<Chatter>(&set.join("chatter.jsonl"))
-                        .into_iter()
-                        .map(|c| Question {
-                            q: c.q,
-                            answers: Vec::new(),
-                            from: "chatter".into(),
-                        })
-                        .collect();
-                    let idle: Vec<Vec<(f32, usize)>> = chatter
-                        .iter()
-                        .map(|c| {
-                            let q = e.query(&c.q).expect("embed");
-                            let mut s: Vec<(f32, usize)> = docs
-                                .iter()
-                                .enumerate()
-                                .map(|(i, v)| (similarity(&q, v), i))
-                                .collect();
-                            s.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-                            s
-                        })
-                        .collect();
-                    unasked(&cands, &questions, &answers, &scored, &chatter, &idle);
-                    inscribe(
-                        &cands,
-                        &found,
-                        &questions,
-                        &answers,
-                        &corpus,
-                        &here.join("../.."),
-                        &cache.join("horadrim.jsonl"),
-                    );
-                }
-            }
-        }
-    }
+            s.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            s
+        })
+        .collect();
+    unasked(&cands, &questions, &answers, &scored, &chatter, &idle);
+    inscribe(
+        &cands,
+        &found,
+        &questions,
+        &answers,
+        &corpus,
+        &here.join("../.."),
+        &cache.join("horadrim.jsonl"),
+    );
 }
 
 #[derive(Deserialize)]

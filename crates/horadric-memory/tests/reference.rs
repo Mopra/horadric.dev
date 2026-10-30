@@ -1,6 +1,6 @@
-//! The models against numbers their makers published, so a change to the
-//! layers written here cannot quietly make different vectors. Skipped
-//! when the model files have not been fetched into the dev state folder.
+//! The model against a question with a known answer, so a change to how
+//! it is run cannot quietly make different vectors. Skipped when the
+//! model files have not been fetched into the dev state folder.
 
 use std::path::PathBuf;
 
@@ -30,18 +30,6 @@ fn scores(e: &Embedder) -> Vec<f32> {
     DOCS.iter()
         .map(|d| similarity(&q, &e.document(d).unwrap()))
         .collect()
-}
-
-#[test]
-fn embedding_gemma_matches_its_model_card() {
-    let Some(e) = load(Kind::EmbeddingGemma) else {
-        return;
-    };
-    // From the model card on Hugging Face, made with sentence-transformers.
-    let card = [0.3011, 0.6359, 0.4930, 0.4889];
-    for (got, want) in scores(&e).iter().zip(card) {
-        assert!((got - want).abs() < 0.002, "{got} against {want}");
-    }
 }
 
 #[test]

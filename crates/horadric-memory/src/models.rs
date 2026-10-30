@@ -53,12 +53,10 @@ const MINILM: Pinned = Pinned {
 const MARK: &str = "verified";
 
 impl Kind {
-    /// The pinned files, for the models Horadric fetches by itself. The
-    /// others were measured once and are fetched by hand.
-    pub fn pinned(self) -> Option<&'static Pinned> {
+    /// The pinned files Horadric fetches the model from.
+    pub fn pinned(self) -> &'static Pinned {
         match self {
-            Kind::MiniLm => Some(&MINILM),
-            Kind::EmbeddingGemma | Kind::BgeSmall => None,
+            Kind::MiniLm => &MINILM,
         }
     }
 }
@@ -80,11 +78,8 @@ pub fn ensure(
     models: &Path,
     fetch: impl Fn(&str, usize) -> Result<Vec<u8>, String>,
 ) -> Result<PathBuf, String> {
-    let pinned = kind
-        .pinned()
-        .ok_or_else(|| format!("{} is not fetched by Horadric", kind.folder()))?;
     let dir = models.join(kind.folder());
-    fill(pinned, &dir, fetch)?;
+    fill(kind.pinned(), &dir, fetch)?;
     Ok(dir)
 }
 
@@ -256,15 +251,13 @@ mod tests {
     }
 
     #[test]
-    fn minilm_is_pinned_and_the_others_are_not() {
-        let p = Kind::MiniLm.pinned().unwrap();
+    fn minilm_is_pinned() {
+        let p = Kind::MiniLm.pinned();
         assert_eq!(
             url(p, &p.files[0]),
             "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/config.json"
         );
         assert!(p.files.iter().all(|f| f.sha256.len() == 64));
-        assert!(Kind::EmbeddingGemma.pinned().is_none());
-        assert!(Kind::BgeSmall.pinned().is_none());
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -352,11 +345,5 @@ mod tests {
         assert!(!folder.join("config.json").exists());
         assert!(!folder.join(MARK).exists());
         fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn models_horadric_does_not_fetch_are_refused() {
-        let err = ensure(Kind::BgeSmall, Path::new("unused"), |_, _| unreachable!()).unwrap_err();
-        assert!(err.contains("bge-small"), "{err}");
     }
 }
