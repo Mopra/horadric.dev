@@ -798,20 +798,31 @@ impl View {
         if unsafe { gfx.kept() }.is_none() {
             return false;
         }
+        // None when the layer no longer shows the conversation.
         let ok = CHATS.with(|c| {
             let Ok(mut chats) = c.try_borrow_mut() else {
-                return true;
+                return Some(true);
             };
             let Some(chat) = chats.get_mut(&self.key) else {
-                return true;
+                return Some(true);
             };
+            // Some changes reach the model without a redraw (an interrupt
+            // that empties the queue), which a full paint on every tick
+            // used to hide.
+            if self.dots.get().is_some() != chat.folio.busy {
+                return None;
+            }
             let (t, heat) = self.advance(chat, Instant::now());
-            unsafe { self.frame(gfx, t, heat) }
+            Some(unsafe { self.frame(gfx, t, heat) })
         });
-        if !ok {
-            *slot = None;
+        match ok {
+            None => false,
+            Some(true) => true,
+            Some(false) => {
+                *slot = None;
+                false
+            }
         }
-        true
     }
 
     /// Moves the runes' clocks on while they move, and starts or stops the
