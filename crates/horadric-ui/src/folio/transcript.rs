@@ -335,8 +335,10 @@ fn stamp(b: &Block, open: bool, st: &State) -> u64 {
 }
 
 /// The room left under a block before the next.
-fn gap_after(b: &Block) -> f32 {
+fn gap_after(b: &Block, next: Option<&Block>) -> f32 {
     match b {
+        // A prompt's images belong to it, so they sit close under its plate.
+        Block::Prompt(_) if matches!(next, Some(Block::Images(_))) => 6.0,
         Block::Footer { .. } => GAP + 16.0,
         Block::Thinking(_) | Block::Tools(_) | Block::Notice(_) | Block::Raw(_) => GAP / 2.0,
         // The full gap, so the reply reads as a new voice.
@@ -464,7 +466,7 @@ impl Ctx<'_> {
             }
             used += w + 8.0;
         }
-        let mut y = 4.0;
+        let mut y = 0.0;
         for row in rows {
             let width: f32 = row.iter().map(|&k| sizes[k].0 + 8.0).sum::<f32>() - 8.0;
             let mut x = cw - width;
@@ -486,7 +488,7 @@ impl Ctx<'_> {
             }
             y += rh + 8.0;
         }
-        s.h = y - 4.0;
+        s.h = y - 8.0;
         s
     }
 
@@ -1134,7 +1136,7 @@ impl View {
                 if matches!(b, Block::Prompt(_)) {
                     st.prompts.push(i);
                 }
-                y += h + gap_after(b);
+                y += h + gap_after(b, chat.folio.blocks.get(i + 1));
             }
         }
         let content = y + tail + 8.0;
@@ -1178,7 +1180,8 @@ impl View {
             if s.h <= 0.0 || top + s.h + 30.0 < area.y || top > area.bottom() {
                 continue;
             }
-            let whole = Rect::new(cx - 8.0, top, cw + 16.0, s.h + gap_after(b));
+            let gap = gap_after(b, chat.folio.blocks.get(i + 1));
+            let whole = Rect::new(cx - 8.0, top, cw + 16.0, s.h + gap);
             let hovered = mouse.is_some_and(|(mx, my)| whole.contains(mx, my));
             rich::draw(gfx, fonts, s, cx, top, hovered);
             let mine = s.hits.iter().chain(s.hover_hits.iter().filter(|_| hovered));
