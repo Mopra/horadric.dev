@@ -447,6 +447,9 @@ pub(crate) enum Input {
     FolioToTerminal(String),
     /// A Folio handed over has ended: its terminal starts now.
     FolioHandedOver(String),
+    /// A Folio's claude.exe ended to read a new login: it starts again on
+    /// its conversation, shown on the stage when true.
+    FolioRestart(String, bool),
     /// A web address Ctrl+clicked in a pane: to the browser pane of the
     /// project on the stage when it has one, otherwise to the user's own
     /// browser.
@@ -7955,6 +7958,24 @@ impl App {
         }
     }
 
+    /// A Folio whose claude.exe ended for a new login starts again in the
+    /// same tile, on the same conversation, with the same flags.
+    fn folio_restart(&mut self, id: &str, show: bool) {
+        let conversation = crate::folio::conversation(id).or_else(|| {
+            let r = self.shared.registry.lock().ok()?;
+            r.get(id)?.claude_session_id.clone()
+        });
+        let Some(dir) = self.dir_of(id) else {
+            return;
+        };
+        crate::folio::close(id);
+        self.folios.remove(id);
+        let own = self.folio_args.remove(id).unwrap_or_default();
+        if let Err(e) = self.start_folio(Some(id.to_string()), dir, conversation, &own, show) {
+            eprintln!("horadric: cannot start {id} again: {e}");
+        }
+    }
+
     /// A Claude terminal's "Open as chat": it ends between turns, and the
     /// Folio starts in the same tile once its process has exited.
     fn terminal_to_folio(&mut self, id: &str) {
@@ -9092,6 +9113,7 @@ impl App {
                 Input::FolioState(id, state) => self.folio_state(&id, state),
                 Input::FolioToTerminal(id) => self.folio_to_terminal(&id),
                 Input::FolioHandedOver(id) => self.folio_handed_over(&id),
+                Input::FolioRestart(id, show) => self.folio_restart(&id, show),
                 Input::WebTab(key, step) => web::tab(&key, step),
                 Input::WebAsk(key, what) => {
                     self.web_ask = Some((key, what));
