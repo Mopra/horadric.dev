@@ -288,16 +288,16 @@ pub fn cluster(
             page_rects.push(Rect::new(m.pad, y, full, m.tile_h));
             y += m.tile_h + m.gap;
         }
-        let wide = full - 2.0 * (m.shell_w + m.gap);
-        let first = Rect::new(m.pad, y, wide, m.add_h);
-        let second = Rect::new(m.pad + wide + m.gap, y, m.shell_w, m.add_h);
-        // The chat is the default way in, so it gets the wide button.
         if cfg!(target_os = "macos") {
-            (add, folio) = (Some(first), Some(second));
+            let wide = full - 2.0 * (m.shell_w + m.gap);
+            add = Some(Rect::new(m.pad, y, wide, m.add_h));
+            folio = Some(Rect::new(m.pad + wide + m.gap, y, m.shell_w, m.add_h));
+            shell = Some(Rect::new(m.pad + full - m.shell_w, y, m.shell_w, m.add_h));
         } else {
-            (add, folio) = (Some(second), Some(first));
+            // The chat is the way in, so it is the one button. The CLI
+            // and a terminal are in the project menu.
+            folio = Some(Rect::new(m.pad, y, full, m.add_h));
         }
-        shell = Some(Rect::new(m.pad + full - m.shell_w, y, m.shell_w, m.add_h));
         y += m.add_h + m.gap;
         if let Some((approve, warriv)) = tasks {
             let l = tasks_tile(m, y, approve, warriv);
@@ -2756,7 +2756,7 @@ mod tests {
             None,
             Some(14.0 * m.file_row_h + m.file_foot),
         );
-        let add = l.add.unwrap();
+        let add = l.folio.unwrap();
         let f = l.files.as_ref().unwrap();
         assert_eq!(f.rect.y - add.bottom(), m.gap);
         assert_eq!(f.rows.len(), 14);
@@ -2820,7 +2820,7 @@ mod tests {
             None,
             Some(5.0 * m.file_row_h + m.file_foot),
         );
-        let add = l.add.unwrap();
+        let add = l.folio.unwrap();
         let t = l.tasks.as_ref().unwrap();
         let f = l.files.as_ref().unwrap();
         assert_eq!(t.rect.y - add.bottom(), m.gap);
@@ -2919,26 +2919,29 @@ mod tests {
         let l = cluster(&m, 3, 0, false, None, None, None);
         assert_eq!(l.tiles.len(), 3);
         assert_eq!(l.tiles[1].y - l.tiles[0].bottom(), m.gap);
-        let (add, folio) = (l.add.unwrap(), l.folio.unwrap());
-        let shell = l.shell.unwrap();
-        let (wide, small, wide_hit) = if cfg!(target_os = "macos") {
-            (add, folio, Hit::Add)
+        let folio = l.folio.unwrap();
+        if cfg!(target_os = "macos") {
+            let (add, shell) = (l.add.unwrap(), l.shell.unwrap());
+            assert_eq!(add.y - l.tiles[2].bottom(), m.gap);
+            // Side by side, together as wide as a tile, the chat between.
+            assert_eq!(shell.y, add.y);
+            assert_eq!(folio.y, add.y);
+            assert_eq!(folio.x - add.right(), m.gap);
+            assert_eq!(shell.x - folio.right(), m.gap);
+            assert_eq!(shell.right(), l.tiles[2].right());
+            assert_eq!(add.x, l.tiles[2].x);
+            assert_eq!(hit(&l, add.x + 2.0, add.y + 1.0), Hit::Add);
+            assert_eq!(hit(&l, shell.x + 2.0, shell.y + 1.0), Hit::Shell);
         } else {
-            (folio, add, Hit::Folio)
-        };
-        assert_eq!(wide.y - l.tiles[2].bottom(), m.gap);
-        // Side by side, together as wide as a tile, the small one between.
-        assert_eq!(shell.y, wide.y);
-        assert_eq!(small.y, wide.y);
-        assert_eq!(small.x - wide.right(), m.gap);
-        assert_eq!(shell.x - small.right(), m.gap);
-        assert_eq!(shell.right(), l.tiles[2].right());
-        assert_eq!(wide.x, l.tiles[2].x);
-        assert_eq!(l.size.1, wide.bottom() + m.pad);
+            // The one button, as wide as a tile.
+            assert!(l.add.is_none() && l.shell.is_none());
+            assert_eq!(folio.x, l.tiles[2].x);
+            assert_eq!(folio.right(), l.tiles[2].right());
+            assert_eq!(hit(&l, folio.right() - 2.0, folio.y + 1.0), Hit::Folio);
+        }
+        assert_eq!(folio.y - l.tiles[2].bottom(), m.gap);
+        assert_eq!(l.size.1, folio.bottom() + m.pad);
         assert_eq!(hit(&l, 40.0, l.tiles[2].y + 1.0), Hit::Tile(2));
-        assert_eq!(hit(&l, 20.0, wide.y + 1.0), wide_hit);
-        assert_eq!(hit(&l, add.x + 2.0, add.y + 1.0), Hit::Add);
-        assert_eq!(hit(&l, shell.x + 2.0, shell.y + 1.0), Hit::Shell);
         assert_eq!(hit(&l, folio.x + 2.0, folio.y + 1.0), Hit::Folio);
         assert_eq!(hit(&l, 20.0, m.pad + 1.0), Hit::Header);
         assert_eq!(hit(&l, m.width - m.pad - 2.0, m.pad + 1.0), Hit::New);
@@ -2952,7 +2955,7 @@ mod tests {
         assert_eq!(l.pages.len(), 2);
         assert_eq!(l.pages[0].y - l.tiles[1].bottom(), m.gap);
         assert_eq!(l.pages[1].y - l.pages[0].bottom(), m.gap);
-        assert_eq!(l.add.unwrap().y - l.pages[1].bottom(), m.gap);
+        assert_eq!(l.folio.unwrap().y - l.pages[1].bottom(), m.gap);
         assert_eq!(hit(&l, 20.0, l.pages[1].y + 1.0), Hit::Page(1));
         assert_eq!(hit(&l, 40.0, l.tiles[1].y + 1.0), Hit::Tile(1));
         // Folded, no tab shows, as no session does.
@@ -3121,7 +3124,7 @@ mod tests {
     fn empty_cluster_still_offers_another_session() {
         let m = Metrics::default();
         let l = cluster(&m, 0, 0, false, None, None, None);
-        let add = l.add.unwrap();
+        let add = l.folio.unwrap();
         assert_eq!(add.y, l.header.bottom() + m.gap);
         assert_eq!(l.size.1, add.bottom() + m.pad);
     }

@@ -1,6 +1,6 @@
 //! The Folio: a headless Claude session's conversation drawn as a chat, not
-//! a terminal. Experimental, a session kind beside the terminal ones: a
-//! tile in its project's cluster and a pane on the stage. See
+//! a terminal. The session kind new Claude sessions open as, beside the
+//! terminal ones: a tile in its project's cluster and a pane on the stage. See
 //! docs/plan/headless.md.
 //!
 //! A Folio is a pane on the stage like a sanctuary: its console has no
@@ -288,7 +288,7 @@ impl Chat {
                 if agents == 1 { "" } else { "s" }
             )
         } else {
-            "chat, experimental".to_string()
+            "chat".to_string()
         };
         match &self.folio.model {
             Some(m) => format!("{state} \u{b7} {m}"),

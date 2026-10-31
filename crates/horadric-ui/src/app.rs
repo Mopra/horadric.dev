@@ -454,6 +454,9 @@ pub(crate) enum Input {
     /// project on the stage when it has one, otherwise to the user's own
     /// browser.
     Link(String),
+    /// A link clicked in a Folio: always to the browser pane of the project
+    /// with this key, opened for it when closed.
+    LinkIn(String, String),
     /// A browser pane's cross: close the page of the project with this key.
     CloseWeb(String),
     /// A browser pane's pop out button: its project's browser into a window
@@ -990,7 +993,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             town_hidden: saved.town_hidden,
             still: saved.still,
             switch_accounts: saved.switch_accounts,
-            chat_sessions: saved.chat_sessions,
+            chat_sessions: !saved.terminal_sessions,
             out_seen: HashMap::new(),
             all_out_told: false,
             discord: saved.discord,
@@ -2516,6 +2519,7 @@ fn web_menu(key: &str) {
 
 fn project_menu(key: &str) {
     const ADD: usize = 1;
+    const ADD_CLI: usize = 10;
     const START_BATCH: usize = 2;
     const START_OVER: usize = 3;
     const END_ALL: usize = 4;
@@ -2582,7 +2586,11 @@ fn project_menu(key: &str) {
     let listed: &[String] = if finding { &[] } else { &hosts };
     let config_listed: &[String] = if finding { &[] } else { &config_hosts };
     merges.truncate(MERGE_END - MERGE);
-    let mut items = vec![Item::action(ADD, "New session")];
+    // The cluster's button is the chat, so the CLI is had here.
+    let mut items = vec![
+        Item::action(ADD, "New session"),
+        Item::action(ADD_CLI, "New CLI session"),
+    ];
     // In trunk mode a worktree is had by asking for one.
     if own_trees == Some(false) {
         items.push(Item::action(ADD_TREE, "New session in its own worktree"));
@@ -2686,6 +2694,7 @@ fn project_menu(key: &str) {
                 }
             }
         }
+        Some(ADD_CLI) => push(Input::Add(key.into())),
         Some(ADD_TREE) => {
             if let Some(dir) = app.project_dir(key) {
                 if let Err(e) = app.start_in(None, dir, Vec::new(), Agent::Claude, true) {
@@ -3423,7 +3432,7 @@ fn folders_in(dir: &str) -> Vec<String> {
 }
 
 fn start_logged(dir: PathBuf) {
-    if let Some(Err(e)) = with_app(|app| app.start(None, dir, Vec::new())) {
+    if let Some(Err(e)) = with_app(|app| app.start_claude(dir)) {
         eprintln!("horadric: cannot start session: {e}");
     }
 }
@@ -3519,7 +3528,7 @@ struct App {
     /// A hireling's conversation, at most one per project, by project key:
     /// a read only Folio beside the session that sent it.
     watches: HashMap<String, Arc<Console>>,
-    /// Folios, the experimental headless chats, by session id: each a
+    /// Folios, the headless chats, by session id: each a
     /// session with a tile like a terminal one, its pane's console with no
     /// program. The session behind each is `folio`'s.
     folios: HashMap<String, Arc<Console>>,
@@ -3683,7 +3692,8 @@ struct App {
     /// A usage limit switches Claude Code to the account with the most
     /// left, from the Settings window.
     switch_accounts: bool,
-    /// New Claude sessions open as a Folio, from the Settings window.
+    /// New Claude sessions the human starts open as a Folio, unless the
+    /// Settings window says terminal.
     chat_sessions: bool,
     /// The sessions a usage limit stopped that were seen to, each with
     /// when it stopped, so one stop switches once.
@@ -3864,7 +3874,19 @@ impl App {
                     match command {
                         Command::New(n) => {
                             let cwd = PathBuf::from(n.cwd);
-                            if let Err(e) = self.start_in(n.name, cwd, n.args, n.agent, false) {
+                            // A bare request is the human's, from Explorer
+                            // or a typed `horadric new`, and opens as the
+                            // Settings window says. One with a name or
+                            // arguments is a script's and gets the terminal
+                            // it asked for.
+                            let bare =
+                                n.agent == Agent::Claude && n.name.is_none() && n.args.is_empty();
+                            let started = if bare {
+                                self.start_claude(cwd)
+                            } else {
+                                self.start_in(n.name, cwd, n.args, n.agent, false)
+                            };
+                            if let Err(e) = started {
                                 eprintln!("horadric: cannot start session: {e}");
                             }
                         }
@@ -4834,7 +4856,10 @@ impl App {
             && !saved.shell
             && saved.ssh.is_none()
             && cwd.is_dir()
-            && (saved.chat || (self.chat_sessions && saved.claude_session_id.is_some()));
+            && (saved.chat
+                || (self.chat_sessions
+                    && saved.claude_session_id.is_some()
+                    && self.started_plainly(id, &saved)));
         if as_chat {
             let conversation = (saved.claude_session_id.clone()).filter(|_| saved.prompted);
             let started =
@@ -4859,6 +4884,21 @@ impl App {
             self.paused.insert(id.to_string(), saved);
         }
         result
+    }
+
+    /// Whether paused session `id` is one the human started with nothing
+    /// more to it, so it may go on as a chat. A Folio is started without
+    /// what a quest, Warriv, a reviewer, an errand, a runeword, its own
+    /// worktree or the town give a terminal on every launch, so those stay
+    /// terminals or they would wake up without their orders.
+    fn started_plainly(&self, id: &str, saved: &SavedSession) -> bool {
+        !horadric_core::warriv::is_warriv(id)
+            && !horadric_core::runeword::is_errand(id)
+            && saved.worktree.is_none()
+            && saved.runeword.is_none()
+            && !self.holds_quest(id)
+            && !self.tasks.prompts.contains_key(id)
+            && !town::is(&folder_key(&saved.cwd))
     }
 
     /// Opens a plain terminal in the project with this key, on the stage
@@ -5834,7 +5874,7 @@ impl App {
             town: !self.town_hidden,
             animations: !self.still,
             switch_accounts: self.switch_accounts,
-            chat_sessions: self.chat_sessions,
+            terminal_sessions: !self.chat_sessions,
             agent: self.settings_agent,
             defaults: self.shared.defaults_of(self.settings_agent),
             offered: (self.settings_agent != Agent::Claude).then(|| {
@@ -6456,7 +6496,7 @@ impl App {
                 self.save();
                 self.switch_when_out();
             }
-            Field::ChatSessions => {
+            Field::TerminalSessions => {
                 self.chat_sessions = !self.chat_sessions;
                 self.save();
             }
@@ -7758,6 +7798,10 @@ impl App {
         env_set.extend(defaults.env(Agent::Claude));
         let mut flags = defaults.flags_for(Agent::Claude, &own, false);
         flags.extend(own.iter().cloned());
+        // Without it a Folio's agent has no browser_* tools and opens pages
+        // in a browser of its own instead of the project's pane.
+        let config = self.mcp_config.as_ref().map(|p| p.to_string_lossy());
+        flags.extend(Agent::Claude.mcp_args("", config.as_deref()));
         // Claude Code takes one system prompt, so one the session brought
         // gets this added to it rather than replaced.
         let subagents = horadric_core::folio::SUBAGENT_PROMPT;
@@ -8446,7 +8490,7 @@ impl App {
             town_hidden: self.town_hidden,
             still: self.still,
             switch_accounts: self.switch_accounts,
-            chat_sessions: self.chat_sessions,
+            terminal_sessions: !self.chat_sessions,
             discord: self.discord,
             recall_across: self.recall_across,
             run: self.run.saved(),
@@ -9033,8 +9077,9 @@ impl App {
                     post(self.notify.0 as isize, WM_HORADRIC_PICK, 0);
                 }
                 Input::Add(key) => {
-                    // The chat has a button of its own, so this one is
-                    // always the terminal, whatever Settings says.
+                    // The chat has a button of its own, so this one, and
+                    // the menu's "New CLI session", is always the
+                    // terminal, whatever Settings says.
                     if self.far_start(&key) {
                     } else if let Some(dir) = self.project_dir(&key) {
                         if let Err(e) = self.start(None, dir, Vec::new()) {
@@ -9088,6 +9133,11 @@ impl App {
                     Some(key) if self.webs.contains_key(&key) => self.open_web_tab(&key, &url),
                     _ => watch::open_link(&crate::links::Target::Web(url), None),
                 },
+                Input::LinkIn(_, url) if !horadric_core::markdown::is_web_link(&url) => {}
+                Input::LinkIn(key, url) if self.webs.contains_key(&key) => {
+                    self.open_web_tab(&key, &url)
+                }
+                Input::LinkIn(key, url) => self.open_web(&key, Some(&url)),
                 Input::CloseWeb(key) => self.close_web(&key),
                 Input::PopWeb(key, out) => self.pop_web(&key, out),
                 Input::Pages(key) => {

@@ -158,7 +158,7 @@ plain words.
    Animations.
 3. **Sessions:** Agent, Model, Effort, Permissions, Workflow agents'
    model, Accounts (moved from the tray), Switch account when one runs
-   out, Open as a chat (experimental), In the project menu.
+   out, Open in a terminal, In the project menu.
 4. **Projects:** the project picker on top, then Colour, Work mode, SSH
    hosts, Warriv drives, And ships public, and later secrets and
    identities.
