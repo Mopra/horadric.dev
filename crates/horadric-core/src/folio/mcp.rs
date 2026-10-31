@@ -97,11 +97,12 @@ impl McpServer {
                 .to_string(),
             tools: v["tools"].as_array().map_or(0, Vec::len),
             proxied: v["sessionProxied"].as_bool().unwrap_or(false),
-            source: v["source"]
-                .as_str()
-                .or(v["scope"].as_str())
-                .unwrap_or_default()
-                .to_string(),
+            // Plugins and connectors say so in `source`; a settings file's
+            // server is known by its `scope`.
+            source: match v["source"].as_str() {
+                Some(s @ ("plugin" | "claudeai")) => s.to_string(),
+                s => v["scope"].as_str().or(s).unwrap_or_default().to_string(),
+            },
             ..McpServer::default()
         }
     }
@@ -228,24 +229,36 @@ impl Folio {
     }
 
     /// What removing `server` came to. Once removed it is turned off in
-    /// this session too, so it stops asking now: the line to write.
-    pub fn mcp_removed(&mut self, server: &str, result: Result<(), String>) -> Option<String> {
-        match result {
-            Ok(()) => {
-                self.mcp_mark(server, |s| {
+    /// this session too, so it stops asking now: the lines to write. A
+    /// plugin turned off takes every server it brings with it.
+    pub fn mcp_removed(&mut self, server: &str, result: Result<(), String>) -> Vec<String> {
+        if let Err(e) = result {
+            self.mcp_mark(server, |s| {
+                s.busy = false;
+                s.error = e.clone();
+            });
+            return Vec::new();
+        }
+        let gone: Vec<String> = match self.mcp.servers.iter().find(|s| s.name == server) {
+            Some(m) => match m.removal() {
+                Some(McpRemoval::Plugin(p)) => (self.mcp.servers.iter())
+                    .filter(|s| s.removal() == Some(McpRemoval::Plugin(p.clone())))
+                    .map(|s| s.name.clone())
+                    .collect(),
+                _ => vec![server.to_string()],
+            },
+            None => vec![server.to_string()],
+        };
+        (gone.iter())
+            .map(|name| {
+                self.mcp_mark(name, |s| {
                     s.removed = true;
+                    s.asking_remove = false;
                     s.error.clear();
                 });
-                Some(self.mcp_toggle(server, false))
-            }
-            Err(e) => {
-                self.mcp_mark(server, |s| {
-                    s.busy = false;
-                    s.error = e.clone();
-                });
-                None
-            }
-        }
+                self.mcp_toggle(name, false)
+            })
+            .collect()
     }
 
     /// Changes `server` in the list and in every card showing it.
@@ -266,7 +279,9 @@ impl Folio {
     /// said kept while a server's status holds. Returns whether a block
     /// changed.
     pub(super) fn mcp_init(&mut self) -> bool {
-        let old = std::mem::take(&mut self.mcp.servers);
+        // Kept, not taken: [`Self::mcp_heard`] carries what the view keeps
+        // (busy, removed) from the list as it was.
+        let old = self.mcp.servers.clone();
         let servers = (self.info.mcp_servers.iter())
             .map(|s| match old.iter().find(|o| o.name == s.name) {
                 Some(o) if o.status == s.status => o.clone(),
@@ -1145,10 +1160,14 @@ mod tests {
         f.feed(&reply);
         f.mcp_ask_remove("remote", true);
         f.mcp_removing("remote");
-        let line = f.mcp_removed("remote", Ok(())).unwrap();
-        assert!(line.contains("mcp_toggle") && line.contains("\"enabled\":false"));
+        let lines = f.mcp_removed("remote", Ok(()));
+        assert!(lines[0].contains("mcp_toggle") && lines[0].contains("\"enabled\":false"));
         let s = f.mcp.servers.iter().find(|s| s.name == "remote").unwrap();
         assert!(s.removed && !s.asking_remove);
+        // A turn's init keeps it removed.
+        f.feed(&json!({"type": "system", "subtype": "init", "session_id": "s",
+            "mcp_servers": [{"name": "remote", "status": "disabled"}]}).to_string());
+        assert!(f.mcp.servers.iter().any(|s| s.name == "remote" && s.removed));
     }
 
     #[test]

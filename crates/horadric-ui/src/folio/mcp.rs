@@ -132,8 +132,20 @@ pub(super) fn settle() {
         .lock()
         .map(|mut r| std::mem::take(&mut *r))
         .unwrap_or_default();
+    let mut later = Vec::new();
     for (key, server, result) in done {
-        answer_with(&key, |f| f.mcp_removed(&server, result));
+        let lines = with(&key, |c| c.folio.mcp_removed(&server, result.clone()));
+        match lines {
+            Some(lines) => {
+                with(&key, |c| lines.iter().for_each(|l| send(c, l)));
+                redraw(&key);
+            }
+            // The chats are held: try again on the next wake.
+            None => later.push((key, server, result)),
+        }
+    }
+    if let Ok(mut r) = REMOVED.lock() {
+        r.extend(later);
     }
 }
 
@@ -482,6 +494,10 @@ pub(super) unsafe fn card(cx: &Ctx, card: &McpCard, w: f32) -> Scene {
                 Some(McpRemoval::ClaudeAi) => "Connectors are removed on claude.ai: \
                      this opens its settings in your browser."
                     .to_string(),
+                Some(McpRemoval::Scope(scope)) if scope == "project" => {
+                    "This removes it from the project's .mcp.json, which everyone working in it shares."
+                        .to_string()
+                }
                 Some(McpRemoval::Scope(scope)) => format!(
                     "This removes it from your {scope} MCP settings, for every session that reads them."
                 ),
