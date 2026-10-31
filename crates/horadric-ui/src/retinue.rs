@@ -367,7 +367,6 @@ impl Retinue {
         let rows: Vec<RetinueRow> = party(&band, now)
             .into_iter()
             .map(|(h, nested)| RetinueRow {
-                rune: hireling::rune_of(&h.kind),
                 lot: h.lot_at(now),
                 age: since(h.started),
                 waited: since(h.heard),

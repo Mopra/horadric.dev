@@ -179,13 +179,15 @@ const loc = gl.getAttribLocation(prog, 'pos'); gl.enableVertexAttribArray(loc); 
 const U = n => gl.getUniformLocation(prog, n);
 
 const val = id => +document.getElementById(id).value;
+// The turn bake.py asks for, past the slider's quarter turn.
+let yawOver = null;
 function renderGL(px, light, simple, stoneOnly = false, zoom = 1, bright = 1) {
   glc.width = glc.height = px;
   gl.viewport(0, 0, px, px);
   gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
   gl.uniform2f(U('res'), px, px);
   gl.uniform3fv(U('lightCol'), LIGHTS[light]);
-  gl.uniform1f(U('yaw'), val('yaw') * Math.PI / 180);
+  gl.uniform1f(U('yaw'), (yawOver ?? val('yaw')) * Math.PI / 180);
   gl.uniform1f(U('pitch'), val('pitch') * Math.PI / 180);
   gl.uniform1f(U('rough'), val('rough') / 60);
   gl.uniform1f(U('chips'), val('chips') / 55);
@@ -249,6 +251,7 @@ if (q.has('light')) current = q.get('light');
 if (q.has('bake')) {
   // Used by bake.py: render one layer and leave it in the page as a data URL.
   const px = +q.get('px'), light = q.get('light');
+  if (q.has('yaw')) yawOver = +q.get('yaw');
   renderGL(px, light, q.get('simple') === '1', light === 'none', +(q.get('zoom') || 1), +(q.get('bright') || 1));
   const out = document.createElement('pre'); out.id = 'baked';
   out.textContent = glc.toDataURL('image/png');
