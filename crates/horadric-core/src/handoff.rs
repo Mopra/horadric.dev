@@ -801,6 +801,12 @@ pub struct Record {
     pub account: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quest: Option<String>,
+    /// The quest of the sender's quest log it works, which moves with it:
+    /// the receiver files it held by the session, the sender lets go of it
+    /// (see [`crate::tasks::arrive`], [`crate::tasks::moved_away`]). Apart
+    /// from `quest`, which older builds read as a bare title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried: Option<Carried>,
     /// The branch it was on, so the receiver's worktree can carry its name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
@@ -844,6 +850,17 @@ pub struct Record {
         deserialize_with = "crate::said::lenient"
     )]
     pub said: Vec<crate::said::Word>,
+}
+
+/// A quest carried with its session in a handoff.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Carried {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// Its agent called it done and the human has not looked yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review: bool,
 }
 
 /// The line a handed off session's next prompt starts with.
@@ -1429,6 +1446,11 @@ pub(crate) mod tests {
             agent: "claude".into(),
             model: Some("opus".into()),
             quest: Some("q1".into()),
+            carried: Some(Carried {
+                title: "Fix it".into(),
+                notes: vec!["Model: opus".into()],
+                review: false,
+            }),
             from: "Laptop".into(),
             n: 4,
             ..Default::default()
@@ -1442,6 +1464,7 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(bare.n, 0);
         assert_eq!(bare.repo, RepoId::default());
+        assert_eq!(bare.carried, None, "an older sender carries no quest");
     }
 
     #[test]

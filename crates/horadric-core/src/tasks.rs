@@ -1002,6 +1002,67 @@ pub fn take(text: &str, line: usize, title: &str, holder: &str) -> Option<String
     )
 }
 
+/// Files a quest that arrived with its session, handed here by a brother,
+/// as held by `holder`, that session's id: an open quest of the same title
+/// is the same quest (a committed log holds it on both brothers) and is
+/// taken, else it is added at the end with its `notes`. `review` keeps a
+/// quest its agent already called done waiting for the human. None when
+/// the title is held, done or matches several here, which only the human
+/// can sort out.
+pub fn arrive(
+    text: &str,
+    title: &str,
+    notes: &[String],
+    holder: &str,
+    review: bool,
+) -> Option<String> {
+    let mark = if review { Mark::Review } else { Mark::Working };
+    let title = one_line(title);
+    let title = title.as_str();
+    let held = |text: &str, line: usize, title: &str| {
+        replace_line(text, line, &item_line(mark, title, Some(holder), None, None))
+    };
+    let tasks = parse(text);
+    let want = one_line(title).to_lowercase();
+    let same: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| one_line(&t.title).to_lowercase() == want)
+        .collect();
+    match same.as_slice() {
+        [] => {
+            let added = append_with_notes(text, title, &notes.join("\n"));
+            let line = parse(&added).last()?.line;
+            held(&added, line, title)
+        }
+        [t] if t.mark == Mark::Open => held(text, t.line, &t.title),
+        [t] if t.holder.as_deref() == Some(holder) && t.mark.held() => Some(text.to_string()),
+        _ => None,
+    }
+}
+
+/// Lets go of the quest held by `holder` here, whose session was handed to
+/// brother `to`: blocked on something outside this log, so the runner
+/// neither starts it again as orphaned nor counts it done for the quests
+/// after it, and the human sees where it went. None when `holder` holds
+/// nothing here.
+pub fn moved_away(text: &str, holder: &str, to: &str, now: u64) -> Option<String> {
+    let task = parse(text)
+        .into_iter()
+        .find(|t| t.holder.as_deref() == Some(holder) && t.mark.held())?;
+    let why = format!("its session went to {to}, whose quest log holds it now");
+    let wait = Wait::Outside(format!("{to} finishes it"));
+    let line = blocked_line(
+        Mark::Blocked,
+        &task.title,
+        Some(holder),
+        Some(&why),
+        Some(&wait),
+        Some(now),
+        None,
+    );
+    replace_line(text, task.line, &line)
+}
+
 /// Sets the item on `line` titled `title` to `mark`. `Open` lets go of the
 /// holder; every other mark keeps it. Only a blocked item keeps why and
 /// what it waits on. None when the line holds something else now.
@@ -2955,6 +3016,44 @@ mod tests {
             "# Quests\n- [ ] First\n  a note\n\n  after a blank\n\n## Later\n- [/] Second @second-1\n"
         );
         assert_eq!(remove(LOG, 8, "Second"), None);
+    }
+
+    #[test]
+    fn a_quest_arrives_with_its_session_once() {
+        let notes = vec!["Model: opus".to_string(), "After: Zero".to_string()];
+        // A log that never had it gets it at the end, held, notes and all.
+        let added = arrive("# Quests\n- [ ] Other\n", "Moved", &notes, "moved-1", false).unwrap();
+        assert_eq!(
+            added,
+            "# Quests\n- [ ] Other\n- [/] Moved @moved-1\n  Model: opus\n  After: Zero\n"
+        );
+        // Twice is once: a landing tried again finds it already held.
+        assert_eq!(arrive(&added, "Moved", &notes, "moved-1", false), Some(added.clone()));
+        // The same quest open here, from a committed log, is taken as is.
+        let open = "- [ ] Moved\n  my notes\n";
+        assert_eq!(
+            arrive(open, "moved", &notes, "moved-1", true).unwrap(),
+            "- [?] Moved @moved-1\n  my notes\n"
+        );
+        // Held by another session here, or done, is the human's to sort.
+        assert_eq!(arrive("- [/] Moved @mine-2\n", "Moved", &notes, "moved-1", false), None);
+        assert_eq!(arrive("- [x] Moved @old-1\n", "Moved", &notes, "moved-1", false), None);
+    }
+
+    #[test]
+    fn a_quest_moved_away_waits_on_its_new_brother() {
+        let log = "- [/] Moved @moved-1\n  a note\n- [ ] After it\n  After: Moved\n";
+        let left = moved_away(log, "moved-1", "Laptop", 1_761_000_000).unwrap();
+        let t = &parse(&left)[0];
+        assert_eq!(t.mark, Mark::Blocked);
+        assert_eq!(t.holder.as_deref(), Some("moved-1"));
+        assert_eq!(t.wait, Some(Wait::Outside("Laptop finishes it".into())));
+        assert!(t.reason.as_deref().is_some_and(|r| r.contains("Laptop")));
+        assert_eq!(t.notes, ["a note"]);
+        // Never started again as an orphan, and the quest after it waits.
+        let next = next(&parse(&left), Mode::Auto, 1, false, |_| Holder::Gone, |_| false);
+        assert_eq!(next, Next::Wait);
+        assert_eq!(moved_away(log, "other-1", "Laptop", 0), None);
     }
 
     #[test]

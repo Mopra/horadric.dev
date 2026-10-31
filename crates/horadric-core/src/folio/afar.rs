@@ -182,6 +182,21 @@ fn block(b: &Block, out: &mut Vec<String>) {
             };
             out.push(format!("\u{2500} {how} in {took}"));
         }
+        Block::Aside {
+            question, answer, ..
+        } => {
+            out.extend(prefixed("btw ", question));
+            match answer {
+                Some(a) => out.extend(a.trim_end().lines().map(|l| format!("  {l}"))),
+                None => out.push("  \u{2026}".into()),
+            }
+        }
+        Block::Shell(r) => {
+            out.extend(prefixed("! ", &r.command));
+            let tail: Vec<&str> = r.output.trim_end().lines().collect();
+            let from = tail.len().saturating_sub(FAILED_TAIL);
+            out.extend(tail[from..].iter().map(|l| format!("    {l}")));
+        }
         Block::Notice(n) => match n {
             Notice::Compacted { trigger, .. } => {
                 out.push(format!("\u{2500} conversation compacted ({trigger})"));
@@ -199,6 +214,11 @@ fn block(b: &Block, out: &mut Vec<String>) {
                 out.extend(text.trim_end().lines().map(str::to_string));
             }
             Notice::Refused(text) => out.push(format!("\u{2500} refused: {}", one_line(text))),
+            Notice::ApiError { kind, text } => out.push(format!(
+                "\u{2500} {}: {}",
+                super::api_error_title(kind),
+                one_line(text)
+            )),
         },
         // Signing in opens a browser on the PC, which a phone cannot.
         Block::SignIn(_) => out.push("\u{2500} signing in to Claude, on the PC".into()),

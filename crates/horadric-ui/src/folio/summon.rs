@@ -23,16 +23,16 @@ use crate::render::color;
 use crate::sparks::RUNES;
 
 /// The seam growing from the middle to the column's edges, in seconds.
-const SEAM: f32 = 0.14;
+const SEAM: f32 = 0.25;
 /// When the page starts to open, a little into the seam so the two read
 /// as one motion.
-const OPEN_AT: f32 = 0.06;
+const OPEN_AT: f32 = 0.1;
 /// The page opening from the seam to the glass's edges.
-const OPEN: f32 = 0.38;
+const OPEN: f32 = 0.55;
 /// A rune drifting away from the edge that shed it, and fading.
-const DRIFT: f32 = 0.45;
+const DRIFT: f32 = 0.56;
 /// The sigil flaring in the seam and going out.
-const SIGIL: f32 = 0.42;
+const SIGIL: f32 = 0.52;
 /// Runes are shed only over this share of the opening, so the last is
 /// gone soon after the page is open.
 const SHED_SPAN: f32 = 0.8;
@@ -56,16 +56,16 @@ fn noise(i: usize, edge: u32, salt: u32) -> f32 {
     (h % 10_000) as f32 / 10_000.0
 }
 
-/// How far open the page is at `t`, from 0 to 1. A cubic out is too
-/// gentle at the end for a page this tall; the extra power lands it.
+/// How far open the page is at `t`, from 0 to 1. Soft at both ends: an
+/// opening that starts at full speed reads as a flash.
 fn opened(t: f32) -> f32 {
     let p = ((t - OPEN_AT) / OPEN).clamp(0.0, 1.0);
-    1.0 - (1.0 - p).powi(4)
+    p * p * p * (p * (p * 6.0 - 15.0) + 10.0)
 }
 
 /// Half the seam's length at `t`, as a share of its full half.
 fn seam(t: f32) -> f32 {
-    motion::ease_out(t / SEAM)
+    motion::ease_in_out(t / SEAM)
 }
 
 /// The frame while the Folio opens, in place of the kept layer `still`
@@ -93,7 +93,7 @@ pub(super) unsafe fn draw(gfx: &Gfx, pal: &Palette, still: &ID2D1Bitmap, t: f32,
         rt.DrawBitmap(
             still,
             Some(&d2d(&to)),
-            0.3 + 0.7 * open,
+            open.sqrt(),
             D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
             None,
         );
@@ -103,7 +103,7 @@ pub(super) unsafe fn draw(gfx: &Gfx, pal: &Palette, still: &ID2D1Bitmap, t: f32,
     // The edges: one line while the seam grows, then two going apart,
     // fading as they near the glass's edges.
     let reach = (right - left) / 2.0 * seam(t);
-    let lit = (1.0 - open).powf(1.3) * (t / 0.04).min(1.0);
+    let lit = (1.0 - open).powf(1.3) * motion::ease_in_out(t / 0.15) * 0.75;
     if lit > 0.01 && reach > 0.0 {
         let line = |y: f32, alpha: f32, width: f32| {
             gfx.brush.SetColor(&color(ink.with_alpha(alpha)));
@@ -122,10 +122,10 @@ pub(super) unsafe fn draw(gfx: &Gfx, pal: &Palette, still: &ID2D1Bitmap, t: f32,
             );
         };
         for y in [mid - half, mid + half] {
-            line(y, lit * 0.9, 1.4);
+            line(y, lit * 0.8, 1.2);
             // A brighter, shorter core, so the edge is hottest where the
             // seam first opened.
-            gfx.brush.SetColor(&color(pal.fg.mix(ink, 0.3).with_alpha(lit)));
+            gfx.brush.SetColor(&color(pal.fg.mix(ink, 0.5).with_alpha(lit * 0.6)));
             let core = reach * 0.35;
             rt.DrawLine(
                 Vector2 {
@@ -137,7 +137,7 @@ pub(super) unsafe fn draw(gfx: &Gfx, pal: &Palette, still: &ID2D1Bitmap, t: f32,
                     Y: y,
                 },
                 &gfx.brush,
-                1.6,
+                1.3,
                 &gfx.round,
             );
         }
@@ -164,7 +164,7 @@ pub(super) unsafe fn draw(gfx: &Gfx, pal: &Palette, still: &ID2D1Bitmap, t: f32,
             let size = 6.0 + 6.0 * n(2);
             let y = from + away * (10.0 + 30.0 * n(3)) * motion::ease_out(q) - size / 2.0;
             let sway = (q * 3.0 + n(4) * TAU).sin() * 4.0 * q;
-            let alpha = (1.0 - q).powf(1.5) * (q * 8.0).min(1.0) * 0.85;
+            let alpha = (1.0 - q).powf(1.5) * motion::ease_in_out(q * 5.0) * 0.7;
             let which = (n(5) * RUNES.len() as f32) as usize;
             gfx.rune(
                 which,
@@ -181,7 +181,7 @@ pub(super) unsafe fn draw(gfx: &Gfx, pal: &Palette, still: &ID2D1Bitmap, t: f32,
     let q = t / SIGIL;
     if (0.0..1.0).contains(&q) {
         let size = 16.0 + 18.0 * motion::ease_out(q);
-        let alpha = (q * PI).sin().powf(0.8) * 0.9;
+        let alpha = (q * PI).sin().powi(2) * 0.6;
         gfx.rune(
             sigil as usize,
             centre,
@@ -201,7 +201,7 @@ mod tests {
     fn the_page_opens_once_and_stays_open() {
         assert_eq!(opened(0.0), 0.0);
         assert_eq!(opened(OPEN_AT), 0.0);
-        assert!(opened(OPEN_AT + OPEN / 2.0) > 0.5);
+        assert!((opened(OPEN_AT + OPEN / 2.0) - 0.5).abs() < 1e-3);
         assert_eq!(opened(OPEN_AT + OPEN), 1.0);
         assert_eq!(opened(LENGTH), 1.0);
         let steps: Vec<f32> = (0..50).map(|i| opened(i as f32 * 0.01)).collect();

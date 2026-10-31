@@ -270,6 +270,10 @@ mod tests {
             .cloned()
             .map(|mut b| {
                 if let Block::Tools(steps) = &mut b {
+                    // A transcript knows when each step ran, a backlog not.
+                    for s in steps.iter_mut() {
+                        (s.began, s.ended) = (None, None);
+                    }
                     for lane in steps.iter_mut().filter_map(|s| s.lane.as_mut()) {
                         lane.steps.clear();
                         lane.progress.clear();

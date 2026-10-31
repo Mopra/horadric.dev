@@ -52,9 +52,10 @@ impl Registry {
     /// name, since the project folder is already the cluster's title.
     /// Returns true when the session's phase changed.
     pub fn apply(&mut self, horadric_id: &str, event: &HookEvent, now: SystemTime) -> bool {
-        // A status line says nothing about whether a session is alive. One
-        // ended and pruned must not come back as a tile from it.
-        if event.hook_event_name == HookEvent::STATUS && !self.sessions.contains_key(horadric_id) {
+        // A status line or a heavy wait says nothing about whether a session
+        // is alive. One ended and pruned must not come back as a tile from it.
+        let news = [HookEvent::STATUS, HookEvent::HEAVY].contains(&event.hook_event_name.as_str());
+        if news && !self.sessions.contains_key(horadric_id) {
             return false;
         }
         let session = self

@@ -135,19 +135,42 @@ impl Project {
     /// Takes in the entries a brother sent, `b64` as `entries` carries
     /// it, inside the lore's lock.
     pub fn import(&self, b64: &str, now: u64) -> Result<(), String> {
-        let entries = brethren::entries_of(&json!({"b64": b64}));
+        self.take_in(brethren::entries_of(&json!({"b64": b64})), now)
+            .map(|_| ())
+    }
+
+    /// Takes in what the copy of this project's shared lore in the memory
+    /// folder `memory` holds and this one lacks: another machine's, read
+    /// from its backup, while that machine is silent. Gives how many
+    /// entries went in. See [`Shared::export_whole`] for what waits for
+    /// the brother itself.
+    pub fn catch_up_from(&self, memory: &Path, now: u64) -> Result<usize, String> {
+        let name = horadric_core::lore::file_name(self.place.key());
+        if !memory.join("brethren").join(format!("{name}l")).is_file() {
+            return Ok(0);
+        }
+        let theirs =
+            Shared::open(memory, self.place.key(), &self.me).map_err(|e| e.to_string())?;
+        let store = Store::text_since(memory, crate::store::Month { year: 0, month: 1 })
+            .map_err(|e| e.to_string())?;
+        self.take_in(theirs.export_whole(&self.have(), &store), now)
+    }
+
+    /// Takes `entries` in, inside the lore's lock. Gives how many were
+    /// new here.
+    fn take_in(&self, entries: Vec<Entry>, now: u64) -> Result<usize, String> {
         if entries.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         let mut store = Store::open(&self.memory).map_err(|e| e.to_string())?;
         let mut shared =
             Shared::open(&self.memory, self.place.key(), &self.me).map_err(|e| e.to_string())?;
-        self.place.change(|lore| {
+        let fresh = self.place.change(|lore| {
             shared
                 .import(entries, lore, &mut store, now)
                 .map_err(|e| e.to_string())
         })?;
-        Ok(())
+        Ok(fresh.len())
     }
 }
 
@@ -172,6 +195,10 @@ impl Lores {
                 .filter_map(|(repo, dir)| Some((repo, Arc::new(Project::of(&dir)?))))
                 .collect(),
         )
+    }
+
+    pub fn projects(&self) -> impl Iterator<Item = &Arc<Project>> {
+        self.0.iter().map(|(_, p)| p)
     }
 
     /// What a hello tells of each: its repository and what this copy

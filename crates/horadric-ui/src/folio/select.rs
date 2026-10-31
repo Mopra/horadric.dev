@@ -14,7 +14,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 
 use super::cards::picks_of;
 use super::flow::{self, Pos};
-use super::transcript::{deny_field, keep_field, other_field, Act, Find, State, FIND_FIELD, SHOWN};
+use super::transcript::{
+    change_field, deny_field, keep_field, other_field, Act, Find, State, FIND_FIELD, SHOWN,
+};
 use super::view::View;
 use super::{answer_with, redraw, with, Chat};
 use crate::app::{self, Input};
@@ -27,6 +29,8 @@ pub(super) fn act(key: &str, a: Act) {
     match a {
         Act::Copy(t) => clipboard::set_text(&t),
         Act::Resume => app::push(Input::Expand(key.to_string())),
+        Act::Edit(block) => super::composer::edit_prompt(key, block),
+        Act::Rewind(block) => super::composer::rewind_to(key, block),
         Act::Link(url) => match with(key, |c| c.key.clone()) {
             Some(project) => app::push(Input::LinkIn(project, url)),
             None => app::push(Input::Link(url)),
@@ -51,6 +55,41 @@ pub(super) fn act(key: &str, a: Act) {
             }
         }
         Act::Always(id) => answer_with(key, |f| f.reply(&id, Reply::Always)),
+        Act::Change(id) => {
+            let field = change_field(&id);
+            let text = with(key, |c| {
+                let st = &mut c.tr.state;
+                if !st.changing.contains(&id) {
+                    let wrote = c.folio.blocks.iter().find_map(|b| match b {
+                        Block::Ask {
+                            request_id,
+                            tool,
+                            input,
+                            ..
+                        } if *request_id == id => horadric_core::folio::edit_text(tool, input),
+                        _ => None,
+                    });
+                    let Some(wrote) = wrote else {
+                        return None;
+                    };
+                    st.denying.remove(&id);
+                    st.changing.insert(id.clone());
+                    // Room for a whole file, which a Write holds.
+                    st.fields
+                        .insert(field.clone(), Field::new(&wrote, true, 4 << 20));
+                    st.focus = Some(field.clone());
+                    None
+                } else {
+                    st.changing.remove(&id);
+                    st.focus = None;
+                    st.fields.remove(&field).map(|f| f.text)
+                }
+            })
+            .flatten();
+            if let Some(text) = text {
+                answer_with(key, |f| f.reply(&id, Reply::Change(&text)));
+            }
+        }
         Act::Deny(id) => {
             let field = deny_field(&id);
             let reason = with(key, |c| {
@@ -92,6 +131,8 @@ pub(super) fn act(key: &str, a: Act) {
                 let st = &mut c.tr.state;
                 st.denying.remove(&id);
                 st.keeping.remove(&id);
+                st.changing.remove(&id);
+                st.fields.remove(&change_field(&id));
                 st.focus = None;
             });
         }
@@ -113,6 +154,48 @@ pub(super) fn act(key: &str, a: Act) {
         }
         Act::Step(id) => {
             with(key, |c| toggle(&mut c.tr.state.flipped, id));
+        }
+        Act::MapStep(i, path) => {
+            with(key, |c| {
+                c.open.insert(i);
+                if let Some(Block::Tools(steps)) = c.folio.blocks.get(i) {
+                    super::transcript::open_path(&mut c.tr.state, steps, &path);
+                }
+                c.tr.state.reveal = Some(i);
+                c.follow = false;
+            });
+        }
+        Act::Light(footer) => {
+            let lit = with(key, |c| {
+                let map = horadric_core::folio::turn_map(&c.folio.blocks, footer);
+                let root = c.dir.to_string_lossy().into_owned();
+                let roots = [root.as_str(), c.key.as_str()];
+                let nodes: Vec<(String, horadric_core::glow::Touch)> = (map.files.iter())
+                    .filter_map(|f| {
+                        let full = horadric_core::glow::full(&f.path, &root);
+                        let how = if f.edits > 0 {
+                            horadric_core::glow::Touch::Edit
+                        } else {
+                            horadric_core::glow::Touch::Read
+                        };
+                        Some((horadric_core::glow::node(&full, &roots)?, how))
+                    })
+                    .collect();
+                crate::glows::light(&c.key, key, &nodes)
+            });
+            if lit == Some(true) {
+                app::push(Input::Sanctuary);
+            }
+        }
+        Act::StepImage(id, k) => {
+            let image = with(key, |c| {
+                let step = super::transcript::find_step(&c.folio.blocks, &id)?;
+                step.images.get(k).cloned()
+            })
+            .flatten();
+            if let Some(img) = image {
+                super::lightbox::open(key, &img.base64);
+            }
         }
         Act::Agent(i, id) => {
             with(key, |c| {
@@ -444,6 +527,13 @@ pub(super) fn char(key: &str, c: char, mods: Mods) -> bool {
         return false;
     };
     match c {
+        '\r' if mods.shift && focus.starts_with("change:") => {
+            with(key, |chat| {
+                if let Some(f) = field_mut(chat, &focus) {
+                    f.insert("\n");
+                }
+            });
+        }
         '\r' => {
             let shift = mods.shift;
             submit(key, &focus, shift);
@@ -457,6 +547,8 @@ pub(super) fn char(key: &str, c: char, mods: Mods) -> bool {
                     st.denying.remove(id);
                 } else if let Some(id) = focus.strip_prefix("keep:") {
                     st.keeping.remove(id);
+                } else if let Some(id) = focus.strip_prefix("change:") {
+                    st.changing.remove(id);
                 }
                 st.focus = None;
             });
@@ -533,6 +625,7 @@ pub(super) fn release_lapsed(chat: &mut Chat) {
     let id = id.to_string();
     st.denying.remove(&id);
     st.keeping.remove(&id);
+    st.changing.remove(&id);
     st.focus = None;
 }
 
@@ -553,6 +646,8 @@ fn submit(key: &str, focus: &str, shift: bool) {
         act(key, Act::Deny(id.to_string()));
     } else if let Some(id) = focus.strip_prefix("keep:") {
         act(key, Act::Keep(id.to_string()));
+    } else if let Some(id) = focus.strip_prefix("change:") {
+        act(key, Act::Change(id.to_string()));
     } else if let Some(block) = focus.strip_prefix("signin:") {
         if let Ok(block) = block.parse() {
             act(key, Act::SignInCode(block));

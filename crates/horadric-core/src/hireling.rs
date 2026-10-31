@@ -46,6 +46,9 @@ impl Lot {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mark {
     pub tool: String,
+    /// What it was given, cut short for a tip: the command, the path, the
+    /// pattern. Empty when nothing said.
+    pub given: String,
     pub start: SystemTime,
     /// None while it runs.
     pub end: Option<SystemTime>,
@@ -294,6 +297,11 @@ impl Band {
                         &mut self.main,
                         Mark {
                             tool: t.clone(),
+                            given: e
+                                .tool_input
+                                .as_ref()
+                                .map(|i| given(t, i))
+                                .unwrap_or_default(),
                             start: now,
                             end: None,
                             failed: false,
@@ -544,6 +552,7 @@ impl Band {
                                 push(
                                     &mut h.marks,
                                     Mark {
+                                        given: given(&tool, &b["input"]),
                                         tool,
                                         start: at,
                                         end: None,
@@ -571,6 +580,20 @@ impl Band {
                 _ => {}
             }
         }
+    }
+}
+
+/// The most of a tool's input a mark keeps.
+const GIVEN_MAX: usize = 160;
+
+/// What a tool was given, as a permission prompt would show it, cut to
+/// [`GIVEN_MAX`] characters: a mark is kept for each of hundreds of tool
+/// calls, and only a tip ever shows it.
+fn given(tool: &str, input: &Value) -> String {
+    let text = crate::ask::detail(tool, input);
+    match text.char_indices().nth(GIVEN_MAX) {
+        Some((at, _)) => format!("{}…", text[..at].trim_end()),
+        None => text,
     }
 }
 
@@ -746,7 +769,7 @@ mod tests {
         let mut b = Band::default();
         b.hear(&sub("PreToolUse", "a1"), t(0));
         let jsonl = concat!(
-            r#"{"type":"assistant","timestamp":"2027-01-15T08:00:01.500Z","message":{"usage":{"input_tokens":2,"cache_read_input_tokens":1000,"output_tokens":50},"content":[{"type":"tool_use","name":"Grep"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2027-01-15T08:00:01.500Z","message":{"usage":{"input_tokens":2,"cache_read_input_tokens":1000,"output_tokens":50},"content":[{"type":"tool_use","name":"Grep","input":{"pattern":"fn main","path":"src"}}]}}"#,
             "\n",
             r#"{"type":"user","timestamp":"2027-01-15T08:00:03Z","message":{"content":[{"type":"tool_result","is_error":true}]}}"#,
             "\n",
@@ -757,9 +780,19 @@ mod tests {
         assert_eq!((h.tools, h.tokens), (1, 1052));
         let m = &h.marks[0];
         assert!(m.failed);
+        assert_eq!(m.given, "fn main");
         let ran = m.end.unwrap().duration_since(m.start).unwrap();
         assert_eq!(ran, Duration::from_millis(1500));
         assert!(h.read < jsonl.len() as u64);
+    }
+
+    #[test]
+    fn what_a_tool_was_given_is_cut_short() {
+        let long = "x".repeat(GIVEN_MAX + 40);
+        let g = given("Bash", &serde_json::json!({ "command": long }));
+        assert_eq!(g.chars().count(), GIVEN_MAX + 1);
+        assert!(g.ends_with('…'));
+        assert_eq!(given("Read", &Value::Null), "");
     }
 
     #[test]

@@ -86,6 +86,10 @@ pub const KNOW_PATH: &str = "/horadric/know";
 /// files it showed the session, for the Arcane Sanctuary to light.
 pub const GLOW_PATH: &str = "/horadric/glow";
 
+/// Path `horadric heavy` posts to while it waits for a slot, and once
+/// it stops waiting, so the session's tile says it is queued.
+pub const HEAVY_PATH: &str = "/horadric/heavy";
+
 /// Path `horadric mcp` posts `lore_recall` to: the app holds the model
 /// that finds notes by meaning, one for every session. The reply carries
 /// the answer, or an error that sends the server back to words.

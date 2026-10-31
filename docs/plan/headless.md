@@ -17,19 +17,14 @@ still drive the phase and win where they and the stream both speak.
 ## What it opens
 
 What a terminal could never do, the reason for all this. Undo last turn
-(conversation and files) and steering or queueing mid turn are built.
+(conversation and files), steering or queueing mid turn, a turn's map
+(its footer opens a timeline of its steps and the files it touched),
+`/all` (one prompt to every Folio of the project), edit and resend or
+rewind to any earlier prompt as a fork, and reviewing each edit before
+it lands are built.
 
-- **Edit and resend** any earlier prompt: a fork at that message
-  (`--fork-session`, `--resume-session-at`), the old branch kept, both
-  browsable. Files rewound with `rewind_files`, so a rewind can go to
-  any earlier point, not only the last turn.
-- **Review before it lands:** an edit mode where each Edit or Write
-  comes as a diff card to accept, change or reject, through
-  `can_use_tool` and `updatedInput`. Line comments on a diff belong here.
-- **The work as a map:** the steps of a turn as a timeline, the files it
-  touched lit in the Arcane Sanctuary as they happen.
-- **Many sessions, one view:** a prompt sent to several sessions at
-  once, answers side by side.
+- **Line comments on a diff** under review: today a reviewed edit is
+  allowed, changed as a whole, or denied with one reason.
 
 ## Smaller features still missing
 
@@ -39,15 +34,6 @@ usable, fast. T3 Code's feel comes from rules more than tricks: a pure
 model, small payloads, nothing that repaints continuously, no spinner
 that lies.
 
-- **API errors as notices of their own.** A login failure shows the
-  sign-in card and a retry shows as a notice, but a rate limit and other
-  API errors still show as the CLI's reply text (the tile does show the
-  error).
-- **Soon:** `!` shell mode run by Horadric; a context breakdown (the
-  categories `get_context_usage` answers are parsed into `ContextUsage`
-  but not drawn); prompt suggestions; session titles; timestamps and a
-  verbose view; images in tool results (only a prompt's images are
-  drawn); `/btw`.
 - **Later:** per-turn git checkpoints (T3 Code's way), worktree per
   session with PR status, fast mode and output style as controls (the
   styles are parsed from `initialize`), an external editor, LaTeX.
@@ -56,5 +42,6 @@ that lies.
 ## Open question
 
 - **The protocol moving.** An unknown message is kept and shown raw,
-  and features are detected by `capabilities`. Not done: a stream that
-  fails to parse at all falls back to a terminal.
+  features are detected by `capabilities`, and a stream that fails to
+  parse at all goes on in a terminal. Still open: a stream that parses
+  but means something new.

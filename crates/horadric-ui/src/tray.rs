@@ -96,6 +96,8 @@ pub enum Choice {
     /// Sign in to WorkOS, so this PC finds its brothers.
     SignIn,
     SignOut,
+    /// Choose what this PC is called among its brothers and phones.
+    Rename,
     /// Hand every session to this brother, or with None stop doing so.
     Leave(Option<String>),
     /// Who keeps this PC's sessions if it falls silent, by id, or no one.
@@ -281,6 +283,7 @@ pub fn menu(
     const ADD_NODE: usize = 18;
     const SHOW_HIDDEN: usize = 19;
     const CONTEXT: usize = 20;
+    const RENAME: usize = 21;
     const RECENT: usize = 100;
     let mut items = Vec::new();
     // What the icon is for, status, comes first. The level rides along
@@ -443,6 +446,10 @@ pub fn menu(
         "Linux nodes".into(),
         node_items(&lines, ADD_NODE),
     ));
+    machines.push(Item::action(
+        RENAME,
+        format!("Name this PC\u{2026}\t{}", crate::portal_pair::pc_name()),
+    ));
     machines.push(match user {
         Some(_) => Item::action(SIGN_OUT, "Sign out"),
         None => Item::action(SIGN_IN, "Sign in to find your other PCs\u{2026}"),
@@ -476,6 +483,7 @@ pub fn menu(
         STOP => Some(Choice::StopWarriv),
         SIGN_IN => Some(Choice::SignIn),
         SIGN_OUT => Some(Choice::SignOut),
+        RENAME => Some(Choice::Rename),
         NO_KEEPER => Some(Choice::Keeper(None)),
         AUTO_TAKEOVER => Some(Choice::AutoTakeover(!keeping.2)),
         i if (CONTROL..CONTROL + RIGHTS).contains(&i) => joined
@@ -521,6 +529,58 @@ pub fn menu(
             .get(i - RECENT)
             .map(|p| Choice::Recent(p.clone())),
         _ => None,
+    }
+}
+
+/// The brothers' lines as the tray's Other PCs shows them, for the Town
+/// Portal key's menu, which holds the brothers and the phones together,
+/// and what a pick among them means.
+pub(crate) struct BrotherLines {
+    pub items: Vec<Item>,
+    joined: Vec<(String, String, bool)>,
+    listed: Vec<joining::Listed>,
+}
+
+impl BrotherLines {
+    pub(crate) fn now() -> BrotherLines {
+        let keeping = crate::app::keeping_tray();
+        let standing = horadric_hooks::state_dir()
+            .map(|d| crate::standing::Standing::load(&d))
+            .unwrap_or_default();
+        let joined: Vec<(String, String, bool)> = keeping
+            .0
+            .iter()
+            .map(|(id, name)| (id.clone(), name.clone(), standing.controls(id)))
+            .collect();
+        let listed = crate::brothers::listed();
+        let items = brother_items(listed.as_deref(), &joined, &crate::far_node::folded_ids());
+        BrotherLines {
+            items,
+            joined,
+            listed: listed.unwrap_or_default(),
+        }
+    }
+
+    /// What picking line `i` asks for. A brother not joined yet is asked
+    /// in at once, which asks nothing more of the caller.
+    pub(crate) fn pick(&self, i: usize) -> Option<Choice> {
+        match i {
+            i if (CONTROL..CONTROL + RIGHTS).contains(&i) => self
+                .joined
+                .get(i - CONTROL)
+                .map(|(id, _, on)| Choice::Control(id.clone(), !on)),
+            i if (CAST_OUT..CAST_OUT + RIGHTS).contains(&i) => self
+                .joined
+                .get(i - CAST_OUT)
+                .map(|(id, name, _)| Choice::CastOut(id.clone(), name.clone())),
+            i if (BROTHER..QUEST_LOG).contains(&i) => {
+                if let Some(b) = self.listed.get(i - BROTHER) {
+                    crate::brothers::ask(&b.id);
+                }
+                None
+            }
+            _ => None,
+        }
     }
 }
 

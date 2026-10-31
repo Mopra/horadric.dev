@@ -31,6 +31,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::chronicle::{self, Happened};
 use horadric_core::escalate;
+use horadric_core::handoff;
 use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
 use horadric_core::usage::{self, format_until};
@@ -695,6 +696,16 @@ impl App {
         self.held_quest(id).is_some()
     }
 
+    /// The project, by key, and the quest session `id` holds there.
+    pub(super) fn quest_held_by(&self, id: &str) -> Option<(String, Task)> {
+        self.shared.boards.borrow().iter().find_map(|(key, b)| {
+            b.tasks
+                .iter()
+                .find(|t| t.mark.held() && t.holder.as_deref() == Some(id))
+                .map(|t| (key.clone(), t.clone()))
+        })
+    }
+
     /// The title of the item session `id` holds.
     pub(super) fn held_quest(&self, id: &str) -> Option<String> {
         self.shared
@@ -1251,6 +1262,40 @@ impl App {
         }
         self.refresh_boards(true);
         self.run_tasks();
+    }
+
+    /// Session `id` was handed to brother `to`: the quest it held here
+    /// goes with it, so it is let go of here rather than started again
+    /// once the session is missed.
+    pub(super) fn quest_moved_away(&mut self, id: &str, to: &str) {
+        let Some((key, _)) = self.quest_held_by(id) else {
+            return;
+        };
+        let to = crate::project::brother_name(to);
+        self.change_list(&key, |text| tasks::moved_away(text, id, &to, unix_now()));
+    }
+
+    /// Session `id` landed here from brother `from` in a worktree of the
+    /// checkout in `main`, with the quest it worked there: filed in that
+    /// checkout's quest log, held by it, so `horadric quest` from it lands
+    /// here. Before it runs, so it starts as a quest's session would.
+    pub(super) fn quest_arrived(&mut self, id: &str, main: &Path, from: &str, q: &handoff::Carried) {
+        let filed = file::update(main, |text| {
+            tasks::arrive(text, &q.title, &q.notes, id, q.review)
+        });
+        match filed {
+            Ok(true) => self.refresh_boards(true),
+            Ok(false) => self.toasts.show(
+                Kind::Failed,
+                "Its quest stayed behind",
+                &format!(
+                    "\"{}\" came from {from}, but this quest log has a quest of that name \
+                     already held or done, so it was not filed again.",
+                    q.title
+                ),
+            ),
+            Err(e) => eprintln!("horadric: cannot write {}: {e}", file::file(main).display()),
+        }
     }
 
     pub(super) fn add_task(&mut self, key: &str, title: &str, notes: &str) {

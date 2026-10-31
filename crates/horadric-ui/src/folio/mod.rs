@@ -165,6 +165,9 @@ struct Chat {
     /// With `to_terminal`, it starts again as a Folio, its last turn
     /// rewound, rather than in a terminal.
     rewinding: bool,
+    /// Its stream could not be read at all, so it goes on in a terminal
+    /// whether or not a turn runs: see [`Folio::unreadable`].
+    unreadable: bool,
     /// The line its conversation was resumed at by a rewind, see
     /// [`Tag::at`].
     rewound: Option<String>,
@@ -228,6 +231,9 @@ pub struct State {
     /// last turn: a headless CLI runs no status line to tell the tile.
     pub model: Option<String>,
     pub context: Option<(u64, u64)>,
+    /// What the CLI called the conversation, for the tile until a hook
+    /// reads the same from the transcript.
+    pub title: Option<String>,
 }
 
 impl State {
@@ -322,6 +328,7 @@ impl Chat {
             loading: None,
             to_terminal: false,
             rewinding: false,
+            unreadable: false,
             rewound: None,
             restarting: false,
             restart_show: false,
@@ -397,6 +404,7 @@ impl Chat {
             ask: self.folio.first_ask(),
             model: self.folio.model.clone(),
             context: (self.folio.context.as_ref()).map(|c| (c.used, c.limit)),
+            title: self.folio.title.clone(),
         }
     }
 
@@ -823,6 +831,25 @@ pub fn rewind_from(id: &str) -> Option<(String, Option<String>)> {
     .flatten()
 }
 
+/// Asks session `id`'s claude to put its files back as they were when
+/// the prompt `uuid` was sent: the app hears
+/// [`Input::FolioFilesRewound`]. False unless it rests.
+pub fn rewind_files(id: &str, uuid: &str) -> bool {
+    with(id, |c| {
+        if !c.between_turns() {
+            return false;
+        }
+        let line = c.folio.rewind_files(uuid);
+        c.hosted.as_ref().is_some_and(|h| h.send_line(&line).is_ok())
+    })
+    .unwrap_or(false)
+}
+
+/// Has session `id` say `text` on its page once it starts again.
+pub fn greet(id: &str, text: &str) {
+    sign_in::greet(id, text);
+}
+
 /// Asks session `id`'s CLI to stop its background task `task`, such as a
 /// subagent.
 pub fn stop_task(id: &str, task: &str) {
@@ -931,6 +958,40 @@ pub fn prompt(id: &str, text: &str) -> bool {
     went
 }
 
+/// Sends `text` to every Folio of the project `key` that can take it, as
+/// though typed into each, so their answers come side by side on the
+/// stage. Returns how many it went to.
+pub fn broadcast(key: &str, text: &str) -> usize {
+    let mut went = Vec::new();
+    CHATS.with(|c| {
+        let Ok(mut chats) = c.try_borrow_mut() else {
+            return;
+        };
+        for (id, chat) in chats.iter_mut() {
+            if chat.key == key && chat.watch.is_none() && composer::prompt(chat, text) {
+                went.push(id.clone());
+            }
+        }
+    });
+    for id in &went {
+        redraw(id);
+    }
+    went.len()
+}
+
+/// Says `text` above session `id`'s composer.
+pub fn say(id: &str, text: &str) {
+    with(id, |c| composer::notice(c, text));
+    redraw(id);
+}
+
+/// Now, in Unix milliseconds.
+fn unix_ms() -> u64 {
+    (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH))
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 /// Stops session `id`'s turn, as Esc in its composer does. False when no
 /// turn runs.
 pub fn stop(id: &str) -> bool {
@@ -963,6 +1024,12 @@ pub fn approve(id: &str) -> bool {
 /// The Claude Code conversation session `id` holds, once its init said.
 pub fn conversation(id: &str) -> Option<String> {
     with(id, |c| c.folio.session_id.clone()).flatten()
+}
+
+/// Whether session `id` goes on in a terminal because its stream could
+/// not be read.
+pub fn unreadable(id: &str) -> bool {
+    with(id, |c| c.unreadable).unwrap_or(false)
 }
 
 /// The window events are routed through to the UI thread, made on first
@@ -1048,6 +1115,21 @@ unsafe extern "system" fn router_proc(
 
 /// Writes changed drafts a moment after the last change. Each call puts
 /// the moment off again, so typing writes once it pauses.
+/// Has [`drain`] look at every Folio soon, lines or not.
+fn wake() {
+    let router = router();
+    if router != 0 {
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(router as *mut c_void)),
+                WM_FOLIO_LINES,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    }
+}
+
 fn save_soon() {
     let router = router();
     if router != 0 {
@@ -1068,6 +1150,7 @@ fn drain() {
     let mut changed: Vec<(HWND, bool)> = Vec::new();
     let mut tell: Vec<Input> = Vec::new();
     let mut banished: Vec<String> = Vec::new();
+    let mut rehook: Vec<String> = Vec::new();
     let busy = CHATS.with(|c| {
         let Ok(mut chats) = c.try_borrow_mut() else {
             return true;
@@ -1089,6 +1172,12 @@ fn drain() {
                 }
                 moved = true;
             }
+            // Review turned on in a claude whose `initialize` went without
+            // its hook: it starts again to register it.
+            let hooked = chat.folio.review_hooked || !chat.folio.initialized;
+            if chat.input.review && !hooked && chat.between_turns() {
+                rehook.push(id.clone());
+            }
             let events: Vec<Event> = match chat.inbox.lock() {
                 Ok(mut q) => q.drain(..).collect(),
                 Err(_) => continue,
@@ -1096,8 +1185,12 @@ fn drain() {
             if events.is_empty() && !moved {
                 continue;
             }
+            // Before the lines, which may ask whether an edit waits.
+            chat.folio.review = chat.input.review;
             let (cleared, live) = (chat.folio.cleared, chat.live);
             for event in events {
+                // A replay's lines are old, and when they came is lost.
+                chat.folio.clock = chat.live.then(unix_ms);
                 match event {
                     Event::Out(l) => moved |= chat.folio.feed(&l),
                     Event::Sent(l) => moved |= chat.folio.feed_sent(&l),
@@ -1124,6 +1217,28 @@ fn drain() {
                         }
                     }
                 }
+            }
+            if chat.folio.unreadable() && !chat.unreadable {
+                // Its words cannot be shown, so it may as well be cut off
+                // mid turn: the terminal resumes the conversation.
+                chat.unreadable = true;
+                chat.rewinding = false;
+                chat.error = Some(
+                    "This Claude's stream could not be read, so it goes on in a terminal."
+                        .to_string(),
+                );
+                moved = true;
+                match (&chat.hosted, chat.ended) {
+                    (Some(h), false) => {
+                        chat.to_terminal = true;
+                        h.close();
+                    }
+                    _ => tell.push(Input::FolioHandedOver(id.clone())),
+                }
+            }
+            // A replay's answer was acted on when it came.
+            if let Some(how) = chat.folio.files_rewound.take().filter(|_| chat.live) {
+                tell.push(Input::FolioFilesRewound(id.clone(), how));
             }
             // A replay's limits are old news, and the bars already had them.
             if let Some(limits) = chat.folio.limits.take().filter(|_| chat.live) {
@@ -1175,6 +1290,9 @@ fn drain() {
                 LPARAM(0),
             );
         }
+    }
+    for id in rehook {
+        restart(&id, "Each Edit and Write now waits for you.", false);
     }
     // Before the repaint, which draws over the page that burns.
     for id in banished {
@@ -1273,6 +1391,7 @@ mod tests {
             ask: None,
             model: None,
             context: None,
+            title: None,
         }
     }
 

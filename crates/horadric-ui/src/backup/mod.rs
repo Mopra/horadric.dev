@@ -6,6 +6,7 @@
 //! size and time), and per file `<path>.hbk`, AES-256-GCM sealed and
 //! bound to its path. The logic here is written once against the trait.
 
+pub mod catch_up;
 pub mod config;
 pub mod credential;
 pub mod crypto;
@@ -170,10 +171,15 @@ fn blob(entry: &Entry) -> String {
 }
 
 /// Whether a path in the state folder, with `/`, is backed up: the
-/// memory's text and the lore's notes. The vectors, the code index and
-/// the Sanctuary's layout are rebuilt, so they are not.
+/// memory's text, the lore's notes and the shared lore's logs. The
+/// vectors, the code index and the Sanctuary's layout are rebuilt, so
+/// they are not. A log goes so a brother can catch up from this backup
+/// ([`catch_up`]), and so a restore keeps who wrote what.
 pub fn chosen(rel: &str) -> bool {
     if let Some(name) = rel.strip_prefix("memory/") {
+        if let Some(log) = name.strip_prefix("brethren/") {
+            return !log.contains('/') && log.ends_with(".jsonl");
+        }
         return name.starts_with("day/")
             || name == "horadrim.json"
             || name == "transcripts.json"
@@ -435,6 +441,7 @@ mod tests {
             "memory/transcripts.json",
             "memory/day/2026-10-16.md",
             "lore/horadric.dev-990a2c84.json",
+            "memory/brethren/horadric.dev-990a2c84.jsonl",
         ] {
             assert!(chosen(yes), "{yes}");
         }
@@ -445,6 +452,8 @@ mod tests {
             "lore/horadric.dev-990a2c84.sanctuary.json",
             "settings.json",
             "memoryx/2026-10.jsonl",
+            "memory/brethren/horadric.dev-990a2c84.seen",
+            "memory/brethren/horadric.dev-990a2c84.lock",
         ] {
             assert!(!chosen(no), "{no}");
         }

@@ -23,7 +23,10 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use horadric_core::mesh;
+use horadric_core::phoning::{self, Keyed, Keys};
 use horadric_core::portal::{b64url, unb64url, Config, Kind, Paired};
+use horadric_core::said::Signer;
 use horadric_core::serving::{answers, Job, Out, Running, Serve, Server};
 use horadric_core::webpush;
 use horadric_core::worktree::Worktree;
@@ -81,6 +84,15 @@ pub(super) struct Portal {
     /// The projects whose lore is shared, by repository, as the last
     /// brother hello found them.
     lore: sharing::Lores,
+    /// The keys derived for phones the signed word vouches for.
+    keys: Keys,
+    /// The phones the signed word serves, whoever paired them, each with
+    /// the key this PC shares with it.
+    served: Vec<Keyed>,
+    /// The `brothers` message each channel of a phone with a key pair was
+    /// sent last, by fingerprint, so it hears the list again only when it
+    /// changed.
+    told: HashMap<u32, u64>,
 }
 
 /// What this PC tells its brothers it is doing, as Windows says: one of
@@ -119,13 +131,19 @@ impl App {
         portal_push::ensure_vapid(&mut config, &dir);
         let now = unix_now();
         let expired = config.drop_expired_ticket(now);
-        if config.forget_stale(now) | expired {
+        let stale = config.forget_stale(now);
+        if !stale.is_empty() | expired {
             let _ = config.save(&dir);
         }
+        // A phone with a key pair not seen for so long is forgotten by
+        // word, so the brothers that serve it stop too.
+        forget_by_word(&dir, &config, &stale, now);
         if let Some(p) = self.portal.as_mut() {
             if p.config.relay == config.relay && p.config.secret == config.secret {
                 p.config = config;
+                p.look_at_word();
                 p.unpair_forgotten();
+                self.portal_tell_brothers();
                 return;
             }
         }
@@ -152,7 +170,13 @@ impl App {
             server: Server::default(),
             brothers: HashMap::new(),
             lore: sharing::Lores::default(),
+            keys: Keys::default(),
+            served: Vec::new(),
+            told: HashMap::new(),
         });
+        if let Some(p) = self.portal.as_mut() {
+            p.look_at_word();
+        }
         brothers::on_requests(Box::new(move || unsafe {
             let _ = PostMessageW(
                 Some(HWND(notify as *mut _)),
@@ -191,12 +215,14 @@ impl App {
                 }
                 Incoming::Close(ch) => {
                     p.phones.remove(&ch);
+                    p.told.remove(&ch);
                     p.server.close(ch);
                 }
                 Incoming::Connected(up) => {
                     p.relay_up = up;
                     if !up {
                         p.phones.clear();
+                        p.told.clear();
                         p.brothers.clear();
                         p.server.clear();
                     }
@@ -204,8 +230,8 @@ impl App {
                 Incoming::Sealed(ch, sealed) => heard_from(p, ch, &sealed, now, &mut pairs),
             }
         }
-        for (ch, name, key) in pairs {
-            p.pair(ch, &name, key, now);
+        for (ch, name, key, public) in pairs {
+            p.pair(ch, &name, key, &public, now);
         }
         for ch in brothers::take_downs() {
             if let Some(brother) = p.brothers.remove(&ch) {
@@ -219,6 +245,58 @@ impl App {
             p.heard_brother(ch, &brother, msg);
         }
         self.portal_serve(|server, here| server.answer(here, now));
+        self.portal_tell_brothers();
+    }
+
+    /// Sends each greeted phone with a key pair the `brothers` list, when
+    /// it has not heard this one yet: at its hello, and whenever a brother
+    /// comes, goes, falls asleep or wakes.
+    fn portal_tell_brothers(&mut self) {
+        let Some(p) = self.portal.as_ref() else {
+            return;
+        };
+        let chans: Vec<u32> = p
+            .phones
+            .iter()
+            .filter_map(|(ch, who)| {
+                let (id, _) = who.as_ref()?;
+                (p.keyed_phone(id) && p.server.greeted_on(*ch)).then_some(*ch)
+            })
+            .collect();
+        if chans.is_empty() {
+            return;
+        }
+        let me = p.me();
+        let roster = p.roster().unwrap_or_default();
+        let sees = brothers::sees();
+        let state = |id: &str| -> &'static str {
+            if !sees.iter().any(|s| s == id) {
+                "away"
+            } else if self.far_asleep(id) {
+                "asleep"
+            } else {
+                "live"
+            }
+        };
+        let msg = if roster.brothers.iter().any(|b| b.id == me) {
+            phoning::brothers_message(&roster, &me, state, |b| {
+                Some(rgb(crate::theme::accent(&format!("brother {}", b.name))))
+            })
+        } else {
+            // Before this PC joined any brother: itself alone.
+            json!({"t": "brothers", "list": [{
+                "id": me, "name": pc_name(), "key": p.public_key(), "state": "live",
+            }]})
+        };
+        let print = horadric_core::portal::fingerprint(&msg);
+        let Some(p) = self.portal.as_mut() else {
+            return;
+        };
+        for ch in chans {
+            if p.told.insert(ch, print) != Some(print) {
+                p.send(ch, &msg);
+            }
+        }
     }
 
     /// Called by the timer: the raw streams every time, the rest at most
@@ -638,31 +716,168 @@ impl Portal {
         horadric_core::rostering::served(&self.dir, &me, &pc_name(), &crate::brothers::Cng, &sees)
     }
 
-    /// Cuts off every connection from a phone no longer in the config,
-    /// telling it why with the key it had, so a forgotten phone stops at
-    /// once rather than at its next reconnect.
+    /// This PC's relay id.
+    fn me(&self) -> String {
+        horadric_core::portal::id(&self.config.secret)
+    }
+
+    /// This PC's signer, None before it has a key pair: it pairs phones
+    /// the old way then, with a key it makes.
+    fn signer<'a>(&self, me: &'a str) -> Option<Signer<'a>> {
+        Signer::of(&self.dir, me, &brothers::Cng)
+    }
+
+    /// This PC's public key, b64url, empty before it has a key pair.
+    fn public_key(&self) -> String {
+        let me = self.me();
+        self.signer(&me).map(|s| s.key()).unwrap_or_default()
+    }
+
+    /// Whether phone `id` has a key pair, so it hears of the brothers.
+    fn keyed_phone(&self, id: &str) -> bool {
+        self.config
+            .phones
+            .iter()
+            .any(|p| p.id == id && !p.public.is_empty())
+            || self.served.iter().any(|p| p.id == id)
+    }
+
+    /// Reads the signed word for the phones it serves, and drops a phone
+    /// paired here that a forget signed anywhere took out.
+    fn look_at_word(&mut self) {
+        let me = self.me();
+        let held = mesh::load_held(&self.dir);
+        let served = match self.signer(&me) {
+            Some(s) => self.keys.served(&held, &me, &s.private, &brothers::Cng),
+            None => Vec::new(),
+        };
+        self.served = served;
+        let forgotten = phoning::forgotten(&held);
+        let gone: Vec<String> = self
+            .config
+            .phones
+            .iter()
+            .filter(|p| {
+                !p.public.is_empty()
+                    && forgotten.contains(&p.public)
+                    && !self.served.iter().any(|s| s.public == p.public)
+            })
+            .map(|p| p.id.clone())
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        let mut fresh = Config::load(&self.dir).unwrap_or_else(|| self.config.clone());
+        fresh.phones.retain(|p| !gone.contains(&p.id));
+        let _ = fresh.save(&self.dir);
+        self.config = fresh;
+    }
+
+    /// Cuts off every connection from a phone neither paired here nor
+    /// served by the signed word, telling it why with the key it had, so
+    /// a forgotten phone stops at once rather than at its next reconnect.
     fn unpair_forgotten(&mut self) {
         for (&ch, who) in self.phones.iter_mut() {
             let Some((id, key)) = who else {
                 continue;
             };
-            if self.config.phones.iter().any(|p| &p.id == id) {
+            let paired = self.config.phones.iter().any(|p| &p.id == id);
+            if paired || self.served.iter().any(|p| &p.id == id) {
                 continue;
             }
             self.link.send(ch, key, &json!({"t": "unpaired"}));
             *who = None;
+            self.told.remove(&ch);
             self.server.open(ch);
         }
     }
 
-    /// A phone pairing with the ticket: it gets a key of its own, sealed
-    /// with the ticket's, or hears why not.
-    fn pair(&mut self, ch: u32, name: &str, ticket: [u8; 32], now: u64) {
+    /// A phone paired the old way asks to see every brother: its public
+    /// key is vouched for as if it had just paired, and from the answer on
+    /// this PC seals with the key derived from it. The answer goes under
+    /// the old key, which stays good.
+    fn upgrade(&mut self, ch: u32, id: &str, public: &str, now: u64) {
+        let me = self.me();
+        let Some(signer) = self.signer(&me) else {
+            return;
+        };
+        let Some(key) = phoning::derive(&signer.private, public, id, &me, &brothers::Cng) else {
+            self.send(ch, &json!({"t": "error", "text": "That key is no key."}));
+            return;
+        };
+        let mut config = Config::load(&self.dir).unwrap_or_else(|| self.config.clone());
+        let name = match config.phones.iter().find(|p| p.id == id) {
+            Some(p) => p.name.clone(),
+            None => return,
+        };
+        if !config.upgrade(id, public, &key) || config.save(&self.dir).is_err() {
+            return;
+        }
+        self.config = config;
+        mesh::vouch(&self.dir, Some(&signer), id, public, &name, now);
+        let answer = phoning::paired_message("upgraded", id, &me, &signer.private);
+        self.send(ch, &answer);
+        if let Some(Some((_, k))) = self.phones.get_mut(&ch) {
+            *k = key;
+        }
+        self.look_at_word();
+    }
+
+    /// The phone asked to be forgotten: by signed word when it has a key
+    /// pair, so every brother drops it, and here at once.
+    fn forgotten_by_phone(&mut self, ch: u32, id: &str, now: u64) {
+        let public = self
+            .config
+            .phones
+            .iter()
+            .map(|p| (&p.id, &p.public))
+            .chain(self.served.iter().map(|p| (&p.id, &p.public)))
+            .find(|(i, k)| *i == id && !k.is_empty())
+            .map(|(_, k)| k.clone());
+        if let Some(public) = public {
+            let me = self.me();
+            mesh::forget(&self.dir, self.signer(&me).as_ref(), id, &public, now);
+        }
+        let mut config = Config::load(&self.dir).unwrap_or_else(|| self.config.clone());
+        let before = config.phones.len();
+        config.phones.retain(|p| p.id != id);
+        if config.phones.len() != before {
+            let _ = config.save(&self.dir);
+        }
+        self.config = config;
+        self.look_at_word();
+        self.unpair_forgotten();
+        // Still served by a vouch whose forget did not take (no key pair
+        // to sign with): cut off on this channel all the same.
+        if let Some(Some((_, key))) = self.phones.get(&ch) {
+            self.link.send(ch, key, &json!({"t": "unpaired"}));
+            self.phones.insert(ch, None);
+            self.told.remove(&ch);
+            self.server.open(ch);
+        }
+    }
+
+    /// A phone pairing with the ticket. One with a key pair of its own
+    /// (`public`, pairing v3) gets this PC's public key, derives the key
+    /// they share from it, and is vouched for in the signed word, so every
+    /// brother serves it; an older one gets a key of its own, sealed with
+    /// the ticket's. Or it hears why not.
+    fn pair(&mut self, ch: u32, name: &str, ticket: [u8; 32], public: &str, now: u64) {
         // Read again: `horadric portal` may have written since the last look.
         let mut config = Config::load(&self.dir).unwrap_or_else(|| self.config.clone());
         let mut random = [0u8; 40];
         portal_crypto::random(&mut random);
-        let reply = match config.pair(name, &random, now) {
+        let me = self.me();
+        // Before this PC has a key pair, a phone with one pairs the old
+        // way: nothing could vouch for it.
+        let signer = self.signer(&me).filter(|_| !public.is_empty());
+        let paired = match &signer {
+            Some(s) => config.pair_keyed(name, &random, now, public, |id| {
+                phoning::derive(&s.private, public, id, &me, &brothers::Cng)
+            }),
+            None => config.pair(name, &random, now),
+        };
+        let reply = match paired {
             Paired::New(phone) => {
                 if config.save(&self.dir).is_err() {
                     json!({"t": "error", "text": "The PC could not save the pairing."})
@@ -673,7 +888,13 @@ impl Portal {
                     ) {
                         *slot = Some((phone.id.clone(), key));
                     }
-                    json!({"t": "paired", "phone": phone.id, "key": phone.key})
+                    match &signer {
+                        Some(s) => {
+                            mesh::vouch(&self.dir, Some(s), &phone.id, public, &phone.name, now);
+                            phoning::paired_message("paired", &phone.id, &me, &s.private)
+                        }
+                        None => json!({"t": "paired", "phone": phone.id, "key": phone.key}),
+                    }
                 }
             }
             Paired::Used => json!({"t": "error", "code": "used", "text":
@@ -681,9 +902,11 @@ impl Portal {
                  `horadric portal phones` on the PC and forget the phone you do not know."}),
             Paired::Expired => json!({"t": "error", "code": "expired", "text":
                 "This pairing code ran out. Run `horadric portal` on the PC for a new one."}),
+            Paired::BadKey => json!({"t": "error", "text": "This phone's key is no key."}),
         };
         self.link.send(ch, &ticket, &reply);
         self.config = config;
+        self.look_at_word();
     }
 }
 
@@ -814,14 +1037,15 @@ impl Serve for Here<'_> {
         }
     }
 
-    /// A phone the human paired may always act. A brother may when the
-    /// roster says so, which is on unless the human switched it off.
+    /// A phone may act unless "Phones can type here" was switched off. A
+    /// brother may when the roster says so, which is on unless the human
+    /// switched it off.
     fn control(&self, who: &str, _kind: Kind) -> bool {
         let Some(p) = &self.0.portal else {
             return false;
         };
         if !p.brothers.values().any(|b| b == who) {
-            return true;
+            return !horadric_core::standing::Standing::load(&p.dir).phones_watch_only;
         }
         let me = horadric_core::portal::id(&p.config.secret);
         p.roster().is_some_and(|r| r.control(&me, who))
@@ -1048,15 +1272,17 @@ fn seen(dir: &Path, config: &mut Config, id: &str, now: u64) {
     *config = fresh;
 }
 
-/// Takes one phone's sealed message: a pairing goes into `pairs`, the
-/// rest, opened, to the server. A frame no known key opens is dropped.
+/// Takes one phone's sealed message: a pairing goes into `pairs`, an
+/// upgrade or a forget to the portal, the rest, opened, to the server. A
+/// frame no known key opens is dropped.
 fn heard_from(
     p: &mut Portal,
     ch: u32,
     sealed: &[u8],
     now: u64,
-    pairs: &mut Vec<(u32, String, [u8; 32])>,
+    pairs: &mut Vec<(u32, String, [u8; 32], String)>,
 ) {
+    let served: Vec<(String, [u8; 32])> = p.served.iter().map(|k| (k.id.clone(), k.key)).collect();
     let who = p.phones.entry(ch).or_default();
     let (id, key, msg) = match who {
         Some((id, key)) => {
@@ -1067,7 +1293,7 @@ fn heard_from(
             };
             (id.clone(), *key, msg)
         }
-        None => match portal::identify(&p.config, sealed, now) {
+        None => match portal::identify(&p.config, &served, sealed, now) {
             Some((Sender::Phone(id, key), msg)) => {
                 *who = Some((id.clone(), key));
                 (id, key, msg)
@@ -1075,22 +1301,70 @@ fn heard_from(
             Some((Sender::Pairing(key), msg)) => {
                 if msg["t"] == "pair" {
                     let name = msg["name"].as_str().unwrap_or_default().to_string();
-                    pairs.push((ch, name, key));
+                    // Pairing v3 carries the phone's public key.
+                    let public = match (msg["v"].as_u64(), msg["key"].as_str()) {
+                        (Some(v), Some(k)) if v >= 3 => k.to_string(),
+                        _ => String::new(),
+                    };
+                    pairs.push((ch, name, key, public));
                 }
                 return;
             }
             None => return,
         },
     };
+    match msg["t"].as_str() {
+        Some("upgrade") => {
+            if let Some(public) = msg["key"].as_str() {
+                p.upgrade(ch, &id, public, now);
+            }
+            return;
+        }
+        Some("forget") => {
+            p.forgotten_by_phone(ch, &id, now);
+            return;
+        }
+        _ => {}
+    }
+    let mut msg = msg;
     if msg["t"] == "hello" {
         seen(&p.dir, &mut p.config, &id, now);
+        p.told.remove(&ch);
+        // A phone's key opened it, whatever its hello says it is.
+        msg["kind"] = json!("phone");
     }
-    for reply in p
+    // A phone paired the old way hears that this PC could serve it every
+    // brother, once it has a key pair to vouch with.
+    let offer = msg["t"] == "hello" && !p.keyed_phone(&id) && !p.public_key().is_empty();
+    for mut reply in p
         .server
         .heard(ch, &id, &msg, micros(SystemTime::now()), fresh_s)
     {
+        if offer && reply["t"] == "hello" {
+            reply["brotherhood"] = json!(true);
+        }
         p.link.send(ch, &key, &reply);
     }
+}
+
+/// Signs a forget for each phone with a key pair among `gone`, so every
+/// brother that serves it stops. Phones paired the old way were only
+/// ever served here, and need no word.
+fn forget_by_word(dir: &Path, config: &Config, gone: &[horadric_core::portal::Phone], now: u64) {
+    if gone.iter().all(|p| p.public.is_empty()) {
+        return;
+    }
+    let me = horadric_core::portal::id(&config.secret);
+    let signer = Signer::of(dir, &me, &brothers::Cng);
+    for p in gone.iter().filter(|p| !p.public.is_empty()) {
+        mesh::forget(dir, signer.as_ref(), &p.id, &p.public, now);
+    }
+}
+
+/// A colour as 0xRRGGBB, as the page draws a brother's mark.
+fn rgb(c: crate::theme::Color) -> u32 {
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (byte(c.r) << 16) | (byte(c.g) << 8) | byte(c.b)
 }
 
 /// Why a brother may not read a project's files.

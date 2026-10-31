@@ -608,7 +608,7 @@ impl Cluster {
         }
         let s = self.scale();
         match layout::hit(&self.layout.borrow(), p.x as f32 / s, p.y as f32 / s) {
-            Hit::Tile(i) | Hit::Lamp(i) | Hit::Browser(i) | Hit::Code(i) => {
+            Hit::Tile(i) | Hit::Lamp(i) | Hit::Browser(i) | Hit::Code(i) | Hit::Band(i) => {
                 self.sessions().get(i).map(|s| s.id.clone())
             }
             _ => None,
@@ -1070,7 +1070,8 @@ impl Cluster {
                     id: &s.id,
                     phase: &s.phase,
                     y: carried.filter(|_| is_held).map_or(r.y, |l| l.top),
-                    hot: is_held || (pressed.is_none() && hot == Hit::Tile(i)),
+                    hot: is_held
+                        || (pressed.is_none() && (hot == Hit::Tile(i) || hot == Hit::Band(i))),
                     held: is_held,
                     icon: theme::tile_icon(s),
                     context: s
@@ -1394,7 +1395,7 @@ impl Cluster {
                     });
                     return Some(LRESULT(0));
                 }
-                if let Hit::Tile(i) | Hit::Lamp(i) = hit {
+                if let Hit::Tile(i) | Hit::Lamp(i) | Hit::Band(i) = hit {
                     if self.start_lift(i, lparam) {
                         return Some(LRESULT(0));
                     }
@@ -1544,7 +1545,30 @@ impl Cluster {
         let s = self.scale();
         let x = (lparam.0 & 0xffff) as i16 as f32 / s;
         let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32 / s;
-        layout::hit(&self.layout.borrow(), x, y)
+        self.hit_at(x, y)
+    }
+
+    /// What is at `x`, `y` DIPs in. A tile's second line is its hirelings'
+    /// only while it counts them, which the layout does not know.
+    fn hit_at(&self, x: f32, y: f32) -> Hit {
+        let layout = self.layout.borrow();
+        let hit = layout::hit(&layout, x, y);
+        let Hit::Tile(i) = hit else {
+            return hit;
+        };
+        if !layout::band_slot(&layout, i).is_some_and(|r| r.contains(x, y)) {
+            return hit;
+        }
+        let now = std::time::SystemTime::now();
+        let counted = self
+            .sessions()
+            .get(i)
+            .is_some_and(|s| s.band.line(now).is_some());
+        if counted {
+            Hit::Band(i)
+        } else {
+            hit
+        }
     }
 
     /// What the cursor is over right now, wherever it is.
@@ -1555,7 +1579,7 @@ impl Cluster {
             let _ = ScreenToClient(self.hwnd, &mut p);
         }
         let s = self.scale();
-        layout::hit(&self.layout.borrow(), p.x as f32 / s, p.y as f32 / s)
+        self.hit_at(p.x as f32 / s, p.y as f32 / s)
     }
 
     /// Asks for a WM_MOUSELEAVE, which Windows sends once per asking.
@@ -1589,7 +1613,7 @@ impl Cluster {
             Hit::Task(i) => self
                 .item_at(i)
                 .map(|item| Cow::Owned(tip::quest(&item.title, item.why.as_deref()))),
-            Hit::Tile(i) => {
+            Hit::Tile(i) | Hit::Band(i) => {
                 let now = std::time::SystemTime::now();
                 let hirelings = self
                     .sessions()
@@ -1814,6 +1838,11 @@ impl Cluster {
             Hit::Lamp(i) => {
                 if let Some(s) = self.sessions().get(i) {
                     app::push(Input::Park(s.id.clone()));
+                }
+            }
+            Hit::Band(i) => {
+                if let Some(s) = self.sessions().get(i) {
+                    app::push(Input::WarTable(s.id.clone()));
                 }
             }
             Hit::Browser(i) => {

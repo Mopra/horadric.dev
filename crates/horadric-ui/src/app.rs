@@ -441,6 +441,9 @@ pub(crate) enum Input {
     /// A portrait in a pane's retinue: show the conversation of the hireling
     /// with the second id, of the session with the first, beside it.
     OpenHireling(String, String),
+    /// A tile's line counting its hirelings: show the session and lay its
+    /// war table over its pane.
+    WarTable(String),
     /// A hireling's pane's cross or Esc, by its Folio's id.
     CloseWatch(String),
     /// The chat button under a project's tiles: a new Folio, a headless
@@ -453,11 +456,25 @@ pub(crate) enum Input {
     Limits(Limits),
     /// A Folio's session changed what its tile should say.
     FolioState(String, crate::folio::State),
+    /// `/all` in a Folio: the prompt to every Folio of the project, by its
+    /// key, and the session it was typed in.
+    FolioAll(String, String, String),
     /// A Folio's "Terminal": end it between turns and carry the session on
     /// in a terminal.
     FolioToTerminal(String),
     /// A Folio handed over has ended: its terminal starts now.
     FolioHandedOver(String),
+    /// A Folio's Edit or Rewind on a prompt: its conversation forks just
+    /// before the `back`th prompt from the end, which says `text`, its
+    /// files go back to then, and it goes on with `resend` when given.
+    FolioFork {
+        id: String,
+        back: usize,
+        text: String,
+        resend: Option<String>,
+    },
+    /// How putting back a Folio's files for a fork went.
+    FolioFilesRewound(String, Result<(), String>),
     /// A Folio's claude.exe ended to read a new login: it starts again on
     /// its conversation, shown on the stage when true.
     FolioRestart(String, bool),
@@ -909,6 +926,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             backup_busy: None,
             backup_done: Arc::new(Mutex::new(Vec::new())),
             backup_checked: None,
+            catch_up_alone: None,
+            catch_up_last: None,
+            catch_up_busy: Arc::default(),
             backup_step: None,
             backup_note: backup_started(),
             settings_project: None,
@@ -1568,6 +1588,21 @@ fn tray_menu(hwnd: HWND) {
             }
             Some(Err(why)) => {
                 with_app(|app| app.toasts.show(Kind::Failed, "Cannot join that node", &why));
+            }
+            None => {}
+        },
+        Some(Choice::Rename) => match far::ask_name() {
+            Some(Ok(name)) => {
+                with_app(|app| {
+                    app.toasts.show(
+                        Kind::Done,
+                        &format!("This PC is {name} now"),
+                        "Brothers hear it within a round, phones at their next link.",
+                    )
+                });
+            }
+            Some(Err(why)) => {
+                with_app(|app| app.toasts.show(Kind::Failed, "Cannot use that name", &why));
             }
             None => {}
         },
@@ -3052,10 +3087,16 @@ fn history_items(past: &[Past], first: usize) -> Vec<Item> {
 }
 
 /// Town Portal's key clicked. Closed, it opens the portal and shows the
-/// code a phone scans; open, it offers another code or closing it.
+/// code a phone scans; open, it is the one menu of the brotherhood and its
+/// phones: the brothers as the tray lists them, each phone with who
+/// vouched for it and "Forget everywhere", another code, whether phones
+/// may type here, and closing the portal.
 fn portal_key() {
     const PAIR: usize = 1;
     const CLOSE: usize = 2;
+    const TYPE: usize = 3;
+    const FORGET: usize = 9900;
+    const PHONES: usize = 99;
     let Some(dir) = horadric_hooks::state_dir() else {
         return;
     };
@@ -3069,14 +3110,46 @@ fn portal_key() {
         .trim_start_matches("wss://")
         .trim_start_matches("ws://")
         .to_string();
-    let items = [
+    let brothers = crate::tray::BrotherLines::now();
+    let phones = crate::portal_pair::known_phones(&dir);
+    let mut items = vec![
         Item::Disabled(format!("Town Portal, through {host}")),
         Item::Separator,
-        Item::action(PAIR, "Pair a phone..."),
-        Item::action(CLOSE, "Close the portal"),
     ];
+    items.extend(brothers.items.iter().cloned());
+    items.push(Item::Separator);
+    if phones.is_empty() {
+        items.push(Item::Disabled("No phone is paired".into()));
+    }
+    for (i, k) in phones.iter().take(PHONES).enumerate() {
+        let by = crate::portal_pair::vouched_by(&dir, k);
+        let label = match (k.public.is_empty(), by.is_empty()) {
+            (true, _) => format!("{}\tthis PC only", k.name),
+            (false, true) => k.name.clone(),
+            (false, false) => format!("{}\tpaired by {by}", k.name),
+        };
+        items.push(Item::Submenu(
+            label,
+            vec![Item::action(FORGET + i, "Forget everywhere\u{2026}")],
+        ));
+    }
+    items.push(Item::Separator);
+    items.push(Item::action(PAIR, "Pair a phone..."));
+    items.push(Item::Action {
+        id: TYPE,
+        label: "Phones can type here".into(),
+        checked: crate::portal_pair::phones_type(&dir),
+        bold: false,
+    });
+    items.push(Item::action(CLOSE, "Close the portal"));
     match menu::popup(&items) {
         Some(PAIR) => portal_pair(&dir),
+        Some(TYPE) => {
+            let on = !crate::portal_pair::phones_type(&dir);
+            if let Err(e) = crate::portal_pair::set_phones_type(&dir, on) {
+                eprintln!("horadric: {e}");
+            }
+        }
         Some(CLOSE) => {
             if let Some(mut c) = horadric_core::portal::Config::load(&dir) {
                 c.enabled = false;
@@ -3087,8 +3160,54 @@ fn portal_key() {
             }
             with_app(|app| app.portal_soon());
         }
-        _ => {}
+        Some(i) if (FORGET..FORGET + PHONES).contains(&i) => {
+            if let Some(k) = phones.get(i - FORGET) {
+                forget_phone(&dir, k);
+            }
+        }
+        Some(i) => match brothers.pick(i) {
+            Some(Choice::Control(id, on)) => set_control(&id, on),
+            Some(Choice::CastOut(id, name)) => {
+                let (line, mine) = crate::brothers::line_of(&id);
+                if confirm_cast_out(&name, &line, mine) {
+                    cast_out(&id);
+                }
+            }
+            _ => {}
+        },
+        None => {}
     }
+}
+
+/// "Forget everywhere": asked first, Cancel the default, since the phone
+/// must be paired again by a code to come back.
+fn forget_phone(dir: &std::path::Path, k: &horadric_core::phoning::Known) {
+    let text = format!(
+        "{} is cut off from every brother, and must scan a new code to come back.",
+        k.name
+    );
+    let answer = ask(&Dialog {
+        tone: Tone::Warning,
+        title: "Forget this phone everywhere?",
+        text: &text,
+        buttons: &["Forget everywhere", "Cancel"],
+        default: 1,
+        check: None,
+    });
+    if answer != Some(0) {
+        return;
+    }
+    if let Err(e) = crate::portal_pair::forget_everywhere(dir, &k.id) {
+        ask(&Dialog {
+            tone: Tone::Error,
+            title: "The phone was not forgotten",
+            text: &e,
+            buttons: &["OK"],
+            default: 0,
+            check: None,
+        });
+    }
+    with_app(|app| app.portal_soon());
 }
 
 /// Opens the portal if it is closed and shows a new code to pair with.
@@ -3430,6 +3549,12 @@ struct App {
     backup_busy: Option<String>,
     backup_done: Arc<Mutex<Vec<crate::backup::run::Done>>>,
     backup_checked: Option<Instant>,
+    /// The shared lore's catch up from the other machines' backups: since
+    /// when no brother has been linked, when it last ran (Unix seconds),
+    /// and whether it runs now.
+    catch_up_alone: Option<u64>,
+    catch_up_last: Option<u64>,
+    catch_up_busy: Arc<std::sync::atomic::AtomicBool>,
     /// Where a restore is, between its questions.
     backup_step: Option<RestoreStep>,
     /// What start found of a restore staged last time: whether it failed,
@@ -6186,6 +6311,7 @@ impl App {
         if let Some(state) = horadric_hooks::state_dir() {
             self.backup_cfg = crate::backup::Config::load(&state);
         }
+        self.catch_up_tick();
         let cfg = &self.backup_cfg;
         if crate::backup::run::due(
             cfg,
@@ -6195,6 +6321,46 @@ impl App {
             self.backup_now();
             self.refresh_settings();
         }
+    }
+
+    /// Catches the shared lore up from the other machines' backups when
+    /// this PC has brothers and none of them has been linked for a while:
+    /// the backup stands in for the brother that never sleeps.
+    fn catch_up_tick(&mut self) {
+        use std::sync::atomic::Ordering;
+        let now = crate::backup::run::unix_now();
+        let has_brothers = horadric_hooks::state_dir()
+            .and_then(|d| horadric_core::joining::Store::load(&d))
+            .is_some_and(|s| !s.brothers.is_empty());
+        let alone = has_brothers && crate::brothers::sees().is_empty() && !self.far_any_linked();
+        self.catch_up_alone = match (alone, self.catch_up_alone) {
+            (false, _) => None,
+            (true, since) => Some(since.unwrap_or(now)),
+        };
+        let cfg = &self.backup_cfg;
+        let due = crate::backup::run::catch_up_due(
+            cfg,
+            crate::backup::run::ready(cfg),
+            self.catch_up_alone,
+            self.catch_up_last,
+            now,
+        );
+        if !due || self.catch_up_busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.catch_up_last = Some(now);
+        let (cfg, dirs, busy) = (cfg.clone(), self.tile_dirs(), self.catch_up_busy.clone());
+        std::thread::spawn(move || {
+            if let Some(state) = horadric_hooks::state_dir() {
+                let lores = horadric_memory::sharing::Lores::of(dirs);
+                match crate::backup::run::catch_up(&state, &cfg, &lores, now) {
+                    Ok(0) => {}
+                    Ok(n) => eprintln!("horadric: caught the lore up from backups: {n} entries"),
+                    Err(e) => eprintln!("horadric: cannot catch the lore up from backups: {e}"),
+                }
+            }
+            busy.store(false, Ordering::SeqCst);
+        });
     }
 
     /// Hands the Settings window the settings again, after a change.
@@ -7820,7 +7986,7 @@ impl App {
         let mut flags = horadric_core::folio::headless_args(&all, subagents);
         // Not kept in `own`: an undo rewinds this start only.
         let rewound = folio_tile::rewound(id);
-        flags.extend(rewound.iter().flat_map(folio_tile::flags));
+        flags.extend(rewound.iter().flat_map(|(r, fork)| folio_tile::flags(r, *fork)));
         let mut env_set = vec![
             (horadric_hooks::SESSION_ENV.to_string(), id.to_string()),
             (
@@ -7829,6 +7995,10 @@ impl App {
             ),
         ];
         env_set.extend(session_env(id, own_tree.as_ref(), &dir));
+        // The CLI keeps what each prompt's edits overwrote only when told
+        // to off a terminal, and a rewind to an earlier prompt puts the
+        // files back from that.
+        env_set.push(("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".into(), "1".into()));
         env_set.extend(self.shared.defaults().env());
         let mut options = horadric_pty::headless::Options {
             args: flags,
@@ -7857,7 +8027,7 @@ impl App {
             name: name.to_string(),
             resume,
             history: 0,
-            at: rewound.and_then(|r| r.keep),
+            at: rewound.and_then(|(r, _)| r.keep),
         };
         if let Err(e) = crate::folio::open_with(id, &dir, tag, &options, start.prompt) {
             // A tile that was there before, a terminal going on as a chat or
@@ -7972,6 +8142,14 @@ impl App {
             session.loot.outstanding.clear();
         }
         session.stream_agents = state.agents.clone();
+        // A terminal's title comes from the transcript as hooks fire; a
+        // Folio's from its stream as soon as the CLI made one up.
+        if let (Some(t), None) = (&state.title, &session.title) {
+            session.title = Some(horadric_core::title::Title {
+                text: t.clone(),
+                custom: false,
+            });
+        }
         if let Some(status) = state.status() {
             session.status = Some(status);
         }
@@ -8017,25 +8195,40 @@ impl App {
     }
 
     /// A Folio handed over has ended: the same tile resumes its
-    /// conversation in a terminal.
+    /// conversation in a terminal, or starts one afresh when it never had
+    /// one.
     fn folio_handed_over(&mut self, id: &str) {
         if self.folio_rewind_ended(id) {
             return;
         }
-        let conversation = crate::folio::conversation(id);
+        // A stream the Folio could not read never named its conversation,
+        // but the hooks still did.
+        let conversation = crate::folio::conversation(id).or_else(|| {
+            let r = self.shared.registry.lock().ok()?;
+            r.get(id)?.claude_session_id.clone()
+        });
+        let unreadable = crate::folio::unreadable(id);
         crate::folio::close(id);
         self.folios.remove(id);
         let own = self.folio_args.remove(id).unwrap_or_default();
-        let (Some(conversation), Some(dir)) = (conversation, self.dir_of(id)) else {
+        let Some(dir) = self.dir_of(id) else {
             return;
         };
         let name = self.name_of(id);
-        let args = Agent::Claude.carry_on(Some(&conversation), &own);
+        let args = Agent::Claude.carry_on(conversation.as_deref(), &own);
         if let Err(e) = self.launch(id, &name, dir, args, Run::Agent(Agent::Claude), true) {
             eprintln!("horadric: cannot open {id} in a terminal: {e}");
             return;
         }
-        if let Ok(mut r) = self.shared.registry.lock() {
+        if unreadable {
+            self.toasts.show(
+                Kind::Info,
+                "Opened in a terminal",
+                "Horadric could not read this Claude's chat stream. Should every chat fail \
+                 so, the setting \"New Claude sessions open in a terminal\" turns them off.",
+            );
+        }
+        if let (Some(conversation), Ok(mut r)) = (conversation, self.shared.registry.lock()) {
             if let Some(s) = r.get_mut(id) {
                 s.claude_session_id = Some(conversation);
                 s.prompted = true;
@@ -9182,13 +9375,32 @@ impl App {
                 }
                 Input::CloseSky(key) => self.close_sky(&key),
                 Input::OpenHireling(session, agent) => self.open_hireling(&session, &agent),
+                Input::WarTable(id) => {
+                    self.reveal(&id, false);
+                    // A session that is resumed or attached first has no
+                    // pane yet, and shows without its table.
+                    if let Some(stage) = &self.stage {
+                        stage.war_table(&id);
+                    }
+                }
                 Input::CloseWatch(id) => self.close_watch(&id),
                 Input::Folio(key) => self.open_folio(&key),
                 Input::CloseFolio(id) => self.close_folio(&id),
                 Input::Limits(limits) => self.hear_limits(&limits),
                 Input::FolioState(id, state) => self.folio_state(&id, state),
+                Input::FolioAll(key, from, text) => {
+                    let n = crate::folio::broadcast(&key, &text);
+                    crate::folio::say(&from, &format!("Sent to {}.", plural(n, "chat")));
+                }
                 Input::FolioToTerminal(id) => self.folio_to_terminal(&id),
                 Input::FolioHandedOver(id) => self.folio_handed_over(&id),
+                Input::FolioFork {
+                    id,
+                    back,
+                    text,
+                    resend,
+                } => self.folio_fork(&id, back, &text, resend),
+                Input::FolioFilesRewound(id, how) => self.folio_files_rewound(&id, how),
                 Input::FolioRestart(id, show) => self.folio_restart(&id, show),
                 Input::FolioAddDir(id, dir) => {
                     let own = self.folio_args.entry(id.clone()).or_default();

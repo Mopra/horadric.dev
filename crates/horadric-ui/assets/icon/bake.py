@@ -1,7 +1,8 @@
 """Bakes the Horadric icon from stone.html, the ray marched rune stone.
 
-Run it after changing the stone: `python crates/horadric-ui/assets/icon/bake.py`.
-Needs Microsoft Edge (it renders the page headless, on the GPU) and Pillow.
+Run it after changing the stone: `python crates/horadric-ui/assets/icon/bake.py`,
+and `bake.py turning` for the hirelings' turning stone.
+Needs Microsoft Edge or Google Chrome (it renders the page headless, on the GPU) and Pillow.
 
 Writes, beside this file:
 
@@ -21,7 +22,10 @@ import sys
 from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+BROWSERS = [
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+]
 
 # Must match LAYERED in icon.rs.
 LAYERED = [16, 20, 24, 32, 40, 48, 64, 96, 128]
@@ -39,15 +43,26 @@ def bright(size):
     return 2.2 if size <= SIMPLE_BELOW else 1.6 if size <= 64 else 1.0
 
 
-def render(px, light, simple=False, zoom=1.0, bright=1.0):
+def render(px, light, simple=False, zoom=1.0, bright=1.0, yaw=None):
     """The page rendered at `px` square, premultiplied."""
     url = "file:///" + os.path.join(HERE, "stone.html").replace("\\", "/")
     url += f"?bake=1&px={px}&light={light}&simple={1 if simple else 0}&zoom={zoom}&bright={bright}"
-    out = subprocess.run(
-        [EDGE, "--headless=new", "--use-angle=d3d11", "--ignore-gpu-blocklist",
-         "--virtual-time-budget=20000", "--dump-dom", url],
-        capture_output=True, text=True, check=True).stdout
-    found = re.search(r"data:image/png;base64,([A-Za-z0-9+/=]+)", out)
+    if yaw is not None:
+        url += f"&yaw={yaw}"
+    found = None
+    # Edge's headless mode sometimes returns an empty page while Edge itself
+    # runs, so Chrome is the fallback.
+    for browser in BROWSERS:
+        if not os.path.exists(browser):
+            continue
+        out = subprocess.run(
+            [browser, "--headless=new", "--use-angle=d3d11", "--ignore-gpu-blocklist",
+             "--user-data-dir=" + os.path.join(os.environ.get("TEMP", HERE), "horadric-bake-" + os.path.basename(browser)),
+             "--virtual-time-budget=20000", "--dump-dom", url],
+            capture_output=True, text=True, check=True).stdout
+        found = re.search(r"data:image/png;base64,([A-Za-z0-9+/=]+)", out)
+        if found:
+            break
     if not found:
         sys.exit(f"no image from the page for {px} {light}")
     im = Image.open(io.BytesIO(base64.b64decode(found.group(1)))).convert("RGBA")
@@ -59,6 +74,34 @@ def render(px, light, simple=False, zoom=1.0, bright=1.0):
 def shrink(im, size):
     """Box filtered, in premultiplied space, so the edge does not darken."""
     return im.reduce(im.width // size)
+
+
+# The turning stone of a hireling's portrait: TURN_FRAMES turns of the icon
+# stone, TURN_STEP degrees apart from its own angle, TURN_SIZE square. Must
+# match turning.rs.
+TURN_FRAMES = 72
+TURN_STEP = 5
+TURN_SIZE = 64
+REST_YAW = 52
+
+
+def turning():
+    """Writes `turning.bin`: per frame, per pixel, the stone premultiplied as
+    red, green, blue and alpha, then its runes' light."""
+    out = bytearray()
+    for i in range(TURN_FRAMES):
+        yaw = REST_YAW + i * TURN_STEP
+        stone = shrink(render(TURN_SIZE * 4, "none", zoom=1.3, bright=1.6, yaw=yaw), TURN_SIZE)
+        lit = shrink(render(TURN_SIZE * 4, "white", zoom=1.3, bright=1.6, yaw=yaw), TURN_SIZE)
+        s, w = stone.tobytes(), lit.tobytes()
+        for j in range(0, len(s), 4):
+            sr, sg, sb, sa = s[j:j + 4]
+            wr, wg, wb, _ = w[j:j + 4]
+            glow = min(255, max(0, (wr - sr + wg - sg + wb - sb) // 3) * 2)
+            out += bytes([sr, sg, sb, sa, glow])
+        print(f"turn {i + 1}/{TURN_FRAMES}", flush=True)
+    with open(os.path.join(HERE, "turning.bin"), "wb") as f:
+        f.write(out)
 
 
 def main():
@@ -89,4 +132,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["turning"]:
+        turning()
+    else:
+        main()

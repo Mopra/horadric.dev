@@ -881,6 +881,13 @@ impl TerminalWindow {
             .map(|p| (Arc::clone(p.console()), p.name()))
     }
 
+    /// Lays the war table over this session's pane, if it has one here.
+    pub fn war_table(&self, id: &str) {
+        if let Some(p) = self.panes.borrow().iter().find(|p| p.session() == id) {
+            p.open_war_table();
+        }
+    }
+
     /// Puts `text` in this session's prompt as a paste, not sent, and gives
     /// it the keyboard so the human can say what to do with it.
     pub fn hand(&self, id: &str, text: &str) -> bool {

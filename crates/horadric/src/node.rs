@@ -1002,6 +1002,7 @@ fn serving(mut machine: Machine, heard: mpsc::Receiver<Event>, events: Sender<Ev
         Some(Link::Relay(ch)) => {
             relay::reply(*ch, msg);
         }
+        Some(Link::Phone(ch)) => relay::phone_reply(*ch, msg),
         None => {}
     };
     loop {
@@ -1112,6 +1113,9 @@ enum Link {
     Pipe(Sender<Vec<u8>>),
     /// A brother over the relay, on this relay channel, sealed.
     Relay(u32),
+    /// A phone the word vouches for, on this relay channel, sealed with
+    /// the key derived for it.
+    Phone(u32),
 }
 
 /// What the relay link said of a brother's channel, done on the serving
@@ -1163,15 +1167,44 @@ fn relayed(
             machine.kin.heard.remove(&id);
         }
         relay::Said::Moved { owners } => machine.keeping_moved(owners),
+        relay::Said::Phone { ch, id, mut msg } => {
+            let ich = relay::inner(ch);
+            // A phone's key opened it, whatever its hello says it is.
+            if msg["t"] == "hello" {
+                msg["kind"] = json!("phone");
+            }
+            if !links.contains_key(&ich) {
+                server.open(ich);
+                links.insert(ich, Link::Phone(ch));
+            }
+            let who = format!("{}{id}", relay::PHONE);
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            let back = server.heard(ich, &who, &msg, now.as_micros() as u64, || {
+                wire::fresh_s(now.as_nanos(), ich)
+            });
+            for m in back {
+                relay::phone_reply(ch, &m);
+            }
+        }
+        relay::Said::PhoneDown { ch } => {
+            let ich = relay::inner(ch);
+            if links.remove(&ich).is_some() {
+                server.close(ich);
+            }
+        }
     }
 }
 
 /// What the node calls itself in its hello and on the relay:
-/// `HORADRIC_PC_NAME`, as a PC's, else the machine's host name.
+/// `HORADRIC_PC_NAME`, as a PC's, else the name chosen with `horadric
+/// name`, else the machine's host name.
 fn machine_name() -> String {
     let env = std::env::var("HORADRIC_PC_NAME").ok();
+    let chosen = horadric_hooks::state_dir().and_then(|d| horadric_core::naming::chosen(&d));
     let host = std::fs::read_to_string("/proc/sys/kernel/hostname").ok();
-    wire::node_name(env.as_deref(), host.as_deref())
+    wire::node_name(env.as_deref(), chosen.as_deref(), host.as_deref())
 }
 
 /// `horadric node --stdio`: the preamble, then frames both ways between

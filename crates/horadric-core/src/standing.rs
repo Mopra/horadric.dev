@@ -39,6 +39,12 @@ pub struct Standing {
     /// so it shrinks as well as grows.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub barred: BTreeSet<String>,
+    /// "Phones can type here" switched off: a phone sees this machine's
+    /// tiles and screens and changes nothing. Off by default, so phones
+    /// can type, as the plan sets; a VPS nobody sits at may be made
+    /// watch only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub phones_watch_only: bool,
 }
 
 impl Standing {
