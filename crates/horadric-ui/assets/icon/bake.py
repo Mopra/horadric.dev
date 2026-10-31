@@ -28,15 +28,21 @@ LAYERED = [16, 20, 24, 32, 40, 48, 64, 96, 128]
 FINISHED = [256, 512, 1024]
 # Below this the runes are cut thicker, so the light still reads in the tray.
 SIMPLE_BELOW = 24
-# Icons fill more of their square than the page's view does, the smallest most.
+# Icons fill their square, as the icons beside them in the taskbar do.
 def zoom(size):
-    return 1.3 if size <= 32 else 1.12
+    return 1.33 if size <= 16 else 1.36
 
 
-def render(px, light, simple=False, zoom=1.0):
+# Small, the stone is lit more, or its dark sides vanish into a dark taskbar
+# and only the runes are left to see.
+def bright(size):
+    return 2.2 if size <= SIMPLE_BELOW else 1.6 if size <= 64 else 1.0
+
+
+def render(px, light, simple=False, zoom=1.0, bright=1.0):
     """The page rendered at `px` square, premultiplied."""
     url = "file:///" + os.path.join(HERE, "stone.html").replace("\\", "/")
-    url += f"?bake=1&px={px}&light={light}&simple={1 if simple else 0}&zoom={zoom}"
+    url += f"?bake=1&px={px}&light={light}&simple={1 if simple else 0}&zoom={zoom}&bright={bright}"
     out = subprocess.run(
         [EDGE, "--headless=new", "--use-angle=d3d11", "--ignore-gpu-blocklist",
          "--virtual-time-budget=20000", "--dump-dom", url],
@@ -59,8 +65,8 @@ def main():
     layers = bytearray()
     for size in LAYERED:
         simple = size <= SIMPLE_BELOW
-        stone = shrink(render(size * 4, "none", simple, zoom(size)), size)
-        lit = shrink(render(size * 4, "white", simple, zoom(size)), size)
+        stone = shrink(render(size * 4, "none", simple, zoom(size), bright(size)), size)
+        lit = shrink(render(size * 4, "white", simple, zoom(size), bright(size)), size)
         s, w = stone.tobytes(), lit.tobytes()
         for i in range(0, len(s), 4):
             sr, sg, sb, sa = s[i:i + 4]

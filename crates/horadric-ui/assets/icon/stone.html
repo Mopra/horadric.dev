@@ -36,7 +36,7 @@ const FS = `#version 300 es
 precision highp float;
 uniform vec2 res;
 uniform vec3 lightCol;
-uniform float yaw, pitch, rough, chips, glowK, seed, simple, stoneOnly, zoom;
+uniform float yaw, pitch, rough, chips, glowK, seed, simple, stoneOnly, zoom, bright;
 out vec4 frag;
 
 float h31(vec3 p) { p = fract(p * .3183099 + .1); p *= 17.; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
@@ -110,6 +110,8 @@ void main() {
   float cy = cos(yaw), sy = sin(yaw), cp = cos(pitch), sp = sin(pitch);
   vec3 ro = 6.2 * vec3(cp * sy, sp, -cp * cy);
   vec3 fw = normalize(-ro), rt = normalize(cross(vec3(0,1,0), fw)), up = cross(fw, rt);
+  // Seen from above, the stone's middle is below the view's; zoomed in, that shows, so lift it back.
+  uv.y -= (zoom - 1.) * .21;
   vec3 rd = normalize(fw + (uv.x * rt + uv.y * up) * .3 / zoom);
   vec3 key = normalize(-.55 * rt + .85 * up - .35 * fw);
   vec3 rim = normalize(.75 * rt + .35 * up + .7 * fw);
@@ -141,7 +143,7 @@ void main() {
     float rimL = pow(max(dot(n, rim), 0.), 2.);
     vec3 h = normalize(key - rd);
     float spec = pow(max(dot(n, h), 0.), 28.) * .06;
-    col = alb * (vec3(1., .96, .9) * 3.9 * dif * sh + vec3(.55, .65, .9) * 2.1 * rimL * ao + vec3(.5, .55, .7) * .22 * ao);
+    col = alb * bright * (vec3(1., .96, .9) * 3.9 * dif * sh + vec3(.55, .65, .9) * 2.1 * bright * rimL * ao + vec3(.5, .55, .7) * .22 * ao);
     col += vec3(1., .96, .9) * spec * sh * (1. - inCut);
     // The rune's light on the stone around it.
     col += L * alb * 30. * exp(-r * 16.) * ao * glowK;
@@ -177,7 +179,7 @@ const loc = gl.getAttribLocation(prog, 'pos'); gl.enableVertexAttribArray(loc); 
 const U = n => gl.getUniformLocation(prog, n);
 
 const val = id => +document.getElementById(id).value;
-function renderGL(px, light, simple, stoneOnly = false, zoom = 1) {
+function renderGL(px, light, simple, stoneOnly = false, zoom = 1, bright = 1) {
   glc.width = glc.height = px;
   gl.viewport(0, 0, px, px);
   gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
@@ -192,6 +194,7 @@ function renderGL(px, light, simple, stoneOnly = false, zoom = 1) {
   gl.uniform1f(U('simple'), simple ? 1 : 0);
   gl.uniform1f(U('stoneOnly'), stoneOnly ? 1 : 0);
   gl.uniform1f(U('zoom'), zoom);
+  gl.uniform1f(U('bright'), bright);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 // Render big, then step down by halves, the way an icon is baked.
@@ -246,7 +249,7 @@ if (q.has('light')) current = q.get('light');
 if (q.has('bake')) {
   // Used by bake.py: render one layer and leave it in the page as a data URL.
   const px = +q.get('px'), light = q.get('light');
-  renderGL(px, light, q.get('simple') === '1', light === 'none', +(q.get('zoom') || 1));
+  renderGL(px, light, q.get('simple') === '1', light === 'none', +(q.get('zoom') || 1), +(q.get('bright') || 1));
   const out = document.createElement('pre'); out.id = 'baked';
   out.textContent = glc.toDataURL('image/png');
   document.body.append(out);
