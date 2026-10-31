@@ -8768,7 +8768,7 @@ impl App {
             .unwrap_or((0, 0, false));
         match self.tray.breathe(working) {
             Some(true) => unsafe {
-                SetTimer(Some(self.notify), BREATH_TIMER, tray::BREATH_STEP_MS, None);
+                SetTimer(Some(self.notify), BREATH_TIMER, tray::FLAME_STEP_MS, None);
             },
             Some(false) => unsafe {
                 let _ = KillTimer(Some(self.notify), BREATH_TIMER);

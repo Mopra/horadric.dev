@@ -71,6 +71,100 @@ pub fn lit(size: u32, light: u32) -> Vec<u32> {
     premul.iter().map(|&p| straight(p)).collect()
 }
 
+/// The stone with its runes on fire, `phase` of the way through one loop of
+/// the flames: 0 and 1 are the same frame, so the frames cycle seamlessly.
+///
+/// The fire is the runes' own light, nothing laid over the icon: each stroke
+/// burns unevenly with noise that rises through it, ember dark where it is
+/// cool and white where it is hottest, and short tongues lick up off the
+/// strokes. The tongues stay on the stone, since colour is clamped to its
+/// alpha.
+pub fn burning(size: u32, light: u32, phase: f32) -> Vec<u32> {
+    let size = size.max(1);
+    let phase = phase.rem_euclid(1.0);
+    let (baked, offset) = layered_for(size);
+    let b = baked as usize;
+    let data = &LAYERS[offset..offset + b * b * 6];
+    let l = [(light >> 16) & 0xff, (light >> 8) & 0xff, light & 0xff].map(|c| c as f32 / 255.0);
+    let k = l[0].max(l[1]).max(l[2]);
+    let glow: Vec<f32> = data.chunks_exact(6).map(|p| p[4] as f32 / 255.0).collect();
+    // Tongues about a tenth of the icon tall, never under two pixels or the
+    // tray's 16 px icon would show none.
+    let scale = size as f32 / baked as f32;
+    let reach = ((size as f32 / 10.0).clamp(2.0, 6.0) / scale).round().max(1.0) as usize;
+    let premul: Vec<[f32; 4]> = (0..b * b)
+        .map(|i| {
+            let (x, y) = (i % b, i / b);
+            let [r, g, bl, a, gl, halo] = [0, 1, 2, 3, 4, 5].map(|c| data[i * 6 + c] as f32 / 255.0);
+            let n = flame(x as f32 / b as f32, y as f32 / b as f32, phase);
+            let lick = (1..=reach)
+                .filter(|d| y + d < b)
+                .map(|d| glow[(y + d) * b + x] * (1.0 - d as f32 / (reach + 1) as f32))
+                .fold(0.0, f32::max);
+            let heat = gl * (0.5 + 0.9 * n) + lick * smooth(0.5, 0.9, n) * 0.9;
+            let fire = ramp(l, heat);
+            let a = (a + halo * k * (0.6 + 0.5 * n)).min(1.0);
+            [(r + fire[0]).min(a), (g + fire[1]).min(a), (bl + fire[2]).min(a), a]
+        })
+        .collect();
+    let premul = resample(&premul, b, size as usize);
+    premul.iter().map(|&p| straight(p)).collect()
+}
+
+/// How the flames burn at `(u, v)`, both 0 to 1 across the icon, from 0 to
+/// 1. Two octaves of value noise scroll up through the icon, the finer one
+/// twice as fast, each wrapping vertically after a whole number of loops so
+/// `phase` 1 meets `phase` 0. A flicker shared by the whole fire rides on
+/// top.
+fn flame(u: f32, v: f32, phase: f32) -> f32 {
+    use std::f32::consts::TAU;
+    const CELLS: f32 = 6.0;
+    let sway = 0.35 * (TAU * phase + v * 5.0).sin();
+    let coarse = value_noise(u * CELLS + sway, (v + phase) * CELLS, CELLS as i32, 11);
+    let fine = value_noise(u * CELLS * 2.0 - sway, (v + 2.0 * phase) * CELLS * 2.0, 2 * CELLS as i32, 29);
+    let flicker = 0.1 * (TAU * 3.0 * phase).sin() + 0.06 * (TAU * 7.0 * phase + 1.3).sin();
+    (0.65 * coarse + 0.35 * fine + flicker).clamp(0.0, 1.0)
+}
+
+/// Smooth value noise from 0 to 1, repeating every `period` cells in `y`.
+fn value_noise(x: f32, y: f32, period: i32, seed: u32) -> f32 {
+    let (x0, y0) = (x.floor(), y.floor());
+    let (fx, fy) = (x - x0, y - y0);
+    let (sx, sy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
+    let at = |dx: i32, dy: i32| lattice(x0 as i32 + dx, (y0 as i32 + dy).rem_euclid(period), seed);
+    let top = at(0, 0) + (at(1, 0) - at(0, 0)) * sx;
+    let bottom = at(0, 1) + (at(1, 1) - at(0, 1)) * sx;
+    top + (bottom - top) * sy
+}
+
+fn lattice(x: i32, y: i32, seed: u32) -> f32 {
+    let mut h = (x as u32).wrapping_mul(0x8da6_b343) ^ (y as u32).wrapping_mul(0xd816_3841) ^ seed.wrapping_mul(0xcb1a_b31f);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0x5bd1_e995);
+    h ^= h >> 15;
+    (h & 0xffff) as f32 / 65535.0
+}
+
+/// The fire's colour at this heat, premultiplied: dark ember red below
+/// half, the light itself at 1, then on toward white.
+fn ramp(l: [f32; 3], heat: f32) -> [f32; 3] {
+    let ember = [l[0] * 0.8, l[1] * 0.3, l[2] * 0.12];
+    let white = l.map(|c| c + (1.0 - c) * 0.75);
+    let lerp = |a: [f32; 3], b: [f32; 3], t: f32| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t);
+    if heat < 0.5 {
+        ember.map(|c| c * heat / 0.5)
+    } else if heat < 1.0 {
+        lerp(ember, l, (heat - 0.5) / 0.5)
+    } else {
+        lerp(l, white, ((heat - 1.0) / 0.3).min(1.0))
+    }
+}
+
+fn smooth(from: f32, to: f32, x: f32) -> f32 {
+    let t = ((x - from) / (to - from)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// The smallest baked size not below `size`, and where it starts in
 /// `LAYERS`. Above the largest, the largest.
 fn layered_for(size: u32) -> (u32, usize) {
@@ -189,6 +283,24 @@ mod tests {
         for p in resample(&src, 20, 7) {
             for (c, want) in p.iter().zip([0.25, 0.5, 0.75, 1.0]) {
                 assert!((c - want).abs() < 1e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn the_flames_loop_and_move() {
+        for size in [16, 32] {
+            assert_eq!(burning(size, GOLD, 0.0), burning(size, GOLD, 1.0), "{size}");
+            assert_ne!(burning(size, GOLD, 0.0), burning(size, GOLD, 0.3), "{size}");
+        }
+    }
+
+    #[test]
+    fn the_fire_stays_on_the_stone() {
+        let (rest, fire) = (pixels(32), burning(32, GOLD, 0.4));
+        for (a, b) in rest.iter().zip(&fire) {
+            if a >> 24 == 0 {
+                assert_eq!(b >> 24, 0);
             }
         }
     }

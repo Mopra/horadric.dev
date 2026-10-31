@@ -8,7 +8,6 @@
 //! be one click and in plain sight.
 
 use std::ffi::c_void;
-use std::time::Duration;
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
@@ -28,7 +27,7 @@ use horadric_core::experience;
 
 use crate::joining;
 use crate::menu::{self, Item};
-use crate::{hotkey, icon, motion, recent};
+use crate::{hotkey, icon, recent};
 
 const ID: u32 = 1;
 
@@ -36,27 +35,23 @@ pub struct Tray {
     hwnd: HWND,
     callback: u32,
     icon: HICON,
-    /// The breathing light, one icon per step, made once and kept.
+    /// The runes burning while a session works, one icon per step, made
+    /// once and kept.
     frames: Vec<HICON>,
-    /// The same breath at the taskbar's size, for the stage's button.
+    /// The same fire at the taskbar's size, for the stage's button.
     big: Vec<HICON>,
-    /// The frame showing while it breathes, `None` while it rests.
+    /// The steady light at the taskbar's size.
+    big_rest: HICON,
+    /// The frame showing while it burns, `None` while it rests.
     frame: Option<usize>,
     tip: String,
 }
 
-/// How many steps one breath takes. At [`BREATH_STEP_MS`] each, a breath
-/// lasts about two seconds, slow enough to read as calm work.
-pub const BREATH_FRAMES: usize = 24;
-pub const BREATH_STEP_MS: u32 = 80;
-
-/// How bright the light is at this step of a breath: full at the start and
-/// end, dimmest halfway. The same curve as a waiting tile's breath.
-pub fn breath(step: usize) -> f32 {
-    let at = Duration::from_millis((step as u64) * BREATH_STEP_MS as u64);
-    let period = Duration::from_millis((BREATH_FRAMES as u64) * BREATH_STEP_MS as u64);
-    1.0 - 0.6 * motion::breathe(at, period)
-}
+/// How many frames one loop of the burning runes takes. At
+/// [`FLAME_STEP_MS`] each a loop lasts about two seconds, and the flames
+/// are drawn to meet themselves at the end, so the seam does not show.
+pub const FLAME_FRAMES: usize = 32;
+pub const FLAME_STEP_MS: u32 = 60;
 
 /// What the user picked from the menu.
 pub enum Choice {
@@ -128,13 +123,10 @@ impl Tray {
         let tray = Tray {
             hwnd,
             callback,
-            icon: make_icon(small, 1.0),
-            frames: (0..BREATH_FRAMES)
-                .map(|i| make_icon(small, breath(i)))
-                .collect(),
-            big: (0..BREATH_FRAMES)
-                .map(|i| make_icon(big, breath(i)))
-                .collect(),
+            icon: make_icon(small, None),
+            frames: (0..FLAME_FRAMES).map(|i| make_icon(small, Some(i))).collect(),
+            big: (0..FLAME_FRAMES).map(|i| make_icon(big, Some(i))).collect(),
+            big_rest: make_icon(big, None),
             frame: None,
             tip: "Horadric".into(),
         };
@@ -160,7 +152,7 @@ impl Tray {
         }
     }
 
-    /// Starts or stops the light breathing. Returns the new state when it
+    /// Starts or stops the runes burning. Returns the new state when it
     /// changed, so the caller starts or stops the timer that steps it.
     pub fn breathe(&mut self, on: bool) -> Option<bool> {
         if on == self.frame.is_some() {
@@ -171,7 +163,7 @@ impl Tray {
         Some(on)
     }
 
-    /// Moves the breath on one frame.
+    /// Moves the fire on one frame.
     pub fn step(&mut self) {
         if let Some(f) = self.frame {
             self.frame = Some((f + 1) % self.frames.len().max(1));
@@ -179,13 +171,12 @@ impl Tray {
         }
     }
 
-    /// The icon for the stage's taskbar button, breathing with the tray's.
-    /// At rest it is the first frame, which is the light at full.
+    /// The icon for the stage's taskbar button, burning with the tray's.
+    /// At rest it is the steady light.
     pub fn taskbar_icon(&self) -> HICON {
-        self.big
-            .get(self.frame.unwrap_or(0))
-            .copied()
-            .unwrap_or_default()
+        self.frame
+            .and_then(|f| self.big.get(f).copied())
+            .unwrap_or(self.big_rest)
     }
 
     fn refresh(&self) {
@@ -219,6 +210,7 @@ impl Drop for Tray {
         unsafe {
             let _ = Shell_NotifyIconW(NIM_DELETE, &self.data());
             let _ = DestroyIcon(self.icon);
+            let _ = DestroyIcon(self.big_rest);
             for f in self.frames.iter().chain(&self.big) {
                 let _ = DestroyIcon(*f);
             }
@@ -699,15 +691,18 @@ fn account_items(logins: &[Pick]) -> Vec<Item> {
     items
 }
 
-/// Turns the drawn pixels into a `size` pixel icon, its light dimmed to
-/// `bright`.
-fn make_icon(size: i32, bright: f32) -> HICON {
+/// Turns the drawn pixels into a `size` pixel icon: the steady light, or
+/// this frame of the fire.
+fn make_icon(size: i32, flame: Option<usize>) -> HICON {
     let light = if horadric_hooks::dev() {
         icon::ERROR
     } else {
         icon::GOLD
     };
-    let pixels = icon::lit(size as u32, dim(light, bright));
+    let pixels = match flame {
+        Some(f) => icon::burning(size as u32, light, f as f32 / FLAME_FRAMES as f32),
+        None => icon::lit(size as u32, light),
+    };
     unsafe {
         let info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -742,14 +737,6 @@ fn make_icon(size: i32, bright: f32) -> HICON {
         let _ = DeleteObject(mask.into());
         icon
     }
-}
-
-/// A `0xRRGGBB` colour with each channel scaled by `k`.
-fn dim(rgb: u32, k: f32) -> u32 {
-    [16, 8, 0].iter().fold(0, |acc, shift| {
-        let c = ((rgb >> shift) & 0xff) as f32 * k.clamp(0.0, 1.0);
-        acc | (c.round() as u32) << shift
-    })
 }
 
 #[cfg(test)]
@@ -893,20 +880,5 @@ mod tests {
         assert!(
             matches!(&forget[2], Item::Action { id, label, .. } if *id == NODE + 2 && label == "lab\tssh to brother Lab")
         );
-    }
-
-    #[test]
-    fn a_breath_starts_bright_dips_halfway_and_comes_back() {
-        assert_eq!(breath(0), 1.0);
-        assert!((breath(BREATH_FRAMES / 2) - 0.4).abs() < 1e-5);
-        assert_eq!(breath(BREATH_FRAMES), breath(0));
-        assert!(breath(3) > breath(6), "dims smoothly on the way down");
-    }
-
-    #[test]
-    fn dimming_scales_each_channel() {
-        assert_eq!(dim(0xE8B04A, 1.0), 0xE8B04A);
-        assert_eq!(dim(0xFF8040, 0.5), 0x804020);
-        assert_eq!(dim(0xFFFFFF, 0.0), 0);
     }
 }
