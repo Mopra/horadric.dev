@@ -2513,6 +2513,7 @@ fn web_menu(key: &str) {
 
 fn project_menu(key: &str) {
     const ADD: usize = 1;
+    const ADD_CLI: usize = 10;
     const START_BATCH: usize = 2;
     const START_OVER: usize = 3;
     const END_ALL: usize = 4;
@@ -2579,7 +2580,11 @@ fn project_menu(key: &str) {
     let listed: &[String] = if finding { &[] } else { &hosts };
     let config_listed: &[String] = if finding { &[] } else { &config_hosts };
     merges.truncate(MERGE_END - MERGE);
-    let mut items = vec![Item::action(ADD, "New session")];
+    // The cluster's button is the chat, so the CLI is had here.
+    let mut items = vec![
+        Item::action(ADD, "New session"),
+        Item::action(ADD_CLI, "New CLI session"),
+    ];
     // In trunk mode a worktree is had by asking for one.
     if own_trees == Some(false) {
         items.push(Item::action(ADD_TREE, "New session in its own worktree"));
@@ -2683,6 +2688,7 @@ fn project_menu(key: &str) {
                 }
             }
         }
+        Some(ADD_CLI) => push(Input::Add(key.into())),
         Some(ADD_TREE) => {
             if let Some(dir) = app.project_dir(key) {
                 if let Err(e) = app.start_in(None, dir, Vec::new(), Agent::Claude, true) {
@@ -9043,8 +9049,9 @@ impl App {
                     post(self.notify.0 as isize, WM_HORADRIC_PICK, 0);
                 }
                 Input::Add(key) => {
-                    // The chat has a button of its own, so this one is
-                    // always the terminal, whatever Settings says.
+                    // The chat has a button of its own, so this one, and
+                    // the menu's "New CLI session", is always the
+                    // terminal, whatever Settings says.
                     if self.far_start(&key) {
                     } else if let Some(dir) = self.project_dir(&key) {
                         if let Err(e) = self.start(None, dir, Vec::new()) {
