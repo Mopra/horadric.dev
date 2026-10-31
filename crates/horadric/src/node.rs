@@ -1135,11 +1135,13 @@ fn relayed(
 }
 
 /// What the node calls itself in its hello and on the relay:
-/// `HORADRIC_PC_NAME`, as a PC's, else the machine's host name.
+/// `HORADRIC_PC_NAME`, as a PC's, else the name chosen with `horadric
+/// name`, else the machine's host name.
 fn machine_name() -> String {
     let env = std::env::var("HORADRIC_PC_NAME").ok();
+    let chosen = horadric_hooks::state_dir().and_then(|d| horadric_core::naming::chosen(&d));
     let host = std::fs::read_to_string("/proc/sys/kernel/hostname").ok();
-    wire::node_name(env.as_deref(), host.as_deref())
+    wire::node_name(env.as_deref(), chosen.as_deref(), host.as_deref())
 }
 
 /// `horadric node --stdio`: the preamble, then frames both ways between

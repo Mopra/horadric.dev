@@ -5,7 +5,6 @@
 use horadric_ui::backup::Vault;
 use horadric_ui::google;
 use horadric_ui::google_drive::DriveVault;
-use horadric_ui::portal_pair::pc_name;
 
 pub fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
@@ -39,9 +38,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
 /// Puts, lists, gets, replaces and deletes a file in this machine's
 /// backup folder, so the Drive client is seen to work before a backup
-/// trusts it.
+/// trusts it. In the folder the backup uses, which goes by the
+/// computer's name whatever this PC is called among its brothers, so a
+/// rename never leaves a second folder behind.
 fn try_drive() -> Result<(), String> {
-    let vault = DriveVault::open(&pc_name())?;
+    let vault = DriveVault::open(&horadric_ui::backup::config::machine())?;
     let name = "try/horadric.txt";
     let big: Vec<u8> = (0..6 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
     vault.put(name, b"first")?;

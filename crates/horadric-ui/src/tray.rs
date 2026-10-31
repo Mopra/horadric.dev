@@ -96,6 +96,8 @@ pub enum Choice {
     /// Sign in to WorkOS, so this PC finds its brothers.
     SignIn,
     SignOut,
+    /// Choose what this PC is called among its brothers and phones.
+    Rename,
     /// Hand every session to this brother, or with None stop doing so.
     Leave(Option<String>),
     /// Who keeps this PC's sessions if it falls silent, by id, or no one.
@@ -281,6 +283,7 @@ pub fn menu(
     const ADD_NODE: usize = 18;
     const SHOW_HIDDEN: usize = 19;
     const CONTEXT: usize = 20;
+    const RENAME: usize = 21;
     const RECENT: usize = 100;
     let mut items = Vec::new();
     // What the icon is for, status, comes first. The level rides along
@@ -443,6 +446,10 @@ pub fn menu(
         "Linux nodes".into(),
         node_items(&lines, ADD_NODE),
     ));
+    machines.push(Item::action(
+        RENAME,
+        format!("Name this PC\u{2026}\t{}", crate::portal_pair::pc_name()),
+    ));
     machines.push(match user {
         Some(_) => Item::action(SIGN_OUT, "Sign out"),
         None => Item::action(SIGN_IN, "Sign in to find your other PCs\u{2026}"),
@@ -476,6 +483,7 @@ pub fn menu(
         STOP => Some(Choice::StopWarriv),
         SIGN_IN => Some(Choice::SignIn),
         SIGN_OUT => Some(Choice::SignOut),
+        RENAME => Some(Choice::Rename),
         NO_KEEPER => Some(Choice::Keeper(None)),
         AUTO_TAKEOVER => Some(Choice::AutoTakeover(!keeping.2)),
         i if (CONTROL..CONTROL + RIGHTS).contains(&i) => joined

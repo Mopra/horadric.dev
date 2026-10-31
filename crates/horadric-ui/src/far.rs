@@ -1172,6 +1172,21 @@ impl App {
 
     /// The key of the brother `who` names: its key, or the name only one
     /// brother has. A name two share names neither.
+    /// Brother `key` says in its own roster entry, signed by it, that it
+    /// is called `name`: its human renamed it there. Its tiles and menus
+    /// go by the new name from the next paint.
+    pub(super) fn far_renamed(&mut self, key: &str, name: &str) {
+        let name = name.trim();
+        let Some(p) = self.far.peers.get_mut(key) else {
+            return;
+        };
+        if name.is_empty() || p.name == name {
+            return;
+        }
+        p.name = name.to_string();
+        crate::project::name_brother(key, name);
+    }
+
     pub(super) fn far_key(&self, who: &str) -> Option<String> {
         if self.far.peers.contains_key(who) {
             return Some(who.to_string());
@@ -1600,6 +1615,30 @@ pub(super) fn ask_node() -> Option<Result<String, String>> {
         return Some(Err(format!("Cannot keep the node list: {e}")));
     }
     list.last().map(|n| Ok(n.name.clone()))
+}
+
+/// "Name this PC": what its brothers and phones call it. Only this PC can
+/// say it, since its roster entry is signed by its own key. Left empty it
+/// goes back to the computer's name. Gives the name it goes by now.
+pub(super) fn ask_name() -> Option<Result<String, String>> {
+    let dir = horadric_hooks::state_dir()?;
+    let now = crate::portal_pair::pc_name();
+    let question = crate::ask::Ask {
+        title: "Name this PC",
+        prompt: "What your other PCs, nodes and phones call this one, like Laptop or \
+                 Desk. Leave it empty for the computer's own name.",
+        initial: &now,
+        placeholder: "Laptop",
+        verb: "name it",
+        notes: false,
+        secret: false,
+        pick: None,
+    };
+    let a = super::ask_beside(None, &question)?;
+    Some(
+        horadric_core::naming::choose(&dir, &a.text)
+            .map(|_| crate::portal_pair::pc_name()),
+    )
 }
 
 /// "Forget": node `name` off the list. Its link and tiles go at the next

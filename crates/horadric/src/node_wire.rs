@@ -233,13 +233,10 @@ pub fn pick_brother(name: &str, among: &[(String, String)]) -> Result<(String, S
 }
 
 /// The name a node gives itself: `HORADRIC_PC_NAME`, as a PC's, else
-/// its host name as `hostname` holds it, else "linux".
-pub fn node_name(env: Option<&str>, hostname: Option<&str>) -> String {
-    env.map(str::trim)
-        .filter(|n| !n.is_empty())
-        .or_else(|| hostname.map(str::trim).filter(|h| !h.is_empty()))
-        .unwrap_or("linux")
-        .to_string()
+/// the one its human chose, else its host name as `hostname` holds it,
+/// else "linux".
+pub fn node_name(env: Option<&str>, chosen: Option<&str>, hostname: Option<&str>) -> String {
+    horadric_core::naming::pick(env, chosen, hostname, "linux")
 }
 
 #[cfg(test)]
@@ -394,17 +391,9 @@ mod tests {
 
     #[test]
     fn a_node_is_named_as_asked_else_by_its_host() {
-        assert_eq!(node_name(Some(" vps "), Some("h1")), "vps");
-        assert_eq!(
-            node_name(
-                Some(""),
-                Some(
-                    "h1
-"
-                )
-            ),
-            "h1"
-        );
-        assert_eq!(node_name(None, None), "linux");
+        assert_eq!(node_name(Some(" vps "), Some("Box"), Some("h1")), "vps");
+        assert_eq!(node_name(None, Some("Box"), Some("h1")), "Box");
+        assert_eq!(node_name(Some(""), None, Some("h1\n")), "h1");
+        assert_eq!(node_name(None, None, None), "linux");
     }
 }

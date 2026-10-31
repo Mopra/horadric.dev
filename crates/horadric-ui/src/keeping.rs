@@ -885,6 +885,9 @@ impl App {
             .max_by_key(|b| b.n)
         {
             self.keeping_keepers(&from, b.keepers.clone());
+            // Its own entry is the one word on its name, so a rename made
+            // there shows here without the link dropping.
+            self.far_renamed(name, &b.name);
         }
         // Its owners were merged into the roster held before this, so a
         // keeper's roster is its word on what was taken over.

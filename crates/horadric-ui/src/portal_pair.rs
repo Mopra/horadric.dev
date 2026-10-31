@@ -40,14 +40,19 @@ pub fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// The name a phone or a brother shows for this PC. `HORADRIC_PC_NAME`
-/// overrides it, so two dev instances on one machine can be told apart.
+/// The name a phone or a brother shows for this PC: the one its human
+/// chose ([`horadric_core::naming`]), else the computer's.
+/// `HORADRIC_PC_NAME` overrides both, so two dev instances on one machine
+/// can be told apart. Read afresh each time, so a rename shows in the
+/// next roster without a restart.
 pub fn pc_name() -> String {
-    std::env::var("HORADRIC_PC_NAME")
-        .ok()
-        .filter(|n| !n.trim().is_empty())
-        .or_else(|| std::env::var("COMPUTERNAME").ok())
-        .unwrap_or_else(|| "PC".into())
+    let chosen = horadric_hooks::state_dir().and_then(|d| horadric_core::naming::chosen(&d));
+    horadric_core::naming::pick(
+        std::env::var("HORADRIC_PC_NAME").ok().as_deref(),
+        chosen.as_deref(),
+        std::env::var("COMPUTERNAME").ok().as_deref(),
+        "PC",
+    )
 }
 
 fn open(url: &str) {

@@ -44,6 +44,7 @@ pub mod lore;
 pub mod markdown;
 pub mod merge;
 pub mod mesh;
+pub mod naming;
 pub mod node;
 pub mod nodes;
 pub mod overlap;

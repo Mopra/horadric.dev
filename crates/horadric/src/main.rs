@@ -116,6 +116,9 @@ Usage:
   horadric backup restore [--from MACHINE]
                                With Horadric quit, put a backup back (another PC's for a
                                new one); the replaced folders are kept beside
+  horadric name [NAME|--computer]
+                               What this machine is called among its brothers and phones:
+                               say it, choose NAME, or go back to the computer's name
   horadric serve                 Listen for Claude Code hook events and show a live table
   horadric hooks install         Add Horadric hooks to ~/.claude/settings.json
   horadric hooks uninstall       Remove them
@@ -248,6 +251,7 @@ fn main() -> ExitCode {
         #[cfg(windows)]
         Some("release") => release::run(&args[1..]),
         Some("status") => status::run(),
+        Some("name") => name_command(&args[1..]),
         #[cfg(not(target_os = "macos"))]
         Some("mcp") => mcp::run(),
         #[cfg(windows)]
@@ -275,6 +279,32 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `horadric name`: says the name this machine chose, or chooses one. A
+/// running Horadric or node goes by it from its next roster round; the
+/// relay hears it at the next connect.
+fn name_command(args: &[String]) -> Result<(), String> {
+    use horadric_core::naming;
+    let dir = horadric_hooks::state_dir().ok_or("there is no state folder")?;
+    match args.first().map(String::as_str) {
+        None => match naming::chosen(&dir) {
+            Some(name) => println!("{name}"),
+            None => println!("No name chosen: this machine goes by the computer's name."),
+        },
+        Some("--computer") => {
+            naming::choose(&dir, "")?;
+            println!("This machine goes by the computer's name again.");
+        }
+        Some(_) => {
+            let name = naming::choose(&dir, &args.join(" "))?.unwrap_or_default();
+            println!("This machine is called {name} now.");
+        }
+    }
+    if std::env::var("HORADRIC_PC_NAME").is_ok_and(|n| !n.trim().is_empty()) {
+        println!("HORADRIC_PC_NAME is set here, and outranks it.");
+    }
+    Ok(())
 }
 
 /// Commands that write to the registry, the user's files or Claude Code's

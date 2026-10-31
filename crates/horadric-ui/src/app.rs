@@ -1568,6 +1568,21 @@ fn tray_menu(hwnd: HWND) {
             }
             None => {}
         },
+        Some(Choice::Rename) => match far::ask_name() {
+            Some(Ok(name)) => {
+                with_app(|app| {
+                    app.toasts.show(
+                        Kind::Done,
+                        &format!("This PC is {name} now"),
+                        "Brothers hear it within a round, phones at their next link.",
+                    )
+                });
+            }
+            Some(Err(why)) => {
+                with_app(|app| app.toasts.show(Kind::Failed, "Cannot use that name", &why));
+            }
+            None => {}
+        },
         Some(Choice::ForgetNode(name)) => far::forget_node(&name),
         Some(Choice::EndAll) => {
             if confirm_end(None) {
