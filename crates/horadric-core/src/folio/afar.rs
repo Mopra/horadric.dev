@@ -202,6 +202,17 @@ fn block(b: &Block, out: &mut Vec<String>) {
         },
         // Signing in opens a browser on the PC, which a phone cannot.
         Block::SignIn(_) => out.push("\u{2500} signing in to Claude, on the PC".into()),
+        Block::Mcp(card) => {
+            for m in (card.servers.iter()).filter(|m| card.all || super::troubled(&m.status)) {
+                out.push(format!("\u{2500} MCP {}: {}", m.name, m.status));
+            }
+        }
+        // Its fields and the browser it may open are on the PC.
+        Block::Elicitation(e) => out.push(format!(
+            "\u{2500} {} asks, on the PC: {}",
+            e.server,
+            one_line(&e.message)
+        )),
         Block::Raw(_) => {}
     }
 }

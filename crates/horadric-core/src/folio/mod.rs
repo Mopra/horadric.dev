@@ -21,6 +21,7 @@
 pub mod afar;
 mod edits;
 mod launch;
+mod mcp;
 mod send;
 mod session;
 mod sign_in;
@@ -29,6 +30,7 @@ mod transcript;
 
 pub use edits::*;
 pub use launch::*;
+pub use mcp::*;
 pub use send::*;
 pub use session::*;
 pub use sign_in::*;
@@ -297,18 +299,27 @@ pub enum Block {
     Notice(Notice),
     /// A login is needed, or runs, from the Folio itself.
     SignIn(SignIn),
+    /// MCP servers and their status: those in trouble, or all of `/mcp`.
+    Mcp(McpCard),
+    /// An MCP server asks the human: a form, or a page to open.
+    Elicitation(Elicitation),
     /// A line we do not understand, kept rather than dropped.
     Raw(String),
 }
 
 /// A control request we sent, waiting for its response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Sent {
     Initialize,
     Mode,
     Model,
     Context,
     StopTask,
+    McpStatus,
+    /// By the server each is about.
+    McpAuth(String),
+    McpReconnect(String),
+    McpToggle(String),
 }
 
 #[derive(Debug, Default)]
@@ -346,6 +357,8 @@ pub struct Folio {
     /// yet taken by the app. A headless CLI runs no status line, so this is
     /// the only way a Folio's work reaches the usage bars.
     pub limits: Option<crate::usage::Limits>,
+    /// The MCP servers as last heard, and what waits on them.
+    pub mcp: McpState,
     /// The blocks of the message streaming now, by content index.
     open: HashMap<u64, Open>,
     /// The id of the message streaming now.
@@ -603,7 +616,10 @@ impl Folio {
                     "set_model" => Sent::Model,
                     "get_context_usage" => Sent::Context,
                     "stop_task" => Sent::StopTask,
-                    _ => return false,
+                    s => match self.mcp_sent(s, &v["request"]) {
+                        Some(kind) => kind,
+                        None => return false,
+                    },
                 };
                 self.requests.insert(id.to_string(), kind);
                 false
@@ -651,6 +667,9 @@ impl Folio {
     fn sent_answer(&mut self, r: &Value) -> bool {
         let id = r["request_id"].as_str().unwrap_or_default();
         let body = &r["response"];
+        if body["action"].is_string() {
+            return self.elicitation_answered(id, body);
+        }
         let allow = body["behavior"] == "allow";
         let to = if allow {
             AskState::Allowed
@@ -1024,7 +1043,9 @@ impl Folio {
                 let model = v["model"].as_str().map(str::to_string);
                 let mode = self.info.permission_mode.clone();
                 self.info.read_init(v);
-                let changed = id != self.session_id
+                let mcp = self.mcp_init();
+                let changed = mcp
+                    || id != self.session_id
                     || model != self.model
                     || mode != self.info.permission_mode;
                 self.session_id = id.or(self.session_id.take());
@@ -1114,6 +1135,7 @@ impl Folio {
                 let rested = self.rest_lanes(|l| l.task_id == id);
                 rested || before != self.background.len()
             }
+            "elicitation_complete" => self.elicitation_complete(v),
             "commands_changed" => {
                 self.info.read_commands(&v["commands"]);
                 false
@@ -1164,7 +1186,6 @@ impl Folio {
             | "files_persisted"
             | "file_snapshot"
             | "file_attachments_missing"
-            | "elicitation_complete"
             | "control_request_progress"
             | "memory_recall"
             | "memory_saved"
@@ -1227,6 +1248,12 @@ impl Folio {
         let Some(kind) = self.requests.remove(id) else {
             return false;
         };
+        if matches!(
+            kind,
+            Sent::McpStatus | Sent::McpAuth(_) | Sent::McpReconnect(_) | Sent::McpToggle(_)
+        ) {
+            return self.mcp_response(kind, r);
+        }
         if r["subtype"] == "error" {
             let error = r["error"].as_str().unwrap_or("refused");
             return self.notice(Notice::Refused(error.to_string()));
@@ -1249,6 +1276,9 @@ impl Folio {
             Sent::Initialize => self.info.read_initialize(body),
             // The task's end comes as its own notification.
             Sent::StopTask => return false,
+            Sent::McpStatus | Sent::McpAuth(_) | Sent::McpReconnect(_) | Sent::McpToggle(_) => {
+                return false
+            }
         }
         true
     }
@@ -1836,6 +1866,7 @@ impl Folio {
                 _ => {}
             }
         }
+        changed |= self.elicitation_withdrawn(None);
         self.busy = false;
         self.open.clear();
         self.streamed.clear();
@@ -1857,6 +1888,9 @@ impl Folio {
     fn control_request(&mut self, v: &Value, line: &str) -> bool {
         let request = &v["request"];
         let request_id = v["request_id"].as_str().unwrap_or_default().to_string();
+        if request["subtype"] == "elicitation" {
+            return self.elicitation(request_id, request);
+        }
         if request["subtype"] != "can_use_tool" {
             // Unanswered, the CLI may wait on it for good. An error is what
             // it gets from any client that does not know a subtype.
@@ -1923,6 +1957,9 @@ impl Folio {
     fn cancel(&mut self, request_id: &str) -> bool {
         if let Some(tool_use) = self.asked.get(request_id) {
             self.withdrawn.insert(tool_use.clone());
+        }
+        if self.elicitation_withdrawn(Some(request_id)) {
+            return true;
         }
         self.blocks.iter_mut().any(|b| match b {
             Block::Ask {

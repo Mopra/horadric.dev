@@ -34,8 +34,23 @@ pub struct SessionInfo {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct McpServer {
     pub name: String,
-    /// Such as `connected`, `pending`, `needs-auth`, `failed`.
+    /// Such as `connected`, `pending`, `needs-auth`, `failed`, `disabled`.
     pub status: String,
+    /// Why it failed, or why signing in or reconnecting did not work.
+    /// From `mcp_status` and our requests only; init never says.
+    pub error: String,
+    /// Such as `stdio`, `http`, `sse`, `claudeai-proxy`.
+    pub transport: String,
+    pub tools: usize,
+    /// Its sign-in is held by claude.ai, not this CLI.
+    pub proxied: bool,
+    /// A sign-in waits in the browser: its page, empty until the CLI gave
+    /// one.
+    pub sign_in: Option<String>,
+    /// The CLI could not sign in to it, so only the terminal's `/mcp` can.
+    pub sign_in_failed: bool,
+    /// A reconnect or toggle of ours is on its way.
+    pub busy: bool,
 }
 
 /// A slash command as `initialize` lists it.
@@ -107,6 +122,7 @@ impl SessionInfo {
                 .map(|s| McpServer {
                     name: text(s, "name"),
                     status: text(s, "status"),
+                    ..McpServer::default()
                 })
                 .collect(),
             plugins: v["plugins"]
@@ -324,7 +340,8 @@ mod tests {
             i.mcp_servers,
             [McpServer {
                 name: "horadric".into(),
-                status: "connected".into()
+                status: "connected".into(),
+                ..McpServer::default()
             }]
         );
         assert_eq!(i.plugins, ["horadric"]);
