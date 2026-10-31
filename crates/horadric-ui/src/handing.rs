@@ -666,6 +666,8 @@ impl App {
             .or_else(|| self.folio_args.get(id).cloned())
             .or_else(|| self.paused.get(id).map(|p| p.args.clone()))
             .unwrap_or_default();
+        // Paused for the handoff, a Folio is a paused chat by now.
+        let chat = self.paused.get(id).is_some_and(|p| p.chat) || self.folios.contains_key(id);
         let n = self.keeping_number(id);
         let said = self.keeping_handing(id, to, n);
         let record = self.shared.registry.lock().ok().and_then(|r| {
@@ -685,6 +687,7 @@ impl App {
                 interrupted: !clean,
                 n,
                 said,
+                chat,
                 ..Record::default()
             })
         });
@@ -1087,7 +1090,9 @@ impl App {
             worktree,
             loot: Default::default(),
             runeword: None,
-            chat: false,
+            // A chat goes on as one, its next prompt told it moved like a
+            // terminal's: its hooks are Claude Code's.
+            chat: record.chat,
         };
         // No one may be at this PC to answer Claude Code's trust prompt
         // for a folder it has never seen.

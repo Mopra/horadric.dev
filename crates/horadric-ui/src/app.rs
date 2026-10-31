@@ -168,6 +168,9 @@ mod node_asks;
 #[path = "keeping.rs"]
 mod keeping;
 
+#[path = "folio_tile.rs"]
+mod folio_tile;
+
 #[path = "steering.rs"]
 mod steering;
 pub(crate) use handing::{leaving_menu, leaving_pick};
@@ -1764,73 +1767,67 @@ fn tile_menu(id: &str) {
     const TERMINAL: usize = 9;
     const AS_CHAT: usize = 10;
     const UNDO: usize = 50;
-    if with_app(|app| app.folios.contains_key(id)) == Some(true) {
+    /// What the menu starts with for a session of this `kind`, a plain
+    /// terminal with `shell`: the picks below add to it.
+    fn tile_items(id: &str, kind: TileKind, shell: bool, rename: Item) -> Vec<Item> {
+        match (kind, shell) {
+            (TileKind::Live, false) => {
+                let mut items = vec![Item::action(OPEN, "Show terminal")];
+                if with_app(|app| app.is_claude_terminal(id)) == Some(true) {
+                    items.push(Item::action(AS_CHAT, "Open as chat"));
+                }
+                items.extend([rename, Item::Separator, Item::action(END, "End session")]);
+                items
+            }
+            (TileKind::Live, true) => vec![
+                Item::action(OPEN, "Show terminal"),
+                rename,
+                Item::Separator,
+                Item::action(END, "Close terminal"),
+            ],
+            (TileKind::Paused, false) => vec![
+                Item::action(OPEN, "Resume"),
+                rename,
+                Item::Separator,
+                Item::action(END, "End session"),
+            ],
+            (TileKind::Paused, true) => vec![
+                Item::action(OPEN, "Open again"),
+                rename,
+                Item::Separator,
+                Item::action(END, "Remove terminal"),
+            ],
+            (TileKind::Elsewhere, _) => vec![rename, Item::action(END, "Remove tile")],
+            (TileKind::Far, _) => with_app(|app| app.far_menu(id, OPEN, RENAME))
+                .flatten()
+                .unwrap_or_default(),
+            (TileKind::Background, _) => vec![
+                Item::action(OPEN, "Attach"),
+                rename,
+                Item::Separator,
+                Item::action(END, "End session"),
+            ],
+        }
+    }
+    let rename = Item::action(RENAME, "Rename\u{2026}");
+    // A Folio has no console, so no tile kind: it is live while its claude
+    // runs, and gets the rest of a Claude terminal's menu below.
+    let (mut items, live, shell) = if with_app(|app| app.folios.contains_key(id)) == Some(true) {
         let items = vec![
             Item::action(OPEN, "Show chat"),
             Item::action(TERMINAL, "Open in terminal"),
-            Item::action(RENAME, "Rename\u{2026}"),
+            rename,
             Item::Separator,
             Item::action(END, "End session"),
         ];
-        match menu::popup(&items) {
-            Some(OPEN) => {
-                with_app(|app| app.reveal(id, false));
-            }
-            Some(TERMINAL) => {
-                with_app(|app| app.folio_to_terminal(id));
-            }
-            Some(RENAME) => rename_session(id),
-            Some(END) => {
-                with_app(|app| app.end(id));
-            }
-            _ => {}
-        }
-        return;
-    }
-    let Some((kind, shell)) = with_app(|app| app.tile_kind(id)).flatten() else {
-        return;
+        (items, crate::folio::running(id), false)
+    } else {
+        let Some((kind, shell)) = with_app(|app| app.tile_kind(id)).flatten() else {
+            return;
+        };
+        let live = matches!(kind, TileKind::Live);
+        (tile_items(id, kind, shell, rename), live, shell)
     };
-    let rename = Item::action(RENAME, "Rename\u{2026}");
-    let live = matches!(kind, TileKind::Live);
-    let items = match (kind, shell) {
-        (TileKind::Live, false) => {
-            let mut items = vec![Item::action(OPEN, "Show terminal")];
-            if with_app(|app| app.is_claude_terminal(id)) == Some(true) {
-                items.push(Item::action(AS_CHAT, "Open as chat"));
-            }
-            items.extend([rename, Item::Separator, Item::action(END, "End session")]);
-            items
-        }
-        (TileKind::Live, true) => vec![
-            Item::action(OPEN, "Show terminal"),
-            rename,
-            Item::Separator,
-            Item::action(END, "Close terminal"),
-        ],
-        (TileKind::Paused, false) => vec![
-            Item::action(OPEN, "Resume"),
-            rename,
-            Item::Separator,
-            Item::action(END, "End session"),
-        ],
-        (TileKind::Paused, true) => vec![
-            Item::action(OPEN, "Open again"),
-            rename,
-            Item::Separator,
-            Item::action(END, "Remove terminal"),
-        ],
-        (TileKind::Elsewhere, _) => vec![rename, Item::action(END, "Remove tile")],
-        (TileKind::Far, _) => with_app(|app| app.far_menu(id, OPEN, RENAME))
-            .flatten()
-            .unwrap_or_default(),
-        (TileKind::Background, _) => vec![
-            Item::action(OPEN, "Attach"),
-            rename,
-            Item::Separator,
-            Item::action(END, "End session"),
-        ],
-    };
-    let mut items = items;
     // Runewords are given from the Runetome; the tile stops the one its
     // session has, with the other things done to it, above ending it.
     let word = with_app(|app| app.runeword_of(id)).flatten();
@@ -1944,6 +1941,9 @@ fn tile_menu(id: &str) {
         }
         Some(AS_CHAT) => {
             with_app(|app| app.terminal_to_folio(id));
+        }
+        Some(TERMINAL) => {
+            with_app(|app| app.folio_to_terminal(id));
         }
         _ => {}
     }
@@ -3969,6 +3969,7 @@ impl App {
                 self.far_check();
                 self.handing_tick();
                 self.keeping_tick();
+                self.folio_rewinds_tick();
                 self.backup_tick();
                 if self
                     .last_check
@@ -6768,6 +6769,9 @@ impl App {
     /// Claude Code session, live or paused, between turns. Only its edit
     /// tools name the files they write; Codex and Grok tools do not.
     fn can_undo(&self, id: &str) -> bool {
+        if self.folios.contains_key(id) {
+            return crate::folio::rewind_from(id).is_some();
+        }
         let between = self.shared.registry.lock().is_ok_and(|r| {
             r.get(id).is_some_and(|s| {
                 !s.shell && s.agent == Agent::Claude && !s.phase.mid_turn() && !s.phase.asks()
@@ -6781,8 +6785,11 @@ impl App {
     }
 
     /// Puts back the files the session's last turn changed, on a thread,
-    /// and toasts how it went.
+    /// and toasts how it went. A Folio's conversation goes back with them.
     fn undo_turn(&self, id: &str) {
+        if self.folios.contains_key(id) && !self.folio_rewind(id) {
+            return;
+        }
         let Some((label, cwd)) = self.shared.registry.lock().ok().and_then(|r| {
             let s = r.get(id)?;
             Some((s.label().to_string(), s.cwd.clone()))
@@ -7485,6 +7492,11 @@ impl App {
     /// Asks the session's mod to stop one of its subagents, the next time
     /// it asks what Horadric knows (every few seconds).
     fn stop_subagent(&mut self, id: &str, agent: &str) {
+        // A Folio's CLI stops its own tasks, and has no mod to ask.
+        if self.folios.contains_key(id) {
+            crate::folio::stop_task(id, agent);
+            return;
+        }
         let wanted = self.stop_agents.entry(id.to_string()).or_default();
         if !wanted.iter().any(|a| a == agent) {
             wanted.push(agent.to_string());
@@ -7493,6 +7505,9 @@ impl App {
 
     /// The subagents a tile's menu can stop, with their labels.
     fn stoppable_subagents(&self, id: &str) -> Vec<(String, String)> {
+        if self.folios.contains_key(id) {
+            return crate::folio::agents(id);
+        }
         let now = SystemTime::now();
         self.shared
             .registry
@@ -7977,7 +7992,10 @@ impl App {
             || horadric_core::warriv::is_warriv(id)
             || horadric_core::runeword::is_errand(id);
         let subagents = (!special).then_some(horadric_core::folio::SUBAGENT_PROMPT);
-        let flags = horadric_core::folio::headless_args(&all, subagents);
+        let mut flags = horadric_core::folio::headless_args(&all, subagents);
+        // Not kept in `own`: an undo rewinds this start only.
+        let rewound = folio_tile::rewound(id);
+        flags.extend(rewound.iter().flat_map(folio_tile::flags));
         let mut env_set = vec![
             (horadric_hooks::SESSION_ENV.to_string(), id.to_string()),
             (
@@ -8014,6 +8032,7 @@ impl App {
             name: name.to_string(),
             resume,
             history: 0,
+            at: rewound.and_then(|r| r.keep),
         };
         if let Err(e) = crate::folio::open_with(id, &dir, tag, &options, start.prompt) {
             // A tile that was there before, a terminal going on as a chat or
@@ -8163,6 +8182,9 @@ impl App {
     /// A Folio handed over has ended: the same tile resumes its
     /// conversation in a terminal.
     fn folio_handed_over(&mut self, id: &str) {
+        if self.folio_rewind_ended(id) {
+            return;
+        }
         let conversation = crate::folio::conversation(id);
         crate::folio::close(id);
         self.folios.remove(id);

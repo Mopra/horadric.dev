@@ -1717,8 +1717,12 @@ impl Pane {
     }
 
     /// Something picked elsewhere on the stage, pasted into this session.
+    /// A Folio has no program reading the pty, so it goes in its composer.
     pub fn hand(&self, text: &str) {
-        self.paste_text(text);
+        match &self.console.folio {
+            Some(key) => folio::handed(key, text),
+            None => self.paste_text(text),
+        }
     }
 
     fn paste_text(&self, text: &str) {
@@ -1892,7 +1896,12 @@ impl Pane {
                 Chord::Zoom => self.tell_stage(WM_PANE_ZOOM),
                 Chord::Focus(dir) => self.move_focus(dir),
                 Chord::Font(step) => app::push(Input::Font(step)),
-                Chord::Find if self.console.sky.is_some() || self.console.folio.is_some() => {}
+                Chord::Find if self.console.sky.is_some() => {}
+                Chord::Find if self.console.folio.is_some() => {
+                    if let Some(key) = &self.console.folio {
+                        folio::find(key);
+                    }
+                }
                 Chord::Find => self.open_search(),
                 Chord::WarTable => self.war_table(None),
             }

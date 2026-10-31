@@ -759,6 +759,7 @@ impl App {
                 cwd: s.cwd.clone(),
                 agent: "claude".into(),
                 from: pc_name(),
+                chat: self.folios.contains_key(id),
                 ..Record::default()
             })
         });

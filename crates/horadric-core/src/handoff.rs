@@ -828,6 +828,11 @@ pub struct Record {
     /// line names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left: Vec<String>,
+    /// It ran as a Folio, so the receiver resumes it as a chat rather than
+    /// in a terminal. Absent from an older sender, whose sessions were
+    /// terminals.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chat: bool,
     /// The signed word on whose the session is: for a handoff the sender's
     /// own that it hands the session on under `n` + 1, for a keeper's
     /// snapshot the owner's that it owns it under `n`, each with the words
