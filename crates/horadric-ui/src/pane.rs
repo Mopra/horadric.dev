@@ -1038,6 +1038,40 @@ impl Pane {
         w
     }
 
+    /// Alt+Down hands the retinue the keyboard; while it holds it, the
+    /// arrows walk it, Enter opens and Esc or Alt+Up give the keyboard
+    /// back. Any other key gives it back too and goes on to the program,
+    /// so typing is never swallowed. True when the key was the retinue's.
+    fn retinue_key(&self, vk: VIRTUAL_KEY, mods: Mods) -> bool {
+        let slot = self.retinue.borrow();
+        let Some(r) = slot.as_ref() else {
+            return false;
+        };
+        let bare = !mods.ctrl && !mods.shift;
+        if !r.keyed() {
+            return vk == VK_DOWN && mods.alt && bare && r.take_keys();
+        }
+        match vk {
+            VK_UP | VK_DOWN if bare && !mods.alt => r.key(vk == VK_DOWN),
+            VK_RETURN if bare && !mods.alt => r.enter(),
+            VK_UP if bare && mods.alt => r.drop_keys(),
+            VK_ESCAPE => {
+                r.drop_keys();
+                if r.table() {
+                    drop(slot);
+                    self.war_table(Some(false));
+                }
+            }
+            // A modifier alone is the start of a chord, not a key.
+            VK_SHIFT | VK_CONTROL | VK_MENU => return false,
+            _ => {
+                r.drop_keys();
+                return false;
+            }
+        }
+        true
+    }
+
     /// Opens the war table, lays it down, or with None turns it over.
     fn war_table(&self, open: Option<bool>) {
         if let Some(r) = self.retinue.borrow().as_ref() {
@@ -1911,6 +1945,10 @@ impl Pane {
                 Chord::Find => self.open_search(),
                 Chord::WarTable => self.war_table(None),
             }
+            return true;
+        }
+        if self.retinue_key(VIRTUAL_KEY(vk), mods) {
+            self.drop_char();
             return true;
         }
         // Esc lays the war table down before the program hears it.
@@ -3385,6 +3423,9 @@ impl Pane {
                     // window, leaves the address as it was, as a browser
                     // does.
                     self.invalidate();
+                }
+                if let Some(r) = self.retinue.borrow().as_ref() {
+                    r.drop_keys();
                 }
                 self.set_focus(false);
                 Some(LRESULT(0))

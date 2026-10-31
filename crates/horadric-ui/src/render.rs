@@ -1194,10 +1194,26 @@ pub struct TableScene<'a> {
     pub span: f32,
     pub title: &'a str,
     pub hot: Option<usize>,
+    /// The tick under the cursor: its track, and its place in the marks.
+    pub hot_tick: Option<(usize, usize)>,
     pub size: (f32, f32),
     pub accent: Color,
     /// For the runes' carving.
     pub age: Duration,
+}
+
+/// Where `t` seconds falls across a war table `w` DIPs wide that spans
+/// `span` seconds. The hover reads ticks back with the same sum.
+pub fn table_x(t: f32, span: f32, w: f32) -> f32 {
+    let (x0, x1) = (TABLE_LABEL_W, (w - 16.0).max(TABLE_LABEL_W + 10.0));
+    x0 + (x1 - x0) * (t / span.max(1.0)).clamp(0.0, 1.0)
+}
+
+/// Where a tool call from `from` to `to` seconds is drawn across the
+/// war table, never thinner than a sliver so a quick one still shows.
+pub fn tick_span(from: f32, to: f32, span: f32, w: f32) -> (f32, f32) {
+    let a = table_x(from, span, w);
+    (a, table_x(to, span, w).max(a + 2.0))
 }
 
 /// The war table's heading, its axis under it, and a track, in DIPs.
@@ -3109,7 +3125,7 @@ impl Painter<'_> {
         let x0 = TABLE_LABEL_W;
         let x1 = (w - 16.0).max(x0 + 10.0);
         let span = scene.span.max(1.0);
-        let at = |t: f32| x0 + (x1 - x0) * (t / span).clamp(0.0, 1.0);
+        let at = |t: f32| table_x(t, span, w);
         // The axis: a mark at every step that fits, its time under it.
         let axis_y = TABLE_HEAD + TABLE_AXIS - 4.0;
         let step = [
@@ -3157,10 +3173,14 @@ impl Painter<'_> {
             let (sx, ex) = (at(tr.start), at(tr.end).max(at(tr.start) + 2.0));
             let lane = Rect::new(sx, mid - 3.0, ex - sx, 6.0);
             self.fill_rounded(&lane, 3.0, ink.with_alpha(0.16));
-            for &(from, to, c, failed) in &tr.marks {
-                let (a, b) = (at(from), at(to).max(at(from) + 2.0));
+            for (k, &(from, to, c, failed)) in tr.marks.iter().enumerate() {
+                let (a, b) = tick_span(from, to, span, w);
                 let tick = Rect::new(a, mid - 5.0, b - a, 10.0);
                 self.fill_rounded(&tick, 1.5, if failed { theme::error() } else { c });
+                if scene.hot_tick == Some((i, k)) {
+                    let ring = Rect::new(a - 2.0, mid - 7.0, b - a + 4.0, 14.0);
+                    self.stroke_rounded(&ring, 2.5, fg.with_alpha(0.9), 1.0);
+                }
             }
             match tr.lot {
                 Lot::Working | Lot::Waiting => {
