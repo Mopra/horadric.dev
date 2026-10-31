@@ -447,8 +447,6 @@ pub struct UsageScene<'a> {
     pub collapsed: bool,
     /// Locked against folding and dragging.
     pub locked: bool,
-    /// Whose limits and settings these are, when there is a header to say.
-    pub provider: &'a str,
     /// What the screen says while no limit is known.
     pub empty: &'a str,
     pub usage: Option<&'a Usage>,
@@ -1327,26 +1325,11 @@ impl Painter<'_> {
     }
 
     /// The usage window, dressed like a cluster: the same plate, the
-    /// limits on a screen and the settings in a grooved section. With one
-    /// agent in use no name on top: the limits say what it is. With more,
-    /// the provider's name, and a chevron that says a click goes on.
+    /// limits on a screen and the settings in a grooved section, no name
+    /// on top: the limits say what it is.
     unsafe fn usage(&self, gpu: &Gpu, m: &Metrics, scene: &UsageScene) {
         let l = scene.layout;
         self.plate(m, l.size);
-        if let Some(h) = l.header {
-            let ink = match scene.button(UsageHit::Header) {
-                Button::Idle => theme::text_dim(),
-                _ => theme::text(),
-            };
-            let label = Rect::new(h.x + 4.0, h.y, h.w - 8.0, h.h);
-            self.text(&gpu.small, ink, scene.provider, label);
-            self.icon(
-                &gpu.icon_small,
-                ink,
-                '\u{E76C}',
-                Rect::new(h.right() - 18.0, h.y, 14.0, h.h),
-            );
-        }
 
         self.screen(gpu, &l.limits_box, m.tile_radius);
         let limits = scene.usage.map(|u| u.limits.named()).unwrap_or_default();
@@ -3786,17 +3769,7 @@ impl Painter<'_> {
             _ => age,
         };
         let age_w = self.measure(gpu, &gpu.small, &age).min(top.w * 0.55);
-        let mut name_rect = Rect::new(top.x, top.y, top.w - age_w - 8.0, top.h);
-        // Which agent runs it, quietly, where it is not Claude.
-        if let Some(tag) = s.agent.mark() {
-            let tag_w = self.measure(gpu, &gpu.small, tag);
-            if tag_w < name_rect.w * 0.4 {
-                let at = Rect::new(name_rect.x, top.y, name_rect.w, top.h);
-                let ink = theme::text_dim().with_alpha(0.75).fade(presence);
-                self.text(&gpu.small_right, ink, tag, at);
-                name_rect.w -= tag_w + 8.0;
-            }
-        }
+        let name_rect = Rect::new(top.x, top.y, top.w - age_w - 8.0, top.h);
         // Its name says how it ended, in item colours, apart from the lamp.
         // Warriv's own sessions and its errands' are in its gold instead.
         let ink = if horadric_core::warriv::is_warriv(&s.id)

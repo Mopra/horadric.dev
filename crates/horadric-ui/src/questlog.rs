@@ -19,7 +19,6 @@ use std::rc::Rc;
 use horadric_core::chronicle::{self, Command, Outcome, Quest, Row, WakeDot, WakeEnd, WarrivWake};
 use horadric_core::runeword;
 use horadric_core::warriv::Kind;
-use horadric_core::Agent;
 use windows::core::{w, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -1637,10 +1636,9 @@ pub(crate) fn ht(e: Edge) -> u32 {
     }
 }
 
-/// The quest's conversation can be written out to read: only Claude
-/// Code's transcripts are read.
+/// The quest's conversation can be written out to read.
 pub fn can_read(q: &Quest) -> bool {
-    q.conversation.is_some() && q.agent == Agent::Claude
+    q.conversation.is_some()
 }
 
 pub fn can_carry(q: &Quest) -> bool {
@@ -1656,9 +1654,6 @@ fn talk_detail(q: &Quest, quests: &[Quest], now: u64, offset: i64) -> QuestDetai
     }
     if let Some(at) = q.ended {
         facts.push(("Last touched", when(at, now, offset)));
-    }
-    if q.agent != Agent::Claude {
-        facts.push(("Agent", q.agent.label().to_string()));
     }
     let me = quests.iter().position(|o| o.main && o.id == q.id);
     let added = quests
@@ -1860,7 +1855,6 @@ mod tests {
             added_by: None,
             added_in: None,
             main: false,
-            agent: Agent::Claude,
         }
     }
 
@@ -1871,7 +1865,6 @@ mod tests {
             started,
             touched,
             cwd: "C:/p".into(),
-            agent: Agent::Claude,
         }
     }
 
@@ -2006,9 +1999,6 @@ mod tests {
             assert_ne!(conversation_color(), outcome_color(o));
         }
         assert!(can_read(t) && can_carry(t));
-        let mut codex = t.clone();
-        codex.agent = Agent::Codex;
-        assert!(!can_read(&codex) && can_carry(&codex));
         assert!(!can_carry(&quest("a", 1, None, Outcome::Done)));
         assert_eq!(
             session_doc(t, "## You\n\nHi\n"),

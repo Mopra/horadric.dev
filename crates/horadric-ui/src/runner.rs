@@ -756,7 +756,7 @@ impl App {
             .values()
             .flat_map(|b| &b.tasks)
             .find(|t| t.mark.held() && t.holder.as_deref() == Some(id))
-            .map(|t| t.model_args(Agent::Claude))
+            .map(|t| t.model_args())
             .unwrap_or_default()
     }
 

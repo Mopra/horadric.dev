@@ -1,6 +1,6 @@
 //! Transcripts kept verbatim, dialogue only: what the human typed and
 //! what the agent said, with each tool call reduced to its name and the
-//! files it named. Claude Code's and Codex's. Tool output, which is most
+//! files it named. Tool output, which is most
 //! of a transcript, is not kept.
 //!
 //! This is the pure half: reading a transcript's new lines into turns,
@@ -22,14 +22,6 @@ const CHUNK: usize = 1000;
 /// The longest piece one turn is cut into, so one long reply does not
 /// become a chunk too long to be read whole.
 const PIECE: usize = 1200;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Format {
-    /// Claude Code's `<session>.jsonl`.
-    Claude,
-    /// Codex's `rollout-*.jsonl`.
-    Codex,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Who {
@@ -64,7 +56,7 @@ pub struct Scan {
 /// Reads `path` from byte `from` to the end of its last whole line. A
 /// file shorter than `from` has been rewritten, and is read from its
 /// start.
-pub fn scan(path: &Path, format: Format, from: u64) -> io::Result<Scan> {
+pub fn scan(path: &Path, from: u64) -> io::Result<Scan> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
     let from = if len < from { 0 } else { from };
@@ -73,24 +65,21 @@ pub fn scan(path: &Path, format: Format, from: u64) -> io::Result<Scan> {
     file.read_to_end(&mut bytes)?;
     // A line still being written is read next time.
     let whole = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-    let mut out = parse(&bytes[..whole], format);
+    let mut out = parse(&bytes[..whole]);
     out.end = from + whole as u64;
     Ok(out)
 }
 
 /// The turns in `jsonl`, which holds whole lines.
-pub fn parse(jsonl: &[u8], format: Format) -> Scan {
+pub fn parse(jsonl: &[u8]) -> Scan {
     let mut out = Scan::default();
     for line in jsonl.split(|&b| b == b'\n') {
         let Ok(v) = serde_json::from_slice::<Value>(line) else {
             continue;
         };
-        match format {
-            Format::Claude => claude_line(&v, &mut out),
-            Format::Codex => codex_line(&v, &mut out),
-        }
+        claude_line(&v, &mut out);
     }
-    // Codex says a message twice, as an event and as an item.
+    // The same thing said twice in a row says nothing more.
     out.turns
         .dedup_by(|b, a| a.who == b.who && a.text == b.text && a.files == b.files);
     out
@@ -140,63 +129,6 @@ fn claude_line(v: &Value, out: &mut Scan) {
     }
 }
 
-fn codex_line(v: &Value, out: &mut Scan) {
-    let time = v["timestamp"].as_str().and_then(iso).unwrap_or(0);
-    let p = &v["payload"];
-    match v["type"].as_str() {
-        Some("session_meta") => {
-            out.cwd = text_of(p, "cwd");
-            out.session = text_of(p, "id");
-        }
-        Some("event_msg") => match p["type"].as_str() {
-            Some("user_message") => talk(out, time, Who::You, p["message"].as_str().unwrap_or("")),
-            Some("agent_message") => {
-                talk(out, time, Who::Agent, p["message"].as_str().unwrap_or(""));
-            }
-            Some("item_completed") => {
-                let who = match p["item"]["type"].as_str() {
-                    Some("UserMessage") => Who::You,
-                    Some("AgentMessage") => Who::Agent,
-                    _ => return,
-                };
-                for c in p["item"]["content"].as_array().into_iter().flatten() {
-                    talk(out, time, who, c["text"].as_str().unwrap_or(""));
-                }
-            }
-            _ => {}
-        },
-        Some("response_item") => match p["type"].as_str() {
-            Some("function_call") => {
-                let args: Value = p["arguments"]
-                    .as_str()
-                    .and_then(|a| serde_json::from_str(a).ok())
-                    .unwrap_or_default();
-                let files = ["path", "file_path", "filename", "file"]
-                    .iter()
-                    .filter_map(|k| args[*k].as_str())
-                    .map(str::to_string)
-                    .collect();
-                tool(out, time, p["name"].as_str().unwrap_or("tool"), files);
-            }
-            Some("custom_tool_call") => {
-                let files = p["input"]
-                    .as_str()
-                    .unwrap_or("")
-                    .lines()
-                    .filter_map(|l| {
-                        ["*** Add File: ", "*** Update File: ", "*** Delete File: "]
-                            .iter()
-                            .find_map(|m| l.strip_prefix(m))
-                    })
-                    .map(|f| f.trim().to_string())
-                    .collect();
-                tool(out, time, p["name"].as_str().unwrap_or("tool"), files);
-            }
-            _ => {}
-        },
-        _ => {}
-    }
-}
 
 fn text_of(v: &Value, key: &str) -> Option<String> {
     v[key]
@@ -598,7 +530,7 @@ mod tests {
             json!({"type":"user","message":{"content":"<command-name>/clear</command-name>"}}),
             json!({"type":"summary","summary":"x"}),
         ]);
-        let s = parse(&bytes, Format::Claude);
+        let s = parse(&bytes);
         assert_eq!(s.cwd.as_deref(), Some("C:\\p"));
         assert_eq!(s.session.as_deref(), Some("s1"));
         let got: Vec<(Who, &str, usize)> = s
@@ -623,30 +555,11 @@ mod tests {
     fn a_task_notification_is_no_dialogue() {
         let bytes = lines(&[json!({"type":"user","message":{"content":
             "<task-notification><status>completed</status></task-notification>"}})]);
-        assert!(parse(&bytes, Format::Claude).turns.is_empty());
+        assert!(parse(&bytes).turns.is_empty());
         assert!(is_notification("\n<task-notification>x"));
         assert!(!is_notification("why did <task-notification> fire?"));
         assert!(holds_notification("You: <task-notification>x\nAgent: ok"));
         assert!(!holds_notification("You: hello"));
-    }
-
-    #[test]
-    fn codex_talk_is_kept_once_whichever_way_it_was_written() {
-        let bytes = lines(&[
-            json!({"type":"session_meta","payload":{"id":"c1","cwd":"C:\\p"}}),
-            json!({"timestamp":"2026-10-16T09:00:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"hello"}}),
-            json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"hello"}]}}}),
-            json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"type":"Text","text":"pong"}]}}}),
-            json!({"type":"response_item","payload":{"type":"function_call","name":"read_file","arguments":"{\"path\":\"a.rs\"}"}}),
-            json!({"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: b.rs\n*** End Patch"}}),
-            json!({"type":"response_item","payload":{"type":"message","role":"developer","content":[{"text":"instructions"}]}}),
-        ]);
-        let s = parse(&bytes, Format::Codex);
-        assert_eq!(s.session.as_deref(), Some("c1"));
-        assert_eq!(s.turns.len(), 4);
-        assert_eq!(s.turns[0].text, "hello");
-        assert_eq!(s.turns[2].files, vec!["a.rs"]);
-        assert_eq!(s.turns[3].files, vec!["b.rs"]);
     }
 
     #[test]
@@ -657,16 +570,16 @@ mod tests {
         let one = json!({"type":"user","message":{"content":"one"}}).to_string();
         let two = json!({"type":"user","message":{"content":"two"}}).to_string();
         std::fs::write(&path, format!("{one}\n{}", &two[..10])).unwrap();
-        let a = scan(&path, Format::Claude, 0).unwrap();
+        let a = scan(&path, 0).unwrap();
         assert_eq!(a.turns.len(), 1);
         assert_eq!(a.end, one.len() as u64 + 1);
         std::fs::write(&path, format!("{one}\n{two}\n")).unwrap();
-        let b = scan(&path, Format::Claude, a.end).unwrap();
+        let b = scan(&path, a.end).unwrap();
         assert_eq!(b.turns.len(), 1);
         assert_eq!(b.turns[0].text, "two");
         // A file rewritten shorter is read again from its start.
         std::fs::write(&path, format!("{two}\n")).unwrap();
-        let c = scan(&path, Format::Claude, b.end).unwrap();
+        let c = scan(&path, b.end).unwrap();
         assert_eq!(c.turns.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }

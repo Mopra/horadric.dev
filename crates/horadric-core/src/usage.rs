@@ -21,8 +21,8 @@ pub struct Limit {
     /// Unix seconds.
     #[serde(default)]
     pub resets_at: Option<u64>,
-    /// How long the window is, when the agent says. Codex does, and a free
-    /// plan's first limit is a month long, not five hours.
+    /// How long the window is, when the source says, which then names it
+    /// over its place.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minutes: Option<u32>,
 }
@@ -67,18 +67,6 @@ impl Limit {
             used: v.get("used_percentage")?.as_f64()? as f32,
             resets_at: v.get("resets_at").and_then(Value::as_u64),
             minutes: None,
-        })
-    }
-
-    /// One of Codex's `rate_limits`, where the percent is `used_percent`.
-    fn from_codex(v: &Value) -> Option<Limit> {
-        Some(Limit {
-            used: v.get("used_percent")?.as_f64()? as f32,
-            resets_at: v.get("resets_at").and_then(Value::as_u64),
-            minutes: v
-                .get("window_minutes")
-                .and_then(Value::as_u64)
-                .and_then(|m| u32::try_from(m).ok()),
         })
     }
 
@@ -138,30 +126,6 @@ impl Limits {
         .filter_map(|(name, l)| Some((name, l?)))
         .map(|(name, l)| (l.window_name().unwrap_or(name), l))
         .collect()
-    }
-
-    /// The limits in the newest `token_count` of a Codex rollout, `text`
-    /// being its end. Its `primary` is the short window and `secondary` the
-    /// long one, as Claude's five hour and weekly limits are. A count with
-    /// no limits, as an API key's has, is passed over for an older one.
-    pub fn from_codex(text: &str) -> Option<Limits> {
-        text.lines().rev().find_map(|line| {
-            if !line.contains("\"token_count\"") {
-                return None;
-            }
-            let v: Value = serde_json::from_str(line).ok()?;
-            let p = v.get("payload")?;
-            if p.get("type")?.as_str()? != "token_count" {
-                return None;
-            }
-            let r = p.get("rate_limits")?;
-            let limits = Limits {
-                five_hour: r.get("primary").and_then(Limit::from_codex),
-                seven_day: r.get("secondary").and_then(Limit::from_codex),
-                spend: None,
-            };
-            (!limits.is_empty()).then_some(limits)
-        })
     }
 
     /// The limits in a headless CLI's `rate_limit_event`, from its
@@ -394,50 +358,28 @@ impl Setting {
         }
     }
 
-    /// What `agent` takes, and what the window calls it. Models by their
+    /// What it takes, and what the window calls it. Models by their
     /// full names, so the version picked is the version that runs, and an
     /// alias moving on to a newer model never changes it behind your back.
     /// The last permission mode sits apart in its list, so it is never
-    /// picked by a slip. Codex's and Grok's are what their own pickers
-    /// list, and they have no permission modes to pick here.
-    pub fn choices(self, agent: Agent) -> &'static [(&'static str, &'static str)] {
-        match (agent, self) {
-            (Agent::Codex, Setting::Model) => &[
-                ("gpt-6-luna", "GPT-6 Luna"),
-                ("gpt-5.6-terra", "GPT-5.6 Terra"),
-                ("gpt-5.6-luna", "GPT-5.6 Luna"),
-                ("gpt-5.5", "GPT-5.5"),
-            ],
-            (Agent::Codex, Setting::Effort) => &[
-                ("low", "Low"),
-                ("medium", "Medium"),
-                ("high", "High"),
-                ("xhigh", "Extra high"),
-                ("max", "Max"),
-            ],
-            (Agent::Grok, Setting::Model) => &[("grok-4.7", "Grok 4.7")],
-            (Agent::Grok, Setting::Effort) => &[
-                ("low", "Low"),
-                ("medium", "Medium"),
-                ("high", "High"),
-                ("xhigh", "Extra high"),
-            ],
-            (Agent::Codex | Agent::Grok, Setting::Permissions | Setting::Workflow) => &[],
-            (Agent::Claude, Setting::Model | Setting::Workflow) => &[
+    /// picked by a slip.
+    pub fn choices(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Setting::Model | Setting::Workflow => &[
                 ("claude-fable-5-1", "Fable 5.1"),
                 ("claude-opus-5-5", "Opus 5.5"),
                 ("claude-opus-5-5[1m]", "Opus 5.5 1M"),
                 ("claude-sonnet-5", "Sonnet 5"),
                 ("claude-haiku-4-5-20251001", "Haiku 4.5"),
             ],
-            (Agent::Claude, Setting::Effort) => &[
+            Setting::Effort => &[
                 ("low", "Low"),
                 ("medium", "Medium"),
                 ("high", "High"),
                 ("xhigh", "Extra high"),
                 ("max", "Max"),
             ],
-            (Agent::Claude, Setting::Permissions) => &[
+            Setting::Permissions => &[
                 ("manual", "Ask first"),
                 ("acceptEdits", "Accept edits"),
                 ("plan", "Plan"),
@@ -474,11 +416,11 @@ impl Setting {
 
     /// What a value is called, or "Default" for none, which leaves it to
     /// the agent's own settings.
-    pub fn name_of(self, agent: Agent, value: Option<&str>) -> &'static str {
+    pub fn name_of(self, value: Option<&str>) -> &'static str {
         let Some(value) = value else {
             return "Default";
         };
-        self.choices(agent)
+        self.choices()
             .iter()
             .find(|(v, _)| *v == value)
             .map_or("Custom", |(_, name)| name)
@@ -518,20 +460,19 @@ impl Defaults {
         }
     }
 
-    /// The environment a session of `agent` starts with. Only Claude Code
-    /// has workflows, and none set leaves the variable to whatever the
-    /// user's own environment says.
-    pub fn env(&self, agent: Agent) -> Vec<(String, String)> {
-        match (agent, &self.workflow_model) {
-            (Agent::Claude, Some(m)) => vec![(WORKFLOW_MODEL_ENV.into(), m.clone())],
-            _ => Vec::new(),
-        }
+    /// The environment a session starts with. None set leaves the
+    /// variable to whatever the user's own environment says.
+    pub fn env(&self) -> Vec<(String, String)> {
+        self.workflow_model
+            .iter()
+            .map(|m| (WORKFLOW_MODEL_ENV.into(), m.clone()))
+            .collect()
     }
 
-    /// The flags to put before the own `args` of a session of `agent`,
-    /// spelled its way. A setting its arguments already make is left to
-    /// them.
-    pub fn flags(&self, agent: Agent, args: &[String]) -> Vec<String> {
+    /// The flags to put before a session's own `args`. A setting its
+    /// arguments already make is left to them.
+    pub fn flags(&self, args: &[String]) -> Vec<String> {
+        let agent = Agent::Claude;
         let mut out = Vec::new();
         for s in Setting::ALL {
             let Some(value) = self.get(s) else {
@@ -548,15 +489,16 @@ impl Defaults {
     /// `flags`, with permission prompts bypassed in place of the mode
     /// picked when `bypass`. A mode the session's own `args` chose still
     /// wins.
-    pub fn flags_for(&self, agent: Agent, args: &[String], bypass: bool) -> Vec<String> {
+    pub fn flags_for(&self, args: &[String], bypass: bool) -> Vec<String> {
         if !bypass {
-            return self.flags(agent, args);
+            return self.flags(args);
         }
+        let agent = Agent::Claude;
         let others = Defaults {
             permission_mode: None,
             ..self.clone()
         };
-        let mut out = others.flags(agent, args);
+        let mut out = others.flags(args);
         if !agent.chosen(Setting::Permissions, args) {
             out.extend(agent.bypass_args());
         }
@@ -655,106 +597,6 @@ mod tests {
             "Opus 5.5 \u{00B7} context 23% \u{00B7} session 41%"
         );
         assert_eq!(Status::default().line(), "");
-    }
-
-    const CODEX: &str = r#"{"timestamp":"t","type":"session_meta","payload":{"id":"x"}}
-{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","primary":{"used_percent":3.0,"window_minutes":300,"resets_at":100},"secondary":{"used_percent":20.5,"window_minutes":10080,"resets_at":900},"credits":null}}}
-{"type":"response_item","payload":{"type":"message","content":"token_count"}}
-{"type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"limit_id":"codex","primary":{"used_percent":1.0,"window_minutes":43200,"resets_at":1793333433},"secondary":null,"plan_type":"free"}}}
-{"type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":null}}
-{"type":"event_msg","payload":{"type":"agent_message","message":"pong"}}"#;
-
-    #[test]
-    fn codex_limits_come_from_its_newest_token_count() {
-        let l = Limits::from_codex(CODEX).unwrap();
-        assert_eq!(
-            l.five_hour,
-            Some(Limit {
-                used: 1.0,
-                resets_at: Some(1793333433),
-                minutes: Some(43200),
-            })
-        );
-        assert_eq!(l.seven_day, None);
-        // A free plan's one limit is a month long, and says so.
-        let names: Vec<&str> = l.named().iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, ["Month"]);
-        // Cut before the newest, the one before it is the newest.
-        let older = &CODEX[..CODEX
-            .find(
-                "
-{\"type\":\"response_item",
-            )
-            .unwrap()];
-        let l = Limits::from_codex(older).unwrap();
-        assert_eq!(l.five_hour.map(|l| l.used), Some(3.0));
-        assert_eq!(l.seven_day.map(|l| l.used), Some(20.5));
-        let names: Vec<&str> = l.named().iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, ["Session", "Week"]);
-        assert_eq!(
-            Limits::from_codex("{\"type\":\"token_count\"} not json"),
-            None
-        );
-        assert_eq!(Limits::from_codex(""), None);
-    }
-
-    #[test]
-    fn a_headless_rate_limit_event_tells_the_limits() {
-        let v: Value = serde_json::from_str(
-            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed",
-            "unifiedWindows":{"five_hour":{"utilization":0.05,"resetsAt":100},
-            "seven_day":{"utilization":0.68,"resetsAt":900},
-            "seven_day_overage_included":{"utilization":0.02,"resetsAt":900}}}}"#,
-        )
-        .unwrap();
-        let l = Limits::from_rate_limit_event(&v).unwrap();
-        assert_eq!(
-            l.five_hour.map(|l| (l.used.round(), l.resets_at)),
-            Some((5.0, Some(100)))
-        );
-        assert_eq!(
-            l.seven_day.map(|l| (l.used.round(), l.resets_at)),
-            Some((68.0, Some(900)))
-        );
-        let old: Value = serde_json::from_str(
-            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"}}"#,
-        )
-        .unwrap();
-        assert_eq!(Limits::from_rate_limit_event(&old), None);
-    }
-
-    #[test]
-    fn a_window_of_no_usual_length_keeps_its_place_name() {
-        let l = Limits {
-            five_hour: Some(Limit {
-                used: 1.0,
-                resets_at: None,
-                minutes: Some(90 * 60),
-            }),
-            ..Limits::default()
-        };
-        assert_eq!(l.named()[0].0, "Session");
-        assert_eq!(
-            serde_json::to_string(&l.five_hour).unwrap(),
-            r#"{"used":1.0,"resets_at":null,"minutes":5400}"#
-        );
-    }
-
-    #[test]
-    fn a_limit_past_its_reset_is_empty() {
-        let l = Limit {
-            used: 80.0,
-            resets_at: Some(1000),
-            minutes: None,
-        };
-        assert_eq!(l.at(400), (80.0, Some(600)));
-        assert_eq!(l.at(1000), (0.0, None));
-        let open = Limit {
-            used: 5.0,
-            resets_at: None,
-            minutes: None,
-        };
-        assert_eq!(open.at(1000), (5.0, None));
     }
 
     fn limit(used: f32, resets_at: u64) -> Option<Limit> {
@@ -952,21 +794,18 @@ mod tests {
             workflow_model: Some("claude-sonnet-5".into()),
         };
         assert_eq!(
-            d.flags(Agent::Claude, &[]),
+            d.flags(&[]),
             args("--model opus --effort high --permission-mode plan")
         );
         assert_eq!(
-            d.flags(
-                Agent::Claude,
-                &args("--model=haiku --dangerously-skip-permissions")
-            ),
+            d.flags(&args("--model=haiku --dangerously-skip-permissions")),
             args("--effort high")
         );
         assert_eq!(
-            d.flags(Agent::Claude, &args("--effort max --permission-mode auto")),
+            d.flags(&args("--effort max --permission-mode auto")),
             args("--model opus")
         );
-        assert!(Defaults::default().flags(Agent::Claude, &[]).is_empty());
+        assert!(Defaults::default().flags(&[]).is_empty());
     }
 
     #[test]
@@ -976,14 +815,13 @@ mod tests {
             ..Defaults::default()
         };
         assert_eq!(
-            d.env(Agent::Claude),
+            d.env(),
             vec![(
                 WORKFLOW_MODEL_ENV.to_string(),
                 "claude-haiku-4-5-20251001".to_string()
             )]
         );
-        assert!(d.env(Agent::Codex).is_empty());
-        assert!(Defaults::default().env(Agent::Claude).is_empty());
+        assert!(Defaults::default().env().is_empty());
         assert_eq!(Setting::Workflow.command(Some("x")), None);
         assert!(!Setting::ALL.contains(&Setting::Workflow));
     }
@@ -997,24 +835,16 @@ mod tests {
             workflow_model: None,
         };
         assert_eq!(
-            d.flags_for(Agent::Claude, &[], true),
+            d.flags_for(&[], true),
             args("--model opus --permission-mode bypassPermissions")
         );
         assert_eq!(
-            d.flags_for(Agent::Claude, &[], false),
-            d.flags(Agent::Claude, &[])
+            d.flags_for(&[], false),
+            d.flags(&[])
         );
         assert_eq!(
-            d.flags_for(Agent::Claude, &args("--permission-mode auto"), true),
+            d.flags_for(&args("--permission-mode auto"), true),
             args("--model opus")
-        );
-        assert_eq!(
-            Defaults::default().flags_for(Agent::Codex, &[], true),
-            args("--dangerously-bypass-approvals-and-sandbox")
-        );
-        assert_eq!(
-            Defaults::default().flags_for(Agent::Grok, &args("--always-approve"), true),
-            Vec::<String>::new()
         );
     }
 
@@ -1029,35 +859,24 @@ mod tests {
     #[test]
     fn settings_name_their_values() {
         let mut d = Defaults::default();
-        let claude = Agent::Claude;
         assert_eq!(
-            Setting::Effort.name_of(claude, d.get(Setting::Effort)),
+            Setting::Effort.name_of(d.get(Setting::Effort)),
             "Default"
         );
         d.set(Setting::Effort, Some("xhigh".into()));
         assert_eq!(
-            Setting::Effort.name_of(claude, d.get(Setting::Effort)),
+            Setting::Effort.name_of(d.get(Setting::Effort)),
             "Extra high"
         );
         assert_eq!(
-            Setting::Model.name_of(claude, Some("claude-opus-5-5")),
+            Setting::Model.name_of(Some("claude-opus-5-5")),
             "Opus 5.5"
         );
-        assert_eq!(Setting::Model.name_of(claude, Some("opus")), "Custom");
-        assert_eq!(
-            Setting::Model.name_of(Agent::Codex, Some("gpt-5.5")),
-            "GPT-5.5"
-        );
-        for a in Agent::ALL {
-            for &s in a.settings() {
-                assert!(!s.choices(a).is_empty(), "{a:?} {s:?}");
-            }
+        assert_eq!(Setting::Model.name_of(Some("opus")), "Custom");
+        for s in Setting::ALL {
+            assert!(!s.choices().is_empty(), "{s:?}");
         }
-        // Each agent's own scale: Grok's stops short of Max.
-        let last = |a: Agent| Setting::Effort.choices(a).last().map(|c| c.0);
-        assert_eq!(last(Agent::Claude), Some("max"));
-        assert_eq!(last(Agent::Codex), Some("max"));
-        assert_eq!(last(Agent::Grok), Some("xhigh"));
+        assert_eq!(Setting::Effort.choices().last().map(|c| c.0), Some("max"));
     }
 
     #[test]
