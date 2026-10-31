@@ -89,8 +89,7 @@ const ICON_FONTS: [PCWSTR; 2] = [w!("Segoe Fluent Icons"), w!("Segoe MDL2 Assets
 /// DirectWrite's enhanced contrast. The usual system value is 0.5 to 1.
 const TEXT_CONTRAST: f32 = 2.0;
 
-/// Where the name and the lines under it start in a tile, after the icon.
-const TILE_TEXT_X: f32 = 56.0;
+use crate::layout::TILE_TEXT_X;
 /// A window's name from the left of its header, in line with the text in
 /// the boxes below it.
 const NAME_INSET: f32 = INNER_PAD;
@@ -3622,7 +3621,11 @@ impl Painter<'_> {
         s: &Session,
         look: &Look,
     ) {
-        let b = scene.button(Hit::Tile(i));
+        // Its hirelings' line is a part of it, and lights it as the rest.
+        let b = match scene.button(Hit::Band(i)) {
+            Button::Idle => scene.button(Hit::Tile(i)),
+            lit => lit,
+        };
         // A finished turn jumps off the plate and settles, so the moment
         // it lands is seen from across the screen.
         let landing = if scene.ambient && s.phase == Phase::Done {
@@ -3956,7 +3959,13 @@ impl Painter<'_> {
                 bottom.w -= word_w + gap;
             }
         }
-        self.text(&gpu.small, theme::text_dim().fade(presence), last, bottom);
+        // Lit under the cursor, as a click on it opens the war table.
+        let last_c = if scene.button(Hit::Band(i)) == Button::Idle {
+            theme::text_dim()
+        } else {
+            theme::text()
+        };
+        self.text(&gpu.small, last_c.fade(presence), last, bottom);
         if let Some(mark) = mark {
             self.browser_mark(&mark, scene.button(Hit::Browser(i)));
         }

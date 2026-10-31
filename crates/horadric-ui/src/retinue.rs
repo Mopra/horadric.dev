@@ -541,7 +541,7 @@ impl Retinue {
                 let what = if self.table.get() {
                     "Back to the terminal (Esc)"
                 } else {
-                    "The war table: this turn and its hirelings over time (Ctrl+Shift+W)"
+                    "The war table: this turn and its hirelings over time (Ctrl+Shift+W). Alt+Down walks the portraits with the keys"
                 };
                 return Some(what.into());
             }
