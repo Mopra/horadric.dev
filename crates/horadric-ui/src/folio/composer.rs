@@ -572,7 +572,7 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
 
 /// A command only the terminal runs: the session goes on in a terminal,
 /// where it can be typed again, once Claude rests.
-fn to_terminal(chat: &mut Chat, command: &str) {
+pub(super) fn to_terminal(chat: &mut Chat, command: &str) {
     let idle = !chat.folio.busy && chat.folio.pending_asks().is_empty();
     match chat.input.key.clone() {
         Some(id) if idle && chat.folio.session_id.is_some() => {
@@ -595,7 +595,7 @@ fn native_command(text: &str) -> Option<&'static str> {
     picker::NATIVE.iter().map(|(n, _)| *n).find(|n| *n == name)
 }
 
-/// Runs `/login` or `/logout` for this session, without its CLI.
+/// Runs `/login`, `/logout` or `/mcp` for this session, without its CLI.
 fn run_native(chat: &mut Chat, name: &str) {
     let Some(id) = chat.input.key.clone() else {
         return;
@@ -603,6 +603,7 @@ fn run_native(chat: &mut Chat, name: &str) {
     chat.input.notice = None;
     match name {
         "login" => super::sign_in::log_in(chat, &id, None),
+        "mcp" => super::mcp::show(chat),
         _ => super::sign_in::log_out(chat, &id),
     }
 }

@@ -42,7 +42,7 @@ pub struct McpServer {
     /// Such as `stdio`, `http`, `sse`, `claudeai-proxy`.
     pub transport: String,
     pub tools: usize,
-    /// Its sign-in is held by claude.ai, not this CLI.
+    /// Its sign-in is held by a cloud session's proxy, not this CLI.
     pub proxied: bool,
     /// A sign-in waits in the browser: its page, empty until the CLI gave
     /// one.

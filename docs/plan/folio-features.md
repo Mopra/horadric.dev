@@ -39,12 +39,20 @@ means a message the SDK names but our fixtures have not confirmed.
 - A18 Find, select and copy across blocks, jump between prompts.
 - A19 Open in terminal and back.
 - A20 Needs-you markers on tile and tab.
+- A21 MCP (2.1.314, done 2026-10-31): a card when a server fails or
+  needs a sign-in, `/mcp` as a card listing every server with sign in,
+  reconnect, enable and disable (`mcp_status`, `mcp_authenticate`,
+  `mcp_reconnect`, `mcp_toggle`). Sign-in opens the CLI's page in the
+  default browser; the CLI takes the callback on localhost and
+  reconnects by itself. A server that cannot sign in headless offers
+  the terminal's `/mcp`. An MCP server's question (elicitation, a form
+  or a page to open) is a card answered with accept, decline or cancel.
 
 ## B. Soon
 
 Rewind (`rewind_files`, `--resume-session-at`), edit and resend as a
 fork, background tasks panel with stop, `!` shell mode run by Horadric,
-context breakdown, local command output as cards, MCP status card, line
+context breakdown, local command output as cards, line
 comments on a diff, review each edit before it lands, prompt
 suggestions, drafts kept per session, session titles, timestamps and a
 verbose view, images in tool results, usage limits meter, `/btw`.
@@ -58,7 +66,7 @@ editor, LaTeX, export.
 
 ## Terminal only
 
-`/config`, `/theme`, `/doctor`, `/ide`, MCP OAuth,
+`/config`, `/theme`, `/doctor`, `/ide`,
 the interactive `/plugin`, `/agents`, `/hooks`, `/permissions` editors,
 voice. Where cheap, a native action replaces them: `/model` by the
 composer control, `/memory` by opening CLAUDE.md in the file viewer.

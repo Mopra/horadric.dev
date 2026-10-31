@@ -94,14 +94,14 @@ impl McpServer {
                 .unwrap_or_default()
                 .to_string(),
             tools: v["tools"].as_array().map_or(0, Vec::len),
-            proxied: v["sessionProxied"].as_bool().unwrap_or(false)
-                || v["config"]["type"] == "claudeai-proxy",
+            proxied: v["sessionProxied"].as_bool().unwrap_or(false),
             ..McpServer::default()
         }
     }
 
     /// Whether a sign-in can be offered: it waits on one, and its sign-in
-    /// is not held by claude.ai.
+    /// is not held by a cloud session's proxy. A claude.ai connector's
+    /// can: its page is claude.ai's.
     pub fn can_sign_in(&self) -> bool {
         self.status == "needs-auth" && !self.proxied
     }

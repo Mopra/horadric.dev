@@ -66,7 +66,9 @@ tests against them.
   string or blocks (images as base64 blocks), with `uuid`, `priority`
   (`now`, `next`, `later`) and `client_composed`. Control requests:
   `initialize`, `interrupt`, `set_permission_mode`, `set_model`,
-  `get_context_usage`, `rewind_files`, `stop_task`, `mcp_status`.
+  `get_context_usage`, `rewind_files`, `stop_task`, `mcp_status`,
+  `mcp_reconnect`, `mcp_toggle`, `mcp_authenticate` (confirmed
+  2026-10-31 against 2.1.314; see `folio/mcp.rs` in core).
 - **Out.** `system`/`init` first (session id, model, tools, slash
   commands, skills, agents, MCP servers, `capabilities`), then
   `assistant` messages (text, thinking, `tool_use` blocks), `user`
@@ -75,7 +77,8 @@ tests against them.
   `terminal_reason`). Also `compact_boundary`, `status`,
   `conversation_reset` after `/clear`, task events for background work,
   and `control_request`s from the CLI: `can_use_tool` and
-  `hook_callback`, answered with a `control_response`.
+  `hook_callback`, answered with a `control_response`, and
+  `elicitation` for an MCP server's form or page.
 - **Asks.** Every permission prompt is a `can_use_tool` request.
   AskUserQuestion is one too: allow it with `updatedInput` carrying
   `answers`. ExitPlanMode most likely is, to be confirmed. Always echo

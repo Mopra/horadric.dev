@@ -23,6 +23,7 @@ pub const TERMINAL_ONLY: &[&str] = &[
 pub const NATIVE: &[(&str, &str)] = &[
     ("login", "Log in to Claude in your browser"),
     ("logout", "Log out of Claude"),
+    ("mcp", "MCP servers: status, sign in, reconnect"),
 ];
 
 /// Shown in a menu at most; the rest are a keystroke away.

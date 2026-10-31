@@ -16,14 +16,14 @@ use crate::layout::Rect;
 use crate::render;
 use crate::theme::{self, Color};
 
-const PAD: f32 = 14.0;
-const BUTTON_H: f32 = 30.0;
+pub(super) const PAD: f32 = 14.0;
+pub(super) const BUTTON_H: f32 = 30.0;
 /// The most of an ask's input a card shows before "Show all".
 const ASK_MAX_H: f32 = 220.0;
 
 /// A button `w` wide ending at `right`, filled when it is the one to
 /// press. Returns its left edge.
-fn button(
+pub(super) fn button(
     cx: &Ctx,
     s: &mut Scene,
     right: f32,
@@ -48,7 +48,16 @@ fn button(
 /// A text field with its caret when it has the keyboard. Returns its
 /// bottom.
 #[allow(clippy::too_many_arguments)]
-fn field(cx: &Ctx, s: &mut Scene, st: &State, id: &str, hint: &str, x: f32, y: f32, w: f32) -> f32 {
+pub(super) fn field(
+    cx: &Ctx,
+    s: &mut Scene,
+    st: &State,
+    id: &str,
+    hint: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+) -> f32 {
     let text = st.text(id);
     let focused = st.keys && st.focus.as_deref() == Some(id);
     let inner = w - 20.0;
@@ -84,7 +93,7 @@ fn field(cx: &Ctx, s: &mut Scene, st: &State, id: &str, hint: &str, x: f32, y: f
     r.bottom()
 }
 
-fn plate(cx: &Ctx, s: &mut Scene, w: f32, h: f32, waiting: bool) {
+pub(super) fn plate(cx: &Ctx, s: &mut Scene, w: f32, h: f32, waiting: bool) {
     let card = Rect::new(0.0, 0.0, w, h);
     s.items.insert(
         0,

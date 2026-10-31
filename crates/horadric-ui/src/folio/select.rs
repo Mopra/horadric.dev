@@ -143,6 +143,7 @@ pub(super) fn act(key: &str, a: Act) {
         Act::SignInPage(block) => super::sign_in::open_page(key, block),
         Act::SignInCode(block) => super::sign_in::send_code(key, block),
         Act::SignInCancel(block) => super::sign_in::cancel(key, block),
+        Act::Mcp(d) => super::mcp::act(key, d),
         Act::FindPrev => jump(key, false),
         Act::FindNext => jump(key, true),
         Act::FindClose => {
@@ -517,6 +518,13 @@ pub(super) fn release_lapsed(chat: &mut Chat) {
         st.focus = None;
         return;
     }
+    if let Some(rest) = focus.strip_prefix(super::mcp::FIELD) {
+        let id = rest.split_once(':').map_or(rest, |(id, _)| id);
+        if !chat.folio.pending_elicitations().contains(&id) {
+            st.focus = None;
+        }
+        return;
+    }
     let id = focus.split_once(':').map_or("", |(_, id)| id);
     if chat.folio.pending_asks().contains(&id) {
         return;
@@ -548,6 +556,9 @@ fn submit(key: &str, focus: &str, shift: bool) {
         if let Ok(block) = block.parse() {
             act(key, Act::SignInCode(block));
         }
+    } else if let Some(rest) = focus.strip_prefix(super::mcp::FIELD) {
+        let id = rest.split_once(':').map_or(rest, |(id, _)| id);
+        act(key, Act::Mcp(super::mcp::Do::Accept(id.to_string())));
     } else if let Some((_, id)) = focus.split_once(':') {
         act(key, Act::Submit(id.to_string()));
     }

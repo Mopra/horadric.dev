@@ -35,6 +35,7 @@ mod controls;
 mod editor;
 mod flow;
 mod lightbox;
+mod mcp;
 mod picker;
 mod rich;
 mod select;
@@ -246,13 +247,18 @@ impl Chat {
     fn between_turns(&self) -> bool {
         let unsure = self.loading.is_some() || !self.live;
         let leaving = self.to_terminal || self.restarting;
-        !unsure && !leaving && !self.folio.busy && self.folio.pending_asks().is_empty()
+        !unsure && !leaving && !self.folio.busy && !self.asking()
+    }
+
+    /// An ask, question, plan or MCP server's question waits on the human.
+    fn asking(&self) -> bool {
+        !self.folio.pending_asks().is_empty() || !self.folio.pending_elicitations().is_empty()
     }
 
     /// Claude works and waits on no one. An ask that waits is at rest for
     /// the runes, so nothing redraws while the human reads it.
     fn working(&self) -> bool {
-        self.folio.busy && self.folio.pending_asks().is_empty()
+        self.folio.busy && !self.asking()
     }
 
     /// The heat the runes move toward: a turn's full burn while Claude
@@ -285,7 +291,7 @@ impl Chat {
     fn state(&self) -> State {
         State {
             busy: self.folio.busy,
-            asking: !self.folio.pending_asks().is_empty(),
+            asking: self.asking(),
             ended: self.ended,
             live: self.live,
             finished: self.folio.turn_finished(),
@@ -806,6 +812,10 @@ unsafe extern "system" fn router_proc(
         watch::tick(hwnd);
         return LRESULT(0);
     }
+    if msg == WM_TIMER && wparam.0 == mcp::MCP_TIMER {
+        mcp::tick(hwnd);
+        return LRESULT(0);
+    }
     if msg == WM_TIMER && wparam.0 == SAVE_TIMER {
         let _ = KillTimer(Some(hwnd), SAVE_TIMER);
         let saved = CHATS.with(|c| {
@@ -922,6 +932,7 @@ fn drain() {
             chat.flush();
             select::release_lapsed(chat);
             composer::tend(id, chat);
+            mcp::tend(chat);
             chat.note_busy();
             if banished.last() == Some(id) {
                 // The runes behind flare up as the page burns, and cool.

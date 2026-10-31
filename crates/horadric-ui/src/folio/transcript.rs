@@ -105,6 +105,8 @@ pub(super) enum Act {
     SignInPage(usize),
     SignInCode(usize),
     SignInCancel(usize),
+    /// On an MCP card or an MCP server's question.
+    Mcp(super::mcp::Do),
     /// More of the conversation above what shows.
     Earlier,
     FindPrev,
@@ -371,6 +373,13 @@ fn stamp(i: usize, b: &Block, open: bool, st: &State) -> u64 {
         Block::SignIn(card) => {
             card.hash(&mut h);
             hash_field(&mut h, st, &cards::code_field(i));
+        }
+        Block::Mcp(card) => format!("{card:?}").hash(&mut h),
+        Block::Elicitation(e) => {
+            format!("{:?}{:?}{}", e.state, e.said, e.complete).hash(&mut h);
+            for id in super::mcp::field_ids(e) {
+                hash_field(&mut h, st, &id);
+            }
         }
     }
     h.finish()
@@ -1207,6 +1216,8 @@ impl View {
                 Block::Question { .. } => cards::question(&ctx, b, st, lw),
                 Block::Plan { .. } => cards::plan(&ctx, b, st, lw),
                 Block::SignIn(_) => cards::sign_in(&ctx, i, b, st, lw),
+                Block::Mcp(card) => super::mcp::card(&ctx, card, lw),
+                Block::Elicitation(e) => super::mcp::elicitation(&ctx, e, st, lw),
                 Block::Footer { .. } => ctx.footer(b, lw),
                 Block::Notice(n) => ctx.notice(n, lw),
                 Block::Raw(t) => ctx.raw(i, t, open, lw),
