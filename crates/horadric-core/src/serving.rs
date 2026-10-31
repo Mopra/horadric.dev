@@ -126,6 +126,17 @@ pub trait Serve {
     fn changes(&self, _id: &str, _path: Option<&str>) -> Job {
         Box::new(|| json!({"t": "error", "text": "Changes cannot be seen here."}))
     }
+    /// The files tile of a project this machine serves, as `afar_files`
+    /// sends it. Read only.
+    fn tree(&self, project: &str) -> Job {
+        let project = project.to_string();
+        Box::new(move || afar_files_error(&project, "", NO_FILES))
+    }
+    /// One file of a project this machine serves, if git lists it.
+    fn read(&self, project: &str, path: &str) -> Job {
+        let (project, path) = (project.to_string(), path.to_string());
+        Box::new(move || afar_files_error(&project, &path, NO_FILES))
+    }
     /// Keeps a phone's push subscription, the page's JSON.
     fn subscribe(&mut self, _who: &str, _sub: &Value) {}
     fn unsubscribe(&mut self, _endpoint: &str) {}
@@ -268,6 +279,8 @@ struct Asked {
     creates: Vec<(u32, String, String)>,
     /// Channel, session, and a path for one file's diff.
     changes: Vec<(u32, String, Option<String>)>,
+    /// A brother's `tree` and `read`: channel, project, and the path read.
+    files: Vec<(u32, String, Option<String>)>,
     /// Channel, project path, title, notes.
     quest_adds: Vec<(u32, String, String, String)>,
     renames: Vec<(u32, String, String)>,
@@ -435,6 +448,18 @@ impl Server {
                     asked.changes.push((ch, id, Some(path)));
                 }
             }
+            // Only a brother: a phone has no files tile, and a project's
+            // files are more than its sessions show.
+            "tree" if c.kind == Kind::Brother => {
+                if let Some(project) = text("project") {
+                    asked.files.push((ch, project, None));
+                }
+            }
+            "read" if c.kind == Kind::Brother => {
+                if let (Some(project), Some(path)) = (text("project"), text("path")) {
+                    asked.files.push((ch, project, Some(path)));
+                }
+            }
             "quests" => {
                 c.quests = true;
                 c.quests_sent = None;
@@ -576,6 +601,13 @@ impl Server {
         }
         for (ch, id, path) in asked.changes {
             out.later.push((ch, serve.changes(&id, path.as_deref())));
+        }
+        for (ch, project, path) in asked.files {
+            let job = match path {
+                None => serve.tree(&project),
+                Some(path) => serve.read(&project, &path),
+            };
+            out.later.push((ch, job));
         }
         for (ch, id, name) in asked.renames {
             if let Err(e) = serve.rename(&id, &name) {
@@ -981,6 +1013,16 @@ fn stream(
     }
 }
 
+/// Why a machine answers no `tree` or `read`.
+const NO_FILES: &str = "Files cannot be seen here.";
+
+/// A `tree` or `read` refused, naming what was asked so the asker knows
+/// which tile or view it was for.
+pub fn afar_files_error(project: &str, path: &str, why: &str) -> Value {
+    let what = if path.is_empty() { "tree" } else { "read" };
+    json!({"t": "error", "for": what, "project": project, "path": path, "text": why})
+}
+
 fn error(text: &str) -> Value {
     json!({"t": "error", "text": text})
 }
@@ -1159,6 +1201,19 @@ mod tests {
         }
         fn handing_answer(&mut self, who: &str, msg: &Value) {
             self.answers.push((who.into(), msg.clone()));
+        }
+        fn tree(&self, project: &str) -> Job {
+            let project = project.to_string();
+            Box::new(move || {
+                crate::afar_files::tree_message(&project, &["a.rs".to_string()], &[])
+            })
+        }
+        fn read(&self, project: &str, path: &str) -> Job {
+            let (project, path) = (project.to_string(), path.to_string());
+            Box::new(move || {
+                crate::afar_files::file_message(&project, &path, b"text
+".to_vec())
+            })
         }
         fn keeping(&mut self, who: &str, msg: &Value) -> Option<Job> {
             self.kept.push((who.into(), msg.clone()));
@@ -1615,6 +1670,29 @@ mod tests {
             serve.imported,
             vec![("\"repo\"".to_string(), "eA".to_string())]
         );
+    }
+
+    #[test]
+    fn a_brother_even_view_only_reads_a_projects_files_and_a_phone_never() {
+        let mut serve = Fake {
+            locked: true,
+            ..Fake::default()
+        };
+        let hello = json!({"t": "hello", "v": 3, "kind": "brother"});
+        let (mut server, _) = greeted(&mut serve, "Desk", hello);
+        let tree = say(&mut server, &mut serve, 1, json!({"t": "tree", "project": "/p"}), 0);
+        assert_eq!(of(&tree, "tree")[0]["files"], json!(["a.rs"]));
+        let read = json!({"t": "read", "project": "/p", "path": "a.rs"});
+        let file = say(&mut server, &mut serve, 2, read, 0);
+        assert_eq!(of(&file, "file")[0]["text"], "text
+");
+
+        let mut serve = Fake::default();
+        let (mut server, _) = greeted(&mut serve, "phone", json!({"t": "hello", "v": 3}));
+        let tree = say(&mut server, &mut serve, 1, json!({"t": "tree", "project": "/p"}), 0);
+        assert!(of(&tree, "tree").is_empty());
+        let read = json!({"t": "read", "project": "/p", "path": "a.rs"});
+        assert!(of(&say(&mut server, &mut serve, 2, read, 0), "file").is_empty());
     }
 
     #[test]

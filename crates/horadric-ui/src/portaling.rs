@@ -42,6 +42,7 @@ use crate::portal_pair::pc_name;
 use crate::portal_push::{self, Subs};
 use crate::project::{folder_key, project_key, project_name};
 use crate::sharing;
+use crate::town;
 use crate::worktree;
 
 /// How often `portal.json` is read, so `horadric portal` takes hold soon.
@@ -307,6 +308,16 @@ impl App {
     }
 
     /// The projects message: the tiles' projects, in their order.
+    /// The folder of a tile project of this PC's, as `projects` spelled
+    /// it: a brother reads the files of those and of nothing else.
+    fn portal_project_dir(&self, project: &str) -> Option<PathBuf> {
+        self.clusters
+            .iter()
+            .filter(|c| horadric_core::afar::split_key(&c.key).is_none() && !town::is(&c.key))
+            .filter_map(|c| self.project_dir(&c.key))
+            .find(|dir| dir.to_string_lossy() == project)
+    }
+
     fn portal_projects(&self) -> Value {
         let projects: Vec<(String, String)> = self
             .clusters
@@ -935,6 +946,24 @@ impl Serve for Here<'_> {
         })
     }
 
+    fn tree(&self, project: &str) -> Job {
+        let dir = self.0.portal_project_dir(project);
+        let project = project.to_string();
+        Box::new(move || match dir {
+            Some(dir) => horadric_core::afar_files::tree(&project, &dir),
+            None => horadric_core::serving::afar_files_error(&project, "", NOT_SHOWN),
+        })
+    }
+
+    fn read(&self, project: &str, path: &str) -> Job {
+        let dir = self.0.portal_project_dir(project);
+        let (project, path) = (project.to_string(), path.to_string());
+        Box::new(move || match dir {
+            Some(dir) => horadric_core::afar_files::read(&project, &dir, &path),
+            None => horadric_core::serving::afar_files_error(&project, &path, NOT_SHOWN),
+        })
+    }
+
     fn subscribe(&mut self, who: &str, sub: &Value) {
         let (Some(p), Some(mut sub)) = (&self.0.portal, Subs::parse(sub)) else {
             return;
@@ -1058,6 +1087,9 @@ fn heard_from(
         p.link.send(ch, &key, &reply);
     }
 }
+
+/// Why a brother may not read a project's files.
+const NOT_SHOWN: &str = "That project is not on this PC's tiles.";
 
 /// The answer to `changes`, or to `diff` for `path`. A session outside a
 /// repository has changed nothing a phone can see; a path that is not one

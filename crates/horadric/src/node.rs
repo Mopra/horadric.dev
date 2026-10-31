@@ -187,6 +187,24 @@ impl Serve for Machine {
         wire::projects(n.registry.all(), &n.recent)
     }
 
+    fn tree(&self, project: &str) -> Job {
+        let dir = self.project_dir(project);
+        let project = project.to_string();
+        Box::new(move || match dir {
+            Some(dir) => horadric_core::afar_files::tree(&project, &dir),
+            None => horadric_core::serving::afar_files_error(&project, "", NOT_SHOWN),
+        })
+    }
+
+    fn read(&self, project: &str, path: &str) -> Job {
+        let dir = self.project_dir(project);
+        let (project, path) = (project.to_string(), path.to_string());
+        Box::new(move || match dir {
+            Some(dir) => horadric_core::afar_files::read(&project, &dir, &path),
+            None => horadric_core::serving::afar_files_error(&project, &path, NOT_SHOWN),
+        })
+    }
+
     fn folders(&self) -> Value {
         let listed = folder_roots(&self.node)
             .into_iter()
@@ -392,6 +410,20 @@ impl Serve for Machine {
 
     fn handing_answer(&mut self, who: &str, msg: &Value) {
         self.heard_answer(who, msg);
+    }
+}
+
+/// Why a brother may not read a project's files.
+const NOT_SHOWN: &str = "That project is not on this node.";
+
+impl Machine {
+    /// The folder of one of the projects this node lists, as `projects`
+    /// spelled it: a brother reads the files of those and of nothing else.
+    fn project_dir(&self, project: &str) -> Option<PathBuf> {
+        let n = lock(&self.node);
+        let known =
+            n.registry.all().any(|s| s.cwd == project) || n.recent.iter().any(|r| r == project);
+        (known && !project.is_empty()).then(|| PathBuf::from(project))
     }
 }
 

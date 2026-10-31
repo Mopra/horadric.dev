@@ -9,94 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-/// What git says about one file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Change {
-    Modified,
-    Added,
-    Deleted,
-    Renamed,
-    Untracked,
-    Conflict,
-}
-
-impl Change {
-    /// The letter VS Code puts beside the name.
-    pub fn letter(self) -> &'static str {
-        match self {
-            Change::Modified => "M",
-            Change::Added => "A",
-            Change::Deleted => "D",
-            Change::Renamed => "R",
-            Change::Untracked => "U",
-            Change::Conflict => "C",
-        }
-    }
-
-    /// Which change a folder shows when it holds several. A conflict blocks
-    /// the next commit, so it wins; an untracked file is the least news.
-    fn rank(self) -> u8 {
-        match self {
-            Change::Conflict => 5,
-            Change::Modified => 4,
-            Change::Deleted => 3,
-            Change::Renamed => 2,
-            Change::Added => 1,
-            Change::Untracked => 0,
-        }
-    }
-
-    fn from_xy(x: u8, y: u8) -> Option<Change> {
-        Some(match (x, y) {
-            (b'?', b'?') => Change::Untracked,
-            (b'!', b'!') => return None,
-            (b'U', _) | (_, b'U') | (b'A', b'A') | (b'D', b'D') => Change::Conflict,
-            (b'R' | b'C', _) | (_, b'R' | b'C') => Change::Renamed,
-            (_, b'D') | (b'D', _) => Change::Deleted,
-            (b'A', _) => Change::Added,
-            _ => Change::Modified,
-        })
-    }
-}
-
-/// Splits NUL separated output, as every `-z` git command prints it.
-pub fn parse_list(out: &[u8]) -> Vec<String> {
-    out.split(|&b| b == 0)
-        .filter(|p| !p.is_empty())
-        .map(|p| String::from_utf8_lossy(p).into_owned())
-        .collect()
-}
-
-/// Reads `git status --porcelain=v1 -z`. Its paths are relative to the
-/// repository root, so `prefix` (from `git rev-parse --show-prefix`, with
-/// its trailing slash) is taken off, and anything outside it is dropped.
-pub fn parse_status(out: &[u8], prefix: &str) -> Vec<(String, Change)> {
-    let mut changes = Vec::new();
-    let mut fields = out.split(|&b| b == 0);
-    while let Some(f) = fields.next() {
-        if f.len() < 4 {
-            continue;
-        }
-        let (x, y) = (f[0], f[1]);
-        // A rename or copy is followed by the path it came from.
-        if matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C') {
-            fields.next();
-        }
-        let Some(change) = Change::from_xy(x, y) else {
-            continue;
-        };
-        let path = String::from_utf8_lossy(&f[3..]);
-        if let Some(rest) = path.strip_prefix(prefix) {
-            // An untracked folder is reported as one entry ending in a slash
-            // unless every file was asked for; either way it is a folder.
-            let rest = rest.trim_end_matches('/');
-            if !rest.is_empty() {
-                changes.push((rest.to_string(), change));
-            }
-        }
-    }
-    changes
-}
+pub use horadric_core::gitfiles::{parse_list, parse_status, Change};
 
 /// One file or folder.
 #[derive(Debug, Clone, PartialEq)]
@@ -328,38 +241,6 @@ mod tests {
             .iter()
             .map(|r| format!("{}{}", "  ".repeat(r.depth), r.label))
             .collect()
-    }
-
-    #[test]
-    fn status_reads_every_kind_and_skips_the_rename_source() {
-        let out = b" M src/a.rs\0A  src/b.rs\0R  src/new.rs\0src/old.rs\0?? notes.md\0 D gone.rs\0UU both.rs\0";
-        let got = parse_status(out, "");
-        assert_eq!(
-            got,
-            vec![
-                ("src/a.rs".into(), Change::Modified),
-                ("src/b.rs".into(), Change::Added),
-                ("src/new.rs".into(), Change::Renamed),
-                ("notes.md".into(), Change::Untracked),
-                ("gone.rs".into(), Change::Deleted),
-                ("both.rs".into(), Change::Conflict),
-            ]
-        );
-    }
-
-    #[test]
-    fn status_is_made_relative_to_the_project_folder() {
-        let out = b" M app/src/a.rs\0 M other/b.rs\0";
-        assert_eq!(
-            parse_status(out, "app/"),
-            vec![("src/a.rs".into(), Change::Modified)]
-        );
-    }
-
-    #[test]
-    fn list_splits_on_nul() {
-        assert_eq!(parse_list(b"a\0b/c\0"), s(&["a", "b/c"]));
-        assert!(parse_list(b"").is_empty());
     }
 
     #[test]

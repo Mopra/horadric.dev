@@ -405,6 +405,7 @@ pub fn kept_entry(session: &str, h: &Holding, snapshot_at: u64) -> Entry {
         since: Some(last_heard(h, snapshot_at)),
         agent: Some(Agent::Claude),
         talked: true,
+        worktree: false,
     }
 }
 

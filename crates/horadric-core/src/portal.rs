@@ -614,6 +614,10 @@ pub fn session_entry(s: &Session, project: &str, paused: bool) -> Value {
         "shell": s.shell,
         "talked": s.prompted && s.claude_session_id.is_some(),
     });
+    // Only then is what it changed its own, not a whole checkout's.
+    if s.worktree.is_some() {
+        entry["worktree"] = json!(true);
+    }
     if !paused && s.phase.asks() {
         let ask = s
             .ask

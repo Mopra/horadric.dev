@@ -185,6 +185,9 @@ pub struct Entry {
     /// Whether it has a conversation to carry on, which handing it off
     /// needs. True from a brother older than the field.
     pub talked: bool,
+    /// It works in a worktree of its own there, so what it changed is its
+    /// own to show on its tile. False from a brother older than the field.
+    pub worktree: bool,
 }
 
 /// What one message from a brother says.
@@ -360,6 +363,7 @@ fn entry(v: &Value) -> Option<Entry> {
             _ => None,
         },
         talked: v.get("talked").and_then(Value::as_bool).unwrap_or(true),
+        worktree: v.get("worktree").and_then(Value::as_bool).unwrap_or(false),
     })
 }
 
@@ -669,6 +673,7 @@ mod tests {
             since: None,
             agent: None,
             talked: true,
+            worktree: false,
         };
         let list = vec![entry("s1"), entry("s2"), entry("s3")];
         let owner = |b: &str| crate::brotherhood::Owner {
@@ -744,6 +749,7 @@ mod tests {
             since: None,
             agent: Some(Agent::Claude),
             talked: true,
+            worktree: false,
         };
         let t = SystemTime::UNIX_EPOCH;
         let (sa, sb) = (session(&a, &e, None, t), session(&b, &e, None, t));
@@ -762,6 +768,7 @@ mod tests {
             since: None,
             agent: Some(Agent::Claude),
             talked: true,
+            worktree: false,
         }
     }
 
@@ -833,6 +840,7 @@ mod tests {
             since: None,
             agent: Some(Agent::Claude),
             talked: true,
+            worktree: false,
         };
         let s = session(&desk, &e, None, t0);
         let b = s.brother.clone().unwrap();
@@ -1019,6 +1027,7 @@ mod tests {
             since: None,
             agent: Some(Agent::Claude),
             talked: true,
+            worktree: false,
         };
         let s = session(&on("vps"), &e, None, t0);
         assert_eq!(s.id, "a@vps");
@@ -1057,6 +1066,7 @@ mod tests {
             since: Some(400),
             agent: Some(Agent::Claude),
             talked: true,
+            worktree: false,
         };
         // A client that just started still shows when the phase began.
         let s = session(&on("vps"), &e, None, t0);
@@ -1067,6 +1077,7 @@ mod tests {
             since: Some(5_000),
             agent: Some(Agent::Claude),
             talked: true,
+            worktree: false,
             ..e.clone()
         };
         assert_eq!(session(&on("vps"), &ahead, None, t0).since, t0);
@@ -1076,6 +1087,7 @@ mod tests {
             since: Some(900),
             agent: Some(Agent::Claude),
             talked: true,
+            worktree: false,
             ..e.clone()
         };
         let done = session(&on("vps"), &idle, Some(&s), t0);

@@ -7,6 +7,7 @@
 
 pub mod accounts;
 pub mod afar;
+pub mod afar_files;
 pub mod agent;
 pub mod aim;
 pub mod ask;
@@ -28,6 +29,7 @@ pub mod experience;
 pub mod fleet;
 pub mod folio;
 pub mod glow;
+pub mod gitfiles;
 pub mod google;
 pub mod handing;
 pub mod handoff;
