@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use horadric_core::folio::{effort_line, prompt_line, Block, ImageData, Priority};
+use horadric_core::folio::{effort_line, prompt_line, typed, Block, ImageData, Priority, Typed};
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -448,21 +448,71 @@ pub(super) fn hold(chat: &mut Chat) {
     }
 }
 
-/// Starts a turn with `text` and `images`.
-fn deliver(chat: &mut Chat, text: &str, images: &[ImageData]) {
+/// Starts a turn with `text` and `images`. False when it did not go.
+fn deliver(chat: &mut Chat, text: &str, images: &[ImageData]) -> bool {
     let line = if images.is_empty() {
         chat.folio.push_prompt(text);
         prompt_line(text)
     } else {
         chat.folio.push_prompt_with_images(text, images)
     };
-    if !write(chat, &line) {
+    let went = write(chat, &line);
+    if !went {
         // No turn started, so none will end with a result.
         chat.folio.end();
     }
     chat.input.busy_was = chat.folio.busy;
     chat.follow = true;
     chat.note_busy();
+    went
+}
+
+/// Carries out a line the app types into the session, as a quest's nudge
+/// or Warriv's answer, the way the composer would had the human typed it.
+/// The composer's draft is the human's and stays as it is. While Claude
+/// works the prompt steers the turn, as typing into a busy terminal does.
+/// False when the session cannot take it yet: ended, handed to a
+/// terminal, its history or replay still coming, or a command only the
+/// terminal runs.
+pub(super) fn prompt(chat: &mut Chat, text: &str) -> bool {
+    if chat.ended || chat.to_terminal || chat.hosted.is_none() {
+        return false;
+    }
+    if chat.loading.is_some() || !chat.live {
+        return false;
+    }
+    match typed(text) {
+        Typed::Model(model) => {
+            let line = chat.folio.set_model(model);
+            let went = write(chat, &line);
+            if went {
+                chat.input.model = Some(model.to_string());
+            }
+            went
+        }
+        Typed::Effort(level) => {
+            set_effort(chat, level);
+            true
+        }
+        Typed::Prompt("") => false,
+        Typed::Prompt(text) if terminal_command(text).is_some() => false,
+        Typed::Prompt(text) if !chat.folio.busy => deliver(chat, text, &[]),
+        Typed::Prompt(text) => {
+            let line = chat.folio.queue_prompt(text, &[], Priority::Next);
+            chat.follow = true;
+            write(chat, &line)
+        }
+    }
+}
+
+/// Stops Claude's turn as Esc does. False when no turn runs or the
+/// request did not go.
+pub(super) fn stop(chat: &mut Chat) -> bool {
+    if !chat.folio.busy {
+        return false;
+    }
+    hold(chat);
+    chat.hosted.as_ref().is_some_and(|h| h.interrupt().is_ok())
 }
 
 /// Sends what the composer holds. While Claude works it goes to the CLI

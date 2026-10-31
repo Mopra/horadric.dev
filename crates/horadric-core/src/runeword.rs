@@ -570,15 +570,17 @@ pub fn keys(spec: &str) -> Result<Vec<Vec<u8>>, String> {
 }
 
 /// What a `keys` step does to a Folio, which has no terminal to type
-/// into: a line once Enter ends it, or a stop.
+/// into: a line once Enter ends it, a stop, or Enter alone, which says
+/// yes to what the agent asks as it would in the terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FolioKey {
     Line(String),
     Stop,
+    Approve,
 }
 
 /// The pieces [`keys`] wrote, as a Folio takes them. Text gathers until
-/// Enter sends it; Backspace takes back a character; Esc and Ctrl+C stop
+/// Enter sends it, and Enter with none approves; Backspace takes back a character; Esc and Ctrl+C stop
 /// the turn and drop what was gathered, as they would in the terminal.
 /// Other keys move a terminal's cursor or menus, which a Folio has not,
 /// and text no Enter ends is never sent.
@@ -588,10 +590,11 @@ pub fn folio_keys(pieces: &[Vec<u8>]) -> Vec<FolioKey> {
     for piece in pieces {
         match piece.as_slice() {
             b"\r" => {
-                if !line.trim().is_empty() {
-                    out.push(FolioKey::Line(std::mem::take(&mut line)));
-                }
-                line.clear();
+                let said = std::mem::take(&mut line);
+                out.push(match said.trim().is_empty() {
+                    true => FolioKey::Approve,
+                    false => FolioKey::Line(said),
+                });
             }
             [0x1b] | [0x03] => {
                 line.clear();
@@ -936,7 +939,8 @@ mod tests {
         assert_eq!(k("Ctrl+C"), vec![FolioKey::Stop]);
         assert_eq!(k("yes{Backspace}{Backspace}s{Enter}"), vec![FolioKey::Line("ys".into())]);
         assert_eq!(k("half{Esc}whole{Enter}"), vec![FolioKey::Stop, FolioKey::Line("whole".into())]);
-        assert_eq!(k("{Up}{Enter}"), Vec::<FolioKey>::new());
+        assert_eq!(k("{Enter}"), vec![FolioKey::Approve]);
+        assert_eq!(k("{Up}"), Vec::<FolioKey>::new());
         assert_eq!(k("never sent"), Vec::<FolioKey>::new());
     }
 

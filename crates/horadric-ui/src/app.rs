@@ -167,6 +167,9 @@ mod node_asks;
 
 #[path = "keeping.rs"]
 mod keeping;
+
+#[path = "steering.rs"]
+mod steering;
 pub(crate) use handing::{leaving_menu, leaving_pick};
 pub(crate) use keeping::{set_auto as set_auto_takeover, set_keeper, tray_state as keeping_tray};
 
@@ -1467,7 +1470,7 @@ fn tray_menu(hwnd: HWND) {
             app.recent.clone(),
             sessions,
             app.key_names(),
-            !app.consoles.is_empty(),
+            !app.consoles.is_empty() || !app.folios.is_empty(),
             app.update.as_ref().map(|m| m.version.clone()),
             xp,
         )
@@ -1996,13 +1999,9 @@ fn found_project(id: &str) {
     }
     let text = format!(
         "Found the project \"{name}\": run `horadric found \"{name}\" --summary \"<what we \
-         settled, in a short paragraph>\"`, then tell me it is made.\r"
+         settled, in a short paragraph>\"`, then tell me it is made."
     );
-    with_app(|app| {
-        if let Some(c) = app.consoles.get(id) {
-            c.write(text.into_bytes());
-        }
-    });
+    with_app(|app| app.send_prompt(id, &text));
 }
 
 /// A session pane's cross, which ends at once as the tile menu's End does,
@@ -4022,19 +4021,26 @@ impl App {
     fn live_counts(&self) -> (usize, usize) {
         let live = self.consoles.values().filter(|c| c.exit_code().is_none());
         let shells = live.clone().filter(|c| c.shell).count();
-        (live.count() - shells, shells)
+        let chats = self.running_folios().count();
+        (live.count() - shells + chats, shells)
     }
 
-    /// Sessions in a Horadric terminal that are in the middle of a turn.
+    /// The Folios whose claude.exe runs, by id.
+    fn running_folios(&self) -> impl Iterator<Item = &String> + Clone {
+        self.folios.keys().filter(|id| crate::folio::running(id))
+    }
+
+    /// Sessions in a Horadric terminal or Folio that are in the middle of
+    /// a turn.
     fn mid_turn_count(&self) -> usize {
         let Ok(r) = self.shared.registry.lock() else {
             return 0;
         };
-        self.consoles
-            .iter()
-            .filter(|(id, c)| {
-                c.exit_code().is_none() && r.get(id).is_some_and(|s| s.phase.mid_turn())
-            })
+        (self.consoles.iter())
+            .filter(|(_, c)| c.exit_code().is_none())
+            .map(|(id, _)| id)
+            .chain(self.running_folios())
+            .filter(|id| r.get(*id).is_some_and(|s| s.phase.mid_turn()))
             .count()
     }
 
@@ -5208,8 +5214,12 @@ impl App {
             .command(value.as_deref())
             .filter(|_| agent == Agent::Claude);
         if let Some(command) = command {
-            for (id, c) in &self.consoles {
-                if !c.claude || c.exit_code().is_some() || setting.chosen_by(&c.args) {
+            let terminals = (self.consoles.iter())
+                .filter(|(_, c)| c.claude && c.exit_code().is_none())
+                .map(|(id, c)| (id, &c.args));
+            let chats = (self.folio_args.iter()).filter(|(id, _)| self.folios.contains_key(*id));
+            for (id, args) in terminals.chain(chats) {
+                if setting.chosen_by(args) {
                     continue;
                 }
                 let queue = self.switches.entry(id.clone()).or_default();
@@ -5251,27 +5261,41 @@ impl App {
         let Ok(registry) = self.shared.registry.lock() else {
             return;
         };
-        let consoles = &self.consoles;
-        let before = &mut self.settings_before;
+        let (consoles, folios) = (&self.consoles, &self.folios);
+        let mut due: Vec<(String, String)> = Vec::new();
         self.switches.retain(|id, queue| {
-            let (Some(c), Some(s)) = (consoles.get(id), registry.get(id)) else {
+            let Some(s) = registry.get(id) else {
                 return false;
             };
-            if c.exit_code().is_some() || queue.is_empty() {
+            // A Folio switches its model by a control request, and holds
+            // an effort back itself while Claude works: free once it is up.
+            let free = match consoles.get(id) {
+                Some(c) if c.exit_code().is_none() => s.free_for_command(c.typed_at()),
+                Some(_) => return false,
+                None if folios.contains_key(id) => crate::folio::ready(id),
+                None => return false,
+            };
+            if queue.is_empty() {
                 return false;
             }
-            if s.free_for_command(c.typed_at()) {
-                let was = match (before.take(), &settings) {
-                    (Some((was, _)), _) => Some(was),
-                    (None, Some(path)) => install::snapshot(path, &install::SWITCHED).ok(),
-                    (None, None) => None,
-                };
-                *before = was.map(|w| (w, Instant::now()));
-                let (_, command) = queue.remove(0);
-                c.write(format!("{command}\r").into_bytes());
+            if free {
+                due.push((id.clone(), queue.remove(0).1));
             }
             !queue.is_empty()
         });
+        drop(registry);
+        if due.is_empty() {
+            return;
+        }
+        let was = match (self.settings_before.take(), &settings) {
+            (Some((was, _)), _) => Some(was),
+            (None, Some(path)) => install::snapshot(path, &install::SWITCHED).ok(),
+            (None, None) => None,
+        };
+        self.settings_before = was.map(|w| (w, Instant::now()));
+        for (id, command) in due {
+            self.send_command(&id, &command);
+        }
     }
 
     fn login(&mut self, agent: Agent) -> &mut Login {
@@ -6856,7 +6880,9 @@ impl App {
             .consoles
             .iter()
             .filter(|(_, c)| c.exit_code().is_none())
-            .filter_map(|(id, _)| r.get(id))
+            .map(|(id, _)| id)
+            .chain(self.running_folios())
+            .filter_map(|id| r.get(id))
             .filter(|s| key.is_none_or(|k| project_key(s) == k))
             .collect();
         let working = running.iter().filter(|s| s.phase.mid_turn()).count();
@@ -8170,7 +8196,7 @@ impl App {
             .map(|r| {
                 r.waiting()
                     .iter()
-                    .filter(|s| self.consoles.contains_key(&s.id))
+                    .filter(|s| self.consoles.contains_key(&s.id) || self.folios.contains_key(&s.id))
                     .map(|s| s.id.clone())
                     .collect()
             })
@@ -8277,7 +8303,7 @@ impl App {
             .iter()
             .filter(|(_, c)| c.exit_code().is_none())
             .map(|(id, _)| id)
-            .chain(self.folios.keys().filter(|id| crate::folio::running(id)))
+            .chain(self.running_folios())
             .collect();
         let pruned = self
             .shared

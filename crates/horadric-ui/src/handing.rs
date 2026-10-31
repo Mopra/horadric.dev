@@ -440,11 +440,7 @@ impl App {
         if !s.prompted || s.claude_session_id.is_none() {
             return Err("it has no conversation to resume yet".into());
         }
-        let live = self
-            .consoles
-            .get(id)
-            .is_some_and(|c| c.exit_code().is_none());
-        if !live && !self.paused.contains_key(id) {
+        if !self.runs_here(id) && !self.paused.contains_key(id) {
             return Err("it is not run by this Horadric".into());
         }
         Ok(())
@@ -590,20 +586,13 @@ impl App {
     fn handing_do(&mut self, id: &str, o: &Outgoing, step: Do) {
         match step {
             Do::Wait => {}
-            // Esc stops a turn in Claude Code, as the human would.
             Do::Interrupt => {
-                if let Some(c) = self.consoles.get(id) {
-                    c.write(b"\x1b".to_vec());
-                }
+                self.interrupt(id);
             }
             Do::AskBases => {
                 // The agent stops first, so nothing changes the tree or
-                // the transcript while they travel. Killed, it pauses.
-                if let Some(c) = self.consoles.get(id) {
-                    if c.exit_code().is_none() {
-                        c.kill();
-                    }
-                }
+                // the transcript while they travel. Halted, it pauses.
+                self.halt(id);
                 let ask = match with(|s| s.asks.get(id).cloned()) {
                     Some(ask) => ask,
                     None => {
@@ -674,6 +663,7 @@ impl App {
             .consoles
             .get(id)
             .map(|c| c.args.clone())
+            .or_else(|| self.folio_args.get(id).cloned())
             .or_else(|| self.paused.get(id).map(|p| p.args.clone()))
             .unwrap_or_default();
         let n = self.keeping_number(id);

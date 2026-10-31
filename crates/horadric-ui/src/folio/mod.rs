@@ -557,6 +557,55 @@ pub fn running(id: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// Whether session `id` takes what [`prompt`] sends now: up, its replay
+/// and history in, and not on its way to a terminal.
+pub fn ready(id: &str) -> bool {
+    with(id, |c| {
+        !c.ended && !c.to_terminal && c.live && c.loading.is_none() && c.hosted.is_some()
+    })
+    .unwrap_or(false)
+}
+
+/// Sends session `id` a line as though typed into it and Enter pressed:
+/// `/model` and `/effort` switch it, anything else is a prompt. False when
+/// it cannot take one now, see [`composer::prompt`].
+pub fn prompt(id: &str, text: &str) -> bool {
+    let went = with(id, |c| composer::prompt(c, text)).unwrap_or(false);
+    if went {
+        redraw(id);
+    }
+    went
+}
+
+/// Stops session `id`'s turn, as Esc in its composer does. False when no
+/// turn runs.
+pub fn stop(id: &str) -> bool {
+    with(id, composer::stop).unwrap_or(false)
+}
+
+/// Allows the oldest permission ask session `id` waits on, once, as Enter
+/// does in the terminal. A question or a plan needs its own answer, so
+/// they wait. False when no permission ask waits.
+pub fn approve(id: &str) -> bool {
+    let line = with(id, |c| {
+        // While a reattach replays, the ask may already be answered.
+        if !c.live {
+            return None;
+        }
+        let ask = c.folio.pending_asks().first()?.to_string();
+        let line = c.folio.answer(&ask, true)?;
+        let h = c.hosted.as_ref()?;
+        h.send_line(&line).ok()?;
+        select::release_lapsed(c);
+        Some(())
+    });
+    let went = line.flatten().is_some();
+    if went {
+        redraw(id);
+    }
+    went
+}
+
 /// The Claude Code conversation session `id` holds, once its init said.
 pub fn conversation(id: &str) -> Option<String> {
     with(id, |c| c.folio.session_id.clone()).flatten()

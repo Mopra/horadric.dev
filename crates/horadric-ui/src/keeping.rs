@@ -1033,11 +1033,7 @@ impl App {
     /// Stops a session taken over elsewhere and keeps its work on its
     /// orphan branch, so nothing done here since is lost.
     fn keeping_orphan(&mut self, id: &str) {
-        if let Some(c) = self.consoles.get(id) {
-            if c.exit_code().is_none() {
-                c.kill();
-            }
-        }
+        self.halt(id);
         let cwd = self
             .shared
             .registry

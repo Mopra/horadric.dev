@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use horadric_core::chronicle::{self, Happened, Woken};
 use horadric_core::tasks::{self, Mark, Mode, Task};
@@ -310,11 +310,9 @@ impl App {
                 let briefs = self.briefs(b, &events);
                 match &mut camp.awake {
                     Some(a) => {
-                        let Some(c) = self.consoles.get(&a.id) else {
+                        if !self.send_prompt(&a.id, &warriv::more(&briefs)) {
                             return false;
-                        };
-                        c.write(warriv::more(&briefs).into_bytes());
-                        self.tasks.enters.push((a.id.clone(), Instant::now()));
+                        }
                         self.record_wake(key, &a.id, woke(&a.id, &events));
                         a.told_at = SystemTime::now();
                         for e in &events {
@@ -864,9 +862,6 @@ impl App {
         if t.mark == Mark::Blocked || (tell.fix && t.mark == Mark::Review) {
             self.set_task(&tell.key, t.line, &t.title, Mark::Working);
         }
-        let Some(c) = self.consoles.get(&h) else {
-            return true;
-        };
         let (text, said) = if tell.fix {
             (
                 warriv::sent_back(&horadric_command(), &tell.text),
@@ -883,8 +878,11 @@ impl App {
                 "Warriv answered",
             )
         };
-        c.write(text.into_bytes());
-        self.tasks.enters.push((h.clone(), Instant::now()));
+        // Live but not taking prompts yet, as a Folio replaying after a
+        // reload: the tell waits for the next round.
+        if !self.send_prompt(&h, &text) {
+            return false;
+        }
         self.tasks.nudged.remove(&h);
         if !self.quiet && !tell.human {
             self.toasts.show(

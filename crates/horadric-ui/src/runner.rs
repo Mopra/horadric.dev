@@ -91,7 +91,7 @@ pub(super) struct State {
     /// Sessions already asked whether they are finished, and when.
     nudged: HashMap<String, SystemTime>,
     /// Nudges whose Enter is still to be sent.
-    enters: Vec<(String, Instant)>,
+    pub(super) enters: Vec<(String, Instant)>,
     /// What has been announced and still holds, so each is said once.
     announced: HashSet<String>,
     /// Projects whose runner started or closed a session on an item, so
@@ -687,9 +687,7 @@ impl App {
     }
 
     pub(super) fn live(&self, id: &str) -> bool {
-        self.consoles
-            .get(id)
-            .is_some_and(|c| c.exit_code().is_none())
+        self.runs_here(id)
     }
 
     /// Whether session `id` holds an item of a list.
@@ -1196,11 +1194,9 @@ impl App {
                     return;
                 }
                 self.set_task(key, t.line, &t.title, Mark::Working);
-                let Some(c) = self.consoles.get(&h) else {
+                if !self.send_prompt(&h, &tasks::waited(&horadric_command(), t)) {
                     return;
-                };
-                c.write(tasks::waited(&horadric_command(), t).into_bytes());
-                self.tasks.enters.push((h.clone(), Instant::now()));
+                }
                 self.tasks.nudged.remove(&h);
             }
         }
@@ -1546,11 +1542,9 @@ impl App {
             .map(|(h, _)| h.clone())
             .collect();
         for h in due {
-            let Some(c) = self.consoles.get(&h).filter(|c| c.exit_code().is_none()) else {
+            if !self.send_prompt(&h, &tasks::go_on(&horadric_command())) {
                 continue;
-            };
-            c.write(tasks::go_on(&horadric_command()).into_bytes());
-            self.tasks.enters.push((h.clone(), Instant::now()));
+            }
             if let Some(r) = self.tasks.refused.get_mut(&h) {
                 r.told = true;
             }
@@ -1684,11 +1678,9 @@ impl App {
             {
                 continue;
             }
-            let Some(c) = self.consoles.get(&h).filter(|c| c.exit_code().is_none()) else {
+            if !self.send_prompt(&h, &tasks::nudge(&horadric_command())) {
                 continue;
-            };
-            c.write(tasks::nudge(&horadric_command()).into_bytes());
-            self.tasks.enters.push((h.clone(), Instant::now()));
+            }
             self.tasks.nudged.insert(h, SystemTime::now());
         }
     }
@@ -2270,9 +2262,7 @@ impl App {
                 self.tasks.drift_waiting.push(d);
                 continue;
             }
-            if let Some(c) = self.consoles.get(&d.session) {
-                c.write(d.text.into_bytes());
-                self.tasks.enters.push((d.session.clone(), Instant::now()));
+            if self.send_prompt(&d.session, &d.text) {
                 self.tasks.nudged.remove(&d.session);
             }
         }
@@ -2356,10 +2346,7 @@ impl App {
         if let Err(e) = reopened {
             eprintln!("horadric: cannot hand \"{}\" back: {e}", l.title);
         }
-        if let Some(c) = self.consoles.get(h) {
-            c.write(said.into_bytes());
-            self.tasks.enters.push((h.to_string(), Instant::now()));
-        }
+        self.send_prompt(h, &said);
         self.tasks.nudged.remove(h);
         self.toasts.show(
             Kind::Failed,
