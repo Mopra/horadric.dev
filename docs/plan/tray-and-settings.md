@@ -154,7 +154,7 @@ plain words.
 
 1. **General:** Start with Windows, Open in Horadric in Explorer,
    Notify when a session waits, Loot sounds.
-2. **Appearance:** Theme, Terminal font, Tiles on screen, Show Tristram,
+2. **Appearance:** Theme, Code font, Tiles on screen, Show Tristram,
    Animations.
 3. **Sessions:** Model, Effort, Permissions, Workflow agents' model,
    Accounts (moved from the tray), Switch account when one runs out,

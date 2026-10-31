@@ -7,8 +7,6 @@ use horadric_core::folio::SessionInfo;
 /// Commands the Folio cannot run: they draw their own screens in the
 /// terminal. They show in the `/` list so they are not missed, marked.
 pub const TERMINAL_ONLY: &[&str] = &[
-    "login",
-    "logout",
     "config",
     "theme",
     "doctor",
@@ -18,6 +16,13 @@ pub const TERMINAL_ONLY: &[&str] = &[
     "agents",
     "hooks",
     "permissions",
+];
+
+/// Commands the Folio runs itself where the CLI would draw a screen,
+/// with what the `/` list says of each.
+pub const NATIVE: &[(&str, &str)] = &[
+    ("login", "Log in to Claude in your browser"),
+    ("logout", "Log out of Claude"),
 ];
 
 /// Shown in a menu at most; the rest are a keystroke away.
@@ -219,6 +224,17 @@ pub fn slash_items(info: &SessionInfo, typed: &str) -> Vec<Item> {
             });
         }
     }
+    for (name, detail) in NATIVE {
+        match all.iter_mut().find(|i| i.value == *name) {
+            Some(i) => i.detail = detail.to_string(),
+            None => all.push(Item {
+                label: format!("/{name}"),
+                detail: detail.to_string(),
+                value: name.to_string(),
+                ..Default::default()
+            }),
+        }
+    }
     for name in TERMINAL_ONLY {
         if !all.iter().any(|i| i.value == *name) {
             all.push(Item {
@@ -351,16 +367,22 @@ mod tests {
     #[test]
     fn the_slash_list_marks_terminal_commands_and_filters() {
         let info = SessionInfo {
-            slash_commands: vec!["compact".into(), "login".into(), "review".into()],
+            slash_commands: vec!["compact".into(), "theme".into(), "login".into(), "review".into()],
             skills: vec!["review".into()],
             agents: vec!["planner".into()],
             ..Default::default()
         };
         let all = slash_items(&info, "");
-        let login = all.iter().find(|i| i.value == "login").unwrap();
-        assert!(login.terminal);
-        assert_eq!(login.detail, "Opens in terminal");
-        assert!(all.iter().any(|i| i.value == "theme" && i.terminal));
+        let theme = all.iter().find(|i| i.value == "theme").unwrap();
+        assert!(theme.terminal);
+        assert_eq!(theme.detail, "Opens in terminal");
+        assert!(all.iter().any(|i| i.value == "config" && i.terminal));
+        // Login and logout run in the Folio, listed once each.
+        let login: Vec<&Item> = all.iter().filter(|i| i.value == "login").collect();
+        assert_eq!(login.len(), 1);
+        assert!(!login[0].terminal);
+        assert_eq!(login[0].detail, "Log in to Claude in your browser");
+        assert!(all.iter().any(|i| i.value == "logout" && !i.terminal));
         assert!(all.iter().any(|i| i.label == "@agent-planner"));
         assert_eq!(
             all.iter().find(|i| i.value == "review").unwrap().detail,

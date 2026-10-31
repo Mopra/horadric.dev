@@ -39,7 +39,7 @@ use horadric_core::{fleet, merge, pack, ship, ssh, Agent, Phase, SavedState, Set
 use horadric_hooks::tasks as file;
 
 use super::{post, push, unix_now, with_app, App, Input, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
-use crate::app::Run;
+use crate::app::{SessionSpec, Workplace};
 use crate::board::{self, Board, RowState};
 use crate::menu::{self, Item};
 use crate::questlog::Ask;
@@ -91,7 +91,7 @@ pub(super) struct State {
     /// Sessions already asked whether they are finished, and when.
     nudged: HashMap<String, SystemTime>,
     /// Nudges whose Enter is still to be sent.
-    enters: Vec<(String, Instant)>,
+    pub(super) enters: Vec<(String, Instant)>,
     /// What has been announced and still holds, so each is said once.
     announced: HashSet<String>,
     /// Projects whose runner started or closed a session on an item, so
@@ -687,9 +687,7 @@ impl App {
     }
 
     pub(super) fn live(&self, id: &str) -> bool {
-        self.consoles
-            .get(id)
-            .is_some_and(|c| c.exit_code().is_none())
+        self.runs_here(id)
     }
 
     /// Whether session `id` holds an item of a list.
@@ -821,9 +819,8 @@ impl App {
     /// it holds an item, how to read and add to it otherwise), about its own
     /// worktree when it has one and about the project's hosts when it has
     /// some, as one system prompt since Claude
-    /// Code takes only one, and, the first time only, the item as its
-    /// prompt. Last, since the prompt is positional. Both are read as they
-    /// are now, so a resume sees the hosts of today.
+    /// Code takes only one. Read as it is now, so a resume sees the hosts
+    /// of today. The item as its first prompt is [`App::claude_start`]'s.
     pub(super) fn task_args(&mut self, id: &str, program: &Path, cwd: &Path) -> Vec<String> {
         let holds = self.holds_quest(id);
         let batch = horadric_pty::is_batch(program);
@@ -897,14 +894,6 @@ impl App {
             // `cmd.exe` ends a command line at a newline.
             out.push(system.join(if batch { " " } else { "\n\n" }));
         }
-        if let Some(prompt) = self.tasks.prompts.remove(id) {
-            // `cmd.exe` ends a command line at a newline.
-            out.push(if batch {
-                tasks::one_line(&prompt)
-            } else {
-                prompt
-            });
-        }
         out
     }
 
@@ -931,10 +920,7 @@ impl App {
         }
         let (pack, packed) = context_pack(key, &dir, &task);
         record_pack(key, &id, title, packed);
-        self.tasks.prompts.insert(
-            id.clone(),
-            tasks::prompt(&task, &pack, &horadric_command(), file::rel(&dir)),
-        );
+        let prompt = tasks::prompt(&task, &pack, &horadric_command(), file::rel(&dir));
         self.refresh_boards(true);
         let parallel = self
             .shared
@@ -942,31 +928,18 @@ impl App {
             .borrow()
             .get(key)
             .is_some_and(|b| b.parallel > 1);
-        let cwd = if parallel {
-            self.own_tree(
-                &id,
-                &tasks::slug(title),
-                dir.clone(),
-                &[],
-                horadric_core::Agent::Claude,
-                true,
-            )
-        } else {
-            dir.clone()
+        // A Folio unless Settings says new sessions open in a terminal:
+        // automation follows the human's one switch back.
+        let spec = SessionSpec {
+            id: Some(id.clone()),
+            name: Some(title.to_string()),
+            prompt: Some(prompt),
+            place: if parallel { Workplace::OwnTree } else { Workplace::Here },
+            branch: Some(tasks::slug(title)),
+            quiet: true,
+            ..SessionSpec::new(dir.clone(), self.chat_sessions)
         };
-        if let Err(e) = self.launch(
-            &id,
-            title,
-            cwd,
-            Vec::new(),
-            Run::Agent(horadric_core::Agent::Claude),
-            false,
-        ) {
-            // A worktree the session never started in holds nothing.
-            if let Some((w, _)) = self.new_trees.remove(&id) {
-                crate::worktree::remove(w);
-            }
-            self.tasks.prompts.remove(&id);
+        if let Err(e) = self.start_session(spec) {
             let _ = file::update(&dir, |text| tasks::set_mark(text, line, title, Mark::Open));
             self.refresh_boards(true);
             return Err(e);
@@ -1196,11 +1169,9 @@ impl App {
                     return;
                 }
                 self.set_task(key, t.line, &t.title, Mark::Working);
-                let Some(c) = self.consoles.get(&h) else {
+                if !self.send_prompt(&h, &tasks::waited(&horadric_command(), t)) {
                     return;
-                };
-                c.write(tasks::waited(&horadric_command(), t).into_bytes());
-                self.tasks.enters.push((h.clone(), Instant::now()));
+                }
                 self.tasks.nudged.remove(&h);
             }
         }
@@ -1303,28 +1274,18 @@ impl App {
             return;
         };
         let id = self.unique_id("quest-giver");
-        self.tasks.prompts.insert(
-            id.clone(),
-            tasks::giver_prompt(&horadric_command(), file::rel(&dir)),
-        );
-        if let Err(e) = self.launch(
-            &id,
-            "Quest Giver",
-            dir,
-            Vec::new(),
-            Run::Agent(horadric_core::Agent::Claude),
-            false,
-        ) {
-            self.tasks.prompts.remove(&id);
+        let spec = SessionSpec {
+            id: Some(id),
+            name: Some("Quest Giver".into()),
+            prompt: Some(tasks::giver_prompt(&horadric_command(), file::rel(&dir))),
+            show: true,
+            quiet: true,
+            ..SessionSpec::new(dir, self.chat_sessions)
+        };
+        if let Err(e) = self.start_session(spec) {
             eprintln!("horadric: cannot start the quest giver: {e}");
             self.toasts
                 .show(Kind::Failed, "Cannot start the quest giver", &e);
-            return;
-        }
-        if self.fill_stage(key) {
-            if let Some(stage) = &self.stage {
-                stage.focus_session(&id);
-            }
         }
     }
 
@@ -1546,11 +1507,9 @@ impl App {
             .map(|(h, _)| h.clone())
             .collect();
         for h in due {
-            let Some(c) = self.consoles.get(&h).filter(|c| c.exit_code().is_none()) else {
+            if !self.send_prompt(&h, &tasks::go_on(&horadric_command())) {
                 continue;
-            };
-            c.write(tasks::go_on(&horadric_command()).into_bytes());
-            self.tasks.enters.push((h.clone(), Instant::now()));
+            }
             if let Some(r) = self.tasks.refused.get_mut(&h) {
                 r.told = true;
             }
@@ -1684,11 +1643,9 @@ impl App {
             {
                 continue;
             }
-            let Some(c) = self.consoles.get(&h).filter(|c| c.exit_code().is_none()) else {
+            if !self.send_prompt(&h, &tasks::nudge(&horadric_command())) {
                 continue;
-            };
-            c.write(tasks::nudge(&horadric_command()).into_bytes());
-            self.tasks.enters.push((h.clone(), Instant::now()));
+            }
             self.tasks.nudged.insert(h, SystemTime::now());
         }
     }
@@ -2270,9 +2227,7 @@ impl App {
                 self.tasks.drift_waiting.push(d);
                 continue;
             }
-            if let Some(c) = self.consoles.get(&d.session) {
-                c.write(d.text.into_bytes());
-                self.tasks.enters.push((d.session.clone(), Instant::now()));
+            if self.send_prompt(&d.session, &d.text) {
                 self.tasks.nudged.remove(&d.session);
             }
         }
@@ -2356,10 +2311,7 @@ impl App {
         if let Err(e) = reopened {
             eprintln!("horadric: cannot hand \"{}\" back: {e}", l.title);
         }
-        if let Some(c) = self.consoles.get(h) {
-            c.write(said.into_bytes());
-            self.tasks.enters.push((h.to_string(), Instant::now()));
-        }
+        self.send_prompt(h, &said);
         self.tasks.nudged.remove(h);
         self.toasts.show(
             Kind::Failed,

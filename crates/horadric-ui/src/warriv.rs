@@ -10,18 +10,18 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use horadric_core::chronicle::{self, Happened, Woken};
 use horadric_core::tasks::{self, Mark, Mode, Task};
 use horadric_core::warriv::{
     self, Brief, Desk, Dried, Drive, Event, Heard, Kind, Review, Reviews, Wake,
 };
-use horadric_core::{escalate, ship, Agent, Phase};
+use horadric_core::{escalate, ship, Phase};
 use horadric_hooks::tasks as file;
 
 use super::{horadric_command, Board};
-use crate::app::{unix_now, App, Run};
+use crate::app::{unix_now, App, SessionSpec};
 use crate::board::Ink;
 use crate::store;
 use crate::toast::Kind as Toast;
@@ -310,11 +310,9 @@ impl App {
                 let briefs = self.briefs(b, &events);
                 match &mut camp.awake {
                     Some(a) => {
-                        let Some(c) = self.consoles.get(&a.id) else {
+                        if !self.send_prompt(&a.id, &warriv::more(&briefs)) {
                             return false;
-                        };
-                        c.write(warriv::more(&briefs).into_bytes());
-                        self.tasks.enters.push((a.id.clone(), Instant::now()));
+                        }
                         self.record_wake(key, &a.id, woke(&a.id, &events));
                         a.told_at = SystemTime::now();
                         for e in &events {
@@ -623,18 +621,14 @@ impl App {
     ) -> Option<Awake> {
         let dir = self.project_dir(key)?;
         let id = self.unique_id(warriv::ID);
-        self.tasks
-            .prompts
-            .insert(id.clone(), warriv::prompt(briefs));
-        if let Err(e) = self.launch(
-            &id,
-            "Warriv",
-            dir,
-            Vec::new(),
-            Run::Agent(Agent::Claude),
-            false,
-        ) {
-            self.tasks.prompts.remove(&id);
+        let spec = SessionSpec {
+            id: Some(id.clone()),
+            name: Some("Warriv".into()),
+            prompt: Some(warriv::prompt(briefs)),
+            quiet: true,
+            ..SessionSpec::new(dir, self.chat_sessions)
+        };
+        if let Err(e) = self.start_session(spec) {
             eprintln!("horadric: cannot start Warriv: {e}");
             self.toasts.show(Toast::Failed, "Cannot start Warriv", &e);
             return None;
@@ -864,9 +858,6 @@ impl App {
         if t.mark == Mark::Blocked || (tell.fix && t.mark == Mark::Review) {
             self.set_task(&tell.key, t.line, &t.title, Mark::Working);
         }
-        let Some(c) = self.consoles.get(&h) else {
-            return true;
-        };
         let (text, said) = if tell.fix {
             (
                 warriv::sent_back(&horadric_command(), &tell.text),
@@ -883,8 +874,11 @@ impl App {
                 "Warriv answered",
             )
         };
-        c.write(text.into_bytes());
-        self.tasks.enters.push((h.clone(), Instant::now()));
+        // Live but not taking prompts yet, as a Folio replaying after a
+        // reload: the tell waits for the next round.
+        if !self.send_prompt(&h, &text) {
+            return false;
+        }
         self.tasks.nudged.remove(&h);
         if !self.quiet && !tell.human {
             self.toasts.show(
@@ -1023,17 +1017,15 @@ impl App {
             diff,
         });
         let id = self.unique_id(warriv::REVIEWER);
-        self.tasks.prompts.insert(id.clone(), prompt);
         let started = SystemTime::now();
-        if let Err(e) = self.launch(
-            &id,
-            "Warriv reviews",
-            dir,
-            Vec::new(),
-            Run::Agent(Agent::Claude),
-            false,
-        ) {
-            self.tasks.prompts.remove(&id);
+        let spec = SessionSpec {
+            id: Some(id.clone()),
+            name: Some("Warriv reviews".into()),
+            prompt: Some(prompt),
+            quiet: true,
+            ..SessionSpec::new(dir, self.chat_sessions)
+        };
+        if let Err(e) = self.start_session(spec) {
             eprintln!("horadric: cannot start a reviewer: {e}");
             self.toasts
                 .show(Toast::Failed, "Cannot start a reviewer", &e);

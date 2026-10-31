@@ -440,11 +440,7 @@ impl App {
         if !s.prompted || s.claude_session_id.is_none() {
             return Err("it has no conversation to resume yet".into());
         }
-        let live = self
-            .consoles
-            .get(id)
-            .is_some_and(|c| c.exit_code().is_none());
-        if !live && !self.paused.contains_key(id) {
+        if !self.runs_here(id) && !self.paused.contains_key(id) {
             return Err("it is not run by this Horadric".into());
         }
         Ok(())
@@ -590,20 +586,13 @@ impl App {
     fn handing_do(&mut self, id: &str, o: &Outgoing, step: Do) {
         match step {
             Do::Wait => {}
-            // Esc stops a turn in Claude Code, as the human would.
             Do::Interrupt => {
-                if let Some(c) = self.consoles.get(id) {
-                    c.write(b"\x1b".to_vec());
-                }
+                self.interrupt(id);
             }
             Do::AskBases => {
                 // The agent stops first, so nothing changes the tree or
-                // the transcript while they travel. Killed, it pauses.
-                if let Some(c) = self.consoles.get(id) {
-                    if c.exit_code().is_none() {
-                        c.kill();
-                    }
-                }
+                // the transcript while they travel. Halted, it pauses.
+                self.halt(id);
                 let ask = match with(|s| s.asks.get(id).cloned()) {
                     Some(ask) => ask,
                     None => {
@@ -674,8 +663,11 @@ impl App {
             .consoles
             .get(id)
             .map(|c| c.args.clone())
+            .or_else(|| self.folio_args.get(id).cloned())
             .or_else(|| self.paused.get(id).map(|p| p.args.clone()))
             .unwrap_or_default();
+        // Paused for the handoff, a Folio is a paused chat by now.
+        let chat = self.paused.get(id).is_some_and(|p| p.chat) || self.folios.contains_key(id);
         let n = self.keeping_number(id);
         let said = self.keeping_handing(id, to, n);
         let record = self.shared.registry.lock().ok().and_then(|r| {
@@ -695,6 +687,7 @@ impl App {
                 interrupted: !clean,
                 n,
                 said,
+                chat,
                 ..Record::default()
             })
         });
@@ -1097,7 +1090,9 @@ impl App {
             worktree,
             loot: Default::default(),
             runeword: None,
-            chat: false,
+            // A chat goes on as one, its next prompt told it moved like a
+            // terminal's: its hooks are Claude Code's.
+            chat: record.chat,
         };
         // No one may be at this PC to answer Claude Code's trust prompt
         // for a folder it has never seen.

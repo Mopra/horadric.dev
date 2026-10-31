@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use horadric_core::folio::{effort_line, prompt_line, Block, ImageData, Priority};
+use horadric_core::folio::{effort_line, prompt_line, typed, Block, ImageData, Priority, Typed};
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -411,6 +411,12 @@ pub(super) fn tend(id: &str, chat: &mut Chat) {
         let line = chat.folio.initialize();
         write(chat, &line);
     }
+    // The session's orders, as a terminal's went in on its command line.
+    if !chat.folio.busy {
+        if let Some(text) = chat.first.take() {
+            deliver(chat, &text, &[]);
+        }
+    }
     if chat.folio.permission_mode() == "bypassPermissions" {
         chat.input.bypass = true;
     }
@@ -448,21 +454,71 @@ pub(super) fn hold(chat: &mut Chat) {
     }
 }
 
-/// Starts a turn with `text` and `images`.
-fn deliver(chat: &mut Chat, text: &str, images: &[ImageData]) {
+/// Starts a turn with `text` and `images`. False when it did not go.
+fn deliver(chat: &mut Chat, text: &str, images: &[ImageData]) -> bool {
     let line = if images.is_empty() {
         chat.folio.push_prompt(text);
         prompt_line(text)
     } else {
         chat.folio.push_prompt_with_images(text, images)
     };
-    if !write(chat, &line) {
+    let went = write(chat, &line);
+    if !went {
         // No turn started, so none will end with a result.
         chat.folio.end();
     }
     chat.input.busy_was = chat.folio.busy;
     chat.follow = true;
     chat.note_busy();
+    went
+}
+
+/// Carries out a line the app types into the session, as a quest's nudge
+/// or Warriv's answer, the way the composer would had the human typed it.
+/// The composer's draft is the human's and stays as it is. While Claude
+/// works the prompt steers the turn, as typing into a busy terminal does.
+/// False when the session cannot take it yet: ended, handed to a
+/// terminal, its history or replay still coming, or a command only the
+/// terminal runs.
+pub(super) fn prompt(chat: &mut Chat, text: &str) -> bool {
+    if chat.ended || chat.to_terminal || chat.hosted.is_none() {
+        return false;
+    }
+    if chat.loading.is_some() || !chat.live {
+        return false;
+    }
+    match typed(text) {
+        Typed::Model(model) => {
+            let line = chat.folio.set_model(model);
+            let went = write(chat, &line);
+            if went {
+                chat.input.model = Some(model.to_string());
+            }
+            went
+        }
+        Typed::Effort(level) => {
+            set_effort(chat, level);
+            true
+        }
+        Typed::Prompt("") => false,
+        Typed::Prompt(text) if terminal_command(text).is_some() => false,
+        Typed::Prompt(text) if !chat.folio.busy => deliver(chat, text, &[]),
+        Typed::Prompt(text) => {
+            let line = chat.folio.queue_prompt(text, &[], Priority::Next);
+            chat.follow = true;
+            write(chat, &line)
+        }
+    }
+}
+
+/// Stops Claude's turn as Esc does. False when no turn runs or the
+/// request did not go.
+pub(super) fn stop(chat: &mut Chat) -> bool {
+    if !chat.folio.busy {
+        return false;
+    }
+    hold(chat);
+    chat.hosted.as_ref().is_some_and(|h| h.interrupt().is_ok())
 }
 
 /// Sends what the composer holds. While Claude works it goes to the CLI
@@ -470,11 +526,23 @@ fn deliver(chat: &mut Chat, text: &str, images: &[ImageData]) {
 /// stops the turn for it.
 pub(super) fn send(chat: &mut Chat, now: bool) {
     // While the history loads, a prompt would land above it.
-    if chat.ended || chat.to_terminal || chat.hosted.is_none() || chat.loading.is_some() {
+    if chat.to_terminal || chat.loading.is_some() {
         return;
     }
     let text = chat.input.ed.expanded().trim().to_string();
     if text.is_empty() && chat.input.images.is_empty() {
+        return;
+    }
+    // Before the session's own checks: a login is what one that ended
+    // for want of it needs.
+    if let Some(name) = native_command(&text) {
+        chat.input.ed.clear();
+        chat.input.menu = None;
+        chat.input.save();
+        run_native(chat, name);
+        return;
+    }
+    if chat.ended || chat.hosted.is_none() {
         return;
     }
     if let Some(name) = terminal_command(&text) {
@@ -518,6 +586,24 @@ fn to_terminal(chat: &mut Chat, command: &str) {
                 "{command} runs in the terminal. Open it there once the work rests."
             ));
         }
+    }
+}
+
+/// The command a prompt runs, when it is one the Folio runs itself.
+fn native_command(text: &str) -> Option<&'static str> {
+    let name = text.strip_prefix('/')?.split_whitespace().next()?;
+    picker::NATIVE.iter().map(|(n, _)| *n).find(|n| *n == name)
+}
+
+/// Runs `/login` or `/logout` for this session, without its CLI.
+fn run_native(chat: &mut Chat, name: &str) {
+    let Some(id) = chat.input.key.clone() else {
+        return;
+    };
+    chat.input.notice = None;
+    match name {
+        "login" => super::sign_in::log_in(chat, &id, None),
+        _ => super::sign_in::log_out(chat, &id),
     }
 }
 
@@ -673,6 +759,11 @@ fn pick(chat: &mut Chat, how: How) -> bool {
             if item.terminal {
                 chat.input.ed.replace(menu.start, caret, "");
                 to_terminal(chat, &item.label);
+                return true;
+            }
+            if let Some(name) = native_command(&format!("/{}", item.value)) {
+                chat.input.ed.replace(menu.start, caret, "");
+                run_native(chat, name);
                 return true;
             }
             let put = if item.value.starts_with('@') {
@@ -1099,6 +1190,32 @@ pub fn dictated(key: &str, text: &str) {
             text.to_string()
         };
         chat.input.ed.type_str(&text);
+        chat.input.edited();
+        follow_menu(chat);
+    });
+    redraw(key);
+}
+
+/// A pick handed from elsewhere on the stage, put in at the caret as one
+/// step, set off by spaces so it never runs into a word.
+pub fn handed(key: &str, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    with(key, |chat| {
+        chat.input.ensure(key);
+        let ed = &mut chat.input.ed;
+        let f = &ed.field;
+        // A selection is replaced, so what touches the pick is outside it.
+        let (lo, hi) = (f.caret.min(f.anchor), f.caret.max(f.anchor));
+        let lead = f.text[..lo].ends_with(|c: char| !c.is_whitespace());
+        let tail = !f.text[hi..].starts_with(char::is_whitespace);
+        let text = format!(
+            "{}{text}{}",
+            if lead { " " } else { "" },
+            if tail { " " } else { "" }
+        );
+        ed.insert(&text);
         chat.input.edited();
         follow_menu(chat);
     });

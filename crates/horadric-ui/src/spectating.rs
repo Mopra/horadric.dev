@@ -142,6 +142,7 @@ impl App {
         self.consoles
             .iter()
             .filter(|(_, c)| c.exit_code() != Some(0))
+            .chain(&self.folios)
             .filter_map(|(id, _)| r.get(id))
             .map(|s| {
                 let project = project_key(s);

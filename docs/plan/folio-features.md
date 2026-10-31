@@ -27,7 +27,15 @@ means a message the SDK names but our fixtures have not confirmed.
 - A14 Todo checklist above the composer.
 - A15 Context meter, compaction marker, `/clear` reset.
 - A16 Subagent lanes under the step that started them.
-- A17 Errors plainly: API retry, rate limit, auth, failed turn.
+- A17 Errors plainly: API retry, rate limit, auth, failed turn. Auth
+  done (2026-10-31): a turn refused for want of a login (assistant
+  `error: authentication_failed`, or an `api_error` with a 401) shows a
+  sign-in card instead of the CLI's "run /login" reply. `/login` and
+  `/logout` run in the Folio: `claude auth login` hidden on pipes, the
+  card with "Open sign-in page" (the default browser) and a field for
+  the code the page shows, then the session starts again on its
+  conversation with the new login. Rate limit and other API errors
+  still show as the CLI's reply text.
 - A18 Find, select and copy across blocks, jump between prompts.
 - A19 Open in terminal and back.
 - A20 Needs-you markers on tile and tab.
@@ -50,7 +58,7 @@ editor, LaTeX, export.
 
 ## Terminal only
 
-`/login`, `/logout`, `/config`, `/theme`, `/doctor`, `/ide`, MCP OAuth,
+`/config`, `/theme`, `/doctor`, `/ide`, MCP OAuth,
 the interactive `/plugin`, `/agents`, `/hooks`, `/permissions` editors,
 voice. Where cheap, a native action replaces them: `/model` by the
 composer control, `/memory` by opening CLAUDE.md in the file viewer.

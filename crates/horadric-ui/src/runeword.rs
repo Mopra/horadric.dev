@@ -23,7 +23,7 @@ use horadric_core::Session;
 use windows::Win32::Foundation::POINT;
 
 use super::Merge;
-use crate::app::{self, unix_now, App, Input, Run};
+use crate::app::{self, unix_now, App, Input, Run, SessionSpec};
 use crate::console;
 use crate::dialog::{Dialog, Tone};
 use crate::menu::{self, Item};
@@ -474,6 +474,11 @@ impl App {
                 }
             }
             Rune::Keys(spec) => match runeword::keys(&spec) {
+                // Lost on a Folio, so said rather than skipped.
+                Ok(p) if self.folios.contains_key(&s.id) && !runeword::folio_takes(&p) => {
+                    let why = format!("a chat cannot take the keys \"{spec}\", only a terminal");
+                    stop(self, &why)
+                }
                 Ok(pieces) => {
                     if self.type_keys(&s.id, pieces) {
                         self.change_on(on, &w.name, |w| w.step = Step::Typing)
@@ -507,10 +512,16 @@ impl App {
     /// apart, and a last moment after them, so a step after it lands once
     /// the agent has taken them. False without a terminal to write to.
     fn type_keys(&mut self, id: &str, pieces: Vec<Vec<u8>>) -> bool {
+        let now = Instant::now();
+        // A Folio takes them at once; the last moment still lets it start
+        // on them before the next step.
+        if self.keys_to_folio(id, &pieces) {
+            (self.tome.typing).push((id.to_string(), Vec::new(), now + KEYS_APART));
+            return true;
+        }
         let Some(c) = self.consoles.get(id).filter(|c| c.exit_code().is_none()) else {
             return false;
         };
-        let now = Instant::now();
         let mut pieces = pieces.into_iter();
         if let Some(first) = pieces.next() {
             c.write(first);
@@ -615,15 +626,10 @@ impl App {
         Some((reviewer, file))
     }
 
-    /// Types one line to a live session, its Enter a moment after so the
-    /// agent takes it as typed. False when there is no console to type to.
+    /// Says one line to a live session, as though typed and Enter pressed.
+    /// False when nothing here takes it.
     fn tell(&mut self, id: &str, text: &str) -> bool {
-        let Some(c) = self.consoles.get(id).filter(|c| c.exit_code().is_none()) else {
-            return false;
-        };
-        c.write(one_line(text).into_bytes());
-        self.tasks.enters.push((id.to_string(), Instant::now()));
-        true
+        self.send_prompt(id, &one_line(text))
     }
 
     /// What a toast calls what a runeword was cast on.
@@ -921,11 +927,7 @@ impl App {
             r.get(id)
                 .is_some_and(|s| !s.shell && s.background.is_none())
         });
-        fit && !self.paused.contains_key(id)
-            && self
-                .consoles
-                .get(id)
-                .is_some_and(|c| c.exit_code().is_none())
+        fit && !self.paused.contains_key(id) && self.runs_here(id)
     }
 
     /// The project's sessions a stone can be cast on, with their labels,
@@ -1149,26 +1151,18 @@ impl App {
             }
             None => runeword::smith_prompt(&horadric, config, &global),
         };
-        let id = self.unique_id("runesmith");
-        self.tasks.prompts.insert(id.clone(), prompt);
-        if let Err(e) = self.launch(
-            &id,
-            "Runesmith",
-            dir,
-            Vec::new(),
-            Run::Agent(horadric_core::Agent::Claude),
-            false,
-        ) {
-            self.tasks.prompts.remove(&id);
+        let spec = SessionSpec {
+            id: Some(self.unique_id("runesmith")),
+            name: Some("Runesmith".into()),
+            prompt: Some(prompt),
+            show: true,
+            quiet: true,
+            ..SessionSpec::new(dir, self.chat_sessions)
+        };
+        if let Err(e) = self.start_session(spec) {
             eprintln!("horadric: cannot start the Runesmith: {e}");
             self.toasts
                 .show(Kind::Failed, "Cannot start the Runesmith", &e);
-            return;
-        }
-        if self.fill_stage(key) {
-            if let Some(stage) = &self.stage {
-                stage.focus_session(&id);
-            }
         }
     }
 }
@@ -1450,16 +1444,14 @@ impl App {
     /// None when it could not start, which a notification says.
     fn start_reviewer(&mut self, name: &str, main: PathBuf, prompt: String) -> Option<String> {
         let id = self.unique_id("review");
-        self.tasks.prompts.insert(id.clone(), prompt);
-        if let Err(e) = self.launch(
-            &id,
-            name,
-            main,
-            Vec::new(),
-            Run::Agent(horadric_core::Agent::Claude),
-            false,
-        ) {
-            self.tasks.prompts.remove(&id);
+        let spec = SessionSpec {
+            id: Some(id.clone()),
+            name: Some(name.to_string()),
+            prompt: Some(prompt),
+            quiet: true,
+            ..SessionSpec::new(main, self.chat_sessions)
+        };
+        if let Err(e) = self.start_session(spec) {
             eprintln!("horadric: cannot start the reviewer: {e}");
             self.toasts
                 .show(Kind::Failed, "Cannot start the reviewer", &e);

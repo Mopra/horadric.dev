@@ -321,6 +321,9 @@ pub struct Pane {
     /// and the one the arrow keys are on.
     start_hover: Cell<Option<usize>>,
     start_pick: Cell<Option<usize>>,
+    /// The address field is being edited in the header, where it was
+    /// clicked, even on the start page, which otherwise holds it.
+    address_up: Cell<bool>,
 }
 
 /// The keys that make no character, which `WM_CHAR` never carries.
@@ -415,6 +418,7 @@ impl Pane {
             keyed: Cell::new(None),
             start_hover: Cell::new(None),
             start_pick: Cell::new(None),
+            address_up: Cell::new(false),
         });
         // A browser pane's page is a window inside it, which its own
         // drawing must leave alone.
@@ -696,12 +700,16 @@ impl Pane {
     pub fn refont(&self) {
         self.fit_grid();
         self.invalidate();
+        if let Some(key) = &self.console.folio {
+            folio::refont(key);
+        }
     }
 
     pub fn focus(&self) {
         // A start page's field takes the keyboard, never its hidden page.
         if self.start_key().is_some() {
             if self.address.borrow().is_none() {
+                self.address_up.set(false);
                 self.edit_address();
             } else {
                 unsafe {
@@ -787,7 +795,7 @@ impl Pane {
         }
         if new_tab::in_field(&l, x, y) && self.address.borrow().is_some() {
             if let Some(f) = self.address.borrow_mut().as_mut() {
-                if double {
+                if self.address_up.replace(false) || double {
                     f.select_all();
                 } else {
                     let caret = field::utf16_at(&f.text, f.caret);
@@ -1131,8 +1139,8 @@ impl Pane {
         // On the start page the field is on the glass, not in the header.
         let start_key = self.start_key().map(str::to_string);
         let (edit, start_edit) = match start_key {
-            Some(_) => (None, edit),
-            None => (edit, None),
+            Some(_) if !self.address_up.get() => (None, edit),
+            _ => (edit, None),
         };
         let shown = match &edit {
             Some(f) => f.text.clone(),
@@ -1712,8 +1720,12 @@ impl Pane {
     }
 
     /// Something picked elsewhere on the stage, pasted into this session.
+    /// A Folio has no program reading the pty, so it goes in its composer.
     pub fn hand(&self, text: &str) {
-        self.paste_text(text);
+        match &self.console.folio {
+            Some(key) => folio::handed(key, text),
+            None => self.paste_text(text),
+        }
     }
 
     fn paste_text(&self, text: &str) {
@@ -1887,7 +1899,12 @@ impl Pane {
                 Chord::Zoom => self.tell_stage(WM_PANE_ZOOM),
                 Chord::Focus(dir) => self.move_focus(dir),
                 Chord::Font(step) => app::push(Input::Font(step)),
-                Chord::Find if self.console.sky.is_some() || self.console.folio.is_some() => {}
+                Chord::Find if self.console.sky.is_some() => {}
+                Chord::Find if self.console.folio.is_some() => {
+                    if let Some(key) = &self.console.folio {
+                        folio::find(key);
+                    }
+                }
                 Chord::Find => self.open_search(),
                 Chord::WarTable => self.war_table(None),
             }
@@ -1902,6 +1919,20 @@ impl Pane {
         // Alt+F4 closes the stage. Windows passes it up from a child.
         if mods.alt && vk == VK_F4 {
             return false;
+        }
+        if let Some(key) = &self.console.folio {
+            // Shift+Insert and Ctrl+Insert are a terminal's paste and copy,
+            // so they are the Folio's Ctrl+V and Ctrl+C.
+            let clip = match (vk, mods.ctrl, mods.shift) {
+                (VK_INSERT, false, true) => Some('\u{16}'),
+                (VK_INSERT, true, false) => Some('\u{3}'),
+                _ => None,
+            };
+            if let Some(c) = clip.filter(|_| !mods.alt) {
+                let ctrl = Mods { ctrl: true, shift: false, alt: false };
+                folio::char(key, c, ctrl);
+                return true;
+            }
         }
         if let Some(key) = self.console.folio.as_deref().filter(|k| folio::is_watch(k)) {
             if vk == VK_ESCAPE && !mods.ctrl && !mods.alt && !mods.shift {
@@ -2431,7 +2462,10 @@ impl Pane {
         let step = match self.bar_at(lparam) {
             None => return false,
             Some(BarHit::Field) => {
-                if self.address.borrow().is_some() {
+                // The start page's field moves up to the header clicked.
+                if !self.address_up.replace(true) && self.address.borrow().is_some() {
+                    self.edit_address();
+                } else if self.address.borrow().is_some() {
                     let l = self.bar_layout();
                     self.place_caret(self.dip(lparam).0 - l.field.0 - BAR_INSET, double);
                 } else {
@@ -3069,8 +3103,9 @@ impl Pane {
     fn on_wheel(&self, wparam: WPARAM, lparam: LPARAM) {
         let raw = ((wparam.0 >> 16) & 0xffff) as i16 as i32;
         if let Some(key) = &self.console.folio {
-            folio::wheel(key, raw);
-            return;
+            if folio::wheel(key, raw, Self::mods().ctrl) {
+                return;
+            }
         }
         if let Some(key) = &self.console.sky {
             // The wheel's point is on the screen, the zoom's in the glass.

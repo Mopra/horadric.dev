@@ -391,6 +391,48 @@ with a body only the phone can read.
 - Both run git away from the UI, so the answer may come after other
   messages. A PC before 0.24 ignores both, and the page shows no list.
 
+## Added in 0.39: Folios
+
+A Folio, the chat that drives Claude Code headless, has no terminal, so
+it is served as one: a phone or a brother that knows nothing of Folios
+watches, types into and answers it unchanged.
+
+- `sessions` entries of a Folio gain `"folio":true`. A client may draw
+  it as a chat; one that does not know the field treats it as any
+  session.
+- `screen` of a Folio is its conversation as plain lines, the newest
+  500, no `styles` runs: a prompt after `> `, Claude's reply as its
+  markdown, one line a tool step with a mark (`…` running, `✓` done,
+  `✗` failed with the end of its output, `■` stopped), thinking folded
+  to one line, a footer line a turn. What was typed from afar and not
+  yet sent is the last line, after `> `. `cols` and `rows` are 100 and
+  40, or the size a brother holds. The cursor is after the last line.
+- `attach` streams the same lines as a terminal paints them: the screen
+  cleared, then the lines. Whenever they change the stream starts over
+  with a replay (`reset`), so a viewer holds no more than one screen.
+- A waiting Folio's `ask` is the request it waits on, with options whose
+  `keys` answer it: a permission's `1` Yes, `2` Always (when it has
+  rules to add) and Escape No; a question's choices by number when it
+  is one question picking one; a plan's `1` Approve, `2` Approve and
+  accept edits, Escape Keep planning. A push carries them as for a
+  terminal.
+- `input` of a Folio is read as keys, as Claude Code's own prompt reads
+  them. A message of one digit, with nothing typed before it, picks
+  that choice of what waits. Other text is typed into a draft. Enter
+  (``) sends the draft as a prompt, folded into the turn running when
+  there is one; while a request waits, the draft is the answer's words
+  instead (a permission denied with them as the reason, a question
+  answered with them one line a question, a plan sent back with them),
+  and Enter with no draft picks the first choice. Escape declines what
+  waits, or else stops the turn; Ctrl+C stops the turn. Backspace and
+  Ctrl+U edit the draft; other escape sequences, such as arrows, do
+  nothing.
+- `start` and `create` start a Folio when the PC's Settings open new
+  Claude sessions as chats, a terminal otherwise, as a tile's own new
+  session does.
+- A PC before 0.39 serves no Folio: `watch` answers the "Open this
+  session once on the PC" error, and `input` "not running on the PC".
+
 ## Protocol v3: raw streams
 
 For another PC of the same human (a brother, see

@@ -569,6 +569,75 @@ pub fn keys(spec: &str) -> Result<Vec<Vec<u8>>, String> {
     Ok(out)
 }
 
+/// What a `keys` step does to a Folio, which has no terminal to type
+/// into: a line once Enter ends it, a stop, or Enter alone, which says
+/// yes to what the agent asks as it would in the terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolioKey {
+    Line(String),
+    Stop,
+    Approve,
+}
+
+/// The pieces [`keys`] wrote, as a Folio takes them. Text gathers until
+/// Enter sends it, and Enter with none approves; Backspace takes back a character; Esc and Ctrl+C stop
+/// the turn and drop what was gathered, as they would in the terminal.
+/// Other keys move a terminal's cursor or menus, which a Folio has not,
+/// and text no Enter ends is never sent.
+pub fn folio_keys(pieces: &[Vec<u8>]) -> Vec<FolioKey> {
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for piece in pieces {
+        match piece.as_slice() {
+            b"\r" => {
+                let said = std::mem::take(&mut line);
+                out.push(match said.trim().is_empty() {
+                    true => FolioKey::Approve,
+                    false => FolioKey::Line(said),
+                });
+            }
+            [0x1b] | [0x03] => {
+                line.clear();
+                out.push(FolioKey::Stop);
+            }
+            [0x7f] | [0x08] => {
+                line.pop();
+            }
+            p if p.first().is_some_and(|b| *b >= 0x20) => {
+                line.push_str(&String::from_utf8_lossy(p));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Whether a Folio takes all of the `pieces` [`keys`] wrote, none of them
+/// lost as [`folio_keys`] reads them. Arrows, Tab and the like move a
+/// terminal's cursor or menus, and text no Enter ends waits in its prompt
+/// line; a Folio has neither.
+pub fn folio_takes(pieces: &[Vec<u8>]) -> bool {
+    let mut open = false;
+    for piece in pieces {
+        match piece.as_slice() {
+            b"\r" | [0x1b] | [0x03] => open = false,
+            [0x7f] | [0x08] => {}
+            p if p.first().is_some_and(|b| *b >= 0x20) => open = true,
+            _ => return false,
+        }
+    }
+    !open
+}
+
+/// Whether a `keys` step among `runes` needs a terminal, so a session
+/// started for them must be one, see [`folio_takes`].
+pub fn needs_terminal(runes: &[Rune]) -> bool {
+    runes.iter().any(|r| match r {
+        Rune::Keys(spec) => keys(spec).is_ok_and(|p| !folio_takes(&p)),
+        _ => false,
+    })
+}
+
 /// One key with any of Ctrl, Alt and Shift before it, as a terminal sends
 /// it: `"Enter"`, `"Ctrl+C"`, `"Shift+Tab"`, `"Alt+Up"`. None for what is
 /// not one.
@@ -888,6 +957,19 @@ mod tests {
     use crate::session::WaitReason;
     use std::time::Duration;
 
+    #[test]
+    fn a_folio_takes_keys_as_lines_and_stops() {
+        let k = |spec: &str| folio_keys(&keys(spec).unwrap());
+        assert_eq!(k("/clear{Enter}"), vec![FolioKey::Line("/clear".into())]);
+        assert_eq!(k("Esc"), vec![FolioKey::Stop]);
+        assert_eq!(k("Ctrl+C"), vec![FolioKey::Stop]);
+        assert_eq!(k("yes{Backspace}{Backspace}s{Enter}"), vec![FolioKey::Line("ys".into())]);
+        assert_eq!(k("half{Esc}whole{Enter}"), vec![FolioKey::Stop, FolioKey::Line("whole".into())]);
+        assert_eq!(k("{Enter}"), vec![FolioKey::Approve]);
+        assert_eq!(k("{Up}"), Vec::<FolioKey>::new());
+        assert_eq!(k("never sent"), Vec::<FolioKey>::new());
+    }
+
     fn t(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
     }
@@ -1184,6 +1266,24 @@ mod tests {
         assert_eq!(keys("{Enter").unwrap_err(), "\"{Enter\" is not closed");
         assert_eq!(keys("{Hyper+A}").unwrap_err(), "no key called \"Hyper+A\"");
         assert!(keys("{F13}").is_err());
+    }
+
+    #[test]
+    fn only_lines_stops_and_enter_need_no_terminal() {
+        let takes = |spec: &str| folio_takes(&keys(spec).unwrap());
+        assert!(takes("/clear{Enter}"));
+        assert!(takes("Esc"));
+        assert!(takes("Ctrl+C"));
+        assert!(takes("Enter"));
+        assert!(takes("yes{Backspace}s{Enter}"));
+        assert!(!takes("Up"));
+        assert!(!takes("Shift+Tab"));
+        assert!(!takes("{Down}{Enter}"));
+        // Left in the prompt line, which a Folio has not.
+        assert!(!takes("half a line"));
+        let say = Rune::Say("go on".into());
+        assert!(!needs_terminal(&[say.clone(), Rune::Keys("Esc".into())]));
+        assert!(needs_terminal(&[say, Rune::Keys("Shift+Tab".into())]));
     }
 
     #[test]

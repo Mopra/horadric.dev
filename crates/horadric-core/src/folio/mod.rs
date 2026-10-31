@@ -18,16 +18,22 @@
 //! the first two become [`Block::Question`] and [`Block::Plan`] when the
 //! CLI asks, the last is [`Folio::todos`].
 
+pub mod afar;
 mod edits;
+mod launch;
 mod send;
 mod session;
+mod sign_in;
 mod tools;
 mod transcript;
 
 pub use edits::*;
+pub use launch::*;
 pub use send::*;
 pub use session::*;
+pub use sign_in::*;
 pub use tools::*;
+pub use transcript::{rewind_point, Rewind};
 
 use std::collections::{HashMap, HashSet};
 
@@ -289,6 +295,8 @@ pub enum Block {
         usage: TurnUsage,
     },
     Notice(Notice),
+    /// A login is needed, or runs, from the Folio itself.
+    SignIn(SignIn),
     /// A line we do not understand, kept rather than dropped.
     Raw(String),
 }
@@ -300,6 +308,7 @@ enum Sent {
     Mode,
     Model,
     Context,
+    StopTask,
 }
 
 #[derive(Debug, Default)]
@@ -537,7 +546,10 @@ impl Folio {
         }
         match v["type"].as_str().unwrap_or_default() {
             "stream_event" => self.stream_event(&v["event"]),
-            "assistant" => self.assistant(&v["message"]),
+            "assistant" => match v["error"].as_str().filter(|e| is_auth_error(e)) {
+                Some(_) => self.need_sign_in(&text_in(&v["message"])),
+                None => self.assistant(&v["message"]),
+            },
             "user" => self.user(&v),
             "result" => self.result(&v),
             "control_request" => self.control_request(&v, line),
@@ -590,6 +602,7 @@ impl Folio {
                     "set_permission_mode" => Sent::Mode,
                     "set_model" => Sent::Model,
                     "get_context_usage" => Sent::Context,
+                    "stop_task" => Sent::StopTask,
                     _ => return false,
                 };
                 self.requests.insert(id.to_string(), kind);
@@ -890,6 +903,14 @@ impl Folio {
         control_request_line(&id, "initialize", serde_json::json!({}))
     }
 
+    /// `stop_task`, for a background task such as a subagent: the line
+    /// to write. A refusal shows as a notice; the stop itself arrives as
+    /// the task's notification.
+    pub fn stop_task(&mut self, task_id: &str) -> String {
+        let id = self.request(Sent::StopTask);
+        control_request_line(&id, "stop_task", serde_json::json!({"task_id": task_id}))
+    }
+
     fn request(&mut self, kind: Sent) -> String {
         self.sent += 1;
         let id = format!("horadric-{}", self.sent);
@@ -953,6 +974,46 @@ impl Folio {
     fn notice(&mut self, n: Notice) -> bool {
         self.blocks.push(Block::Notice(n));
         true
+    }
+
+    /// A line of the app's own for the human, such as who it logged in as.
+    pub fn note(&mut self, text: &str) {
+        self.notice(Notice::Info(text.to_string()));
+    }
+
+    /// The sign-in card of this turn, the one since the last prompt.
+    pub fn sign_in_card(&mut self) -> Option<&mut SignIn> {
+        let from = (self.blocks.iter())
+            .rposition(|b| matches!(b, Block::Prompt(_)))
+            .map_or(0, |i| i + 1);
+        self.blocks[from..].iter_mut().rev().find_map(|b| match b {
+            Block::SignIn(s) => Some(s),
+            _ => None,
+        })
+    }
+
+    /// The turn failed for want of a login: a card offers one. A turn says
+    /// so twice (the refused call, then its error), so it shows once.
+    fn need_sign_in(&mut self, why: &str) -> bool {
+        if let Some(card) = self.sign_in_card() {
+            if card.state != SignInState::Needed || why.trim().is_empty() || card.why == why.trim()
+            {
+                return false;
+            }
+            card.why = why.trim().to_string();
+            return true;
+        }
+        self.blocks.push(Block::SignIn(SignIn::needed(why)));
+        true
+    }
+
+    /// The human asked to log in: a card for run `run`, the one this turn
+    /// has when there is one.
+    pub fn sign_in_started(&mut self, run: u64) {
+        match self.sign_in_card() {
+            Some(card) => card.begin(run),
+            None => self.blocks.push(Block::SignIn(SignIn::started(run))),
+        }
     }
 
     fn system(&mut self, v: &Value, line: &str) -> bool {
@@ -1057,6 +1118,12 @@ impl Folio {
                 self.info.read_commands(&v["commands"]);
                 false
             }
+            // Retried calls show as `api_retry`; only a refused login is
+            // worth a word here, and the turn's error says it again.
+            "api_error" => match is_auth_api_error(&v["error"]) {
+                true => self.need_sign_in(v["error"]["message"].as_str().unwrap_or_default()),
+                false => false,
+            },
             "local_command_output" => match said(&v["content"]) {
                 Some(t) => self.command_notice(t),
                 None => false,
@@ -1090,7 +1157,6 @@ impl Folio {
             | "session_metadata"
             | "turn_duration"
             | "post_turn_summary"
-            | "api_error"
             | "permission_denied"
             | "permission_retry"
             | "permission_check_status"
@@ -1181,6 +1247,8 @@ impl Folio {
             }
             Sent::Context => self.context = Some(ContextUsage::from_response(body)),
             Sent::Initialize => self.info.read_initialize(body),
+            // The task's end comes as its own notification.
+            Sent::StopTask => return false,
         }
         true
     }
@@ -1990,6 +2058,15 @@ fn first_line(text: &str) -> String {
     } else {
         first.to_string()
     }
+}
+
+/// All the text of a message's content, such as an error the CLI wrote
+/// as the reply.
+fn text_in(message: &Value) -> String {
+    let texts = (message["content"].as_array().into_iter().flatten())
+        .filter(|b| b["type"] == "text")
+        .map(|b| text_of(b, "text"));
+    texts.collect::<Vec<_>>().join("\n")
 }
 
 fn text_of(block: &Value, field: &str) -> String {
@@ -3445,5 +3522,54 @@ mod tests {
         // A request made after the replay does not reuse an id.
         let next = request_id(&r.set_model("opus"));
         assert!(sent.iter().all(|l| request_id(l) != next));
+    }
+
+    #[test]
+    fn a_refused_login_shows_one_sign_in_card() {
+        let mut f = Folio::new();
+        f.push_prompt("hi");
+        let refused = r#"{"type":"system","subtype":"api_error","level":"error","error":{"status":401,"message":"401 OAuth token has expired"},"retryAttempt":0,"maxRetries":10}"#;
+        assert!(f.feed(refused));
+        let said = "OAuth token has expired \u{b7} Please run /login";
+        let error = serde_json::json!({
+            "type": "assistant",
+            "error": "authentication_failed",
+            "message": {"id": "m1", "model": "<synthetic>", "role": "assistant",
+                "content": [{"type": "text", "text": said}]},
+        });
+        assert!(f.feed(&error.to_string()));
+        let cards: Vec<&SignIn> = (f.blocks.iter())
+            .filter_map(|b| match b {
+                Block::SignIn(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].state, SignInState::Needed);
+        assert_eq!(cards[0].why, said);
+        assert!(!f.blocks.iter().any(|b| matches!(b, Block::Reply(_))));
+        // Asked for, the same card runs the login.
+        f.sign_in_started(7);
+        assert_eq!(f.sign_in_card().map(|c| c.run), Some(7));
+        assert_eq!(f.blocks.iter().filter(|b| matches!(b, Block::SignIn(_))).count(), 1);
+        // A later turn's failure gets a card of its own.
+        f.push_prompt("again");
+        f.feed(&error.to_string());
+        assert_eq!(f.blocks.iter().filter(|b| matches!(b, Block::SignIn(_))).count(), 2);
+    }
+
+    #[test]
+    fn other_api_errors_stay_the_reply() {
+        let mut f = Folio::new();
+        let error = serde_json::json!({
+            "type": "assistant",
+            "error": "rate_limit",
+            "message": {"id": "m1", "role": "assistant",
+                "content": [{"type": "text", "text": "API Error: Rate limit reached"}]},
+        });
+        f.feed(&error.to_string());
+        assert!(matches!(f.blocks.last(), Some(Block::Reply(t)) if t.contains("Rate limit")));
+        let retry = r#"{"type":"system","subtype":"api_error","level":"error","error":{"status":529}}"#;
+        assert!(!f.feed(retry));
     }
 }

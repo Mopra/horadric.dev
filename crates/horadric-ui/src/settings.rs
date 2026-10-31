@@ -170,7 +170,7 @@ impl Field {
     pub fn help(self) -> &'static str {
         match self {
             Field::Theme => "The colours of the tiles, the terminal and every window",
-            Field::Font => "The typeface sessions are drawn in",
+            Field::Font => "The typeface terminals and a Folio's code are drawn in",
             Field::Screen => "The monitor the tiles stand on",
             Field::Town => "The tile for work that belongs to no project",
             Field::Animations => "Runes, breathing lights and moving tiles",
@@ -430,7 +430,7 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
             let (moves, m) = switch(v.animations);
             vec![
                 line(Field::Theme, "Theme", v.theme.label(), Control::List),
-                line(Field::Font, "Terminal font", &v.font, Control::List),
+                line(Field::Font, "Code font", &v.font, Control::List),
                 line(Field::Screen, "Tiles on screen", name, control),
                 line(Field::Town, "Show Tristram", town, t),
                 line(Field::Animations, "Animations", moves, m),

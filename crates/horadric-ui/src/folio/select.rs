@@ -139,6 +139,10 @@ pub(super) fn act(key: &str, a: Act) {
         Act::Todos => {
             with(key, |c| c.tr.state.todos_open = !c.tr.state.todos_open);
         }
+        Act::SignIn(block) => super::sign_in::log_in_at(key, block),
+        Act::SignInPage(block) => super::sign_in::open_page(key, block),
+        Act::SignInCode(block) => super::sign_in::send_code(key, block),
+        Act::SignInCancel(block) => super::sign_in::cancel(key, block),
         Act::FindPrev => jump(key, false),
         Act::FindNext => jump(key, true),
         Act::FindClose => {
@@ -378,27 +382,34 @@ fn selected(c: &Chat) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+/// Opens the find bar of session `key`'s conversation with the keyboard
+/// in it, or selects what it holds to type over: Ctrl+F, and the stage's
+/// Ctrl+Shift+F.
+pub fn find(key: &str) {
+    with(key, |chat| {
+        let st = &mut chat.tr.state;
+        if st.find.is_none() {
+            st.find = Some(Find {
+                field: Field::new("", false, 500),
+                hits: Vec::new(),
+                at: 0,
+                for_: (String::new(), usize::MAX),
+            });
+        }
+        st.focus = Some(FIND_FIELD.to_string());
+        if let Some(f) = &mut st.find {
+            f.field.select_all();
+        }
+    });
+    redraw(key);
+}
+
 /// A typed character, before the composer gets it. True when the
 /// transcript took it: Ctrl+F, Ctrl+C on a selection, or typing into the
 /// find bar or a card's field.
 pub(super) fn char(key: &str, c: char, mods: Mods) -> bool {
     if c == '\u{6}' {
-        with(key, |chat| {
-            let st = &mut chat.tr.state;
-            if st.find.is_none() {
-                st.find = Some(Find {
-                    field: Field::new("", false, 500),
-                    hits: Vec::new(),
-                    at: 0,
-                    for_: (String::new(), usize::MAX),
-                });
-            }
-            st.focus = Some(FIND_FIELD.to_string());
-            if let Some(f) = &mut st.find {
-                f.field.select_all();
-            }
-        });
-        redraw(key);
+        find(key);
         return true;
     }
     let focus = with(key, |chat| chat.tr.state.focus.clone()).flatten();
@@ -497,6 +508,15 @@ pub(super) fn release_lapsed(chat: &mut Chat) {
     if focus == FIND_FIELD {
         return;
     }
+    // A sign-in card's code field keeps the keyboard while its login runs.
+    if let Some(block) = focus.strip_prefix("signin:") {
+        let live = block.parse().ok().and_then(|b: usize| chat.folio.blocks.get(b));
+        if matches!(live, Some(Block::SignIn(card)) if card.active()) {
+            return;
+        }
+        st.focus = None;
+        return;
+    }
     let id = focus.split_once(':').map_or("", |(_, id)| id);
     if chat.folio.pending_asks().contains(&id) {
         return;
@@ -524,6 +544,10 @@ fn submit(key: &str, focus: &str, shift: bool) {
         act(key, Act::Deny(id.to_string()));
     } else if let Some(id) = focus.strip_prefix("keep:") {
         act(key, Act::Keep(id.to_string()));
+    } else if let Some(block) = focus.strip_prefix("signin:") {
+        if let Ok(block) = block.parse() {
+            act(key, Act::SignInCode(block));
+        }
     } else if let Some((_, id)) = focus.split_once(':') {
         act(key, Act::Submit(id.to_string()));
     }

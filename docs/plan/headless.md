@@ -3,7 +3,7 @@
 Decided on 2026-10-24. A first slice landed 2026-10-29: the engine,
 the model and a plain Folio behind a button on each project cluster
 (see Steps). Since 2026-10-31 new Claude sessions open as a Folio by
-default. A Claude session's pane
+default, those automation starts too (step 8). A Claude session's pane
 shows Claude Code's terminal today: PowerShell output, tool calls and
 diffs scroll past in full, take most of the room, and are rarely what
 the human wants to read. The human wants Horadric to own the whole
@@ -83,6 +83,16 @@ tests against them.
 - **Slash commands** go as plain user text: custom commands, skills,
   `/compact`, `/clear`, `/model sonnet`, `/effort`. Pickers and
   `/login`, `/theme` do not exist headless.
+- **Login** (2026-10-31, 2.1.314). `claude auth login` works with no
+  console: on pipes it opens the browser itself, listens on localhost,
+  and prints `If the browser didn't open, visit: <url>` and `Paste code
+  here if prompted > ` (no line end). The browser coming back finishes
+  it; the printed page instead shows a `code#state` to write on stdin.
+  `Login successful.` and exit 0, or `Login failed: …` on stderr. It
+  writes the same files as any login, so account switching is
+  untouched. `claude auth status --json` says `loggedIn`, `authMethod`,
+  `email`, `subscriptionType`. The Folio runs both hidden; see
+  `folio/sign_in.rs` in core and ui.
 - **One process, many turns.** Stdin stays open for the session;
   closing it ends it. A prompt sent mid turn with `next` is folded
   into the running turn after its next tool step (or starts the next
@@ -150,7 +160,8 @@ carry over: the composer is where typing burns in.
 
 - `/model`, effort and permission mode pickers: controls on the
   composer.
-- `/config`, `/theme`, `/login` and other terminal only commands: a
+- `/login` and `/logout`: run by the Folio itself, see Login above.
+- `/config`, `/theme` and other terminal only commands: a
   "Open in terminal" action ends the headless process once idle and
   resumes the same session in a terminal pane (`--resume`); "Back to the
   Folio" does the reverse. One session, two ways in, never both at
@@ -226,17 +237,37 @@ the lore.
    way the human starts a Claude session follows it (the cluster's
    button, the project menu, the tray, the folder picker, a bare
    `horadric new`, Explorer). "New CLI session" in the project menu is
-   always a terminal. Quests, Warriv, reviewers, errands, runewords,
-   own worktrees and the town stay terminals, new or resumed, until a
-   Folio can be started with their orders.
+   always a terminal. Since 2026-10-31 a Folio starts with everything a
+   terminal session gets (`App::claude_start` builds both, and
+   `App::start_session` takes a spec for either): own worktrees, with
+   their ports and setup, and the town open as Folios, and a first
+   prompt goes in as the first message.
+8. **Automation on Folios.** Done 2026-10-31: quests (taken by hand or
+   by the runner, in their own worktree when the project runs several),
+   the Quest Giver, Warriv and its reviewer, a runeword's reviewer, the
+   Runesmith, errands, stones cast on a fresh session and a quest log's
+   Carry on all start through `start_session` as Folios, unless the
+   setting says terminal: the one switch back covers automation too.
+   They are driven through `steering.rs` (a prompt, a command, a stop,
+   a halt), so nothing types bytes. A paused one resumes as a Folio, its
+   role rebuilt from its id and the list by `claude_start`. What stays a
+   terminal: a runeword whose `keys` include one a Folio cannot take
+   (an arrow, Tab, text no Enter ends), see `runeword::needs_terminal`;
+   cast on a Folio such a step stops the runeword and says why. A
+   `run` step shown in a pane, the bare `--resume` picker and `horadric
+   new` with a name or arguments stay terminals too. Account switching
+   winds a Folio down at rest (or at once, or when a limit refused it)
+   and starts it again on the same conversation with the new login,
+   the go on prompt as its first message. A worktree Horadric just made
+   of a trusted project is trusted, so an unattended quest never waits
+   on the Folio's trust ask. An automated start that fails says so in a
+   toast or the log, never a dialog.
 
 Then "What it opens", one by one. The full feature list toward
 replacing the CLI, in tiers, is [folio-features.md](folio-features.md).
 
 ## Open questions
 
-- **Quests and Warriv.** Whether quest sessions go headless too. Warriv
-  reads sessions through hooks and transcripts, so it should not care.
 - **The Brotherhood.** A headless session handed to another machine
   goes by its transcript, as today, and resumes headless there.
 - **The protocol moving.** Feature detection by `capabilities`, and a

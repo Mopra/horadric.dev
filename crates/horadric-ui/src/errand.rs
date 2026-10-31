@@ -15,10 +15,10 @@ use std::process::{Command, Stdio};
 
 use horadric_core::chronicle::{self, Happened, WakeEnd};
 use horadric_core::runeword::{self, Armed, Clocked, Event, Rune, Runeword, Step, Stone, Tick};
-use horadric_core::{ship, warriv, Agent};
+use horadric_core::{ship, warriv};
 
 use super::cast_key;
-use crate::app::{self, unix_now, App, Run};
+use crate::app::{self, unix_now, App, SessionSpec};
 use crate::dialog::{Dialog, Tone};
 use crate::store;
 use crate::toast::Kind;
@@ -197,9 +197,12 @@ impl App {
             .values()
             .filter_map(|a| a.session.clone().filter(|_| a.running))
             .filter(|id| {
-                self.consoles
-                    .get(id)
-                    .is_some_and(|c| c.exit_code().is_some())
+                let chat_ended = self.folios.contains_key(id) && !crate::folio::running(id);
+                chat_ended
+                    || self
+                        .consoles
+                        .get(id)
+                        .is_some_and(|c| c.exit_code().is_some())
             })
             .collect();
         for id in quit {
@@ -404,19 +407,25 @@ impl App {
         label: &str,
         runes: Vec<Rune>,
     ) -> Result<(), String> {
+        // Keys only a terminal takes, an arrow or a Tab, keep it one.
+        let chat = self.chat_sessions && !runeword::needs_terminal(&runes);
         let mut word = Runeword::new(label, runes);
+        let mut prompt = None;
         if let Some(Rune::Say(first)) = word.runes.first() {
-            self.tasks.prompts.insert(id.to_string(), first.clone());
+            prompt = Some(first.clone());
             word.step = Step::Told {
                 at: std::time::SystemTime::now(),
                 heard: None,
             };
         }
-        let run = Run::Agent(Agent::Claude);
-        if let Err(e) = self.launch(id, label, dir, Vec::new(), run, false) {
-            self.tasks.prompts.remove(id);
-            return Err(e);
-        }
+        let spec = SessionSpec {
+            id: Some(id.to_string()),
+            name: Some(label.to_string()),
+            prompt,
+            quiet: true,
+            ..SessionSpec::new(dir, chat)
+        };
+        self.start_session(spec)?;
         self.set_runeword(id, Some(word));
         Ok(())
     }

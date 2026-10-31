@@ -3,7 +3,7 @@
 //! and a plan to approve or send back. Each is built into a [`Scene`]
 //! like any block; what is typed into their fields lives in [`State`].
 
-use horadric_core::folio::{AskState, Block, FileEdit};
+use horadric_core::folio::{AskState, Block, FileEdit, SignInState};
 use windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_EMERGENCY_BREAK;
 
 use super::flow;
@@ -511,6 +511,104 @@ pub(super) unsafe fn plan(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
     }
     let h = y + PAD;
     plate(cx, &mut s, w, h, *state == AskState::Waiting);
+    s.h = h;
+    s
+}
+
+/// The sign-in card's code field, by its block.
+pub(super) fn code_field(block: usize) -> String {
+    format!("signin:{block}")
+}
+
+/// Logging in to Claude: why it is needed, then the sign-in page and a
+/// field for the code it shows, then how it went.
+pub(super) unsafe fn sign_in(cx: &Ctx, i: usize, b: &Block, st: &State, w: f32) -> Scene {
+    let mut s = Scene::default();
+    let Block::SignIn(card) = b else {
+        return s;
+    };
+    let inner = w - 2.0 * PAD;
+    let right = w - PAD;
+    let title = match &card.state {
+        SignInState::Needed => "Claude is not logged in",
+        SignInState::Done(_) => "Logged in",
+        _ => "Log in to Claude",
+    };
+    s.line(title, F::Title, Rect::new(PAD, PAD, inner, 20.0), cx.pal.fg);
+    let mut y = PAD + 26.0;
+    let say = |s: &mut Scene, y: &mut f32, text: &str, ink: Color| {
+        if let Some(l) = cx.layout(&cx.fonts.body, text, inner) {
+            s.unit(&l, PAD, *y, ink, text);
+            *y += render::text_size(&l).1 + 8.0;
+        }
+    };
+    if !card.why.is_empty() && card.state == SignInState::Needed {
+        say(&mut s, &mut y, &card.why, cx.pal.dim);
+    }
+    let text = match &card.state {
+        SignInState::Needed => String::new(),
+        SignInState::Starting => "Starting the sign-in\u{2026}".to_string(),
+        SignInState::Waiting if card.bad_code => {
+            "That code was not whole. Copy all of it from the page and paste it again.".to_string()
+        }
+        SignInState::Waiting => {
+            "The sign-in page opened in your browser. Finish there and this goes on by itself."
+                .to_string()
+        }
+        SignInState::Checking => "Checking the code\u{2026}".to_string(),
+        SignInState::Done(Some(email)) => {
+            format!("Logged in as {email}. The session starts again with it.")
+        }
+        SignInState::Done(None) => "The session starts again with the new login.".to_string(),
+        SignInState::Failed(why) => format!("The sign-in failed: {why}"),
+        SignInState::Cancelled => "The sign-in was closed.".to_string(),
+    };
+    if !text.is_empty() {
+        let ink = match card.state {
+            SignInState::Failed(_) => theme::waiting(),
+            _ => cx.pal.fg.with_alpha(0.85),
+        };
+        say(&mut s, &mut y, &text, ink);
+    }
+    let waiting = matches!(card.state, SignInState::Waiting | SignInState::Checking);
+    if waiting && card.asks_code {
+        let id = code_field(i);
+        let hint = "Or paste the code the page shows, then Enter";
+        y = field(cx, &mut s, st, &id, hint, PAD, y, inner) + 10.0;
+    }
+    match &card.state {
+        SignInState::Needed | SignInState::Failed(_) | SignInState::Cancelled => {
+            let label = match card.state {
+                SignInState::Needed => "Log in",
+                _ => "Try again",
+            };
+            button(cx, &mut s, right, y, label, true, Hit::Tr(Act::SignIn(i)));
+            y += BUTTON_H;
+        }
+        SignInState::Starting | SignInState::Waiting | SignInState::Checking => {
+            let mut x = right;
+            if card.url.is_some() {
+                x = button(
+                    cx,
+                    &mut s,
+                    x,
+                    y,
+                    "Open sign-in page",
+                    true,
+                    Hit::Tr(Act::SignInPage(i)),
+                ) - 8.0;
+            }
+            if waiting && card.asks_code && !st.text(&code_field(i)).trim().is_empty() {
+                x = button(cx, &mut s, x, y, "Send code", false, Hit::Tr(Act::SignInCode(i))) - 8.0;
+            }
+            button(cx, &mut s, x, y, "Cancel", false, Hit::Tr(Act::SignInCancel(i)));
+            y += BUTTON_H;
+        }
+        SignInState::Done(_) => {}
+    }
+    let h = y + PAD;
+    let asking = matches!(card.state, SignInState::Needed | SignInState::Waiting);
+    plate(cx, &mut s, w, h, asking);
     s.h = h;
     s
 }
