@@ -1092,18 +1092,34 @@ impl App {
         const RENAME: usize = 3;
         const END: usize = 4;
         let paused = self.paused.contains_key(id);
-        let mut items = Vec::new();
-        if paused {
-            items.push(Item::pick("Resume", RESUME));
-        } else {
-            items.push(Item::pick("Show", SHOW));
-        }
-        items.push(Item::pick("Rename\u{2026}", RENAME));
-        items.push(Item::Separator);
-        items.push(Item::pick(
+        let open = vec![
+            if paused {
+                Item::pick("Resume", RESUME)
+            } else {
+                Item::pick("Show", SHOW)
+            },
+            Item::pick("Rename\u{2026}", RENAME),
+        ];
+        let end = vec![Item::pick(
             if paused { "Forget" } else { "End session" },
             END,
-        ));
+        )];
+        // The groups of the Windows tile menu in its order (calls to action,
+        // open, what the session is doing, end), so a line the port gains
+        // lands where it is on Windows. The port has no calls to action or
+        // doing lines yet; an empty group is left out.
+        let calls: Vec<Item> = Vec::new();
+        let doing: Vec<Item> = Vec::new();
+        let mut items = Vec::new();
+        for group in [calls, open, doing, end] {
+            if group.is_empty() {
+                continue;
+            }
+            if !items.is_empty() {
+                items.push(Item::Separator);
+            }
+            items.extend(group);
+        }
         match menu::popup(self.mtm, &items, at) {
             Some(SHOW) => {
                 if let Some(key) = self.project_of(id) {
