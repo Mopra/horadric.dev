@@ -631,6 +631,9 @@ impl Pane {
     pub fn reveal(&self) {
         self.shown.set(Some(Instant::now()));
         self.invalidate();
+        if let Some(key) = &self.console.folio {
+            folio::summon(key);
+        }
     }
 
     /// Moves the fades on to now and returns how much background to lay

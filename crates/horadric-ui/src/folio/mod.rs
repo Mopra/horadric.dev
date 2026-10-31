@@ -42,6 +42,7 @@ mod rich;
 mod select;
 mod sign_in;
 mod slash;
+mod summon;
 mod transcript;
 mod view;
 mod watch;
@@ -77,7 +78,7 @@ use crate::folio_look as look;
 pub use composer::{before_caret, dictated, dictation, handed};
 pub use select::find;
 pub use view::{
-    attach, char, key, keyboard_moved, place, place_bar, refont, register_class, wheel,
+    attach, char, key, keyboard_moved, place, place_bar, refont, register_class, summon, wheel,
 };
 pub use watch::{is_watch, watch, watch_detail, watch_title};
 /// Posted to the pane a Folio is in when what its header says may have

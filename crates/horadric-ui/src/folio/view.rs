@@ -147,6 +147,8 @@ fn make(key: &str, shared: &Rc<Shared>, parent: HWND, bar: bool) -> Option<HWND>
         composer: RefCell::new(None),
         ticking: Cell::new(0),
         banished: Cell::new(None),
+        summon_asked: Cell::new(false),
+        summoned: Cell::new(None),
         caret_since: Cell::new(Instant::now()),
         caret_was: Cell::new(0),
         last: Cell::new(None),
@@ -291,6 +293,21 @@ pub(super) fn banish(key: &str) {
     }
     view.banished.set(Some(Instant::now()));
     view.clock(true);
+}
+
+/// The Folio of session `key` was called up from its tile: its page is
+/// summoned onto the glass (see [`summon`]).
+pub fn summon(key: &str) {
+    if !crate::backdrop::animations_on() {
+        return;
+    }
+    let Some(view) = view_of(key) else {
+        return;
+    };
+    view.summon_asked.set(true);
+    unsafe {
+        let _ = InvalidateRect(Some(view.hwnd()), None, false);
+    }
 }
 
 /// A key that makes a character, from the pane: the composer's.
@@ -445,6 +462,11 @@ pub(super) struct View {
     /// When the page was last cleared, for the clock to run fast while
     /// it burns.
     pub(super) banished: Cell<Option<Instant>>,
+    /// Asked to play the opening, which starts with the next full paint:
+    /// a pane just made may not be shown for a frame or two yet.
+    pub(super) summon_asked: Cell<bool>,
+    /// When the opening began, while it plays.
+    pub(super) summoned: Cell<Option<Instant>>,
     /// When the caret last moved or the keyboard came, which restarts its
     /// blink lit, and what it was then.
     pub(super) caret_since: Cell<Instant>,
@@ -831,7 +853,7 @@ impl View {
     /// and stops it otherwise.
     pub(super) fn clock(&self, moving: bool) {
         let on = moving && self.seen();
-        let fast = self.burning() || lightbox::moving(&self.key);
+        let fast = self.burning() || self.summoning() || lightbox::moving(&self.key);
         let rate = match (on, fast) {
             (false, _) => 0,
             (true, true) => BANISH_MS,
@@ -938,6 +960,16 @@ impl View {
         }
     }
 
+    /// The opening is still playing, and how far into it, in seconds.
+    fn summoning(&self) -> bool {
+        self.summon_at().is_some()
+    }
+
+    fn summon_at(&self) -> Option<f32> {
+        let t = self.summoned.get()?.elapsed().as_secs_f32();
+        (t < super::summon::LENGTH).then_some(t)
+    }
+
     /// A cleared page is still burning away.
     fn burning(&self) -> bool {
         (self.banished.get()).is_some_and(|t| t.elapsed().as_secs_f32() < banish::LENGTH)
@@ -948,7 +980,11 @@ impl View {
     fn advance(&self, chat: &mut Chat, now: Instant) -> (f32, f32) {
         chat.note_busy();
         let heat = chat.heat();
-        let moving = chat.busy_was || heat > 0.0 || self.burning() || lightbox::moving(&self.key);
+        let moving = chat.busy_was
+            || heat > 0.0
+            || self.burning()
+            || self.summoning()
+            || lightbox::moving(&self.key);
         if moving {
             let dt = self
                 .last
@@ -959,6 +995,12 @@ impl View {
         }
         self.clock(moving);
         (self.clock.get(), heat)
+    }
+
+    /// The rune this Folio flares as it opens, its own for as long as the
+    /// session keeps its id.
+    fn sigil(&self) -> u32 {
+        self.key.bytes().fold(0x811C_9DC5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193))
     }
 
     fn palette(gfx: &Gfx) -> Palette {
@@ -985,6 +1027,9 @@ impl View {
             return self.draw_bar(gfx, chat);
         }
         let now = Instant::now();
+        if self.summon_asked.take() {
+            self.summoned.set(Some(now));
+        }
         chat.tr.state.keys = self.has_keyboard();
         chat.tr.state.caret_lit = self.blink(chat, now);
         let (t, heat) = self.advance(chat, now);
@@ -1072,9 +1117,14 @@ impl View {
         rt.Clear(Some(&color(pal.bg)));
         let view = (size.width, size.height);
         self.background(gfx, &pal, view, (t, self.warp.get()), heat);
-        match &gfx.ghost {
-            Some(g) => banish::draw(gfx, &pal, &still, g),
-            None => rt.DrawBitmap(
+        let summoning = self.summon_at();
+        if summoning.is_none() {
+            self.summoned.set(None);
+        }
+        match (&gfx.ghost, summoning) {
+            (Some(g), _) => banish::draw(gfx, &pal, &still, g),
+            (None, Some(t)) => super::summon::draw(gfx, &pal, &still, t, self.sigil()),
+            (None, None) => rt.DrawBitmap(
                 &still,
                 None,
                 1.0,

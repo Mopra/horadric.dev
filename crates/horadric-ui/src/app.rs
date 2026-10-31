@@ -6832,6 +6832,11 @@ impl App {
             {
                 stage.release();
             } else {
+                // Called up from behind, a Folio opens as it does on a
+                // stage that just came to its project.
+                if !stage.is_foreground() && self.folios.contains_key(id) {
+                    crate::folio::summon(id);
+                }
                 stage.focus_session(id);
             }
             return;
