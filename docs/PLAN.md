@@ -52,7 +52,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 ## Next
 
 - [One portal](plan/one-portal.md): a phone paired once sees every brother and every session. The signed words are built; left: the PC side (pairing v3, vouching on pair), the page's socket per brother, and the merged desktop menu.
-- [Headless sessions and the Folio](plan/headless.md): built and the default; left: edit and resend as a fork, review before an edit lands, the turn as a map, one prompt to many sessions, and the smaller Folio features.
+- [Headless sessions and the Folio](plan/headless.md): built and the default; left: line comments under review, the turn as a map, one prompt to many sessions, and the smaller Folio features.
 - [macOS](plan/macos.md): what is left of Horadric on a Mac: the Folio, the browser pane, quests and Warriv, files, usage, Discord, Settings.
 - [Orchestration](plan/orchestration.md): a Warriv session restored after a restart, and which model Warriv runs on.
 - [Claude Code 2.1.287 to 2.1.296](plan/claude-code-2-1-287-to-2-1-296.md): cloud session tiles, waiting on `claude agents --json`.
