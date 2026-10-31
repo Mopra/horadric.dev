@@ -92,8 +92,6 @@ switch, and what to do when a tool says it is not logged in: block the
 quest with `horadric quest blocked --on-login gh`, a new kind of
 wait a blocked quest can name, which holds once that identity has a `gh` login. The row reads "needs gh
 login for Optipeople" and a click opens the identity's row in Settings.
-Same for Codex and Grok Build: the variables are in their environment
-like any program's.
 
 **Plain terminals and the browser pane.** A plain terminal in the stage
 gets its project's

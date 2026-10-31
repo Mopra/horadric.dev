@@ -206,7 +206,7 @@ type Thumbs = HashMap<(usize, usize), Option<(ID2D1Bitmap, u32, u32)>>;
 #[derive(Default)]
 pub(super) struct Cache {
     /// The render target and colours the scenes were built for.
-    made_for: (usize, [u32; 2]),
+    made_for: (usize, [u32; 2], String),
     /// The column width the scenes were built at, and the last one asked
     /// for with when it changed, to tell a drag from a settled size.
     built_w: f32,
@@ -1120,10 +1120,13 @@ impl View {
         let made_for = (
             gfx.win.as_raw() as usize,
             [key_of(pal.fg), key_of(pal.accent)],
+            gfx.family.clone(),
         );
         if cache.made_for != made_for {
-            // Brushes and bitmaps belong to a render target.
-            let fonts = cache.fonts.take();
+            // Brushes and bitmaps belong to a render target, and the
+            // formats to the family code is set in.
+            let refont = cache.made_for.2 != made_for.2;
+            let fonts = cache.fonts.take().filter(|_| !refont);
             *cache = Cache {
                 made_for,
                 fonts,
@@ -1132,7 +1135,7 @@ impl View {
         }
         let lw = self.layout_width(cache, cw);
         if cache.fonts.is_none() {
-            cache.fonts = Fonts::new(&self.shared.gpu).ok();
+            cache.fonts = Fonts::new(&self.shared.gpu, &gfx.family).ok();
         }
         let Cache {
             fonts,

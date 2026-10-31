@@ -69,6 +69,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Ghostty's terminal core](plan/ghostty.md): move the grid from `alacritty_terminal` to libghostty, after a trial.
 - [The Forge](plan/the-forge.md): files worked on with Claude beside the session (decks, artefacts, markdown, images), pinned, edited by hand, versioned and exported. Proposed.
 - [The hirelings](plan/hirelings.md): subagents as runes on the tile, the retinue under a session's grid, and the war table. Built; left: keys into the retinue, the tile's count opening the table, ticks on hover.
+- [GPU light](plan/gpu-light.md): every glow, shadow and spark drawn with real bloom, the shadow effect and particles instead of stacked shapes, window by window, then the Mac. Step 0 built: the working lamp.
 - [The tray menu and Settings](plan/tray-and-settings.md): a short grouped tray menu, and Settings as a resizable window of described cards with search. Proposed.
 
 ## Loose ends
@@ -92,7 +93,7 @@ Small things left over from parts that are built.
   it, but a hand download does, and so does the Windows 11 short context
   menu (Windows refused the unsigned package, 2026-10-13). An NSIS
   installer would go with it.
-- **Never tried for real:** a second Claude, Codex or Grok subscription,
+- **Never tried for real:** a second Claude subscription,
   SSH hosts and fleets against a real server, an IME. The lore notes on
   each part say what was only unit tested.
 

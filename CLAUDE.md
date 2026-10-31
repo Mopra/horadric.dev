@@ -1,6 +1,6 @@
 # Working on Horadric
 
-Horadric shows every coding agent session you have running as a tile on your
+Horadric shows every Claude Code session you have running (Horadric is Claude only) as a tile on your
 desktop (Windows first, with a macOS port), grouped by project. Read
 [README.md](README.md) for what it does and [docs/PLAN.md](docs/PLAN.md) for what comes next. Read the
 plan's index before starting anything, then only the parts in

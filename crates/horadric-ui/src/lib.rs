@@ -129,7 +129,6 @@ mod dictate;
 pub mod discord;
 #[cfg(windows)]
 pub use dialog::error_alone;
-pub use store::exe_command;
 /// For `horadric quest`, which writes the chronicle from a session's shell
 /// under the same project key the app uses.
 pub use {

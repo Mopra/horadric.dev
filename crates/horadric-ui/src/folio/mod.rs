@@ -28,6 +28,7 @@
 
 pub mod afar;
 mod backdrop;
+pub mod band;
 mod banish;
 mod cards;
 mod composer;
@@ -70,9 +71,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::app::{self, Input};
 use crate::folio_look as look;
 
-pub use composer::{before_caret, dictated, dictation};
+pub use composer::{before_caret, dictated, dictation, handed};
 pub use select::find;
-pub use view::{attach, char, key, keyboard_moved, place, place_bar, register_class, wheel};
+pub use view::{
+    attach, char, key, keyboard_moved, place, place_bar, refont, register_class, wheel,
+};
 pub use watch::{is_watch, watch, watch_detail, watch_title};
 /// Posted to the pane a Folio is in when what its header says may have
 /// changed.
@@ -166,6 +169,9 @@ struct Chat {
     restarting: bool,
     /// Whether it comes to the stage as it starts again.
     restart_show: bool,
+    /// Its claude.exe ends for an account switch, which starts it again
+    /// once every session has stopped: what was typed waits.
+    winding: bool,
     /// What it says once its history is in, see [`sign_in::greeting`].
     greeting: Option<String>,
     /// Waits for the human to trust its folder, with what starts it then.
@@ -182,6 +188,8 @@ struct Chat {
     /// The first prompt, sent once the session is live and its history
     /// read: a quest, Warriv's events, an errand's first step.
     first: Option<String>,
+    /// The quest and shared files above the composer, as the app last said.
+    band: band::Band,
 }
 
 /// What the app hears of a Folio, for its tile's phase.
@@ -191,9 +199,9 @@ pub struct State {
     /// An ask waits on the human.
     pub asking: bool,
     pub ended: bool,
-    /// Ended, and not to go on in a terminal or start again: claude.exe
-    /// crashed, was killed or lost its host. The tile pauses, so a click
-    /// resumes the conversation.
+    /// Ended, and not to go on in a terminal, start again or wait out an
+    /// account switch: claude.exe crashed, was killed or lost its host.
+    /// The tile pauses, so a click resumes the conversation.
     pub gone: bool,
     /// The host's replay is in, so this is where the session stands.
     pub live: bool,
@@ -202,7 +210,8 @@ pub struct State {
     /// How many background tasks run, once the CLI has said.
     pub background: Option<usize>,
     /// The agents among them, by id with their type, once the CLI has
-    /// said: the tile's sparks where the mod's roster is silent.
+    /// said: the tile's sparks before the mod's roster speaks, or with no
+    /// mod at all. The mod runs headless and its roster wins.
     pub agents: Option<Vec<(String, String)>>,
     /// How the last turn failed, as a `StopFailure` names it, with what
     /// Claude said of it: the tile shows the error, and a usage limit
@@ -304,6 +313,7 @@ impl Chat {
             header: String::new(),
             told: None,
             live: false,
+            band: band::Band::default(),
             pending: None,
             loading: None,
             to_terminal: false,
@@ -311,6 +321,7 @@ impl Chat {
             rewound: None,
             restarting: false,
             restart_show: false,
+            winding: false,
             greeting: None,
             tr: transcript::Ui::default(),
             watch: None,
@@ -363,7 +374,7 @@ impl Chat {
             busy: self.folio.busy,
             asking: !self.folio.pending_asks().is_empty(),
             ended: self.ended,
-            gone: self.ended && !self.to_terminal && !self.restarting,
+            gone: self.ended && !(self.to_terminal || self.restarting || self.winding),
             live: self.live,
             finished: self.folio.turn_finished(),
             background: (self.folio.background_heard).then_some(self.folio.background.len()),
@@ -640,7 +651,7 @@ pub fn close(id: &str) {
     let mut gone = CHATS.with(|c| c.borrow_mut().remove(id));
     if let Some(c) = gone.as_mut() {
         // Handed over, it may come back as a Folio: what was typed waits.
-        if c.to_terminal || c.restarting {
+        if c.to_terminal || c.restarting || c.winding {
             c.input.fold_queue();
         } else {
             c.input.forget();
@@ -681,6 +692,29 @@ fn let_go(id: &str, rewinding: bool) -> bool {
     .unwrap_or(false)
 }
 
+/// Ends session `id`'s claude.exe for an account switch, keeping its tile
+/// and what was typed; the app starts it again on the new login. At rest
+/// only, unless `now`. True once it is on its way out or has ended.
+pub fn wind_down(id: &str, now: bool) -> bool {
+    with(id, |c| {
+        if c.ended || c.hosted.is_none() {
+            return true;
+        }
+        if c.to_terminal || c.restarting || c.pending.is_some() {
+            return false;
+        }
+        if !now && !c.between_turns() {
+            return false;
+        }
+        c.winding = true;
+        if let Some(h) = &c.hosted {
+            h.close();
+        }
+        true
+    })
+    .unwrap_or(false)
+}
+
 /// Where an undo of session `id`'s last turn counts back from: its
 /// conversation, and the line it was rewound to when no prompt came
 /// since. None while it works, an ask waits, or it has no conversation.
@@ -701,6 +735,14 @@ pub fn rewind_from(id: &str) -> Option<(String, Option<String>)> {
 /// subagent.
 pub fn stop_task(id: &str, task: &str) {
     answer_with(id, |f| Some(f.stop_task(task)));
+}
+
+/// What the band above session `id`'s composer says, redrawn only when
+/// that changes: the app sets it every second.
+pub fn set_band(id: &str, b: band::Band) {
+    if with(id, |c| (c.band != b).then(|| c.band = b)).flatten().is_some() {
+        redraw(id);
+    }
 }
 
 /// The subagents session `id` runs in the background, by task id with a
@@ -725,8 +767,8 @@ pub fn agents(id: &str) -> Vec<(String, String)> {
 /// Starts session `id`'s claude.exe again on its conversation, so it
 /// reads a new login, saying `said` first. One that ended starts at once,
 /// one at rest once it has ended; one at work or asking is left alone.
-/// `show` brings it to the stage. Says whether it starts again.
-pub fn restart(id: &str, said: &str, show: bool) -> bool {
+/// `show` brings it to the stage.
+fn restart(id: &str, said: &str, show: bool) {
     // Some(true) starts it now, Some(false) once claude.exe has ended.
     let how = with(id, |c| {
         if c.to_terminal || c.restarting || c.pending.is_some() || c.loading.is_some() {
@@ -746,13 +788,12 @@ pub fn restart(id: &str, said: &str, show: bool) -> bool {
     })
     .flatten();
     let Some(now) = how else {
-        return false;
+        return;
     };
     sign_in::greet(id, said);
     if now {
         app::push(Input::FolioRestart(id.to_string(), show));
     }
-    true
 }
 
 /// Lets go of every Folio, as the app reloads or quits keeping its

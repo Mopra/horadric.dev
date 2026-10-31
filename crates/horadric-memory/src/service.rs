@@ -30,7 +30,6 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use horadric_core::Agent;
 use horadric_hooks::listener::{RecallCall, Reply, Tagged};
 use horadric_hooks::lore::{now, Place};
 use serde_json::{json, Value};
@@ -38,7 +37,6 @@ use serde_json::{json, Value};
 use crate::keeper::{Answer, CodeFile, Keeper, Theirs, Unasked};
 use crate::parts::{self, PieceSource, Tree};
 use crate::recall::{self, Ask};
-use crate::transcripts::Format;
 use crate::{models, Embedder, Kind};
 
 /// The model memory runs on, chosen on the yardstick.
@@ -204,7 +202,6 @@ pub fn mind(dir: &Path) -> Result<(String, horadric_core::sanctuary::Graph), Str
 pub struct Keep {
     pub path: PathBuf,
     pub cwd: String,
-    pub format: Format,
 }
 
 /// Who a recall answers.
@@ -356,8 +353,7 @@ pub fn keep_hooked(t: &Tagged) {
 
 /// What a hook event asks the memory to keep: the session's transcript
 /// when its turn ended, its context is about to be compacted, or it is
-/// over. A subagent's hooks are its own, not the session's, and Grok's
-/// transcripts are not read.
+/// over. A subagent's hooks are its own, not the session's.
 pub fn keep_of(t: &Tagged) -> Option<Keep> {
     let e = &t.event;
     if !matches!(
@@ -368,15 +364,9 @@ pub fn keep_of(t: &Tagged) -> Option<Keep> {
     {
         return None;
     }
-    let format = match t.agent {
-        Agent::Claude => Format::Claude,
-        Agent::Codex => Format::Codex,
-        Agent::Grok => return None,
-    };
     Some(Keep {
         path: e.transcript_path.clone().into(),
         cwd: e.cwd.clone(),
-        format,
     })
 }
 
@@ -392,15 +382,9 @@ fn start() -> Sender<Msg> {
 
 /// What is on disk now, to keep once, newest first: the first start of
 /// the memory reads it a file at a time, resting between.
-fn backlog() -> Vec<(PathBuf, Format)> {
-    let claude = horadric_hooks::transcript::files()
-        .into_iter()
-        .map(|p| (p, Format::Claude));
-    let codex = horadric_hooks::codex::files()
-        .into_iter()
-        .map(|p| (p, Format::Codex));
+fn backlog() -> Vec<PathBuf> {
     // Reversed, since the loop takes from the end.
-    let mut all: Vec<_> = claude.chain(codex).collect();
+    let mut all = horadric_hooks::transcript::files();
     all.reverse();
     all
 }
@@ -536,7 +520,6 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
                     &mut keeper,
                     &mut projects,
                     &job.path,
-                    job.format,
                     Some(&job.cwd),
                 );
             }
@@ -557,8 +540,8 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
                     behind = true;
                     continue;
                 }
-                if let Some((path, format)) = backlog.pop() {
-                    kept(&mut keeper, &mut projects, &path, format, None);
+                if let Some(path) = backlog.pop() {
+                    kept(&mut keeper, &mut projects, &path, None);
                     behind = true;
                     continue;
                 }
@@ -593,10 +576,9 @@ fn kept(
     keeper: &mut Keeper<Embedder>,
     projects: &mut Projects,
     path: &Path,
-    format: Format,
     cwd: Option<&str>,
 ) {
-    if let Err(e) = keeper.ingest(path, format, cwd, |c| projects.of(c), now()) {
+    if let Err(e) = keeper.ingest(path, cwd, |c| projects.of(c), now()) {
         eprintln!("horadric: memory could not keep {}: {e}", path.display());
     }
 }
@@ -714,7 +696,7 @@ mod tests {
     use super::*;
     use horadric_core::HookEvent;
 
-    fn tagged(hook: &str, agent: Agent, subagent: bool) -> Tagged {
+    fn tagged(hook: &str, subagent: bool) -> Tagged {
         Tagged {
             horadric_id: "s".into(),
             event: HookEvent {
@@ -724,7 +706,6 @@ mod tests {
                 agent_id: subagent.then(|| "sub".into()),
                 ..Default::default()
             },
-            agent,
             limits: None,
         }
     }
@@ -744,21 +725,17 @@ mod tests {
     #[test]
     fn a_turns_end_compaction_or_end_keeps_the_transcript() {
         for hook in ["Stop", "PreCompact", "SessionEnd"] {
-            let k = keep_of(&tagged(hook, Agent::Claude, false)).expect(hook);
+            let k = keep_of(&tagged(hook, false)).expect(hook);
             assert_eq!(k.path, PathBuf::from("/t/a.jsonl"));
             assert_eq!(k.cwd, "/p");
-            assert_eq!(k.format, Format::Claude);
         }
-        let codex = keep_of(&tagged("Stop", Agent::Codex, false)).unwrap();
-        assert_eq!(codex.format, Format::Codex);
     }
 
     #[test]
-    fn other_hooks_subagents_grok_and_no_transcript_keep_nothing() {
-        assert!(keep_of(&tagged("UserPromptSubmit", Agent::Claude, false)).is_none());
-        assert!(keep_of(&tagged("Stop", Agent::Claude, true)).is_none());
-        assert!(keep_of(&tagged("Stop", Agent::Grok, false)).is_none());
-        let mut none = tagged("Stop", Agent::Claude, false);
+    fn other_hooks_subagents_and_no_transcript_keep_nothing() {
+        assert!(keep_of(&tagged("UserPromptSubmit", false)).is_none());
+        assert!(keep_of(&tagged("Stop", true)).is_none());
+        let mut none = tagged("Stop", false);
         none.event.transcript_path.clear();
         assert!(keep_of(&none).is_none());
     }

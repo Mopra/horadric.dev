@@ -33,7 +33,7 @@
 //! the same hosts, so an update costs a few seconds and no session notices.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
 use std::net::TcpStream;
 use std::os::windows::io::AsRawHandle;
@@ -220,8 +220,8 @@ const WM_HORADRIC_UPDATE: u32 = WM_APP + 16;
 const WM_HORADRIC_DOWNLOADED: u32 = WM_APP + 17;
 /// A worktree went but its branch stayed, into the runner's `kept`.
 const WM_HORADRIC_KEPT: u32 = WM_APP + 18;
-/// Show the list of an agent's accounts, from the usage window's Account
-/// row. The agent is the message's `wparam`, its place in `Agent::ALL`.
+/// Show the list of Claude's accounts, from the usage window's Account
+/// row.
 const WM_HORADRIC_ACCOUNT_MENU: u32 = WM_APP + 24;
 /// Ask what the app's `web_ask` says, for a browser pane.
 const WM_HORADRIC_WEB: u32 = WM_APP + 25;
@@ -274,10 +274,10 @@ struct SettingsList {
     apart: Option<usize>,
 }
 
-/// The lines of the list for `agent`'s default `setting`, Default first,
-/// and the place of `now` among them.
-fn default_choices(agent: Agent, setting: Setting, now: Option<&str>) -> (Vec<String>, usize) {
-    let choices = setting.choices(agent);
+/// The lines of the list for the default `setting`, Default first, and
+/// the place of `now` among them.
+fn default_choices(setting: Setting, now: Option<&str>) -> (Vec<String>, usize) {
+    let choices = setting.choices();
     let labels = std::iter::once("Default")
         .chain(choices.iter().map(|(_, name)| *name))
         .map(str::to_string)
@@ -294,11 +294,11 @@ fn default_choices(agent: Agent, setting: Setting, now: Option<&str>) -> (Vec<St
 
 /// The value line `i` of the list from [`default_choices`] stands for:
 /// None for Default, which leaves it to the agent.
-fn default_picked(agent: Agent, setting: Setting, i: usize) -> Option<Option<String>> {
+fn default_picked(setting: Setting, i: usize) -> Option<Option<String>> {
     match i {
         0 => Some(None),
         i => setting
-            .choices(agent)
+            .choices()
             .get(i - 1)
             .map(|(v, _)| Some(v.to_string())),
     }
@@ -498,17 +498,16 @@ pub(crate) enum Input {
     Spotlight,
     /// A list setting in the usage window clicked: drop its list under its
     /// row, given in screen pixels.
-    SettingMenu(Agent, Setting, RECT),
+    SettingMenu(Setting, RECT),
     /// Town Portal's key on the stage's caption clicked.
     PortalKey,
-    /// The usage window's Account row clicked: the agent's accounts to
-    /// switch to.
-    AccountMenu(Agent),
+    /// The usage window's Account row clicked: the accounts to switch to.
+    AccountMenu,
     /// The usage window's Version row clicked: the release it names, or the
     /// notes of this one.
     Version,
     /// A setting's list closed, with the value picked, if one was.
-    Picked(Agent, Setting, Option<Option<String>>),
+    Picked(Setting, Option<Option<String>>),
     /// A row of the Settings window clicked, its place on screen given for
     /// a list to drop from.
     SettingsClick(Field, RECT),
@@ -521,7 +520,7 @@ pub(crate) enum Input {
     /// shortcut's new chord.
     SettingsPress(Press),
     /// A slider in the usage window let go at a new value.
-    SetDefault(Agent, Setting, Option<String>),
+    SetDefault(Setting, Option<String>),
     /// An answer typed on the away card, for the quest `title` in the
     /// project at `dir`: to its question, or against what was `assumed`.
     Answered {
@@ -691,7 +690,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     }
     let registry = Arc::new(Mutex::new(registry));
     let usage = Arc::new(Mutex::new(saved.usage.clone()));
-    let agent_usage = Arc::new(Mutex::new(saved.agent_usage.clone()));
     let requests: Arc<Mutex<Vec<Command>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Listener thread: sockets in, tagged events and commands out.
@@ -708,7 +706,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     // an idle one's stale numbers never pull the bars back.
     let feed_registry = Arc::clone(&registry);
     let feed_usage = Arc::clone(&usage);
-    let feed_agent_usage = Arc::clone(&agent_usage);
     thread::spawn(move || {
         // Background sessions already running get their tiles now, not at
         // their next hook, which may be a while for one that is done.
@@ -732,13 +729,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                     limits: held.map_or(limits.clone(), |h| h.limits.merge(&limits, now)),
                     at: now,
                 };
-                if t.agent == Agent::Claude {
-                    if let Ok(mut u) = feed_usage.lock() {
-                        *u = Some(heard(u.as_ref()));
-                    }
-                } else if let Ok(mut u) = feed_agent_usage.lock() {
-                    let merged = heard(u.get(&t.agent));
-                    u.insert(t.agent, merged);
+                if let Ok(mut u) = feed_usage.lock() {
+                    *u = Some(heard(u.as_ref()));
                 }
             }
             let route = feed_registry
@@ -780,10 +772,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             // Woken by the post below whether or not it lit anything.
             crate::glows::hear(&feed_registry, &target, &t.event);
             // A turn's end is when its keeper is sent the snapshot.
-            if t.agent == Agent::Claude
-                && t.event.hook_event_name == "Stop"
-                && t.event.agent_id.is_none()
-            {
+            if t.event.hook_event_name == "Stop" && t.event.agent_id.is_none() {
                 keeping::turn_ended(&target, &t.event.transcript_path);
             }
             post_event(notify_id, changed);
@@ -861,13 +850,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         active: RefCell::new(None),
         browsing: RefCell::new(HashSet::new()),
         usage,
-        agent_usage,
-        account: RefCell::new(BTreeMap::new()),
-        defaults: RefCell::new({
-            let mut d = saved.agent_defaults.clone();
-            d.insert(Agent::Claude, saved.defaults.clone());
-            d
-        }),
+        account: RefCell::new(None),
+        defaults: RefCell::new(saved.defaults.clone()),
         boards: RefCell::new(HashMap::new()),
         tomes: RefCell::new(HashMap::new()),
         warriv: RefCell::new(HashMap::new()),
@@ -900,10 +884,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         let mut app = App {
             shared,
             usage_window,
-            agents_found: [Agent::Codex, Agent::Grok]
-                .into_iter()
-                .filter(|a| console::agent_program(*a).is_some())
-                .collect(),
             start_window: None,
             status_settings,
             mcp_config,
@@ -911,8 +891,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             dropdown: None,
             settings_window: None,
             settings_list_for: None,
-            settings_agent: Agent::Claude,
-            agents_off: saved.agents_off.clone(),
             settings_ask: None,
             backup_cfg: horadric_hooks::state_dir()
                 .map(|d| crate::backup::Config::load(&d))
@@ -926,7 +904,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             switches: HashMap::new(),
             settings_before: None,
             accounts: accounts::load(),
-            logins: Agent::ALL.map(|a| (a, Login::default())).into(),
+            login: Login::default(),
             clusters: Vec::new(),
             consoles: HashMap::new(),
             portal: None,
@@ -1044,9 +1022,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             experience: Arc::new(Mutex::new(None)),
             counting_xp: Arc::new(AtomicBool::new(false)),
         };
-        for agent in Agent::ALL {
-            app.read_login(agent);
-        }
+        app.read_login();
         app.reconcile(false);
         app.count_experience();
         app.attach_hosts();
@@ -1326,7 +1302,7 @@ unsafe extern "system" fn app_proc(
             return LRESULT(0);
         }
         WM_HORADRIC_ACCOUNT_MENU => {
-            account_menu(Agent::ALL.get(wparam.0).copied().unwrap_or_default());
+            account_menu();
             return LRESULT(0);
         }
         WM_HORADRIC_VERSION => {
@@ -1363,18 +1339,14 @@ unsafe extern "system" fn app_proc(
             // Outside the app's borrow: the list takes the focus as it opens,
             // and the windows losing it are the app's.
             let want = with_app(|app| {
-                let (agent, setting, row) = app.setting_menu_for.take()?;
-                let current = app
-                    .shared
-                    .defaults_of(agent)
-                    .get(setting)
-                    .map(str::to_string);
+                let (setting, row) = app.setting_menu_for.take()?;
+                let current = app.shared.defaults().get(setting).map(str::to_string);
                 let dpi = app.usage_window.as_ref().map_or(96, |u| u.dpi());
-                Some((Rc::clone(&app.shared), agent, setting, current, row, dpi))
+                Some((Rc::clone(&app.shared), setting, current, row, dpi))
             })
             .flatten();
-            if let Some((shared, agent, setting, current, row, dpi)) = want {
-                match Dropdown::open(shared, agent, setting, current.as_deref(), row, dpi) {
+            if let Some((shared, setting, current, row, dpi)) = want {
+                match Dropdown::open(shared, setting, current.as_deref(), row, dpi) {
                     Ok(d) => {
                         with_app(|app| app.dropped(d));
                     }
@@ -1550,17 +1522,13 @@ fn tray_menu(hwnd: HWND) {
         Some(Choice::StopWarriv) => {
             with_app(App::stop_warriv);
         }
-        Some(Choice::Account(agent, i)) => {
-            let picked = logins
-                .iter()
-                .find(|l| l.agent == agent)
-                .and_then(|l| l.accounts.get(i));
-            if let Some(to) = picked.map(|a| a.id.clone()) {
-                with_app(|app| app.switch_account(agent, to, false));
+        Some(Choice::Account(i)) => {
+            if let Some(to) = logins.get(i).map(|a| a.id.clone()) {
+                with_app(|app| app.switch_account(to, false));
             }
         }
-        Some(Choice::AddAccount(agent)) => {
-            with_app(|app| app.add_account(agent));
+        Some(Choice::AddAccount) => {
+            with_app(App::add_account);
         }
         Some(Choice::SignIn) => crate::workos::sign_in_in_background(),
         Some(Choice::SignOut) => crate::workos::sign_out(),
@@ -2283,19 +2251,13 @@ pub(crate) enum Run {
     Program(PathBuf),
 }
 
-/// What to say when `agent` is not installed, or was installed after
+/// What to say when Claude Code is not installed, or was installed after
 /// Horadric started and is not on the `PATH` it has.
-fn not_found(agent: Agent) -> String {
-    let get = match agent {
-        Agent::Claude => "Install it from https://claude.com/claude-code",
-        Agent::Codex => "Install it with `npm install -g @openai/codex`",
-        Agent::Grok => "Install Grok Build from https://x.ai/cli",
-    };
-    format!(
-        "Horadric cannot find {}. {get}, then try again. If it is installed, \
-         quit Horadric from the tray and start it again, so it sees the new PATH.",
-        agent.label()
-    )
+fn not_found() -> String {
+    "Horadric cannot find Claude Code. Install it from https://claude.com/claude-code, \
+     then try again. If it is installed, quit Horadric from the tray and start it \
+     again, so it sees the new PATH."
+        .to_string()
 }
 
 /// Puts the keyboard in the address bar of the project's browser pane,
@@ -2540,7 +2502,6 @@ fn project_menu(key: &str) {
     const SSH_CONFIG_END: usize = 300;
     const MERGE: usize = 300;
     const MERGE_END: usize = 400;
-    const ADD_AGENT: usize = 500;
     const PAST: usize = 600;
     let dir = with_app(|app| app.project_dir(key)).flatten();
     // Reading transcripts and asking git are the slow part of opening the
@@ -2593,19 +2554,6 @@ fn project_menu(key: &str) {
     // In trunk mode a worktree is had by asking for one.
     if own_trees == Some(false) {
         items.push(Item::action(ADD_TREE, "New session in its own worktree"));
-    }
-    // Claude Code is what the plus starts. Another agent is offered when
-    // it is installed and not turned off in the Settings window.
-    let off = with_app(|app| app.agents_off.clone()).unwrap_or_default();
-    let others: Vec<Agent> = [Agent::Codex, Agent::Grok]
-        .into_iter()
-        .filter(|a| !off.contains(a) && console::agent_program(*a).is_some())
-        .collect();
-    for (i, a) in others.iter().enumerate() {
-        items.push(Item::action(
-            ADD_AGENT + i,
-            format!("New {} session", a.label()),
-        ));
     }
     items.extend([
         Item::Submenu("History".into(), history_items(&past, PAST)),
@@ -2702,13 +2650,6 @@ fn project_menu(key: &str) {
                     ..SessionSpec::new(dir, app.chat_sessions)
                 };
                 if let Err(e) = app.start_session(spec) {
-                    eprintln!("horadric: cannot start session: {e}");
-                }
-            }
-        }
-        Some(i) if (ADD_AGENT..ADD_AGENT + others.len()).contains(&i) => {
-            if let Some(dir) = app.project_dir(key) {
-                if let Err(e) = app.start_in(None, dir, Vec::new(), others[i - ADD_AGENT], false) {
                     eprintln!("horadric: cannot start session: {e}");
                 }
             }
@@ -3059,16 +3000,10 @@ fn add_host(dir: &Path, host: &str) {
     }
 }
 
-/// Every agent's past conversations in `dir` together, the newest
-/// `limit`, newest first, leaving out the ones in `held`.
+/// The past conversations in `dir`, the newest `limit`, newest first,
+/// leaving out the ones in `held`.
 fn past_in(dir: &Path, held: &[String], limit: usize) -> Vec<Past> {
-    let dir = dir.to_string_lossy();
-    let mut past = transcript::history(&dir, held, limit);
-    past.extend(horadric_hooks::codex::history(&dir, held, limit));
-    past.extend(horadric_hooks::grok::history(&dir, held, limit));
-    past.sort_by_key(|p| std::cmp::Reverse(p.modified));
-    past.truncate(limit);
-    past
+    transcript::history(&dir.to_string_lossy(), held, limit)
 }
 
 /// The lines of a History menu: each past conversation, `first` on, then
@@ -3146,17 +3081,17 @@ fn portal_pair(dir: &std::path::Path) {
     with_app(|app| app.portal_soon());
 }
 
-/// `agent`'s accounts: a pick switches to it, and Add account logs in to
+/// The kept accounts: a pick switches to it, and Add account logs in to
 /// another.
-fn account_menu(agent: Agent) {
+fn account_menu() {
     const ADD: usize = 1;
     const NOW: usize = 2;
     const PICK: usize = 100;
     const FORGET: usize = 200;
-    let Some((all, live, switching)) = with_app(|app| app.account_choices(agent)) else {
+    let Some((all, live, switching)) = with_app(App::account_choices) else {
         return;
     };
-    let all: Vec<Account> = all.of(agent).cloned().collect();
+    let all: Vec<Account> = all.list;
     let now = unix_now();
     let mut items: Vec<Item> = all
         .iter()
@@ -3168,10 +3103,7 @@ fn account_menu(agent: Agent) {
         })
         .collect();
     if items.is_empty() {
-        items.push(Item::Disabled(format!(
-            "Not logged in to {}",
-            agent.provider()
-        )));
+        items.push(Item::Disabled("Not logged in to Claude".into()));
     }
     if let Some((to, waiting)) = &switching {
         let email = all
@@ -3198,17 +3130,17 @@ fn account_menu(agent: Agent) {
     }
     let picked = menu::popup(&items);
     with_app(|app| match picked {
-        Some(ADD) => app.add_account(agent),
+        Some(ADD) => app.add_account(),
         Some(NOW) => {
             if let Some((to, _)) = switching {
-                app.switch_account(agent, to, true);
+                app.switch_account(to, true);
             }
         }
         Some(i) if (FORGET..FORGET + all.len()).contains(&i) => {
-            app.forget_account(agent, &all[i - FORGET].id);
+            app.forget_account(&all[i - FORGET].id);
         }
         Some(i) if (PICK..PICK + all.len()).contains(&i) => {
-            app.switch_account(agent, all[i - PICK].id.clone(), false);
+            app.switch_account(all[i - PICK].id.clone(), false);
         }
         _ => {}
     });
@@ -3445,9 +3377,6 @@ struct App {
     shared: Rc<Shared>,
     /// The account's usage and the defaults for new sessions.
     usage_window: Option<Box<UsageWindow>>,
-    /// The agents besides Claude Code found installed when the app
-    /// started, each with a screen in the usage window.
-    agents_found: Vec<Agent>,
     /// Stands where the first project will go while none is open.
     start_window: Option<Box<StartWindow>>,
     /// The settings file that gives a session `horadric status` as its status
@@ -3457,16 +3386,11 @@ struct App {
     /// project's browser pane. None when it could not be written.
     mcp_config: Option<PathBuf>,
     /// The setting whose list is about to drop, and its row on screen.
-    setting_menu_for: Option<(Agent, Setting, RECT)>,
+    setting_menu_for: Option<(Setting, RECT)>,
     /// A setting's list, while it is dropped down.
     dropdown: Option<Box<Dropdown>>,
     /// The Settings window, while it is open.
     settings_window: Option<Box<SettingsWindow>>,
-    /// The agent whose defaults the Settings window's Sessions section
-    /// shows.
-    settings_agent: Agent,
-    /// The installed agents a project's menu does not offer.
-    agents_off: BTreeSet<Agent>,
     /// The row of the Settings window whose list is about to drop, and its
     /// place on screen.
     settings_list_for: Option<(Field, RECT)>,
@@ -3496,11 +3420,10 @@ struct App {
     /// what they pick as the default for every new session, even outside
     /// Horadric, so these go back once it has.
     settings_before: Option<(Vec<Option<serde_json::Value>>, Instant)>,
-    /// Every account logged in to, each agent's, kept for switching
-    /// between.
+    /// Every account logged in to, kept for switching between.
     accounts: Accounts,
-    /// Each agent's login as the app follows it.
-    logins: BTreeMap<Agent, Login>,
+    /// Claude Code's login as the app follows it.
+    login: Login,
     // Boxed on purpose: the window procedures hold a raw pointer to each
     // window struct, so it must not move when the Vec grows.
     #[allow(clippy::vec_box)]
@@ -3779,8 +3702,7 @@ type Looked = Result<Option<Manifest>, String>;
 /// A session's worktree changes, and whether its work landed when asked.
 type Counted = (String, Option<Diff>, Option<bool>);
 
-/// One agent's login as the app follows it. Each agent's is its own: a
-/// switch of one stops only that agent's sessions.
+/// Claude Code's login as the app follows it.
 #[derive(Default)]
 struct Login {
     /// Who it is logged in as, by account id, as last read.
@@ -3801,11 +3723,10 @@ struct Login {
     settling: Option<(String, Instant)>,
 }
 
-/// Switching an agent's accounts. Every running agent holds its login in
-/// memory, so each stops once it is free and all resume on the new
-/// login together. None may run on while the files change: one still on
-/// the old login would write its token back when it refreshes it, and
-/// Codex takes another account on disk as a permanent error.
+/// Switching accounts. Every running `claude` holds its login in memory,
+/// so each stops once it is free and all resume on the new login
+/// together. None may run on while the files change: one still on the old
+/// login would write its token back when it refreshes it.
 struct AccountSwitch {
     to: String,
     /// Still running, to stop once free.
@@ -3883,12 +3804,11 @@ impl App {
                             // Settings window says. One with a name or
                             // arguments is a script's and gets the terminal
                             // it asked for.
-                            let bare =
-                                n.agent == Agent::Claude && n.name.is_none() && n.args.is_empty();
+                            let bare = n.name.is_none() && n.args.is_empty();
                             let started = if bare {
                                 self.start_claude(cwd)
                             } else {
-                                self.start_in(n.name, cwd, n.args, n.agent, false)
+                                self.start_in(n.name, cwd, n.args, Agent::Claude, false)
                             };
                             if let Err(e) = started {
                                 eprintln!("horadric: cannot start session: {e}");
@@ -3970,6 +3890,7 @@ impl App {
                 self.handing_tick();
                 self.keeping_tick();
                 self.folio_rewinds_tick();
+                self.folio_bands_tick();
                 self.backup_tick();
                 if self
                     .last_check
@@ -4106,7 +4027,6 @@ impl App {
                 serial,
                 saved.args.clone(),
                 saved.shell,
-                saved.agent,
                 PathBuf::from(&saved.cwd),
                 self.notify,
             ) {
@@ -4813,8 +4733,7 @@ impl App {
             },
             history::Pick::All => None,
         };
-        let agent = past.map_or(Agent::Claude, |p| p.agent);
-        if let Some(p) = past.filter(|p| self.chat_sessions && p.agent == Agent::Claude) {
+        if let Some(p) = past.filter(|_| self.chat_sessions) {
             match self.start_folio(None, dir.to_path_buf(), Some(p.id.clone()), &[], true) {
                 Ok(id) => {
                     if let Ok(mut r) = self.shared.registry.lock() {
@@ -4827,8 +4746,8 @@ impl App {
             }
             return;
         }
-        let args = agent.resume_args(past.map(|p| p.id.as_str()));
-        let id = match self.start_in(None, dir.to_path_buf(), args, agent, false) {
+        let args = Agent::Claude.resume_args(past.map(|p| p.id.as_str()));
+        let id = match self.start_in(None, dir.to_path_buf(), args, Agent::Claude, false) {
             Ok(id) => id,
             Err(e) => {
                 eprintln!("horadric: cannot resume a conversation: {e}");
@@ -4863,15 +4782,16 @@ impl App {
         self.consoles.remove(id);
         let cwd = PathBuf::from(&saved.cwd);
         // A chat resumes as one; a terminal does when new sessions open as
-        // chats and it has a conversation to carry on.
-        let as_chat = saved.agent == Agent::Claude
-            && !saved.shell
+        // chats and it has a conversation to carry on. Its role, a quest's,
+        // Warriv's, an errand's, comes back with it either way: the flags
+        // are rebuilt from its id and the list as it starts.
+        let as_chat = !saved.shell
             && saved.ssh.is_none()
             && cwd.is_dir()
             && (saved.chat
                 || (self.chat_sessions
                     && saved.claude_session_id.is_some()
-                    && self.started_plainly(id, &saved)));
+                    && !Self::keeps_terminal(&saved)));
         if as_chat {
             // A Folio that ended still holds its pane, which would keep the
             // new one from opening.
@@ -4890,7 +4810,7 @@ impl App {
             let run = match (&saved.ssh, saved.shell) {
                 (Some(host), _) => Run::Ssh(host.clone()),
                 (None, true) => Run::Shell,
-                (None, false) => Run::Agent(saved.agent),
+                (None, false) => Run::Agent(Agent::Claude),
             };
             self.launch(id, &saved.name, cwd, args, run, show)
         } else {
@@ -4902,16 +4822,10 @@ impl App {
         result
     }
 
-    /// Whether paused session `id` is one the human started, so it may go
-    /// on as a chat. A Folio gets all a terminal gets on every launch, its
-    /// own worktree, the town and a first prompt too, but a quest, Warriv,
-    /// an errand and a runeword are typed into as they run, which a Folio
-    /// cannot be told to yet, so those stay terminals.
-    fn started_plainly(&self, id: &str, saved: &SavedSession) -> bool {
-        !horadric_core::warriv::is_warriv(id)
-            && !horadric_core::runeword::is_errand(id)
-            && saved.runeword.is_none()
-            && !self.holds_quest(id)
+    /// Whether a paused terminal must stay one: its runeword has keys, an
+    /// arrow or a Tab, that only a terminal takes.
+    fn keeps_terminal(saved: &SavedSession) -> bool {
+        (saved.runeword.as_ref()).is_some_and(|w| horadric_core::runeword::needs_terminal(&w.runes))
     }
 
     /// Opens a plain terminal in the project with this key, on the stage
@@ -4999,10 +4913,7 @@ impl App {
             _ => None,
         };
         let (program, args) = match &run {
-            Run::Agent(agent) => (
-                console::agent_program(*agent).ok_or_else(|| not_found(*agent))?,
-                args,
-            ),
+            Run::Agent(agent) => (console::agent_program(*agent).ok_or_else(not_found)?, args),
             Run::Shell => (
                 console::shell_program().ok_or("no shell found (set HORADRIC_SHELL)")?,
                 args,
@@ -5044,10 +4955,6 @@ impl App {
                     }
                     own_tree = s.worktree.clone();
                     s.shell = shell && !attach;
-                    if let Run::Agent(agent) = run {
-                        // A shell put in with `HORADRIC_AGENT` stays Claude's.
-                        s.agent = console::agent_of(&program).unwrap_or(agent);
-                    }
                     // Until the remote shell sets a title, the tile says
                     // where it is.
                     if let Some(h) = &host {
@@ -5066,7 +4973,7 @@ impl App {
         };
         let mut env = session_env(id, own_tree.as_ref(), &cwd);
         if !attach && !shell && console::is_claude(&program) {
-            env.extend(self.shared.defaults_of(Agent::Claude).env(Agent::Claude));
+            env.extend(self.shared.defaults().env());
         }
         let serial = self.next_serial;
         self.next_serial += 1;
@@ -5116,34 +5023,9 @@ impl App {
     /// Code, not for a shell put in its place with `HORADRIC_AGENT`, and not
     /// over settings the session brought itself.
     fn extra_args(&mut self, id: &str, program: &Path, args: &[String], cwd: &Path) -> Vec<String> {
-        let bypass = self.bypasses_prompts(id);
-        match console::agent_of(program) {
-            Some(Agent::Claude) => {}
-            Some(other) => self.record_agent_launch(id, other.program()),
-            // A shell put in its place with `HORADRIC_AGENT`.
-            None => self.record_agent_launch(id, "other"),
-        }
-        if console::agent_of(program) == Some(Agent::Codex) {
-            let hook = store::exe_command(&console::host_program(), "hook codex");
-            let mut extra = Agent::Codex.hook_args(&hook);
-            extra.extend(Agent::Codex.login_args());
-            let exe = console::host_program();
-            extra.extend(Agent::Codex.mcp_args(&exe.to_string_lossy(), None));
-            extra.extend(self.shared.defaults_of(Agent::Codex).flags_for(
-                Agent::Codex,
-                args,
-                bypass,
-            ));
-            return extra;
-        }
-        // Grok's hook is in its home, written by `install`.
-        if console::agent_of(program) == Some(Agent::Grok) {
-            return self
-                .shared
-                .defaults_of(Agent::Grok)
-                .flags_for(Agent::Grok, args, bypass);
-        }
         if !console::is_claude(program) {
+            // A shell put in its place with `HORADRIC_AGENT`.
+            self.record_agent_launch(id, "other");
             return Vec::new();
         }
         let start = self.claude_start(id, program, args, cwd);
@@ -5179,10 +5061,7 @@ impl App {
         // default model stays out.
         let model = self.quest_model_args(id, args);
         let own: Vec<String> = args.iter().chain(&model).cloned().collect();
-        let mut extra =
-            self.shared
-                .defaults_of(Agent::Claude)
-                .flags_for(Agent::Claude, &own, bypass);
+        let mut extra = self.shared.defaults().flags_for(&own, bypass);
         extra.extend(model);
         if !has_flag(args, "--settings") {
             // A quest's session starts without the claude.ai connectors its
@@ -5200,7 +5079,7 @@ impl App {
             }
         }
         let config = self.mcp_config.as_ref().map(|p| p.to_string_lossy());
-        extra.extend(Agent::Claude.mcp_args("", config.as_deref()));
+        extra.extend(Agent::Claude.mcp_args(config.as_deref()));
         // Before the task's flags, whose system prompt ends them: a list
         // of folders takes every word up to the next flag, a prompt too.
         if town::is(&folder_key(&cwd.to_string_lossy())) {
@@ -5214,31 +5093,12 @@ impl App {
         }
     }
 
-    /// The agents with a screen in the usage window: Claude Code, those
-    /// installed, and any with a session, which may have been started
-    /// from a program installed since.
-    fn agents_in_use(&self) -> Vec<Agent> {
-        let running: HashSet<Agent> = self
-            .shared
-            .registry
-            .lock()
-            .map(|r| r.all().map(|s| s.agent).collect())
-            .unwrap_or_default();
-        Agent::ALL
-            .into_iter()
-            .filter(|a| *a == Agent::Claude || self.agents_found.contains(a) || running.contains(a))
-            .collect()
-    }
-
-    /// A setting picked in the usage window for `agent`'s sessions. They
-    /// take it as they start or resume. Running Claude Code sessions switch
-    /// too where it has a command for it, typed in once each is free, unless
-    /// one chose the setting with its own arguments.
-    fn set_default(&mut self, agent: Agent, setting: Setting, value: Option<String>) {
-        let command = setting
-            .command(value.as_deref())
-            .filter(|_| agent == Agent::Claude);
-        if let Some(command) = command {
+    /// A setting picked in the usage window. Sessions take it as they
+    /// start or resume. Running ones switch too where Claude Code has a
+    /// command for it, typed in once each is free, unless one chose the
+    /// setting with its own arguments.
+    fn set_default(&mut self, setting: Setting, value: Option<String>) {
+        if let Some(command) = setting.command(value.as_deref()) {
             let terminals = (self.consoles.iter())
                 .filter(|(_, c)| c.claude && c.exit_code().is_none())
                 .map(|(id, c)| (id, &c.args));
@@ -5252,12 +5112,7 @@ impl App {
                 queue.push((setting, command.clone()));
             }
         }
-        self.shared
-            .defaults
-            .borrow_mut()
-            .entry(agent)
-            .or_default()
-            .set(setting, value);
+        self.shared.defaults.borrow_mut().set(setting, value);
         if let Some(u) = &self.usage_window {
             u.invalidate();
         }
@@ -5323,24 +5178,19 @@ impl App {
         }
     }
 
-    fn login(&mut self, agent: Agent) -> &mut Login {
-        self.logins.entry(agent).or_default()
-    }
-
-    /// Reads who `agent` is logged in as, keeps that login, and shows it.
-    /// At start and whenever its login files change: a refreshed token
-    /// replaces the kept one, and a login typed into any session adds an
-    /// account.
-    fn read_login(&mut self, agent: Agent) {
-        let stamp = accounts::stamp(agent);
-        let login = self.login(agent);
+    /// Reads who is logged in, keeps that login, and shows it. At start
+    /// and whenever the login files change: a refreshed token replaces the
+    /// kept one, and a login typed into any session adds an account.
+    fn read_login(&mut self) {
+        let stamp = accounts::stamp();
+        let login = &mut self.login;
         login.read = stamp.clone();
         login.seen = stamp;
         if let Some((to, at)) = login.settling.clone() {
             if at.elapsed() > SETTLES_IN {
                 login.settling = None;
-            } else if accounts::live_id(agent).as_ref() != Some(&to) {
-                eprintln!("horadric: the {agent:?} login was written over, putting it back");
+            } else if accounts::live_id().as_ref() != Some(&to) {
+                eprintln!("horadric: the login was written over, putting it back");
                 if let Some(a) = self.accounts.get(&to).cloned() {
                     if let Err(e) = self.put_file(&a) {
                         eprintln!("horadric: cannot put the login back: {e}");
@@ -5348,27 +5198,27 @@ impl App {
                 }
                 // From the first put, so a writer that never stops is not
                 // fought for ever.
-                self.login(agent).settling = Some((to, at));
+                self.login.settling = Some((to, at));
                 return;
             }
         }
-        let Some(live) = accounts::live(agent) else {
+        let Some(live) = accounts::live() else {
             // Mid write, or not logged in. Who it was stays shown then.
-            if accounts::live_id(agent).is_none() {
-                self.login(agent).account = None;
-                self.show_account(agent, None);
+            if accounts::live_id().is_none() {
+                self.login.account = None;
+                self.show_account(None);
             }
             return;
         };
         let id = live.id.clone();
         let changed = self.accounts.remember(live);
         let added = self
-            .login(agent)
+            .login
             .adding
             .as_ref()
             .is_some_and(|(before, _)| before.as_ref() != Some(&id));
         if added {
-            let before = self.login(agent).adding.take().and_then(|(b, _)| b);
+            let before = self.login.adding.take().and_then(|(b, _)| b);
             let email = self.accounts.get(&id).map(|a| a.email.clone());
             self.save_accounts();
             // Back to the account the sessions run on, so adding one stops
@@ -5379,7 +5229,7 @@ impl App {
                         eprintln!("horadric: cannot put the login back: {e}");
                     }
                 }
-                None => self.adopt(agent, id),
+                None => self.adopt(id),
             }
             self.toasts.show(
                 Kind::Done,
@@ -5391,57 +5241,43 @@ impl App {
         if changed {
             self.save_accounts();
         }
-        if self.login(agent).account.as_ref() != Some(&id) {
-            self.adopt(agent, id);
+        if self.login.account.as_ref() != Some(&id) {
+            self.adopt(id);
         }
     }
 
-    /// Reads each agent's login again once its files changed and held
-    /// still.
+    /// Reads the login again once its files changed and held still.
     fn watch_login(&mut self) {
-        for agent in Agent::ALL {
-            let login = self.login(agent);
-            if login
-                .adding
-                .as_ref()
-                .is_some_and(|(_, at)| at.elapsed() > ADDING_FOR)
-            {
-                login.adding = None;
-            }
-            let stamp = accounts::stamp(agent);
-            if stamp != login.seen {
-                login.seen = stamp;
-                continue;
-            }
-            if stamp != login.read {
-                self.read_login(agent);
-            }
+        let login = &mut self.login;
+        if login
+            .adding
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > ADDING_FOR)
+        {
+            login.adding = None;
+        }
+        let stamp = accounts::stamp();
+        if stamp != login.seen {
+            login.seen = stamp;
+            return;
+        }
+        if stamp != login.read {
+            self.read_login();
         }
     }
 
-    /// Account `id` is the one `agent` uses now: its limits come back and
-    /// the usage window names it. The limits heard until now were the
+    /// Account `id` is the one in use now: its limits come back and the
+    /// usage window names it. The limits heard until now were the
     /// account's before it.
-    fn adopt(&mut self, agent: Agent, id: String) {
-        if let Some(before) = self.login(agent).account.clone() {
+    fn adopt(&mut self, id: String) {
+        if let Some(before) = self.login.account.clone() {
             let arriving = self.accounts.get(&id).and_then(|a| a.usage.clone());
-            let leaving = match agent {
-                Agent::Claude => self
-                    .shared
-                    .usage
-                    .lock()
-                    .ok()
-                    .map(|mut u| std::mem::replace(&mut *u, arriving)),
-                _ => self
-                    .shared
-                    .agent_usage
-                    .lock()
-                    .ok()
-                    .map(|mut all| match arriving {
-                        Some(u) => all.insert(agent, u),
-                        None => all.remove(&agent),
-                    }),
-            };
+            let leaving = self
+                .shared
+                .usage
+                .lock()
+                .ok()
+                .map(|mut u| std::mem::replace(&mut *u, arriving));
             if let Some(leaving) = leaving {
                 self.accounts.set_usage(&before, leaving);
             }
@@ -5450,19 +5286,16 @@ impl App {
         // Taken by hand or logged in to again, it is worth trying.
         self.accounts.set_out(&id, None);
         self.all_out_told = false;
-        self.login(agent).account = Some(id);
+        self.login.account = Some(id);
         self.save_accounts();
-        self.show_account(agent, email);
+        self.show_account(email);
     }
 
-    fn show_account(&mut self, agent: Agent, email: Option<String>) {
-        if self.shared.account.borrow().get(&agent) == email.as_ref() {
+    fn show_account(&mut self, email: Option<String>) {
+        if *self.shared.account.borrow() == email {
             return;
         }
-        match email {
-            Some(e) => self.shared.account.borrow_mut().insert(agent, e),
-            None => self.shared.account.borrow_mut().remove(&agent),
-        };
+        *self.shared.account.borrow_mut() = email;
         if let Some(u) = &self.usage_window {
             if u.fit() {
                 self.arrange();
@@ -5476,14 +5309,11 @@ impl App {
         }
     }
 
-    /// The accounts for `agent`'s Account menu, the one in use, and the
-    /// one a switch is on its way to with how many sessions it waits for.
-    /// The one in use carries the limits heard now, not those it left with.
-    fn account_choices(
-        &mut self,
-        agent: Agent,
-    ) -> (Accounts, Option<String>, Option<(String, usize)>) {
-        let login = self.login(agent);
+    /// The accounts for the Account menu, the one in use, and the one a
+    /// switch is on its way to with how many sessions it waits for. The
+    /// one in use carries the limits heard now, not those it left with.
+    fn account_choices(&mut self) -> (Accounts, Option<String>, Option<(String, usize)>) {
+        let login = &self.login;
         let switching = login
             .switch
             .as_ref()
@@ -5491,34 +5321,26 @@ impl App {
         let live = login.account.clone();
         let mut all = self.accounts.clone();
         if let Some(id) = &live {
-            all.set_usage(id, self.usage_of(agent));
+            all.set_usage(id, self.usage_of());
         }
         (all, live, switching)
     }
 
-    /// The limits heard for `agent`'s account in use.
-    fn usage_of(&self, agent: Agent) -> Option<Usage> {
-        match agent {
-            Agent::Claude => self.shared.usage.lock().ok()?.clone(),
-            _ => self.shared.agent_usage.lock().ok()?.get(&agent).cloned(),
-        }
+    /// The limits heard for the account in use.
+    fn usage_of(&self) -> Option<Usage> {
+        self.shared.usage.lock().ok()?.clone()
     }
 
-    /// The limits of each agent's account in use, for the brothers.
+    /// The limits of the account in use, for the brothers.
     fn told_usage(&self) -> Vec<horadric_core::usage::Told> {
-        Agent::ALL
-            .into_iter()
-            .filter_map(|agent| {
-                let usage = self.usage_of(agent)?;
-                let account = self.logins.get(&agent).and_then(|l| l.account.clone());
-                let email = self.shared.account.borrow().get(&agent).cloned();
-                Some(horadric_core::usage::Told {
-                    agent,
-                    account,
-                    email,
-                    usage,
-                })
+        self.usage_of()
+            .map(|usage| horadric_core::usage::Told {
+                agent: Agent::Claude,
+                account: self.login.account.clone(),
+                email: self.shared.account.borrow().clone(),
+                usage,
             })
+            .into_iter()
             .collect()
     }
 
@@ -5530,7 +5352,7 @@ impl App {
         let now = unix_now();
         let mut changed = false;
         for t in told {
-            let live = self.logins.get(&t.agent).and_then(|l| l.account.clone());
+            let live = self.login.account.clone();
             let here = match (&live, &t.account) {
                 (None, _) => true,
                 (Some(live), Some(theirs)) => live == theirs,
@@ -5546,65 +5368,49 @@ impl App {
             }
             let merged =
                 |held: Option<&Usage>| held.map_or(t.usage.clone(), |h| h.merge(&t.usage, now));
-            let before = self.usage_of(t.agent);
-            match t.agent {
-                Agent::Claude => {
-                    if let Ok(mut u) = self.shared.usage.lock() {
-                        *u = Some(merged(u.as_ref()));
-                    }
-                }
-                agent => {
-                    if let Ok(mut all) = self.shared.agent_usage.lock() {
-                        let m = merged(all.get(&agent));
-                        all.insert(agent, m);
-                    }
-                }
+            let before = self.usage_of();
+            if let Ok(mut u) = self.shared.usage.lock() {
+                *u = Some(merged(u.as_ref()));
             }
             if live.is_none() && t.email.is_some() {
-                self.show_account(t.agent, t.email.clone());
+                self.show_account(t.email.clone());
             }
-            changed |= self.usage_of(t.agent) != before;
+            changed |= self.usage_of() != before;
         }
         changed
     }
 
-    /// Each agent's kept accounts for the tray's Account menu, with what
-    /// each has left. Only agents logged in to some.
-    fn logins(&mut self) -> Vec<tray::Logins> {
+    /// The kept accounts for the tray's Account menu, with what each has
+    /// left.
+    fn logins(&mut self) -> Vec<tray::Pick> {
         let now = unix_now();
-        Agent::ALL
-            .into_iter()
-            .filter_map(|agent| {
-                let (all, live, _) = self.account_choices(agent);
-                let accounts: Vec<tray::Pick> = all
-                    .of(agent)
-                    .map(|a| tray::Pick {
-                        id: a.id.clone(),
-                        label: a.label_at(now),
-                        live: live.as_deref() == Some(a.id.as_str()),
-                    })
-                    .collect();
-                (!accounts.is_empty()).then_some(tray::Logins { agent, accounts })
+        let (all, live, _) = self.account_choices();
+        all.list
+            .iter()
+            .map(|a| tray::Pick {
+                id: a.id.clone(),
+                label: a.label_at(now),
+                live: live.as_deref() == Some(a.id.as_str()),
             })
             .collect()
     }
 
-    /// Opens a login for another of `agent`'s accounts. The sessions keep
-    /// running on this one: the new login is kept and this one put back.
-    fn add_account(&mut self, agent: Agent) {
-        if let Some(why) = accounts::refused(agent) {
+    /// Opens a login for another account. The sessions keep running on
+    /// this one: the new login is kept and this one put back.
+    fn add_account(&mut self) {
+        if let Some(why) = accounts::refused() {
             self.toasts
                 .show(Kind::Failed, "Cannot add an account", &why);
             return;
         }
-        self.read_login(agent);
-        match accounts::log_in(agent) {
+        self.read_login();
+        match accounts::log_in() {
             Ok(()) => {
-                let login = self.login(agent);
+                let login = &mut self.login;
                 login.adding = Some((login.account.clone(), Instant::now()));
                 self.toasts.show(
                     Kind::Info,
-                    &format!("Log in to {}", agent.provider()),
+                    "Log in to Claude",
                     "Log in with the other account in the window that opened. \
                      The sessions carry on with this one.",
                 );
@@ -5615,62 +5421,57 @@ impl App {
         }
     }
 
-    fn forget_account(&mut self, agent: Agent, id: &str) {
-        if self.login(agent).account.as_deref() == Some(id) {
+    fn forget_account(&mut self, id: &str) {
+        if self.login.account.as_deref() == Some(id) {
             return;
         }
         self.accounts.forget(id);
         self.save_accounts();
     }
 
-    /// Whether the console of session `id` runs `agent` itself, so it
-    /// holds `agent`'s login. For Claude not a shell put in its place with
-    /// `HORADRIC_AGENT`.
-    fn runs(&self, id: &str, agent: Agent) -> bool {
+    /// Whether session `id` runs `claude` itself, so it holds the login:
+    /// not a shell put in its place with `HORADRIC_AGENT`. A Folio's
+    /// claude.exe holds it too.
+    fn runs(&self, id: &str) -> bool {
+        if self.folios.contains_key(id) {
+            return crate::folio::running(id);
+        }
         let Some(c) = self.consoles.get(id) else {
             return false;
         };
         if c.exit_code().is_some() || c.shell || self.background_of(id).is_some() {
             return false;
         }
-        if agent == Agent::Claude {
-            return c.claude;
-        }
-        self.shared
-            .registry
-            .lock()
-            .is_ok_and(|r| r.get(id).is_some_and(|s| s.agent == agent))
+        c.claude
     }
 
-    /// Switches `agent` to account `to`. The sessions of `agent` Horadric
-    /// runs stop as each finishes its turn and resume on the new login
-    /// together, see [`AccountSwitch`]. With `now` they stop at once. The
-    /// other agents' sessions run on.
-    fn switch_account(&mut self, agent: Agent, to: String, now: bool) {
-        self.begin_switch(agent, to, now, true);
+    /// Switches to account `to`. The sessions Horadric runs stop as each
+    /// finishes its turn and resume on the new login together, see
+    /// [`AccountSwitch`]. With `now` they stop at once.
+    fn switch_account(&mut self, to: String, now: bool) {
+        self.begin_switch(to, now, true);
     }
 
     /// [`App::switch_account`], saying so with `say`: a switch a limit
     /// set off has said why already.
-    fn begin_switch(&mut self, agent: Agent, to: String, now: bool, say: bool) {
-        if let Some(why) = accounts::refused(agent) {
+    fn begin_switch(&mut self, to: String, now: bool, say: bool) {
+        if let Some(why) = accounts::refused() {
             self.toasts
                 .show(Kind::Failed, "Cannot switch accounts", &why);
             return;
         }
-        if let Some(s) = &mut self.login(agent).switch {
+        if let Some(s) = &mut self.login.switch {
             s.to = to;
             s.now |= now;
             self.switch_step();
             return;
         }
-        if self.login(agent).account.as_ref() == Some(&to) {
+        if self.login.account.as_ref() == Some(&to) {
             return;
         }
-        let running: Vec<String> = self
-            .consoles
-            .keys()
-            .filter(|id| self.runs(id, agent))
+        let running: Vec<String> = (self.consoles.keys())
+            .chain(self.folios.keys())
+            .filter(|id| self.runs(id))
             .cloned()
             .collect();
         if let (true, false, Some(a)) = (say, running.is_empty(), self.accounts.get(&to)) {
@@ -5680,7 +5481,7 @@ impl App {
                 "Each session stops once its turn is done, and all resume on the new account together.",
             );
         }
-        self.login(agent).switch = Some(AccountSwitch {
+        self.login.switch = Some(AccountSwitch {
             to,
             running,
             stopped: Vec::new(),
@@ -5695,7 +5496,6 @@ impl App {
     /// ran out is noted as out until its limit resets, so the next switch
     /// does not come straight back to it. Once for each stop.
     fn switch_when_out(&mut self) {
-        let agent = Agent::Claude;
         let stops: Vec<(String, SystemTime)> = match self.shared.registry.lock() {
             Ok(r) => (self.consoles.keys())
                 .chain(self.folios.keys())
@@ -5710,29 +5510,26 @@ impl App {
             .retain(|id, since| stops.iter().any(|(i, s)| i == id && s == since));
         let fresh: Vec<(String, SystemTime)> = stops
             .into_iter()
-            .filter(|(id, _)| {
-                let ours = self.runs(id, agent) || self.folios.contains_key(id);
-                !self.out_seen.contains_key(id) && ours
-            })
+            .filter(|(id, _)| !self.out_seen.contains_key(id) && self.runs(id))
             .collect();
-        if !self.switch_accounts || fresh.is_empty() || self.login(agent).switch.is_some() {
+        if !self.switch_accounts || fresh.is_empty() || self.login.switch.is_some() {
             return;
         }
         self.out_seen.extend(fresh);
-        let Some(live) = self.login(agent).account.clone() else {
+        let Some(live) = self.login.account.clone() else {
             return;
         };
         let now = unix_now();
         // Not the fullest limit's reset, which can be the weekly one days
         // off when the refusal was the session's.
         let until = self
-            .usage_of(agent)
+            .usage_of()
             .and_then(|u| u.limits.out_until(now, false))
             .unwrap_or(now + OUT_FOR);
         self.accounts.set_out(&live, Some(until));
         self.save_accounts();
         let leaving = self.accounts.get(&live).map(|a| a.email.clone());
-        match self.accounts.roomiest(agent, Some(&live), now) {
+        match self.accounts.roomiest(Some(&live), now) {
             Some(to) => {
                 let (id, email) = (to.id.clone(), to.email.clone());
                 self.toasts.show(
@@ -5740,9 +5537,9 @@ impl App {
                     &format!("{} ran out", leaving.unwrap_or_default()),
                     &format!("Switching to {email}, and the stopped turns go on there."),
                 );
-                self.begin_switch(agent, id, false, false);
+                self.begin_switch(id, false, false);
             }
-            None if self.accounts.of(agent).count() > 1 && !self.all_out_told => {
+            None if self.accounts.list.len() > 1 && !self.all_out_told => {
                 self.all_out_told = true;
                 self.toasts.show(
                     Kind::Info,
@@ -5754,25 +5551,36 @@ impl App {
         }
     }
 
-    /// Moves every switch on, see [`App::switch_step_of`].
+    /// Moves the switch on: stops each session free to stop, and once
+    /// every one has, puts the new login in and resumes them all.
     fn switch_step(&mut self) {
-        for agent in Agent::ALL {
-            self.switch_step_of(agent);
-        }
-    }
-
-    /// Moves `agent`'s switch on: stops each session free to stop, and
-    /// once every one has, puts the new login in and resumes them all.
-    fn switch_step_of(&mut self, agent: Agent) {
-        let Some(mut s) = self.login(agent).switch.take() else {
+        let Some(mut s) = self.login.switch.take() else {
             return;
         };
         if let Ok(r) = self.shared.registry.lock() {
-            let consoles = &self.consoles;
+            let (consoles, folios) = (&self.consoles, &self.folios);
             let stopped = &mut s.stopped;
             let limited = &mut s.limited;
             let now = s.now;
             s.running.retain(|id| {
+                if folios.contains_key(id) {
+                    if !crate::folio::running(id) {
+                        return false;
+                    }
+                    let session = r.get(id);
+                    let out = session.is_some_and(|x| x.limited());
+                    // Nothing is typed into a Folio but its composer, which
+                    // waits through the restart.
+                    let free = now || session.is_some_and(|x| x.free_to_restart(None));
+                    let down = free && crate::folio::wind_down(id, now || out);
+                    if down {
+                        stopped.push(id.clone());
+                        if out {
+                            limited.push(id.clone());
+                        }
+                    }
+                    return !down;
+                }
                 let Some(c) = consoles.get(id).filter(|c| c.exit_code().is_none()) else {
                     // Gone on its own, ended or crashed: nothing to carry.
                     return false;
@@ -5790,79 +5598,58 @@ impl App {
             });
         }
         let stopping = s.stopped.iter().any(|id| {
-            self.consoles
-                .get(id)
-                .is_some_and(|c| c.exit_code().is_none())
+            let terminal = (self.consoles.get(id)).is_some_and(|c| c.exit_code().is_none());
+            terminal || (self.folios.contains_key(id) && crate::folio::running(id))
         });
         if !s.running.is_empty() || stopping {
-            self.login(agent).switch = Some(s);
+            self.login.switch = Some(s);
             return;
         }
         let email = self.accounts.get(&s.to).map(|a| a.email.clone());
-        match self.put_login(agent, &s.to) {
-            Ok(()) => {
-                if agent == Agent::Claude {
-                    self.folios_on_new_login(email.as_deref());
-                }
-                self.toasts.show(
-                    Kind::Done,
-                    &format!("Switched to {}", email.unwrap_or_default()),
-                    "The sessions carry on with this account.",
-                )
-            }
+        match self.put_login(&s.to) {
+            Ok(()) => self.toasts.show(
+                Kind::Done,
+                &format!("Switched to {}", email.unwrap_or_default()),
+                "The sessions carry on with this account.",
+            ),
             Err(e) => self.toasts.show(Kind::Failed, "Cannot switch accounts", &e),
         }
         // Once each, whatever happened: on the old login if the switch failed.
         let on_stage = self.shared.active.borrow().clone();
         for id in &s.stopped {
-            if self.paused.contains_key(id) {
-                // Its refused prompt is the last in the conversation, and
-                // this takes it up again on the new login.
-                let go_on = agent == Agent::Claude && s.limited.contains(id);
-                if go_on {
-                    self.tasks
-                        .prompts
-                        .insert(id.clone(), horadric_core::accounts::GO_ON.to_string());
-                }
-                if let Err(e) = self.resume(id, false) {
-                    eprintln!("horadric: cannot resume {id}: {e}");
-                    self.tasks.prompts.remove(id);
-                }
+            let chat = self.folios.contains_key(id);
+            if !chat && !self.paused.contains_key(id) {
+                continue;
+            }
+            // Its refused prompt is the last in the conversation, and
+            // this takes it up again on the new login.
+            if s.limited.contains(id) {
+                self.tasks
+                    .prompts
+                    .insert(id.clone(), horadric_core::accounts::GO_ON.to_string());
+            }
+            if chat {
+                // Same tile, same conversation, its claude.exe reading the
+                // new login; the prompt goes in as its first message.
+                self.folio_restart(id, false);
+                continue;
+            }
+            if let Err(e) = self.resume(id, false) {
+                eprintln!("horadric: cannot resume {id}: {e}");
+                self.tasks.prompts.remove(id);
             }
         }
         if let Some(id) = on_stage.filter(|id| s.stopped.contains(id)) {
-            if self.consoles.contains_key(&id) {
+            if self.consoles.contains_key(&id) || self.folios.contains_key(&id) {
                 self.reveal(&id, false);
             }
         }
     }
 
-    /// Each Folio starts again so its claude.exe reads the new login, as a
-    /// terminal is stopped and resumed. One a usage limit stopped takes
-    /// its refused prompt up again; one at work is left to finish.
-    fn folios_on_new_login(&mut self, email: Option<&str>) {
-        let said = match email {
-            Some(e) => format!("Switched to {e}."),
-            None => "Switched accounts.".to_string(),
-        };
-        let ids: Vec<String> = self.folios.keys().cloned().collect();
-        for id in ids {
-            let limited = (self.shared.registry.lock())
-                .is_ok_and(|r| r.get(&id).is_some_and(|s| s.limited()));
-            if limited {
-                (self.tasks.prompts)
-                    .insert(id.clone(), horadric_core::accounts::GO_ON.to_string());
-            }
-            if !crate::folio::restart(&id, &said, false) {
-                self.tasks.prompts.remove(&id);
-            }
-        }
-    }
-
-    /// Logs `agent` in as account `to`, keeping the leaving login as it is
-    /// now first, since it may have been refreshed since it was kept.
-    fn put_login(&mut self, agent: Agent, to: &str) -> Result<(), String> {
-        if let Some(live) = accounts::live(agent) {
+    /// Logs in as account `to`, keeping the leaving login as it is now
+    /// first, since it may have been refreshed since it was kept.
+    fn put_login(&mut self, to: &str) -> Result<(), String> {
+        if let Some(live) = accounts::live() {
             self.accounts.remember(live);
         }
         let target = self
@@ -5871,16 +5658,16 @@ impl App {
             .cloned()
             .ok_or("that account is no longer kept")?;
         self.put_file(&target).map_err(|e| e.to_string())?;
-        self.adopt(agent, to.to_string());
+        self.adopt(to.to_string());
         Ok(())
     }
 
-    /// Writes `account`'s login into its agent's files, and watches for a
-    /// while that it stays.
+    /// Writes `account`'s login into Claude Code's files, and watches for
+    /// a while that it stays.
     fn put_file(&mut self, account: &Account) -> std::io::Result<()> {
         accounts::put(account)?;
-        let stamp = accounts::stamp(account.agent);
-        let login = self.login(account.agent);
+        let stamp = accounts::stamp();
+        let login = &mut self.login;
         login.read = stamp.clone();
         login.seen = stamp;
         login.settling = Some((account.id.clone(), Instant::now()));
@@ -5895,9 +5682,7 @@ impl App {
         }
         let whose = self.dropdown.as_ref().map(|d| d.whose);
         let i = match whose {
-            Some(Whose::Default(agent, setting)) => {
-                agent.settings().iter().position(|s| *s == setting)
-            }
+            Some(Whose::Default(setting)) => Setting::ALL.iter().position(|s| *s == setting),
             _ => None,
         };
         if let Some(u) = &self.usage_window {
@@ -5950,12 +5735,7 @@ impl App {
             animations: !self.still,
             switch_accounts: self.switch_accounts,
             terminal_sessions: !self.chat_sessions,
-            agent: self.settings_agent,
-            defaults: self.shared.defaults_of(self.settings_agent),
-            offered: (self.settings_agent != Agent::Claude).then(|| {
-                console::agent_program(self.settings_agent)
-                    .map(|_| !self.agents_off.contains(&self.settings_agent))
-            }),
+            defaults: self.shared.defaults(),
             autostart: (!horadric_hooks::dev()).then(autostart::is_enabled),
             explorer: (!horadric_hooks::dev()).then(explorer::is_installed),
             discord: self.discord,
@@ -6472,17 +6252,11 @@ impl App {
                     .iter()
                     .position(|t| *t == self.backup_cfg.to)),
             ),
-            Field::Agent => list(
-                "Whose defaults the rows show",
-                Agent::ALL.iter().map(|a| a.label().to_string()).collect(),
-                at(Agent::ALL.iter().position(|a| *a == self.settings_agent)),
-            ),
             Field::Default(setting) => {
-                let agent = self.settings_agent;
-                let now = self.shared.defaults_of(agent);
-                let (labels, current) = default_choices(agent, setting, now.get(setting));
+                let now = self.shared.defaults();
+                let (labels, current) = default_choices(setting, now.get(setting));
                 Some(SettingsList {
-                    note: dropdown::note(agent, setting),
+                    note: dropdown::note(setting),
                     apart: (setting == Setting::Permissions).then(|| labels.len() - 1),
                     labels,
                     current,
@@ -6527,7 +6301,6 @@ impl App {
             | Field::Screen
             | Field::Microphone
             | Field::Discord
-            | Field::Agent
             | Field::Default(_)
             | Field::Project
             | Field::Colour
@@ -6580,13 +6353,6 @@ impl App {
                 self.save();
                 // So the choice is heard the moment it is made.
                 self.sound(Loot::Drop);
-            }
-            Field::Offered => {
-                let agent = self.settings_agent;
-                if agent != Agent::Claude && !self.agents_off.remove(&agent) {
-                    self.agents_off.insert(agent);
-                }
-                self.save();
             }
             Field::Autostart => {
                 if horadric_hooks::dev() {
@@ -6696,15 +6462,9 @@ impl App {
                     self.backup_set_to(*to);
                 }
             }
-            Field::Agent => {
-                if let Some(a) = Agent::ALL.get(i) {
-                    self.settings_agent = *a;
-                }
-            }
             Field::Default(setting) => {
-                let agent = self.settings_agent;
-                if let Some(value) = default_picked(agent, setting, i) {
-                    self.set_default(agent, setting, value);
+                if let Some(value) = default_picked(setting, i) {
+                    self.set_default(setting, value);
                 }
             }
             Field::Project => {
@@ -6778,16 +6538,14 @@ impl App {
     }
 
     /// Whether the tile menu offers to undo the session's last turn: a
-    /// Claude Code session, live or paused, between turns. Only its edit
-    /// tools name the files they write; Codex and Grok tools do not.
+    /// session, live or paused, between turns.
     fn can_undo(&self, id: &str) -> bool {
         if self.folios.contains_key(id) {
             return crate::folio::rewind_from(id).is_some();
         }
         let between = self.shared.registry.lock().is_ok_and(|r| {
-            r.get(id).is_some_and(|s| {
-                !s.shell && s.agent == Agent::Claude && !s.phase.mid_turn() && !s.phase.asks()
-            })
+            r.get(id)
+                .is_some_and(|s| !s.shell && !s.phase.mid_turn() && !s.phase.asks())
         });
         between
             && matches!(
@@ -7476,12 +7234,28 @@ impl App {
     /// files it shares with other sessions, those named as their tiles are.
     fn know_call(&mut self, call: KnowCall) {
         let quest = self.held_quest(&call.session);
-        let shared: Vec<(String, Vec<String>)> = self
-            .shared
+        let shared = self.shared_names(&call.overlaps);
+        // A mod that gave up waiting never hears this answer, so its stops
+        // wait for the next ask rather than being lost.
+        let stop = if call.reply.wanted() {
+            self.stop_agents.remove(&call.session).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        call.reply.send(known(quest.as_deref(), &shared, &stop));
+    }
+
+    /// Each shared file with the labels of the other sessions that changed
+    /// it, those still on a tile.
+    fn shared_names(
+        &self,
+        overlaps: &[horadric_core::overlap::Overlap],
+    ) -> Vec<(String, Vec<String>)> {
+        self.shared
             .registry
             .lock()
             .map(|r| {
-                call.overlaps
+                overlaps
                     .iter()
                     .map(|o| {
                         let names = o
@@ -7493,21 +7267,26 @@ impl App {
                     })
                     .collect()
             })
-            .unwrap_or_default();
-        // A mod that gave up waiting never hears this answer, so its stops
-        // wait for the next ask rather than being lost.
-        let stop = if call.reply.wanted() {
-            self.stop_agents.remove(&call.session).unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        call.reply.send(known(quest.as_deref(), &shared, &stop));
+            .unwrap_or_default()
+    }
+
+    /// The band above each Folio's composer, what the mod shows above a
+    /// terminal's prompt. The mod's `ui.render` never runs headless, so
+    /// the app tells the Folio what it would have answered the mod.
+    fn folio_bands_tick(&mut self) {
+        for id in self.folios.keys() {
+            let overlaps = listener::shared_files(id);
+            let shared = self.shared_names(&overlaps);
+            let band = crate::folio::band::Band::new(self.held_quest(id), shared);
+            crate::folio::set_band(id, band);
+        }
     }
 
     /// Asks the session's mod to stop one of its subagents, the next time
     /// it asks what Horadric knows (every few seconds).
     fn stop_subagent(&mut self, id: &str, agent: &str) {
-        // A Folio's CLI stops its own tasks, and has no mod to ask.
+        // A Folio's CLI is told at once by a control request, sooner than
+        // the mod's next ask (the mod runs headless too).
         if self.folios.contains_key(id) {
             crate::folio::stop_task(id, agent);
             return;
@@ -7902,6 +7681,7 @@ impl App {
             branch,
             chat,
             show,
+            quiet,
         } = spec;
         if !dir.is_dir() {
             return Err(format!("{} is not a directory", dir.display()));
@@ -7930,7 +7710,7 @@ impl App {
             self.tasks.prompts.insert(id.clone(), prompt);
         }
         let started = match chat {
-            true => self.open_chat(&id, &name, dir, resume, own, existed),
+            true => self.open_chat(&id, &name, dir, resume, own, existed, quiet),
             false => self.launch(&id, &name, dir, own, Run::Agent(Agent::Claude), false),
         };
         if let Err(e) = started {
@@ -7939,7 +7719,7 @@ impl App {
             if let Some((w, _)) = self.new_trees.remove(&id) {
                 worktree::remove(w);
             }
-            if !chat {
+            if !chat && !quiet {
                 // Said outside the borrow. Otherwise nothing shows it
                 // failed: the folder picker only closes, and no tile appears.
                 self.start_failed = Some(e.clone());
@@ -7960,7 +7740,9 @@ impl App {
 
     /// Starts session `id`, named `name`, as a Folio in `dir` on `own`,
     /// its own arguments as a chat takes them, carrying on `resume`. A
-    /// tile that `existed` stays, paused, when it does not start.
+    /// tile that `existed` stays, paused, when it does not start. With
+    /// `quiet` a failure is only returned, not shown in a dialog.
+    #[allow(clippy::too_many_arguments)]
     fn open_chat(
         &mut self,
         id: &str,
@@ -7969,10 +7751,20 @@ impl App {
         resume: Option<String>,
         own: Vec<String>,
         existed: bool,
+        quiet: bool,
     ) -> Result<(), String> {
         let fresh = self.new_trees.remove(id);
         if fresh.is_none() {
             recent::remember(&mut self.recent, &dir.to_string_lossy());
+        }
+        // A worktree just made of a trusted project is as trusted: a quest
+        // started while no one is here would wait on the Folio's ask.
+        if let Some((w, _)) = &fresh {
+            if crate::accounts::trusted(Path::new(&w.main)) {
+                if let Err(e) = crate::accounts::trust(&dir) {
+                    eprintln!("horadric: cannot trust {}: {e}", dir.display());
+                }
+            }
         }
         self.register_folio(id, &dir, name, resume.as_deref());
         let own_tree = (self.shared.registry.lock().ok()).and_then(|mut r| {
@@ -8006,7 +7798,7 @@ impl App {
             ),
         ];
         env_set.extend(session_env(id, own_tree.as_ref(), &dir));
-        env_set.extend(self.shared.defaults_of(Agent::Claude).env(Agent::Claude));
+        env_set.extend(self.shared.defaults().env());
         let mut options = horadric_pty::headless::Options {
             args: flags,
             env_set,
@@ -8050,8 +7842,10 @@ impl App {
                     worktree::remove(w);
                 }
             }
-            self.start_failed = Some(e.clone());
-            post(self.notify.0 as isize, WM_HORADRIC_START_FAILED, 0);
+            if !quiet {
+                self.start_failed = Some(e.clone());
+                post(self.notify.0 as isize, WM_HORADRIC_START_FAILED, 0);
+            }
             return Err(e);
         }
         let serial = self.next_serial;
@@ -8074,7 +7868,6 @@ impl App {
             r.apply(id, &register, SystemTime::now());
             if let Some(s) = r.get_mut(id) {
                 s.shell = false;
-                s.agent = Agent::Claude;
                 if let Some(conversation) = resume {
                     s.claude_session_id = Some(conversation.to_string());
                     s.prompted = true;
@@ -8242,8 +8035,7 @@ impl App {
     fn terminal_to_folio(&mut self, id: &str) {
         let between = self.shared.registry.lock().is_ok_and(|r| {
             r.get(id).is_some_and(|s| {
-                s.agent == Agent::Claude
-                    && !s.shell
+                !s.shell
                     && s.claude_session_id.is_some()
                     && matches!(s.phase, Phase::Idle | Phase::Done)
             })
@@ -8276,7 +8068,7 @@ impl App {
         self.consoles.get(id).is_some_and(|c| c.claude)
             && self.shared.registry.lock().is_ok_and(|r| {
                 r.get(id)
-                    .is_some_and(|s| s.agent == Agent::Claude && !s.shell && s.ssh.is_none())
+                    .is_some_and(|s| !s.shell && s.ssh.is_none())
             })
     }
 
@@ -8679,23 +8471,8 @@ impl App {
                 .filter(|(_, order)| !order.is_empty())
                 .collect(),
             sessions,
-            defaults: self.shared.defaults_of(Agent::Claude),
-            agents_off: self.agents_off.clone(),
-            agent_defaults: self
-                .shared
-                .defaults
-                .borrow()
-                .iter()
-                .filter(|(a, d)| **a != Agent::Claude && **d != horadric_core::Defaults::default())
-                .map(|(a, d)| (*a, d.clone()))
-                .collect(),
+            defaults: self.shared.defaults(),
             usage: self.shared.usage.lock().ok().and_then(|u| u.clone()),
-            agent_usage: self
-                .shared
-                .agent_usage
-                .lock()
-                .map(|u| u.clone())
-                .unwrap_or_default(),
             usage_window: self.usage_window.as_ref().map(|u| SavedPanel {
                 collapsed: u.collapsed.get(),
                 locked: u.locked.get(),
@@ -8941,10 +8718,8 @@ impl App {
             c.update();
         }
         self.sync_start();
-        // A status line can bring the first limits, which adds rows, and a
-        // session of another agent its screen.
+        // A status line can bring the first limits, which adds rows.
         if let Some(u) = &self.usage_window {
-            u.set_screens(self.agents_in_use());
             u.fit();
         }
         self.arrange();
@@ -9396,16 +9171,13 @@ impl App {
                     }
                 }
                 Input::PortalKey => post(self.notify.0 as isize, WM_HORADRIC_PORTAL_KEY, 0),
-                Input::AccountMenu(a) => {
-                    let i = Agent::ALL.iter().position(|x| *x == a).unwrap_or(0);
-                    post(self.notify.0 as isize, WM_HORADRIC_ACCOUNT_MENU, i);
-                }
+                Input::AccountMenu => post(self.notify.0 as isize, WM_HORADRIC_ACCOUNT_MENU, 0),
                 Input::Version => post(self.notify.0 as isize, WM_HORADRIC_VERSION, 0),
-                Input::SettingMenu(a, s, row) => {
-                    self.setting_menu_for = Some((a, s, row));
+                Input::SettingMenu(s, row) => {
+                    self.setting_menu_for = Some((s, row));
                     post(self.notify.0 as isize, WM_HORADRIC_SETTING_MENU, 0);
                 }
-                Input::Picked(agent, setting, pick) => {
+                Input::Picked(setting, pick) => {
                     if let Some(d) = self.dropdown.take() {
                         d.destroy();
                     }
@@ -9414,10 +9186,10 @@ impl App {
                         u.invalidate();
                     }
                     if let Some(value) = pick {
-                        self.set_default(agent, setting, value);
+                        self.set_default(setting, value);
                     }
                 }
-                Input::SetDefault(agent, setting, value) => self.set_default(agent, setting, value),
+                Input::SetDefault(setting, value) => self.set_default(setting, value),
                 Input::SettingsClick(field, row) => self.settings_click(field, row),
                 Input::SettingsPicked(field, pick) => self.settings_picked(field, pick),
                 Input::SettingsClosed => self.close_settings(),
@@ -10186,6 +9958,9 @@ pub(crate) struct SessionSpec {
     pub chat: bool,
     /// Shown on the stage with the keyboard.
     pub show: bool,
+    /// Started by automation, which tells of a failure its own way: no
+    /// dialog waits for a human who may be away, once per retry.
+    pub quiet: bool,
 }
 
 impl SessionSpec {
@@ -10202,6 +9977,7 @@ impl SessionSpec {
             branch: None,
             chat,
             show: false,
+            quiet: false,
         }
     }
 }
@@ -10404,20 +10180,17 @@ mod tests {
 
     #[test]
     fn a_default_list_puts_default_first_and_picks_back_its_value() {
-        let (labels, at) = default_choices(Agent::Claude, Setting::Effort, Some("xhigh"));
+        let (labels, at) = default_choices(Setting::Effort, Some("xhigh"));
         assert_eq!(labels[0], "Default");
         assert_eq!(labels[at], "Extra high");
         assert_eq!(
-            default_picked(Agent::Claude, Setting::Effort, at),
+            default_picked(Setting::Effort, at),
             Some(Some("xhigh".to_string()))
         );
-        assert_eq!(default_choices(Agent::Claude, Setting::Model, None).1, 0);
-        assert_eq!(
-            default_choices(Agent::Claude, Setting::Model, Some("opus")).1,
-            0
-        );
-        assert_eq!(default_picked(Agent::Codex, Setting::Model, 0), Some(None));
-        assert_eq!(default_picked(Agent::Grok, Setting::Model, 9), None);
+        assert_eq!(default_choices(Setting::Model, None).1, 0);
+        assert_eq!(default_choices(Setting::Model, Some("opus")).1, 0);
+        assert_eq!(default_picked(Setting::Model, 0), Some(None));
+        assert_eq!(default_picked(Setting::Model, 99), None);
     }
 
     #[test]

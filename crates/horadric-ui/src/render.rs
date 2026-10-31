@@ -66,11 +66,12 @@ use crate::layout::{
     SettingRow, SettingsHit, SettingsLayout, StartHit, StartLayout, SuggestLayout, TasksLayout,
     ToastLayout, TomeLayout, UsageHit, UsageLayout, KNOB_R,
 };
-use crate::motion::{self, ORBIT};
+use crate::motion;
 use crate::portal_key::Look as PortalLook;
 use crate::settings::Control;
 use crate::theme::{self, Color};
 
+mod bloom;
 mod stone;
 pub(crate) use stone::{StoneLook, StoneState};
 
@@ -447,8 +448,6 @@ pub struct UsageScene<'a> {
     pub collapsed: bool,
     /// Locked against folding and dragging.
     pub locked: bool,
-    /// Whose limits and settings these are, when there is a header to say.
-    pub provider: &'a str,
     /// What the screen says while no limit is known.
     pub empty: &'a str,
     pub usage: Option<&'a Usage>,
@@ -752,6 +751,7 @@ pub struct Target {
     /// The theme the layer was drawn in, so a new one draws it again.
     theme: Cell<theme::Theme>,
     gradients: Gradients,
+    bloom: bloom::Bloom,
 }
 
 /// Gradient brushes by their stops. A gradient is a texture on the GPU, and
@@ -844,6 +844,7 @@ impl Target {
             layer: RefCell::new(None),
             theme: Cell::new(theme::current()),
             gradients: Gradients::default(),
+            bloom: bloom::Bloom::default(),
         })
     }
 
@@ -895,6 +896,9 @@ impl Target {
                     None,
                 );
             }
+            // A failed bloom leaves the frame without its glow, never
+            // without its frame.
+            let _ = self.bloom(gpu, scene);
             if scene.ambient {
                 self.painter(&self.rt).light(m, scene);
             }
@@ -1327,26 +1331,11 @@ impl Painter<'_> {
     }
 
     /// The usage window, dressed like a cluster: the same plate, the
-    /// limits on a screen and the settings in a grooved section. With one
-    /// agent in use no name on top: the limits say what it is. With more,
-    /// the provider's name, and a chevron that says a click goes on.
+    /// limits on a screen and the settings in a grooved section, no name
+    /// on top: the limits say what it is.
     unsafe fn usage(&self, gpu: &Gpu, m: &Metrics, scene: &UsageScene) {
         let l = scene.layout;
         self.plate(m, l.size);
-        if let Some(h) = l.header {
-            let ink = match scene.button(UsageHit::Header) {
-                Button::Idle => theme::text_dim(),
-                _ => theme::text(),
-            };
-            let label = Rect::new(h.x + 4.0, h.y, h.w - 8.0, h.h);
-            self.text(&gpu.small, ink, scene.provider, label);
-            self.icon(
-                &gpu.icon_small,
-                ink,
-                '\u{E76C}',
-                Rect::new(h.right() - 18.0, h.y, 14.0, h.h),
-            );
-        }
 
         self.screen(gpu, &l.limits_box, m.tile_radius);
         let limits = scene.usage.map(|u| u.limits.named()).unwrap_or_default();
@@ -2380,8 +2369,7 @@ impl Painter<'_> {
             }
             match phase {
                 Phase::Working => {
-                    let t = motion::cycle(look.phase_age, ORBIT);
-                    self.scan(&lamp_rect(&r), c, t, look.enter);
+                    // Its lamp's surge is light, drawn by the bloom.
                     let context = s.status.as_ref().and_then(|st| st.context);
                     if let Some(c) = context.filter(|&c| c >= 75.0) {
                         let (ix, iy) = icon_centre(&r);
@@ -3201,15 +3189,6 @@ impl Painter<'_> {
         }
     }
 
-    /// A hot spot running up and down a working session's lamp, `t` of
-    /// the way through a sweep.
-    unsafe fn scan(&self, r: &Rect, c: Color, t: f32, strength: f32) {
-        let travel = (1.0 - (t * std::f32::consts::TAU).cos()) / 2.0;
-        let y = r.y + 2.0 + (r.h - 4.0) * travel;
-        let hot = c.mix(Color::rgb(0xFFFFFF), 0.5);
-        self.glow_dot(r.x + r.w / 2.0, y, 7.0, hot, strength);
-    }
-
     /// A small round indicator, lit in `c`.
     unsafe fn led(&self, x: f32, y: f32, c: Color) {
         self.glow_dot(x, y, 6.0, c, 0.45);
@@ -3786,17 +3765,7 @@ impl Painter<'_> {
             _ => age,
         };
         let age_w = self.measure(gpu, &gpu.small, &age).min(top.w * 0.55);
-        let mut name_rect = Rect::new(top.x, top.y, top.w - age_w - 8.0, top.h);
-        // Which agent runs it, quietly, where it is not Claude.
-        if let Some(tag) = s.agent.mark() {
-            let tag_w = self.measure(gpu, &gpu.small, tag);
-            if tag_w < name_rect.w * 0.4 {
-                let at = Rect::new(name_rect.x, top.y, name_rect.w, top.h);
-                let ink = theme::text_dim().with_alpha(0.75).fade(presence);
-                self.text(&gpu.small_right, ink, tag, at);
-                name_rect.w -= tag_w + 8.0;
-            }
-        }
+        let name_rect = Rect::new(top.x, top.y, top.w - age_w - 8.0, top.h);
         // Its name says how it ended, in item colours, apart from the lamp.
         // Warriv's own sessions and its errands' are in its gold instead.
         let ink = if horadric_core::warriv::is_warriv(&s.id)

@@ -60,10 +60,6 @@ What it costs:
 - Horadric would have to draw everything the TUI draws today: diffs,
   plan mode, questions, slash commands, `/rewind`, images. And keep up
   each time Claude Code adds something.
-- Codex and Grok would need their own paths. The Agent Client Protocol
-  (https://agentclientprotocol.com) covers Claude (through
-  `claude-agent-acp`), Codex through an adapter, Gemini and others, but
-  not Grok.
 - Whether a subscription login works the same through the SDK as in the
   CLI has to be checked before anything else.
 
