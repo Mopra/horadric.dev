@@ -131,6 +131,8 @@ pub(super) struct Far {
     /// machine as, while that brother is reached over the relay: the relay
     /// link is preferred, and this takes over when it drops.
     standby: HashMap<String, Via>,
+    /// What is asked of brothers about their files and changes.
+    pub(super) files: super::far_files::FarFiles,
 }
 
 fn debug_far(what: &str) {
@@ -186,6 +188,7 @@ impl Far {
             lore_dirs: Vec::new(),
             relay_dirs: Vec::new(),
             standby: HashMap::new(),
+            files: Default::default(),
         }
     }
 }
@@ -219,6 +222,11 @@ impl App {
         }
         self.far_lore(None);
         self.far_lore_relayed();
+        // An ask held back by the gap goes now, though nothing stirred since.
+        let keys: Vec<String> = self.far.peers.keys().cloned().collect();
+        for key in keys {
+            self.far_glance(&key);
+        }
         if self.far_lines() {
             self.reconcile(true);
         }
@@ -521,7 +529,7 @@ impl App {
 
     /// Sends `msg` to the brother keyed `key`, stamped as every message
     /// after hello is.
-    fn far_send(&mut self, key: &str, msg: Value) {
+    pub(super) fn far_send(&mut self, key: &str, msg: Value) {
         let Some(p) = self.far.peers.get_mut(key) else {
             return;
         };
@@ -794,6 +802,9 @@ impl App {
         if self.keeping_heard(&name, msg) {
             return false;
         }
+        if let Some(changed) = self.far_files_heard(&name, msg) {
+            return changed;
+        }
         match afar::hear(msg) {
             Heard::Hello { control, v, .. } => {
                 if v < afar::VERSION {
@@ -845,7 +856,9 @@ impl App {
                 if let Some(p) = self.far.peers.get_mut(&name) {
                     p.list = list.clone();
                 }
-                self.far_sessions(&name, &list)
+                let changed = self.far_sessions(&name, &list);
+                self.far_glance(&name);
+                changed
             }
             Heard::Projects(list) => {
                 if let Some(p) = self.far.peers.get_mut(&name) {
@@ -1241,6 +1254,35 @@ impl App {
             .collect()
     }
 
+    /// The sessions the brother keyed `key` lists, while it answers.
+    pub(super) fn far_entries(&self, key: &str) -> Option<Vec<afar::Entry>> {
+        let p = self.far.peers.get(key)?;
+        (p.via.is_some() && p.client.ready()).then(|| p.list.clone())
+    }
+
+    /// The path there of the brother's project called `name`, as its
+    /// `projects` said.
+    pub(super) fn far_project_path(&self, key: &str, name: &str) -> Option<String> {
+        let p = self.far.peers.get(key)?;
+        p.projects
+            .iter()
+            .find(|(_, n)| n == name)
+            .map(|(path, _)| path.clone())
+    }
+
+    /// The name of the brother's project at `path` there.
+    pub(super) fn far_project_name(&self, key: &str, path: &str) -> Option<String> {
+        let p = self.far.peers.get(key)?;
+        p.projects
+            .iter()
+            .find(|(pa, _)| pa == path)
+            .map(|(_, name)| name.clone())
+    }
+
+    pub(super) fn far_brother_key(&self, id: &str) -> Option<String> {
+        self.far_brother_of(id)
+    }
+
     fn far_brother_of(&self, id: &str) -> Option<String> {
         let r = self.shared.registry.lock().ok()?;
         Some(r.get(id)?.brother.as_ref()?.id.clone())
@@ -1346,12 +1388,13 @@ impl App {
     /// that needs this PC's disk (its folder, files, changes). None for a
     /// tile of this PC's. More lines (a handoff) are the caller's to add.
     pub(super) fn far_menu(&self, id: &str, open: usize, rename: usize) -> Option<Vec<Item>> {
-        let (key, paused) = {
+        let (key, paused, diff) = {
             let r = self.shared.registry.lock().ok()?;
             let s = r.get(id)?;
             (
                 s.brother.as_ref()?.id.clone(),
                 s.phase == horadric_core::Phase::Paused,
+                s.diff.clone(),
             )
         };
         let p = self.far.peers.get(&key);
@@ -1361,7 +1404,11 @@ impl App {
             control: p.is_some_and(|p| p.control),
         };
         let name = p.map_or_else(|| crate::project::brother_name(&key), |p| p.name.clone());
-        Some(far_items(&name, can, open, rename))
+        let mut items = far_items(&name, can, open, rename);
+        if let Some(changes) = diff.filter(|d| can.up && !d.is_empty()).map(|d| far_changes(&d)) {
+            items.extend([Item::Separator, changes]);
+        }
+        Some(items)
     }
 
     /// Acts on a pick from [`App::far_menu`] that is its own; false for
@@ -1370,6 +1417,18 @@ impl App {
         if picked == FAR_HIDE {
             self.far_hide(&[id.to_string()]);
             self.reconcile(false);
+            return true;
+        }
+        if let Some(i) = picked.checked_sub(FAR_CHANGES).filter(|&i| i < CHANGES_LISTED) {
+            let path = self
+                .shared
+                .registry
+                .lock()
+                .ok()
+                .and_then(|r| Some(r.get(id)?.diff.as_ref()?.uncommitted.get(i)?.path.clone()));
+            if let Some(path) = path {
+                self.far_read_diff(id, &path);
+            }
             return true;
         }
         if picked != FAR_END {
@@ -1491,6 +1550,35 @@ const FAR_END: usize = 2400;
 
 /// The tile menu's id for hiding a brother's tile here.
 const FAR_HIDE: usize = 2401;
+
+/// Where the tile menu's ids for a brother's session's changed files
+/// start, [`CHANGES_LISTED`] of them.
+const FAR_CHANGES: usize = 2410;
+
+/// The most changed files the menu lists. A menu taller than the screen
+/// scrolls by the pixel, which is no way to look at a change.
+const CHANGES_LISTED: usize = 40;
+
+/// What a brother's session changed, as the tile menu's submenu: each
+/// file with its counts, its diff shown on the stage when picked.
+fn far_changes(d: &horadric_core::diff::Diff) -> Item {
+    use horadric_core::diff as changes;
+    let files = &d.uncommitted;
+    let mut items: Vec<Item> = files
+        .iter()
+        .take(CHANGES_LISTED)
+        .enumerate()
+        .map(|(i, f)| Item::action(FAR_CHANGES + i, changes::menu_label(f)))
+        .collect();
+    if files.len() > CHANGES_LISTED {
+        let more = files.len() - CHANGES_LISTED;
+        items.push(Item::Disabled(format!("and {more} more")));
+    }
+    Item::Submenu(
+        format!("Changes	{}", changes::glance(d.totals())),
+        items,
+    )
+}
 
 /// How many hidden tiles are remembered. One is not dropped when its
 /// brother stops listing it, since a brother coming back up may list its
@@ -1645,6 +1733,7 @@ mod tests {
             since: None,
             agent: Some(horadric_core::Agent::Claude),
             talked: true,
+            worktree: false,
         };
         let beta = afar::OnBrother {
             id: "b".into(),

@@ -159,6 +159,9 @@ mod portaling;
 #[path = "far.rs"]
 mod far;
 
+#[path = "far_files.rs"]
+mod far_files;
+
 #[path = "handing.rs"]
 mod handing;
 
@@ -9125,6 +9128,9 @@ impl App {
                 Input::Swap(a, b) => self.swap(&a, &b),
                 Input::Reorder(key, shown) => self.reorder(&key, &shown),
                 Input::Browser(id) => self.show_browsers(&id),
+                Input::View(key, _, rel, _) if horadric_core::afar::split_key(&key).is_some() => {
+                    self.far_read(&key, &rel);
+                }
                 Input::View(key, dir, rel, line) => {
                     self.open_view(&key, &dir, &rel);
                     if let (Some(line), Some(view)) = (line, self.views.get(&key)) {

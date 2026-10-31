@@ -819,6 +819,18 @@ impl Cluster {
         changed
     }
 
+    /// A brother's project's files, as it served them: shown as a local
+    /// project's watcher would show them, on the same message, since a
+    /// brother's cluster has no watcher of its own.
+    pub fn far_tree(&self, tree: Tree) {
+        if let Ok(mut s) = self.files.borrow().slot.lock() {
+            *s = Some(tree);
+        }
+        unsafe {
+            let _ = PostMessageW(Some(self.hwnd), WM_CLUSTER_FILES, WPARAM(0), LPARAM(0));
+        }
+    }
+
     /// Draws again if what it shows changed since it was last drawn.
     pub fn refresh(&self) {
         if self.drawn.borrow().as_ref() != Some(&self.still()) {
@@ -1832,7 +1844,16 @@ impl Cluster {
             if !node.dir {
                 // A deleted file has nothing to open.
                 if node.change != Some(Change::Deleted) {
-                    if let Some(dir) = &self.dir {
+                    // A brother's file is read from it, never from a disk
+                    // here, and only to look at.
+                    if horadric_core::afar::split_key(&self.key).is_some() {
+                        app::push(Input::View(
+                            self.key.clone(),
+                            PathBuf::new(),
+                            node.path.clone(),
+                            None,
+                        ));
+                    } else if let Some(dir) = &self.dir {
                         let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
                         if ctrl {
                             watch::open(dir, &node.path);
