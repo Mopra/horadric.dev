@@ -53,6 +53,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use horadric_core::folio::Folio;
+use horadric_core::usage::Status;
+use horadric_core::{HookEvent, Phase, WaitReason};
 use horadric_pty::headless::Options;
 use horadric_pty::headless_host::{Event, Hosted};
 use serde::{Deserialize, Serialize};
@@ -198,6 +200,76 @@ pub struct State {
     /// The agents among them, by id with their type, once the CLI has
     /// said: the tile's sparks where the mod's roster is silent.
     pub agents: Option<Vec<(String, String)>>,
+    /// How the last turn failed, as a `StopFailure` names it, with what
+    /// Claude said of it: the tile shows the error, and a usage limit
+    /// switches account.
+    pub failed: Option<(String, String)>,
+    /// The tool and input of the oldest ask, so the tile and its
+    /// notification say what is asked.
+    pub ask: Option<(String, serde_json::Value)>,
+    /// The model, and the context's tokens used of its window after the
+    /// last turn: a headless CLI runs no status line to tell the tile.
+    pub model: Option<String>,
+    pub context: Option<(u64, u64)>,
+}
+
+impl State {
+    /// The hook event that brings a tile in `phase` to where this Folio
+    /// stands, as a terminal's hooks would have, if any. `waits_on` is the
+    /// tool the tile last heard asked about. `resync` is a reattached
+    /// tile's first word once the replay is in.
+    pub fn event(
+        &self,
+        phase: &Phase,
+        waits_on: Option<&str>,
+        resync: bool,
+    ) -> Option<HookEvent> {
+        let tool = self.ask.as_ref().map(|(t, _)| t.as_str());
+        if self.ended {
+            None
+        } else if self.asking {
+            // A second ask after the first is answered is news too.
+            (!phase.asks() || waits_on != tool).then(|| HookEvent {
+                tool_name: tool.map(str::to_string),
+                tool_input: self.ask.as_ref().map(|(_, i)| i.clone()),
+                ..HookEvent::synthetic("PermissionRequest")
+            })
+        } else if self.busy {
+            (!phase.mid_turn() || phase.is_waiting()).then(|| HookEvent::synthetic("PreToolUse"))
+        } else if let Some((kind, said)) = &self.failed {
+            let now = Phase::Waiting(WaitReason::Error(kind.clone()));
+            (*phase != now).then(|| HookEvent {
+                error_type: Some(kind.clone()),
+                error_message: (!said.is_empty()).then(|| said.clone()),
+                ..HookEvent::synthetic("StopFailure")
+            })
+        } else if resync && self.finished {
+            // A turn that ended while no app watched is Done, as it would
+            // have become.
+            (*phase == Phase::Idle).then(|| HookEvent::synthetic("Stop"))
+        } else if *phase == Phase::Working || phase.asks() {
+            Some(HookEvent::synthetic("Stop"))
+        } else if phase.is_waiting() {
+            // An error this process never had, such as the one a login
+            // or a new account just cleared: nothing to read as Done.
+            Some(HookEvent::synthetic("Interrupt"))
+        } else {
+            None
+        }
+    }
+
+    /// What the tile shows of the model and its context, as a terminal's
+    /// status line says it. None until the CLI has said either.
+    pub fn status(&self) -> Option<Status> {
+        let context = (self.context)
+            .filter(|&(_, limit)| limit > 0)
+            .map(|(used, limit)| (used as f32 * 100.0 / limit as f32).min(100.0));
+        (self.model.is_some() || context.is_some()).then(|| Status {
+            model: self.model.clone(),
+            context,
+            limits: Default::default(),
+        })
+    }
 }
 
 impl Chat {
@@ -296,6 +368,10 @@ impl Chat {
                     .map(|t| (t.task_id.clone(), t.agent_type.clone()))
                     .collect()
             }),
+            failed: (self.folio.failed.clone()).map(|kind| (kind, self.folio.last_reply())),
+            ask: self.folio.first_ask(),
+            model: self.folio.model.clone(),
+            context: (self.folio.context.as_ref()).map(|c| (c.used, c.limit)),
         }
     }
 
@@ -1036,6 +1112,80 @@ fn interrupt(id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at_rest() -> State {
+        State {
+            busy: false,
+            asking: false,
+            ended: false,
+            live: true,
+            finished: true,
+            background: None,
+            agents: None,
+            failed: None,
+            ask: None,
+            model: None,
+            context: None,
+        }
+    }
+
+    fn name(e: Option<HookEvent>) -> Option<String> {
+        e.map(|e| e.hook_event_name)
+    }
+
+    #[test]
+    fn a_failed_turn_reaches_the_tile_as_its_error() {
+        let failed = State {
+            failed: Some(("rate_limit".into(), "You've hit your limit".into())),
+            ..at_rest()
+        };
+        let e = failed.event(&Phase::Working, None, false).unwrap();
+        assert_eq!(e.hook_event_name, "StopFailure");
+        assert_eq!(e.error_type.as_deref(), Some("rate_limit"));
+        assert_eq!(e.error_message.as_deref(), Some("You've hit your limit"));
+        let limited = Phase::Waiting(WaitReason::Error("rate_limit".into()));
+        // Said once, and never worn down to Done while it stands.
+        assert_eq!(name(failed.event(&limited, None, false)), None);
+        assert_eq!(name(at_rest().event(&Phase::Working, None, false)).as_deref(), Some("Stop"));
+        // Gone with a new process, it is not read as a finished turn.
+        let fresh = State { finished: false, ..at_rest() };
+        assert_eq!(name(fresh.event(&limited, None, false)).as_deref(), Some("Interrupt"));
+        let busy = State { busy: true, ..failed.clone() };
+        assert_eq!(name(busy.event(&limited, None, false)).as_deref(), Some("PreToolUse"));
+    }
+
+    #[test]
+    fn an_ask_names_its_tool_and_a_new_one_is_said_again() {
+        let input = serde_json::json!({"command": "ls"});
+        let asking = State {
+            asking: true,
+            finished: false,
+            ask: Some(("Bash".into(), input.clone())),
+            ..at_rest()
+        };
+        let e = asking.event(&Phase::Working, None, false).unwrap();
+        assert_eq!(e.hook_event_name, "PermissionRequest");
+        assert_eq!(e.tool_name.as_deref(), Some("Bash"));
+        assert_eq!(e.tool_input, Some(input));
+        let perm = Phase::Waiting(WaitReason::Permission);
+        assert_eq!(name(asking.event(&perm, Some("Bash"), false)), None);
+        assert!(asking.event(&perm, Some("AskUserQuestion"), false).is_some());
+    }
+
+    #[test]
+    fn the_context_meter_reads_the_last_turns_usage() {
+        assert_eq!(at_rest().status(), None);
+        let s = State {
+            model: Some("claude-opus-5-5".into()),
+            context: Some((50_000, 200_000)),
+            ..at_rest()
+        };
+        let st = s.status().unwrap();
+        assert_eq!(st.context, Some(25.0));
+        assert_eq!(st.model.as_deref(), Some("claude-opus-5-5"));
+        let unmeasured = State { context: Some((5, 0)), ..at_rest() };
+        assert_eq!(unmeasured.status(), None);
+    }
 
     #[test]
     fn start_failure_quotes_the_last_lines_of_stderr() {

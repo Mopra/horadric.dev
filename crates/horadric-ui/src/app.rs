@@ -8114,24 +8114,13 @@ impl App {
             session.loot.outstanding.clear();
         }
         session.stream_agents = state.agents.clone();
-        let phase = session.phase.clone();
-        let now = SystemTime::now();
-        // A reattached tile starts Idle; once its replay is in, a turn that
-        // ended while no app watched is Done, as it would have become.
+        if let Some(status) = state.status() {
+            session.status = Some(status);
+        }
         let resync = state.live && self.resync.remove(id);
-        let event = if state.ended {
-            None
-        } else if resync && !state.busy && !state.asking && state.finished {
-            (phase == Phase::Idle).then_some("Stop")
-        } else if state.asking {
-            (!matches!(phase, Phase::Waiting(_))).then_some("PermissionRequest")
-        } else if state.busy {
-            (!phase.mid_turn() || matches!(phase, Phase::Waiting(_))).then_some("PreToolUse")
-        } else {
-            matches!(phase, Phase::Working | Phase::Waiting(_)).then_some("Stop")
-        };
-        if let Some(name) = event {
-            r.apply(id, &HookEvent::synthetic(name), now);
+        let event = state.event(&session.phase, session.waits_on.as_deref(), resync);
+        if let Some(event) = event {
+            r.apply(id, &event, SystemTime::now());
         }
         drop(r);
         self.reconcile(false);
