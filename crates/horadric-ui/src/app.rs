@@ -7418,6 +7418,7 @@ impl App {
                         name: s.label(),
                         phase: &s.phase,
                         line: &s.last_line,
+                        ask: s.ask.as_ref(),
                     })
                     .collect();
                 inbox::alert(&waiting)
