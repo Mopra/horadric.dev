@@ -29,7 +29,7 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
-    CreateRoundRectRgn, GetUpdateRect, InvalidateRect, ScreenToClient, SetWindowRgn, ValidateRect,
+    CreateRoundRectRgn, GetUpdateRect, InvalidateRect, UpdateWindow, ScreenToClient, SetWindowRgn, ValidateRect,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -307,6 +307,10 @@ pub fn summon(key: &str) {
     view.summon_asked.set(true);
     unsafe {
         let _ = InvalidateRect(Some(view.hwnd()), None, false);
+        // Its first frame, with the page still shut, drawn now: a stage
+        // coming up from behind otherwise shows the page whole for a frame
+        // before the opening begins.
+        let _ = UpdateWindow(view.hwnd());
     }
 }
 
