@@ -1717,8 +1717,12 @@ impl Pane {
     }
 
     /// Something picked elsewhere on the stage, pasted into this session.
+    /// A Folio has no program reading the pty, so it goes in its composer.
     pub fn hand(&self, text: &str) {
-        self.paste_text(text);
+        match &self.console.folio {
+            Some(key) => folio::handed(key, text),
+            None => self.paste_text(text),
+        }
     }
 
     fn paste_text(&self, text: &str) {
