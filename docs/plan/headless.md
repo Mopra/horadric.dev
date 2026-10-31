@@ -226,10 +226,13 @@ the lore.
    way the human starts a Claude session follows it (the cluster's
    button, the project menu, the tray, the folder picker, a bare
    `horadric new`, Explorer). "New CLI session" in the project menu is
-   always a terminal. Quests, Warriv, reviewers, errands, runewords,
-   own worktrees and the town stay terminals, new or resumed, until a
-   Folio can be started with their orders. Codex and Grok keep their
-   terminals.
+   always a terminal. Since 2026-10-31 a Folio starts with everything a
+   terminal session gets (`App::claude_start` builds both, and
+   `App::start_session` takes a spec for either): own worktrees, with
+   their ports and setup, and the town open as Folios, and a first
+   prompt goes in as the first message. Quests, Warriv, reviewers,
+   errands and runewords stay terminals, new or resumed, until a Folio
+   can be typed into as they run. Codex and Grok keep their terminals.
 
 Then "What it opens", one by one. The full feature list toward
 replacing the CLI, in tiers, is [folio-features.md](folio-features.md).
