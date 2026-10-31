@@ -447,6 +447,9 @@ pub(crate) enum Input {
     FolioToTerminal(String),
     /// A Folio handed over has ended: its terminal starts now.
     FolioHandedOver(String),
+    /// A Folio's claude.exe ended to read a new login: it starts again on
+    /// its conversation, shown on the stage when true.
+    FolioRestart(String, bool),
     /// A web address Ctrl+clicked in a pane: to the browser pane of the
     /// project on the stage when it has one, otherwise to the user's own
     /// browser.
@@ -7923,20 +7926,19 @@ impl App {
 
     fn folio_state(&mut self, id: &str, state: crate::folio::State) {
         // A reattached tile knows its conversation only from its replay,
-        // and History must not offer it while this one runs.
+        // and History must not offer it while this one runs. After a
+        // `/clear` it is the stream that says the conversation changed,
+        // so the new one's hooks and hirelings come to this tile.
         let conversation = crate::folio::conversation(id);
         let Ok(mut r) = self.shared.registry.lock() else {
             return;
         };
-        if let (Some(c), Some(s)) = (conversation, r.get_mut(id)) {
-            if s.claude_session_id.is_none() {
-                s.claude_session_id = Some(c);
-                s.prompted = true;
-            }
-        }
         let Some(session) = r.get_mut(id) else {
             return;
         };
+        if let Some(c) = conversation {
+            session.follow(&c, SystemTime::now());
+        }
         // The CLI lists its background tasks, where hooks only hear them
         // start: once none run, the turn's end is not a wait on them. A
         // headless wake for a finished task posts no prompt to say so.
@@ -7996,6 +7998,24 @@ impl App {
                 s.claude_session_id = Some(conversation);
                 s.prompted = true;
             }
+        }
+    }
+
+    /// A Folio whose claude.exe ended for a new login starts again in the
+    /// same tile, on the same conversation, with the same flags.
+    fn folio_restart(&mut self, id: &str, show: bool) {
+        let conversation = crate::folio::conversation(id).or_else(|| {
+            let r = self.shared.registry.lock().ok()?;
+            r.get(id)?.claude_session_id.clone()
+        });
+        let Some(dir) = self.dir_of(id) else {
+            return;
+        };
+        crate::folio::close(id);
+        self.folios.remove(id);
+        let own = self.folio_args.remove(id).unwrap_or_default();
+        if let Err(e) = self.start_folio(Some(id.to_string()), dir, conversation, &own, show) {
+            eprintln!("horadric: cannot start {id} again: {e}");
         }
     }
 
@@ -9142,6 +9162,7 @@ impl App {
                 Input::FolioState(id, state) => self.folio_state(&id, state),
                 Input::FolioToTerminal(id) => self.folio_to_terminal(&id),
                 Input::FolioHandedOver(id) => self.folio_handed_over(&id),
+                Input::FolioRestart(id, show) => self.folio_restart(&id, show),
                 Input::WebTab(key, step) => web::tab(&key, step),
                 Input::WebAsk(key, what) => {
                     self.web_ask = Some((key, what));

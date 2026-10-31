@@ -139,6 +139,10 @@ pub(super) fn act(key: &str, a: Act) {
         Act::Todos => {
             with(key, |c| c.tr.state.todos_open = !c.tr.state.todos_open);
         }
+        Act::SignIn(block) => super::sign_in::log_in_at(key, block),
+        Act::SignInPage(block) => super::sign_in::open_page(key, block),
+        Act::SignInCode(block) => super::sign_in::send_code(key, block),
+        Act::SignInCancel(block) => super::sign_in::cancel(key, block),
         Act::FindPrev => jump(key, false),
         Act::FindNext => jump(key, true),
         Act::FindClose => {
@@ -497,6 +501,15 @@ pub(super) fn release_lapsed(chat: &mut Chat) {
     if focus == FIND_FIELD {
         return;
     }
+    // A sign-in card's code field keeps the keyboard while its login runs.
+    if let Some(block) = focus.strip_prefix("signin:") {
+        let live = block.parse().ok().and_then(|b: usize| chat.folio.blocks.get(b));
+        if matches!(live, Some(Block::SignIn(card)) if card.active()) {
+            return;
+        }
+        st.focus = None;
+        return;
+    }
     let id = focus.split_once(':').map_or("", |(_, id)| id);
     if chat.folio.pending_asks().contains(&id) {
         return;
@@ -524,6 +537,10 @@ fn submit(key: &str, focus: &str, shift: bool) {
         act(key, Act::Deny(id.to_string()));
     } else if let Some(id) = focus.strip_prefix("keep:") {
         act(key, Act::Keep(id.to_string()));
+    } else if let Some(block) = focus.strip_prefix("signin:") {
+        if let Ok(block) = block.parse() {
+            act(key, Act::SignInCode(block));
+        }
     } else if let Some((_, id)) = focus.split_once(':') {
         act(key, Act::Submit(id.to_string()));
     }
