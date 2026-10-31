@@ -526,15 +526,7 @@ fn tile(p: &Painter, m: &Metrics, s: &Scene, i: usize, r: &Rect, session: &Sessi
         _ => age,
     };
     let age_w = measure(Font::Small, &age).min(top.w * 0.55);
-    let mut name_rect = Rect::new(top.x, top.y, top.w - age_w - 8.0, top.h);
-    if let Some(tag) = session.agent.mark() {
-        let tag_w = measure(Font::Small, tag);
-        if tag_w < name_rect.w * 0.4 {
-            let ink = theme::text_dim().with_alpha(0.75).fade(presence);
-            p.text(Font::SmallRight, ink, tag, name_rect);
-            name_rect.w -= tag_w + 8.0;
-        }
-    }
+    let name_rect = Rect::new(top.x, top.y, top.w - age_w - 8.0, top.h);
     let ink = if horadric_core::warriv::is_warriv(&session.id)
         || horadric_core::runeword::is_errand(&session.id)
     {

@@ -10,7 +10,7 @@ use std::time::SystemTime;
 
 use horadric_core::pack;
 use horadric_core::spend::{self, Spend};
-use horadric_core::{title, Agent, Limits, Title};
+use horadric_core::{title, Title};
 
 /// Claude Code repeats the title every few turns, so the end of the file
 /// nearly always has it. A transcript is megabytes by the end of a long day.
@@ -113,7 +113,7 @@ fn path_in(root: &Path, cwd: &str, id: &str) -> Option<PathBuf> {
         })
 }
 
-/// A conversation an agent kept, which its resume carries on.
+/// A conversation Claude Code kept, which its resume carries on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Past {
     pub id: String,
@@ -121,8 +121,6 @@ pub struct Past {
     pub modified: SystemTime,
     /// When it started, as near as the file system says.
     pub started: SystemTime,
-    /// Whose conversation it is, which says how to carry it on.
-    pub agent: Agent,
 }
 
 /// A menu is not the place for every conversation ever held in a folder,
@@ -172,7 +170,6 @@ fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
                 title,
                 modified,
                 started,
-                agent: Agent::Claude,
             })
         })
         .take(limit)
@@ -270,14 +267,6 @@ pub fn tail_title(path: &Path) -> Option<Title> {
     read_from(&mut file, len.saturating_sub(TAIL)).and_then(|b| title::latest(&b))
 }
 
-/// The limits in the newest `token_count` near the end of a Codex rollout.
-pub fn codex_limits(path: &Path) -> Option<Limits> {
-    let mut file = File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    let tail = read_from(&mut file, len.saturating_sub(TAIL))?;
-    Limits::from_codex(&String::from_utf8_lossy(&tail))
-}
-
 /// What the conversation `id`, held in `cwd`, spent in tokens, with the
 /// subagents it ran, whose transcripts Claude Code keeps in a folder named
 /// after it. None when it has no transcript on disk.
@@ -368,16 +357,6 @@ mod tests {
         );
         assert_eq!(title(&path).map(|t| t.text).as_deref(), Some("Early title"));
         let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn codex_limits_are_read_from_the_rollouts_end() {
-        let count = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":7.0,"window_minutes":300,"resets_at":50}}}}"#;
-        let path = scratch("codex", &[count.into(), r#"{"type":"event_msg"}"#.into()]);
-        let l = codex_limits(Path::new(&path)).unwrap();
-        assert_eq!(l.five_hour.map(|l| l.used), Some(7.0));
-        let _ = std::fs::remove_file(path);
-        assert_eq!(codex_limits(Path::new("C:/no/such/rollout.jsonl")), None);
     }
 
     #[test]

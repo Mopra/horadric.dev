@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use horadric_core::markdown::{Align, Inline, Style};
-use windows::core::{Interface, Result, PCWSTR};
+use windows::core::{Interface, Result, HSTRING, PCWSTR};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT, D2D_SIZE_U,
 };
@@ -42,7 +42,6 @@ use crate::layout::Rect;
 use crate::render::{self, color, Gpu};
 use crate::theme::Color;
 
-const MONO: PCWSTR = windows::core::w!("Cascadia Mono");
 
 /// A code block's padding and its header with the language and Copy.
 const CODE_PAD: f32 = 12.0;
@@ -208,15 +207,19 @@ pub(super) struct Fonts {
     pub(super) right: IDWriteTextFormat,
     pub(super) centre: IDWriteTextFormat,
     pub(super) small_wrap: IDWriteTextFormat,
+    /// The terminal font's family, which code is set in.
+    pub(super) family: HSTRING,
 }
 
 impl Fonts {
-    pub(super) unsafe fn new(gpu: &Gpu) -> Result<Fonts> {
+    pub(super) unsafe fn new(gpu: &Gpu, family: &str) -> Result<Fonts> {
         let n = DWRITE_FONT_WEIGHT_NORMAL;
         let semi = DWRITE_FONT_WEIGHT_SEMI_BOLD;
-        let code = text_format(gpu, MONO, 13.5, n, false, false)?;
+        let family = HSTRING::from(family);
+        let mono = PCWSTR(family.as_ptr());
+        let code = text_format(gpu, mono, 13.5, n, false, false)?;
         code.SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK)?;
-        let rows = text_format(gpu, MONO, 13.0, n, false, false)?;
+        let rows = text_format(gpu, mono, 13.0, n, false, false)?;
         rows.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
         rows.SetLineSpacing(
             DWRITE_LINE_SPACING_METHOD_UNIFORM,
@@ -237,6 +240,7 @@ impl Fonts {
             right,
             centre,
             small_wrap: text_format(gpu, FONT, 13.5, n, false, false)?,
+            family,
         })
     }
 
@@ -362,7 +366,7 @@ impl Ctx<'_> {
                     let _ = l.SetStrikethrough(true, dr);
                 }
                 Style::Code => {
-                    let _ = l.SetFontFamilyName(MONO, dr);
+                    let _ = l.SetFontFamilyName(PCWSTR(self.fonts.family.as_ptr()), dr);
                     let _ = l.SetFontSize(size * 0.88, dr);
                     self.paint(&l, r.clone(), self.code_ink());
                     code_runs.push(r);

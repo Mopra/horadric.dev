@@ -169,7 +169,7 @@ pub fn write_mcp_config(exe: &Path) -> Option<PathBuf> {
 /// Claude Code runs the command in a shell that may be Git Bash, cmd or
 /// PowerShell. Forward slashes read as a path in all three, and quotes
 /// only where a space needs them, since PowerShell takes a quoted first
-/// word as a string rather than a program. Codex's hooks the same.
+/// word as a string rather than a program.
 pub fn exe_command(exe: &Path, rest: &str) -> String {
     let exe = exe.to_string_lossy().replace('\\', "/");
     if exe.contains(' ') {
@@ -268,8 +268,7 @@ pub fn chronicle_all() -> Vec<chronicle::Record> {
 /// The record of what the quest `id` of the project `key` spent: every
 /// conversation the chronicle saw a turn of under it, and `live`, ones
 /// whose turn has not ended and so has no turn in it yet. None when
-/// nothing counts. A conversation with no Claude Code transcript is
-/// looked for among Codex's.
+/// nothing counts.
 pub fn spent(
     records: &[chronicle::Record],
     key: &str,
@@ -287,8 +286,7 @@ pub fn spent(
     let sittings: Vec<Sitting> = seen
         .into_iter()
         .filter_map(|(conversation, cwd)| {
-            let spend = horadric_hooks::transcript::spend(&cwd, &conversation)
-                .or_else(|| horadric_hooks::codex::spend(&conversation))?;
+            let spend = horadric_hooks::transcript::spend(&cwd, &conversation)?;
             (!spend.is_empty()).then_some(Sitting {
                 conversation,
                 spend,
@@ -386,9 +384,9 @@ mod tests {
         assert_eq!(
             exe_command(
                 Path::new(r"C:\Program Files\Horadric\horadric.exe"),
-                "hook codex"
+                "status"
             ),
-            "\"C:/Program Files/Horadric/horadric.exe\" hook codex"
+            "\"C:/Program Files/Horadric/horadric.exe\" status"
         );
     }
 }

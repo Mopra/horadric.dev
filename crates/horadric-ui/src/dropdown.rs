@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 
-use horadric_core::{Agent, Setting};
+use horadric_core::Setting;
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -51,9 +51,8 @@ const DROP: f32 = 4.0;
 /// Whose list it is, which is who hears what was picked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Whose {
-    /// A session default in the usage window, of the agent whose screen
-    /// it dropped from.
-    Default(Agent, Setting),
+    /// A session default in the usage window.
+    Default(Setting),
     /// A row of the Settings window.
     Settings(Field),
 }
@@ -93,10 +92,10 @@ pub fn register_class() -> Result<()> {
 
 /// When a pick takes hold, the note on top of the list. A running Claude
 /// Code session switches once it is free, see
-/// [`horadric_core::Session::free_for_command`]. The other agents have no
-/// command Horadric can type in.
-pub(crate) fn note(agent: Agent, setting: Setting) -> &'static str {
-    if agent == Agent::Claude && setting.command(None).is_some() {
+/// [`horadric_core::Session::free_for_command`], where there is a command
+/// Horadric can type in.
+pub(crate) fn note(setting: Setting) -> &'static str {
+    if setting.command(None).is_some() {
         "Running sessions switch too"
     } else {
         "From the next start or resume"
@@ -108,13 +107,12 @@ impl Dropdown {
     /// pixels at `dpi`, or over it when there is no room below.
     pub fn open(
         shared: Rc<Shared>,
-        agent: Agent,
         setting: Setting,
         current: Option<&str>,
         row: RECT,
         dpi: u32,
     ) -> Result<Box<Self>> {
-        let choices = setting.choices(agent);
+        let choices = setting.choices();
         let mut labels = vec!["Default".to_string()];
         let mut values = vec![None];
         for (v, name) in choices {
@@ -128,8 +126,8 @@ impl Dropdown {
         // The last permission mode sits apart, so it is never picked by a slip.
         let apart = (setting == Setting::Permissions).then(|| labels.len() - 1);
         let list = List {
-            whose: Whose::Default(agent, setting),
-            note: note(agent, setting).to_string(),
+            whose: Whose::Default(setting),
+            note: note(setting).to_string(),
             labels,
             values,
             current,
@@ -321,11 +319,11 @@ impl Dropdown {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         match self.whose {
-            Whose::Default(agent, setting) => {
+            Whose::Default(setting) => {
                 let value = pick
                     .and_then(|i| self.values.get(i))
                     .map(|v| v.map(str::to_string));
-                app::push(Input::Picked(agent, setting, value));
+                app::push(Input::Picked(setting, value));
             }
             Whose::Settings(field) => app::push(Input::SettingsPicked(field, pick)),
         }
@@ -478,11 +476,9 @@ mod tests {
 
     #[test]
     fn the_note_says_when_a_pick_takes_hold() {
-        let claude = |s| note(Agent::Claude, s);
-        assert!(claude(Setting::Model).starts_with("Running"));
-        assert!(claude(Setting::Effort).starts_with("Running"));
-        assert!(claude(Setting::Permissions).starts_with("From the next"));
-        assert!(note(Agent::Codex, Setting::Model).starts_with("From the next"));
+        assert!(note(Setting::Model).starts_with("Running"));
+        assert!(note(Setting::Effort).starts_with("Running"));
+        assert!(note(Setting::Permissions).starts_with("From the next"));
     }
 
     #[test]

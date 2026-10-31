@@ -608,8 +608,9 @@ pub fn session_entry(s: &Session, project: &str, paused: bool) -> Value {
         // When it took its phase, Unix seconds, so a brother's tile keeps
         // its age when that brother's client starts again.
         "since": unix_secs(s.since),
-        // So a brother offers handoff only for a Claude Code session.
-        "agent": s.agent.program(),
+        // An older brother offers handoff only for a Claude Code session,
+        // and reads this to know one.
+        "agent": "claude",
         "shell": s.shell,
         "talked": s.prompted && s.claude_session_id.is_some(),
     });

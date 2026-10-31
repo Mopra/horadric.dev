@@ -17,7 +17,7 @@ use horadric_core::tasks::Task;
 use horadric_core::Agent;
 use horadric_hooks::tasks as file;
 
-use super::{past_in, App};
+use super::{past_in, App, SessionSpec};
 use crate::questlog::{self, Ask, QuestLog};
 use crate::store;
 use crate::window::project_name;
@@ -118,7 +118,6 @@ impl App {
                 started: secs(p.started),
                 touched: secs(p.modified),
                 cwd: cwd.clone(),
-                agent: p.agent,
             })
             .collect()
     }
@@ -274,8 +273,13 @@ impl App {
             return;
         };
         let name = Some(q.name.clone()).filter(|n| !n.trim().is_empty());
-        let args = q.agent.resume_args(Some(&conversation));
-        let started = match self.start_in(name, dir, args, q.agent, false) {
+        let started = self.start_session(SessionSpec {
+            name,
+            resume: Some(conversation.clone()),
+            show: true,
+            ..SessionSpec::new(dir, self.chat_sessions)
+        });
+        let started = match started {
             Ok(id) => id,
             Err(e) => {
                 eprintln!("horadric: cannot carry on the quest: {e}");

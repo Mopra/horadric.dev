@@ -180,9 +180,8 @@ fn ask_app(port: u16, session: Option<&str>, body: &Value) -> Result<Value, Stri
 
 /// The server, with `app` the call to the Horadric that owns the session.
 struct Server<A> {
-    /// Whether Horadric started this session. Grok starts this server for
-    /// every session, since it is in Grok's own config, and one Horadric
-    /// did not start has no browser, so it is offered no tools.
+    /// Whether Horadric started this session. One it did not start has no
+    /// browser, so it is offered no tools.
     browser: bool,
     app: A,
     /// How long after a click or a key the page is given to react.

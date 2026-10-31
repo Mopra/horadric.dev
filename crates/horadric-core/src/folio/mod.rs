@@ -19,6 +19,7 @@
 //! CLI asks, the last is [`Folio::todos`].
 
 pub mod afar;
+pub mod backlog;
 mod edits;
 mod launch;
 mod mcp;
@@ -359,6 +360,14 @@ pub struct Folio {
     pub limits: Option<crate::usage::Limits>,
     /// The MCP servers as last heard, and what waits on them.
     pub mcp: McpState,
+    /// How the last turn failed, as a hook's `StopFailure` names it
+    /// (`rate_limit`, `authentication_failed`, `unknown`), until a turn
+    /// ends well or the next prompt goes. The tile shows it and a usage
+    /// limit switches account, as for a terminal.
+    pub failed: Option<String>,
+    /// The error an `assistant` message of this turn carried, which the
+    /// turn's `result` only flags.
+    turn_error: Option<String>,
     /// The blocks of the message streaming now, by content index.
     open: HashMap<u64, Open>,
     /// The id of the message streaming now.
@@ -502,6 +511,8 @@ impl Folio {
     pub fn push_prompt(&mut self, text: &str) {
         self.blocks.push(Block::Prompt(text.to_string()));
         self.busy = true;
+        self.failed = None;
+        self.turn_error = None;
     }
 
     /// The human sent a prompt with images. Returns the line to write.
@@ -559,10 +570,15 @@ impl Folio {
         }
         match v["type"].as_str().unwrap_or_default() {
             "stream_event" => self.stream_event(&v["event"]),
-            "assistant" => match v["error"].as_str().filter(|e| is_auth_error(e)) {
-                Some(_) => self.need_sign_in(&text_in(&v["message"])),
-                None => self.assistant(&v["message"]),
-            },
+            "assistant" => {
+                if let Some(e) = v["error"].as_str().filter(|e| !e.is_empty()) {
+                    self.turn_error = Some(e.to_string());
+                }
+                match v["error"].as_str().filter(|e| is_auth_error(e)) {
+                    Some(_) => self.need_sign_in(&text_in(&v["message"])),
+                    None => self.assistant(&v["message"]),
+                }
+            }
             "user" => self.user(&v),
             "result" => self.result(&v),
             "control_request" => self.control_request(&v, line),
@@ -859,6 +875,64 @@ impl Folio {
         let last =
             (own.iter().rev()).find(|b| matches!(b, Block::Prompt(_) | Block::Footer { .. }));
         matches!(last, Some(Block::Footer { .. }))
+    }
+
+    /// The text of the last turn's last reply, empty when it had none: what
+    /// a failed turn said of its error.
+    pub fn last_reply(&self) -> String {
+        (self.blocks.iter().rev())
+            .take_while(|b| !matches!(b, Block::Prompt(_)))
+            .find_map(|b| match b {
+                Block::Reply(t) => Some(t.trim().to_string()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// The oldest ask still waiting on the human, as a hook names it: the
+    /// tool and its input, so a tile and a notification say what it asks
+    /// as they do for a terminal's.
+    pub fn first_ask(&self) -> Option<(String, Value)> {
+        self.blocks.iter().find_map(|b| match b {
+            Block::Ask {
+                request_id,
+                tool,
+                input,
+                state: AskState::Waiting,
+                ..
+            } if !request_id.is_empty() => Some((tool.clone(), input.clone())),
+            Block::Question {
+                request_id,
+                questions,
+                state: AskState::Waiting,
+                ..
+            } if !request_id.is_empty() => {
+                let questions: Vec<Value> = (questions.iter())
+                    .map(|q| {
+                        serde_json::json!({
+                            "question": q.question,
+                            "header": q.header,
+                            "multiSelect": q.multi_select,
+                            "options": (q.options.iter())
+                                .map(|o| serde_json::json!({"label": o.label}))
+                                .collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                let input = serde_json::json!({ "questions": questions });
+                Some(("AskUserQuestion".to_string(), input))
+            }
+            Block::Plan {
+                request_id,
+                plan,
+                state: AskState::Waiting,
+                ..
+            } if !request_id.is_empty() => Some((
+                "ExitPlanMode".to_string(),
+                serde_json::json!({ "plan": plan }),
+            )),
+            _ => None,
+        })
     }
 
     /// The asks, questions and plans still waiting on the human, oldest
@@ -1783,6 +1857,14 @@ impl Folio {
             (true, false) => Ending::Failed,
             (false, false) => Ending::Done,
         };
+        // The CLI may flag a refused turn a success, with the error only on
+        // its message, so either says it failed.
+        let error = self.turn_error.take();
+        self.failed = match ending {
+            Ending::Stopped => None,
+            Ending::Failed => Some(error.unwrap_or_else(|| "unknown".into())),
+            Ending::Done => error,
+        };
         let usage = TurnUsage::from_result(v);
         if let (Some(used), Some(limit)) = (usage.context_used, usage.context_limit) {
             let c = self.context.get_or_insert_with(ContextUsage::default);
@@ -2539,6 +2621,27 @@ mod tests {
         let out = f.approve_plan("p1", None).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["response"]["response"]["updatedInput"]["plan"], "Do it.");
+    }
+
+    #[test]
+    fn the_first_ask_names_its_tool_for_the_tile() {
+        let mut f = Folio::new();
+        f.push_prompt("p");
+        assert_eq!(f.first_ask(), None);
+        let input =
+            serde_json::json!({"questions": [{"question": "Q?", "options": [{"label": "A"}]}]});
+        let q = serde_json::json!({"type": "control_request", "request_id": "q1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": input}});
+        f.feed(&q.to_string());
+        let bash = serde_json::json!({"type": "control_request", "request_id": "b1", "request": {
+            "subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "ls"}}});
+        f.feed(&bash.to_string());
+        let (tool, asked) = f.first_ask().unwrap();
+        assert_eq!(tool, "AskUserQuestion");
+        assert_eq!(asked["questions"][0]["question"], "Q?");
+        assert_eq!(asked["questions"][0]["options"][0]["label"], "A");
+        f.answer_question("q1", &[vec!["A".into()]]);
+        assert_eq!(f.first_ask(), Some(("Bash".into(), serde_json::json!({"command": "ls"}))));
     }
 
     #[test]
@@ -3608,5 +3711,31 @@ mod tests {
         assert!(matches!(f.blocks.last(), Some(Block::Reply(t)) if t.contains("Rate limit")));
         let retry = r#"{"type":"system","subtype":"api_error","level":"error","error":{"status":529}}"#;
         assert!(!f.feed(retry));
+    }
+
+    #[test]
+    fn a_failed_turn_names_its_error_until_the_next_prompt() {
+        let mut f = Folio::new();
+        f.push_prompt("hi");
+        let limited = serde_json::json!({
+            "type": "assistant",
+            "error": "rate_limit",
+            "message": {"id": "m1", "role": "assistant",
+                "content": [{"type": "text", "text": "You've hit your limit"}]},
+        });
+        f.feed(&limited.to_string());
+        f.feed(r#"{"type":"result","subtype":"success","is_error":true,"duration_ms":5}"#);
+        assert_eq!(f.failed.as_deref(), Some("rate_limit"));
+        assert_eq!(f.last_reply(), "You've hit your limit");
+        f.push_prompt("again");
+        assert_eq!(f.failed, None);
+        f.feed(r#"{"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":5}"#);
+        assert_eq!(f.failed.as_deref(), Some("unknown"));
+        f.push_prompt("stop");
+        f.feed(r#"{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming","duration_ms":5}"#);
+        assert_eq!(f.failed, None);
+        f.push_prompt("fine");
+        f.feed(r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":5}"#);
+        assert_eq!(f.failed, None);
     }
 }

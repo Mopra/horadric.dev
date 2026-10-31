@@ -198,7 +198,7 @@ pub struct Console {
     pub args: Vec<String>,
     /// A plain shell, not an agent.
     pub shell: bool,
-    /// Claude Code, not a shell or another agent put in its place with
+    /// Claude Code, not a shell or another program put in its place with
     /// `HORADRIC_AGENT`, so its slash commands work.
     pub claude: bool,
     /// Where the program started, or a view's file lives: what a relative
@@ -298,15 +298,12 @@ pub struct Launch {
 
 /// The program `agent` runs, from `PATH` or where its installers put it,
 /// the first `.exe` or `.cmd` in path order, as cmd.exe resolves it. The
-/// npm installs are `.cmd` shims, so `.exe` alone would skip them. For
-/// Claude, `HORADRIC_AGENT` wins when set, which is how a plain shell gets
-/// into a tile for testing.
+/// npm installs are `.cmd` shims, so `.exe` alone would skip them.
+/// `HORADRIC_AGENT` wins when set, which is how a plain shell gets into a
+/// tile for testing.
 pub fn agent_program(agent: Agent) -> Option<PathBuf> {
     let path = claude_search_path();
-    let chosen = std::env::var("HORADRIC_AGENT")
-        .ok()
-        .filter(|_| agent == Agent::Claude);
-    let name = chosen.unwrap_or_else(|| agent.program().into());
+    let name = std::env::var("HORADRIC_AGENT").unwrap_or_else(|_| agent.program().into());
     if Path::new(&name).is_absolute() {
         return Some(PathBuf::from(name));
     }
@@ -315,17 +312,11 @@ pub fn agent_program(agent: Agent) -> Option<PathBuf> {
 }
 
 /// Whether `program` is Claude Code, which takes Horadric's flags and slash
-/// commands. A shell or another agent put in with `HORADRIC_AGENT` does not.
+/// commands. A shell put in with `HORADRIC_AGENT` does not.
 pub fn is_claude(program: &Path) -> bool {
     program
         .file_stem()
         .is_some_and(|s| s.eq_ignore_ascii_case("claude"))
-}
-
-/// The agent `program` is, by its name: `codex.cmd` is Codex. None for a
-/// shell put in its place with `HORADRIC_AGENT`.
-pub fn agent_of(program: &Path) -> Option<Agent> {
-    Agent::from_name(&program.file_stem()?.to_string_lossy())
 }
 
 /// The shell a plain terminal runs: `HORADRIC_SHELL`, the login shell
@@ -387,9 +378,9 @@ fn claude_search_path() -> std::ffi::OsString {
     std::env::join_paths(std::env::split_paths(&path).chain(dirs)).unwrap_or(path)
 }
 
-/// Where the agents' installers put them on a Mac: Claude Code's native
-/// installer, npm's usual global prefixes, Homebrew on Apple Silicon and
-/// on Intel, Bun, and Grok Build's own.
+/// Where Claude Code's installers put it on a Mac: its native installer,
+/// npm's usual global prefixes, Homebrew on Apple Silicon and on Intel,
+/// and Bun.
 #[cfg(not(windows))]
 fn unix_install_dirs(home: Option<PathBuf>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
@@ -402,14 +393,12 @@ fn unix_install_dirs(home: Option<PathBuf>) -> Vec<PathBuf> {
     dirs.push(PathBuf::from("/usr/local/bin"));
     if let Some(h) = home {
         dirs.push(h.join(".bun/bin"));
-        dirs.push(h.join(".grok/bin"));
     }
     dirs
 }
 
-/// The folders the agents' installers put them in: Claude Code's native
-/// one, npm's global folder, winget's links, Scoop's shims and Grok
-/// Build's own.
+/// The folders Claude Code's installers put it in: its native one, npm's
+/// global folder, winget's links and Scoop's shims.
 #[cfg(windows)]
 fn install_dirs(
     profile: Option<PathBuf>,
@@ -428,7 +417,6 @@ fn install_dirs(
     }
     if let Some(p) = profile {
         dirs.push(p.join("scoop").join("shims"));
-        dirs.push(p.join(".grok").join("bin"));
     }
     dirs
 }
@@ -538,11 +526,7 @@ impl Console {
         };
         let claude = !launch.shell && is_claude(&launch.program);
         let mut program = launch.program;
-        let agent = agent_of(&program).filter(|_| !launch.shell);
-        let mut args = match agent {
-            Some(agent) => agent.line(&launch.extra, &launch.args),
-            None => [&launch.extra[..], &launch.args[..]].concat(),
-        };
+        let mut args = [&launch.extra[..], &launch.args[..]].concat();
         let mut env_set = if launch.shell {
             vec![]
         } else {
@@ -556,7 +540,6 @@ impl Console {
         // unanswered, which behind Windows' own pseudo console it always does.
         let fgbg = palette::colorfgbg(palette::background());
         env_set.push(("COLORFGBG".into(), fgbg.into()));
-        env_set.extend(agent.map(Agent::env).unwrap_or_default());
         env_set.extend(launch.env);
         // The setup runs in the pane, where its output can be read, and
         // the agent starts after it in the same console.
@@ -616,7 +599,6 @@ impl Console {
         serial: usize,
         args: Vec<String>,
         shell: bool,
-        agent: Agent,
         cwd: PathBuf,
         notify: Notify,
     ) -> io::Result<Arc<Console>> {
@@ -626,9 +608,7 @@ impl Console {
             serial,
             args,
             shell,
-            claude: !shell
-                && agent == Agent::Claude
-                && agent_program(agent).is_some_and(|p| is_claude(&p)),
+            claude: !shell && agent_program(Agent::Claude).is_some_and(|p| is_claude(&p)),
             cwd: Some(cwd),
             reattached: true,
         };
@@ -831,9 +811,14 @@ impl Console {
     }
 
     /// An agent's session, which a pick can be handed to: not a shell, a
-    /// file view or a page.
+    /// file view or a page. A Folio is one too, through its composer, but
+    /// not a hireling's, which is read only.
     pub fn is_agent(&self) -> bool {
-        self.remote.is_some() && !self.shell
+        #[cfg(windows)]
+        let folio = (self.folio.as_deref()).is_some_and(|k| !crate::folio::is_watch(k));
+        #[cfg(not(windows))]
+        let folio = false;
+        (self.remote.is_some() && !self.shell) || folio
     }
 
     /// A console with no program for the browser pane of project `key`.
@@ -1615,7 +1600,6 @@ mod tests {
                 r"C:\Users\x\AppData\Roaming\npm",
                 r"C:\Users\x\AppData\Local\Microsoft\WinGet\Links",
                 r"C:\Users\x\scoop\shims",
-                r"C:\Users\x\.grok\bin",
             ]
             .map(PathBuf::from)
         );
@@ -1636,7 +1620,6 @@ mod tests {
         let dirs = unix_install_dirs(Some(PathBuf::from("/Users/x")));
         assert_eq!(dirs[0], PathBuf::from("/Users/x/.local/bin"));
         assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")));
-        assert!(dirs.contains(&PathBuf::from("/Users/x/.grok/bin")));
         assert!(!unix_install_dirs(None).is_empty());
     }
 

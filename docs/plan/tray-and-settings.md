@@ -66,7 +66,7 @@ Settings (`settings.rs`):
 - A fixed 604 by about 400 window: no resize, no scroll, so the tallest
   section sets the height and the planned rows (secrets, identities,
   dictation) have no room.
-- No descriptions. "In the project menu", "Workflow agents' model",
+- No descriptions. "Workflow agents' model",
   "Recall across projects", "The tongue", "Ask before a click casts" mean
   nothing to a new user.
 - Ten sections in a doubtful order: Projects, probably the most used, is
@@ -140,8 +140,8 @@ column of cards on the right. Each card:
 ```
 
 Title in the normal weight, description one line in the muted colour,
-control right aligned. A setting that can't be changed now (Permissions
-for Codex, Tiles on screen with one monitor) stays and says why in its
+control right aligned. A setting that can't be changed now (Tiles on
+screen with one monitor) stays and says why in its
 description. Rare options sit in an expander.
 
 **Themed names stay, with the plain meaning beside them.** Horadric's
@@ -154,11 +154,11 @@ plain words.
 
 1. **General:** Start with Windows, Open in Horadric in Explorer,
    Notify when a session waits, Loot sounds.
-2. **Appearance:** Theme, Terminal font, Tiles on screen, Show Tristram,
+2. **Appearance:** Theme, Code font, Tiles on screen, Show Tristram,
    Animations.
-3. **Sessions:** Agent, Model, Effort, Permissions, Workflow agents'
-   model, Accounts (moved from the tray), Switch account when one runs
-   out, Open in a terminal, In the project menu.
+3. **Sessions:** Model, Effort, Permissions, Workflow agents' model,
+   Accounts (moved from the tray), Switch account when one runs out,
+   Open in a terminal.
 4. **Projects:** the project picker on top, then Colour, Work mode, SSH
    hosts, Warriv drives, And ships public, and later secrets and
    identities.

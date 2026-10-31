@@ -37,9 +37,10 @@ use crate::wire::{
     LineDecoder, LineLog, LineMessage, Logged, MAX_LINE,
 };
 
-/// The lines a host keeps, in bytes. A long session's tool results run to
-/// tens of MB; past this the oldest go, and the transcript on disk still
-/// has them.
+/// The lines a host keeps, in bytes, deltas of finished blocks not
+/// counted (see [`LineLog`]). A long session's tool results run to tens
+/// of MB; past this the oldest go, and the transcript on disk still has
+/// them, under the conversation [`HostInfo`] names.
 pub const LOG_CAP: usize = 32 * 1024 * 1024;
 
 /// How long a host whose claude ended waits for its client to read it.
@@ -86,6 +87,11 @@ pub struct HostInfo {
     pub tag: String,
     /// When the host started claude, in seconds since 1970.
     pub started: u64,
+    /// The conversation claude carries on now, so a client that attaches
+    /// knows it before any line names it, even once the backlog lost the
+    /// `init` that did. None from hosts of older builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
 }
 
 /// Runs a headless host until claude ends and its client heard. Returns
@@ -127,8 +133,8 @@ struct Host {
 struct Shared {
     state: Arc<Mutex<State>>,
     claude: Mutex<Headless>,
-    /// [`HostInfo`] as JSON.
-    info: String,
+    /// What [`welcome`] says, but for the conversation, which can change.
+    info: HostInfo,
 }
 
 struct State {
@@ -220,11 +226,12 @@ impl Host {
             started: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
+            conversation: spec.resume.clone(),
         };
         let shared = Arc::new(Shared {
             state,
             claude: Mutex::new(claude),
-            info: serde_json::to_string(&info).map_err(io::Error::other)?,
+            info,
         });
 
         let (ended_tx, ended) = mpsc::channel();
@@ -306,7 +313,13 @@ fn welcome(pipe: Pipe, shared: &Arc<Shared>) {
         queued: Arc::clone(&queued),
         done: done_rx,
     };
-    client.send(&LineMessage::Info(shared.info.clone()));
+    let mut info = shared.info.clone();
+    if let Some(now) = st.log.conversation() {
+        info.conversation = Some(now.to_string());
+    }
+    client.send(&LineMessage::Info(
+        serde_json::to_string(&info).unwrap_or_default(),
+    ));
     for message in st.log.backlog() {
         client.send(&message);
     }
@@ -495,7 +508,18 @@ impl Hosted {
         id: &str,
         on_event: impl FnMut(Event) + Send + 'static,
     ) -> io::Result<Hosted> {
+        Hosted::attach_with(instance, id, |_| on_event)
+    }
+
+    /// [`Hosted::attach`], its `on_event` made from what the host said
+    /// about itself, so it can read the backlog knowing whose it is.
+    pub fn attach_with<F: FnMut(Event) + Send + 'static>(
+        instance: &str,
+        id: &str,
+        make: impl FnOnce(&HostInfo) -> F,
+    ) -> io::Result<Hosted> {
         let connected = connect(&headless_pipe_name(instance, id))?;
+        let on_event = make(&connected.info);
         Ok(Hosted::begin(id, connected, on_event))
     }
 
@@ -866,6 +890,22 @@ mod tests {
         client.close();
         drop(client);
         ended.recv_timeout(Duration::from_secs(10)).unwrap();
+    }
+
+    /// Hosts started by the build before keep running after an update,
+    /// and the build before attaches to hosts of this one after a rollback.
+    #[test]
+    fn host_info_reads_across_builds() {
+        let old: HostInfo =
+            serde_json::from_str(r#"{"pid":1,"cwd":"c:\\p","tag":"t","started":2}"#).unwrap();
+        assert_eq!(old.conversation, None);
+        let new = HostInfo {
+            conversation: Some("abc".into()),
+            ..old.clone()
+        };
+        let json = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<HostInfo>(&json).unwrap(), new);
+        assert!(!serde_json::to_string(&old).unwrap().contains("conversation"));
     }
 
     /// Every event up to and with the first that `want` takes.

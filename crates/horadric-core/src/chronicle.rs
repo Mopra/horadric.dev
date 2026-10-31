@@ -22,7 +22,6 @@ use crate::pack::Touched;
 use crate::spend::{self, Sitting, Spend};
 use crate::tasks::{Mark, Task};
 use crate::warriv::Kind;
-use crate::Agent;
 
 /// The file, beside `state.json`.
 pub const FILE: &str = "chronicle.jsonl";
@@ -879,8 +878,6 @@ pub struct Quest {
     /// on the main line itself. Its `accepted` is when it started, `ended`
     /// when it was last touched.
     pub main: bool,
-    /// Whose conversation it is, which says how to carry it on.
-    pub agent: Agent,
 }
 
 impl Quest {
@@ -907,7 +904,6 @@ impl Quest {
             added_by: None,
             added_in: None,
             main: false,
-            agent: Agent::Claude,
         }
     }
 
@@ -1098,7 +1094,6 @@ pub struct Talk {
     pub started: u64,
     pub touched: u64,
     pub cwd: String,
-    pub agent: Agent,
 }
 
 /// `quests` with each of `talks` that no quest holds put among them as a
@@ -1118,7 +1113,6 @@ pub fn with_talks(mut quests: Vec<Quest>, talks: &[Talk]) -> Vec<Quest> {
         q.outcome = Outcome::Done;
         q.conversation = Some((t.id.clone(), t.cwd.clone()));
         q.main = true;
-        q.agent = t.agent;
         quests.push(q);
     }
     for i in 0..quests.len() {
@@ -2183,7 +2177,6 @@ mod tests {
             started,
             touched,
             cwd: "C:/p".into(),
-            agent: Agent::Claude,
         }
     }
 

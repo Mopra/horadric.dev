@@ -700,6 +700,9 @@ impl Pane {
     pub fn refont(&self) {
         self.fit_grid();
         self.invalidate();
+        if let Some(key) = &self.console.folio {
+            folio::refont(key);
+        }
     }
 
     pub fn focus(&self) {
@@ -1717,8 +1720,12 @@ impl Pane {
     }
 
     /// Something picked elsewhere on the stage, pasted into this session.
+    /// A Folio has no program reading the pty, so it goes in its composer.
     pub fn hand(&self, text: &str) {
-        self.paste_text(text);
+        match &self.console.folio {
+            Some(key) => folio::handed(key, text),
+            None => self.paste_text(text),
+        }
     }
 
     fn paste_text(&self, text: &str) {
@@ -1912,6 +1919,20 @@ impl Pane {
         // Alt+F4 closes the stage. Windows passes it up from a child.
         if mods.alt && vk == VK_F4 {
             return false;
+        }
+        if let Some(key) = &self.console.folio {
+            // Shift+Insert and Ctrl+Insert are a terminal's paste and copy,
+            // so they are the Folio's Ctrl+V and Ctrl+C.
+            let clip = match (vk, mods.ctrl, mods.shift) {
+                (VK_INSERT, false, true) => Some('\u{16}'),
+                (VK_INSERT, true, false) => Some('\u{3}'),
+                _ => None,
+            };
+            if let Some(c) = clip.filter(|_| !mods.alt) {
+                let ctrl = Mods { ctrl: true, shift: false, alt: false };
+                folio::char(key, c, ctrl);
+                return true;
+            }
         }
         if let Some(key) = self.console.folio.as_deref().filter(|k| folio::is_watch(k)) {
             if vk == VK_ESCAPE && !mods.ctrl && !mods.alt && !mods.shift {
@@ -3082,8 +3103,9 @@ impl Pane {
     fn on_wheel(&self, wparam: WPARAM, lparam: LPARAM) {
         let raw = ((wparam.0 >> 16) & 0xffff) as i16 as i32;
         if let Some(key) = &self.console.folio {
-            folio::wheel(key, raw);
-            return;
+            if folio::wheel(key, raw, Self::mods().ctrl) {
+                return;
+            }
         }
         if let Some(key) = &self.console.sky {
             // The wheel's point is on the screen, the zoom's in the glass.

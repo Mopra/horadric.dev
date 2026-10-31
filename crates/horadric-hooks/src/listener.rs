@@ -22,11 +22,11 @@ use std::time::{Duration, SystemTime};
 
 use horadric_core::overlap::{self, Claims, Overlap};
 use horadric_core::spend::uptake;
-use horadric_core::{Agent, HookEvent, Limits, Status};
+use horadric_core::{HookEvent, Limits, Status};
 use serde_json::{json, Value};
 
 use crate::{
-    checkpoint, client, pace, transcript, AGENT_HEADER, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH,
+    checkpoint, client, pace, transcript, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH,
     HOOK_PATH, KNOW_PATH, NEW_PATH, OWNER_HEADER, RECALL_PATH, RELOAD_PATH, SESSION_HEADER,
     STATE_HEADER, STATUS_PATH, TASKS_PATH,
 };
@@ -36,10 +36,8 @@ use crate::{
 pub struct Tagged {
     pub horadric_id: String,
     pub event: HookEvent,
-    /// Which agent sent it, whose limits `limits` are.
-    pub agent: Agent,
-    /// The account's limits, when the event brought them: a status line's,
-    /// or those at the end of a Codex transcript when a turn stops.
+    /// The account's limits, when the event brought them, as a status
+    /// line's do.
     pub limits: Option<Limits>,
 }
 
@@ -50,13 +48,11 @@ pub struct NewSession {
     pub cwd: String,
     /// Passed to the agent as they are.
     pub args: Vec<String>,
-    /// Which agent to start. A request without one is for Claude Code.
-    pub agent: Agent,
 }
 
 impl NewSession {
     pub fn to_json(&self) -> String {
-        json!({ "name": self.name, "cwd": self.cwd, "args": self.args, "agent": self.agent })
+        json!({ "name": self.name, "cwd": self.cwd, "args": self.args })
             .to_string()
     }
 
@@ -72,16 +68,14 @@ impl NewSession {
                 .map(|x| x.as_str().map(str::to_string))
                 .collect::<Option<Vec<_>>>()?,
         };
-        let agent = match v.get("agent") {
-            None | Some(Value::Null) => Agent::Claude,
-            Some(a) => Agent::from_name(a.as_str()?)?,
-        };
-        Some(NewSession {
-            name,
-            cwd,
-            args,
-            agent,
-        })
+        // An older `horadric new` could ask for another agent, which is
+        // not started as Claude.
+        match v.get("agent") {
+            None | Some(Value::Null) => {}
+            Some(a) if a.as_str()?.eq_ignore_ascii_case("claude") => {}
+            Some(_) => return None,
+        }
+        Some(NewSession { name, cwd, args })
     }
 }
 
@@ -328,7 +322,6 @@ fn handle(
     let mut command = String::new();
     let mut state = String::new();
     let mut from_browser = false;
-    let mut agent = None;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -347,7 +340,6 @@ fn handle(
                 n if n == OWNER_HEADER => owner = value.parse::<u16>().ok(),
                 n if n == COMMAND_HEADER => command = value.to_string(),
                 n if n == STATE_HEADER => state = value.to_string(),
-                n if n == AGENT_HEADER => agent = Agent::from_name(value),
                 "origin" => from_browser = true,
                 _ => {}
             }
@@ -397,7 +389,6 @@ fn handle(
             let _ = tx.send(Tagged {
                 horadric_id,
                 event,
-                agent: Agent::Claude,
                 limits,
             });
         }
@@ -461,17 +452,11 @@ fn handle(
         return respond(&stream, "200 OK");
     }
 
-    // Grok runs Claude's hooks as well as its own. Should it ever reach
-    // Claude's `http` hook, its command hook has sent the event already.
-    if agent.unwrap_or_default() == Agent::Claude && Agent::is_grok_shaped(&body) {
-        return respond(&stream, "200 OK");
-    }
-
     // Parsing is all that happens before the reply, which tells an agent
     // that just edited a file another session is still changing. A
     // prompt's reply waits for the memory instead, after the event is
     // handed on, so the tile turns to working at once.
-    let parsed = agent.unwrap_or_default().event(&body);
+    let parsed = HookEvent::from_json(&body).ok();
     // A turn's checkpoint is taken before the agent hears back, so its
     // first edit cannot come before it. Only the app keeps them, and only
     // for sessions it holds: an event passed on is the owner's to keep.
@@ -480,7 +465,7 @@ fn handle(
     }
     let prompt = parsed
         .as_ref()
-        .filter(|_| agent.unwrap_or_default() == Agent::Claude && !horadric_id.is_empty())
+        .filter(|_| !horadric_id.is_empty())
         .and_then(|e| prompt_recall(&horadric_id, e, &body));
     let overlap = match &parsed {
         Some(event) => claims()
@@ -495,7 +480,7 @@ fn handle(
     };
     let wide = parsed
         .as_ref()
-        .filter(|_| agent.unwrap_or_default() == Agent::Claude && !horadric_id.is_empty())
+        .filter(|_| !horadric_id.is_empty())
         .and_then(|e| pace().lock().ok()?.hear(&horadric_id, e));
     let known = match (known, wide) {
         (Some(k), Some(w)) => Some(format!("{k}\n\n{w}")),
@@ -525,11 +510,7 @@ fn handle(
         // not bounce back. Nobody listening there means the event is lost,
         // which is what it would be without the hop.
         let body = String::from_utf8_lossy(&body);
-        let agent = agent.unwrap_or_default().program();
-        let headers = [
-            (SESSION_HEADER, horadric_id.as_str()),
-            (AGENT_HEADER, agent),
-        ];
+        let headers = [(SESSION_HEADER, horadric_id.as_str())];
         if prompt.is_none() {
             let _ = client::post(owner, HOOK_PATH, &headers, &body);
             return Ok(());
@@ -549,17 +530,10 @@ fn handle(
         } else if event.may_peek_title() {
             event.title = transcript::tail_title(std::path::Path::new(&event.transcript_path));
         }
-        let agent = agent.unwrap_or_default();
-        // Codex writes its limits into the transcript, not to a hook, and
-        // a turn that stopped has just had them counted.
-        let limits = (agent == Agent::Codex && event.hook_event_name == "Stop")
-            .then(|| transcript::codex_limits(std::path::Path::new(&event.transcript_path)))
-            .flatten();
         let _ = tx.send(Tagged {
             horadric_id,
             event,
-            agent,
-            limits,
+            limits: None,
         });
     }
     match (prompt, commands) {
@@ -723,7 +697,6 @@ fn glow(stream: &TcpStream, session: String, body: &[u8], tx: &Sender<Tagged>) -
     let _ = tx.send(Tagged {
         horadric_id: session,
         event,
-        agent: Agent::Claude,
         limits: None,
     });
     Ok(())
@@ -792,10 +765,7 @@ fn recall(stream: &TcpStream, body: &[u8], commands: &Sender<Command>) -> io::Re
 /// Hands the mod's question to the app with the files its session shares,
 /// and answers with what the app answers.
 fn know(stream: &TcpStream, session: String, commands: &Sender<Command>) -> io::Result<()> {
-    let overlaps = claims()
-        .lock()
-        .map(|c| c.shared(&session, SystemTime::now()))
-        .unwrap_or_default();
+    let overlaps = shared_files(&session);
     let (reply, rx) = Reply::new();
     let call = KnowCall {
         session,
@@ -809,6 +779,16 @@ fn know(stream: &TcpStream, session: String, commands: &Sender<Command>) -> io::
         Ok(answer) => respond_with(stream, "200 OK", &answer),
         Err(_) => respond(stream, "504 Gateway Timeout"),
     }
+}
+
+/// The files `session` shares with other sessions, as `/horadric/know`
+/// would answer. A Folio's band asks here, in the process that serves the
+/// listener, rather than over the port.
+pub fn shared_files(session: &str) -> Vec<Overlap> {
+    claims()
+        .lock()
+        .map(|c| c.shared(session, SystemTime::now()))
+        .unwrap_or_default()
 }
 
 /// Every session's turn as [`pace::Pace`] counts it.
@@ -955,27 +935,6 @@ mod tests {
     }
 
     #[test]
-    fn an_event_from_another_agent_is_read_in_its_shape() {
-        let (host, _host_rx) = start();
-        let (dev, dev_rx) = start();
-        let grok = r#"{"sessionId":"g","hookEventName":"stop","reason":"end_turn"}"#;
-        post(
-            host,
-            &format!(
-                "X-Horadric-Session: tile-4
-X-Horadric-Agent: grok
-X-Horadric-Port: {dev}
-"
-            ),
-            grok,
-        );
-        // Passed on with its agent, or the owner could not read it.
-        let got = dev_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(got.event.session_id, "g");
-        assert_eq!(got.event.hook_event_name, "Stop");
-    }
-
-    #[test]
     fn event_owned_here_or_by_nobody_stays() {
         let (port, rx) = start();
         for owner in [format!("{port}"), String::new(), "junk".into()] {
@@ -1057,7 +1016,6 @@ X-Horadric-Port: {dev}
             name: Some("fix-login".into()),
             cwd: "C:/dev/app".into(),
             args: vec!["--model".into(), "haiku".into()],
-            agent: Agent::Codex,
         };
         let reply = post_new(port, "X-Horadric-Command: new\r\n", &want.to_json());
         assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
@@ -1435,10 +1393,10 @@ Origin: https://a.b
         let n = NewSession::from_json(br#"{"cwd":"C:/x"}"#).unwrap();
         assert_eq!(n.name, None);
         assert!(n.args.is_empty());
-        assert_eq!(n.agent, Agent::Claude);
         assert_eq!(NewSession::from_json(br#"{"name":"x"}"#), None);
+        assert!(NewSession::from_json(br#"{"cwd":"C:/x","agent":"claude"}"#).is_some());
         assert_eq!(
-            NewSession::from_json(br#"{"cwd":"C:/x","agent":"gemini"}"#),
+            NewSession::from_json(br#"{"cwd":"C:/x","agent":"codex"}"#),
             None
         );
     }

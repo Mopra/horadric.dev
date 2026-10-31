@@ -224,7 +224,6 @@ pub fn start(hit: StartHit) -> Option<&'static str> {
 /// `locked` saying whether the padlock is closed.
 pub fn usage(hit: UsageHit, row: Option<Row>, locked: bool) -> Option<&'static str> {
     Some(match (hit, row) {
-        (UsageHit::Header, _) => "Show the next agent's limits",
         (UsageHit::Lock, _) if locked => "Unpin, so this scrolls with the tiles and drags",
         (UsageHit::Lock, _) => "Pin this to the top while the tiles below it scroll",
         (UsageHit::Limits, _) => "Fold or unfold the limits",

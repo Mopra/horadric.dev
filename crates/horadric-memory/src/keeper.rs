@@ -18,7 +18,7 @@ use horadric_core::lore::{Lore, Note, Past};
 use crate::horadrim::{self, Tongue, MARK, TOLD};
 use crate::recall::{self, Ask, Candidate, Now, Source};
 use crate::store::{Chunk, ChunkId, FileMark, Kind, Store};
-use crate::transcripts::{self, Format};
+use crate::transcripts;
 use crate::Embedder;
 
 /// What the keeper embeds with: the model, or a stand in for tests.
@@ -502,14 +502,13 @@ impl<E: Embed> Keeper<E> {
     pub fn ingest(
         &mut self,
         path: &Path,
-        format: Format,
         cwd: Option<&str>,
         project_of: impl FnOnce(&str) -> Option<String>,
         now: u64,
     ) -> Result<usize, String> {
         let key = path.to_string_lossy().to_lowercase();
         let from = self.cursors.get(&key).copied().unwrap_or(0);
-        let mut scan = transcripts::scan(path, format, from).map_err(|e| e.to_string())?;
+        let mut scan = transcripts::scan(path, from).map_err(|e| e.to_string())?;
         // A path read for the first time may hold a conversation already
         // kept from another path: a handed off session's moved transcript.
         if let (0, Some(session)) = (from, scan.session.as_deref()) {
@@ -1275,11 +1274,11 @@ mod tests {
         let mut k: Keeper<Topics> = Keeper::open(&dir).unwrap();
         let project = |cwd: &str| Some(cwd.to_lowercase());
         assert_eq!(
-            k.ingest(&file, Format::Claude, None, project, NOW).unwrap(),
+            k.ingest(&file, None, project, NOW).unwrap(),
             1
         );
         assert_eq!(
-            k.ingest(&file, Format::Claude, None, project, NOW).unwrap(),
+            k.ingest(&file, None, project, NOW).unwrap(),
             0
         );
         let mut text = fs::read_to_string(&file).unwrap();
@@ -1289,7 +1288,7 @@ mod tests {
         drop(k);
         let mut k: Keeper<Topics> = Keeper::open(&dir).unwrap();
         assert_eq!(
-            k.ingest(&file, Format::Claude, None, project, NOW).unwrap(),
+            k.ingest(&file, None, project, NOW).unwrap(),
             1
         );
         let kept: Vec<&Chunk> = k.store.chunks().map(|(_, c)| c).collect();
@@ -1307,12 +1306,12 @@ mod tests {
         let other = dir.with_extension("other.jsonl");
         fs::write(&other, line("user", "hello")).unwrap();
         assert_eq!(
-            k.ingest(&other, Format::Claude, None, |_| None, NOW)
+            k.ingest(&other, None, |_| None, NOW)
                 .unwrap(),
             0
         );
         assert_eq!(
-            k.ingest(&other, Format::Claude, None, project, NOW)
+            k.ingest(&other, None, project, NOW)
                 .unwrap(),
             0
         );
@@ -1336,7 +1335,7 @@ mod tests {
         fs::write(&a, &old).unwrap();
         let mut k: Keeper<Topics> = Keeper::open(&dir).unwrap();
         let project = |cwd: &str| Some(cwd.to_lowercase());
-        assert_eq!(k.ingest(&a, Format::Claude, None, project, NOW).unwrap(), 1);
+        assert_eq!(k.ingest(&a, None, project, NOW).unwrap(), 1);
         // Filed under a new folder with its cwd moved, then a turn there.
         let b = dir.with_extension("b.jsonl");
         let moved = line(r"C:\b", "2026-10-23T10:00:00Z", "the codeword is HELIX");
@@ -1345,7 +1344,7 @@ mod tests {
             moved + &line(r"C:\b", "2026-10-23T11:00:00Z", "what was it?"),
         )
         .unwrap();
-        assert_eq!(k.ingest(&b, Format::Claude, None, project, NOW).unwrap(), 1);
+        assert_eq!(k.ingest(&b, None, project, NOW).unwrap(), 1);
         let kept: Vec<&Chunk> = k.store.chunks().map(|(_, c)| c).collect();
         assert_eq!(kept.len(), 2);
         assert_eq!(kept[0].project, r"c:\a");

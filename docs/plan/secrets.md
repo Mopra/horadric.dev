@@ -82,8 +82,6 @@ Horadric hands the value to the one program that needs it.
   asked for gets a few lines joined into its `--append-system-prompt`:
   the names (never the values), the `secret run` form, never to print,
   write or pass a secret on in any other way, and the `--on-secret` wait.
-  The CLI is the same for Codex and Grok Build, since it is a program they
-  run like any other.
 
 **What it does not protect against.** DPAPI opens for any program running
 as this user, so malware already on the machine can read `secrets.dat`
