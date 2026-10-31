@@ -19,10 +19,13 @@ own at low priority instead of a thread per core (decided 2026-10-30):
 Hugging Face's pure Rust ML crates, no DLL to ship and no service that
 must be running, and the tokenizer is the one the models were trained
 with (writing either is not the project), and in `horadric-link`, for
-a Linux node on the relay, `ring`, `p256`, `rustls`, `webpki-roots`
+a Linux node and the Mac on the relay, `ring`, `p256`, `rustls`, `webpki-roots`
 and `tungstenite`: the AES-GCM, ECDH, TLS and WebSocket that Windows
 has built in and Linux does not (writing crypto is not the project
-either). Windows keeps CNG and WinHTTP; the crate is used there only
+either; the Mac has CommonCrypto but no ECDH a stored key loads into, and
+one crate for both unix machines beats two, decided 2026-11-01).
+`serde_json` is a plain dependency there since its relay link reads the
+relay's frames. Windows keeps CNG and WinHTTP; the crate is used there only
 by a test that holds the two to the same bytes. `p256` has its `ecdsa`
 feature too, for the signatures a brother's word carries (decided
 2026-10-25), which brings `ecdsa`, `rfc6979`, `sha2` and `signature`.

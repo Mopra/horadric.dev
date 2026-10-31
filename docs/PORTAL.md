@@ -419,7 +419,8 @@ watches, types into and answers it unchanged.
 - `input` of a Folio is read as keys, as Claude Code's own prompt reads
   them. A message of one digit, with nothing typed before it, picks
   that choice of what waits. Other text is typed into a draft. Enter
-  (``) sends the draft as a prompt, folded into the turn running when
+  (`
+`) sends the draft as a prompt, folded into the turn running when
   there is one; while a request waits, the draft is the answer's words
   instead (a permission denied with them as the reason, a question
   answered with them one line a question, a plan sent back with them),
@@ -1060,3 +1061,51 @@ holds that id under that very key shows the node as that brother: one
 cluster, one tray line. The relay link is preferred; the `ssh` link waits
 ready behind it and serves only while the relay link is down. Two
 brothers that share a name are shown with the start of their keys.
+
+## Protocol v3: a brother's files
+
+Added in 0.39. Between linked brothers only; a phone's are ignored. Read
+only, so a brother that may only watch is answered too.
+
+- `{"t":"tree","project"}`, `project` a path from the machine's own
+  `projects`. The answer is
+  `{"t":"tree","project","git":true,"files":[..],"changes":[[path,letter]],"cut"}`:
+  every file git lists in the project folder (tracked, or untracked and
+  not ignored), relative to it with forward slashes, and each changed
+  file with the letter its files tile shows (`M A D R U C`). At most
+  20,000 files and 640 KB of paths, `cut` true when more were left out.
+  A project outside git answers `"git":false` and no files.
+- `{"t":"read","project","path"}`, `path` from that tree. The answer is
+  `{"t":"file","project","path","text","cut"}`, at most 512 KB cut at the
+  end of a line. A path that is absolute, holds `..`, `.`, `\`, `:` or
+  an empty part, or that git does not list (an ignored `.env`, a file
+  made up) answers `{"t":"error","for":"read","project","path","text"}`,
+  as does a file that is not UTF-8 text. A project not on the machine's
+  tiles answers the same error, `"for":"tree"` for a tree.
+- A session entry in `sessions` carries `"worktree":true` when the
+  session works in a worktree of its own. A brother asks such a session's
+  `changes` (above, "what a session changed") to show its `+12 −3` on
+  its tile, and `diff` for a file picked from its tile menu.
+- A client asks again only after the brother's sessions moved on (phase,
+  line or since changed), at most every 3 seconds per project or
+  session, one ask at a time, given up after 30 seconds unanswered. A
+  machine older than this ignores both asks and its tiles show no files.
+
+## Proposed: teams
+
+Not on the relay yet: what a relay grouping a WorkOS organization's
+people into one brotherhood would add, and what a machine already does
+with it. The relay, which alone sees whose login each machine is, marks
+a machine signed in as another person of the same organization with
+`"kin":"team"`, in its `brothers` list entries and on the `join` and
+`link` frames. A machine keeps the ids it was told in `team.json` beside
+`standing.json`, and never drops one, so a relay rolled back cannot give
+a teammate the rights of the human's own machines. A teammate's machine
+joins with the six digit code as any brother does, then:
+
+- it only watches this machine (its "Can control this PC" starts off);
+- no lore goes to it and none is taken from it, whatever that switch
+  says, since the lore holds conversations word for word.
+
+A machine the relay does not mark is the human's own, so a relay without
+teams changes nothing.
