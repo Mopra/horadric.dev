@@ -7,14 +7,14 @@
 //! keys, the `brothers` list a phone learns the others from, and whether
 //! a phone paired here was forgotten by word.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde_json::{json, Value};
 
 use crate::brotherhood::{Brother, Roster};
 use crate::joining::{public_of, Crypto};
 use crate::mesh::Held;
-use crate::portal::{b64url, phone_key, unb64url};
+use crate::portal::{b64url, fingerprint, phone_key, unb64url};
 use crate::said::What;
 
 /// A phone the word serves, with the key this machine shares with it.
@@ -142,6 +142,151 @@ pub fn paired_message(t: &str, phone: &str, me: &str, private: &[u8; 96]) -> Val
     })
 }
 
+/// The phone channels of a machine that pairs no phones but serves those
+/// the word vouches for: a Linux node. A PC keeps its own, with pairing.
+#[derive(Default)]
+pub struct Chans {
+    /// Each phone channel the relay opened, and once a frame opened with a
+    /// served phone's key, which phone and key.
+    chans: HashMap<u32, Option<(String, [u8; 32])>>,
+    keys: Keys,
+    served: Vec<Keyed>,
+    /// The channels whose phone said hello, so it hears the brothers.
+    greeted: HashSet<u32>,
+    /// The `brothers` message each was sent last, by fingerprint.
+    told: HashMap<u32, u64>,
+}
+
+/// What a phone's frame comes to.
+#[derive(Debug, PartialEq)]
+pub enum Heard {
+    /// Nothing: a channel the relay never opened, or no served key opens
+    /// it.
+    Nothing,
+    /// A message for the server, from phone `id`.
+    Asked { id: String, msg: Value },
+    /// The phone asked to be forgotten, by the public key it was vouched
+    /// for under: the caller signs it, then [`Chans::look`] cuts it off.
+    Forget { id: String, public: String },
+}
+
+impl Chans {
+    pub fn open(&mut self, ch: u32) {
+        self.chans.insert(ch, None);
+    }
+
+    /// True when `ch` was a phone's.
+    pub fn close(&mut self, ch: u32) -> bool {
+        self.greeted.remove(&ch);
+        self.told.remove(&ch);
+        self.chans.remove(&ch).is_some()
+    }
+
+    /// Opens a frame on `ch`: with the key of the phone it is known as,
+    /// or on a channel not known yet with each served phone's key.
+    pub fn frame(&mut self, ch: u32, sealed: &[u8], crypto: &dyn Crypto) -> Heard {
+        let Some(who) = self.chans.get_mut(&ch) else {
+            return Heard::Nothing;
+        };
+        let read = |key: &[u8; 32]| -> Option<Value> {
+            serde_json::from_slice(&crypto.open_bound(key, sealed, &[])?).ok()
+        };
+        let (id, msg) = match who {
+            Some((id, key)) => match read(key) {
+                Some(msg) => (id.clone(), msg),
+                None => return Heard::Nothing,
+            },
+            None => {
+                let found = self
+                    .served
+                    .iter()
+                    .find_map(|p| Some((p.id.clone(), p.key, read(&p.key)?)));
+                let Some((id, key, msg)) = found else {
+                    return Heard::Nothing;
+                };
+                *who = Some((id.clone(), key));
+                (id, msg)
+            }
+        };
+        match msg["t"].as_str() {
+            Some("forget") => {
+                let public = self
+                    .served
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.public.clone())
+                    .unwrap_or_default();
+                Heard::Forget { id, public }
+            }
+            // Pairing and upgrading are for the brother a phone paired
+            // with; this machine pairs none.
+            Some("pair") | Some("upgrade") => Heard::Nothing,
+            t => {
+                if t == Some("hello") {
+                    self.greeted.insert(ch);
+                    self.told.remove(&ch);
+                }
+                Heard::Asked { id, msg }
+            }
+        }
+    }
+
+    /// `msg` sealed for the phone on `ch`, None when no key opened it yet.
+    pub fn seal(&self, ch: u32, msg: &Value, crypto: &dyn Crypto) -> Option<Vec<u8>> {
+        let (_, key) = self.chans.get(&ch)?.as_ref()?;
+        Some(crypto.seal_bound(key, msg.to_string().as_bytes(), &[]))
+    }
+
+    /// Takes the phones `h` serves now. Each channel of a phone it no
+    /// longer serves is told `unpaired`, sealed, and is nobody from then
+    /// on: those are answered, with the channel, for the caller to send
+    /// and to tell the server of.
+    pub fn look(
+        &mut self,
+        h: &Held,
+        me: &str,
+        private: Option<&[u8; 96]>,
+        crypto: &dyn Crypto,
+    ) -> Vec<(u32, Vec<u8>)> {
+        self.served = match private {
+            Some(private) => self.keys.served(h, me, private, crypto),
+            None => Vec::new(),
+        };
+        let unpaired = json!({"t": "unpaired"}).to_string();
+        let mut cut = Vec::new();
+        for (&ch, who) in self.chans.iter_mut() {
+            let Some((id, key)) = who else {
+                continue;
+            };
+            if self.served.iter().any(|p| &p.id == id && p.key == *key) {
+                continue;
+            }
+            cut.push((ch, crypto.seal_bound(key, unpaired.as_bytes(), &[])));
+            *who = None;
+            self.greeted.remove(&ch);
+            self.told.remove(&ch);
+        }
+        cut
+    }
+
+    /// `brothers` sealed for each greeted phone that has not heard this
+    /// list yet.
+    pub fn tell(&mut self, brothers: &Value, crypto: &dyn Crypto) -> Vec<(u32, Vec<u8>)> {
+        let print = fingerprint(brothers);
+        let plain = brothers.to_string();
+        let mut out = Vec::new();
+        for &ch in &self.greeted {
+            let Some(Some((_, key))) = self.chans.get(&ch) else {
+                continue;
+            };
+            if self.told.insert(ch, print) != Some(print) {
+                out.push((ch, crypto.seal_bound(key, plain.as_bytes(), &[])));
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +323,64 @@ mod tests {
         assert_eq!(list[1]["key"], "kb");
         assert_eq!(list[1]["mark"], 0x123456);
         assert!(list[0].get("mark").is_none());
+    }
+
+    use crate::joining::fake::Fake;
+
+    fn chans_serving(id: &str, key: [u8; 32]) -> Chans {
+        let mut c = Chans::default();
+        c.served.push(Keyed {
+            id: id.into(),
+            name: "Phone".into(),
+            public: "PUB".into(),
+            key,
+        });
+        c
+    }
+
+    #[test]
+    fn a_phone_channel_is_known_by_the_served_key_that_opens_it() {
+        let f = Fake::new();
+        let mut c = chans_serving("p", [5; 32]);
+        let hello = f.seal_bound(&[5; 32], br#"{"t":"hello","v":3}"#, &[]);
+        // A channel the relay never opened is nobody's.
+        assert_eq!(c.frame(1, &hello, &f), Heard::Nothing);
+        c.open(1);
+        let other = f.seal_bound(&[6; 32], br#"{"t":"hello"}"#, &[]);
+        assert_eq!(c.frame(1, &other, &f), Heard::Nothing);
+        let Heard::Asked { id, msg } = c.frame(1, &hello, &f) else {
+            panic!("the served key opens it");
+        };
+        assert_eq!((id.as_str(), msg["v"].as_u64()), ("p", Some(3)));
+        let back = c.seal(1, &json!({"t": "x"}), &f).unwrap();
+        assert!(f.open_bound(&[5; 32], &back, &[]).is_some());
+        // Greeted, it hears the brothers once a list.
+        let list = json!({"t": "brothers", "list": []});
+        assert_eq!(c.tell(&list, &f).len(), 1);
+        assert!(c.tell(&list, &f).is_empty());
+        let forget = f.seal_bound(&[5; 32], br#"{"t":"forget"}"#, &[]);
+        assert_eq!(
+            c.frame(1, &forget, &f),
+            Heard::Forget {
+                id: "p".into(),
+                public: "PUB".into()
+            }
+        );
+        assert!(c.close(1));
+        assert!(!c.close(1));
+    }
+
+    #[test]
+    fn a_phone_the_word_stops_serving_is_told_unpaired_and_cut_off() {
+        let f = Fake::new();
+        let mut c = chans_serving("p", [5; 32]);
+        c.open(1);
+        c.frame(1, &f.seal_bound(&[5; 32], br#"{"t":"hello"}"#, &[]), &f);
+        let cut = c.look(&Held::default(), "me", None, &f);
+        assert_eq!(cut.len(), 1);
+        let said = f.open_bound(&[5; 32], &cut[0].1, &[]).unwrap();
+        assert_eq!(said, br#"{"t":"unpaired"}"#);
+        assert_eq!(c.seal(1, &json!({}), &f), None);
+        assert!(c.tell(&json!({"t": "brothers"}), &f).is_empty());
     }
 }
