@@ -170,6 +170,14 @@ pub fn arrive(elapsed: Duration, length: Duration) -> (f32, f32) {
     (t, 1.0 - t)
 }
 
+/// Fast start, a little past the mark, then back onto it: a key that pops
+/// up. The overshoot is a few percent, felt more than seen.
+pub fn ease_out_back(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0) - 1.0;
+    let c = 1.2;
+    1.0 + (c + 1.0) * t.powi(3) + c * t.powi(2)
+}
+
 /// Soft at both ends.
 pub fn ease_in_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);

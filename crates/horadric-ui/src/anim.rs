@@ -288,6 +288,11 @@ impl Glow {
             .map_or(0.0, |(_, v)| *v)
     }
 
+    /// Whether `which` is on its way up rather than down.
+    pub fn rising(&self, which: Hit) -> bool {
+        self.hot == Some(which)
+    }
+
     /// Whether a button is still on its way, so the frame after needs
     /// drawing.
     pub fn moving(&self) -> bool {
