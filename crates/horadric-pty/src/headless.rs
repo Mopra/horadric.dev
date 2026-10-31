@@ -68,6 +68,10 @@ const STDERR_WAIT: Duration = Duration::from_millis(500);
 pub struct Options {
     /// The `claude.exe` to run. Found with [`claude_exe`] when None.
     pub program: Option<PathBuf>,
+    /// Before [`FLAGS`], for a `program` that starts claude.exe itself, as
+    /// `horadric setup` does once a new worktree's setup has run.
+    #[serde(default)]
+    pub before: Vec<String>,
     /// After [`FLAGS`] and `--resume`, such as `--model=sonnet`.
     pub args: Vec<String>,
     /// Added to the environment, replacing any value it had.
@@ -115,6 +119,7 @@ impl Headless {
         };
         let mut command = Command::new(program);
         command
+            .args(&options.before)
             .args(arguments(resume, &options.args))
             .current_dir(cwd)
             .stdin(Stdio::piped())

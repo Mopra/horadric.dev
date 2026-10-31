@@ -27,7 +27,7 @@ use horadric_core::portal::{b64url, unb64url, Config, Kind, Paired};
 use horadric_core::serving::{answers, Job, Out, Running, Serve, Server};
 use horadric_core::webpush;
 use horadric_core::worktree::Worktree;
-use horadric_core::Phase;
+use horadric_core::{Phase, Session};
 use serde_json::{json, Value};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, PostMessageW, SetTimer};
@@ -290,7 +290,13 @@ impl App {
                     .filter(|s| portal::served(s))
                     .map(|s| {
                         let paused = self.paused.contains_key(&s.id);
-                        portal::session_entry(s, &project_name(&project_key(s)), paused)
+                        let s = self.folio_asking(s);
+                        let mut entry =
+                            portal::session_entry(&s, &project_name(&project_key(&s)), paused);
+                        if self.folios.contains_key(&s.id) {
+                            entry["folio"] = json!(true);
+                        }
+                        entry
                     })
                     .collect()
             })
@@ -327,8 +333,9 @@ impl App {
             .ok()
             .and_then(|r| {
                 let s = r.all().filter(|s| portal::served(s)).find(|s| s.id == id)?;
-                let project = project_name(&project_key(s));
-                Some(webpush::payload(&pc, s, &project, waiting).to_string())
+                let s = self.folio_asking(s);
+                let project = project_name(&project_key(&s));
+                Some(webpush::payload(&pc, &s, &project, waiting).to_string())
             })
             .unwrap_or_default()
             .into_bytes()
@@ -381,6 +388,26 @@ impl App {
         Ok(title)
     }
 
+    /// A Folio's pane, when `id` is one. A hireling's read only Folio is
+    /// in `watches`, never here.
+    fn served_folio(&self, id: &str) -> Option<&Arc<crate::console::Console>> {
+        self.folios.get(id)
+    }
+
+    /// `s` with the ask its Folio waits on, which headless never posts as
+    /// a hook, so a phone's card and a push answer it as a terminal's.
+    fn folio_asking<'a>(&self, s: &'a Session) -> std::borrow::Cow<'a, Session> {
+        let asks = s.phase.asks() && self.served_folio(&s.id).is_some();
+        match asks.then(|| crate::folio::afar::ask(&s.id, s.since)).flatten() {
+            Some(ask) => {
+                let mut s = s.clone();
+                s.ask = Some(ask);
+                std::borrow::Cow::Owned(s)
+            }
+            None => std::borrow::Cow::Borrowed(s),
+        }
+    }
+
     /// A session's last reply: what its last Stop hook said, or, when this
     /// UI did not hear that one (it started since), the transcript's.
     fn portal_reply(&self, id: &str) -> Option<String> {
@@ -418,7 +445,7 @@ impl App {
                 .project_dir(&key)
                 .ok_or_else(|| format!("{project} is not there any more."))?;
             trust_for_phone(&dir);
-            return self.start(None, dir, Vec::new());
+            return self.start_claude(dir);
         }
         let offered = self
             .portal_folders()
@@ -430,7 +457,7 @@ impl App {
         }
         let dir = PathBuf::from(project);
         trust_for_phone(&dir);
-        self.start(None, dir, Vec::new())
+        self.start_claude(dir)
     }
 
     /// The folders projects live in, each with its subfolders: the
@@ -511,7 +538,7 @@ impl App {
         git_init(&dir);
         trust_for_phone(&dir);
         let project = dir.to_string_lossy().into_owned();
-        let id = self.start(None, dir, Vec::new())?;
+        let id = self.start_claude(dir)?;
         Ok((project, id))
     }
 }
@@ -698,7 +725,7 @@ impl Serve for Here<'_> {
         if self.foreign(id) {
             return Running::Elsewhere;
         }
-        if let Some(c) = self.0.consoles.get(id) {
+        if let Some(c) = self.0.consoles.get(id).or_else(|| self.0.served_folio(id)) {
             Running::Here(Arc::as_ptr(c) as usize as u64)
         } else if self.0.paused.contains_key(id) {
             Running::Paused
@@ -708,13 +735,18 @@ impl Serve for Here<'_> {
     }
 
     fn input(&mut self, id: &str, data: &str) {
-        if let Some(c) = self.0.consoles.get(id) {
+        if self.0.served_folio(id).is_some() {
+            crate::folio::afar::typed(id, data);
+        } else if let Some(c) = self.0.consoles.get(id) {
             c.note_typed_from_afar();
             c.write(data.as_bytes().to_vec());
         }
     }
 
     fn screen(&self, id: &str) -> Option<Value> {
+        if self.0.served_folio(id).is_some() {
+            return folio_screen(id);
+        }
         let console = self.0.consoles.get(id)?;
         let s = console.screen.lock().ok()?;
         let screen = portal::screen_text(&s.term);
@@ -729,15 +761,24 @@ impl Serve for Here<'_> {
     }
 
     fn size(&self, id: &str) -> Option<(u16, u16)> {
+        if self.0.served_folio(id).is_some() {
+            return Some(crate::folio::afar::size(id));
+        }
         let size = self.0.consoles.get(id)?.size();
         Some((size.cols, size.rows))
     }
 
     fn output_since(&self, id: &str, at: u64) -> Option<(Vec<u8>, u64)> {
+        if self.0.served_folio(id).is_some() {
+            return crate::folio::afar::output_since(id, at);
+        }
         self.0.consoles.get(id)?.raw_since(at)
     }
 
     fn output_replay(&self, id: &str) -> (u64, Vec<u8>) {
+        if self.0.served_folio(id).is_some() {
+            return crate::folio::afar::output_replay(id);
+        }
         self.0
             .consoles
             .get(id)
@@ -749,6 +790,10 @@ impl Serve for Here<'_> {
     }
 
     fn hold_size(&mut self, id: &str, size: Option<(u16, u16)>) {
+        if self.0.served_folio(id).is_some() {
+            crate::folio::afar::hold_size(id, size);
+            return;
+        }
         let Some(c) = self.0.consoles.get(id) else {
             return;
         };
@@ -854,6 +899,7 @@ impl Serve for Here<'_> {
         }
         let app = &mut *self.0;
         let known = app.consoles.contains_key(id)
+            || app.folios.contains_key(id)
             || app.paused.contains_key(id)
             || app
                 .shared
@@ -927,6 +973,23 @@ fn fresh_s() -> String {
 }
 
 /// A time in microseconds since 1970, the unit `size_owner` compares.
+/// The screen message of a Folio: its conversation as plain lines, the
+/// cursor after the last.
+fn folio_screen(id: &str) -> Option<Value> {
+    let lines = crate::folio::afar::lines(id)?;
+    let (cols, rows) = crate::folio::afar::size(id);
+    let cursor = (
+        lines.len().saturating_sub(1),
+        lines.last().map_or(0, |l| l.chars().count()),
+    );
+    let screen = portal::Screen {
+        styles: vec![Vec::new(); lines.len()],
+        lines,
+        cursor,
+    };
+    Some(portal::screen_message(id, cols as usize, rows as usize, &screen))
+}
+
 fn micros(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)

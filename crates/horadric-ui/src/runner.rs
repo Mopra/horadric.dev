@@ -819,9 +819,8 @@ impl App {
     /// it holds an item, how to read and add to it otherwise), about its own
     /// worktree when it has one and about the project's hosts when it has
     /// some, as one system prompt since Claude
-    /// Code takes only one, and, the first time only, the item as its
-    /// prompt. Last, since the prompt is positional. Both are read as they
-    /// are now, so a resume sees the hosts of today.
+    /// Code takes only one. Read as it is now, so a resume sees the hosts
+    /// of today. The item as its first prompt is [`App::claude_start`]'s.
     pub(super) fn task_args(&mut self, id: &str, program: &Path, cwd: &Path) -> Vec<String> {
         let holds = self.holds_quest(id);
         let batch = horadric_pty::is_batch(program);
@@ -894,14 +893,6 @@ impl App {
             out.push("--append-system-prompt".into());
             // `cmd.exe` ends a command line at a newline.
             out.push(system.join(if batch { " " } else { "\n\n" }));
-        }
-        if let Some(prompt) = self.tasks.prompts.remove(id) {
-            // `cmd.exe` ends a command line at a newline.
-            out.push(if batch {
-                tasks::one_line(&prompt)
-            } else {
-                prompt
-            });
         }
         out
     }

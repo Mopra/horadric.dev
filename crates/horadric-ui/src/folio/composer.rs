@@ -411,6 +411,12 @@ pub(super) fn tend(id: &str, chat: &mut Chat) {
         let line = chat.folio.initialize();
         write(chat, &line);
     }
+    // The session's orders, as a terminal's went in on its command line.
+    if !chat.folio.busy {
+        if let Some(text) = chat.first.take() {
+            deliver(chat, &text, &[]);
+        }
+    }
     if chat.folio.permission_mode() == "bypassPermissions" {
         chat.input.bypass = true;
     }
@@ -520,11 +526,23 @@ pub(super) fn stop(chat: &mut Chat) -> bool {
 /// stops the turn for it.
 pub(super) fn send(chat: &mut Chat, now: bool) {
     // While the history loads, a prompt would land above it.
-    if chat.ended || chat.to_terminal || chat.hosted.is_none() || chat.loading.is_some() {
+    if chat.to_terminal || chat.loading.is_some() {
         return;
     }
     let text = chat.input.ed.expanded().trim().to_string();
     if text.is_empty() && chat.input.images.is_empty() {
+        return;
+    }
+    // Before the session's own checks: a login is what one that ended
+    // for want of it needs.
+    if let Some(name) = native_command(&text) {
+        chat.input.ed.clear();
+        chat.input.menu = None;
+        chat.input.save();
+        run_native(chat, name);
+        return;
+    }
+    if chat.ended || chat.hosted.is_none() {
         return;
     }
     if let Some(name) = terminal_command(&text) {
@@ -568,6 +586,24 @@ fn to_terminal(chat: &mut Chat, command: &str) {
                 "{command} runs in the terminal. Open it there once the work rests."
             ));
         }
+    }
+}
+
+/// The command a prompt runs, when it is one the Folio runs itself.
+fn native_command(text: &str) -> Option<&'static str> {
+    let name = text.strip_prefix('/')?.split_whitespace().next()?;
+    picker::NATIVE.iter().map(|(n, _)| *n).find(|n| *n == name)
+}
+
+/// Runs `/login` or `/logout` for this session, without its CLI.
+fn run_native(chat: &mut Chat, name: &str) {
+    let Some(id) = chat.input.key.clone() else {
+        return;
+    };
+    chat.input.notice = None;
+    match name {
+        "login" => super::sign_in::log_in(chat, &id, None),
+        _ => super::sign_in::log_out(chat, &id),
     }
 }
 
@@ -723,6 +759,11 @@ fn pick(chat: &mut Chat, how: How) -> bool {
             if item.terminal {
                 chat.input.ed.replace(menu.start, caret, "");
                 to_terminal(chat, &item.label);
+                return true;
+            }
+            if let Some(name) = native_command(&format!("/{}", item.value)) {
+                chat.input.ed.replace(menu.start, caret, "");
+                run_native(chat, name);
                 return true;
             }
             let put = if item.value.starts_with('@') {

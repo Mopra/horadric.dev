@@ -99,6 +99,12 @@ pub(super) enum Act {
     /// A text field takes the keyboard.
     Field(String),
     Todos,
+    /// Sign-in card, by its block: log in, open its page, send the code
+    /// in its field, close it.
+    SignIn(usize),
+    SignInPage(usize),
+    SignInCode(usize),
+    SignInCancel(usize),
     /// More of the conversation above what shows.
     Earlier,
     FindPrev,
@@ -300,7 +306,7 @@ fn hash_field(h: &mut DefaultHasher, st: &State, id: &str) {
 }
 
 /// What block `b` is built from: when this changes, it is built again.
-fn stamp(b: &Block, open: bool, st: &State) -> u64 {
+fn stamp(i: usize, b: &Block, open: bool, st: &State) -> u64 {
     let mut h = DefaultHasher::new();
     open.hash(&mut h);
     std::mem::discriminant(b).hash(&mut h);
@@ -362,6 +368,10 @@ fn stamp(b: &Block, open: bool, st: &State) -> u64 {
             ..
         } => (*duration_ms, *ending as u8).hash(&mut h),
         Block::Notice(n) => format!("{n:?}").hash(&mut h),
+        Block::SignIn(card) => {
+            card.hash(&mut h);
+            hash_field(&mut h, st, &cards::code_field(i));
+        }
     }
     h.finish()
 }
@@ -1176,7 +1186,7 @@ impl View {
         }
         for (i, b) in folio.blocks.iter().enumerate().skip(from) {
             let open = chat.open.contains(&i);
-            let stamp = stamp(b, open, st);
+            let stamp = stamp(i, b, open, st);
             if blocks[i].as_ref().is_some_and(|x| x.stamp == stamp) {
                 continue;
             }
@@ -1196,6 +1206,7 @@ impl View {
                 Block::Ask { .. } => cards::ask(&ctx, b, st, lw),
                 Block::Question { .. } => cards::question(&ctx, b, st, lw),
                 Block::Plan { .. } => cards::plan(&ctx, b, st, lw),
+                Block::SignIn(_) => cards::sign_in(&ctx, i, b, st, lw),
                 Block::Footer { .. } => ctx.footer(b, lw),
                 Block::Notice(n) => ctx.notice(n, lw),
                 Block::Raw(t) => ctx.raw(i, t, open, lw),
