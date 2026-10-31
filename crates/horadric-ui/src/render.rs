@@ -137,8 +137,6 @@ const RUNE_CARVE: Duration = Duration::from_millis(1800);
 const RUNE_SETTLE: f32 = 2.0;
 /// A hireling's rune on the tile, DIPs tall, and its cut.
 const RUNE_H: f32 = 7.0;
-/// The two runes cut into the ends of the New chat key under the cursor.
-const BAY_RUNES: (usize, usize) = (3, 8);
 const RUNE_STROKE: f32 = 1.1;
 
 /// The Folio's button, a chat bubble.
@@ -349,50 +347,39 @@ impl Scene<'_> {
     /// How a bay button draws this frame. Windows' animation setting off,
     /// it is lit or not, as the cursor says, and holds still.
     fn bay(&self, which: Hit) -> Bay {
-        let (lit, wiggle, carved) = match self.button(which) {
-            Button::Pressed => (0.0, 0.0, 0.0),
-            Button::Hover if !self.ambient => (1.0, 0.0, 1.0),
-            _ if !self.ambient => (0.0, 0.0, 0.0),
+        let (rise, dust) = match self.button(which) {
+            Button::Pressed => (0.0, None),
+            Button::Hover if !self.ambient => (1.0, None),
+            _ if !self.ambient => (0.0, None),
             _ => (
-                self.glow.of(which),
-                self.glow.wiggle(which),
-                self.glow.carved(which),
+                crate::anim::heft(self.glow.of(which), self.glow.rising(which)),
+                self.glow.dust(which),
             ),
         };
-        Bay {
-            lit,
-            wiggle,
-            carved,
-            accent: self.accent,
-        }
+        Bay { rise, dust }
     }
 }
 
-/// A bay button's moment: how far through lighting (0 to 1, linear), how
-/// far its glyph is swung in degrees, how much of the runes on its key are
-/// cut, and the project's colour they are cut in.
+/// A bay button's moment: how high its key stands (1 at rest under the
+/// cursor, a touch more as it carries past), and how far the dust it shook
+/// loose has fallen.
 #[derive(Clone, Copy)]
 struct Bay {
-    lit: f32,
-    wiggle: f32,
-    carved: f32,
-    accent: Color,
+    rise: f32,
+    dust: Option<f32>,
 }
 
+/// How far a bay's key lifts off the plate when fully up, in DIPs.
+const BAY_LIFT: f32 = 1.5;
+
 impl Bay {
-    /// The key rises first.
-    fn rise(&self) -> f32 {
-        motion::ease_out((self.lit / 0.65).min(1.0))
-    }
-
-    /// The runes show once it has started rising, and go first on the way
-    /// back.
-    fn lock(&self) -> f32 {
-        motion::ease_out(((self.lit - 0.3) / 0.7).clamp(0.0, 1.0))
-    }
-
     fn ink(&self) -> Color {
-        theme::text_dim().mix(theme::text(), self.rise())
+        theme::text_dim().mix(theme::text(), self.rise.clamp(0.0, 1.0))
+    }
+
+    /// Where what is on the key is drawn, lifted with it.
+    fn face(&self, r: &Rect) -> Rect {
+        Rect::new(r.x, r.y - BAY_LIFT * self.rise.max(0.0), r.w, r.h)
     }
 }
 
@@ -4045,7 +4032,7 @@ impl Painter<'_> {
     /// session.
     unsafe fn add(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Bay, glyph: char) {
         self.bay_slot(gpu, m, r, b);
-        self.swung_icon(gpu, b.ink(), glyph, *r, b.wiggle);
+        self.icon(&gpu.icon_small, b.ink(), glyph, b.face(r));
     }
 
     /// A glyph with words beside it, the pair centred in the bay, for the
@@ -4061,27 +4048,15 @@ impl Painter<'_> {
     ) {
         let ink = b.ink();
         self.bay_slot(gpu, m, r, b);
+        let r = &b.face(r);
         let glyph_w = 12.0;
         let gap = 6.0;
         let label_w = self.measure(gpu, &gpu.small, label);
         let x = r.x + ((r.w - glyph_w - gap - label_w) / 2.0).max(0.0);
-        let at = Rect::new(x, r.y, glyph_w, r.h);
-        self.swung_icon(gpu, ink, glyph, at, b.wiggle);
+        self.icon(&gpu.icon_small, ink, glyph, Rect::new(x, r.y, glyph_w, r.h));
         let text_x = x + glyph_w + gap;
         let text = Rect::new(text_x, r.y, (r.x + r.w - text_x).max(0.0), r.h);
         self.text(&gpu.small, ink, label, text);
-        // A rune cut into each end of the key, the left one first, as if
-        // the button were inscribed for you as you reach for it.
-        let k = b.lock();
-        let inset = 16.0;
-        if k > 0.0 && r.w > 2.0 * (inset + 8.0) + label_w + glyph_w + gap {
-            let ink = b.accent.with_alpha(0.8 * k);
-            let cy = r.y + r.h / 2.0;
-            let first = (b.carved / 0.6).min(1.0);
-            let second = ((b.carved - 0.4) / 0.6).clamp(0.0, 1.0);
-            self.rune(BAY_RUNES.0, (r.x + inset, cy), 8.0, ink, first);
-            self.rune(BAY_RUNES.1, (r.right() - inset, cy), 8.0, ink, second);
-        }
     }
 
     /// A bay sunk into the plate, where something is yet to go, its edge
@@ -4096,29 +4071,46 @@ impl Painter<'_> {
         }
     }
 
-    /// A bay under the cursor, its key rising.
+    /// A bay under the cursor: its key lifted like a stone, and as it
+    /// lands at the top a little dust shaken from its underside, falling
+    /// past its foot and gone.
     unsafe fn bay_slot(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Bay) {
-        self.slot(gpu, m, r, b.rise());
-    }
-
-    /// A small glyph turned `degrees` about its middle.
-    unsafe fn swung_icon(&self, gpu: &Gpu, ink: Color, glyph: char, r: Rect, degrees: f32) {
-        if degrees == 0.0 {
-            self.icon(&gpu.icon_small, ink, glyph, r);
-            return;
+        let rise = b.rise.clamp(0.0, 1.0);
+        if rise < 1.0 {
+            self.sunk(gpu, r, m.tile_radius, theme::well());
+            self.dashed(gpu, m, r, 1.0 - rise);
         }
-        let (s, c) = degrees.to_radians().sin_cos();
-        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-        self.rt.SetTransform(&Matrix3x2 {
-            M11: c,
-            M12: s,
-            M21: -s,
-            M22: c,
-            M31: cx - cx * c + cy * s,
-            M32: cy - cx * s - cy * c,
-        });
-        self.icon(&gpu.icon_small, ink, glyph, r);
-        self.rt.SetTransform(&Matrix3x2::identity());
+        if b.rise > 0.0 {
+            let face = b.face(r);
+            self.key(gpu, &face, m.tile_radius, theme::surface(), 0.6 * b.rise, rise);
+        }
+        let Some(u) = b.dust else {
+            return;
+        };
+        // Across the foot of the key, some way in from the corners, each
+        // mote with its own drift and fall so they do not move as one.
+        const MOTES: [(f32, f32, f32); 6] = [
+            (0.12, -1.6, 1.0),
+            (0.27, -0.6, 0.8),
+            (0.41, 0.4, 1.15),
+            (0.6, -0.3, 0.9),
+            (0.76, 0.9, 1.05),
+            (0.9, 1.7, 0.85),
+        ];
+        let foot = r.y + r.h + 1.5;
+        let fade = (1.0 - u) * (1.0 - u);
+        for (along, drift, weight) in MOTES {
+            let x = r.x + r.w * along + drift * u * 2.0;
+            let y = foot + 7.0 * weight * u * u;
+            let e = D2D1_ELLIPSE {
+                point: Vector2 { X: x, Y: y },
+                radiusX: 0.75,
+                radiusY: 0.75,
+            };
+            self.brush
+                .SetColor(&color(theme::legend().with_alpha(0.55 * fade * weight.min(1.0))));
+            self.rt.FillEllipse(&e, self.brush);
+        }
     }
 
     /// The dashed outline of a bay.

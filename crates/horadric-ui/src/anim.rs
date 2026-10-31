@@ -15,19 +15,13 @@ use crate::motion::{
 use crate::layout::Hit;
 use crate::theme;
 
-/// How long a bay button takes to light: its key rising, then the
-/// brackets closing in on it. Staged, so a little longer than a fade.
-pub const BAY: Duration = Duration::from_millis(180);
-/// The glyph's one tap of a wiggle when the cursor arrives: how long after
-/// it starts, how long it rings, and how far it swings at first, in degrees.
-const WIGGLE_DELAY: Duration = Duration::from_millis(60);
-const WIGGLE: Duration = Duration::from_millis(420);
-const WIGGLE_SWING: f32 = 9.0;
-/// The runes cut into the key once it has risen: how long after the cursor
-/// arrives the first stroke goes in, and how long the cutting takes. Slow
-/// enough to see the hand at work.
-const CARVE_DELAY: Duration = Duration::from_millis(90);
-const CARVE: Duration = Duration::from_millis(380);
+/// How long a bay's key takes to rise: slower than a fade, since it is a
+/// stone being lifted.
+pub const BAY: Duration = Duration::from_millis(260);
+/// Dust shaken loose as the key lands at the top: how long after the
+/// cursor arrives it starts to fall, and how long it falls.
+const DUST_DELAY: Duration = Duration::from_millis(190);
+const DUST: Duration = Duration::from_millis(560);
 /// How fast a tile slides to a new place: half the way every this long.
 const SLIDE: Duration = Duration::from_millis(60);
 /// How fast a context bar finds a new level: half the way every this long.
@@ -306,27 +300,19 @@ impl Glow {
             .map_or(0.0, |(_, v)| *v)
     }
 
-    /// How far `which`'s glyph is swung this frame, in degrees: a tap
-    /// that rings down soon after the cursor arrives, and nothing as it
-    /// leaves.
-    pub fn wiggle(&self, which: Hit) -> f32 {
-        match (self.entered, self.last) {
-            (Some(at), Some(now)) if self.hot == Some(which) => {
-                wiggle_at(now.duration_since(at))
-            }
-            _ => 0.0,
-        }
+    /// Whether `which` is on its way up rather than down.
+    pub fn rising(&self, which: Hit) -> bool {
+        self.hot == Some(which)
     }
 
-    /// How much of `which`'s runes are cut, 0 to 1. Leaving, they stay
-    /// whole and fade with the rest.
-    pub fn carved(&self, which: Hit) -> f32 {
+    /// How far the dust shaken off `which` has fallen, 0 to 1, while it
+    /// falls. Only under the cursor: a stone set down sheds none.
+    pub fn dust(&self, which: Hit) -> Option<f32> {
         match (self.entered, self.last) {
             (Some(at), Some(now)) if self.hot == Some(which) => {
-                let t = now.duration_since(at).saturating_sub(CARVE_DELAY);
-                motion::ease_in_out(motion::progress(t, CARVE))
+                dust_at(now.duration_since(at))
             }
-            _ => 1.0,
+            _ => None,
         }
     }
 
@@ -334,7 +320,7 @@ impl Glow {
     /// drawing.
     pub fn moving(&self) -> bool {
         let target = |b: Hit| if Some(b) == self.hot { 1.0 } else { 0.0 };
-        let settled = (WIGGLE_DELAY + WIGGLE).max(CARVE_DELAY + CARVE);
+        let settled = DUST_DELAY + DUST;
         let ringing = match (self.entered, self.last) {
             (Some(at), Some(now)) => now.duration_since(at) < settled,
             _ => false,
@@ -343,17 +329,28 @@ impl Glow {
     }
 }
 
-/// A damped swing, `since` the cursor arrived: one and a half swings, each
-/// smaller than the last, then still.
-fn wiggle_at(since: Duration) -> f32 {
-    let Some(t) = since.checked_sub(WIGGLE_DELAY) else {
-        return 0.0;
-    };
-    let u = motion::progress(t, WIGGLE);
-    if u >= 1.0 {
-        return 0.0;
+fn dust_at(since: Duration) -> Option<f32> {
+    let t = since.checked_sub(DUST_DELAY)?;
+    let u = motion::progress(t, DUST);
+    (u < 1.0).then_some(u)
+}
+
+/// How high a bay's key stands, `lit` of the way through its fade. Going
+/// up it is a stone lifted: slow to start, a touch past the top as its
+/// weight carries it, then down onto its rest. Going down it just drops,
+/// gathering speed.
+pub fn heft(lit: f32, rising: bool) -> f32 {
+    let lit = lit.clamp(0.0, 1.0);
+    if !rising {
+        return lit * lit;
     }
-    WIGGLE_SWING * (u * 3.0 * std::f32::consts::PI).sin() * (1.0 - u).powi(2)
+    let up = motion::ease_in_out(lit / 0.8);
+    let carry = if lit > 0.6 {
+        0.07 * (std::f32::consts::PI * (lit - 0.6) / 0.4).sin()
+    } else {
+        0.0
+    };
+    up + carry
 }
 
 /// Whether a tile's lamp flashes for you: its pane is parked off the
@@ -845,11 +842,18 @@ mod tests {
     }
 
     #[test]
-    fn a_wiggle_rings_down_and_stops() {
-        assert_eq!(wiggle_at(Duration::ZERO), 0.0);
-        let early = wiggle_at(WIGGLE_DELAY + WIGGLE / 6);
-        let late = wiggle_at(WIGGLE_DELAY + WIGGLE * 5 / 6);
-        assert!(early.abs() > late.abs() && early > 0.0);
-        assert_eq!(wiggle_at(WIGGLE_DELAY + WIGGLE), 0.0);
+    fn a_lifted_key_carries_past_its_rest_and_settles() {
+        assert_eq!(heft(0.0, true), 0.0);
+        assert!(heft(0.85, true) > 1.0);
+        assert!((heft(1.0, true) - 1.0).abs() < 1e-5);
+        // Set down, it never goes above where it was.
+        assert!((0..=10).all(|i| heft(i as f32 / 10.0, false) <= 1.0));
+    }
+
+    #[test]
+    fn dust_falls_once_after_the_key_lands() {
+        assert_eq!(dust_at(Duration::ZERO), None);
+        assert!(dust_at(DUST_DELAY + DUST / 2).is_some());
+        assert_eq!(dust_at(DUST_DELAY + DUST), None);
     }
 }
