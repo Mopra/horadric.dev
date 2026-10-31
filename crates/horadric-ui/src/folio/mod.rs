@@ -52,9 +52,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use horadric_core::folio::backlog::{self, Kept};
 use horadric_core::folio::Folio;
 use horadric_pty::headless::Options;
-use horadric_pty::headless_host::{Event, Hosted};
+use horadric_pty::headless_host::{Event, HostInfo, Hosted};
 use serde::{Deserialize, Serialize};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -423,6 +424,89 @@ fn load_history(chat: &mut Chat, path: PathBuf, limit: u64) {
     });
 }
 
+/// A reattached Folio's events. The backlog is read into a Folio right
+/// here, on the reader thread: a long session's runs to tens of MB, and
+/// reading several on the UI thread stalled the window at start. The
+/// Folio goes in `slot`, which [`drain`] waits for, and what follows the
+/// backlog goes on to `live` as it comes.
+fn catch_up(
+    info: &HostInfo,
+    slot: Arc<Mutex<Option<Folio>>>,
+    mut live: impl FnMut(Event) + Send + 'static,
+) -> impl FnMut(Event) + Send + 'static {
+    let tag: Tag = serde_json::from_str(&info.tag).unwrap_or_default();
+    let dir = info.cwd.clone();
+    let conversation = info.conversation.clone();
+    let mut kept: Option<Vec<Kept>> = Some(Vec::new());
+    let mut dropped = false;
+    move |event| {
+        let Some(lines) = kept.as_mut() else {
+            return live(event);
+        };
+        match event {
+            Event::Out(l) => lines.push(Kept::Out(l)),
+            Event::Sent(l) => lines.push(Kept::Sent(l)),
+            Event::Dropped(n) => {
+                eprintln!("horadric: a Folio's host lost its {n} oldest lines");
+                dropped = true;
+            }
+            Event::Live | Event::End(_) => {
+                let lines = kept.take().unwrap_or_default();
+                let folio = read_backlog(&dir, &tag, conversation.as_deref(), &lines, dropped);
+                if let Ok(mut s) = slot.lock() {
+                    *s = Some(folio);
+                }
+                live(event);
+            }
+        }
+    }
+}
+
+/// The Folio a host's backlog `lines` show, with the transcript before
+/// them: up to where a resumed session began, or, when the backlog lost
+/// its start (`dropped`), the whole of it, of the conversation the host
+/// names or else the backlog does.
+fn read_backlog(
+    dir: &Path,
+    tag: &Tag,
+    conversation: Option<&str>,
+    lines: &[Kept],
+    dropped: bool,
+) -> Folio {
+    let read = |path: &Path, limit: u64| {
+        let mut bytes = Vec::new();
+        if let Ok(file) = std::fs::File::open(path) {
+            let _ = file.take(limit).read_to_end(&mut bytes);
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let conversation = (conversation.map(str::to_string))
+        .or_else(|| backlog::conversation_in(lines))
+        .or_else(|| tag.resume.clone());
+    // After a `/clear` in the backlog what shows is all in it anyway.
+    if dropped && !backlog::cleared_in(lines) {
+        if let Some((path, len)) = (conversation.as_deref()).and_then(|c| history_file(dir, c)) {
+            // An undo's point holds until the conversation goes on past it.
+            let at = tag.at.as_deref().filter(|_| len <= tag.history);
+            match Folio::from_transcript_and_backlog(&read(&path, len), at, lines) {
+                Some(f) => return f,
+                None => eprintln!("horadric: a Folio's backlog does not line up with its transcript"),
+            }
+        }
+    }
+    let mut folio = match tag.resume.as_deref().and_then(|c| history_file(dir, c)) {
+        Some((path, _)) => {
+            Folio::from_transcript_at(&read(&path, tag.history), tag.at.as_deref())
+        }
+        None => Folio::new(),
+    };
+    folio.feed_kept(lines);
+    if folio.session_id.is_none() {
+        folio.session_id = conversation;
+    }
+    folio
+}
+
 /// Starts session `id`, a headless Claude in `dir` in a host of its own,
 /// resuming the conversation `tag.resume` when it names one. `options`
 /// carry the flags and the environment its hooks find it by. In a folder
@@ -524,7 +608,11 @@ pub fn reattach() -> Vec<Found> {
         let inbox: Arc<Mutex<VecDeque<Event>>> = Arc::default();
         let posted: Arc<AtomicBool> = Arc::default();
         let events = on_event(Arc::clone(&inbox), Arc::clone(&posted));
-        let hosted = match Hosted::attach(&horadric_hooks::instance(), &id, events) {
+        let slot: Arc<Mutex<Option<Folio>>> = Arc::default();
+        let read_into = Arc::clone(&slot);
+        let hosted = match Hosted::attach_with(&horadric_hooks::instance(), &id, |info| {
+            catch_up(info, read_into, events)
+        }) {
             Ok(h) => h,
             Err(e) => {
                 eprintln!("horadric: cannot attach to the Folio {id}: {e}");
@@ -537,11 +625,7 @@ pub fn reattach() -> Vec<Found> {
         chat.inbox = inbox;
         chat.posted = posted;
         chat.rewound = tag.at.clone();
-        if let Some(conversation) = &tag.resume {
-            if let Some((path, _)) = history_file(&info.cwd, conversation) {
-                load_history(&mut chat, path, tag.history);
-            }
-        }
+        chat.loading = Some(slot);
         chat.hosted = Some(hosted);
         CHATS.with(|c| c.borrow_mut().insert(id.clone(), chat));
         found.push(Found {
