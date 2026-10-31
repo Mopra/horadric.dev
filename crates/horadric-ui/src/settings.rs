@@ -122,8 +122,8 @@ pub enum Field {
     Default(Setting),
     /// Whether a usage limit switches to the account with the most left.
     SwitchAccounts,
-    /// Whether new Claude sessions open as a chat.
-    ChatSessions,
+    /// Whether new Claude sessions open in a terminal, not a chat.
+    TerminalSessions,
     /// Whether a project's menu offers to start the agent.
     Offered,
     Autostart,
@@ -187,7 +187,7 @@ impl Field {
             Field::Default(Setting::Permissions) => "What new sessions may do without asking",
             Field::Default(Setting::Workflow) => "The model of the agents a workflow starts",
             Field::SwitchAccounts => "At a usage limit, go on with the account most left",
-            Field::ChatSessions => "A chat window in place of a terminal",
+            Field::TerminalSessions => "The Claude CLI in place of a chat window",
             Field::Offered => "Offer this agent in each project's menu",
             Field::Autostart => "Open Horadric when you sign in to Windows",
             Field::Explorer => "Adds it to a folder's right-click menu",
@@ -287,8 +287,8 @@ pub struct Values {
     pub offered: Option<Option<bool>>,
     /// Claude Code switches account by itself when one runs out.
     pub switch_accounts: bool,
-    /// New Claude sessions open as a Folio, a chat.
-    pub chat_sessions: bool,
+    /// New Claude sessions open in a terminal, not as a Folio, a chat.
+    pub terminal_sessions: bool,
     /// None where the switch is not offered, a dev instance.
     pub autostart: Option<bool>,
     /// The same for "Open in Horadric" in Explorer.
@@ -511,10 +511,10 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                     word,
                     c,
                 ));
-                let (word, c) = switch(v.chat_sessions);
+                let (word, c) = switch(v.terminal_sessions);
                 rows.push(line(
-                    Field::ChatSessions,
-                    "New Claude sessions open as a chat (experimental)",
+                    Field::TerminalSessions,
+                    "New Claude sessions open in a terminal",
                     word,
                     c,
                 ));
@@ -1581,7 +1581,7 @@ mod tests {
             },
             offered: None,
             switch_accounts: false,
-            chat_sessions: false,
+            terminal_sessions: false,
             autostart: Some(true),
             explorer: Some(false),
             discord: Discord::Unnamed,
@@ -1689,7 +1689,7 @@ mod tests {
                 Field::Default(Setting::Workflow),
                 Field::Offered,
                 Field::SwitchAccounts,
-                Field::ChatSessions,
+                Field::TerminalSessions,
             ]
         );
         assert_eq!(
@@ -1848,7 +1848,7 @@ mod tests {
         );
         assert_eq!(rows[5].control, Control::Fixed);
         assert_eq!(rows[6].control, Control::Switch(false));
-        assert_eq!(rows[7].field, Field::ChatSessions);
+        assert_eq!(rows[7].field, Field::TerminalSessions);
         v.agent = Agent::Codex;
         v.defaults = Defaults {
             model: Some("gpt-5.5".into()),

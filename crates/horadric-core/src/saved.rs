@@ -151,11 +151,13 @@ pub struct SavedState {
     /// most left and go on. Off until turned on in the Settings window.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub switch_accounts: bool,
-    /// New Claude sessions open as a Folio, a chat, not a terminal. Off
-    /// until turned on in the Settings window while the Folio is
-    /// experimental.
+    /// New Claude sessions open in a terminal, not as a Folio, a chat.
+    /// Off, so chats, until turned on in the Settings window. Its name is
+    /// new: `chat_sessions` was the opposite switch, saved only when on,
+    /// so a file can not tell whether it was turned off or never touched,
+    /// and it is read no more.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub chat_sessions: bool,
+    pub terminal_sessions: bool,
     /// What the human's Discord profile shows, off until chosen in the
     /// tray. Kept per instance, so a dev one stays off on its own.
     #[serde(default, skip_serializing_if = "Discord::is_off")]
