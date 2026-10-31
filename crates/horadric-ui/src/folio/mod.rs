@@ -153,6 +153,9 @@ struct Chat {
     restarting: bool,
     /// Whether it comes to the stage as it starts again.
     restart_show: bool,
+    /// Its claude.exe ends for an account switch, which starts it again
+    /// once every session has stopped: what was typed waits.
+    winding: bool,
     /// What it says once its history is in, see [`sign_in::greeting`].
     greeting: Option<String>,
     /// Waits for the human to trust its folder, with what starts it then.
@@ -222,6 +225,7 @@ impl Chat {
             to_terminal: false,
             restarting: false,
             restart_show: false,
+            winding: false,
             greeting: None,
             tr: transcript::Ui::default(),
             watch: None,
@@ -534,7 +538,7 @@ pub fn close(id: &str) {
     let mut gone = CHATS.with(|c| c.borrow_mut().remove(id));
     if let Some(c) = gone.as_mut() {
         // Handed over, it may come back as a Folio: what was typed waits.
-        if c.to_terminal || c.restarting {
+        if c.to_terminal || c.restarting || c.winding {
             c.input.fold_queue();
         } else {
             c.input.forget();
@@ -559,6 +563,30 @@ pub fn hand_over(id: &str) -> bool {
         };
         c.to_terminal = true;
         h.close();
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// Ends session `id`'s claude.exe for an account switch, keeping its tile
+/// and what was typed; the app starts it again on the new login. At rest
+/// only, unless `now`. True once it is on its way out or has ended.
+pub fn wind_down(id: &str, now: bool) -> bool {
+    with(id, |c| {
+        if c.ended || c.hosted.is_none() {
+            return true;
+        }
+        if c.to_terminal || c.restarting || c.pending.is_some() {
+            return false;
+        }
+        let busy = c.folio.busy || !c.folio.pending_asks().is_empty();
+        if !now && (!c.live || c.loading.is_some() || busy) {
+            return false;
+        }
+        c.winding = true;
+        if let Some(h) = &c.hosted {
+            h.close();
+        }
         true
     })
     .unwrap_or(false)

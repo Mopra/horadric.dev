@@ -5616,8 +5616,11 @@ impl App {
 
     /// Whether the console of session `id` runs `agent` itself, so it
     /// holds `agent`'s login. For Claude not a shell put in its place with
-    /// `HORADRIC_AGENT`.
+    /// `HORADRIC_AGENT`; a Folio's claude.exe holds Claude's.
     fn runs(&self, id: &str, agent: Agent) -> bool {
+        if self.folios.contains_key(id) {
+            return agent == Agent::Claude && crate::folio::running(id);
+        }
         let Some(c) = self.consoles.get(id) else {
             return false;
         };
@@ -5658,9 +5661,8 @@ impl App {
         if self.login(agent).account.as_ref() == Some(&to) {
             return;
         }
-        let running: Vec<String> = self
-            .consoles
-            .keys()
+        let running: Vec<String> = (self.consoles.keys())
+            .chain(self.folios.keys())
             .filter(|id| self.runs(id, agent))
             .cloned()
             .collect();
@@ -5688,9 +5690,8 @@ impl App {
     fn switch_when_out(&mut self) {
         let agent = Agent::Claude;
         let stops: Vec<(String, SystemTime)> = match self.shared.registry.lock() {
-            Ok(r) => self
-                .consoles
-                .keys()
+            Ok(r) => (self.consoles.keys())
+                .chain(self.folios.keys())
                 .filter_map(|id| {
                     let s = r.get(id).filter(|s| s.limited())?;
                     Some((id.clone(), s.since))
@@ -5757,11 +5758,29 @@ impl App {
             return;
         };
         if let Ok(r) = self.shared.registry.lock() {
-            let consoles = &self.consoles;
+            let (consoles, folios) = (&self.consoles, &self.folios);
             let stopped = &mut s.stopped;
             let limited = &mut s.limited;
             let now = s.now;
             s.running.retain(|id| {
+                if folios.contains_key(id) {
+                    if !crate::folio::running(id) {
+                        return false;
+                    }
+                    let session = r.get(id);
+                    let out = session.is_some_and(|x| x.limited());
+                    // Nothing is typed into a Folio but its composer, which
+                    // waits through the restart.
+                    let free = now || session.is_some_and(|x| x.free_to_restart(None));
+                    let down = free && crate::folio::wind_down(id, now || out);
+                    if down {
+                        stopped.push(id.clone());
+                        if out {
+                            limited.push(id.clone());
+                        }
+                    }
+                    return !down;
+                }
                 let Some(c) = consoles.get(id).filter(|c| c.exit_code().is_none()) else {
                     // Gone on its own, ended or crashed: nothing to carry.
                     return false;
@@ -5779,9 +5798,8 @@ impl App {
             });
         }
         let stopping = s.stopped.iter().any(|id| {
-            self.consoles
-                .get(id)
-                .is_some_and(|c| c.exit_code().is_none())
+            let terminal = (self.consoles.get(id)).is_some_and(|c| c.exit_code().is_none());
+            terminal || (self.folios.contains_key(id) && crate::folio::running(id))
         });
         if !s.running.is_empty() || stopping {
             self.login(agent).switch = Some(s);
@@ -5799,23 +5817,30 @@ impl App {
         // Once each, whatever happened: on the old login if the switch failed.
         let on_stage = self.shared.active.borrow().clone();
         for id in &s.stopped {
-            if self.paused.contains_key(id) {
-                // Its refused prompt is the last in the conversation, and
-                // this takes it up again on the new login.
-                let go_on = agent == Agent::Claude && s.limited.contains(id);
-                if go_on {
-                    self.tasks
-                        .prompts
-                        .insert(id.clone(), horadric_core::accounts::GO_ON.to_string());
-                }
-                if let Err(e) = self.resume(id, false) {
-                    eprintln!("horadric: cannot resume {id}: {e}");
-                    self.tasks.prompts.remove(id);
-                }
+            let chat = self.folios.contains_key(id);
+            if !chat && !self.paused.contains_key(id) {
+                continue;
+            }
+            // Its refused prompt is the last in the conversation, and
+            // this takes it up again on the new login.
+            if agent == Agent::Claude && s.limited.contains(id) {
+                self.tasks
+                    .prompts
+                    .insert(id.clone(), horadric_core::accounts::GO_ON.to_string());
+            }
+            if chat {
+                // Same tile, same conversation, its claude.exe reading the
+                // new login; the prompt goes in as its first message.
+                self.folio_restart(id, false);
+                continue;
+            }
+            if let Err(e) = self.resume(id, false) {
+                eprintln!("horadric: cannot resume {id}: {e}");
+                self.tasks.prompts.remove(id);
             }
         }
         if let Some(id) = on_stage.filter(|id| s.stopped.contains(id)) {
-            if self.consoles.contains_key(&id) {
+            if self.consoles.contains_key(&id) || self.folios.contains_key(&id) {
                 self.reveal(&id, false);
             }
         }
