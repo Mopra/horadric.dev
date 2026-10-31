@@ -13,10 +13,6 @@ and is written up under "The look", Motion, in docs/PLAN.md.
 
 Everything in docs/IDEAS.md not yet built, asked for by the human. For each one: write its design into docs/PLAN.md first (a section under Next, with the reasoning), change its entry in IDEAS.md to say it is planned, then build it. The rule in IDEAS.md holds: the theme earns its place by making something clearer or quicker.
 
-## Codex and Grok Build
-
-ChatGPT and xAI subscriptions used from Horadric like a Claude one. See "Codex and Grok Build beside Claude Code" under Next in docs/PLAN.md, which has the table of what each agent gives and the reasoning; read it before starting. Claude sessions must behave exactly as before at every step.
-
 ## Discord Activity
 
 Rust was installed on this machine after Horadric started, so a session's shell may not find `cargo`: put `%USERPROFILE%\.cargo\bin` first on `PATH` (Git Bash: `export PATH="$HOME/.cargo/bin:$PATH"`). Commits stay local on `main`; this account cannot push, and the work goes up as one PR when the section is done.

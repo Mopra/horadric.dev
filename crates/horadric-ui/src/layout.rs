@@ -690,15 +690,11 @@ pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
 /// The geometry of the usage window: the account's limits on a screen,
 /// the settings for sessions in a section below. Folded, only the first
 /// limit is left, the session's budget, which is the one that runs out
-/// first. With one agent in use it has no header: it belongs to no
-/// project, so there is no name to show, and the screen itself is what
-/// folds it. With more, a line on top names whose limits and settings
-/// these are, and a click on it goes on to the next agent's.
+/// first. It has no header: it belongs to no project, so there is no name
+/// to show, and the screen itself is what folds it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageLayout {
     pub size: (f32, f32),
-    /// The line naming the provider, when there is more than one.
-    pub header: Option<Rect>,
     /// The screen the limits are on.
     pub limits_box: Rect,
     /// One row per limit, or one for the line that says none is known yet.
@@ -727,11 +723,10 @@ pub struct SettingRow {
 pub const KNOB_R: f32 = 7.0;
 
 /// Lays out the usage window with `limits` limits known and a setting per
-/// entry of `scales`, each true for a slider, under a header line when
-/// `header`. With no limit known it keeps one row, for saying so.
+/// entry of `scales`, each true for a slider. With no limit known it
+/// keeps one row, for saying so.
 pub fn usage(
     m: &Metrics,
-    header: bool,
     limits: usize,
     scales: &[bool],
     collapsed: bool,
@@ -740,17 +735,11 @@ pub fn usage(
     // Inside a tile, rows keep off its rounded corners.
     let inner = 4.0;
     let mut y = m.pad;
-    let header = header.then(|| {
-        let r = Rect::new(m.pad, y, full, USAGE_HEADER_H);
-        y = r.bottom() + 6.0;
-        r
-    });
     let top = y;
     y += inner;
     let rows = if collapsed { 1 } else { limits.max(1) };
     let mut l = UsageLayout {
         size: (m.width, 0.0),
-        header,
         limits_box: Rect::default(),
         limits: Vec::new(),
         lock: Rect::default(),
@@ -763,10 +752,9 @@ pub fn usage(
     }
     y += inner;
     l.limits_box = Rect::new(m.pad, top, full, y - top);
-    // Deep enough into the screen to swallow its rounded corner, and up to
-    // the header without covering it.
+    // Deep enough into the screen to swallow its rounded corner.
     let (bite, reach) = (m.tile_radius + 4.0, 12.0);
-    let lock_top = header.map_or(top - reach, |h| h.bottom().max(top - reach));
+    let lock_top = top - reach;
     let x = l.limits_box.right() - bite;
     l.lock = Rect::new(x, lock_top, bite + reach, top + bite - lock_top);
     if !collapsed {
@@ -814,13 +802,9 @@ pub fn slider_stop(track: &Rect, n: usize, x: f32) -> usize {
     (t * (n - 1) as f32).round() as usize
 }
 
-const USAGE_HEADER_H: f32 = 22.0;
-
 /// Which part of the usage window a point is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageHit {
-    /// The line naming the provider, which goes on to the next one's.
-    Header,
     /// The limits' screen, which folds and unfolds the window.
     Limits,
     /// The padlock, which pins and unpins the window.
@@ -830,9 +814,6 @@ pub enum UsageHit {
 }
 
 pub fn usage_hit(l: &UsageLayout, x: f32, y: f32) -> UsageHit {
-    if l.header.is_some_and(|h| h.contains(x, y)) {
-        return UsageHit::Header;
-    }
     if l.lock.contains(x, y) {
         return UsageHit::Lock;
     }
@@ -2508,7 +2489,7 @@ mod tests {
     #[test]
     fn usage_window_holds_limits_then_settings() {
         let m = Metrics::default();
-        let l = usage(&m, false, 2, &SCALES, false);
+        let l = usage(&m, 2, &SCALES, false);
         assert_eq!(l.limits.len(), 2);
         assert_eq!(l.settings.len(), 3);
         let limits = l.limits_box;
@@ -2537,15 +2518,14 @@ mod tests {
     #[test]
     fn the_padlock_sits_in_the_top_right_corner_clear_of_the_rest() {
         let m = Metrics::default();
-        for (header, collapsed) in [(false, false), (true, false), (false, true)] {
-            let l = usage(&m, header, 2, &SCALES, collapsed);
+        for collapsed in [false, true] {
+            let l = usage(&m, 2, &SCALES, collapsed);
             let (k, b) = (l.lock, l.limits_box);
             // Inside the plate's seam, over the screen's corner.
             assert!(k.y >= 6.0 && k.right() <= l.size.0 - 6.0);
             assert!(k.x < b.right() && k.right() > b.right());
             assert!(k.y < b.y && k.bottom() > b.y + m.tile_radius);
             assert!(b.right() - k.x > m.tile_radius);
-            assert!(l.header.is_none_or(|h| k.y >= h.bottom()));
             let (x, y) = (k.x + k.w / 2.0, k.y + k.h / 2.0);
             assert_eq!(usage_hit(&l, x, y), UsageHit::Lock);
         }
@@ -2554,7 +2534,7 @@ mod tests {
     #[test]
     fn only_a_scale_gets_a_slider_under_its_name() {
         let m = Metrics::default();
-        let l = usage(&m, false, 2, &SCALES, false);
+        let l = usage(&m, 2, &SCALES, false);
         assert!(l.settings[0].track.is_none() && l.settings[2].track.is_none());
         let row = l.settings[1];
         let t = row.track.unwrap();
@@ -2564,29 +2544,14 @@ mod tests {
     }
 
     #[test]
-    fn a_header_names_the_provider_above_the_limits() {
-        let m = Metrics::default();
-        let plain = usage(&m, false, 2, &SCALES, false);
-        assert!(plain.header.is_none());
-        let l = usage(&m, true, 2, &SCALES, false);
-        let h = l.header.unwrap();
-        assert_eq!(h.y, m.pad);
-        assert!(l.limits_box.y > h.bottom());
-        assert_eq!(l.size.1 - plain.size.1, l.limits_box.y - plain.limits_box.y);
-        assert_eq!(usage_hit(&l, h.x + 5.0, h.y + 5.0), UsageHit::Header);
-        // Folded, it still says whose.
-        assert!(usage(&m, true, 2, &SCALES, true).header.is_some());
-    }
-
-    #[test]
     fn folded_it_keeps_the_first_limit_alone() {
         let m = Metrics::default();
-        assert_eq!(usage(&m, false, 0, &SCALES, false).limits.len(), 1);
-        let folded = usage(&m, false, 3, &SCALES, true);
+        assert_eq!(usage(&m, 0, &SCALES, false).limits.len(), 1);
+        let folded = usage(&m, 3, &SCALES, true);
         assert_eq!(folded.limits.len(), 1);
         assert!(folded.settings.is_empty() && folded.settings_box.is_none());
         assert_eq!(folded.size.1, folded.limits_box.bottom() + m.pad);
-        assert!(folded.size.1 < usage(&m, false, 3, &SCALES, false).size.1);
+        assert!(folded.size.1 < usage(&m, 3, &SCALES, false).size.1);
     }
 
     #[test]

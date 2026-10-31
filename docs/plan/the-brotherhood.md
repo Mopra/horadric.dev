@@ -319,9 +319,6 @@ key set up from every PC and cannot reach a home server behind a router.
   same step the receiver confirms, with the session's number one higher.
   Until then the sender still owns it, so a handoff that fails halfway
   leaves the session where it was.
-- **Claude Code first.** Codex and Grok Build keep their transcripts
-  elsewhere and resume differently. Their tiles show no "Hand off" until
-  each is done the same way.
 
 ### Taking over
 
@@ -1298,7 +1295,7 @@ Each step is useful alone and each is verified before the next starts.
     only by default, and the lore shared or not per project; catching
     the lore up from Drive; the Mac as a brother (its portal has no
     crypto yet either); remote files and the git glance over the same
-    protocol, read only first; Codex and Grok Build handoff; a quest
+    protocol, read only first; a quest
     moving with its session, so the quest log on the receiver knows it.
 
 ## Pure and tested

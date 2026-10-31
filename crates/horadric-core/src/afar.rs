@@ -178,8 +178,9 @@ pub struct Entry {
     /// When it took its phase there, Unix seconds. None from a brother
     /// older than the field.
     pub since: Option<u64>,
-    /// The agent it runs, None for a plain shell, which cannot be handed
-    /// off. Claude Code from a brother older than the field.
+    /// The agent it runs, None for a plain shell or another agent's
+    /// session, which cannot be handed off. Claude Code from a brother
+    /// older than the field.
     pub agent: Option<Agent>,
     /// Whether it has a conversation to carry on, which handing it off
     /// needs. True from a brother older than the field.
@@ -348,14 +349,15 @@ fn entry(v: &Value) -> Option<Entry> {
         line: text("line"),
         paused,
         since: v.get("since").and_then(Value::as_u64).filter(|s| *s > 0),
-        agent: match v.get("shell").and_then(Value::as_bool) {
-            Some(true) => None,
-            _ => Some(
-                v.get("agent")
-                    .and_then(Value::as_str)
-                    .and_then(Agent::from_name)
-                    .unwrap_or_default(),
-            ),
+        // An older brother may still run another agent's session, which
+        // cannot be handed to Claude, so it is taken like a shell's.
+        agent: match (
+            v.get("shell").and_then(Value::as_bool),
+            v.get("agent").and_then(Value::as_str),
+        ) {
+            (Some(true), _) => None,
+            (_, None | Some("claude")) => Some(Agent::Claude),
+            _ => None,
         },
         talked: v.get("talked").and_then(Value::as_bool).unwrap_or(true),
     })
@@ -467,7 +469,6 @@ pub fn session(brother: &OnBrother, e: &Entry, was: Option<&Session>, now: Syste
     s.name = e.name.clone();
     s.renamed = true;
     s.shell = e.agent.is_none();
-    s.agent = e.agent.unwrap_or_default();
     s.prompted = e.talked;
     // A phone hears a finished turn as idle, so done here is idle there.
     let same = s.phase == e.phase || (s.phase == Phase::Done && e.phase == Phase::Idle);
@@ -1112,7 +1113,7 @@ mod tests {
             [
                 Some(Agent::Claude),
                 Some(Agent::Claude),
-                Some(Agent::Codex),
+                None,
                 None,
                 Some(Agent::Claude)
             ]
@@ -1121,9 +1122,7 @@ mod tests {
         let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
         let shell = session(&on("b"), &l[3], None, t0);
         assert!(shell.shell);
-        let codex = session(&on("b"), &l[2], None, t0);
-        assert!(!codex.shell);
-        assert_eq!(codex.agent, Agent::Codex);
+        assert!(session(&on("b"), &l[2], None, t0).shell);
         assert!(!session(&on("b"), &l[4], None, t0).prompted);
     }
 }

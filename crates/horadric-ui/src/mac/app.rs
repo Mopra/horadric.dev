@@ -549,9 +549,6 @@ impl App {
                 r.apply(id, &register, SystemTime::now());
                 if let Some(s) = r.get_mut(id) {
                     s.shell = shell;
-                    if let Run::Agent(agent) = run {
-                        s.agent = console::agent_of(&program).unwrap_or(agent);
-                    }
                 }
                 known
             })
@@ -615,7 +612,7 @@ impl App {
             let run = if saved.shell {
                 Run::Shell
             } else {
-                Run::Agent(saved.agent)
+                Run::Agent(Agent::Claude)
             };
             let args = if saved.shell {
                 Vec::new()
@@ -649,7 +646,6 @@ impl App {
                 serial,
                 saved.args.clone(),
                 saved.shell,
-                saved.agent,
                 PathBuf::from(&saved.cwd),
                 super::Notify,
             ) {
@@ -1341,7 +1337,7 @@ impl App {
             match c {
                 Command::New(n) => {
                     let name = n.name.filter(|s| !s.is_empty());
-                    self.start(name, PathBuf::from(n.cwd), n.args, n.agent);
+                    self.start(name, PathBuf::from(n.cwd), n.args, Agent::Claude);
                 }
                 Command::Reload(r) => self.reload(r),
                 // The quest log, overlaps, the browser pane and the memory

@@ -4,9 +4,7 @@
 //! Launchpad and Spotlight find them, links the command into
 //! `~/.local/bin` (where Claude Code's own installer puts `claude`, so it
 //! is usually on `PATH` already), adds the LaunchAgent that opens it at
-//! login, and installs the Claude Code hooks and, when Grok Build is
-//! there, its hook file and its entry for `horadric mcp`. No admin rights
-//! anywhere. `horadric uninstall` takes all of it back out, and leaves the
+//! login, and installs the Claude Code hooks. No admin rights anywhere. `horadric uninstall` takes all of it back out, and leaves the
 //! saved sessions in Application Support.
 
 use std::fs;
@@ -179,32 +177,6 @@ fn link_command(binary: &Path) -> Result<(), String> {
         Err(_) => {}
     }
     std::os::unix::fs::symlink(binary, &link).map_err(|e| format!("{}: {e}", link.display()))
-}
-
-/// Writes Grok's hook file to run `exe hook grok`, and gives Grok `exe mcp`
-/// in its config, when Grok is on this machine. Returns where the hooks
-/// went, or None when there is no Grok.
-pub fn grok_hooks(exe: &Path) -> Result<Option<PathBuf>, String> {
-    use horadric_hooks::install as hooks;
-    let Some(home) = hooks::grok_home() else {
-        return Ok(None);
-    };
-    let command = horadric_ui::exe_command(exe, "hook grok");
-    let path = hooks::grok_hooks_path(&home);
-    match hooks::install_grok(&home, &command, &exe.to_string_lossy()) {
-        Ok(true) => Ok(Some(path)),
-        Ok(false) => Ok(None),
-        Err(e) => Err(format!("{}: {e}", path.display())),
-    }
-}
-
-/// Removes Grok's hook file and its MCP table, if there are any.
-pub fn remove_grok_hooks() -> Result<(), String> {
-    use horadric_hooks::install as hooks;
-    let Some(home) = hooks::grok_home() else {
-        return Ok(());
-    };
-    hooks::uninstall_grok(&home).map_err(|e| format!("{}: {e}", home.display()))
 }
 
 pub fn same_dir(a: &Path, b: &Path) -> bool {

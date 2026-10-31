@@ -37,7 +37,7 @@ renderer, ConPTY and session hosts. What it would bring:
 
 1. Build libghostty-vt for Windows x64 and link it from a small Rust
    test behind a feature flag, not in the app.
-2. Feed it recorded output from real sessions (Claude Code, Codex, a
+2. Feed it recorded output from real sessions (Claude Code, a
    `cargo build`, `vim`) and compare its screen with alacritty_terminal's
    cell by cell.
 3. Measure parsing throughput on a large dump against alacritty_terminal.

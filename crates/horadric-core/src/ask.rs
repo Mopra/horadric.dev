@@ -125,13 +125,6 @@ impl Ask {
         }
     }
 
-    /// Without the keys to type, for an agent whose prompt is not Claude
-    /// Code's, so its numbers mean something else.
-    pub fn without_keys(mut self) -> Ask {
-        self.options.clear();
-        self
-    }
-
     /// As a phone is sent it, `since` in Unix seconds.
     pub fn to_json(&self) -> Value {
         let options: Vec<Value> = self
@@ -307,10 +300,6 @@ mod tests {
             t0(),
         );
         assert_eq!((a.detail.as_str(), a.options.len()), ("1. Do it", 0));
-        assert!(Ask::permission("Bash", None, false, t0())
-            .without_keys()
-            .options
-            .is_empty());
     }
 
     #[test]
