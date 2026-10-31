@@ -59,7 +59,7 @@ use crate::layout::{self, ClusterLayout, Hit, Metrics};
 use crate::motion;
 pub use crate::project::{folder_key, project_key, project_name};
 use crate::render::{
-    FilesScene, Flight, Gpu, Scene, Target, TaskRow, TasksScene, TomeScene, TomeStone, TRACE_BARS,
+    FilesScene, Flight, Gpu, Scene, Target, TaskRow, TasksScene, TomeScene, TomeStone,
 };
 use crate::theme;
 use crate::tip;
@@ -209,23 +209,16 @@ struct Still {
     astir: bool,
 }
 
-/// What a tile shows that moves with time alone: its age, and its trace
-/// of the last minutes, the trace's slide rounded to a quarter bar.
+/// What a tile shows that moves with time alone: its age.
 #[derive(PartialEq)]
 struct Clock {
     age: String,
-    trace: Vec<u8>,
-    slide: u8,
 }
 
 impl Clock {
     fn of(s: &Session, now: SystemTime) -> Clock {
-        let (bars, scrolled) = s.trace(now, TRACE_BARS);
-        let busy = bars.iter().any(|&b| b > 0.0);
         Clock {
             age: format_age(now.duration_since(s.since).unwrap_or_default()),
-            trace: bars.iter().map(|b| (b * 32.0) as u8).collect(),
-            slide: if busy { (scrolled * 4.0) as u8 } else { 0 },
         }
     }
 }
@@ -1943,7 +1936,6 @@ fn cloaked(hwnd: HWND) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horadric_core::session::ACTIVITY_SPAN;
 
     #[test]
     fn an_idle_tile_reads_the_same_until_its_age_moves() {
@@ -1953,18 +1945,5 @@ mod tests {
         let at = |secs| Clock::of(&s, t0 + Duration::from_secs(secs));
         assert!(at(300) == at(301));
         assert!(at(300) != at(360));
-    }
-
-    #[test]
-    fn a_busy_trace_moves_a_quarter_bar_at_a_time() {
-        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
-        let mut s = Session::new("t", "t", "C:/repo");
-        s.since = t0;
-        s.activity = vec![t0 + Duration::from_secs(290)];
-        let bar = ACTIVITY_SPAN.as_secs() / TRACE_BARS as u64;
-        let slides: HashSet<u8> = (0..bar)
-            .map(|i| Clock::of(&s, t0 + Duration::from_secs(300 + i)).slide)
-            .collect();
-        assert_eq!(slides.len(), 4);
     }
 }

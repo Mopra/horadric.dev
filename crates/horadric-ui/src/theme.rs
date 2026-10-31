@@ -622,12 +622,12 @@ pub fn phase_color(phase: &Phase) -> Color {
     }
 }
 
-/// A session's key face. Waiting is backlit in its colour, since it needs
-/// you and has to be seen from across the room. The rest leave the lamp to
+/// A session's tile face. Waiting is tinted faintly in its colour, since
+/// it needs you; its edge does the rest. The rest leave the lamp to
 /// say what they do, and one that has stopped is latched down, darker.
 pub fn phase_fill(phase: &Phase) -> Color {
     match phase {
-        Phase::Waiting(_) => surface().mix(phase_color(phase), 0.22),
+        Phase::Waiting(_) => surface().mix(phase_color(phase), 0.07),
         Phase::Working | Phase::Done | Phase::Idle => surface(),
         Phase::Ended | Phase::Paused => well().mix(surface(), 0.5),
     }

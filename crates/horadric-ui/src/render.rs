@@ -100,23 +100,16 @@ const TOWN_MARK: f32 = 20.0;
 const INNER_PAD: f32 = 14.0;
 /// The room a background session's mark takes after a catch-up line.
 const MARK_W: f32 = 18.0;
-/// The activity trace at the bottom right of a tile.
-pub const TRACE_BARS: usize = 20;
-const TRACE_BAR_W: f32 = 1.6;
-const TRACE_GAP: f32 = 0.8;
-const TRACE_H: f32 = 11.0;
 /// How far a finished turn's key jumps, in DIPs.
 const LAND_RISE: f32 = 3.0;
 /// How tall a finished turn's loot beam grows above its key, in DIPs.
-const BEAM_H: f32 = 120.0;
+const BEAM_H: f32 = 72.0;
 /// How far a tile whose session has gone sinks as it fades, in DIPs.
 const LEAVE_SINK: f32 = 8.0;
 /// One slow breath of a busy project's wash.
 const BUSY_BREATH: Duration = Duration::from_millis(4000);
 /// One slow breath of the quests tile's edge while Warriv works.
 const WARRIV_BREATH: Duration = Duration::from_millis(3200);
-/// A glint's run along a nearly full context meter.
-const SHIMMER: Duration = Duration::from_millis(2600);
 /// More subagents than this still draw this many sparks.
 const MAX_SPARKS: usize = 5;
 /// How bright the sparks circle a lamp whose turn is over while its
@@ -166,6 +159,8 @@ pub struct Gpu {
     /// Icons, centred in the rect they are drawn in.
     pub icon: IDWriteTextFormat,
     pub icon_small: IDWriteTextFormat,
+    /// A tile's icon, at the Folio's size, so it sits back from the name.
+    pub tile_icon: IDWriteTextFormat,
     /// The initial on a browser tab's badge, centred on it.
     pub badge: IDWriteTextFormat,
     pub text_params: IDWriteRenderingParams,
@@ -193,6 +188,8 @@ impl Gpu {
             icon.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
             let icon_small = format(&dw, icons, 11.0, normal, false)?;
             icon_small.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            let tile_icon = format(&dw, icons, 12.0, normal, false)?;
+            tile_icon.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
             let badge = format(&dw, FONT, 9.5, DWRITE_FONT_WEIGHT_BOLD, false)?;
             badge.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
             // The system's text contrast is tuned for dark text on white.
@@ -220,6 +217,7 @@ impl Gpu {
                 chip,
                 icon,
                 icon_small,
+                tile_icon,
                 badge,
             })
         }
@@ -1194,7 +1192,7 @@ impl Painter<'_> {
             if let Some((r, s, look)) = tiles(scene).nth(i) {
                 self.tile(gpu, m, scene, i, &r, s, &look);
                 // Blue, as a pane is while it is dragged.
-                self.stroke_rounded(&r, m.tile_radius, theme::working().with_alpha(0.7), 1.5);
+                self.stroke_rounded(&r.inset(0.6), m.tile_radius - 0.6, theme::working().with_alpha(0.7), 1.2);
             }
         }
         for (i, (r, p)) in scene.layout.pages.iter().zip(scene.pages).enumerate() {
@@ -2382,13 +2380,6 @@ impl Painter<'_> {
                 Phase::Working => {
                     let t = motion::cycle(look.phase_age, ORBIT);
                     self.scan(&lamp_rect(&r), c, t, look.enter);
-                    let context = s.status.as_ref().and_then(|st| st.context);
-                    if let Some(c) = context.filter(|&c| c >= 75.0) {
-                        let (ix, iy) = icon_centre(&r);
-                        let track = Rect::new(ix - 10.0, iy + 14.0, 20.0, 3.0);
-                        let t = motion::cycle(look.phase_age, SHIMMER);
-                        self.shimmer(&track, look.context, t, theme::fullness_color(c));
-                    }
                     let n = s.subagents(scene.now).min(MAX_SPARKS);
                     let lamp = lamp_rect(&r);
                     self.hirelings(&lamp, s, scene.now, c, n, look.phase_age, look.enter);
@@ -2430,13 +2421,13 @@ impl Painter<'_> {
             let c = theme::phase_color(&Phase::Done);
             let (x, base) = icon_centre(&r);
             let tall = 12.0 + BEAM_H * grown;
+            // A thread of light, not a shaft: next to the Folio a wide
+            // glowing beam read as a game's pickup.
             let stops = [(0.0, c.with_alpha(0.0)), (1.0, c)];
-            for (w, a) in [(14.0, 0.18), (6.0, 0.45), (2.0, 0.9)] {
+            for (w, a) in [(5.0, 0.12), (1.5, 0.6)] {
                 let shaft = Rect::new(x - w / 2.0, base - tall, w, tall);
                 self.fill_rounded_gradient(&shaft, w / 2.0, &stops, a * strength);
             }
-            let white = Color::rgb(0xFFFFFF);
-            self.glow_dot(x, base, 16.0, c.mix(white, 0.3), 0.6 * strength);
         }
     }
 
@@ -2521,7 +2512,7 @@ impl Painter<'_> {
         let (w, h) = scene.layout.size;
         let depth = 110.0f32.min(h);
         let a = scene.accent;
-        let stops = [(0.0, a.with_alpha(0.1)), (1.0, a.with_alpha(0.0))];
+        let stops = [(0.0, a.with_alpha(0.06)), (1.0, a.with_alpha(0.0))];
         self.fill_rounded_gradient(&Rect::new(0.0, 0.0, w, depth), 0.0, &stops, glow);
     }
 
@@ -2700,6 +2691,18 @@ impl Painter<'_> {
         self.inner(gpu, r, radius, bevel, theme::bevel_light(), shade, opacity);
     }
 
+    /// A tile as the Folio draws a card: a flat face and a hairline round
+    /// it, no ledge, shadow or bevel. Raised keys next to the Folio's flat
+    /// cards read as toys.
+    unsafe fn card(&self, r: &Rect, radius: f32, face: Color, edge: Color, opacity: f32) {
+        let opacity = opacity.clamp(0.0, 1.0);
+        if opacity <= 0.0 {
+            return;
+        }
+        self.fill_rounded(r, radius, face.fade(opacity));
+        self.stroke_rounded(&r.inset(0.5), radius - 0.5, edge.fade(opacity), 1.0);
+    }
+
     /// Something sunk into the plate: its floor in `fill`, shade under its
     /// top edge, and the plate's lit lip along its bottom.
     unsafe fn sunk(&self, gpu: &Gpu, r: &Rect, radius: f32, fill: Color) {
@@ -2785,32 +2788,18 @@ impl Painter<'_> {
         self.engrave(r, radius);
     }
 
-    /// A session's lamp in its slot at `r`, burning `level` of full in `c`.
-    /// Off, it is dark glass with a glint on it, so an unlit lamp still
-    /// reads as a lamp.
+    /// A session's lamp in its slot at `r`, `level` of full in `c`: a thin
+    /// rule down the tile's left, as the Folio marks a lane, flat and
+    /// without glow. Off, a faint rule still holds its place.
     unsafe fn lamp(&self, r: &Rect, c: Color, level: f32) {
         let round = r.w / 2.0;
-        let housing = r.inset(-1.5);
-        let black = Color::rgb(0);
-        self.fill_rounded(&housing, round + 1.5, black.with_alpha(0.55));
+        let off = theme::text().with_alpha(0.1);
+        self.fill_rounded(r, round, off);
         if level <= 0.0 {
-            self.fill_rounded(r, round, theme::lamp_off());
-            let glint = Rect::new(r.x + 1.0, r.y + 2.0, r.w - 2.0, r.h * 0.3);
-            self.fill_rounded(&glint, 1.0, Color::rgb(0xFFFFFF).with_alpha(0.08));
             return;
         }
-        let level = level.min(1.0);
-        // The light spilling onto the key round it.
-        let rings = 4;
-        for i in 0..rings {
-            let s = 1.5 + i as f32 * 2.0;
-            let k = 1.0 - i as f32 / rings as f32;
-            let spill = c.with_alpha(level * 0.16 * k * k);
-            self.stroke_rounded(&r.inset(-s), round + s, spill, 2.0);
-        }
-        self.fill_rounded(r, round, theme::lamp_off().mix(c, level));
-        let hot = c.mix(Color::rgb(0xFFFFFF), 0.45).fade(level);
-        self.fill_rounded(&r.inset(1.0), (round - 1.0).max(0.5), hot);
+        let ink = c.mix(theme::text(), 0.15).with_alpha(0.25 + 0.65 * level.min(1.0));
+        self.fill_rounded(r, round, ink);
     }
 
     /// A rune for each hireling, circling the lamp: carving itself while
@@ -3171,48 +3160,41 @@ impl Painter<'_> {
         if n == 0 {
             return;
         }
-        let white = Color::rgb(0xFFFFFF);
         let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
         let (rx, ry) = (SPARK_REACH, r.h / 2.0 + 3.0);
         let turn = motion::cycle(age, SPARK_ORBIT);
+        let ink = c.mix(theme::text(), 0.3).with_alpha(0.8 * strength.min(1.0));
         for k in 0..n {
             let a = std::f32::consts::TAU * (turn + k as f32 / n as f32);
             let (x, y) = (cx + rx * a.cos(), cy + ry * a.sin());
-            self.glow_dot(x, y, 5.0, c.mix(white, 0.4), 0.8 * strength);
-            self.glow_dot(x, y, 1.6, white, strength);
+            self.fill_rounded(&Rect::new(x - 1.5, y - 1.5, 3.0, 3.0), 1.5, ink);
         }
     }
 
-    /// A lamp switched off like an old picture tube, `t` of the way
-    /// through: its light squeezes to a bright line across its middle, the
-    /// line to a dot, and the dot goes out.
+    /// A lamp switched off, `t` of the way through: its rule draws in to
+    /// a dot at its middle as it fades out.
     unsafe fn power_down(&self, r: &Rect, t: f32) {
-        let white = Color::rgb(0xFFFFFF);
-        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-        if t < 0.5 {
-            let q = motion::ease_in_out(t / 0.5);
-            let h = (r.h * (1.0 - q)).max(1.5);
-            let line = Rect::new(r.x, cy - h / 2.0, r.w, h);
-            self.fill_rounded(&line, r.w / 2.0, white.with_alpha(0.55 + 0.4 * q));
-            self.glow_dot(cx, cy, 6.0 + 4.0 * q, white, 0.3 + 0.5 * q);
-        } else {
-            let q = (t - 0.5) / 0.5;
-            self.glow_dot(cx, cy, 10.0 * (1.0 - q) + 2.0, white, 0.8 * (1.0 - q));
-        }
+        let cy = r.y + r.h / 2.0;
+        let q = motion::ease_in_out(t.clamp(0.0, 1.0));
+        let h = (r.h * (1.0 - q)).max(r.w);
+        let line = Rect::new(r.x, cy - h / 2.0, r.w, h);
+        let ink = theme::text().with_alpha(0.6 * (1.0 - q));
+        self.fill_rounded(&line, r.w / 2.0, ink);
     }
 
     /// A hot spot running up and down a working session's lamp, `t` of
     /// the way through a sweep.
     unsafe fn scan(&self, r: &Rect, c: Color, t: f32, strength: f32) {
         let travel = (1.0 - (t * std::f32::consts::TAU).cos()) / 2.0;
-        let y = r.y + 2.0 + (r.h - 4.0) * travel;
-        let hot = c.mix(Color::rgb(0xFFFFFF), 0.5);
-        self.glow_dot(r.x + r.w / 2.0, y, 7.0, hot, strength);
+        let len = 8.0f32.min(r.h);
+        let y = r.y + (r.h - len) * travel;
+        let hot = c.mix(theme::text(), 0.45).with_alpha(0.9 * strength.min(1.0));
+        self.fill_rounded(&Rect::new(r.x, y, r.w, len), r.w / 2.0, hot);
     }
 
     /// A small round indicator, lit in `c`.
     unsafe fn led(&self, x: f32, y: f32, c: Color) {
-        self.glow_dot(x, y, 6.0, c, 0.45);
+        self.glow_dot(x, y, 5.0, c, 0.2);
         let dot = D2D1_ELLIPSE {
             point: Vector2 { X: x, Y: y },
             radiusX: 2.5,
@@ -3238,36 +3220,6 @@ impl Painter<'_> {
             let c = if i < lit { c } else { theme::lamp_off() };
             self.fill_rounded(&seg, 1.0, c);
         }
-    }
-
-    /// A meter that fills like a liquid: `fraction` of the way along, the
-    /// segment it has reached only as far lit as the level is into it.
-    unsafe fn tank(&self, r: &Rect, fraction: f32, c: Color, segments: usize) {
-        let gap = 1.0;
-        let w = (r.w - gap * (segments as f32 - 1.0)) / segments as f32;
-        let level = fraction.clamp(0.0, 1.0) * segments as f32;
-        for i in 0..segments {
-            let seg = Rect::new(r.x + i as f32 * (w + gap), r.y, w, r.h);
-            self.fill_rounded(&seg, 1.0, theme::lamp_off());
-            let full = (level - i as f32).clamp(0.0, 1.0);
-            if full > 0.0 {
-                let lit = Rect::new(seg.x, seg.y, seg.w * full, seg.h);
-                self.fill_rounded(&lit, 1.0, c);
-            }
-        }
-    }
-
-    /// A glint running along the lit part of a context meter that is
-    /// nearly full, `t` of the way through its run.
-    unsafe fn shimmer(&self, r: &Rect, fraction: f32, t: f32, c: Color) {
-        let lit = r.w * fraction.clamp(0.0, 1.0);
-        if lit <= 0.0 {
-            return;
-        }
-        let white = Color::rgb(0xFFFFFF);
-        let x = r.x + lit * motion::ease_in_out(t);
-        let fade = (std::f32::consts::PI * t).sin();
-        self.glow_dot(x, r.y + r.h / 2.0, 5.0, c.mix(white, 0.5), 0.7 * fade);
     }
 
     /// `r`'s shadow, moved by `(dx, dy)` and blurred `blur` wide: the same
@@ -3330,26 +3282,17 @@ impl Painter<'_> {
         }
     }
 
-    /// A waiting tile's light: its colour spilling out from under it and a
-    /// line round its edge. All of it outside the tile or on its rim, so it
-    /// can be laid over the kept layer every frame.
+    /// A waiting tile's edge in its colour, the Folio's mark of a card
+    /// that needs you. On the rim only, so it can be laid over the kept
+    /// layer every frame.
     unsafe fn halo(&self, r: &Rect, radius: f32, c: Color, strength: f32) {
         if strength <= 0.0 {
             return;
         }
-        let rings = 5;
-        for i in 0..rings {
-            let s = 1.0 + i as f32 * 2.0;
-            let k = 1.0 - i as f32 / rings as f32;
-            let a = strength * 0.2 * k * k;
-            self.stroke_rounded(&r.inset(-s), radius + s, c.with_alpha(a), 2.0);
-        }
-        self.stroke_rounded(
-            &r.inset(0.75),
-            radius - 0.75,
-            c.with_alpha(strength * 0.75),
-            1.5,
-        );
+        // Breathing from 0.3 to 0.7 strength reads 0.55 to 0.75, never
+        // dark, and a beckon fading in from nothing still starts at nothing.
+        let a = (0.4 + 0.5 * strength).min(1.0) * (4.0 * strength).min(1.0);
+        self.stroke_rounded(&r.inset(0.6), radius - 0.6, c.with_alpha(a), 1.2);
     }
 
     unsafe fn fill_rounded(&self, r: &Rect, radius: f32, c: Color) {
@@ -3505,7 +3448,7 @@ impl Painter<'_> {
                 let ink = brother_ink(b).with_alpha(if scene.on_stage { 0.9 } else { 0.6 });
                 self.stroke_rounded(&r, radius, ink, 2.0);
             }
-            None => self.stroke_rounded(&r, radius, scene.accent.with_alpha(0.55), 1.5),
+            None => self.stroke_rounded(&r, radius, scene.accent.with_alpha(0.45), 1.0),
         }
     }
 
@@ -3523,23 +3466,17 @@ impl Painter<'_> {
     ) {
         let b = scene.button(Hit::Page(i));
         let selected = scene.page_selected == Some(i);
-        let rest = theme::key_depth(&Phase::Idle, selected);
-        let lift = match b {
-            Button::Pressed => (0.15 - rest).min(0.0),
-            Button::Hover if !selected => 0.3,
-            _ => 0.0,
-        };
         let hover = if b == Button::Hover { 1.0 } else { 0.0 };
-        let face = theme::surface().mix(theme::text(), 0.03 * hover);
-        let face = if selected {
-            face.mix(theme::well(), 0.25)
+        let pressed = if b == Button::Pressed { 1.0 } else { 0.0 };
+        let face = theme::surface()
+            .mix(theme::text(), 0.03 * hover)
+            .mix(theme::well(), 0.3 * pressed);
+        let (face, edge) = if selected {
+            (face.mix(scene.accent, 0.06), scene.accent.with_alpha(0.55))
         } else {
-            face
+            (face, theme::text().with_alpha(0.12 + 0.07 * hover))
         };
-        self.key(gpu, r, m.tile_radius, face, rest + lift, 1.0);
-        if selected {
-            self.latched(gpu, r, m.tile_radius, 1.0);
-        }
+        self.card(r, m.tile_radius, face, edge, 1.0);
         self.lamp(&lamp_rect(r), theme::text_dim(), 0.0);
         let (ix, iy) = icon_centre(r);
         match &p.icon {
@@ -3549,8 +3486,8 @@ impl Painter<'_> {
                 crate::favicon::draw(self.rt, icon, rect(&at));
             }
             None => self.icon(
-                &gpu.icon,
-                theme::text_dim(),
+                &gpu.tile_icon,
+                theme::text_dim().with_alpha(0.75),
                 '\u{E774}',
                 Rect::new(ix - 14.0, iy - 14.0, 28.0, 28.0),
             ),
@@ -3637,23 +3574,19 @@ impl Painter<'_> {
             1.0
         };
         let presence = stance.presence * look.enter * reach;
-        let lift = match b {
-            Button::Pressed => (0.15 - rest).min(0.0),
-            _ if selected => 0.0,
-            _ => 0.3 * look.hover,
-        };
-        let held = if scene.held == Some(i) { 1.0 } else { 0.0 };
-        let depth = rest + lift + held + 0.9 * landing;
-        let face = theme::phase_fill(phase).mix(theme::text(), 0.03 * look.hover);
-        let face = if selected {
-            face.mix(theme::well(), 0.25)
+        // A press darkens the face, as the Folio's buttons do: the text
+        // keeps its colours.
+        let pressed = if b == Button::Pressed { 1.0 } else { 0.0 };
+        let face = theme::phase_fill(phase)
+            .mix(theme::text(), 0.03 * look.hover)
+            .mix(theme::well(), 0.3 * pressed);
+        let (face, edge) = if selected {
+            (face.mix(scene.accent, 0.06), scene.accent.with_alpha(0.55))
         } else {
-            face
+            let a = 0.07 + 0.07 * look.hover + 0.05 * rest.min(1.0);
+            (face, theme::text().with_alpha(a))
         };
-        self.key(gpu, r, radius, face, depth, look.enter);
-        if selected {
-            self.latched(gpu, r, radius, look.enter);
-        }
+        self.card(r, radius, face, edge, look.enter);
         // A session that runs on another brother than the cluster's (one
         // handed off that kept its place) wears that brother's mark.
         if let Some(b) = s
@@ -3662,34 +3595,32 @@ impl Painter<'_> {
             .filter(|b| scene.brother.map(|(k, _)| k) != Some(b.id.as_str()))
         {
             let ink = brother_ink(&b.id).with_alpha(0.8 * look.enter * reach);
-            self.stroke_rounded(r, radius, ink, 2.0);
+            self.stroke_rounded(&r.inset(0.6), radius - 0.6, ink, 1.2);
         }
 
-        // The phase, as light. Waiting needs you, so it is the one that
-        // moves most: its lamp breathes and its key is backlit, light
-        // spilling out under it. A finished turn flashes once.
+        // The phase. Waiting needs you, so it is the one that moves: its
+        // edge takes the waiting colour and breathes, as a Folio card that
+        // needs you does. A finished turn flashes once, faintly.
         let arrival = if ambient { look.arrival } else { 0.0 };
         match phase {
             Phase::Waiting(_) => {
-                let glow = c.with_alpha(0.3);
-                self.inner(gpu, r, radius, (2.0, 8.0), glow, glow, look.enter);
                 if !ambient {
                     self.halo(r, radius, c, 0.6);
                 }
                 if arrival > 0.0 {
                     // A ring leaving the tile the moment it starts waiting.
-                    let spread = (1.0 - arrival) * 5.0;
+                    let spread = (1.0 - arrival) * 4.0;
                     let ring = Rect::new(
                         r.x - spread,
                         r.y - spread,
                         r.w + 2.0 * spread,
                         r.h + 2.0 * spread,
                     );
-                    self.stroke_rounded(&ring, radius + spread, c.with_alpha(arrival * 0.45), 1.2);
+                    self.stroke_rounded(&ring, radius + spread, c.with_alpha(arrival * 0.3), 1.0);
                 }
             }
             Phase::Done if arrival > 0.0 => {
-                self.fill_rounded(r, radius, c.with_alpha(0.14 * arrival * look.enter));
+                self.fill_rounded(r, radius, c.with_alpha(0.06 * arrival * look.enter));
             }
             _ => {}
         }
@@ -3715,34 +3646,24 @@ impl Painter<'_> {
         if scene.parked.get(i).copied().unwrap_or(false) {
             let l = lamp_rect(r);
             let ring = Rect::new(l.x - 3.0, l.y - 3.0, l.w + 6.0, l.h + 6.0);
-            self.stroke_rounded(&ring, 4.0, theme::text_dim().fade(presence), 1.2);
+            self.stroke_rounded(&ring, 3.0, theme::text_dim().fade(0.6 * presence), 1.0);
         }
 
-        // The icon: what the agent is doing, in the phase's light.
+        // The icon: what the agent is doing, quiet as the Folio's are. The
+        // lamp says the phase; the icon only leans toward its colour.
         let icon_c = if matches!(lit, Phase::Idle | Phase::Ended | Phase::Paused) {
-            theme::text_dim()
+            theme::text_dim().with_alpha(0.75)
         } else {
-            c
+            theme::text_dim().mix(c, 0.35)
         };
         let (ix, iy) = icon_centre(r);
-        // How full the context is, as a short bar under the icon, the way
-        // the usage window draws a limit. Only while the process that
-        // measured it runs.
+        // How full the context is says itself in words once it matters,
+        // on the bottom row. Only while the process that measured it runs.
         let context = s
             .status
             .as_ref()
             .and_then(|st| st.context)
             .filter(|_| !matches!(phase, Phase::Paused | Phase::Ended));
-        if let Some(c) = context {
-            let ink = if c >= 75.0 {
-                theme::fullness_color(c)
-            } else {
-                theme::text_dim().with_alpha(0.7)
-            };
-            let track = Rect::new(ix - 10.0, iy + 14.0, 20.0, 3.0);
-            let level = if ambient { look.context } else { c / 100.0 };
-            self.tank(&track, level, ink.fade(presence), 5);
-        }
         // A new tool turns the icon over like a card: the old one folds
         // away edge on, and the new one opens out.
         let icon_r = Rect::new(ix - 14.0, iy - 14.0, 28.0, 28.0);
@@ -3762,10 +3683,10 @@ impl Painter<'_> {
                 M31: 0.0,
                 M32: iy * (1.0 - squash.max(0.02)),
             });
-            self.icon(&gpu.icon, icon_ink, glyph, icon_r);
+            self.icon(&gpu.tile_icon, icon_ink, glyph, icon_r);
             self.rt.SetTransform(&Matrix3x2::identity());
         } else {
-            self.icon(&gpu.icon, icon_ink, theme::tile_icon(s), icon_r);
+            self.icon(&gpu.tile_icon, icon_ink, theme::tile_icon(s), icon_r);
         }
 
         let pad = INNER_PAD;
@@ -3806,11 +3727,14 @@ impl Painter<'_> {
         } else {
             theme::rarity_color(s.rarity())
         };
+        // Softened toward the plain ink, as the Folio softens its text, so
+        // an item colour tints the name rather than paints it.
+        let ink = ink.mix(theme::text(), 0.35).mix(theme::surface(), 0.08);
         let ink = ink.fade(presence);
         self.text(&gpu.name, ink, s.label(), name_rect);
         let age_c = match phase {
-            Phase::Waiting(_) => c,
-            _ => theme::text_dim(),
+            Phase::Waiting(_) => c.mix(theme::text_dim(), 0.25),
+            _ => theme::text_dim().with_alpha(0.85),
         };
         self.text_tabular(gpu, &gpu.small_right, age_c.fade(presence), &age, top);
 
@@ -3856,15 +3780,14 @@ impl Painter<'_> {
         // the session is due a `/compact` or a fresh start.
         let crowded = context.filter(|&c| c >= 75.0);
         let crowded_w = 58.0;
-        let (activity, scrolled) = s.trace(scene.now, TRACE_BARS);
-        let trace_w = TRACE_BARS as f32 * (TRACE_BAR_W + TRACE_GAP) - TRACE_GAP;
-        let busy = activity.iter().any(|&a| a > 0.0);
         let gap = 8.0;
+        // No activity trace: the Folio says what happened in words, and
+        // a bar chart in a 27 DIP row was the noisiest thing on the tile.
         let parts = layout::tile_line(
             bottom.w,
             diff.as_ref().map(|d| d.2 + 4.0 + d.3 + gap),
             crowded.map(|_| crowded_w + gap),
-            busy.then_some(trace_w + gap),
+            None,
         );
         if let Some((plus, minus, plus_w, minus_w)) = diff.filter(|_| parts.diff) {
             let ink = |c: Color| c.fade(presence);
@@ -3889,22 +3812,6 @@ impl Painter<'_> {
                 at,
             );
             bottom.w -= crowded_w + gap;
-        }
-        if parts.trace {
-            let trace_c = if icon_c == theme::text_dim() {
-                theme::text_dim().with_alpha(0.45)
-            } else {
-                c.with_alpha(0.7)
-            };
-            let base = bottom.y + bottom.h / 2.0 + TRACE_H / 2.0;
-            self.trace(
-                &activity,
-                scrolled,
-                bottom.right() - trace_w,
-                base,
-                trace_c.fade(presence),
-            );
-            bottom.w -= trace_w + gap;
         }
         // A runeword's rune in the cube's gold, before what it last said.
         if let Some(w) = &s.runeword {
@@ -3955,30 +3862,6 @@ impl Painter<'_> {
             line(tip, (back, cy + half));
         }
         line((cx + 1.5, cy - half - 0.5), (cx - 1.5, cy + half + 0.5));
-    }
-
-    /// Bars of how busy a session was over the last minutes, oldest on the
-    /// left, standing on `base`. A slice with nothing in it is a dot, so
-    /// quiet reads as quiet rather than as missing. The bars drift left as
-    /// the newest slice fills, `scrolled` of a bar, and the oldest fades
-    /// as it goes.
-    unsafe fn trace(&self, activity: &[f32], scrolled: f32, x: f32, base: f32, c: Color) {
-        let step = TRACE_BAR_W + TRACE_GAP;
-        for (i, &a) in activity.iter().enumerate() {
-            let bx = x + (i as f32 - scrolled) * step;
-            let c = if i == 0 { c.fade(1.0 - scrolled) } else { c };
-            let h = if a > 0.0 {
-                2.0 + a * (TRACE_H - 2.0)
-            } else {
-                1.0
-            };
-            let alpha = if a > 0.0 { 1.0 } else { 0.35 };
-            self.fill_rounded(
-                &Rect::new(bx, base - h, TRACE_BAR_W, h),
-                TRACE_BAR_W / 2.0,
-                c.fade(alpha),
-            );
-        }
     }
 
     /// The session has a browser open: a small window with a tab bar, the
@@ -4047,7 +3930,10 @@ impl Painter<'_> {
     /// dashed. The cursor raises a key into it, as if offering one.
     unsafe fn slot(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Button) {
         match b {
-            Button::Hover => self.key(gpu, r, m.tile_radius, theme::surface(), 0.6, 1.0),
+            Button::Hover => {
+                let edge = theme::text().with_alpha(0.16);
+                self.card(r, m.tile_radius, theme::surface(), edge, 1.0);
+            }
             Button::Idle | Button::Pressed => {
                 self.sunk(gpu, r, m.tile_radius, theme::well());
                 self.dashed(gpu, m, r);
@@ -4507,7 +4393,7 @@ fn icon_centre(r: &Rect) -> (f32, f32) {
 
 /// Where a tile's lamp sits: a slot down its left edge.
 fn lamp_rect(r: &Rect) -> Rect {
-    Rect::new(r.x + 12.0, r.y + 14.0, 4.0, r.h - 28.0)
+    Rect::new(r.x + 13.0, r.y + 16.0, 2.0, r.h - 32.0)
 }
 
 /// How far each of the shapes that make a `blur` wide soft edge grows past
