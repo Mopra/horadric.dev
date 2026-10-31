@@ -467,7 +467,9 @@ impl App {
         };
         let held = crate::joining::Store::load(&dir).is_some_and(|s| s.get(key).is_some());
         let controls = horadric_core::standing::Standing::load(&dir).controls(key);
-        afar::takes_entries(matches!(via, Via::Node(_)), held, controls)
+        // A teammate's lore is theirs, as this PC's is the human's.
+        let own = horadric_core::team::Team::load(&dir).kin(key).shares_lore();
+        own && afar::takes_entries(matches!(via, Via::Node(_)), held, controls)
     }
 
     /// Tells brother `key`, reached through the relay, what this PC holds

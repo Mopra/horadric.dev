@@ -864,6 +864,11 @@ impl Serve for Here<'_> {
         }
     }
 
+    fn shares_lore(&self, who: &str) -> bool {
+        horadric_hooks::state_dir()
+            .is_none_or(|d| horadric_core::team::Team::load(&d).kin(who).shares_lore())
+    }
+
     fn handoff(&mut self, id: &str, to: &str) -> Result<(), String> {
         self.0.handoff_to(id, to, false)
     }

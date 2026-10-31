@@ -173,6 +173,11 @@ pub trait Serve {
     }
     /// Takes in the entries a brother sent, `b64` as `entries` carries it.
     fn lore_import(&mut self, _project: &Value, _b64: &str) {}
+    /// Whether lore goes to and comes from brother `who` at all: not with
+    /// a teammate's machine (see `team`).
+    fn shares_lore(&self, _who: &str) -> bool {
+        true
+    }
     /// `handoff`: hand session `id` to the brother named `to` once its
     /// turn ends (see `crate::handing`).
     fn handoff(&mut self, _id: &str, _to: &str) -> Result<(), String> {
@@ -293,8 +298,8 @@ struct Asked {
     unsubs: Vec<String>,
     /// A brother's `lore`: channel, project.
     lores: Vec<(u32, String)>,
-    /// A brother's `entries`: project, b64.
-    entries: Vec<(Value, String)>,
+    /// A brother's `entries`: who, project, b64.
+    entries: Vec<(String, Value, String)>,
     /// Channel, session, the brother to hand it to.
     handoffs: Vec<(u32, String, String)>,
     /// A brother's `bases` and `bundle`: channel, who, the message.
@@ -540,7 +545,7 @@ impl Server {
             }
             "entries" if c.kind == Kind::Brother => {
                 if let (false, Some(b64)) = (msg["project"].is_null(), text("b64")) {
-                    asked.entries.push((msg["project"].clone(), b64));
+                    asked.entries.push((c.who.clone(), msg["project"].clone(), b64));
                 }
             }
             _ => {}
@@ -651,13 +656,18 @@ impl Server {
                 out.later.push((*ch, job));
             }
         }
-        for (project, b64) in &asked.entries {
-            serve.lore_import(project, b64);
+        for (who, project, b64) in &asked.entries {
+            if serve.shares_lore(who) {
+                serve.lore_import(project, b64);
+            }
         }
         for (ch, key) in asked.lores {
             let Some(c) = self.clients.get_mut(&ch) else {
                 continue;
             };
+            if !serve.shares_lore(&c.who) {
+                continue;
+            }
             let Some((project, theirs)) = c.lore.get_mut(&key) else {
                 continue;
             };
@@ -1202,6 +1212,9 @@ mod tests {
         fn handing_answer(&mut self, who: &str, msg: &Value) {
             self.answers.push((who.into(), msg.clone()));
         }
+        fn shares_lore(&self, who: &str) -> bool {
+            who != "Mate"
+        }
         fn tree(&self, project: &str) -> Job {
             let project = project.to_string();
             Box::new(move || {
@@ -1670,6 +1683,25 @@ mod tests {
             serve.imported,
             vec![("\"repo\"".to_string(), "eA".to_string())]
         );
+    }
+
+    #[test]
+    fn a_teammates_machine_is_sent_no_lore_and_its_lore_is_not_taken() {
+        let mut serve = Fake::default();
+        let hello = json!({"t": "hello", "v": 3, "kind": "brother"});
+        let (mut server, _) = greeted(&mut serve, "Mate", hello);
+        let as_mate = |server: &mut Server, serve: &mut Fake, n: u64, mut msg: Value| {
+            msg["s"] = json!("S");
+            msg["n"] = json!(n);
+            server.heard(1, "Mate", &msg, 0, || unreachable!());
+            sent(server.answer(serve, 0))
+        };
+        let lore = json!({"t": "lore", "project": "repo", "have": {"me": 1}});
+        let msgs = as_mate(&mut server, &mut serve, 1, lore);
+        assert!(of(&msgs, "entries").is_empty());
+        let entries = json!({"t": "entries", "project": "repo", "b64": "eA"});
+        as_mate(&mut server, &mut serve, 2, entries);
+        assert!(serve.imported.is_empty());
     }
 
     #[test]

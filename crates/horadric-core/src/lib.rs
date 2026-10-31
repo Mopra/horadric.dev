@@ -72,6 +72,7 @@ pub mod spend;
 pub mod ssh;
 pub mod standing;
 pub mod tasks;
+pub mod team;
 pub mod title;
 pub mod trust;
 pub mod usage;

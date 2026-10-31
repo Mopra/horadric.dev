@@ -356,6 +356,7 @@ impl Brothers {
     pub fn text(&mut self, v: &Value) -> bool {
         self.tick();
         if let Some(list) = joining::brothers_message(v) {
+            self.learn_team(crate::team::team_in_list(v));
             self.tried.retain(|id| list.iter().any(|(b, _)| b == id));
             self.listed = list;
             self.link_joined();
@@ -363,6 +364,10 @@ impl Brothers {
         }
         let id = v.get("id").and_then(Value::as_str).unwrap_or("");
         let name = v.get("name").and_then(Value::as_str).unwrap_or("");
+        let channel = v.get("join").or_else(|| v.get("link")).is_some();
+        if channel && !id.is_empty() && crate::team::Kin::of(v) == crate::team::Kin::Team {
+            self.learn_team([id.to_string()]);
+        }
         if let Some(ch) = v.get("join").and_then(Value::as_u64) {
             self.given(ch as u32, id, name);
             return true;
@@ -398,6 +403,27 @@ impl Brothers {
             }
         }
         false
+    }
+
+    /// Keeps the machines the relay says are teammates', so each is
+    /// treated as one from its first link on.
+    fn learn_team(&self, ids: impl IntoIterator<Item = String>) {
+        let Some(dir) = &self.dir else {
+            return;
+        };
+        let mut team = crate::team::Team::load(dir);
+        if team.learn(ids) {
+            if let Err(e) = team.save(dir) {
+                eprintln!("horadric: cannot keep whose machines are teammates': {e}");
+            }
+        }
+    }
+
+    /// Whether brother `id` is a teammate's machine, as the relay said.
+    pub fn teammate(&self, id: &str) -> bool {
+        self.dir
+            .as_deref()
+            .is_some_and(|d| crate::team::Team::load(d).kin(id) == crate::team::Kin::Team)
     }
 
     /// A binary frame on channel `ch`. True when the channel is a
@@ -1540,6 +1566,10 @@ impl Brothers {
             standing.vouch(&id, &new);
             for k in &old {
                 standing.replaced(&id, k);
+            }
+            // A teammate's machine only watches until the human says more.
+            if !crate::team::Team::load(&dir).kin(&id).controls_at_join() {
+                standing.set_control(&id, false);
             }
             if let Err(e) = standing.save(&dir) {
                 eprintln!("horadric: cannot keep who was let in: {e}");
