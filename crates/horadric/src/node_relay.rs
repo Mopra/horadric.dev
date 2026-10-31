@@ -496,7 +496,9 @@ fn heard(socket: &Socket, text: bool, data: &[u8]) {
         if let Some(ch) = v.get("open").and_then(Value::as_u64) {
             match phones().as_mut() {
                 Some(p) => p.chans.open(ch as u32),
-                None => socket.send(true, json!({ "close": ch }).to_string().as_bytes()),
+                None => {
+                    socket.send(true, json!({ "close": ch }).to_string().as_bytes());
+                }
             }
         }
         if let Some(ch) = v.get("close").and_then(Value::as_u64) {

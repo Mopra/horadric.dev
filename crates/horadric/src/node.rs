@@ -762,7 +762,7 @@ fn launch(id: &str, cwd: PathBuf, args: Vec<String>) -> Result<Attached, String>
         Vec::new()
     };
     line.extend(args);
-    let mut env_set = vec![
+    let env_set = vec![
         (SESSION_ENV.to_string(), id.to_string()),
         (OWNER_ENV.to_string(), horadric_hooks::port().to_string()),
     ];

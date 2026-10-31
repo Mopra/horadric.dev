@@ -28,10 +28,12 @@ pub fn program(
 /// The arguments that make the shell `program` run `command` once and
 /// exit, by what kind of shell it is.
 pub fn run_args(program: &Path, command: &str) -> Vec<String> {
-    let stem = (program.file_stem())
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    let mut args: Vec<String> = match stem.as_str() {
+    // Split by hand: a Windows path read on a Mac or Linux has no
+    // separators `Path` knows, and a node can be told one.
+    let path = program.to_string_lossy().to_lowercase();
+    let file = path.rsplit(['/', '\\']).next().unwrap_or_default();
+    let stem = file.strip_suffix(".exe").unwrap_or(file);
+    let mut args: Vec<String> = match stem {
         "pwsh" | "powershell" => vec![
             "-NoProfile".into(),
             "-NonInteractive".into(),

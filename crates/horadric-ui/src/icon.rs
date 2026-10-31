@@ -54,11 +54,9 @@ pub fn lit(size: u32, light: u32) -> Vec<u32> {
     let l = [(light >> 16) & 0xff, (light >> 8) & 0xff, light & 0xff].map(|c| c as f32 / 255.0);
     // The halo fades with the light, so a dimmed light does not leave a ring.
     let k = l[0].max(l[1]).max(l[2]);
-    let premul: Vec<[f32; 4]> = data
-        .chunks_exact(6)
+    let premul: Vec<[f32; 4]> = (data.as_chunks::<6>().0.iter())
         .map(|p| {
-            let [r, g, b, a, glow, halo] =
-                [p[0], p[1], p[2], p[3], p[4], p[5]].map(|v| v as f32 / 255.0);
+            let [r, g, b, a, glow, halo] = p.map(|v| v as f32 / 255.0);
             let a = (a + halo * k).min(1.0);
             [
                 (r + glow * l[0]).min(a),
@@ -88,7 +86,12 @@ pub fn burning(size: u32, light: u32, phase: f32) -> Vec<u32> {
     let data = &LAYERS[offset..offset + b * b * 6];
     let l = [(light >> 16) & 0xff, (light >> 8) & 0xff, light & 0xff].map(|c| c as f32 / 255.0);
     let k = l[0].max(l[1]).max(l[2]);
-    let glow: Vec<f32> = data.chunks_exact(6).map(|p| p[4] as f32 / 255.0).collect();
+    let glow: Vec<f32> = data
+        .as_chunks::<6>()
+        .0
+        .iter()
+        .map(|p| p[4] as f32 / 255.0)
+        .collect();
     // Tongues about a tenth of the icon tall, never under two pixels or the
     // tray's 16 px icon would show none.
     let scale = size as f32 / baked as f32;
@@ -120,8 +123,8 @@ pub fn burning(size: u32, light: u32, phase: f32) -> Vec<u32> {
     premul.iter().map(|&p| straight(p)).collect()
 }
 
-/// How the flames burn at `(u, v)`, both 0 to 1 across the icon, from 0 to
-/// 1. Two octaves of value noise scroll up through the icon, the finer one
+/// How the flames burn at `(u, v)`, both 0 to 1 across the icon, from 0
+/// to 1. Two octaves of value noise scroll up through the icon, the finer one
 /// twice as fast, each wrapping vertically after a whole number of loops so
 /// `phase` 1 meets `phase` 0. A flicker shared by the whole fire rides on
 /// top.

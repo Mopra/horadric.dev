@@ -40,8 +40,10 @@ fn read_wav(bytes: &[u8]) -> Vec<f32> {
         if id == b"data" {
             let end = (at + 8 + len).min(bytes.len());
             return bytes[at + 8..end]
-                .chunks_exact(2)
-                .map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0)
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|s| i16::from_le_bytes(*s) as f32 / 32768.0)
                 .collect();
         }
         at += 8 + len + (len & 1);

@@ -25,7 +25,7 @@ pub fn frame(i: usize) -> (Vec<u8>, Vec<u8>) {
     let data = &DATA[(i % FRAMES) * n * 5..][..n * 5];
     let mut stone = Vec::with_capacity(n * 4);
     let mut light = Vec::with_capacity(n * 4);
-    for p in data.chunks_exact(5) {
+    for p in data.as_chunks::<5>().0 {
         stone.extend_from_slice(&[p[2], p[1], p[0], p[3]]);
         light.extend_from_slice(&[0, 0, 0, p[4]]);
     }

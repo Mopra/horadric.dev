@@ -71,7 +71,7 @@ pub fn pick<'a>(store: &'a Store, tag: &str, project: &str, most: usize) -> Vec<
             (None, _) => dialogue.push(m(id.to_string(), c)),
         }
     }
-    let newest = |v: &mut Vec<Memory>| v.sort_by(|a, b| b.time.cmp(&a.time));
+    let newest = |v: &mut Vec<Memory>| v.sort_by_key(|m| std::cmp::Reverse(m.time));
     newest(&mut quests);
     newest(&mut dialogue);
     newest(&mut code);
