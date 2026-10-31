@@ -451,6 +451,9 @@ pub(crate) enum Input {
     /// project on the stage when it has one, otherwise to the user's own
     /// browser.
     Link(String),
+    /// A link clicked in a Folio: always to the browser pane of the project
+    /// with this key, opened for it when closed.
+    LinkIn(String, String),
     /// A browser pane's cross: close the page of the project with this key.
     CloseWeb(String),
     /// A browser pane's pop out button: its project's browser into a window
@@ -7755,6 +7758,10 @@ impl App {
         env_set.extend(defaults.env(Agent::Claude));
         let mut flags = defaults.flags_for(Agent::Claude, &own, false);
         flags.extend(own.iter().cloned());
+        // Without it a Folio's agent has no browser_* tools and opens pages
+        // in a browser of its own instead of the project's pane.
+        let config = self.mcp_config.as_ref().map(|p| p.to_string_lossy());
+        flags.extend(Agent::Claude.mcp_args("", config.as_deref()));
         // Claude Code takes one system prompt, so one the session brought
         // gets this added to it rather than replaced.
         let subagents = horadric_core::folio::SUBAGENT_PROMPT;
@@ -9067,6 +9074,11 @@ impl App {
                     Some(key) if self.webs.contains_key(&key) => self.open_web_tab(&key, &url),
                     _ => watch::open_link(&crate::links::Target::Web(url), None),
                 },
+                Input::LinkIn(_, url) if !horadric_core::markdown::is_web_link(&url) => {}
+                Input::LinkIn(key, url) if self.webs.contains_key(&key) => {
+                    self.open_web_tab(&key, &url)
+                }
+                Input::LinkIn(key, url) => self.open_web(&key, Some(&url)),
                 Input::CloseWeb(key) => self.close_web(&key),
                 Input::PopWeb(key, out) => self.pop_web(&key, out),
                 Input::Pages(key) => {

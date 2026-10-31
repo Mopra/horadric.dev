@@ -26,7 +26,10 @@ use crate::keys::Mods;
 pub(super) fn act(key: &str, a: Act) {
     match a {
         Act::Copy(t) => clipboard::set_text(&t),
-        Act::Link(url) => app::push(Input::Link(url)),
+        Act::Link(url) => match with(key, |c| c.key.clone()) {
+            Some(project) => app::push(Input::LinkIn(project, url)),
+            None => app::push(Input::Link(url)),
+        },
         Act::Path(path, line) => {
             // What a reply names is the model's word: only a file inside
             // the project opens.
