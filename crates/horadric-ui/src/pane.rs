@@ -1887,7 +1887,12 @@ impl Pane {
                 Chord::Zoom => self.tell_stage(WM_PANE_ZOOM),
                 Chord::Focus(dir) => self.move_focus(dir),
                 Chord::Font(step) => app::push(Input::Font(step)),
-                Chord::Find if self.console.sky.is_some() || self.console.folio.is_some() => {}
+                Chord::Find if self.console.sky.is_some() => {}
+                Chord::Find if self.console.folio.is_some() => {
+                    if let Some(key) = &self.console.folio {
+                        folio::find(key);
+                    }
+                }
                 Chord::Find => self.open_search(),
                 Chord::WarTable => self.war_table(None),
             }
