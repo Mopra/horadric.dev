@@ -4862,7 +4862,9 @@ impl App {
         self.consoles.remove(id);
         let cwd = PathBuf::from(&saved.cwd);
         // A chat resumes as one; a terminal does when new sessions open as
-        // chats and it has a conversation to carry on.
+        // chats and it has a conversation to carry on. Its role, a quest's,
+        // Warriv's, an errand's, comes back with it either way: the flags
+        // are rebuilt from its id and the list as it starts.
         let as_chat = saved.agent == Agent::Claude
             && !saved.shell
             && saved.ssh.is_none()
@@ -4870,7 +4872,7 @@ impl App {
             && (saved.chat
                 || (self.chat_sessions
                     && saved.claude_session_id.is_some()
-                    && self.started_plainly(id, &saved)));
+                    && !Self::keeps_terminal(&saved)));
         if as_chat {
             let conversation = (saved.claude_session_id.clone()).filter(|_| saved.prompted);
             let started =
@@ -4897,16 +4899,10 @@ impl App {
         result
     }
 
-    /// Whether paused session `id` is one the human started, so it may go
-    /// on as a chat. A Folio gets all a terminal gets on every launch, its
-    /// own worktree, the town and a first prompt too, but a quest, Warriv,
-    /// an errand and a runeword are typed into as they run, which a Folio
-    /// cannot be told to yet, so those stay terminals.
-    fn started_plainly(&self, id: &str, saved: &SavedSession) -> bool {
-        !horadric_core::warriv::is_warriv(id)
-            && !horadric_core::runeword::is_errand(id)
-            && saved.runeword.is_none()
-            && !self.holds_quest(id)
+    /// Whether a paused terminal must stay one: its runeword has keys, an
+    /// arrow or a Tab, that only a terminal takes.
+    fn keeps_terminal(saved: &SavedSession) -> bool {
+        (saved.runeword.as_ref()).is_some_and(|w| horadric_core::runeword::needs_terminal(&w.runes))
     }
 
     /// Opens a plain terminal in the project with this key, on the stage
@@ -7922,6 +7918,15 @@ impl App {
         let fresh = self.new_trees.remove(id);
         if fresh.is_none() {
             recent::remember(&mut self.recent, &dir.to_string_lossy());
+        }
+        // A worktree just made of a trusted project is as trusted: a quest
+        // started while no one is here would wait on the Folio's ask.
+        if let Some((w, _)) = &fresh {
+            if crate::accounts::trusted(Path::new(&w.main)) {
+                if let Err(e) = crate::accounts::trust(&dir) {
+                    eprintln!("horadric: cannot trust {}: {e}", dir.display());
+                }
+            }
         }
         self.register_folio(id, &dir, name, resume.as_deref());
         let own_tree = (self.shared.registry.lock().ok()).and_then(|mut r| {

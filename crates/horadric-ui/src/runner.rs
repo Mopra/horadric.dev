@@ -39,7 +39,7 @@ use horadric_core::{fleet, merge, pack, ship, ssh, Agent, Phase, SavedState, Set
 use horadric_hooks::tasks as file;
 
 use super::{post, push, unix_now, with_app, App, Input, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
-use crate::app::Run;
+use crate::app::{SessionSpec, Workplace};
 use crate::board::{self, Board, RowState};
 use crate::menu::{self, Item};
 use crate::questlog::Ask;
@@ -920,10 +920,7 @@ impl App {
         }
         let (pack, packed) = context_pack(key, &dir, &task);
         record_pack(key, &id, title, packed);
-        self.tasks.prompts.insert(
-            id.clone(),
-            tasks::prompt(&task, &pack, &horadric_command(), file::rel(&dir)),
-        );
+        let prompt = tasks::prompt(&task, &pack, &horadric_command(), file::rel(&dir));
         self.refresh_boards(true);
         let parallel = self
             .shared
@@ -931,31 +928,17 @@ impl App {
             .borrow()
             .get(key)
             .is_some_and(|b| b.parallel > 1);
-        let cwd = if parallel {
-            self.own_tree(
-                &id,
-                &tasks::slug(title),
-                dir.clone(),
-                &[],
-                horadric_core::Agent::Claude,
-                true,
-            )
-        } else {
-            dir.clone()
+        // A Folio unless Settings says new sessions open in a terminal:
+        // automation follows the human's one switch back.
+        let spec = SessionSpec {
+            id: Some(id.clone()),
+            name: Some(title.to_string()),
+            prompt: Some(prompt),
+            place: if parallel { Workplace::OwnTree } else { Workplace::Here },
+            branch: Some(tasks::slug(title)),
+            ..SessionSpec::new(dir.clone(), self.chat_sessions)
         };
-        if let Err(e) = self.launch(
-            &id,
-            title,
-            cwd,
-            Vec::new(),
-            Run::Agent(horadric_core::Agent::Claude),
-            false,
-        ) {
-            // A worktree the session never started in holds nothing.
-            if let Some((w, _)) = self.new_trees.remove(&id) {
-                crate::worktree::remove(w);
-            }
-            self.tasks.prompts.remove(&id);
+        if let Err(e) = self.start_session(spec) {
             let _ = file::update(&dir, |text| tasks::set_mark(text, line, title, Mark::Open));
             self.refresh_boards(true);
             return Err(e);
@@ -1290,28 +1273,17 @@ impl App {
             return;
         };
         let id = self.unique_id("quest-giver");
-        self.tasks.prompts.insert(
-            id.clone(),
-            tasks::giver_prompt(&horadric_command(), file::rel(&dir)),
-        );
-        if let Err(e) = self.launch(
-            &id,
-            "Quest Giver",
-            dir,
-            Vec::new(),
-            Run::Agent(horadric_core::Agent::Claude),
-            false,
-        ) {
-            self.tasks.prompts.remove(&id);
+        let spec = SessionSpec {
+            id: Some(id),
+            name: Some("Quest Giver".into()),
+            prompt: Some(tasks::giver_prompt(&horadric_command(), file::rel(&dir))),
+            show: true,
+            ..SessionSpec::new(dir, self.chat_sessions)
+        };
+        if let Err(e) = self.start_session(spec) {
             eprintln!("horadric: cannot start the quest giver: {e}");
             self.toasts
                 .show(Kind::Failed, "Cannot start the quest giver", &e);
-            return;
-        }
-        if self.fill_stage(key) {
-            if let Some(stage) = &self.stage {
-                stage.focus_session(&id);
-            }
         }
     }
 
