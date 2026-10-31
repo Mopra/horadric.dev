@@ -10,19 +10,10 @@ What is left is below.
 
 ## Still to do
 
-- **A brother's name the human can change.** A brother is called by
-  `HORADRIC_PC_NAME` or the computer's name (`portal_pair::pc_name`).
-  The plan was a name like "Laptop" or "vps" the human sets, carried in
-  the roster (`Roster::rename` exists, only tests call it).
-- **Catching the lore up from Drive.** The encrypted Drive backup holds
-  each machine's lore, so a brother that wakes with every other one
-  silent could catch up from there, as the brother that never sleeps.
 - **The Mac as a brother.** Its portal has no crypto yet either.
 - **Remote files and the git glance** over the same protocol, read only
   first. A remote project has neither today, since both assume a local
   disk.
-- **A quest moving with its session,** so the quest log on the receiver
-  knows it. See the open question below.
 - **Teams.** A WorkOS organization as a brotherhood of several people,
   each seeing the others' sessions view only by default, and the lore
   shared or not per project. The login was picked with this in mind.
@@ -31,10 +22,12 @@ Each of these is its own decision when it comes.
 
 ## Open questions
 
-- A quest's session handed to another brother: does the quest move with
-  it, or stay on the brother whose quest log it is in? Warriv on two
-  brothers working the same repository would need to agree on who runs
-  what.
+- Should a quest follow a takeover too? It moves with a handed off
+  session, but the silent owner's quest log keeps a taken over one held
+  by a session that now runs elsewhere. Nor does it follow a session
+  that lands outside a worktree of its own, or on a Linux node, which
+  has no quest log; the sender's copy then waits blocked, naming the
+  brother, for the human.
 - Handing off a plain terminal: a shell has no transcript to resume, so
   probably never, only its folder.
 - In a team, should dialogue be shared at all? The lore holds
