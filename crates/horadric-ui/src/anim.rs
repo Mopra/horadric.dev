@@ -15,6 +15,9 @@ use crate::motion::{
 use crate::layout::Hit;
 use crate::theme;
 
+/// How long a bay button takes to light: its dashed edge closing into a
+/// line, then a key rising into it. Two steps want longer than a fade.
+pub const BAY: Duration = Duration::from_millis(220);
 /// How fast a tile slides to a new place: half the way every this long.
 const SLIDE: Duration = Duration::from_millis(60);
 /// How fast a context bar finds a new level: half the way every this long.
@@ -247,8 +250,8 @@ impl Tiles {
     }
 }
 
-/// How lit each button is under the cursor, 0 to 1, so a button rises and
-/// sinks over [`HOVER`] as a tile does instead of snapping. Only the ones
+/// How lit each button is under the cursor, 0 to 1, so a button lights
+/// over [`BAY`] instead of snapping. Only the ones
 /// on their way somewhere or lit are kept.
 #[derive(Default)]
 pub struct Glow {
@@ -276,7 +279,7 @@ impl Glow {
         }
         for (b, v) in &mut self.lit {
             let target = if Some(*b) == hot { 1.0 } else { 0.0 };
-            *v = motion::fade(*v, target, dt, HOVER);
+            *v = motion::fade(*v, target, dt, BAY);
         }
         self.lit.retain(|(b, v)| *v > 0.0 || Some(*b) == hot);
     }
@@ -286,11 +289,6 @@ impl Glow {
             .iter()
             .find(|(b, _)| *b == which)
             .map_or(0.0, |(_, v)| *v)
-    }
-
-    /// Whether `which` is on its way up rather than down.
-    pub fn rising(&self, which: Hit) -> bool {
-        self.hot == Some(which)
     }
 
     /// Whether a button is still on its way, so the frame after needs
@@ -770,20 +768,20 @@ mod tests {
         let mut g = Glow::default();
         // Long after the last frame: the fade starts now, it does not jump.
         g.step(now, None);
-        g.step(now + HOVER * 10, Some(Hit::Folio));
+        g.step(now + BAY * 10, Some(Hit::Folio));
         assert_eq!(g.of(Hit::Folio), 0.0);
-        let now = now + HOVER * 10;
-        g.step(now + HOVER / 2, Some(Hit::Folio));
+        let now = now + BAY * 10;
+        g.step(now + BAY / 2, Some(Hit::Folio));
         assert!(g.moving() && g.of(Hit::Folio) > 0.4 && g.of(Hit::Folio) < 0.6);
-        g.step(now + HOVER * 2, Some(Hit::Folio));
+        g.step(now + BAY * 2, Some(Hit::Folio));
         assert_eq!(g.of(Hit::Folio), 1.0);
         assert!(!g.moving());
-        g.step(now + HOVER * 2, Some(Hit::Folio));
+        g.step(now + BAY * 2, Some(Hit::Folio));
         // The cursor moves to the next button: one sinks as the other rises.
-        g.step(now + HOVER * 3, Some(Hit::Add));
-        g.step(now + HOVER * 3 + HOVER / 2, Some(Hit::Add));
+        g.step(now + BAY * 3, Some(Hit::Add));
+        g.step(now + BAY * 3 + BAY / 2, Some(Hit::Add));
         assert!(g.of(Hit::Folio) > 0.4 && g.of(Hit::Add) > 0.4);
-        g.step(now + HOVER * 4, None);
+        g.step(now + BAY * 4, None);
         assert_eq!((g.of(Hit::Folio), g.of(Hit::Add)), (0.0, 0.0));
         assert!(g.lit.is_empty());
     }
