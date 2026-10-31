@@ -37,6 +37,7 @@ mod lightbox;
 mod picker;
 mod rich;
 mod select;
+mod sign_in;
 mod transcript;
 mod view;
 mod watch;
@@ -146,6 +147,13 @@ struct Chat {
     live: bool,
     /// The session goes on in a terminal once claude.exe has ended.
     to_terminal: bool,
+    /// The session starts again once claude.exe has ended, so it reads a
+    /// new login.
+    restarting: bool,
+    /// Whether it comes to the stage as it starts again.
+    restart_show: bool,
+    /// What it says once its history is in, see [`sign_in::greeting`].
+    greeting: Option<String>,
     /// Waits for the human to trust its folder, with what starts it then.
     /// Claude Code asks before it runs a folder's hooks and MCP servers,
     /// but not headless, so the Folio asks for it.
@@ -211,6 +219,9 @@ impl Chat {
             pending: None,
             loading: None,
             to_terminal: false,
+            restarting: false,
+            restart_show: false,
+            greeting: None,
             tr: transcript::Ui::default(),
             watch: None,
             first: None,
@@ -414,6 +425,12 @@ pub fn open_with(
             load_history(&mut chat, path, len);
         }
     }
+    if let Some(said) = sign_in::greeting(id) {
+        match chat.loading {
+            Some(_) => chat.greeting = Some(said),
+            None => chat.folio.note(&said),
+        }
+    }
     if !crate::accounts::trusted(dir) {
         chat.pending = Some((tag, options.clone()));
         CHATS.with(|c| c.borrow_mut().insert(id.to_string(), chat));
@@ -516,7 +533,7 @@ pub fn close(id: &str) {
     let mut gone = CHATS.with(|c| c.borrow_mut().remove(id));
     if let Some(c) = gone.as_mut() {
         // Handed over, it may come back as a Folio: what was typed waits.
-        if c.to_terminal {
+        if c.to_terminal || c.restarting {
             c.input.fold_queue();
         } else {
             c.input.forget();
@@ -544,6 +561,38 @@ pub fn hand_over(id: &str) -> bool {
         true
     })
     .unwrap_or(false)
+}
+
+/// Starts session `id`'s claude.exe again on its conversation, so it
+/// reads a new login, saying `said` first. One that ended starts at once,
+/// one at rest once it has ended; one at work or asking is left alone.
+/// `show` brings it to the stage.
+fn restart(id: &str, said: &str, show: bool) {
+    // Some(true) starts it now, Some(false) once claude.exe has ended.
+    let how = with(id, |c| {
+        if c.to_terminal || c.restarting || c.pending.is_some() || c.loading.is_some() {
+            return None;
+        }
+        if c.ended || c.hosted.is_none() {
+            return Some(true);
+        }
+        if !c.live || c.folio.busy || !c.folio.pending_asks().is_empty() {
+            return None;
+        }
+        let h = c.hosted.as_ref()?;
+        c.restarting = true;
+        c.restart_show = show;
+        h.close();
+        Some(false)
+    })
+    .flatten();
+    let Some(now) = how else {
+        return;
+    };
+    sign_in::greet(id, said);
+    if now {
+        app::push(Input::FolioRestart(id.to_string(), show));
+    }
 }
 
 /// Lets go of every Folio, as the app reloads or quits keeping its
@@ -622,6 +671,10 @@ unsafe extern "system" fn router_proc(
         drain();
         return LRESULT(0);
     }
+    if msg == sign_in::WM_FOLIO_LOGIN {
+        sign_in::tend();
+        return LRESULT(0);
+    }
     if msg == WM_TIMER && wparam.0 == watch::WATCH_TIMER {
         watch::tick(hwnd);
         return LRESULT(0);
@@ -683,6 +736,9 @@ fn drain() {
                 chat.folio = history;
                 chat.tr.state.from = None;
                 chat.loading = None;
+                if let Some(said) = chat.greeting.take() {
+                    chat.folio.note(&said);
+                }
                 moved = true;
             }
             let events: Vec<Event> = match chat.inbox.lock() {
@@ -714,6 +770,9 @@ fn drain() {
                         moved = true;
                         if chat.to_terminal {
                             tell.push(Input::FolioHandedOver(id.clone()));
+                        }
+                        if chat.restarting {
+                            tell.push(Input::FolioRestart(id.clone(), chat.restart_show));
                         }
                     }
                 }
