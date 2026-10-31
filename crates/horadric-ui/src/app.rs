@@ -3970,6 +3970,7 @@ impl App {
                 self.handing_tick();
                 self.keeping_tick();
                 self.folio_rewinds_tick();
+                self.folio_bands_tick();
                 self.backup_tick();
                 if self
                     .last_check
@@ -7440,12 +7441,28 @@ impl App {
     /// files it shares with other sessions, those named as their tiles are.
     fn know_call(&mut self, call: KnowCall) {
         let quest = self.held_quest(&call.session);
-        let shared: Vec<(String, Vec<String>)> = self
-            .shared
+        let shared = self.shared_names(&call.overlaps);
+        // A mod that gave up waiting never hears this answer, so its stops
+        // wait for the next ask rather than being lost.
+        let stop = if call.reply.wanted() {
+            self.stop_agents.remove(&call.session).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        call.reply.send(known(quest.as_deref(), &shared, &stop));
+    }
+
+    /// Each shared file with the labels of the other sessions that changed
+    /// it, those still on a tile.
+    fn shared_names(
+        &self,
+        overlaps: &[horadric_core::overlap::Overlap],
+    ) -> Vec<(String, Vec<String>)> {
+        self.shared
             .registry
             .lock()
             .map(|r| {
-                call.overlaps
+                overlaps
                     .iter()
                     .map(|o| {
                         let names = o
@@ -7457,21 +7474,26 @@ impl App {
                     })
                     .collect()
             })
-            .unwrap_or_default();
-        // A mod that gave up waiting never hears this answer, so its stops
-        // wait for the next ask rather than being lost.
-        let stop = if call.reply.wanted() {
-            self.stop_agents.remove(&call.session).unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        call.reply.send(known(quest.as_deref(), &shared, &stop));
+            .unwrap_or_default()
+    }
+
+    /// The band above each Folio's composer, what the mod shows above a
+    /// terminal's prompt. The mod's `ui.render` never runs headless, so
+    /// the app tells the Folio what it would have answered the mod.
+    fn folio_bands_tick(&mut self) {
+        for id in self.folios.keys() {
+            let overlaps = listener::shared_files(id);
+            let shared = self.shared_names(&overlaps);
+            let band = crate::folio::band::Band::new(self.held_quest(id), shared);
+            crate::folio::set_band(id, band);
+        }
     }
 
     /// Asks the session's mod to stop one of its subagents, the next time
     /// it asks what Horadric knows (every few seconds).
     fn stop_subagent(&mut self, id: &str, agent: &str) {
-        // A Folio's CLI stops its own tasks, and has no mod to ask.
+        // A Folio's CLI is told at once by a control request, sooner than
+        // the mod's next ask (the mod runs headless too).
         if self.folios.contains_key(id) {
             crate::folio::stop_task(id, agent);
             return;

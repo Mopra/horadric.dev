@@ -172,6 +172,13 @@ carry over: the composer is where typing burns in.
   asking.
 - The status line: the footer and the tile get model, cost and context
   from the stream.
+- The mod's band (2026-10-31, against 2.1.314). Headless the mod loads
+  and all of it runs but `ui.render`: `session.start` says `surface:
+  null, isInteractive: false`, its clock ticks, the roster and spawns
+  post, `/horadric/know` is asked every 3 s and the overlap note reaches
+  Claude beside a prompt. Only the band above the prompt is never drawn,
+  so the Folio draws it above its composer (`folio/band.rs`), from what
+  the app would answer the mod, every second.
 
 ## What it opens
 

@@ -792,10 +792,7 @@ fn recall(stream: &TcpStream, body: &[u8], commands: &Sender<Command>) -> io::Re
 /// Hands the mod's question to the app with the files its session shares,
 /// and answers with what the app answers.
 fn know(stream: &TcpStream, session: String, commands: &Sender<Command>) -> io::Result<()> {
-    let overlaps = claims()
-        .lock()
-        .map(|c| c.shared(&session, SystemTime::now()))
-        .unwrap_or_default();
+    let overlaps = shared_files(&session);
     let (reply, rx) = Reply::new();
     let call = KnowCall {
         session,
@@ -809,6 +806,16 @@ fn know(stream: &TcpStream, session: String, commands: &Sender<Command>) -> io::
         Ok(answer) => respond_with(stream, "200 OK", &answer),
         Err(_) => respond(stream, "504 Gateway Timeout"),
     }
+}
+
+/// The files `session` shares with other sessions, as `/horadric/know`
+/// would answer. A Folio's band asks here, in the process that serves the
+/// listener, rather than over the port.
+pub fn shared_files(session: &str) -> Vec<Overlap> {
+    claims()
+        .lock()
+        .map(|c| c.shared(session, SystemTime::now()))
+        .unwrap_or_default()
 }
 
 /// Every session's turn as [`pace::Pace`] counts it.

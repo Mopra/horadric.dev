@@ -970,7 +970,12 @@ impl View {
         } else {
             self.composer(gfx, chat, &pal, cx, cw, h, &mut composer_hits)
         };
-        let area = Rect::new(0.0, 0.0, w, (composer.y - 10.0).max(0.0));
+        let top = if chat.watch.is_some() {
+            composer.y
+        } else {
+            super::band::draw(gfx, &self.shared.gpu, &pal, &chat.band, cx, cw, composer.y)
+        };
+        let area = Rect::new(0.0, 0.0, w, (top - 10.0).max(0.0));
         self.transcript(gfx, &pal, chat, cx, cw, &area, &mut hits);
         // What scrolls up fades out into the glass's top edge, not cut.
         if chat.scroll > 0.0 {

@@ -28,6 +28,7 @@
 
 pub mod afar;
 mod backdrop;
+pub mod band;
 mod banish;
 mod cards;
 mod composer;
@@ -180,6 +181,8 @@ struct Chat {
     /// The first prompt, sent once the session is live and its history
     /// read: a quest, Warriv's events, an errand's first step.
     first: Option<String>,
+    /// The quest and shared files above the composer, as the app last said.
+    band: band::Band,
 }
 
 /// What the app hears of a Folio, for its tile's phase.
@@ -196,7 +199,8 @@ pub struct State {
     /// How many background tasks run, once the CLI has said.
     pub background: Option<usize>,
     /// The agents among them, by id with their type, once the CLI has
-    /// said: the tile's sparks where the mod's roster is silent.
+    /// said: the tile's sparks before the mod's roster speaks, or with no
+    /// mod at all. The mod runs headless and its roster wins.
     pub agents: Option<Vec<(String, String)>>,
 }
 
@@ -228,6 +232,7 @@ impl Chat {
             header: String::new(),
             told: None,
             live: false,
+            band: band::Band::default(),
             pending: None,
             loading: None,
             to_terminal: false,
@@ -620,6 +625,14 @@ pub fn rewind_from(id: &str) -> Option<(String, Option<String>)> {
 /// subagent.
 pub fn stop_task(id: &str, task: &str) {
     answer_with(id, |f| Some(f.stop_task(task)));
+}
+
+/// What the band above session `id`'s composer says, redrawn only when
+/// that changes: the app sets it every second.
+pub fn set_band(id: &str, b: band::Band) {
+    if with(id, |c| (c.band != b).then(|| c.band = b)).flatten().is_some() {
+        redraw(id);
+    }
 }
 
 /// The subagents session `id` runs in the background, by task id with a
