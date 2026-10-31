@@ -3,9 +3,14 @@
 //! so the setup's output shows in the session's own pane and the agent
 //! starts in the same console once it is done. Its arguments go on
 //! exactly as given, which a batch file in between could not promise.
+//!
+//! `horadric setup --headless <program> <args>` is the same for a Folio,
+//! whose stdout and stdin are the agent's stream-json: the setup writes
+//! to stderr and reads nothing, so neither the stream nor the first prompt
+//! is touched.
 
 use std::os::windows::process::CommandExt;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use horadric_core::worktree::SETUP_ENV;
 
@@ -14,6 +19,8 @@ const DIM: &str = "\x1b[2m";
 const PLAIN: &str = "\x1b[0m";
 
 pub fn run(args: &[String]) -> Result<(), String> {
+    let headless = args.first().is_some_and(|a| a == "--headless");
+    let args = &args[usize::from(headless)..];
     let (program, rest) = args
         .split_first()
         .ok_or("usage: horadric setup <program> [args...]")?;
@@ -23,25 +30,34 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .unwrap_or_default();
     ignore_ctrl_c();
     let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+    let say = |line: String| match headless {
+        true => eprintln!("{line}"),
+        false => println!("{line}"),
+    };
     for c in &commands {
-        println!("{DIM}> {c}{PLAIN}");
+        say(match headless {
+            true => format!("> {c}"),
+            false => format!("{DIM}> {c}{PLAIN}"),
+        });
         // `/s` takes the quotes off and runs the rest as typed, so the
         // command's own quotes reach cmd as they are in the config.
-        let status = Command::new(&comspec)
-            .raw_arg(format!("/d /s /c \"{c}\""))
-            .status();
-        match status {
+        let mut command = Command::new(&comspec);
+        command.raw_arg(format!("/d /s /c \"{c}\""));
+        if headless {
+            command.stdin(Stdio::null()).stdout(std::io::stderr());
+        }
+        match command.status() {
             Ok(s) if s.success() => {}
             // The agent starts anyway: it can read what went wrong above
             // and put it right, which is better than a pane that stops.
-            Ok(s) => println!(
+            Ok(s) => say(format!(
                 "horadric: `{c}` failed ({}), the agent starts anyway",
                 s.code().unwrap_or(1)
-            ),
-            Err(e) => println!("horadric: cannot run `{c}`: {e}"),
+            )),
+            Err(e) => say(format!("horadric: cannot run `{c}`: {e}")),
         }
     }
-    if !commands.is_empty() {
+    if !commands.is_empty() && !headless {
         println!();
     }
     let status = Command::new(program)
