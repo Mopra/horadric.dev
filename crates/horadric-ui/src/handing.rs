@@ -670,6 +670,11 @@ impl App {
         let chat = self.paused.get(id).is_some_and(|p| p.chat) || self.folios.contains_key(id);
         let n = self.keeping_number(id);
         let said = self.keeping_handing(id, to, n);
+        let carried = self.quest_held_by(id).map(|(_, t)| handoff::Carried {
+            title: t.title,
+            notes: t.notes,
+            review: t.mark == horadric_core::tasks::Mark::Review,
+        });
         let record = self.shared.registry.lock().ok().and_then(|r| {
             let s = r.get(id)?;
             Some(Record {
@@ -688,6 +693,7 @@ impl App {
                 n,
                 said,
                 chat,
+                carried,
                 ..Record::default()
             })
         });
@@ -788,6 +794,7 @@ impl App {
             && (handoff::repo_id(dir).is_none() || handoff::has_changes(dir)))
         .then_some(cwd.as_str());
         let text = let_go_text(&crate::project::brother_name(to), stays);
+        self.quest_moved_away(id, to);
         if let Some(session) = session {
             handing::forget_ref(dir, &session);
         }
@@ -1098,6 +1105,13 @@ impl App {
         // for a folder it has never seen.
         if let Err(e) = crate::accounts::trust(&cwd) {
             eprintln!("horadric: cannot trust {}: {e}", cwd.display());
+        }
+        // Only a session in a worktree of its own is told which quest log
+        // `horadric quest` works on (`session_env`), so only there can its
+        // quest follow it.
+        if let (Some(q), Some(w)) = (&record.carried, &saved.worktree) {
+            let main = PathBuf::from(&w.main);
+            self.quest_arrived(&id, &main, &record.from, q);
         }
         if let Ok(mut r) = self.shared.registry.lock() {
             r.add(saved.to_session(SystemTime::now()));
