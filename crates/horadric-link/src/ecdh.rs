@@ -133,4 +133,30 @@ mod tests {
         assert_eq!(from_scalar(&[0; 32]), None);
         assert_eq!(from_scalar(&[0xff; 32]), None);
     }
+
+    /// The page's vector in `horadric.portal/test/phonekey.test.js`,
+    /// worked out apart from either side: the PC must derive the key the
+    /// phone derives, from its own half of the ECDH.
+    #[test]
+    fn the_phone_key_matches_the_pages_vector() {
+        let phone = from_scalar(&[1; 32]).unwrap();
+        let brother = from_scalar(&[2; 32]).unwrap();
+        assert_eq!(
+            b64url(&public(&phone)),
+            "BG_wO5SSQc4drdQ1GeaWDgqFtBppoFwygQOqK84VlMoWPE91OlW_AdxT9sCwx-7ni0DG_30lqW4igrmJzvccFEo"
+        );
+        let shared = agree(&brother, &public(&phone)).unwrap();
+        let key = horadric_core::portal::phone_key(
+            &shared,
+            &public(&phone),
+            &public(&brother),
+            "AAECAwQFBgc",
+            "00112233445566778899aabbccddeeff",
+        );
+        let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "4fad95513bcb5e4265148da11fc8c732983016307bc317733e4ed2a145d72d67"
+        );
+    }
 }
