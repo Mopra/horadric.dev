@@ -28,7 +28,9 @@
 
 use serde_json::{Map, Value};
 
-use super::{control_request_line, control_success, AskState, Block, Folio, McpServer, Sent};
+use super::{
+    control_request_line, control_success, AskState, Block, Folio, McpRemoval, McpServer, Sent,
+};
 
 /// Asks for status this many times while a sign-in or a pending server
 /// waits, every couple of seconds, then gives up on the sign-in: five
@@ -95,7 +97,27 @@ impl McpServer {
                 .to_string(),
             tools: v["tools"].as_array().map_or(0, Vec::len),
             proxied: v["sessionProxied"].as_bool().unwrap_or(false),
+            source: v["source"]
+                .as_str()
+                .or(v["scope"].as_str())
+                .unwrap_or_default()
+                .to_string(),
             ..McpServer::default()
+        }
+    }
+
+    /// How it can be removed, None when Horadric cannot: one given on the
+    /// command line or by managed settings.
+    pub fn removal(&self) -> Option<McpRemoval> {
+        match self.source.as_str() {
+            "plugin" => {
+                // Named `plugin:<plugin>:<server>`.
+                let plugin = self.name.strip_prefix("plugin:")?.split(':').next()?;
+                (!plugin.is_empty()).then(|| McpRemoval::Plugin(plugin.to_string()))
+            }
+            "claudeai" => Some(McpRemoval::ClaudeAi),
+            "user" | "project" | "local" => Some(McpRemoval::Scope(self.source.clone())),
+            _ => None,
         }
     }
 
@@ -188,6 +210,44 @@ impl Folio {
         )
     }
 
+    /// Asks the human to be sure before removing `server`, or stops
+    /// asking.
+    pub fn mcp_ask_remove(&mut self, server: &str, asking: bool) {
+        self.mcp_mark(server, |s| {
+            s.asking_remove = asking;
+            s.error.clear();
+        });
+    }
+
+    /// Removing `server` began: it shows as busy until [`Self::mcp_removed`].
+    pub fn mcp_removing(&mut self, server: &str) {
+        self.mcp_mark(server, |s| {
+            s.asking_remove = false;
+            s.busy = true;
+        });
+    }
+
+    /// What removing `server` came to. Once removed it is turned off in
+    /// this session too, so it stops asking now: the line to write.
+    pub fn mcp_removed(&mut self, server: &str, result: Result<(), String>) -> Option<String> {
+        match result {
+            Ok(()) => {
+                self.mcp_mark(server, |s| {
+                    s.removed = true;
+                    s.error.clear();
+                });
+                Some(self.mcp_toggle(server, false))
+            }
+            Err(e) => {
+                self.mcp_mark(server, |s| {
+                    s.busy = false;
+                    s.error = e.clone();
+                });
+                None
+            }
+        }
+    }
+
     /// Changes `server` in the list and in every card showing it.
     fn mcp_mark(&mut self, server: &str, f: impl Fn(&mut McpServer)) {
         for s in self.mcp.servers.iter_mut().filter(|s| s.name == server) {
@@ -214,6 +274,8 @@ impl Folio {
                     status: s.status.clone(),
                     transport: o.transport.clone(),
                     proxied: o.proxied,
+                    source: o.source.clone(),
+                    removed: o.removed,
                     sign_in: o.sign_in.clone().filter(|_| s.status == "needs-auth"),
                     ..s.clone()
                 },
@@ -253,6 +315,11 @@ impl Folio {
                 s.sign_in_failed = o.sign_in_failed;
             }
             s.busy = was.is_some_and(|o| o.busy);
+            s.asking_remove = was.is_some_and(|o| o.asking_remove);
+            s.removed = was.is_some_and(|o| o.removed);
+            if s.source.is_empty() {
+                s.source = was.map(|o| o.source.clone()).unwrap_or_default();
+            }
         }
         if self.mcp.polls >= POLLS {
             for s in &mut servers {
@@ -1052,6 +1119,36 @@ mod tests {
         assert_eq!(s.status, "connected");
         assert_eq!(s.sign_in, None);
         assert_eq!(f.mcp_wanted(), McpWant::No);
+    }
+
+    #[test]
+    fn a_server_is_removed_where_it_was_configured() {
+        let of = |name: &str, source: &str| {
+            McpServer::from_status(&json!({"name": name, "status": "needs-auth", "source": source}))
+                .removal()
+        };
+        assert_eq!(
+            of("plugin:context7:context7", "plugin"),
+            Some(McpRemoval::Plugin("context7".into()))
+        );
+        assert_eq!(of("claude.ai Gmail", "claudeai"), Some(McpRemoval::ClaudeAi));
+        assert_eq!(of("db", "user"), Some(McpRemoval::Scope("user".into())));
+        assert_eq!(of("elicit", "dynamic"), None);
+        assert_eq!(of("plugin:", "plugin"), None);
+    }
+
+    #[test]
+    fn a_removed_server_is_turned_off_here_too() {
+        let mut f = Folio::new();
+        let line = f.mcp_status();
+        let reply = STATUS.replace("\"ID\"", &format!("\"{}\"", id_of(&line)));
+        f.feed(&reply);
+        f.mcp_ask_remove("remote", true);
+        f.mcp_removing("remote");
+        let line = f.mcp_removed("remote", Ok(())).unwrap();
+        assert!(line.contains("mcp_toggle") && line.contains("\"enabled\":false"));
+        let s = f.mcp.servers.iter().find(|s| s.name == "remote").unwrap();
+        assert!(s.removed && !s.asking_remove);
     }
 
     #[test]

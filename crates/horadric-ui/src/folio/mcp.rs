@@ -1,13 +1,16 @@
 //! MCP in the Folio: the card listing servers (those in trouble as they
-//! turn up, all of them on `/mcp`) with sign in, reconnect and enable,
-//! and the card an MCP server's question (an elicitation) becomes. The
+//! turn up, all of them on `/mcp`) with sign in, reconnect, disable and
+//! remove, and the card an MCP server's question (an elicitation) becomes. The
 //! status is asked for once a session is live, and again every couple of
 //! seconds while a sign-in or a starting server waits, since the CLI
 //! says nothing when a status changes.
 
+use std::process::Stdio;
+use std::sync::Mutex;
+
 use horadric_core::folio::{
-    AskState, Block, ElicitAction, Elicitation, FieldKind, McpCard, McpServer, McpWant,
-    ELICIT_SEP,
+    AskState, Block, ElicitAction, Elicitation, FieldKind, McpCard, McpRemoval, McpServer,
+    McpWant, ELICIT_SEP,
 };
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::HWND;
@@ -39,6 +42,10 @@ pub(super) enum Do {
     StopSignIn(String),
     Reconnect(String),
     Toggle(String, bool),
+    /// Remove a server for good: asked to be sure first, then done.
+    AskRemove(String),
+    KeepIt(String),
+    Remove(String),
     /// Signing in only the terminal's `/mcp` can do.
     Terminal,
     /// An elicitation, by request id.
@@ -52,6 +59,82 @@ pub(super) enum Do {
     /// A field of an elicitation: an option picked (or, for one taking
     /// several, picked or unpicked).
     Pick(String, String, String),
+}
+
+/// Where claude.ai connectors are removed.
+const CONNECTORS: &str = "https://claude.ai/settings/connectors";
+
+/// What removals said, by session key and server, for the UI thread.
+static REMOVED: Mutex<Vec<(String, String, Result<(), String>)>> = Mutex::new(Vec::new());
+
+/// Removes `server` where it is configured, on a thread since the CLI
+/// takes a second or two. Its answer comes back through [`settle`].
+fn remove(key: &str, server: &str) {
+    let found = with(key, |c| {
+        let m = c.folio.mcp.servers.iter().find(|m| m.name == server)?;
+        Some((m.removal()?, c.dir.clone()))
+    });
+    let Some((removal, dir)) = found.flatten() else {
+        return;
+    };
+    let args: Vec<String> = match removal {
+        McpRemoval::ClaudeAi => {
+            with(key, |c| c.folio.mcp_ask_remove(server, false));
+            open(CONNECTORS);
+            return;
+        }
+        McpRemoval::Plugin(p) => vec!["plugin".into(), "disable".into(), p, "--json".into()],
+        McpRemoval::Scope(scope) => {
+            vec!["mcp".into(), "remove".into(), server.into(), "-s".into(), scope]
+        }
+    };
+    with(key, |c| c.folio.mcp_removing(server));
+    let (key, server, router) = (key.to_string(), server.to_string(), router());
+    std::thread::spawn(move || {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let result = run_removal(&args, &dir);
+        if let Ok(mut r) = REMOVED.lock() {
+            r.push((key, server, result));
+        }
+        super::sign_in::post(router);
+    });
+}
+
+fn run_removal(args: &[&str], dir: &std::path::Path) -> Result<(), String> {
+    let out = super::sign_in::command(args)?
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("claude did not start: {e}"))?;
+    let said = String::from_utf8_lossy(&out.stdout);
+    // `plugin disable --json`: a plugin already off is as good as done.
+    let json = (said.lines()).find_map(|l| serde_json::from_str::<serde_json::Value>(l).ok());
+    if out.status.success() || json.as_ref().is_some_and(|v| v["alreadyInGoalState"] == true) {
+        return Ok(());
+    }
+    let why = json
+        .and_then(|v| v["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let last = (err.lines().chain(said.lines()))
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .last();
+            last.unwrap_or("It could not be removed.").to_string()
+        });
+    Err(why)
+}
+
+/// Takes in what removals said: each removed server is turned off in its
+/// session too.
+pub(super) fn settle() {
+    let done = REMOVED
+        .lock()
+        .map(|mut r| std::mem::take(&mut *r))
+        .unwrap_or_default();
+    for (key, server, result) in done {
+        answer_with(&key, |f| f.mcp_removed(&server, result));
+    }
 }
 
 fn field_id(request_id: &str, name: &str) -> String {
@@ -178,6 +261,13 @@ pub(super) fn act(key: &str, d: Do) {
         }
         Do::Reconnect(s) => answer_with(key, |f| Some(f.mcp_reconnect(&s))),
         Do::Toggle(s, on) => answer_with(key, |f| Some(f.mcp_toggle(&s, on))),
+        Do::AskRemove(s) => {
+            with(key, |c| c.folio.mcp_ask_remove(&s, true));
+        }
+        Do::KeepIt(s) => {
+            with(key, |c| c.folio.mcp_ask_remove(&s, false));
+        }
+        Do::Remove(s) => remove(key, &s),
         Do::Terminal => {
             with(key, |c| super::composer::to_terminal(c, "/mcp"));
         }
@@ -331,7 +421,12 @@ pub(super) unsafe fn card(cx: &Ctx, card: &McpCard, w: f32) -> Scene {
         let mut row = |label: &str, primary: bool, d: Do, s: &mut Scene| {
             x = button(cx, s, x, y, label, primary, Hit::Tr(Act::Mcp(d))) - 8.0;
         };
-        if m.busy {
+        let removal = m.removal();
+        let trouble = horadric_core::folio::troubled(&m.status);
+        if m.busy || m.removed {
+        } else if m.asking_remove {
+            row("Remove", true, Do::Remove(name.clone()), &mut s);
+            row("Keep it", false, Do::KeepIt(name.clone()), &mut s);
         } else if let Some(url) = &m.sign_in {
             row("Stop", false, Do::StopSignIn(name.clone()), &mut s);
             if !url.is_empty() {
@@ -343,29 +438,59 @@ pub(super) unsafe fn card(cx: &Ctx, card: &McpCard, w: f32) -> Scene {
             row("Sign in from the terminal", false, Do::Terminal, &mut s);
         } else if m.status == "failed" {
             row("Reconnect", true, Do::Reconnect(name.clone()), &mut s);
-        } else if card.all && m.status == "disabled" {
+        } else if m.status == "disabled" {
             row("Enable", false, Do::Toggle(name.clone(), true), &mut s);
         } else if card.all && m.status == "connected" {
             row("Disable", false, Do::Toggle(name.clone(), false), &mut s);
         }
-        let (word, ink) = status_of(cx, m);
-        let word = if m.busy { "\u{2026}".to_string() } else { word };
+        // A server in trouble can also be let go of: off here, or gone.
+        let settled = m.busy || m.removed || m.asking_remove || m.sign_in.is_some();
+        if !settled && trouble {
+            row("Disable", false, Do::Toggle(name.clone(), false), &mut s);
+        }
+        if !settled && removal.is_some() && (card.all || trouble) {
+            row("Remove", false, Do::AskRemove(name.clone()), &mut s);
+        }
+        let (word, ink) = match (m.removed, m.busy) {
+            (true, _) => ("removed".to_string(), cx.pal.faint),
+            (false, true) => ("\u{2026}".to_string(), cx.pal.dim),
+            _ => status_of(cx, m),
+        };
         let left = (x - PAD).max(80.0);
         s.line(
             m.name.clone(),
             F::Line,
-            Rect::new(PAD, y + 4.0, left * 0.55, 22.0),
+            Rect::new(PAD, y + 4.0, left * 0.62, 22.0),
             cx.pal.fg,
         );
         s.line(
             word,
             F::Small,
-            Rect::new(PAD + left * 0.55 + 8.0, y + 6.0, left * 0.45 - 8.0, 20.0),
+            Rect::new(PAD + left * 0.62 + 8.0, y + 6.0, left * 0.38 - 8.0, 20.0),
             ink,
         );
         y += BUTTON_H + 6.0;
         if !m.error.is_empty() {
             say(&mut s, &mut y, &m.error, cx.pal.dim);
+        }
+        if m.asking_remove {
+            let what = match &removal {
+                Some(McpRemoval::Plugin(p)) => format!(
+                    "This turns off the {p} plugin in every session, with its skills and commands. \
+                     claude plugin enable {p} brings it back."
+                ),
+                Some(McpRemoval::ClaudeAi) => "Connectors are removed on claude.ai: \
+                     this opens its settings in your browser."
+                    .to_string(),
+                Some(McpRemoval::Scope(scope)) => format!(
+                    "This removes it from your {scope} MCP settings, for every session that reads them."
+                ),
+                None => String::new(),
+            };
+            say(&mut s, &mut y, &what, cx.pal.fg.with_alpha(0.85));
+        }
+        if m.removed {
+            say(&mut s, &mut y, "Removed. New sessions start without it.", cx.pal.dim);
         }
         match &m.sign_in {
             Some(url) if url.is_empty() => {
@@ -377,12 +502,18 @@ pub(super) unsafe fn card(cx: &Ctx, card: &McpCard, w: f32) -> Scene {
                 "The sign-in page opened in your browser. Finish there and this follows by itself.",
                 cx.pal.fg.with_alpha(0.85),
             ),
-            None if m.status == "needs-auth" && (m.sign_in_failed || !m.can_sign_in()) => say(
+            None if m.status == "needs-auth"
+                && !m.removed
+                && !m.asking_remove
+                && (m.sign_in_failed || !m.can_sign_in()) =>
+            {
+                say(
                 &mut s,
                 &mut y,
-                "Its sign-in runs only in the terminal: the session goes on there, then type /mcp.",
-                cx.pal.dim,
-            ),
+                    "Its sign-in runs only in the terminal: the session goes on there, then type /mcp.",
+                    cx.pal.dim,
+                )
+            }
             None => {}
         }
         y += 4.0;

@@ -51,6 +51,24 @@ pub struct McpServer {
     pub sign_in_failed: bool,
     /// A reconnect or toggle of ours is on its way.
     pub busy: bool,
+    /// Where it is configured: `plugin`, `claudeai`, or a settings scope
+    /// (`user`, `project`, `local`). Says how it can be removed.
+    pub source: String,
+    /// The human asked to remove it and is asked to be sure.
+    pub asking_remove: bool,
+    /// Removed by us: new sessions start without it.
+    pub removed: bool,
+}
+
+/// How a server can be removed for good, beyond turning it off here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpRemoval {
+    /// It comes with a plugin: turning the plugin off removes it.
+    Plugin(String),
+    /// A claude.ai connector: removed on claude.ai's settings page.
+    ClaudeAi,
+    /// In a settings file of this scope: `claude mcp remove`.
+    Scope(String),
 }
 
 /// A slash command as `initialize` lists it.

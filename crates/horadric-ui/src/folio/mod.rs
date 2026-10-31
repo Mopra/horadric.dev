@@ -1015,6 +1015,7 @@ unsafe extern "system" fn router_proc(
     if msg == sign_in::WM_FOLIO_LOGIN {
         sign_in::tend();
         slash::tend();
+        mcp::settle();
         return LRESULT(0);
     }
     if msg == WM_TIMER && wparam.0 == watch::WATCH_TIMER {
