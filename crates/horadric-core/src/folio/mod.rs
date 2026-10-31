@@ -168,6 +168,27 @@ pub enum Notice {
     /// A line the CLI wants the human to read, such as a notification, a
     /// warning or a model falling back.
     Info(String),
+    /// The API refused the turn for a reason other than the login, which
+    /// the CLI words as if Claude had replied: a usage limit, billing, a
+    /// request too large, the service down.
+    ApiError {
+        /// The assistant message's `error`, such as `rate_limit`.
+        kind: String,
+        /// What the CLI said of it.
+        text: String,
+    },
+}
+
+/// What a [`Notice::ApiError`] of `kind` is called.
+pub fn api_error_title(kind: &str) -> &'static str {
+    match kind {
+        "rate_limit" => "Usage limit reached",
+        "billing_error" => "Billing problem",
+        "invalid_request" => "Request refused",
+        "server_error" => "Claude's service failed",
+        "max_output_tokens" => "Reply cut short",
+        _ => "API error",
+    }
 }
 
 /// A task running in the background of a session.
@@ -576,7 +597,10 @@ impl Folio {
                 }
                 match v["error"].as_str().filter(|e| is_auth_error(e)) {
                     Some(_) => self.need_sign_in(&text_in(&v["message"])),
-                    None => self.assistant(&v["message"]),
+                    None => match self.api_error(&v) {
+                        Some(changed) => changed,
+                        None => self.assistant(&v["message"]),
+                    },
                 }
             }
             "user" => self.user(&v),
@@ -883,7 +907,9 @@ impl Folio {
         (self.blocks.iter().rev())
             .take_while(|b| !matches!(b, Block::Prompt(_)))
             .find_map(|b| match b {
-                Block::Reply(t) => Some(t.trim().to_string()),
+                Block::Reply(t) | Block::Notice(Notice::ApiError { text: t, .. }) => {
+                    Some(t.trim().to_string())
+                }
                 _ => None,
             })
             .unwrap_or_default()
@@ -1067,6 +1093,23 @@ impl Folio {
     fn notice(&mut self, n: Notice) -> bool {
         self.blocks.push(Block::Notice(n));
         true
+    }
+
+    /// An `assistant` line that is the CLI's words for a failed API call
+    /// rather than Claude's, as a notice: None when it is a reply. Only a
+    /// message no model wrote counts, so a real reply that ran out of
+    /// room is still the reply.
+    fn api_error(&mut self, v: &Value) -> Option<bool> {
+        let kind = v["error"].as_str().filter(|e| !e.is_empty());
+        let kind = kind.or_else(|| (v["isApiErrorMessage"] == true).then_some("unknown"))?;
+        let model = v["message"]["model"].as_str().unwrap_or_default();
+        if !(model.is_empty() || model.starts_with('<')) {
+            return None;
+        }
+        Some(self.notice(Notice::ApiError {
+            kind: kind.to_string(),
+            text: text_in(&v["message"]).trim().to_string(),
+        }))
     }
 
     /// A line of the app's own for the human, such as who it logged in as.
@@ -3699,18 +3742,54 @@ mod tests {
     }
 
     #[test]
-    fn other_api_errors_stay_the_reply() {
+    fn other_api_errors_are_notices_of_their_own() {
         let mut f = Folio::new();
         let error = serde_json::json!({
             "type": "assistant",
             "error": "rate_limit",
-            "message": {"id": "m1", "role": "assistant",
+            "message": {"id": "m1", "model": "<synthetic>", "role": "assistant",
                 "content": [{"type": "text", "text": "API Error: Rate limit reached"}]},
         });
         f.feed(&error.to_string());
-        assert!(matches!(f.blocks.last(), Some(Block::Reply(t)) if t.contains("Rate limit")));
+        assert_eq!(
+            f.blocks.last(),
+            Some(&Block::Notice(Notice::ApiError {
+                kind: "rate_limit".into(),
+                text: "API Error: Rate limit reached".into(),
+            }))
+        );
+        assert!(!f.blocks.iter().any(|b| matches!(b, Block::Reply(_))));
         let retry = r#"{"type":"system","subtype":"api_error","level":"error","error":{"status":529}}"#;
         assert!(!f.feed(retry));
+        // A reply a model wrote stays the reply, whatever ended it.
+        let cut = serde_json::json!({
+            "type": "assistant",
+            "error": "max_output_tokens",
+            "message": {"id": "m2", "model": "claude-opus-4-1", "role": "assistant",
+                "content": [{"type": "text", "text": "Half a reply"}]},
+        });
+        f.feed(&cut.to_string());
+        assert!(matches!(f.blocks.last(), Some(Block::Reply(t)) if t == "Half a reply"));
+    }
+
+    #[test]
+    fn a_transcript_s_api_error_is_a_notice_too() {
+        let jsonl = [
+            serde_json::json!({"type": "user", "uuid": "a", "parentUuid": null,
+                "message": {"role": "user", "content": "hi"}}),
+            serde_json::json!({"type": "assistant", "uuid": "b", "parentUuid": "a",
+                "isApiErrorMessage": true, "error": "billing_error",
+                "message": {"id": "m", "model": "<synthetic>", "role": "assistant",
+                    "content": [{"type": "text", "text": "Credit balance too low"}]}}),
+        ]
+        .map(|v| v.to_string())
+        .join("\n");
+        let f = Folio::from_transcript(&jsonl);
+        assert!(matches!(
+            f.blocks.last(),
+            Some(Block::Notice(Notice::ApiError { kind, .. })) if kind == "billing_error"
+        ));
+        assert_eq!(f.last_reply(), "Credit balance too low");
     }
 
     #[test]

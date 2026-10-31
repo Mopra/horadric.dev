@@ -77,7 +77,9 @@ impl Folio {
                     self.transcript_user(&v);
                 }
                 "assistant" => {
-                    self.assistant(&v["message"]);
+                    if self.api_error(&v).is_none() {
+                        self.assistant(&v["message"]);
+                    }
                 }
                 "system" if v["subtype"] == "compact_boundary" => {
                     self.system(&v, line);

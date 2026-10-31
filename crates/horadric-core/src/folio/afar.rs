@@ -199,6 +199,11 @@ fn block(b: &Block, out: &mut Vec<String>) {
                 out.extend(text.trim_end().lines().map(str::to_string));
             }
             Notice::Refused(text) => out.push(format!("\u{2500} refused: {}", one_line(text))),
+            Notice::ApiError { kind, text } => out.push(format!(
+                "\u{2500} {}: {}",
+                super::api_error_title(kind),
+                one_line(text)
+            )),
         },
         // Signing in opens a browser on the PC, which a phone cannot.
         Block::SignIn(_) => out.push("\u{2500} signing in to Claude, on the PC".into()),

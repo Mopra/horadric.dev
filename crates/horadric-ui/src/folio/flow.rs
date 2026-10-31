@@ -466,6 +466,7 @@ pub fn notice(n: &Notice) -> String {
         Notice::CommandOutput(s) => s.trim().to_string(),
         Notice::Refused(s) => format!("Refused: {}", s.trim()),
         Notice::Info(s) => s.trim().to_string(),
+        Notice::ApiError { kind, .. } => horadric_core::folio::api_error_title(kind).to_string(),
     }
 }
 

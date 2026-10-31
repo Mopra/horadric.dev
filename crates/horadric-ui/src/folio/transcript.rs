@@ -1002,6 +1002,9 @@ impl Ctx<'_> {
     }
 
     unsafe fn notice(&self, n: &horadric_core::folio::Notice, cw: f32) -> Scene {
+        if let horadric_core::folio::Notice::ApiError { text, .. } = n {
+            return self.api_error(&flow::notice(n), text, cw);
+        }
         let mut s = Scene::default();
         let text = flow::notice(n);
         let Some(l) = self.one_line(&self.gfx.small, &text) else {
@@ -1024,6 +1027,27 @@ impl Ctx<'_> {
         );
         s.unit(&l, x, 3.0, ink, &text);
         s.h = 22.0;
+        s
+    }
+
+    /// A refused turn, in the error's colour where the reply would be: what
+    /// went wrong as its title, the CLI's words under it, since they say
+    /// when a limit resets or what to do.
+    unsafe fn api_error(&self, title: &str, said: &str, cw: f32) -> Scene {
+        let mut s = Scene::default();
+        let ink = theme::error().with_alpha(0.9);
+        s.line('\u{E783}'.to_string(), F::Icon, Rect::new(0.0, 0.0, 16.0, LINE_H), ink);
+        s.line(title, F::Line, Rect::new(22.0, 0.0, cw - 22.0, LINE_H), ink);
+        let mut h = LINE_H;
+        if let Some(l) = (!said.is_empty())
+            .then(|| self.layout(&self.gfx.small, said, cw - 22.0))
+            .flatten()
+        {
+            s.unit(&l, 22.0, LINE_H, self.pal.dim, said);
+            h += render::text_size(&l).1 + 2.0;
+        }
+        s.fill(Rect::new(7.0, LINE_H, 1.5, h - LINE_H), 0.0, ink.with_alpha(0.3));
+        s.h = h;
         s
     }
 
