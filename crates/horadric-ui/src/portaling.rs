@@ -1292,9 +1292,12 @@ fn heard_from(
         }
         _ => {}
     }
+    let mut msg = msg;
     if msg["t"] == "hello" {
         seen(&p.dir, &mut p.config, &id, now);
         p.told.remove(&ch);
+        // A phone's key opened it, whatever its hello says it is.
+        msg["kind"] = json!("phone");
     }
     // A phone paired the old way hears that this PC could serve it every
     // brother, once it has a key pair to vouch with.

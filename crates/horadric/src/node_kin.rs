@@ -334,6 +334,11 @@ impl Machine {
     /// watch: a relay brother as `standing.json` says, a viewer over
     /// `ssh` always, since only the node's own user's keys reach it.
     pub(super) fn kin_control(&self, who: &str, _kind: Kind) -> bool {
+        // A phone types unless "Phones can type here" was switched off.
+        if who.starts_with(relay::PHONE) {
+            return horadric_hooks::state_dir()
+                .is_some_and(|dir| !Standing::load(&dir).phones_watch_only);
+        }
         if !self.kin.peers.values().any(|p| p.id == who) {
             return true;
         }
