@@ -438,6 +438,9 @@ pub(crate) enum Input {
     /// A portrait in a pane's retinue: show the conversation of the hireling
     /// with the second id, of the session with the first, beside it.
     OpenHireling(String, String),
+    /// A tile's line counting its hirelings: show the session and lay its
+    /// war table over its pane.
+    WarTable(String),
     /// A hireling's pane's cross or Esc, by its Folio's id.
     CloseWatch(String),
     /// The chat button under a project's tiles: a new Folio, a headless
@@ -450,11 +453,25 @@ pub(crate) enum Input {
     Limits(Limits),
     /// A Folio's session changed what its tile should say.
     FolioState(String, crate::folio::State),
+    /// `/all` in a Folio: the prompt to every Folio of the project, by its
+    /// key, and the session it was typed in.
+    FolioAll(String, String, String),
     /// A Folio's "Terminal": end it between turns and carry the session on
     /// in a terminal.
     FolioToTerminal(String),
     /// A Folio handed over has ended: its terminal starts now.
     FolioHandedOver(String),
+    /// A Folio's Edit or Rewind on a prompt: its conversation forks just
+    /// before the `back`th prompt from the end, which says `text`, its
+    /// files go back to then, and it goes on with `resend` when given.
+    FolioFork {
+        id: String,
+        back: usize,
+        text: String,
+        resend: Option<String>,
+    },
+    /// How putting back a Folio's files for a fork went.
+    FolioFilesRewound(String, Result<(), String>),
     /// A Folio's claude.exe ended to read a new login: it starts again on
     /// its conversation, shown on the stage when true.
     FolioRestart(String, bool),
@@ -7901,7 +7918,7 @@ impl App {
         let mut flags = horadric_core::folio::headless_args(&all, subagents);
         // Not kept in `own`: an undo rewinds this start only.
         let rewound = folio_tile::rewound(id);
-        flags.extend(rewound.iter().flat_map(folio_tile::flags));
+        flags.extend(rewound.iter().flat_map(|(r, fork)| folio_tile::flags(r, *fork)));
         let mut env_set = vec![
             (horadric_hooks::SESSION_ENV.to_string(), id.to_string()),
             (
@@ -7910,6 +7927,10 @@ impl App {
             ),
         ];
         env_set.extend(session_env(id, own_tree.as_ref(), &dir));
+        // The CLI keeps what each prompt's edits overwrote only when told
+        // to off a terminal, and a rewind to an earlier prompt puts the
+        // files back from that.
+        env_set.push(("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".into(), "1".into()));
         env_set.extend(self.shared.defaults().env());
         let mut options = horadric_pty::headless::Options {
             args: flags,
@@ -7938,7 +7959,7 @@ impl App {
             name: name.to_string(),
             resume,
             history: 0,
-            at: rewound.and_then(|r| r.keep),
+            at: rewound.and_then(|(r, _)| r.keep),
         };
         if let Err(e) = crate::folio::open_with(id, &dir, tag, &options, start.prompt) {
             // A tile that was there before, a terminal going on as a chat or
@@ -8053,6 +8074,14 @@ impl App {
             session.loot.outstanding.clear();
         }
         session.stream_agents = state.agents.clone();
+        // A terminal's title comes from the transcript as hooks fire; a
+        // Folio's from its stream as soon as the CLI made one up.
+        if let (Some(t), None) = (&state.title, &session.title) {
+            session.title = Some(horadric_core::title::Title {
+                text: t.clone(),
+                custom: false,
+            });
+        }
         if let Some(status) = state.status() {
             session.status = Some(status);
         }
@@ -8098,25 +8127,40 @@ impl App {
     }
 
     /// A Folio handed over has ended: the same tile resumes its
-    /// conversation in a terminal.
+    /// conversation in a terminal, or starts one afresh when it never had
+    /// one.
     fn folio_handed_over(&mut self, id: &str) {
         if self.folio_rewind_ended(id) {
             return;
         }
-        let conversation = crate::folio::conversation(id);
+        // A stream the Folio could not read never named its conversation,
+        // but the hooks still did.
+        let conversation = crate::folio::conversation(id).or_else(|| {
+            let r = self.shared.registry.lock().ok()?;
+            r.get(id)?.claude_session_id.clone()
+        });
+        let unreadable = crate::folio::unreadable(id);
         crate::folio::close(id);
         self.folios.remove(id);
         let own = self.folio_args.remove(id).unwrap_or_default();
-        let (Some(conversation), Some(dir)) = (conversation, self.dir_of(id)) else {
+        let Some(dir) = self.dir_of(id) else {
             return;
         };
         let name = self.name_of(id);
-        let args = Agent::Claude.carry_on(Some(&conversation), &own);
+        let args = Agent::Claude.carry_on(conversation.as_deref(), &own);
         if let Err(e) = self.launch(id, &name, dir, args, Run::Agent(Agent::Claude), true) {
             eprintln!("horadric: cannot open {id} in a terminal: {e}");
             return;
         }
-        if let Ok(mut r) = self.shared.registry.lock() {
+        if unreadable {
+            self.toasts.show(
+                Kind::Info,
+                "Opened in a terminal",
+                "Horadric could not read this Claude's chat stream. Should every chat fail \
+                 so, the setting \"New Claude sessions open in a terminal\" turns them off.",
+            );
+        }
+        if let (Some(conversation), Ok(mut r)) = (conversation, self.shared.registry.lock()) {
             if let Some(s) = r.get_mut(id) {
                 s.claude_session_id = Some(conversation);
                 s.prompted = true;
@@ -9260,13 +9304,32 @@ impl App {
                 }
                 Input::CloseSky(key) => self.close_sky(&key),
                 Input::OpenHireling(session, agent) => self.open_hireling(&session, &agent),
+                Input::WarTable(id) => {
+                    self.reveal(&id, false);
+                    // A session that is resumed or attached first has no
+                    // pane yet, and shows without its table.
+                    if let Some(stage) = &self.stage {
+                        stage.war_table(&id);
+                    }
+                }
                 Input::CloseWatch(id) => self.close_watch(&id),
                 Input::Folio(key) => self.open_folio(&key),
                 Input::CloseFolio(id) => self.close_folio(&id),
                 Input::Limits(limits) => self.hear_limits(&limits),
                 Input::FolioState(id, state) => self.folio_state(&id, state),
+                Input::FolioAll(key, from, text) => {
+                    let n = crate::folio::broadcast(&key, &text);
+                    crate::folio::say(&from, &format!("Sent to {}.", plural(n, "chat")));
+                }
                 Input::FolioToTerminal(id) => self.folio_to_terminal(&id),
                 Input::FolioHandedOver(id) => self.folio_handed_over(&id),
+                Input::FolioFork {
+                    id,
+                    back,
+                    text,
+                    resend,
+                } => self.folio_fork(&id, back, &text, resend),
+                Input::FolioFilesRewound(id, how) => self.folio_files_rewound(&id, how),
                 Input::FolioRestart(id, show) => self.folio_restart(&id, show),
                 Input::FolioAddDir(id, dir) => {
                     let own = self.folio_args.entry(id.clone()).or_default();

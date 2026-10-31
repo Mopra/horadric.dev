@@ -13,7 +13,9 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use horadric_core::folio::{effort_line, prompt_line, typed, Block, ImageData, Priority, Typed};
+use horadric_core::folio::{
+    effort_line, prompt_line, shell_command, typed, Block, ImageData, Priority, Typed,
+};
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -145,6 +147,9 @@ struct Saved {
     /// Prompts queued while Claude worked, so a reload loses none.
     #[serde(default)]
     queue: Vec<SavedPrompt>,
+    /// Each edit waits for the human, see [`Folio::review`].
+    #[serde(default)]
+    review: bool,
 }
 
 /// A queued prompt as it is kept, its images as the API takes them.
@@ -154,6 +159,19 @@ struct SavedPrompt {
     #[serde(default)]
     images: Vec<(String, String)>,
 }
+
+/// An earlier prompt taken back into the composer to change: sent, it
+/// forks the conversation there.
+struct Editing {
+    /// The prompt's block.
+    block: usize,
+    /// What the composer held before, which comes back after.
+    draft: String,
+}
+
+/// What the line above the composer says while a prompt is edited.
+const EDITING: &str =
+    "Editing an earlier prompt: sending forks the conversation there, the files put back too. Esc lets it be.";
 
 /// One session's composer.
 pub(super) struct Input {
@@ -191,6 +209,9 @@ pub(super) struct Input {
     /// Where the open menu was last drawn, for the wheel over it.
     pub(super) menu_at: Option<Rect>,
     ime: Option<[i32; 4]>,
+    editing: Option<Editing>,
+    /// Each edit waits for the human; kept with the draft.
+    pub(super) review: bool,
 }
 
 impl Input {
@@ -219,6 +240,8 @@ impl Input {
             top: 0.0,
             menu_at: None,
             ime: None,
+            editing: None,
+            review: false,
         }
     }
 
@@ -243,6 +266,7 @@ impl Input {
             self.ed = Editor::from_parts(&saved.draft, saved.pastes);
         }
         self.history = History::new(saved.history);
+        self.review = saved.review;
         if self.queue.is_empty() && !saved.queue.is_empty() {
             self.restored = true;
             self.queue = (saved.queue.into_iter())
@@ -276,6 +300,7 @@ impl Input {
                         .collect(),
                 })
                 .collect(),
+            review: self.review,
         };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -383,6 +408,7 @@ fn write(chat: &mut Chat, line: &str) -> bool {
 /// the next queued prompt. Called as lines are read and as it paints.
 pub(super) fn tend(id: &str, chat: &mut Chat) {
     chat.input.ensure(id);
+    chat.folio.review = chat.input.review;
     if chat.hosted.is_none() || chat.ended {
         return;
     }
@@ -432,6 +458,10 @@ pub(super) fn tend(id: &str, chat: &mut Chat) {
     if chat.input.busy_was && !busy {
         let line = chat.folio.get_context_usage();
         write(chat, &line);
+        // Headless, the CLI names no conversation by itself.
+        if let Some(line) = chat.folio.ask_title() {
+            write(chat, &line);
+        }
         // Claude was stopped: what waited goes back into the composer
         // rather than run, as the CLI does.
         if std::mem::take(&mut chat.input.held) {
@@ -456,6 +486,7 @@ pub(super) fn hold(chat: &mut Chat) {
 
 /// Starts a turn with `text` and `images`. False when it did not go.
 fn deliver(chat: &mut Chat, text: &str, images: &[ImageData]) -> bool {
+    let text = &format!("{}{text}", chat.folio.shell_context());
     let line = if images.is_empty() {
         chat.folio.push_prompt(text);
         prompt_line(text)
@@ -533,6 +564,15 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
     if text.is_empty() && chat.input.images.is_empty() {
         return;
     }
+    if let Some(block) = chat.input.editing.as_ref().map(|e| e.block) {
+        if !text.is_empty() && fork(chat, block, Some(&text)) {
+            chat.input.history.push(&text);
+            let draft = chat.input.editing.take().map(|e| e.draft).unwrap_or_default();
+            put(chat, &draft);
+            chat.input.save();
+        }
+        return;
+    }
     // Before the session's own checks: a login is what one that ended
     // for want of it needs.
     if let Some(name) = native_command(&text) {
@@ -540,6 +580,18 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
         chat.input.menu = None;
         chat.input.save();
         run_native(chat, name, &text);
+        return;
+    }
+    // Horadric runs it, not Claude, so it needs no session.
+    if let Some(command) = shell_command(&text) {
+        let command = command.to_string();
+        if text.len() <= HISTORY_ENTRY_MAX {
+            chat.input.history.push(&text);
+        }
+        chat.input.ed.clear();
+        chat.input.menu = None;
+        chat.input.save();
+        super::slash::run_shell(chat, &command);
         return;
     }
     if chat.ended || chat.hosted.is_none() {
@@ -564,6 +616,7 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
     } else {
         // Held back until the turn's end, a correction would come too late.
         let priority = if now { Priority::Now } else { Priority::Next };
+        let text = format!("{}{text}", chat.folio.shell_context());
         let line = chat.folio.queue_prompt(&text, &data, priority);
         write(chat, &line);
         chat.follow = true;
@@ -608,6 +661,23 @@ fn run_native(chat: &mut Chat, name: &str, text: &str) {
         .unwrap_or("")
         .trim();
     match name {
+        "btw" if words.is_empty() => notice(chat, "Say /btw and the question."),
+        "btw" if chat.ended || chat.hosted.is_none() => {
+            notice(chat, "/btw needs the session running.");
+        }
+        "btw" => {
+            let line = chat.folio.side_question(words);
+            if !write(chat, &line) {
+                chat.folio.blocks.pop();
+            }
+            chat.follow = true;
+        }
+        "all" if words.is_empty() => notice(chat, "Say /all and the prompt."),
+        "all" => crate::app::push(crate::app::Input::FolioAll(
+            chat.key.clone(),
+            id.clone(),
+            words.to_string(),
+        )),
         "login" => super::sign_in::log_in(chat, &id, None),
         "mcp" => super::mcp::show(chat),
         "logout" => super::sign_in::log_out(chat, &id),
@@ -636,6 +706,79 @@ pub(super) fn choose(chat: &mut Chat, items: Vec<Item>, empty: &str) {
     }
     chat.input.notice = None;
     chat.input.menu = Some(Menu::new(MenuKind::Choice, items, 0));
+}
+
+/// Takes the prompt at `block` of session `key` back into the composer to
+/// change and send again, keeping what the composer held for after.
+pub(super) fn edit_prompt(key: &str, block: usize) {
+    with(key, |chat| {
+        chat.input.ensure(key);
+        let Some(Block::Prompt(text)) = chat.folio.blocks.get(block) else {
+            return;
+        };
+        if !chat.between_turns() {
+            chat.input.notice = Some("A prompt can be edited once Claude rests.".into());
+            return;
+        }
+        let text = text.clone();
+        let draft = match chat.input.editing.take() {
+            Some(e) => e.draft,
+            None => chat.input.ed.expanded(),
+        };
+        put(chat, &text);
+        chat.input.editing = Some(Editing { block, draft });
+        chat.input.notice = Some(EDITING.into());
+    });
+    redraw(key);
+}
+
+/// Session `key`'s conversation and files go back to before the prompt
+/// at `block`, which waits in the composer to be sent again, as Claude
+/// Code's rewind leaves it.
+pub(super) fn rewind_to(key: &str, block: usize) {
+    with(key, |chat| {
+        chat.input.ensure(key);
+        let text = match chat.folio.blocks.get(block) {
+            Some(Block::Prompt(t)) => t.clone(),
+            _ => return,
+        };
+        if fork(chat, block, None) && chat.input.editing.is_none() {
+            if chat.input.ed.expanded().trim().is_empty() {
+                put(chat, &text);
+            }
+            chat.input.save();
+        }
+    });
+    redraw(key);
+}
+
+/// Asks the app to fork the conversation at the prompt at `block`, going
+/// on with `resend` when given. Says why not above the composer when it
+/// cannot now.
+fn fork(chat: &mut Chat, block: usize, resend: Option<&str>) -> bool {
+    let Some(id) = chat.input.key.clone() else {
+        return false;
+    };
+    let Some(Block::Prompt(text)) = chat.folio.blocks.get(block) else {
+        chat.input.editing = None;
+        chat.input.notice = Some("That prompt is no longer on the page.".into());
+        return false;
+    };
+    if !chat.between_turns() {
+        chat.input.notice = Some("That can be done once Claude rests.".into());
+        return false;
+    }
+    let back = (chat.folio.blocks[block..].iter())
+        .filter(|b| matches!(b, Block::Prompt(_)))
+        .count();
+    crate::app::push(crate::app::Input::FolioFork {
+        id,
+        back,
+        text: text.clone(),
+        resend: resend.map(str::to_string),
+    });
+    chat.input.notice = None;
+    true
 }
 
 /// Puts `text` in the composer for the human to finish, caret at its end.
@@ -845,8 +988,38 @@ fn pick(chat: &mut Chat, how: How) -> bool {
             "effort" => open_picker(chat, MenuKind::Effort),
             "tasks" => open_picker(chat, MenuKind::Tasks),
             "context" => {
+                let rows: Vec<Item> = (chat.folio.context.as_ref())
+                    .map(controls::context_rows)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(label, detail)| Item {
+                        label,
+                        detail,
+                        ..Default::default()
+                    })
+                    .collect();
+                choose(chat, rows, "The context is not measured yet.");
+                // Fresh for the next look.
                 let line = chat.folio.get_context_usage();
                 write(chat, &line);
+            }
+            "review" => {
+                chat.input.review = !chat.input.review;
+                chat.folio.review = chat.input.review;
+                chat.input.changed();
+                // A claude that has not got the hook yet starts again.
+                super::wake();
+                chat.input.notice = Some(
+                    match chat.input.review {
+                        true => "Each Edit and Write now waits for you as a diff to allow, change or deny.",
+                        false => "Edits land as the permission mode says again.",
+                    }
+                    .into(),
+                );
+            }
+            "verbose" => {
+                let st = &mut chat.tr.state;
+                st.verbose = !st.verbose;
             }
             "terminal" => {
                 if let Some(id) = chat.input.key.clone() {
@@ -940,10 +1113,22 @@ fn settings_items(chat: &Chat) -> Vec<Item> {
             controls::meter(ctx.used, ctx.limit).1,
         ));
     }
+    let verbose = if chat.tr.state.verbose { "On" } else { "Off" };
+    items.push(row(
+        "verbose",
+        "Verbose",
+        format!("{verbose}: every step open, with its time"),
+    ));
     let tasks = chat.folio.background.len();
     if tasks > 0 {
         items.push(row("tasks", "Tasks", controls::tasks_line(tasks)));
     }
+    let review = if chat.input.review {
+        "Each edit waits for you"
+    } else {
+        "Edits land as the mode says"
+    };
+    items.push(row("review", "Review edits", review.to_string()));
     if terminal_ready(chat) {
         items.push(row(
             "terminal",
@@ -1069,6 +1254,13 @@ pub(super) fn on_char(key: &str, c: char, mods: Mods) {
                 set_mode(chat, next);
                 edit = false;
             }
+            // Takes the CLI's guess at what comes next.
+            '\t' if chat.input.menu.is_none() && chat.input.ed.is_empty() => {
+                if let Some(s) = chat.folio.suggestion.clone().filter(|_| !chat.folio.busy) {
+                    put(chat, &s);
+                }
+                edit = false;
+            }
             '\t' => {
                 pick(chat, How::Tab);
                 edit = false;
@@ -1083,6 +1275,8 @@ pub(super) fn on_char(key: &str, c: char, mods: Mods) {
                     // A selection goes first; a second Esc stops Claude.
                     let f = &mut chat.input.ed.field;
                     f.set_caret(f.caret, false);
+                } else if let Some(e) = chat.input.editing.take() {
+                    put(chat, &e.draft);
                 } else if chat.folio.busy {
                     hold(chat);
                     if let Some(h) = &chat.hosted {
@@ -1607,12 +1801,15 @@ impl View {
         let (ox, oy) = (r.x + PAD, r.y + PAD + images_h);
         let text_box = Rect::new(ox, oy, inner_w, view_h);
         if empty {
+            let guess = (chat.folio.suggestion.as_deref())
+                .filter(|_| !chat.ended && !chat.folio.busy)
+                .map(|s| format!("{s}    Tab"));
             let hint = if chat.ended {
                 PLACEHOLDER_ENDED
             } else if chat.folio.busy {
                 PLACEHOLDER_BUSY
             } else {
-                PLACEHOLDER
+                guess.as_deref().unwrap_or(PLACEHOLDER)
             };
             gfx.text_in(
                 hint,

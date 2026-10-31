@@ -89,8 +89,7 @@ const ICON_FONTS: [PCWSTR; 2] = [w!("Segoe Fluent Icons"), w!("Segoe MDL2 Assets
 /// DirectWrite's enhanced contrast. The usual system value is 0.5 to 1.
 const TEXT_CONTRAST: f32 = 2.0;
 
-/// Where the name and the lines under it start in a tile, after the icon.
-const TILE_TEXT_X: f32 = 56.0;
+use crate::layout::TILE_TEXT_X;
 /// A window's name from the left of its header, in line with the text in
 /// the boxes below it.
 const NAME_INSET: f32 = INNER_PAD;
@@ -1162,6 +1161,9 @@ pub const RETINUE_HEAD: f32 = 22.0;
 pub const RETINUE_CELL: f32 = 48.0;
 /// A portrait's frame, square.
 const PORTRAIT: f32 = 34.0;
+/// A portrait's stone, centre to face, and how fast one at work turns.
+const STONE_HALF: f32 = 10.0;
+const STONE_TURN_DEG_S: f32 = 30.0;
 
 /// How many of `n` portraits a column `h` DIPs tall shows. When they do
 /// not all fit the last place goes to a "+N" for the rest.
@@ -1194,10 +1196,26 @@ pub struct TableScene<'a> {
     pub span: f32,
     pub title: &'a str,
     pub hot: Option<usize>,
+    /// The tick under the cursor: its track, and its place in the marks.
+    pub hot_tick: Option<(usize, usize)>,
     pub size: (f32, f32),
     pub accent: Color,
     /// For the runes' carving.
     pub age: Duration,
+}
+
+/// Where `t` seconds falls across a war table `w` DIPs wide that spans
+/// `span` seconds. The hover reads ticks back with the same sum.
+pub fn table_x(t: f32, span: f32, w: f32) -> f32 {
+    let (x0, x1) = (TABLE_LABEL_W, (w - 16.0).max(TABLE_LABEL_W + 10.0));
+    x0 + (x1 - x0) * (t / span.max(1.0)).clamp(0.0, 1.0)
+}
+
+/// Where a tool call from `from` to `to` seconds is drawn across the
+/// war table, never thinner than a sliver so a quick one still shows.
+pub fn tick_span(from: f32, to: f32, span: f32, w: f32) -> (f32, f32) {
+    let a = table_x(from, span, w);
+    (a, table_x(to, span, w).max(a + 2.0))
 }
 
 /// The war table's heading, its axis under it, and a track, in DIPs.
@@ -3036,10 +3054,21 @@ impl Painter<'_> {
                 Lot::Done => (gold, gold.with_alpha(0.7), 1.0),
                 Lot::Failed => (theme::error(), theme::error().with_alpha(0.6), 1.0),
             };
-            self.fill_rounded(&frame, 3.0, edge.with_alpha(0.08));
-            self.stroke_rounded(&frame.inset(0.5), 3.0, edge, 1.0);
-            let centre = (frame.x + PORTRAIT / 2.0, frame.y + PORTRAIT / 2.0);
-            self.rune_cut(row.rune, centre, 18.0, ink, drawn, 1.6);
+            // One at work turns, one waiting on you leans toward you on
+            // its beat, and the rest stand at the icon's angle.
+            let (turn, tilt) = match row.lot {
+                Lot::Working => (
+                    crate::cube::REST_TURN + row.age.as_secs_f32() * STONE_TURN_DEG_S,
+                    crate::cube::REST_TILT,
+                ),
+                Lot::Waiting => (
+                    crate::cube::REST_TURN,
+                    crate::cube::REST_TILT + 12.0 * motion::waiting_breath(row.waited),
+                ),
+                _ => (crate::cube::REST_TURN, crate::cube::REST_TILT),
+            };
+            let centre = (frame.x + PORTRAIT / 2.0, frame.y + PORTRAIT / 2.0 + 0.5);
+            self.rune_cube(gpu, row.rune, centre, (turn, tilt), edge, ink, drawn);
             let (l, t, r, b) = (frame.x, frame.y, frame.x + PORTRAIT, frame.y + PORTRAIT);
             match row.lot {
                 Lot::Done => {
@@ -3050,12 +3079,11 @@ impl Painter<'_> {
                     // The frame broken where the crack starts, then the
                     // crack down through the rune.
                     let crack = [
-                        (l + 21.0, t),
-                        (l + 17.0, t + 9.0),
-                        (l + 22.0, t + 15.0),
-                        (l + 16.0, t + 24.0),
+                        (l + 21.0, t + 3.0),
+                        (l + 17.0, t + 10.0),
+                        (l + 22.0, t + 16.0),
+                        (l + 16.0, t + 25.0),
                     ];
-                    line((l + 19.5, t), (l + 22.5, t), p.term_bg, 2.0);
                     for seg in crack.windows(2) {
                         line(seg[0], seg[1], theme::error(), 1.2);
                     }
@@ -3088,6 +3116,54 @@ impl Painter<'_> {
         }
     }
 
+    /// A hireling's rune stone: the faces the eye sees, dark and lit by
+    /// how they catch the light, bound in `edge`, its rune cut on each
+    /// side in `ink`, faint where a side turns away.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn rune_cube(
+        &self,
+        gpu: &Gpu,
+        rune: usize,
+        at: (f32, f32),
+        (turn, tilt): (f32, f32),
+        edge: Color,
+        ink: Color,
+        drawn: f32,
+    ) {
+        let p = theme::palette();
+        let faces = crate::cube::faces(STONE_HALF, turn, tilt);
+        let pt = |(x, y): (f32, f32)| Vector2 {
+            X: at.0 + x,
+            Y: at.1 + y,
+        };
+        let bound = p.term_bg.mix(edge, 0.55);
+        for f in &faces {
+            let shade = p.term_bg.mix(p.term_fg, 0.05 + 0.16 * f.light);
+            self.polygon(gpu, &f.corners.map(pt), shade);
+            if f.side {
+                let c = pt(f.centre);
+                self.rt.SetTransform(&Matrix3x2 {
+                    M11: f.right.0,
+                    M12: f.right.1,
+                    M21: f.down.0,
+                    M22: f.down.1,
+                    M31: c.X,
+                    M32: c.Y,
+                });
+                let k = (f.facing * 1.6).min(1.0);
+                self.rune_cut(rune, (0.0, 0.0), STONE_HALF * 1.25, ink.fade(k), drawn, 1.6);
+                self.rt.SetTransform(&Matrix3x2::identity());
+            }
+        }
+        self.brush.SetColor(&color(bound));
+        for f in &faces {
+            for k in 0..4 {
+                let (a, b) = (pt(f.corners[k]), pt(f.corners[(k + 1) % 4]));
+                self.rt.DrawLine(a, b, self.brush, 1.0, None);
+            }
+        }
+    }
+
     /// The war table: a heading, an axis of time, and a track per worker
     /// on it, the main loop first. A track is a faint bar from its start
     /// to its end, its tool calls as ticks in their craft's colour over
@@ -3109,7 +3185,7 @@ impl Painter<'_> {
         let x0 = TABLE_LABEL_W;
         let x1 = (w - 16.0).max(x0 + 10.0);
         let span = scene.span.max(1.0);
-        let at = |t: f32| x0 + (x1 - x0) * (t / span).clamp(0.0, 1.0);
+        let at = |t: f32| table_x(t, span, w);
         // The axis: a mark at every step that fits, its time under it.
         let axis_y = TABLE_HEAD + TABLE_AXIS - 4.0;
         let step = [
@@ -3157,10 +3233,14 @@ impl Painter<'_> {
             let (sx, ex) = (at(tr.start), at(tr.end).max(at(tr.start) + 2.0));
             let lane = Rect::new(sx, mid - 3.0, ex - sx, 6.0);
             self.fill_rounded(&lane, 3.0, ink.with_alpha(0.16));
-            for &(from, to, c, failed) in &tr.marks {
-                let (a, b) = (at(from), at(to).max(at(from) + 2.0));
+            for (k, &(from, to, c, failed)) in tr.marks.iter().enumerate() {
+                let (a, b) = tick_span(from, to, span, w);
                 let tick = Rect::new(a, mid - 5.0, b - a, 10.0);
                 self.fill_rounded(&tick, 1.5, if failed { theme::error() } else { c });
+                if scene.hot_tick == Some((i, k)) {
+                    let ring = Rect::new(a - 2.0, mid - 7.0, b - a + 4.0, 14.0);
+                    self.stroke_rounded(&ring, 2.5, fg.with_alpha(0.9), 1.0);
+                }
             }
             match tr.lot {
                 Lot::Working | Lot::Waiting => {
@@ -3602,7 +3682,11 @@ impl Painter<'_> {
         s: &Session,
         look: &Look,
     ) {
-        let b = scene.button(Hit::Tile(i));
+        // Its hirelings' line is a part of it, and lights it as the rest.
+        let b = match scene.button(Hit::Band(i)) {
+            Button::Idle => scene.button(Hit::Tile(i)),
+            lit => lit,
+        };
         // A finished turn jumps off the plate and settles, so the moment
         // it lands is seen from across the screen.
         let landing = if scene.ambient && s.phase == Phase::Done {
@@ -3831,7 +3915,11 @@ impl Painter<'_> {
         self.text_tabular(gpu, &gpu.small_right, age_c.fade(presence), &age, top);
 
         // Last line, and what the agent did lately beside it.
-        let at_work = if !s.band.hirelings.is_empty() {
+        // Queued for heavy first: a session that waits its turn there
+        // looks stuck otherwise.
+        let at_work = if let Some(queued) = s.queued_line(scene.now) {
+            queued
+        } else if !s.band.hirelings.is_empty() {
             s.band.line(scene.now).unwrap_or_default()
         } else if phase == &Phase::Working || s.agents_alone(scene.now) > 0 {
             horadric_core::session::subagent_line(&s.subagent_types(scene.now))
@@ -3936,7 +4024,13 @@ impl Painter<'_> {
                 bottom.w -= word_w + gap;
             }
         }
-        self.text(&gpu.small, theme::text_dim().fade(presence), last, bottom);
+        // Lit under the cursor, as a click on it opens the war table.
+        let last_c = if scene.button(Hit::Band(i)) == Button::Idle {
+            theme::text_dim()
+        } else {
+            theme::text()
+        };
+        self.text(&gpu.small, last_c.fade(presence), last, bottom);
         if let Some(mark) = mark {
             self.browser_mark(&mark, scene.button(Hit::Browser(i)));
         }

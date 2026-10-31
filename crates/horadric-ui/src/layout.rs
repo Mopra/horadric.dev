@@ -533,6 +533,10 @@ pub enum Hit {
     Shell,
     /// The Folio button between them.
     Folio,
+    /// A tile's second line while it counts the session's hirelings,
+    /// which opens the war table. [`hit`] says `Tile`; the window, which
+    /// knows what the line says, tells this one from it.
+    Band(usize),
     FilesHeader,
     /// A row of the files tile, counted from the top one showing.
     File(usize),
@@ -569,6 +573,7 @@ impl Hit {
                 | Hit::Add
                 | Hit::Shell
                 | Hit::Folio
+                | Hit::Band(_)
                 | Hit::TasksMode
                 | Hit::TasksAdd
                 | Hit::TasksGive
@@ -598,6 +603,24 @@ pub fn button<T: PartialEq>(which: T, hot: T, pressed: Option<T>) -> Button {
         None if hot == which => Button::Hover,
         None => Button::Idle,
     }
+}
+
+/// Where a tile's name and the line under it start, after its icon.
+pub const TILE_TEXT_X: f32 = 56.0;
+
+/// The `i`th tile's second line, from its text's start up to the buttons
+/// at its end: where it counts the session's hirelings, see [`Hit::Band`].
+pub fn band_slot(layout: &ClusterLayout, i: usize) -> Option<Rect> {
+    let t = layout.tiles.get(i)?;
+    let left = t.x + TILE_TEXT_X;
+    let end = [layout.marks.get(i), layout.codes.get(i)]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|b| b.x - 2.0)
+        .fold(t.right() - 14.0, f32::min);
+    let row_h = t.h / 2.0;
+    Some(Rect::new(left, t.y + row_h - 1.0, end - left, row_h - 5.0))
 }
 
 /// The strip down a tile's left edge that takes a click on its lamp: the
@@ -2972,6 +2995,20 @@ mod tests {
         let unmarked = l.tiles[0];
         assert_eq!(hit(&l, b.x + 1.0, unmarked.y + 40.0), Hit::Tile(0));
         assert!(Hit::Browser(1).lights());
+    }
+
+    #[test]
+    fn the_hirelings_line_stops_short_of_the_buttons_and_the_top_line() {
+        let m = Metrics::default();
+        let mut l = cluster(&m, 2, 0, false, None, None, None);
+        mark(&mut l, &m, &[true, false], &[true, false]);
+        let (t, code) = (l.tiles[0], l.codes[0].unwrap());
+        let line = band_slot(&l, 0).unwrap();
+        assert!(line.right() < code.x && line.x > t.x + 20.0);
+        assert!(line.y > t.y + t.h / 3.0 && line.bottom() <= t.bottom());
+        let bare = band_slot(&l, 1).unwrap();
+        assert!(bare.right() > line.right());
+        assert!(band_slot(&l, 2).is_none());
     }
 
     #[test]

@@ -123,8 +123,8 @@ A pure module, `particles.rs` in the pure half of `horadric-ui`
 ### Frame scheduling
 
 Unchanged. The vsync clock (`vsync.rs`) beats while anything moves; a
-covered or minimised cluster skips its frame (see
-[performance](performance.md)). Particles only ask for frames while a
+covered or minimised cluster skips its frame (the lore has the
+performance passes). Particles only ask for frames while a
 burst is alive.
 
 ### When there is no GPU
