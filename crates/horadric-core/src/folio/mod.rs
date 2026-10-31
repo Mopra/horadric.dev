@@ -415,7 +415,33 @@ pub struct Folio {
     requests: HashMap<String, Sent>,
     /// For request ids and queued prompts' uuids.
     sent: u64,
+    /// Whether any line of the stream was one the Folio knows, and how
+    /// many it could not read before one was, for [`Folio::unreadable`].
+    understood: bool,
+    unread: u32,
+    /// The stream has ended.
+    stream_ended: bool,
 }
+
+/// How many lines a stream may start with that the Folio cannot read
+/// before it is taken for one it never will: the CLI's protocol moved
+/// from under it. A few, since a CLI may print a warning line first.
+pub const UNREADABLE_AFTER: u32 = 6;
+
+/// The types of stdout line the Folio reads.
+const KNOWN_LINES: &[&str] = &[
+    "stream_event",
+    "assistant",
+    "user",
+    "result",
+    "control_request",
+    "control_cancel_request",
+    "control_response",
+    "command_lifecycle",
+    "conversation_reset",
+    "rate_limit_event",
+    "system",
+];
 
 /// A content block between its `content_block_start` and its stop.
 #[derive(Debug)]
@@ -584,8 +610,13 @@ impl Folio {
             return false;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else {
+            self.unread += 1;
             return self.raw(line);
         };
+        match KNOWN_LINES.contains(&v["type"].as_str().unwrap_or_default()) {
+            true => self.understood = true,
+            false => self.unread += 1,
+        }
         if let Some(parent) = v["parent_tool_use_id"].as_str() {
             return self.subagent(parent, &v);
         }
@@ -891,6 +922,15 @@ impl Folio {
     /// they ended before this process.
     pub fn turn_finished(&self) -> bool {
         !self.busy && self.turn_over()
+    }
+
+    /// Whether the stream is one the Folio cannot read at all: not one
+    /// line of it known, and [`UNREADABLE_AFTER`] it could not read, or
+    /// any before the CLI ended. A session the Folio cannot draw goes on
+    /// in a terminal instead.
+    pub fn unreadable(&self) -> bool {
+        !self.understood
+            && (self.unread >= UNREADABLE_AFTER || (self.stream_ended && self.unread > 0))
     }
 
     /// Whether the last prompt of this process has its footer.
@@ -1944,6 +1984,7 @@ impl Folio {
     /// The stream ended: claude.exe exited or its pipe broke. Whatever the
     /// turn left open is over. Returns whether anything changed.
     pub fn end(&mut self) -> bool {
+        self.stream_ended = true;
         let was = self.busy || !self.queued.is_empty() || !self.background.is_empty();
         self.dropped.append(&mut self.queued);
         // The CLI's background tasks die with it, and a new process says
@@ -2896,6 +2937,38 @@ mod tests {
         }
         assert_eq!(f.blocks[1], Block::Thinking("Hmm, yes.".into()));
         assert_eq!(f.blocks.len(), 2);
+    }
+
+    #[test]
+    fn a_stream_with_no_line_it_knows_is_unreadable() {
+        let mut f = Folio::new();
+        for _ in 0..UNREADABLE_AFTER - 1 {
+            f.feed("not json at all");
+        }
+        assert!(!f.unreadable());
+        f.feed(r#"{"type":"brand_new_kind"}"#);
+        assert!(f.unreadable());
+        // A CLI that printed a little and quit is unreadable too.
+        let mut f = Folio::new();
+        f.feed("Warning: something");
+        assert!(!f.unreadable());
+        f.end();
+        assert!(f.unreadable());
+        // One line it knows, and the rest is the protocol growing.
+        let mut f = Folio::new();
+        f.feed("Warning: something");
+        for line in PLAIN.lines().take(1) {
+            f.feed(line);
+        }
+        for _ in 0..2 * UNREADABLE_AFTER {
+            f.feed(r#"{"type":"brand_new_kind"}"#);
+        }
+        f.end();
+        assert!(!f.unreadable());
+        // A CLI that ended silent failed to start, which says why itself.
+        let mut f = Folio::new();
+        f.end();
+        assert!(!f.unreadable());
     }
 
     #[test]

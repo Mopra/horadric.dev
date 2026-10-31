@@ -165,6 +165,9 @@ struct Chat {
     /// With `to_terminal`, it starts again as a Folio, its last turn
     /// rewound, rather than in a terminal.
     rewinding: bool,
+    /// Its stream could not be read at all, so it goes on in a terminal
+    /// whether or not a turn runs: see [`Folio::unreadable`].
+    unreadable: bool,
     /// The line its conversation was resumed at by a rewind, see
     /// [`Tag::at`].
     rewound: Option<String>,
@@ -322,6 +325,7 @@ impl Chat {
             loading: None,
             to_terminal: false,
             rewinding: false,
+            unreadable: false,
             rewound: None,
             restarting: false,
             restart_show: false,
@@ -965,6 +969,12 @@ pub fn conversation(id: &str) -> Option<String> {
     with(id, |c| c.folio.session_id.clone()).flatten()
 }
 
+/// Whether session `id` goes on in a terminal because its stream could
+/// not be read.
+pub fn unreadable(id: &str) -> bool {
+    with(id, |c| c.unreadable).unwrap_or(false)
+}
+
 /// The window events are routed through to the UI thread, made on first
 /// use.
 fn router() -> isize {
@@ -1123,6 +1133,24 @@ fn drain() {
                             tell.push(Input::FolioRestart(id.clone(), chat.restart_show));
                         }
                     }
+                }
+            }
+            if chat.folio.unreadable() && !chat.unreadable {
+                // Its words cannot be shown, so it may as well be cut off
+                // mid turn: the terminal resumes the conversation.
+                chat.unreadable = true;
+                chat.rewinding = false;
+                chat.error = Some(
+                    "This Claude's stream could not be read, so it goes on in a terminal."
+                        .to_string(),
+                );
+                moved = true;
+                match (&chat.hosted, chat.ended) {
+                    (Some(h), false) => {
+                        chat.to_terminal = true;
+                        h.close();
+                    }
+                    _ => tell.push(Input::FolioHandedOver(id.clone())),
                 }
             }
             // A replay's limits are old news, and the bars already had them.

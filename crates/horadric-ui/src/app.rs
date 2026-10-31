@@ -8014,25 +8014,40 @@ impl App {
     }
 
     /// A Folio handed over has ended: the same tile resumes its
-    /// conversation in a terminal.
+    /// conversation in a terminal, or starts one afresh when it never had
+    /// one.
     fn folio_handed_over(&mut self, id: &str) {
         if self.folio_rewind_ended(id) {
             return;
         }
-        let conversation = crate::folio::conversation(id);
+        // A stream the Folio could not read never named its conversation,
+        // but the hooks still did.
+        let conversation = crate::folio::conversation(id).or_else(|| {
+            let r = self.shared.registry.lock().ok()?;
+            r.get(id)?.claude_session_id.clone()
+        });
+        let unreadable = crate::folio::unreadable(id);
         crate::folio::close(id);
         self.folios.remove(id);
         let own = self.folio_args.remove(id).unwrap_or_default();
-        let (Some(conversation), Some(dir)) = (conversation, self.dir_of(id)) else {
+        let Some(dir) = self.dir_of(id) else {
             return;
         };
         let name = self.name_of(id);
-        let args = Agent::Claude.carry_on(Some(&conversation), &own);
+        let args = Agent::Claude.carry_on(conversation.as_deref(), &own);
         if let Err(e) = self.launch(id, &name, dir, args, Run::Agent(Agent::Claude), true) {
             eprintln!("horadric: cannot open {id} in a terminal: {e}");
             return;
         }
-        if let Ok(mut r) = self.shared.registry.lock() {
+        if unreadable {
+            self.toasts.show(
+                Kind::Info,
+                "Opened in a terminal",
+                "Horadric could not read this Claude's chat stream. Should every chat fail \
+                 so, the setting \"New Claude sessions open in a terminal\" turns them off.",
+            );
+        }
+        if let (Some(conversation), Ok(mut r)) = (conversation, self.shared.registry.lock()) {
             if let Some(s) = r.get_mut(id) {
                 s.claude_session_id = Some(conversation);
                 s.prompted = true;
