@@ -231,6 +231,9 @@ pub struct State {
     /// last turn: a headless CLI runs no status line to tell the tile.
     pub model: Option<String>,
     pub context: Option<(u64, u64)>,
+    /// What the CLI called the conversation, for the tile until a hook
+    /// reads the same from the transcript.
+    pub title: Option<String>,
 }
 
 impl State {
@@ -401,6 +404,7 @@ impl Chat {
             ask: self.folio.first_ask(),
             model: self.folio.model.clone(),
             context: (self.folio.context.as_ref()).map(|c| (c.used, c.limit)),
+            title: self.folio.title.clone(),
         }
     }
 
@@ -954,6 +958,40 @@ pub fn prompt(id: &str, text: &str) -> bool {
     went
 }
 
+/// Sends `text` to every Folio of the project `key` that can take it, as
+/// though typed into each, so their answers come side by side on the
+/// stage. Returns how many it went to.
+pub fn broadcast(key: &str, text: &str) -> usize {
+    let mut went = Vec::new();
+    CHATS.with(|c| {
+        let Ok(mut chats) = c.try_borrow_mut() else {
+            return;
+        };
+        for (id, chat) in chats.iter_mut() {
+            if chat.key == key && chat.watch.is_none() && composer::prompt(chat, text) {
+                went.push(id.clone());
+            }
+        }
+    });
+    for id in &went {
+        redraw(id);
+    }
+    went.len()
+}
+
+/// Says `text` above session `id`'s composer.
+pub fn say(id: &str, text: &str) {
+    with(id, |c| composer::notice(c, text));
+    redraw(id);
+}
+
+/// Now, in Unix milliseconds.
+fn unix_ms() -> u64 {
+    (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH))
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 /// Stops session `id`'s turn, as Esc in its composer does. False when no
 /// turn runs.
 pub fn stop(id: &str) -> bool {
@@ -1151,6 +1189,8 @@ fn drain() {
             chat.folio.review = chat.input.review;
             let (cleared, live) = (chat.folio.cleared, chat.live);
             for event in events {
+                // A replay's lines are old, and when they came is lost.
+                chat.folio.clock = chat.live.then(unix_ms);
                 match event {
                     Event::Out(l) => moved |= chat.folio.feed(&l),
                     Event::Sent(l) => moved |= chat.folio.feed_sent(&l),
@@ -1351,6 +1391,7 @@ mod tests {
             ask: None,
             model: None,
             context: None,
+            title: None,
         }
     }
 

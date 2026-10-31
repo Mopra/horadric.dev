@@ -3,9 +3,11 @@
 //! Ten sessions that each start `cargo test` or `vitest` at once share the
 //! CPU ten ways and all finish late, and the desktop stutters meanwhile. A
 //! session that runs its heavy command through `horadric heavy` waits while
-//! another one runs, and is told whose it waits for. The slot is a file
-//! lock the system lets go of when its process ends, however it ends, so a
-//! session killed mid run never leaves the others waiting.
+//! others hold every slot (one, unless the machine has cores for more, see
+//! [`slots`]), is told whose it waits for, and its tile says it is queued.
+//! A slot is a file lock the system lets go of when its process ends,
+//! however it ends, so a session killed mid run never leaves the others
+//! waiting.
 //!
 //! It also keeps the command's output out of the agent's context window.
 //! A build or a test run prints thousands of lines, and every line an
@@ -49,6 +51,78 @@ pub fn waiting_line(holder: &Holder, now: u64) -> String {
         "waiting for `{}` in {folder}{by}, running for {}. Yours starts when it ends.",
         holder.command,
         duration(now.saturating_sub(holder.since)),
+    )
+}
+
+/// The setting that overrides how many heavy commands run at once.
+pub const SLOTS_ENV: &str = "HORADRIC_HEAVY_SLOTS";
+
+/// Logical cores a heavy command gets to itself. A `cargo test` keeps
+/// sixteen of them busy, so a second slot only pays where there are
+/// sixteen more.
+pub const CORES_PER_SLOT: usize = 16;
+
+/// The most slots a setting can ask for: past this the memory wait, not
+/// the slots, decides, and a typo of `40` must not undo the queue.
+pub const MOST_SLOTS: usize = 8;
+
+/// How many heavy commands run at once: the setting when it is a number,
+/// else one for every [`CORES_PER_SLOT`] logical cores, never less than
+/// one nor more than [`MOST_SLOTS`].
+pub fn slots(setting: Option<&str>, cores: usize) -> usize {
+    setting
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(cores / CORES_PER_SLOT)
+        .clamp(1, MOST_SLOTS)
+}
+
+/// The lock and holder files of slot `i`. The first keeps the names it
+/// had when there was only one, so a Horadric from before still queues
+/// with this one.
+pub fn slot_files(i: usize) -> (String, String) {
+    if i == 0 {
+        ("slot.lock".into(), "slot.json".into())
+    } else {
+        (format!("slot-{i}.lock"), format!("slot-{i}.json"))
+    }
+}
+
+/// What a session's `horadric heavy` tells its tile: that it waits for a
+/// slot, and whose commands hold them, or that it has stopped waiting.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Queued {
+    pub waiting: bool,
+    #[serde(default)]
+    pub holders: Vec<Holder>,
+}
+
+/// How often a waiting `horadric heavy` says again that it waits. A wait
+/// is only believed for [`QUEUED_STALE`] after it was last said, since a
+/// waiter killed while it waits cannot say it stopped.
+pub const QUEUED_EVERY: u64 = 15;
+pub const QUEUED_STALE: u64 = 45;
+
+/// The tile's line while its session waits for a slot: whose command it
+/// waits behind, and for how long that has run. Behind several, the one
+/// that has run longest, which likely ends first.
+pub fn queued_line(holders: &[Holder], now: u64) -> String {
+    let Some(first) = holders.iter().min_by_key(|h| h.since) else {
+        return "queued for heavy".into();
+    };
+    let folder = first
+        .cwd
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&first.cwd);
+    let more = match holders.len() {
+        1 => String::new(),
+        n => format!(" and {} more", n - 1),
+    };
+    format!(
+        "queued for heavy behind `{}` in {folder}{more}, {}",
+        first.command,
+        duration(now.saturating_sub(first.since)),
     )
 }
 
@@ -196,6 +270,53 @@ fn ended(code: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn held(command: &str, cwd: &str, since: u64) -> Holder {
+        Holder {
+            command: command.into(),
+            cwd: cwd.into(),
+            session: None,
+            pid: 1,
+            since,
+        }
+    }
+
+    #[test]
+    fn slots_follow_the_cores_unless_set() {
+        assert_eq!(slots(None, 4), 1);
+        assert_eq!(slots(None, 16), 1);
+        assert_eq!(slots(None, 31), 1);
+        assert_eq!(slots(None, 32), 2);
+        assert_eq!(slots(None, 512), MOST_SLOTS);
+        assert_eq!(slots(Some(" 3 "), 4), 3);
+        assert_eq!(slots(Some("0"), 64), 1);
+        assert_eq!(slots(Some("40"), 4), MOST_SLOTS);
+        assert_eq!(slots(Some("two"), 32), 2);
+    }
+
+    #[test]
+    fn the_first_slot_keeps_its_old_names() {
+        assert_eq!(slot_files(0), ("slot.lock".into(), "slot.json".into()));
+        assert_eq!(slot_files(2), ("slot-2.lock".into(), "slot-2.json".into()));
+    }
+
+    #[test]
+    fn queued_names_the_oldest_holder() {
+        let one = [held("cargo test", "C:/p/horadric.dev/", 100)];
+        assert_eq!(
+            queued_line(&one, 285),
+            "queued for heavy behind `cargo test` in horadric.dev, 3m 05s"
+        );
+        let two = [
+            held("npm test", "C:\\p\\site", 200),
+            held("cargo build", "C:\\p\\core", 100),
+        ];
+        assert_eq!(
+            queued_line(&two, 160),
+            "queued for heavy behind `cargo build` in core and 1 more, 1m 00s"
+        );
+        assert_eq!(queued_line(&[], 0), "queued for heavy");
+    }
 
     fn holder(session: Option<&str>) -> Holder {
         Holder {

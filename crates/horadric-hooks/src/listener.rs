@@ -26,7 +26,7 @@ use horadric_core::{HookEvent, Limits, Status};
 use serde_json::{json, Value};
 
 use crate::{
-    checkpoint, client, pace, transcript, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH,
+    checkpoint, client, pace, transcript, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH, HEAVY_PATH,
     HOOK_PATH, KNOW_PATH, NEW_PATH, OWNER_HEADER, RECALL_PATH, RELOAD_PATH, SESSION_HEADER,
     STATE_HEADER, STATUS_PATH, TASKS_PATH,
 };
@@ -356,6 +356,7 @@ fn handle(
         KNOW_PATH,
         GLOW_PATH,
         RECALL_PATH,
+        HEAVY_PATH,
     ];
     if method != "POST" || !paths.contains(&path) {
         return respond(&stream, "404 Not Found");
@@ -414,6 +415,7 @@ fn handle(
             BROWSER_PATH => "browser",
             GLOW_PATH => "glow",
             RECALL_PATH => "recall",
+            HEAVY_PATH => "heavy",
             _ => "reload",
         };
         if from_browser || command != wanted {
@@ -429,7 +431,10 @@ fn handle(
             );
         }
         if path == GLOW_PATH {
-            return glow(&stream, horadric_id, &body, tx);
+            return glow(&stream, horadric_id, &body, tx, HookEvent::GLOW);
+        }
+        if path == HEAVY_PATH {
+            return glow(&stream, horadric_id, &body, tx, HookEvent::HEAVY);
         }
         let Some(commands) = commands else {
             return respond(&stream, "503 Service Unavailable");
@@ -680,9 +685,17 @@ fn before_search(session: &str, event: &HookEvent, commands: &Sender<Command>) -
     ))
 }
 
-/// Hands what a lore tool showed a session to the app as a
-/// [`HookEvent::GLOW`]. Nothing waits on it: it is light, not work.
-fn glow(stream: &TcpStream, session: String, body: &[u8], tx: &Sender<Tagged>) -> io::Result<()> {
+/// Hands news of a session that is not a hook to the app as Horadric's
+/// own event `name`: what a lore tool showed it ([`HookEvent::GLOW`]) or
+/// that its `horadric heavy` waits ([`HookEvent::HEAVY`]). Nothing waits
+/// on it: it is news, not work.
+fn glow(
+    stream: &TcpStream,
+    session: String,
+    body: &[u8],
+    tx: &Sender<Tagged>,
+    name: &str,
+) -> io::Result<()> {
     let Ok(input) = serde_json::from_slice::<Value>(body) else {
         return respond(stream, "400 Bad Request");
     };
@@ -692,7 +705,7 @@ fn glow(stream: &TcpStream, session: String, body: &[u8], tx: &Sender<Tagged>) -
     respond(stream, "200 OK")?;
     let event = HookEvent {
         tool_input: Some(input),
-        ..HookEvent::synthetic(HookEvent::GLOW)
+        ..HookEvent::synthetic(name)
     };
     let _ = tx.send(Tagged {
         horadric_id: session,

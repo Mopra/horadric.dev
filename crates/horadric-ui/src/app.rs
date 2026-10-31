@@ -438,6 +438,9 @@ pub(crate) enum Input {
     /// A portrait in a pane's retinue: show the conversation of the hireling
     /// with the second id, of the session with the first, beside it.
     OpenHireling(String, String),
+    /// A tile's line counting its hirelings: show the session and lay its
+    /// war table over its pane.
+    WarTable(String),
     /// A hireling's pane's cross or Esc, by its Folio's id.
     CloseWatch(String),
     /// The chat button under a project's tiles: a new Folio, a headless
@@ -450,6 +453,9 @@ pub(crate) enum Input {
     Limits(Limits),
     /// A Folio's session changed what its tile should say.
     FolioState(String, crate::folio::State),
+    /// `/all` in a Folio: the prompt to every Folio of the project, by its
+    /// key, and the session it was typed in.
+    FolioAll(String, String, String),
     /// A Folio's "Terminal": end it between turns and carry the session on
     /// in a terminal.
     FolioToTerminal(String),
@@ -7984,6 +7990,14 @@ impl App {
             session.loot.outstanding.clear();
         }
         session.stream_agents = state.agents.clone();
+        // A terminal's title comes from the transcript as hooks fire; a
+        // Folio's from its stream as soon as the CLI made one up.
+        if let (Some(t), None) = (&state.title, &session.title) {
+            session.title = Some(horadric_core::title::Title {
+                text: t.clone(),
+                custom: false,
+            });
+        }
         if let Some(status) = state.status() {
             session.status = Some(status);
         }
@@ -9206,11 +9220,23 @@ impl App {
                 }
                 Input::CloseSky(key) => self.close_sky(&key),
                 Input::OpenHireling(session, agent) => self.open_hireling(&session, &agent),
+                Input::WarTable(id) => {
+                    self.reveal(&id, false);
+                    // A session that is resumed or attached first has no
+                    // pane yet, and shows without its table.
+                    if let Some(stage) = &self.stage {
+                        stage.war_table(&id);
+                    }
+                }
                 Input::CloseWatch(id) => self.close_watch(&id),
                 Input::Folio(key) => self.open_folio(&key),
                 Input::CloseFolio(id) => self.close_folio(&id),
                 Input::Limits(limits) => self.hear_limits(&limits),
                 Input::FolioState(id, state) => self.folio_state(&id, state),
+                Input::FolioAll(key, from, text) => {
+                    let n = crate::folio::broadcast(&key, &text);
+                    crate::folio::say(&from, &format!("Sent to {}.", plural(n, "chat")));
+                }
                 Input::FolioToTerminal(id) => self.folio_to_terminal(&id),
                 Input::FolioHandedOver(id) => self.folio_handed_over(&id),
                 Input::FolioFork {

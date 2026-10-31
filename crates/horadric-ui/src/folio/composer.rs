@@ -13,7 +13,9 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use horadric_core::folio::{effort_line, prompt_line, typed, Block, ImageData, Priority, Typed};
+use horadric_core::folio::{
+    effort_line, prompt_line, shell_command, typed, Block, ImageData, Priority, Typed,
+};
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -456,6 +458,10 @@ pub(super) fn tend(id: &str, chat: &mut Chat) {
     if chat.input.busy_was && !busy {
         let line = chat.folio.get_context_usage();
         write(chat, &line);
+        // Headless, the CLI names no conversation by itself.
+        if let Some(line) = chat.folio.ask_title() {
+            write(chat, &line);
+        }
         // Claude was stopped: what waited goes back into the composer
         // rather than run, as the CLI does.
         if std::mem::take(&mut chat.input.held) {
@@ -480,6 +486,7 @@ pub(super) fn hold(chat: &mut Chat) {
 
 /// Starts a turn with `text` and `images`. False when it did not go.
 fn deliver(chat: &mut Chat, text: &str, images: &[ImageData]) -> bool {
+    let text = &format!("{}{text}", chat.folio.shell_context());
     let line = if images.is_empty() {
         chat.folio.push_prompt(text);
         prompt_line(text)
@@ -575,6 +582,18 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
         run_native(chat, name, &text);
         return;
     }
+    // Horadric runs it, not Claude, so it needs no session.
+    if let Some(command) = shell_command(&text) {
+        let command = command.to_string();
+        if text.len() <= HISTORY_ENTRY_MAX {
+            chat.input.history.push(&text);
+        }
+        chat.input.ed.clear();
+        chat.input.menu = None;
+        chat.input.save();
+        super::slash::run_shell(chat, &command);
+        return;
+    }
     if chat.ended || chat.hosted.is_none() {
         return;
     }
@@ -597,6 +616,7 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
     } else {
         // Held back until the turn's end, a correction would come too late.
         let priority = if now { Priority::Now } else { Priority::Next };
+        let text = format!("{}{text}", chat.folio.shell_context());
         let line = chat.folio.queue_prompt(&text, &data, priority);
         write(chat, &line);
         chat.follow = true;
@@ -641,6 +661,23 @@ fn run_native(chat: &mut Chat, name: &str, text: &str) {
         .unwrap_or("")
         .trim();
     match name {
+        "btw" if words.is_empty() => notice(chat, "Say /btw and the question."),
+        "btw" if chat.ended || chat.hosted.is_none() => {
+            notice(chat, "/btw needs the session running.");
+        }
+        "btw" => {
+            let line = chat.folio.side_question(words);
+            if !write(chat, &line) {
+                chat.folio.blocks.pop();
+            }
+            chat.follow = true;
+        }
+        "all" if words.is_empty() => notice(chat, "Say /all and the prompt."),
+        "all" => crate::app::push(crate::app::Input::FolioAll(
+            chat.key.clone(),
+            id.clone(),
+            words.to_string(),
+        )),
         "login" => super::sign_in::log_in(chat, &id, None),
         "mcp" => super::mcp::show(chat),
         "logout" => super::sign_in::log_out(chat, &id),
@@ -951,6 +988,18 @@ fn pick(chat: &mut Chat, how: How) -> bool {
             "effort" => open_picker(chat, MenuKind::Effort),
             "tasks" => open_picker(chat, MenuKind::Tasks),
             "context" => {
+                let rows: Vec<Item> = (chat.folio.context.as_ref())
+                    .map(controls::context_rows)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(label, detail)| Item {
+                        label,
+                        detail,
+                        ..Default::default()
+                    })
+                    .collect();
+                choose(chat, rows, "The context is not measured yet.");
+                // Fresh for the next look.
                 let line = chat.folio.get_context_usage();
                 write(chat, &line);
             }
@@ -967,6 +1016,10 @@ fn pick(chat: &mut Chat, how: How) -> bool {
                     }
                     .into(),
                 );
+            }
+            "verbose" => {
+                let st = &mut chat.tr.state;
+                st.verbose = !st.verbose;
             }
             "terminal" => {
                 if let Some(id) = chat.input.key.clone() {
@@ -1060,6 +1113,12 @@ fn settings_items(chat: &Chat) -> Vec<Item> {
             controls::meter(ctx.used, ctx.limit).1,
         ));
     }
+    let verbose = if chat.tr.state.verbose { "On" } else { "Off" };
+    items.push(row(
+        "verbose",
+        "Verbose",
+        format!("{verbose}: every step open, with its time"),
+    ));
     let tasks = chat.folio.background.len();
     if tasks > 0 {
         items.push(row("tasks", "Tasks", controls::tasks_line(tasks)));
@@ -1193,6 +1252,13 @@ pub(super) fn on_char(key: &str, c: char, mods: Mods) {
                 let now = chat.folio.permission_mode().to_string();
                 let next = controls::next_mode(&now, chat.input.bypass);
                 set_mode(chat, next);
+                edit = false;
+            }
+            // Takes the CLI's guess at what comes next.
+            '\t' if chat.input.menu.is_none() && chat.input.ed.is_empty() => {
+                if let Some(s) = chat.folio.suggestion.clone().filter(|_| !chat.folio.busy) {
+                    put(chat, &s);
+                }
                 edit = false;
             }
             '\t' => {
@@ -1735,12 +1801,15 @@ impl View {
         let (ox, oy) = (r.x + PAD, r.y + PAD + images_h);
         let text_box = Rect::new(ox, oy, inner_w, view_h);
         if empty {
+            let guess = (chat.folio.suggestion.as_deref())
+                .filter(|_| !chat.ended && !chat.folio.busy)
+                .map(|s| format!("{s}    Tab"));
             let hint = if chat.ended {
                 PLACEHOLDER_ENDED
             } else if chat.folio.busy {
                 PLACEHOLDER_BUSY
             } else {
-                PLACEHOLDER
+                guess.as_deref().unwrap_or(PLACEHOLDER)
             };
             gfx.text_in(
                 hint,

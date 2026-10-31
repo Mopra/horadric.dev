@@ -182,6 +182,21 @@ fn block(b: &Block, out: &mut Vec<String>) {
             };
             out.push(format!("\u{2500} {how} in {took}"));
         }
+        Block::Aside {
+            question, answer, ..
+        } => {
+            out.extend(prefixed("btw ", question));
+            match answer {
+                Some(a) => out.extend(a.trim_end().lines().map(|l| format!("  {l}"))),
+                None => out.push("  \u{2026}".into()),
+            }
+        }
+        Block::Shell(r) => {
+            out.extend(prefixed("! ", &r.command));
+            let tail: Vec<&str> = r.output.trim_end().lines().collect();
+            let from = tail.len().saturating_sub(FAILED_TAIL);
+            out.extend(tail[from..].iter().map(|l| format!("    {l}")));
+        }
         Block::Notice(n) => match n {
             Notice::Compacted { trigger, .. } => {
                 out.push(format!("\u{2500} conversation compacted ({trigger})"));

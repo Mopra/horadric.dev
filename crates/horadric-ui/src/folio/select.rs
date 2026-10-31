@@ -155,6 +155,48 @@ pub(super) fn act(key: &str, a: Act) {
         Act::Step(id) => {
             with(key, |c| toggle(&mut c.tr.state.flipped, id));
         }
+        Act::MapStep(i, path) => {
+            with(key, |c| {
+                c.open.insert(i);
+                if let Some(Block::Tools(steps)) = c.folio.blocks.get(i) {
+                    super::transcript::open_path(&mut c.tr.state, steps, &path);
+                }
+                c.tr.state.reveal = Some(i);
+                c.follow = false;
+            });
+        }
+        Act::Light(footer) => {
+            let lit = with(key, |c| {
+                let map = horadric_core::folio::turn_map(&c.folio.blocks, footer);
+                let root = c.dir.to_string_lossy().into_owned();
+                let roots = [root.as_str(), c.key.as_str()];
+                let nodes: Vec<(String, horadric_core::glow::Touch)> = (map.files.iter())
+                    .filter_map(|f| {
+                        let full = horadric_core::glow::full(&f.path, &root);
+                        let how = if f.edits > 0 {
+                            horadric_core::glow::Touch::Edit
+                        } else {
+                            horadric_core::glow::Touch::Read
+                        };
+                        Some((horadric_core::glow::node(&full, &roots)?, how))
+                    })
+                    .collect();
+                crate::glows::light(&c.key, key, &nodes)
+            });
+            if lit == Some(true) {
+                app::push(Input::Sanctuary);
+            }
+        }
+        Act::StepImage(id, k) => {
+            let image = with(key, |c| {
+                let step = super::transcript::find_step(&c.folio.blocks, &id)?;
+                step.images.get(k).cloned()
+            })
+            .flatten();
+            if let Some(img) = image {
+                super::lightbox::open(key, &img.base64);
+            }
+        }
         Act::Agent(i, id) => {
             with(key, |c| {
                 c.open.insert(i);

@@ -18,6 +18,8 @@ pub const TERMINAL_ONLY: &[&str] = &[];
 /// Commands the Folio runs itself where the CLI would draw a screen,
 /// with what the `/` list says of each.
 pub const NATIVE: &[(&str, &str)] = &[
+    ("btw", "Ask aside, without it joining the conversation"),
+    ("all", "Send a prompt to every chat of this project"),
     ("login", "Log in to Claude in your browser"),
     ("logout", "Log out of Claude"),
     ("mcp", "MCP servers: status, sign in, reconnect"),
@@ -37,6 +39,8 @@ pub const NATIVE: &[(&str, &str)] = &[
 /// required waits for them instead of running when picked.
 pub const NATIVE_HINTS: &[(&str, &str, bool)] = &[
     ("add-dir", "<folder>", true),
+    ("all", "<prompt>", true),
+    ("btw", "<question>", true),
     ("export", "[file]", false),
     ("permissions", "[allow|ask|deny <rule>]", false),
     ("plugin", "[install|uninstall|marketplace ...]", false),

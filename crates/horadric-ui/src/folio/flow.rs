@@ -427,6 +427,14 @@ pub fn footer(duration_ms: u64, ending: Ending, usage: &TurnUsage) -> String {
     s
 }
 
+/// The clock time of `ms` (Unix milliseconds) at `offset` seconds from
+/// UTC, as hours, minutes and seconds.
+pub fn clock(ms: u64, offset: i64) -> String {
+    let secs = (ms / 1000) as i64 + offset;
+    let day = secs.rem_euclid(86_400);
+    format!("{:02}:{:02}:{:02}", day / 3600, day % 3600 / 60, day % 60)
+}
+
 /// A notice as its one quiet line.
 pub fn notice(n: &Notice) -> String {
     match n {
@@ -924,6 +932,15 @@ mod tests {
         assert_eq!(next_prompt(&tops, 300.0, true), Some(0.0));
         assert_eq!(next_prompt(&tops, 950.0, false), None);
         assert_eq!(next_prompt(&tops, 0.0, true), None);
+    }
+
+    #[test]
+    fn a_clock_reads_local_time() {
+        // 2026-10-31 12:00:05 UTC.
+        let ms = 1_793_448_005_000;
+        assert_eq!(clock(ms, 0), "12:00:05");
+        assert_eq!(clock(ms, 3600), "13:00:05");
+        assert_eq!(clock(ms, -13 * 3600), "23:00:05");
     }
 
     #[test]

@@ -264,7 +264,12 @@ pub(super) struct Ctx<'a> {
     pub(super) brushes: &'a RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
     /// The project's folder, for showing paths inside it short.
     pub(super) dir: &'a std::path::Path,
+    /// Step result images, decoded once.
+    pub(super) thumbs: &'a StepThumbs,
 }
+
+/// Decoded thumbnails by key, None where one would not decode.
+pub(super) type StepThumbs = RefCell<HashMap<String, Option<(ID2D1Bitmap, u32, u32)>>>;
 
 fn range(r: std::ops::Range<u32>) -> DWRITE_TEXT_RANGE {
     DWRITE_TEXT_RANGE {

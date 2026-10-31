@@ -52,13 +52,12 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 ## Next
 
 - [One portal](plan/one-portal.md): a phone paired once sees every brother and every session. The signed words are built; left: the PC side (pairing v3, vouching on pair), the page's socket per brother, and the merged desktop menu.
-- [Headless sessions and the Folio](plan/headless.md): built and the default; left: line comments under review, the turn as a map, one prompt to many sessions, and the smaller Folio features.
+- [Headless sessions and the Folio](plan/headless.md): built and the default; left: line comments under review and the later Folio features.
 - [macOS](plan/macos.md): what is left of Horadric on a Mac: the Folio, the browser pane, quests and Warriv, files, usage, Discord, Settings.
 - [Orchestration](plan/orchestration.md): a Warriv session restored after a restart, and which model Warriv runs on.
 - [Claude Code 2.1.287 to 2.1.296](plan/claude-code-2-1-287-to-2-1-296.md): cloud session tiles, waiting on `claude agents --json`.
 - [Lore](plan/lore.md): when to compact a quest, and tuning the context pack.
 - [Memory](plan/memory.md): the small gaps left in long term memory.
-- [Performance](plan/performance.md): the tile showing a session queued on `horadric heavy`, and more than one heavy slot.
 - [The agent's cursor](plan/the-agent-s-cursor.md): agents testing without taking the human's mouse. Proposed.
 - [The Brotherhood](plan/the-brotherhood.md): steps 1 to 18 are built; left: renaming a brother, lore catch up from Drive, the Mac as a brother, remote files, quests moving with sessions, teams.
 - [Secrets](plan/secrets.md): tokens for quests that push, call APIs or deploy.
@@ -68,7 +67,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Dictation](plan/dictation.md): Ctrl+Space dictation with Whisper is built; left: faster drafts, cleanup, a personal dictionary, Settings, outside Horadric, macOS.
 - [Ghostty's terminal core](plan/ghostty.md): move the grid from `alacritty_terminal` to libghostty, after a trial.
 - [The Forge](plan/the-forge.md): files worked on with Claude beside the session (decks, artefacts, markdown, images), pinned, edited by hand, versioned and exported. Proposed.
-- [The hirelings](plan/hirelings.md): left of the subagent views: keys into the retinue, the tile's count opening the war table, ticks on hover, an on-screen check.
+- [The hirelings](plan/hirelings.md): left of the subagent views: an on-screen check, and open questions (typing to one, agent teams, nesting).
 - [GPU light](plan/gpu-light.md): every glow, shadow and spark drawn with real bloom, the shadow effect and particles instead of stacked shapes, window by window, then the Mac. The working lamp is built; next the light module.
 
 ## Reference

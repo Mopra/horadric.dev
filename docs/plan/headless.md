@@ -17,16 +17,14 @@ still drive the phase and win where they and the stream both speak.
 ## What it opens
 
 What a terminal could never do, the reason for all this. Undo last turn
-(conversation and files), steering or queueing mid turn, edit and
-resend or rewind to any earlier prompt as a fork, and reviewing each
-edit before it lands are built.
+(conversation and files), steering or queueing mid turn, a turn's map
+(its footer opens a timeline of its steps and the files it touched),
+`/all` (one prompt to every Folio of the project), edit and resend or
+rewind to any earlier prompt as a fork, and reviewing each edit before
+it lands are built.
 
 - **Line comments on a diff** under review: today a reviewed edit is
   allowed, changed as a whole, or denied with one reason.
-- **The work as a map:** the steps of a turn as a timeline, the files it
-  touched lit in the Arcane Sanctuary as they happen.
-- **Many sessions, one view:** a prompt sent to several sessions at
-  once, answers side by side.
 
 ## Smaller features still missing
 
@@ -36,11 +34,6 @@ usable, fast. T3 Code's feel comes from rules more than tricks: a pure
 model, small payloads, nothing that repaints continuously, no spinner
 that lies.
 
-- **Soon:** `!` shell mode run by Horadric; a context breakdown (the
-  categories `get_context_usage` answers are parsed into `ContextUsage`
-  but not drawn); prompt suggestions; session titles; timestamps and a
-  verbose view; images in tool results (only a prompt's images are
-  drawn); `/btw`.
 - **Later:** per-turn git checkpoints (T3 Code's way), worktree per
   session with PR status, fast mode and output style as controls (the
   styles are parsed from `initialize`), an external editor, LaTeX.
