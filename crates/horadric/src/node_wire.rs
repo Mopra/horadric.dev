@@ -184,13 +184,12 @@ pub fn fresh_s(nanos: u128, ch: u32) -> String {
     format!("{:032x}", nanos ^ ((ch as u128) << 96))
 }
 
-/// Whether `program` is `agent` itself, which takes Horadric's flags,
+/// Whether `program` is `claude` itself, which takes Horadric's flags,
 /// and not a shell put in its place with `HORADRIC_AGENT`.
-pub fn is_agent(program: &Path, agent: Agent) -> bool {
+pub fn is_claude(program: &Path) -> bool {
     program
         .file_stem()
-        .and_then(|s| Agent::from_name(&s.to_string_lossy()))
-        == Some(agent)
+        .is_some_and(|s| s.eq_ignore_ascii_case(Agent::Claude.program()))
 }
 
 /// This program's path as `current_exe` gave it, less the ` (deleted)`
@@ -250,11 +249,8 @@ mod tests {
 
     #[test]
     fn a_stand_in_for_the_agent_gets_none_of_its_flags() {
-        let claude = Path::new("/home/a/.local/bin/claude");
-        assert!(is_agent(claude, Agent::Claude));
-        assert!(!is_agent(claude, Agent::Codex));
-        assert!(!is_agent(Path::new("/bin/bash"), Agent::Claude));
-        assert!(is_agent(Path::new("/usr/bin/codex"), Agent::Codex));
+        assert!(is_claude(Path::new("/home/a/.local/bin/claude")));
+        assert!(!is_claude(Path::new("/bin/bash")));
     }
 
     #[test]

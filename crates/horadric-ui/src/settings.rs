@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 use crate::backup::config::To;
 use horadric_core::saved::Discord;
-use horadric_core::{Agent, Defaults, Setting};
+use horadric_core::{Defaults, Setting};
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -115,8 +115,6 @@ pub enum Field {
     Sounds,
     /// What Ctrl+Space dictation listens to.
     Microphone,
-    /// Whose session defaults the rows under it show.
-    Agent,
     /// A default for the sessions Horadric starts, the same value the
     /// usage window's rows show.
     Default(Setting),
@@ -124,8 +122,6 @@ pub enum Field {
     SwitchAccounts,
     /// Whether new Claude sessions open in a terminal, not a chat.
     TerminalSessions,
-    /// Whether a project's menu offers to start the agent.
-    Offered,
     Autostart,
     /// "Open in Horadric" on folders in Explorer.
     Explorer,
@@ -174,21 +170,19 @@ impl Field {
     pub fn help(self) -> &'static str {
         match self {
             Field::Theme => "The colours of the tiles, the terminal and every window",
-            Field::Font => "The typeface sessions are drawn in",
+            Field::Font => "The typeface terminals and a Folio's code are drawn in",
             Field::Screen => "The monitor the tiles stand on",
             Field::Town => "The tile for work that belongs to no project",
             Field::Animations => "Runes, breathing lights and moving tiles",
             Field::Notify => "A Windows notification when a session needs you",
             Field::Sounds => "A soft sound when a turn finishes or work lands",
             Field::Microphone => "What Ctrl+Space dictation listens to",
-            Field::Agent => "The agent the defaults below are for",
             Field::Default(Setting::Model) => "The model new sessions start on",
             Field::Default(Setting::Effort) => "How long new sessions think before they answer",
             Field::Default(Setting::Permissions) => "What new sessions may do without asking",
             Field::Default(Setting::Workflow) => "The model of the agents a workflow starts",
             Field::SwitchAccounts => "At a usage limit, go on with the account most left",
             Field::TerminalSessions => "The Claude CLI in place of a chat window",
-            Field::Offered => "Offer this agent in each project's menu",
             Field::Autostart => "Open Horadric when you sign in to Windows",
             Field::Explorer => "Adds it to a folder's right-click menu",
             Field::Updates => "Horadric also looks by itself now and then",
@@ -279,12 +273,8 @@ pub struct Values {
     /// Tristram's tile shows.
     pub town: bool,
     pub animations: bool,
-    /// The agent the Sessions section shows, and its defaults.
-    pub agent: Agent,
+    /// What the sessions Horadric starts get.
     pub defaults: Defaults,
-    /// Whether its project menu line is on. None where it can not be
-    /// turned off, Claude Code, and Some(None) where it is not installed.
-    pub offered: Option<Option<bool>>,
     /// Claude Code switches account by itself when one runs out.
     pub switch_accounts: bool,
     /// New Claude sessions open in a terminal, not as a Folio, a chat.
@@ -440,7 +430,7 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
             let (moves, m) = switch(v.animations);
             vec![
                 line(Field::Theme, "Theme", v.theme.label(), Control::List),
-                line(Field::Font, "Terminal font", &v.font, Control::List),
+                line(Field::Font, "Code font", &v.font, Control::List),
                 line(Field::Screen, "Tiles on screen", name, control),
                 line(Field::Town, "Show Tristram", town, t),
                 line(Field::Animations, "Animations", moves, m),
@@ -476,49 +466,28 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
             ]
         }
         Section::Sessions => {
-            let mut rows = vec![line(Field::Agent, "Agent", v.agent.label(), Control::List)];
-            // Workflows are Claude Code's alone.
-            let workflow = (v.agent == Agent::Claude).then_some(&Setting::Workflow);
-            rows.extend(v.agent.settings().iter().chain(workflow).map(|s| {
-                let value = s.name_of(v.agent, v.defaults.get(*s));
-                line(Field::Default(*s), s.label(), value, Control::List)
-            }));
-            let offered = match v.offered {
-                None => line(
-                    Field::Offered,
-                    "In the project menu",
-                    "Always",
-                    Control::Fixed,
-                ),
-                Some(None) => line(
-                    Field::Offered,
-                    "In the project menu",
-                    "Not installed",
-                    Control::Fixed,
-                ),
-                Some(Some(on)) => {
-                    let (word, c) = switch(on);
-                    line(Field::Offered, "In the project menu", word, c)
-                }
-            };
-            rows.push(offered);
-            // The limit that stops a turn is Claude Code's to report.
-            if v.agent == Agent::Claude {
-                let (word, c) = switch(v.switch_accounts);
-                rows.push(line(
-                    Field::SwitchAccounts,
-                    "Switch account when one runs out",
-                    word,
-                    c,
-                ));
-                let (word, c) = switch(v.terminal_sessions);
-                rows.push(line(
-                    Field::TerminalSessions,
-                    "New Claude sessions open in a terminal",
-                    word,
-                    c,
-                ));
-            }
+            let mut rows: Vec<Line> = Setting::ALL
+                .iter()
+                .chain([&Setting::Workflow])
+                .map(|s| {
+                    let value = s.name_of(v.defaults.get(*s));
+                    line(Field::Default(*s), s.label(), value, Control::List)
+                })
+                .collect();
+            let (word, c) = switch(v.switch_accounts);
+            rows.push(line(
+                Field::SwitchAccounts,
+                "Switch account when one runs out",
+                word,
+                c,
+            ));
+            let (word, c) = switch(v.terminal_sessions);
+            rows.push(line(
+                Field::TerminalSessions,
+                "New Claude sessions open in a terminal",
+                word,
+                c,
+            ));
             rows
         }
         Section::Keys => {
@@ -763,22 +732,12 @@ fn height(section: Section, v: &Values) -> f32 {
 }
 
 /// How tall the tallest section's rows stand, which sets the window's
-/// height. The Sessions section counts with whichever agent has the
-/// most, so picking another does not leave the window a size its rows no
-/// longer fill.
+/// height.
 fn tallest(v: &Values) -> f32 {
-    let sessions = Agent::ALL.iter().map(|a| {
-        let v = Values {
-            agent: *a,
-            ..v.clone()
-        };
-        height(Section::Sessions, &v)
-    });
     let project = PROJECT_ROWS as f32 * Line::height(&lines(Section::Projects, v)[0]);
     Section::ALL
         .iter()
         .map(|s| height(*s, v))
-        .chain(sessions)
         .fold(project, f32::max)
 }
 
@@ -1574,12 +1533,10 @@ mod tests {
             microphone: "Windows default".into(),
             town: true,
             animations: true,
-            agent: Agent::Claude,
             defaults: Defaults {
                 effort: Some("xhigh".into()),
                 ..Default::default()
             },
-            offered: None,
             switch_accounts: false,
             terminal_sessions: false,
             autostart: Some(true),
@@ -1682,12 +1639,10 @@ mod tests {
         assert_eq!(
             fields(Section::Sessions, &v),
             [
-                Field::Agent,
                 Field::Default(Setting::Model),
                 Field::Default(Setting::Effort),
                 Field::Default(Setting::Permissions),
                 Field::Default(Setting::Workflow),
-                Field::Offered,
                 Field::SwitchAccounts,
                 Field::TerminalSessions,
             ]
@@ -1725,8 +1680,8 @@ mod tests {
                 Field::ShipsPublic
             ]
         );
-        // Claude Code's Sessions rows, a row more than a project's.
-        assert_eq!(tallest(&v), (PROJECT_ROWS + 1) as f32 * 52.0);
+        // A project's rows, the tallest section.
+        assert_eq!(tallest(&v), PROJECT_ROWS as f32 * 52.0);
     }
 
     #[test]
@@ -1802,8 +1757,8 @@ mod tests {
         let rows = lines(Section::Projects, &v);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].control, Control::Fixed);
-        // Claude Code's Sessions rows, a row more than a project's.
-        assert_eq!(tallest(&v), (PROJECT_ROWS + 1) as f32 * 52.0);
+        // A project's rows, the tallest section.
+        assert_eq!(tallest(&v), PROJECT_ROWS as f32 * 52.0);
     }
 
     #[test]
@@ -1829,51 +1784,16 @@ mod tests {
     }
 
     #[test]
-    fn the_sessions_rows_show_the_picked_agents_defaults() {
-        let mut v = values();
+    fn the_sessions_rows_show_the_defaults() {
+        let v = values();
         let rows = lines(Section::Sessions, &v);
         let values: Vec<&str> = rows.iter().map(|l| l.value.as_str()).collect();
         assert_eq!(
             values,
-            [
-                "Claude Code",
-                "Default",
-                "Extra high",
-                "Default",
-                "Default",
-                "Always",
-                "Off",
-                "Off"
-            ]
+            ["Default", "Extra high", "Default", "Default", "Off", "Off"]
         );
-        assert_eq!(rows[5].control, Control::Fixed);
-        assert_eq!(rows[6].control, Control::Switch(false));
-        assert_eq!(rows[7].field, Field::TerminalSessions);
-        v.agent = Agent::Codex;
-        v.defaults = Defaults {
-            model: Some("gpt-5.5".into()),
-            ..Default::default()
-        };
-        v.offered = Some(Some(false));
-        let rows = lines(Section::Sessions, &v);
-        assert_eq!(
-            rows.iter().map(|l| l.field).collect::<Vec<_>>(),
-            [
-                Field::Agent,
-                Field::Default(Setting::Model),
-                Field::Default(Setting::Effort),
-                Field::Offered,
-            ]
-        );
-        assert_eq!(rows[1].value, "GPT-5.5");
-        assert!(tallest(&v) >= 6.0 * 52.0);
-        assert_eq!(rows[3].control, Control::Switch(false));
-        v.offered = Some(None);
-        let rows = lines(Section::Sessions, &v);
-        assert_eq!(
-            (rows[3].value.as_str(), rows[3].control),
-            ("Not installed", Control::Fixed)
-        );
+        assert_eq!(rows[4].control, Control::Switch(false));
+        assert_eq!(rows[5].field, Field::TerminalSessions);
     }
 
     #[test]

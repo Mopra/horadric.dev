@@ -3,7 +3,7 @@
 Decided on 2026-10-24. A first slice landed 2026-10-29: the engine,
 the model and a plain Folio behind a button on each project cluster
 (see Steps). Since 2026-10-31 new Claude sessions open as a Folio by
-default. A Claude session's pane
+default, those automation starts too (step 8). A Claude session's pane
 shows Claude Code's terminal today: PowerShell output, tool calls and
 diffs scroll past in full, take most of the room, and are rarely what
 the human wants to read. The human wants Horadric to own the whole
@@ -248,17 +248,33 @@ the lore.
    terminal session gets (`App::claude_start` builds both, and
    `App::start_session` takes a spec for either): own worktrees, with
    their ports and setup, and the town open as Folios, and a first
-   prompt goes in as the first message. Quests, Warriv, reviewers,
-   errands and runewords stay terminals, new or resumed, until a Folio
-   can be typed into as they run. Codex and Grok keep their terminals.
+   prompt goes in as the first message.
+8. **Automation on Folios.** Done 2026-10-31: quests (taken by hand or
+   by the runner, in their own worktree when the project runs several),
+   the Quest Giver, Warriv and its reviewer, a runeword's reviewer, the
+   Runesmith, errands, stones cast on a fresh session and a quest log's
+   Carry on all start through `start_session` as Folios, unless the
+   setting says terminal: the one switch back covers automation too.
+   They are driven through `steering.rs` (a prompt, a command, a stop,
+   a halt), so nothing types bytes. A paused one resumes as a Folio, its
+   role rebuilt from its id and the list by `claude_start`. What stays a
+   terminal: a runeword whose `keys` include one a Folio cannot take
+   (an arrow, Tab, text no Enter ends), see `runeword::needs_terminal`;
+   cast on a Folio such a step stops the runeword and says why. A
+   `run` step shown in a pane, the bare `--resume` picker and `horadric
+   new` with a name or arguments stay terminals too. Account switching
+   winds a Folio down at rest (or at once, or when a limit refused it)
+   and starts it again on the same conversation with the new login,
+   the go on prompt as its first message. A worktree Horadric just made
+   of a trusted project is trusted, so an unattended quest never waits
+   on the Folio's trust ask. An automated start that fails says so in a
+   toast or the log, never a dialog.
 
 Then "What it opens", one by one. The full feature list toward
 replacing the CLI, in tiers, is [folio-features.md](folio-features.md).
 
 ## Open questions
 
-- **Quests and Warriv.** Whether quest sessions go headless too. Warriv
-  reads sessions through hooks and transcripts, so it should not care.
 - **The Brotherhood.** A headless session handed to another machine
   goes by its transcript, as today, and resumes headless there.
 - **The protocol moving.** Feature detection by `capabilities`, and a

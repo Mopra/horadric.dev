@@ -23,7 +23,7 @@ use horadric_core::Session;
 use windows::Win32::Foundation::POINT;
 
 use super::Merge;
-use crate::app::{self, unix_now, App, Input, Run};
+use crate::app::{self, unix_now, App, Input, Run, SessionSpec};
 use crate::console;
 use crate::dialog::{Dialog, Tone};
 use crate::menu::{self, Item};
@@ -474,6 +474,11 @@ impl App {
                 }
             }
             Rune::Keys(spec) => match runeword::keys(&spec) {
+                // Lost on a Folio, so said rather than skipped.
+                Ok(p) if self.folios.contains_key(&s.id) && !runeword::folio_takes(&p) => {
+                    let why = format!("a chat cannot take the keys \"{spec}\", only a terminal");
+                    stop(self, &why)
+                }
                 Ok(pieces) => {
                     if self.type_keys(&s.id, pieces) {
                         self.change_on(on, &w.name, |w| w.step = Step::Typing)
@@ -1146,26 +1151,18 @@ impl App {
             }
             None => runeword::smith_prompt(&horadric, config, &global),
         };
-        let id = self.unique_id("runesmith");
-        self.tasks.prompts.insert(id.clone(), prompt);
-        if let Err(e) = self.launch(
-            &id,
-            "Runesmith",
-            dir,
-            Vec::new(),
-            Run::Agent(horadric_core::Agent::Claude),
-            false,
-        ) {
-            self.tasks.prompts.remove(&id);
+        let spec = SessionSpec {
+            id: Some(self.unique_id("runesmith")),
+            name: Some("Runesmith".into()),
+            prompt: Some(prompt),
+            show: true,
+            quiet: true,
+            ..SessionSpec::new(dir, self.chat_sessions)
+        };
+        if let Err(e) = self.start_session(spec) {
             eprintln!("horadric: cannot start the Runesmith: {e}");
             self.toasts
                 .show(Kind::Failed, "Cannot start the Runesmith", &e);
-            return;
-        }
-        if self.fill_stage(key) {
-            if let Some(stage) = &self.stage {
-                stage.focus_session(&id);
-            }
         }
     }
 }
@@ -1447,16 +1444,14 @@ impl App {
     /// None when it could not start, which a notification says.
     fn start_reviewer(&mut self, name: &str, main: PathBuf, prompt: String) -> Option<String> {
         let id = self.unique_id("review");
-        self.tasks.prompts.insert(id.clone(), prompt);
-        if let Err(e) = self.launch(
-            &id,
-            name,
-            main,
-            Vec::new(),
-            Run::Agent(horadric_core::Agent::Claude),
-            false,
-        ) {
-            self.tasks.prompts.remove(&id);
+        let spec = SessionSpec {
+            id: Some(id.clone()),
+            name: Some(name.to_string()),
+            prompt: Some(prompt),
+            quiet: true,
+            ..SessionSpec::new(main, self.chat_sessions)
+        };
+        if let Err(e) = self.start_session(spec) {
             eprintln!("horadric: cannot start the reviewer: {e}");
             self.toasts
                 .show(Kind::Failed, "Cannot start the reviewer", &e);

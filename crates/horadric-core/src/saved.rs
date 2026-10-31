@@ -6,7 +6,7 @@
 //! resume one by id. A saved session comes back as a paused tile, and
 //! clicking it runs `claude --resume <id>` in the same folder.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -104,17 +104,6 @@ pub struct SavedState {
     /// until the first reply after a restart.
     #[serde(default)]
     pub usage: Option<Usage>,
-    /// The other agents' defaults, each from its own lists. Claude Code's
-    /// are `defaults`, from before there was a choice.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub agent_defaults: BTreeMap<Agent, Defaults>,
-    /// The agents a project's menu does not offer to start, though they
-    /// are installed. Claude Code is always offered.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub agents_off: BTreeSet<Agent>,
-    /// The other agents' limits as last heard. Claude Code's are `usage`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub agent_usage: BTreeMap<Agent, Usage>,
     /// Where the usage window was.
     #[serde(default)]
     pub usage_window: Option<SavedPanel>,
@@ -450,6 +439,8 @@ pub struct SavedSession {
     pub renamed: bool,
     pub cwd: String,
     /// The agent it runs, Claude for a file from before there was a choice.
+    /// A session another agent ran does not read, and is dropped on its
+    /// own, since its conversation is not Claude's to resume.
     #[serde(default)]
     pub agent: Agent,
     /// What the session was started with, `--model` and friends.
@@ -502,7 +493,7 @@ impl SavedSession {
             title: s.title.clone(),
             renamed: s.renamed,
             cwd: s.cwd.clone(),
-            agent: s.agent,
+            agent: Agent::Claude,
             args,
             claude_session_id: s.claude_session_id.clone(),
             prompted: s.prompted,
@@ -522,7 +513,6 @@ impl SavedSession {
         let mut s = Session::new(&self.id, &self.name, &self.cwd);
         s.title = self.title.clone();
         s.renamed = self.renamed;
-        s.agent = self.agent;
         s.claude_session_id = self.claude_session_id.clone();
         s.prompted = self.prompted;
         s.last_line = self.last_line.clone();
@@ -790,16 +780,17 @@ mod tests {
     }
 
     #[test]
-    fn a_codex_session_resumes_the_codex_way() {
-        let mut s = saved(&["-m", "gpt"], true);
-        s.agent = Agent::Codex;
-        assert_eq!(s.launch_args(), vec!["resume", "abc", "-m", "gpt"]);
-        let back = s.to_session(SystemTime::UNIX_EPOCH);
-        assert_eq!(back.agent, Agent::Codex);
-        assert_eq!(
-            SavedSession::from_session(&back, vec![], false).agent,
-            Agent::Codex
+    fn a_session_another_agent_ran_is_dropped_and_the_rest_load() {
+        let (state, damaged) = SavedState::read(
+            br#"{"version":1,"sessions":[
+                {"id":"a","name":"a","cwd":"C:/app","agent":"codex"},
+                {"id":"b","name":"b","cwd":"C:/app","agent":"claude"}
+            ],"agents_off":["grok"],"agent_defaults":{"codex":{}}}"#,
         );
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].id, "b");
+        // The file is set aside once, with the dropped session in it.
+        assert!(damaged);
     }
 
     #[test]
@@ -842,21 +833,6 @@ mod tests {
                 at: 7,
                 ..Default::default()
             }),
-            agent_defaults: BTreeMap::from([(
-                Agent::Codex,
-                Defaults {
-                    model: Some("gpt-5.5".into()),
-                    ..Default::default()
-                },
-            )]),
-            agents_off: BTreeSet::from([Agent::Grok]),
-            agent_usage: BTreeMap::from([(
-                Agent::Codex,
-                Usage {
-                    at: 9,
-                    ..Default::default()
-                },
-            )]),
             usage_window: Some(SavedPanel {
                 collapsed: true,
                 locked: true,
@@ -899,9 +875,6 @@ mod tests {
         assert_eq!(back.grids, state.grids);
         assert_eq!(back.defaults, state.defaults);
         assert_eq!(back.usage, state.usage);
-        assert_eq!(back.agent_defaults, state.agent_defaults);
-        assert_eq!(back.agents_off, state.agents_off);
-        assert_eq!(back.agent_usage, state.agent_usage);
         assert_eq!(back.usage_window, state.usage_window);
         assert_eq!(back.font_size, state.font_size);
         assert_eq!(back.theme, state.theme);

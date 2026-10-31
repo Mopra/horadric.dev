@@ -24,7 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use horadric_core::warriv::Drive;
-use horadric_core::{experience, Agent};
+use horadric_core::experience;
 
 use crate::joining;
 use crate::menu::{self, Item};
@@ -94,10 +94,10 @@ pub enum Choice {
     ShipsPublic(String, bool),
     /// Stop every drive at once.
     StopWarriv,
-    /// Switch this agent to its account at this place in the list given.
-    Account(Agent, usize),
-    /// Log this agent in to another account.
-    AddAccount(Agent),
+    /// Switch to the account at this place in the list given.
+    Account(usize),
+    /// Log in to another account.
+    AddAccount,
     /// Sign in to WorkOS, so this PC finds its brothers.
     SignIn,
     SignOut,
@@ -237,16 +237,9 @@ const QUEST_LOG: usize = 1000;
 const DRIVE: usize = 5000;
 const PUBLIC: usize = 6000;
 
-/// Where the Account menu's ids start: a hundred for each agent, its
-/// accounts and then Add account.
+/// Where the Account menu's ids start: the accounts, then Add account.
 const ACCOUNT: usize = 7000;
 const ADD_ACCOUNT: usize = 99;
-
-/// One agent's kept accounts, as the Account menu lists them.
-pub struct Logins {
-    pub agent: Agent,
-    pub accounts: Vec<Pick>,
-}
 
 /// One account in the Account menu.
 pub struct Pick {
@@ -267,14 +260,14 @@ pub struct Driven {
 /// session, the away card and stopping Warriv, where they have one.
 /// `update` is a newer release's version, when a check found one. `xp` is
 /// the experience counted from git, None until the first count is back.
-/// `logins` are the accounts to switch between, a click away. `sessions`
+/// `logins` are the kept accounts to switch between, a click away. `sessions`
 /// is how many there are and how many wait on you.
 pub fn menu(
     recent_projects: &[String],
     sessions: (usize, usize),
     hotkeys: [Option<&str>; hotkey::COUNT],
     driven: &[Driven],
-    logins: &[Logins],
+    logins: &[Pick],
     terminal: bool,
     update: Option<&str>,
     xp: Option<u64>,
@@ -508,13 +501,10 @@ pub fn menu(
         i if (NODE..BROTHER).contains(&i) => nodes
             .get(i - NODE)
             .map(|n| Choice::ForgetNode(n.name.clone())),
-        i if (ACCOUNT..ACCOUNT + 100 * Agent::ALL.len()).contains(&i) => {
-            let agent = Agent::ALL[(i - ACCOUNT) / 100];
-            match (i - ACCOUNT) % 100 {
-                ADD_ACCOUNT => Some(Choice::AddAccount(agent)),
-                n => Some(Choice::Account(agent, n)),
-            }
-        }
+        i if (ACCOUNT..=ACCOUNT + ADD_ACCOUNT).contains(&i) => match i - ACCOUNT {
+            ADD_ACCOUNT => Some(Choice::AddAccount),
+            n => Some(Choice::Account(n)),
+        },
         i if i >= PUBLIC => driven.get(i - PUBLIC).map(|d| {
             Choice::ShipsPublic(
                 d.key.clone(),
@@ -692,33 +682,20 @@ fn node_items(lines: &[(String, String, Option<String>)], add: usize) -> Vec<Ite
     items
 }
 
-/// The Account menu: each agent's accounts with what each has left, a
-/// pick switching to it, and Add account. An agent's name heads its own
-/// only when there are several.
-fn account_items(logins: &[Logins]) -> Vec<Item> {
-    let mut items = Vec::new();
-    for l in logins {
-        let place = Agent::ALL.iter().position(|a| *a == l.agent).unwrap_or(0);
-        let base = ACCOUNT + 100 * place;
-        if logins.len() > 1 {
-            if !items.is_empty() {
-                items.push(Item::Separator);
-            }
-            items.push(Item::Disabled(l.agent.provider().to_string()));
-        }
-        items.extend(
-            l.accounts
-                .iter()
-                .take(ADD_ACCOUNT)
-                .enumerate()
-                .map(|(i, p)| Item::Action {
-                    id: base + i,
-                    label: p.label.clone(),
-                    checked: p.live,
-                }),
-        );
-        items.push(Item::action(base + ADD_ACCOUNT, "Add account"));
-    }
+/// The Account menu: the accounts with what each has left, a pick
+/// switching to it, and Add account.
+fn account_items(logins: &[Pick]) -> Vec<Item> {
+    let mut items: Vec<Item> = logins
+        .iter()
+        .take(ADD_ACCOUNT)
+        .enumerate()
+        .map(|(i, p)| Item::Action {
+            id: ACCOUNT + i,
+            label: p.label.clone(),
+            checked: p.live,
+        })
+        .collect();
+    items.push(Item::action(ACCOUNT + ADD_ACCOUNT, "Add account"));
     items
 }
 

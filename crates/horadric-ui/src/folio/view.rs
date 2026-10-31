@@ -6,7 +6,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use windows::core::{w, Interface, Result, PCWSTR};
+use windows::core::{w, Interface, Result, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F,
@@ -34,7 +34,8 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_NEXT, VK_PRIOR, VK_SHIFT,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_END, VK_HOME, VK_NEXT, VK_PRIOR,
+    VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -92,7 +93,6 @@ const SOFTEN: f32 = 0.09;
 /// Prose lines this many times their size apart. DirectWrite's own spacing
 /// is set for interfaces and packs a long answer too tight to follow.
 const LEADING: f32 = 1.6;
-const MONO: PCWSTR = w!("Cascadia Mono");
 const ICONS: PCWSTR = w!("Segoe Fluent Icons");
 
 /// Not in the windows crate's WindowsAndMessaging.
@@ -254,6 +254,12 @@ pub fn keyboard_moved(key: &str) {
     super::redraw(key);
 }
 
+/// The terminal font changed, which the conversation is zoomed by and
+/// sets its code in. Nothing else would redraw the child window.
+pub fn refont(key: &str) {
+    super::redraw(key);
+}
+
 /// `/clear` emptied the conversation of session `key`: the page as last
 /// drawn burns away over the empty one. Called before the repaint that
 /// draws the empty page, while the kept layer still holds the old.
@@ -305,8 +311,20 @@ pub fn key(key: &str, vk: u16, mods: Mods) -> bool {
     if select::key(key, vk, mods) {
         return true;
     }
-    let page = with(key, |c| c.view_h * 0.85).unwrap_or(0.0);
+    let (page, empty) = with(key, |c| (c.view_h * 0.85, c.input.ed.is_empty()))
+        .unwrap_or((0.0, true));
+    // With nothing typed, Ctrl+Home and Ctrl+End have no text to move
+    // through and go to either end of the conversation, as in a reader.
+    let ends = mods.ctrl && !mods.shift && !mods.alt && (empty || super::is_watch(key));
     let done = match vk {
+        v if ends && v == VK_HOME.0 => {
+            scroll_by(key, -f32::MAX);
+            true
+        }
+        v if ends && v == VK_END.0 => {
+            scroll_by(key, f32::MAX);
+            true
+        }
         v if v == VK_PRIOR.0 => {
             scroll_by(key, -page);
             true
@@ -325,18 +343,23 @@ pub fn key(key: &str, vk: u16, mods: Mods) -> bool {
     done
 }
 
-/// The wheel, from the pane, in Windows' units of 120 a notch.
-pub fn wheel(key: &str, delta: i32) {
+/// The wheel, from the pane, in Windows' units of 120 a notch. False
+/// leaves it to the pane: with Ctrl held, outside an open image, it zooms
+/// the font as over a terminal.
+pub fn wheel(key: &str, delta: i32, ctrl: bool) -> bool {
     if lightbox::wheel(key, delta) {
-        return;
+        return true;
     }
+    if ctrl {
+        return false;
+    }
+    let s = view_of(key).map_or(1.0, |v| v.scale());
     // Over an open menu the wheel scrolls the menu, not the conversation.
     let on_menu = with(key, |c| {
         let (Some(at), Some(view)) = (c.input.menu_at, c.view) else {
             return false;
         };
         let mut p = POINT::default();
-        let s = dpi(view) as f32 / 96.0;
         let inside = unsafe {
             GetCursorPos(&mut p).is_ok()
                 && ScreenToClient(view, &mut p).as_bool()
@@ -353,6 +376,7 @@ pub fn wheel(key: &str, delta: i32) {
         scroll_by(key, -delta as f32 / 120.0 * NOTCH);
     }
     redraw(key);
+    true
 }
 
 pub(super) fn scroll_by(key: &str, by: f32) {
@@ -392,6 +416,8 @@ pub(super) struct Gfx {
     pub(super) shade: ID2D1LinearGradientBrush,
     pub(super) round: ID2D1StrokeStyle,
     pub(super) accent: Color,
+    /// The terminal font's family, which code is set in here too.
+    pub(super) family: String,
     pub(super) text: IDWriteTextFormat,
     pub(super) line: IDWriteTextFormat,
     pub(super) italic: IDWriteTextFormat,
@@ -523,10 +549,15 @@ pub(super) fn rounded(r: &Rect, radius: f32) -> D2D1_ROUNDED_RECT {
 }
 
 impl Gfx {
-    pub(super) unsafe fn new(gpu: &Gpu, hwnd: HWND, key: &str) -> Result<Gfx> {
+    pub(super) unsafe fn new(
+        gpu: &Gpu,
+        hwnd: HWND,
+        dpi: u32,
+        key: &str,
+        family: &str,
+    ) -> Result<Gfx> {
         let mut r = RECT::default();
         let _ = GetClientRect(hwnd, &mut r);
-        let dpi = dpi(hwnd);
         let win = render::hwnd_target(gpu, hwnd, r.right as u32, r.bottom as u32, dpi, false)?;
         let rt: ID2D1RenderTarget = win.cast()?;
         let brush = rt.CreateSolidColorBrush(&color(theme::palette().term_fg), None)?;
@@ -568,6 +599,7 @@ impl Gfx {
         )?;
         let normal = DWRITE_FONT_WEIGHT_NORMAL;
         let semi = DWRITE_FONT_WEIGHT_SEMI_BOLD;
+        let mono = HSTRING::from(family);
         let button = text_format(gpu, FONT, 13.0, semi, false, true)?;
         button.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         let icon = text_format(gpu, ICONS, 12.0, normal, false, true)?;
@@ -584,12 +616,13 @@ impl Gfx {
             shade,
             round,
             accent,
+            family: family.to_string(),
             text: reading(gpu, READ, normal)?,
             line: text_format(gpu, FONT, 14.0, normal, false, true)?,
             italic: text_format(gpu, FONT, 14.0, normal, true, false)?,
             small: text_format(gpu, FONT, 12.5, normal, false, true)?,
             title: text_format(gpu, FONT, 14.5, semi, false, true)?,
-            mono: text_format(gpu, MONO, 13.0, normal, false, false)?,
+            mono: text_format(gpu, PCWSTR(mono.as_ptr()), 13.0, normal, false, false)?,
             button,
             icon,
             big,
@@ -722,7 +755,20 @@ impl View {
     }
 
     pub(super) fn scale(&self) -> f32 {
-        dpi(self.hwnd()) as f32 / 96.0
+        self.dpi() as f32 / 96.0
+    }
+
+    /// The window's DPI grown by the terminal's font zoom, so Ctrl+= sizes
+    /// a Folio as it does a terminal, its layout with its text as a
+    /// browser's zoom does. The header row keeps its height, as a
+    /// terminal pane's does.
+    pub(super) fn dpi(&self) -> u32 {
+        let raw = dpi(self.hwnd());
+        if self.bar {
+            return raw;
+        }
+        let zoom = self.shared.font.size() / crate::keys::FONT_DEFAULT;
+        (raw as f32 * zoom).round().max(48.0) as u32
     }
 
     pub(super) fn dip(&self, lparam: LPARAM) -> (f32, f32) {
@@ -811,11 +857,12 @@ impl View {
         // The session's id is the key here; its colour is its project's.
         let project = with(&self.key, |c| c.key.clone()).unwrap_or_default();
         let accent = theme::accent(&project);
-        if slot.as_ref().is_some_and(|g| g.accent != accent) {
+        let family = self.shared.font.family();
+        if slot.as_ref().is_some_and(|g| g.accent != accent || g.family != family) {
             *slot = None;
         }
         if slot.is_none() {
-            match unsafe { Gfx::new(&self.shared.gpu, hwnd, &project) } {
+            match unsafe { Gfx::new(&self.shared.gpu, hwnd, self.dpi(), &project, &family) } {
                 Ok(g) => *slot = Some(g),
                 Err(e) => {
                     eprintln!("horadric: folio render target: {e}");
@@ -826,7 +873,7 @@ impl View {
         let Some(gfx) = slot.as_mut() else {
             return;
         };
-        let now = dpi(hwnd);
+        let now = self.dpi();
         if gfx.dpi != now {
             unsafe { gfx.win.SetDpi(now as f32, now as f32) };
             gfx.dpi = now;
