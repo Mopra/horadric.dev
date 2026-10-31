@@ -28,6 +28,7 @@ pub use edits::*;
 pub use send::*;
 pub use session::*;
 pub use tools::*;
+pub use transcript::{rewind_point, Rewind};
 
 use std::collections::{HashMap, HashSet};
 
@@ -300,6 +301,7 @@ enum Sent {
     Mode,
     Model,
     Context,
+    StopTask,
 }
 
 #[derive(Debug, Default)]
@@ -590,6 +592,7 @@ impl Folio {
                     "set_permission_mode" => Sent::Mode,
                     "set_model" => Sent::Model,
                     "get_context_usage" => Sent::Context,
+                    "stop_task" => Sent::StopTask,
                     _ => return false,
                 };
                 self.requests.insert(id.to_string(), kind);
@@ -890,6 +893,14 @@ impl Folio {
         control_request_line(&id, "initialize", serde_json::json!({}))
     }
 
+    /// `stop_task`, for a background task such as a subagent: the line
+    /// to write. A refusal shows as a notice; the stop itself arrives as
+    /// the task's notification.
+    pub fn stop_task(&mut self, task_id: &str) -> String {
+        let id = self.request(Sent::StopTask);
+        control_request_line(&id, "stop_task", serde_json::json!({"task_id": task_id}))
+    }
+
     fn request(&mut self, kind: Sent) -> String {
         self.sent += 1;
         let id = format!("horadric-{}", self.sent);
@@ -1181,6 +1192,8 @@ impl Folio {
             }
             Sent::Context => self.context = Some(ContextUsage::from_response(body)),
             Sent::Initialize => self.info.read_initialize(body),
+            // The task's end comes as its own notification.
+            Sent::StopTask => return false,
         }
         true
     }
