@@ -137,6 +137,8 @@ const RUNE_CARVE: Duration = Duration::from_millis(1800);
 const RUNE_SETTLE: f32 = 2.0;
 /// A hireling's rune on the tile, DIPs tall, and its cut.
 const RUNE_H: f32 = 7.0;
+/// The two runes cut into the ends of the New chat key under the cursor.
+const BAY_RUNES: (usize, usize) = (3, 8);
 const RUNE_STROKE: f32 = 1.1;
 
 /// The Folio's button, a chat bubble.
@@ -343,27 +345,33 @@ impl Scene<'_> {
     /// How a bay button draws this frame. Windows' animation setting off,
     /// it is lit or not, as the cursor says, and holds still.
     fn bay(&self, which: Hit) -> Bay {
-        let (lit, wiggle) = match self.button(which) {
-            Button::Pressed => (0.0, 0.0),
-            Button::Hover if !self.ambient => (1.0, 0.0),
-            _ if !self.ambient => (0.0, 0.0),
-            _ => (self.glow.of(which), self.glow.wiggle(which)),
+        let (lit, wiggle, carved) = match self.button(which) {
+            Button::Pressed => (0.0, 0.0, 0.0),
+            Button::Hover if !self.ambient => (1.0, 0.0, 1.0),
+            _ if !self.ambient => (0.0, 0.0, 0.0),
+            _ => (
+                self.glow.of(which),
+                self.glow.wiggle(which),
+                self.glow.carved(which),
+            ),
         };
         Bay {
             lit,
             wiggle,
+            carved,
             accent: self.accent,
         }
     }
 }
 
 /// A bay button's moment: how far through lighting (0 to 1, linear), how
-/// far its glyph is swung in degrees, and the project's colour for the
-/// brackets that close on it.
+/// far its glyph is swung in degrees, how much of the runes on its key are
+/// cut, and the project's colour they are cut in.
 #[derive(Clone, Copy)]
 struct Bay {
     lit: f32,
     wiggle: f32,
+    carved: f32,
     accent: Color,
 }
 
@@ -373,7 +381,7 @@ impl Bay {
         motion::ease_out((self.lit / 0.65).min(1.0))
     }
 
-    /// The brackets come in after it has started, and go first on the way
+    /// The runes show once it has started rising, and go first on the way
     /// back.
     fn lock(&self) -> f32 {
         motion::ease_out(((self.lit - 0.3) / 0.7).clamp(0.0, 1.0))
@@ -4055,6 +4063,18 @@ impl Painter<'_> {
         let text_x = x + glyph_w + gap;
         let text = Rect::new(text_x, r.y, (r.x + r.w - text_x).max(0.0), r.h);
         self.text(&gpu.small, ink, label, text);
+        // A rune cut into each end of the key, the left one first, as if
+        // the button were inscribed for you as you reach for it.
+        let k = b.lock();
+        let inset = 16.0;
+        if k > 0.0 && r.w > 2.0 * (inset + 8.0) + label_w + glyph_w + gap {
+            let ink = b.accent.with_alpha(0.8 * k);
+            let cy = r.y + r.h / 2.0;
+            let first = (b.carved / 0.6).min(1.0);
+            let second = ((b.carved - 0.4) / 0.6).clamp(0.0, 1.0);
+            self.rune(BAY_RUNES.0, (r.x + inset, cy), 8.0, ink, first);
+            self.rune(BAY_RUNES.1, (r.right() - inset, cy), 8.0, ink, second);
+        }
     }
 
     /// A bay sunk into the plate, where something is yet to go, its edge
@@ -4069,33 +4089,9 @@ impl Painter<'_> {
         }
     }
 
-    /// A bay under the cursor: its key rising, then brackets in the
-    /// project's colour closing on its corners from outside, the way a
-    /// game marks what it has in its sights.
+    /// A bay under the cursor, its key rising.
     unsafe fn bay_slot(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Bay) {
         self.slot(gpu, m, r, b.rise());
-        let k = b.lock();
-        if k <= 0.0 {
-            return;
-        }
-        let out = 2.0 + 5.0 * (1.0 - k);
-        let arm = 4.0 + 2.0 * k;
-        let (l, t) = (r.x - out, r.y - out);
-        let (rt, bt) = (r.right() + out, r.y + r.h + out);
-        self.brush.SetColor(&color(b.accent.with_alpha(0.85 * k)));
-        let corners = [
-            (l, t, 1.0, 1.0),
-            (rt, t, -1.0, 1.0),
-            (l, bt, 1.0, -1.0),
-            (rt, bt, -1.0, -1.0),
-        ];
-        for (x, y, dx, dy) in corners {
-            let at = Vector2 { X: x, Y: y };
-            let across = Vector2 { X: x + dx * arm, Y: y };
-            let down = Vector2 { X: x, Y: y + dy * arm };
-            self.rt.DrawLine(at, across, self.brush, 1.25, None);
-            self.rt.DrawLine(at, down, self.brush, 1.25, None);
-        }
     }
 
     /// A small glyph turned `degrees` about its middle.

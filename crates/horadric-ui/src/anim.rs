@@ -23,6 +23,11 @@ pub const BAY: Duration = Duration::from_millis(180);
 const WIGGLE_DELAY: Duration = Duration::from_millis(60);
 const WIGGLE: Duration = Duration::from_millis(420);
 const WIGGLE_SWING: f32 = 9.0;
+/// The runes cut into the key once it has risen: how long after the cursor
+/// arrives the first stroke goes in, and how long the cutting takes. Slow
+/// enough to see the hand at work.
+const CARVE_DELAY: Duration = Duration::from_millis(90);
+const CARVE: Duration = Duration::from_millis(380);
 /// How fast a tile slides to a new place: half the way every this long.
 const SLIDE: Duration = Duration::from_millis(60);
 /// How fast a context bar finds a new level: half the way every this long.
@@ -313,12 +318,25 @@ impl Glow {
         }
     }
 
+    /// How much of `which`'s runes are cut, 0 to 1. Leaving, they stay
+    /// whole and fade with the rest.
+    pub fn carved(&self, which: Hit) -> f32 {
+        match (self.entered, self.last) {
+            (Some(at), Some(now)) if self.hot == Some(which) => {
+                let t = now.duration_since(at).saturating_sub(CARVE_DELAY);
+                motion::ease_in_out(motion::progress(t, CARVE))
+            }
+            _ => 1.0,
+        }
+    }
+
     /// Whether a button is still on its way, so the frame after needs
     /// drawing.
     pub fn moving(&self) -> bool {
         let target = |b: Hit| if Some(b) == self.hot { 1.0 } else { 0.0 };
+        let settled = (WIGGLE_DELAY + WIGGLE).max(CARVE_DELAY + CARVE);
         let ringing = match (self.entered, self.last) {
-            (Some(at), Some(now)) => now.duration_since(at) < WIGGLE_DELAY + WIGGLE,
+            (Some(at), Some(now)) => now.duration_since(at) < settled,
             _ => false,
         };
         ringing || self.lit.iter().any(|&(b, v)| v != target(b))
