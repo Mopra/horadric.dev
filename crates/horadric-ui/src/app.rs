@@ -7926,20 +7926,19 @@ impl App {
 
     fn folio_state(&mut self, id: &str, state: crate::folio::State) {
         // A reattached tile knows its conversation only from its replay,
-        // and History must not offer it while this one runs.
+        // and History must not offer it while this one runs. After a
+        // `/clear` it is the stream that says the conversation changed,
+        // so the new one's hooks and hirelings come to this tile.
         let conversation = crate::folio::conversation(id);
         let Ok(mut r) = self.shared.registry.lock() else {
             return;
         };
-        if let (Some(c), Some(s)) = (conversation, r.get_mut(id)) {
-            if s.claude_session_id.is_none() {
-                s.claude_session_id = Some(c);
-                s.prompted = true;
-            }
-        }
         let Some(session) = r.get_mut(id) else {
             return;
         };
+        if let Some(c) = conversation {
+            session.follow(&c, SystemTime::now());
+        }
         // The CLI lists its background tasks, where hooks only hear them
         // start: once none run, the turn's end is not a wait on them. A
         // headless wake for a finished task posts no prompt to say so.
