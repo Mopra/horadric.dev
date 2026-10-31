@@ -55,9 +55,3 @@ Horadric's grid drops it today.
   have no hooks: a build or install that sends it lights its tile.
 - Show the most urgent state on the stage's taskbar button with
   `ITaskbarList3::SetProgressState` (error beats paused beats working).
-
-## OSC 8 hyperlinks
-
-Smaller, found in the same pass: Claude Code sends OSC 8 links. A Ctrl
-click on one could open it in the browser pane, the way a path opens in
-VS Code.

@@ -20,16 +20,17 @@ Ideas that are not planned yet, most of them from the Diablo name, are in
 
 ## Shape of the thing
 
-Six crates, one binary.
+Seven crates, one binary.
 
 | Crate | Owns | Platform |
 |---|---|---|
 | `horadric-core` | Session, Phase, Registry, the state machine | any |
 | `horadric-hooks` | The localhost listener, its client, the settings installer | any |
-| `horadric-pty` | ConPTY pseudo consoles, the session host and its pipe protocol | Windows |
-| `horadric-ui` | Cluster and terminal windows, layout, drawing | Windows |
-| `horadric-memory` | Embeddings, the memory store, recall | any |
-| `horadric` | The command line, `horadricw` for Explorer, the wiring | Windows |
+| `horadric-link` | The relay and the crypto for linked machines | any |
+| `horadric-pty` | Pseudo consoles (ConPTY, and a unix half), the session host and its pipe protocol | Windows, unix |
+| `horadric-ui` | Cluster and terminal windows, layout, drawing (`src/mac/` for AppKit) | Windows, macOS |
+| `horadric-memory` | Embeddings, the memory store, recall, Whisper for dictation | any |
+| `horadric` | The command line, `horadricw` for Explorer, the wiring | Windows, macOS, Linux |
 
 `horadric-core` and the pure halves of `horadric-ui` (`layout`, `columns`, `theme`,
 `palette`, `keys`, `frame`, `files`, `viewer`, `highlight`, `shell`, `board`) have no
@@ -50,27 +51,32 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 
 ## Next
 
-- [One portal](plan/one-portal.md): a phone paired once sees every brother and every session, a tab per brother, forgotten everywhere at once.
-- [Headless sessions and the Folio](plan/headless.md): Claude sessions driven headless over stream-json, no SDK, and drawn by Horadric as the Folio instead of a terminal.
-- [macOS](plan/macos.md): what is left of Horadric on a Mac: the browser pane, quests and Warriv, files, usage, Discord, Settings.
+- [One portal](plan/one-portal.md): a phone paired once sees every brother and every session. The signed words are built; left: the PC side (pairing v3, vouching on pair), the page's socket per brother, and the merged desktop menu.
+- [Headless sessions and the Folio](plan/headless.md): built and the default; left: edit and resend as a fork, review before an edit lands, the turn as a map, one prompt to many sessions, and the smaller Folio features.
+- [macOS](plan/macos.md): what is left of Horadric on a Mac: the Folio, the browser pane, quests and Warriv, files, usage, Discord, Settings.
 - [Orchestration](plan/orchestration.md): a Warriv session restored after a restart, and which model Warriv runs on.
 - [Claude Code 2.1.287 to 2.1.296](plan/claude-code-2-1-287-to-2-1-296.md): cloud session tiles, waiting on `claude agents --json`.
-- [Lore](plan/lore.md): compaction at the right moment and tuning the context pack.
+- [Lore](plan/lore.md): when to compact a quest, and tuning the context pack.
 - [Memory](plan/memory.md): the small gaps left in long term memory.
-- [Performance](plan/performance.md): what is left of the UI thread performance pass.
+- [Performance](plan/performance.md): the tile showing a session queued on `horadric heavy`, and more than one heavy slot.
 - [The agent's cursor](plan/the-agent-s-cursor.md): agents testing without taking the human's mouse. Proposed.
-- [The Brotherhood](plan/the-brotherhood.md): every machine with Horadric as one brotherhood, joined by a WorkOS login: each sees every session, hands sessions to another, takes over from one that falls silent, and shares one lore.
-- [Who owns a session](plan/brotherhood-ownership.md): the specification of the brotherhood's signed word, whose a session is and who is out, with the invariants its simulation checks.
+- [The Brotherhood](plan/the-brotherhood.md): steps 1 to 18 are built; left: renaming a brother, lore catch up from Drive, the Mac as a brother, remote files, quests moving with sessions, teams.
 - [Secrets](plan/secrets.md): tokens for quests that push, call APIs or deploy.
 - [Identities](plan/identities.md): each project's gh, git, npm and Vercel logins, so no session switches another's account.
-- [Signals](plan/signals.md): what is left of the status line JSON, OpenTelemetry export, and OSC 9;4 progress from the agents.
+- [Signals](plan/signals.md): status line cost, refresh and outside sessions, OpenTelemetry export, and OSC 9;4 progress.
 - [Small local models](plan/local-models.md): static embeddings as memory's first pass, and a small model for the sentence per session.
-- [Dictation](plan/dictation.md): Ctrl+Space dictates with Whisper on the machine, the words shown live and a microphone picked in Settings; what is left: a bigger or faster model, cleanup, a personal dictionary, outside Horadric.
+- [Dictation](plan/dictation.md): Ctrl+Space dictation with Whisper is built; left: faster drafts, cleanup, a personal dictionary, Settings, outside Horadric, macOS.
 - [Ghostty's terminal core](plan/ghostty.md): move the grid from `alacritty_terminal` to libghostty, after a trial.
 - [The Forge](plan/the-forge.md): files worked on with Claude beside the session (decks, artefacts, markdown, images), pinned, edited by hand, versioned and exported. Proposed.
-- [The hirelings](plan/hirelings.md): subagents as runes on the tile, the retinue under a session's grid, and the war table. Built; left: keys into the retinue, the tile's count opening the table, ticks on hover.
-- [GPU light](plan/gpu-light.md): every glow, shadow and spark drawn with real bloom, the shadow effect and particles instead of stacked shapes, window by window, then the Mac. Step 0 built: the working lamp.
-- [The tray menu and Settings](plan/tray-and-settings.md): a short grouped tray menu, and Settings as a resizable window of described cards with search. Proposed.
+- [The hirelings](plan/hirelings.md): left of the subagent views: keys into the retinue, the tile's count opening the war table, ticks on hover, an on-screen check.
+- [GPU light](plan/gpu-light.md): every glow, shadow and spark drawn with real bloom, the shadow effect and particles instead of stacked shapes, window by window, then the Mac. The working lamp is built; next the light module.
+
+## Reference
+
+Specifications of built parts that the code follows. Where one and the
+code disagree, one of them is a bug.
+
+- [Who owns a session](plan/brotherhood-ownership.md): the brotherhood's signed word, whose a session is and who is out, with the invariants both simulations check.
 
 ## Loose ends
 
@@ -107,15 +113,7 @@ Small things left over from parts that are built.
 
 ## Open questions
 
-Carried from the concept, with what is known now.
+Carried from the concept. The answered ones are in the lore.
 
-- **Can a tile light up without stealing focus?** Yes, so far.
-  `WS_EX_NOACTIVATE` plus `SWP_NOACTIVATE` holds through raising.
-- **How does a session get named?** Claude Code writes its own title for
-  the conversation into the transcript (`ai-title`, or `custom-title` after
-  `/rename`). The listener reads the transcript's tail on `SessionStart`,
-  `UserPromptSubmit` and `Stop` and the tile shows that title. A name given
-  with `--name` beats Claude's title but not a `/rename`. The folder name is
-  the fallback until the first turn ends.
 - **What about the VS Code extension's Claude?** Still unanswered. Probably
   the answer is to stop using it.

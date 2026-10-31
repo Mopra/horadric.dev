@@ -1,9 +1,9 @@
 # GPU light: every glow, shadow and spark drawn the way a game draws them
 
 Proposed 2026-10-31. The first piece is built: a working session's lamp
-surges with real bloom (`render/bloom.rs`, commit `11fe3c1`). The human
-looked at it and called it much better. This part takes the rest of
-Horadric the same way.
+surges with real bloom (`render/bloom.rs`, commit `11fe3c1`, the lore
+has how). The human looked at it and called it much better. This part
+takes the rest of Horadric the same way.
 
 ## Why
 
@@ -143,11 +143,6 @@ below ends with a dev build the human looks at, and is committed only
 when they like it. Steps 1 to 4 are the cluster window, since that is
 where the human looks most.
 
-### Step 0: the working lamp (built)
-
-The bouncing glow dot (`scan`) became two pulses surging up the lamp
-inside its glass, bloomed. `render/bloom.rs`.
-
 ### Step 1: the light module
 
 - Move `render/bloom.rs` to `crate::light`, with `begin`, `present` and
@@ -157,7 +152,7 @@ inside its glass, bloomed. `render/bloom.rs`.
 - The software fallback.
 - Measure: forty tiles, ten of them working, on a release build. The
   UI thread's share of a core with the bloom must stay within one point
-  of without it. Write the numbers into [performance](performance.md).
+  of without it. Write the numbers into the lore.
 
 ### Step 2: the cluster's moving light
 

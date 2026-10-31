@@ -30,8 +30,8 @@ renderer, ConPTY and session hosts. What it would bring:
 - **Zig.** Building it needs a Zig toolchain beside cargo, on this
   machine, CI and the macOS build. Or a prebuilt static library,
   vendored like `conpty.dll`.
-- **A dependency decision.** It replaces one listed in CLAUDE.md, so
-  CLAUDE.md changes with it.
+- **A dependency decision.** It replaces one listed in
+  [dependencies.md](../dependencies.md), so that changes with it.
 
 ## The trial
 
@@ -50,5 +50,6 @@ renderer, ConPTY and session hosts. What it would bring:
 The trial's result goes in the lore. If it fails, note why and what
 would have to change upstream, and recheck at Ghostty's next release.
 
-Touches: `crates/horadric-ui/src/console.rs` and the nine other files
-that use `alacritty_terminal`, and the macOS port.
+Touches: `crates/horadric-ui/src/console.rs` and the ten other files
+that use `alacritty_terminal` (`mac/stage.rs` among them, so the macOS
+port too).

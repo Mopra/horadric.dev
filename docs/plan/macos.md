@@ -4,6 +4,8 @@ The Mac's core loop shipped in 0.17.0 (tiles, stage, hosts, resume,
 menu bar, install, updater). What is still not built on the Mac, each
 its own step:
 
+- **The Folio.** New Claude sessions on Windows open as a Folio; the
+  Mac still starts every session in a terminal.
 - **The browser pane**, as a `WKWebView` (WebView2's counterpart).
 - **The quest log runner and Warriv.**
 - **The files tile and the file viewer.**

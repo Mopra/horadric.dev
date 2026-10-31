@@ -12,9 +12,11 @@ over 125 quests, so it had no job.
 ## Not done
 
 - **Compaction at the right moment.** A quest that ends at a 180k window
-  could go on from a 40k summary after its exploration. Whether Horadric
-  can ask Claude Code to compact then (after the pack is read, before the
-  edits) is an open question of Claude Code's interface.
+  could go on from a 40k summary after its exploration. Quests now run
+  as Folios, so the interface question is answered: Horadric can send
+  `/compact` as a prompt and sees `compact_boundary` come back. Left is
+  when to send it (after the pack is read, before the edits) and how to
+  tell that moment from the stream.
 - **Tuning the context pack.** Run `horadric quest spend` again once more
   than 30 quests have run with a pack, before changing the pack's size or
   weights.

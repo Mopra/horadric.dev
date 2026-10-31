@@ -41,28 +41,13 @@ it off everywhere, and that is what keeps the cost bearable.
   key>"}`, and from then on both seal with the derived key and the
   phone's hello carries `"v":3`. A brother tells a phone sealed with a
   derived key from a v2 phone by trying every key it has, as today.
-- **Two new words.** In `said.rs`, beside `admits` and `cast_out`, both
-  with `n` 0:
-
-  | kind | fields | says |
-  |---|---|---|
-  | `vouches` | `phone`, `key`, `name` | `by`'s human paired phone `phone`, whose public key is `key` |
-  | `forgets` | `phone`, `key` | `by`'s human (or the phone itself, through `by`) forgot that phone, for good |
-
-  A phone is **served** by a brother when some `vouches` of its key is
-  signed by a member that is in (not out, not contested, by `standing`),
-  and no `forgets` names its key. `forgets` from any member that is in
-  wins over every `vouches`, whatever came first, as cast out does: it
-  is worked out afresh from the words, never stored. A forget counts
-  from a contested brother too (only one that is out says nothing),
-  since a forget only ever takes a phone away and the contested one may
-  be the honest one. A signer's own forgets free their places in its
-  16. A brother cast out
-  takes the phones it alone vouched for with it, so a stolen PC cannot
-  keep adding phones. Of one signer's `vouches`, only the 16 naming the
-  lowest keys count, so a thief cannot make every brother hold a
-  thousand phones. Pairing the same phone again after a forget is a new
-  key pair, never the old key back.
+- **Two words carry it.** `vouches` and `forgets` are built, in
+  `said.rs` with `said::phones` and `mesh::vouch` and `mesh::forget`
+  (the lore has the details). The rules (who counts, a forget beats
+  every vouch, 16 phones a signer) are in
+  [the ownership specification](brotherhood-ownership.md), "phones".
+  What is left is that nothing outside the simulations signs them yet:
+  pairing must vouch, and every forget must sign one.
 - **The phone learns its brothers from any of them.** After hello, a
   brother sends `{"t":"brothers","list":[{"id","name","key","mark",
   "state"}]}`: every member that is in, with its relay id, its public
@@ -122,24 +107,21 @@ it off everywhere, and that is what keeps the cost bearable.
 
 ## Steps
 
-1. **The words.** `vouches` and `forgets` in `said.rs` with their
-   signing bytes, `phones()` as a pure function of the words and
-   `standing`, `mesh.rs` signing this machine's own. Tests for each, and
-   two invariants in both simulations: a phone forgotten by an honest
-   brother is served by no honest brother that holds the word; a phone
-   vouched for only by a brother that is out is served by none.
-2. **The phone key and serving.** Pairing v3 (the phone's public key in
+Step 1, the words, is built (commit b44140c). Of step 3, the tabs and
+All for phones paired with several PCs by hand landed in
+`../horadric.portal` (commit 324eafb); the phone's key pair
+(`public/phonekey.js`), pairing v3 and the upgrade offer are written there
+but not committed yet.
+
+1. **The phone key and serving.** Pairing v3 (the phone's public key in
    `pair`), the derived key, a channel opened by a vouched phone's key
    in `serving.rs` so a Linux node serves phones too, `brothers`,
-   `upgrade`, `forget`, the typing switch. PORTAL.md gains it. Verified
-   with "Alpha", "Beta" and a dev node by a script phone: paired with
-   Alpha, served by all three, forgotten on Beta, cut off by all three.
-3. **The page.** Key pair, a socket per brother, tabs, All, push per
-   brother, the upgrade offer. In `../horadric.portal`. Verified in the
-   browser pane against the three.
-4. **The desktop menu.** The merged menu and "Forget everywhere".
+   `upgrade`, `forget`, the typing switch. Pairing calls `mesh::vouch`,
+   forgetting `mesh::forget`. PORTAL.md gains it. Verified with "Alpha",
+   "Beta" and a dev node by a script phone: paired with Alpha, served by
+   all three, forgotten on Beta, cut off by all three.
+2. **The page.** Commit what is written, then a socket per brother from
+   the `brothers` list, push per brother, and the upgrade offer. In
+   `../horadric.portal`. Verified in the browser pane against the three.
+3. **The desktop menu.** The merged menu and "Forget everywhere".
    Verified on screen.
-
-Step 3's tabs and All can land first for phones already paired with
-several PCs by hand: it needs only the socket per PC, which the page
-can open today.
