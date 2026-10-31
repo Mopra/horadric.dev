@@ -443,7 +443,8 @@ impl App {
         let live = self
             .consoles
             .get(id)
-            .is_some_and(|c| c.exit_code().is_none());
+            .is_some_and(|c| c.exit_code().is_none())
+            || (self.folios.contains_key(id) && crate::folio::running(id));
         if !live && !self.paused.contains_key(id) {
             return Err("it is not run by this Horadric".into());
         }
@@ -594,6 +595,8 @@ impl App {
             Do::Interrupt => {
                 if let Some(c) = self.consoles.get(id) {
                     c.write(b"\x1b".to_vec());
+                } else if self.folios.contains_key(id) {
+                    crate::folio::interrupt(id);
                 }
             }
             Do::AskBases => {
@@ -604,6 +607,7 @@ impl App {
                         c.kill();
                     }
                 }
+                self.pause_folio(id);
                 let ask = match with(|s| s.asks.get(id).cloned()) {
                     Some(ask) => ask,
                     None => {
@@ -676,6 +680,8 @@ impl App {
             .map(|c| c.args.clone())
             .or_else(|| self.paused.get(id).map(|p| p.args.clone()))
             .unwrap_or_default();
+        // Paused for the handoff, a Folio is a paused chat by now.
+        let chat = self.paused.get(id).is_some_and(|p| p.chat) || self.folios.contains_key(id);
         let n = self.keeping_number(id);
         let said = self.keeping_handing(id, to, n);
         let record = self.shared.registry.lock().ok().and_then(|r| {
@@ -695,6 +701,7 @@ impl App {
                 interrupted: !clean,
                 n,
                 said,
+                chat,
                 ..Record::default()
             })
         });
@@ -1097,7 +1104,9 @@ impl App {
             worktree,
             loot: Default::default(),
             runeword: None,
-            chat: false,
+            // A chat goes on as one, its next prompt told it moved like a
+            // terminal's: its hooks are Claude Code's.
+            chat: record.chat,
         };
         // No one may be at this PC to answer Claude Code's trust prompt
         // for a folder it has never seen.

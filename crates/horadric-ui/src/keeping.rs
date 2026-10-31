@@ -759,6 +759,7 @@ impl App {
                 cwd: s.cwd.clone(),
                 agent: "claude".into(),
                 from: pc_name(),
+                chat: self.folios.contains_key(id),
                 ..Record::default()
             })
         });
@@ -1038,6 +1039,7 @@ impl App {
                 c.kill();
             }
         }
+        self.pause_folio(id);
         let cwd = self
             .shared
             .registry
