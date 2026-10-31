@@ -17,6 +17,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 webpki-roots = "1"
 # Only the handshake: the TLS under it is ours, the same as HTTPS uses.
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
-
-[dev-dependencies]
+# The relay's text frames and the brothers' messages are JSON, as
+# horadric-core speaks them; already in every Horadric build.
 serde_json = { workspace = true }
+
