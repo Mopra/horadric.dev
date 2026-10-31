@@ -6,24 +6,51 @@ use horadric_core::folio::SessionInfo;
 
 /// Commands the Folio cannot run: they draw their own screens in the
 /// terminal. They show in the `/` list so they are not missed, marked.
-pub const TERMINAL_ONLY: &[&str] = &[
-    "config",
-    "theme",
-    "doctor",
-    "ide",
-    "terminal-setup",
-    "plugin",
-    "agents",
-    "hooks",
-    "permissions",
-];
+///
+/// None are left. Over stream-json `/config` (as `key=value`) and
+/// `/doctor` work in the CLI itself, and the ones that say "isn't
+/// available in this environment" there are in [`NATIVE`]. `/ide` and
+/// `/terminal-setup` mean nothing in a window Horadric draws, so they are
+/// not offered at all. What only a terminal can do (MCP OAuth, voice) has
+/// no command of its own here.
+pub const TERMINAL_ONLY: &[&str] = &[];
 
 /// Commands the Folio runs itself where the CLI would draw a screen,
 /// with what the `/` list says of each.
 pub const NATIVE: &[(&str, &str)] = &[
     ("login", "Log in to Claude in your browser"),
     ("logout", "Log out of Claude"),
+    ("memory", "Open a CLAUDE.md"),
+    ("agents", "Open a subagent's file"),
+    ("hooks", "The hooks the settings run"),
+    ("permissions", "The allow, ask and deny rules"),
+    ("plugin", "Plugins and marketplaces"),
+    ("theme", "Horadric's theme, in Settings"),
+    ("resume", "Carry on an earlier conversation"),
+    ("export", "Save the conversation as markdown"),
+    ("add-dir", "Let Claude work in another folder too"),
+    ("exit", "End this chat"),
 ];
+
+/// What follows a native command in the `/` list. One whose words are
+/// required waits for them instead of running when picked.
+pub const NATIVE_HINTS: &[(&str, &str, bool)] = &[
+    ("add-dir", "<folder>", true),
+    ("export", "[file]", false),
+    ("permissions", "[allow|ask|deny <rule>]", false),
+    ("plugin", "[install|uninstall|marketplace ...]", false),
+];
+
+/// The hint a native command shows, and whether its words are required.
+pub fn native_hint(name: &str) -> Option<(&'static str, bool)> {
+    NATIVE_HINTS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, h, needed)| (*h, *needed))
+}
+
+/// Commands the CLI lists that mean nothing in a Folio.
+const HIDDEN: &[&str] = &["ide", "terminal-setup"];
 
 /// Shown in a menu at most; the rest are a keystroke away.
 pub const SHOWN: usize = 8;
@@ -41,6 +68,9 @@ pub enum MenuKind {
     Tasks,
     /// The header's one button: each row opens a picker or does a thing.
     Settings,
+    /// A native command's list: picking a row does what its value says
+    /// (see `slash::act`).
+    Choice,
 }
 
 impl MenuKind {
@@ -201,6 +231,7 @@ pub fn slash_items(info: &SessionInfo, typed: &str) -> Vec<Item> {
     let mut all: Vec<Item> = info
         .slash_commands_for("")
         .into_iter()
+        .filter(|c| !HIDDEN.contains(&c.name.as_str()))
         .map(|c| Item {
             terminal: TERMINAL_ONLY.contains(&c.name.as_str()),
             detail: if c.description.is_empty() && c.skill {
@@ -225,12 +256,17 @@ pub fn slash_items(info: &SessionInfo, typed: &str) -> Vec<Item> {
         }
     }
     for (name, detail) in NATIVE {
+        let hint = native_hint(name).map_or("", |(h, _)| h).to_string();
         match all.iter_mut().find(|i| i.value == *name) {
-            Some(i) => i.detail = detail.to_string(),
+            Some(i) => {
+                i.detail = detail.to_string();
+                i.hint = hint;
+            }
             None => all.push(Item {
                 label: format!("/{name}"),
                 detail: detail.to_string(),
                 value: name.to_string(),
+                hint,
                 ..Default::default()
             }),
         }
@@ -365,24 +401,34 @@ mod tests {
     }
 
     #[test]
-    fn the_slash_list_marks_terminal_commands_and_filters() {
+    fn the_slash_list_runs_native_commands_and_filters() {
         let info = SessionInfo {
-            slash_commands: vec!["compact".into(), "theme".into(), "login".into(), "review".into()],
+            slash_commands: vec![
+                "compact".into(),
+                "theme".into(),
+                "login".into(),
+                "review".into(),
+                "ide".into(),
+                "config".into(),
+            ],
             skills: vec!["review".into()],
             agents: vec!["planner".into()],
             ..Default::default()
         };
         let all = slash_items(&info, "");
-        let theme = all.iter().find(|i| i.value == "theme").unwrap();
-        assert!(theme.terminal);
-        assert_eq!(theme.detail, "Opens in terminal");
-        assert!(all.iter().any(|i| i.value == "config" && i.terminal));
-        // Login and logout run in the Folio, listed once each.
+        assert!(all.iter().all(|i| !i.terminal));
+        let theme: Vec<&Item> = all.iter().filter(|i| i.value == "theme").collect();
+        assert_eq!(theme.len(), 1);
+        assert_eq!(theme[0].detail, "Horadric's theme, in Settings");
+        // Config works over stream-json, so it goes to the CLI as listed.
+        assert!(all.iter().any(|i| i.value == "config"));
+        assert!(!all.iter().any(|i| i.value == "ide"));
         let login: Vec<&Item> = all.iter().filter(|i| i.value == "login").collect();
         assert_eq!(login.len(), 1);
-        assert!(!login[0].terminal);
         assert_eq!(login[0].detail, "Log in to Claude in your browser");
-        assert!(all.iter().any(|i| i.value == "logout" && !i.terminal));
+        assert!(all.iter().any(|i| i.value == "logout"));
+        let add = all.iter().find(|i| i.value == "add-dir").unwrap();
+        assert_eq!(add.hint, "<folder>");
         assert!(all.iter().any(|i| i.label == "@agent-planner"));
         assert_eq!(
             all.iter().find(|i| i.value == "review").unwrap().detail,

@@ -39,6 +39,7 @@ mod picker;
 mod rich;
 mod select;
 mod sign_in;
+mod slash;
 mod transcript;
 mod view;
 mod watch;
@@ -800,6 +801,7 @@ unsafe extern "system" fn router_proc(
     }
     if msg == sign_in::WM_FOLIO_LOGIN {
         sign_in::tend();
+        slash::tend();
         return LRESULT(0);
     }
     if msg == WM_TIMER && wparam.0 == watch::WATCH_TIMER {

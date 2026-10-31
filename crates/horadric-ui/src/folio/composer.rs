@@ -539,7 +539,7 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
         chat.input.ed.clear();
         chat.input.menu = None;
         chat.input.save();
-        run_native(chat, name);
+        run_native(chat, name, &text);
         return;
     }
     if chat.ended || chat.hosted.is_none() {
@@ -595,16 +595,54 @@ fn native_command(text: &str) -> Option<&'static str> {
     picker::NATIVE.iter().map(|(n, _)| *n).find(|n| *n == name)
 }
 
-/// Runs `/login` or `/logout` for this session, without its CLI.
-fn run_native(chat: &mut Chat, name: &str) {
+/// Runs a command in [`picker::NATIVE`] for this session, without its
+/// CLI. `text` is all that was typed, the command's words after its name.
+fn run_native(chat: &mut Chat, name: &str, text: &str) {
     let Some(id) = chat.input.key.clone() else {
         return;
     };
     chat.input.notice = None;
+    let words = text
+        .trim_start_matches('/')
+        .strip_prefix(name)
+        .unwrap_or("")
+        .trim();
     match name {
         "login" => super::sign_in::log_in(chat, &id, None),
-        _ => super::sign_in::log_out(chat, &id),
+        "logout" => super::sign_in::log_out(chat, &id),
+        _ => super::slash::run(chat, &id, name, words),
     }
+}
+
+/// The session's id, which its tile and stage know it by.
+pub(super) fn session_id(chat: &Chat) -> Option<String> {
+    chat.input.key.clone()
+}
+
+/// Says one line above the composer, as a terminal command's notice does.
+/// An empty one takes the last away.
+pub(super) fn notice(chat: &mut Chat, text: &str) {
+    chat.input.notice = (!text.is_empty()).then(|| text.to_string());
+}
+
+/// Opens a native command's list under the header, or says `empty` when
+/// it has no rows.
+pub(super) fn choose(chat: &mut Chat, items: Vec<Item>, empty: &str) {
+    if items.is_empty() {
+        notice(chat, empty);
+        chat.input.menu = None;
+        return;
+    }
+    chat.input.notice = None;
+    chat.input.menu = Some(Menu::new(MenuKind::Choice, items, 0));
+}
+
+/// Puts `text` in the composer for the human to finish, caret at its end.
+pub(super) fn put(chat: &mut Chat, text: &str) {
+    chat.input.ed.clear();
+    let at = chat.input.ed.field.caret;
+    chat.input.ed.replace(at, at, text);
+    chat.input.edited();
 }
 
 /// The command a prompt runs, when it is one only the terminal can.
@@ -761,9 +799,11 @@ fn pick(chat: &mut Chat, how: How) -> bool {
                 to_terminal(chat, &item.label);
                 return true;
             }
-            if let Some(name) = native_command(&format!("/{}", item.value)) {
+            let needs_words = picker::native_hint(&item.value).is_some_and(|(_, n)| n);
+            if let Some(name) = native_command(&format!("/{}", item.value)).filter(|_| !needs_words)
+            {
                 chat.input.ed.replace(menu.start, caret, "");
-                run_native(chat, name);
+                run_native(chat, name, &format!("/{name}"));
                 return true;
             }
             let put = if item.value.starts_with('@') {
@@ -797,6 +837,7 @@ fn pick(chat: &mut Chat, how: How) -> bool {
         }
         MenuKind::Effort => set_effort(chat, &item.value),
         MenuKind::Tasks => show_task(chat, &item.value),
+        MenuKind::Choice => super::slash::act(chat, &item.value),
         MenuKind::Settings => match item.value.as_str() {
             "mode" => open_picker(chat, MenuKind::Mode),
             "model" => open_picker(chat, MenuKind::Model),
@@ -1878,6 +1919,7 @@ impl View {
             let glass_w = gfx.rt.GetSize().width;
             let w: f32 = match menu.kind {
                 MenuKind::Model | MenuKind::Tasks => 340.0,
+                MenuKind::Choice => 440.0,
                 MenuKind::Settings => 280.0,
                 _ => 220.0,
             };
