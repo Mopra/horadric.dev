@@ -60,7 +60,7 @@ use horadric_core::release::{self, Manifest};
 use horadric_core::saved::{Discord, Side};
 use horadric_core::ssh;
 use horadric_core::usage::{has_flag, Limits};
-use horadric_core::worktree::{self as tree, Worktree};
+use horadric_core::worktree::{self as tree, Worktree, SETUP_ENV};
 use horadric_core::{
     session_id, Carry, HookEvent, Phase, Registry, Route, SavedCluster, SavedPanel, SavedSession,
     SavedState, Session, Setting, Usage,
@@ -2694,7 +2694,12 @@ fn project_menu(key: &str) {
         Some(ADD_CLI) => push(Input::Add(key.into())),
         Some(ADD_TREE) => {
             if let Some(dir) = app.project_dir(key) {
-                if let Err(e) = app.start_in(None, dir, Vec::new(), Agent::Claude, true) {
+                let spec = SessionSpec {
+                    place: Workplace::OwnTree,
+                    show: true,
+                    ..SessionSpec::new(dir, app.chat_sessions)
+                };
+                if let Err(e) = app.start_session(spec) {
                     eprintln!("horadric: cannot start session: {e}");
                 }
             }
@@ -4883,19 +4888,16 @@ impl App {
         result
     }
 
-    /// Whether paused session `id` is one the human started with nothing
-    /// more to it, so it may go on as a chat. A Folio is started without
-    /// what a quest, Warriv, a reviewer, an errand, a runeword, its own
-    /// worktree or the town give a terminal on every launch, so those stay
-    /// terminals or they would wake up without their orders.
+    /// Whether paused session `id` is one the human started, so it may go
+    /// on as a chat. A Folio gets all a terminal gets on every launch, its
+    /// own worktree, the town and a first prompt too, but a quest, Warriv,
+    /// an errand and a runeword are typed into as they run, which a Folio
+    /// cannot be told to yet, so those stay terminals.
     fn started_plainly(&self, id: &str, saved: &SavedSession) -> bool {
         !horadric_core::warriv::is_warriv(id)
             && !horadric_core::runeword::is_errand(id)
-            && saved.worktree.is_none()
             && saved.runeword.is_none()
             && !self.holds_quest(id)
-            && !self.tasks.prompts.contains_key(id)
-            && !town::is(&folder_key(&saved.cwd))
     }
 
     /// Opens a plain terminal in the project with this key, on the stage
@@ -5048,26 +5050,7 @@ impl App {
         } else {
             self.extra_args(id, &program, &args, &cwd)
         };
-        let env = own_tree
-            .as_ref()
-            .map(|w| {
-                let mut env = w.ports.map(tree::env).unwrap_or_default();
-                // `horadric quest` finds the list in the main tree.
-                env.push((TASKS_ENV.into(), folder_key(&cwd.to_string_lossy())));
-                env
-            })
-            // Empty, so one this Horadric was started with, as a dev
-            // instance from a quest's worktree is, never sends `horadric
-            // quest` to another project's list. Warriv works on its own
-            // project's list from wherever its shell has wandered.
-            .unwrap_or_else(|| {
-                let main = match horadric_core::warriv::is_warriv(id) {
-                    true => folder_key(&cwd.to_string_lossy()),
-                    false => String::new(),
-                };
-                vec![(TASKS_ENV.into(), main)]
-            });
-        let mut env = env;
+        let mut env = session_env(id, own_tree.as_ref(), &cwd);
         if !attach && !shell && console::is_claude(&program) {
             env.extend(self.shared.defaults_of(Agent::Claude).env(Agent::Claude));
         }
@@ -5149,6 +5132,35 @@ impl App {
         if !console::is_claude(program) {
             return Vec::new();
         }
+        let start = self.claude_start(id, program, args, cwd);
+        let mut extra = start.flags;
+        if let Some(prompt) = start.prompt {
+            // Last, since the prompt is positional. `cmd.exe` ends a
+            // command line at a newline.
+            extra.push(match horadric_pty::is_batch(program) {
+                true => horadric_core::tasks::one_line(&prompt),
+                false => prompt,
+            });
+        }
+        extra
+    }
+
+    /// What Horadric gives Claude Code session `id` on every start or
+    /// resume in `cwd`, before its own `args`, terminal or Folio alike so
+    /// the two never drift: the defaults from the usage window (prompts
+    /// bypassed for a quest in its own worktree), the quest's model, the
+    /// status line and a quest's lean connectors in `--settings`, the
+    /// tools for the project's browser pane, what [`App::task_args`] tells
+    /// it, and the town's projects. The first prompt is taken out of
+    /// `tasks.prompts`, so it is sent once.
+    fn claude_start(
+        &mut self,
+        id: &str,
+        program: &Path,
+        args: &[String],
+        cwd: &Path,
+    ) -> ClaudeStart {
+        let bypass = self.bypasses_prompts(id);
         // The quest's model counts as the session's own choice, so the
         // default model stays out.
         let model = self.quest_model_args(id, args);
@@ -5175,12 +5187,17 @@ impl App {
         }
         let config = self.mcp_config.as_ref().map(|p| p.to_string_lossy());
         extra.extend(Agent::Claude.mcp_args("", config.as_deref()));
-        extra.extend(self.task_args(id, program, cwd));
+        // Before the task's flags, whose system prompt ends them: a list
+        // of folders takes every word up to the next flag, a prompt too.
         if town::is(&folder_key(&cwd.to_string_lossy())) {
             extra.extend(town::add_dir_args(&self.town_projects()));
         }
+        extra.extend(self.task_args(id, program, cwd));
         self.record_launch(id, args, &extra);
-        extra
+        ClaudeStart {
+            flags: extra,
+            prompt: self.tasks.prompts.remove(id),
+        }
     }
 
     /// The agents with a screen in the usage window: Claude Code, those
@@ -7741,7 +7758,12 @@ impl App {
         let Some(dir) = self.project_dir(key) else {
             return;
         };
-        if let Err(e) = self.start_folio(None, dir, None, &[], true) {
+        let spec = SessionSpec {
+            place: Workplace::Project,
+            show: true,
+            ..SessionSpec::new(dir, true)
+        };
+        if let Err(e) = self.start_session(spec) {
             eprintln!("horadric: cannot start a chat: {e}");
         }
     }
@@ -7750,7 +7772,11 @@ impl App {
     /// open as a chat, a terminal otherwise.
     fn start_claude(&mut self, dir: PathBuf) -> Result<String, String> {
         if self.chat_sessions {
-            self.start_folio(None, dir, None, &[], true)
+            self.start_session(SessionSpec {
+                place: Workplace::Project,
+                show: true,
+                ..SessionSpec::new(dir, true)
+            })
         } else {
             self.start(None, dir, Vec::new())
         }
@@ -7770,48 +7796,135 @@ impl App {
         args: &[String],
         show: bool,
     ) -> Result<String, String> {
+        self.start_session(SessionSpec {
+            id,
+            resume,
+            args: args.to_vec(),
+            show,
+            ..SessionSpec::new(dir, true)
+        })
+    }
+
+    /// Starts a Claude session as `spec` says, a Folio or a terminal, with
+    /// all Horadric gives one either way (see [`App::claude_start`]), and
+    /// says its id. The one way in for whatever starts a session for a
+    /// run of its own, so moving one from a terminal to a Folio is
+    /// `spec.chat`.
+    pub(crate) fn start_session(&mut self, spec: SessionSpec) -> Result<String, String> {
+        let SessionSpec {
+            id,
+            name,
+            dir,
+            args,
+            resume,
+            prompt,
+            place,
+            branch,
+            chat,
+            show,
+        } = spec;
         if !dir.is_dir() {
             return Err(format!("{} is not a directory", dir.display()));
         }
         let folder = folder_name(&dir);
-        let id = id.unwrap_or_else(|| self.unique_id(&folder));
+        let id = id.unwrap_or_else(|| self.unique_id(name.as_deref().unwrap_or(&folder)));
         let known =
             (self.shared.registry.lock().ok()).and_then(|r| r.get(&id).map(|s| s.name.clone()));
         let existed = known.is_some();
-        let name = known.unwrap_or(folder);
-        let own = chat_args(args);
-        recent::remember(&mut self.recent, &dir.to_string_lossy());
-        self.register_folio(&id, &dir, &name, resume.as_deref());
-        let key = self.project_of(&id).unwrap_or_default();
-        let defaults = self.shared.defaults_of(Agent::Claude);
+        let branch = branch.or_else(|| name.clone()).unwrap_or("session".into());
+        let name = known.or(name).unwrap_or(folder);
+        let own = match chat {
+            true => chat_args(&args),
+            false => Agent::Claude.carry_on(resume.as_deref(), &args),
+        };
+        // A tile carried on keeps the folder it has, and a conversation the
+        // folder it was held in.
+        let dir = match place {
+            Workplace::Project | Workplace::OwnTree if !existed && resume.is_none() => {
+                let asked = place == Workplace::OwnTree;
+                self.own_tree(&id, &branch, dir, &own, Agent::Claude, asked)
+            }
+            _ => dir,
+        };
+        if let Some(prompt) = prompt {
+            self.tasks.prompts.insert(id.clone(), prompt);
+        }
+        let started = match chat {
+            true => self.open_chat(&id, &name, dir, resume, own, existed),
+            false => self.launch(&id, &name, dir, own, Run::Agent(Agent::Claude), false),
+        };
+        if let Err(e) = started {
+            self.tasks.prompts.remove(&id);
+            // A worktree the session never started in holds nothing.
+            if let Some((w, _)) = self.new_trees.remove(&id) {
+                worktree::remove(w);
+            }
+            if !chat {
+                // Said outside the borrow. Otherwise nothing shows it
+                // failed: the folder picker only closes, and no tile appears.
+                self.start_failed = Some(e.clone());
+                post(self.notify.0 as isize, WM_HORADRIC_START_FAILED, 0);
+            }
+            return Err(e);
+        }
+        if show {
+            let key = self.project_of(&id).unwrap_or_default();
+            if self.fill_stage(&key) {
+                if let Some(stage) = &self.stage {
+                    stage.focus_session(&id);
+                }
+            }
+        }
+        Ok(id)
+    }
+
+    /// Starts session `id`, named `name`, as a Folio in `dir` on `own`,
+    /// its own arguments as a chat takes them, carrying on `resume`. A
+    /// tile that `existed` stays, paused, when it does not start.
+    fn open_chat(
+        &mut self,
+        id: &str,
+        name: &str,
+        dir: PathBuf,
+        resume: Option<String>,
+        own: Vec<String>,
+        existed: bool,
+    ) -> Result<(), String> {
+        let fresh = self.new_trees.remove(id);
+        if fresh.is_none() {
+            recent::remember(&mut self.recent, &dir.to_string_lossy());
+        }
+        self.register_folio(id, &dir, name, resume.as_deref());
+        let own_tree = (self.shared.registry.lock().ok()).and_then(|mut r| {
+            let s = r.get_mut(id)?;
+            if let Some((w, _)) = &fresh {
+                s.worktree = Some(w.clone());
+            }
+            s.worktree.clone()
+        });
+        let key = self.project_of(id).unwrap_or_default();
+        let claude = horadric_pty::headless::claude_exe();
+        let program = (claude.clone()).unwrap_or_else(|| PathBuf::from("claude.exe"));
+        let start = self.claude_start(id, &program, &own, &dir);
+        let mut all = start.flags;
+        all.extend(own.iter().cloned());
+        // Those three are told what to do and with which tools, not to hand
+        // the work to helpers.
+        let special = horadric_core::warriv::is_reviewer(id)
+            || horadric_core::warriv::is_warriv(id)
+            || horadric_core::runeword::is_errand(id);
+        let subagents = (!special).then_some(horadric_core::folio::SUBAGENT_PROMPT);
+        let flags = horadric_core::folio::headless_args(&all, subagents);
         let mut env_set = vec![
-            (horadric_hooks::SESSION_ENV.to_string(), id.clone()),
+            (horadric_hooks::SESSION_ENV.to_string(), id.to_string()),
             (
                 horadric_hooks::OWNER_ENV.to_string(),
                 horadric_hooks::port().to_string(),
             ),
-            (TASKS_ENV.to_string(), String::new()),
         ];
-        env_set.extend(defaults.env(Agent::Claude));
-        let mut flags = defaults.flags_for(Agent::Claude, &own, false);
-        flags.extend(own.iter().cloned());
-        // Without it a Folio's agent has no browser_* tools and opens pages
-        // in a browser of its own instead of the project's pane.
-        let config = self.mcp_config.as_ref().map(|p| p.to_string_lossy());
-        flags.extend(Agent::Claude.mcp_args("", config.as_deref()));
-        // Claude Code takes one system prompt, so one the session brought
-        // gets this added to it rather than replaced.
-        let subagents = horadric_core::folio::SUBAGENT_PROMPT;
-        match flags.iter().position(|a| a == "--append-system-prompt") {
-            Some(i) if i + 1 < flags.len() => {
-                flags[i + 1] = format!("{}\n\n{subagents}", flags[i + 1]);
-            }
-            _ => {
-                flags.push("--append-system-prompt".into());
-                flags.push(subagents.into());
-            }
-        }
-        let options = horadric_pty::headless::Options {
+        env_set.extend(session_env(id, own_tree.as_ref(), &dir));
+        env_set.extend(self.shared.defaults_of(Agent::Claude).env(Agent::Claude));
+        let mut options = horadric_pty::headless::Options {
             args: flags,
             env_set,
             env_remove: console::inherited_env(console::under_claude())
@@ -7820,24 +7933,37 @@ impl App {
                 .collect(),
             ..Default::default()
         };
+        let setup = fresh.map(|(_, setup)| setup).unwrap_or_default();
+        if let (false, Some(claude)) = (setup.is_empty(), claude) {
+            // `horadric setup` runs it and then claude.exe on the same
+            // pipes, as a terminal's setup runs in its pane first.
+            let commands = serde_json::to_string(&setup).unwrap_or_default();
+            options.env_set.push((SETUP_ENV.into(), commands));
+            options.before = vec![
+                "setup".into(),
+                "--headless".into(),
+                claude.to_string_lossy().into_owned(),
+            ];
+            options.program = Some(console::host_program());
+        }
         let tag = crate::folio::Tag {
-            key: key.clone(),
-            name,
+            key,
+            name: name.to_string(),
             resume,
             history: 0,
         };
-        if let Err(e) = crate::folio::open(&id, &dir, tag, &options) {
+        if let Err(e) = crate::folio::open_with(id, &dir, tag, &options, start.prompt) {
             // A tile that was there before, a terminal going on as a chat or
             // a paused one resuming, stays, paused, for a click to try again.
             if let Ok(mut r) = self.shared.registry.lock() {
                 if existed {
                     r.apply(
-                        &id,
+                        id,
                         &HookEvent::synthetic(HookEvent::PAUSE),
                         SystemTime::now(),
                     );
-                } else {
-                    r.remove(&id);
+                } else if let Some(w) = r.remove(id).and_then(|s| s.worktree) {
+                    worktree::remove(w);
                 }
             }
             self.start_failed = Some(e.clone());
@@ -7846,16 +7972,11 @@ impl App {
         }
         let serial = self.next_serial;
         self.next_serial += 1;
-        self.folios
-            .insert(id.clone(), Console::folio(id.clone(), serial, id.clone()));
-        self.folio_args.insert(id.clone(), own);
+        let folio = Console::folio(id.to_string(), serial, id.to_string());
+        self.folios.insert(id.to_string(), folio);
+        self.folio_args.insert(id.to_string(), own);
         self.reconcile(true);
-        if show && self.fill_stage(&key) {
-            if let Some(stage) = &self.stage {
-                stage.focus_session(&id);
-            }
-        }
-        Ok(id)
+        Ok(())
     }
 
     /// Gives a Folio its tile, as `launch` does a terminal session's.
@@ -9903,6 +10024,92 @@ fn on_one_screen(r: [i32; 4]) -> bool {
         && r[1] >= w.top - 1
         && r[2] <= w.right + 1
         && r[3] <= w.bottom + 1
+}
+
+/// What [`App::claude_start`] gives a Claude session.
+struct ClaudeStart {
+    /// Before the session's own arguments.
+    flags: Vec<String>,
+    /// Its first prompt, sent once: last on a terminal's command line, as
+    /// the first message in a Folio.
+    prompt: Option<String>,
+}
+
+/// Where a new session works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Workplace {
+    /// In the folder it is given.
+    Here,
+    /// In a worktree of its own unless the project works in one tree, as
+    /// a session the human starts does.
+    Project,
+    /// In a worktree of its own wherever there is a repository.
+    OwnTree,
+}
+
+/// A Claude session to start with [`App::start_session`].
+pub(crate) struct SessionSpec {
+    /// A new one when None. A tile's id carries that tile on.
+    pub id: Option<String>,
+    /// What its tile is called, the folder's name when None. A tile carried
+    /// on keeps its own.
+    pub name: Option<String>,
+    pub dir: PathBuf,
+    /// Its own arguments, as a terminal's command line holds them.
+    pub args: Vec<String>,
+    /// The conversation it carries on.
+    pub resume: Option<String>,
+    /// Its first prompt, a quest's or an errand's first step.
+    pub prompt: Option<String>,
+    pub place: Workplace,
+    /// The branch of a worktree of its own, the name when None.
+    pub branch: Option<String>,
+    /// A Folio rather than a terminal.
+    pub chat: bool,
+    /// Shown on the stage with the keyboard.
+    pub show: bool,
+}
+
+impl SessionSpec {
+    /// A new session in `dir`, a Folio when `chat`, with nothing more.
+    pub(crate) fn new(dir: PathBuf, chat: bool) -> SessionSpec {
+        SessionSpec {
+            id: None,
+            name: None,
+            dir,
+            args: Vec::new(),
+            resume: None,
+            prompt: None,
+            place: Workplace::Here,
+            branch: None,
+            chat,
+            show: false,
+        }
+    }
+}
+
+/// The environment session `id` in `cwd` gets beside its tag, terminal or
+/// Folio: its worktree's ports, and which quest log `horadric quest` works
+/// on.
+fn session_env(id: &str, own_tree: Option<&Worktree>, cwd: &Path) -> Vec<(String, String)> {
+    own_tree
+        .map(|w| {
+            let mut env = w.ports.map(tree::env).unwrap_or_default();
+            // `horadric quest` finds the list in the main tree.
+            env.push((TASKS_ENV.into(), folder_key(&cwd.to_string_lossy())));
+            env
+        })
+        // Empty, so one this Horadric was started with, as a dev instance
+        // from a quest's worktree is, never sends `horadric quest` to
+        // another project's list. Warriv works on its own project's list
+        // from wherever its shell has wandered.
+        .unwrap_or_else(|| {
+            let main = match horadric_core::warriv::is_warriv(id) {
+                true => folder_key(&cwd.to_string_lossy()),
+                false => String::new(),
+            };
+            vec![(TASKS_ENV.into(), main)]
+        })
 }
 
 /// A Claude session's own arguments as a chat takes them: without the

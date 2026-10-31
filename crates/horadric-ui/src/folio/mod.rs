@@ -157,6 +157,9 @@ struct Chat {
     tr: transcript::Ui,
     /// A hireling's conversation, read only, rather than a session.
     watch: Option<watch::Watch>,
+    /// The first prompt, sent once the session is live and its history
+    /// read: a quest, Warriv's events, an errand's first step.
+    first: Option<String>,
 }
 
 /// What the app hears of a Folio, for its tile's phase.
@@ -210,6 +213,7 @@ impl Chat {
             to_terminal: false,
             tr: transcript::Ui::default(),
             watch: None,
+            first: None,
         }
     }
 
@@ -388,12 +392,20 @@ fn load_history(chat: &mut Chat, path: PathBuf, limit: u64) {
 /// resuming the conversation `tag.resume` when it names one. `options`
 /// carry the flags and the environment its hooks find it by. In a folder
 /// Claude Code has not been told to trust, it waits for the human to say
-/// so in its pane first.
-pub fn open(id: &str, dir: &Path, mut tag: Tag, options: &Options) -> Result<(), String> {
+/// so in its pane first. `first` goes in as its first prompt once it can
+/// take one, the folder trusted and any history read.
+pub fn open_with(
+    id: &str,
+    dir: &Path,
+    mut tag: Tag,
+    options: &Options,
+    first: Option<String>,
+) -> Result<(), String> {
     if CHATS.with(|c| c.borrow().contains_key(id)) {
         return Ok(());
     }
     let mut chat = Chat::new(&tag.key, dir);
+    chat.first = first;
     if let Some(conversation) = tag.resume.clone() {
         // `--resume` streams only the new turns: what came before is read
         // from the transcript, and how much there was goes in the tag.

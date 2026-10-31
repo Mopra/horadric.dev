@@ -411,6 +411,12 @@ pub(super) fn tend(id: &str, chat: &mut Chat) {
         let line = chat.folio.initialize();
         write(chat, &line);
     }
+    // The session's orders, as a terminal's went in on its command line.
+    if !chat.folio.busy {
+        if let Some(text) = chat.first.take() {
+            deliver(chat, &text, &[]);
+        }
+    }
     if chat.folio.permission_mode() == "bypassPermissions" {
         chat.input.bypass = true;
     }
