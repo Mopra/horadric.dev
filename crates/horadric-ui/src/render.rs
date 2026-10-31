@@ -158,6 +158,8 @@ pub struct Gpu {
     pub body: IDWriteTextFormat,
     pub small: IDWriteTextFormat,
     pub small_right: IDWriteTextFormat,
+    /// A menu's default line, the one a left click would do.
+    pub small_bold: IDWriteTextFormat,
     /// A button's label, centred on it.
     pub small_centre: IDWriteTextFormat,
     /// The project's name at the top of its cluster.
@@ -186,6 +188,7 @@ impl Gpu {
             let body = format(&dw, FONT, 14.0, normal, false)?;
             let small = format(&dw, FONT, 12.5, normal, false)?;
             let small_right = format(&dw, FONT, 12.5, normal, true)?;
+            let small_bold = format(&dw, FONT, 12.5, DWRITE_FONT_WEIGHT_BOLD, false)?;
             let small_centre = format(&dw, FONT, 12.5, semi, false)?;
             small_centre.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
             let display = format(&dw, FONT_DISPLAY, 15.5, semi, false)?;
@@ -217,6 +220,7 @@ impl Gpu {
                 body,
                 small,
                 small_right,
+                small_bold,
                 small_centre,
                 display,
                 name,
@@ -601,6 +605,8 @@ pub struct MenuLook<'a> {
     pub detail_w: f32,
     pub separator: bool,
     pub checked: bool,
+    /// Drawn bold: what a left click would have done.
+    pub bold: bool,
     pub enabled: bool,
     /// Opens more lines beside it.
     pub sub: bool,
@@ -1883,8 +1889,9 @@ impl Painter<'_> {
             } else {
                 text.w - line.detail_w - 16.0
             };
+            let face = if line.bold { &gpu.small_bold } else { &gpu.small };
             self.text(
-                &gpu.small,
+                face,
                 ink,
                 line.label,
                 Rect::new(text.x, text.y, room, text.h),

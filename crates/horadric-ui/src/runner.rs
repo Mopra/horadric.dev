@@ -2734,6 +2734,7 @@ fn mode_menu(key: &str) {
             id: i + 1,
             label: m.explain().to_string(),
             checked: *m == board.mode,
+            bold: false,
         })
         .collect();
     if stopped {
@@ -2746,6 +2747,7 @@ fn mode_menu(key: &str) {
         id: DRIVES,
         label: "Warriv drives".into(),
         checked: drive.is_some(),
+        bold: false,
     });
     let public = drive.as_ref().is_some_and(|d| d.ships_public);
     match &drive {
@@ -2753,6 +2755,7 @@ fn mode_menu(key: &str) {
             id: PUBLIC,
             label: "and ships public".into(),
             checked: public,
+            bold: false,
         }),
         None => items.push(Item::Disabled("and ships public".into())),
     }
@@ -2768,6 +2771,7 @@ fn mode_menu(key: &str) {
             id: PARALLEL + n,
             label: at_once(n),
             checked: n == board.parallel.max(1),
+            bold: false,
         }));
     } else {
         items.push(Item::Disabled(

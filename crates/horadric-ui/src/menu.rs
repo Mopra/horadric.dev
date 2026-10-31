@@ -70,6 +70,9 @@ pub enum Item {
         id: usize,
         label: String,
         checked: bool,
+        /// Drawn bold, as Windows draws a menu's default line: what a left
+        /// click on the thing the menu is for would have done.
+        bold: bool,
     },
     Disabled(String),
     Separator,
@@ -83,7 +86,16 @@ impl Item {
             id,
             label: label.into(),
             checked: false,
+            bold: false,
         }
+    }
+
+    /// Marks an action as the menu's default line.
+    pub fn default(mut self) -> Item {
+        if let Item::Action { bold, .. } = &mut self {
+            *bold = true;
+        }
+        self
     }
 
     fn pickable(&self) -> bool {
@@ -308,11 +320,12 @@ impl Menu {
         work: [i32; 4],
     ) -> (MenuLayout, Vec<(String, String, f32)>) {
         let gpu = &self.shared.gpu;
-        let width = |t: &str| {
+        let width = |t: &str, bold: bool| {
+            let face = if bold { &gpu.small_bold } else { &gpu.small };
             if t.is_empty() {
                 0.0
             } else {
-                render::wrapped(gpu, &gpu.small, t, 10_000.0)
+                render::wrapped(gpu, face, t, 10_000.0)
                     .map(|l| render::text_size(&l).0)
                     .unwrap_or(0.0)
             }
@@ -320,9 +333,10 @@ impl Menu {
         let mut lines = Vec::with_capacity(items.len());
         let mut text = Vec::with_capacity(items.len());
         for item in items {
-            let (label, sub) = match item {
-                Item::Action { label, .. } | Item::Disabled(label) => (label.as_str(), false),
-                Item::Submenu(label, _) => (label.as_str(), true),
+            let (label, sub, bold) = match item {
+                Item::Action { label, bold, .. } => (label.as_str(), false, *bold),
+                Item::Disabled(label) => (label.as_str(), false, false),
+                Item::Submenu(label, _) => (label.as_str(), true, false),
                 Item::Separator => {
                     lines.push(MenuLine::Separator);
                     text.push(Default::default());
@@ -330,7 +344,7 @@ impl Menu {
                 }
             };
             let (a, b) = split(label);
-            let (wa, wb) = (width(a), width(b));
+            let (wa, wb) = (width(a, bold), width(b, false));
             lines.push(MenuLine::Row {
                 label: wa,
                 detail: wb,
@@ -686,6 +700,7 @@ impl Menu {
                 detail_w: *detail_w,
                 separator: matches!(item, Item::Separator),
                 checked: matches!(item, Item::Action { checked: true, .. }),
+                bold: matches!(item, Item::Action { bold: true, .. }),
                 enabled: item.pickable(),
                 sub: matches!(item, Item::Submenu(..)),
                 open: l.open == Some(i),

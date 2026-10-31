@@ -1758,7 +1758,7 @@ fn tile_menu(id: &str) {
         let end = |label: &str| Some(Item::action(END, label));
         match (kind, shell) {
             (TileKind::Live, false) => {
-                let mut open = vec![Item::action(OPEN, "Show terminal")];
+                let mut open = vec![Item::action(OPEN, "Show terminal").default()];
                 if with_app(|app| app.is_claude_terminal(id)) == Some(true) {
                     open.push(Item::action(AS_CHAT, "Open as chat"));
                 }
@@ -1766,15 +1766,15 @@ fn tile_menu(id: &str) {
                 (open, end("End session"))
             }
             (TileKind::Live, true) => (
-                vec![Item::action(OPEN, "Show terminal"), rename],
+                vec![Item::action(OPEN, "Show terminal").default(), rename],
                 end("Close terminal"),
             ),
             (TileKind::Paused, false) => (
-                vec![Item::action(OPEN, "Resume"), rename],
+                vec![Item::action(OPEN, "Resume").default(), rename],
                 end("End session"),
             ),
             (TileKind::Paused, true) => (
-                vec![Item::action(OPEN, "Open again"), rename],
+                vec![Item::action(OPEN, "Open again").default(), rename],
                 end("Remove terminal"),
             ),
             (TileKind::Elsewhere, _) => (vec![rename], end("Remove tile")),
@@ -1785,7 +1785,7 @@ fn tile_menu(id: &str) {
                 None,
             ),
             (TileKind::Background, _) => (
-                vec![Item::action(OPEN, "Attach"), rename],
+                vec![Item::action(OPEN, "Attach").default(), rename],
                 end("End session"),
             ),
         }
@@ -1795,7 +1795,7 @@ fn tile_menu(id: &str) {
     // runs, and gets the rest of a Claude terminal's menu below.
     let (open, end, live, shell) = if with_app(|app| app.folios.contains_key(id)) == Some(true) {
         let open = vec![
-            Item::action(OPEN, "Show chat"),
+            Item::action(OPEN, "Show chat").default(),
             Item::action(TERMINAL, "Open in terminal"),
             rename,
         ];
@@ -2341,6 +2341,7 @@ fn size_items(key: &str, base: usize) -> Vec<Item> {
         id,
         label,
         checked: on,
+        bold: false,
     };
     let mut items = vec![check(base, "Fit to pane".into(), now.is_none())];
     for (i, (name, w, h)) in viewport::PRESETS.iter().enumerate() {
@@ -3121,6 +3122,7 @@ fn account_menu() {
             id: PICK + i,
             label: a.label_at(now),
             checked: live.as_deref() == Some(a.id.as_str()),
+            bold: false,
         })
         .collect();
     if items.is_empty() {

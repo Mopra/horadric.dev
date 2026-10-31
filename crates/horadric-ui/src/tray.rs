@@ -356,6 +356,7 @@ pub fn menu(
                     None => d.name.clone(),
                 },
                 checked: d.drive.is_some(),
+                bold: false,
             })
             .collect();
         let public: Vec<Item> = driven
@@ -366,6 +367,7 @@ pub fn menu(
                     id: PUBLIC + i,
                     label: d.name.clone(),
                     checked: d.drive.as_ref()?.ships_public,
+                    bold: false,
                 })
             })
             .collect();
@@ -550,6 +552,7 @@ fn brother_items(
                     id: CONTROL + j,
                     label: "Can control this PC".into(),
                     checked: *on,
+                    bold: false,
                 },
                 Item::Separator,
                 Item::action(CAST_OUT + j, format!("Cast out {name}\u{2026}")),
@@ -622,6 +625,7 @@ fn keeping_items(keeping: &(Vec<(String, String)>, Option<String>, bool)) -> Vec
             id: KEEPER + i,
             label: name.clone(),
             checked: keeper.as_deref() == Some(id.as_str()),
+            bold: false,
         })
         .collect();
     picks.push(Item::Separator);
@@ -629,6 +633,7 @@ fn keeping_items(keeping: &(Vec<(String, String)>, Option<String>, bool)) -> Vec
         id: NO_KEEPER,
         label: "No one".into(),
         checked: keeper.is_none(),
+        bold: false,
     });
     let mut items = vec![Item::Submenu("Keeps my sessions".into(), picks)];
     if keeper.is_some() {
@@ -636,6 +641,7 @@ fn keeping_items(keeping: &(Vec<(String, String)>, Option<String>, bool)) -> Vec
             id: AUTO_TAKEOVER,
             label: "Take over by itself after 10 minutes".into(),
             checked: *auto,
+            bold: false,
         });
     }
     items
@@ -685,6 +691,7 @@ fn account_items(logins: &[Pick]) -> Vec<Item> {
             id: ACCOUNT + i,
             label: p.label.clone(),
             checked: p.live,
+            bold: false,
         })
         .collect();
     items.push(Item::action(ACCOUNT + ADD_ACCOUNT, "Add account"));
