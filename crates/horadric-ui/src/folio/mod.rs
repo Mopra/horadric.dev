@@ -70,7 +70,9 @@ use crate::folio_look as look;
 
 pub use composer::{before_caret, dictated, dictation};
 pub use select::find;
-pub use view::{attach, char, key, keyboard_moved, place, place_bar, register_class, wheel};
+pub use view::{
+    attach, char, key, keyboard_moved, place, place_bar, refont, register_class, wheel,
+};
 pub use watch::{is_watch, watch, watch_detail, watch_title};
 /// Posted to the pane a Folio is in when what its header says may have
 /// changed.

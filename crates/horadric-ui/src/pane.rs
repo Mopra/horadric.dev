@@ -700,6 +700,9 @@ impl Pane {
     pub fn refont(&self) {
         self.fit_grid();
         self.invalidate();
+        if let Some(key) = &self.console.folio {
+            folio::refont(key);
+        }
     }
 
     pub fn focus(&self) {
@@ -1913,6 +1916,20 @@ impl Pane {
         if mods.alt && vk == VK_F4 {
             return false;
         }
+        if let Some(key) = &self.console.folio {
+            // Shift+Insert and Ctrl+Insert are a terminal's paste and copy,
+            // so they are the Folio's Ctrl+V and Ctrl+C.
+            let clip = match (vk, mods.ctrl, mods.shift) {
+                (VK_INSERT, false, true) => Some('\u{16}'),
+                (VK_INSERT, true, false) => Some('\u{3}'),
+                _ => None,
+            };
+            if let Some(c) = clip.filter(|_| !mods.alt) {
+                let ctrl = Mods { ctrl: true, shift: false, alt: false };
+                folio::char(key, c, ctrl);
+                return true;
+            }
+        }
         if let Some(key) = self.console.folio.as_deref().filter(|k| folio::is_watch(k)) {
             if vk == VK_ESCAPE && !mods.ctrl && !mods.alt && !mods.shift {
                 self.close();
@@ -3082,8 +3099,9 @@ impl Pane {
     fn on_wheel(&self, wparam: WPARAM, lparam: LPARAM) {
         let raw = ((wparam.0 >> 16) & 0xffff) as i16 as i32;
         if let Some(key) = &self.console.folio {
-            folio::wheel(key, raw);
-            return;
+            if folio::wheel(key, raw, Self::mods().ctrl) {
+                return;
+            }
         }
         if let Some(key) = &self.console.sky {
             // The wheel's point is on the screen, the zoom's in the glass.
