@@ -14,7 +14,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
-use horadric_core::folio::{Block, Ending, Lane, Step, StepState, TodoStatus};
+use horadric_core::folio::{
+    timeline, turn_map, Block, Ending, Lane, ShellRun, Step, StepKind, StepState, TodoStatus,
+};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct2D::{
     ID2D1Bitmap, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
@@ -116,6 +118,13 @@ pub(super) enum Act {
     FindClose,
     /// An ended session starts again on its conversation.
     Resume,
+    /// A step on a turn's map: its run and the steps down to it opened,
+    /// by the run's block and the path of step ids.
+    MapStep(usize, Vec<String>),
+    /// A turn's files lit in the Arcane Sanctuary, by the turn's footer.
+    Light(usize),
+    /// An image a step's result carried, by the step's id and its place.
+    StepImage(String, usize),
 }
 
 /// A text field on a card or the find bar's, by its id.
@@ -164,6 +173,8 @@ pub(super) struct State {
     /// Per question card, per question, the options picked.
     pub(super) picks: HashMap<String, Vec<BTreeSet<usize>>>,
     pub(super) todos_open: bool,
+    /// Every block and step open, each step with when it ran.
+    pub(super) verbose: bool,
     pub(super) sel: Option<(Pos, Pos)>,
     pub(super) dragging: bool,
     pub(super) mouse: Option<(f32, f32)>,
@@ -219,6 +230,8 @@ pub(super) struct Cache {
     blocks: Vec<Option<Built>>,
     /// Decoded thumbnails by block and image.
     thumbs: Thumbs,
+    /// A step's result images, decoded, by step id and place.
+    step_thumbs: rich::StepThumbs,
 }
 
 impl Cache {
@@ -260,6 +273,7 @@ impl Ui {
             mouse: st.mouse,
             area: st.area,
             todos_open: st.todos_open,
+            verbose: st.verbose,
             ..State::default()
         };
         self.cache.blocks.clear();
@@ -281,6 +295,8 @@ fn hash_step(h: &mut DefaultHasher, s: &Step, st: &State) {
     hash_str(h, &s.summary);
     (s.state as u8).hash(h);
     s.output.len().hash(h);
+    s.images.len().hash(h);
+    (s.began, s.ended).hash(h);
     hash_str(h, s.input["command"].as_str().unwrap_or_default());
     if let Some(e) = &s.edit {
         (e.added, e.removed, e.hunks.len(), e.changes.len()).hash(h);
@@ -315,6 +331,7 @@ fn hash_field(h: &mut DefaultHasher, st: &State, id: &str) {
 fn stamp(i: usize, b: &Block, open: bool, st: &State) -> u64 {
     let mut h = DefaultHasher::new();
     open.hash(&mut h);
+    st.verbose.hash(&mut h);
     std::mem::discriminant(b).hash(&mut h);
     match b {
         // These only grow while they stream, and a reply settled after
@@ -371,8 +388,16 @@ fn stamp(i: usize, b: &Block, open: bool, st: &State) -> u64 {
         Block::Footer {
             duration_ms,
             ending,
+            at,
             ..
-        } => (*duration_ms, *ending as u8).hash(&mut h),
+        } => (*duration_ms, *ending as u8, *at, i).hash(&mut h),
+        Block::Aside {
+            question,
+            answer,
+            failed,
+            ..
+        } => (question, answer, failed).hash(&mut h),
+        Block::Shell(r) => (r.output.len(), r.running, r.code, r.sent).hash(&mut h),
         Block::Notice(n) => format!("{n:?}").hash(&mut h),
         Block::SignIn(card) => {
             card.hash(&mut h);
@@ -395,7 +420,11 @@ fn gap_after(b: &Block, next: Option<&Block>) -> f32 {
         // A prompt's images belong to it, so they sit close under its plate.
         Block::Prompt(_) if matches!(next, Some(Block::Images(_))) => 6.0,
         Block::Footer { .. } => GAP + 16.0,
-        Block::Thinking(_) | Block::Tools(_) | Block::Notice(_) | Block::Raw(_) => GAP / 2.0,
+        Block::Thinking(_)
+        | Block::Tools(_)
+        | Block::Notice(_)
+        | Block::Raw(_)
+        | Block::Shell(_) => GAP / 2.0,
         // The full gap, so the reply reads as a new voice.
         _ => GAP,
     }
@@ -413,6 +442,7 @@ fn raw_text(t: &str) -> String {
 /// Whether a step opens to more than its line.
 fn has_detail(s: &Step) -> bool {
     s.edit.is_some()
+        || !s.images.is_empty()
         || s.lane.is_some()
         || !s.output.trim().is_empty()
         || is_shell(&s.tool) && s.input["command"].is_string()
@@ -448,7 +478,33 @@ fn at_work(step: &Step, lane: &Lane) -> bool {
 
 /// Whether a step shows its detail: a failed one does until closed.
 fn step_open(s: &Step, st: &State) -> bool {
-    (s.state == StepState::Failed) != st.flipped.contains(&s.id)
+    let by_default = st.verbose || s.state == StepState::Failed;
+    by_default != st.flipped.contains(&s.id)
+}
+
+/// The step with tool use id `id`, in any run or lane.
+pub(super) fn find_step<'a>(blocks: &'a [Block], id: &str) -> Option<&'a Step> {
+    fn within<'a>(steps: &'a [Step], id: &str) -> Option<&'a Step> {
+        steps.iter().find_map(|s| {
+            if s.id == id {
+                return Some(s);
+            }
+            within(&s.lane.as_ref()?.steps, id)
+        })
+    }
+    blocks.iter().rev().find_map(|b| match b {
+        Block::Tools(steps) => within(steps, id),
+        _ => None,
+    })
+}
+
+/// A clock time for a Unix time in milliseconds, in local time.
+fn clock(ms: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    flow::clock(ms, crate::questlog::utc_offset(now))
 }
 
 impl Ctx<'_> {
@@ -749,11 +805,14 @@ impl Ctx<'_> {
             );
             right -= 24.0;
         }
-        let label = if step.summary.is_empty() {
+        let mut label = if step.summary.is_empty() {
             step.tool.clone()
         } else {
             format!("{}  {}", step.tool, step.summary)
         };
+        if let Some(at) = step.began.filter(|_| st.verbose) {
+            label = format!("{}  {label}", clock(at));
+        }
         s.line(
             label,
             F::Small,
@@ -786,7 +845,156 @@ impl Ctx<'_> {
         } else {
             y = self.output(s, step, dx, y, dw, st);
         }
+        if !step.images.is_empty() {
+            y = self.step_images(s, step, dx, y + 6.0, dw);
+        }
         y + 6.0
+    }
+
+    /// The images a step's result carried, as thumbnails in rows.
+    unsafe fn step_images(&self, s: &mut Scene, step: &Step, x: f32, y: f32, w: f32) -> f32 {
+        let (mut cx, mut cy, mut row_h) = (x, y, 0.0f32);
+        for (k, img) in step.images.iter().enumerate() {
+            let got = (self.thumbs.borrow_mut())
+                .entry(format!("{}:{k}", step.id))
+                .or_insert_with(|| rich::thumbnail(self.gfx, &img.base64))
+                .clone();
+            let (tw, th) = match &got {
+                Some((_, bw, bh)) => {
+                    let f = (THUMB_W / *bw as f32).min(THUMB_H / *bh as f32).min(0.5);
+                    (*bw as f32 * f, *bh as f32 * f)
+                }
+                None => (THUMB_H, THUMB_H * 0.75),
+            };
+            if cx + tw > x + w && cx > x {
+                cx = x;
+                cy += row_h + 8.0;
+                row_h = 0.0;
+            }
+            let r = Rect::new(cx, cy, tw, th);
+            match got {
+                Some((b, _, _)) => s.items.push(rich::Item::Image(b, r)),
+                None => {
+                    s.fill(r, 8.0, self.pal.fg.with_alpha(0.06));
+                    s.line("Image", F::Centre, r, self.pal.faint);
+                }
+            }
+            s.stroke(r, 6.0, self.pal.fg.with_alpha(0.15), 1.0);
+            s.hit(r, Hit::Tr(Act::StepImage(step.id.clone(), k)));
+            cx += tw + 8.0;
+            row_h = row_h.max(th);
+        }
+        cy + row_h
+    }
+
+    /// A question put aside with `/btw`, and its answer, under a quiet
+    /// rule so it reads as outside the conversation.
+    unsafe fn aside(&self, b: &Block, cw: f32) -> Scene {
+        let mut s = Scene::default();
+        let Block::Aside {
+            question,
+            answer,
+            failed,
+            ..
+        } = b
+        else {
+            return s;
+        };
+        let head = format!("By the way: {question}");
+        let mut y = 0.0;
+        if let Some(l) = self.layout(&self.gfx.small, &head, cw - NEST) {
+            s.unit(&l, NEST, 2.0, self.pal.faint, &head);
+            y = 6.0 + render::text_size(&l).1;
+        }
+        match answer {
+            None => {
+                s.line("\u{2026}", F::Small, Rect::new(NEST, y, 40.0, 18.0), self.pal.faint);
+                y += 18.0;
+            }
+            Some(t) if *failed => {
+                if let Some(l) = self.layout(&self.gfx.small, t, cw - NEST) {
+                    s.unit(&l, NEST, y, theme::error(), t);
+                    y += render::text_size(&l).1;
+                }
+            }
+            Some(t) => {
+                let (r, _) = self.reply(t, cw - NEST, Vec::new());
+                s.append(&r, NEST, y);
+                y += r.h;
+            }
+        }
+        s.fill(Rect::new(7.0, 2.0, 1.5, y - 2.0), 0.0, self.pal.accent.with_alpha(0.3));
+        s.h = y;
+        s
+    }
+
+    /// A `!` command the human ran, with what it printed, in mono on a
+    /// dark plate like a shell step's.
+    unsafe fn shell(&self, r: &ShellRun, cw: f32) -> Scene {
+        let mut s = Scene::default();
+        let (tail, _) = flow::last_lines(&r.output, OUTPUT_LINES);
+        let mut text = format!("! {}", r.command.trim_end().replace('\n', "\n  "));
+        let cmd_len = text.encode_utf16().count() as u32;
+        if !tail.is_empty() {
+            text.push('\n');
+            text.push_str(&tail);
+        }
+        let Some(l) = self.layout(&self.fonts.rows, &text, cw - 20.0) else {
+            return s;
+        };
+        let failed = r.code.is_some_and(|c| c != 0) || (!r.running && r.code.is_none());
+        let out_ink = if failed {
+            theme::error().mix(self.pal.fg, 0.35)
+        } else {
+            self.pal.fg.with_alpha(0.62)
+        };
+        self.paint(&l, cmd_len..text.encode_utf16().count() as u32, out_ink);
+        let (_, th) = render::text_size(&l);
+        let plate = Rect::new(0.0, 0.0, cw, th + 16.0);
+        s.fill(plate, 6.0, Color::rgb(0).with_alpha(0.3));
+        s.items.push(rich::Item::Clip(plate));
+        s.unit(&l, 10.0, 8.0, self.pal.fg.with_alpha(0.9), &text);
+        s.items.push(rich::Item::Unclip);
+        let said = if r.running {
+            "Running\u{2026}".to_string()
+        } else {
+            let code = match r.code {
+                Some(0) => String::new(),
+                Some(c) => format!("Exit code {c}. "),
+                None => "It did not run. ".to_string(),
+            };
+            let goes = if r.sent {
+                "Claude has read it."
+            } else {
+                "Goes to Claude with your next prompt."
+            };
+            format!("{code}{goes}")
+        };
+        let row = Rect::new(4.0, plate.bottom() + 2.0, cw - 4.0, 18.0);
+        s.line(said, F::Small, row, self.pal.faint);
+        s.h = row.bottom();
+        s
+    }
+
+    /// A map step's colour, by the sort of work it was.
+    fn kind_ink(&self, kind: StepKind, state: StepState) -> Color {
+        if state == StepState::Failed {
+            return theme::error().with_alpha(0.8);
+        }
+        let ink = match kind {
+            StepKind::Read => self.pal.accent.mix(self.pal.fg, 0.55).with_alpha(0.55),
+            StepKind::Edit => theme::done().with_alpha(0.85),
+            StepKind::Shell => self.pal.fg.with_alpha(0.55),
+            StepKind::Search => self.pal.faint.with_alpha(0.7),
+            StepKind::Agent => self.pal.accent.with_alpha(0.85),
+            StepKind::Web => self.pal.accent.mix(theme::done(), 0.5).with_alpha(0.7),
+            StepKind::Other => self.pal.dim.with_alpha(0.6),
+        };
+        if state == StepState::Stopped {
+            ink.with_alpha(0.3)
+        } else {
+            ink
+        }
     }
 
     /// A shell step's command and the end of its output, or any step's
@@ -1027,12 +1235,24 @@ impl Ctx<'_> {
         s
     }
 
-    fn footer(&self, b: &Block, cw: f32) -> Scene {
+    /// A turn's end: how long it took and what it used, and, opened, the
+    /// turn's map: its steps on a timeline and the files it touched.
+    #[allow(clippy::too_many_arguments)]
+    fn footer(
+        &self,
+        i: usize,
+        b: &Block,
+        open: bool,
+        blocks: &[Block],
+        verbose: bool,
+        cw: f32,
+    ) -> Scene {
         let mut s = Scene::default();
         let Block::Footer {
             duration_ms,
             ending,
             usage,
+            at,
         } = b
         else {
             return s;
@@ -1041,16 +1261,130 @@ impl Ctx<'_> {
             Ending::Failed => theme::error().with_alpha(0.8),
             Ending::Done | Ending::Stopped => self.pal.faint,
         };
-        let line = flow::footer(*duration_ms, *ending, usage);
-        s.line(line, F::Small, Rect::new(0.0, 0.0, cw, FOOTER_H), ink);
+        let mut line = flow::footer(*duration_ms, *ending, usage);
+        if let Some(at) = at.filter(|_| verbose) {
+            line = format!("{} \u{b7} {line}", clock(at));
+        }
+        let map = turn_map(blocks, i);
+        let mapped = !map.steps.is_empty();
+        let row = Rect::new(0.0, 0.0, cw, FOOTER_H);
+        s.line(line, F::Small, Rect::new(0.0, 0.0, cw - 60.0, FOOTER_H), ink);
+        if mapped {
+            let chevron = if open { '\u{E70D}' } else { '\u{E76C}' };
+            s.line(
+                "Map",
+                F::Right,
+                Rect::new(cw - 60.0, 0.0, 40.0, FOOTER_H),
+                self.pal.faint,
+            );
+            s.line(
+                chevron.to_string(),
+                F::Icon,
+                Rect::new(cw - 16.0, 0.0, 16.0, FOOTER_H),
+                self.pal.faint.with_alpha(0.5),
+            );
+            s.hit(row, Hit::Fold(i));
+        }
+        let mut y = FOOTER_H;
+        if open && mapped {
+            y = self.map(&mut s, i, &map, y + 10.0, cw);
+        }
         // A short rule under the turn, in the project's colour.
         s.fill(
-            Rect::new(0.0, FOOTER_H + 8.0, 28.0, 1.0),
+            Rect::new(0.0, y + 8.0, 28.0, 1.0),
             0.0,
             self.pal.accent.with_alpha(0.35),
         );
-        s.h = FOOTER_H;
+        s.h = y;
         s
+    }
+
+    /// The turn's map from `y`: a bar a step where and how long it ran,
+    /// steps at the same time on rows of their own, then the files it read
+    /// and changed. Returns where it ends.
+    fn map(
+        &self,
+        s: &mut Scene,
+        footer: usize,
+        map: &horadric_core::folio::TurnMap,
+        y: f32,
+        cw: f32,
+    ) -> f32 {
+        const ROW: f32 = 12.0;
+        const BAR: f32 = 8.0;
+        let bars = timeline(map);
+        let rows = bars.iter().map(|b| b.row + 1).max().unwrap_or(1) as f32;
+        let track = Rect::new(0.0, y, cw, rows * ROW + 4.0);
+        s.fill(track, 4.0, self.pal.fg.with_alpha(0.035));
+        for (step, bar) in map.steps.iter().zip(&bars) {
+            let w = ((bar.to - bar.from) * cw - 1.0).max(3.0);
+            let r = Rect::new(bar.from * cw, y + 2.0 + bar.row as f32 * ROW, w, BAR);
+            s.fill(r, 2.0, self.kind_ink(step.kind, step.state));
+            let hit = Rect::new(r.x, r.y - 2.0, r.w.max(6.0), ROW);
+            s.hit(hit, Hit::Tr(Act::MapStep(step.block, step.path.clone())));
+        }
+        let mut y = track.bottom() + 4.0;
+        let files = map.files.len();
+        let mut said = format!(
+            "{} step{}",
+            map.steps.len(),
+            if map.steps.len() == 1 { "" } else { "s" }
+        );
+        if files > 0 {
+            said.push_str(&format!(
+                " \u{b7} {files} file{}",
+                if files == 1 { "" } else { "s" }
+            ));
+        }
+        s.line(said, F::Small, Rect::new(0.0, y, cw / 2.0, 18.0), self.pal.faint);
+        if let (Some(a), Some(b)) = (map.began, map.ended) {
+            let took = crate::folio_look::footer_line(b.saturating_sub(a), Ending::Done);
+            s.line(took, F::Right, Rect::new(cw / 2.0, y, cw / 2.0, 18.0), self.pal.faint);
+        }
+        y += 22.0;
+        for f in &map.files {
+            let r = Rect::new(0.0, y, cw, 22.0);
+            let (icon, ink) = if f.edits > 0 {
+                ('\u{E70F}', theme::done().with_alpha(0.85))
+            } else {
+                ('\u{E8A5}', self.pal.faint)
+            };
+            s.line(icon.to_string(), F::Icon, Rect::new(4.0, y, 16.0, 22.0), ink);
+            let name = flow::project_path(self.dir, &f.path).unwrap_or_else(|| f.path.clone());
+            s.line(
+                name.replace('\\', "/"),
+                F::Small,
+                Rect::new(26.0, y, cw - 140.0, 22.0),
+                self.link_ink(),
+            );
+            let mut detail = Vec::new();
+            if f.reads > 0 {
+                detail.push(format!("read {}", f.reads));
+            }
+            if f.edits > 0 {
+                detail.push(format!("+{} -{}", f.added, f.removed));
+            }
+            s.line(
+                detail.join(" \u{b7} "),
+                F::Right,
+                Rect::new(cw - 110.0, y, 110.0, 22.0),
+                self.pal.faint,
+            );
+            s.hit(r, Hit::Tr(Act::Path(f.path.clone(), None)));
+            y += 22.0;
+        }
+        if files > 0 {
+            let r = Rect::new(0.0, y + 2.0, 200.0, 20.0);
+            s.line(
+                "Light them in the Arcane Sanctuary",
+                F::Small,
+                Rect::new(4.0, y + 2.0, 196.0, 20.0),
+                self.link_ink(),
+            );
+            s.hit(r, Hit::Tr(Act::Light(footer)));
+            y += 24.0;
+        }
+        y
     }
 
     /// A line the model did not know, kept: folded to what kind it is,
@@ -1151,6 +1485,7 @@ impl View {
             brushes,
             blocks,
             thumbs,
+            step_thumbs,
             ..
         } = cache;
         let Some(fonts) = fonts.as_ref() else {
@@ -1163,6 +1498,7 @@ impl View {
             fonts,
             brushes,
             dir: &chat.dir,
+            thumbs: step_thumbs,
         };
 
         // The todo list stays at the top, the conversation scrolling under.
@@ -1201,7 +1537,9 @@ impl View {
             *b = None;
         }
         for (i, b) in folio.blocks.iter().enumerate().skip(from) {
-            let open = chat.open.contains(&i);
+            // Verbose opens every block but a turn's map.
+            let every = st.verbose && !matches!(b, Block::Footer { .. });
+            let open = every != chat.open.contains(&i);
             let stamp = stamp(i, b, open, st);
             if blocks[i].as_ref().is_some_and(|x| x.stamp == stamp) {
                 continue;
@@ -1225,7 +1563,9 @@ impl View {
                 Block::SignIn(_) => cards::sign_in(&ctx, i, b, st, lw),
                 Block::Mcp(card) => super::mcp::card(&ctx, card, lw),
                 Block::Elicitation(e) => super::mcp::elicitation(&ctx, e, st, lw),
-                Block::Footer { .. } => ctx.footer(b, lw),
+                Block::Footer { .. } => ctx.footer(i, b, open, &folio.blocks, st.verbose, lw),
+                Block::Aside { .. } => ctx.aside(b, lw),
+                Block::Shell(r) => ctx.shell(r, lw),
                 Block::Notice(n) => ctx.notice(n, lw),
                 Block::Raw(t) => ctx.raw(i, t, open, lw),
             };

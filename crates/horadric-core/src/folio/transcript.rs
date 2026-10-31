@@ -72,6 +72,7 @@ impl Folio {
                 continue;
             }
             let before = self.blocks.len();
+            self.clock = v["timestamp"].as_str().and_then(unix_ms);
             match v["type"].as_str().unwrap_or_default() {
                 "user" => {
                     self.transcript_user(&v);
@@ -107,6 +108,7 @@ impl Folio {
                 self.session_id = v["sessionId"].as_str().map(str::to_string);
             }
         }
+        self.clock = None;
         if let Some(&n) = at.and_then(|a| after.get(a)) {
             self.blocks.truncate(n);
         }
@@ -122,7 +124,9 @@ impl Folio {
             if let Some(out) = command_output(s) {
                 self.blocks.push(Block::Notice(Notice::CommandOutput(out)));
             } else if let Some(p) = typed_prompt(s) {
-                self.blocks.push(Block::Prompt(p));
+                let (runs, p) = super::split_shell(&p);
+                self.shells_sent(runs);
+                self.blocks.push(Block::Prompt(p.to_string()));
             }
             return;
         }
@@ -166,6 +170,13 @@ impl Folio {
             self.blocks.push(Block::Images(images));
         }
     }
+}
+
+/// A transcript line's `timestamp` in Unix milliseconds.
+fn unix_ms(s: &str) -> Option<u64> {
+    let t = crate::hireling::parse_time(s)?;
+    let d = t.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(d.as_millis() as u64)
 }
 
 /// Where a rewind of a conversation's last turn resumes: the line to

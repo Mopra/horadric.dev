@@ -25,6 +25,21 @@ pub fn program(
         .or_else(|| comspec.map(PathBuf::from))
 }
 
+/// The arguments that make the shell `program` run `command` once and
+/// exit, by what kind of shell it is.
+pub fn run_args(program: &Path, command: &str) -> Vec<String> {
+    let stem = (program.file_stem())
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mut args: Vec<String> = match stem.as_str() {
+        "pwsh" | "powershell" => vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into()],
+        "cmd" => vec!["/D".into(), "/S".into(), "/C".into()],
+        _ => vec!["-c".into()],
+    };
+    args.push(command.to_string());
+    args
+}
+
 /// The `ssh` for an SSH terminal: the one Windows ships, which talks to
 /// the Windows `ssh-agent` service, before any other on `PATH` (Git's own
 /// does not).
@@ -179,5 +194,13 @@ mod tests {
     fn terminals_are_numbered_from_the_second() {
         assert_eq!(name(0), "Terminal");
         assert_eq!(name(1), "Terminal 2");
+    }
+
+    #[test]
+    fn a_command_runs_once_in_each_kind_of_shell() {
+        let pwsh = run_args(Path::new("C:\\Program Files\\PowerShell\\7\\pwsh.exe"), "ls");
+        assert_eq!(pwsh, ["-NoProfile", "-NonInteractive", "-Command", "ls"]);
+        assert_eq!(run_args(Path::new("C:\\Windows\\cmd.exe"), "dir"), ["/D", "/S", "/C", "dir"]);
+        assert_eq!(run_args(Path::new("D:\\tools\\bash.exe"), "ls"), ["-c", "ls"]);
     }
 }

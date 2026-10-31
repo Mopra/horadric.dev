@@ -22,18 +22,22 @@ pub mod afar;
 pub mod backlog;
 mod edits;
 mod launch;
+mod map;
 mod mcp;
 mod send;
 mod session;
+mod shell;
 mod sign_in;
 mod tools;
 mod transcript;
 
 pub use edits::*;
 pub use launch::*;
+pub use map::*;
 pub use mcp::*;
 pub use send::*;
 pub use session::*;
+pub use shell::*;
 pub use sign_in::*;
 pub use tools::*;
 pub use transcript::{rewind_point, Rewind};
@@ -59,6 +63,12 @@ pub struct Step {
     /// The end of its result's text, at most [`OUTPUT_TAIL`] bytes: a
     /// shell command's last lines, an error.
     pub output: String,
+    /// Images its result carried, such as a screenshot a tool took.
+    pub images: Vec<PromptImage>,
+    /// When it started and when its result came, in Unix milliseconds:
+    /// None where no clock was known (a host's replay).
+    pub began: Option<u64>,
+    pub ended: Option<u64>,
 }
 
 /// Told to every Folio's agent, since a Folio is where the human hands
@@ -296,7 +306,21 @@ pub enum Block {
         duration_ms: u64,
         ending: Ending,
         usage: TurnUsage,
+        /// When it ended, in Unix milliseconds, where known.
+        at: Option<u64>,
     },
+    /// A question put aside with `/btw`: answered from the conversation
+    /// without becoming part of it.
+    Aside {
+        request_id: String,
+        question: String,
+        /// None while it is being answered.
+        answer: Option<String>,
+        failed: bool,
+    },
+    /// A command the human ran with `!`, its output going to Claude with
+    /// the next prompt.
+    Shell(ShellRun),
     Notice(Notice),
     /// A login is needed, or runs, from the Folio itself.
     SignIn(SignIn),
@@ -321,6 +345,8 @@ enum Sent {
     McpAuth(String),
     McpReconnect(String),
     McpToggle(String),
+    Title,
+    Aside,
 }
 
 #[derive(Debug, Default)]
@@ -394,6 +420,16 @@ pub struct Folio {
     requests: HashMap<String, Sent>,
     /// For request ids and queued prompts' uuids.
     sent: u64,
+    /// The time of the line being fed, in Unix milliseconds, set by whoever
+    /// feeds it: the live stream's clock, or a transcript line's own
+    /// timestamp. None for a replay, whose lines carry no time.
+    pub clock: Option<u64>,
+    /// What the conversation is called, as the CLI made it up.
+    pub title: Option<String>,
+    /// Whether a title was asked for, so it is asked once.
+    pub title_asked: bool,
+    /// The prompt the CLI guesses the human sends next, until a prompt goes.
+    pub suggestion: Option<String>,
 }
 
 /// A content block between its `content_block_start` and its stop.
@@ -442,6 +478,19 @@ fn result_text(content: &Value) -> String {
     }
 }
 
+/// The images in a tool result's content.
+fn result_images(content: &Value) -> Vec<PromptImage> {
+    (content.as_array().into_iter().flatten())
+        .filter(|b| b["type"] == "image" && b["source"]["type"] == "base64")
+        .map(|b| {
+            PromptImage::new(&ImageData {
+                media_type: text_of(&b["source"], "media_type"),
+                base64: text_of(&b["source"], "data"),
+            })
+        })
+        .collect()
+}
+
 /// The last `max` bytes of `s`, cut at a char boundary.
 fn tail(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -468,7 +517,7 @@ fn find_step<'a>(steps: &'a mut [Step], id: &str) -> Option<&'a mut Step> {
     None
 }
 
-fn new_step(id: &str, tool: &str, input: &Value) -> Step {
+fn new_step(id: &str, tool: &str, input: &Value, began: Option<u64>) -> Step {
     Step {
         id: id.to_string(),
         tool: tool.to_string(),
@@ -481,6 +530,9 @@ fn new_step(id: &str, tool: &str, input: &Value) -> Step {
             ..Lane::default()
         }),
         output: String::new(),
+        images: Vec::new(),
+        began,
+        ended: None,
     }
 }
 
@@ -507,9 +559,13 @@ impl Folio {
         Self::default()
     }
 
-    /// The human sent a prompt.
+    /// The human sent a prompt. The output of `!` commands that went with
+    /// it shows as their own blocks, once.
     pub fn push_prompt(&mut self, text: &str) {
+        let (runs, text) = split_shell(text);
+        self.shells_sent(runs);
         self.blocks.push(Block::Prompt(text.to_string()));
+        self.suggestion = None;
         self.busy = true;
         self.failed = None;
         self.turn_error = None;
@@ -593,6 +649,15 @@ impl Folio {
                 false
             }
             "system" => self.system(&v, line),
+            "prompt_suggestion" => {
+                let s = v["suggestion"].as_str().map(str::trim).filter(|s| !s.is_empty());
+                // One that lands after the human already wrote again is stale.
+                if self.busy {
+                    return false;
+                }
+                self.suggestion = s.map(str::to_string);
+                true
+            }
             _ => self.raw(line),
         }
     }
@@ -989,11 +1054,144 @@ impl Folio {
     /// `initialize`: the line to write. The answer fills
     /// [`SessionInfo::commands`] with descriptions for the `/` list, and
     /// [`SessionInfo::models`] with each model's effort levels. Optional:
-    /// the CLI works without it.
+    /// the CLI works without it. It also asks for a guess at the next
+    /// prompt after each turn, [`Folio::suggestion`].
     pub fn initialize(&mut self) -> String {
         self.initialized = true;
         let id = self.request(Sent::Initialize);
-        control_request_line(&id, "initialize", serde_json::json!({}))
+        control_request_line(
+            &id,
+            "initialize",
+            serde_json::json!({"promptSuggestions": true}),
+        )
+    }
+
+    /// `generate_session_title` from what the conversation is about: the
+    /// line to write, or None when one was asked for already or the
+    /// conversation is known by a title. The CLI writes the title into the
+    /// transcript, where the tile reads it as a terminal's, and the answer
+    /// sets [`Folio::title`].
+    pub fn ask_title(&mut self) -> Option<String> {
+        if self.title_asked || self.title.is_some() {
+            return None;
+        }
+        let about = (self.blocks.iter())
+            .find_map(|b| match b {
+                Block::Prompt(t) if !t.trim().is_empty() && !t.starts_with('/') => Some(t.trim()),
+                _ => None,
+            })?
+            .chars()
+            .take(2000)
+            .collect::<String>();
+        self.title_asked = true;
+        let id = self.request(Sent::Title);
+        Some(control_request_line(
+            &id,
+            "generate_session_title",
+            serde_json::json!({"description": about, "persist": true}),
+        ))
+    }
+
+    fn set_title(&mut self, title: Option<&str>) -> bool {
+        let t = title.map(str::trim).filter(|t| !t.is_empty());
+        if t.is_none() || t == self.title.as_deref() {
+            return false;
+        }
+        self.title = t.map(str::to_string);
+        true
+    }
+
+    /// `/btw`: a side question answered from the conversation without
+    /// joining it, shown as a [`Block::Aside`]. The line to write.
+    pub fn side_question(&mut self, question: &str) -> String {
+        let id = self.request(Sent::Aside);
+        self.blocks.push(Block::Aside {
+            request_id: id.clone(),
+            question: question.to_string(),
+            answer: None,
+            failed: false,
+        });
+        control_request_line(
+            &id,
+            "side_question",
+            serde_json::json!({"question": question}),
+        )
+    }
+
+    fn aside_answered(&mut self, id: &str, said: Result<Option<String>, String>) -> bool {
+        let block = (self.blocks.iter_mut().rev())
+            .find(|b| matches!(b, Block::Aside { request_id, .. } if request_id == id));
+        let Some(Block::Aside { answer, failed, .. }) = block else {
+            return false;
+        };
+        match said {
+            Ok(a) => *answer = Some(a.unwrap_or_else(|| "No answer.".into())),
+            Err(e) => {
+                *answer = Some(e);
+                *failed = true;
+            }
+        }
+        true
+    }
+
+    /// A `!` command the human started: its block, by index, to fill
+    /// with [`Folio::shell_done`].
+    pub fn shell_started(&mut self, command: &str) -> usize {
+        self.blocks.push(Block::Shell(ShellRun {
+            command: command.to_string(),
+            running: true,
+            ..ShellRun::default()
+        }));
+        self.blocks.len() - 1
+    }
+
+    /// The `!` command `command` at block `at` ended with `output` and
+    /// `code`. The command is checked, since a `/clear` may have emptied
+    /// the page while it ran.
+    pub fn shell_done(&mut self, at: usize, command: &str, output: &str, code: Option<i32>) {
+        if let Some(Block::Shell(run)) = self.blocks.get_mut(at) {
+            if run.command == command && run.running {
+                run.output = tail(output, OUTPUT_TAIL);
+                run.code = code;
+                run.running = false;
+            }
+        }
+    }
+
+    /// What the `!` commands run since the last prompt said, to go before
+    /// the next prompt's text so Claude reads it too, once: they are marked
+    /// sent. Empty when none ran.
+    pub fn shell_context(&mut self) -> String {
+        let from = (self.blocks.iter())
+            .rposition(|b| matches!(b, Block::Prompt(_)))
+            .map_or(0, |i| i + 1);
+        (self.blocks[from..].iter_mut())
+            .filter_map(|b| match b {
+                Block::Shell(r) if !r.running && !r.sent => {
+                    r.sent = true;
+                    Some(shell_text(r))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `!` commands a prompt carried: those shown since the last prompt
+    /// stand for themselves, the rest (a replay) get blocks of their own.
+    fn shells_sent(&mut self, runs: Vec<ShellRun>) {
+        let from = (self.blocks.iter())
+            .rposition(|b| matches!(b, Block::Prompt(_)))
+            .map_or(0, |i| i + 1);
+        let mut seen = from;
+        for run in runs {
+            let shown = (self.blocks.iter().enumerate().skip(seen))
+                .find(|(_, b)| matches!(b, Block::Shell(r) if r.command == run.command))
+                .map(|(i, _)| i);
+            match shown {
+                Some(i) => seen = i + 1,
+                None => self.blocks.push(Block::Shell(ShellRun { sent: true, ..run })),
+            }
+        }
     }
 
     /// `stop_task`, for a background task such as a subagent: the line
@@ -1210,6 +1408,7 @@ impl Folio {
                 rested || before != self.background.len()
             }
             "elicitation_complete" => self.elicitation_complete(v),
+            "session_title_changed" => self.set_title(v["title"].as_str()),
             "commands_changed" => {
                 self.info.read_commands(&v["commands"]);
                 false
@@ -1249,7 +1448,6 @@ impl Folio {
             | "task_summary"
             | "stop_hook_summary"
             | "session_state_changed"
-            | "session_title_changed"
             | "session_metadata"
             | "turn_duration"
             | "post_turn_summary"
@@ -1328,6 +1526,17 @@ impl Folio {
         ) {
             return self.mcp_response(kind, r);
         }
+        if kind == Sent::Aside {
+            let said = match r["subtype"] == "error" {
+                true => Err(r["error"].as_str().unwrap_or("Not answered.").to_string()),
+                false => Ok(r["response"]["response"].as_str().map(str::to_string)),
+            };
+            return self.aside_answered(id, said);
+        }
+        // An old CLI that cannot make a title is not worth a word.
+        if kind == Sent::Title {
+            return self.set_title(r["response"]["title"].as_str());
+        }
         if r["subtype"] == "error" {
             let error = r["error"].as_str().unwrap_or("refused");
             return self.notice(Notice::Refused(error.to_string()));
@@ -1350,6 +1559,7 @@ impl Folio {
             Sent::Initialize => self.info.read_initialize(body),
             // The task's end comes as its own notification.
             Sent::StopTask => return false,
+            Sent::Title | Sent::Aside => return false,
             Sent::McpStatus | Sent::McpAuth(_) | Sent::McpReconnect(_) | Sent::McpToggle(_) => {
                 return false
             }
@@ -1546,7 +1756,7 @@ impl Folio {
         if self.step_mut(id).is_some() {
             return self.set_step_input(id, input);
         }
-        let step = new_step(id, tool, input);
+        let step = new_step(id, tool, input, self.clock);
         match self.blocks.last_mut() {
             Some(Block::Tools(steps)) => steps.push(step),
             _ => self.blocks.push(Block::Tools(vec![step])),
@@ -1649,6 +1859,7 @@ impl Folio {
     /// A line of a subagent's own: its words and steps go to its lane.
     /// Its lines do not stream, so each comes whole.
     fn subagent(&mut self, parent: &str, v: &Value) -> bool {
+        let clock = self.clock;
         match v["type"].as_str().unwrap_or_default() {
             "assistant" => {
                 let mut changed = false;
@@ -1677,7 +1888,7 @@ impl Folio {
                             } else if let Some(s) = find_step(&mut lane.steps, id) {
                                 changed |= set_input(s, input);
                             } else {
-                                lane.steps.push(new_step(id, tool, input));
+                                lane.steps.push(new_step(id, tool, input, clock));
                                 changed = true;
                             }
                         }
@@ -1739,11 +1950,14 @@ impl Folio {
                 (true, true) => StepState::Stopped,
                 (true, false) => StepState::Failed,
             };
+            let clock = self.clock;
             let Some(step) = self.step_mut(id) else {
                 continue;
             };
             step.state = state;
             step.output = tail(&text, OUTPUT_TAIL);
+            step.images = result_images(&block["content"]);
+            step.ended = clock;
             if let Some(edit) = step.edit.as_mut() {
                 if detail.is_object() {
                     edit.apply_result(detail);
@@ -1879,6 +2093,7 @@ impl Folio {
                 duration_ms: v["duration_ms"].as_u64().unwrap_or_default(),
                 ending,
                 usage,
+                at: self.clock,
             });
         }
         if let Some(id) = v["session_id"].as_str() {

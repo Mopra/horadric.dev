@@ -450,6 +450,9 @@ pub(crate) enum Input {
     Limits(Limits),
     /// A Folio's session changed what its tile should say.
     FolioState(String, crate::folio::State),
+    /// `/all` in a Folio: the prompt to every Folio of the project, by its
+    /// key, and the session it was typed in.
+    FolioAll(String, String, String),
     /// A Folio's "Terminal": end it between turns and carry the session on
     /// in a terminal.
     FolioToTerminal(String),
@@ -7969,6 +7972,14 @@ impl App {
             session.loot.outstanding.clear();
         }
         session.stream_agents = state.agents.clone();
+        // A terminal's title comes from the transcript as hooks fire; a
+        // Folio's from its stream as soon as the CLI made one up.
+        if let (Some(t), None) = (&state.title, &session.title) {
+            session.title = Some(horadric_core::title::Title {
+                text: t.clone(),
+                custom: false,
+            });
+        }
         if let Some(status) = state.status() {
             session.status = Some(status);
         }
@@ -9181,6 +9192,10 @@ impl App {
                 Input::CloseFolio(id) => self.close_folio(&id),
                 Input::Limits(limits) => self.hear_limits(&limits),
                 Input::FolioState(id, state) => self.folio_state(&id, state),
+                Input::FolioAll(key, from, text) => {
+                    let n = crate::folio::broadcast(&key, &text);
+                    crate::folio::say(&from, &format!("Sent to {}.", plural(n, "chat")));
+                }
                 Input::FolioToTerminal(id) => self.folio_to_terminal(&id),
                 Input::FolioHandedOver(id) => self.folio_handed_over(&id),
                 Input::FolioRestart(id, show) => self.folio_restart(&id, show),
