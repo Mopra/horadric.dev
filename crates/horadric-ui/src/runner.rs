@@ -936,6 +936,7 @@ impl App {
             prompt: Some(prompt),
             place: if parallel { Workplace::OwnTree } else { Workplace::Here },
             branch: Some(tasks::slug(title)),
+            quiet: true,
             ..SessionSpec::new(dir.clone(), self.chat_sessions)
         };
         if let Err(e) = self.start_session(spec) {
@@ -1278,6 +1279,7 @@ impl App {
             name: Some("Quest Giver".into()),
             prompt: Some(tasks::giver_prompt(&horadric_command(), file::rel(&dir))),
             show: true,
+            quiet: true,
             ..SessionSpec::new(dir, self.chat_sessions)
         };
         if let Err(e) = self.start_session(spec) {

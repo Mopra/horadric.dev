@@ -7872,6 +7872,7 @@ impl App {
             branch,
             chat,
             show,
+            quiet,
         } = spec;
         if !dir.is_dir() {
             return Err(format!("{} is not a directory", dir.display()));
@@ -7900,7 +7901,7 @@ impl App {
             self.tasks.prompts.insert(id.clone(), prompt);
         }
         let started = match chat {
-            true => self.open_chat(&id, &name, dir, resume, own, existed),
+            true => self.open_chat(&id, &name, dir, resume, own, existed, quiet),
             false => self.launch(&id, &name, dir, own, Run::Agent(Agent::Claude), false),
         };
         if let Err(e) = started {
@@ -7909,7 +7910,7 @@ impl App {
             if let Some((w, _)) = self.new_trees.remove(&id) {
                 worktree::remove(w);
             }
-            if !chat {
+            if !chat && !quiet {
                 // Said outside the borrow. Otherwise nothing shows it
                 // failed: the folder picker only closes, and no tile appears.
                 self.start_failed = Some(e.clone());
@@ -7930,7 +7931,9 @@ impl App {
 
     /// Starts session `id`, named `name`, as a Folio in `dir` on `own`,
     /// its own arguments as a chat takes them, carrying on `resume`. A
-    /// tile that `existed` stays, paused, when it does not start.
+    /// tile that `existed` stays, paused, when it does not start. With
+    /// `quiet` a failure is only returned, not shown in a dialog.
+    #[allow(clippy::too_many_arguments)]
     fn open_chat(
         &mut self,
         id: &str,
@@ -7939,6 +7942,7 @@ impl App {
         resume: Option<String>,
         own: Vec<String>,
         existed: bool,
+        quiet: bool,
     ) -> Result<(), String> {
         let fresh = self.new_trees.remove(id);
         if fresh.is_none() {
@@ -8025,8 +8029,10 @@ impl App {
                     worktree::remove(w);
                 }
             }
-            self.start_failed = Some(e.clone());
-            post(self.notify.0 as isize, WM_HORADRIC_START_FAILED, 0);
+            if !quiet {
+                self.start_failed = Some(e.clone());
+                post(self.notify.0 as isize, WM_HORADRIC_START_FAILED, 0);
+            }
             return Err(e);
         }
         let serial = self.next_serial;
@@ -10145,6 +10151,9 @@ pub(crate) struct SessionSpec {
     pub chat: bool,
     /// Shown on the stage with the keyboard.
     pub show: bool,
+    /// Started by automation, which tells of a failure its own way: no
+    /// dialog waits for a human who may be away, once per retry.
+    pub quiet: bool,
 }
 
 impl SessionSpec {
@@ -10161,6 +10170,7 @@ impl SessionSpec {
             branch: None,
             chat,
             show: false,
+            quiet: false,
         }
     }
 }

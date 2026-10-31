@@ -422,6 +422,7 @@ impl App {
             id: Some(id.to_string()),
             name: Some(label.to_string()),
             prompt,
+            quiet: true,
             ..SessionSpec::new(dir, chat)
         };
         self.start_session(spec)?;

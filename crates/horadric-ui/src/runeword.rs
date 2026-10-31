@@ -1156,6 +1156,7 @@ impl App {
             name: Some("Runesmith".into()),
             prompt: Some(prompt),
             show: true,
+            quiet: true,
             ..SessionSpec::new(dir, self.chat_sessions)
         };
         if let Err(e) = self.start_session(spec) {
@@ -1447,6 +1448,7 @@ impl App {
             id: Some(id.clone()),
             name: Some(name.to_string()),
             prompt: Some(prompt),
+            quiet: true,
             ..SessionSpec::new(main, self.chat_sessions)
         };
         if let Err(e) = self.start_session(spec) {

@@ -625,6 +625,7 @@ impl App {
             id: Some(id.clone()),
             name: Some("Warriv".into()),
             prompt: Some(warriv::prompt(briefs)),
+            quiet: true,
             ..SessionSpec::new(dir, self.chat_sessions)
         };
         if let Err(e) = self.start_session(spec) {
@@ -1021,6 +1022,7 @@ impl App {
             id: Some(id.clone()),
             name: Some("Warriv reviews".into()),
             prompt: Some(prompt),
+            quiet: true,
             ..SessionSpec::new(dir, self.chat_sessions)
         };
         if let Err(e) = self.start_session(spec) {
