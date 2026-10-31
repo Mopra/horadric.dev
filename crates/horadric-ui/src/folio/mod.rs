@@ -191,6 +191,10 @@ pub struct State {
     /// An ask waits on the human.
     pub asking: bool,
     pub ended: bool,
+    /// Ended, and not to go on in a terminal or start again: claude.exe
+    /// crashed, was killed or lost its host. The tile pauses, so a click
+    /// resumes the conversation.
+    pub gone: bool,
     /// The host's replay is in, so this is where the session stands.
     pub live: bool,
     /// The last turn ended, its reply not yet followed by a prompt.
@@ -359,6 +363,7 @@ impl Chat {
             busy: self.folio.busy,
             asking: !self.folio.pending_asks().is_empty(),
             ended: self.ended,
+            gone: self.ended && !self.to_terminal && !self.restarting,
             live: self.live,
             finished: self.folio.turn_finished(),
             background: (self.folio.background_heard).then_some(self.folio.background.len()),
@@ -720,8 +725,8 @@ pub fn agents(id: &str) -> Vec<(String, String)> {
 /// Starts session `id`'s claude.exe again on its conversation, so it
 /// reads a new login, saying `said` first. One that ended starts at once,
 /// one at rest once it has ended; one at work or asking is left alone.
-/// `show` brings it to the stage.
-fn restart(id: &str, said: &str, show: bool) {
+/// `show` brings it to the stage. Says whether it starts again.
+pub fn restart(id: &str, said: &str, show: bool) -> bool {
     // Some(true) starts it now, Some(false) once claude.exe has ended.
     let how = with(id, |c| {
         if c.to_terminal || c.restarting || c.pending.is_some() || c.loading.is_some() {
@@ -741,12 +746,13 @@ fn restart(id: &str, said: &str, show: bool) {
     })
     .flatten();
     let Some(now) = how else {
-        return;
+        return false;
     };
     sign_in::greet(id, said);
     if now {
         app::push(Input::FolioRestart(id.to_string(), show));
     }
+    true
 }
 
 /// Lets go of every Folio, as the app reloads or quits keeping its
@@ -1118,6 +1124,7 @@ mod tests {
             busy: false,
             asking: false,
             ended: false,
+            gone: false,
             live: true,
             finished: true,
             background: None,

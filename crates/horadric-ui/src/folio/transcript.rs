@@ -37,6 +37,8 @@ use crate::theme::{self, Color};
 const TOP: f32 = 18.0;
 const GAP: f32 = 18.0;
 const LINE_H: f32 = 26.0;
+/// The Resume button under an ended session, with the gap above it.
+const RESUME_H: f32 = 38.0;
 const STEP_H: f32 = 26.0;
 const FOOTER_H: f32 = 18.0;
 /// A prompt's plate: the room around its text, and how much of the
@@ -110,6 +112,8 @@ pub(super) enum Act {
     FindPrev,
     FindNext,
     FindClose,
+    /// An ended session starts again on its conversation.
+    Resume,
 }
 
 /// A text field on a card or the find bar's, by its id.
@@ -1224,7 +1228,8 @@ impl View {
                 LINE_H + GAP
             } else {
                 0.0
-            };
+            }
+            + if chat.ended { RESUME_H } else { 0.0 };
         st.tops.clear();
         st.prompts.clear();
         let earlier = from > 0;
@@ -1317,11 +1322,19 @@ impl View {
         } else if chat.ended {
             let r = Rect::new(cx, y, cw, LINE_H);
             gfx.text_in(
-                "The session ended. Close the Folio to start again.",
+                "The session ended. Resume carries on the conversation.",
                 &gfx.line,
                 &r,
                 pal.dim,
             );
+        }
+        // One that never started can be tried again just the same.
+        if chat.ended {
+            let b = Rect::new(cx, y + LINE_H + 8.0, 96.0, RESUME_H - 8.0);
+            gfx.stroke_round(&b, 8.0, pal.fg.with_alpha(0.32), 1.0);
+            let label = Rect::new(b.x + 22.0, b.y + 2.0, b.w - 22.0, LINE_H);
+            gfx.text_in("Resume", &gfx.line, &label, pal.fg);
+            hits.push((b, Hit::Tr(Act::Resume)));
         }
         rt.PopAxisAlignedClip();
 

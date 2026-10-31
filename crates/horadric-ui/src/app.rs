@@ -4873,6 +4873,10 @@ impl App {
                     && saved.claude_session_id.is_some()
                     && self.started_plainly(id, &saved)));
         if as_chat {
+            // A Folio that ended still holds its pane, which would keep the
+            // new one from opening.
+            crate::folio::close(id);
+            self.folios.remove(id);
             let conversation = (saved.claude_session_id.clone()).filter(|_| saved.prompted);
             let started =
                 self.start_folio(Some(id.to_string()), cwd, conversation, &saved.args, show);
@@ -5693,9 +5697,8 @@ impl App {
     fn switch_when_out(&mut self) {
         let agent = Agent::Claude;
         let stops: Vec<(String, SystemTime)> = match self.shared.registry.lock() {
-            Ok(r) => self
-                .consoles
-                .keys()
+            Ok(r) => (self.consoles.keys())
+                .chain(self.folios.keys())
                 .filter_map(|id| {
                     let s = r.get(id).filter(|s| s.limited())?;
                     Some((id.clone(), s.since))
@@ -5707,7 +5710,10 @@ impl App {
             .retain(|id, since| stops.iter().any(|(i, s)| i == id && s == since));
         let fresh: Vec<(String, SystemTime)> = stops
             .into_iter()
-            .filter(|(id, _)| !self.out_seen.contains_key(id) && self.runs(id, agent))
+            .filter(|(id, _)| {
+                let ours = self.runs(id, agent) || self.folios.contains_key(id);
+                !self.out_seen.contains_key(id) && ours
+            })
             .collect();
         if !self.switch_accounts || fresh.is_empty() || self.login(agent).switch.is_some() {
             return;
@@ -5794,11 +5800,16 @@ impl App {
         }
         let email = self.accounts.get(&s.to).map(|a| a.email.clone());
         match self.put_login(agent, &s.to) {
-            Ok(()) => self.toasts.show(
-                Kind::Done,
-                &format!("Switched to {}", email.unwrap_or_default()),
-                "The sessions carry on with this account.",
-            ),
+            Ok(()) => {
+                if agent == Agent::Claude {
+                    self.folios_on_new_login(email.as_deref());
+                }
+                self.toasts.show(
+                    Kind::Done,
+                    &format!("Switched to {}", email.unwrap_or_default()),
+                    "The sessions carry on with this account.",
+                )
+            }
             Err(e) => self.toasts.show(Kind::Failed, "Cannot switch accounts", &e),
         }
         // Once each, whatever happened: on the old login if the switch failed.
@@ -5822,6 +5833,28 @@ impl App {
         if let Some(id) = on_stage.filter(|id| s.stopped.contains(id)) {
             if self.consoles.contains_key(&id) {
                 self.reveal(&id, false);
+            }
+        }
+    }
+
+    /// Each Folio starts again so its claude.exe reads the new login, as a
+    /// terminal is stopped and resumed. One a usage limit stopped takes
+    /// its refused prompt up again; one at work is left to finish.
+    fn folios_on_new_login(&mut self, email: Option<&str>) {
+        let said = match email {
+            Some(e) => format!("Switched to {e}."),
+            None => "Switched accounts.".to_string(),
+        };
+        let ids: Vec<String> = self.folios.keys().cloned().collect();
+        for id in ids {
+            let limited = (self.shared.registry.lock())
+                .is_ok_and(|r| r.get(&id).is_some_and(|s| s.limited()));
+            if limited {
+                (self.tasks.prompts)
+                    .insert(id.clone(), horadric_core::accounts::GO_ON.to_string());
+            }
+            if !crate::folio::restart(&id, &said, false) {
+                self.tasks.prompts.remove(&id);
             }
         }
     }
@@ -8123,7 +8156,31 @@ impl App {
             r.apply(id, &event, SystemTime::now());
         }
         drop(r);
+        if state.gone {
+            self.folio_gone(id);
+        }
         self.reconcile(false);
+    }
+
+    /// A Folio whose claude.exe ended on its own pauses, as a terminal that
+    /// crashed does, so its tile resumes the conversation. The pane stays
+    /// for what it last said to be read.
+    fn folio_gone(&mut self, id: &str) {
+        if self.paused.contains_key(id) {
+            return;
+        }
+        let args = self.folio_args.get(id).cloned().unwrap_or_default();
+        if let Ok(mut r) = self.shared.registry.lock() {
+            if let Some(s) = r.get(id) {
+                let saved = SavedSession {
+                    chat: true,
+                    ..SavedSession::from_session(s, args, false)
+                };
+                self.paused.insert(id.to_string(), saved);
+                r.apply(id, &HookEvent::synthetic(HookEvent::PAUSE), SystemTime::now());
+            }
+        }
+        self.reconcile(true);
     }
 
     /// The Folio's "Terminal": it ends between turns, and once it has the
