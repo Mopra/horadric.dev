@@ -1161,6 +1161,9 @@ pub const RETINUE_HEAD: f32 = 22.0;
 pub const RETINUE_CELL: f32 = 48.0;
 /// A portrait's frame, square.
 const PORTRAIT: f32 = 34.0;
+/// A portrait's stone, centre to face, and how fast one at work turns.
+const STONE_HALF: f32 = 10.0;
+const STONE_TURN_DEG_S: f32 = 30.0;
 
 /// How many of `n` portraits a column `h` DIPs tall shows. When they do
 /// not all fit the last place goes to a "+N" for the rest.
@@ -3051,10 +3054,21 @@ impl Painter<'_> {
                 Lot::Done => (gold, gold.with_alpha(0.7), 1.0),
                 Lot::Failed => (theme::error(), theme::error().with_alpha(0.6), 1.0),
             };
-            self.fill_rounded(&frame, 3.0, edge.with_alpha(0.08));
-            self.stroke_rounded(&frame.inset(0.5), 3.0, edge, 1.0);
-            let centre = (frame.x + PORTRAIT / 2.0, frame.y + PORTRAIT / 2.0);
-            self.rune_cut(row.rune, centre, 18.0, ink, drawn, 1.6);
+            // One at work turns, one waiting on you leans toward you on
+            // its beat, and the rest stand at the icon's angle.
+            let (turn, tilt) = match row.lot {
+                Lot::Working => (
+                    crate::cube::REST_TURN + row.age.as_secs_f32() * STONE_TURN_DEG_S,
+                    crate::cube::REST_TILT,
+                ),
+                Lot::Waiting => (
+                    crate::cube::REST_TURN,
+                    crate::cube::REST_TILT + 12.0 * motion::waiting_breath(row.waited),
+                ),
+                _ => (crate::cube::REST_TURN, crate::cube::REST_TILT),
+            };
+            let centre = (frame.x + PORTRAIT / 2.0, frame.y + PORTRAIT / 2.0 + 0.5);
+            self.rune_cube(gpu, row.rune, centre, (turn, tilt), edge, ink, drawn);
             let (l, t, r, b) = (frame.x, frame.y, frame.x + PORTRAIT, frame.y + PORTRAIT);
             match row.lot {
                 Lot::Done => {
@@ -3065,12 +3079,11 @@ impl Painter<'_> {
                     // The frame broken where the crack starts, then the
                     // crack down through the rune.
                     let crack = [
-                        (l + 21.0, t),
-                        (l + 17.0, t + 9.0),
-                        (l + 22.0, t + 15.0),
-                        (l + 16.0, t + 24.0),
+                        (l + 21.0, t + 3.0),
+                        (l + 17.0, t + 10.0),
+                        (l + 22.0, t + 16.0),
+                        (l + 16.0, t + 25.0),
                     ];
-                    line((l + 19.5, t), (l + 22.5, t), p.term_bg, 2.0);
                     for seg in crack.windows(2) {
                         line(seg[0], seg[1], theme::error(), 1.2);
                     }
@@ -3100,6 +3113,54 @@ impl Painter<'_> {
             let r = Rect::new(0.0, y + 4.0, w - 1.0, 16.0);
             let more = format!("+{}", scene.rows.len() - fit);
             self.text(&gpu.small_centre, fg.with_alpha(0.55), &more, r);
+        }
+    }
+
+    /// A hireling's rune stone: the faces the eye sees, dark and lit by
+    /// how they catch the light, bound in `edge`, its rune cut on each
+    /// side in `ink`, faint where a side turns away.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn rune_cube(
+        &self,
+        gpu: &Gpu,
+        rune: usize,
+        at: (f32, f32),
+        (turn, tilt): (f32, f32),
+        edge: Color,
+        ink: Color,
+        drawn: f32,
+    ) {
+        let p = theme::palette();
+        let faces = crate::cube::faces(STONE_HALF, turn, tilt);
+        let pt = |(x, y): (f32, f32)| Vector2 {
+            X: at.0 + x,
+            Y: at.1 + y,
+        };
+        let bound = p.term_bg.mix(edge, 0.55);
+        for f in &faces {
+            let shade = p.term_bg.mix(p.term_fg, 0.05 + 0.16 * f.light);
+            self.polygon(gpu, &f.corners.map(pt), shade);
+            if f.side {
+                let c = pt(f.centre);
+                self.rt.SetTransform(&Matrix3x2 {
+                    M11: f.right.0,
+                    M12: f.right.1,
+                    M21: f.down.0,
+                    M22: f.down.1,
+                    M31: c.X,
+                    M32: c.Y,
+                });
+                let k = (f.facing * 1.6).min(1.0);
+                self.rune_cut(rune, (0.0, 0.0), STONE_HALF * 1.25, ink.fade(k), drawn, 1.6);
+                self.rt.SetTransform(&Matrix3x2::identity());
+            }
+        }
+        self.brush.SetColor(&color(bound));
+        for f in &faces {
+            for k in 0..4 {
+                let (a, b) = (pt(f.corners[k]), pt(f.corners[(k + 1) % 4]));
+                self.rt.DrawLine(a, b, self.brush, 1.0, None);
+            }
         }
     }
 

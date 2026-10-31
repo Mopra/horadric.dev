@@ -76,6 +76,7 @@ pub mod shell;
 pub mod sky;
 pub mod sparks;
 pub mod spectator;
+pub mod cube;
 pub use horadric_core::standing;
 pub mod summon;
 pub mod symbols;
