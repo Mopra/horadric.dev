@@ -19,6 +19,7 @@
 //! CLI asks, the last is [`Folio::todos`].
 
 pub mod afar;
+pub mod backlog;
 mod edits;
 mod launch;
 mod send;

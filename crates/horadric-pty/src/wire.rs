@@ -8,7 +8,7 @@
 //! so a new UI has to understand every version still running, and a small
 //! protocol keeps that easy.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 /// This build's protocol. A UI speaks every version up to its own.
 pub const VERSION: u8 = 1;
@@ -376,11 +376,123 @@ impl Logged {
 /// count of those gone says so. The newest line always stays, however
 /// long. The whole conversation is in the session's transcript on disk
 /// anyway; this is what a reload needs to carry on mid turn.
+///
+/// A reply streams token by token before its whole copy arrives, and the
+/// tokens are most of a long session's lines. Once a content block has
+/// both ended and been copied whole, its deltas say nothing the copy does
+/// not, so they go and the cap holds far more of the conversation. The
+/// block's start and stop stay, small, so a client replaying the rest
+/// still pairs the copy with the block it streamed.
 pub struct LineLog {
-    lines: VecDeque<Logged>,
+    /// None where a delta was let go: taking it out of the middle of the
+    /// queue would move every line after it.
+    lines: VecDeque<Option<Logged>>,
     bytes: usize,
     cap: usize,
     dropped: u64,
+    /// How many of `lines` are None.
+    holes: usize,
+    /// The number the next line pushed gets, so a line's place can be
+    /// found again after the oldest went.
+    next: u64,
+    streaming: Streaming,
+    conversation: Option<String>,
+}
+
+/// The message streaming now, as far as letting its deltas go needs.
+#[derive(Default)]
+struct Streaming {
+    message: String,
+    /// Its content blocks by index.
+    blocks: HashMap<u64, Streamed>,
+    /// How many blocks started, so each knows its place among them.
+    started: u64,
+    /// How many whole copies of its blocks arrived. They come one per
+    /// block, in the order the blocks started.
+    copies: u64,
+}
+
+struct Streamed {
+    /// Which of the message's blocks it is, from 0.
+    nth: u64,
+    stopped: bool,
+    /// The numbers of its delta lines.
+    deltas: Vec<u64>,
+}
+
+/// What a stdout line is, as far as [`LineLog`] cares. A subagent's lines
+/// (with a `parent_tool_use_id`) are always `Other`: their streams
+/// interleave with the main one.
+#[derive(Debug, PartialEq, Eq)]
+enum Shape {
+    MessageStart(String),
+    BlockStart(u64),
+    Delta(u64),
+    BlockStop(u64),
+    Copy(String),
+    Init(String),
+    Other,
+}
+
+fn shape(line: &str) -> Shape {
+    use serde::de::IgnoredAny;
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    struct Head {
+        #[serde(rename = "type", default)]
+        kind: String,
+        #[serde(default)]
+        subtype: String,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        parent_tool_use_id: Option<IgnoredAny>,
+        #[serde(default)]
+        event: Option<EventHead>,
+        #[serde(default)]
+        message: Option<MessageHead>,
+    }
+    #[derive(Deserialize)]
+    struct EventHead {
+        #[serde(rename = "type", default)]
+        kind: String,
+        #[serde(default)]
+        index: u64,
+        #[serde(default)]
+        message: Option<MessageHead>,
+    }
+    #[derive(Deserialize)]
+    struct MessageHead {
+        #[serde(default)]
+        id: Option<String>,
+    }
+    // Most lines are none of these, and some are megabytes of tool result.
+    let words = [r#""stream_event""#, r#""assistant""#, r#""init""#];
+    if !words.iter().any(|w| line.contains(w)) {
+        return Shape::Other;
+    }
+    let Ok(h) = serde_json::from_str::<Head>(line) else {
+        return Shape::Other;
+    };
+    if h.parent_tool_use_id.is_some() {
+        return Shape::Other;
+    }
+    let id = |m: Option<MessageHead>| m.and_then(|m| m.id).unwrap_or_default();
+    match (h.kind.as_str(), h.event) {
+        ("stream_event", Some(e)) => match e.kind.as_str() {
+            "message_start" => Shape::MessageStart(id(e.message)),
+            "content_block_start" => Shape::BlockStart(e.index),
+            "content_block_delta" => Shape::Delta(e.index),
+            "content_block_stop" => Shape::BlockStop(e.index),
+            _ => Shape::Other,
+        },
+        ("assistant", _) => Shape::Copy(id(h.message)),
+        ("system", _) if h.subtype == "init" => match h.session_id {
+            Some(s) => Shape::Init(s),
+            None => Shape::Other,
+        },
+        _ => Shape::Other,
+    }
 }
 
 impl LineLog {
@@ -390,18 +502,103 @@ impl LineLog {
             bytes: 0,
             cap,
             dropped: 0,
+            holes: 0,
+            next: 0,
+            streaming: Streaming::default(),
+            conversation: None,
         }
     }
 
     pub fn push(&mut self, line: Logged) {
+        let shape = match &line {
+            Logged::Out(t) => shape(t),
+            Logged::Sent(_) => Shape::Other,
+        };
+        let seq = self.next;
+        match shape {
+            Shape::MessageStart(id) => {
+                // Nothing points into the queue between messages, so this
+                // is when the holes can close.
+                if self.holes > self.lines.len() / 2 {
+                    self.lines.retain(Option::is_some);
+                    self.holes = 0;
+                }
+                self.streaming = Streaming {
+                    message: id,
+                    ..Streaming::default()
+                };
+            }
+            Shape::BlockStart(i) => {
+                let s = &mut self.streaming;
+                let nth = s.started;
+                s.started += 1;
+                s.blocks.insert(
+                    i,
+                    Streamed {
+                        nth,
+                        stopped: false,
+                        deltas: Vec::new(),
+                    },
+                );
+            }
+            Shape::Delta(i) => {
+                if let Some(b) = self.streaming.blocks.get_mut(&i) {
+                    b.deltas.push(seq);
+                }
+            }
+            Shape::BlockStop(i) => {
+                if let Some(b) = self.streaming.blocks.get_mut(&i) {
+                    b.stopped = true;
+                }
+            }
+            Shape::Copy(id) if !id.is_empty() && id == self.streaming.message => {
+                self.streaming.copies += 1;
+            }
+            Shape::Init(id) => self.conversation = Some(id),
+            Shape::Copy(_) | Shape::Other => {}
+        }
         self.bytes += line.len();
-        self.lines.push_back(line);
-        while self.bytes > self.cap && self.lines.len() > 1 {
-            if let Some(old) = self.lines.pop_front() {
-                self.bytes -= old.len();
-                self.dropped += 1;
+        self.lines.push_back(Some(line));
+        self.next += 1;
+        self.let_go_of_deltas();
+        while self.bytes > self.cap && self.lines.len() - self.holes > 1 {
+            match self.lines.pop_front() {
+                Some(Some(old)) => {
+                    self.bytes -= old.len();
+                    self.dropped += 1;
+                }
+                Some(None) => self.holes -= 1,
+                None => break,
             }
         }
+    }
+
+    /// Lets go of the deltas of every block that has ended and been copied.
+    fn let_go_of_deltas(&mut self) {
+        let s = &mut self.streaming;
+        let done: Vec<u64> = (s.blocks.iter())
+            .filter(|(_, b)| b.stopped && b.nth < s.copies)
+            .map(|(&i, _)| i)
+            .collect();
+        let first = self.next - self.lines.len() as u64;
+        for i in done {
+            let Some(b) = s.blocks.remove(&i) else {
+                continue;
+            };
+            for seq in b.deltas.into_iter().filter(|&q| q >= first) {
+                let slot = self.lines.get_mut((seq - first) as usize);
+                if let Some(old) = slot.and_then(Option::take) {
+                    self.bytes -= old.len();
+                    self.holes += 1;
+                }
+            }
+        }
+    }
+
+    /// The conversation the session carries on now, as its latest
+    /// `system`/`init` named it. A `/clear` starts a new one.
+    pub fn conversation(&self) -> Option<&str> {
+        self.conversation.as_deref()
     }
 
     /// How many of the oldest lines are gone.
@@ -415,7 +612,7 @@ impl LineLog {
         if self.dropped > 0 {
             out.push(LineMessage::Dropped(self.dropped));
         }
-        out.extend(self.lines.iter().map(|l| match l {
+        out.extend(self.lines.iter().flatten().map(|l| match l {
             Logged::Out(t) => LineMessage::Out(t.clone()),
             Logged::Sent(t) => LineMessage::Sent(t.clone()),
         }));
@@ -423,12 +620,13 @@ impl LineLog {
         out
     }
 
+    /// How many lines it keeps.
     pub fn len(&self) -> usize {
-        self.lines.len()
+        self.lines.len() - self.holes
     }
 
     pub fn is_empty(&self) -> bool {
-        self.lines.is_empty()
+        self.len() == 0
     }
 
     /// The bytes the kept lines hold.
@@ -696,6 +894,133 @@ mod tests {
         log.push(Logged::Sent("x".into()));
         assert_eq!(log.backlog()[1], LineMessage::Sent("x".into()));
         assert_eq!(log.len(), 1);
+    }
+
+    fn event(kind: &str, rest: &str) -> String {
+        format!(r#"{{"type":"stream_event","event":{{"type":"{kind}"{rest}}},"parent_tool_use_id":null}}"#)
+    }
+
+    fn copy(id: &str) -> String {
+        format!(r#"{{"type":"assistant","message":{{"id":"{id}","content":[]}},"parent_tool_use_id":null}}"#)
+    }
+
+    fn kept(log: &LineLog) -> Vec<String> {
+        (log.backlog().into_iter())
+            .filter_map(|m| match m {
+                LineMessage::Out(t) | LineMessage::Sent(t) => Some(t),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_block_ended_and_copied_lets_its_deltas_go() {
+        let mut log = LineLog::new(1 << 20);
+        let start = event("message_start", r#","message":{"id":"m1"}"#);
+        let lines = [
+            start.clone(),
+            event("content_block_start", r#","index":0"#),
+            event("content_block_delta", r#","index":0,"delta":"a""#),
+            event("content_block_delta", r#","index":0,"delta":"b""#),
+            copy("m1"),
+            event("content_block_stop", r#","index":0"#),
+            event("content_block_start", r#","index":1"#),
+            event("content_block_delta", r#","index":1,"delta":"c""#),
+        ];
+        for l in &lines {
+            log.push(Logged::Out(l.clone()));
+        }
+        let left = kept(&log);
+        assert_eq!(left.len(), 6, "{left:#?}");
+        assert!(!left.contains(&lines[2]) && !left.contains(&lines[3]));
+        assert!(left.contains(&lines[7]), "the block still streaming keeps its");
+        assert!(left.contains(&start), "so the copy pairs with what streamed");
+        assert_eq!(log.len(), 6);
+
+        // The copy may come after the stop as well.
+        log.push(Logged::Out(event("content_block_stop", r#","index":1"#)));
+        assert!(kept(&log).contains(&lines[7]), "not copied yet");
+        log.push(Logged::Out(copy("m1")));
+        assert!(!kept(&log).contains(&lines[7]));
+        assert_eq!(log.bytes(), kept(&log).iter().map(String::len).sum::<usize>());
+    }
+
+    #[test]
+    fn a_subagent_stream_and_another_messages_copy_keep_their_deltas() {
+        let mut log = LineLog::new(1 << 20);
+        let theirs = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0},"parent_tool_use_id":"toolu_1"}"#;
+        for l in [
+            event("message_start", r#","message":{"id":"m1"}"#),
+            event("content_block_start", r#","index":0"#),
+            event("content_block_delta", r#","index":0"#),
+            theirs.to_string(),
+            event("content_block_stop", r#","index":0"#),
+            copy("m0"),
+        ] {
+            log.push(Logged::Out(l));
+        }
+        assert_eq!(log.len(), 6);
+    }
+
+    #[test]
+    fn a_recorded_stream_keeps_all_but_its_finished_deltas() {
+        let stream = include_str!("../../horadric-core/tests/fixtures/headless/edits.jsonl");
+        let mut log = LineLog::new(1 << 30);
+        for l in stream.lines() {
+            log.push(Logged::Out(l.to_string()));
+        }
+        let want: Vec<&str> = (stream.lines())
+            .filter(|l| !l.contains(r#""type":"content_block_delta""#))
+            .collect();
+        assert_eq!(kept(&log), want);
+        assert_eq!(
+            log.conversation(),
+            Some("4792f003-15a6-47f5-8cdd-efd07abf2ea4")
+        );
+    }
+
+    #[test]
+    fn holes_close_between_messages_and_the_cap_still_counts_whole_lines() {
+        let mut log = LineLog::new(1 << 20);
+        for n in 0..3 {
+            let id = format!("m{n}");
+            log.push(Logged::Out(event(
+                "message_start",
+                &format!(r#","message":{{"id":"{id}"}}"#),
+            )));
+            log.push(Logged::Out(event("content_block_start", r#","index":0"#)));
+            for _ in 0..10 {
+                log.push(Logged::Out(event("content_block_delta", r#","index":0"#)));
+            }
+            log.push(Logged::Out(copy(&id)));
+            log.push(Logged::Out(event("content_block_stop", r#","index":0"#)));
+        }
+        assert_eq!(log.len(), 12);
+        assert!(log.lines.len() < 12 + 30, "closed some");
+        let before = kept(&log);
+        let mut small = LineLog::new(log.bytes() - 1);
+        for l in &before {
+            small.push(Logged::Out(l.clone()));
+        }
+        assert_eq!(small.dropped(), 1);
+        assert_eq!(kept(&small), before[1..]);
+    }
+
+    #[test]
+    fn the_conversation_follows_each_init() {
+        let mut log = LineLog::new(1 << 20);
+        assert_eq!(log.conversation(), None);
+        log.push(Logged::Out(
+            r#"{"type":"system","subtype":"init","session_id":"a"}"#.into(),
+        ));
+        log.push(Logged::Out(
+            r#"{"type":"system","subtype":"status","session_id":"x"}"#.into(),
+        ));
+        assert_eq!(log.conversation(), Some("a"));
+        log.push(Logged::Out(
+            r#"{"type":"system","subtype":"init","session_id":"b"}"#.into(),
+        ));
+        assert_eq!(log.conversation(), Some("b"));
     }
 
     #[test]
