@@ -14,16 +14,23 @@
 //! The band only learns a hireling's tokens and tool count from its
 //! transcript, so the column reads what each one's has grown by.
 //!
-//! Turned over (Ctrl+Shift+W, or the glyph atop the column) it is the
-//! war table: the same window over the whole glass, the turn drawn on one
-//! axis of time, a track for the main loop and one per hireling. The
-//! grid under it keeps its size, so the program never redraws for it.
+//! Turned over (Ctrl+Shift+W, the glyph atop the column, or the line on
+//! the tile that counts them) it is the war table: the same window over
+//! the whole glass, the turn drawn on one axis of time, a track for the
+//! main loop and one per hireling. The grid under it keeps its size, so
+//! the program never redraws for it. Hovering a tick on a track says
+//! which tool it was and what it was given.
+//!
+//! Alt+Down hands it the keyboard: the arrows walk the portraits (or the
+//! tracks), Enter opens one, Esc gives the keyboard back. The pane holds
+//! the keys and asks it what each one does, since the focus stays in the
+//! pane for the program's sake.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::io::{Read, Seek, SeekFrom};
 use std::rc::Rc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use horadric_core::hireling::{self, Band, Craft, Lot, Mark};
 use windows::core::{w, Result, PCWSTR};
@@ -42,8 +49,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::app::{self, Input};
 use crate::render::{
-    retinue_fit, RetinueRow, RetinueScene, TableScene, TableTrack, Target, RETINUE_CELL,
-    RETINUE_HEAD, RETINUE_W, TABLE_AXIS, TABLE_HEAD, TABLE_ROW_H,
+    retinue_fit, tick_span, RetinueRow, RetinueScene, TableScene, TableTrack, Target,
+    RETINUE_CELL, RETINUE_HEAD, RETINUE_W, TABLE_AXIS, TABLE_HEAD, TABLE_ROW_H,
 };
 use crate::theme::{self, Color};
 use crate::window::Shared;
@@ -83,6 +90,11 @@ pub struct Retinue {
     /// The portrait under the cursor; `usize::MAX` for the war table's
     /// glyph, or its Close.
     hot: Cell<Option<usize>>,
+    /// The war table's tick under the cursor: its track, the main loop's
+    /// being 0, and its place in that track's marks.
+    tick: Cell<Option<(usize, usize)>>,
+    /// Holding the keyboard: the arrows move `hot`, Enter opens it.
+    keyed: Cell<bool>,
     tracking: Cell<bool>,
     /// Turned over into the war table.
     table: Cell<bool>,
@@ -101,6 +113,8 @@ impl Retinue {
             ids: RefCell::new(Vec::new()),
             rows: Cell::new(0),
             hot: Cell::new(None),
+            tick: Cell::new(None),
+            keyed: Cell::new(false),
             tracking: Cell::new(false),
             table: Cell::new(false),
             beat: Cell::new(0),
@@ -140,9 +154,97 @@ impl Retinue {
     /// Turns it into the war table or back. The pane places it after.
     pub fn set_table(&self, on: bool) {
         if self.table.replace(on) != on {
-            self.hot.set(None);
+            self.tick.set(None);
             self.poll();
+            // Keys held carry over to the first of what is shown now.
+            self.hot.set(self.keyed.get().then(|| self.first()));
             self.invalidate();
+        }
+    }
+
+    /// Whether it holds the keyboard.
+    pub fn keyed(&self) -> bool {
+        self.keyed.get()
+    }
+
+    /// Takes the keyboard, on the first portrait or track, or on the war
+    /// table's glyph where there is none. False when nothing is shown.
+    pub fn take_keys(&self) -> bool {
+        if self.rows.get() == 0 && !self.table.get() {
+            return false;
+        }
+        self.keyed.set(true);
+        self.hot.set(Some(self.first()));
+        self.invalidate();
+        true
+    }
+
+    /// Gives the keyboard back.
+    pub fn drop_keys(&self) {
+        if self.keyed.replace(false) {
+            self.hot.set(None);
+            self.invalidate();
+        }
+    }
+
+    /// The first portrait, or track, that a key can land on.
+    fn first(&self) -> usize {
+        if self.reachable() > 0 {
+            0
+        } else {
+            usize::MAX
+        }
+    }
+
+    /// How many portraits, or hirelings' tracks, are in sight to be
+    /// reached by a key or a click.
+    fn reachable(&self) -> usize {
+        let hwnd = self.hwnd.get();
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+        let mut rc = Default::default();
+        unsafe {
+            let _ = GetClientRect(hwnd, &mut rc);
+        }
+        let h = rc.bottom as f32 * 96.0 / dpi as f32;
+        let n = self.ids.borrow().len();
+        if self.table.get() {
+            // Track 0 is the main loop's, which opens nothing.
+            let top = TABLE_HEAD + TABLE_AXIS + 6.0 + TABLE_ROW_H;
+            n.min(((h - top) / TABLE_ROW_H).max(0.0).floor() as usize)
+        } else {
+            retinue_fit(n, h)
+        }
+    }
+
+    /// Up or Down while it holds the keyboard: the glyph atop counts as
+    /// one above the first.
+    pub fn key(&self, down: bool) {
+        let at = step(self.hot.get(), self.reachable(), down);
+        if self.hot.replace(Some(at)) != Some(at) {
+            self.invalidate();
+        }
+    }
+
+    /// Opens what the keys lit, as a click on it would.
+    pub fn enter(&self) {
+        if let Some(at) = self.hot.get() {
+            self.open(at);
+        }
+    }
+
+    /// A portrait or track opens its hireling's conversation; the glyph
+    /// or Close turns the war table over.
+    fn open(&self, at: usize) {
+        if at == usize::MAX {
+            self.set_table(!self.table.get());
+            self.tell_pane();
+            return;
+        }
+        let id = self.ids.borrow().get(at).cloned();
+        if let Some(agent) = id {
+            // Its conversation takes the keyboard.
+            self.drop_keys();
+            app::push(Input::OpenHireling(self.session.clone(), agent));
         }
     }
 
@@ -328,6 +430,7 @@ impl Retinue {
                     .hot
                     .get()
                     .map(|i| if i == usize::MAX { i } else { i + 1 }),
+                hot_tick: self.tick.get(),
                 size,
                 accent: self.accent.get(),
                 age: now
@@ -380,16 +483,65 @@ impl Retinue {
         (y >= top && (i as usize) < self.ids.borrow().len()).then_some(i as usize)
     }
 
-    fn hover(&self, row: Option<usize>) {
-        if self.hot.replace(row) != row {
+    /// The war table's tick at `x`, `y` pixels in, as its track and its
+    /// place among the track's marks, and what its tip says.
+    fn tick_at(&self, x: i32, y: i32) -> Option<((usize, usize), String)> {
+        if !self.table.get() {
+            return None;
+        }
+        let hwnd = self.hwnd.get();
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+        let k = 96.0 / dpi as f32;
+        let (x, y) = (x as f32 * k, y as f32 * k);
+        let mut rc = Default::default();
+        unsafe {
+            let _ = GetClientRect(hwnd, &mut rc);
+        }
+        let w = rc.right as f32 * k;
+        let top = TABLE_HEAD + TABLE_AXIS + 6.0;
+        let i = ((y - top) / TABLE_ROW_H).floor();
+        // Only near the lane, so the rest of a row still says whose it is.
+        let mid = top + (i + 0.5) * TABLE_ROW_H;
+        if i < 0.0 || (y - mid).abs() > 8.0 {
+            return None;
+        }
+        let i = i as usize;
+        let now = SystemTime::now();
+        let band = self
+            .shared
+            .registry
+            .lock()
+            .ok()?
+            .get(&self.session)?
+            .band
+            .clone();
+        let (tracks, span) = tracks(&band, now, self.accent.get());
+        let spans: Vec<(f32, f32)> = tracks.get(i)?.marks.iter().map(|m| (m.0, m.1)).collect();
+        let at = tick_under(&spans, x, span, w)?;
+        let mark = match i {
+            0 => band.main.get(at)?,
+            _ => table_order(&band, now).get(i - 1)?.marks.get(at)?,
+        };
+        Some(((i, at), tick_tip(mark, now)))
+    }
+
+    fn hover(&self, row: Option<usize>, tick: Option<((usize, usize), String)>) {
+        let (tick, said) = tick.unzip();
+        // Moving the mouse takes over from the keys.
+        let row = row.or(self.hot.get().filter(|_| self.keyed.get()));
+        if self.hot.replace(row) != row || self.tick.replace(tick) != tick {
             self.invalidate();
+        }
+        if let Some(said) = said {
+            tip::over_line(&self.shared, self.hwnd.get(), Some(said.into()));
+            return;
         }
         let line: Option<Line> = row.and_then(|i| {
             if i == usize::MAX {
                 let what = if self.table.get() {
                     "Back to the terminal (Esc)"
                 } else {
-                    "The war table: this turn and its hirelings over time (Ctrl+Shift+W)"
+                    "The war table: this turn and its hirelings over time (Ctrl+Shift+W). Alt+Down walks the portraits with the keys"
                 };
                 return Some(what.into());
             }
@@ -479,12 +631,16 @@ impl Retinue {
                         let _ = TrackMouseEvent(&mut t);
                     }
                 }
-                self.hover(self.row_at(x, y));
+                self.hover(self.row_at(x, y), self.tick_at(x, y));
                 Some(LRESULT(0))
             }
             WM_MOUSELEAVE => {
                 self.tracking.set(false);
-                self.hot.set(None);
+                // Keys held keep what they lit.
+                if !self.keyed.get() {
+                    self.hot.set(None);
+                }
+                self.tick.set(None);
                 tip::away(self.hwnd.get());
                 self.invalidate();
                 Some(LRESULT(0))
@@ -499,20 +655,80 @@ impl Retinue {
             }
             WM_LBUTTONUP => {
                 tip::press(self.hwnd.get());
-                let at = self.row_at(x, y);
-                if at == Some(usize::MAX) {
-                    self.set_table(!self.table.get());
-                    self.tell_pane();
-                    return Some(LRESULT(0));
-                }
-                let id = at.and_then(|i| self.ids.borrow().get(i).cloned());
-                if let Some(agent) = id {
-                    app::push(Input::OpenHireling(self.session.clone(), agent));
+                if let Some(at) = self.row_at(x, y) {
+                    self.open(at);
                 }
                 Some(LRESULT(0))
             }
             _ => None,
         }
+    }
+}
+
+/// Where Up or Down from `at` lands among `n` portraits or tracks, the
+/// glyph atop (`usize::MAX`) above the first. Neither wraps, so holding
+/// a key stops at an end.
+fn step(at: Option<usize>, n: usize, down: bool) -> usize {
+    match (at, down) {
+        _ if n == 0 => usize::MAX,
+        (None, _) | (Some(usize::MAX), true) => 0,
+        (Some(usize::MAX), false) | (Some(0), false) => usize::MAX,
+        (Some(i), false) => (i - 1).min(n - 1),
+        (Some(i), true) => (i + 1).min(n - 1),
+    }
+}
+
+/// Which of a track's ticks, each `(from, to)` in seconds, is under `x`
+/// DIPs across a war table `w` wide spanning `span` seconds. A few DIPs
+/// either side count, as a quick call is drawn a sliver; where several
+/// are that near, the closest wins, and of those the later, drawn on top.
+fn tick_under(spans: &[(f32, f32)], x: f32, span: f32, w: f32) -> Option<usize> {
+    const SLOP: f32 = 3.0;
+    let mut best: Option<(usize, f32)> = None;
+    for (k, &(from, to)) in spans.iter().enumerate() {
+        let (a, b) = tick_span(from, to, span, w);
+        let off = if x < a {
+            a - x
+        } else if x > b {
+            x - b
+        } else {
+            0.0
+        };
+        if off <= SLOP && best.is_none_or(|(_, o)| off <= o) {
+            best = Some((k, off));
+        }
+    }
+    best.map(|(k, _)| k)
+}
+
+/// A tick's tip: the tool, how long it took or that it still runs, and
+/// what it was given.
+fn tick_tip(m: &Mark, now: SystemTime) -> String {
+    let took = match m.end {
+        Some(end) => took(end.duration_since(m.start).unwrap_or_default()),
+        None => format!(
+            "running {}",
+            took(now.duration_since(m.start).unwrap_or_default())
+        ),
+    };
+    let mut head = format!("{} \u{b7} {took}", m.tool);
+    if m.failed {
+        head.push_str(" \u{b7} failed");
+    }
+    match m.given.as_str() {
+        "" => head,
+        given => format!("{head}\n{given}"),
+    }
+}
+
+/// How long a tool call took, to a tenth of a second while short, as
+/// most take less than one.
+fn took(d: Duration) -> String {
+    let s = d.as_secs_f32();
+    if s < 10.0 {
+        format!("{s:.1}s")
+    } else {
+        horadric_core::heavy::duration(d.as_secs())
     }
 }
 
@@ -681,5 +897,40 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match (*ptr).handle(msg, wparam, lparam) {
         Some(r) => r,
         None => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keys_walk_from_the_glyph_down_and_stop_at_the_ends() {
+        let g = usize::MAX;
+        assert_eq!(step(None, 3, true), 0);
+        assert_eq!(step(Some(g), 3, true), 0);
+        assert_eq!(step(Some(0), 3, false), g);
+        assert_eq!(step(Some(g), 3, false), g);
+        assert_eq!(step(Some(1), 3, true), 2);
+        assert_eq!(step(Some(2), 3, true), 2);
+        // Portraits went while it was lit.
+        assert_eq!(step(Some(5), 2, false), 1);
+        assert_eq!(step(Some(5), 2, true), 1);
+        assert_eq!(step(Some(1), 0, true), g);
+    }
+
+    #[test]
+    fn the_nearest_tick_is_hovered_and_a_sliver_is_easy_to_hit() {
+        // 1000 DIPs wide over 100 seconds: the track runs 170 to 984.
+        let w = 1000.0;
+        let x = |t: f32| crate::render::table_x(t, 100.0, w);
+        let spans = [(0.0, 10.0), (10.0, 10.0), (50.0, 60.0)];
+        assert_eq!(tick_under(&spans, x(5.0), 100.0, w), Some(0));
+        // The quick one at 10 s shares an edge with the first; it is drawn
+        // on top and wins.
+        assert_eq!(tick_under(&spans, x(10.0) + 1.0, 100.0, w), Some(1));
+        assert_eq!(tick_under(&spans, x(10.0) + 4.5, 100.0, w), Some(1));
+        assert_eq!(tick_under(&spans, x(30.0), 100.0, w), None);
+        assert_eq!(tick_under(&spans, x(60.0) + 2.0, 100.0, w), Some(2));
     }
 }

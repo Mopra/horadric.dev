@@ -67,7 +67,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Dictation](plan/dictation.md): Ctrl+Space dictation with Whisper is built; left: faster drafts, cleanup, a personal dictionary, Settings, outside Horadric, macOS.
 - [Ghostty's terminal core](plan/ghostty.md): move the grid from `alacritty_terminal` to libghostty, after a trial.
 - [The Forge](plan/the-forge.md): files worked on with Claude beside the session (decks, artefacts, markdown, images), pinned, edited by hand, versioned and exported. Proposed.
-- [The hirelings](plan/hirelings.md): left of the subagent views: keys into the retinue, the tile's count opening the war table, ticks on hover, an on-screen check.
+- [The hirelings](plan/hirelings.md): left of the subagent views: an on-screen check, and open questions (typing to one, agent teams, nesting).
 - [GPU light](plan/gpu-light.md): every glow, shadow and spark drawn with real bloom, the shadow effect and particles instead of stacked shapes, window by window, then the Mac. The working lamp is built; next the light module.
 
 ## Reference

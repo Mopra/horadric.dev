@@ -438,6 +438,9 @@ pub(crate) enum Input {
     /// A portrait in a pane's retinue: show the conversation of the hireling
     /// with the second id, of the session with the first, beside it.
     OpenHireling(String, String),
+    /// A tile's line counting its hirelings: show the session and lay its
+    /// war table over its pane.
+    WarTable(String),
     /// A hireling's pane's cross or Esc, by its Folio's id.
     CloseWatch(String),
     /// The chat button under a project's tiles: a new Folio, a headless
@@ -9187,6 +9190,14 @@ impl App {
                 }
                 Input::CloseSky(key) => self.close_sky(&key),
                 Input::OpenHireling(session, agent) => self.open_hireling(&session, &agent),
+                Input::WarTable(id) => {
+                    self.reveal(&id, false);
+                    // A session that is resumed or attached first has no
+                    // pane yet, and shows without its table.
+                    if let Some(stage) = &self.stage {
+                        stage.war_table(&id);
+                    }
+                }
                 Input::CloseWatch(id) => self.close_watch(&id),
                 Input::Folio(key) => self.open_folio(&key),
                 Input::CloseFolio(id) => self.close_folio(&id),
