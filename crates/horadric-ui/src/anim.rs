@@ -12,6 +12,7 @@ use horadric_core::Phase;
 use crate::motion::{
     self, ARRIVAL, ENTER, FLIP, FRAME_BREATH, FRAME_FAST, FRAME_ORBIT, HOVER, SETTLE,
 };
+use crate::layout::Hit;
 use crate::theme;
 
 /// How fast a tile slides to a new place: half the way every this long.
@@ -243,6 +244,55 @@ impl Tiles {
         } else {
             None
         }
+    }
+}
+
+/// How lit each button is under the cursor, 0 to 1, so a button rises and
+/// sinks over [`HOVER`] as a tile does instead of snapping. Only the ones
+/// on their way somewhere or lit are kept.
+#[derive(Default)]
+pub struct Glow {
+    lit: Vec<(Hit, f32)>,
+    hot: Option<Hit>,
+    last: Option<Instant>,
+}
+
+impl Glow {
+    /// Moves every button on to `now`, `hot` being the one under the
+    /// cursor, if any.
+    pub fn step(&mut self, now: Instant, hot: Option<Hit>) {
+        // Nothing was drawn while it all held still, so the time since the
+        // last frame is no measure of how far a fade should go.
+        let dt = match self.last {
+            Some(l) if self.moving() => now.duration_since(l),
+            _ => Duration::ZERO,
+        };
+        self.last = Some(now);
+        self.hot = hot;
+        if let Some(h) = hot {
+            if !self.lit.iter().any(|(b, _)| *b == h) {
+                self.lit.push((h, 0.0));
+            }
+        }
+        for (b, v) in &mut self.lit {
+            let target = if Some(*b) == hot { 1.0 } else { 0.0 };
+            *v = motion::fade(*v, target, dt, HOVER);
+        }
+        self.lit.retain(|(b, v)| *v > 0.0 || Some(*b) == hot);
+    }
+
+    pub fn of(&self, which: Hit) -> f32 {
+        self.lit
+            .iter()
+            .find(|(b, _)| *b == which)
+            .map_or(0.0, |(_, v)| *v)
+    }
+
+    /// Whether a button is still on its way, so the frame after needs
+    /// drawing.
+    pub fn moving(&self) -> bool {
+        let target = |b: Hit| if Some(b) == self.hot { 1.0 } else { 0.0 };
+        self.lit.iter().any(|&(b, v)| v != target(b))
     }
 }
 
@@ -707,5 +757,29 @@ mod tests {
         // Back again, it is new and rises in.
         let l = t.step(now + ms(32), &[tile("a", &Phase::Idle, 0.0, false)]);
         assert_eq!(l[0].enter, 0.0);
+    }
+
+    #[test]
+    fn a_button_fades_up_under_the_cursor_and_back_down() {
+        let now = Instant::now();
+        let mut g = Glow::default();
+        // Long after the last frame: the fade starts now, it does not jump.
+        g.step(now, None);
+        g.step(now + HOVER * 10, Some(Hit::Folio));
+        assert_eq!(g.of(Hit::Folio), 0.0);
+        let now = now + HOVER * 10;
+        g.step(now + HOVER / 2, Some(Hit::Folio));
+        assert!(g.moving() && g.of(Hit::Folio) > 0.4 && g.of(Hit::Folio) < 0.6);
+        g.step(now + HOVER * 2, Some(Hit::Folio));
+        assert_eq!(g.of(Hit::Folio), 1.0);
+        assert!(!g.moving());
+        g.step(now + HOVER * 2, Some(Hit::Folio));
+        // The cursor moves to the next button: one sinks as the other rises.
+        g.step(now + HOVER * 3, Some(Hit::Add));
+        g.step(now + HOVER * 3 + HOVER / 2, Some(Hit::Add));
+        assert!(g.of(Hit::Folio) > 0.4 && g.of(Hit::Add) > 0.4);
+        g.step(now + HOVER * 4, None);
+        assert_eq!((g.of(Hit::Folio), g.of(Hit::Add)), (0.0, 0.0));
+        assert!(g.lit.is_empty());
     }
 }

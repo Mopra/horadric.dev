@@ -162,6 +162,8 @@ pub struct Cluster {
     tracking: Cell<bool>,
     /// Where each tile has got to on its way somewhere.
     tiles: RefCell<anim::Tiles>,
+    /// How lit each bay button is, fading with the cursor.
+    glow: RefCell<anim::Glow>,
     /// Task rows done a moment ago, struck through and folding away.
     finishing: RefCell<anim::Finishing>,
     /// A finished row has folded away since the last layout.
@@ -391,6 +393,7 @@ impl Cluster {
             pressed: Cell::new(None),
             tracking: Cell::new(false),
             tiles: RefCell::new(anim::Tiles::default()),
+            glow: RefCell::new(anim::Glow::default()),
             leaving: RefCell::new(anim::Leaving::default()),
             finishing: RefCell::new(anim::Finishing::default()),
             handoffs: RefCell::new(anim::Handoffs::default()),
@@ -1068,6 +1071,11 @@ impl Cluster {
             .collect();
         let now = Instant::now();
         let looks = self.tiles.borrow_mut().step(now, &inputs);
+        // Only the bays rise and sink; the other buttons are lit or not.
+        let bay = matches!(hot, Hit::Add | Hit::Shell | Hit::Folio) && pressed.is_none();
+        self.glow.borrow_mut().step(now, bay.then_some(hot));
+        let glow = self.glow.borrow();
+        let glowing = glow.moving();
         let ambient = backdrop::animations_on();
         let breathing = ambient && tasks_scene.as_ref().is_some_and(|t| t.astir);
         let drawn = sessions
@@ -1131,7 +1139,8 @@ impl Cluster {
             })
             .collect();
         let finishing = finishing || !flights.is_empty();
-        let rebuild = self.dirty.replace(false) || moving || !ghosts.is_empty() || finishing;
+        let rebuild =
+            self.dirty.replace(false) || moving || glowing || !ghosts.is_empty() || finishing;
         if rebuild {
             *self.drawn.borrow_mut() = Some(self.still_of(sessions.clone(), items.clone()));
         }
@@ -1168,6 +1177,7 @@ impl Cluster {
             tome: tome_scene,
             hot: self.hot.get(),
             pressed: self.pressed.get(),
+            glow: &glow,
         };
         let result = slot
             .as_ref()
@@ -1183,6 +1193,7 @@ impl Cluster {
         // The quests tile's breath needs frames of its own, and only while
         // it breathes.
         let next = motion::sooner(next, breathing.then_some(motion::FRAME_BREATH));
+        let next = motion::sooner(next, (glowing && ambient).then_some(motion::FRAME_FAST));
         let beckoning = ambient
             && (refs.iter().zip(&parked)).any(|(s, &p)| anim::beckons(&s.phase, s.unread(), p));
         let next = motion::sooner(next, beckoning.then_some(motion::FRAME_BREATH));

@@ -320,6 +320,8 @@ pub struct Scene<'a> {
     /// the buttons to light up.
     pub hot: Hit,
     pub pressed: Option<Hit>,
+    /// How lit each button is, fading with the cursor.
+    pub glow: &'a crate::anim::Glow,
     /// Windows' animation setting. Off, the light holds still.
     pub ambient: bool,
     /// Something other than the light changed since the last frame, so the
@@ -336,6 +338,17 @@ impl Scene<'_> {
 
     fn button(&self, which: Hit) -> Button {
         layout::button(which, self.hot, self.pressed)
+    }
+
+    /// How lit `which` is, 0 to 1, eased. Windows' animation setting off,
+    /// it is lit or not, as the cursor says.
+    fn lit(&self, which: Hit) -> f32 {
+        match self.button(which) {
+            Button::Pressed => 0.0,
+            Button::Hover if !self.ambient => 1.0,
+            _ if !self.ambient => 0.0,
+            _ => motion::ease_in_out(self.glow.of(which)),
+        }
     }
 }
 
@@ -1207,14 +1220,14 @@ impl Painter<'_> {
         self.beams(scene);
         self.flights(scene);
         if let Some(add) = &scene.layout.add {
-            self.add(gpu, m, add, scene.button(Hit::Add), CLI_ICON);
+            self.add(gpu, m, add, scene.lit(Hit::Add), CLI_ICON);
         }
         if let Some(shell) = &scene.layout.shell {
-            self.add(gpu, m, shell, scene.button(Hit::Shell), theme::SHELL_ICON);
+            self.add(gpu, m, shell, scene.lit(Hit::Shell), theme::SHELL_ICON);
         }
         if let Some(folio) = &scene.layout.folio {
-            let b = scene.button(Hit::Folio);
-            self.add_labelled(gpu, m, folio, b, FOLIO_ICON, "New chat");
+            let k = scene.lit(Hit::Folio);
+            self.add_labelled(gpu, m, folio, k, FOLIO_ICON, "New chat");
         }
         if let (Some(l), Some(t)) = (&scene.layout.tasks, &scene.tasks) {
             self.tasks(gpu, m, scene, l, t);
@@ -2276,7 +2289,7 @@ impl Painter<'_> {
         let r = l.open;
         let b = scene.button(StartHit::Open);
         let (_, ink) = theme::button_look(b);
-        self.slot(gpu, m, &r, b);
+        self.slot(gpu, m, &r, if b == Button::Hover { 1.0 } else { 0.0 });
         let (ix, iy) = icon_centre(&r);
         self.icon(
             &gpu.icon,
@@ -3983,9 +3996,9 @@ impl Painter<'_> {
     /// Another session in this project, or a plain terminal: an empty bay
     /// where the next key would go, sunk in so it never reads as a
     /// session.
-    unsafe fn add(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Button, glyph: char) {
-        let (_, ink) = theme::button_look(b);
-        self.slot(gpu, m, r, b);
+    unsafe fn add(&self, gpu: &Gpu, m: &Metrics, r: &Rect, lit: f32, glyph: char) {
+        let ink = theme::text_dim().mix(theme::text(), lit);
+        self.slot(gpu, m, r, lit);
         self.icon(&gpu.icon_small, ink, glyph, *r);
     }
 
@@ -3996,12 +4009,12 @@ impl Painter<'_> {
         gpu: &Gpu,
         m: &Metrics,
         r: &Rect,
-        b: Button,
+        lit: f32,
         glyph: char,
         label: &str,
     ) {
-        let (_, ink) = theme::button_look(b);
-        self.slot(gpu, m, r, b);
+        let ink = theme::text_dim().mix(theme::text(), lit);
+        self.slot(gpu, m, r, lit);
         let glyph_w = 12.0;
         let gap = 6.0;
         let label_w = self.measure(gpu, &gpu.small, label);
@@ -4013,19 +4026,20 @@ impl Painter<'_> {
     }
 
     /// A bay sunk into the plate, where something is yet to go, its edge
-    /// dashed. The cursor raises a key into it, as if offering one.
-    unsafe fn slot(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Button) {
-        match b {
-            Button::Hover => self.key(gpu, r, m.tile_radius, theme::surface(), 0.6, 1.0),
-            Button::Idle | Button::Pressed => {
-                self.sunk(gpu, r, m.tile_radius, theme::well());
-                self.dashed(gpu, m, r);
-            }
+    /// dashed. The cursor raises a key into it, as if offering one, `lit`
+    /// of the way up.
+    unsafe fn slot(&self, gpu: &Gpu, m: &Metrics, r: &Rect, lit: f32) {
+        if lit < 1.0 {
+            self.sunk(gpu, r, m.tile_radius, theme::well());
+            self.dashed(gpu, m, r, 1.0 - lit);
+        }
+        if lit > 0.0 {
+            self.key(gpu, r, m.tile_radius, theme::surface(), 0.6 * lit, lit);
         }
     }
 
     /// The dashed outline of a bay.
-    unsafe fn dashed(&self, gpu: &Gpu, m: &Metrics, r: &Rect) {
+    unsafe fn dashed(&self, gpu: &Gpu, m: &Metrics, r: &Rect, opacity: f32) {
         let edge = r.inset(2.5);
         let radius = m.tile_radius - 2.5;
         let length = motion::perimeter(edge.w, edge.h, radius);
@@ -4046,7 +4060,7 @@ impl Painter<'_> {
             Some(&[unit * 0.35, unit * 0.65]),
         );
         self.brush
-            .SetColor(&color(theme::legend().with_alpha(0.35)));
+            .SetColor(&color(theme::legend().with_alpha(0.35 * opacity)));
         self.rt.DrawRoundedRectangle(
             &rounded(&edge, radius),
             self.brush,
