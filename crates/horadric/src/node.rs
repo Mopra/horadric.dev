@@ -214,7 +214,6 @@ impl Serve for Machine {
                 name: None,
                 cwd: project.to_string(),
                 args: Vec::new(),
-                agent: Agent::Claude,
             },
         )
     }
@@ -641,10 +640,7 @@ fn serve() -> Result<(), String> {
             continue;
         }
         // A turn's end is when the keeper is sent the snapshot.
-        if t.agent == Agent::Claude
-            && t.event.hook_event_name == "Stop"
-            && t.event.agent_id.is_none()
-        {
+        if t.event.hook_event_name == "Stop" && t.event.agent_id.is_none() {
             keeping::turn_ended(&t.horadric_id, &t.event.transcript_path);
         }
         let mut n = lock(&node);
@@ -686,9 +682,7 @@ fn start(node: &Shared, asked: NewSession) -> Result<String, String> {
     }
     // Nobody sits at a server to answer Claude Code's trust prompt, and it
     // asks again for a folder below one already trusted.
-    if asked.agent == Agent::Claude {
-        trust(&cwd);
-    }
+    trust(&cwd);
     let base = asked
         .name
         .clone()
@@ -705,12 +699,10 @@ fn start(node: &Shared, asked: NewSession) -> Result<String, String> {
         }
         id
     };
-    let line = asked.agent.line(&[], &asked.args);
-    let attached = launch(&id, cwd, asked.agent, line)?;
+    let attached = launch(&id, cwd, asked.args.clone())?;
     {
         let mut n = lock(node);
-        let mut s = Session::new(&id, asked.name.unwrap_or(base), asked.cwd.clone());
-        s.agent = asked.agent;
+        let s = Session::new(&id, asked.name.unwrap_or(base), asked.cwd.clone());
         n.registry.add(s);
         n.args.insert(id.clone(), asked.args);
         n.recent = node_state::with_recent(&n.recent, &asked.cwd);
@@ -720,24 +712,20 @@ fn start(node: &Shared, asked: NewSession) -> Result<String, String> {
     Ok(id)
 }
 
-/// Runs `agent` with `args` in `cwd`, in a host of its own for session
+/// Runs `claude` with `args` in `cwd`, in a host of its own for session
 /// `id`.
-fn launch(id: &str, cwd: PathBuf, agent: Agent, args: Vec<String>) -> Result<Attached, String> {
+fn launch(id: &str, cwd: PathBuf, args: Vec<String>) -> Result<Attached, String> {
     let instance = horadric_hooks::instance();
     if !cwd.is_dir() {
         return Err(format!("{} is not a folder here", cwd.display()));
     }
-    let program =
-        agent_program(agent).ok_or_else(|| format!("`{}` is not on PATH", agent.program()))?;
+    let program = agent_program().ok_or("`claude` is not on PATH")?;
     let exe = exe()?;
-    // Its agent gets the lore tools, as the app's do; a shell put in its
+    // Claude gets the lore tools, as the app's do; a shell put in its
     // place with `HORADRIC_AGENT` would take the flags for a script.
-    let mut line = if wire::is_agent(&program, agent) {
+    let mut line = if wire::is_claude(&program) {
         let config = mcp_config(&exe);
-        agent.mcp_args(
-            &exe.to_string_lossy(),
-            config.as_deref().and_then(Path::to_str),
-        )
+        Agent::Claude.mcp_args(config.as_deref().and_then(Path::to_str))
     } else {
         Vec::new()
     };
@@ -746,7 +734,6 @@ fn launch(id: &str, cwd: PathBuf, agent: Agent, args: Vec<String>) -> Result<Att
         (SESSION_ENV.to_string(), id.to_string()),
         (OWNER_ENV.to_string(), horadric_hooks::port().to_string()),
     ];
-    env_set.extend(agent.env());
     let spec = Spec {
         pipe: pipe_name(&instance, id),
         command: horadric_pty::Command {
@@ -785,7 +772,7 @@ fn mcp_config(exe: &Path) -> Option<PathBuf> {
 /// Carries a paused session on in its folder: its conversation resumed,
 /// with what it was started with.
 fn resume(node: &Shared, id: &str) -> Result<(), String> {
-    let (cwd, agent, carry) = {
+    let (cwd, carry) = {
         let n = lock(node);
         if n.hosted.contains_key(id) {
             return Ok(());
@@ -795,11 +782,10 @@ fn resume(node: &Shared, id: &str) -> Result<(), String> {
         let args = n.args.get(id).cloned().unwrap_or_default();
         (
             PathBuf::from(&s.cwd),
-            s.agent,
-            s.agent.carry_on(conversation, &args),
+            Agent::Claude.carry_on(conversation, &args),
         )
     };
-    let attached = launch(id, cwd, agent, agent.line(&[], &carry))?;
+    let attached = launch(id, cwd, carry)?;
     {
         let mut n = lock(node);
         if let Some(s) = n.registry.get_mut(id) {
@@ -812,18 +798,18 @@ fn resume(node: &Shared, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The program for `agent`, `HORADRIC_AGENT` in Claude Code's place as in
-/// the app, found on `PATH` unless it is a full path.
-fn agent_program(agent: Agent) -> Option<PathBuf> {
-    let chosen = std::env::var("HORADRIC_AGENT")
+/// The program a session runs, `claude`, or `HORADRIC_AGENT` in its
+/// place as in the app, found on `PATH` unless it is a full path.
+fn agent_program() -> Option<PathBuf> {
+    let name = std::env::var("HORADRIC_AGENT")
         .ok()
-        .filter(|a| !a.is_empty() && agent == Agent::Claude);
-    let name = chosen.unwrap_or_else(|| agent.program().into());
+        .filter(|a| !a.is_empty())
+        .unwrap_or_else(|| Agent::Claude.program().into());
     if Path::new(&name).is_absolute() {
         return Some(PathBuf::from(name));
     }
-    // systemd gives a user service a bare PATH, without the folders the
-    // agents' own installers put them in.
+    // systemd gives a user service a bare PATH, without the folders
+    // Claude Code's own installers put it in.
     let path = std::env::var("PATH").unwrap_or_default();
     let path = wire::search_path(&path, horadric_hooks::home().as_deref());
     horadric_pty::find_program(

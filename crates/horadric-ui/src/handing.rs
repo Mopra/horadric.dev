@@ -356,7 +356,7 @@ impl App {
         let r = self.shared.registry.lock().ok()?;
         let s = r.get(id)?;
         let key = s.brother.as_ref()?.id.clone();
-        (!s.shell && s.agent == Agent::Claude && s.prompted).then_some(key)
+        (!s.shell && s.prompted).then_some(key)
     }
 
     /// Asks the owner of brother's tile `id` to hand it to `to`, or takes
@@ -434,7 +434,7 @@ impl App {
         if s.brother.is_some() {
             return Err("it runs on a brother".into());
         }
-        if s.shell || s.ssh.is_some() || s.background.is_some() || s.agent != Agent::Claude {
+        if s.shell || s.ssh.is_some() || s.background.is_some() {
             return Err("only a Claude Code session can be handed off".into());
         }
         if !s.prompted || s.claude_session_id.is_none() {

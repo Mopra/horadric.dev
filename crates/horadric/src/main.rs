@@ -25,7 +25,6 @@ mod headless_debug;
 #[cfg(windows)]
 mod headless_host_debug;
 mod heavy;
-mod hook;
 #[cfg(windows)]
 mod install;
 #[cfg(target_os = "macos")]
@@ -74,14 +73,13 @@ const WHERE: &str = "Its icon is in the tray, by the clock.";
 const WHERE: &str = "Its icon is in the menu bar.";
 
 const USAGE: &str = "\
-horadric: every coding agent session as a tile on your desktop
+horadric: every Claude Code session as a tile on your desktop
 
 Usage:
   horadric                       Start Horadric in the background (tray icon and tiles)
   horadric app                   Run it in this terminal instead, with its log
-  horadric new [--name NAME] [--cwd DIR] [--agent claude|codex|grok] [-- agent args...]
-                               Start a session in a Horadric terminal, Claude
-                               Code unless --agent says another
+  horadric new [--name NAME] [--cwd DIR] [-- claude args...]
+                               Start a session in a Horadric terminal
   horadric run [--name NAME] [--cwd DIR] [-- claude args...]
                                Start a tagged `claude` in this terminal instead
   horadric quest done [SUMMARY]|blocked WHY|add TITLE|aim TEXT|list
@@ -130,8 +128,6 @@ Usage:
   horadric uninstall             Take all of that back out
   horadric status                The status line Horadric gives its sessions: reads Claude
                                Code's JSON on stdin and passes it to the app
-  horadric hook codex|grok       The command hook Codex and Grok post their events
-                               through: reads one on stdin and passes it to the app
   horadric mcp                   The MCP server Horadric gives its sessions: the tools
                                that open, drive and close the project's browser pane
   horadric portal [off|phones|forget N|all|relay URL]
@@ -252,7 +248,6 @@ fn main() -> ExitCode {
         #[cfg(windows)]
         Some("release") => release::run(&args[1..]),
         Some("status") => status::run(),
-        Some("hook") => hook::run(&args[1..]),
         #[cfg(not(target_os = "macos"))]
         Some("mcp") => mcp::run(),
         #[cfg(windows)]
@@ -401,16 +396,13 @@ fn install_command() -> Result<(), String> {
         horadric_hooks::install::settings_path().ok_or("cannot find your home directory")?;
     horadric_hooks::install::install(&settings, horadric_hooks::port())
         .map_err(|e| format!("{}: {e}", settings.display()))?;
-    let grok = install::grok_hooks(&dir.join("horadric.exe"))?;
+    horadric_hooks::install::forget_grok()?;
     println!("installed Horadric in {}", dir.display());
     println!("  Start menu: search for Horadric");
     println!("  Terminal:   `horadric` in any new terminal (this one still has the old PATH)");
     println!("  Explorer:   right click a folder, Show more options, Open in Horadric");
     println!("  Starts with Windows (switch it off from the tray menu)");
     println!("  Claude Code hooks in {}", settings.display());
-    if let Some(grok) = grok {
-        println!("  Grok Build hooks in {}", grok.display());
-    }
     launch(&dir.join("horadric.exe"))
 }
 
@@ -421,7 +413,7 @@ fn uninstall_command() -> Result<(), String> {
         horadric_hooks::install::settings_path().ok_or("cannot find your home directory")?;
     horadric_hooks::install::uninstall(&settings)
         .map_err(|e| format!("{}: {e}", settings.display()))?;
-    install::remove_grok_hooks()?;
+    horadric_hooks::install::forget_grok()?;
     println!("uninstalled Horadric: PATH, Start menu, Explorer, start with Windows and hooks");
     if let Some(dir) = install::dir().filter(|d| d.exists()) {
         println!(
@@ -443,7 +435,7 @@ fn install_command() -> Result<(), String> {
     let exe = install::dir()
         .ok_or("cannot find your home directory")?
         .join("horadric");
-    let grok = install::grok_hooks(&exe)?;
+    horadric_hooks::install::forget_grok()?;
     println!("installed Horadric in {}", app.display());
     println!("  Launchpad and Spotlight: Horadric");
     match install::link() {
@@ -456,9 +448,6 @@ fn install_command() -> Result<(), String> {
     }
     println!("  Opens at login (switch it off from the menu bar)");
     println!("  Claude Code hooks in {}", settings.display());
-    if let Some(grok) = grok {
-        println!("  Grok Build hooks in {}", grok.display());
-    }
     launch(&exe)
 }
 
@@ -469,7 +458,7 @@ fn uninstall_command() -> Result<(), String> {
         horadric_hooks::install::settings_path().ok_or("cannot find your home directory")?;
     horadric_hooks::install::uninstall(&settings)
         .map_err(|e| format!("{}: {e}", settings.display()))?;
-    install::remove_grok_hooks()?;
+    horadric_hooks::install::forget_grok()?;
     println!("uninstalled Horadric: the app, the command, opening at login and the hooks");
     if let Some(dir) = horadric_hooks::state_dir() {
         println!("saved sessions stay in {}", dir.display());
@@ -530,20 +519,13 @@ fn hooks(sub: Option<&str>) -> Result<(), String> {
             install::install(&path, port).map_err(|e| format!("{}: {e}", path.display()))?;
             println!("installed Horadric hooks in {}", path.display());
             println!("posting to {}", horadric_hooks::hook_url(port));
-            #[cfg(not(target_os = "linux"))]
-            {
-                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-                if let Some(grok) = crate::install::grok_hooks(&exe)? {
-                    println!("installed Grok Build hooks in {}", grok.display());
-                }
-            }
+            install::forget_grok()?;
             Ok(())
         }
         Some("uninstall") => {
             install::uninstall(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             println!("removed Horadric hooks from {}", path.display());
-            #[cfg(not(target_os = "linux"))]
-            crate::install::remove_grok_hooks()?;
+            install::forget_grok()?;
             Ok(())
         }
         Some("status") => {

@@ -119,9 +119,6 @@ impl Machine {
         {
             let n = lock(&self.node);
             let s = n.registry.get(id).ok_or("no such session here")?;
-            if s.agent != Agent::Claude {
-                return Err("only a Claude Code session can be handed off".into());
-            }
             if !s.prompted || s.claude_session_id.is_none() {
                 return Err("it has no conversation to resume yet".into());
             }

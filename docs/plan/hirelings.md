@@ -184,10 +184,6 @@ becomes the way to see what a long solo turn did.
 6. **Folio:** pass `--forward-subagent-text`, so lanes have the
    hireling's words as well as its tools.
 
-Codex and Grok: Codex has subagents but sends no hooks for them that
-we know of. Start with Claude, and show the others' as a count only
-once their hooks say anything.
-
 ## Steps
 
 1. Data: items 1 to 3 above, and the honest roll up on the tile.

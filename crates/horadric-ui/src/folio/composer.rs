@@ -1237,6 +1237,32 @@ pub fn dictated(key: &str, text: &str) {
     redraw(key);
 }
 
+/// A pick handed from elsewhere on the stage, put in at the caret as one
+/// step, set off by spaces so it never runs into a word.
+pub fn handed(key: &str, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    with(key, |chat| {
+        chat.input.ensure(key);
+        let ed = &mut chat.input.ed;
+        let f = &ed.field;
+        // A selection is replaced, so what touches the pick is outside it.
+        let (lo, hi) = (f.caret.min(f.anchor), f.caret.max(f.anchor));
+        let lead = f.text[..lo].ends_with(|c: char| !c.is_whitespace());
+        let tail = !f.text[hi..].starts_with(char::is_whitespace);
+        let text = format!(
+            "{}{text}{}",
+            if lead { " " } else { "" },
+            if tail { " " } else { "" }
+        );
+        ed.insert(&text);
+        chat.input.edited();
+        follow_menu(chat);
+    });
+    redraw(key);
+}
+
 /// The text ahead of the caret, which dictation gives Whisper to read so
 /// the speech goes on from it.
 pub fn before_caret(key: &str) -> String {

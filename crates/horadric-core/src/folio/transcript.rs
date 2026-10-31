@@ -53,6 +53,13 @@ impl Folio {
     }
 
     fn replay(&mut self, jsonl: &str, sidechain: bool, at: Option<&str>) {
+        self.replay_open(jsonl, sidechain, at);
+        self.settle_turn();
+    }
+
+    /// [`Folio::replay`] with its last turn left as it stands, for a
+    /// backlog that may say the turn still runs.
+    pub(super) fn replay_open(&mut self, jsonl: &str, sidechain: bool, at: Option<&str>) {
         // How many blocks there were after each line, by its uuid, and the
         // last line's, to see a branch start.
         let mut after: HashMap<String, usize> = HashMap::new();
@@ -103,7 +110,6 @@ impl Folio {
         if let Some(&n) = at.and_then(|a| after.get(a)) {
             self.blocks.truncate(n);
         }
-        self.settle_turn();
         self.history = self.blocks.len();
     }
 

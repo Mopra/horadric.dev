@@ -26,6 +26,7 @@ use crate::keys::Mods;
 pub(super) fn act(key: &str, a: Act) {
     match a {
         Act::Copy(t) => clipboard::set_text(&t),
+        Act::Resume => app::push(Input::Expand(key.to_string())),
         Act::Link(url) => match with(key, |c| c.key.clone()) {
             Some(project) => app::push(Input::LinkIn(project, url)),
             None => app::push(Input::Link(url)),

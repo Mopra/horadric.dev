@@ -110,7 +110,7 @@ mod tests {
         assert!(trusted(&c, "C:/Users/me/code/x"));
         assert!(trusted(&c, "c:/users/me/code"));
         assert!(!trusted(&c, "C:/Users/me"));
-        assert!(!trusted(&c, "C:/Users/me/codex"));
+        assert!(!trusted(&c, "C:/Users/me/coder"));
     }
 
     #[test]

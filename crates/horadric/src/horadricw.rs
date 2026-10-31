@@ -55,7 +55,6 @@ mod windows_only {
             name: None,
             cwd: folder.to_string_lossy().to_string(),
             args: Vec::new(),
-            agent: horadric_core::Agent::Claude,
         };
         let state = horadric_hooks::state_header();
         match client::ask(

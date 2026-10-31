@@ -18,7 +18,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use horadric_core::agent::Agent;
 use horadric_core::folio::{AuthStatus, Block, Heard, SignIn, SignInState};
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -85,7 +84,7 @@ pub(super) fn post(router: isize) {
 /// `claude.exe` with `args`, on pipes, with no window, and with the
 /// environment a headless session gets, so it logs in where they look.
 pub(super) fn command(args: &[&str]) -> Result<Command, String> {
-    if let Some(why) = crate::accounts::refused(Agent::Claude) {
+    if let Some(why) = crate::accounts::refused() {
         return Err(why);
     }
     let exe = horadric_pty::headless::claude_exe().ok_or("claude.exe was not found")?;

@@ -39,7 +39,7 @@ use horadric_core::keeping::{
 use horadric_core::mesh::Trust;
 use horadric_core::said::{Signer, Word};
 use horadric_core::serving::Job;
-use horadric_core::{mesh, rostering, Agent, Phase};
+use horadric_core::{mesh, rostering, Phase};
 use serde_json::Value;
 
 use super::{lock, machine_name, relay, Machine};
@@ -357,7 +357,6 @@ impl Machine {
         let record = {
             let n = lock(&self.node);
             n.registry.get(id).and_then(|s| {
-                (s.agent == Agent::Claude).then_some(())?;
                 Some(Record {
                     session: s.claude_session_id.clone()?,
                     id: id.to_string(),

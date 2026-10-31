@@ -136,14 +136,11 @@ impl Task {
         model_of(&self.notes)
     }
 
-    /// What its session is started with for its `Model:` line, Claude
-    /// Code's way. Other agents name their models otherwise, so they get
-    /// none.
-    pub fn model_args(&self, agent: crate::Agent) -> Vec<String> {
-        match (agent, self.model()) {
-            (crate::Agent::Claude, Some(m)) => vec!["--model".into(), m.into()],
-            _ => Vec::new(),
-        }
+    /// What its session is started with for its `Model:` line.
+    pub fn model_args(&self) -> Vec<String> {
+        self.model()
+            .map(|m| vec!["--model".into(), m.into()])
+            .unwrap_or_default()
     }
 
     /// The claude.ai connectors its `Connectors:` notes lines ask for, by
@@ -2381,20 +2378,18 @@ mod tests {
     }
 
     #[test]
-    fn only_claude_code_is_started_with_the_quests_model() {
+    fn a_quest_is_started_with_its_model() {
         let t = &parse(
             "- [ ] Q
   Model: haiku
 ",
         )[0];
-        assert_eq!(t.model_args(crate::Agent::Claude), ["--model", "haiku"]);
-        assert!(t.model_args(crate::Agent::Codex).is_empty());
-        assert!(t.model_args(crate::Agent::Grok).is_empty());
+        assert_eq!(t.model_args(), ["--model", "haiku"]);
         let none = &parse(
             "- [ ] Q
 ",
         )[0];
-        assert!(none.model_args(crate::Agent::Claude).is_empty());
+        assert!(none.model_args().is_empty());
     }
 
     #[test]
