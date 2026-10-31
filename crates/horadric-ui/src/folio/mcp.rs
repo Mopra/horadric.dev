@@ -64,8 +64,11 @@ pub(super) enum Do {
 /// Where claude.ai connectors are removed.
 const CONNECTORS: &str = "https://claude.ai/settings/connectors";
 
-/// What removals said, by session key and server, for the UI thread.
-static REMOVED: Mutex<Vec<(String, String, Result<(), String>)>> = Mutex::new(Vec::new());
+/// A session key, a server, and what removing it said.
+type Removal = (String, String, Result<(), String>);
+
+/// What removals said, for the UI thread.
+static REMOVED: Mutex<Vec<Removal>> = Mutex::new(Vec::new());
 
 /// Removes `server` where it is configured, on a thread since the CLI
 /// takes a second or two. Its answer comes back through [`settle`].
@@ -128,8 +131,7 @@ fn run_removal(args: &[&str], dir: &std::path::Path) -> Result<(), String> {
             let err = String::from_utf8_lossy(&out.stderr);
             let last = (err.lines().chain(said.lines()))
                 .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .last();
+                .rfind(|l| !l.is_empty());
             last.unwrap_or("It could not be removed.").to_string()
         });
     Err(why)

@@ -1492,16 +1492,16 @@ fn tray_menu(hwnd: HWND) {
     let driven = with_app(|app| app.driven()).unwrap_or_default();
     let logins = with_app(App::logins).unwrap_or_default();
     let hotkeys = hotkeys.each_ref().map(Option::as_deref);
-    let menu = tray::menu(
-        &projects,
+    let menu = tray::menu(tray::Menu {
+        recent_projects: &projects,
         sessions,
         hotkeys,
-        &driven,
-        &logins,
+        driven: &driven,
+        logins: &logins,
         terminal,
-        update.as_deref(),
+        update: update.as_deref(),
         xp,
-    );
+    });
     match menu {
         Some(Choice::Settings) => open_settings(None),
         Some(Choice::New) => pick_and_start(hwnd, projects.first().map(PathBuf::from)),
@@ -4121,7 +4121,7 @@ impl App {
             .filter(|(_, c)| c.exit_code().is_none())
             .map(|(id, _)| id)
             .chain(self.running_folios())
-            .filter(|id| r.get(*id).is_some_and(|s| s.phase.mid_turn()))
+            .filter(|id| r.get(id).is_some_and(|s| s.phase.mid_turn()))
             .count()
     }
 

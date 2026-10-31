@@ -35,8 +35,12 @@ enum Then {
     Markets,
 }
 
-/// Hidden runs that ended, by the session that asked, for the UI thread.
-static DONE: Mutex<Vec<(String, Then, Result<String, String>)>> = Mutex::new(Vec::new());
+/// A hidden run that ended: the session that asked, what to do next, and
+/// what it printed or why it failed.
+type Done = (String, Then, Result<String, String>);
+
+/// Hidden runs that ended, for the UI thread.
+static DONE: Mutex<Vec<Done>> = Mutex::new(Vec::new());
 
 /// A `!` command that ended: the session, its block and command, what it
 /// printed and its exit code.

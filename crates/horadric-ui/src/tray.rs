@@ -252,22 +252,36 @@ pub struct Driven {
     pub drive: Option<Drive>,
 }
 
-/// The tray menu. `hotkeys` are the shortcuts for the next waiting
-/// session, the away card and stopping Warriv, where they have one.
-/// `update` is a newer release's version, when a check found one. `xp` is
-/// the experience counted from git, None until the first count is back.
-/// `logins` are the kept accounts to switch between, a click away. `sessions`
-/// is how many there are and how many wait on you.
-pub fn menu(
-    recent_projects: &[String],
-    sessions: (usize, usize),
-    hotkeys: [Option<&str>; hotkey::COUNT],
-    driven: &[Driven],
-    logins: &[Pick],
-    terminal: bool,
-    update: Option<&str>,
-    xp: Option<u64>,
-) -> Option<Choice> {
+/// What the tray menu shows.
+pub struct Menu<'a> {
+    pub recent_projects: &'a [String],
+    /// How many sessions there are and how many wait on you.
+    pub sessions: (usize, usize),
+    /// The shortcuts for the next waiting session, the away card and
+    /// stopping Warriv, where they have one.
+    pub hotkeys: [Option<&'a str>; hotkey::COUNT],
+    pub driven: &'a [Driven],
+    /// The kept accounts to switch between, a click away.
+    pub logins: &'a [Pick],
+    pub terminal: bool,
+    /// A newer release's version, when a check found one.
+    pub update: Option<&'a str>,
+    /// The experience counted from git, None until the first count is back.
+    pub xp: Option<u64>,
+}
+
+/// The tray menu.
+pub fn menu(m: Menu) -> Option<Choice> {
+    let Menu {
+        recent_projects,
+        sessions,
+        hotkeys,
+        driven,
+        logins,
+        terminal,
+        update,
+        xp,
+    } = m;
     const NEW: usize = 1;
     const QUIT: usize = 2;
     const SETTINGS: usize = 3;

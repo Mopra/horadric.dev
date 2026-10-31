@@ -3790,7 +3790,7 @@ mod tests {
         assert_eq!(lane.steps[0].tool, "Read");
         let (i, path) = f.find_task("a7548526e7c37b501").unwrap();
         assert!(matches!(f.blocks[i], Block::Tools(_)));
-        assert_eq!(path, [agent.id.clone()]);
+        assert_eq!(path, std::slice::from_ref(&agent.id));
         assert!(f.find_task("").is_none());
 
         let f = play("p", BACKGROUND_AGENT);

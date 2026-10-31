@@ -69,9 +69,7 @@ pub(super) fn act(key: &str, a: Act) {
                         } if *request_id == id => horadric_core::folio::edit_text(tool, input),
                         _ => None,
                     });
-                    let Some(wrote) = wrote else {
-                        return None;
-                    };
+                    let wrote = wrote?;
                     st.denying.remove(&id);
                     st.changing.insert(id.clone());
                     // Room for a whole file, which a Write holds.

@@ -213,6 +213,6 @@ mod tests {
     fn the_last_rune_is_gone_by_the_end() {
         let last = OPEN_AT + OPEN * SHED_SPAN;
         assert!(last + DRIFT <= LENGTH + 1e-6);
-        assert!(OPEN_AT + OPEN < LENGTH);
+        const { assert!(OPEN_AT + OPEN < LENGTH) };
     }
 }

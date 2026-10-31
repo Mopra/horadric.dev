@@ -43,6 +43,10 @@ const MOST: f32 = 16.0;
 /// A press that moves less than this is a click, not a drag.
 const SLOP: f32 = 3.0;
 
+/// Where a press on the image began, the pan then, and whether it has
+/// moved past a click.
+type Press = ((f32, f32), (f32, f32), bool);
+
 struct Lightbox {
     pixels: Vec<u8>,
     w: u32,
@@ -63,9 +67,7 @@ struct Lightbox {
     last: Option<Instant>,
     /// The glass in DIPs as last drawn.
     size: (f32, f32),
-    /// Where a press on the image began, the pan then, and whether it has
-    /// moved past a click.
-    press: Option<((f32, f32), (f32, f32), bool)>,
+    press: Option<Press>,
     /// Owes a frame though nothing animates: a drag moved it.
     dirty: bool,
 }

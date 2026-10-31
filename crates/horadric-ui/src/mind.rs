@@ -8,6 +8,7 @@
 //! Between recalls a few faint sparks wander the links, so the mind looks
 //! awake.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
@@ -151,8 +152,8 @@ fn routes(from: usize, next: &[Vec<usize>]) -> HashMap<usize, usize> {
             continue;
         }
         for &n in &next[at] {
-            if !back.contains_key(&n) {
-                back.insert(n, at);
+            if let Entry::Vacant(e) = back.entry(n) {
+                e.insert(at);
                 queue.push_back((n, hops + 1));
             }
         }

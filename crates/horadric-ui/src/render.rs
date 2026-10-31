@@ -1093,10 +1093,10 @@ impl Target {
             let mut stones = self.stones.borrow_mut();
             for row in scene.rows {
                 let f = crate::turning::frame_at(row.turn());
-                if !stones.contains_key(&f) {
+                if let std::collections::hash_map::Entry::Vacant(e) = stones.entry(f) {
                     let (stone, light) = crate::turning::frame(f);
                     let size = crate::turning::SIZE as u32;
-                    stones.insert(f, (self.bitmap(size, &stone)?, self.bitmap(size, &light)?));
+                    e.insert((self.bitmap(size, &stone)?, self.bitmap(size, &light)?));
                 }
             }
             self.rt.BeginDraw();
