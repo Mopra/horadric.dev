@@ -831,9 +831,14 @@ impl Console {
     }
 
     /// An agent's session, which a pick can be handed to: not a shell, a
-    /// file view or a page.
+    /// file view or a page. A Folio is one too, through its composer, but
+    /// not a hireling's, which is read only.
     pub fn is_agent(&self) -> bool {
-        self.remote.is_some() && !self.shell
+        #[cfg(windows)]
+        let folio = (self.folio.as_deref()).is_some_and(|k| !crate::folio::is_watch(k));
+        #[cfg(not(windows))]
+        let folio = false;
+        (self.remote.is_some() && !self.shell) || folio
     }
 
     /// A console with no program for the browser pane of project `key`.

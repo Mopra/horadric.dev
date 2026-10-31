@@ -17,11 +17,11 @@ use horadric_core::tasks::{self, Mark, Mode, Task};
 use horadric_core::warriv::{
     self, Brief, Desk, Dried, Drive, Event, Heard, Kind, Review, Reviews, Wake,
 };
-use horadric_core::{escalate, ship, Agent, Phase};
+use horadric_core::{escalate, ship, Phase};
 use horadric_hooks::tasks as file;
 
 use super::{horadric_command, Board};
-use crate::app::{unix_now, App, Run};
+use crate::app::{unix_now, App, SessionSpec};
 use crate::board::Ink;
 use crate::store;
 use crate::toast::Kind as Toast;
@@ -621,18 +621,14 @@ impl App {
     ) -> Option<Awake> {
         let dir = self.project_dir(key)?;
         let id = self.unique_id(warriv::ID);
-        self.tasks
-            .prompts
-            .insert(id.clone(), warriv::prompt(briefs));
-        if let Err(e) = self.launch(
-            &id,
-            "Warriv",
-            dir,
-            Vec::new(),
-            Run::Agent(Agent::Claude),
-            false,
-        ) {
-            self.tasks.prompts.remove(&id);
+        let spec = SessionSpec {
+            id: Some(id.clone()),
+            name: Some("Warriv".into()),
+            prompt: Some(warriv::prompt(briefs)),
+            quiet: true,
+            ..SessionSpec::new(dir, self.chat_sessions)
+        };
+        if let Err(e) = self.start_session(spec) {
             eprintln!("horadric: cannot start Warriv: {e}");
             self.toasts.show(Toast::Failed, "Cannot start Warriv", &e);
             return None;
@@ -1021,17 +1017,15 @@ impl App {
             diff,
         });
         let id = self.unique_id(warriv::REVIEWER);
-        self.tasks.prompts.insert(id.clone(), prompt);
         let started = SystemTime::now();
-        if let Err(e) = self.launch(
-            &id,
-            "Warriv reviews",
-            dir,
-            Vec::new(),
-            Run::Agent(Agent::Claude),
-            false,
-        ) {
-            self.tasks.prompts.remove(&id);
+        let spec = SessionSpec {
+            id: Some(id.clone()),
+            name: Some("Warriv reviews".into()),
+            prompt: Some(prompt),
+            quiet: true,
+            ..SessionSpec::new(dir, self.chat_sessions)
+        };
+        if let Err(e) = self.start_session(spec) {
             eprintln!("horadric: cannot start a reviewer: {e}");
             self.toasts
                 .show(Toast::Failed, "Cannot start a reviewer", &e);

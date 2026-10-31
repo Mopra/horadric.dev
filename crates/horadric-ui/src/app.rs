@@ -4863,7 +4863,9 @@ impl App {
         self.consoles.remove(id);
         let cwd = PathBuf::from(&saved.cwd);
         // A chat resumes as one; a terminal does when new sessions open as
-        // chats and it has a conversation to carry on.
+        // chats and it has a conversation to carry on. Its role, a quest's,
+        // Warriv's, an errand's, comes back with it either way: the flags
+        // are rebuilt from its id and the list as it starts.
         let as_chat = saved.agent == Agent::Claude
             && !saved.shell
             && saved.ssh.is_none()
@@ -4871,7 +4873,7 @@ impl App {
             && (saved.chat
                 || (self.chat_sessions
                     && saved.claude_session_id.is_some()
-                    && self.started_plainly(id, &saved)));
+                    && !Self::keeps_terminal(&saved)));
         if as_chat {
             let conversation = (saved.claude_session_id.clone()).filter(|_| saved.prompted);
             let started =
@@ -4898,16 +4900,10 @@ impl App {
         result
     }
 
-    /// Whether paused session `id` is one the human started, so it may go
-    /// on as a chat. A Folio gets all a terminal gets on every launch, its
-    /// own worktree, the town and a first prompt too, but a quest, Warriv,
-    /// an errand and a runeword are typed into as they run, which a Folio
-    /// cannot be told to yet, so those stay terminals.
-    fn started_plainly(&self, id: &str, saved: &SavedSession) -> bool {
-        !horadric_core::warriv::is_warriv(id)
-            && !horadric_core::runeword::is_errand(id)
-            && saved.runeword.is_none()
-            && !self.holds_quest(id)
+    /// Whether a paused terminal must stay one: its runeword has keys, an
+    /// arrow or a Tab, that only a terminal takes.
+    fn keeps_terminal(saved: &SavedSession) -> bool {
+        (saved.runeword.as_ref()).is_some_and(|w| horadric_core::runeword::needs_terminal(&w.runes))
     }
 
     /// Opens a plain terminal in the project with this key, on the stage
@@ -5621,8 +5617,11 @@ impl App {
 
     /// Whether the console of session `id` runs `agent` itself, so it
     /// holds `agent`'s login. For Claude not a shell put in its place with
-    /// `HORADRIC_AGENT`.
+    /// `HORADRIC_AGENT`; a Folio's claude.exe holds Claude's.
     fn runs(&self, id: &str, agent: Agent) -> bool {
+        if self.folios.contains_key(id) {
+            return agent == Agent::Claude && crate::folio::running(id);
+        }
         let Some(c) = self.consoles.get(id) else {
             return false;
         };
@@ -5663,9 +5662,8 @@ impl App {
         if self.login(agent).account.as_ref() == Some(&to) {
             return;
         }
-        let running: Vec<String> = self
-            .consoles
-            .keys()
+        let running: Vec<String> = (self.consoles.keys())
+            .chain(self.folios.keys())
             .filter(|id| self.runs(id, agent))
             .cloned()
             .collect();
@@ -5693,9 +5691,8 @@ impl App {
     fn switch_when_out(&mut self) {
         let agent = Agent::Claude;
         let stops: Vec<(String, SystemTime)> = match self.shared.registry.lock() {
-            Ok(r) => self
-                .consoles
-                .keys()
+            Ok(r) => (self.consoles.keys())
+                .chain(self.folios.keys())
                 .filter_map(|id| {
                     let s = r.get(id).filter(|s| s.limited())?;
                     Some((id.clone(), s.since))
@@ -5762,11 +5759,29 @@ impl App {
             return;
         };
         if let Ok(r) = self.shared.registry.lock() {
-            let consoles = &self.consoles;
+            let (consoles, folios) = (&self.consoles, &self.folios);
             let stopped = &mut s.stopped;
             let limited = &mut s.limited;
             let now = s.now;
             s.running.retain(|id| {
+                if folios.contains_key(id) {
+                    if !crate::folio::running(id) {
+                        return false;
+                    }
+                    let session = r.get(id);
+                    let out = session.is_some_and(|x| x.limited());
+                    // Nothing is typed into a Folio but its composer, which
+                    // waits through the restart.
+                    let free = now || session.is_some_and(|x| x.free_to_restart(None));
+                    let down = free && crate::folio::wind_down(id, now || out);
+                    if down {
+                        stopped.push(id.clone());
+                        if out {
+                            limited.push(id.clone());
+                        }
+                    }
+                    return !down;
+                }
                 let Some(c) = consoles.get(id).filter(|c| c.exit_code().is_none()) else {
                     // Gone on its own, ended or crashed: nothing to carry.
                     return false;
@@ -5784,9 +5799,8 @@ impl App {
             });
         }
         let stopping = s.stopped.iter().any(|id| {
-            self.consoles
-                .get(id)
-                .is_some_and(|c| c.exit_code().is_none())
+            let terminal = (self.consoles.get(id)).is_some_and(|c| c.exit_code().is_none());
+            terminal || (self.folios.contains_key(id) && crate::folio::running(id))
         });
         if !s.running.is_empty() || stopping {
             self.login(agent).switch = Some(s);
@@ -5804,23 +5818,30 @@ impl App {
         // Once each, whatever happened: on the old login if the switch failed.
         let on_stage = self.shared.active.borrow().clone();
         for id in &s.stopped {
-            if self.paused.contains_key(id) {
-                // Its refused prompt is the last in the conversation, and
-                // this takes it up again on the new login.
-                let go_on = agent == Agent::Claude && s.limited.contains(id);
-                if go_on {
-                    self.tasks
-                        .prompts
-                        .insert(id.clone(), horadric_core::accounts::GO_ON.to_string());
-                }
-                if let Err(e) = self.resume(id, false) {
-                    eprintln!("horadric: cannot resume {id}: {e}");
-                    self.tasks.prompts.remove(id);
-                }
+            let chat = self.folios.contains_key(id);
+            if !chat && !self.paused.contains_key(id) {
+                continue;
+            }
+            // Its refused prompt is the last in the conversation, and
+            // this takes it up again on the new login.
+            if agent == Agent::Claude && s.limited.contains(id) {
+                self.tasks
+                    .prompts
+                    .insert(id.clone(), horadric_core::accounts::GO_ON.to_string());
+            }
+            if chat {
+                // Same tile, same conversation, its claude.exe reading the
+                // new login; the prompt goes in as its first message.
+                self.folio_restart(id, false);
+                continue;
+            }
+            if let Err(e) = self.resume(id, false) {
+                eprintln!("horadric: cannot resume {id}: {e}");
+                self.tasks.prompts.remove(id);
             }
         }
         if let Some(id) = on_stage.filter(|id| s.stopped.contains(id)) {
-            if self.consoles.contains_key(&id) {
+            if self.consoles.contains_key(&id) || self.folios.contains_key(&id) {
                 self.reveal(&id, false);
             }
         }
@@ -7866,6 +7887,7 @@ impl App {
             branch,
             chat,
             show,
+            quiet,
         } = spec;
         if !dir.is_dir() {
             return Err(format!("{} is not a directory", dir.display()));
@@ -7894,7 +7916,7 @@ impl App {
             self.tasks.prompts.insert(id.clone(), prompt);
         }
         let started = match chat {
-            true => self.open_chat(&id, &name, dir, resume, own, existed),
+            true => self.open_chat(&id, &name, dir, resume, own, existed, quiet),
             false => self.launch(&id, &name, dir, own, Run::Agent(Agent::Claude), false),
         };
         if let Err(e) = started {
@@ -7903,7 +7925,7 @@ impl App {
             if let Some((w, _)) = self.new_trees.remove(&id) {
                 worktree::remove(w);
             }
-            if !chat {
+            if !chat && !quiet {
                 // Said outside the borrow. Otherwise nothing shows it
                 // failed: the folder picker only closes, and no tile appears.
                 self.start_failed = Some(e.clone());
@@ -7924,7 +7946,9 @@ impl App {
 
     /// Starts session `id`, named `name`, as a Folio in `dir` on `own`,
     /// its own arguments as a chat takes them, carrying on `resume`. A
-    /// tile that `existed` stays, paused, when it does not start.
+    /// tile that `existed` stays, paused, when it does not start. With
+    /// `quiet` a failure is only returned, not shown in a dialog.
+    #[allow(clippy::too_many_arguments)]
     fn open_chat(
         &mut self,
         id: &str,
@@ -7933,10 +7957,20 @@ impl App {
         resume: Option<String>,
         own: Vec<String>,
         existed: bool,
+        quiet: bool,
     ) -> Result<(), String> {
         let fresh = self.new_trees.remove(id);
         if fresh.is_none() {
             recent::remember(&mut self.recent, &dir.to_string_lossy());
+        }
+        // A worktree just made of a trusted project is as trusted: a quest
+        // started while no one is here would wait on the Folio's ask.
+        if let Some((w, _)) = &fresh {
+            if crate::accounts::trusted(Path::new(&w.main)) {
+                if let Err(e) = crate::accounts::trust(&dir) {
+                    eprintln!("horadric: cannot trust {}: {e}", dir.display());
+                }
+            }
         }
         self.register_folio(id, &dir, name, resume.as_deref());
         let own_tree = (self.shared.registry.lock().ok()).and_then(|mut r| {
@@ -8014,8 +8048,10 @@ impl App {
                     worktree::remove(w);
                 }
             }
-            self.start_failed = Some(e.clone());
-            post(self.notify.0 as isize, WM_HORADRIC_START_FAILED, 0);
+            if !quiet {
+                self.start_failed = Some(e.clone());
+                post(self.notify.0 as isize, WM_HORADRIC_START_FAILED, 0);
+            }
             return Err(e);
         }
         let serial = self.next_serial;
@@ -10137,6 +10173,9 @@ pub(crate) struct SessionSpec {
     pub chat: bool,
     /// Shown on the stage with the keyboard.
     pub show: bool,
+    /// Started by automation, which tells of a failure its own way: no
+    /// dialog waits for a human who may be away, once per retry.
+    pub quiet: bool,
 }
 
 impl SessionSpec {
@@ -10153,6 +10192,7 @@ impl SessionSpec {
             branch: None,
             chat,
             show: false,
+            quiet: false,
         }
     }
 }
