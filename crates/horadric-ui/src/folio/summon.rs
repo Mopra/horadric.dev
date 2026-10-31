@@ -23,16 +23,16 @@ use crate::render::color;
 use crate::sparks::RUNES;
 
 /// The seam growing from the middle to the column's edges, in seconds.
-const SEAM: f32 = 0.2;
+const SEAM: f32 = 0.25;
 /// When the page starts to open, a little into the seam so the two read
 /// as one motion.
-const OPEN_AT: f32 = 0.08;
+const OPEN_AT: f32 = 0.1;
 /// The page opening from the seam to the glass's edges.
-const OPEN: f32 = 0.44;
+const OPEN: f32 = 0.55;
 /// A rune drifting away from the edge that shed it, and fading.
-const DRIFT: f32 = 0.45;
+const DRIFT: f32 = 0.56;
 /// The sigil flaring in the seam and going out.
-const SIGIL: f32 = 0.42;
+const SIGIL: f32 = 0.52;
 /// Runes are shed only over this share of the opening, so the last is
 /// gone soon after the page is open.
 const SHED_SPAN: f32 = 0.8;
@@ -103,7 +103,7 @@ pub(super) unsafe fn draw(gfx: &Gfx, pal: &Palette, still: &ID2D1Bitmap, t: f32,
     // The edges: one line while the seam grows, then two going apart,
     // fading as they near the glass's edges.
     let reach = (right - left) / 2.0 * seam(t);
-    let lit = (1.0 - open).powf(1.3) * motion::ease_in_out(t / 0.12) * 0.75;
+    let lit = (1.0 - open).powf(1.3) * motion::ease_in_out(t / 0.15) * 0.75;
     if lit > 0.01 && reach > 0.0 {
         let line = |y: f32, alpha: f32, width: f32| {
             gfx.brush.SetColor(&color(ink.with_alpha(alpha)));
@@ -201,7 +201,7 @@ mod tests {
     fn the_page_opens_once_and_stays_open() {
         assert_eq!(opened(0.0), 0.0);
         assert_eq!(opened(OPEN_AT), 0.0);
-        assert!(opened(OPEN_AT + OPEN / 2.0) > 0.5);
+        assert!((opened(OPEN_AT + OPEN / 2.0) - 0.5).abs() < 1e-3);
         assert_eq!(opened(OPEN_AT + OPEN), 1.0);
         assert_eq!(opened(LENGTH), 1.0);
         let steps: Vec<f32> = (0..50).map(|i| opened(i as f32 * 0.01)).collect();
