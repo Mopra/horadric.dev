@@ -5,10 +5,11 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use horadric_core::heavy::{self, Holder};
-use horadric_hooks::SESSION_ENV;
+use horadric_core::heavy::{self, Holder, Queued};
+use horadric_hooks::{client, COMMAND_HEADER, HEAVY_PATH, OWNER_ENV, SESSION_ENV, SESSION_HEADER};
 
 const USAGE: &str = "\
 usage: horadric heavy -- <command> [args...]
@@ -20,7 +21,9 @@ usage: horadric heavy -- <command> [args...]
                                         The same, showing the whole output
        A --timeout before the command is ignored: set the timeout on the
        tool that runs heavy instead.
-       horadric heavy                   Say who runs one now";
+       horadric heavy                   Say who runs one now
+       HORADRIC_HEAVY_SLOTS sets how many run at once; unset, one for
+       every 16 logical cores.";
 
 /// Kept outputs older than this are dropped when the next command runs.
 const KEEP_OUTPUT: Duration = Duration::from_secs(24 * 3600);
@@ -37,6 +40,17 @@ const ENOUGH_MEMORY: u64 = 2 << 30;
 const MEMORY_WAIT: Duration = Duration::from_secs(10 * 60);
 
 const MEMORY_POLL: Duration = Duration::from_secs(5);
+
+/// How often a waiter tries the slots again when there is more than one.
+/// With one it blocks on it instead, which keeps the waiters in turn.
+const SLOT_POLL: Duration = Duration::from_millis(500);
+
+/// One place in the queue: a file lock the system lets go of however its
+/// holder ends, and where its holder says who it is.
+struct Slot {
+    lock: File,
+    holder: PathBuf,
+}
 
 /// What the words after `heavy` ask for.
 #[derive(Debug, PartialEq, Eq)]
@@ -157,18 +171,23 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let (full, words) = (request.full, request.words);
     let dir = std::env::temp_dir().join("horadric-heavy");
     fs::create_dir_all(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
-    let (lock_path, holder_path) = (dir.join("slot.lock"), dir.join("slot.json"));
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|e| format!("cannot open {}: {e}", lock_path.display()))?;
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let count = heavy::slots(std::env::var(heavy::SLOTS_ENV).ok().as_deref(), cores);
+    let mut slots = (0..count)
+        .map(|i| open_slot(&dir, i))
+        .collect::<Result<Vec<_>, _>>()?;
     if words.is_empty() {
-        say_who(&lock, &holder_path);
+        say_who(&slots);
         return Ok(());
     }
-    take(&lock, &holder_path)?;
+    let taken = take(&slots)?;
+    let Slot {
+        lock,
+        holder: holder_path,
+    } = slots.swap_remove(taken);
+    // The others are not held, and closing them leaves nobody waiting on
+    // a handle of ours.
+    drop(slots);
     let me = Holder {
         command: heavy::command_line(words),
         cwd: std::env::current_dir()
@@ -272,26 +291,114 @@ fn meminfo_available(meminfo: &str) -> Option<u64> {
     Some(kib * 1024)
 }
 
-/// Takes the slot, first saying whose command it waits for when it is held.
-fn take(lock: &File, holder_path: &PathBuf) -> Result<(), String> {
-    match lock.try_lock() {
-        Ok(()) => return Ok(()),
-        Err(TryLockError::WouldBlock) => {}
-        Err(TryLockError::Error(e)) => return Err(format!("cannot take the slot: {e}")),
+fn open_slot(dir: &Path, i: usize) -> Result<Slot, String> {
+    let (lock, holder) = heavy::slot_files(i);
+    let lock_path = dir.join(lock);
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("cannot open {}: {e}", lock_path.display()))?;
+    Ok(Slot {
+        lock,
+        holder: dir.join(holder),
+    })
+}
+
+/// The first slot free now, taken.
+fn try_any(slots: &[Slot]) -> Result<Option<usize>, String> {
+    for (i, slot) in slots.iter().enumerate() {
+        match slot.lock.try_lock() {
+            Ok(()) => return Ok(Some(i)),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(e)) => return Err(format!("cannot take the slot: {e}")),
+        }
     }
-    let line = match read_holder(holder_path) {
-        Some(h) => heavy::waiting_line(&h, unix_now()),
+    Ok(None)
+}
+
+/// Takes a slot and gives its index, first saying whose command it waits
+/// for when all are held, and telling the session's tile while it waits.
+fn take(slots: &[Slot]) -> Result<usize, String> {
+    if let Some(i) = try_any(slots)? {
+        return Ok(i);
+    }
+    let held: Vec<Holder> = slots.iter().filter_map(|s| read_holder(&s.holder)).collect();
+    let line = match held.iter().min_by_key(|h| h.since) {
+        Some(h) if held.len() == 1 => heavy::waiting_line(h, unix_now()),
+        Some(h) => format!(
+            "all {} slots are taken; {}",
+            slots.len(),
+            heavy::waiting_line(h, unix_now())
+        ),
         None => "waiting for another session's heavy command to end.".into(),
     };
     eprintln!("horadric: {line}");
-    lock.lock()
-        .map_err(|e| format!("cannot take the slot: {e}"))
+    let (done, told) = mpsc::channel::<()>();
+    let paths: Vec<PathBuf> = slots.iter().map(|s| s.holder.clone()).collect();
+    let teller = std::thread::spawn(move || tell_tile(&paths, &told));
+    let taken = match slots {
+        [one] => one
+            .lock
+            .lock()
+            .map(|()| 0)
+            .map_err(|e| format!("cannot take the slot: {e}")),
+        _ => loop {
+            std::thread::sleep(SLOT_POLL);
+            match try_any(slots) {
+                Ok(Some(i)) => break Ok(i),
+                Ok(None) => {}
+                Err(e) => break Err(e),
+            }
+        },
+    };
+    drop(done);
+    let _ = teller.join();
+    taken
 }
 
-fn say_who(lock: &File, holder_path: &PathBuf) {
-    match lock.try_lock() {
-        Ok(()) => println!("Nobody runs a heavy command now."),
-        Err(_) => match read_holder(holder_path) {
+/// Tells the session's tile it waits for a slot, again every
+/// [`heavy::QUEUED_EVERY`] seconds with whoever holds them then, until
+/// `done` closes, then that it stopped. Outside a Horadric session, or
+/// with no Horadric listening, nobody hears it and nothing is lost.
+fn tell_tile(holder_paths: &[PathBuf], done: &mpsc::Receiver<()>) {
+    let Some(session) = std::env::var(SESSION_ENV).ok().filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let owner = std::env::var(OWNER_ENV)
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(horadric_hooks::port);
+    let headers = [(COMMAND_HEADER, "heavy"), (SESSION_HEADER, session.as_str())];
+    let say = |queued: Queued| {
+        if let Ok(body) = serde_json::to_string(&queued) {
+            let _ = client::post(owner, HEAVY_PATH, &headers, &body);
+        }
+    };
+    loop {
+        say(Queued {
+            waiting: true,
+            holders: holder_paths.iter().filter_map(read_holder).collect(),
+        });
+        if done.recv_timeout(Duration::from_secs(heavy::QUEUED_EVERY))
+            != Err(RecvTimeoutError::Timeout)
+        {
+            break;
+        }
+    }
+    say(Queued::default());
+}
+
+fn say_who(slots: &[Slot]) {
+    let mut busy = 0;
+    for slot in slots {
+        if slot.lock.try_lock().is_ok() {
+            let _ = slot.lock.unlock();
+            continue;
+        }
+        busy += 1;
+        match read_holder(&slot.holder) {
             Some(h) => println!(
                 "`{}` in {}{}, pid {}, running for {}.",
                 h.command,
@@ -303,7 +410,12 @@ fn say_who(lock: &File, holder_path: &PathBuf) {
                 heavy::duration(unix_now().saturating_sub(h.since))
             ),
             None => println!("Another session runs a heavy command now."),
-        },
+        }
+    }
+    match (busy, slots.len()) {
+        (0, _) => println!("Nobody runs a heavy command now."),
+        (_, 1) => {}
+        (b, n) => println!("{b} of {n} slots taken."),
     }
 }
 

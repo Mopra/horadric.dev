@@ -541,7 +541,11 @@ fn tile(p: &Painter, m: &Metrics, s: &Scene, i: usize, r: &Rect, session: &Sessi
     };
     p.text(Font::SmallRight, age_c.fade(presence), &age, top);
 
-    let last = if session.last_line.is_empty() {
+    // A session queued for heavy looks stuck without it.
+    let queued = session.queued_line(s.now);
+    let last = if let Some(q) = &queued {
+        q
+    } else if session.last_line.is_empty() {
         &session.cwd
     } else {
         &session.last_line

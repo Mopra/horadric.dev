@@ -58,7 +58,6 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Claude Code 2.1.287 to 2.1.296](plan/claude-code-2-1-287-to-2-1-296.md): cloud session tiles, waiting on `claude agents --json`.
 - [Lore](plan/lore.md): when to compact a quest, and tuning the context pack.
 - [Memory](plan/memory.md): the small gaps left in long term memory.
-- [Performance](plan/performance.md): the tile showing a session queued on `horadric heavy`, and more than one heavy slot.
 - [The agent's cursor](plan/the-agent-s-cursor.md): agents testing without taking the human's mouse. Proposed.
 - [The Brotherhood](plan/the-brotherhood.md): steps 1 to 18 are built; left: renaming a brother, lore catch up from Drive, the Mac as a brother, remote files, quests moving with sessions, teams.
 - [Secrets](plan/secrets.md): tokens for quests that push, call APIs or deploy.

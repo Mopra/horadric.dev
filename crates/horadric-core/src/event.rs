@@ -154,6 +154,11 @@ impl HookEvent {
     /// nodes and the touch (see `glow::told`).
     pub const GLOW: &'static str = "HoradricGlow";
 
+    /// Horadric's own event for a session whose `horadric heavy` waits for
+    /// a slot, or has stopped waiting: `tool_input` holds a
+    /// [`crate::heavy::Queued`]. It never changes a phase.
+    pub const HEAVY: &'static str = "HoradricHeavy";
+
     /// An event Horadric makes up itself, with every optional field empty.
     pub fn synthetic(hook_event_name: &str) -> Self {
         HookEvent {
