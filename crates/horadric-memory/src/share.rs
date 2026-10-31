@@ -486,6 +486,36 @@ impl Shared {
         self.as_sent(self.log.to_send(theirs, most).into_iter(), store)
     }
 
+    /// What a copy holding `theirs` lacks, as [`Shared::export`] gives it,
+    /// but each writer's run cut before the first passage whose text
+    /// `store` does not show. For a copy read from a backup rather than
+    /// its brother: a passage sent without its text is taken for one
+    /// forgotten and never asked for again, while one not sent yet comes
+    /// whole from the brother itself once it is back. Never stamps, since
+    /// a copy read from elsewhere is no brother's own to number.
+    pub fn export_whole(&self, theirs: &Have, store: &Store) -> Vec<Entry> {
+        let here = said_here(store, &self.project);
+        let mut cut: BTreeSet<String> = BTreeSet::new();
+        let mut out = Vec::new();
+        for e in self.log.to_send(theirs, usize::MAX) {
+            if cut.contains(&e.by) {
+                continue;
+            }
+            let mut sent = e.clone();
+            if let Some(fp) = sent.kept.take() {
+                match here.get(&fp).and_then(|id| store.chunk(*id)) {
+                    Some(c) => sent.said = Some(said_of(c)),
+                    None => {
+                        cut.insert(e.by.clone());
+                        continue;
+                    }
+                }
+            }
+            out.push(sent);
+        }
+        out
+    }
+
     /// [`Shared::stamp`] then [`Shared::export`], reading of the store only
     /// what was added since the last time and the passages that go. The
     /// store is tens of MB, and an export runs whenever it grows.
@@ -1062,6 +1092,47 @@ mod tests {
                 .note
                 .as_ref()
                 .is_some_and(|n| n.text.ends_with("per project"))));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_copy_from_a_backup_sends_only_what_it_holds_whole() {
+        let root = temp("whole");
+        let mut a = Brother::new(&root, "aaaa0001", "p");
+        let mut b = Brother::new(&root, "bbbb0002", "p");
+        let first = said("p", "s", "kept in the backup", NOW - 30);
+        a.store
+            .add_all(&[first.clone(), said("p", "s", "said after it", NOW - 20)], NOW)
+            .unwrap();
+        a.note("a fact", NOW - 10, &[]);
+        a.shared.stamp(&a.lore, &a.store).unwrap();
+        // A backup holding a's whole log but only the first passage's
+        // month, as one cut short or still being written would.
+        let copy = root.join("copy").join("memory");
+        fs::create_dir_all(copy.join("brethren")).unwrap();
+        for f in fs::read_dir(a.dir.join("memory").join("brethren")).unwrap() {
+            let f = f.unwrap();
+            fs::copy(f.path(), copy.join("brethren").join(f.file_name())).unwrap();
+        }
+        Store::open(&copy).unwrap().add(&first, NOW).unwrap();
+        let theirs = Shared::open(&copy, "p", "bbbb0002").unwrap();
+        let store = Store::open(&copy).unwrap();
+        let sent = theirs.export_whole(&b.shared.have(), &store);
+        // a stamps passages first, then notes: the second passage cuts a's
+        // run, and the note behind it waits too.
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].said.as_ref().unwrap().text, "kept in the backup");
+        b.shared
+            .import(sent, &mut b.lore, &mut b.store, NOW)
+            .unwrap();
+        assert_eq!(b.passages("p"), ["kept in the backup"]);
+        assert!(b.texts().is_empty());
+        // Nothing went without its text, so a itself still sends the rest.
+        assert_eq!(b.take_from(&mut a).len(), 2);
+        assert_eq!(b.passages("p"), ["kept in the backup", "said after it"]);
+        assert_eq!(b.texts(), ["a fact"]);
+        // Read again, the copy has nothing more to give.
+        assert!(theirs.export_whole(&b.shared.have(), &store).is_empty());
         let _ = fs::remove_dir_all(&root);
     }
 

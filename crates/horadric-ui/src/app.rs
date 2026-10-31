@@ -906,6 +906,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             backup_busy: None,
             backup_done: Arc::new(Mutex::new(Vec::new())),
             backup_checked: None,
+            catch_up_alone: None,
+            catch_up_last: None,
+            catch_up_busy: Arc::default(),
             backup_step: None,
             backup_note: backup_started(),
             settings_project: None,
@@ -3442,6 +3445,12 @@ struct App {
     backup_busy: Option<String>,
     backup_done: Arc<Mutex<Vec<crate::backup::run::Done>>>,
     backup_checked: Option<Instant>,
+    /// The shared lore's catch up from the other machines' backups: since
+    /// when no brother has been linked, when it last ran (Unix seconds),
+    /// and whether it runs now.
+    catch_up_alone: Option<u64>,
+    catch_up_last: Option<u64>,
+    catch_up_busy: Arc<std::sync::atomic::AtomicBool>,
     /// Where a restore is, between its questions.
     backup_step: Option<RestoreStep>,
     /// What start found of a restore staged last time: whether it failed,
@@ -6198,6 +6207,7 @@ impl App {
         if let Some(state) = horadric_hooks::state_dir() {
             self.backup_cfg = crate::backup::Config::load(&state);
         }
+        self.catch_up_tick();
         let cfg = &self.backup_cfg;
         if crate::backup::run::due(
             cfg,
@@ -6207,6 +6217,46 @@ impl App {
             self.backup_now();
             self.refresh_settings();
         }
+    }
+
+    /// Catches the shared lore up from the other machines' backups when
+    /// this PC has brothers and none of them has been linked for a while:
+    /// the backup stands in for the brother that never sleeps.
+    fn catch_up_tick(&mut self) {
+        use std::sync::atomic::Ordering;
+        let now = crate::backup::run::unix_now();
+        let has_brothers = horadric_hooks::state_dir()
+            .and_then(|d| horadric_core::joining::Store::load(&d))
+            .is_some_and(|s| !s.brothers.is_empty());
+        let alone = has_brothers && crate::brothers::sees().is_empty() && !self.far_any_linked();
+        self.catch_up_alone = match (alone, self.catch_up_alone) {
+            (false, _) => None,
+            (true, since) => Some(since.unwrap_or(now)),
+        };
+        let cfg = &self.backup_cfg;
+        let due = crate::backup::run::catch_up_due(
+            cfg,
+            crate::backup::run::ready(cfg),
+            self.catch_up_alone,
+            self.catch_up_last,
+            now,
+        );
+        if !due || self.catch_up_busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.catch_up_last = Some(now);
+        let (cfg, dirs, busy) = (cfg.clone(), self.tile_dirs(), self.catch_up_busy.clone());
+        std::thread::spawn(move || {
+            if let Some(state) = horadric_hooks::state_dir() {
+                let lores = horadric_memory::sharing::Lores::of(dirs);
+                match crate::backup::run::catch_up(&state, &cfg, &lores, now) {
+                    Ok(0) => {}
+                    Ok(n) => eprintln!("horadric: caught the lore up from backups: {n} entries"),
+                    Err(e) => eprintln!("horadric: cannot catch the lore up from backups: {e}"),
+                }
+            }
+            busy.store(false, Ordering::SeqCst);
+        });
     }
 
     /// Hands the Settings window the settings again, after a change.

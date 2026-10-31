@@ -1187,6 +1187,11 @@ impl App {
         crate::project::name_brother(key, name);
     }
 
+    /// Whether any brother is linked now, by the relay or over `ssh`.
+    pub(super) fn far_any_linked(&self) -> bool {
+        self.far.peers.values().any(|p| p.via.is_some() && p.heard.linked)
+    }
+
     pub(super) fn far_key(&self, who: &str) -> Option<String> {
         if self.far.peers.contains_key(who) {
             return Some(who.to_string());

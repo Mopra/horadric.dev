@@ -91,6 +91,74 @@ pub fn machines(config: &Config) -> Result<Vec<String>, String> {
     }
 }
 
+/// Whether to catch the shared lore up from the other machines' backups
+/// now: the backup can be reached, every brother has been out of reach
+/// since `alone_since` for as long as one takes to count as silent, and
+/// the last catch up was an hour or more ago. A brother back on its link
+/// sends what it wrote itself, sooner and whole.
+pub fn catch_up_due(
+    config: &Config,
+    ready: bool,
+    alone_since: Option<u64>,
+    last: Option<u64>,
+    now: u64,
+) -> bool {
+    config.to != To::Off
+        && ready
+        && alone_since.is_some_and(|t| {
+            now.saturating_sub(t) >= horadric_core::brotherhood::SILENT_SECS
+        })
+        && last.is_none_or(|l| now.saturating_sub(l) >= EVERY)
+}
+
+/// Catches the shared lore of `lores` up from every other machine's
+/// backup at the target (see [`super::catch_up`]). Gives how many entries
+/// went in; an error only when nothing went in and some machine failed.
+pub fn catch_up(
+    state: &Path,
+    config: &Config,
+    lores: &horadric_memory::sharing::Lores,
+    now: u64,
+) -> Result<usize, String> {
+    let pass = credential::read(credential::PASSPHRASE).ok_or("no passphrase is set")?;
+    let me = config::machine();
+    let mut keys: Vec<&str> = lores.projects().map(|p| p.place.key()).collect();
+    keys.sort_unstable();
+    let (mut taken, mut why) = (0, Vec::new());
+    for m in machines(config)? {
+        if m == me || !super::folder::safe(&m) || m.contains('/') {
+            continue;
+        }
+        let copy = state.join(super::catch_up::FOLDER).join(&m);
+        let fetched =
+            vault_of(config, &m).and_then(|v| super::catch_up::fetch(v.as_ref(), &pass, &copy));
+        if let Err(e) = fetched {
+            why.push(format!("{m}: {e}"));
+            continue;
+        }
+        if super::catch_up::caught(&copy, &keys) {
+            continue;
+        }
+        let mut whole = true;
+        for p in lores.projects() {
+            match p.catch_up_from(&copy.join("memory"), now) {
+                Ok(n) => taken += n,
+                Err(e) => {
+                    whole = false;
+                    why.push(format!("{m}: {e}"));
+                }
+            }
+        }
+        if whole {
+            super::catch_up::mark_caught(&copy, &keys);
+        }
+    }
+    match why.is_empty() || taken > 0 {
+        true => Ok(taken),
+        false => Err(why.join("; ")),
+    }
+}
+
 /// One backup, its result kept in `backup.json` for the Settings section.
 /// Returns the config as saved.
 pub fn run_once(state: &Path) -> (Config, Result<Report, String>) {
@@ -244,6 +312,20 @@ mod tests {
         assert!(due(&config(To::Folder, Some(100)), true, 100 + EVERY));
         // A clock set back does not hold backups off for good.
         assert!(!due(&config(To::Folder, Some(500)), true, 100));
+    }
+
+    #[test]
+    fn a_catch_up_waits_for_silence_and_an_hour() {
+        let on = config(To::Drive, None);
+        let silent = horadric_core::brotherhood::SILENT_SECS;
+        let now = 10_000;
+        assert!(catch_up_due(&on, true, Some(now - silent), None, now));
+        assert!(!catch_up_due(&on, true, Some(now - silent + 1), None, now));
+        assert!(!catch_up_due(&on, true, None, None, now), "a brother is linked");
+        assert!(!catch_up_due(&on, true, Some(0), Some(now - EVERY + 1), now));
+        assert!(catch_up_due(&on, true, Some(0), Some(now - EVERY), now));
+        assert!(!catch_up_due(&on, false, Some(0), None, now));
+        assert!(!catch_up_due(&config(To::Off, None), true, Some(0), None, now));
     }
 
     #[test]
