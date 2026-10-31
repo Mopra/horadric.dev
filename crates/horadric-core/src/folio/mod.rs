@@ -36,7 +36,7 @@ pub use send::*;
 pub use session::*;
 pub use sign_in::*;
 pub use tools::*;
-pub use transcript::{rewind_point, Rewind};
+pub use transcript::{prompt_point, rewind_point, Rewind};
 
 use std::collections::{HashMap, HashSet};
 
@@ -342,6 +342,7 @@ enum Sent {
     McpAuth(String),
     McpReconnect(String),
     McpToggle(String),
+    RewindFiles,
 }
 
 #[derive(Debug, Default)]
@@ -389,6 +390,9 @@ pub struct Folio {
     /// The error an `assistant` message of this turn carried, which the
     /// turn's `result` only flags.
     turn_error: Option<String>,
+    /// How the last [`Folio::rewind_files`] went, the CLI's error when it
+    /// did not, until the app takes it.
+    pub files_rewound: Option<Result<(), String>>,
     /// The blocks of the message streaming now, by content index.
     open: HashMap<u64, Open>,
     /// The id of the message streaming now.
@@ -687,6 +691,7 @@ impl Folio {
                     "set_model" => Sent::Model,
                     "get_context_usage" => Sent::Context,
                     "stop_task" => Sent::StopTask,
+                    "rewind_files" => Sent::RewindFiles,
                     s => match self.mcp_sent(s, &v["request"]) {
                         Some(kind) => kind,
                         None => return false,
@@ -1070,6 +1075,19 @@ impl Folio {
         control_request_line(&id, "stop_task", serde_json::json!({"task_id": task_id}))
     }
 
+    /// Asks the CLI to put the files back as they were when the prompt
+    /// `user_message_id` (its transcript uuid) was sent. The CLI keeps
+    /// the files' earlier states only when it runs with file
+    /// checkpointing on. The answer lands in [`Folio::files_rewound`].
+    pub fn rewind_files(&mut self, user_message_id: &str) -> String {
+        let id = self.request(Sent::RewindFiles);
+        control_request_line(
+            &id,
+            "rewind_files",
+            serde_json::json!({"user_message_id": user_message_id}),
+        )
+    }
+
     fn request(&mut self, kind: Sent) -> String {
         self.sent += 1;
         let id = format!("horadric-{}", self.sent);
@@ -1411,6 +1429,14 @@ impl Folio {
         ) {
             return self.mcp_response(kind, r);
         }
+        if kind == Sent::RewindFiles {
+            let error = r["error"].as_str().or(r["response"]["error"].as_str());
+            self.files_rewound = Some(match (r["subtype"] == "error", error) {
+                (false, _) if r["response"]["canRewind"] != false => Ok(()),
+                (_, e) => Err(e.unwrap_or("The files could not be put back.").to_string()),
+            });
+            return false;
+        }
         if r["subtype"] == "error" {
             let error = r["error"].as_str().unwrap_or("refused");
             return self.notice(Notice::Refused(error.to_string()));
@@ -1436,6 +1462,7 @@ impl Folio {
             Sent::McpStatus | Sent::McpAuth(_) | Sent::McpReconnect(_) | Sent::McpToggle(_) => {
                 return false
             }
+            Sent::RewindFiles => return false,
         }
         true
     }
@@ -2937,6 +2964,31 @@ mod tests {
         }
         assert_eq!(f.blocks[1], Block::Thinking("Hmm, yes.".into()));
         assert_eq!(f.blocks.len(), 2);
+    }
+
+    #[test]
+    fn a_rewind_of_the_files_says_how_it_went() {
+        let mut f = Folio::new();
+        let line = f.rewind_files("u-1");
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["request"]["subtype"], "rewind_files");
+        assert_eq!(v["request"]["user_message_id"], "u-1");
+        let id = v["request_id"].as_str().unwrap().to_string();
+        let ok = serde_json::json!({"type": "control_response", "response": {
+            "subtype": "success", "request_id": id, "response": {"canRewind": true}}});
+        f.feed(&ok.to_string());
+        assert_eq!(f.files_rewound.take(), Some(Ok(())));
+        let line = f.rewind_files("u-2");
+        let v: Value = serde_json::from_str(&line).unwrap();
+        let id = v["request_id"].as_str().unwrap().to_string();
+        let refused = serde_json::json!({"type": "control_response", "response": {
+            "subtype": "error", "request_id": id, "error": "File rewinding is not enabled."}});
+        f.feed(&refused.to_string());
+        assert_eq!(
+            f.files_rewound.take(),
+            Some(Err("File rewinding is not enabled.".into()))
+        );
+        assert!(f.blocks.is_empty());
     }
 
     #[test]

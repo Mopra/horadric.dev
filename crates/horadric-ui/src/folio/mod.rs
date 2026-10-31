@@ -827,6 +827,25 @@ pub fn rewind_from(id: &str) -> Option<(String, Option<String>)> {
     .flatten()
 }
 
+/// Asks session `id`'s claude to put its files back as they were when
+/// the prompt `uuid` was sent: the app hears
+/// [`Input::FolioFilesRewound`]. False unless it rests.
+pub fn rewind_files(id: &str, uuid: &str) -> bool {
+    with(id, |c| {
+        if !c.between_turns() {
+            return false;
+        }
+        let line = c.folio.rewind_files(uuid);
+        c.hosted.as_ref().is_some_and(|h| h.send_line(&line).is_ok())
+    })
+    .unwrap_or(false)
+}
+
+/// Has session `id` say `text` on its page once it starts again.
+pub fn greet(id: &str, text: &str) {
+    sign_in::greet(id, text);
+}
+
 /// Asks session `id`'s CLI to stop its background task `task`, such as a
 /// subagent.
 pub fn stop_task(id: &str, task: &str) {
@@ -1152,6 +1171,10 @@ fn drain() {
                     }
                     _ => tell.push(Input::FolioHandedOver(id.clone())),
                 }
+            }
+            // A replay's answer was acted on when it came.
+            if let Some(how) = chat.folio.files_rewound.take().filter(|_| chat.live) {
+                tell.push(Input::FolioFilesRewound(id.clone(), how));
             }
             // A replay's limits are old news, and the bars already had them.
             if let Some(limits) = chat.folio.limits.take().filter(|_| chat.live) {

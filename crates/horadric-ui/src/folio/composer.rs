@@ -155,6 +155,19 @@ struct SavedPrompt {
     images: Vec<(String, String)>,
 }
 
+/// An earlier prompt taken back into the composer to change: sent, it
+/// forks the conversation there.
+struct Editing {
+    /// The prompt's block.
+    block: usize,
+    /// What the composer held before, which comes back after.
+    draft: String,
+}
+
+/// What the line above the composer says while a prompt is edited.
+const EDITING: &str =
+    "Editing an earlier prompt: sending forks the conversation there, the files put back too. Esc lets it be.";
+
 /// One session's composer.
 pub(super) struct Input {
     /// The session's id, once known: what its draft and history are kept
@@ -191,6 +204,7 @@ pub(super) struct Input {
     /// Where the open menu was last drawn, for the wheel over it.
     pub(super) menu_at: Option<Rect>,
     ime: Option<[i32; 4]>,
+    editing: Option<Editing>,
 }
 
 impl Input {
@@ -219,6 +233,7 @@ impl Input {
             top: 0.0,
             menu_at: None,
             ime: None,
+            editing: None,
         }
     }
 
@@ -533,6 +548,15 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
     if text.is_empty() && chat.input.images.is_empty() {
         return;
     }
+    if let Some(block) = chat.input.editing.as_ref().map(|e| e.block) {
+        if !text.is_empty() && fork(chat, block, Some(&text)) {
+            chat.input.history.push(&text);
+            let draft = chat.input.editing.take().map(|e| e.draft).unwrap_or_default();
+            put(chat, &draft);
+            chat.input.save();
+        }
+        return;
+    }
     // Before the session's own checks: a login is what one that ended
     // for want of it needs.
     if let Some(name) = native_command(&text) {
@@ -636,6 +660,79 @@ pub(super) fn choose(chat: &mut Chat, items: Vec<Item>, empty: &str) {
     }
     chat.input.notice = None;
     chat.input.menu = Some(Menu::new(MenuKind::Choice, items, 0));
+}
+
+/// Takes the prompt at `block` of session `key` back into the composer to
+/// change and send again, keeping what the composer held for after.
+pub(super) fn edit_prompt(key: &str, block: usize) {
+    with(key, |chat| {
+        chat.input.ensure(key);
+        let Some(Block::Prompt(text)) = chat.folio.blocks.get(block) else {
+            return;
+        };
+        if !chat.between_turns() {
+            chat.input.notice = Some("A prompt can be edited once Claude rests.".into());
+            return;
+        }
+        let text = text.clone();
+        let draft = match chat.input.editing.take() {
+            Some(e) => e.draft,
+            None => chat.input.ed.expanded(),
+        };
+        put(chat, &text);
+        chat.input.editing = Some(Editing { block, draft });
+        chat.input.notice = Some(EDITING.into());
+    });
+    redraw(key);
+}
+
+/// Session `key`'s conversation and files go back to before the prompt
+/// at `block`, which waits in the composer to be sent again, as Claude
+/// Code's rewind leaves it.
+pub(super) fn rewind_to(key: &str, block: usize) {
+    with(key, |chat| {
+        chat.input.ensure(key);
+        let text = match chat.folio.blocks.get(block) {
+            Some(Block::Prompt(t)) => t.clone(),
+            _ => return,
+        };
+        if fork(chat, block, None) && chat.input.editing.is_none() {
+            if chat.input.ed.expanded().trim().is_empty() {
+                put(chat, &text);
+            }
+            chat.input.save();
+        }
+    });
+    redraw(key);
+}
+
+/// Asks the app to fork the conversation at the prompt at `block`, going
+/// on with `resend` when given. Says why not above the composer when it
+/// cannot now.
+fn fork(chat: &mut Chat, block: usize, resend: Option<&str>) -> bool {
+    let Some(id) = chat.input.key.clone() else {
+        return false;
+    };
+    let Some(Block::Prompt(text)) = chat.folio.blocks.get(block) else {
+        chat.input.editing = None;
+        chat.input.notice = Some("That prompt is no longer on the page.".into());
+        return false;
+    };
+    if !chat.between_turns() {
+        chat.input.notice = Some("That can be done once Claude rests.".into());
+        return false;
+    }
+    let back = (chat.folio.blocks[block..].iter())
+        .filter(|b| matches!(b, Block::Prompt(_)))
+        .count();
+    crate::app::push(crate::app::Input::FolioFork {
+        id,
+        back,
+        text: text.clone(),
+        resend: resend.map(str::to_string),
+    });
+    chat.input.notice = None;
+    true
 }
 
 /// Puts `text` in the composer for the human to finish, caret at its end.
@@ -1083,6 +1180,8 @@ pub(super) fn on_char(key: &str, c: char, mods: Mods) {
                     // A selection goes first; a second Esc stops Claude.
                     let f = &mut chat.input.ed.field;
                     f.set_caret(f.caret, false);
+                } else if let Some(e) = chat.input.editing.take() {
+                    put(chat, &e.draft);
                 } else if chat.folio.busy {
                     hold(chat);
                     if let Some(h) = &chat.hosted {

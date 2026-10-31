@@ -184,6 +184,30 @@ pub struct Rewind {
 /// [`Folio::from_transcript_at`]), or from its last line. None when no
 /// prompt is found, or `head` is not in `jsonl`.
 pub fn rewind_point(jsonl: &str, head: Option<&str>) -> Option<Rewind> {
+    prompts_back(jsonl, head, 1).into_iter().next().map(|(r, _)| r)
+}
+
+/// The rewind to just before a prompt further back than the last turn:
+/// the `back`th prompt counting back from `head` (1 is the last), as
+/// [`rewind_point`] counts. What the human sees and what the transcript
+/// holds can differ by a prompt or two (a command the Folio ran itself,
+/// a turn that never reached the file), so the prompt must read `text`,
+/// and the one that does nearest the count is taken. None when no
+/// prompt back from `head` reads `text`.
+pub fn prompt_point(jsonl: &str, head: Option<&str>, back: usize, text: &str) -> Option<Rewind> {
+    let text = text.trim();
+    let want = back.max(1) - 1;
+    let prompts = prompts_back(jsonl, head, usize::MAX);
+    (prompts.into_iter().enumerate())
+        .filter(|(_, (_, t))| t.trim() == text)
+        .min_by_key(|(i, _)| i.abs_diff(want))
+        .map(|(_, (r, _))| r)
+}
+
+/// Up to `most` prompts along the chain from `head` (or the last line)
+/// back, the last first: where each rewinds to, and what it said.
+fn prompts_back(jsonl: &str, head: Option<&str>, most: usize) -> Vec<(Rewind, String)> {
+    let mut found = Vec::new();
     let mut lines: HashMap<String, Value> = HashMap::new();
     let mut last = None;
     for line in jsonl.lines() {
@@ -199,29 +223,38 @@ pub fn rewind_point(jsonl: &str, head: Option<&str>) -> Option<Rewind> {
         last = Some(u.clone());
         lines.insert(u, v);
     }
-    let mut at = match head {
-        Some(h) => h.to_string(),
-        None => last?,
+    let Some(mut at) = head.map(str::to_string).or(last) else {
+        return found;
     };
     // Bounded, should a chain ever loop.
     for _ in 0..lines.len() {
-        let v = lines.get(&at)?;
+        let Some(v) = lines.get(&at) else {
+            break;
+        };
         let parent = v["parentUuid"].as_str().map(str::to_string);
         if v["type"] == "user" {
             let mut f = Folio::new();
             f.transcript_user(v);
-            if matches!(f.blocks.first(), Some(Block::Prompt(_))) {
-                return Some(Rewind {
-                    keep: parent,
-                    drop: at,
-                });
+            if let Some(Block::Prompt(said)) = f.blocks.first() {
+                let rewind = Rewind {
+                    keep: parent.clone(),
+                    drop: at.clone(),
+                };
+                found.push((rewind, said.clone()));
+                if found.len() >= most {
+                    break;
+                }
             }
         }
         // A compact starts its chain afresh, naming the one before as its
         // logical parent.
-        at = parent.or_else(|| v["logicalParentUuid"].as_str().map(str::to_string))?;
+        let next = parent.or_else(|| v["logicalParentUuid"].as_str().map(str::to_string));
+        let Some(next) = next else {
+            break;
+        };
+        at = next;
     }
-    None
+    found
 }
 
 /// What the human typed, from a transcript's prompt text: a slash command
@@ -331,6 +364,39 @@ mod tests {
         assert_eq!(prompts(&Folio::from_transcript(&jsonl)), ["A", "C"]);
         let r = rewind_point(&jsonl, None).unwrap();
         assert_eq!((r.keep.as_deref(), r.drop.as_str()), (Some("a2"), "c"));
+    }
+
+    #[test]
+    fn any_earlier_prompt_rewinds_to_the_line_before_it() {
+        let mut lines = two_turns();
+        lines.push(line("user", "c", Some("b1"), "C"));
+        lines.push(line("assistant", "c1", Some("c"), "ok C"));
+        let jsonl = lines.join("\n");
+        let r = prompt_point(&jsonl, None, 2, "B").unwrap();
+        assert_eq!((r.keep.as_deref(), r.drop.as_str()), (Some("a2"), "b"));
+        let r = prompt_point(&jsonl, None, 3, "A").unwrap();
+        assert_eq!((r.keep, r.drop.as_str()), (None, "a"));
+        // Counted one off, the text still finds it.
+        let r = prompt_point(&jsonl, None, 1, "B").unwrap();
+        assert_eq!(r.drop, "b");
+        assert_eq!(prompt_point(&jsonl, None, 2, "D"), None);
+        // From a head rewound to, what came after is not counted.
+        let r = prompt_point(&jsonl, Some("a2"), 1, "A").unwrap();
+        assert_eq!(r.drop, "a");
+        assert_eq!(prompt_point(&jsonl, Some("a2"), 1, "C"), None);
+    }
+
+    #[test]
+    fn the_same_words_twice_take_the_one_nearest_the_count() {
+        let lines = [
+            line("user", "a", None, "go on"),
+            line("assistant", "a1", Some("a"), "ok"),
+            line("user", "b", Some("a1"), "go on"),
+            line("assistant", "b1", Some("b"), "ok"),
+        ];
+        let jsonl = lines.join("\n");
+        assert_eq!(prompt_point(&jsonl, None, 1, "go on").unwrap().drop, "b");
+        assert_eq!(prompt_point(&jsonl, None, 2, "go on").unwrap().drop, "a");
     }
 
     #[test]

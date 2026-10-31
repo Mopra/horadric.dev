@@ -455,6 +455,17 @@ pub(crate) enum Input {
     FolioToTerminal(String),
     /// A Folio handed over has ended: its terminal starts now.
     FolioHandedOver(String),
+    /// A Folio's Edit or Rewind on a prompt: its conversation forks just
+    /// before the `back`th prompt from the end, which says `text`, its
+    /// files go back to then, and it goes on with `resend` when given.
+    FolioFork {
+        id: String,
+        back: usize,
+        text: String,
+        resend: Option<String>,
+    },
+    /// How putting back a Folio's files for a fork went.
+    FolioFilesRewound(String, Result<(), String>),
     /// A Folio's claude.exe ended to read a new login: it starts again on
     /// its conversation, shown on the stage when true.
     FolioRestart(String, bool),
@@ -7817,7 +7828,7 @@ impl App {
         let mut flags = horadric_core::folio::headless_args(&all, subagents);
         // Not kept in `own`: an undo rewinds this start only.
         let rewound = folio_tile::rewound(id);
-        flags.extend(rewound.iter().flat_map(folio_tile::flags));
+        flags.extend(rewound.iter().flat_map(|(r, fork)| folio_tile::flags(r, *fork)));
         let mut env_set = vec![
             (horadric_hooks::SESSION_ENV.to_string(), id.to_string()),
             (
@@ -7826,6 +7837,10 @@ impl App {
             ),
         ];
         env_set.extend(session_env(id, own_tree.as_ref(), &dir));
+        // The CLI keeps what each prompt's edits overwrote only when told
+        // to off a terminal, and a rewind to an earlier prompt puts the
+        // files back from that.
+        env_set.push(("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".into(), "1".into()));
         env_set.extend(self.shared.defaults().env());
         let mut options = horadric_pty::headless::Options {
             args: flags,
@@ -7854,7 +7869,7 @@ impl App {
             name: name.to_string(),
             resume,
             history: 0,
-            at: rewound.and_then(|r| r.keep),
+            at: rewound.and_then(|(r, _)| r.keep),
         };
         if let Err(e) = crate::folio::open_with(id, &dir, tag, &options, start.prompt) {
             // A tile that was there before, a terminal going on as a chat or
@@ -9198,6 +9213,13 @@ impl App {
                 Input::FolioState(id, state) => self.folio_state(&id, state),
                 Input::FolioToTerminal(id) => self.folio_to_terminal(&id),
                 Input::FolioHandedOver(id) => self.folio_handed_over(&id),
+                Input::FolioFork {
+                    id,
+                    back,
+                    text,
+                    resend,
+                } => self.folio_fork(&id, back, &text, resend),
+                Input::FolioFilesRewound(id, how) => self.folio_files_rewound(&id, how),
                 Input::FolioRestart(id, show) => self.folio_restart(&id, show),
                 Input::FolioAddDir(id, dir) => {
                     let own = self.folio_args.entry(id.clone()).or_default();

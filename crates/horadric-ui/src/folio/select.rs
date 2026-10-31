@@ -27,6 +27,8 @@ pub(super) fn act(key: &str, a: Act) {
     match a {
         Act::Copy(t) => clipboard::set_text(&t),
         Act::Resume => app::push(Input::Expand(key.to_string())),
+        Act::Edit(block) => super::composer::edit_prompt(key, block),
+        Act::Rewind(block) => super::composer::rewind_to(key, block),
         Act::Link(url) => match with(key, |c| c.key.clone()) {
             Some(project) => app::push(Input::LinkIn(project, url)),
             None => app::push(Input::Link(url)),

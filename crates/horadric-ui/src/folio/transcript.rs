@@ -116,6 +116,12 @@ pub(super) enum Act {
     FindClose,
     /// An ended session starts again on its conversation.
     Resume,
+    /// A prompt, by its block, taken back into the composer to change and
+    /// send again as a fork of the conversation there.
+    Edit(usize),
+    /// The conversation and its files go back to before a prompt, by its
+    /// block, which waits in the composer.
+    Rewind(usize),
 }
 
 /// A text field on a card or the find bar's, by its id.
@@ -490,7 +496,7 @@ impl Ctx<'_> {
     /// shadowed under its top edge with a catch of light along its bottom.
     /// Ansuz (the spoken word) is cut in at its left, and the text is the
     /// reply's type, a little toward the accent.
-    unsafe fn prompt(&self, t: &str, cw: f32) -> Scene {
+    unsafe fn prompt(&self, i: usize, t: &str, cw: f32) -> Scene {
         const RUNE_W: f32 = 20.0;
         let mut s = Scene::default();
         let max = cw * PLATE_SHARE - 2.0 * PLATE_X - RUNE_W;
@@ -520,6 +526,28 @@ impl Ctx<'_> {
         ));
         let text = self.pal.fg.mix(self.pal.accent, 0.18).with_alpha(0.95);
         s.unit(&l, r.x + PLATE_X + RUNE_W, top, text, t);
+        // Off the plate's left, where the column is always free.
+        let mut x = r.x - 8.0;
+        for (icon, label, w, act) in [
+            ('\u{E7A7}', "Rewind", 78.0, Act::Rewind(i)),
+            ('\u{E70F}', "Edit", 58.0, Act::Edit(i)),
+        ] {
+            x -= w;
+            let b = Rect::new(x, 4.0, w, 22.0);
+            s.hover.push(Item::Line(
+                icon.to_string(),
+                F::Icon,
+                Rect::new(b.x + 6.0, b.y, 16.0, b.h),
+                self.pal.faint,
+            ));
+            s.hover.push(Item::Line(
+                label.into(),
+                F::Small,
+                Rect::new(b.x + 26.0, b.y, w - 28.0, b.h),
+                self.pal.faint,
+            ));
+            s.hover_hits.push((b, Hit::Tr(act)));
+        }
         s.h = r.h;
         s
     }
@@ -1233,7 +1261,7 @@ impl View {
             let old = blocks[i].take().map(|b| b.paras).unwrap_or_default();
             let mut paras = Vec::new();
             let scene = match b {
-                Block::Prompt(t) => ctx.prompt(t, lw),
+                Block::Prompt(t) => ctx.prompt(i, t, lw),
                 Block::Images(v) => ctx.images(i, v, thumbs, lw),
                 Block::Reply(t) if t.trim().is_empty() => Scene::default(),
                 Block::Reply(t) => {
