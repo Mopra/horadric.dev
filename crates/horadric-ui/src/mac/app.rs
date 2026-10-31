@@ -66,6 +66,10 @@ pub enum Input {
     Commands,
     Console(Note, usize),
     Tick,
+    /// The relay link, a brother's ask or the sign in said something.
+    Kin(super::brothers::Note),
+    /// The brothers' server looks for what changed.
+    KinTick,
 }
 
 thread_local! {
@@ -132,12 +136,12 @@ enum Run {
 
 pub struct App {
     mtm: MainThreadMarker,
-    registry: Arc<Mutex<Registry>>,
-    consoles: HashMap<String, Arc<Console>>,
+    pub(super) registry: Arc<Mutex<Registry>>,
+    pub(super) consoles: HashMap<String, Arc<Console>>,
     next_serial: usize,
     /// Sessions whose agent is not running, by id, as saved.
-    paused: HashMap<String, SavedSession>,
-    clusters: Vec<Cluster>,
+    pub(super) paused: HashMap<String, SavedSession>,
+    pub(super) clusters: Vec<Cluster>,
     /// The order projects stand in the column, by key.
     order: Vec<String>,
     collapsed: HashSet<String>,
@@ -157,6 +161,8 @@ pub struct App {
     quit: bool,
     frozen: bool,
     update: update::Updater,
+    /// What the Mac keeps of its brothers, the server they ask included.
+    pub(super) kin: super::brothers::Kin,
 }
 
 /// Runs the app until it quits.
@@ -235,6 +241,7 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
         quit: false,
         frozen: false,
         update: update::Updater::new(saved.update_told.clone()),
+        kin: super::brothers::Kin::default(),
     };
     app.attach_hosts();
     for id in &carry {
@@ -259,6 +266,9 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
         app.stage.present();
     }
     APP.with(|a| *a.borrow_mut() = Some(app));
+    // It waits for a sign in before it dials, so a Mac that never joins a
+    // brotherhood never reaches the relay.
+    super::brothers::start();
     tick_soon();
     snapshot::start();
 
@@ -407,6 +417,8 @@ impl App {
             Input::Console(Note::Output, serial) => self.output(serial),
             Input::Console(Note::Exit, serial) => self.exited(serial),
             Input::Tick => self.tick(),
+            Input::Kin(note) => super::brothers::heard(self, note),
+            Input::KinTick => super::brothers::tick(self),
         }
     }
 
@@ -421,7 +433,7 @@ impl App {
 
     /// The folder new sessions in the project with this key start in: a
     /// session's own, which keeps the case the key lost, or the key.
-    fn project_dir(&self, key: &str) -> Option<PathBuf> {
+    pub(super) fn project_dir(&self, key: &str) -> Option<PathBuf> {
         let from_session = self.registry.lock().ok().and_then(|r| {
             r.all()
                 .filter(|s| project_key(s) == key)
@@ -485,6 +497,18 @@ impl App {
         if let Some(key) = self.project_of(&id) {
             self.show_project(&key, Some(&id));
         }
+    }
+
+    /// Starts Claude in a new session in `cwd` for a brother, without
+    /// showing it here or asking anything: the brother hears why not.
+    pub(super) fn start_afar(&mut self, cwd: PathBuf) -> Result<String, String> {
+        let base = cwd
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "session".into());
+        let id = self.unique_id(&base);
+        self.launch(&id, &base, cwd, Vec::new(), Run::Agent(Agent::Claude))?;
+        Ok(id)
     }
 
     fn open_shell(&mut self, key: &str) {
@@ -597,7 +621,7 @@ impl App {
     }
 
     /// Resumes a paused session in the same tile, with its conversation.
-    fn resume(&mut self, id: &str, show: bool) -> Result<(), String> {
+    pub(super) fn resume(&mut self, id: &str, show: bool) -> Result<(), String> {
         let Some(saved) = self.paused.remove(id) else {
             return Ok(());
         };
@@ -739,7 +763,7 @@ impl App {
     }
 
     /// Ends a session: its program is told to stop, and its tile goes.
-    fn end(&mut self, id: &str) {
+    pub(super) fn end(&mut self, id: &str) {
         match self.consoles.get(id) {
             Some(c) if c.exit_code().is_none() => {
                 // A clean end: the tile goes when the exit arrives.
@@ -771,7 +795,7 @@ impl App {
 
     /// Makes the clusters match the projects in the registry, places them
     /// and redraws them, and brings the stage up to date.
-    fn reconcile(&mut self) {
+    pub(super) fn reconcile(&mut self) {
         let now = SystemTime::now();
         let sessions: Vec<horadric_core::Session> = self
             .registry
@@ -1213,7 +1237,7 @@ impl App {
 
     // Menus.
 
-    fn menus(&self) {
+    pub(super) fn menus(&self) {
         let waiting = self.waiting.len();
         let mut items = vec![
             Item::keyed("New Session\u{2026}", NEW_SESSION, "n"),
@@ -1235,6 +1259,7 @@ impl App {
             items.push(Item::Sub("Recent Projects".into(), recent));
         }
         items.push(Item::Separator);
+        items.push(super::brothers::menu(self));
         let themes: Vec<Item> = theme::Theme::ALL
             .iter()
             .enumerate()
@@ -1274,6 +1299,10 @@ impl App {
     }
 
     fn menu_pick(&mut self, tag: usize) {
+        // Before the recent folders, whose tags run on from theirs.
+        if super::brothers::picked(self, tag) {
+            return;
+        }
         match tag {
             NEW_SESSION => self.pick_and_start(),
             NEW_TERMINAL => {
@@ -1408,6 +1437,7 @@ impl App {
             self.save();
         }
         self.update.tick();
+        super::brothers::refresh(self);
         if let Some(checked) = self.update.take_checked() {
             // An update found is offered from the menu too, whatever the
             // answer to the question below.

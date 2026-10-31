@@ -60,6 +60,17 @@ impl Item {
             key: Some(key),
         }
     }
+
+    /// A line that says something and does nothing when picked.
+    pub fn disabled(title: impl Into<String>) -> Item {
+        Item::Pick {
+            title: title.into(),
+            tag: 0,
+            enabled: false,
+            checked: false,
+            key: None,
+        }
+    }
 }
 
 thread_local! {

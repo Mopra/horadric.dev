@@ -44,6 +44,16 @@ pub fn confirm(title: &str, text: &str, ok: &str) -> bool {
     a.runModal() == NSAlertFirstButtonReturn
 }
 
+/// Asks a yes or no question whose buttons say what each does. True for
+/// `yes`. `no` comes first, so Return presses it and a stray key never
+/// lets a machine in.
+pub fn choose(title: &str, text: &str, yes: &str, no: &str) -> bool {
+    let a = alert(title, text);
+    a.addButtonWithTitle(&NSString::from_str(no));
+    a.addButtonWithTitle(&NSString::from_str(yes));
+    a.runModal() == NSAlertSecondButtonReturn
+}
+
 /// Asks for a line of text, starting from `initial`. None for Cancel.
 pub fn ask(title: &str, text: &str, initial: &str) -> Option<String> {
     let mtm = mtm();

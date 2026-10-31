@@ -5,6 +5,7 @@
 
 mod app;
 pub mod autostart;
+mod brothers;
 mod cluster;
 mod delegate;
 mod dialog;

@@ -62,6 +62,9 @@ horadric-link = { path = "../horadric-link" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 horadric-pty = { path = "../horadric-pty" }
+# The relay link, its crypto and the WorkOS sign in, which Windows has in
+# CNG and WinHTTP: the Mac as a brother.
+horadric-link = { path = "../horadric-link" }
 block2 = "0.6"
 libc = "0.2"
 objc2 = "0.6"
