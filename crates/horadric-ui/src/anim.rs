@@ -15,9 +15,14 @@ use crate::motion::{
 use crate::layout::Hit;
 use crate::theme;
 
-/// How long a bay button takes to light: its dashed edge closing into a
-/// line, then a key rising into it. Two steps want longer than a fade.
-pub const BAY: Duration = Duration::from_millis(220);
+/// How long a bay button takes to light: its key rising, then the
+/// brackets closing in on it. Staged, so a little longer than a fade.
+pub const BAY: Duration = Duration::from_millis(180);
+/// The glyph's one tap of a wiggle when the cursor arrives: how long after
+/// it starts, how long it rings, and how far it swings at first, in degrees.
+const WIGGLE_DELAY: Duration = Duration::from_millis(60);
+const WIGGLE: Duration = Duration::from_millis(420);
+const WIGGLE_SWING: f32 = 9.0;
 /// How fast a tile slides to a new place: half the way every this long.
 const SLIDE: Duration = Duration::from_millis(60);
 /// How fast a context bar finds a new level: half the way every this long.
@@ -251,12 +256,14 @@ impl Tiles {
 }
 
 /// How lit each button is under the cursor, 0 to 1, so a button lights
-/// over [`BAY`] instead of snapping. Only the ones
-/// on their way somewhere or lit are kept.
+/// over [`BAY`] instead of snapping. Only the ones on their way somewhere
+/// or lit are kept.
 #[derive(Default)]
 pub struct Glow {
     lit: Vec<(Hit, f32)>,
     hot: Option<Hit>,
+    /// When the cursor came onto the button it is on.
+    entered: Option<Instant>,
     last: Option<Instant>,
 }
 
@@ -271,6 +278,9 @@ impl Glow {
             _ => Duration::ZERO,
         };
         self.last = Some(now);
+        if hot != self.hot {
+            self.entered = hot.map(|_| now);
+        }
         self.hot = hot;
         if let Some(h) = hot {
             if !self.lit.iter().any(|(b, _)| *b == h) {
@@ -291,12 +301,41 @@ impl Glow {
             .map_or(0.0, |(_, v)| *v)
     }
 
+    /// How far `which`'s glyph is swung this frame, in degrees: a tap
+    /// that rings down soon after the cursor arrives, and nothing as it
+    /// leaves.
+    pub fn wiggle(&self, which: Hit) -> f32 {
+        match (self.entered, self.last) {
+            (Some(at), Some(now)) if self.hot == Some(which) => {
+                wiggle_at(now.duration_since(at))
+            }
+            _ => 0.0,
+        }
+    }
+
     /// Whether a button is still on its way, so the frame after needs
     /// drawing.
     pub fn moving(&self) -> bool {
         let target = |b: Hit| if Some(b) == self.hot { 1.0 } else { 0.0 };
-        self.lit.iter().any(|&(b, v)| v != target(b))
+        let ringing = match (self.entered, self.last) {
+            (Some(at), Some(now)) => now.duration_since(at) < WIGGLE_DELAY + WIGGLE,
+            _ => false,
+        };
+        ringing || self.lit.iter().any(|&(b, v)| v != target(b))
     }
+}
+
+/// A damped swing, `since` the cursor arrived: one and a half swings, each
+/// smaller than the last, then still.
+fn wiggle_at(since: Duration) -> f32 {
+    let Some(t) = since.checked_sub(WIGGLE_DELAY) else {
+        return 0.0;
+    };
+    let u = motion::progress(t, WIGGLE);
+    if u >= 1.0 {
+        return 0.0;
+    }
+    WIGGLE_SWING * (u * 3.0 * std::f32::consts::PI).sin() * (1.0 - u).powi(2)
 }
 
 /// Whether a tile's lamp flashes for you: its pane is parked off the
@@ -775,14 +814,24 @@ mod tests {
         assert!(g.moving() && g.of(Hit::Folio) > 0.4 && g.of(Hit::Folio) < 0.6);
         g.step(now + BAY * 2, Some(Hit::Folio));
         assert_eq!(g.of(Hit::Folio), 1.0);
+        // Lit, and once the glyph's wiggle has rung down, still.
+        g.step(now + BAY * 4, Some(Hit::Folio));
         assert!(!g.moving());
-        g.step(now + BAY * 2, Some(Hit::Folio));
         // The cursor moves to the next button: one sinks as the other rises.
-        g.step(now + BAY * 3, Some(Hit::Add));
-        g.step(now + BAY * 3 + BAY / 2, Some(Hit::Add));
+        g.step(now + BAY * 5, Some(Hit::Add));
+        g.step(now + BAY * 5 + BAY / 2, Some(Hit::Add));
         assert!(g.of(Hit::Folio) > 0.4 && g.of(Hit::Add) > 0.4);
-        g.step(now + BAY * 4, None);
+        g.step(now + BAY * 6, None);
         assert_eq!((g.of(Hit::Folio), g.of(Hit::Add)), (0.0, 0.0));
         assert!(g.lit.is_empty());
+    }
+
+    #[test]
+    fn a_wiggle_rings_down_and_stops() {
+        assert_eq!(wiggle_at(Duration::ZERO), 0.0);
+        let early = wiggle_at(WIGGLE_DELAY + WIGGLE / 6);
+        let late = wiggle_at(WIGGLE_DELAY + WIGGLE * 5 / 6);
+        assert!(early.abs() > late.abs() && early > 0.0);
+        assert_eq!(wiggle_at(WIGGLE_DELAY + WIGGLE), 0.0);
     }
 }

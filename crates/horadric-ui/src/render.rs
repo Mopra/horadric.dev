@@ -340,15 +340,47 @@ impl Scene<'_> {
         layout::button(which, self.hot, self.pressed)
     }
 
-    /// How lit `which` is, 0 to 1. Windows' animation setting off, it is
-    /// lit or not, as the cursor says.
-    fn lit(&self, which: Hit) -> f32 {
-        match self.button(which) {
-            Button::Pressed => 0.0,
-            Button::Hover if !self.ambient => 1.0,
-            _ if !self.ambient => 0.0,
-            _ => self.glow.of(which),
+    /// How a bay button draws this frame. Windows' animation setting off,
+    /// it is lit or not, as the cursor says, and holds still.
+    fn bay(&self, which: Hit) -> Bay {
+        let (lit, wiggle) = match self.button(which) {
+            Button::Pressed => (0.0, 0.0),
+            Button::Hover if !self.ambient => (1.0, 0.0),
+            _ if !self.ambient => (0.0, 0.0),
+            _ => (self.glow.of(which), self.glow.wiggle(which)),
+        };
+        Bay {
+            lit,
+            wiggle,
+            accent: self.accent,
         }
+    }
+}
+
+/// A bay button's moment: how far through lighting (0 to 1, linear), how
+/// far its glyph is swung in degrees, and the project's colour for the
+/// brackets that close on it.
+#[derive(Clone, Copy)]
+struct Bay {
+    lit: f32,
+    wiggle: f32,
+    accent: Color,
+}
+
+impl Bay {
+    /// The key rises first.
+    fn rise(&self) -> f32 {
+        motion::ease_out((self.lit / 0.65).min(1.0))
+    }
+
+    /// The brackets come in after it has started, and go first on the way
+    /// back.
+    fn lock(&self) -> f32 {
+        motion::ease_out(((self.lit - 0.3) / 0.7).clamp(0.0, 1.0))
+    }
+
+    fn ink(&self) -> Color {
+        theme::text_dim().mix(theme::text(), self.rise())
     }
 }
 
@@ -1220,14 +1252,14 @@ impl Painter<'_> {
         self.beams(scene);
         self.flights(scene);
         if let Some(add) = &scene.layout.add {
-            self.add(gpu, m, add, scene.lit(Hit::Add), CLI_ICON);
+            self.add(gpu, m, add, scene.bay(Hit::Add), CLI_ICON);
         }
         if let Some(shell) = &scene.layout.shell {
-            self.add(gpu, m, shell, scene.lit(Hit::Shell), theme::SHELL_ICON);
+            self.add(gpu, m, shell, scene.bay(Hit::Shell), theme::SHELL_ICON);
         }
         if let Some(folio) = &scene.layout.folio {
-            let k = scene.lit(Hit::Folio);
-            self.add_labelled(gpu, m, folio, k, FOLIO_ICON, "New chat");
+            let b = scene.bay(Hit::Folio);
+            self.add_labelled(gpu, m, folio, b, FOLIO_ICON, "New chat");
         }
         if let (Some(l), Some(t)) = (&scene.layout.tasks, &scene.tasks) {
             self.tasks(gpu, m, scene, l, t);
@@ -3996,10 +4028,9 @@ impl Painter<'_> {
     /// Another session in this project, or a plain terminal: an empty bay
     /// where the next key would go, sunk in so it never reads as a
     /// session.
-    unsafe fn add(&self, gpu: &Gpu, m: &Metrics, r: &Rect, lit: f32, glyph: char) {
-        let ink = theme::text_dim().mix(theme::text(), bay_rise(lit));
-        self.slot(gpu, m, r, lit);
-        self.icon(&gpu.icon_small, ink, glyph, *r);
+    unsafe fn add(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Bay, glyph: char) {
+        self.bay_slot(gpu, m, r, b);
+        self.swung_icon(gpu, b.ink(), glyph, *r, b.wiggle);
     }
 
     /// A glyph with words beside it, the pair centred in the bay, for the
@@ -4009,41 +4040,86 @@ impl Painter<'_> {
         gpu: &Gpu,
         m: &Metrics,
         r: &Rect,
-        lit: f32,
+        b: Bay,
         glyph: char,
         label: &str,
     ) {
-        let ink = theme::text_dim().mix(theme::text(), bay_rise(lit));
-        self.slot(gpu, m, r, lit);
+        let ink = b.ink();
+        self.bay_slot(gpu, m, r, b);
         let glyph_w = 12.0;
         let gap = 6.0;
         let label_w = self.measure(gpu, &gpu.small, label);
         let x = r.x + ((r.w - glyph_w - gap - label_w) / 2.0).max(0.0);
-        self.icon(&gpu.icon_small, ink, glyph, Rect::new(x, r.y, glyph_w, r.h));
+        let at = Rect::new(x, r.y, glyph_w, r.h);
+        self.swung_icon(gpu, ink, glyph, at, b.wiggle);
         let text_x = x + glyph_w + gap;
         let text = Rect::new(text_x, r.y, (r.x + r.w - text_x).max(0.0), r.h);
         self.text(&gpu.small, ink, label, text);
     }
 
     /// A bay sunk into the plate, where something is yet to go, its edge
-    /// dashed. Under the cursor its dashes draw together into one line, as
-    /// a rune is carved, then a key rises into it as if offering one. `lit`
-    /// is how far through that it is, and it runs back the same way.
-    unsafe fn slot(&self, gpu: &Gpu, m: &Metrics, r: &Rect, lit: f32) {
-        let rise = bay_rise(lit);
+    /// dashed. The cursor raises a key into it, as if offering one.
+    unsafe fn slot(&self, gpu: &Gpu, m: &Metrics, r: &Rect, rise: f32) {
         if rise < 1.0 {
             self.sunk(gpu, r, m.tile_radius, theme::well());
-            let close = motion::ease_in_out((lit / 0.55).min(1.0));
-            self.dashed(gpu, m, r, close);
+            self.dashed(gpu, m, r, 1.0 - rise);
         }
         if rise > 0.0 {
             self.key(gpu, r, m.tile_radius, theme::surface(), 0.6 * rise, rise);
         }
     }
 
-    /// The dashed outline of a bay, `close` of the way to one solid line:
-    /// each dash grows from its middle until it meets the next.
-    unsafe fn dashed(&self, gpu: &Gpu, m: &Metrics, r: &Rect, close: f32) {
+    /// A bay under the cursor: its key rising, then brackets in the
+    /// project's colour closing on its corners from outside, the way a
+    /// game marks what it has in its sights.
+    unsafe fn bay_slot(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Bay) {
+        self.slot(gpu, m, r, b.rise());
+        let k = b.lock();
+        if k <= 0.0 {
+            return;
+        }
+        let out = 2.0 + 5.0 * (1.0 - k);
+        let arm = 4.0 + 2.0 * k;
+        let (l, t) = (r.x - out, r.y - out);
+        let (rt, bt) = (r.right() + out, r.y + r.h + out);
+        self.brush.SetColor(&color(b.accent.with_alpha(0.85 * k)));
+        let corners = [
+            (l, t, 1.0, 1.0),
+            (rt, t, -1.0, 1.0),
+            (l, bt, 1.0, -1.0),
+            (rt, bt, -1.0, -1.0),
+        ];
+        for (x, y, dx, dy) in corners {
+            let at = Vector2 { X: x, Y: y };
+            let across = Vector2 { X: x + dx * arm, Y: y };
+            let down = Vector2 { X: x, Y: y + dy * arm };
+            self.rt.DrawLine(at, across, self.brush, 1.25, None);
+            self.rt.DrawLine(at, down, self.brush, 1.25, None);
+        }
+    }
+
+    /// A small glyph turned `degrees` about its middle.
+    unsafe fn swung_icon(&self, gpu: &Gpu, ink: Color, glyph: char, r: Rect, degrees: f32) {
+        if degrees == 0.0 {
+            self.icon(&gpu.icon_small, ink, glyph, r);
+            return;
+        }
+        let (s, c) = degrees.to_radians().sin_cos();
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        self.rt.SetTransform(&Matrix3x2 {
+            M11: c,
+            M12: s,
+            M21: -s,
+            M22: c,
+            M31: cx - cx * c + cy * s,
+            M32: cy - cx * s - cy * c,
+        });
+        self.icon(&gpu.icon_small, ink, glyph, r);
+        self.rt.SetTransform(&Matrix3x2::identity());
+    }
+
+    /// The dashed outline of a bay.
+    unsafe fn dashed(&self, gpu: &Gpu, m: &Metrics, r: &Rect, opacity: f32) {
         let edge = r.inset(2.5);
         let radius = m.tile_radius - 2.5;
         let length = motion::perimeter(edge.w, edge.h, radius);
@@ -4059,13 +4135,12 @@ impl Painter<'_> {
                 lineJoin: D2D1_LINE_JOIN_ROUND,
                 miterLimit: 1.0,
                 dashStyle: D2D1_DASH_STYLE_CUSTOM,
-                dashOffset: unit * 0.3 * close,
+                dashOffset: 0.0,
             },
-            Some(&[unit * (0.35 + 0.6 * close), unit * (0.65 - 0.6 * close)]),
+            Some(&[unit * 0.35, unit * 0.65]),
         );
-        let ink = theme::legend().mix(theme::text(), 0.5 * close);
         self.brush
-            .SetColor(&color(ink.with_alpha(0.35 + 0.3 * close)));
+            .SetColor(&color(theme::legend().with_alpha(0.35 * opacity)));
         self.rt.DrawRoundedRectangle(
             &rounded(&edge, radius),
             self.brush,
@@ -4487,12 +4562,6 @@ fn tiles<'a>(scene: &'a Scene) -> impl Iterator<Item = (Rect, &'a Session, Look)
                 .unwrap_or_else(|| Look::still(rect.y));
             (Rect::new(rect.x, look.y, rect.w, rect.h), *s, look)
         })
-}
-
-/// How far a bay's key has risen, `lit` of the way through lighting: it
-/// starts once the edge is nearly closed.
-fn bay_rise(lit: f32) -> f32 {
-    motion::ease_in_out((lit - 0.4) / 0.6)
 }
 
 fn icon_centre(r: &Rect) -> (f32, f32) {
