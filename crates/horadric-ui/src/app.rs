@@ -312,6 +312,8 @@ pub enum PaneAsk {
     End,
     /// The pane's selection right clicked: copy it or hand it to an agent.
     Hand,
+    /// A Folio's `/theme`: the Settings window, at the theme.
+    Theme,
 }
 
 /// What is asked for a browser pane, outside the app's borrow.
@@ -456,6 +458,12 @@ pub(crate) enum Input {
     /// A Folio's claude.exe ended to read a new login: it starts again on
     /// its conversation, shown on the stage when true.
     FolioRestart(String, bool),
+    /// A Folio's `/add-dir`: it starts again on its conversation with this
+    /// folder added to the ones Claude may work in.
+    FolioAddDir(String, PathBuf),
+    /// A Folio's `/resume`: carry on this past conversation from the
+    /// folder, as History does.
+    Resume(PathBuf, Past),
     /// A web address Ctrl+clicked in a pane: to the browser pane of the
     /// project on the stage when it has one, otherwise to the user's own
     /// browser.
@@ -1599,6 +1607,11 @@ fn open_settings(at: Option<String>) {
         Some(_) => settings::Section::Projects,
         None => settings::Section::default(),
     };
+    open_settings_in(section, at);
+}
+
+/// [`open_settings`] at `section`, shown even when the window was open.
+fn open_settings_in(section: settings::Section, at: Option<String>) {
     let want = with_app(|app| {
         if at.is_some() {
             app.settings_project = at;
@@ -1606,7 +1619,7 @@ fn open_settings(at: Option<String>) {
         }
         match &app.settings_window {
             Some(w) => {
-                if section == settings::Section::Projects {
+                if section != settings::Section::default() {
                     w.show(section);
                 }
                 Err(w.hwnd)
@@ -1983,6 +1996,7 @@ fn pane_ask(id: &str, what: PaneAsk) {
             with_app(|app| app.end(id));
         }
         PaneAsk::Hand => hand_menu(id),
+        PaneAsk::Theme => open_settings_in(settings::Section::Appearance, None),
     }
 }
 
@@ -9156,6 +9170,17 @@ impl App {
                 Input::FolioToTerminal(id) => self.folio_to_terminal(&id),
                 Input::FolioHandedOver(id) => self.folio_handed_over(&id),
                 Input::FolioRestart(id, show) => self.folio_restart(&id, show),
+                Input::FolioAddDir(id, dir) => {
+                    let own = self.folio_args.entry(id.clone()).or_default();
+                    own.extend(["--add-dir".to_string(), dir.to_string_lossy().into_owned()]);
+                    self.folio_restart(&id, true);
+                }
+                Input::Resume(dir, past) => {
+                    // One conversation in two sessions would fork it.
+                    if !self.held_conversations().contains(&past.id) {
+                        self.reopen(&dir, &[past], history::Pick::Past(0));
+                    }
+                }
                 Input::WebTab(key, step) => web::tab(&key, step),
                 Input::WebAsk(key, what) => {
                     self.web_ask = Some((key, what));

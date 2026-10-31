@@ -70,7 +70,7 @@ thread_local! {
 /// What logouts said, by the session that asked, for the UI thread.
 static LOGOUTS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
-fn post(router: isize) {
+pub(super) fn post(router: isize) {
     unsafe {
         let _ = PostMessageW(
             Some(HWND(router as *mut c_void)),
@@ -83,7 +83,7 @@ fn post(router: isize) {
 
 /// `claude.exe` with `args`, on pipes, with no window, and with the
 /// environment a headless session gets, so it logs in where they look.
-fn command(args: &[&str]) -> Result<Command, String> {
+pub(super) fn command(args: &[&str]) -> Result<Command, String> {
     if let Some(why) = crate::accounts::refused() {
         return Err(why);
     }

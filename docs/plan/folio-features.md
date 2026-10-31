@@ -62,11 +62,16 @@ verbose view, images in tool results, usage limits meter, `/btw`.
 Turn timeline and files lit in the Arcane Sanctuary, one prompt to
 several sessions, per-turn git checkpoints (T3 Code's way), worktree
 per session with PR status, fast mode and output style, external
-editor, LaTeX, export.
+editor, LaTeX.
 
 ## Terminal only
 
-`/config`, `/theme`, `/doctor`, `/ide`,
-the interactive `/plugin`, `/agents`, `/hooks`, `/permissions` editors,
-voice. Where cheap, a native action replaces them: `/model` by the
-composer control, `/memory` by opening CLAUDE.md in the file viewer.
+Voice. Every `/` command the CLI answers with "isn't
+available in this environment" over stream-json is native in the Folio
+(`folio/slash.rs`): `/memory` and `/agents` open their files in the
+viewer, `/hooks` lists them, `/permissions` adds and takes out rules in
+`.claude/settings.local.json`, `/plugin` runs `claude plugin` hidden,
+`/theme` opens Settings, `/resume` lists History, `/export` writes
+markdown, `/add-dir` starts the Folio again with the folder, `/exit`
+ends it. `/config` and `/doctor` work in the CLI itself; `/ide` and
+`/terminal-setup` are not offered. `/mcp` is a card (A21).
