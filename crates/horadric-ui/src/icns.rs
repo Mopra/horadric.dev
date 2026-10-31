@@ -1,5 +1,6 @@
-//! The Mac app icon, `horadric.icns`, made from the icon [`crate::icon`]
-//! draws, so the Mac has no icon file to keep in step with it either.
+//! The Mac app icon, `horadric.icns`, made from the baked stone in
+//! [`crate::icon`]: its finished PNGs for the large sizes, its layers for the
+//! small ones.
 //!
 //! An `.icns` is a header and one PNG per size. The PNGs here are written
 //! with stored deflate blocks, uncompressed: a few hundred kilobytes more
@@ -23,6 +24,9 @@ pub fn horadric(dev: bool) -> Vec<u8> {
     let entries: Vec<(&[u8; 4], Vec<u8>)> = ENTRIES
         .iter()
         .map(|(kind, size)| {
+            if let Some(baked) = icon::png(*size, dev) {
+                return (*kind, baked.to_vec());
+            }
             let pixels = if dev {
                 icon::dev_pixels(*size)
             } else {

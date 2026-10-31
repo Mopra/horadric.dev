@@ -1,44 +1,37 @@
-//! The Horadric icon, drawn in code: the Horadric cube, seen corner on, its
-//! lid lifted and light pouring out of it. The cube is dark with a thin rim,
-//! and one colour lights it all, so the light can change with what Horadric
-//! is doing. No icon file to ship, and it is drawn at exactly the size the
-//! tray asks for.
+//! The Horadric icon: a block of dark rune stone, a rune cut into each face
+//! and lit from inside. Too heavy to draw at run time, it is ray marched once
+//! by `assets/icon/stone.html` and baked by `assets/icon/bake.py`.
+//!
+//! The small sizes are baked as two layers, the stone and the light of its
+//! runes, so one colour still lights it all and the tray can change and
+//! breathe it. The large sizes are finished PNGs.
 //!
 //! Self contained on purpose: the `horadric` build script includes this file
 //! to bake the same icon into the executables, so it can not reach the rest
 //! of the crate. A dev instance's light is the error red instead of gold, so
 //! the two tray icons can not be mistaken.
 
-#[derive(Clone, Copy)]
-struct Color {
-    r: f32,
-    g: f32,
-    b: f32,
-}
-
-impl Color {
-    const fn rgb(hex: u32) -> Color {
-        Color {
-            r: ((hex >> 16) & 0xff) as f32 / 255.0,
-            g: ((hex >> 8) & 0xff) as f32 / 255.0,
-            b: (hex & 0xff) as f32 / 255.0,
-        }
-    }
-
-    fn scale(self, k: f32) -> Color {
-        Color {
-            r: (self.r * k).min(1.0),
-            g: (self.g * k).min(1.0),
-            b: (self.b * k).min(1.0),
-        }
-    }
-}
-
 pub const GOLD: u32 = 0xE8B04A;
 pub const ERROR: u32 = 0xFF5D66;
-const LID: Color = Color::rgb(0x2C2F3A);
-const LEFT: Color = Color::rgb(0x1B1D24);
-const RIGHT: Color = Color::rgb(0x121317);
+
+/// The sizes `layers.bin` holds, smallest first. Each is `size * size`
+/// pixels of six bytes: the stone premultiplied as red, green, blue and
+/// alpha, then the rune light, then the alpha of the light's halo.
+const LAYERED: [u32; 9] = [16, 20, 24, 32, 40, 48, 64, 96, 128];
+static LAYERS: &[u8] = include_bytes!("../assets/icon/layers.bin");
+
+/// The large sizes, finished, gold and the dev instance's red.
+pub fn png(size: u32, dev: bool) -> Option<&'static [u8]> {
+    Some(match (size, dev) {
+        (256, false) => include_bytes!("../assets/icon/gold-256.png"),
+        (512, false) => include_bytes!("../assets/icon/gold-512.png"),
+        (1024, false) => include_bytes!("../assets/icon/gold-1024.png"),
+        (256, true) => include_bytes!("../assets/icon/red-256.png"),
+        (512, true) => include_bytes!("../assets/icon/red-512.png"),
+        (1024, true) => include_bytes!("../assets/icon/red-1024.png"),
+        _ => return None,
+    })
+}
 
 /// Pixels, row by row from the top, as `0xAARRGGBB` with straight alpha,
 /// which is what a 32 bit icon bitmap wants.
@@ -51,144 +44,105 @@ pub fn dev_pixels(size: u32) -> Vec<u32> {
     lit(size, ERROR)
 }
 
-/// The cube lit by any colour, given as `0xRRGGBB`.
+/// The stone lit by any colour, given as `0xRRGGBB`. Sizes between the baked
+/// ones are filtered down from the next larger.
 pub fn lit(size: u32, light: u32) -> Vec<u32> {
-    draw(size, Color::rgb(light))
+    let size = size.max(1);
+    let (baked, offset) = layered_for(size);
+    let n = (baked * baked) as usize;
+    let data = &LAYERS[offset..offset + n * 6];
+    let l = [(light >> 16) & 0xff, (light >> 8) & 0xff, light & 0xff].map(|c| c as f32 / 255.0);
+    // The halo fades with the light, so a dimmed light does not leave a ring.
+    let k = l[0].max(l[1]).max(l[2]);
+    let premul: Vec<[f32; 4]> = data
+        .chunks_exact(6)
+        .map(|p| {
+            let [r, g, b, a, glow, halo] = [p[0], p[1], p[2], p[3], p[4], p[5]].map(|v| v as f32 / 255.0);
+            let a = (a + halo * k).min(1.0);
+            [
+                (r + glow * l[0]).min(a),
+                (g + glow * l[1]).min(a),
+                (b + glow * l[2]).min(a),
+                a,
+            ]
+        })
+        .collect();
+    let premul = resample(&premul, baked as usize, size as usize);
+    premul.iter().map(|&p| straight(p)).collect()
 }
 
-type Point = (f32, f32);
+/// The smallest baked size not below `size`, and where it starts in
+/// `LAYERS`. Above the largest, the largest.
+fn layered_for(size: u32) -> (u32, usize) {
+    let mut offset = 0;
+    for &s in &LAYERED {
+        if s >= size || s == LAYERED[LAYERED.len() - 1] {
+            return (s, offset);
+        }
+        offset += (s * s) as usize * 6;
+    }
+    unreachable!("LAYERED is not empty")
+}
 
-fn draw(size: u32, light: Color) -> Vec<u32> {
-    let u = size as f32 / 16.0;
-    // An isometric cube on a 16 unit grid: edge `h`, centre `(cx, cy)`, set
-    // low so the lifted lid fits above it.
-    let (cx, cy, h) = (8.0 * u, 9.28 * u, 6.72 * u);
-    let s = h * 3f32.sqrt() / 2.0;
-    let (t, r, c, l) = (
-        (cx, cy - h),
-        (cx + s, cy - h / 2.0),
-        (cx, cy),
-        (cx - s, cy - h / 2.0),
-    );
-    let (br, b, bl) = ((cx + s, cy + h / 2.0), (cx, cy + h), (cx - s, cy + h / 2.0));
-    let mouth = [t, r, c, l];
-    let left = [l, c, b, bl];
-    let right = [c, r, br, b];
-    let lift = h * 0.32;
-    let lid = shift(&mouth, -lift);
-    // The lid's two front sides, so it reads as a slab and not a sheet.
-    let thick = h * 0.12;
-    let (lr, lc, ll) = (lid[1], lid[2], lid[3]);
-    let lid_left = [ll, lc, (lc.0, lc.1 + thick), (ll.0, ll.1 + thick)];
-    let lid_right = [lc, lr, (lr.0, lr.1 + thick), (lc.0, lc.1 + thick)];
-
-    let core = light.scale(1.25);
-    let rim = light.scale(0.55);
-    // Back to front. A rim polygon under each face shrunk towards its own
-    // centre leaves the rim showing round it.
-    let shapes: [(Vec<Point>, Color); 8] = [
-        (mouth.to_vec(), core),
-        (left.to_vec(), rim),
-        (right.to_vec(), rim),
-        (shrink(&left, 0.90), LEFT),
-        (shrink(&right, 0.90), RIGHT),
-        (lid_left.to_vec(), LEFT),
-        (lid_right.to_vec(), RIGHT),
-        (lid.to_vec(), rim),
-    ];
-    let lid_top = shrink(&lid, 0.88);
-    // The glow spills from the open mouth and from the gap under the lid.
-    let glow_from = [mouth.to_vec(), shift(&mouth, -lift * 0.5)];
-    let spread = size as f32 / 16.0;
-
-    const SAMPLES: u32 = 4;
-    let mut out = Vec::with_capacity((size * size) as usize);
-    for py in 0..size {
-        for px in 0..size {
-            // Straight alpha compositing, back to front, averaged over a
-            // grid of samples for smooth edges.
-            let (mut sr, mut sg, mut sb, mut sa) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-            for sy in 0..SAMPLES {
-                for sx in 0..SAMPLES {
-                    let x = px as f32 + (sx as f32 + 0.5) / SAMPLES as f32;
-                    let y = py as f32 + (sy as f32 + 0.5) / SAMPLES as f32;
-                    let d = glow_from
-                        .iter()
-                        .map(|p| distance(p, x, y))
-                        .fold(f32::MAX, f32::min);
-                    let mut px_color = (light, 0.7 * (-(d / spread).powi(2)).exp());
-                    for (shape, color) in &shapes {
-                        if contains(shape, x, y) {
-                            px_color = (*color, 1.0);
-                        }
-                    }
-                    if contains(&lid_top, x, y) {
-                        px_color = (LID, 1.0);
-                    }
-                    let (color, a) = px_color;
-                    sr += color.r * a;
-                    sg += color.g * a;
-                    sb += color.b * a;
-                    sa += a;
-                }
-            }
-            let n = (SAMPLES * SAMPLES) as f32;
-            let alpha = sa / n;
-            let (r, g, b) = if sa > 0.0 {
-                (sr / sa, sg / sa, sb / sa)
-            } else {
-                (0.0, 0.0, 0.0)
-            };
-            out.push(byte(alpha) << 24 | byte(r) << 16 | byte(g) << 8 | byte(b));
+/// Area filtered from `from` square to `to` square, each output pixel the
+/// average of what it covers.
+fn resample(src: &[[f32; 4]], from: usize, to: usize) -> Vec<[f32; 4]> {
+    if from == to {
+        return src.to_vec();
+    }
+    let taps = taps(from, to);
+    let mut rows = vec![[0.0; 4]; from * to];
+    for y in 0..from {
+        for (x, tap) in taps.iter().enumerate() {
+            rows[y * to + x] = mix(tap.iter().map(|&(i, w)| (src[y * from + i], w)));
+        }
+    }
+    let mut out = vec![[0.0; 4]; to * to];
+    for (y, tap) in taps.iter().enumerate() {
+        for x in 0..to {
+            out[y * to + x] = mix(tap.iter().map(|&(i, w)| (rows[i * to + x], w)));
         }
     }
     out
 }
 
-fn byte(v: f32) -> u32 {
-    (v.clamp(0.0, 1.0) * 255.0).round() as u32
-}
-
-fn shrink(points: &[Point], k: f32) -> Vec<Point> {
-    let n = points.len() as f32;
-    let cx = points.iter().map(|p| p.0).sum::<f32>() / n;
-    let cy = points.iter().map(|p| p.1).sum::<f32>() / n;
-    points
-        .iter()
-        .map(|&(x, y)| (cx + (x - cx) * k, cy + (y - cy) * k))
+/// For each output index, the source indices it covers and their weights.
+fn taps(from: usize, to: usize) -> Vec<Vec<(usize, f32)>> {
+    let scale = from as f32 / to as f32;
+    (0..to)
+        .map(|i| {
+            let (a, b) = (i as f32 * scale, (i + 1) as f32 * scale);
+            let mut tap = Vec::new();
+            let mut j = a.floor() as usize;
+            while (j as f32) < b && j < from {
+                let w = b.min(j as f32 + 1.0) - a.max(j as f32);
+                if w > 0.0 {
+                    tap.push((j, w));
+                }
+                j += 1;
+            }
+            let total: f32 = tap.iter().map(|t| t.1).sum();
+            tap.iter_mut().for_each(|t| t.1 /= total);
+            tap
+        })
         .collect()
 }
 
-fn shift(points: &[Point], dy: f32) -> Vec<Point> {
-    points.iter().map(|&(x, y)| (x, y + dy)).collect()
-}
-
-/// Even odd crossing test, enough for the convex faces drawn here.
-fn contains(polygon: &[Point], x: f32, y: f32) -> bool {
-    let mut inside = false;
-    for (i, &(x1, y1)) in polygon.iter().enumerate() {
-        let (x2, y2) = polygon[(i + 1) % polygon.len()];
-        if (y1 > y) != (y2 > y) && x < (x2 - x1) * (y - y1) / (y2 - y1) + x1 {
-            inside = !inside;
+fn mix(samples: impl Iterator<Item = ([f32; 4], f32)>) -> [f32; 4] {
+    samples.fold([0.0; 4], |mut acc, (p, w)| {
+        for c in 0..4 {
+            acc[c] += p[c] * w;
         }
-    }
-    inside
+        acc
+    })
 }
 
-/// How far a point lies outside a polygon, zero inside it.
-fn distance(polygon: &[Point], x: f32, y: f32) -> f32 {
-    if contains(polygon, x, y) {
-        return 0.0;
+fn straight([r, g, b, a]: [f32; 4]) -> u32 {
+    if a <= 0.0 {
+        return 0;
     }
-    (0..polygon.len())
-        .map(|i| {
-            let (x1, y1) = polygon[i];
-            let (x2, y2) = polygon[(i + 1) % polygon.len()];
-            let (dx, dy) = (x2 - x1, y2 - y1);
-            let t = (((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
-            ((x - x1 - t * dx).powi(2) + (y - y1 - t * dy).powi(2)).sqrt()
-        })
-        .fold(f32::MAX, f32::min)
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    byte(a) << 24 | byte(r / a) << 16 | byte(g / a) << 8 | byte(b / a)
 }
 
 #[cfg(test)]
@@ -199,45 +153,53 @@ mod tests {
         p[(y * size + x) as usize]
     }
 
-    fn hex(c: Color) -> u32 {
-        byte(c.r) << 16 | byte(c.g) << 8 | byte(c.b)
+    #[test]
+    fn the_layers_hold_every_baked_size() {
+        let total: u32 = LAYERED.iter().map(|s| s * s * 6).sum();
+        assert_eq!(LAYERS.len(), total as usize);
     }
 
     #[test]
-    fn the_mouth_is_lit_and_the_sides_are_dark() {
-        let p = pixels(32);
-        assert_eq!(p.len(), 32 * 32);
-        assert_eq!(at(&p, 32, 0, 31) >> 24, 0, "corner is transparent");
-        assert_eq!(
-            at(&p, 32, 16, 17) & 0xFFFFFF,
-            hex(Color::rgb(GOLD).scale(1.25)),
-            "light in the mouth"
-        );
-        assert_eq!(at(&p, 32, 10, 22) & 0xFFFFFF, hex(LEFT), "left side");
-        assert_eq!(at(&p, 32, 22, 22) & 0xFFFFFF, hex(RIGHT), "right side");
-        assert_eq!(at(&p, 32, 16, 6) & 0xFFFFFF, hex(LID), "lid");
+    fn the_corners_are_clear_and_the_middle_is_stone() {
+        for size in [16, 32, 48] {
+            let p = pixels(size);
+            assert_eq!(at(&p, size, 0, 0) >> 24, 0, "{size}");
+            assert_eq!(at(&p, size, size / 2, size / 2) >> 24, 0xff, "{size}");
+        }
     }
 
     #[test]
-    fn the_light_glows_past_the_cube() {
-        let p = pixels(64);
-        // Beside the gap under the lid, outside the cube's own outline.
-        let alpha = at(&p, 64, 6, 22) >> 24;
-        assert!(alpha > 0 && alpha < 255, "glow alpha {alpha}");
+    fn the_light_only_changes_the_runes() {
+        let (gold, red) = (pixels(32), dev_pixels(32));
+        let differ = gold.iter().zip(&red).filter(|(a, b)| a != b).count();
+        assert!(differ > 0);
+        assert!(differ < gold.len() / 2);
     }
 
     #[test]
-    fn dev_icon_differs_only_in_its_light() {
-        let (p, d) = (pixels(32), dev_pixels(32));
-        assert_ne!(at(&p, 32, 16, 17), at(&d, 32, 16, 17), "the light");
-        assert_eq!(at(&p, 32, 10, 22), at(&d, 32, 10, 22), "the sides match");
-        assert_eq!(at(&p, 32, 16, 6), at(&d, 32, 16, 6), "the lid matches");
+    fn scales_to_sizes_between_and_beyond() {
+        for size in [1, 17, 28, 80, 200] {
+            assert_eq!(lit(size, GOLD).len(), (size * size) as usize);
+        }
     }
 
     #[test]
-    fn scales_to_any_size() {
-        assert_eq!(pixels(16).len(), 256);
-        assert_eq!(pixels(20).len(), 400);
-        assert_eq!(lit(24, 0x3DB4FF).len(), 576);
+    fn resampling_keeps_a_flat_colour_flat() {
+        let src = vec![[0.25, 0.5, 0.75, 1.0]; 20 * 20];
+        for p in resample(&src, 20, 7) {
+            for (c, want) in p.iter().zip([0.25, 0.5, 0.75, 1.0]) {
+                assert!((c - want).abs() < 1e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn the_large_sizes_are_pngs() {
+        for dev in [false, true] {
+            for size in [256, 512, 1024] {
+                assert!(png(size, dev).unwrap().starts_with(b"\x89PNG"));
+            }
+        }
+        assert!(png(32, false).is_none());
     }
 }

@@ -272,17 +272,12 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// The cube in the Dock, drawn as the tiles' icon is, red for a dev
-/// instance.
+/// The rune stone in the Dock, red for a dev instance.
 fn set_dock_icon(app: &NSApplication) {
-    const SIZE: u32 = 512;
-    let pixels = if horadric_hooks::dev() {
-        crate::icon::dev_pixels(SIZE)
-    } else {
-        crate::icon::pixels(SIZE)
+    let Some(png) = crate::icon::png(512, horadric_hooks::dev()) else {
+        return;
     };
-    let png = crate::icns::png(SIZE, SIZE, &pixels);
-    let data = objc2_foundation::NSData::with_bytes(&png);
+    let data = objc2_foundation::NSData::with_bytes(png);
     if let Some(image) =
         objc2_app_kit::NSImage::initWithData(objc2_app_kit::NSImage::alloc(), &data)
     {

@@ -5,7 +5,8 @@
 //! Writes a compiled resource file (`.res`) directly and hands it to the
 //! linker, which takes `.res` files as input. No resource compiler and no
 //! build dependency: the format is a few headers around the icon images and
-//! a version block. The icon is drawn by the same code as the tray icon.
+//! a version block. The icon is the same baked stone as the tray icon; the
+//! largest size goes in as its PNG, which Windows takes as an icon image.
 
 use std::env;
 use std::fs;
@@ -24,6 +25,7 @@ const SIZES: [u32; 8] = [16, 20, 24, 32, 40, 48, 64, 256];
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../horadric-ui/src/icon.rs");
+    println!("cargo:rerun-if-changed=../horadric-ui/assets/icon");
     let windows = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
     let msvc = env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
     if !windows || !msvc {
@@ -39,7 +41,10 @@ fn main() {
     group.extend(1u16.to_le_bytes()); // icons, not cursors
     group.extend((SIZES.len() as u16).to_le_bytes());
     for (i, &size) in SIZES.iter().enumerate() {
-        let image = dib(size);
+        let image = match icon::png(size, false) {
+            Some(png) => png.to_vec(),
+            None => dib(size),
+        };
         let id = i as u16 + 1;
         // Width and height are a byte each, where 0 means 256.
         group.push(size as u8);
