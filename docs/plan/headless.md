@@ -1,8 +1,9 @@
 # Headless sessions and the Folio
 
 Decided on 2026-10-24. A first slice landed 2026-10-29: the engine,
-the model and a plain Folio behind an experimental button on each
-project cluster (see Steps). A Claude session's pane
+the model and a plain Folio behind a button on each project cluster
+(see Steps). Since 2026-10-31 new Claude sessions open as a Folio by
+default. A Claude session's pane
 shows Claude Code's terminal today: PowerShell output, tool calls and
 diffs scroll past in full, take most of the room, and are rarely what
 the human wants to read. The human wants Horadric to own the whole
@@ -196,8 +197,9 @@ five fixtures), step 2, step 3, step 4 and a first step 6. A Folio is
 a session kind: a tile of its own (its hooks find it by
 `HORADRIC_SESSION`, as a terminal's do), a pane in the stage's grid,
 several per project, its host reattached after a reload or a crash.
-The setting "New Claude sessions open as a chat" makes the new session
-button, a resumed tile and the History menu start Folios. "Terminal"
+The setting "New Claude sessions open as a chat" (inverted since, see
+step 7) made the new session button, a resumed tile and the History
+menu start Folios. "Terminal"
 on the Folio and "Open as chat" on a Claude terminal's tile hand one
 session between the two in the same tile. The confirmed protocol is in
 the lore.
@@ -219,8 +221,15 @@ the lore.
 5. **The Folio, rich.** Markdown, code highlighting, diffs, subagent
    lanes, images, slash command list, model and mode controls, footer.
 6. **Open in terminal and back.**
-7. **Default on** for new Claude sessions once the human has worked in
-   it for a week. Codex and Grok keep their terminals.
+7. **Default on** for new Claude sessions. Done 2026-10-31: the
+   setting is now "New Claude sessions open in a terminal", off. Every
+   way the human starts a Claude session follows it (the cluster's
+   button, the project menu, the tray, the folder picker, a bare
+   `horadric new`, Explorer). "New CLI session" in the project menu is
+   always a terminal. Quests, Warriv, reviewers, errands, runewords,
+   own worktrees and the town stay terminals, new or resumed, until a
+   Folio can be started with their orders. Codex and Grok keep their
+   terminals.
 
 Then "What it opens", one by one. The full feature list toward
 replacing the CLI, in tiers, is [folio-features.md](folio-features.md).

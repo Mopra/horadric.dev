@@ -1529,7 +1529,7 @@ impl View {
         let r = Rect::new(area.x + 20.0, mid - 22.0, area.w - 40.0, 30.0);
         gfx.text_in(&title, &gfx.big, &r, pal.fg.with_alpha(0.85));
         let r = Rect::new(area.x + 20.0, mid + 10.0, area.w - 40.0, 20.0);
-        let note = "Experimental. Drawn by Horadric.";
+        let note = "Drawn by Horadric.";
         let mut centred = gfx.button.clone();
         if let Ok(f) = text_format(
             &self.shared.gpu,
