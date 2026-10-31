@@ -137,9 +137,42 @@ pub fn control_success(request_id: &str, response: Value) -> String {
     .to_string()
 }
 
+/// What a line typed into a session asks of a Folio. A terminal takes
+/// `/model` and `/effort` as typed; headless, the model switches through
+/// a control request, and effort is a prompt the composer must hear of to
+/// show the level picked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Typed<'a> {
+    Model(&'a str),
+    Effort(&'a str),
+    Prompt(&'a str),
+}
+
+/// Reads `text` as [`Typed`]. A bare `/model` or `/effort` opens a picker
+/// in the terminal, which headless has not, so it stays a prompt.
+pub fn typed(text: &str) -> Typed<'_> {
+    let text = text.trim();
+    let mut words = text.splitn(2, char::is_whitespace);
+    let (command, value) = (words.next().unwrap_or(""), words.next().map(str::trim));
+    match (command, value) {
+        ("/model", Some(m)) if !m.is_empty() => Typed::Model(m),
+        ("/effort", Some(l)) if !l.is_empty() => Typed::Effort(l),
+        _ => Typed::Prompt(text),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_and_effort_are_read_from_what_is_typed() {
+        assert_eq!(typed("/model claude-opus-5-5"), Typed::Model("claude-opus-5-5"));
+        assert_eq!(typed(" /effort  high \r\n"), Typed::Effort("high"));
+        assert_eq!(typed("/model"), Typed::Prompt("/model"));
+        assert_eq!(typed("/models x"), Typed::Prompt("/models x"));
+        assert_eq!(typed("go on\r"), Typed::Prompt("go on"));
+    }
 
     #[test]
     fn a_prompt_with_images_puts_them_first() {
