@@ -228,8 +228,7 @@ the lore.
    `horadric new`, Explorer). "New CLI session" in the project menu is
    always a terminal. Quests, Warriv, reviewers, errands, runewords,
    own worktrees and the town stay terminals, new or resumed, until a
-   Folio can be started with their orders. Codex and Grok keep their
-   terminals.
+   Folio can be started with their orders.
 
 Then "What it opens", one by one. The full feature list toward
 replacing the CLI, in tiers, is [folio-features.md](folio-features.md).

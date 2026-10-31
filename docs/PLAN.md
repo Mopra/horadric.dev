@@ -92,7 +92,7 @@ Small things left over from parts that are built.
   it, but a hand download does, and so does the Windows 11 short context
   menu (Windows refused the unsigned package, 2026-10-13). An NSIS
   installer would go with it.
-- **Never tried for real:** a second Claude, Codex or Grok subscription,
+- **Never tried for real:** a second Claude subscription,
   SSH hosts and fleets against a real server, an IME. The lore notes on
   each part say what was only unit tested.
 

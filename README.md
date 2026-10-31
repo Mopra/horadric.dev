@@ -5,7 +5,7 @@
 <h1 align="center">Horadric</h1>
 
 <p align="center">
-  Every coding agent you have running, as a tile on your desktop, on Windows and macOS.<br />
+  Every Claude Code session you have running, as a tile on your desktop, on Windows and macOS.<br />
   Grouped by project. Lit when it needs you. A full terminal when you click it.
 </p>
 
@@ -55,8 +55,8 @@ screen, grouped by project, showing what it is doing and how long it has
 been doing it. A tile lights up amber the moment its agent needs you. Click
 it and the session opens in a real terminal, with the real CLI in it.
 
-It works with **Claude Code**, **Codex** and **Grok Build**. It never puts a
-chat UI of its own in front of the agent. The terminal is the UI.
+It works with **Claude Code**. It never puts a chat UI of its own in front
+of the agent. The terminal is the UI.
 
 ## Features
 
@@ -164,9 +164,8 @@ starts waiting while you are in another app.
 
 ## Install on Windows
 
-You need Windows 10 or 11 and at least one of
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code),
-[Codex](https://github.com/openai/codex) or Grok Build.
+You need Windows 10 or 11 and
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
 With [Chocolatey](https://community.chocolatey.org/packages/horadric):
 
@@ -235,7 +234,6 @@ The global shortcuts can be changed in Settings, under Keys.
 
 ```
 horadric new --name fix-login          start a session in this folder
-horadric new --agent codex             start one with another agent
 horadric quest add "Fix the login bug" add to the quest log
 horadric serve                         every session's state as a table
 ```
