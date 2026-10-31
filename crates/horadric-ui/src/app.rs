@@ -3049,10 +3049,16 @@ fn history_items(past: &[Past], first: usize) -> Vec<Item> {
 }
 
 /// Town Portal's key clicked. Closed, it opens the portal and shows the
-/// code a phone scans; open, it offers another code or closing it.
+/// code a phone scans; open, it is the one menu of the brotherhood and its
+/// phones: the brothers as the tray lists them, each phone with who
+/// vouched for it and "Forget everywhere", another code, whether phones
+/// may type here, and closing the portal.
 fn portal_key() {
     const PAIR: usize = 1;
     const CLOSE: usize = 2;
+    const TYPE: usize = 3;
+    const FORGET: usize = 9900;
+    const PHONES: usize = 99;
     let Some(dir) = horadric_hooks::state_dir() else {
         return;
     };
@@ -3066,14 +3072,46 @@ fn portal_key() {
         .trim_start_matches("wss://")
         .trim_start_matches("ws://")
         .to_string();
-    let items = [
+    let brothers = crate::tray::BrotherLines::now();
+    let phones = crate::portal_pair::known_phones(&dir);
+    let mut items = vec![
         Item::Disabled(format!("Town Portal, through {host}")),
         Item::Separator,
-        Item::action(PAIR, "Pair a phone..."),
-        Item::action(CLOSE, "Close the portal"),
     ];
+    items.extend(brothers.items.iter().cloned());
+    items.push(Item::Separator);
+    if phones.is_empty() {
+        items.push(Item::Disabled("No phone is paired".into()));
+    }
+    for (i, k) in phones.iter().take(PHONES).enumerate() {
+        let by = crate::portal_pair::vouched_by(&dir, k);
+        let label = match (k.public.is_empty(), by.is_empty()) {
+            (true, _) => format!("{}\tthis PC only", k.name),
+            (false, true) => k.name.clone(),
+            (false, false) => format!("{}\tpaired by {by}", k.name),
+        };
+        items.push(Item::Submenu(
+            label,
+            vec![Item::action(FORGET + i, "Forget everywhere\u{2026}")],
+        ));
+    }
+    items.push(Item::Separator);
+    items.push(Item::action(PAIR, "Pair a phone..."));
+    items.push(Item::Action {
+        id: TYPE,
+        label: "Phones can type here".into(),
+        checked: crate::portal_pair::phones_type(&dir),
+        bold: false,
+    });
+    items.push(Item::action(CLOSE, "Close the portal"));
     match menu::popup(&items) {
         Some(PAIR) => portal_pair(&dir),
+        Some(TYPE) => {
+            let on = !crate::portal_pair::phones_type(&dir);
+            if let Err(e) = crate::portal_pair::set_phones_type(&dir, on) {
+                eprintln!("horadric: {e}");
+            }
+        }
         Some(CLOSE) => {
             if let Some(mut c) = horadric_core::portal::Config::load(&dir) {
                 c.enabled = false;
@@ -3084,8 +3122,54 @@ fn portal_key() {
             }
             with_app(|app| app.portal_soon());
         }
-        _ => {}
+        Some(i) if (FORGET..FORGET + PHONES).contains(&i) => {
+            if let Some(k) = phones.get(i - FORGET) {
+                forget_phone(&dir, k);
+            }
+        }
+        Some(i) => match brothers.pick(i) {
+            Some(Choice::Control(id, on)) => set_control(&id, on),
+            Some(Choice::CastOut(id, name)) => {
+                let (line, mine) = crate::brothers::line_of(&id);
+                if confirm_cast_out(&name, &line, mine) {
+                    cast_out(&id);
+                }
+            }
+            _ => {}
+        },
+        None => {}
     }
+}
+
+/// "Forget everywhere": asked first, Cancel the default, since the phone
+/// must be paired again by a code to come back.
+fn forget_phone(dir: &std::path::Path, k: &horadric_core::phoning::Known) {
+    let text = format!(
+        "{} is cut off from every brother, and must scan a new code to come back.",
+        k.name
+    );
+    let answer = ask(&Dialog {
+        tone: Tone::Warning,
+        title: "Forget this phone everywhere?",
+        text: &text,
+        buttons: &["Forget everywhere", "Cancel"],
+        default: 1,
+        check: None,
+    });
+    if answer != Some(0) {
+        return;
+    }
+    if let Err(e) = crate::portal_pair::forget_everywhere(dir, &k.id) {
+        ask(&Dialog {
+            tone: Tone::Error,
+            title: "The phone was not forgotten",
+            text: &e,
+            buttons: &["OK"],
+            default: 0,
+            check: None,
+        });
+    }
+    with_app(|app| app.portal_soon());
 }
 
 /// Opens the portal if it is closed and shows a new code to pair with.

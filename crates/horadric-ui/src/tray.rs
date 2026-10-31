@@ -524,6 +524,58 @@ pub fn menu(
     }
 }
 
+/// The brothers' lines as the tray's Other PCs shows them, for the Town
+/// Portal key's menu, which holds the brothers and the phones together,
+/// and what a pick among them means.
+pub(crate) struct BrotherLines {
+    pub items: Vec<Item>,
+    joined: Vec<(String, String, bool)>,
+    listed: Vec<joining::Listed>,
+}
+
+impl BrotherLines {
+    pub(crate) fn now() -> BrotherLines {
+        let keeping = crate::app::keeping_tray();
+        let standing = horadric_hooks::state_dir()
+            .map(|d| crate::standing::Standing::load(&d))
+            .unwrap_or_default();
+        let joined: Vec<(String, String, bool)> = keeping
+            .0
+            .iter()
+            .map(|(id, name)| (id.clone(), name.clone(), standing.controls(id)))
+            .collect();
+        let listed = crate::brothers::listed();
+        let items = brother_items(listed.as_deref(), &joined, &crate::far_node::folded_ids());
+        BrotherLines {
+            items,
+            joined,
+            listed: listed.unwrap_or_default(),
+        }
+    }
+
+    /// What picking line `i` asks for. A brother not joined yet is asked
+    /// in at once, which asks nothing more of the caller.
+    pub(crate) fn pick(&self, i: usize) -> Option<Choice> {
+        match i {
+            i if (CONTROL..CONTROL + RIGHTS).contains(&i) => self
+                .joined
+                .get(i - CONTROL)
+                .map(|(id, _, on)| Choice::Control(id.clone(), !on)),
+            i if (CAST_OUT..CAST_OUT + RIGHTS).contains(&i) => self
+                .joined
+                .get(i - CAST_OUT)
+                .map(|(id, name, _)| Choice::CastOut(id.clone(), name.clone())),
+            i if (BROTHER..QUEST_LOG).contains(&i) => {
+                if let Some(b) = self.listed.get(i - BROTHER) {
+                    crate::brothers::ask(&b.id);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Where a joined brother's "Can control this PC" and "Cast out" ids
 /// start, one each per joined brother.
 const CONTROL: usize = 9600;

@@ -142,6 +142,58 @@ pub fn paired_message(t: &str, phone: &str, me: &str, private: &[u8; 96]) -> Val
     })
 }
 
+/// A phone as the desktop's menu and `horadric portal phones` list it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Known {
+    pub id: String,
+    pub name: String,
+    /// Its public key, empty for a phone paired the old way.
+    pub public: String,
+    /// The brothers that vouched for it, by relay id.
+    pub by: Vec<String>,
+    /// Paired with this machine, so in its `portal.json`.
+    pub here: bool,
+    /// When it last said hello here, for one paired here.
+    pub seen: Option<u64>,
+}
+
+/// Every phone this machine knows: those `paired` with it first, as they
+/// paired, then those the word `served` that another brother vouched for.
+pub fn known(paired: &[crate::portal::Phone], served: &[crate::said::Phone]) -> Vec<Known> {
+    let by = |public: &str| -> Vec<String> {
+        served
+            .iter()
+            .filter(|s| !public.is_empty() && s.key == public)
+            .flat_map(|s| s.by.values().cloned())
+            .collect()
+    };
+    let mut out: Vec<Known> = paired
+        .iter()
+        .map(|p| Known {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            public: p.public.clone(),
+            by: by(&p.public),
+            here: true,
+            seen: Some(p.seen),
+        })
+        .collect();
+    for s in served {
+        if out.iter().any(|k| k.id == s.phone && k.public == s.key) {
+            continue;
+        }
+        out.push(Known {
+            id: s.phone.clone(),
+            name: s.name.clone(),
+            public: s.key.clone(),
+            by: s.by.values().cloned().collect(),
+            here: false,
+            seen: None,
+        });
+    }
+    out
+}
+
 /// The phone channels of a machine that pairs no phones but serves those
 /// the word vouches for: a Linux node. A PC keeps its own, with pairing.
 #[derive(Default)]
@@ -326,6 +378,35 @@ mod tests {
     }
 
     use crate::joining::fake::Fake;
+
+    #[test]
+    fn known_phones_are_those_paired_here_then_those_vouched_elsewhere() {
+        let phone = |id: &str, public: &str| crate::portal::Phone {
+            id: id.into(),
+            name: id.to_uppercase(),
+            key: "k".into(),
+            public: public.into(),
+            was: String::new(),
+            paired: 1,
+            seen: 2,
+        };
+        let served = |id: &str, key: &str, by: &[&str]| crate::said::Phone {
+            phone: id.into(),
+            key: key.into(),
+            name: id.to_uppercase(),
+            by: by.iter().map(|b| (format!("key of {b}"), b.to_string())).collect(),
+        };
+        let k = known(
+            &[phone("old", ""), phone("mine", "P1")],
+            &[served("mine", "P1", &["me"]), served("far", "P2", &["laptop", "vps"])],
+        );
+        let ids: Vec<(&str, bool)> = k.iter().map(|k| (k.id.as_str(), k.here)).collect();
+        assert_eq!(ids, [("old", true), ("mine", true), ("far", false)]);
+        assert!(k[0].by.is_empty());
+        assert_eq!(k[1].by, ["me"]);
+        assert_eq!(k[2].by, ["laptop", "vps"]);
+        assert_eq!((k[1].seen, k[2].seen), (Some(2), None));
+    }
 
     fn chans_serving(id: &str, key: [u8; 32]) -> Chans {
         let mut c = Chans::default();
