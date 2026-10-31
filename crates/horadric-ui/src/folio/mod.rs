@@ -26,6 +26,7 @@
 //! [`transcript`] lays out and draws the blocks, [`composer`] the input
 //! box and its buttons, and [`backdrop`] the background.
 
+pub mod afar;
 mod backdrop;
 mod banish;
 mod cards;
