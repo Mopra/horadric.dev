@@ -26,6 +26,7 @@
 //! [`transcript`] lays out and draws the blocks, [`composer`] the input
 //! box and its buttons, and [`backdrop`] the background.
 
+pub mod afar;
 mod backdrop;
 mod banish;
 mod cards;
@@ -37,6 +38,7 @@ mod lightbox;
 mod picker;
 mod rich;
 mod select;
+mod sign_in;
 mod transcript;
 mod view;
 mod watch;
@@ -157,6 +159,13 @@ struct Chat {
     /// The line its conversation was resumed at by a rewind, see
     /// [`Tag::at`].
     rewound: Option<String>,
+    /// The session starts again once claude.exe has ended, so it reads a
+    /// new login.
+    restarting: bool,
+    /// Whether it comes to the stage as it starts again.
+    restart_show: bool,
+    /// What it says once its history is in, see [`sign_in::greeting`].
+    greeting: Option<String>,
     /// Waits for the human to trust its folder, with what starts it then.
     /// Claude Code asks before it runs a folder's hooks and MCP servers,
     /// but not headless, so the Folio asks for it.
@@ -168,6 +177,9 @@ struct Chat {
     tr: transcript::Ui,
     /// A hireling's conversation, read only, rather than a session.
     watch: Option<watch::Watch>,
+    /// The first prompt, sent once the session is live and its history
+    /// read: a quest, Warriv's events, an errand's first step.
+    first: Option<String>,
 }
 
 /// What the app hears of a Folio, for its tile's phase.
@@ -221,15 +233,20 @@ impl Chat {
             to_terminal: false,
             rewinding: false,
             rewound: None,
+            restarting: false,
+            restart_show: false,
+            greeting: None,
             tr: transcript::Ui::default(),
             watch: None,
+            first: None,
         }
     }
 
     /// Its claude can be let go without losing a turn or an ask.
     fn between_turns(&self) -> bool {
         let unsure = self.loading.is_some() || !self.live;
-        !unsure && !self.folio.busy && self.folio.pending_asks().is_empty() && !self.to_terminal
+        let leaving = self.to_terminal || self.restarting;
+        !unsure && !leaving && !self.folio.busy && self.folio.pending_asks().is_empty()
     }
 
     /// Claude works and waits on no one. An ask that waits is at rest for
@@ -410,19 +427,33 @@ fn load_history(chat: &mut Chat, path: PathBuf, limit: u64) {
 /// resuming the conversation `tag.resume` when it names one. `options`
 /// carry the flags and the environment its hooks find it by. In a folder
 /// Claude Code has not been told to trust, it waits for the human to say
-/// so in its pane first.
-pub fn open(id: &str, dir: &Path, mut tag: Tag, options: &Options) -> Result<(), String> {
+/// so in its pane first. `first` goes in as its first prompt once it can
+/// take one, the folder trusted and any history read.
+pub fn open_with(
+    id: &str,
+    dir: &Path,
+    mut tag: Tag,
+    options: &Options,
+    first: Option<String>,
+) -> Result<(), String> {
     if CHATS.with(|c| c.borrow().contains_key(id)) {
         return Ok(());
     }
     let mut chat = Chat::new(&tag.key, dir);
     chat.rewound = tag.at.clone();
+    chat.first = first;
     if let Some(conversation) = tag.resume.clone() {
         // `--resume` streams only the new turns: what came before is read
         // from the transcript, and how much there was goes in the tag.
         if let Some((path, len)) = history_file(dir, &conversation) {
             tag.history = len;
             load_history(&mut chat, path, len);
+        }
+    }
+    if let Some(said) = sign_in::greeting(id) {
+        match chat.loading {
+            Some(_) => chat.greeting = Some(said),
+            None => chat.folio.note(&said),
         }
     }
     if !crate::accounts::trusted(dir) {
@@ -528,7 +559,7 @@ pub fn close(id: &str) {
     let mut gone = CHATS.with(|c| c.borrow_mut().remove(id));
     if let Some(c) = gone.as_mut() {
         // Handed over, it may come back as a Folio: what was typed waits.
-        if c.to_terminal {
+        if c.to_terminal || c.restarting {
             c.input.fold_queue();
         } else {
             c.input.forget();
@@ -585,16 +616,6 @@ pub fn rewind_from(id: &str) -> Option<(String, Option<String>)> {
     .flatten()
 }
 
-/// Sends `text` to session `id` as though typed and sent. False when it
-/// cannot take a prompt now: ended, loading, or going on elsewhere.
-pub fn prompt(id: &str, text: &str) -> bool {
-    let sent = with(id, |c| composer::prompt(c, text)).unwrap_or(false);
-    if sent {
-        redraw(id);
-    }
-    sent
-}
-
 /// Asks session `id`'s CLI to stop its background task `task`, such as a
 /// subagent.
 pub fn stop_task(id: &str, task: &str) {
@@ -620,6 +641,38 @@ pub fn agents(id: &str) -> Vec<(String, String)> {
     .unwrap_or_default()
 }
 
+/// Starts session `id`'s claude.exe again on its conversation, so it
+/// reads a new login, saying `said` first. One that ended starts at once,
+/// one at rest once it has ended; one at work or asking is left alone.
+/// `show` brings it to the stage.
+fn restart(id: &str, said: &str, show: bool) {
+    // Some(true) starts it now, Some(false) once claude.exe has ended.
+    let how = with(id, |c| {
+        if c.to_terminal || c.restarting || c.pending.is_some() || c.loading.is_some() {
+            return None;
+        }
+        if c.ended || c.hosted.is_none() {
+            return Some(true);
+        }
+        if !c.live || c.folio.busy || !c.folio.pending_asks().is_empty() {
+            return None;
+        }
+        let h = c.hosted.as_ref()?;
+        c.restarting = true;
+        c.restart_show = show;
+        h.close();
+        Some(false)
+    })
+    .flatten();
+    let Some(now) = how else {
+        return;
+    };
+    sign_in::greet(id, said);
+    if now {
+        app::push(Input::FolioRestart(id.to_string(), show));
+    }
+}
+
 /// Lets go of every Folio, as the app reloads or quits keeping its
 /// sessions: their hosts run on, and [`reattach`] finds them again.
 pub fn detach_all() {
@@ -641,6 +694,55 @@ pub fn running(id: &str) -> bool {
         !c.ended && c.hosted.as_ref().is_some_and(Hosted::running)
     })
     .unwrap_or(false)
+}
+
+/// Whether session `id` takes what [`prompt`] sends now: up, its replay
+/// and history in, and not on its way to a terminal.
+pub fn ready(id: &str) -> bool {
+    with(id, |c| {
+        !c.ended && !c.to_terminal && c.live && c.loading.is_none() && c.hosted.is_some()
+    })
+    .unwrap_or(false)
+}
+
+/// Sends session `id` a line as though typed into it and Enter pressed:
+/// `/model` and `/effort` switch it, anything else is a prompt. False when
+/// it cannot take one now, see [`composer::prompt`].
+pub fn prompt(id: &str, text: &str) -> bool {
+    let went = with(id, |c| composer::prompt(c, text)).unwrap_or(false);
+    if went {
+        redraw(id);
+    }
+    went
+}
+
+/// Stops session `id`'s turn, as Esc in its composer does. False when no
+/// turn runs.
+pub fn stop(id: &str) -> bool {
+    with(id, composer::stop).unwrap_or(false)
+}
+
+/// Allows the oldest permission ask session `id` waits on, once, as Enter
+/// does in the terminal. A question or a plan needs its own answer, so
+/// they wait. False when no permission ask waits.
+pub fn approve(id: &str) -> bool {
+    let line = with(id, |c| {
+        // While a reattach replays, the ask may already be answered.
+        if !c.live {
+            return None;
+        }
+        let ask = c.folio.pending_asks().first()?.to_string();
+        let line = c.folio.answer(&ask, true)?;
+        let h = c.hosted.as_ref()?;
+        h.send_line(&line).ok()?;
+        select::release_lapsed(c);
+        Some(())
+    });
+    let went = line.flatten().is_some();
+    if went {
+        redraw(id);
+    }
+    went
 }
 
 /// The Claude Code conversation session `id` holds, once its init said.
@@ -694,6 +796,10 @@ unsafe extern "system" fn router_proc(
 ) -> LRESULT {
     if msg == WM_FOLIO_LINES {
         drain();
+        return LRESULT(0);
+    }
+    if msg == sign_in::WM_FOLIO_LOGIN {
+        sign_in::tend();
         return LRESULT(0);
     }
     if msg == WM_TIMER && wparam.0 == watch::WATCH_TIMER {
@@ -757,6 +863,9 @@ fn drain() {
                 chat.folio = history;
                 chat.tr.state.from = None;
                 chat.loading = None;
+                if let Some(said) = chat.greeting.take() {
+                    chat.folio.note(&said);
+                }
                 moved = true;
             }
             let events: Vec<Event> = match chat.inbox.lock() {
@@ -788,6 +897,9 @@ fn drain() {
                         moved = true;
                         if chat.to_terminal {
                             tell.push(Input::FolioHandedOver(id.clone()));
+                        }
+                        if chat.restarting {
+                            tell.push(Input::FolioRestart(id.clone(), chat.restart_show));
                         }
                     }
                 }
@@ -913,8 +1025,7 @@ fn answer_with(id: &str, make: impl FnOnce(&mut Folio) -> Option<String>) {
     redraw(id);
 }
 
-/// Stops the turn session `id` works on, as Esc does in a terminal.
-pub fn interrupt(id: &str) {
+fn interrupt(id: &str) {
     with(id, |c| {
         if let Some(h) = &c.hosted {
             let _ = h.interrupt();

@@ -83,6 +83,16 @@ tests against them.
 - **Slash commands** go as plain user text: custom commands, skills,
   `/compact`, `/clear`, `/model sonnet`, `/effort`. Pickers and
   `/login`, `/theme` do not exist headless.
+- **Login** (2026-10-31, 2.1.314). `claude auth login` works with no
+  console: on pipes it opens the browser itself, listens on localhost,
+  and prints `If the browser didn't open, visit: <url>` and `Paste code
+  here if prompted > ` (no line end). The browser coming back finishes
+  it; the printed page instead shows a `code#state` to write on stdin.
+  `Login successful.` and exit 0, or `Login failed: …` on stderr. It
+  writes the same files as any login, so account switching is
+  untouched. `claude auth status --json` says `loggedIn`, `authMethod`,
+  `email`, `subscriptionType`. The Folio runs both hidden; see
+  `folio/sign_in.rs` in core and ui.
 - **One process, many turns.** Stdin stays open for the session;
   closing it ends it. A prompt sent mid turn with `next` is folded
   into the running turn after its next tool step (or starts the next
@@ -150,7 +160,8 @@ carry over: the composer is where typing burns in.
 
 - `/model`, effort and permission mode pickers: controls on the
   composer.
-- `/config`, `/theme`, `/login` and other terminal only commands: a
+- `/login` and `/logout`: run by the Folio itself, see Login above.
+- `/config`, `/theme` and other terminal only commands: a
   "Open in terminal" action ends the headless process once idle and
   resumes the same session in a terminal pane (`--resume`); "Back to the
   Folio" does the reverse. One session, two ways in, never both at
@@ -226,10 +237,13 @@ the lore.
    way the human starts a Claude session follows it (the cluster's
    button, the project menu, the tray, the folder picker, a bare
    `horadric new`, Explorer). "New CLI session" in the project menu is
-   always a terminal. Quests, Warriv, reviewers, errands, runewords,
-   own worktrees and the town stay terminals, new or resumed, until a
-   Folio can be started with their orders. Codex and Grok keep their
-   terminals.
+   always a terminal. Since 2026-10-31 a Folio starts with everything a
+   terminal session gets (`App::claude_start` builds both, and
+   `App::start_session` takes a spec for either): own worktrees, with
+   their ports and setup, and the town open as Folios, and a first
+   prompt goes in as the first message. Quests, Warriv, reviewers,
+   errands and runewords stay terminals, new or resumed, until a Folio
+   can be typed into as they run. Codex and Grok keep their terminals.
 
 Then "What it opens", one by one. The full feature list toward
 replacing the CLI, in tiers, is [folio-features.md](folio-features.md).

@@ -536,7 +536,7 @@ fn without_prompt(args: &[String], value_flags: &[&str]) -> Vec<String> {
 /// Claude's flags that take one value, as the next argument, or may
 /// (`--debug`, `--worktree` and the like), which then take the next
 /// argument that is not a flag, prompt or not.
-const CLAUDE_VALUE_FLAGS: [&str; 38] = [
+pub(crate) const CLAUDE_VALUE_FLAGS: [&str; 38] = [
     "--agent",
     "--agents",
     "--append-system-prompt",
@@ -579,7 +579,7 @@ const CLAUDE_VALUE_FLAGS: [&str; 38] = [
 
 /// Claude's flags that take every argument after them up to the next flag,
 /// so no prompt can follow one.
-const CLAUDE_LIST_FLAGS: [&str; 9] = [
+pub(crate) const CLAUDE_LIST_FLAGS: [&str; 9] = [
     "--add-dir",
     "--allowedTools",
     "--allowed-tools",

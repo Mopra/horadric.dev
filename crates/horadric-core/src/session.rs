@@ -610,6 +610,30 @@ impl Session {
         true
     }
 
+    /// Takes up the conversation a session Horadric reads the stream of
+    /// says it is in, as a `SessionStart` from `/clear` would have. Claude
+    /// Code never posts `SessionStart` to an http hook, so without this a
+    /// Folio's `/clear` leaves the tile on the old conversation and every
+    /// hook of the new one, its hirelings' too, is someone else's. True
+    /// when the conversation changed.
+    pub fn follow(&mut self, conversation: &str, now: SystemTime) -> bool {
+        if conversation.is_empty() || self.claude_session_id.as_deref() == Some(conversation) {
+            return false;
+        }
+        if self.claude_session_id.is_none() {
+            self.claude_session_id = Some(conversation.to_string());
+            self.prompted = true;
+            return true;
+        }
+        let fresh = HookEvent {
+            session_id: conversation.to_string(),
+            source: Some("clear".to_string()),
+            ..HookEvent::synthetic("SessionStart")
+        };
+        self.apply(&fresh, now);
+        true
+    }
+
     /// Whether the event's conversation is this tile's: the one it knows,
     /// the first it hears of, or the one a `SessionStart` from `/clear` or
     /// `/resume` names. Horadric's own events have none and always are.
@@ -1043,6 +1067,30 @@ mod tests {
         ] {
             assert!(!p.mid_turn(), "{p:?}");
         }
+    }
+
+    #[test]
+    fn a_folio_follows_its_stream_into_the_conversation_a_clear_began() {
+        let mut r = crate::registry::Registry::new();
+        r.apply("f1", &ev("UserPromptSubmit"), now());
+        let start = HookEvent {
+            session_id: "c2".into(),
+            agent_id: Some("a1".into()),
+            agent_type: Some("general-purpose".into()),
+            ..HookEvent::synthetic("SubagentStart")
+        };
+        // Before: the new conversation's hooks are a stranger's.
+        assert_eq!(r.route("f1", &start), crate::registry::Route::Stranger);
+        let s = r.get_mut("f1").unwrap();
+        assert!(s.follow("c2", now()));
+        assert!(!s.follow("c2", now()));
+        assert_eq!(s.claude_session_id.as_deref(), Some("c2"));
+        let to = crate::registry::Route::To("f1".into());
+        assert_eq!(r.route("f1", &start), to);
+        r.apply("f1", &start, now());
+        let band = &r.get("f1").unwrap().band;
+        assert_eq!(band.hirelings.len(), 1);
+        assert_eq!(band.hirelings[0].kind, "general-purpose");
     }
 
     fn ev(name: &str) -> HookEvent {

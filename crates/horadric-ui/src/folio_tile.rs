@@ -1,6 +1,5 @@
-//! What a Folio's tile does that a terminal's does through its keys:
-//! undoing the last turn rewinds the conversation as well as the files,
-//! and a Folio that has to stop for a brother pauses as a chat.
+//! A Folio's Undo last turn, which rewinds the conversation as well as
+//! the files a terminal's puts back.
 //!
 //! claude cannot rewind a conversation it is running, so an undo lets it
 //! end ([`crate::folio::rewind`]) and starts it again resumed at the line
@@ -13,11 +12,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::time::SystemTime;
 
 use horadric_core::folio::{rewind_point, Rewind};
-use horadric_core::saved::SavedSession;
-use horadric_core::HookEvent;
 
 use super::App;
 use crate::toast::Kind;
@@ -139,8 +135,8 @@ impl App {
         if pending.is_none() {
             return false;
         }
+        // Its pane stays meanwhile, and a start that fails pauses it.
         crate::folio::close(id);
-        self.folios.remove(id);
         self.folio_rewind_start(id);
         true
     }
@@ -186,33 +182,7 @@ impl App {
         if let Err(e) = self.start_folio(Some(id.to_string()), dir, resume, &args, true) {
             REWINDS.with(|r| r.borrow_mut().remove(id));
             eprintln!("horadric: {id} did not start again after its undo: {e}");
-            self.pause_as_chat(id, args);
+            self.halt(id);
         }
-    }
-
-    /// Ends Folio `id`'s claude and keeps its tile paused, to resume as a
-    /// chat, as a terminal killed for a handoff or a takeover is.
-    pub(super) fn pause_folio(&mut self, id: &str) {
-        if self.folios.remove(id).is_none() {
-            return;
-        }
-        crate::folio::close(id);
-        let args = self.folio_args.remove(id).unwrap_or_default();
-        self.pause_as_chat(id, args);
-        self.sync_stage();
-    }
-
-    fn pause_as_chat(&mut self, id: &str, args: Vec<String>) {
-        if let Ok(mut r) = self.shared.registry.lock() {
-            if let Some(s) = r.get(id) {
-                let saved = SavedSession {
-                    chat: true,
-                    ..SavedSession::from_session(s, args, false)
-                };
-                self.paused.insert(id.to_string(), saved);
-                r.apply(id, &HookEvent::synthetic(HookEvent::PAUSE), SystemTime::now());
-            }
-        }
-        self.reconcile(true);
     }
 }

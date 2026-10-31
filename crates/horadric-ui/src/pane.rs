@@ -321,6 +321,9 @@ pub struct Pane {
     /// and the one the arrow keys are on.
     start_hover: Cell<Option<usize>>,
     start_pick: Cell<Option<usize>>,
+    /// The address field is being edited in the header, where it was
+    /// clicked, even on the start page, which otherwise holds it.
+    address_up: Cell<bool>,
 }
 
 /// The keys that make no character, which `WM_CHAR` never carries.
@@ -415,6 +418,7 @@ impl Pane {
             keyed: Cell::new(None),
             start_hover: Cell::new(None),
             start_pick: Cell::new(None),
+            address_up: Cell::new(false),
         });
         // A browser pane's page is a window inside it, which its own
         // drawing must leave alone.
@@ -702,6 +706,7 @@ impl Pane {
         // A start page's field takes the keyboard, never its hidden page.
         if self.start_key().is_some() {
             if self.address.borrow().is_none() {
+                self.address_up.set(false);
                 self.edit_address();
             } else {
                 unsafe {
@@ -787,7 +792,7 @@ impl Pane {
         }
         if new_tab::in_field(&l, x, y) && self.address.borrow().is_some() {
             if let Some(f) = self.address.borrow_mut().as_mut() {
-                if double {
+                if self.address_up.replace(false) || double {
                     f.select_all();
                 } else {
                     let caret = field::utf16_at(&f.text, f.caret);
@@ -1131,8 +1136,8 @@ impl Pane {
         // On the start page the field is on the glass, not in the header.
         let start_key = self.start_key().map(str::to_string);
         let (edit, start_edit) = match start_key {
-            Some(_) => (None, edit),
-            None => (edit, None),
+            Some(_) if !self.address_up.get() => (None, edit),
+            _ => (edit, None),
         };
         let shown = match &edit {
             Some(f) => f.text.clone(),
@@ -2436,7 +2441,10 @@ impl Pane {
         let step = match self.bar_at(lparam) {
             None => return false,
             Some(BarHit::Field) => {
-                if self.address.borrow().is_some() {
+                // The start page's field moves up to the header clicked.
+                if !self.address_up.replace(true) && self.address.borrow().is_some() {
+                    self.edit_address();
+                } else if self.address.borrow().is_some() {
                     let l = self.bar_layout();
                     self.place_caret(self.dip(lparam).0 - l.field.0 - BAR_INSET, double);
                 } else {

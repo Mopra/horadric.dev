@@ -197,9 +197,12 @@ impl App {
             .values()
             .filter_map(|a| a.session.clone().filter(|_| a.running))
             .filter(|id| {
-                self.consoles
-                    .get(id)
-                    .is_some_and(|c| c.exit_code().is_some())
+                let chat_ended = self.folios.contains_key(id) && !crate::folio::running(id);
+                chat_ended
+                    || self
+                        .consoles
+                        .get(id)
+                        .is_some_and(|c| c.exit_code().is_some())
             })
             .collect();
         for id in quit {

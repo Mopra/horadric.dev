@@ -507,10 +507,16 @@ impl App {
     /// apart, and a last moment after them, so a step after it lands once
     /// the agent has taken them. False without a terminal to write to.
     fn type_keys(&mut self, id: &str, pieces: Vec<Vec<u8>>) -> bool {
+        let now = Instant::now();
+        // A Folio takes them at once; the last moment still lets it start
+        // on them before the next step.
+        if self.keys_to_folio(id, &pieces) {
+            (self.tome.typing).push((id.to_string(), Vec::new(), now + KEYS_APART));
+            return true;
+        }
         let Some(c) = self.consoles.get(id).filter(|c| c.exit_code().is_none()) else {
             return false;
         };
-        let now = Instant::now();
         let mut pieces = pieces.into_iter();
         if let Some(first) = pieces.next() {
             c.write(first);
@@ -615,15 +621,10 @@ impl App {
         Some((reviewer, file))
     }
 
-    /// Types one line to a live session, its Enter a moment after so the
-    /// agent takes it as typed. False when there is no console to type to.
+    /// Says one line to a live session, as though typed and Enter pressed.
+    /// False when nothing here takes it.
     fn tell(&mut self, id: &str, text: &str) -> bool {
-        let Some(c) = self.consoles.get(id).filter(|c| c.exit_code().is_none()) else {
-            return false;
-        };
-        c.write(one_line(text).into_bytes());
-        self.tasks.enters.push((id.to_string(), Instant::now()));
-        true
+        self.send_prompt(id, &one_line(text))
     }
 
     /// What a toast calls what a runeword was cast on.
@@ -921,11 +922,7 @@ impl App {
             r.get(id)
                 .is_some_and(|s| !s.shell && s.background.is_none())
         });
-        fit && !self.paused.contains_key(id)
-            && self
-                .consoles
-                .get(id)
-                .is_some_and(|c| c.exit_code().is_none())
+        fit && !self.paused.contains_key(id) && self.runs_here(id)
     }
 
     /// The project's sessions a stone can be cast on, with their labels,
