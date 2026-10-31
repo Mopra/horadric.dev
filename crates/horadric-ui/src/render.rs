@@ -3831,7 +3831,11 @@ impl Painter<'_> {
         self.text_tabular(gpu, &gpu.small_right, age_c.fade(presence), &age, top);
 
         // Last line, and what the agent did lately beside it.
-        let at_work = if !s.band.hirelings.is_empty() {
+        // Queued for heavy first: a session that waits its turn there
+        // looks stuck otherwise.
+        let at_work = if let Some(queued) = s.queued_line(scene.now) {
+            queued
+        } else if !s.band.hirelings.is_empty() {
             s.band.line(scene.now).unwrap_or_default()
         } else if phase == &Phase::Working || s.agents_alone(scene.now) > 0 {
             horadric_core::session::subagent_line(&s.subagent_types(scene.now))
