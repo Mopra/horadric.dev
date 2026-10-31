@@ -66,11 +66,12 @@ use crate::layout::{
     SettingRow, SettingsHit, SettingsLayout, StartHit, StartLayout, SuggestLayout, TasksLayout,
     ToastLayout, TomeLayout, UsageHit, UsageLayout, KNOB_R,
 };
-use crate::motion::{self, ORBIT};
+use crate::motion;
 use crate::portal_key::Look as PortalLook;
 use crate::settings::Control;
 use crate::theme::{self, Color};
 
+mod bloom;
 mod stone;
 pub(crate) use stone::{StoneLook, StoneState};
 
@@ -752,6 +753,7 @@ pub struct Target {
     /// The theme the layer was drawn in, so a new one draws it again.
     theme: Cell<theme::Theme>,
     gradients: Gradients,
+    bloom: bloom::Bloom,
 }
 
 /// Gradient brushes by their stops. A gradient is a texture on the GPU, and
@@ -844,6 +846,7 @@ impl Target {
             layer: RefCell::new(None),
             theme: Cell::new(theme::current()),
             gradients: Gradients::default(),
+            bloom: bloom::Bloom::default(),
         })
     }
 
@@ -895,6 +898,9 @@ impl Target {
                     None,
                 );
             }
+            // A failed bloom leaves the frame without its glow, never
+            // without its frame.
+            let _ = self.bloom(gpu, scene);
             if scene.ambient {
                 self.painter(&self.rt).light(m, scene);
             }
@@ -2380,8 +2386,7 @@ impl Painter<'_> {
             }
             match phase {
                 Phase::Working => {
-                    let t = motion::cycle(look.phase_age, ORBIT);
-                    self.scan(&lamp_rect(&r), c, t, look.enter);
+                    // Its lamp's surge is light, drawn by the bloom.
                     let context = s.status.as_ref().and_then(|st| st.context);
                     if let Some(c) = context.filter(|&c| c >= 75.0) {
                         let (ix, iy) = icon_centre(&r);
@@ -3199,15 +3204,6 @@ impl Painter<'_> {
             let q = (t - 0.5) / 0.5;
             self.glow_dot(cx, cy, 10.0 * (1.0 - q) + 2.0, white, 0.8 * (1.0 - q));
         }
-    }
-
-    /// A hot spot running up and down a working session's lamp, `t` of
-    /// the way through a sweep.
-    unsafe fn scan(&self, r: &Rect, c: Color, t: f32, strength: f32) {
-        let travel = (1.0 - (t * std::f32::consts::TAU).cos()) / 2.0;
-        let y = r.y + 2.0 + (r.h - 4.0) * travel;
-        let hot = c.mix(Color::rgb(0xFFFFFF), 0.5);
-        self.glow_dot(r.x + r.w / 2.0, y, 7.0, hot, strength);
     }
 
     /// A small round indicator, lit in `c`.
