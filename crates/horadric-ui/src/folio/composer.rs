@@ -502,6 +502,23 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
     }
 }
 
+/// Sends `text` as a prompt the composer did not hold: a turn when Claude
+/// rests, or folded into the running one at its next step. False when the
+/// session cannot take one now.
+pub(super) fn prompt(chat: &mut Chat, text: &str) -> bool {
+    if chat.ended || chat.to_terminal || chat.hosted.is_none() || chat.loading.is_some() {
+        return false;
+    }
+    if !chat.folio.busy {
+        deliver(chat, text, &[]);
+    } else {
+        let line = chat.folio.queue_prompt(text, &[], Priority::Next);
+        write(chat, &line);
+        chat.follow = true;
+    }
+    true
+}
+
 /// A command only the terminal runs: the session goes on in a terminal,
 /// where it can be typed again, once Claude rests.
 fn to_terminal(chat: &mut Chat, command: &str) {

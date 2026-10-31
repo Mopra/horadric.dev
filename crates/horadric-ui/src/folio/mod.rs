@@ -98,6 +98,10 @@ pub struct Tag {
     /// reads the transcript up to here and no turn shows twice.
     #[serde(default)]
     pub history: u64,
+    /// The line of that transcript it was resumed at, when an undo
+    /// rewound it there: what comes after in the file was undone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
 }
 
 /// One Folio and the session behind it.
@@ -147,6 +151,12 @@ struct Chat {
     live: bool,
     /// The session goes on in a terminal once claude.exe has ended.
     to_terminal: bool,
+    /// With `to_terminal`, it starts again as a Folio, its last turn
+    /// rewound, rather than in a terminal.
+    rewinding: bool,
+    /// The line its conversation was resumed at by a rewind, see
+    /// [`Tag::at`].
+    rewound: Option<String>,
     /// Waits for the human to trust its folder, with what starts it then.
     /// Claude Code asks before it runs a folder's hooks and MCP servers,
     /// but not headless, so the Folio asks for it.
@@ -209,9 +219,17 @@ impl Chat {
             pending: None,
             loading: None,
             to_terminal: false,
+            rewinding: false,
+            rewound: None,
             tr: transcript::Ui::default(),
             watch: None,
         }
+    }
+
+    /// Its claude can be let go without losing a turn or an ask.
+    fn between_turns(&self) -> bool {
+        let unsure = self.loading.is_some() || !self.live;
+        !unsure && !self.folio.busy && self.folio.pending_asks().is_empty() && !self.to_terminal
     }
 
     /// Claude works and waits on no one. An ask that waits is at rest for
@@ -266,7 +284,9 @@ impl Chat {
 
     fn detail(&self) -> String {
         let agents = self.folio.agents_at_work();
-        let state = if self.to_terminal {
+        let state = if self.rewinding {
+            "undoing the last turn".to_string()
+        } else if self.to_terminal {
             "opening in a terminal".to_string()
         } else if self.error.is_some() || self.ended {
             "ended".to_string()
@@ -364,13 +384,14 @@ fn history_file(dir: &Path, conversation: &str) -> Option<(PathBuf, u64)> {
 fn load_history(chat: &mut Chat, path: PathBuf, limit: u64) {
     let slot: Arc<Mutex<Option<Folio>>> = Arc::default();
     chat.loading = Some(Arc::clone(&slot));
+    let at = chat.rewound.clone();
     let router = router();
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
         if let Ok(file) = std::fs::File::open(&path) {
             let _ = file.take(limit).read_to_end(&mut bytes);
         }
-        let folio = Folio::from_transcript(&String::from_utf8_lossy(&bytes));
+        let folio = Folio::from_transcript_at(&String::from_utf8_lossy(&bytes), at.as_deref());
         if let Ok(mut s) = slot.lock() {
             *s = Some(folio);
         }
@@ -395,6 +416,7 @@ pub fn open(id: &str, dir: &Path, mut tag: Tag, options: &Options) -> Result<(),
         return Ok(());
     }
     let mut chat = Chat::new(&tag.key, dir);
+    chat.rewound = tag.at.clone();
     if let Some(conversation) = tag.resume.clone() {
         // `--resume` streams only the new turns: what came before is read
         // from the transcript, and how much there was goes in the tag.
@@ -483,6 +505,7 @@ pub fn reattach() -> Vec<Found> {
         let mut chat = Chat::new(&tag.key, &info.cwd);
         chat.inbox = inbox;
         chat.posted = posted;
+        chat.rewound = tag.at.clone();
         if let Some(conversation) = &tag.resume {
             if let Some((path, _)) = history_file(&info.cwd, conversation) {
                 load_history(&mut chat, path, tag.history);
@@ -520,19 +543,81 @@ pub fn close(id: &str) {
 /// terminal: the app hears [`Input::FolioHandedOver`] once
 /// claude.exe has ended. False while it works or an ask waits.
 pub fn hand_over(id: &str) -> bool {
+    let_go(id, false)
+}
+
+/// Ends session `id` once it is between turns, as [`hand_over`] does, for
+/// the app to start it again with its last turn rewound: it hears
+/// [`Input::FolioHandedOver`] too.
+pub fn rewind(id: &str) -> bool {
+    let_go(id, true)
+}
+
+fn let_go(id: &str, rewinding: bool) -> bool {
     with(id, |c| {
-        let unsure = c.loading.is_some() || !c.live;
-        if unsure || c.folio.busy || !c.folio.pending_asks().is_empty() || c.to_terminal {
+        if !c.between_turns() {
             return false;
         }
         let Some(h) = &c.hosted else {
             return false;
         };
         c.to_terminal = true;
+        c.rewinding = rewinding;
         h.close();
         true
     })
     .unwrap_or(false)
+}
+
+/// Where an undo of session `id`'s last turn counts back from: its
+/// conversation, and the line it was rewound to when no prompt came
+/// since. None while it works, an ask waits, or it has no conversation.
+pub fn rewind_from(id: &str) -> Option<(String, Option<String>)> {
+    with(id, |c| {
+        if !c.between_turns() {
+            return None;
+        }
+        let conversation = c.folio.session_id.clone()?;
+        let prompted = (c.folio.blocks.get(c.folio.history..).into_iter().flatten())
+            .any(|b| matches!(b, horadric_core::folio::Block::Prompt(_)));
+        Some((conversation, c.rewound.clone().filter(|_| !prompted)))
+    })
+    .flatten()
+}
+
+/// Sends `text` to session `id` as though typed and sent. False when it
+/// cannot take a prompt now: ended, loading, or going on elsewhere.
+pub fn prompt(id: &str, text: &str) -> bool {
+    let sent = with(id, |c| composer::prompt(c, text)).unwrap_or(false);
+    if sent {
+        redraw(id);
+    }
+    sent
+}
+
+/// Asks session `id`'s CLI to stop its background task `task`, such as a
+/// subagent.
+pub fn stop_task(id: &str, task: &str) {
+    answer_with(id, |f| Some(f.stop_task(task)));
+}
+
+/// The subagents session `id` runs in the background, by task id with a
+/// label, once the CLI has listed them.
+pub fn agents(id: &str) -> Vec<(String, String)> {
+    with(id, |c| {
+        (c.folio.background.iter())
+            .filter(|t| t.is_agent())
+            .map(|t| {
+                let label = match (t.agent_type.as_str(), t.description.trim()) {
+                    ("", d) => d.to_string(),
+                    (a, "") => a.to_string(),
+                    (a, d) => format!("{a}: {d}"),
+                };
+                (t.task_id.clone(), label)
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Lets go of every Folio, as the app reloads or quits keeping its
@@ -828,7 +913,8 @@ fn answer_with(id: &str, make: impl FnOnce(&mut Folio) -> Option<String>) {
     redraw(id);
 }
 
-fn interrupt(id: &str) {
+/// Stops the turn session `id` works on, as Esc does in a terminal.
+pub fn interrupt(id: &str) {
     with(id, |c| {
         if let Some(h) = &c.hosted {
             let _ = h.interrupt();
@@ -857,6 +943,7 @@ mod tests {
             name: "p".into(),
             resume: Some("abc".into()),
             history: 42,
+            at: None,
         };
         let json = serde_json::to_string(&tag).unwrap();
         assert_eq!(serde_json::from_str::<Tag>(&json).unwrap(), tag);
