@@ -19,12 +19,14 @@
 //! CLI asks, the last is [`Folio::todos`].
 
 mod edits;
+mod launch;
 mod send;
 mod session;
 mod tools;
 mod transcript;
 
 pub use edits::*;
+pub use launch::*;
 pub use send::*;
 pub use session::*;
 pub use tools::*;
