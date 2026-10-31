@@ -7371,7 +7371,9 @@ impl App {
             .into_iter()
             .filter(|s| !self.waiting.contains(&s.id))
             .filter(|s| {
-                let serial = self.consoles.get(&s.id).map(|c| c.serial);
+                let serial = (self.consoles.get(&s.id))
+                    .or_else(|| self.folios.get(&s.id))
+                    .map(|c| c.serial);
                 !seen.is_some_and(|stage| serial.is_some_and(|n| stage.shows(n)))
             })
             .collect();
