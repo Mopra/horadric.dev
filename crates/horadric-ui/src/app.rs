@@ -1742,124 +1742,122 @@ fn tile_menu(id: &str) {
     const OPEN: usize = 1;
     const END: usize = 2;
     const RENAME: usize = 3;
-    const STOP_RUNEWORD: usize = 6;
     const FOUND: usize = 7;
     const TAKE_OVER: usize = 8;
     const TERMINAL: usize = 9;
     const AS_CHAT: usize = 10;
     const UNDO: usize = 50;
-    /// What the menu starts with for a session of this `kind`, a plain
-    /// terminal with `shell`: the picks below add to it.
-    fn tile_items(id: &str, kind: TileKind, shell: bool, rename: Item) -> Vec<Item> {
+    /// The opening group for a session of this `kind`, a plain terminal
+    /// with `shell`, and the line that ends it, if it has one.
+    fn tile_items(
+        id: &str,
+        kind: TileKind,
+        shell: bool,
+        rename: Item,
+    ) -> (Vec<Item>, Option<Item>) {
+        let end = |label: &str| Some(Item::action(END, label));
         match (kind, shell) {
             (TileKind::Live, false) => {
-                let mut items = vec![Item::action(OPEN, "Show terminal")];
+                let mut open = vec![Item::action(OPEN, "Show terminal")];
                 if with_app(|app| app.is_claude_terminal(id)) == Some(true) {
-                    items.push(Item::action(AS_CHAT, "Open as chat"));
+                    open.push(Item::action(AS_CHAT, "Open as chat"));
                 }
-                items.extend([rename, Item::Separator, Item::action(END, "End session")]);
-                items
+                open.push(rename);
+                (open, end("End session"))
             }
-            (TileKind::Live, true) => vec![
-                Item::action(OPEN, "Show terminal"),
-                rename,
-                Item::Separator,
-                Item::action(END, "Close terminal"),
-            ],
-            (TileKind::Paused, false) => vec![
-                Item::action(OPEN, "Resume"),
-                rename,
-                Item::Separator,
-                Item::action(END, "End session"),
-            ],
-            (TileKind::Paused, true) => vec![
-                Item::action(OPEN, "Open again"),
-                rename,
-                Item::Separator,
-                Item::action(END, "Remove terminal"),
-            ],
-            (TileKind::Elsewhere, _) => vec![rename, Item::action(END, "Remove tile")],
-            (TileKind::Far, _) => with_app(|app| app.far_menu(id, OPEN, RENAME))
-                .flatten()
-                .unwrap_or_default(),
-            (TileKind::Background, _) => vec![
-                Item::action(OPEN, "Attach"),
-                rename,
-                Item::Separator,
-                Item::action(END, "End session"),
-            ],
+            (TileKind::Live, true) => (
+                vec![Item::action(OPEN, "Show terminal"), rename],
+                end("Close terminal"),
+            ),
+            (TileKind::Paused, false) => (
+                vec![Item::action(OPEN, "Resume"), rename],
+                end("End session"),
+            ),
+            (TileKind::Paused, true) => (
+                vec![Item::action(OPEN, "Open again"), rename],
+                end("Remove terminal"),
+            ),
+            (TileKind::Elsewhere, _) => (vec![rename], end("Remove tile")),
+            (TileKind::Far, _) => (
+                with_app(|app| app.far_menu(id, OPEN, RENAME))
+                    .flatten()
+                    .unwrap_or_default(),
+                None,
+            ),
+            (TileKind::Background, _) => (
+                vec![Item::action(OPEN, "Attach"), rename],
+                end("End session"),
+            ),
         }
     }
     let rename = Item::action(RENAME, "Rename\u{2026}");
     // A Folio has no console, so no tile kind: it is live while its claude
     // runs, and gets the rest of a Claude terminal's menu below.
-    let (mut items, live, shell) = if with_app(|app| app.folios.contains_key(id)) == Some(true) {
-        let items = vec![
+    let (open, end, live, shell) = if with_app(|app| app.folios.contains_key(id)) == Some(true) {
+        let open = vec![
             Item::action(OPEN, "Show chat"),
             Item::action(TERMINAL, "Open in terminal"),
             rename,
-            Item::Separator,
-            Item::action(END, "End session"),
         ];
-        (items, crate::folio::running(id), false)
+        let end = Some(Item::action(END, "End session"));
+        (open, end, crate::folio::running(id), false)
     } else {
         let Some((kind, shell)) = with_app(|app| app.tile_kind(id)).flatten() else {
             return;
         };
         let live = matches!(kind, TileKind::Live);
-        (tile_items(id, kind, shell, rename), live, shell)
+        let (open, end) = tile_items(id, kind, shell, rename);
+        (open, end, live, shell)
     };
+
+    // The same groups in the same order on every tile, an empty one left
+    // out, so a line is always where it was last time.
+    let mut calls = Vec::new();
+    let here = with_app(|app| app.keeping_offer(id)).flatten();
+    let elsewhere = with_app(|app| app.keeping_offer_elsewhere(id)).flatten();
+    if let Some(label) = here.clone().or(elsewhere.map(|(_, l)| l)) {
+        calls.push(Item::action(TAKE_OVER, label));
+    }
+    let in_town = with_app(|app| app.project_of(id).is_some_and(|k| town::is(&k)));
+    if in_town == Some(true) && live && !shell {
+        calls.push(Item::action(FOUND, "Found a project\u{2026}"));
+    }
+
+    let mut doing = Vec::new();
+    let tree = with_app(|app| app.diff_of(id)).flatten();
+    if let Some((w, diff)) = &tree {
+        doing.push(changes_menu(w, diff.as_ref()));
+    }
     // Runewords are given from the Runetome; the tile stops the one its
-    // session has, with the other things done to it, above ending it.
+    // session has, beside the subagents it runs: both are something the
+    // session is busy with that can be stopped.
     let word = with_app(|app| app.runeword_of(id)).flatten();
-    if let (Some(w), Some(at)) = (
-        word,
-        items.iter().rposition(|i| matches!(i, Item::Separator)),
-    ) {
-        let stop = format!("Stop {} ({})", w.name, w.progress());
-        items.insert(at, Item::action(STOP_RUNEWORD, stop));
-    }
-    if with_app(|app| app.can_undo(id)) == Some(true) {
-        if let Some(at) = items.iter().rposition(|i| matches!(i, Item::Separator)) {
-            items.insert(at, Item::action(UNDO, "Undo last turn"));
-        }
-    }
     let subagents = if live && !shell {
         with_app(|app| app.stoppable_subagents(id)).unwrap_or_default()
     } else {
         Vec::new()
     };
-    if let (false, Some(at)) = (
-        subagents.is_empty(),
-        items.iter().rposition(|i| matches!(i, Item::Separator)),
-    ) {
-        items.insert(at, subagents_menu(&subagents));
+    let word = word.map(|w| format!("Stop {} ({})", w.name, w.progress()));
+    if let Some(running) = running_menu(word, &subagents) {
+        doing.push(running);
     }
-    let tree = with_app(|app| app.diff_of(id)).flatten();
-    if let Some((w, diff)) = &tree {
-        items.insert(0, changes_menu(w, diff.as_ref()));
-        items.insert(1, Item::Separator);
-    }
-    let in_town = with_app(|app| app.project_of(id).is_some_and(|k| town::is(&k)));
-    if in_town == Some(true) && live && !shell {
-        items.insert(0, Item::action(FOUND, "Found a project\u{2026}"));
-        items.insert(1, Item::Separator);
-    }
-    if let (Some(hand), Some(at)) = (
-        with_app(|app| app.handoff_menu(id)).flatten(),
-        items.iter().rposition(|i| matches!(i, Item::Separator)),
-    ) {
-        items.insert(at, hand);
+    if let Some(hand) = with_app(|app| app.handoff_menu(id)).flatten() {
+        doing.push(hand);
     }
     if let Some(hand) = with_app(|app| app.handoff_far_menu(id)).flatten() {
-        items.push(Item::Separator);
-        items.push(hand);
+        doing.push(hand);
     }
-    let here = with_app(|app| app.keeping_offer(id)).flatten();
-    let elsewhere = with_app(|app| app.keeping_offer_elsewhere(id)).flatten();
-    if let Some(label) = here.clone().or(elsewhere.map(|(_, l)| l)) {
-        items.insert(0, Item::action(TAKE_OVER, label));
-        items.insert(1, Item::Separator);
+    if with_app(|app| app.can_undo(id)) == Some(true) {
+        doing.push(Item::action(UNDO, "Undo last turn"));
+    }
+
+    let groups = [calls, open, doing, end.into_iter().collect()];
+    let mut items = Vec::new();
+    for group in groups.into_iter().filter(|g| !g.is_empty()) {
+        if !items.is_empty() {
+            items.push(Item::Separator);
+        }
+        items.extend(group);
     }
     let picked = menu::popup(&items);
     if picked == Some(TAKE_OVER) {
@@ -1934,15 +1932,24 @@ fn tile_menu(id: &str) {
 /// after it, past every other id the menu uses.
 const STOP_SUBAGENT: usize = 900;
 
-/// The subagents a session runs, each a pick that stops it, by
-/// [`STOP_SUBAGENT`] and its place in `agents`.
-fn subagents_menu(agents: &[(String, String)]) -> Item {
-    let items = agents
-        .iter()
-        .enumerate()
-        .map(|(i, (_, label))| Item::action(STOP_SUBAGENT + i, format!("Stop {label}")))
+/// A tile menu's id for stopping its session's runeword.
+const STOP_RUNEWORD: usize = 6;
+
+/// What a session is busy with that can be stopped: its runeword, by
+/// `word`, the line that stops it, and the subagents it runs, each by
+/// [`STOP_SUBAGENT`] and its place in `agents`. None when it runs neither.
+fn running_menu(word: Option<String>, agents: &[(String, String)]) -> Option<Item> {
+    let mut items: Vec<Item> = word
+        .map(|w| Item::action(STOP_RUNEWORD, w))
+        .into_iter()
         .collect();
-    Item::Submenu(format!("Subagents ({})", agents.len()), items)
+    items.extend(
+        agents
+            .iter()
+            .enumerate()
+            .map(|(i, (_, label))| Item::action(STOP_SUBAGENT + i, format!("Stop {label}"))),
+    );
+    (!items.is_empty()).then(|| Item::Submenu(format!("Running ({})", items.len()), items))
 }
 
 /// Asks for the new project's name, then asks the town session to found it:
@@ -10178,15 +10185,17 @@ mod tests {
     }
 
     #[test]
-    fn the_subagents_menu_stops_each_by_its_place() {
+    fn the_running_menu_stops_each_by_its_place() {
         let agents = [
             ("a1".to_string(), "Explore: map (5s)".to_string()),
             ("a2".to_string(), "Plan".to_string()),
         ];
-        let Item::Submenu(title, items) = subagents_menu(&agents) else {
+        assert!(running_menu(None, &[]).is_none());
+        let Some(Item::Submenu(title, items)) = running_menu(Some("Stop Zod".into()), &agents)
+        else {
             panic!("not a submenu");
         };
-        assert_eq!(title, "Subagents (2)");
+        assert_eq!(title, "Running (3)");
         let picks: Vec<(usize, String)> = items
             .into_iter()
             .filter_map(|i| match i {
@@ -10197,6 +10206,7 @@ mod tests {
         assert_eq!(
             picks,
             vec![
+                (STOP_RUNEWORD, "Stop Zod".to_string()),
                 (STOP_SUBAGENT, "Stop Explore: map (5s)".to_string()),
                 (STOP_SUBAGENT + 1, "Stop Plan".to_string()),
             ]
