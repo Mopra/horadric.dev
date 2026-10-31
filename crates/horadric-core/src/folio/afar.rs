@@ -200,6 +200,8 @@ fn block(b: &Block, out: &mut Vec<String>) {
             }
             Notice::Refused(text) => out.push(format!("\u{2500} refused: {}", one_line(text))),
         },
+        // Signing in opens a browser on the PC, which a phone cannot.
+        Block::SignIn(_) => out.push("\u{2500} signing in to Claude, on the PC".into()),
         Block::Raw(_) => {}
     }
 }
