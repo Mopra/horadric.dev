@@ -17,7 +17,9 @@ still drive the phase and win where they and the stream both speak.
 ## What it opens
 
 What a terminal could never do, the reason for all this. Undo last turn
-(conversation and files) and steering or queueing mid turn are built.
+(conversation and files), steering or queueing mid turn, a turn's map
+(its footer opens a timeline of its steps and the files it touched) and
+`/all` (one prompt to every Folio of the project) are built.
 
 - **Edit and resend** any earlier prompt: a fork at that message
   (`--fork-session`, `--resume-session-at`), the old branch kept, both
@@ -26,10 +28,6 @@ What a terminal could never do, the reason for all this. Undo last turn
 - **Review before it lands:** an edit mode where each Edit or Write
   comes as a diff card to accept, change or reject, through
   `can_use_tool` and `updatedInput`. Line comments on a diff belong here.
-- **The work as a map:** the steps of a turn as a timeline, the files it
-  touched lit in the Arcane Sanctuary as they happen.
-- **Many sessions, one view:** a prompt sent to several sessions at
-  once, answers side by side.
 
 ## Smaller features still missing
 
@@ -43,11 +41,6 @@ that lies.
   sign-in card and a retry shows as a notice, but a rate limit and other
   API errors still show as the CLI's reply text (the tile does show the
   error).
-- **Soon:** `!` shell mode run by Horadric; a context breakdown (the
-  categories `get_context_usage` answers are parsed into `ContextUsage`
-  but not drawn); prompt suggestions; session titles; timestamps and a
-  verbose view; images in tool results (only a prompt's images are
-  drawn); `/btw`.
 - **Later:** per-turn git checkpoints (T3 Code's way), worktree per
   session with PR status, fast mode and output style as controls (the
   styles are parsed from `initialize`), an external editor, LaTeX.
