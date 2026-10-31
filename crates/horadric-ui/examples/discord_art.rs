@@ -14,7 +14,11 @@ fn main() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/discord");
     fs::create_dir_all(&dir).expect("make docs/discord");
     let stone = dir.join("horadric.png");
-    fs::write(&stone, icon::png(SIZE, false).expect("the 512 icon is baked")).expect("write the png");
+    fs::write(
+        &stone,
+        icon::png(SIZE, false).expect("the 512 icon is baked"),
+    )
+    .expect("write the png");
     println!("{}", stone.display());
     for (name, pixels) in art::LAMPS.map(|(name, lamp)| (name, art::lamp(SIZE, lamp))) {
         let path = dir.join(format!("{name}.png"));

@@ -567,7 +567,12 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
     if let Some(block) = chat.input.editing.as_ref().map(|e| e.block) {
         if !text.is_empty() && fork(chat, block, Some(&text)) {
             chat.input.history.push(&text);
-            let draft = chat.input.editing.take().map(|e| e.draft).unwrap_or_default();
+            let draft = chat
+                .input
+                .editing
+                .take()
+                .map(|e| e.draft)
+                .unwrap_or_default();
             put(chat, &draft);
             chat.input.save();
         }

@@ -545,7 +545,9 @@ impl Server {
             }
             "entries" if c.kind == Kind::Brother => {
                 if let (false, Some(b64)) = (msg["project"].is_null(), text("b64")) {
-                    asked.entries.push((c.who.clone(), msg["project"].clone(), b64));
+                    asked
+                        .entries
+                        .push((c.who.clone(), msg["project"].clone(), b64));
                 }
             }
             _ => {}
@@ -1217,15 +1219,18 @@ mod tests {
         }
         fn tree(&self, project: &str) -> Job {
             let project = project.to_string();
-            Box::new(move || {
-                crate::afar_files::tree_message(&project, &["a.rs".to_string()], &[])
-            })
+            Box::new(move || crate::afar_files::tree_message(&project, &["a.rs".to_string()], &[]))
         }
         fn read(&self, project: &str, path: &str) -> Job {
             let (project, path) = (project.to_string(), path.to_string());
             Box::new(move || {
-                crate::afar_files::file_message(&project, &path, b"text
-".to_vec())
+                crate::afar_files::file_message(
+                    &project,
+                    &path,
+                    b"text
+"
+                    .to_vec(),
+                )
             })
         }
         fn keeping(&mut self, who: &str, msg: &Value) -> Option<Job> {
@@ -1712,16 +1717,31 @@ mod tests {
         };
         let hello = json!({"t": "hello", "v": 3, "kind": "brother"});
         let (mut server, _) = greeted(&mut serve, "Desk", hello);
-        let tree = say(&mut server, &mut serve, 1, json!({"t": "tree", "project": "/p"}), 0);
+        let tree = say(
+            &mut server,
+            &mut serve,
+            1,
+            json!({"t": "tree", "project": "/p"}),
+            0,
+        );
         assert_eq!(of(&tree, "tree")[0]["files"], json!(["a.rs"]));
         let read = json!({"t": "read", "project": "/p", "path": "a.rs"});
         let file = say(&mut server, &mut serve, 2, read, 0);
-        assert_eq!(of(&file, "file")[0]["text"], "text
-");
+        assert_eq!(
+            of(&file, "file")[0]["text"],
+            "text
+"
+        );
 
         let mut serve = Fake::default();
         let (mut server, _) = greeted(&mut serve, "phone", json!({"t": "hello", "v": 3}));
-        let tree = say(&mut server, &mut serve, 1, json!({"t": "tree", "project": "/p"}), 0);
+        let tree = say(
+            &mut server,
+            &mut serve,
+            1,
+            json!({"t": "tree", "project": "/p"}),
+            0,
+        );
         assert!(of(&tree, "tree").is_empty());
         let read = json!({"t": "read", "project": "/p", "path": "a.rs"});
         assert!(of(&say(&mut server, &mut serve, 2, read, 0), "file").is_empty());

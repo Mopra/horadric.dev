@@ -673,8 +673,7 @@ impl Session {
                     self.tool = Some(t.clone());
                 }
             }
-            "UserPromptSubmit" | "Stop" | "StopFailure" if !event.is_subagent() =>
-            {
+            "UserPromptSubmit" | "Stop" | "StopFailure" if !event.is_subagent() => {
                 self.tool = None;
                 self.agents.clear();
             }

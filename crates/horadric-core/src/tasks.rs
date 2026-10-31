@@ -1020,7 +1020,11 @@ pub fn arrive(
     let title = one_line(title);
     let title = title.as_str();
     let held = |text: &str, line: usize, title: &str| {
-        replace_line(text, line, &item_line(mark, title, Some(holder), None, None))
+        replace_line(
+            text,
+            line,
+            &item_line(mark, title, Some(holder), None, None),
+        )
     };
     let tasks = parse(text);
     let want = one_line(title).to_lowercase();
@@ -3028,7 +3032,10 @@ mod tests {
             "# Quests\n- [ ] Other\n- [/] Moved @moved-1\n  Model: opus\n  After: Zero\n"
         );
         // Twice is once: a landing tried again finds it already held.
-        assert_eq!(arrive(&added, "Moved", &notes, "moved-1", false), Some(added.clone()));
+        assert_eq!(
+            arrive(&added, "Moved", &notes, "moved-1", false),
+            Some(added.clone())
+        );
         // The same quest open here, from a committed log, is taken as is.
         let open = "- [ ] Moved\n  my notes\n";
         assert_eq!(
@@ -3036,8 +3043,14 @@ mod tests {
             "- [?] Moved @moved-1\n  my notes\n"
         );
         // Held by another session here, or done, is the human's to sort.
-        assert_eq!(arrive("- [/] Moved @mine-2\n", "Moved", &notes, "moved-1", false), None);
-        assert_eq!(arrive("- [x] Moved @old-1\n", "Moved", &notes, "moved-1", false), None);
+        assert_eq!(
+            arrive("- [/] Moved @mine-2\n", "Moved", &notes, "moved-1", false),
+            None
+        );
+        assert_eq!(
+            arrive("- [x] Moved @old-1\n", "Moved", &notes, "moved-1", false),
+            None
+        );
     }
 
     #[test]
@@ -3051,7 +3064,14 @@ mod tests {
         assert!(t.reason.as_deref().is_some_and(|r| r.contains("Laptop")));
         assert_eq!(t.notes, ["a note"]);
         // Never started again as an orphan, and the quest after it waits.
-        let next = next(&parse(&left), Mode::Auto, 1, false, |_| Holder::Gone, |_| false);
+        let next = next(
+            &parse(&left),
+            Mode::Auto,
+            1,
+            false,
+            |_| Holder::Gone,
+            |_| false,
+        );
         assert_eq!(next, Next::Wait);
         assert_eq!(moved_away(log, "other-1", "Laptop", 0), None);
     }

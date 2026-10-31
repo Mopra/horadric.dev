@@ -604,7 +604,10 @@ pub(super) fn release_lapsed(chat: &mut Chat) {
     }
     // A sign-in card's code field keeps the keyboard while its login runs.
     if let Some(block) = focus.strip_prefix("signin:") {
-        let live = block.parse().ok().and_then(|b: usize| chat.folio.blocks.get(b));
+        let live = block
+            .parse()
+            .ok()
+            .and_then(|b: usize| chat.folio.blocks.get(b));
         if matches!(live, Some(Block::SignIn(card)) if card.active()) {
             return;
         }

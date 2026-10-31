@@ -897,11 +897,15 @@ mod tests {
     }
 
     fn event(kind: &str, rest: &str) -> String {
-        format!(r#"{{"type":"stream_event","event":{{"type":"{kind}"{rest}}},"parent_tool_use_id":null}}"#)
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"{kind}"{rest}}},"parent_tool_use_id":null}}"#
+        )
     }
 
     fn copy(id: &str) -> String {
-        format!(r#"{{"type":"assistant","message":{{"id":"{id}","content":[]}},"parent_tool_use_id":null}}"#)
+        format!(
+            r#"{{"type":"assistant","message":{{"id":"{id}","content":[]}},"parent_tool_use_id":null}}"#
+        )
     }
 
     fn kept(log: &LineLog) -> Vec<String> {
@@ -933,8 +937,14 @@ mod tests {
         let left = kept(&log);
         assert_eq!(left.len(), 6, "{left:#?}");
         assert!(!left.contains(&lines[2]) && !left.contains(&lines[3]));
-        assert!(left.contains(&lines[7]), "the block still streaming keeps its");
-        assert!(left.contains(&start), "so the copy pairs with what streamed");
+        assert!(
+            left.contains(&lines[7]),
+            "the block still streaming keeps its"
+        );
+        assert!(
+            left.contains(&start),
+            "so the copy pairs with what streamed"
+        );
         assert_eq!(log.len(), 6);
 
         // The copy may come after the stop as well.
@@ -942,7 +952,10 @@ mod tests {
         assert!(kept(&log).contains(&lines[7]), "not copied yet");
         log.push(Logged::Out(copy("m1")));
         assert!(!kept(&log).contains(&lines[7]));
-        assert_eq!(log.bytes(), kept(&log).iter().map(String::len).sum::<usize>());
+        assert_eq!(
+            log.bytes(),
+            kept(&log).iter().map(String::len).sum::<usize>()
+        );
     }
 
     #[test]

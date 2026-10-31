@@ -52,8 +52,7 @@ pub struct NewSession {
 
 impl NewSession {
     pub fn to_json(&self) -> String {
-        json!({ "name": self.name, "cwd": self.cwd, "args": self.args })
-            .to_string()
+        json!({ "name": self.name, "cwd": self.cwd, "args": self.args }).to_string()
     }
 
     pub fn from_json(body: &[u8]) -> Option<Self> {

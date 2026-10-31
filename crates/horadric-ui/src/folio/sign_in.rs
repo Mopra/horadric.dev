@@ -145,8 +145,14 @@ fn spawn(id: u64, chat: &str) -> Result<Run, String> {
         .map_err(|e| format!("claude auth login did not start: {e}"))?;
     let said: Arc<Mutex<Said>> = Arc::default();
     let readers = [
-        child.stdout.take().map(|o| reader(o, Arc::clone(&said), false, router)),
-        child.stderr.take().map(|e| reader(e, Arc::clone(&said), true, router)),
+        child
+            .stdout
+            .take()
+            .map(|o| reader(o, Arc::clone(&said), false, router)),
+        child
+            .stderr
+            .take()
+            .map(|e| reader(e, Arc::clone(&said), true, router)),
     ];
     let stdin = child.stdin.take();
     let child = Arc::new(Mutex::new(child));

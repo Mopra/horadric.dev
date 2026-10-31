@@ -122,7 +122,13 @@ impl Painter<'_> {
                 continue;
             }
             let t = motion::cycle(look.phase_age, ORBIT);
-            self.surge(gpu, &super::lamp_rect(&r), theme::phase_color(&s.phase), t, look.enter);
+            self.surge(
+                gpu,
+                &super::lamp_rect(&r),
+                theme::phase_color(&s.phase),
+                t,
+                look.enter,
+            );
         }
     }
 
@@ -147,11 +153,7 @@ impl Painter<'_> {
                 let p = motion::ease_in_out(p);
                 let head = r.bottom() - travel * p;
                 let streak = Rect::new(r.x, head, r.w, tail);
-                let stops = [
-                    (0.0, hot),
-                    (0.12, c),
-                    (1.0, c.with_alpha(0.0)),
-                ];
+                let stops = [(0.0, hot), (0.12, c), (1.0, c.with_alpha(0.0))];
                 self.fill_rounded_gradient(&streak, r.w / 2.0, &stops, strength);
             }
         });

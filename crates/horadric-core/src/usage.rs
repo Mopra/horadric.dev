@@ -838,10 +838,7 @@ mod tests {
             d.flags_for(&[], true),
             args("--model opus --permission-mode bypassPermissions")
         );
-        assert_eq!(
-            d.flags_for(&[], false),
-            d.flags(&[])
-        );
+        assert_eq!(d.flags_for(&[], false), d.flags(&[]));
         assert_eq!(
             d.flags_for(&args("--permission-mode auto"), true),
             args("--model opus")
@@ -859,19 +856,13 @@ mod tests {
     #[test]
     fn settings_name_their_values() {
         let mut d = Defaults::default();
-        assert_eq!(
-            Setting::Effort.name_of(d.get(Setting::Effort)),
-            "Default"
-        );
+        assert_eq!(Setting::Effort.name_of(d.get(Setting::Effort)), "Default");
         d.set(Setting::Effort, Some("xhigh".into()));
         assert_eq!(
             Setting::Effort.name_of(d.get(Setting::Effort)),
             "Extra high"
         );
-        assert_eq!(
-            Setting::Model.name_of(Some("claude-opus-5-5")),
-            "Opus 5.5"
-        );
+        assert_eq!(Setting::Model.name_of(Some("claude-opus-5-5")), "Opus 5.5");
         assert_eq!(Setting::Model.name_of(Some("opus")), "Custom");
         for s in Setting::ALL {
             assert!(!s.choices().is_empty(), "{s:?}");

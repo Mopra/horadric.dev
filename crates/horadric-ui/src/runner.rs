@@ -945,7 +945,11 @@ impl App {
             id: Some(id.clone()),
             name: Some(title.to_string()),
             prompt: Some(prompt),
-            place: if parallel { Workplace::OwnTree } else { Workplace::Here },
+            place: if parallel {
+                Workplace::OwnTree
+            } else {
+                Workplace::Here
+            },
             branch: Some(tasks::slug(title)),
             quiet: true,
             ..SessionSpec::new(dir.clone(), self.chat_sessions)
@@ -1279,7 +1283,13 @@ impl App {
     /// checkout in `main`, with the quest it worked there: filed in that
     /// checkout's quest log, held by it, so `horadric quest` from it lands
     /// here. Before it runs, so it starts as a quest's session would.
-    pub(super) fn quest_arrived(&mut self, id: &str, main: &Path, from: &str, q: &handoff::Carried) {
+    pub(super) fn quest_arrived(
+        &mut self,
+        id: &str,
+        main: &Path,
+        from: &str,
+        q: &handoff::Carried,
+    ) {
         let filed = file::update(main, |text| {
             tasks::arrive(text, &q.title, &q.notes, id, q.review)
         });

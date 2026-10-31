@@ -271,7 +271,10 @@ mod tests {
         assert_eq!(h.url.as_deref(), Some(URL));
         assert!(h.asks_code);
         assert!(!h.succeeded);
-        let half = Heard::read("Opening browser to sign in\u{2026}\nIf the browser didn't open, visit: ", "");
+        let half = Heard::read(
+            "Opening browser to sign in\u{2026}\nIf the browser didn't open, visit: ",
+            "",
+        );
         assert_eq!(half.url, None);
     }
 
@@ -286,7 +289,10 @@ mod tests {
     fn success_failure_and_bad_codes_are_heard() {
         let done = Heard::read(&format!("{}Login successful.\n", printed()), "");
         assert!(done.succeeded);
-        let failed = Heard::read(&printed(), "Login failed: Request failed with status code 400\n");
+        let failed = Heard::read(
+            &printed(),
+            "Login failed: Request failed with status code 400\n",
+        );
         assert_eq!(
             failed.failure.as_deref(),
             Some("Request failed with status code 400")

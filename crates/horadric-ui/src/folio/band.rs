@@ -83,7 +83,11 @@ pub fn rows(b: &Band) -> Vec<Row> {
             rest: q.clone(),
         });
     }
-    let shown = if b.shared.len() > MOST { MOST - 1 } else { MOST };
+    let shown = if b.shared.len() > MOST {
+        MOST - 1
+    } else {
+        MOST
+    };
     for s in b.shared.iter().take(shown) {
         out.push(Row {
             lead: s.file.clone(),
@@ -134,7 +138,12 @@ pub(super) unsafe fn draw(
             Lead::Quest => (pal.faint, pal.caret()),
             Lead::File | Lead::More => (warn, pal.dim),
         };
-        gfx.text_in(&row.lead, &gfx.small, &Rect::new(x, y, lead_w + 1.0, LINE), lead_c);
+        gfx.text_in(
+            &row.lead,
+            &gfx.small,
+            &Rect::new(x, y, lead_w + 1.0, LINE),
+            lead_c,
+        );
         let rest = Rect::new(x + lead_w, y, (w - lead_w).max(0.0), LINE);
         gfx.text_in(&row.rest, &gfx.small, &rest, rest_c);
     }

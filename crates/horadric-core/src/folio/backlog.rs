@@ -140,9 +140,9 @@ impl Folio {
         // Prompts sent after the cut that the transcript wrote already:
         // ours carry no uuid to tell them by, but they are its last ones.
         let mut written = match (at, parts[cut].1.as_deref()) {
-            (None, Some(u)) => prompts(&f).saturating_sub(prompts(
-                &Folio::from_transcript_at(jsonl, Some(u)),
-            )),
+            (None, Some(u)) => {
+                prompts(&f).saturating_sub(prompts(&Folio::from_transcript_at(jsonl, Some(u))))
+            }
             _ => 0,
         };
         let mut skipped: HashSet<&str> = HashSet::new();
@@ -311,8 +311,7 @@ mod tests {
         let so_far = EDITS.lines().take(stop).collect::<Vec<_>>().join("\n");
         let transcript = upto_stream(TRANSCRIPT_EDITS, &so_far);
         let all = out(EDITS);
-        let mut f =
-            Folio::from_transcript_and_backlog(&transcript, None, &all[20..stop]).unwrap();
+        let mut f = Folio::from_transcript_and_backlog(&transcript, None, &all[20..stop]).unwrap();
         let mut want = whole(&transcript, &so_far);
         assert_eq!(shown(&f), shown(&want));
         assert!(f.busy && want.busy);

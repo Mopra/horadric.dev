@@ -125,7 +125,8 @@ pub(super) unsafe fn draw(gfx: &Gfx, pal: &Palette, still: &ID2D1Bitmap, t: f32,
             line(y, lit * 0.8, 1.2);
             // A brighter, shorter core, so the edge is hottest where the
             // seam first opened.
-            gfx.brush.SetColor(&color(pal.fg.mix(ink, 0.5).with_alpha(lit * 0.6)));
+            gfx.brush
+                .SetColor(&color(pal.fg.mix(ink, 0.5).with_alpha(lit * 0.6)));
             let core = reach * 0.35;
             rt.DrawLine(
                 Vector2 {

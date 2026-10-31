@@ -242,7 +242,9 @@ impl App {
         if !crate::folio::rewind(id) {
             REWINDS.with(|r| r.borrow_mut().remove(id));
             let said = match how {
-                Ok(()) => "Its files went back, but it started working before the conversation could.",
+                Ok(()) => {
+                    "Its files went back, but it started working before the conversation could."
+                }
                 Err(_) => "It started working before the conversation could go back.",
             };
             self.toasts.show(Kind::Failed, "Not rewound", said);

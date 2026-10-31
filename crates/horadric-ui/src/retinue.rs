@@ -49,8 +49,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::app::{self, Input};
 use crate::render::{
-    retinue_fit, tick_span, RetinueRow, RetinueScene, TableScene, TableTrack, Target,
-    RETINUE_CELL, RETINUE_HEAD, RETINUE_W, TABLE_AXIS, TABLE_HEAD, TABLE_ROW_H,
+    retinue_fit, tick_span, RetinueRow, RetinueScene, TableScene, TableTrack, Target, RETINUE_CELL,
+    RETINUE_HEAD, RETINUE_W, TABLE_AXIS, TABLE_HEAD, TABLE_ROW_H,
 };
 use crate::theme::{self, Color};
 use crate::window::Shared;

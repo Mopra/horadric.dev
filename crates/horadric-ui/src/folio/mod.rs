@@ -241,12 +241,7 @@ impl State {
     /// stands, as a terminal's hooks would have, if any. `waits_on` is the
     /// tool the tile last heard asked about. `resync` is a reattached
     /// tile's first word once the replay is in.
-    pub fn event(
-        &self,
-        phase: &Phase,
-        waits_on: Option<&str>,
-        resync: bool,
-    ) -> Option<HookEvent> {
+    pub fn event(&self, phase: &Phase, waits_on: Option<&str>, resync: bool) -> Option<HookEvent> {
         let tool = self.ask.as_ref().map(|(t, _)| t.as_str());
         if self.ended {
             None
@@ -598,14 +593,14 @@ fn read_backlog(
             let at = tag.at.as_deref().filter(|_| len <= tag.history);
             match Folio::from_transcript_and_backlog(&read(&path, len), at, lines) {
                 Some(f) => return f,
-                None => eprintln!("horadric: a Folio's backlog does not line up with its transcript"),
+                None => {
+                    eprintln!("horadric: a Folio's backlog does not line up with its transcript")
+                }
             }
         }
     }
     let mut folio = match tag.resume.as_deref().and_then(|c| history_file(dir, c)) {
-        Some((path, _)) => {
-            Folio::from_transcript_at(&read(&path, tag.history), tag.at.as_deref())
-        }
+        Some((path, _)) => Folio::from_transcript_at(&read(&path, tag.history), tag.at.as_deref()),
         None => Folio::new(),
     };
     folio.feed_kept(lines);
@@ -840,7 +835,9 @@ pub fn rewind_files(id: &str, uuid: &str) -> bool {
             return false;
         }
         let line = c.folio.rewind_files(uuid);
-        c.hosted.as_ref().is_some_and(|h| h.send_line(&line).is_ok())
+        c.hosted
+            .as_ref()
+            .is_some_and(|h| h.send_line(&line).is_ok())
     })
     .unwrap_or(false)
 }
@@ -859,7 +856,10 @@ pub fn stop_task(id: &str, task: &str) {
 /// What the band above session `id`'s composer says, redrawn only when
 /// that changes: the app sets it every second.
 pub fn set_band(id: &str, b: band::Band) {
-    if with(id, |c| (c.band != b).then(|| c.band = b)).flatten().is_some() {
+    if with(id, |c| (c.band != b).then(|| c.band = b))
+        .flatten()
+        .is_some()
+    {
         redraw(id);
     }
 }
@@ -1412,12 +1412,27 @@ mod tests {
         let limited = Phase::Waiting(WaitReason::Error("rate_limit".into()));
         // Said once, and never worn down to Done while it stands.
         assert_eq!(name(failed.event(&limited, None, false)), None);
-        assert_eq!(name(at_rest().event(&Phase::Working, None, false)).as_deref(), Some("Stop"));
+        assert_eq!(
+            name(at_rest().event(&Phase::Working, None, false)).as_deref(),
+            Some("Stop")
+        );
         // Gone with a new process, it is not read as a finished turn.
-        let fresh = State { finished: false, ..at_rest() };
-        assert_eq!(name(fresh.event(&limited, None, false)).as_deref(), Some("Interrupt"));
-        let busy = State { busy: true, ..failed.clone() };
-        assert_eq!(name(busy.event(&limited, None, false)).as_deref(), Some("PreToolUse"));
+        let fresh = State {
+            finished: false,
+            ..at_rest()
+        };
+        assert_eq!(
+            name(fresh.event(&limited, None, false)).as_deref(),
+            Some("Interrupt")
+        );
+        let busy = State {
+            busy: true,
+            ..failed.clone()
+        };
+        assert_eq!(
+            name(busy.event(&limited, None, false)).as_deref(),
+            Some("PreToolUse")
+        );
     }
 
     #[test]
@@ -1435,7 +1450,9 @@ mod tests {
         assert_eq!(e.tool_input, Some(input));
         let perm = Phase::Waiting(WaitReason::Permission);
         assert_eq!(name(asking.event(&perm, Some("Bash"), false)), None);
-        assert!(asking.event(&perm, Some("AskUserQuestion"), false).is_some());
+        assert!(asking
+            .event(&perm, Some("AskUserQuestion"), false)
+            .is_some());
     }
 
     #[test]
@@ -1449,7 +1466,10 @@ mod tests {
         let st = s.status().unwrap();
         assert_eq!(st.context, Some(25.0));
         assert_eq!(st.model.as_deref(), Some("claude-opus-5-5"));
-        let unmeasured = State { context: Some((5, 0)), ..at_rest() };
+        let unmeasured = State {
+            context: Some((5, 0)),
+            ..at_rest()
+        };
         assert_eq!(unmeasured.status(), None);
     }
 

@@ -80,14 +80,13 @@ pub fn known_phones(dir: &Path) -> Vec<horadric_core::phoning::Known> {
 pub fn vouched_by(dir: &Path, k: &horadric_core::phoning::Known) -> String {
     let me = Config::load(dir).map(|c| horadric_core::portal::id(&c.secret));
     let roster = horadric_core::mesh::load(dir);
-    let names: Vec<String> = k
-        .by
-        .iter()
-        .map(|id| match me.as_deref() == Some(id.as_str()) {
-            true => "this PC".to_string(),
-            false => roster.name(id).to_string(),
-        })
-        .collect();
+    let names: Vec<String> =
+        k.by.iter()
+            .map(|id| match me.as_deref() == Some(id.as_str()) {
+                true => "this PC".to_string(),
+                false => roster.name(id).to_string(),
+            })
+            .collect();
     names.join(", ")
 }
 
@@ -132,5 +131,6 @@ pub fn phones_type(dir: &Path) -> bool {
 pub fn set_phones_type(dir: &Path, on: bool) -> Result<(), String> {
     let mut s = horadric_core::standing::Standing::load(dir);
     s.phones_watch_only = !on;
-    s.save(dir).map_err(|e| format!("cannot keep the switch: {e}"))
+    s.save(dir)
+        .map_err(|e| format!("cannot keep the switch: {e}"))
 }

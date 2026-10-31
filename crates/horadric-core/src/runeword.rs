@@ -963,8 +963,14 @@ mod tests {
         assert_eq!(k("/clear{Enter}"), vec![FolioKey::Line("/clear".into())]);
         assert_eq!(k("Esc"), vec![FolioKey::Stop]);
         assert_eq!(k("Ctrl+C"), vec![FolioKey::Stop]);
-        assert_eq!(k("yes{Backspace}{Backspace}s{Enter}"), vec![FolioKey::Line("ys".into())]);
-        assert_eq!(k("half{Esc}whole{Enter}"), vec![FolioKey::Stop, FolioKey::Line("whole".into())]);
+        assert_eq!(
+            k("yes{Backspace}{Backspace}s{Enter}"),
+            vec![FolioKey::Line("ys".into())]
+        );
+        assert_eq!(
+            k("half{Esc}whole{Enter}"),
+            vec![FolioKey::Stop, FolioKey::Line("whole".into())]
+        );
         assert_eq!(k("{Enter}"), vec![FolioKey::Approve]);
         assert_eq!(k("{Up}"), Vec::<FolioKey>::new());
         assert_eq!(k("never sent"), Vec::<FolioKey>::new());

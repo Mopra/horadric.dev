@@ -157,9 +157,8 @@ pub fn put(account: &Account) -> io::Result<()> {
 /// not a session, so it gets no pane. The app sees the new login in the
 /// files.
 pub fn log_in() -> io::Result<()> {
-    let program = console::claude_program().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "claude not found on PATH")
-    })?;
+    let program = console::claude_program()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "claude not found on PATH"))?;
     // `start` gives it a console with working handles, which a program
     // without one cannot hand down.
     let mut command = std::process::Command::new("cmd.exe");

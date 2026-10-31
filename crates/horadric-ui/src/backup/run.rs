@@ -105,9 +105,8 @@ pub fn catch_up_due(
 ) -> bool {
     config.to != To::Off
         && ready
-        && alone_since.is_some_and(|t| {
-            now.saturating_sub(t) >= horadric_core::brotherhood::SILENT_SECS
-        })
+        && alone_since
+            .is_some_and(|t| now.saturating_sub(t) >= horadric_core::brotherhood::SILENT_SECS)
         && last.is_none_or(|l| now.saturating_sub(l) >= EVERY)
 }
 
@@ -321,11 +320,26 @@ mod tests {
         let now = 10_000;
         assert!(catch_up_due(&on, true, Some(now - silent), None, now));
         assert!(!catch_up_due(&on, true, Some(now - silent + 1), None, now));
-        assert!(!catch_up_due(&on, true, None, None, now), "a brother is linked");
-        assert!(!catch_up_due(&on, true, Some(0), Some(now - EVERY + 1), now));
+        assert!(
+            !catch_up_due(&on, true, None, None, now),
+            "a brother is linked"
+        );
+        assert!(!catch_up_due(
+            &on,
+            true,
+            Some(0),
+            Some(now - EVERY + 1),
+            now
+        ));
         assert!(catch_up_due(&on, true, Some(0), Some(now - EVERY), now));
         assert!(!catch_up_due(&on, false, Some(0), None, now));
-        assert!(!catch_up_due(&config(To::Off, None), true, Some(0), None, now));
+        assert!(!catch_up_due(
+            &config(To::Off, None),
+            true,
+            Some(0),
+            None,
+            now
+        ));
     }
 
     #[test]

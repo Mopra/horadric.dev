@@ -26,21 +26,21 @@ use horadric_core::{format_age, Limit, Phase, Session, Usage};
 use windows::core::{w, Interface, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
-    D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
+    D2D1_FIGURE_END_CLOSED, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap, ID2D1BitmapRenderTarget, ID2D1Factory, ID2D1Geometry,
     ID2D1GradientStopCollection, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush,
-    ID2D1RadialGradientBrush, ID2D1RenderTarget, ID2D1SolidColorBrush,
-    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-    D2D1_BITMAP_PROPERTIES, D2D1_OPACITY_MASK_CONTENT_GRAPHICS,
-    D2D1_CAP_STYLE_ROUND, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_CUSTOM,
+    ID2D1RadialGradientBrush, ID2D1RenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND,
+    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_CUSTOM,
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAMMA_2_2,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
-    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_IMMEDIATELY,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND,
+    D2D1_OPACITY_MASK_CONTENT_GRAPHICS, D2D1_PRESENT_OPTIONS_IMMEDIATELY,
     D2D1_PRESENT_OPTIONS_RETAIN_CONTENTS, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
@@ -1944,7 +1944,11 @@ impl Painter<'_> {
             } else {
                 text.w - line.detail_w - 16.0
             };
-            let face = if line.bold { &gpu.small_bold } else { &gpu.small };
+            let face = if line.bold {
+                &gpu.small_bold
+            } else {
+                &gpu.small
+            };
             self.text(
                 face,
                 ink,
@@ -4175,7 +4179,14 @@ impl Painter<'_> {
         }
         if b.rise > 0.0 {
             let face = b.face(r);
-            self.key(gpu, &face, m.tile_radius, theme::surface(), 0.6 * b.rise, rise);
+            self.key(
+                gpu,
+                &face,
+                m.tile_radius,
+                theme::surface(),
+                0.6 * b.rise,
+                rise,
+            );
         }
         let Some(u) = b.dust else {
             return;
@@ -4200,8 +4211,9 @@ impl Painter<'_> {
                 radiusX: 0.75,
                 radiusY: 0.75,
             };
-            self.brush
-                .SetColor(&color(theme::legend().with_alpha(0.55 * fade * weight.min(1.0))));
+            self.brush.SetColor(&color(
+                theme::legend().with_alpha(0.55 * fade * weight.min(1.0)),
+            ));
             self.rt.FillEllipse(&e, self.brush);
         }
     }

@@ -7986,7 +7986,11 @@ impl App {
         let mut flags = horadric_core::folio::headless_args(&all, subagents);
         // Not kept in `own`: an undo rewinds this start only.
         let rewound = folio_tile::rewound(id);
-        flags.extend(rewound.iter().flat_map(|(r, fork)| folio_tile::flags(r, *fork)));
+        flags.extend(
+            rewound
+                .iter()
+                .flat_map(|(r, fork)| folio_tile::flags(r, *fork)),
+        );
         let mut env_set = vec![
             (horadric_hooks::SESSION_ENV.to_string(), id.to_string()),
             (
@@ -7998,7 +8002,10 @@ impl App {
         // The CLI keeps what each prompt's edits overwrote only when told
         // to off a terminal, and a rewind to an earlier prompt puts the
         // files back from that.
-        env_set.push(("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".into(), "1".into()));
+        env_set.push((
+            "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".into(),
+            "1".into(),
+        ));
         env_set.extend(self.shared.defaults().env());
         let mut options = horadric_pty::headless::Options {
             args: flags,
@@ -8180,7 +8187,11 @@ impl App {
                     ..SavedSession::from_session(s, args, false)
                 };
                 self.paused.insert(id.to_string(), saved);
-                r.apply(id, &HookEvent::synthetic(HookEvent::PAUSE), SystemTime::now());
+                r.apply(
+                    id,
+                    &HookEvent::synthetic(HookEvent::PAUSE),
+                    SystemTime::now(),
+                );
             }
         }
         self.reconcile(true);
@@ -8290,10 +8301,11 @@ impl App {
     /// as a chat.
     fn is_claude_terminal(&self, id: &str) -> bool {
         self.consoles.get(id).is_some_and(|c| c.claude)
-            && self.shared.registry.lock().is_ok_and(|r| {
-                r.get(id)
-                    .is_some_and(|s| !s.shell && s.ssh.is_none())
-            })
+            && self
+                .shared
+                .registry
+                .lock()
+                .is_ok_and(|r| r.get(id).is_some_and(|s| !s.shell && s.ssh.is_none()))
     }
 
     /// Where a session works, from its tile.
@@ -8424,7 +8436,9 @@ impl App {
             .map(|r| {
                 r.waiting()
                     .iter()
-                    .filter(|s| self.consoles.contains_key(&s.id) || self.folios.contains_key(&s.id))
+                    .filter(|s| {
+                        self.consoles.contains_key(&s.id) || self.folios.contains_key(&s.id)
+                    })
                     .map(|s| s.id.clone())
                     .collect()
             })

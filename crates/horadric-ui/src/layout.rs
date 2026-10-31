@@ -748,12 +748,7 @@ pub const KNOB_R: f32 = 7.0;
 /// Lays out the usage window with `limits` limits known and a setting per
 /// entry of `scales`, each true for a slider. With no limit known it
 /// keeps one row, for saying so.
-pub fn usage(
-    m: &Metrics,
-    limits: usize,
-    scales: &[bool],
-    collapsed: bool,
-) -> UsageLayout {
+pub fn usage(m: &Metrics, limits: usize, scales: &[bool], collapsed: bool) -> UsageLayout {
     let full = m.width - 2.0 * m.pad;
     // Inside a tile, rows keep off its rounded corners.
     let inner = 4.0;

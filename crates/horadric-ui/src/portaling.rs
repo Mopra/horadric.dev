@@ -487,7 +487,10 @@ impl App {
     /// a hook, so a phone's card and a push answer it as a terminal's.
     fn folio_asking<'a>(&self, s: &'a Session) -> std::borrow::Cow<'a, Session> {
         let asks = s.phase.asks() && self.served_folio(&s.id).is_some();
-        match asks.then(|| crate::folio::afar::ask(&s.id, s.since)).flatten() {
+        match asks
+            .then(|| crate::folio::afar::ask(&s.id, s.since))
+            .flatten()
+        {
             Some(ask) => {
                 let mut s = s.clone();
                 s.ask = Some(ask);
@@ -1245,7 +1248,12 @@ fn folio_screen(id: &str) -> Option<Value> {
         lines,
         cursor,
     };
-    Some(portal::screen_message(id, cols as usize, rows as usize, &screen))
+    Some(portal::screen_message(
+        id,
+        cols as usize,
+        rows as usize,
+        &screen,
+    ))
 }
 
 fn micros(t: SystemTime) -> u64 {

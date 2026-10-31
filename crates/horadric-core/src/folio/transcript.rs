@@ -195,7 +195,10 @@ pub struct Rewind {
 /// [`Folio::from_transcript_at`]), or from its last line. None when no
 /// prompt is found, or `head` is not in `jsonl`.
 pub fn rewind_point(jsonl: &str, head: Option<&str>) -> Option<Rewind> {
-    prompts_back(jsonl, head, 1).into_iter().next().map(|(r, _)| r)
+    prompts_back(jsonl, head, 1)
+        .into_iter()
+        .next()
+        .map(|(r, _)| r)
 }
 
 /// The rewind to just before a prompt further back than the last turn:
@@ -347,8 +350,7 @@ mod tests {
         vec![
             line("user", "a", None, "A"),
             line("assistant", "a1", Some("a"), "ok A"),
-            serde_json::json!({"type": "attachment", "uuid": "a2", "parentUuid": "a1"})
-                .to_string(),
+            serde_json::json!({"type": "attachment", "uuid": "a2", "parentUuid": "a1"}).to_string(),
             line("user", "b", Some("a2"), "B"),
             line("assistant", "b1", Some("b"), "ok B"),
         ]

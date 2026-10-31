@@ -946,7 +946,12 @@ impl Ctx<'_> {
         }
         match answer {
             None => {
-                s.line("\u{2026}", F::Small, Rect::new(NEST, y, 40.0, 18.0), self.pal.faint);
+                s.line(
+                    "\u{2026}",
+                    F::Small,
+                    Rect::new(NEST, y, 40.0, 18.0),
+                    self.pal.faint,
+                );
                 y += 18.0;
             }
             Some(t) if *failed => {
@@ -961,7 +966,11 @@ impl Ctx<'_> {
                 y += r.h;
             }
         }
-        s.fill(Rect::new(7.0, 2.0, 1.5, y - 2.0), 0.0, self.pal.accent.with_alpha(0.3));
+        s.fill(
+            Rect::new(7.0, 2.0, 1.5, y - 2.0),
+            0.0,
+            self.pal.accent.with_alpha(0.3),
+        );
         s.h = y;
         s
     }
@@ -1282,7 +1291,12 @@ impl Ctx<'_> {
     unsafe fn api_error(&self, title: &str, said: &str, cw: f32) -> Scene {
         let mut s = Scene::default();
         let ink = theme::error().with_alpha(0.9);
-        s.line('\u{E783}'.to_string(), F::Icon, Rect::new(0.0, 0.0, 16.0, LINE_H), ink);
+        s.line(
+            '\u{E783}'.to_string(),
+            F::Icon,
+            Rect::new(0.0, 0.0, 16.0, LINE_H),
+            ink,
+        );
         s.line(title, F::Line, Rect::new(22.0, 0.0, cw - 22.0, LINE_H), ink);
         let mut h = LINE_H;
         if let Some(l) = (!said.is_empty())
@@ -1292,7 +1306,11 @@ impl Ctx<'_> {
             s.unit(&l, 22.0, LINE_H, self.pal.dim, said);
             h += render::text_size(&l).1 + 2.0;
         }
-        s.fill(Rect::new(7.0, LINE_H, 1.5, h - LINE_H), 0.0, ink.with_alpha(0.3));
+        s.fill(
+            Rect::new(7.0, LINE_H, 1.5, h - LINE_H),
+            0.0,
+            ink.with_alpha(0.3),
+        );
         s.h = h;
         s
     }
@@ -1330,7 +1348,12 @@ impl Ctx<'_> {
         let map = turn_map(blocks, i);
         let mapped = !map.steps.is_empty();
         let row = Rect::new(0.0, 0.0, cw, FOOTER_H);
-        s.line(line, F::Small, Rect::new(0.0, 0.0, cw - 60.0, FOOTER_H), ink);
+        s.line(
+            line,
+            F::Small,
+            Rect::new(0.0, 0.0, cw - 60.0, FOOTER_H),
+            ink,
+        );
         if mapped {
             let chevron = if open { '\u{E70D}' } else { '\u{E76C}' };
             s.line(
@@ -1398,10 +1421,20 @@ impl Ctx<'_> {
                 if files == 1 { "" } else { "s" }
             ));
         }
-        s.line(said, F::Small, Rect::new(0.0, y, cw / 2.0, 18.0), self.pal.faint);
+        s.line(
+            said,
+            F::Small,
+            Rect::new(0.0, y, cw / 2.0, 18.0),
+            self.pal.faint,
+        );
         if let (Some(a), Some(b)) = (map.began, map.ended) {
             let took = crate::folio_look::footer_line(b.saturating_sub(a), Ending::Done);
-            s.line(took, F::Right, Rect::new(cw / 2.0, y, cw / 2.0, 18.0), self.pal.faint);
+            s.line(
+                took,
+                F::Right,
+                Rect::new(cw / 2.0, y, cw / 2.0, 18.0),
+                self.pal.faint,
+            );
         }
         y += 22.0;
         for f in &map.files {
@@ -1411,7 +1444,12 @@ impl Ctx<'_> {
             } else {
                 ('\u{E8A5}', self.pal.faint)
             };
-            s.line(icon.to_string(), F::Icon, Rect::new(4.0, y, 16.0, 22.0), ink);
+            s.line(
+                icon.to_string(),
+                F::Icon,
+                Rect::new(4.0, y, 16.0, 22.0),
+                ink,
+            );
             let name = flow::project_path(self.dir, &f.path).unwrap_or_else(|| f.path.clone());
             s.line(
                 name.replace('\\', "/"),

@@ -97,7 +97,11 @@ pub(super) fn run(chat: &mut Chat, id: &str, name: &str, words: &str) {
     match name {
         "memory" => {
             let rows = existing(memory_files(&chat.dir, &crate::inventory::claude_dir()));
-            choose(chat, rows, "No CLAUDE.md yet: /init writes one for the project.");
+            choose(
+                chat,
+                rows,
+                "No CLAUDE.md yet: /init writes one for the project.",
+            );
         }
         "agents" => {
             let rows = existing(agent_files(&chat.dir, &crate::inventory::claude_dir()));
@@ -140,7 +144,9 @@ pub(super) fn run(chat: &mut Chat, id: &str, name: &str, words: &str) {
             }
             None => notice(chat, "Say /permissions allow, ask or deny, then the rule."),
         },
-        "plugin" if words.is_empty() => hidden(chat, id, &["plugin", "list", "--json"], Then::Plugins),
+        "plugin" if words.is_empty() => {
+            hidden(chat, id, &["plugin", "list", "--json"], Then::Plugins)
+        }
         "plugin" => {
             let mut args = vec!["plugin"];
             args.extend(words.split_whitespace());
@@ -189,7 +195,10 @@ pub(super) fn act(chat: &mut Chat, value: &str) {
         ["put", text] => put(chat, text),
         ["unrule", path, list, rule] => {
             let said = edit_json(Path::new(path), |v| remove_rule(v, list, rule));
-            let name = Path::new(path).file_name().unwrap_or_default().to_string_lossy();
+            let name = Path::new(path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
             notice(
                 chat,
                 &match said {
@@ -212,15 +221,27 @@ pub(super) fn act(chat: &mut Chat, value: &str) {
             let verb = if *on == "true" { "disable" } else { "enable" };
             let rows = vec![
                 row(toggle, "", &format!("run\tplugin {verb} {id_}")),
-                row("Update", "Restart to apply", &format!("run\tplugin update {id_}")),
+                row(
+                    "Update",
+                    "Restart to apply",
+                    &format!("run\tplugin update {id_}"),
+                ),
                 row("Uninstall", "", &format!("run\tplugin uninstall {id_}")),
             ];
             choose(chat, rows, "");
         }
         ["market", name] => {
             let rows = vec![
-                row("Update", "", &format!("run\tplugin marketplace update {name}")),
-                row("Remove", "", &format!("run\tplugin marketplace remove {name}")),
+                row(
+                    "Update",
+                    "",
+                    &format!("run\tplugin marketplace update {name}"),
+                ),
+                row(
+                    "Remove",
+                    "",
+                    &format!("run\tplugin marketplace remove {name}"),
+                ),
             ];
             choose(chat, rows, "");
         }
@@ -286,7 +307,10 @@ fn memory_files(dir: &Path, claude: &Path) -> Vec<(String, PathBuf)> {
 /// The subagents' files, the project's then the user's, by name.
 fn agent_files(dir: &Path, claude: &Path) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
-    for (place, folder) in [("Project", dir.join(".claude")), ("User", claude.to_path_buf())] {
+    for (place, folder) in [
+        ("Project", dir.join(".claude")),
+        ("User", claude.to_path_buf()),
+    ] {
         let Ok(entries) = std::fs::read_dir(folder.join("agents")) else {
             continue;
         };
@@ -329,9 +353,8 @@ fn read_json(path: &Path) -> Value {
 /// file that does not parse is left alone rather than overwritten.
 fn edit_json(path: &Path, change: impl FnOnce(&mut Value)) -> Result<(), String> {
     let mut v = match std::fs::read_to_string(path) {
-        Ok(s) if !s.trim().is_empty() => {
-            serde_json::from_str(&s).map_err(|e| format!("{} does not parse: {e}", path.display()))?
-        }
+        Ok(s) if !s.trim().is_empty() => serde_json::from_str(&s)
+            .map_err(|e| format!("{} does not parse: {e}", path.display()))?,
         _ => Value::Object(Default::default()),
     };
     change(&mut v);
@@ -351,7 +374,12 @@ fn hooks_in(settings: &Value) -> Vec<(String, String, String)> {
     for (event, groups) in events {
         for g in groups.as_array().into_iter().flatten() {
             let matcher = g.get("matcher").and_then(Value::as_str).unwrap_or("");
-            for h in g.get("hooks").and_then(Value::as_array).into_iter().flatten() {
+            for h in g
+                .get("hooks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
                 let command = (h.get("command").or_else(|| h.get("url")))
                     .and_then(Value::as_str)
                     .unwrap_or("");
@@ -404,8 +432,8 @@ fn add_rule(settings: &mut Value, list: &str, rule: &str) {
 }
 
 fn remove_rule(settings: &mut Value, list: &str, rule: &str) {
-    if let Some(rules) = (settings.pointer_mut(&format!("/permissions/{list}")))
-        .and_then(Value::as_array_mut)
+    if let Some(rules) =
+        (settings.pointer_mut(&format!("/permissions/{list}"))).and_then(Value::as_array_mut)
     {
         rules.retain(|r| r.as_str() != Some(rule));
     }
@@ -497,7 +525,9 @@ fn markdown(blocks: &[Block]) -> String {
                 for s in steps {
                     match s.summary.as_str() {
                         "" => out.push_str(&format!("- {}\n", s.tool)),
-                        sum => out.push_str(&format!("- {}: `{}`\n", s.tool, sum.replace('`', "'"))),
+                        sum => {
+                            out.push_str(&format!("- {}: `{}`\n", s.tool, sum.replace('`', "'")))
+                        }
                     }
                 }
                 out.push('\n');
@@ -531,7 +561,11 @@ fn default_name(blocks: &[Block], now: std::time::SystemTime) -> String {
         .collect::<Vec<_>>()
         .join("-")
         .to_lowercase();
-    let slug = if slug.is_empty() { "conversation".into() } else { slug };
+    let slug = if slug.is_empty() {
+        "conversation".into()
+    } else {
+        slug
+    };
     format!("{y:04}-{m:02}-{d:02}-{slug}.md")
 }
 
@@ -587,7 +621,9 @@ fn hidden(chat: &mut Chat, id: &str, args: &[&str], then: Then) {
 pub(super) fn tend() {
     let shells = SHELLS.lock().map(|mut d| std::mem::take(&mut *d));
     for (id, at, command, output, code) in shells.unwrap_or_default() {
-        with(&id, |chat| chat.folio.shell_done(at, &command, &output, code));
+        with(&id, |chat| {
+            chat.folio.shell_done(at, &command, &output, code)
+        });
         redraw(&id);
     }
     let done = DONE.lock().map(|mut d| std::mem::take(&mut *d));
@@ -661,9 +697,12 @@ fn market_rows(json: &str) -> Vec<Item> {
     (v.as_array().into_iter().flatten())
         .filter_map(|m| {
             let name = m.get("name")?.as_str()?;
-            let from = (m.get("repo").or_else(|| m.get("url")).or_else(|| m.get("path")))
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let from = (m
+                .get("repo")
+                .or_else(|| m.get("url"))
+                .or_else(|| m.get("path")))
+            .and_then(Value::as_str)
+            .unwrap_or("");
             Some(row(name, from, &format!("market\t{name}")))
         })
         .collect()
@@ -694,7 +733,10 @@ mod tests {
             add_rule_words("allow Bash(git log:*)"),
             Some(("allow", "Bash(git log:*)"))
         );
-        assert_eq!(add_rule_words("Deny  Read(.env) "), Some(("deny", "Read(.env)")));
+        assert_eq!(
+            add_rule_words("Deny  Read(.env) "),
+            Some(("deny", "Read(.env)"))
+        );
         assert_eq!(add_rule_words("allow"), None);
         assert_eq!(add_rule_words("permit Bash"), None);
     }
@@ -753,7 +795,9 @@ mod tests {
 
     #[test]
     fn plugins_and_markets_become_rows() {
-        let p = plugin_rows(r#"[{"id":"a@m","enabled":true,"scope":"user"},{"id":"b@m","enabled":false,"scope":"project"}]"#);
+        let p = plugin_rows(
+            r#"[{"id":"a@m","enabled":true,"scope":"user"},{"id":"b@m","enabled":false,"scope":"project"}]"#,
+        );
         assert_eq!(p.len(), 2);
         assert_eq!(p[0].value, "plugin\ta@m\ttrue");
         assert_eq!(p[1].detail, "Off, project");

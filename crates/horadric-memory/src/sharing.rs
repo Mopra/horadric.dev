@@ -149,8 +149,7 @@ impl Project {
         if !memory.join("brethren").join(format!("{name}l")).is_file() {
             return Ok(0);
         }
-        let theirs =
-            Shared::open(memory, self.place.key(), &self.me).map_err(|e| e.to_string())?;
+        let theirs = Shared::open(memory, self.place.key(), &self.me).map_err(|e| e.to_string())?;
         let store = Store::text_since(memory, crate::store::Month { year: 0, month: 1 })
             .map_err(|e| e.to_string())?;
         self.take_in(theirs.export_whole(&self.have(), &store), now)

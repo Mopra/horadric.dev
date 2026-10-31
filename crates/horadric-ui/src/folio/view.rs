@@ -29,13 +29,13 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
-    CreateRoundRectRgn, GetUpdateRect, InvalidateRect, UpdateWindow, ScreenToClient, SetWindowRgn, ValidateRect,
+    CreateRoundRectRgn, GetUpdateRect, InvalidateRect, ScreenToClient, SetWindowRgn, UpdateWindow,
+    ValidateRect,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_END, VK_HOME, VK_NEXT, VK_PRIOR,
-    VK_SHIFT,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_END, VK_HOME, VK_NEXT, VK_PRIOR, VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -332,8 +332,8 @@ pub fn key(key: &str, vk: u16, mods: Mods) -> bool {
     if select::key(key, vk, mods) {
         return true;
     }
-    let (page, empty) = with(key, |c| (c.view_h * 0.85, c.input.ed.is_empty()))
-        .unwrap_or((0.0, true));
+    let (page, empty) =
+        with(key, |c| (c.view_h * 0.85, c.input.ed.is_empty())).unwrap_or((0.0, true));
     // With nothing typed, Ctrl+Home and Ctrl+End have no text to move
     // through and go to either end of the conversation, as in a reader.
     let ends = mods.ctrl && !mods.shift && !mods.alt && (empty || super::is_watch(key));
@@ -884,7 +884,10 @@ impl View {
         let project = with(&self.key, |c| c.key.clone()).unwrap_or_default();
         let accent = theme::accent(&project);
         let family = self.shared.font.family();
-        if slot.as_ref().is_some_and(|g| g.accent != accent || g.family != family) {
+        if slot
+            .as_ref()
+            .is_some_and(|g| g.accent != accent || g.family != family)
+        {
             *slot = None;
         }
         if slot.is_none() {
@@ -1004,7 +1007,9 @@ impl View {
     /// The rune this Folio flares as it opens, its own for as long as the
     /// session keeps its id.
     fn sigil(&self) -> u32 {
-        self.key.bytes().fold(0x811C_9DC5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193))
+        self.key.bytes().fold(0x811C_9DC5u32, |h, b| {
+            (h ^ b as u32).wrapping_mul(0x0100_0193)
+        })
     }
 
     fn palette(gfx: &Gfx) -> Palette {

@@ -117,7 +117,9 @@ fn block(b: &Block, out: &mut Vec<String>) {
                 }
             }
             out.push(match state {
-                AskState::Waiting if has_rules(suggestions) => "  1 Yes \u{b7} 2 Always \u{b7} Esc No".into(),
+                AskState::Waiting if has_rules(suggestions) => {
+                    "  1 Yes \u{b7} 2 Always \u{b7} Esc No".into()
+                }
                 AskState::Waiting => "  1 Yes \u{b7} Esc No".into(),
                 other => format!("  {}", settled(*other)),
             });
@@ -492,12 +494,22 @@ mod tests {
     fn the_screen_shows_prompt_reply_and_what_is_typed() {
         let mut f = Folio::new();
         f.push_prompt("hello\nthere");
-        f.blocks.push(Block::Reply("Hi.\n\nHow can I help?\n".into()));
+        f.blocks
+            .push(Block::Reply("Hi.\n\nHow can I help?\n".into()));
         f.busy = false;
         let l = lines(&f, "next");
         assert_eq!(
             l,
-            ["> hello", "  there", "", "Hi.", "", "How can I help?", "", "> next"]
+            [
+                "> hello",
+                "  there",
+                "",
+                "Hi.",
+                "",
+                "How can I help?",
+                "",
+                "> next"
+            ]
         );
         f.busy = true;
         assert_eq!(lines(&f, "").last().unwrap(), "\u{2026} working");
@@ -515,7 +527,11 @@ mod tests {
 
     #[test]
     fn a_permission_asks_with_the_keys_that_answer_it() {
-        let mut f = asking("Bash", json!({"command": "ls"}), json!([{"type": "addRules"}]));
+        let mut f = asking(
+            "Bash",
+            json!({"command": "ls"}),
+            json!([{"type": "addRules"}]),
+        );
         let a = ask(&f, SystemTime::UNIX_EPOCH).unwrap();
         assert_eq!(a.detail, "ls");
         let keys: Vec<&str> = a.options.iter().map(|o| o.keys.as_str()).collect();
@@ -581,7 +597,9 @@ mod tests {
         let acts = typed(&mut f, &mut draft, "2");
         assert!(matches!(&acts[..], [Typed::Write(l)] if l.contains("acceptEdits")));
         typed(&mut back, &mut draft, "smaller steps\r");
-        assert!(matches!(&back.blocks[0], Block::Plan { state: AskState::Denied, feedback, .. } if feedback == "smaller steps"));
+        assert!(
+            matches!(&back.blocks[0], Block::Plan { state: AskState::Denied, feedback, .. } if feedback == "smaller steps")
+        );
     }
 
     #[test]

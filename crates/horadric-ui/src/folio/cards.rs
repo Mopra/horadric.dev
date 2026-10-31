@@ -645,9 +645,25 @@ pub(super) unsafe fn sign_in(cx: &Ctx, i: usize, b: &Block, st: &State, w: f32) 
                 ) - 8.0;
             }
             if waiting && card.asks_code && !st.text(&code_field(i)).trim().is_empty() {
-                x = button(cx, &mut s, x, y, "Send code", false, Hit::Tr(Act::SignInCode(i))) - 8.0;
+                x = button(
+                    cx,
+                    &mut s,
+                    x,
+                    y,
+                    "Send code",
+                    false,
+                    Hit::Tr(Act::SignInCode(i)),
+                ) - 8.0;
             }
-            button(cx, &mut s, x, y, "Cancel", false, Hit::Tr(Act::SignInCancel(i)));
+            button(
+                cx,
+                &mut s,
+                x,
+                y,
+                "Cancel",
+                false,
+                Hit::Tr(Act::SignInCancel(i)),
+            );
             y += BUTTON_H;
         }
         SignInState::Done(_) => {}

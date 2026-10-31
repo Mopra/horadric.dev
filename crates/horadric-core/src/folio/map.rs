@@ -93,9 +93,7 @@ pub fn turn_map(blocks: &[Block], footer: usize) -> TurnMap {
         }
     }
     let first = map.steps.iter().filter_map(|s| s.began).min();
-    let last = (map.steps.iter())
-        .filter_map(|s| s.ended.or(s.began))
-        .max();
+    let last = (map.steps.iter()).filter_map(|s| s.ended.or(s.began)).max();
     match blocks.get(footer) {
         Some(Block::Footer {
             at: Some(at),
@@ -250,7 +248,13 @@ mod tests {
     fn a_turn_s_steps_and_files_make_its_map() {
         let mut f = Folio::new();
         f.push_prompt("go");
-        step(&mut f, "a", "Read", json!({"file_path": "C:\\p\\src\\a.rs"}), 1_000);
+        step(
+            &mut f,
+            "a",
+            "Read",
+            json!({"file_path": "C:\\p\\src\\a.rs"}),
+            1_000,
+        );
         result(&mut f, "a", 1_500);
         let edit = json!({"file_path": "C:/p/src/a.rs", "old_string": "x", "new_string": "y\nz"});
         step(&mut f, "b", "Edit", edit, 1_500);

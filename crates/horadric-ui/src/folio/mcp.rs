@@ -9,8 +9,8 @@ use std::process::Stdio;
 use std::sync::Mutex;
 
 use horadric_core::folio::{
-    AskState, Block, ElicitAction, Elicitation, FieldKind, McpCard, McpRemoval, McpServer,
-    McpWant, ELICIT_SEP,
+    AskState, Block, ElicitAction, Elicitation, FieldKind, McpCard, McpRemoval, McpServer, McpWant,
+    ELICIT_SEP,
 };
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::HWND;
@@ -85,7 +85,13 @@ fn remove(key: &str, server: &str) {
         }
         McpRemoval::Plugin(p) => vec!["plugin".into(), "disable".into(), p, "--json".into()],
         McpRemoval::Scope(scope) => {
-            vec!["mcp".into(), "remove".into(), server.into(), "-s".into(), scope]
+            vec![
+                "mcp".into(),
+                "remove".into(),
+                server.into(),
+                "-s".into(),
+                scope,
+            ]
         }
     };
     with(key, |c| c.folio.mcp_removing(server));
@@ -109,7 +115,11 @@ fn run_removal(args: &[&str], dir: &std::path::Path) -> Result<(), String> {
     let said = String::from_utf8_lossy(&out.stdout);
     // `plugin disable --json`: a plugin already off is as good as done.
     let json = (said.lines()).find_map(|l| serde_json::from_str::<serde_json::Value>(l).ok());
-    if out.status.success() || json.as_ref().is_some_and(|v| v["alreadyInGoalState"] == true) {
+    if out.status.success()
+        || json
+            .as_ref()
+            .is_some_and(|v| v["alreadyInGoalState"] == true)
+    {
         return Ok(());
     }
     let why = json
@@ -327,15 +337,19 @@ pub(super) fn act(key: &str, d: Do) {
         Do::Flip(id, name) => {
             with(key, |c| {
                 let on = current(c, &id, &name) == "true";
-                set(&mut c.tr.state, &id, &name, if on { "false" } else { "true" });
+                set(
+                    &mut c.tr.state,
+                    &id,
+                    &name,
+                    if on { "false" } else { "true" },
+                );
             });
         }
         Do::Pick(id, name, value) => {
             with(key, |c| {
                 let many = elicitation_of(c, &id).is_some_and(|e| {
-                    (e.fields.iter()).any(|f| {
-                        f.name == name && matches!(f.kind, FieldKind::Choices { .. })
-                    })
+                    (e.fields.iter())
+                        .any(|f| f.name == name && matches!(f.kind, FieldKind::Choices { .. }))
                 });
                 let now = if many {
                     let had = current(c, &id, &name);
@@ -506,7 +520,12 @@ pub(super) unsafe fn card(cx: &Ctx, card: &McpCard, w: f32) -> Scene {
             say(&mut s, &mut y, &what, cx.pal.fg.with_alpha(0.85));
         }
         if m.removed {
-            say(&mut s, &mut y, "Removed. New sessions start without it.", cx.pal.dim);
+            say(
+                &mut s,
+                &mut y,
+                "Removed. New sessions start without it.",
+                cx.pal.dim,
+            );
         }
         match &m.sign_in {
             Some(url) if url.is_empty() => {
@@ -572,7 +591,13 @@ pub(super) unsafe fn elicitation(cx: &Ctx, e: &Elicitation, st: &State, w: f32) 
     }
     let rid = &e.request_id;
     if let Some(url) = &e.url {
-        say(&mut s, &mut y, url, cx.pal.accent.mix(cx.pal.fg, 0.45), true);
+        say(
+            &mut s,
+            &mut y,
+            url,
+            cx.pal.accent.mix(cx.pal.fg, 0.45),
+            true,
+        );
         y += 6.0;
     } else if waiting {
         for f in &e.fields {
@@ -589,7 +614,12 @@ pub(super) unsafe fn elicitation(cx: &Ctx, e: &Elicitation, st: &State, w: f32) 
                 typed
             };
             if !matches!(f.kind, FieldKind::Boolean) {
-                s.line(label.clone(), F::Small, Rect::new(PAD, y, inner, 18.0), cx.pal.dim);
+                s.line(
+                    label.clone(),
+                    F::Small,
+                    Rect::new(PAD, y, inner, 18.0),
+                    cx.pal.dim,
+                );
                 y += 20.0;
                 if !f.description.is_empty() {
                     say(&mut s, &mut y, &f.description, cx.pal.faint, true);
@@ -611,8 +641,18 @@ pub(super) unsafe fn elicitation(cx: &Ctx, e: &Elicitation, st: &State, w: f32) 
                     let on = value == "true";
                     let r = Rect::new(PAD, y, inner, 26.0);
                     let icon = if on { "\u{E73A}" } else { "\u{E739}" };
-                    s.line(icon, F::Icon, Rect::new(PAD, y + 3.0, 16.0, 20.0), cx.pal.dim);
-                    s.line(label, F::Line, Rect::new(PAD + 24.0, y + 2.0, inner - 24.0, 22.0), cx.pal.fg);
+                    s.line(
+                        icon,
+                        F::Icon,
+                        Rect::new(PAD, y + 3.0, 16.0, 20.0),
+                        cx.pal.dim,
+                    );
+                    s.line(
+                        label,
+                        F::Line,
+                        Rect::new(PAD + 24.0, y + 2.0, inner - 24.0, 22.0),
+                        cx.pal.fg,
+                    );
                     s.hit(r, Hit::Tr(Act::Mcp(Do::Flip(rid.clone(), f.name.clone()))));
                     y += 28.0;
                     if !f.description.is_empty() {
@@ -641,8 +681,18 @@ pub(super) unsafe fn elicitation(cx: &Ctx, e: &Elicitation, st: &State, w: f32) 
                             (false, true) => "\u{ECCB}",
                             (false, false) => "\u{ECCA}",
                         };
-                        s.line(icon, F::Icon, Rect::new(r.x + 10.0, y + 6.0, 16.0, 18.0), cx.pal.dim);
-                        s.line(shown.clone(), F::Line, Rect::new(r.x + 34.0, y + 4.0, inner - 44.0, 22.0), cx.pal.fg);
+                        s.line(
+                            icon,
+                            F::Icon,
+                            Rect::new(r.x + 10.0, y + 6.0, 16.0, 18.0),
+                            cx.pal.dim,
+                        );
+                        s.line(
+                            shown.clone(),
+                            F::Line,
+                            Rect::new(r.x + 34.0, y + 4.0, inner - 44.0, 22.0),
+                            cx.pal.fg,
+                        );
                         let pick = Do::Pick(rid.clone(), f.name.clone(), v.clone());
                         s.hit(r, Hit::Tr(Act::Mcp(pick)));
                         y = r.bottom() + 6.0;
@@ -662,8 +712,24 @@ pub(super) unsafe fn elicitation(cx: &Ctx, e: &Elicitation, st: &State, w: f32) 
             None => (Do::Accept(rid.clone()), "Submit"),
         };
         let mut x = button(cx, &mut s, right, y, label, true, Hit::Tr(Act::Mcp(go))) - 8.0;
-        x = button(cx, &mut s, x, y, "Decline", false, Hit::Tr(Act::Mcp(Do::Decline(rid.clone())))) - 8.0;
-        button(cx, &mut s, x, y, "Cancel", false, Hit::Tr(Act::Mcp(Do::Cancel(rid.clone()))));
+        x = button(
+            cx,
+            &mut s,
+            x,
+            y,
+            "Decline",
+            false,
+            Hit::Tr(Act::Mcp(Do::Decline(rid.clone()))),
+        ) - 8.0;
+        button(
+            cx,
+            &mut s,
+            x,
+            y,
+            "Cancel",
+            false,
+            Hit::Tr(Act::Mcp(Do::Cancel(rid.clone()))),
+        );
         y += BUTTON_H;
     } else {
         let said = match (e.said, e.state) {

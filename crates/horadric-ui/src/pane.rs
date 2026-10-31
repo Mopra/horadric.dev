@@ -1975,7 +1975,11 @@ impl Pane {
                 _ => None,
             };
             if let Some(c) = clip.filter(|_| !mods.alt) {
-                let ctrl = Mods { ctrl: true, shift: false, alt: false };
+                let ctrl = Mods {
+                    ctrl: true,
+                    shift: false,
+                    alt: false,
+                };
                 folio::char(key, c, ctrl);
                 return true;
             }

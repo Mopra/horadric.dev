@@ -32,7 +32,11 @@ pub fn run_args(program: &Path, command: &str) -> Vec<String> {
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     let mut args: Vec<String> = match stem.as_str() {
-        "pwsh" | "powershell" => vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into()],
+        "pwsh" | "powershell" => vec![
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+        ],
         "cmd" => vec!["/D".into(), "/S".into(), "/C".into()],
         _ => vec!["-c".into()],
     };
@@ -198,9 +202,18 @@ mod tests {
 
     #[test]
     fn a_command_runs_once_in_each_kind_of_shell() {
-        let pwsh = run_args(Path::new("C:\\Program Files\\PowerShell\\7\\pwsh.exe"), "ls");
+        let pwsh = run_args(
+            Path::new("C:\\Program Files\\PowerShell\\7\\pwsh.exe"),
+            "ls",
+        );
         assert_eq!(pwsh, ["-NoProfile", "-NonInteractive", "-Command", "ls"]);
-        assert_eq!(run_args(Path::new("C:\\Windows\\cmd.exe"), "dir"), ["/D", "/S", "/C", "dir"]);
-        assert_eq!(run_args(Path::new("D:\\tools\\bash.exe"), "ls"), ["-c", "ls"]);
+        assert_eq!(
+            run_args(Path::new("C:\\Windows\\cmd.exe"), "dir"),
+            ["/D", "/S", "/C", "dir"]
+        );
+        assert_eq!(
+            run_args(Path::new("D:\\tools\\bash.exe"), "ls"),
+            ["-c", "ls"]
+        );
     }
 }

@@ -1213,7 +1213,10 @@ impl App {
 
     /// Whether any brother is linked now, by the relay or over `ssh`.
     pub(super) fn far_any_linked(&self) -> bool {
-        self.far.peers.values().any(|p| p.via.is_some() && p.heard.linked)
+        self.far
+            .peers
+            .values()
+            .any(|p| p.via.is_some() && p.heard.linked)
     }
 
     pub(super) fn far_key(&self, who: &str) -> Option<String> {
@@ -1436,7 +1439,10 @@ impl App {
         };
         let name = p.map_or_else(|| crate::project::brother_name(&key), |p| p.name.clone());
         let mut items = far_items(&name, can, open, rename);
-        if let Some(changes) = diff.filter(|d| can.up && !d.is_empty()).map(|d| far_changes(&d)) {
+        if let Some(changes) = diff
+            .filter(|d| can.up && !d.is_empty())
+            .map(|d| far_changes(&d))
+        {
             items.extend([Item::Separator, changes]);
         }
         Some(items)
@@ -1450,7 +1456,10 @@ impl App {
             self.reconcile(false);
             return true;
         }
-        if let Some(i) = picked.checked_sub(FAR_CHANGES).filter(|&i| i < CHANGES_LISTED) {
+        if let Some(i) = picked
+            .checked_sub(FAR_CHANGES)
+            .filter(|&i| i < CHANGES_LISTED)
+        {
             let path = self
                 .shared
                 .registry
@@ -1605,10 +1614,7 @@ fn far_changes(d: &horadric_core::diff::Diff) -> Item {
         let more = files.len() - CHANGES_LISTED;
         items.push(Item::Disabled(format!("and {more} more")));
     }
-    Item::Submenu(
-        format!("Changes	{}", changes::glance(d.totals())),
-        items,
-    )
+    Item::Submenu(format!("Changes	{}", changes::glance(d.totals())), items)
 }
 
 /// How many hidden tiles are remembered. One is not dropped when its
@@ -1739,10 +1745,7 @@ pub(super) fn ask_name() -> Option<Result<String, String>> {
         pick: None,
     };
     let a = super::ask_beside(None, &question)?;
-    Some(
-        horadric_core::naming::choose(&dir, &a.text)
-            .map(|_| crate::portal_pair::pc_name()),
-    )
+    Some(horadric_core::naming::choose(&dir, &a.text).map(|_| crate::portal_pair::pc_name()))
 }
 
 /// "Forget": node `name` off the list. Its link and tiles go at the next

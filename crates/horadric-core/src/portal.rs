@@ -901,7 +901,10 @@ mod tests {
     fn a_phone_with_a_key_pair_gets_the_derived_key_and_a_bad_key_spends_no_ticket() {
         let mut c = Config::fresh(&[0; 32]);
         c.open_ticket(&[9; 32], 1000);
-        assert_eq!(c.pair_keyed("a", &[1; 40], 1001, "PUB", |_| None), Paired::BadKey);
+        assert_eq!(
+            c.pair_keyed("a", &[1; 40], 1001, "PUB", |_| None),
+            Paired::BadKey
+        );
         let mut asked = String::new();
         let Paired::New(phone) = c.pair_keyed("a", &[1; 40], 1002, "PUB", |id| {
             asked = id.to_string();
@@ -910,8 +913,14 @@ mod tests {
             panic!("the ticket was spent by a bad key");
         };
         assert_eq!(asked, phone.id);
-        assert_eq!((phone.key, phone.public), (b64url(&[7; 32]), "PUB".to_string()));
-        assert_eq!(c.pair_keyed("b", &[2; 40], 1003, "P2", |_| Some([8; 32])), Paired::Used);
+        assert_eq!(
+            (phone.key, phone.public),
+            (b64url(&[7; 32]), "PUB".to_string())
+        );
+        assert_eq!(
+            c.pair_keyed("b", &[2; 40], 1003, "P2", |_| Some([8; 32])),
+            Paired::Used
+        );
     }
 
     #[test]

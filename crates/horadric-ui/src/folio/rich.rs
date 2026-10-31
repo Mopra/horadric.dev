@@ -42,7 +42,6 @@ use crate::layout::Rect;
 use crate::render::{self, color, Gpu};
 use crate::theme::Color;
 
-
 /// A code block's padding and its header with the language and Copy.
 const CODE_PAD: f32 = 12.0;
 const CODE_HEAD: f32 = 28.0;

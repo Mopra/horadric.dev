@@ -167,7 +167,10 @@ mod tests {
 
     #[test]
     fn model_and_effort_are_read_from_what_is_typed() {
-        assert_eq!(typed("/model claude-opus-5-5"), Typed::Model("claude-opus-5-5"));
+        assert_eq!(
+            typed("/model claude-opus-5-5"),
+            Typed::Model("claude-opus-5-5")
+        );
         assert_eq!(typed(" /effort  high \r\n"), Typed::Effort("high"));
         assert_eq!(typed("/model"), Typed::Prompt("/model"));
         assert_eq!(typed("/models x"), Typed::Prompt("/models x"));

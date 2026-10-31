@@ -423,8 +423,7 @@ mod tests {
             "agent": "codex", "id": "codex:acc:user", "email": "a@x.dk",
             "login": { "tokens": {} }
         });
-        let all: Accounts =
-            serde_json::from_value(json!({ "list": [codex, claude] })).unwrap();
+        let all: Accounts = serde_json::from_value(json!({ "list": [codex, claude] })).unwrap();
         assert_eq!(all.list.len(), 1);
         assert_eq!(all.list[0].id, "u-one:org-one");
     }
@@ -484,8 +483,7 @@ mod tests {
         all.remember(with_usage("two", 70.0, 10.0));
         all.remember(with_usage("three", 20.0, 90.0));
         let pick = |all: &Accounts, live: &str, now| {
-            all.roomiest(Some(live), now)
-                .map(|a| a.email.clone())
+            all.roomiest(Some(live), now).map(|a| a.email.clone())
         };
         // Two has 30 left of its session, three 10 of its week.
         assert_eq!(

@@ -48,7 +48,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
             for (i, k) in known.iter().enumerate() {
                 let paired = c.phones.iter().find(|p| p.id == k.id);
                 let when = match paired {
-                    Some(p) => format!(", paired {}, last seen {}", ago(now, p.paired), ago(now, p.seen)),
+                    Some(p) => format!(
+                        ", paired {}, last seen {}",
+                        ago(now, p.paired),
+                        ago(now, p.seen)
+                    ),
                     None => String::new(),
                 };
                 let by = vouched_by(&dir, k);

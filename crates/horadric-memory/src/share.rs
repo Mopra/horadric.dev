@@ -1102,7 +1102,10 @@ mod tests {
         let mut b = Brother::new(&root, "bbbb0002", "p");
         let first = said("p", "s", "kept in the backup", NOW - 30);
         a.store
-            .add_all(&[first.clone(), said("p", "s", "said after it", NOW - 20)], NOW)
+            .add_all(
+                &[first.clone(), said("p", "s", "said after it", NOW - 20)],
+                NOW,
+            )
             .unwrap();
         a.note("a fact", NOW - 10, &[]);
         a.shared.stamp(&a.lore, &a.store).unwrap();

@@ -750,7 +750,10 @@ impl Folio {
             }
             "system" => self.system(&v, line),
             "prompt_suggestion" => {
-                let s = v["suggestion"].as_str().map(str::trim).filter(|s| !s.is_empty());
+                let s = v["suggestion"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
                 // One that lands after the human already wrote again is stale.
                 if self.busy {
                     return false;
@@ -1317,7 +1320,9 @@ impl Folio {
                 .map(|(i, _)| i);
             match shown {
                 Some(i) => seen = i + 1,
-                None => self.blocks.push(Block::Shell(ShellRun { sent: true, ..run })),
+                None => self
+                    .blocks
+                    .push(Block::Shell(ShellRun { sent: true, ..run })),
             }
         }
     }
@@ -3056,7 +3061,10 @@ mod tests {
         assert_eq!(asked["questions"][0]["question"], "Q?");
         assert_eq!(asked["questions"][0]["options"][0]["label"], "A");
         f.answer_question("q1", &[vec!["A".into()]]);
-        assert_eq!(f.first_ask(), Some(("Bash".into(), serde_json::json!({"command": "ls"}))));
+        assert_eq!(
+            f.first_ask(),
+            Some(("Bash".into(), serde_json::json!({"command": "ls"})))
+        );
     }
 
     #[test]
@@ -3311,14 +3319,19 @@ mod tests {
         // The ask that follows can land with the human's own text.
         let input = serde_json::json!({"file_path": "a.txt", "content": "four"});
         assert_eq!(edit_text("Write", &input).as_deref(), Some("four"));
-        f.feed(&serde_json::json!({"type": "control_request", "request_id": "r1",
+        f.feed(
+            &serde_json::json!({"type": "control_request", "request_id": "r1",
             "request": {"subtype": "can_use_tool", "tool_name": "Write", "input": input}})
-            .to_string());
+            .to_string(),
+        );
         let line = f.reply("r1", Reply::Change("five")).unwrap();
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["response"]["response"]["behavior"], "allow");
         assert_eq!(v["response"]["response"]["updatedInput"]["content"], "five");
-        assert_eq!(v["response"]["response"]["updatedInput"]["file_path"], "a.txt");
+        assert_eq!(
+            v["response"]["response"]["updatedInput"]["file_path"],
+            "a.txt"
+        );
         assert_eq!(edit_text("MultiEdit", &serde_json::json!({})), None);
     }
 
@@ -4215,11 +4228,23 @@ mod tests {
         // Asked for, the same card runs the login.
         f.sign_in_started(7);
         assert_eq!(f.sign_in_card().map(|c| c.run), Some(7));
-        assert_eq!(f.blocks.iter().filter(|b| matches!(b, Block::SignIn(_))).count(), 1);
+        assert_eq!(
+            f.blocks
+                .iter()
+                .filter(|b| matches!(b, Block::SignIn(_)))
+                .count(),
+            1
+        );
         // A later turn's failure gets a card of its own.
         f.push_prompt("again");
         f.feed(&error.to_string());
-        assert_eq!(f.blocks.iter().filter(|b| matches!(b, Block::SignIn(_))).count(), 2);
+        assert_eq!(
+            f.blocks
+                .iter()
+                .filter(|b| matches!(b, Block::SignIn(_)))
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -4240,7 +4265,8 @@ mod tests {
             }))
         );
         assert!(!f.blocks.iter().any(|b| matches!(b, Block::Reply(_))));
-        let retry = r#"{"type":"system","subtype":"api_error","level":"error","error":{"status":529}}"#;
+        let retry =
+            r#"{"type":"system","subtype":"api_error","level":"error","error":{"status":529}}"#;
         assert!(!f.feed(retry));
         // A reply a model wrote stays the reply, whatever ended it.
         let cut = serde_json::json!({

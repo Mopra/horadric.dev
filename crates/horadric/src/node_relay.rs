@@ -185,9 +185,12 @@ fn look_at_phones() {
     let signer = horadric_core::said::Signer::of(&dir, &me, &LinkCrypto);
     let linked: Vec<String> =
         with(|b| b.linked().into_iter().map(|(_, id)| id).collect()).unwrap_or_default();
-    let name = phones().as_ref().map(|p| p.name.clone()).unwrap_or_default();
-    let roster =
-        horadric_core::rostering::served(&dir, &me, &name, &LinkCrypto, &linked).unwrap_or_default();
+    let name = phones()
+        .as_ref()
+        .map(|p| p.name.clone())
+        .unwrap_or_default();
+    let roster = horadric_core::rostering::served(&dir, &me, &name, &LinkCrypto, &linked)
+        .unwrap_or_default();
     let state = |id: &str| -> &'static str {
         if linked.iter().any(|l| l == id) {
             "live"

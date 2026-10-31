@@ -275,7 +275,10 @@ mod tests {
         assert_eq!(claude.agent, Agent::Claude);
         // Another agent's session is not taken for Claude's.
         assert!(serde_json::from_str::<Old>(r#"{"agent":"codex"}"#).is_err());
-        assert_eq!(serde_json::to_string(&Agent::Claude).unwrap(), r#""claude""#);
+        assert_eq!(
+            serde_json::to_string(&Agent::Claude).unwrap(),
+            r#""claude""#
+        );
     }
 
     #[test]

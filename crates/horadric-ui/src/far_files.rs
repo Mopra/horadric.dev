@@ -215,8 +215,11 @@ impl App {
                 let read = Read::File(key.to_string(), path.to_string(), rel.to_string());
                 if let Some((_, true)) = self.far.files.reads.remove(&read) {
                     let text = msg["text"].as_str().unwrap_or("It cannot be read.");
-                    self.toasts
-                        .show(crate::toast::Kind::Info, &format!("Cannot show {rel}"), text);
+                    self.toasts.show(
+                        crate::toast::Kind::Info,
+                        &format!("Cannot show {rel}"),
+                        text,
+                    );
                 }
                 Some(false)
             }
@@ -235,7 +238,10 @@ impl App {
             return;
         };
         let read = Read::File(key.clone(), path.clone(), rel.to_string());
-        self.far.files.reads.insert(read, (cluster.to_string(), true));
+        self.far
+            .files
+            .reads
+            .insert(read, (cluster.to_string(), true));
         self.far_send(&key, json!({"t": "read", "project": path, "path": rel}));
     }
 

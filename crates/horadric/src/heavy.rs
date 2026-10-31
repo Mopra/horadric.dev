@@ -324,7 +324,10 @@ fn take(slots: &[Slot]) -> Result<usize, String> {
     if let Some(i) = try_any(slots)? {
         return Ok(i);
     }
-    let held: Vec<Holder> = slots.iter().filter_map(|s| read_holder(&s.holder)).collect();
+    let held: Vec<Holder> = slots
+        .iter()
+        .filter_map(|s| read_holder(&s.holder))
+        .collect();
     let line = match held.iter().min_by_key(|h| h.since) {
         Some(h) if held.len() == 1 => heavy::waiting_line(h, unix_now()),
         Some(h) => format!(
@@ -370,7 +373,10 @@ fn tell_tile(holder_paths: &[PathBuf], done: &mpsc::Receiver<()>) {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or_else(horadric_hooks::port);
-    let headers = [(COMMAND_HEADER, "heavy"), (SESSION_HEADER, session.as_str())];
+    let headers = [
+        (COMMAND_HEADER, "heavy"),
+        (SESSION_HEADER, session.as_str()),
+    ];
     let say = |queued: Queued| {
         if let Ok(body) = serde_json::to_string(&queued) {
             let _ = client::post(owner, HEAVY_PATH, &headers, &body);

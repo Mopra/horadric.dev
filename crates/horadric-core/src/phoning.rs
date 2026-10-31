@@ -394,11 +394,17 @@ mod tests {
             phone: id.into(),
             key: key.into(),
             name: id.to_uppercase(),
-            by: by.iter().map(|b| (format!("key of {b}"), b.to_string())).collect(),
+            by: by
+                .iter()
+                .map(|b| (format!("key of {b}"), b.to_string()))
+                .collect(),
         };
         let k = known(
             &[phone("old", ""), phone("mine", "P1")],
-            &[served("mine", "P1", &["me"]), served("far", "P2", &["laptop", "vps"])],
+            &[
+                served("mine", "P1", &["me"]),
+                served("far", "P2", &["laptop", "vps"]),
+            ],
         );
         let ids: Vec<(&str, bool)> = k.iter().map(|k| (k.id.as_str(), k.here)).collect();
         assert_eq!(ids, [("old", true), ("mine", true), ("far", false)]);

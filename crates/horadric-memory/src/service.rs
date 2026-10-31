@@ -516,12 +516,7 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
                 behind = keeper.has_model() || !backlog.is_empty() || owed.is_some();
             }
             Some(Msg::Keep(job)) => {
-                kept(
-                    &mut keeper,
-                    &mut projects,
-                    &job.path,
-                    Some(&job.cwd),
-                );
+                kept(&mut keeper, &mut projects, &job.path, Some(&job.cwd));
             }
             Some(Msg::Model(Ok(model))) => {
                 keeper.set_model(*model);
@@ -572,12 +567,7 @@ fn sync_code(keeper: &mut Keeper<Embedder>, dir: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-fn kept(
-    keeper: &mut Keeper<Embedder>,
-    projects: &mut Projects,
-    path: &Path,
-    cwd: Option<&str>,
-) {
+fn kept(keeper: &mut Keeper<Embedder>, projects: &mut Projects, path: &Path, cwd: Option<&str>) {
     if let Err(e) = keeper.ingest(path, cwd, |c| projects.of(c), now()) {
         eprintln!("horadric: memory could not keep {}: {e}", path.display());
     }

@@ -122,9 +122,15 @@ mod tests {
 
     #[test]
     fn only_a_machine_the_relay_marks_team_is_a_teammates() {
-        assert_eq!(Kin::of(&json!({"join": 3, "id": "a", "kin": "team"})), Kin::Team);
+        assert_eq!(
+            Kin::of(&json!({"join": 3, "id": "a", "kin": "team"})),
+            Kin::Team
+        );
         assert_eq!(Kin::of(&json!({"join": 3, "id": "a"})), Kin::Own);
-        assert_eq!(Kin::of(&json!({"join": 3, "id": "a", "kin": "own"})), Kin::Own);
+        assert_eq!(
+            Kin::of(&json!({"join": 3, "id": "a", "kin": "own"})),
+            Kin::Own
+        );
         let list = json!({"brothers": [
             {"id": "a", "name": "Desk"},
             {"id": "b", "name": "Ann's laptop", "kin": "team"},

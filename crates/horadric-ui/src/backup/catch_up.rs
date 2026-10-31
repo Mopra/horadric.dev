@@ -54,7 +54,10 @@ pub fn fetch(vault: &dyn Vault, passphrase: &str, into: &Path) -> Result<usize, 
         let plain = open_bound(&key, &sealed, entry.path.as_bytes())
             .ok_or_else(|| format!("{} in the backup is damaged", entry.path))?;
         if crypto::hex(&crypto::sha256(&plain)) != entry.sha256 {
-            return Err(format!("{} in the backup is not what was backed up", entry.path));
+            return Err(format!(
+                "{} in the backup is not what was backed up",
+                entry.path
+            ));
         }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -86,7 +89,8 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("horadric-catch-up-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("horadric-catch-up-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -124,12 +128,18 @@ mod tests {
         mark_caught(&into, &["p"]);
         assert_eq!(fetch(&vault, "passphrase", &into).unwrap(), 0);
         assert!(caught(&into, &["p"]));
-        assert!(!caught(&into, &["p", "q"]), "a project opened since is read for");
+        assert!(
+            !caught(&into, &["p", "q"]),
+            "a project opened since is read for"
+        );
 
         write(&state, "memory/brethren/p-1.jsonl", "a longer log");
         back_up(&state, &vault, "passphrase", 200).unwrap();
         assert_eq!(fetch(&vault, "passphrase", &into).unwrap(), 1);
-        assert!(!caught(&into, &["p"]), "a fetch that changed the copy asks for a read");
+        assert!(
+            !caught(&into, &["p"]),
+            "a fetch that changed the copy asks for a read"
+        );
         let log = std::fs::read_to_string(local(&into, "memory/brethren/p-1.jsonl")).unwrap();
         assert_eq!(log, "a longer log");
         let _ = std::fs::remove_dir_all(&state);
@@ -139,6 +149,9 @@ mod tests {
     #[test]
     fn no_backup_there_is_nothing_to_fetch() {
         let into = scratch("none");
-        assert_eq!(fetch(&MemoryVault::default(), "passphrase", &into).unwrap(), 0);
+        assert_eq!(
+            fetch(&MemoryVault::default(), "passphrase", &into).unwrap(),
+            0
+        );
     }
 }

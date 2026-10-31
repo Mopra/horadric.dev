@@ -1273,24 +1273,15 @@ mod tests {
         .unwrap();
         let mut k: Keeper<Topics> = Keeper::open(&dir).unwrap();
         let project = |cwd: &str| Some(cwd.to_lowercase());
-        assert_eq!(
-            k.ingest(&file, None, project, NOW).unwrap(),
-            1
-        );
-        assert_eq!(
-            k.ingest(&file, None, project, NOW).unwrap(),
-            0
-        );
+        assert_eq!(k.ingest(&file, None, project, NOW).unwrap(), 1);
+        assert_eq!(k.ingest(&file, None, project, NOW).unwrap(), 0);
         let mut text = fs::read_to_string(&file).unwrap();
         text += &line("user", "and a dog");
         fs::write(&file, text).unwrap();
         // A restart remembers how far it had read.
         drop(k);
         let mut k: Keeper<Topics> = Keeper::open(&dir).unwrap();
-        assert_eq!(
-            k.ingest(&file, None, project, NOW).unwrap(),
-            1
-        );
+        assert_eq!(k.ingest(&file, None, project, NOW).unwrap(), 1);
         let kept: Vec<&Chunk> = k.store.chunks().map(|(_, c)| c).collect();
         assert_eq!(kept.len(), 2);
         assert_eq!(kept[0].project, "c:\\proj");
@@ -1305,16 +1296,8 @@ mod tests {
         // A transcript no project claims is passed over, and not read again.
         let other = dir.with_extension("other.jsonl");
         fs::write(&other, line("user", "hello")).unwrap();
-        assert_eq!(
-            k.ingest(&other, None, |_| None, NOW)
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            k.ingest(&other, None, project, NOW)
-                .unwrap(),
-            0
-        );
+        assert_eq!(k.ingest(&other, None, |_| None, NOW).unwrap(), 0);
+        assert_eq!(k.ingest(&other, None, project, NOW).unwrap(), 0);
         fs::remove_dir_all(&dir).unwrap();
         fs::remove_file(&file).unwrap();
         fs::remove_file(&other).unwrap();

@@ -61,7 +61,12 @@ pub fn choose(dir: &Path, typed: &str) -> Result<Option<String>, String> {
 
 /// The name to go by: the override, the chosen one, the computer's, then
 /// `fallback`, the first that is not blank.
-pub fn pick(env: Option<&str>, chosen: Option<&str>, computer: Option<&str>, fallback: &str) -> String {
+pub fn pick(
+    env: Option<&str>,
+    chosen: Option<&str>,
+    computer: Option<&str>,
+    fallback: &str,
+) -> String {
     [env, chosen, computer]
         .into_iter()
         .flatten()
@@ -86,8 +91,14 @@ mod tests {
 
     #[test]
     fn the_override_then_the_chosen_then_the_computer() {
-        assert_eq!(pick(Some("dev"), Some("Laptop"), Some("DESKTOP-1"), "PC"), "dev");
-        assert_eq!(pick(Some(" "), Some("Laptop"), Some("DESKTOP-1"), "PC"), "Laptop");
+        assert_eq!(
+            pick(Some("dev"), Some("Laptop"), Some("DESKTOP-1"), "PC"),
+            "dev"
+        );
+        assert_eq!(
+            pick(Some(" "), Some("Laptop"), Some("DESKTOP-1"), "PC"),
+            "Laptop"
+        );
         assert_eq!(pick(None, None, Some("DESKTOP-1"), "PC"), "DESKTOP-1");
         assert_eq!(pick(None, None, None, "PC"), "PC");
     }
@@ -100,7 +111,11 @@ mod tests {
         assert_eq!(choose(&dir, " Laptop "), Ok(Some("Laptop".into())));
         assert_eq!(chosen(&dir).as_deref(), Some("Laptop"));
         assert!(choose(&dir, "a\tb").is_err());
-        assert_eq!(chosen(&dir).as_deref(), Some("Laptop"), "a refused name changes nothing");
+        assert_eq!(
+            chosen(&dir).as_deref(),
+            Some("Laptop"),
+            "a refused name changes nothing"
+        );
         assert_eq!(choose(&dir, ""), Ok(None));
         assert_eq!(chosen(&dir), None);
         assert_eq!(choose(&dir, ""), Ok(None), "forgetting twice is fine");

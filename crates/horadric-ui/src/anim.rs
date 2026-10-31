@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 
 use horadric_core::Phase;
 
+use crate::layout::Hit;
 use crate::motion::{
     self, ARRIVAL, ENTER, FLIP, FRAME_BREATH, FRAME_FAST, FRAME_ORBIT, HOVER, SETTLE,
 };
-use crate::layout::Hit;
 use crate::theme;
 
 /// How long a bay's key takes to rise: slower than a fade, since it is a
@@ -309,9 +309,7 @@ impl Glow {
     /// falls. Only under the cursor: a stone set down sheds none.
     pub fn dust(&self, which: Hit) -> Option<f32> {
         match (self.entered, self.last) {
-            (Some(at), Some(now)) if self.hot == Some(which) => {
-                dust_at(now.duration_since(at))
-            }
+            (Some(at), Some(now)) if self.hot == Some(which) => dust_at(now.duration_since(at)),
             _ => None,
         }
     }

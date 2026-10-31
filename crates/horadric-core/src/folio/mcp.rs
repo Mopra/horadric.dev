@@ -679,7 +679,9 @@ fn options(v: &Value) -> Option<Vec<(String, String)>> {
         list.iter()
             .filter_map(|o| {
                 let value = o["const"].as_str()?.to_string();
-                let label = o["title"].as_str().map_or_else(|| value.clone(), str::to_string);
+                let label = o["title"]
+                    .as_str()
+                    .map_or_else(|| value.clone(), str::to_string);
                 Some((value, label))
             })
             .collect(),
@@ -761,16 +763,24 @@ impl ElicitField {
             } => {
                 let n = raw.chars().count();
                 if min_len.is_some_and(|m| n < m) {
-                    return Err(format!("{label} needs at least {} characters.", min_len.unwrap_or(0)));
+                    return Err(format!(
+                        "{label} needs at least {} characters.",
+                        min_len.unwrap_or(0)
+                    ));
                 }
                 if max_len.is_some_and(|m| n > m) {
-                    return Err(format!("{label} takes at most {} characters.", max_len.unwrap_or(0)));
+                    return Err(format!(
+                        "{label} takes at most {} characters.",
+                        max_len.unwrap_or(0)
+                    ));
                 }
                 if format == "email" && !raw.contains('@') {
                     return Err(format!("{label} should be an email address."));
                 }
                 if format == "uri" && !raw.contains(':') {
-                    return Err(format!("{label} should be an address, such as https://\u{2026}"));
+                    return Err(format!(
+                        "{label} should be an address, such as https://\u{2026}"
+                    ));
                 }
                 Value::String(raw.to_string())
             }
@@ -909,8 +919,11 @@ mod tests {
 
     fn answer(f: &mut Folio, line: &str, body: Value) {
         let id = id_of(line);
-        f.feed(&json!({"type": "control_response", "response": {
-            "subtype": "success", "request_id": id, "response": body}}).to_string());
+        f.feed(
+            &json!({"type": "control_response", "response": {
+            "subtype": "success", "request_id": id, "response": body}})
+            .to_string(),
+        );
     }
 
     fn cards(f: &Folio) -> Vec<&McpCard> {
@@ -926,7 +939,10 @@ mod tests {
     fn a_form_is_read_in_the_server_s_order_and_answered() {
         let mut f = Folio::new();
         assert!(f.feed(FORM));
-        assert!(f.take_outbox().is_empty(), "the human answers, not the Folio");
+        assert!(
+            f.take_outbox().is_empty(),
+            "the human answers, not the Folio"
+        );
         let Some(Block::Elicitation(e)) = f.blocks.last() else {
             panic!("no card");
         };
@@ -977,7 +993,10 @@ mod tests {
     #[test]
     fn fields_check_what_is_typed() {
         let field = |v: Value, required: bool| ElicitField::parse("x", &v, required);
-        let n = field(json!({"type": "integer", "minimum": 1, "maximum": 9}), false);
+        let n = field(
+            json!({"type": "integer", "minimum": 1, "maximum": 9}),
+            false,
+        );
         assert_eq!(n.value("4"), Ok(Some(json!(4))));
         assert_eq!(n.value(""), Ok(None));
         assert!(n.value("4.5").is_err());
@@ -1041,9 +1060,11 @@ mod tests {
 
         let mut r = Folio::new();
         r.feed(URL);
-        r.feed_sent(
-            &elicitation_response("2a10377c", ElicitAction::Decline, None),
-        );
+        r.feed_sent(&elicitation_response(
+            "2a10377c",
+            ElicitAction::Decline,
+            None,
+        ));
         let Some(Block::Elicitation(e)) = r.blocks.last() else {
             panic!("no card");
         };
@@ -1070,7 +1091,10 @@ mod tests {
         // The same trouble at the next turn's init adds no card.
         f.feed(r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"elicit","status":"connected"},{"name":"broken","status":"failed"},{"name":"remote","status":"needs-auth"}]}"#);
         assert_eq!(cards(&f).len(), 1);
-        assert_eq!(f.mcp.servers[1].error, "Connection closed", "kept from status");
+        assert_eq!(
+            f.mcp.servers[1].error, "Connection closed",
+            "kept from status"
+        );
         assert_eq!(f.mcp_wanted(), McpWant::No);
 
         // `/mcp` lists them all.
@@ -1083,7 +1107,9 @@ mod tests {
     #[test]
     fn a_new_failure_at_init_asks_why() {
         let mut f = Folio::new();
-        f.feed(r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"x","status":"failed"}]}"#);
+        f.feed(
+            r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"x","status":"failed"}]}"#,
+        );
         assert_eq!(cards(&f).len(), 1);
         let line = f.mcp_status();
         answer(
@@ -1110,7 +1136,10 @@ mod tests {
             json!({"authUrl": "https://auth.example.com/authorize?x=1",
                 "requiresUserAction": true, "callbackExpected": true, "callbackPort": 46445}),
         );
-        assert_eq!(f.take_mcp_pages(), ["https://auth.example.com/authorize?x=1"]);
+        assert_eq!(
+            f.take_mcp_pages(),
+            ["https://auth.example.com/authorize?x=1"]
+        );
         assert_eq!(
             cards(&f)[0].servers[1].sign_in.as_deref(),
             Some("https://auth.example.com/authorize?x=1")
@@ -1146,7 +1175,10 @@ mod tests {
             of("plugin:context7:context7", "plugin"),
             Some(McpRemoval::Plugin("context7".into()))
         );
-        assert_eq!(of("claude.ai Gmail", "claudeai"), Some(McpRemoval::ClaudeAi));
+        assert_eq!(
+            of("claude.ai Gmail", "claudeai"),
+            Some(McpRemoval::ClaudeAi)
+        );
         assert_eq!(of("db", "user"), Some(McpRemoval::Scope("user".into())));
         assert_eq!(of("elicit", "dynamic"), None);
         assert_eq!(of("plugin:", "plugin"), None);
@@ -1165,9 +1197,16 @@ mod tests {
         let s = f.mcp.servers.iter().find(|s| s.name == "remote").unwrap();
         assert!(s.removed && !s.asking_remove);
         // A turn's init keeps it removed.
-        f.feed(&json!({"type": "system", "subtype": "init", "session_id": "s",
-            "mcp_servers": [{"name": "remote", "status": "disabled"}]}).to_string());
-        assert!(f.mcp.servers.iter().any(|s| s.name == "remote" && s.removed));
+        f.feed(
+            &json!({"type": "system", "subtype": "init", "session_id": "s",
+            "mcp_servers": [{"name": "remote", "status": "disabled"}]})
+            .to_string(),
+        );
+        assert!(f
+            .mcp
+            .servers
+            .iter()
+            .any(|s| s.name == "remote" && s.removed));
     }
 
     #[test]
@@ -1177,10 +1216,12 @@ mod tests {
         let reply = STATUS.replace("\"ID\"", &format!("\"{}\"", id_of(&line)));
         f.feed(&reply);
         let sign_in = f.mcp_sign_in("remote");
-        f.feed(&json!({"type": "control_response", "response": {"subtype": "error",
+        f.feed(
+            &json!({"type": "control_response", "response": {"subtype": "error",
             "request_id": id_of(&sign_in),
             "error": "Server type \"stdio\" does not support OAuth authentication"}})
-        .to_string());
+            .to_string(),
+        );
         let s = &cards(&f)[0].servers[1];
         assert_eq!(s.sign_in, None);
         assert!(s.sign_in_failed);
@@ -1188,9 +1229,11 @@ mod tests {
         assert!(f.take_mcp_pages().is_empty());
 
         let again = f.mcp_reconnect("broken");
-        f.feed(&json!({"type": "control_response", "response": {"subtype": "error",
+        f.feed(
+            &json!({"type": "control_response", "response": {"subtype": "error",
             "request_id": id_of(&again), "error": "Connection closed"}})
-        .to_string());
+            .to_string(),
+        );
         assert!(!cards(&f)[0].servers[0].busy);
         assert_eq!(f.mcp_wanted(), McpWant::Now, "the status may have moved");
         let off = f.mcp_toggle("broken", false);

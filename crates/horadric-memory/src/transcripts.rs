@@ -129,7 +129,6 @@ fn claude_line(v: &Value, out: &mut Scan) {
     }
 }
 
-
 fn text_of(v: &Value, key: &str) -> Option<String> {
     v[key]
         .as_str()

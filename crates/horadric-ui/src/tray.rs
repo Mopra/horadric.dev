@@ -22,8 +22,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, DestroyIcon, GetSystemMetrics, HICON, ICONINFO, SM_CXICON, SM_CXSMICON,
 };
 
-use horadric_core::warriv::Drive;
 use horadric_core::experience;
+use horadric_core::warriv::Drive;
 
 use crate::joining;
 use crate::menu::{self, Item};
@@ -126,7 +126,9 @@ impl Tray {
             hwnd,
             callback,
             icon: make_icon(small, None),
-            frames: (0..FLAME_FRAMES).map(|i| make_icon(small, Some(i))).collect(),
+            frames: (0..FLAME_FRAMES)
+                .map(|i| make_icon(small, Some(i)))
+                .collect(),
             big: (0..FLAME_FRAMES).map(|i| make_icon(big, Some(i))).collect(),
             big_rest: make_icon(big, None),
             frame: None,

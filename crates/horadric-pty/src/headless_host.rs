@@ -905,7 +905,9 @@ mod tests {
         };
         let json = serde_json::to_string(&new).unwrap();
         assert_eq!(serde_json::from_str::<HostInfo>(&json).unwrap(), new);
-        assert!(!serde_json::to_string(&old).unwrap().contains("conversation"));
+        assert!(!serde_json::to_string(&old)
+            .unwrap()
+            .contains("conversation"));
     }
 
     /// Every event up to and with the first that `want` takes.

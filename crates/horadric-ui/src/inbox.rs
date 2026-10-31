@@ -125,15 +125,28 @@ mod tests {
             }])
             .unwrap()
         };
-        let bash = Ask::permission("Bash", Some(&serde_json::json!({"command": "ls"})), false, now);
+        let bash = Ask::permission(
+            "Bash",
+            Some(&serde_json::json!({"command": "ls"})),
+            false,
+            now,
+        );
         let a = say(&bash);
         assert_eq!(a.title, "s needs permission for Bash");
         assert_eq!(a.text, bash.detail);
         let input = serde_json::json!({"questions": [{"question": "Tabs?", "options": []}]});
         let q = Ask::permission("AskUserQuestion", Some(&input), false, now);
         let a = say(&q);
-        assert_eq!((a.title.as_str(), a.text.as_str()), ("s has a question", "Tabs?"));
-        let plan = Ask::permission("ExitPlanMode", Some(&serde_json::json!({"plan": "x"})), false, now);
+        assert_eq!(
+            (a.title.as_str(), a.text.as_str()),
+            ("s has a question", "Tabs?")
+        );
+        let plan = Ask::permission(
+            "ExitPlanMode",
+            Some(&serde_json::json!({"plan": "x"})),
+            false,
+            now,
+        );
         assert_eq!(say(&plan).title, "s has a plan for you");
     }
 
