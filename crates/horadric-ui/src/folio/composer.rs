@@ -145,6 +145,9 @@ struct Saved {
     /// Prompts queued while Claude worked, so a reload loses none.
     #[serde(default)]
     queue: Vec<SavedPrompt>,
+    /// Each edit waits for the human, see [`Folio::review`].
+    #[serde(default)]
+    review: bool,
 }
 
 /// A queued prompt as it is kept, its images as the API takes them.
@@ -205,6 +208,8 @@ pub(super) struct Input {
     pub(super) menu_at: Option<Rect>,
     ime: Option<[i32; 4]>,
     editing: Option<Editing>,
+    /// Each edit waits for the human; kept with the draft.
+    pub(super) review: bool,
 }
 
 impl Input {
@@ -234,6 +239,7 @@ impl Input {
             menu_at: None,
             ime: None,
             editing: None,
+            review: false,
         }
     }
 
@@ -258,6 +264,7 @@ impl Input {
             self.ed = Editor::from_parts(&saved.draft, saved.pastes);
         }
         self.history = History::new(saved.history);
+        self.review = saved.review;
         if self.queue.is_empty() && !saved.queue.is_empty() {
             self.restored = true;
             self.queue = (saved.queue.into_iter())
@@ -291,6 +298,7 @@ impl Input {
                         .collect(),
                 })
                 .collect(),
+            review: self.review,
         };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -398,6 +406,7 @@ fn write(chat: &mut Chat, line: &str) -> bool {
 /// the next queued prompt. Called as lines are read and as it paints.
 pub(super) fn tend(id: &str, chat: &mut Chat) {
     chat.input.ensure(id);
+    chat.folio.review = chat.input.review;
     if chat.hosted.is_none() || chat.ended {
         return;
     }
@@ -945,6 +954,20 @@ fn pick(chat: &mut Chat, how: How) -> bool {
                 let line = chat.folio.get_context_usage();
                 write(chat, &line);
             }
+            "review" => {
+                chat.input.review = !chat.input.review;
+                chat.folio.review = chat.input.review;
+                chat.input.changed();
+                // A claude that has not got the hook yet starts again.
+                super::wake();
+                chat.input.notice = Some(
+                    match chat.input.review {
+                        true => "Each Edit and Write now waits for you as a diff to allow, change or deny.",
+                        false => "Edits land as the permission mode says again.",
+                    }
+                    .into(),
+                );
+            }
             "terminal" => {
                 if let Some(id) = chat.input.key.clone() {
                     crate::app::push(crate::app::Input::FolioToTerminal(id));
@@ -1041,6 +1064,12 @@ fn settings_items(chat: &Chat) -> Vec<Item> {
     if tasks > 0 {
         items.push(row("tasks", "Tasks", controls::tasks_line(tasks)));
     }
+    let review = if chat.input.review {
+        "Each edit waits for you"
+    } else {
+        "Edits land as the mode says"
+    };
+    items.push(row("review", "Review edits", review.to_string()));
     if terminal_ready(chat) {
         items.push(row(
             "terminal",

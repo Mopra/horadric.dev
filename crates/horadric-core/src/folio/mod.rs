@@ -138,6 +138,40 @@ pub enum Reply<'a> {
     Always,
     /// Deny, with what Claude should do instead; empty says only no.
     Deny(&'a str),
+    /// Allow an edit with the human's own text in place of what Claude
+    /// wrote (see [`edit_text`]).
+    Change(&'a str),
+}
+
+/// The id Horadric's PreToolUse hook goes by, which the Folio registers
+/// at `initialize` for the edit tools, so that with [`Folio::review`] on
+/// each edit comes as an ask whatever the permission mode.
+pub const REVIEW_HOOK: &str = "horadric-review";
+
+/// How long, in seconds, the CLI waits for the review hook's answer. An
+/// answer that never comes blocks the edit (checked on 2.1.316), so this
+/// is long: while no app is attached a reviewed edit waits for one, as
+/// an ask does.
+const REVIEW_WAIT_S: u64 = 24 * 60 * 60;
+
+/// The tools whose work review holds back.
+const EDIT_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit";
+
+/// The field of an edit tool's input holding the text it writes, which
+/// the human may change before it lands.
+fn edit_field(tool: &str) -> Option<&'static str> {
+    match tool {
+        "Edit" => Some("new_string"),
+        "Write" => Some("content"),
+        "NotebookEdit" => Some("new_source"),
+        _ => None,
+    }
+}
+
+/// The text an edit tool's `input` writes, for the human to change. None
+/// for a tool with no one such text, such as MultiEdit.
+pub fn edit_text(tool: &str, input: &Value) -> Option<String> {
+    input[edit_field(tool)?].as_str().map(str::to_string)
 }
 
 /// Something the CLI says about the session between replies.
@@ -390,6 +424,9 @@ pub struct Folio {
     /// The error an `assistant` message of this turn carried, which the
     /// turn's `result` only flags.
     turn_error: Option<String>,
+    /// Each Edit or Write waits for the human, shown as a diff to accept,
+    /// change or reject, even in a mode that would let it through.
+    pub review: bool,
     /// How the last [`Folio::rewind_files`] went, the CLI's error when it
     /// did not, until the app takes it.
     pub files_rewound: Option<Result<(), String>>,
@@ -405,6 +442,9 @@ pub struct Folio {
     outbox: Vec<(String, String)>,
     /// Whether `initialize` went to this process, sent here or replayed.
     pub initialized: bool,
+    /// Whether that `initialize` registered the review hook, which only
+    /// one sent with [`Folio::review`] on does.
+    pub review_hooked: bool,
     /// The input of each AskUserQuestion and ExitPlanMode ask, by request
     /// id, for the answer to echo back whether or not it named its tool use.
     ask_inputs: HashMap<String, Value>,
@@ -685,6 +725,7 @@ impl Folio {
                 let kind = match v["request"]["subtype"].as_str().unwrap_or_default() {
                     "initialize" => {
                         self.initialized = true;
+                        self.review_hooked = !v["request"]["hooks"].is_null();
                         Sent::Initialize
                     }
                     "set_permission_mode" => Sent::Mode,
@@ -837,6 +878,13 @@ impl Folio {
                 serde_json::json!({"behavior": "deny", "message": reason.trim()}),
             ),
             Reply::Deny(_) => control_response(request_id, false, input),
+            Reply::Change(text) => {
+                let mut input = input;
+                if let Some(field) = edit_field(input_tool(&self.blocks, request_id)) {
+                    input[field] = Value::String(text.to_string());
+                }
+                control_response(request_id, true, input)
+            }
         })
     }
 
@@ -1064,7 +1112,19 @@ impl Folio {
     pub fn initialize(&mut self) -> String {
         self.initialized = true;
         let id = self.request(Sent::Initialize);
-        control_request_line(&id, "initialize", serde_json::json!({}))
+        // Hooks can only be given here. Only with review on, since an
+        // edit waits on the hook's answer, which no app gives while none
+        // is attached; once on, the answer is what turns review off.
+        self.review_hooked = self.review;
+        let fields = match self.review {
+            true => serde_json::json!({"hooks": {"PreToolUse": [{
+                "matcher": EDIT_TOOLS,
+                "hookCallbackIds": [REVIEW_HOOK],
+                "timeout": REVIEW_WAIT_S,
+            }]}}),
+            false => serde_json::json!({}),
+        };
+        control_request_line(&id, "initialize", fields)
     }
 
     /// `stop_task`, for a background task such as a subagent: the line
@@ -2084,6 +2144,24 @@ impl Folio {
         if request["subtype"] == "elicitation" {
             return self.elicitation(request_id, request);
         }
+        if request["subtype"] == "hook_callback" && request["callback_id"] == REVIEW_HOOK {
+            // An ask makes the CLI ask as `can_use_tool`, which becomes
+            // the ask card; nothing said lets the edit go as the mode
+            // would.
+            let tool = request["input"]["tool_name"].as_str().unwrap_or_default();
+            let edits = EDIT_TOOLS.split('|').any(|t| t == tool);
+            let answer = match self.review && edits {
+                true => serde_json::json!({"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "ask",
+                    "permissionDecisionReason": "The human reviews each edit.",
+                }}),
+                false => serde_json::json!({}),
+            };
+            self.outbox
+                .push((request_id.clone(), control_success(&request_id, answer)));
+            return false;
+        }
         if request["subtype"] != "can_use_tool" {
             // Unanswered, the CLI may wait on it for good. An error is what
             // it gets from any client that does not know a subtype.
@@ -2182,6 +2260,20 @@ impl Folio {
 fn said(v: &Value) -> Option<String> {
     let t = v.as_str()?.trim();
     (!t.is_empty()).then(|| t.to_string())
+}
+
+/// The tool of the ask `request_id` among `blocks`.
+fn input_tool<'a>(blocks: &'a [Block], request_id: &str) -> &'a str {
+    (blocks.iter())
+        .find_map(|b| match b {
+            Block::Ask {
+                request_id: r,
+                tool,
+                ..
+            } if r == request_id => Some(tool.as_str()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// What a slash command printed, from the user message the CLI wraps it
@@ -2964,6 +3056,58 @@ mod tests {
         }
         assert_eq!(f.blocks[1], Block::Thinking("Hmm, yes.".into()));
         assert_eq!(f.blocks.len(), 2);
+    }
+
+    #[test]
+    fn review_turns_each_edit_into_an_ask_that_can_be_changed() {
+        let mut f = Folio::new();
+        let init: Value = serde_json::from_str(&f.initialize()).unwrap();
+        assert!(init["request"]["hooks"].is_null() && !f.review_hooked);
+        let mut f = Folio::new();
+        f.review = true;
+        let line = f.initialize();
+        let init: Value = serde_json::from_str(&line).unwrap();
+        assert!(f.review_hooked);
+        let mut g = Folio::new();
+        g.feed_sent(&line);
+        assert!(g.review_hooked);
+        f.review = false;
+        let hook = &init["request"]["hooks"]["PreToolUse"][0];
+        assert_eq!(hook["hookCallbackIds"][0], REVIEW_HOOK);
+        assert!(hook["matcher"].as_str().unwrap().contains("Write"));
+        let callback = |id: &str, tool: &str| {
+            serde_json::json!({"type": "control_request", "request_id": id, "request": {
+                "subtype": "hook_callback", "callback_id": REVIEW_HOOK,
+                "input": {"hook_event_name": "PreToolUse", "tool_name": tool,
+                    "tool_input": {}}}})
+            .to_string()
+        };
+        // Off, the edit goes as the mode says.
+        f.feed(&callback("h1", "Write"));
+        let out: Value = serde_json::from_str(&f.take_outbox()[0]).unwrap();
+        assert_eq!(out["response"]["request_id"], "h1");
+        assert_eq!(out["response"]["response"], serde_json::json!({}));
+        f.review = true;
+        f.feed(&callback("h2", "Write"));
+        let out: Value = serde_json::from_str(&f.take_outbox()[0]).unwrap();
+        let said = &out["response"]["response"]["hookSpecificOutput"];
+        assert_eq!(said["permissionDecision"], "ask");
+        // Anything but an edit is not held back.
+        f.feed(&callback("h3", "Bash"));
+        let out: Value = serde_json::from_str(&f.take_outbox()[0]).unwrap();
+        assert_eq!(out["response"]["response"], serde_json::json!({}));
+        // The ask that follows can land with the human's own text.
+        let input = serde_json::json!({"file_path": "a.txt", "content": "four"});
+        assert_eq!(edit_text("Write", &input).as_deref(), Some("four"));
+        f.feed(&serde_json::json!({"type": "control_request", "request_id": "r1",
+            "request": {"subtype": "can_use_tool", "tool_name": "Write", "input": input}})
+            .to_string());
+        let line = f.reply("r1", Reply::Change("five")).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["response"]["response"]["behavior"], "allow");
+        assert_eq!(v["response"]["response"]["updatedInput"]["content"], "five");
+        assert_eq!(v["response"]["response"]["updatedInput"]["file_path"], "a.txt");
+        assert_eq!(edit_text("MultiEdit", &serde_json::json!({})), None);
     }
 
     #[test]

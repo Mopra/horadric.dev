@@ -1077,6 +1077,21 @@ unsafe extern "system" fn router_proc(
 
 /// Writes changed drafts a moment after the last change. Each call puts
 /// the moment off again, so typing writes once it pauses.
+/// Has [`drain`] look at every Folio soon, lines or not.
+fn wake() {
+    let router = router();
+    if router != 0 {
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(router as *mut c_void)),
+                WM_FOLIO_LINES,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    }
+}
+
 fn save_soon() {
     let router = router();
     if router != 0 {
@@ -1097,6 +1112,7 @@ fn drain() {
     let mut changed: Vec<(HWND, bool)> = Vec::new();
     let mut tell: Vec<Input> = Vec::new();
     let mut banished: Vec<String> = Vec::new();
+    let mut rehook: Vec<String> = Vec::new();
     let busy = CHATS.with(|c| {
         let Ok(mut chats) = c.try_borrow_mut() else {
             return true;
@@ -1118,6 +1134,12 @@ fn drain() {
                 }
                 moved = true;
             }
+            // Review turned on in a claude whose `initialize` went without
+            // its hook: it starts again to register it.
+            let hooked = chat.folio.review_hooked || !chat.folio.initialized;
+            if chat.input.review && !hooked && chat.between_turns() {
+                rehook.push(id.clone());
+            }
             let events: Vec<Event> = match chat.inbox.lock() {
                 Ok(mut q) => q.drain(..).collect(),
                 Err(_) => continue,
@@ -1125,6 +1147,8 @@ fn drain() {
             if events.is_empty() && !moved {
                 continue;
             }
+            // Before the lines, which may ask whether an edit waits.
+            chat.folio.review = chat.input.review;
             let (cleared, live) = (chat.folio.cleared, chat.live);
             for event in events {
                 match event {
@@ -1226,6 +1250,9 @@ fn drain() {
                 LPARAM(0),
             );
         }
+    }
+    for id in rehook {
+        restart(&id, "Each Edit and Write now waits for you.", false);
     }
     // Before the repaint, which draws over the page that burns.
     for id in banished {

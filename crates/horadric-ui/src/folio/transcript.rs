@@ -87,6 +87,9 @@ pub(super) enum Act {
     All(String),
     /// Ask: allow, and add its suggested rules.
     Always(String),
+    /// Edit ask: open the field holding the text it writes, or let it
+    /// land with what the field holds.
+    Change(String),
     /// Ask: open the reason field, or deny with what it holds.
     Deny(String),
     /// Ask or plan: close the field without answering.
@@ -128,6 +131,9 @@ pub(super) enum Act {
 pub(super) fn deny_field(id: &str) -> String {
     format!("deny:{id}")
 }
+pub(super) fn change_field(id: &str) -> String {
+    format!("change:{id}")
+}
 pub(super) fn keep_field(id: &str) -> String {
     format!("keep:{id}")
 }
@@ -167,6 +173,8 @@ pub(super) struct State {
     /// Asks whose deny reason is open, plans whose feedback is.
     pub(super) denying: HashSet<String>,
     pub(super) keeping: HashSet<String>,
+    /// Edit asks whose text is open to change.
+    pub(super) changing: HashSet<String>,
     /// Per question card, per question, the options picked.
     pub(super) picks: HashMap<String, Vec<BTreeSet<usize>>>,
     pub(super) todos_open: bool,
@@ -344,8 +352,10 @@ fn stamp(i: usize, b: &Block, open: bool, st: &State) -> u64 {
         } => {
             (*state as u8).hash(&mut h);
             st.denying.contains(request_id).hash(&mut h);
+            st.changing.contains(request_id).hash(&mut h);
             st.all.contains(request_id).hash(&mut h);
             hash_field(&mut h, st, &deny_field(request_id));
+            hash_field(&mut h, st, &change_field(request_id));
         }
         Block::Question {
             request_id,

@@ -8,7 +8,7 @@ use windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_EMERGENCY_BREAK;
 
 use super::flow;
 use super::rich::{Ctx, Scene, F};
-use super::transcript::{deny_field, keep_field, other_field, Act, State};
+use super::transcript::{change_field, deny_field, keep_field, other_field, Act, State};
 use super::view::{Hit, CARET_W};
 use crate::field::utf16_at;
 use crate::folio_look as look;
@@ -165,6 +165,32 @@ pub(super) unsafe fn ask(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
     let right = w - PAD;
     let always = flow::always_label(suggestions);
     match state {
+        AskState::Waiting if st.changing.contains(request_id) => {
+            let id = change_field(request_id);
+            let hint = "What it writes instead";
+            y = field(cx, &mut s, st, &id, hint, PAD, y, inner) + 10.0;
+            let say = "Shift+Enter for a new line";
+            s.line(say, F::Small, Rect::new(PAD, y, inner, 18.0), cx.pal.faint);
+            let x = button(
+                cx,
+                &mut s,
+                right,
+                y,
+                "Allow as changed",
+                true,
+                Hit::Tr(Act::Change(request_id.clone())),
+            );
+            button(
+                cx,
+                &mut s,
+                x - 8.0,
+                y,
+                "Cancel",
+                false,
+                Hit::Tr(Act::Cancel(request_id.clone())),
+            );
+            y += BUTTON_H;
+        }
         AskState::Waiting if st.denying.contains(request_id) => {
             let id = deny_field(request_id);
             let hint = "What should be done instead? (optional)";
@@ -213,6 +239,17 @@ pub(super) unsafe fn ask(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
                     "Always allow",
                     false,
                     Hit::Tr(Act::Always(request_id.clone())),
+                );
+            }
+            if horadric_core::folio::edit_text(tool, input).is_some() {
+                x = button(
+                    cx,
+                    &mut s,
+                    x - 8.0,
+                    y,
+                    "Change",
+                    false,
+                    Hit::Tr(Act::Change(request_id.clone())),
                 );
             }
             button(
