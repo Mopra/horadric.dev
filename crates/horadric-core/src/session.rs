@@ -183,6 +183,10 @@ pub struct Session {
     /// after the primary's Stop, until its report wakes Claude again.
     #[serde(skip)]
     pub roster: Option<Vec<ModAgent>>,
+    /// What its `horadric heavy` last said while waiting for a slot, and
+    /// when. See [`Session::queued_line`].
+    #[serde(skip)]
+    pub heavy: Option<(crate::heavy::Queued, SystemTime)>,
     /// When the session last sent any event, a subagent's included: a
     /// roster that long unheard is not believed, see [`ROSTER_STALE`].
     #[serde(skip)]
@@ -277,6 +281,7 @@ impl Session {
             agents: Vec::new(),
             agent_types: Vec::new(),
             roster: None,
+            heavy: None,
             heard_at: None,
             stream_agents: None,
             band: Default::default(),
@@ -389,6 +394,17 @@ impl Session {
 
     /// Applies a hook event. Returns true when the phase changed.
     pub fn apply(&mut self, event: &HookEvent, now: SystemTime) -> bool {
+        // Said again every few seconds by the command, not by the agent, so
+        // it must not count as the session being heard from.
+        if event.hook_event_name == HookEvent::HEAVY {
+            self.heavy = event
+                .tool_input
+                .clone()
+                .and_then(|v| serde_json::from_value::<crate::heavy::Queued>(v).ok())
+                .filter(|q| q.waiting)
+                .map(|q| (q, now));
+            return false;
+        }
         // Horadric's own events carry no id. A different id is someone
         // else's conversation wearing this tile's tag: Claude Code's
         // background daemon hands the environment of the session that
@@ -525,6 +541,23 @@ impl Session {
             self.ask = None;
         }
         changed
+    }
+
+    /// The tile's line while its `horadric heavy` waits for a slot, so a
+    /// session queued behind another's tests does not look stuck. None
+    /// once it got one, and once it has not said so for
+    /// [`crate::heavy::QUEUED_STALE`] seconds: a waiter killed while it
+    /// waits never says it stopped.
+    pub fn queued_line(&self, now: SystemTime) -> Option<String> {
+        let (queued, heard) = self.heavy.as_ref()?;
+        let quiet = now.duration_since(*heard).unwrap_or_default();
+        if quiet.as_secs() >= crate::heavy::QUEUED_STALE || self.phase != Phase::Working {
+            return None;
+        }
+        let unix = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        Some(crate::heavy::queued_line(&queued.holders, unix))
     }
 
     /// Takes what the program says about itself with OSC 7501: its most
@@ -1083,6 +1116,35 @@ mod tests {
 
     fn said(phase: Phase, line: &str) -> Option<(Phase, Option<String>)> {
         Some((phase, Some(line.to_string())))
+    }
+
+    fn heavy(waiting: bool) -> HookEvent {
+        let queued = crate::heavy::Queued {
+            waiting,
+            holders: Vec::new(),
+        };
+        HookEvent {
+            tool_input: serde_json::to_value(queued).ok(),
+            ..HookEvent::synthetic(HookEvent::HEAVY)
+        }
+    }
+
+    #[test]
+    fn a_heavy_wait_shows_until_it_ends_or_goes_quiet() {
+        let mut s = Session::new("t", "t", "C:/repo");
+        let t0 = now();
+        s.apply(&ev("UserPromptSubmit"), t0);
+        assert!(!s.apply(&heavy(true), t0));
+        assert_eq!(s.queued_line(t0).as_deref(), Some("queued for heavy"));
+        let stale = t0 + Duration::from_secs(crate::heavy::QUEUED_STALE);
+        assert_eq!(s.queued_line(stale), None);
+        s.apply(&heavy(true), t0);
+        s.apply(&heavy(false), t0);
+        assert_eq!(s.queued_line(t0), None);
+        // A turn that ended while it waited shows no queue.
+        s.apply(&heavy(true), t0);
+        s.apply(&ev("Stop"), t0);
+        assert_eq!(s.queued_line(t0), None);
     }
 
     #[test]

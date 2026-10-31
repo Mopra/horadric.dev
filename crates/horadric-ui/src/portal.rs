@@ -140,18 +140,28 @@ pub enum Sender {
 }
 
 /// Opens a frame from a channel not yet known: with each paired phone's
-/// key, then with the ticket's while it lasts. `None` when no key opens
-/// it, which is every frame from a phone that was forgotten.
+/// key (and the key it had before it upgraded to a key pair), then with
+/// each key derived for a phone another brother vouched for (`served`,
+/// id and key), then with the ticket's while it lasts. `None` when no key
+/// opens it, which is every frame from a phone that was forgotten.
 #[cfg(windows)]
-pub fn identify(config: &Config, sealed: &[u8], now: u64) -> Option<(Sender, Value)> {
+pub fn identify(
+    config: &Config,
+    served: &[(String, [u8; 32])],
+    sealed: &[u8],
+    now: u64,
+) -> Option<(Sender, Value)> {
     let read = |key: &[u8; 32]| -> Option<Value> {
         serde_json::from_slice(&crate::portal_crypto::open(key, sealed)?).ok()
     };
-    for phone in &config.phones {
-        if let Some(key) = key32(&phone.key) {
-            if let Some(msg) = read(&key) {
-                return Some((Sender::Phone(phone.id.clone(), key), msg));
-            }
+    let paired = config
+        .phones
+        .iter()
+        .flat_map(|p| [(&p.id, &p.key), (&p.id, &p.was)])
+        .filter_map(|(id, k)| Some((id.clone(), key32(k)?)));
+    for (id, key) in paired.chain(served.iter().cloned()) {
+        if let Some(msg) = read(&key) {
+            return Some((Sender::Phone(id, key), msg));
         }
     }
     let key = config.ticket_key(now)?;
@@ -650,18 +660,24 @@ mod tests {
         let hi = br#"{"t":"hello"}"#;
         let sealed = |k: u8| crate::portal_crypto::seal(&[k; 32], hi);
         assert_eq!(
-            identify(&c, &sealed(1), 100),
+            identify(&c, &[], &sealed(1), 100),
             Some((Sender::Phone(phone, [1; 32]), json!({"t":"hello"})))
         );
         assert_eq!(
-            identify(&c, &sealed(8), 100),
+            identify(&c, &[], &sealed(8), 100),
             Some((Sender::Pairing([8; 32]), json!({"t":"hello"})))
+        );
+        // A phone another brother vouched for, by the key derived for it.
+        let served = [("far".to_string(), [5; 32])];
+        assert_eq!(
+            identify(&c, &served, &sealed(5), 100),
+            Some((Sender::Phone("far".into(), [5; 32]), json!({"t":"hello"})))
         );
         // The ticket's key opens nothing once it ran out, nor does the
         // old shared key or any other.
-        assert_eq!(identify(&c, &sealed(8), 400), None);
-        assert_eq!(identify(&c, &sealed(9), 100), None);
-        assert_eq!(identify(&c, b"short", 100), None);
+        assert_eq!(identify(&c, &[], &sealed(8), 400), None);
+        assert_eq!(identify(&c, &[], &sealed(9), 100), None);
+        assert_eq!(identify(&c, &[], b"short", 100), None);
     }
 
     #[test]

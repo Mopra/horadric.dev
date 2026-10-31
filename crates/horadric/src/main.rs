@@ -162,6 +162,8 @@ Environment:
                                install, hooks and explorer changes are refused
   HORADRIC_AGENT                 Program a Horadric terminal runs (default claude.exe)
   HORADRIC_DEBUG                 Log window positions and paint times
+  HORADRIC_HEAVY_SLOTS           How many `horadric heavy` commands run at once on this
+                               machine (default one for every 16 logical cores)
 ";
 
 fn main() -> ExitCode {

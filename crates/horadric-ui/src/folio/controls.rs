@@ -2,7 +2,7 @@
 //! the permission modes in Shift+Tab's order, the model's name, and the
 //! context meter's words.
 
-use horadric_core::folio::ModelInfo;
+use horadric_core::folio::{ContextUsage, ModelInfo};
 
 /// The permission modes in the order Shift+Tab walks them, with what the
 /// control calls each.
@@ -119,6 +119,33 @@ pub fn meter(used: u64, limit: u64) -> (f32, String) {
     let full = (used as f64 / limit as f64).clamp(0.0, 1.0);
     let pct = (full * 100.0).round() as u64;
     (full as f32, format!("{pct}% of {}", tokens(limit)))
+}
+
+/// What fills the context, a row per category as the CLI counts them:
+/// its name, and its tokens with their share of the window. Deferred ones
+/// are listed but take no room until loaded.
+pub fn context_rows(c: &ContextUsage) -> Vec<(String, String)> {
+    let mut rows = vec![("Used".to_string(), meter(c.used, c.limit).1)];
+    for cat in &c.categories {
+        let detail = if cat.deferred {
+            format!("{}, not loaded", tokens(cat.tokens))
+        } else if c.limit > 0 {
+            let pct = cat.tokens as f64 * 100.0 / c.limit as f64;
+            let pct = if pct > 0.0 && pct < 1.0 {
+                "<1".to_string()
+            } else {
+                format!("{}", pct.round() as u64)
+            };
+            format!("{}, {pct}%", tokens(cat.tokens))
+        } else {
+            tokens(cat.tokens)
+        };
+        rows.push((cat.name.clone(), detail));
+    }
+    if let Some(at) = c.auto_compact_at.filter(|_| c.limit > 0) {
+        rows.push(("Compacts at".to_string(), tokens(at)));
+    }
+    rows
 }
 
 /// The background tasks pill: how many run.
@@ -238,6 +265,33 @@ mod tests {
         assert_eq!(tokens(200_000), "200k");
         assert_eq!(tokens(1_000_000), "1M");
         assert_eq!(tokens(1_500_000), "1.5M");
+    }
+
+    #[test]
+    fn the_context_reads_as_rows() {
+        use horadric_core::folio::ContextCategory;
+        let cat = |name: &str, tokens: u64, deferred: bool| ContextCategory {
+            name: name.into(),
+            tokens,
+            deferred,
+        };
+        let c = ContextUsage {
+            used: 50_000,
+            limit: 200_000,
+            auto_compact_at: Some(160_000),
+            categories: vec![
+                cat("System prompt", 20_000, false),
+                cat("Memory files", 500, false),
+                cat("MCP tools", 9_000, true),
+            ],
+        };
+        let rows = context_rows(&c);
+        let detail = |i: usize| rows[i].1.as_str();
+        assert_eq!(detail(0), "25% of 200k");
+        assert_eq!(detail(1), "20k, 10%");
+        assert_eq!(detail(2), "500, <1%");
+        assert_eq!(detail(3), "9k, not loaded");
+        assert_eq!(rows[4], ("Compacts at".to_string(), "160k".to_string()));
     }
 
     #[test]

@@ -67,3 +67,70 @@ fn open(url: &str) {
         );
     }
 }
+
+/// Every phone this PC knows, paired here or vouched for by a brother,
+/// as `horadric portal phones` and the Town Portal menu list them.
+pub fn known_phones(dir: &Path) -> Vec<horadric_core::phoning::Known> {
+    let paired = Config::load(dir).map(|c| c.phones).unwrap_or_default();
+    let served = horadric_core::mesh::phones(&horadric_core::mesh::load_held(dir));
+    horadric_core::phoning::known(&paired, &served)
+}
+
+/// Who vouched for a phone, by name, "this PC" for this one.
+pub fn vouched_by(dir: &Path, k: &horadric_core::phoning::Known) -> String {
+    let me = Config::load(dir).map(|c| horadric_core::portal::id(&c.secret));
+    let roster = horadric_core::mesh::load(dir);
+    let names: Vec<String> = k
+        .by
+        .iter()
+        .map(|id| match me.as_deref() == Some(id.as_str()) {
+            true => "this PC".to_string(),
+            false => roster.name(id).to_string(),
+        })
+        .collect();
+    names.join(", ")
+}
+
+/// Forgets phone `id` on every brother: one with a key pair by a signed
+/// forget, which each brother that takes it obeys; one paired here the
+/// old way, here alone, which is everywhere it was served. The running
+/// app cuts it off within seconds. Answers the phone's name.
+pub fn forget_everywhere(dir: &Path, id: &str) -> Result<String, String> {
+    let known = known_phones(dir);
+    let k = known
+        .iter()
+        .find(|k| k.id == id)
+        .ok_or("That phone is not known here.")?;
+    if !k.public.is_empty() {
+        let me = Config::load(dir)
+            .map(|c| horadric_core::portal::id(&c.secret))
+            .unwrap_or_default();
+        let signer = horadric_core::said::Signer::of(dir, &me, &crate::brothers::Cng);
+        let signed = horadric_core::mesh::forget(dir, signer.as_ref(), &k.id, &k.public, now());
+        if !signed && !k.here {
+            return Err("This PC has no key pair to sign the forget with.".into());
+        }
+    }
+    if let Some(mut c) = Config::load(dir) {
+        let before = c.phones.len();
+        c.phones.retain(|p| p.id != id);
+        if c.phones.len() != before {
+            c.save(dir)
+                .map_err(|e| format!("cannot write {}: {e}", dir.join("portal.json").display()))?;
+        }
+    }
+    Ok(k.name.clone())
+}
+
+/// "Phones can type here": whether a phone may change anything on this
+/// PC, or only watch it.
+pub fn phones_type(dir: &Path) -> bool {
+    !horadric_core::standing::Standing::load(dir).phones_watch_only
+}
+
+/// Switches "Phones can type here". It takes hold at a phone's next hello.
+pub fn set_phones_type(dir: &Path, on: bool) -> Result<(), String> {
+    let mut s = horadric_core::standing::Standing::load(dir);
+    s.phones_watch_only = !on;
+    s.save(dir).map_err(|e| format!("cannot keep the switch: {e}"))
+}

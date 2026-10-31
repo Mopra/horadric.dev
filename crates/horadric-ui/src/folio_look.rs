@@ -455,6 +455,9 @@ mod tests {
             edit: None,
             lane: None,
             output: String::new(),
+            images: Vec::new(),
+            began: None,
+            ended: None,
         }
     }
 

@@ -1,5 +1,6 @@
 //! A Folio's Undo last turn, which rewinds the conversation as well as
-//! the files a terminal's puts back.
+//! the files a terminal's puts back, and its Edit and Rewind on any
+//! earlier prompt, which fork it there.
 //!
 //! claude cannot rewind a conversation it is running, so an undo lets it
 //! end ([`crate::folio::rewind`]) and starts it again resumed at the line
@@ -7,13 +8,19 @@
 //! hidden flags of the CLI that keep the undone turn in the transcript
 //! but out of the conversation). The new host waits for the old one to
 //! have gone, since both would take the same pipe.
+//!
+//! A fork goes the same way with `--fork-session` and no dropped turn:
+//! the conversation carries on as a new one holding what came before the
+//! prompt, and the old one stays whole in History. Its files go back
+//! first, by the CLI's own `rewind_files` while it still runs, which can
+//! reach any prompt it kept checkpoints for (see `App::open_chat`).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use horadric_core::folio::{rewind_point, Rewind};
+use horadric_core::folio::{prompt_point, rewind_point, Rewind};
 
 use super::App;
 use crate::toast::Kind;
@@ -29,34 +36,68 @@ struct Pending {
     rewind: Rewind,
     /// Its claude has ended, so it starts once its host is gone too.
     ended: bool,
+    /// A fork at an earlier prompt rather than an undo.
+    fork: Option<Fork>,
+}
+
+struct Fork {
+    /// The prompt forked before, for the line that says so.
+    prompt: String,
+    /// What it goes on with: an edited prompt.
+    resend: Option<String>,
+    /// How putting back the files went, once it has.
+    files: Option<Result<(), String>>,
 }
 
 thread_local! {
     static REWINDS: RefCell<HashMap<String, Pending>> = RefCell::new(HashMap::new());
 }
 
-/// The rewind Folio `id` starts with, taken once it is due: what
-/// [`App::start_folio`] adds to its flags and its tag.
-pub(super) fn rewound(id: &str) -> Option<Rewind> {
+/// The rewind Folio `id` starts with, taken once it is due, and whether
+/// it forks: what [`App::start_folio`] adds to its flags and its tag.
+pub(super) fn rewound(id: &str) -> Option<(Rewind, bool)> {
     REWINDS.with(|r| {
         let mut r = r.borrow_mut();
         r.get(id).filter(|p| p.ended)?;
-        r.remove(id).map(|p| p.rewind)
+        r.remove(id).map(|p| (p.rewind, p.fork.is_some()))
     })
 }
 
-/// The flags that resume a conversation at `r`. A first turn undone
-/// leaves nothing to resume, so it has none.
-pub(super) fn flags(r: &Rewind) -> Vec<String> {
-    match &r.keep {
-        Some(keep) => vec![
+/// The flags that resume a conversation at `r`, as a new one when it
+/// forks. A first turn undone leaves nothing to resume, so it has none.
+pub(super) fn flags(r: &Rewind, fork: bool) -> Vec<String> {
+    match (&r.keep, fork) {
+        (Some(keep), false) => vec![
             "--resume-session-at".into(),
             keep.clone(),
             "--resume-drops-turn".into(),
             r.drop.clone(),
         ],
-        None => Vec::new(),
+        // Without a dropped turn named, the CLI cuts the conversation at
+        // `keep` however many turns follow.
+        (Some(keep), true) => vec![
+            "--fork-session".into(),
+            "--resume-session-at".into(),
+            keep.clone(),
+        ],
+        (None, _) => Vec::new(),
     }
+}
+
+/// What the page says once a fork has started again.
+fn fork_line(f: &Fork) -> String {
+    let mut said: String = f.prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if said.chars().count() > 60 {
+        said = said.chars().take(59).collect::<String>() + "\u{2026}";
+    }
+    let files = match &f.files {
+        Some(Ok(())) => "Its files went back with it.".to_string(),
+        Some(Err(e)) => format!("Its files were left as they are: {e}"),
+        None => "Its files were left as they are.".to_string(),
+    };
+    format!(
+        "Rewound to before \u{201c}{said}\u{201d}. The conversation as it was is kept in History. {files}"
+    )
 }
 
 /// The end of the file at `path`, from the first whole line after
@@ -122,10 +163,90 @@ impl App {
                     conversation,
                     rewind,
                     ended: false,
+                    fork: None,
                 },
             )
         });
         true
+    }
+
+    /// Forks Folio `id` just before the `back`th prompt from the end,
+    /// which reads `text`: its files go back first, then it ends and
+    /// starts again as a new conversation from there, going on with
+    /// `resend` when given.
+    pub(super) fn folio_fork(&mut self, id: &str, back: usize, text: &str, resend: Option<String>) {
+        if REWINDS.with(|r| r.borrow().contains_key(id)) {
+            return;
+        }
+        let Some((conversation, head)) = crate::folio::rewind_from(id) else {
+            self.toasts.show(
+                Kind::Info,
+                "Not rewound",
+                "It works or asks something now. Rewind once it rests.",
+            );
+            return;
+        };
+        let path = self
+            .dir_of(id)
+            .and_then(|d| horadric_hooks::transcript::path(&d.to_string_lossy(), &conversation));
+        let found = path
+            .and_then(|p| read_transcript(&p, true))
+            .and_then(|(jsonl, _)| prompt_point(&jsonl, head.as_deref(), back, text));
+        let Some(rewind) = found else {
+            self.toasts.show(
+                Kind::Failed,
+                "Not rewound",
+                "That prompt was not found in the conversation Claude keeps.",
+            );
+            return;
+        };
+        let drop = rewind.drop.clone();
+        REWINDS.with(|r| {
+            r.borrow_mut().insert(
+                id.to_string(),
+                Pending {
+                    conversation,
+                    rewind,
+                    ended: false,
+                    fork: Some(Fork {
+                        prompt: text.to_string(),
+                        resend,
+                        files: None,
+                    }),
+                },
+            )
+        });
+        if !crate::folio::rewind_files(id, &drop) {
+            REWINDS.with(|r| r.borrow_mut().remove(id));
+            self.toasts.show(
+                Kind::Info,
+                "Not rewound",
+                "It works or asks something now. Rewind once it rests.",
+            );
+        }
+    }
+
+    /// Folio `id`'s CLI put its files back for a fork, or said why not:
+    /// either way the conversation forks now. Files it never kept
+    /// checkpoints for, as a session started before they were on, stay.
+    pub(super) fn folio_files_rewound(&mut self, id: &str, how: Result<(), String>) {
+        let waiting = REWINDS.with(|r| {
+            let mut r = r.borrow_mut();
+            let f = r.get_mut(id)?.fork.as_mut().filter(|f| f.files.is_none())?;
+            f.files = Some(how.clone());
+            Some(())
+        });
+        if waiting.is_none() {
+            return;
+        }
+        if !crate::folio::rewind(id) {
+            REWINDS.with(|r| r.borrow_mut().remove(id));
+            let said = match how {
+                Ok(()) => "Its files went back, but it started working before the conversation could.",
+                Err(_) => "It started working before the conversation could go back.",
+            };
+            self.toasts.show(Kind::Failed, "Not rewound", said);
+        }
     }
 
     /// Folio `id`'s claude ended: true when it was for a rewind, which it
@@ -164,6 +285,11 @@ impl App {
         }) else {
             return;
         };
+        let fork = REWINDS.with(|r| {
+            let mut r = r.borrow_mut();
+            let f = r.get_mut(id)?.fork.as_mut()?;
+            Some((fork_line(f), f.resend.take()))
+        });
         let Some(dir) = self.dir_of(id) else {
             REWINDS.with(|r| r.borrow_mut().remove(id));
             return;
@@ -179,6 +305,12 @@ impl App {
         }
         let args = self.folio_args.get(id).cloned().unwrap_or_default();
         let resume = (!fresh).then_some(conversation);
+        if let Some((said, resend)) = fork {
+            crate::folio::greet(id, &said);
+            if let Some(prompt) = resend {
+                self.tasks.prompts.insert(id.to_string(), prompt);
+            }
+        }
         if let Err(e) = self.start_folio(Some(id.to_string()), dir, resume, &args, true) {
             REWINDS.with(|r| r.borrow_mut().remove(id));
             eprintln!("horadric: {id} did not start again after its undo: {e}");

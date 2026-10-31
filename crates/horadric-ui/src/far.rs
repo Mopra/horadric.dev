@@ -1170,6 +1170,15 @@ impl App {
         keys.into_iter().map(|(_, key)| key.clone()).collect()
     }
 
+    /// Whether brother `id` said it went to sleep, as last heard: a phone
+    /// shows its tab amber rather than out of reach.
+    pub(super) fn far_asleep(&self, id: &str) -> bool {
+        self.far
+            .peers
+            .get(id)
+            .is_some_and(|p| p.heard.said == horadric_core::brotherhood::Said::Sleeping)
+    }
+
     /// The key of the brother `who` names: its key, or the name only one
     /// brother has. A name two share names neither.
     /// Brother `key` says in its own roster entry, signed by it, that it

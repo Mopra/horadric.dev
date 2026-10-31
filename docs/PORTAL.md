@@ -51,9 +51,12 @@ instance. b64url is base64url without padding. Times are Unix seconds.
 - The stage's caption has a Town Portal key beside the window's keys: a
   rolled scroll while the portal is off, a blue portal once it is on,
   swirling while a paired phone is connected. Clicked while off, it does
-  what `horadric portal` does without the wait; while on, it offers
-  "Pair a phone..." and "Close the portal" (off, and the open ticket
-  dropped).
+  what `horadric portal` does without the wait; while on, it is the menu
+  of the brotherhood and its phones: the brothers as the tray lists them
+  (each joined one with "Can control this PC" and "Cast out..."), every
+  phone known here with the brother that vouched for it and "Forget
+  everywhere...", "Pair a phone...", "Phones can type here" and "Close
+  the portal" (off, and the open ticket dropped). See "Pairing v3".
 
 Trading the ticket, sealed with the ticket's key:
 
@@ -419,7 +422,8 @@ watches, types into and answers it unchanged.
 - `input` of a Folio is read as keys, as Claude Code's own prompt reads
   them. A message of one digit, with nothing typed before it, picks
   that choice of what waits. Other text is typed into a draft. Enter
-  (``) sends the draft as a prompt, folded into the turn running when
+  (`
+`) sends the draft as a prompt, folded into the turn running when
   there is one; while a request waits, the draft is the answer's words
   instead (a permission denied with them as the reason, a question
   answered with them one line a question, a plan sent back with them),
@@ -1060,3 +1064,56 @@ holds that id under that very key shows the node as that brother: one
 cluster, one tray line. The relay link is preferred; the `ssh` link waits
 ready behind it and serves only while the relay link is down. Two
 brothers that share a name are shown with the start of their keys.
+
+## Pairing v3: one portal for every brother
+
+Added after 0.38 (the lore has the reasoning). A phone pairs
+once, with any brother, and every brother serves it.
+
+- **The phone has a key pair.** The page makes an ECDH P-256 key pair
+  with WebCrypto (the private half not extractable, kept in IndexedDB)
+  and sends its public half when it pairs: `{"t":"pair","v":3,"name",
+  "key":"<b64url of the 65 byte point>"}`, sealed with the ticket.
+- **The PC answers with its own public key**, never a key:
+  `{"t":"paired","phone":"<id>","brother":"<its relay id>","bkey":"<its
+  public key>"}`. Both sides derive the key they share: SHA-256 over the
+  label `"horadric phone key v1"`, then each part led by its length as 4
+  bytes big endian: the ECDH secret (the x coordinate, 32 bytes), the
+  phone's public key, the brother's public key, the phone's id and the
+  brother's relay id (both as the strings travel). `portal.json` keeps
+  the derived key as the phone's `key`, with `"public"` beside it. A PC
+  with no key pair yet (it never joined a brother) answers the v2 way.
+- **The PC vouches for the phone** in its signed word (`vouches`, see
+  "Protocol v3: signed word" and docs/plan/brotherhood-ownership.md,
+  "phones"). Every brother that takes the word derives its own key with
+  the phone and opens the phone's frames with it, on a channel the relay
+  opened as `/phone?id=<that brother's relay id>`. A Linux node serves
+  phones only so; it pairs none. No brother passes on another's
+  sessions.
+- **After hello**, and again whenever it changes, a brother sends a
+  phone with a key pair `{"t":"brothers","list":[{"id","name","key",
+  "mark","state"}]}`: each member in, its relay id, name, public key,
+  colour (0xRRGGBB, where the brother draws one) and how this brother
+  finds it now, `live`, `asleep` or `away`. The page opens a socket to
+  each. One that has not heard the vouch yet opens none of the phone's
+  frames, and the page shows it as not reached yet.
+- **A hello is a phone's** whatever `kind` it says: a phone's key opened
+  it.
+- **Upgrading.** A brother with a key pair answers the hello of a phone
+  paired the v2 way with `"brotherhood":true`. The page may then send
+  `{"t":"upgrade","key":"<its public key>"}`; the PC vouches for it as if
+  it paired, answers `{"t":"upgraded","phone","brother","bkey"}` under
+  the old key and seals with the derived key from then on. The old key
+  (`"was"` in `portal.json`) still opens the phone's frames.
+- **Forgetting.** `{"t":"forget"}` from the phone, "Forget everywhere"
+  on any brother's portal menu or `horadric portal forget N` signs
+  `forgets` for the phone's key; every brother that takes it sends the
+  phone `unpaired` and drops it within 2 seconds. A phone not seen for
+  30 days by the brother it paired with is forgotten by that brother's
+  word. A phone paired the v2 way is forgotten on its one PC as before.
+- **Phones can type here**, a switch in `standing.json`
+  (`"phones_watch_only": true` when off), on by default. Off, a phone's
+  control is off: it sees this machine's tiles and screens and changes
+  nothing.
+- **Push** stays with the brother a phone paired with: only its
+  subscription is kept, by `portal.json`'s phones.

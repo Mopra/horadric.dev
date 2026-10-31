@@ -26,14 +26,16 @@ use horadric_core::{format_age, Limit, Phase, Session, Usage};
 use windows::core::{w, Interface, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
+    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
     D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1BitmapRenderTarget, ID2D1Factory, ID2D1Geometry,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1BitmapRenderTarget, ID2D1Factory, ID2D1Geometry,
     ID2D1GradientStopCollection, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush,
     ID2D1RadialGradientBrush, ID2D1RenderTarget, ID2D1SolidColorBrush,
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+    D2D1_BITMAP_PROPERTIES, D2D1_OPACITY_MASK_CONTENT_GRAPHICS,
     D2D1_CAP_STYLE_ROUND, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_CUSTOM,
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAMMA_2_2,
@@ -89,8 +91,7 @@ const ICON_FONTS: [PCWSTR; 2] = [w!("Segoe Fluent Icons"), w!("Segoe MDL2 Assets
 /// DirectWrite's enhanced contrast. The usual system value is 0.5 to 1.
 const TEXT_CONTRAST: f32 = 2.0;
 
-/// Where the name and the lines under it start in a tile, after the icon.
-const TILE_TEXT_X: f32 = 56.0;
+use crate::layout::TILE_TEXT_X;
 /// A window's name from the left of its header, in line with the text in
 /// the boxes below it.
 const NAME_INSET: f32 = INNER_PAD;
@@ -798,6 +799,8 @@ pub struct Target {
     theme: Cell<theme::Theme>,
     gradients: Gradients,
     bloom: bloom::Bloom,
+    /// The retinue's stones, made as its portraits first need them.
+    stones: RefCell<Stones>,
 }
 
 /// Gradient brushes by their stops. A gradient is a texture on the GPU, and
@@ -891,6 +894,7 @@ impl Target {
             theme: Cell::new(theme::current()),
             gradients: Gradients::default(),
             bloom: bloom::Bloom::default(),
+            stones: RefCell::default(),
         })
     }
 
@@ -1086,8 +1090,17 @@ impl Target {
     /// target must be recreated.
     pub fn draw_retinue(&self, gpu: &Gpu, scene: &RetinueScene) -> Result<()> {
         unsafe {
+            let mut stones = self.stones.borrow_mut();
+            for row in scene.rows {
+                let f = crate::turning::frame_at(row.turn());
+                if !stones.contains_key(&f) {
+                    let (stone, light) = crate::turning::frame(f);
+                    let size = crate::turning::SIZE as u32;
+                    stones.insert(f, (self.bitmap(size, &stone)?, self.bitmap(size, &light)?));
+                }
+            }
             self.rt.BeginDraw();
-            self.painter(&self.rt).retinue(gpu, scene);
+            self.painter(&self.rt).retinue(gpu, scene, &stones);
             self.rt.EndDraw(None, None)
         }
     }
@@ -1115,6 +1128,29 @@ impl Target {
         }
     }
 
+    /// A `size` square bitmap of premultiplied BGRA pixels, on this target.
+    fn bitmap(&self, size: u32, bgra: &[u8]) -> Result<ID2D1Bitmap> {
+        let props = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        unsafe {
+            self.rt.CreateBitmap(
+                D2D_SIZE_U {
+                    width: size,
+                    height: size,
+                },
+                Some(bgra.as_ptr() as *const _),
+                size * 4,
+                &props,
+            )
+        }
+    }
+
     fn painter<'a>(&'a self, rt: &'a ID2D1RenderTarget) -> Painter<'a> {
         Painter {
             rt,
@@ -1132,9 +1168,8 @@ fn brother_ink(name: &str) -> Color {
 /// Draws on the window or on its kept layer, which share their brushes.
 /// One hireling's portrait in a pane's retinue, made ready to draw.
 pub struct RetinueRow {
-    pub rune: usize,
     pub lot: horadric_core::hireling::Lot,
-    /// How long it has run, for its rune's carving.
+    /// How long it has run, for how far its stone has turned.
     pub age: Duration,
     /// How long since it was last heard, for the beat of one waiting.
     pub waited: Duration,
@@ -1145,6 +1180,21 @@ pub struct RetinueRow {
     /// How many hirelings of its own it has out, which get no portrait.
     pub nested: usize,
 }
+
+impl RetinueRow {
+    /// How far its stone has turned from the icon's angle, in degrees: one
+    /// at work turns, the rest stand still.
+    pub fn turn(&self) -> f32 {
+        match self.lot {
+            horadric_core::hireling::Lot::Working => self.age.as_secs_f32() * STONE_TURN_DEG_S,
+            _ => 0.0,
+        }
+    }
+}
+
+/// The turning stone's frames a target has made, by frame: the stone, and
+/// its runes' light as a mask to fill with the state's colour.
+pub type Stones = HashMap<usize, (ID2D1Bitmap, ID2D1Bitmap)>;
 
 /// A pane's retinue: a portrait per hireling, the one under the cursor,
 /// and its size in DIPs.
@@ -1162,6 +1212,8 @@ pub const RETINUE_HEAD: f32 = 22.0;
 pub const RETINUE_CELL: f32 = 48.0;
 /// A portrait's frame, square.
 const PORTRAIT: f32 = 34.0;
+/// How fast the stone of one at work turns.
+const STONE_TURN_DEG_S: f32 = 30.0;
 
 /// How many of `n` portraits a column `h` DIPs tall shows. When they do
 /// not all fit the last place goes to a "+N" for the rest.
@@ -1194,10 +1246,26 @@ pub struct TableScene<'a> {
     pub span: f32,
     pub title: &'a str,
     pub hot: Option<usize>,
+    /// The tick under the cursor: its track, and its place in the marks.
+    pub hot_tick: Option<(usize, usize)>,
     pub size: (f32, f32),
     pub accent: Color,
     /// For the runes' carving.
     pub age: Duration,
+}
+
+/// Where `t` seconds falls across a war table `w` DIPs wide that spans
+/// `span` seconds. The hover reads ticks back with the same sum.
+pub fn table_x(t: f32, span: f32, w: f32) -> f32 {
+    let (x0, x1) = (TABLE_LABEL_W, (w - 16.0).max(TABLE_LABEL_W + 10.0));
+    x0 + (x1 - x0) * (t / span.max(1.0)).clamp(0.0, 1.0)
+}
+
+/// Where a tool call from `from` to `to` seconds is drawn across the
+/// war table, never thinner than a sliver so a quick one still shows.
+pub fn tick_span(from: f32, to: f32, span: f32, w: f32) -> (f32, f32) {
+    let a = table_x(from, span, w);
+    (a, table_x(to, span, w).max(a + 2.0))
 }
 
 /// The war table's heading, its axis under it, and a track, in DIPs.
@@ -2973,12 +3041,13 @@ impl Painter<'_> {
     }
 
     /// The retinue: a column of portraits, the war table's glyph atop
-    /// it. A portrait is its hireling's rune in a frame, a track of its
+    /// it. A portrait is the icon's rune stone, a track of its hireling's
     /// latest tool calls under it, and in its corners the craft of the
-    /// tool it is in and how many hirelings of its own it sent. The rune
-    /// carves while it works and beats while it waits on a permission; a
-    /// finished one's frame turns gold with a check, a failed one's cracks.
-    unsafe fn retinue(&self, gpu: &Gpu, scene: &RetinueScene) {
+    /// tool it is in and how many hirelings of its own it sent. The stone
+    /// turns while it works and its runes breathe while it waits on a
+    /// permission; a finished one's runes turn gold with a check, a failed
+    /// one's red, and it cracks.
+    unsafe fn retinue(&self, gpu: &Gpu, scene: &RetinueScene, stones: &Stones) {
         use horadric_core::hireling::Lot;
         let (w, h) = scene.size;
         let p = theme::palette();
@@ -3016,30 +3085,37 @@ impl Painter<'_> {
                 self.fill_rounded(&r, 4.0, fg.with_alpha(0.07));
             }
             let frame = Rect::new(fx, y + 2.0, PORTRAIT, PORTRAIT);
-            let (edge, ink, drawn) = match row.lot {
-                Lot::Working => {
-                    let carve = motion::cycle(row.age, RUNE_CARVE);
-                    (
-                        scene.accent.with_alpha(0.6),
-                        scene.accent,
-                        (carve * 1.6).min(1.0),
-                    )
-                }
+            // The rune light in the state's colour; one waiting on you
+            // breathes it, as the tray does.
+            let ink = match row.lot {
+                Lot::Working => scene.accent,
                 Lot::Waiting => {
-                    let beat = motion::waiting_breath(row.waited);
-                    (
-                        theme::waiting(),
-                        theme::waiting().fade(0.4 + 0.6 * beat),
-                        1.0,
-                    )
+                    theme::waiting().fade(0.4 + 0.6 * motion::waiting_breath(row.waited))
                 }
-                Lot::Done => (gold, gold.with_alpha(0.7), 1.0),
-                Lot::Failed => (theme::error(), theme::error().with_alpha(0.6), 1.0),
+                Lot::Done => gold,
+                Lot::Failed => theme::error(),
             };
-            self.fill_rounded(&frame, 3.0, edge.with_alpha(0.08));
-            self.stroke_rounded(&frame.inset(0.5), 3.0, edge, 1.0);
-            let centre = (frame.x + PORTRAIT / 2.0, frame.y + PORTRAIT / 2.0);
-            self.rune_cut(row.rune, centre, 18.0, ink, drawn, 1.6);
+            if let Some((stone, light)) = stones.get(&crate::turning::frame_at(row.turn())) {
+                let dest = rect(&frame);
+                self.rt.DrawBitmap(
+                    stone,
+                    Some(&dest),
+                    1.0,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    None,
+                );
+                // An opacity mask draws only without antialiasing.
+                self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+                self.brush.SetColor(&color(ink));
+                self.rt.FillOpacityMask(
+                    light,
+                    self.brush,
+                    D2D1_OPACITY_MASK_CONTENT_GRAPHICS,
+                    Some(&dest),
+                    None,
+                );
+                self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            }
             let (l, t, r, b) = (frame.x, frame.y, frame.x + PORTRAIT, frame.y + PORTRAIT);
             match row.lot {
                 Lot::Done => {
@@ -3050,12 +3126,11 @@ impl Painter<'_> {
                     // The frame broken where the crack starts, then the
                     // crack down through the rune.
                     let crack = [
-                        (l + 21.0, t),
-                        (l + 17.0, t + 9.0),
-                        (l + 22.0, t + 15.0),
-                        (l + 16.0, t + 24.0),
+                        (l + 21.0, t + 3.0),
+                        (l + 17.0, t + 10.0),
+                        (l + 22.0, t + 16.0),
+                        (l + 16.0, t + 25.0),
                     ];
-                    line((l + 19.5, t), (l + 22.5, t), p.term_bg, 2.0);
                     for seg in crack.windows(2) {
                         line(seg[0], seg[1], theme::error(), 1.2);
                     }
@@ -3109,7 +3184,7 @@ impl Painter<'_> {
         let x0 = TABLE_LABEL_W;
         let x1 = (w - 16.0).max(x0 + 10.0);
         let span = scene.span.max(1.0);
-        let at = |t: f32| x0 + (x1 - x0) * (t / span).clamp(0.0, 1.0);
+        let at = |t: f32| table_x(t, span, w);
         // The axis: a mark at every step that fits, its time under it.
         let axis_y = TABLE_HEAD + TABLE_AXIS - 4.0;
         let step = [
@@ -3157,10 +3232,14 @@ impl Painter<'_> {
             let (sx, ex) = (at(tr.start), at(tr.end).max(at(tr.start) + 2.0));
             let lane = Rect::new(sx, mid - 3.0, ex - sx, 6.0);
             self.fill_rounded(&lane, 3.0, ink.with_alpha(0.16));
-            for &(from, to, c, failed) in &tr.marks {
-                let (a, b) = (at(from), at(to).max(at(from) + 2.0));
+            for (k, &(from, to, c, failed)) in tr.marks.iter().enumerate() {
+                let (a, b) = tick_span(from, to, span, w);
                 let tick = Rect::new(a, mid - 5.0, b - a, 10.0);
                 self.fill_rounded(&tick, 1.5, if failed { theme::error() } else { c });
+                if scene.hot_tick == Some((i, k)) {
+                    let ring = Rect::new(a - 2.0, mid - 7.0, b - a + 4.0, 14.0);
+                    self.stroke_rounded(&ring, 2.5, fg.with_alpha(0.9), 1.0);
+                }
             }
             match tr.lot {
                 Lot::Working | Lot::Waiting => {
@@ -3602,7 +3681,11 @@ impl Painter<'_> {
         s: &Session,
         look: &Look,
     ) {
-        let b = scene.button(Hit::Tile(i));
+        // Its hirelings' line is a part of it, and lights it as the rest.
+        let b = match scene.button(Hit::Band(i)) {
+            Button::Idle => scene.button(Hit::Tile(i)),
+            lit => lit,
+        };
         // A finished turn jumps off the plate and settles, so the moment
         // it lands is seen from across the screen.
         let landing = if scene.ambient && s.phase == Phase::Done {
@@ -3831,7 +3914,11 @@ impl Painter<'_> {
         self.text_tabular(gpu, &gpu.small_right, age_c.fade(presence), &age, top);
 
         // Last line, and what the agent did lately beside it.
-        let at_work = if !s.band.hirelings.is_empty() {
+        // Queued for heavy first: a session that waits its turn there
+        // looks stuck otherwise.
+        let at_work = if let Some(queued) = s.queued_line(scene.now) {
+            queued
+        } else if !s.band.hirelings.is_empty() {
             s.band.line(scene.now).unwrap_or_default()
         } else if phase == &Phase::Working || s.agents_alone(scene.now) > 0 {
             horadric_core::session::subagent_line(&s.subagent_types(scene.now))
@@ -3936,7 +4023,13 @@ impl Painter<'_> {
                 bottom.w -= word_w + gap;
             }
         }
-        self.text(&gpu.small, theme::text_dim().fade(presence), last, bottom);
+        // Lit under the cursor, as a click on it opens the war table.
+        let last_c = if scene.button(Hit::Band(i)) == Button::Idle {
+            theme::text_dim()
+        } else {
+            theme::text()
+        };
+        self.text(&gpu.small, last_c.fade(presence), last, bottom);
         if let Some(mark) = mark {
             self.browser_mark(&mark, scene.button(Hit::Browser(i)));
         }

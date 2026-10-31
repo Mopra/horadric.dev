@@ -22,21 +22,25 @@ pub mod afar;
 pub mod backlog;
 mod edits;
 mod launch;
+mod map;
 mod mcp;
 mod send;
 mod session;
+mod shell;
 mod sign_in;
 mod tools;
 mod transcript;
 
 pub use edits::*;
 pub use launch::*;
+pub use map::*;
 pub use mcp::*;
 pub use send::*;
 pub use session::*;
+pub use shell::*;
 pub use sign_in::*;
 pub use tools::*;
-pub use transcript::{rewind_point, Rewind};
+pub use transcript::{prompt_point, rewind_point, Rewind};
 
 use std::collections::{HashMap, HashSet};
 
@@ -59,6 +63,12 @@ pub struct Step {
     /// The end of its result's text, at most [`OUTPUT_TAIL`] bytes: a
     /// shell command's last lines, an error.
     pub output: String,
+    /// Images its result carried, such as a screenshot a tool took.
+    pub images: Vec<PromptImage>,
+    /// When it started and when its result came, in Unix milliseconds:
+    /// None where no clock was known (a host's replay).
+    pub began: Option<u64>,
+    pub ended: Option<u64>,
 }
 
 /// Told to every Folio's agent, since a Folio is where the human hands
@@ -138,6 +148,40 @@ pub enum Reply<'a> {
     Always,
     /// Deny, with what Claude should do instead; empty says only no.
     Deny(&'a str),
+    /// Allow an edit with the human's own text in place of what Claude
+    /// wrote (see [`edit_text`]).
+    Change(&'a str),
+}
+
+/// The id Horadric's PreToolUse hook goes by, which the Folio registers
+/// at `initialize` for the edit tools, so that with [`Folio::review`] on
+/// each edit comes as an ask whatever the permission mode.
+pub const REVIEW_HOOK: &str = "horadric-review";
+
+/// How long, in seconds, the CLI waits for the review hook's answer. An
+/// answer that never comes blocks the edit (checked on 2.1.316), so this
+/// is long: while no app is attached a reviewed edit waits for one, as
+/// an ask does.
+const REVIEW_WAIT_S: u64 = 24 * 60 * 60;
+
+/// The tools whose work review holds back.
+const EDIT_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit";
+
+/// The field of an edit tool's input holding the text it writes, which
+/// the human may change before it lands.
+fn edit_field(tool: &str) -> Option<&'static str> {
+    match tool {
+        "Edit" => Some("new_string"),
+        "Write" => Some("content"),
+        "NotebookEdit" => Some("new_source"),
+        _ => None,
+    }
+}
+
+/// The text an edit tool's `input` writes, for the human to change. None
+/// for a tool with no one such text, such as MultiEdit.
+pub fn edit_text(tool: &str, input: &Value) -> Option<String> {
+    input[edit_field(tool)?].as_str().map(str::to_string)
 }
 
 /// Something the CLI says about the session between replies.
@@ -168,6 +212,27 @@ pub enum Notice {
     /// A line the CLI wants the human to read, such as a notification, a
     /// warning or a model falling back.
     Info(String),
+    /// The API refused the turn for a reason other than the login, which
+    /// the CLI words as if Claude had replied: a usage limit, billing, a
+    /// request too large, the service down.
+    ApiError {
+        /// The assistant message's `error`, such as `rate_limit`.
+        kind: String,
+        /// What the CLI said of it.
+        text: String,
+    },
+}
+
+/// What a [`Notice::ApiError`] of `kind` is called.
+pub fn api_error_title(kind: &str) -> &'static str {
+    match kind {
+        "rate_limit" => "Usage limit reached",
+        "billing_error" => "Billing problem",
+        "invalid_request" => "Request refused",
+        "server_error" => "Claude's service failed",
+        "max_output_tokens" => "Reply cut short",
+        _ => "API error",
+    }
 }
 
 /// A task running in the background of a session.
@@ -296,7 +361,21 @@ pub enum Block {
         duration_ms: u64,
         ending: Ending,
         usage: TurnUsage,
+        /// When it ended, in Unix milliseconds, where known.
+        at: Option<u64>,
     },
+    /// A question put aside with `/btw`: answered from the conversation
+    /// without becoming part of it.
+    Aside {
+        request_id: String,
+        question: String,
+        /// None while it is being answered.
+        answer: Option<String>,
+        failed: bool,
+    },
+    /// A command the human ran with `!`, its output going to Claude with
+    /// the next prompt.
+    Shell(ShellRun),
     Notice(Notice),
     /// A login is needed, or runs, from the Folio itself.
     SignIn(SignIn),
@@ -321,6 +400,9 @@ enum Sent {
     McpAuth(String),
     McpReconnect(String),
     McpToggle(String),
+    RewindFiles,
+    Title,
+    Aside,
 }
 
 #[derive(Debug, Default)]
@@ -368,6 +450,12 @@ pub struct Folio {
     /// The error an `assistant` message of this turn carried, which the
     /// turn's `result` only flags.
     turn_error: Option<String>,
+    /// Each Edit or Write waits for the human, shown as a diff to accept,
+    /// change or reject, even in a mode that would let it through.
+    pub review: bool,
+    /// How the last [`Folio::rewind_files`] went, the CLI's error when it
+    /// did not, until the app takes it.
+    pub files_rewound: Option<Result<(), String>>,
     /// The blocks of the message streaming now, by content index.
     open: HashMap<u64, Open>,
     /// The id of the message streaming now.
@@ -380,6 +468,9 @@ pub struct Folio {
     outbox: Vec<(String, String)>,
     /// Whether `initialize` went to this process, sent here or replayed.
     pub initialized: bool,
+    /// Whether that `initialize` registered the review hook, which only
+    /// one sent with [`Folio::review`] on does.
+    pub review_hooked: bool,
     /// The input of each AskUserQuestion and ExitPlanMode ask, by request
     /// id, for the answer to echo back whether or not it named its tool use.
     ask_inputs: HashMap<String, Value>,
@@ -394,7 +485,44 @@ pub struct Folio {
     requests: HashMap<String, Sent>,
     /// For request ids and queued prompts' uuids.
     sent: u64,
+    /// Whether any line of the stream was one the Folio knows, and how
+    /// many it could not read before one was, for [`Folio::unreadable`].
+    understood: bool,
+    unread: u32,
+    /// The stream has ended.
+    stream_ended: bool,
+    /// The time of the line being fed, in Unix milliseconds, set by whoever
+    /// feeds it: the live stream's clock, or a transcript line's own
+    /// timestamp. None for a replay, whose lines carry no time.
+    pub clock: Option<u64>,
+    /// What the conversation is called, as the CLI made it up.
+    pub title: Option<String>,
+    /// Whether a title was asked for, so it is asked once.
+    pub title_asked: bool,
+    /// The prompt the CLI guesses the human sends next, until a prompt goes.
+    pub suggestion: Option<String>,
 }
+
+/// How many lines a stream may start with that the Folio cannot read
+/// before it is taken for one it never will: the CLI's protocol moved
+/// from under it. A few, since a CLI may print a warning line first.
+pub const UNREADABLE_AFTER: u32 = 6;
+
+/// The types of stdout line the Folio reads.
+const KNOWN_LINES: &[&str] = &[
+    "stream_event",
+    "assistant",
+    "user",
+    "result",
+    "control_request",
+    "control_cancel_request",
+    "control_response",
+    "command_lifecycle",
+    "conversation_reset",
+    "rate_limit_event",
+    "system",
+    "prompt_suggestion",
+];
 
 /// A content block between its `content_block_start` and its stop.
 #[derive(Debug)]
@@ -442,6 +570,19 @@ fn result_text(content: &Value) -> String {
     }
 }
 
+/// The images in a tool result's content.
+fn result_images(content: &Value) -> Vec<PromptImage> {
+    (content.as_array().into_iter().flatten())
+        .filter(|b| b["type"] == "image" && b["source"]["type"] == "base64")
+        .map(|b| {
+            PromptImage::new(&ImageData {
+                media_type: text_of(&b["source"], "media_type"),
+                base64: text_of(&b["source"], "data"),
+            })
+        })
+        .collect()
+}
+
 /// The last `max` bytes of `s`, cut at a char boundary.
 fn tail(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -468,7 +609,7 @@ fn find_step<'a>(steps: &'a mut [Step], id: &str) -> Option<&'a mut Step> {
     None
 }
 
-fn new_step(id: &str, tool: &str, input: &Value) -> Step {
+fn new_step(id: &str, tool: &str, input: &Value, began: Option<u64>) -> Step {
     Step {
         id: id.to_string(),
         tool: tool.to_string(),
@@ -481,6 +622,9 @@ fn new_step(id: &str, tool: &str, input: &Value) -> Step {
             ..Lane::default()
         }),
         output: String::new(),
+        images: Vec::new(),
+        began,
+        ended: None,
     }
 }
 
@@ -507,9 +651,13 @@ impl Folio {
         Self::default()
     }
 
-    /// The human sent a prompt.
+    /// The human sent a prompt. The output of `!` commands that went with
+    /// it shows as their own blocks, once.
     pub fn push_prompt(&mut self, text: &str) {
+        let (runs, text) = split_shell(text);
+        self.shells_sent(runs);
         self.blocks.push(Block::Prompt(text.to_string()));
+        self.suggestion = None;
         self.busy = true;
         self.failed = None;
         self.turn_error = None;
@@ -563,8 +711,13 @@ impl Folio {
             return false;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else {
+            self.unread += 1;
             return self.raw(line);
         };
+        match KNOWN_LINES.contains(&v["type"].as_str().unwrap_or_default()) {
+            true => self.understood = true,
+            false => self.unread += 1,
+        }
         if let Some(parent) = v["parent_tool_use_id"].as_str() {
             return self.subagent(parent, &v);
         }
@@ -576,7 +729,10 @@ impl Folio {
                 }
                 match v["error"].as_str().filter(|e| is_auth_error(e)) {
                     Some(_) => self.need_sign_in(&text_in(&v["message"])),
-                    None => self.assistant(&v["message"]),
+                    None => match self.api_error(&v) {
+                        Some(changed) => changed,
+                        None => self.assistant(&v["message"]),
+                    },
                 }
             }
             "user" => self.user(&v),
@@ -593,6 +749,15 @@ impl Folio {
                 false
             }
             "system" => self.system(&v, line),
+            "prompt_suggestion" => {
+                let s = v["suggestion"].as_str().map(str::trim).filter(|s| !s.is_empty());
+                // One that lands after the human already wrote again is stale.
+                if self.busy {
+                    return false;
+                }
+                self.suggestion = s.map(str::to_string);
+                true
+            }
             _ => self.raw(line),
         }
     }
@@ -626,12 +791,14 @@ impl Folio {
                 let kind = match v["request"]["subtype"].as_str().unwrap_or_default() {
                     "initialize" => {
                         self.initialized = true;
+                        self.review_hooked = !v["request"]["hooks"].is_null();
                         Sent::Initialize
                     }
                     "set_permission_mode" => Sent::Mode,
                     "set_model" => Sent::Model,
                     "get_context_usage" => Sent::Context,
                     "stop_task" => Sent::StopTask,
+                    "rewind_files" => Sent::RewindFiles,
                     s => match self.mcp_sent(s, &v["request"]) {
                         Some(kind) => kind,
                         None => return false,
@@ -777,6 +944,13 @@ impl Folio {
                 serde_json::json!({"behavior": "deny", "message": reason.trim()}),
             ),
             Reply::Deny(_) => control_response(request_id, false, input),
+            Reply::Change(text) => {
+                let mut input = input;
+                if let Some(field) = edit_field(input_tool(&self.blocks, request_id)) {
+                    input[field] = Value::String(text.to_string());
+                }
+                control_response(request_id, true, input)
+            }
         })
     }
 
@@ -869,6 +1043,15 @@ impl Folio {
         !self.busy && self.turn_over()
     }
 
+    /// Whether the stream is one the Folio cannot read at all: not one
+    /// line of it known, and [`UNREADABLE_AFTER`] it could not read, or
+    /// any before the CLI ended. A session the Folio cannot draw goes on
+    /// in a terminal instead.
+    pub fn unreadable(&self) -> bool {
+        !self.understood
+            && (self.unread >= UNREADABLE_AFTER || (self.stream_ended && self.unread > 0))
+    }
+
     /// Whether the last prompt of this process has its footer.
     fn turn_over(&self) -> bool {
         let own = self.blocks.get(self.history..).unwrap_or_default();
@@ -883,7 +1066,9 @@ impl Folio {
         (self.blocks.iter().rev())
             .take_while(|b| !matches!(b, Block::Prompt(_)))
             .find_map(|b| match b {
-                Block::Reply(t) => Some(t.trim().to_string()),
+                Block::Reply(t) | Block::Notice(Notice::ApiError { text: t, .. }) => {
+                    Some(t.trim().to_string())
+                }
                 _ => None,
             })
             .unwrap_or_default()
@@ -989,11 +1174,152 @@ impl Folio {
     /// `initialize`: the line to write. The answer fills
     /// [`SessionInfo::commands`] with descriptions for the `/` list, and
     /// [`SessionInfo::models`] with each model's effort levels. Optional:
-    /// the CLI works without it.
+    /// the CLI works without it. It also asks for a guess at the next
+    /// prompt after each turn, [`Folio::suggestion`].
     pub fn initialize(&mut self) -> String {
         self.initialized = true;
         let id = self.request(Sent::Initialize);
-        control_request_line(&id, "initialize", serde_json::json!({}))
+        // Hooks can only be given here. Only with review on, since an
+        // edit waits on the hook's answer, which no app gives while none
+        // is attached; once on, the answer is what turns review off.
+        self.review_hooked = self.review;
+        let fields = match self.review {
+            true => serde_json::json!({"promptSuggestions": true, "hooks": {"PreToolUse": [{
+                "matcher": EDIT_TOOLS,
+                "hookCallbackIds": [REVIEW_HOOK],
+                "timeout": REVIEW_WAIT_S,
+            }]}}),
+            false => serde_json::json!({"promptSuggestions": true}),
+        };
+        control_request_line(&id, "initialize", fields)
+    }
+
+    /// `generate_session_title` from what the conversation is about: the
+    /// line to write, or None when one was asked for already or the
+    /// conversation is known by a title. The CLI writes the title into the
+    /// transcript, where the tile reads it as a terminal's, and the answer
+    /// sets [`Folio::title`].
+    pub fn ask_title(&mut self) -> Option<String> {
+        if self.title_asked || self.title.is_some() {
+            return None;
+        }
+        let about = (self.blocks.iter())
+            .find_map(|b| match b {
+                Block::Prompt(t) if !t.trim().is_empty() && !t.starts_with('/') => Some(t.trim()),
+                _ => None,
+            })?
+            .chars()
+            .take(2000)
+            .collect::<String>();
+        self.title_asked = true;
+        let id = self.request(Sent::Title);
+        Some(control_request_line(
+            &id,
+            "generate_session_title",
+            serde_json::json!({"description": about, "persist": true}),
+        ))
+    }
+
+    fn set_title(&mut self, title: Option<&str>) -> bool {
+        let t = title.map(str::trim).filter(|t| !t.is_empty());
+        if t.is_none() || t == self.title.as_deref() {
+            return false;
+        }
+        self.title = t.map(str::to_string);
+        true
+    }
+
+    /// `/btw`: a side question answered from the conversation without
+    /// joining it, shown as a [`Block::Aside`]. The line to write.
+    pub fn side_question(&mut self, question: &str) -> String {
+        let id = self.request(Sent::Aside);
+        self.blocks.push(Block::Aside {
+            request_id: id.clone(),
+            question: question.to_string(),
+            answer: None,
+            failed: false,
+        });
+        control_request_line(
+            &id,
+            "side_question",
+            serde_json::json!({"question": question}),
+        )
+    }
+
+    fn aside_answered(&mut self, id: &str, said: Result<Option<String>, String>) -> bool {
+        let block = (self.blocks.iter_mut().rev())
+            .find(|b| matches!(b, Block::Aside { request_id, .. } if request_id == id));
+        let Some(Block::Aside { answer, failed, .. }) = block else {
+            return false;
+        };
+        match said {
+            Ok(a) => *answer = Some(a.unwrap_or_else(|| "No answer.".into())),
+            Err(e) => {
+                *answer = Some(e);
+                *failed = true;
+            }
+        }
+        true
+    }
+
+    /// A `!` command the human started: its block, by index, to fill
+    /// with [`Folio::shell_done`].
+    pub fn shell_started(&mut self, command: &str) -> usize {
+        self.blocks.push(Block::Shell(ShellRun {
+            command: command.to_string(),
+            running: true,
+            ..ShellRun::default()
+        }));
+        self.blocks.len() - 1
+    }
+
+    /// The `!` command `command` at block `at` ended with `output` and
+    /// `code`. The command is checked, since a `/clear` may have emptied
+    /// the page while it ran.
+    pub fn shell_done(&mut self, at: usize, command: &str, output: &str, code: Option<i32>) {
+        if let Some(Block::Shell(run)) = self.blocks.get_mut(at) {
+            if run.command == command && run.running {
+                run.output = tail(output, OUTPUT_TAIL);
+                run.code = code;
+                run.running = false;
+            }
+        }
+    }
+
+    /// What the `!` commands run since the last prompt said, to go before
+    /// the next prompt's text so Claude reads it too, once: they are marked
+    /// sent. Empty when none ran.
+    pub fn shell_context(&mut self) -> String {
+        let from = (self.blocks.iter())
+            .rposition(|b| matches!(b, Block::Prompt(_)))
+            .map_or(0, |i| i + 1);
+        (self.blocks[from..].iter_mut())
+            .filter_map(|b| match b {
+                Block::Shell(r) if !r.running && !r.sent => {
+                    r.sent = true;
+                    Some(shell_text(r))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `!` commands a prompt carried: those shown since the last prompt
+    /// stand for themselves, the rest (a replay) get blocks of their own.
+    fn shells_sent(&mut self, runs: Vec<ShellRun>) {
+        let from = (self.blocks.iter())
+            .rposition(|b| matches!(b, Block::Prompt(_)))
+            .map_or(0, |i| i + 1);
+        let mut seen = from;
+        for run in runs {
+            let shown = (self.blocks.iter().enumerate().skip(seen))
+                .find(|(_, b)| matches!(b, Block::Shell(r) if r.command == run.command))
+                .map(|(i, _)| i);
+            match shown {
+                Some(i) => seen = i + 1,
+                None => self.blocks.push(Block::Shell(ShellRun { sent: true, ..run })),
+            }
+        }
     }
 
     /// `stop_task`, for a background task such as a subagent: the line
@@ -1002,6 +1328,19 @@ impl Folio {
     pub fn stop_task(&mut self, task_id: &str) -> String {
         let id = self.request(Sent::StopTask);
         control_request_line(&id, "stop_task", serde_json::json!({"task_id": task_id}))
+    }
+
+    /// Asks the CLI to put the files back as they were when the prompt
+    /// `user_message_id` (its transcript uuid) was sent. The CLI keeps
+    /// the files' earlier states only when it runs with file
+    /// checkpointing on. The answer lands in [`Folio::files_rewound`].
+    pub fn rewind_files(&mut self, user_message_id: &str) -> String {
+        let id = self.request(Sent::RewindFiles);
+        control_request_line(
+            &id,
+            "rewind_files",
+            serde_json::json!({"user_message_id": user_message_id}),
+        )
     }
 
     fn request(&mut self, kind: Sent) -> String {
@@ -1067,6 +1406,23 @@ impl Folio {
     fn notice(&mut self, n: Notice) -> bool {
         self.blocks.push(Block::Notice(n));
         true
+    }
+
+    /// An `assistant` line that is the CLI's words for a failed API call
+    /// rather than Claude's, as a notice: None when it is a reply. Only a
+    /// message no model wrote counts, so a real reply that ran out of
+    /// room is still the reply.
+    fn api_error(&mut self, v: &Value) -> Option<bool> {
+        let kind = v["error"].as_str().filter(|e| !e.is_empty());
+        let kind = kind.or_else(|| (v["isApiErrorMessage"] == true).then_some("unknown"))?;
+        let model = v["message"]["model"].as_str().unwrap_or_default();
+        if !(model.is_empty() || model.starts_with('<')) {
+            return None;
+        }
+        Some(self.notice(Notice::ApiError {
+            kind: kind.to_string(),
+            text: text_in(&v["message"]).trim().to_string(),
+        }))
     }
 
     /// A line of the app's own for the human, such as who it logged in as.
@@ -1210,6 +1566,7 @@ impl Folio {
                 rested || before != self.background.len()
             }
             "elicitation_complete" => self.elicitation_complete(v),
+            "session_title_changed" => self.set_title(v["title"].as_str()),
             "commands_changed" => {
                 self.info.read_commands(&v["commands"]);
                 false
@@ -1249,7 +1606,6 @@ impl Folio {
             | "task_summary"
             | "stop_hook_summary"
             | "session_state_changed"
-            | "session_title_changed"
             | "session_metadata"
             | "turn_duration"
             | "post_turn_summary"
@@ -1328,6 +1684,25 @@ impl Folio {
         ) {
             return self.mcp_response(kind, r);
         }
+        if kind == Sent::RewindFiles {
+            let error = r["error"].as_str().or(r["response"]["error"].as_str());
+            self.files_rewound = Some(match (r["subtype"] == "error", error) {
+                (false, _) if r["response"]["canRewind"] != false => Ok(()),
+                (_, e) => Err(e.unwrap_or("The files could not be put back.").to_string()),
+            });
+            return false;
+        }
+        if kind == Sent::Aside {
+            let said = match r["subtype"] == "error" {
+                true => Err(r["error"].as_str().unwrap_or("Not answered.").to_string()),
+                false => Ok(r["response"]["response"].as_str().map(str::to_string)),
+            };
+            return self.aside_answered(id, said);
+        }
+        // An old CLI that cannot make a title is not worth a word.
+        if kind == Sent::Title {
+            return self.set_title(r["response"]["title"].as_str());
+        }
         if r["subtype"] == "error" {
             let error = r["error"].as_str().unwrap_or("refused");
             return self.notice(Notice::Refused(error.to_string()));
@@ -1350,9 +1725,11 @@ impl Folio {
             Sent::Initialize => self.info.read_initialize(body),
             // The task's end comes as its own notification.
             Sent::StopTask => return false,
+            Sent::Title | Sent::Aside => return false,
             Sent::McpStatus | Sent::McpAuth(_) | Sent::McpReconnect(_) | Sent::McpToggle(_) => {
                 return false
             }
+            Sent::RewindFiles => return false,
         }
         true
     }
@@ -1546,7 +1923,7 @@ impl Folio {
         if self.step_mut(id).is_some() {
             return self.set_step_input(id, input);
         }
-        let step = new_step(id, tool, input);
+        let step = new_step(id, tool, input, self.clock);
         match self.blocks.last_mut() {
             Some(Block::Tools(steps)) => steps.push(step),
             _ => self.blocks.push(Block::Tools(vec![step])),
@@ -1649,6 +2026,7 @@ impl Folio {
     /// A line of a subagent's own: its words and steps go to its lane.
     /// Its lines do not stream, so each comes whole.
     fn subagent(&mut self, parent: &str, v: &Value) -> bool {
+        let clock = self.clock;
         match v["type"].as_str().unwrap_or_default() {
             "assistant" => {
                 let mut changed = false;
@@ -1677,7 +2055,7 @@ impl Folio {
                             } else if let Some(s) = find_step(&mut lane.steps, id) {
                                 changed |= set_input(s, input);
                             } else {
-                                lane.steps.push(new_step(id, tool, input));
+                                lane.steps.push(new_step(id, tool, input, clock));
                                 changed = true;
                             }
                         }
@@ -1739,11 +2117,14 @@ impl Folio {
                 (true, true) => StepState::Stopped,
                 (true, false) => StepState::Failed,
             };
+            let clock = self.clock;
             let Some(step) = self.step_mut(id) else {
                 continue;
             };
             step.state = state;
             step.output = tail(&text, OUTPUT_TAIL);
+            step.images = result_images(&block["content"]);
+            step.ended = clock;
             if let Some(edit) = step.edit.as_mut() {
                 if detail.is_object() {
                     edit.apply_result(detail);
@@ -1879,6 +2260,7 @@ impl Folio {
                 duration_ms: v["duration_ms"].as_u64().unwrap_or_default(),
                 ending,
                 usage,
+                at: self.clock,
             });
         }
         if let Some(id) = v["session_id"].as_str() {
@@ -1901,6 +2283,7 @@ impl Folio {
     /// The stream ended: claude.exe exited or its pipe broke. Whatever the
     /// turn left open is over. Returns whether anything changed.
     pub fn end(&mut self) -> bool {
+        self.stream_ended = true;
         let was = self.busy || !self.queued.is_empty() || !self.background.is_empty();
         self.dropped.append(&mut self.queued);
         // The CLI's background tasks die with it, and a new process says
@@ -1972,6 +2355,24 @@ impl Folio {
         let request_id = v["request_id"].as_str().unwrap_or_default().to_string();
         if request["subtype"] == "elicitation" {
             return self.elicitation(request_id, request);
+        }
+        if request["subtype"] == "hook_callback" && request["callback_id"] == REVIEW_HOOK {
+            // An ask makes the CLI ask as `can_use_tool`, which becomes
+            // the ask card; nothing said lets the edit go as the mode
+            // would.
+            let tool = request["input"]["tool_name"].as_str().unwrap_or_default();
+            let edits = EDIT_TOOLS.split('|').any(|t| t == tool);
+            let answer = match self.review && edits {
+                true => serde_json::json!({"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "ask",
+                    "permissionDecisionReason": "The human reviews each edit.",
+                }}),
+                false => serde_json::json!({}),
+            };
+            self.outbox
+                .push((request_id.clone(), control_success(&request_id, answer)));
+            return false;
         }
         if request["subtype"] != "can_use_tool" {
             // Unanswered, the CLI may wait on it for good. An error is what
@@ -2071,6 +2472,20 @@ impl Folio {
 fn said(v: &Value) -> Option<String> {
     let t = v.as_str()?.trim();
     (!t.is_empty()).then(|| t.to_string())
+}
+
+/// The tool of the ask `request_id` among `blocks`.
+fn input_tool<'a>(blocks: &'a [Block], request_id: &str) -> &'a str {
+    (blocks.iter())
+        .find_map(|b| match b {
+            Block::Ask {
+                request_id: r,
+                tool,
+                ..
+            } if r == request_id => Some(tool.as_str()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// What a slash command printed, from the user message the CLI wraps it
@@ -2853,6 +3268,115 @@ mod tests {
         }
         assert_eq!(f.blocks[1], Block::Thinking("Hmm, yes.".into()));
         assert_eq!(f.blocks.len(), 2);
+    }
+
+    #[test]
+    fn review_turns_each_edit_into_an_ask_that_can_be_changed() {
+        let mut f = Folio::new();
+        let init: Value = serde_json::from_str(&f.initialize()).unwrap();
+        assert!(init["request"]["hooks"].is_null() && !f.review_hooked);
+        let mut f = Folio::new();
+        f.review = true;
+        let line = f.initialize();
+        let init: Value = serde_json::from_str(&line).unwrap();
+        assert!(f.review_hooked);
+        let mut g = Folio::new();
+        g.feed_sent(&line);
+        assert!(g.review_hooked);
+        f.review = false;
+        let hook = &init["request"]["hooks"]["PreToolUse"][0];
+        assert_eq!(hook["hookCallbackIds"][0], REVIEW_HOOK);
+        assert!(hook["matcher"].as_str().unwrap().contains("Write"));
+        let callback = |id: &str, tool: &str| {
+            serde_json::json!({"type": "control_request", "request_id": id, "request": {
+                "subtype": "hook_callback", "callback_id": REVIEW_HOOK,
+                "input": {"hook_event_name": "PreToolUse", "tool_name": tool,
+                    "tool_input": {}}}})
+            .to_string()
+        };
+        // Off, the edit goes as the mode says.
+        f.feed(&callback("h1", "Write"));
+        let out: Value = serde_json::from_str(&f.take_outbox()[0]).unwrap();
+        assert_eq!(out["response"]["request_id"], "h1");
+        assert_eq!(out["response"]["response"], serde_json::json!({}));
+        f.review = true;
+        f.feed(&callback("h2", "Write"));
+        let out: Value = serde_json::from_str(&f.take_outbox()[0]).unwrap();
+        let said = &out["response"]["response"]["hookSpecificOutput"];
+        assert_eq!(said["permissionDecision"], "ask");
+        // Anything but an edit is not held back.
+        f.feed(&callback("h3", "Bash"));
+        let out: Value = serde_json::from_str(&f.take_outbox()[0]).unwrap();
+        assert_eq!(out["response"]["response"], serde_json::json!({}));
+        // The ask that follows can land with the human's own text.
+        let input = serde_json::json!({"file_path": "a.txt", "content": "four"});
+        assert_eq!(edit_text("Write", &input).as_deref(), Some("four"));
+        f.feed(&serde_json::json!({"type": "control_request", "request_id": "r1",
+            "request": {"subtype": "can_use_tool", "tool_name": "Write", "input": input}})
+            .to_string());
+        let line = f.reply("r1", Reply::Change("five")).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["response"]["response"]["behavior"], "allow");
+        assert_eq!(v["response"]["response"]["updatedInput"]["content"], "five");
+        assert_eq!(v["response"]["response"]["updatedInput"]["file_path"], "a.txt");
+        assert_eq!(edit_text("MultiEdit", &serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn a_rewind_of_the_files_says_how_it_went() {
+        let mut f = Folio::new();
+        let line = f.rewind_files("u-1");
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["request"]["subtype"], "rewind_files");
+        assert_eq!(v["request"]["user_message_id"], "u-1");
+        let id = v["request_id"].as_str().unwrap().to_string();
+        let ok = serde_json::json!({"type": "control_response", "response": {
+            "subtype": "success", "request_id": id, "response": {"canRewind": true}}});
+        f.feed(&ok.to_string());
+        assert_eq!(f.files_rewound.take(), Some(Ok(())));
+        let line = f.rewind_files("u-2");
+        let v: Value = serde_json::from_str(&line).unwrap();
+        let id = v["request_id"].as_str().unwrap().to_string();
+        let refused = serde_json::json!({"type": "control_response", "response": {
+            "subtype": "error", "request_id": id, "error": "File rewinding is not enabled."}});
+        f.feed(&refused.to_string());
+        assert_eq!(
+            f.files_rewound.take(),
+            Some(Err("File rewinding is not enabled.".into()))
+        );
+        assert!(f.blocks.is_empty());
+    }
+
+    #[test]
+    fn a_stream_with_no_line_it_knows_is_unreadable() {
+        let mut f = Folio::new();
+        for _ in 0..UNREADABLE_AFTER - 1 {
+            f.feed("not json at all");
+        }
+        assert!(!f.unreadable());
+        f.feed(r#"{"type":"brand_new_kind"}"#);
+        assert!(f.unreadable());
+        // A CLI that printed a little and quit is unreadable too.
+        let mut f = Folio::new();
+        f.feed("Warning: something");
+        assert!(!f.unreadable());
+        f.end();
+        assert!(f.unreadable());
+        // One line it knows, and the rest is the protocol growing.
+        let mut f = Folio::new();
+        f.feed("Warning: something");
+        for line in PLAIN.lines().take(1) {
+            f.feed(line);
+        }
+        for _ in 0..2 * UNREADABLE_AFTER {
+            f.feed(r#"{"type":"brand_new_kind"}"#);
+        }
+        f.end();
+        assert!(!f.unreadable());
+        // A CLI that ended silent failed to start, which says why itself.
+        let mut f = Folio::new();
+        f.end();
+        assert!(!f.unreadable());
     }
 
     #[test]
@@ -3699,18 +4223,54 @@ mod tests {
     }
 
     #[test]
-    fn other_api_errors_stay_the_reply() {
+    fn other_api_errors_are_notices_of_their_own() {
         let mut f = Folio::new();
         let error = serde_json::json!({
             "type": "assistant",
             "error": "rate_limit",
-            "message": {"id": "m1", "role": "assistant",
+            "message": {"id": "m1", "model": "<synthetic>", "role": "assistant",
                 "content": [{"type": "text", "text": "API Error: Rate limit reached"}]},
         });
         f.feed(&error.to_string());
-        assert!(matches!(f.blocks.last(), Some(Block::Reply(t)) if t.contains("Rate limit")));
+        assert_eq!(
+            f.blocks.last(),
+            Some(&Block::Notice(Notice::ApiError {
+                kind: "rate_limit".into(),
+                text: "API Error: Rate limit reached".into(),
+            }))
+        );
+        assert!(!f.blocks.iter().any(|b| matches!(b, Block::Reply(_))));
         let retry = r#"{"type":"system","subtype":"api_error","level":"error","error":{"status":529}}"#;
         assert!(!f.feed(retry));
+        // A reply a model wrote stays the reply, whatever ended it.
+        let cut = serde_json::json!({
+            "type": "assistant",
+            "error": "max_output_tokens",
+            "message": {"id": "m2", "model": "claude-opus-4-1", "role": "assistant",
+                "content": [{"type": "text", "text": "Half a reply"}]},
+        });
+        f.feed(&cut.to_string());
+        assert!(matches!(f.blocks.last(), Some(Block::Reply(t)) if t == "Half a reply"));
+    }
+
+    #[test]
+    fn a_transcript_s_api_error_is_a_notice_too() {
+        let jsonl = [
+            serde_json::json!({"type": "user", "uuid": "a", "parentUuid": null,
+                "message": {"role": "user", "content": "hi"}}),
+            serde_json::json!({"type": "assistant", "uuid": "b", "parentUuid": "a",
+                "isApiErrorMessage": true, "error": "billing_error",
+                "message": {"id": "m", "model": "<synthetic>", "role": "assistant",
+                    "content": [{"type": "text", "text": "Credit balance too low"}]}}),
+        ]
+        .map(|v| v.to_string())
+        .join("\n");
+        let f = Folio::from_transcript(&jsonl);
+        assert!(matches!(
+            f.blocks.last(),
+            Some(Block::Notice(Notice::ApiError { kind, .. })) if kind == "billing_error"
+        ));
+        assert_eq!(f.last_reply(), "Credit balance too low");
     }
 
     #[test]

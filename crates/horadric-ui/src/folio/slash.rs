@@ -38,6 +38,55 @@ enum Then {
 /// Hidden runs that ended, by the session that asked, for the UI thread.
 static DONE: Mutex<Vec<(String, Then, Result<String, String>)>> = Mutex::new(Vec::new());
 
+/// A `!` command that ended: the session, its block and command, what it
+/// printed and its exit code.
+type ShellDone = (String, usize, String, String, Option<i32>);
+static SHELLS: Mutex<Vec<ShellDone>> = Mutex::new(Vec::new());
+
+/// Runs a `!` command in the project's folder with the shell a terminal
+/// gets, off the UI thread, its output shown as it ends and sent to
+/// Claude with the next prompt.
+pub(super) fn run_shell(chat: &mut Chat, command: &str) {
+    let Some(id) = session_id(chat) else {
+        return;
+    };
+    let Some(program) = crate::console::shell_program() else {
+        notice(chat, "No shell found to run that in.");
+        return;
+    };
+    let at = chat.folio.shell_started(command);
+    chat.follow = true;
+    let mut c = std::process::Command::new(&program);
+    c.args(crate::shell::run_args(&program, command))
+        .current_dir(&chat.dir)
+        .stdin(std::process::Stdio::null());
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+    }
+    let (router, command) = (super::router(), command.to_string());
+    std::thread::spawn(move || {
+        let (output, code) = match c.output() {
+            Ok(o) => {
+                let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
+                let err = String::from_utf8_lossy(&o.stderr);
+                if !err.trim().is_empty() {
+                    if !text.is_empty() && !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str(&err);
+                }
+                (text, o.status.code())
+            }
+            Err(e) => (format!("Could not start {}: {e}", program.display()), None),
+        };
+        if let Ok(mut d) = SHELLS.lock() {
+            d.push((id, at, command, output, code));
+        }
+        super::sign_in::post(router);
+    });
+}
+
 thread_local! {
     /// The conversations a `/resume` list offered, by session.
     static OFFERED: RefCell<HashMap<String, Vec<Past>>> = RefCell::new(HashMap::new());
@@ -536,6 +585,11 @@ fn hidden(chat: &mut Chat, id: &str, args: &[&str], then: Then) {
 
 /// Brings in what hidden runs said, on the UI thread.
 pub(super) fn tend() {
+    let shells = SHELLS.lock().map(|mut d| std::mem::take(&mut *d));
+    for (id, at, command, output, code) in shells.unwrap_or_default() {
+        with(&id, |chat| chat.folio.shell_done(at, &command, &output, code));
+        redraw(&id);
+    }
     let done = DONE.lock().map(|mut d| std::mem::take(&mut *d));
     for (id, then, said) in done.unwrap_or_default() {
         with(&id, |chat| {
@@ -670,6 +724,9 @@ mod tests {
             edit: None,
             lane: None,
             output: String::new(),
+            images: Vec::new(),
+            began: None,
+            ended: None,
         };
         let blocks = vec![
             Block::Prompt("Fix the tiles".into()),

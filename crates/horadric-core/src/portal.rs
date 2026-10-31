@@ -58,9 +58,21 @@ pub struct Phone {
     pub id: String,
     /// What the phone called itself, such as "iPhone, Safari".
     pub name: String,
-    /// Its AES-256 key, b64url. It crossed the relay once, sealed with
-    /// the ticket, and lives only here and in that phone's browser.
+    /// Its AES-256 key, b64url. A phone with a key pair of its own
+    /// ([`Phone::public`]) has one derived by both sides ([`phone_key`]),
+    /// which never crossed the relay; an older one's crossed it once,
+    /// sealed with the ticket, and lives only here and in that phone's
+    /// browser.
     pub key: String,
+    /// The phone's ECDH public key, b64url of the 65 byte point, when it
+    /// paired with one (pairing v3) or upgraded to one. Empty for a phone
+    /// with only a key this PC made.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub public: String,
+    /// The key this PC made, kept after an upgrade to a key pair: the
+    /// page may still seal with it until it sees the PC switched.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub was: String,
     /// When it paired and when it last said hello, Unix seconds.
     pub paired: u64,
     pub seen: u64,
@@ -87,6 +99,8 @@ pub enum Paired {
     Used,
     /// The ticket ran out, or there is none.
     Expired,
+    /// The phone's public key is no P-256 point. The ticket is not spent.
+    BadKey,
 }
 
 impl Config {
@@ -134,22 +148,47 @@ impl Config {
     /// Pairs a phone with the ticket: the first to ask gets a key of its
     /// own, made from `random`, and the ticket is spent.
     pub fn pair(&mut self, name: &str, random: &[u8; 40], now: u64) -> Paired {
+        self.pair_keyed(name, random, now, "", |_| None)
+    }
+
+    /// [`Config::pair`] for a phone with a key pair of its own whose
+    /// public key is `public` (empty for one without): its key is what
+    /// `derive` makes of the phone's new id, and no key is made here.
+    pub fn pair_keyed(
+        &mut self,
+        name: &str,
+        random: &[u8; 40],
+        now: u64,
+        public: &str,
+        derive: impl FnOnce(&str) -> Option<[u8; 32]>,
+    ) -> Paired {
         let Some(t) = self.ticket.as_mut().filter(|t| now < t.until) else {
             return Paired::Expired;
         };
         if t.used {
             return Paired::Used;
         }
+        let id = b64url(&random[..8]);
+        let key = if public.is_empty() {
+            b64url(&random[8..])
+        } else {
+            match derive(&id) {
+                Some(k) => b64url(&k),
+                None => return Paired::BadKey,
+            }
+        };
         t.used = true;
         let name: String = name.trim().chars().take(60).collect();
         let phone = Phone {
-            id: b64url(&random[..8]),
+            id,
             name: if name.is_empty() {
                 "Phone".into()
             } else {
                 name
             },
-            key: b64url(&random[8..]),
+            key,
+            public: public.to_string(),
+            was: String::new(),
             paired: now,
             seen: now,
         };
@@ -167,12 +206,32 @@ impl Config {
         gone
     }
 
-    /// Forgets the phones not seen for [`STALE_SECS`]. True when any went.
-    pub fn forget_stale(&mut self, now: u64) -> bool {
-        let before = self.phones.len();
-        self.phones
-            .retain(|p| now.saturating_sub(p.seen) < STALE_SECS);
-        self.phones.len() != before
+    /// Forgets the phones not seen for [`STALE_SECS`], and answers them:
+    /// one with a key pair is forgotten by signed word too, which is the
+    /// caller's to sign.
+    pub fn forget_stale(&mut self, now: u64) -> Vec<Phone> {
+        let (gone, kept) = std::mem::take(&mut self.phones)
+            .into_iter()
+            .partition(|p| now.saturating_sub(p.seen) >= STALE_SECS);
+        self.phones = kept;
+        gone
+    }
+
+    /// Phone `id`, paired with a key this PC made, now has the key pair
+    /// whose public key is `public` and the key `key` derived with it.
+    /// The old key stays good until the phone pairs again. False when no
+    /// such phone is paired, or it has a key pair already.
+    pub fn upgrade(&mut self, id: &str, public: &str, key: &[u8; 32]) -> bool {
+        let Some(p) = self
+            .phones
+            .iter_mut()
+            .find(|p| p.id == id && p.public.is_empty())
+        else {
+            return false;
+        };
+        p.was = std::mem::replace(&mut p.key, b64url(key));
+        p.public = public.to_string();
+        true
     }
 
     /// The link a phone opens to pair, while there is a ticket. Everything
@@ -215,6 +274,30 @@ impl Config {
             uri_encode(pc_name)
         ))
     }
+}
+
+/// The key a phone with a key pair shares with one brother, never sent:
+/// from the ECDH `shared` secret of the phone's key and the brother's,
+/// both public keys (65 byte points), the phone's id and the brother's
+/// relay id, framed as `joining` frames its own. The page derives the
+/// same in `phonekey.js`.
+pub fn phone_key(
+    shared: &[u8; 32],
+    phone_public: &[u8],
+    brother_public: &[u8],
+    phone: &str,
+    relay_id: &str,
+) -> [u8; 32] {
+    crate::joining::derive(
+        "horadric phone key v1",
+        &[
+            shared,
+            phone_public,
+            brother_public,
+            phone.as_bytes(),
+            relay_id.as_bytes(),
+        ],
+    )
 }
 
 /// A b64url key as AES-256 wants it, `None` when it is not 32 bytes.
@@ -811,6 +894,38 @@ mod tests {
     }
 
     #[test]
+    fn a_phone_with_a_key_pair_gets_the_derived_key_and_a_bad_key_spends_no_ticket() {
+        let mut c = Config::fresh(&[0; 32]);
+        c.open_ticket(&[9; 32], 1000);
+        assert_eq!(c.pair_keyed("a", &[1; 40], 1001, "PUB", |_| None), Paired::BadKey);
+        let mut asked = String::new();
+        let Paired::New(phone) = c.pair_keyed("a", &[1; 40], 1002, "PUB", |id| {
+            asked = id.to_string();
+            Some([7; 32])
+        }) else {
+            panic!("the ticket was spent by a bad key");
+        };
+        assert_eq!(asked, phone.id);
+        assert_eq!((phone.key, phone.public), (b64url(&[7; 32]), "PUB".to_string()));
+        assert_eq!(c.pair_keyed("b", &[2; 40], 1003, "P2", |_| Some([8; 32])), Paired::Used);
+    }
+
+    #[test]
+    fn an_upgrade_keeps_the_old_key_and_happens_once() {
+        let mut c = Config::fresh(&[0; 32]);
+        c.open_ticket(&[9; 32], 1000);
+        let Paired::New(phone) = c.pair("a", &[1; 40], 1001) else {
+            panic!();
+        };
+        assert!(!c.upgrade("nobody", "PUB", &[7; 32]));
+        assert!(c.upgrade(&phone.id, "PUB", &[7; 32]));
+        assert_eq!(c.phones[0].was, phone.key);
+        assert_eq!(c.phones[0].key, b64url(&[7; 32]));
+        assert!(!c.upgrade(&phone.id, "OTHER", &[8; 32]));
+        assert_eq!(c.phones[0].public, "PUB");
+    }
+
+    #[test]
     fn a_ticket_pairs_one_phone_once_and_runs_out() {
         let mut c = Config::fresh(&[0; 32]);
         assert_eq!(c.pair("a", &[1; 40], 0), Paired::Expired);
@@ -852,8 +967,8 @@ mod tests {
             c.open_ticket(&[9; 32], seen);
             c.pair(&format!("p{i}"), &[i as u8; 40], seen);
         }
-        assert!(!c.forget_stale(STALE_SECS - 1));
-        assert!(c.forget_stale(STALE_SECS));
+        assert!(c.forget_stale(STALE_SECS - 1).is_empty());
+        assert_eq!(c.forget_stale(STALE_SECS).len(), 1);
         assert_eq!(c.phones.len(), 1);
         assert_eq!(c.phones[0].name, "p1");
     }

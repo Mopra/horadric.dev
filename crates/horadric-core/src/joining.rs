@@ -226,7 +226,7 @@ impl Store {
 
 /// SHA-256 over a label and parts, each part led by its length, so no
 /// two different lists of parts hash the same.
-fn derive(label: &str, parts: &[&[u8]]) -> [u8; 32] {
+pub(crate) fn derive(label: &str, parts: &[&[u8]]) -> [u8; 32] {
     let mut data = label.as_bytes().to_vec();
     for p in parts {
         data.extend_from_slice(&(p.len() as u32).to_be_bytes());

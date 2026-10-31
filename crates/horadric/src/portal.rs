@@ -7,7 +7,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use horadric_core::portal::{Config, Subs, TICKET_SECS};
-use horadric_ui::portal_pair::{now, pair_a_phone, pc_name, random32};
+use horadric_ui::portal_pair::{
+    forget_everywhere, known_phones, now, pair_a_phone, pc_name, random32, vouched_by,
+};
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let dir = horadric_hooks::state_dir().ok_or("cannot find %APPDATA%")?;
@@ -38,31 +40,59 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
         Some("phones") => {
             let c = config.ok_or("Town Portal was never turned on")?;
-            if c.phones.is_empty() {
+            let known = known_phones(&dir);
+            if known.is_empty() {
                 println!("No phone is paired. Pair one with `horadric portal`.");
             }
             let now = now();
-            for (i, p) in c.phones.iter().enumerate() {
-                println!(
-                    "{}. {}, paired {}, last seen {}",
-                    i + 1,
-                    p.name,
-                    ago(now, p.paired),
-                    ago(now, p.seen)
-                );
+            for (i, k) in known.iter().enumerate() {
+                let paired = c.phones.iter().find(|p| p.id == k.id);
+                let when = match paired {
+                    Some(p) => format!(", paired {}, last seen {}", ago(now, p.paired), ago(now, p.seen)),
+                    None => String::new(),
+                };
+                let by = vouched_by(&dir, k);
+                let whose = match (k.public.is_empty(), by.is_empty()) {
+                    (true, _) => ", this PC only".to_string(),
+                    (false, true) => String::new(),
+                    (false, false) => format!(", paired by {by}"),
+                };
+                println!("{}. {}{whose}{when}", i + 1, k.name);
             }
         }
         Some("forget") => {
-            let mut c = config.ok_or("Town Portal was never turned on")?;
+            config.ok_or("Town Portal was never turned on")?;
             let which = args
                 .get(1)
                 .ok_or("usage: horadric portal forget NUMBER|all (see horadric portal phones)")?;
-            let gone = forget(&mut c, which)?;
-            save(&c)?;
+            let known = known_phones(&dir);
+            // A phone with a key pair is forgotten by signed word, so every
+            // brother drops it; one paired the old way only ever was here.
+            let picked: Vec<_> = if which == "all" {
+                known.iter().collect()
+            } else {
+                let i = which
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|&i| i >= 1 && i <= known.len())
+                    .ok_or_else(|| format!("no phone {which}; see horadric portal phones"))?;
+                vec![&known[i - 1]]
+            };
+            let mut gone = Vec::new();
+            for k in picked {
+                gone.push(forget_everywhere(&dir, &k.id)?);
+            }
             if which == "all" {
+                if let Some(mut c) = Config::load(&dir) {
+                    forget(&mut c, "all")?;
+                    save(&c)?;
+                }
                 Subs::clear(&dir).map_err(|e| format!("cannot forget the phones' push: {e}"))?;
             }
-            println!("Forgotten: {gone}. It is cut off now, if Horadric is running.");
+            println!(
+                "Forgotten on every brother: {}. Cut off now where Horadric is running.",
+                gone.join(", ")
+            );
         }
         // The name from before phones had keys of their own.
         Some("rekey") => {
