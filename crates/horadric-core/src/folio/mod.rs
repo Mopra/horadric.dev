@@ -18,6 +18,7 @@
 //! the first two become [`Block::Question`] and [`Block::Plan`] when the
 //! CLI asks, the last is [`Folio::todos`].
 
+pub mod afar;
 mod edits;
 mod launch;
 mod send;
