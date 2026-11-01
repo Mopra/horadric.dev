@@ -7,10 +7,6 @@ holds only what is still not done.
 
 ## Not done
 
-- **The bit vector prefilter.** Search scans every int8 vector. Once the
-  store is big (hundreds of thousands of chunks), scan 96 byte bit
-  vectors by Hamming distance first and score only the best few thousand
-  in int8.
 - **Redaction does not know the vault's own secrets.** `redact` catches
   token shapes and secret-sounding names, but not the values kept in the
   vault (see [secrets.md](secrets.md)). It should cut those too.

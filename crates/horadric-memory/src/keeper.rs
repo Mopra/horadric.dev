@@ -365,15 +365,19 @@ impl<E: Embed> Keeper<E> {
         let mut cosine: HashMap<usize, f32> = HashMap::new();
         let meaning: Vec<usize> = match &query {
             Some((tag, q)) => {
-                let mut close: Vec<(f32, usize)> = cands
+                let ids: Vec<(usize, ChunkId)> = cands
                     .iter()
                     .enumerate()
-                    .filter_map(|(i, c)| {
-                        let id = match (c.note_of(), c.source) {
-                            (Some(n), _) => copies[&n.id],
-                            (None, Source::Chunk(id, _)) => id,
-                            (None, _) => return None,
-                        };
+                    .filter_map(|(i, c)| match (c.note_of(), c.source) {
+                        (Some(n), _) => Some((i, copies[&n.id])),
+                        (None, Source::Chunk(id, _)) => Some((i, id)),
+                        (None, _) => None,
+                    })
+                    .collect();
+                let mut close: Vec<(f32, usize)> = store
+                    .worth_scoring(tag, q, ids, recall::MOST_BY_MEANING)
+                    .into_iter()
+                    .filter_map(|(i, id)| {
                         let cos = store.cosine(tag, id, q)?;
                         (cos >= recall::LEAST_COSINE).then_some((cos, i))
                     })
@@ -390,9 +394,24 @@ impl<E: Embed> Keeper<E> {
         });
         let offering = unasked.is_some();
         if let Some(u) = unasked {
+            // A hit found by its words alone may have been left out of the
+            // meaning shortlist, so its cosine is asked for here.
+            let cosine_of = |i: usize| {
+                cosine.get(&i).copied().or_else(|| {
+                    let (tag, q) = query.as_ref()?;
+                    let id = match (cands[i].note_of(), cands[i].source) {
+                        (Some(n), _) => copies[&n.id],
+                        (None, Source::Chunk(id, _)) => id,
+                        (None, _) => return None,
+                    };
+                    store
+                        .cosine(tag, id, q)
+                        .filter(|&c| c >= recall::LEAST_COSINE)
+                })
+            };
             found = recall::offered(
                 &found,
-                |i| cosine.get(&i).copied(),
+                cosine_of,
                 |i| u.seen.contains(&recall::id_of(&cands[i])),
             );
             if found.is_empty() {
