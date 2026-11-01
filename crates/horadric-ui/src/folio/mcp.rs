@@ -61,9 +61,6 @@ pub(super) enum Do {
     Pick(String, String, String),
 }
 
-/// Where claude.ai connectors are removed.
-const CONNECTORS: &str = "https://claude.ai/settings/connectors";
-
 /// A session key, a server, and what removing it said.
 type Removal = (String, String, Result<(), String>);
 
@@ -81,9 +78,16 @@ fn remove(key: &str, server: &str) {
         return;
     };
     let args: Vec<String> = match removal {
+        // Removing it on claude.ai needs a signed in browser, and a
+        // connector that needs sign-in is the one the human wants gone.
+        // Denying it in their own settings is local and undone the same way.
         McpRemoval::ClaudeAi => {
-            with(key, |c| c.folio.mcp_ask_remove(server, false));
-            open(CONNECTORS);
+            with(key, |c| c.folio.mcp_removing(server));
+            let result = deny_connector(server);
+            if let Ok(mut r) = REMOVED.lock() {
+                r.push((key.to_string(), server.to_string(), result));
+            }
+            super::sign_in::post(router());
             return;
         }
         McpRemoval::Plugin(p) => vec!["plugin".into(), "disable".into(), p, "--json".into()],
@@ -107,6 +111,22 @@ fn remove(key: &str, server: &str) {
         }
         super::sign_in::post(router);
     });
+}
+
+/// Adds `server` to `deniedMcpServers` in the user's settings, so no
+/// session in any project loads it.
+fn deny_connector(server: &str) -> Result<(), String> {
+    let path = crate::inventory::claude_dir().join("settings.json");
+    let mut settings: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s)
+            .map_err(|e| format!("{} is not JSON ({e}); fix it first", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(format!("{} cannot be read ({e})", path.display())),
+    };
+    let switch = horadric_core::context::Switch::Server(server.to_string());
+    horadric_core::context::set(&mut settings, &switch, false);
+    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text + "\n").map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn run_removal(args: &[&str], dir: &std::path::Path) -> Result<(), String> {
@@ -507,8 +527,8 @@ pub(super) unsafe fn card(cx: &Ctx, card: &McpCard, w: f32) -> Scene {
                     "This turns off the {p} plugin in every session, with its skills and commands. \
                      claude plugin enable {p} brings it back."
                 ),
-                Some(McpRemoval::ClaudeAi) => "Connectors are removed on claude.ai: \
-                     this opens its settings in your browser."
+                Some(McpRemoval::ClaudeAi) => "This turns it off in every session on this \
+                     machine, in your own settings. It stays on claude.ai."
                     .to_string(),
                 Some(McpRemoval::Scope(scope)) if scope == "project" => {
                     "This removes it from the project's .mcp.json, which everyone working in it shares."
