@@ -948,9 +948,9 @@ impl Target {
             }
             // A failed bloom leaves the frame without its glow, never
             // without its frame.
-            let _ = self.bloom(gpu, scene);
+            let _ = self.bloom(gpu, m, scene);
             if scene.ambient {
-                self.painter(&self.rt).light(m, scene);
+                self.painter(&self.rt).light(scene);
             }
             self.fade_cut();
             self.rt.EndDraw(None, None)
@@ -2473,16 +2473,13 @@ impl Painter<'_> {
 
     /// The light that never stops while a session works or waits, drawn
     /// fresh over the kept layer every frame.
-    unsafe fn light(&self, m: &Metrics, scene: &Scene) {
-        let radius = m.tile_radius;
+    unsafe fn light(&self, scene: &Scene) {
         self.busy_wash(scene);
-        self.astir_breath(m, scene);
         for (i, (r, s, look)) in tiles(scene).enumerate() {
             let phase = &s.phase;
             let c = theme::phase_color(phase);
             if scene.beckons(i, s) {
                 let on = motion::beacon(look.phase_age) * look.enter;
-                self.halo(&r, radius, c, 0.7 * on);
                 self.lamp(&lamp_rect(&r), c, on);
                 continue;
             }
@@ -2502,7 +2499,6 @@ impl Painter<'_> {
                 }
                 Phase::Waiting(_) => {
                     let breath = motion::waiting_breath(look.phase_age);
-                    self.halo(&r, radius, c, (0.3 + 0.4 * breath) * look.enter);
                     let level = (0.55 + 0.45 * breath) * look.enter;
                     self.lamp(&lamp_rect(&r), c, level);
                     let c = theme::phase_color(&Phase::Working);
@@ -2591,25 +2587,6 @@ impl Painter<'_> {
             radius - 0.75,
             gold.with_alpha(0.3 + 0.5 * breath),
             1.5,
-        );
-    }
-
-    /// The quests tile breathing while Warriv works.
-    unsafe fn astir_breath(&self, m: &Metrics, scene: &Scene) {
-        let (Some(l), Some(t)) = (&scene.layout.tasks, &scene.tasks) else {
-            return;
-        };
-        if !t.astir {
-            return;
-        }
-        let clock = scene
-            .now
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default();
-        self.astir(
-            &l.rect,
-            m.tile_radius,
-            motion::breathe(clock, WARRIV_BREATH),
         );
     }
 
@@ -3788,17 +3765,6 @@ impl Painter<'_> {
                 self.inner(gpu, r, radius, (2.0, 8.0), glow, glow, look.enter);
                 if !ambient {
                     self.halo(r, radius, c, 0.6);
-                }
-                if arrival > 0.0 {
-                    // A ring leaving the tile the moment it starts waiting.
-                    let spread = (1.0 - arrival) * 5.0;
-                    let ring = Rect::new(
-                        r.x - spread,
-                        r.y - spread,
-                        r.w + 2.0 * spread,
-                        r.h + 2.0 * spread,
-                    );
-                    self.stroke_rounded(&ring, radius + spread, c.with_alpha(arrival * 0.45), 1.2);
                 }
             }
             Phase::Done if arrival > 0.0 => {
