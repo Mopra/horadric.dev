@@ -1237,21 +1237,31 @@ by its length as 4 bytes big endian.
    pass, or on any frame out of order. It holds at most 3 asks at once
    and refuses more.
 
-## Proposed: teams
+## Teams
 
-Not on the relay yet: what a relay grouping a WorkOS organization's
-people into one brotherhood would add, and what a machine already does
-with it. The relay, which alone sees whose login each machine is, marks
-a machine signed in as another person of the same organization with
-`"kin":"team"`, in its `brothers` list entries and on the `join` and
-`link` frames. A machine keeps the ids it was told in `team.json` beside
+A WorkOS organization's people as one brotherhood. The relay, which
+alone sees whose login each machine is, reads the organization from the
+access token's `org_id` claim and marks a machine signed in as another
+person of the same organization with `"kin":"team"`, in its `brothers`
+list entries and on the `join` and `link` frames. It does so only
+between machines that dial `/pc` with `team=1` (`relaying::knowing_teams`):
+a Horadric from before teams, and the Mac and the Linux node today, would
+take a teammate's machine for the human's own, so the relay never lists
+one to them nor them to one. A fresh token whose organization changed
+moves the machine, and its channels to former teammates close. A machine keeps the ids it was told in `team.json` beside
 `standing.json`, and never drops one, so a relay rolled back cannot give
 a teammate the rights of the human's own machines. A teammate's machine
 joins with the six digit code as any brother does, then:
 
 - it only watches this machine (its "Can control this PC" starts off);
-- no lore goes to it and none is taken from it, whatever that switch
-  says, since the lore holds conversations word for word.
+- lore crosses only for a project whose "Teammates get its notes" is on
+  (the project menu, kept in `team.json` as `shared`), and then only the
+  notes and quest summaries the sending machine wrote itself: a passage
+  of dialogue goes as its number alone, so the other side's count still
+  moves past it. What a teammate's machine sends is taken only for
+  writers whose dialogue this machine does not hold, so a teammate cannot
+  write, replace or forget as the human's own brothers. Each side's
+  switch rules what it asks for and what it answers.
 
 A machine the relay does not mark is the human's own, so a relay without
 teams changes nothing.
