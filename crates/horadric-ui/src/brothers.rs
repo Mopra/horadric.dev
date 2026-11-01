@@ -113,7 +113,7 @@ impl Boxes {
 }
 
 /// Presses No on every window of thread `thread`: its question box.
-pub(crate) fn dismiss(thread: u32) {
+fn dismiss(thread: u32) {
     unsafe extern "system" fn no(hwnd: HWND, _: LPARAM) -> BOOL {
         let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(IDNO.0 as usize), LPARAM(0));
         true.into()

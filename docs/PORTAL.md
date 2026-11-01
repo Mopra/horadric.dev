@@ -1214,9 +1214,12 @@ by its length as 4 bytes big endian.
    the first 4 bytes of `derive('horadric ask code v1', parts)`, big
    endian, mod 1,000,000, as six digits in two groups ("587 941"), and
    the ask key is `derive('horadric ask key v1', parts)`.
-5. The PC asks its human, No the default: "iPhone, Safari wants to use
-   Town Portal, signed in as x@y.com. Does the phone show 587 941? Yes
-   lets it see and type in this PC's sessions and every brother's." The
+5. The PC asks its human with the code first, on a line of its own,
+   then the phone's name and email (stripped of line breaks, control and
+   direction marks, since the relay chooses them and could otherwise put
+   a code of its own above the real one). The box is OK and Cancel,
+   Cancel the default, never Yes and No: Yes answers to a bare "y", and
+   a box that opens while the human types in a session takes the keys. The
    phone shows the same code, "Desktop asks you about this phone. Say
    yes there only if it shows the same code", and Yes and No of its own.
    Its human must say yes on the phone too: otherwise a relay playing

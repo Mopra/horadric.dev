@@ -39,12 +39,34 @@ pub fn agree(s: &[u8; 32], phone: (&[u8], &[u8]), pc: (&[u8], &[u8])) -> (String
     (code, derive("horadric ask key v1", &parts))
 }
 
-/// What the PC's human is asked.
+/// What the PC's human is asked. The code comes first, alone, since the
+/// name and email are the relay's to choose: put first, either could
+/// carry a code of its own ahead of the real one.
 pub fn question_text(phone: &str, email: &str, code: &str) -> String {
     format!(
-        "{phone} wants to use Town Portal, signed in as {email}. Does the phone show {code}? \
-         Yes lets it see and type in this PC's sessions and every brother's."
+        "Does the phone show this code?\n\n        {code}\n\n\
+         A phone ({phone}, signed in as {email}) wants to use Town Portal. \
+         Letting it in lets it see and type in this PC's sessions and every brother's.\n\n\
+         OK lets it in. Cancel keeps it out."
     )
+}
+
+/// `text` as it may be shown to the human: no line breaks, control or
+/// direction marks (a relay could push the real code out of sight or
+/// turn text around with them), runs of space as one, at most `max`
+/// characters.
+pub fn shown(text: &str, max: usize) -> String {
+    let format = |c: char| {
+        matches!(c, '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
+    };
+    let kept: String = text
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| !c.is_control() && !format(*c))
+        .collect();
+    let words: Vec<&str> = kept.split_whitespace().collect();
+    words.join(" ").chars().take(max).collect()
 }
 
 /// This PC as an ask needs it: its relay id, its name and its key pair.
@@ -164,7 +186,7 @@ impl Asks {
         if self.held.len() >= MAX_ASKS {
             return (false, old);
         }
-        let email: String = email.trim().chars().take(254).collect();
+        let email = shown(email, 80);
         self.held.insert(
             ch,
             Ask {
@@ -249,14 +271,7 @@ impl Asks {
         if msg["v"].as_u64() != Some(ASK_V) {
             return Err(Step::Dropped(None));
         }
-        let name: String = msg["name"]
-            .as_str()
-            .unwrap_or_default()
-            .trim()
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(60)
-            .collect();
+        let name = shown(msg["name"].as_str().unwrap_or_default(), 60);
         let me = me().ok_or(Step::Refuse)?;
         let mut nonce = [0u8; 16];
         crypto.random(&mut nonce);
@@ -345,6 +360,20 @@ impl Asks {
 mod tests {
     use super::*;
     use crate::joining::fake::Fake;
+
+    #[test]
+    fn shown_text_cannot_break_lines_or_turn_around() {
+        assert_eq!(shown("a@b.c.\n\n\nDoes it show 1?", 80), "a@b.c. Does it show 1?");
+        assert_eq!(shown("iPhone\u{202E}lahs", 60), "iPhonelahs");
+        assert_eq!(shown("  \u{200B} ", 60), "");
+        assert_eq!(shown(&"x".repeat(100), 60).len(), 60);
+    }
+
+    #[test]
+    fn the_code_comes_before_what_the_relay_chose() {
+        let t = question_text("587 941", "587 941", "123 456");
+        assert!(t.find("123 456").unwrap() < t.find("587 941").unwrap());
+    }
 
     fn hex(b: &[u8]) -> String {
         b.iter().map(|x| format!("{x:02x}")).collect()
@@ -448,14 +477,7 @@ mod tests {
             (&public_of(&pc), &pc_nonce),
         );
         assert_eq!(q.code, code);
-        assert_eq!(
-            q.text,
-            format!(
-                "iPhone, Safari wants to use Town Portal, signed in as x@y.com. Does the \
-                 phone show {code}? Yes lets it see and type in this PC's sessions and every \
-                 brother's."
-            )
-        );
+        assert_eq!(q.text, question_text("iPhone, Safari", "x@y.com", &code));
         assert_eq!(asks.answer(7, q.token + 1, true), None);
         assert_eq!(
             asks.answer(7, q.token, true),
