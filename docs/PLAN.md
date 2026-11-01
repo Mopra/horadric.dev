@@ -51,23 +51,23 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 
 ## Next
 
-- [One portal](plan/one-portal.md): a phone paired once sees every brother and every session. Built; left: trimming the tray, and the test with three machines.
+- [One portal](plan/one-portal.md): a phone paired once sees every brother and every session. Built; left: the test with three machines, and pairing a phone by signing in (being built).
 - [Headless sessions and the Folio](plan/headless.md): built and the default; left: the later Folio features.
-- [macOS](plan/macos.md): what is left of Horadric on a Mac: the Folio, the browser pane, quests and Warriv, files, usage, Discord, Settings.
+- [macOS](plan/macos.md): the Folio, browser pane, quests, files, usage, Discord and Settings are built, unverified on a real Mac; left: the rest of each, and switching accounts.
 - [Claude Code 2.1.287 to 2.1.296](plan/claude-code-2-1-287-to-2-1-296.md): cloud session tiles, waiting on `claude agents --json`.
 - [Lore](plan/lore.md): watch quest compaction run for real.
-- [Memory](plan/memory.md): the small gaps left in long term memory.
+- [Memory](plan/memory.md): built; left: arming the daily distill.
 - [The agent's cursor](plan/the-agent-s-cursor.md): agents testing without taking the human's mouse. Proposed.
-- [The Brotherhood](plan/the-brotherhood.md): built; left: the rest of the Mac as a brother (brothers' tiles, handing off, its files) and the rest of teams.
+- [The Brotherhood](plan/the-brotherhood.md): built, the Mac and teams too; left: the Mac's keeper, taking over and leaving, and a real two-person team run.
 - [Secrets](plan/secrets.md): tokens for quests that push, call APIs or deploy.
 - [Identities](plan/identities.md): each project's gh, git, npm and Vercel logins, so no session switches another's account.
-- [Signals](plan/signals.md): status line cost, refresh and outside sessions, OpenTelemetry export, and OSC 9;4 progress.
+- [Signals](plan/signals.md): built; left: a look on screen, the Mac's cost lines and progress, and traces.
 - [Small local models](plan/local-models.md): static embeddings as memory's first pass, and a small model for the sentence per session.
-- [Dictation](plan/dictation.md): Ctrl+Space dictation with Whisper is built; left: faster drafts, cleanup, a personal dictionary, Settings, outside Horadric, macOS.
+- [Dictation](plan/dictation.md): built, with a global chord; left: a bigger model, Danish, a plate outside Horadric, and the Mac's key and draft.
 - [Ghostty's terminal core](plan/ghostty.md): move the grid from `alacritty_terminal` to libghostty, after a trial.
 - [The Forge](plan/the-forge.md): files worked on with Claude beside the session (decks, artefacts, markdown, images), pinned, edited by hand, versioned and exported. Proposed.
 - [The hirelings](plan/hirelings.md): built; left: an on-screen check, and open questions (typing to one, agent teams, nesting).
-- [GPU light](plan/gpu-light.md): every glow, shadow and spark drawn with real bloom, the shadow effect and particles instead of stacked shapes, window by window, then the Mac. The working lamp is built; next the light module.
+- [GPU light](plan/gpu-light.md): every glow, shadow and spark drawn with real bloom, the shadow effect and particles instead of stacked shapes, window by window, then the Mac. Steps 1 and 2 are built; step 3 waits on the human's look.
 
 ## Reference
 
