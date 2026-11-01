@@ -171,6 +171,9 @@ mod folio_review;
 #[cfg(any(windows, target_os = "macos"))]
 #[cfg_attr(not(windows), allow(dead_code))]
 mod folio_cli;
+#[cfg(any(windows, target_os = "macos"))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod folio_rewind;
 #[cfg(windows)]
 mod menu;
 #[cfg(windows)]

@@ -17,18 +17,12 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
 
-use horadric_core::folio::{prompt_point, rewind_point, Rewind};
+use horadric_core::folio::{prompt_point, Rewind};
 
 use super::App;
+use crate::folio_rewind::{find_rewind, fork_line, read_transcript};
 use crate::toast::Kind;
-
-/// How much of a transcript's end is read for the turn to undo, before
-/// the whole of it: a long session's runs to many megabytes, and its last
-/// prompt is near the end.
-const TAIL: u64 = 4 << 20;
 
 /// A Folio being rewound, from the undo until it starts again.
 struct Pending {
@@ -63,72 +57,7 @@ pub(super) fn rewound(id: &str) -> Option<(Rewind, bool)> {
     })
 }
 
-/// The flags that resume a conversation at `r`, as a new one when it
-/// forks. A first turn undone leaves nothing to resume, so it has none.
-pub(super) fn flags(r: &Rewind, fork: bool) -> Vec<String> {
-    match (&r.keep, fork) {
-        (Some(keep), false) => vec![
-            "--resume-session-at".into(),
-            keep.clone(),
-            "--resume-drops-turn".into(),
-            r.drop.clone(),
-        ],
-        // Without a dropped turn named, the CLI cuts the conversation at
-        // `keep` however many turns follow.
-        (Some(keep), true) => vec![
-            "--fork-session".into(),
-            "--resume-session-at".into(),
-            keep.clone(),
-        ],
-        (None, _) => Vec::new(),
-    }
-}
-
-/// What the page says once a fork has started again.
-fn fork_line(f: &Fork) -> String {
-    let mut said: String = f.prompt.split_whitespace().collect::<Vec<_>>().join(" ");
-    if said.chars().count() > 60 {
-        said = said.chars().take(59).collect::<String>() + "\u{2026}";
-    }
-    let files = match &f.files {
-        Some(Ok(())) => "Its files went back with it.".to_string(),
-        Some(Err(e)) => format!("Its files were left as they are: {e}"),
-        None => "Its files were left as they are.".to_string(),
-    };
-    format!(
-        "Rewound to before \u{201c}{said}\u{201d}. The conversation as it was is kept in History. {files}"
-    )
-}
-
-/// The end of the file at `path`, from the first whole line after
-/// `TAIL` bytes from its end, or all of it with `whole`.
-fn read_transcript(path: &Path, whole: bool) -> Option<(String, bool)> {
-    let mut file = std::fs::File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    let from = if whole { 0 } else { len.saturating_sub(TAIL) };
-    file.seek(SeekFrom::Start(from)).ok()?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    if from == 0 {
-        return Some((text, true));
-    }
-    let start = text.find('\n').map_or(text.len(), |i| i + 1);
-    Some((text[start..].to_string(), false))
-}
-
-/// The rewind of the last turn of `conversation`, counting back from
-/// `head` when it was rewound there before.
-fn find_rewind(path: &Path, head: Option<&str>) -> Option<Rewind> {
-    let (tail, whole) = read_transcript(path, false)?;
-    if let Some(r) = rewind_point(&tail, head) {
-        return Some(r);
-    }
-    if whole {
-        return None;
-    }
-    rewind_point(&read_transcript(path, true)?.0, head)
-}
+pub(super) use crate::folio_rewind::flags;
 
 impl App {
     /// Starts rewinding Folio `id`'s conversation to before its last turn,
@@ -290,7 +219,7 @@ impl App {
         let fork = REWINDS.with(|r| {
             let mut r = r.borrow_mut();
             let f = r.get_mut(id)?.fork.as_mut()?;
-            Some((fork_line(f), f.resend.take()))
+            Some((fork_line(&f.prompt, f.files.as_ref()), f.resend.take()))
         });
         let Some(dir) = self.dir_of(id) else {
             REWINDS.with(|r| r.borrow_mut().remove(id));
