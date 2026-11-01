@@ -189,6 +189,8 @@ mod questlog;
 #[cfg(windows)]
 mod recent;
 #[cfg(windows)]
+mod light;
+#[cfg(windows)]
 mod render;
 #[cfg(windows)]
 mod retinue;

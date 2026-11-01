@@ -73,7 +73,7 @@ use crate::portal_key::Look as PortalLook;
 use crate::settings::Control;
 use crate::theme::{self, Color};
 
-mod bloom;
+mod shine;
 mod stone;
 pub(crate) use stone::{StoneLook, StoneState};
 
@@ -798,7 +798,7 @@ pub struct Target {
     /// The theme the layer was drawn in, so a new one draws it again.
     theme: Cell<theme::Theme>,
     gradients: Gradients,
-    bloom: bloom::Bloom,
+    light: crate::light::Light,
     /// The retinue's stones, made as its portraits first need them.
     stones: RefCell<Stones>,
 }
@@ -893,7 +893,7 @@ impl Target {
             layer: RefCell::new(None),
             theme: Cell::new(theme::current()),
             gradients: Gradients::default(),
-            bloom: bloom::Bloom::default(),
+            light: crate::light::Light::default(),
             stones: RefCell::default(),
         })
     }
