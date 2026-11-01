@@ -9,8 +9,9 @@ use windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE;
 use windows_numerics::Vector2;
 
 use super::{
-    color, Gpu, Painter, Scene, Target, AGENTS_ALONE, HIRELING_ORBIT, MAX_SPARKS, RUNE_CARVE,
-    RUNE_H, RUNE_SETTLE, RUNE_STROKE, SHIMMER, SPARK_ORBIT, SPARK_REACH, WARRIV_BREATH,
+    color, Gpu, Painter, Scene, Target, AGENTS_ALONE, BEAM_H, HIRELING_ORBIT, MAX_SPARKS,
+    RUNE_CARVE, RUNE_H, RUNE_SETTLE, RUNE_STROKE, SHIMMER, SPARK_ORBIT, SPARK_REACH,
+    WARRIV_BREATH,
 };
 use crate::layout::{Metrics, Rect};
 use crate::light::Bloom;
@@ -43,9 +44,12 @@ impl Target {
 fn shines(scene: &Scene) -> bool {
     let astir = scene.tasks.as_ref().is_some_and(|t| t.astir);
     astir
-        || super::tiles(scene).enumerate().any(|(i, (_, s, _))| {
+        || !scene.flights.is_empty()
+        || super::tiles(scene).enumerate().any(|(i, (_, s, look))| {
             scene.beckons(i, s)
                 || matches!(s.phase, Phase::Working | Phase::Waiting(_))
+                || s.phase == Phase::Done && look.phase_age < motion::BEAM
+                || s.phase == Phase::Ended && look.settle > 0.0
                 || !s.band.hirelings.is_empty()
                 || s.agents_alone(scene.now) > 0
         })
@@ -59,6 +63,7 @@ impl Painter<'_> {
         if let Some(r) = self.astir_rim(m, scene) {
             lit.push(r.inset(-2.0));
         }
+        lit.extend(self.flights(scene));
         for (i, (r, s, look)) in super::tiles(scene).enumerate() {
             let c = theme::phase_color(&s.phase);
             if scene.beckons(i, s) {
@@ -92,6 +97,19 @@ impl Painter<'_> {
                     let spread = self.arrival_ring(&r, radius, c, look.arrival);
                     lit.push(r.inset(-2.0 - spread));
                     self.hirelings(&lamp, s, now, working, 0, look.phase_age, look.enter)
+                }
+                Phase::Done if look.phase_age < motion::BEAM => {
+                    if let Some(shaft) = self.beam(&r, s, look.phase_age, look.enter) {
+                        lit.push(shaft);
+                    }
+                    let n = s.agents_alone(now).min(MAX_SPARKS);
+                    let age = look.phase_age / 2;
+                    self.hirelings(&lamp, s, now, working, n, age, AGENTS_ALONE)
+                }
+                Phase::Ended if look.settle > 0.0 => {
+                    self.power_down(&lamp, s, 1.0 - look.settle);
+                    lit.push(lamp.inset(-LAMP_REACH));
+                    false
                 }
                 _ => {
                     let n = s.agents_alone(now).min(MAX_SPARKS);
@@ -325,5 +343,89 @@ impl Painter<'_> {
         };
         self.brush.SetColor(&color(c));
         self.rt.FillEllipse(&e, self.brush);
+    }
+
+    /// A finished turn is loot dropping: a shaft of its lamp's green shoots
+    /// up off the key with motes rising in it, and fades. Where it reaches.
+    unsafe fn beam(&self, r: &Rect, s: &Session, age: Duration, enter: f32) -> Option<Rect> {
+        let (grown, bright) = motion::beam(age);
+        let strength = bright * enter;
+        if strength <= 0.0 {
+            return None;
+        }
+        let c = theme::phase_color(&Phase::Done);
+        let (x, base) = super::icon_centre(r);
+        let tall = 12.0 + BEAM_H * grown;
+        let stops = [(0.0, c.with_alpha(0.0)), (1.0, heat_color(c, 0.8))];
+        for (w, a) in [(5.0, 0.3), (1.6, 0.9)] {
+            let shaft = Rect::new(x - w / 2.0, base - tall, w, tall);
+            self.fill_rounded_gradient(&shaft, w / 2.0, &stops, a * strength);
+        }
+        self.dot(x, base, 2.0, heat_color(c, 1.3).fade(strength));
+        let motes = Burst::new(particles::seed_of(&s.id), 8, Kind::Mote);
+        let secs = age.as_secs_f32();
+        for i in 0..motes.count {
+            // Spread up the shaft, so it is full of them at once.
+            let from = base - tall * 0.8 * i as f32 / motes.count as f32;
+            if let Some(p) = motes.particle(i, secs) {
+                let ink = heat_color(c, p.heat).fade(p.alpha * strength);
+                self.dot(x + p.x, from + p.y, p.size, ink);
+            }
+        }
+        let rise = 40.0;
+        Some(Rect::new(x - 8.0, base - tall - rise, 16.0, tall + rise + 8.0))
+    }
+
+    /// A light leaving a task's row for the lamp of the session that took
+    /// it: a streak with a trail, flaring as it lands. Where each went.
+    unsafe fn flights(&self, scene: &Scene) -> Vec<Rect> {
+        let c = theme::working();
+        let mut lit = Vec::new();
+        for (n, f) in scene.flights.iter().enumerate() {
+            let ((fx, fy), (tx, ty), p) = (f.from, f.to, f.done);
+            // A little arc out to the right, so it reads as thrown.
+            let bow = 24.0;
+            let at = |p: f32| {
+                let k = motion::ease_in_out(p.clamp(0.0, 1.0));
+                let out = (std::f32::consts::PI * k).sin() * bow;
+                (fx + (tx - fx) * k + out, fy + (ty - fy) * k)
+            };
+            const TRAIL: usize = 5;
+            for tail in (1..=TRAIL).rev() {
+                let (x, y) = at(p - tail as f32 * 0.035);
+                let fade = 1.0 - tail as f32 / (TRAIL + 1) as f32;
+                self.dot(x, y, 0.5 + fade, heat_color(c, 0.9 * fade).fade(0.8 * fade));
+            }
+            let (x, y) = at(p);
+            self.dot(x, y, 1.8, heat_color(c, 1.5));
+            if p > 0.8 {
+                let k = (p - 0.8) / 0.2;
+                self.dot(tx, ty, 1.0 + 2.0 * (1.0 - k), heat_color(c, 1.2).fade(1.0 - k));
+                let sparks = Burst::new(n as u64, 6, Kind::Spark);
+                self.burst(&sparks, (tx, ty), k * sparks.span(), c, 1.0);
+            }
+            let reach = 16.0;
+            let (x0, x1) = (fx.min(tx) - reach, fx.max(tx) + bow + reach);
+            let (y0, y1) = (fy.min(ty) - reach, fy.max(ty) + reach);
+            lit.push(Rect::new(x0, y0, x1 - x0, y1 - y0));
+        }
+        lit
+    }
+
+    /// A lamp going out, `t` of the way through: its light collapses to
+    /// its middle and leaves it as a few embers.
+    unsafe fn power_down(&self, r: &Rect, s: &Session, t: f32) {
+        let white = Color::rgb(0xFFFFFF);
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        if t < 0.5 {
+            let q = motion::ease_in_out(t / 0.5);
+            let h = (r.h * (1.0 - q)).max(r.w * 0.6);
+            let w = r.w * (1.0 - 0.4 * q);
+            let core = Rect::new(cx - w / 2.0, cy - h / 2.0, w, h);
+            self.fill_rounded(&core, w / 2.0, white.with_alpha(0.5 + 0.4 * q));
+        }
+        let embers = Burst::new(particles::seed_of(&s.id), 4, Kind::Ember);
+        let k = (t - 0.35) / 0.65;
+        self.burst(&embers, (cx, cy), k * embers.span(), theme::working(), 1.0);
     }
 }

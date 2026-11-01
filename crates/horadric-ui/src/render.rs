@@ -1318,8 +1318,6 @@ impl Painter<'_> {
         for (i, (r, p)) in scene.layout.pages.iter().zip(scene.pages).enumerate() {
             self.page(gpu, m, scene, i, r, p);
         }
-        self.beams(scene);
-        self.flights(scene);
         if let Some(add) = &scene.layout.add {
             self.add(gpu, m, add, scene.bay(Hit::Add), CLI_ICON);
         }
@@ -2493,63 +2491,6 @@ impl Painter<'_> {
         }
     }
 
-    /// A finished turn is loot dropping: a beam of its lamp's green shoots
-    /// up off the key and fades, over the tiles above it, the moment the
-    /// turn ends. Drawn after every key so none covers it.
-    unsafe fn beams(&self, scene: &Scene) {
-        if !scene.ambient {
-            return;
-        }
-        for (r, s, look) in tiles(scene) {
-            if s.phase != Phase::Done || look.phase_age >= motion::BEAM {
-                continue;
-            }
-            let (grown, bright) = motion::beam(look.phase_age);
-            let strength = bright * look.enter;
-            if strength <= 0.0 {
-                continue;
-            }
-            let c = theme::phase_color(&Phase::Done);
-            let (x, base) = icon_centre(&r);
-            let tall = 12.0 + BEAM_H * grown;
-            let stops = [(0.0, c.with_alpha(0.0)), (1.0, c)];
-            for (w, a) in [(14.0, 0.18), (6.0, 0.45), (2.0, 0.9)] {
-                let shaft = Rect::new(x - w / 2.0, base - tall, w, tall);
-                self.fill_rounded_gradient(&shaft, w / 2.0, &stops, a * strength);
-            }
-            let white = Color::rgb(0xFFFFFF);
-            self.glow_dot(x, base, 16.0, c.mix(white, 0.3), 0.6 * strength);
-        }
-    }
-
-    /// A light leaving a task's row for the lamp of the session that took
-    /// it, a short tail behind it, flaring as it lands.
-    unsafe fn flights(&self, scene: &Scene) {
-        let c = theme::working();
-        let white = Color::rgb(0xFFFFFF);
-        for f in scene.flights {
-            let ((fx, fy), (tx, ty), p) = (f.from, f.to, f.done);
-            let at = |p: f32| {
-                let k = motion::ease_in_out(p.clamp(0.0, 1.0));
-                // A little arc out to the right, so it reads as thrown.
-                let bow = (std::f32::consts::PI * k).sin() * 24.0;
-                (fx + (tx - fx) * k + bow, fy + (ty - fy) * k)
-            };
-            for tail in (1..6).rev() {
-                let (x, y) = at(p - tail as f32 * 0.035);
-                let fade = 1.0 - tail as f32 / 6.0;
-                self.glow_dot(x, y, 5.0, c, 0.5 * fade);
-            }
-            let (x, y) = at(p);
-            self.glow_dot(x, y, 9.0, c.mix(white, 0.3), 0.9);
-            self.glow_dot(x, y, 2.0, white, 1.0);
-            if p > 0.8 {
-                let flare = 1.0 - (p - 0.8) / 0.2;
-                self.glow_dot(tx, ty, 22.0, c, 0.6 * flare);
-            }
-        }
-    }
-
     /// Warriv's gold round the inside of the quests tile, `breath` from 0
     /// to 1, so the camp is seen moving without a word read: a rim and a
     /// softer band inside it.
@@ -3167,24 +3108,6 @@ impl Painter<'_> {
         }
     }
 
-    /// A lamp switched off like an old picture tube, `t` of the way
-    /// through: its light squeezes to a bright line across its middle, the
-    /// line to a dot, and the dot goes out.
-    unsafe fn power_down(&self, r: &Rect, t: f32) {
-        let white = Color::rgb(0xFFFFFF);
-        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-        if t < 0.5 {
-            let q = motion::ease_in_out(t / 0.5);
-            let h = (r.h * (1.0 - q)).max(1.5);
-            let line = Rect::new(r.x, cy - h / 2.0, r.w, h);
-            self.fill_rounded(&line, r.w / 2.0, white.with_alpha(0.55 + 0.4 * q));
-            self.glow_dot(cx, cy, 6.0 + 4.0 * q, white, 0.3 + 0.5 * q);
-        } else {
-            let q = (t - 0.5) / 0.5;
-            self.glow_dot(cx, cy, 10.0 * (1.0 - q) + 2.0, white, 0.8 * (1.0 - q));
-        }
-    }
-
     /// A small round indicator, lit in `c`.
     unsafe fn led(&self, x: f32, y: f32, c: Color) {
         self.glow_dot(x, y, 6.0, c, 0.45);
@@ -3663,10 +3586,8 @@ impl Painter<'_> {
             let well = Rect::new(slot.x + 6.0, r.y + 8.0, slot.w - 8.0, r.h - 16.0);
             self.fill_rounded(&well, 4.0, fill);
         }
+        // A lamp going out is light, drawn by the bloom.
         self.lamp(&lamp_rect(r), c, level);
-        if ambient && *phase == Phase::Ended && look.settle > 0.0 {
-            self.power_down(&lamp_rect(r), 1.0 - look.settle);
-        }
         if scene.parked.get(i).copied().unwrap_or(false) {
             let l = lamp_rect(r);
             let ring = Rect::new(l.x - 3.0, l.y - 3.0, l.w + 6.0, l.h + 6.0);
