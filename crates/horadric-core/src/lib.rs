@@ -8,6 +8,7 @@
 pub mod accounts;
 pub mod afar;
 pub mod afar_files;
+pub mod afar_tiles;
 pub mod agent;
 pub mod aim;
 pub mod ask;
