@@ -51,12 +51,11 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 
 ## Next
 
-- [One portal](plan/one-portal.md): a phone paired once sees every brother and every session. Built; left: push for brothers' sessions, trimming the tray, and the test with three machines.
-- [Headless sessions and the Folio](plan/headless.md): built and the default; left: line comments under review and the later Folio features.
+- [One portal](plan/one-portal.md): a phone paired once sees every brother and every session. Built; left: trimming the tray, and the test with three machines.
+- [Headless sessions and the Folio](plan/headless.md): built and the default; left: the later Folio features.
 - [macOS](plan/macos.md): what is left of Horadric on a Mac: the Folio, the browser pane, quests and Warriv, files, usage, Discord, Settings.
-- [Orchestration](plan/orchestration.md): a Warriv session restored after a restart, and which model Warriv runs on.
 - [Claude Code 2.1.287 to 2.1.296](plan/claude-code-2-1-287-to-2-1-296.md): cloud session tiles, waiting on `claude agents --json`.
-- [Lore](plan/lore.md): when to compact a quest, and tuning the context pack.
+- [Lore](plan/lore.md): watch quest compaction run for real.
 - [Memory](plan/memory.md): the small gaps left in long term memory.
 - [The agent's cursor](plan/the-agent-s-cursor.md): agents testing without taking the human's mouse. Proposed.
 - [The Brotherhood](plan/the-brotherhood.md): built; left: the rest of the Mac as a brother (brothers' tiles, handing off, its files) and the rest of teams.
