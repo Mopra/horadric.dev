@@ -302,13 +302,12 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
         run: Default::default(),
         views: HashMap::new(),
         quests: questing::Quests::new(&saved),
-        files: super::files::Files {
-            folded: (saved.clusters.iter())
+        files: super::files::Files::folded(
+            (saved.clusters.iter())
                 .filter(|c| c.files_collapsed)
                 .map(|c| c.key.clone())
                 .collect(),
-            ..Default::default()
-        },
+        ),
         defaults: saved.defaults.clone(),
         usage,
     };

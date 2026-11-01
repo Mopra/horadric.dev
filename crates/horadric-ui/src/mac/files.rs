@@ -108,6 +108,14 @@ pub struct FilesView {
 }
 
 impl Files {
+    /// No tiles yet, the projects in `folded` folded as saved.
+    pub fn folded(folded: HashSet<String>) -> Files {
+        Files {
+            projects: HashMap::new(),
+            folded,
+        }
+    }
+
     /// Keeps a tile for each project in `projects`, by key and folder, and
     /// lets the rest go. A new one is scanned at once.
     pub fn keep(&mut self, projects: &[(String, PathBuf)]) {
