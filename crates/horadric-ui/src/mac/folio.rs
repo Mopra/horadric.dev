@@ -766,17 +766,20 @@ define_class!(
                     .map(|e| e.modifierFlags())
                     .unwrap_or_else(NSEventModifierFlags::empty);
                 // Shift or Option with Return is a new line, as in Claude.
+                // The method macro converts only the tail value to Bool, so
+                // this returns no early.
                 if flags.intersects(NSEventModifierFlags::Shift | NSEventModifierFlags::Option) {
-                    return false;
+                    false
+                } else {
+                    self.submit();
+                    true
                 }
-                self.submit();
-                return true;
-            }
-            if selector == sel!(cancelOperation:) {
+            } else if selector == sel!(cancelOperation:) {
                 stop(&self.ivars().id.borrow());
-                return true;
+                true
+            } else {
+                false
             }
-            false
         }
     }
 );

@@ -339,7 +339,7 @@ pub(super) fn heard(app: &mut App, note: Note) {
         Note::Up { ch, id, name } => {
             let mut kin = std::mem::take(&mut app.kin);
             kin.server.open(ch);
-            kin.linked.insert(ch, id);
+            kin.linked.insert(ch, id.clone());
             app.kin = kin;
             eprintln!("horadric brothers: linked to {name}");
             super::far::up(app, ch, &id, &name);
