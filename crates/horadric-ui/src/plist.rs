@@ -50,6 +50,8 @@ pub fn info_plist(version: &str, icon: Option<&str>) -> String {
 	<string>{MIN_MACOS}</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Dictation listens while you hold its key, and the words are written on this Mac.</string>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
 </dict>

@@ -13,6 +13,7 @@ mod dialog;
 mod folio;
 mod look;
 mod menu;
+mod microphone;
 mod paint;
 mod path;
 mod queue;
