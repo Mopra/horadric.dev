@@ -1173,9 +1173,9 @@ fn relayed(
             if msg["t"] == "hello" {
                 msg["kind"] = json!("phone");
             }
-            if !links.contains_key(&ich) {
+            if let std::collections::hash_map::Entry::Vacant(e) = links.entry(ich) {
                 server.open(ich);
-                links.insert(ich, Link::Phone(ch));
+                e.insert(Link::Phone(ch));
             }
             let who = format!("{}{id}", relay::PHONE);
             let now = SystemTime::now()
