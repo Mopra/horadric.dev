@@ -188,13 +188,15 @@ fn build(mtm: MainThreadMarker) -> Window {
     let height = PAD * 2.0 + HEAD * 3.0 + ROW * (1.0 + 2.0 + sessions) + 24.0;
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WIDTH, height));
     let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
-    let window = NSWindow::initWithContentRect_styleMask_backing_defer(
-        NSWindow::alloc(mtm),
-        frame,
-        style,
-        NSBackingStoreType::Buffered,
-        false,
-    );
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            frame,
+            style,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str("Horadric Settings"));
     let content = window.contentView().expect("a window has a content view");
