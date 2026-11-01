@@ -8,14 +8,16 @@ use std::collections::BTreeSet;
 
 use horadric_core::folio::{Block, Reply};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DELETE, VK_DOWN,
-    VK_END, VK_F3, VK_HOME, VK_LEFT, VK_RIGHT, VK_UP,
+    GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    VK_DELETE, VK_DOWN, VK_END, VK_F3, VK_HOME, VK_LEFT, VK_RIGHT, VK_SHIFT, VK_UP,
 };
 
 use super::cards::picks_of;
 use super::flow::{self, Pos};
+use super::comments;
 use super::transcript::{
-    change_field, deny_field, keep_field, other_field, Act, Find, State, FIND_FIELD, SHOWN,
+    change_field, deny_field, keep_field, note_field, other_field, Act, Find, State, FIND_FIELD,
+    SHOWN,
 };
 use super::view::View;
 use super::{answer_with, redraw, with, Chat};
@@ -88,6 +90,48 @@ pub(super) fn act(key: &str, a: Act) {
                 answer_with(key, |f| f.reply(&id, Reply::Change(&text)));
             }
         }
+        Act::Line(id, row) => {
+            let extend = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+            with(key, |c| {
+                let st = &mut c.tr.state;
+                st.reviews.entry(id.clone()).or_default().pick(row, extend);
+                let field = note_field(&id);
+                (st.fields.entry(field.clone())).or_insert_with(|| Field::new("", true, 8000));
+                st.focus = Some(field);
+            });
+        }
+        Act::Note(id) => {
+            with(key, |c| {
+                let st = &mut c.tr.state;
+                let field = note_field(&id);
+                let text = st.text(&field).to_string();
+                if st.reviews.entry(id.clone()).or_default().add(&text) {
+                    st.fields.remove(&field);
+                    st.focus = None;
+                }
+            });
+        }
+        Act::Unnote(id, which) => {
+            with(key, |c| {
+                let st = &mut c.tr.state;
+                let review = st.reviews.entry(id.clone()).or_default();
+                match which {
+                    Some(k) => review.remove(k),
+                    None => {
+                        review.draft = None;
+                        st.fields.remove(&note_field(&id));
+                        st.focus = None;
+                    }
+                }
+            });
+        }
+        Act::SendNotes(id) => {
+            let reason = with(key, |c| notes_reason(c, &id, "")).flatten();
+            if let Some(reason) = reason {
+                with(key, |c| c.tr.state.reviews.remove(&id));
+                answer_with(key, |f| f.reply(&id, Reply::Deny(&reason)));
+            }
+        }
         Act::Deny(id) => {
             let field = deny_field(&id);
             let reason = with(key, |c| {
@@ -98,7 +142,11 @@ pub(super) fn act(key: &str, a: Act) {
                 } else {
                     st.denying.remove(&id);
                     st.focus = None;
-                    Some(st.fields.remove(&field).map(|f| f.text).unwrap_or_default())
+                    let typed = st.fields.remove(&field).map(|f| f.text).unwrap_or_default();
+                    // Comments left on its lines go with the reason.
+                    let reason = notes_reason(c, &id, &typed).unwrap_or(typed);
+                    c.tr.state.reviews.remove(&id);
+                    Some(reason)
                 }
             })
             .flatten();
@@ -525,7 +573,7 @@ pub(super) fn char(key: &str, c: char, mods: Mods) -> bool {
         return false;
     };
     match c {
-        '\r' if mods.shift && focus.starts_with("change:") => {
+        '\r' if mods.shift && (focus.starts_with("change:") || focus.starts_with("note:")) => {
             with(key, |chat| {
                 if let Some(f) = field_mut(chat, &focus) {
                     f.insert("\n");
@@ -547,6 +595,11 @@ pub(super) fn char(key: &str, c: char, mods: Mods) -> bool {
                     st.keeping.remove(id);
                 } else if let Some(id) = focus.strip_prefix("change:") {
                     st.changing.remove(id);
+                } else if let Some(id) = focus.strip_prefix("note:") {
+                    if let Some(r) = st.reviews.get_mut(id) {
+                        r.draft = None;
+                    }
+                    st.fields.remove(&focus);
                 }
                 st.focus = None;
             });
@@ -630,6 +683,38 @@ pub(super) fn release_lapsed(chat: &mut Chat) {
     st.focus = None;
 }
 
+/// The denial for an edit ask's line comments, with `extra` typed as the
+/// reason, or None when it has none. Reads the file once, to say where in
+/// it each comment is.
+fn notes_reason(c: &Chat, id: &str, extra: &str) -> Option<String> {
+    let review = c.tr.state.reviews.get(id).filter(|r| !r.is_empty())?;
+    let (tool, input) = c.folio.blocks.iter().find_map(|b| match b {
+        Block::Ask {
+            request_id,
+            tool,
+            input,
+            ..
+        } if request_id == id => Some((tool, input)),
+        _ => None,
+    })?;
+    let e = horadric_core::folio::FileEdit::from_input(tool, input)?;
+    let rows = flow::diff_rows(&e);
+    let before = if !e.hunks.is_empty() {
+        vec![Some(0); e.hunks.len()]
+    } else {
+        match tool.as_str() {
+            "Write" => vec![Some(0)],
+            "Edit" | "MultiEdit" => match std::fs::read_to_string(&e.path) {
+                Ok(file) => comments::lines_before(&file, &e.changes),
+                Err(_) => vec![None; e.changes.len()],
+            },
+            _ => vec![None; e.changes.len()],
+        }
+    };
+    let path = flow::project_path(&c.dir, &e.path).unwrap_or_else(|| e.path.clone());
+    Some(comments::reason(&path, &rows, &before, &review.comments, extra))
+}
+
 fn field_mut<'a>(chat: &'a mut Chat, id: &str) -> Option<&'a mut Field> {
     let st = &mut chat.tr.state;
     if id == FIND_FIELD {
@@ -649,6 +734,8 @@ fn submit(key: &str, focus: &str, shift: bool) {
         act(key, Act::Keep(id.to_string()));
     } else if let Some(id) = focus.strip_prefix("change:") {
         act(key, Act::Change(id.to_string()));
+    } else if let Some(id) = focus.strip_prefix("note:") {
+        act(key, Act::Note(id.to_string()));
     } else if let Some(block) = focus.strip_prefix("signin:") {
         if let Ok(block) = block.parse() {
             act(key, Act::SignInCode(block));

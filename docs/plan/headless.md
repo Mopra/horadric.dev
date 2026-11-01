@@ -21,10 +21,7 @@ What a terminal could never do, the reason for all this. Undo last turn
 (its footer opens a timeline of its steps and the files it touched),
 `/all` (one prompt to every Folio of the project), edit and resend or
 rewind to any earlier prompt as a fork, and reviewing each edit before
-it lands are built.
-
-- **Line comments on a diff** under review: today a reviewed edit is
-  allowed, changed as a whole, or denied with one reason.
+it lands, with comments on its lines sent back as the denial, are built.
 
 ## Smaller features still missing
 

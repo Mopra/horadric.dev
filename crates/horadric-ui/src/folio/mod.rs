@@ -31,6 +31,7 @@ mod backdrop;
 pub mod band;
 mod banish;
 mod cards;
+mod comments;
 mod composer;
 mod controls;
 mod editor;

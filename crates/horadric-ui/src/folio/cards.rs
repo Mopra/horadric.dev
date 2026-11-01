@@ -8,7 +8,10 @@ use windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_EMERGENCY_BREAK;
 
 use super::flow;
 use super::rich::{Ctx, Scene, F};
-use super::transcript::{change_field, deny_field, keep_field, other_field, Act, State};
+use super::comments::{self, Review};
+use super::transcript::{
+    change_field, deny_field, keep_field, note_field, other_field, Act, State,
+};
 use super::view::{Hit, CARET_W};
 use crate::field::utf16_at;
 use crate::folio_look as look;
@@ -134,8 +137,20 @@ pub(super) unsafe fn ask(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
     // An edit shows what it changes, as its step will; anything else all
     // it acts on, every line, so nothing asked about is out of sight.
     let edit = FileEdit::from_input(tool, input).filter(|_| waiting);
+    let changing = st.changing.contains(request_id);
+    let denying = st.denying.contains(request_id);
+    let none = Review::default();
+    let review = st.reviews.get(request_id).unwrap_or(&none);
+    // Comments are made only while nothing else is open on the card.
+    let commenting = edit.is_some() && waiting && !changing && !denying;
+    let mut rows = Vec::new();
     if let Some(e) = &edit {
-        y = cx.diff(&mut s, request_id, e, PAD, y, inner, st) + 10.0;
+        let open = commenting.then_some(review);
+        y = cx.diff(&mut s, request_id, e, PAD, y, inner, st, open) + 10.0;
+        rows = flow::diff_rows(e);
+        if !changing {
+            y = notes(cx, &mut s, request_id, &rows, review, commenting, y, inner);
+        }
     } else if let Some(l) = cx.layout(&cx.gfx.mono, shown, inner) {
         let _ = l.SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
         let (_, lh) = render::text_size(&l);
@@ -165,7 +180,7 @@ pub(super) unsafe fn ask(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
     let right = w - PAD;
     let always = flow::always_label(suggestions);
     match state {
-        AskState::Waiting if st.changing.contains(request_id) => {
+        AskState::Waiting if changing => {
             let id = change_field(request_id);
             let hint = "What it writes instead";
             y = field(cx, &mut s, st, &id, hint, PAD, y, inner) + 10.0;
@@ -191,9 +206,12 @@ pub(super) unsafe fn ask(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
             );
             y += BUTTON_H;
         }
-        AskState::Waiting if st.denying.contains(request_id) => {
+        AskState::Waiting if denying => {
             let id = deny_field(request_id);
-            let hint = "What should be done instead? (optional)";
+            let hint = match review.comments.len() {
+                0 => "What should be done instead? (optional)",
+                _ => "Anything to add to your comments? (optional)",
+            };
             y = field(cx, &mut s, st, &id, hint, PAD, y, inner) + 10.0;
             let x = button(
                 cx,
@@ -215,21 +233,54 @@ pub(super) unsafe fn ask(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
             );
             y += BUTTON_H;
         }
+        AskState::Waiting if commenting && review.draft.is_some() => {
+            let (from, to) = review.span().unwrap_or_default();
+            let say = format!("Comment on {}", comments::shown_place(&rows, from, to).to_lowercase());
+            s.line(say, F::Small, Rect::new(PAD, y, inner, 18.0), cx.pal.dim);
+            y += 20.0;
+            let id = note_field(request_id);
+            let hint = "What should change here?";
+            y = field(cx, &mut s, st, &id, hint, PAD, y, inner) + 10.0;
+            let say = "Enter adds it, Shift+Enter for a new line, Shift+click a number for more lines";
+            s.line(say, F::Small, Rect::new(PAD, y + 34.0, inner, 18.0), cx.pal.faint);
+            let x = button(
+                cx,
+                &mut s,
+                right,
+                y,
+                "Add comment",
+                true,
+                Hit::Tr(Act::Note(request_id.clone())),
+            );
+            button(
+                cx,
+                &mut s,
+                x - 8.0,
+                y,
+                "Cancel",
+                false,
+                Hit::Tr(Act::Unnote(request_id.clone(), None)),
+            );
+            y += BUTTON_H + 22.0;
+        }
         AskState::Waiting => {
             if let Some(label) = &always {
                 let say = format!("Always allow: {label}");
                 s.line(say, F::Small, Rect::new(PAD, y, inner, 18.0), cx.pal.faint);
                 y += 24.0;
             }
-            let mut x = button(
-                cx,
-                &mut s,
-                right,
-                y,
-                "Allow",
-                true,
-                Hit::Answer(request_id.clone(), true),
-            );
+            let mut x = right + 8.0;
+            let notes = review.comments.len();
+            if notes > 0 {
+                let label = match notes {
+                    1 => "Send 1 comment".to_string(),
+                    n => format!("Send {n} comments"),
+                };
+                let send = Hit::Tr(Act::SendNotes(request_id.clone()));
+                x = button(cx, &mut s, x - 8.0, y, &label, true, send);
+            }
+            let allow = Hit::Answer(request_id.clone(), true);
+            x = button(cx, &mut s, x - 8.0, y, "Allow", notes == 0, allow);
             if always.is_some() {
                 x = button(
                     cx,
@@ -273,6 +324,49 @@ pub(super) unsafe fn ask(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
     plate(cx, &mut s, w, h, *state == AskState::Waiting);
     s.h = h;
     s
+}
+
+/// The comments on an edit ask's lines, each with where it is and a way
+/// to drop it, or how to make one when there are none. Returns the bottom.
+#[allow(clippy::too_many_arguments)]
+unsafe fn notes(
+    cx: &Ctx,
+    s: &mut Scene,
+    request_id: &str,
+    rows: &[flow::DiffRow],
+    review: &Review,
+    commenting: bool,
+    mut y: f32,
+    inner: f32,
+) -> f32 {
+    if review.comments.is_empty() {
+        if commenting && review.draft.is_none() && !rows.is_empty() {
+            let say = "Click a line number to comment on it";
+            s.line(say, F::Small, Rect::new(PAD, y, inner, 18.0), cx.pal.faint);
+            y += 24.0;
+        }
+        return y;
+    }
+    for (k, c) in review.comments.iter().enumerate() {
+        let top = y;
+        let place = comments::shown_place(rows, c.from, c.to);
+        let ink = cx.pal.accent.mix(cx.pal.fg, 0.45);
+        s.line(place, F::Small, Rect::new(PAD + 10.0, y, inner - 90.0, 18.0), ink);
+        if commenting {
+            let drop = Rect::new(PAD + inner - 64.0, y, 64.0, 18.0);
+            s.line("Remove", F::Small, drop, cx.pal.faint);
+            s.hit(drop, Hit::Tr(Act::Unnote(request_id.to_string(), Some(k))));
+        }
+        y += 20.0;
+        if let Some(l) = cx.layout(&cx.fonts.body, &c.text, inner - 10.0) {
+            let (_, th) = render::text_size(&l);
+            s.text(&l, PAD + 10.0, y, cx.pal.fg.with_alpha(0.9));
+            y += th;
+        }
+        s.fill(Rect::new(PAD, top, 2.0, y - top), 0.0, cx.pal.accent);
+        y += 10.0;
+    }
+    y
 }
 
 /// What a question card counts as answered: per question, the labels

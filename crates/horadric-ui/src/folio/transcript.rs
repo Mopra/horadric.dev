@@ -92,6 +92,15 @@ pub(super) enum Act {
     /// Edit ask: open the field holding the text it writes, or let it
     /// land with what the field holds.
     Change(String),
+    /// Edit ask: a row of its diff, by its place in the rows, clicked to
+    /// comment on (with Shift, stretching the comment being written).
+    Line(String, usize),
+    /// Edit ask: keep the comment being written.
+    Note(String),
+    /// Edit ask: drop comment `.1`, or the one being written when None.
+    Unnote(String, Option<usize>),
+    /// Edit ask: deny it with its comments as the reason.
+    SendNotes(String),
     /// Ask: open the reason field, or deny with what it holds.
     Deny(String),
     /// Ask or plan: close the field without answering.
@@ -143,6 +152,9 @@ pub(super) fn deny_field(id: &str) -> String {
 pub(super) fn change_field(id: &str) -> String {
     format!("change:{id}")
 }
+pub(super) fn note_field(id: &str) -> String {
+    format!("note:{id}")
+}
 pub(super) fn keep_field(id: &str) -> String {
     format!("keep:{id}")
 }
@@ -184,6 +196,8 @@ pub(super) struct State {
     pub(super) keeping: HashSet<String>,
     /// Edit asks whose text is open to change.
     pub(super) changing: HashSet<String>,
+    /// Edit asks' line comments, by request id.
+    pub(super) reviews: HashMap<String, super::comments::Review>,
     /// Per question card, per question, the options picked.
     pub(super) picks: HashMap<String, Vec<BTreeSet<usize>>>,
     pub(super) todos_open: bool,
@@ -373,6 +387,8 @@ fn stamp(i: usize, b: &Block, open: bool, st: &State) -> u64 {
             st.all.contains(request_id).hash(&mut h);
             hash_field(&mut h, st, &deny_field(request_id));
             hash_field(&mut h, st, &change_field(request_id));
+            st.reviews.get(request_id).hash(&mut h);
+            hash_field(&mut h, st, &note_field(request_id));
         }
         Block::Question {
             request_id,
@@ -879,7 +895,7 @@ impl Ctx<'_> {
         if let Some(lane) = &step.lane {
             y = self.lane(s, step, lane, dx, y, cw, st);
         } else if let Some(e) = &step.edit {
-            y = self.diff(s, &step.id, e, dx, y, dw, st);
+            y = self.diff(s, &step.id, e, dx, y, dw, st, None);
         } else {
             y = self.output(s, step, dx, y, dw, st);
         }
@@ -1110,7 +1126,9 @@ impl Ctx<'_> {
     }
 
     /// An edit's file, as a link that opens it, and its diff inline. `id`
-    /// is what "Show all" is kept under: the step's, or the ask's.
+    /// is what "Show all" is kept under: the step's, or the ask's. With
+    /// `review`, an edit ask open to comments: each row's numbers take a
+    /// click, and the rows commented on are marked.
     #[allow(clippy::too_many_arguments)]
     pub(super) unsafe fn diff(
         &self,
@@ -1121,6 +1139,7 @@ impl Ctx<'_> {
         y: f32,
         w: f32,
         st: &State,
+        review: Option<&super::comments::Review>,
     ) -> f32 {
         let head = Rect::new(x, y, w, 22.0);
         let what = if e.created { "Created" } else { "Changed" };
@@ -1172,6 +1191,19 @@ impl Ctx<'_> {
                 0.0,
                 tint,
             );
+        }
+        if let Some(review) = review {
+            for (k, r) in rows[..shown].iter().enumerate() {
+                if r.mark == '~' {
+                    continue;
+                }
+                let row = Rect::new(x, y + 6.0 + k as f32 * MONO_LINE, 2.0 * gw, MONO_LINE);
+                if review.marks(k) {
+                    s.fill(row, 0.0, self.pal.accent.with_alpha(0.22));
+                    s.fill(Rect::new(x, row.y, 2.0, row.h), 0.0, self.pal.accent);
+                }
+                s.hit(row, Hit::Tr(Act::Line(id.to_string(), k)));
+            }
         }
         for (k, nums) in [olds, news].iter().enumerate() {
             if let Some(l) = self.layout(&self.fonts.rows, &nums.join("\n"), gw - 6.0) {
