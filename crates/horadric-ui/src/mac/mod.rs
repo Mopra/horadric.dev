@@ -12,6 +12,8 @@ mod cluster;
 mod delegate;
 mod dialog;
 mod folio;
+mod folio_commands;
+mod folio_forms;
 mod handing;
 mod keeping;
 mod look;

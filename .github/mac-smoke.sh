@@ -2,7 +2,8 @@
 # The Mac's "verified on screen", for a Mac nobody sits at: a dev
 # instance started with a shell in place of the agent, fake sessions
 # posted to its port, a real session started through `horadric new`, and
-# every window drawn into a PNG by HORADRIC_SNAPSHOT. Then the app is
+# every window drawn into a PNG by HORADRIC_SNAPSHOT, and a Folio opened
+# on a stand in for claude (.github/fake-claude.py). Then the app is
 # killed and started again, to see the session's host outlive it and the
 # new app attach to it. Checks what it can and leaves the PNGs in $OUT.
 set -u
@@ -17,6 +18,30 @@ rm -rf "$OUT" "$STATE"
 mkdir -p "$OUT"
 failed=0
 fail() { echo "FAIL: $*"; failed=1; }
+
+# A stand in for claude first on the PATH, so a Folio opens with no
+# Claude account, in a folder Claude Code is told it trusts, as the
+# Folio asks before it starts claude in any other.
+FAKE="$OUT/fake-bin"
+mkdir -p "$FAKE"
+cp .github/fake-claude.py "$FAKE/claude"
+chmod +x "$FAKE/claude"
+export PATH="$FAKE:$PATH"
+FOLIO_DIR="$OUT/folio-project"
+mkdir -p "$FOLIO_DIR"
+printf 'first line
+old line
+' >"$FOLIO_DIR/notes.txt"
+python3 - "$FOLIO_DIR" <<'PY'
+import json, os, sys
+path = os.path.expanduser("~/.claude.json")
+try:
+    config = json.load(open(path))
+except (OSError, ValueError):
+    config = {}
+config.setdefault("projects", {})[sys.argv[1]] = {"hasTrustDialogAccepted": True}
+json.dump(config, open(path, "w"), indent=2)
+PY
 
 up() {
   for _ in $(seq 1 100); do
@@ -76,6 +101,29 @@ if osascript -e 'tell application "System Events" to keystroke "echo TYPED-OK"' 
 else
   echo "WARN: System Events may not type here: $(cat "$OUT/osascript.log")"
 fi
+# A bare start opens a Folio: the fake claude greets and asks to edit.
+"$BIN" new --cwd "$FOLIO_DIR" >"$OUT/new-folio.log" 2>&1 || fail "horadric new (Folio): $(cat "$OUT/new-folio.log")"
+sleep 8
+folio=$(ls "$HORADRIC_SNAPSHOT"/pane-folio-project*.txt 2>/dev/null | grep -v tmp | head -1)
+if [ -n "$folio" ]; then
+  echo "--- the Folio's conversation"; cat "$folio"
+  grep -q FAKE-CLAUDE-HELLO "$folio" || fail "the Folio did not show the fake claude's reply"
+  grep -q "Claude asks to change" "$folio" || fail "the Folio did not show the edit ask"
+  grep -q "+ new line" "$folio" || fail "the Folio did not show the edit's diff"
+else
+  fail "no text of the Folio (a Folio did not open)"
+fi
+cp "$HORADRIC_SNAPSHOT/stage.png" "$OUT/folio-stage.png" 2>/dev/null
+# Typed into its composer, a prompt reaches the fake, which says it back.
+osascript -e 'tell application "System Events" to keystroke "hello folio"' -e 'tell application "System Events" to key code 36' 2>>"$OUT/osascript.log"
+sleep 3
+if [ -n "$folio" ] && grep -q "FAKE-CLAUDE-HEARD: hello folio" "$folio"; then
+  echo "typing reached the Folio"
+else
+  echo "WARN: a prompt typed into the Folio did not reach claude"
+fi
+cp "$HORADRIC_SNAPSHOT/stage.png" "$OUT/folio-typed.png" 2>/dev/null
+
 for f in stage cluster-0 cluster-1 settings usage; do
   [ -s "$HORADRIC_SNAPSHOT/$f.png" ] || fail "no $f.png"
 done
@@ -93,7 +141,7 @@ kill -9 "$(cat "$OUT/app.pid")"
 sleep 2
 hosts=$(pgrep -f "horadric host" | wc -l | tr -d ' ')
 [ "$hosts" -ge 1 ] || fail "the host ended with the app"
-rm -f "$HORADRIC_SNAPSHOT"/*.png
+rm -f "$HORADRIC_SNAPSHOT"/*.png "$HORADRIC_SNAPSHOT"/pane-folio-project*.txt
 
 start_app second
 sleep 8
@@ -101,6 +149,13 @@ mkdir -p "$OUT/second"
 cp "$HORADRIC_SNAPSHOT"/*.png "$OUT/second/" 2>/dev/null
 [ -s "$OUT/second/stage.png" ] || [ -s "$OUT/second/cluster-0.png" ] || fail "nothing drawn after the restart"
 grep -q "cannot attach" "$OUT/app-second.log" && fail "the second app could not attach: $(grep 'cannot attach' "$OUT/app-second.log")"
+# The Folio's host ran on too: the new app found it and read it back.
+folio=$(ls "$HORADRIC_SNAPSHOT"/pane-folio-project*.txt 2>/dev/null | grep -v tmp | head -1)
+if [ -n "$folio" ] && grep -q FAKE-CLAUDE-HELLO "$folio"; then
+  echo "the Folio came back after the restart"
+else
+  fail "the Folio did not come back after the restart"
+fi
 
 # Quit with the sessions ended, as the human would from the menu.
 kill -9 "$(cat "$OUT/app.pid")" 2>/dev/null

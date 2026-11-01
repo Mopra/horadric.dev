@@ -76,6 +76,9 @@ pub enum Input {
     KinTick,
     /// A Folio's stream moved its tile: busy, asking, ended.
     FolioState(String, crate::folio_session::State),
+    /// A Folio asks for what only the app does: to go on in the same tile
+    /// once its claude ended, to show a file, to end.
+    Folio(String, super::folio::Ask),
     /// A files tile's scan came back, or its folder changed.
     Files(super::files::Note),
     /// A files tile's booked scan is due.
@@ -512,6 +515,7 @@ impl App {
             Input::Kin(note) => super::brothers::heard(self, note),
             Input::KinTick => super::brothers::tick(self),
             Input::FolioState(id, state) => self.folio_state(&id, state),
+            Input::Folio(id, ask) => self.folio_ask(&id, ask),
             Input::Files(note) => {
                 if self.files.heard(note) {
                     self.reconcile();
@@ -805,6 +809,63 @@ impl App {
             self.folio_gone(id);
         }
         self.reconcile();
+    }
+
+    /// What a Folio asks of the app.
+    fn folio_ask(&mut self, id: &str, ask: super::folio::Ask) {
+        use super::folio::{Ask, Leave};
+        match ask {
+            Ask::View(path) => {
+                if let Some(key) = self.project_of(id) {
+                    self.open_file(&key, path);
+                }
+            }
+            Ask::Exit => self.end(id),
+            // Its claude has ended and its host gone: the same tile goes
+            // on, in a terminal or as a Folio started again.
+            Ask::Left(left) => {
+                let mut own = self.folio_args.remove(id).unwrap_or_default();
+                super::folio::close(id);
+                self.consoles.remove(id);
+                let started = match left.leave {
+                    Leave::Terminal => {
+                        let args = Agent::Claude.carry_on(left.conversation.as_deref(), &own);
+                        let went =
+                            self.launch(id, &left.name, left.dir, args, Run::Agent(Agent::Claude));
+                        // Its hooks name the conversation once it runs; the
+                        // tile knows it meanwhile, to resume it.
+                        if let (Some(c), Ok(mut r)) = (left.conversation, self.registry.lock()) {
+                            if let Some(s) = r.get_mut(id) {
+                                s.claude_session_id = Some(c);
+                                s.prompted = true;
+                            }
+                        }
+                        went
+                    }
+                    Leave::Again(again) => {
+                        own.extend(again.own.iter().cloned());
+                        let resume = again.resume.clone();
+                        if resume.is_none() {
+                            if let Ok(mut r) = self.registry.lock() {
+                                if let Some(s) = r.get_mut(id) {
+                                    s.claude_session_id = None;
+                                    s.prompted = false;
+                                }
+                            }
+                        }
+                        super::folio::prepare(id, again);
+                        self.open_chat(id, &left.name, left.dir, resume, own, true)
+                    }
+                };
+                if let Err(e) = started {
+                    dialog::error("Horadric could not start the session again", &e);
+                    return;
+                }
+                if let Some(key) = self.project_of(id) {
+                    self.show_project(&key, Some(id));
+                }
+            }
+        }
     }
 
     /// A Folio whose claude ended on its own pauses, as a terminal that
