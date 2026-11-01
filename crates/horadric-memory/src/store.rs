@@ -1619,7 +1619,7 @@ mod tests {
         .map(|r| at(r))
         .collect();
         let there = |p: &Path| there.contains(&p.to_string_lossy().replace('\\', "/"));
-        let home = |f: &str| gone_tree_home(Path::new(f), &there).map(|p| project_key(&p));
+        let home = |f: &str| gone_tree_home(Path::new(f), there).map(|p| project_key(&p));
         assert_eq!(home(&at("/site.fix-the-tiles")), Some(at("/site")));
         assert_eq!(home(&at("/site.web.new-page")), Some(at("/site.web")));
         assert_eq!(home(&at("/site/.claude/worktrees/x")), Some(at("/site")));

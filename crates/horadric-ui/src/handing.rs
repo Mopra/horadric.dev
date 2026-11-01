@@ -961,8 +961,8 @@ fn ask_place(hwnd: HWND, q: &Question) -> Said {
         Some((url, dest)) => {
             let pressed = super::ask(&Dialog {
                 tone: Tone::Question,
-                title: &title,
-                text: &text,
+                title,
+                text,
                 buttons: &["Clone", "Pick a folder", "Refuse"],
                 default: 0,
                 check: None,
@@ -976,7 +976,7 @@ fn ask_place(hwnd: HWND, q: &Question) -> Said {
         None => {
             let pressed = super::ask(&Dialog {
                 tone: Tone::Question,
-                title: &title,
+                title,
                 text,
                 buttons: &["Pick a folder", "Refuse"],
                 default: 0,

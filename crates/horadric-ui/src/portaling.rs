@@ -148,7 +148,9 @@ impl App {
                 p.look_at_word();
                 p.unpair_forgotten();
                 for (_, token) in p.asks.expire(now) {
-                    token.map(portal_ask::withdraw);
+                    if let Some(token) = token {
+                        portal_ask::withdraw(token)
+                    }
                 }
                 self.portal_tell_brothers();
                 return;
@@ -220,12 +222,16 @@ impl App {
         for incoming in heard {
             match incoming {
                 Incoming::Open(ch) => {
-                    p.asks.close(ch).map(portal_ask::withdraw);
+                    if let Some(a) = p.asks.close(ch) {
+                        portal_ask::withdraw(a)
+                    }
                     p.phones.insert(ch, None);
                     p.server.open(ch);
                 }
                 Incoming::Close(ch) => {
-                    p.asks.close(ch).map(portal_ask::withdraw);
+                    if let Some(a) = p.asks.close(ch) {
+                        portal_ask::withdraw(a)
+                    }
                     p.phones.remove(&ch);
                     p.told.remove(&ch);
                     p.server.close(ch);
@@ -911,7 +917,9 @@ impl Portal {
     /// The relay opened `ch` as an ask from a phone signed in as `email`.
     fn ask_opened(&mut self, ch: u32, email: &str, now: u64) {
         let (held, old) = self.asks.open(ch, email, now);
-        old.map(portal_ask::withdraw);
+        if let Some(old) = old {
+            portal_ask::withdraw(old)
+        }
         if !held {
             self.refuse(ch);
         }
@@ -954,7 +962,9 @@ impl Portal {
                 portal_ask::ask(ch, q.token, q.text, wake);
             }
             Step::Dropped(token) => {
-                token.map(portal_ask::withdraw);
+                if let Some(token) = token {
+                    portal_ask::withdraw(token)
+                }
             }
         }
     }
