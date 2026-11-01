@@ -13,6 +13,3 @@ holds only what is still not done.
   nothing until the human arms it in the tome: it starts a session a day,
   and the rounds went because sessions popping up on their own were not
   wanted. Not tried end to end, since that starts an agent.
-- **The model choice may reopen.** EmbeddingGemma beat MiniLM on dialogue
-  alone (81.8 % against 72.7 %); its code was removed, so a switch means
-  writing it again.
