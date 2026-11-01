@@ -81,11 +81,7 @@ impl Attention {
     }
 
     fn forward(&mut self, x: &Tensor, mask: Option<&Tensor>) -> Result<Tensor> {
-        let new = split(
-            &self.key.forward(x)?,
-            &self.value.forward(x)?,
-            self.heads,
-        )?;
+        let new = split(&self.key.forward(x)?, &self.value.forward(x)?, self.heads)?;
         let seen = match self.seen.take() {
             Some(old) => Seen {
                 keys: Tensor::cat(&[&old.keys, &new.keys], 3)?,
@@ -140,7 +136,8 @@ impl Cross {
 
 fn heads(x: &Tensor, heads: usize) -> Result<Tensor> {
     let (batch, len, state) = x.dims3()?;
-    x.reshape((batch, len, heads, state / heads))?.transpose(1, 2)
+    x.reshape((batch, len, heads, state / heads))?
+        .transpose(1, 2)
 }
 
 /// Whisper scales both the queries and the keys by the fourth root of the
@@ -224,7 +221,10 @@ impl Decoder {
         Ok(Decoder {
             logits: Linear::new(embed.embeddings(), None)?,
             embed,
-            positions: vb.get((config.max_target_positions, state), "embed_positions.weight")?,
+            positions: vb.get(
+                (config.max_target_positions, state),
+                "embed_positions.weight",
+            )?,
             blocks,
             ln: layer_norm(state, 1e-5, vb.pp("layer_norm"))?,
             seen: 0,
@@ -257,13 +257,15 @@ impl Decoder {
             .then(|| {
                 let m: Vec<f32> = (0..len)
                     .flat_map(|i| {
-                        (0..seen + len).map(move |j| {
-                            if j > seen + i {
-                                f32::NEG_INFINITY
-                            } else {
-                                0.0
-                            }
-                        })
+                        (0..seen + len).map(
+                            move |j| {
+                                if j > seen + i {
+                                    f32::NEG_INFINITY
+                                } else {
+                                    0.0
+                                }
+                            },
+                        )
                     })
                     .collect();
                 Tensor::from_vec(m, (len, seen + len), device)

@@ -329,7 +329,11 @@ pub fn pack_with(task: &Task, quests: &[Quest], tuning: &Tuning) -> Vec<Hint> {
                 }
             };
             let e = &mut files[i];
-            e.1 += if changed { tuning.changed * score } else { *score };
+            e.1 += if changed {
+                tuning.changed * score
+            } else {
+                *score
+            };
             let by = if changed { &mut e.2 } else { &mut e.3 };
             by.get_or_insert(q.title.as_str());
         }
@@ -705,7 +709,12 @@ mod tests {
     fn a_replay_draws_each_pack_from_the_quests_done_before() {
         let mut first = done("Speed up the board paint", &[], &["src/board.rs"], &[]);
         (first.accepted, first.ended) = (Some(1), Some(2));
-        let mut second = done("Speed up the board paint again", &[], &["src/board.rs"], &[]);
+        let mut second = done(
+            "Speed up the board paint again",
+            &[],
+            &["src/board.rs"],
+            &[],
+        );
         (second.accepted, second.ended) = (Some(3), Some(4));
         let u = replay(&[first, second], &TUNING);
         assert_eq!(u.packs, 1, "the first had nothing before it");

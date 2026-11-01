@@ -43,7 +43,9 @@ pub struct Words {
 }
 
 fn lower(s: &str) -> Vec<char> {
-    s.chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect()
+    s.chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect()
 }
 
 /// An apostrophe ends a word here, so "Folio" fixes "folio's" too.

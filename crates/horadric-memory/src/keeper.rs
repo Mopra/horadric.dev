@@ -409,11 +409,9 @@ impl<E: Embed> Keeper<E> {
                         .filter(|&c| c >= recall::LEAST_COSINE)
                 })
             };
-            found = recall::offered(
-                &found,
-                cosine_of,
-                |i| u.seen.contains(&recall::id_of(&cands[i])),
-            );
+            found = recall::offered(&found, cosine_of, |i| {
+                u.seen.contains(&recall::id_of(&cands[i]))
+            });
             if found.is_empty() {
                 return Ok(Answer::default());
             }

@@ -18,8 +18,8 @@ use horadric_hooks::listener::{BrowserCall, Reply};
 use serde_json::{json, Value};
 
 use super::{App, WEB};
-use crate::console::Console;
 use crate::browse::{self, closed, error, Call};
+use crate::console::Console;
 use crate::web;
 use crate::window::project_name;
 

@@ -542,7 +542,12 @@ impl BrotherLines {
             .collect();
         let listed = crate::brothers::listed();
         let team: Vec<String> = horadric_hooks::state_dir()
-            .map(|d| horadric_core::team::Team::load(&d).mates.into_iter().collect())
+            .map(|d| {
+                horadric_core::team::Team::load(&d)
+                    .mates
+                    .into_iter()
+                    .collect()
+            })
             .unwrap_or_default();
         let items = brother_items(
             listed.as_deref(),

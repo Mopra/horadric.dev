@@ -2251,7 +2251,10 @@ not green."
         assert!(!comes_back("warriv-51234", false));
         assert!(!comes_back("warriv-review-4100", false));
         assert!(comes_back("fix-the-tiles-1", false));
-        assert!(comes_back("warriv-s-rounds-the-whole-project-looked-70758", false));
+        assert!(comes_back(
+            "warriv-s-rounds-the-whole-project-looked-70758",
+            false
+        ));
         // A reload: the host outlived it.
         assert!(comes_back("warriv-51234", true));
         assert!(comes_back("warriv-review-4100", true));
@@ -2291,7 +2294,9 @@ not green."
         // A state.json from before has no wake in it.
         let old: Heard = serde_json::from_str(r#"{"seen":["x"]}"#).unwrap();
         assert_eq!(old.awake, None);
-        assert!(!serde_json::to_string(&Heard::default()).unwrap().contains("awake"));
+        assert!(!serde_json::to_string(&Heard::default())
+            .unwrap()
+            .contains("awake"));
     }
 
     #[test]

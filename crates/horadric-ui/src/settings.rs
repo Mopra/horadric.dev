@@ -481,7 +481,12 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                     &v.microphone,
                     Control::List,
                 ),
-                line(Field::DictationWords, "Words it should know", "Edit", Control::Button),
+                line(
+                    Field::DictationWords,
+                    "Words it should know",
+                    "Edit",
+                    Control::Button,
+                ),
                 line(Field::TidyDictation, "Tidy with Haiku", tidy, t),
             ]
         }

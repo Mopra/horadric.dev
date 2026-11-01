@@ -284,7 +284,11 @@ impl Asks {
             "nonce": b64url(&nonce),
         });
         let stage = Stage::Asking {
-            name: if name.is_empty() { "Phone".into() } else { name },
+            name: if name.is_empty() {
+                "Phone".into()
+            } else {
+                name
+            },
             commit,
             private: me.private,
             nonce,
@@ -309,7 +313,10 @@ impl Asks {
             return Err(Step::Dropped(None));
         };
         let public = msg["pub"].as_str().and_then(unb64url).ok_or(Step::Refuse)?;
-        let nonce = msg["nonce"].as_str().and_then(unb64url).ok_or(Step::Refuse)?;
+        let nonce = msg["nonce"]
+            .as_str()
+            .and_then(unb64url)
+            .ok_or(Step::Refuse)?;
         let mine = public_of(&private);
         // ECDH with its own public key agrees too, so a relay that hands
         // the PC's key back to it would otherwise get a matching code.
@@ -363,7 +370,10 @@ mod tests {
 
     #[test]
     fn shown_text_cannot_break_lines_or_turn_around() {
-        assert_eq!(shown("a@b.c.\n\n\nDoes it show 1?", 80), "a@b.c. Does it show 1?");
+        assert_eq!(
+            shown("a@b.c.\n\n\nDoes it show 1?", 80),
+            "a@b.c. Does it show 1?"
+        );
         assert_eq!(shown("iPhone\u{202E}lahs", 60), "iPhonelahs");
         assert_eq!(shown("  \u{200B} ", 60), "");
         assert_eq!(shown(&"x".repeat(100), 60).len(), 60);
@@ -524,7 +534,10 @@ mod tests {
         assert_eq!(asks.heard(1, &phone.reveal(), &f, || None), Step::Nothing);
 
         // A relay hands the PC its own key, committed to properly.
-        let mirror = Phone { private: pc, nonce: [9; 16] };
+        let mirror = Phone {
+            private: pc,
+            nonce: [9; 16],
+        };
         asks.open(2, "x@y.com", 0);
         sent(asks.heard(2, &mirror.ask(), &f, me(pc)));
         assert_eq!(asks.heard(2, &mirror.reveal(), &f, || None), Step::Refuse);
@@ -547,10 +560,7 @@ mod tests {
 
         asks.open(2, "x@y.com", 0);
         sent(asks.heard(2, &phone.ask(), &f, me(pc)));
-        assert_eq!(
-            asks.heard(2, &phone.ask(), &f, me(pc)),
-            Step::Dropped(None)
-        );
+        assert_eq!(asks.heard(2, &phone.ask(), &f, me(pc)), Step::Dropped(None));
 
         let q = to_the_box(&mut asks, &f, 3);
         assert_eq!(
@@ -575,9 +585,18 @@ mod tests {
         let pc = f.pair().unwrap();
         let mut asks = Asks::default();
         for (ch, bad) in [
-            (1, json!({"t": "ask", "v": 2, "name": "P", "commit": b64url(&[0; 32])})),
-            (2, json!({"t": "ask", "name": "P", "commit": b64url(&[0; 32])})),
-            (3, json!({"t": "ask", "v": 1, "name": "P", "commit": b64url(&[0; 31])})),
+            (
+                1,
+                json!({"t": "ask", "v": 2, "name": "P", "commit": b64url(&[0; 32])}),
+            ),
+            (
+                2,
+                json!({"t": "ask", "name": "P", "commit": b64url(&[0; 32])}),
+            ),
+            (
+                3,
+                json!({"t": "ask", "v": 1, "name": "P", "commit": b64url(&[0; 31])}),
+            ),
         ] {
             asks.open(ch, "x@y.com", 0);
             let frame = bad.to_string().into_bytes();

@@ -73,8 +73,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::app::{self, Input};
 use crate::folio_look as look;
-pub use crate::folio_session::{State, Tag};
 use crate::folio_session::{catch_up, history_file, start_failure};
+pub use crate::folio_session::{State, Tag};
 
 pub use composer::{before_caret, dictated, dictation, handed, open_history};
 pub use select::find;

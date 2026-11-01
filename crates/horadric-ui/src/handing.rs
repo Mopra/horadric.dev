@@ -47,9 +47,9 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use super::{unix_now, with_app, App, WM_HORADRIC_FAR, WM_HORADRIC_PLACE};
-use crate::quests::Runner as _;
 use crate::dialog::{Dialog, Tone};
 use crate::menu::Item;
+use crate::quests::Runner as _;
 use crate::toast::Kind;
 
 /// How long a landed session gets to start on the UI thread before the

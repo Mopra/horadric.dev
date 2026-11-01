@@ -179,7 +179,8 @@ fn build(mtm: MainThreadMarker) -> Window {
             detail.setAlignment(objc2_app_kit::NSTextAlignment::Right);
             detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
             let bar_frame = NSRect::new(at(top + 22.0, 12.0), NSSize::new(inner, 12.0));
-            let bar = NSProgressIndicator::initWithFrame(NSProgressIndicator::alloc(mtm), bar_frame);
+            let bar =
+                NSProgressIndicator::initWithFrame(NSProgressIndicator::alloc(mtm), bar_frame);
             bar.setStyle(NSProgressIndicatorStyle::Bar);
             bar.setIndeterminate(false);
             bar.setMinValue(0.0);

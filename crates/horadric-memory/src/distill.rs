@@ -222,7 +222,12 @@ mod tests {
             .add_all(
                 &[
                     said("p", "s1", "You: why int8?", NOW - 600),
-                    said("p", "w1", "You: Horadric woke you for this:\n- x", NOW - 500),
+                    said(
+                        "p",
+                        "w1",
+                        "You: Horadric woke you for this:\n- x",
+                        NOW - 500,
+                    ),
                     said("p", "w1", "Agent: noted", NOW - 400),
                     said("q", "s2", "You: other project", NOW - 300),
                     said("p", "s1", "Agent: a quarter of the size", NOW - 200),

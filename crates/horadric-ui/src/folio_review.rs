@@ -281,7 +281,6 @@ fn gap_row() -> DiffRow {
     }
 }
 
-
 /// The denial for the comments `review` holds on the edit ask
 /// `request_id` of `blocks`, with `extra` typed as the reason, or None
 /// when it has none. Reads the file once, to say where in it each
@@ -372,7 +371,10 @@ mod tests {
         assert_eq!(place(&rows, 2, 2, &before), "Line 42");
         assert_eq!(place(&rows, 0, 3, &before), "Lines 41 to 43");
         assert_eq!(place(&rows, 1, 1, &before), "Removed line 42");
-        assert_eq!(place(&rows, 5, 5, &before), "Removed line 1 of the edit's text");
+        assert_eq!(
+            place(&rows, 5, 5, &before),
+            "Removed line 1 of the edit's text"
+        );
         assert_eq!(place(&rows, 4, 4, &before), "Between changes");
     }
 
@@ -411,7 +413,13 @@ mod tests {
                 text: " Fine. ".into(),
             },
         ];
-        let got = reason("src/main.rs", &rows, &[Some(9), None], &comments, "and run the tests");
+        let got = reason(
+            "src/main.rs",
+            &rows,
+            &[Some(9), None],
+            &comments,
+            "and run the tests",
+        );
         let want = "Not applied. The human reviewed this edit to src/main.rs and left comments on its lines. \
                     Revise the edit with each in mind, then make it again.\n\
                     \n\

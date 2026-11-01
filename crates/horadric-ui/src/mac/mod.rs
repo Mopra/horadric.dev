@@ -6,11 +6,11 @@
 mod app;
 pub mod autostart;
 mod brothers;
-mod far;
-mod files;
 mod cluster;
 mod delegate;
 mod dialog;
+mod far;
+mod files;
 mod folio;
 mod folio_commands;
 mod folio_forms;
@@ -21,13 +21,13 @@ mod menu;
 mod microphone;
 mod paint;
 mod path;
-mod settings;
 mod queue;
+mod settings;
 mod snapshot;
 mod stage;
 mod update;
-mod web;
 mod usage;
+mod web;
 
 use crate::console::Note;
 

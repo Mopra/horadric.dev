@@ -65,9 +65,9 @@ use horadric_core::{
     session_id, Carry, HookEvent, Phase, Registry, Route, SavedCluster, SavedPanel, SavedSession,
     SavedState, Session, Setting, Usage,
 };
+use horadric_hooks::install;
 use horadric_hooks::listener::{self, Command, KnowCall, Reload, Tagged};
 use horadric_hooks::transcript::{self, Past};
-use horadric_hooks::install;
 use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -101,7 +101,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
-use crate::quests::{Runner as _, Warriv as _};
 use crate::accounts;
 use crate::agents;
 use crate::appear;
@@ -122,6 +121,7 @@ use crate::menu::{self, Item};
 use crate::pick;
 use crate::portal_key;
 use crate::questlog::{self, QuestLog};
+use crate::quests::{Runner as _, Warriv as _};
 use crate::render::Gpu;
 use crate::sanctuary;
 use crate::screens::{self, Screen};
@@ -141,8 +141,8 @@ use crate::{
 
 #[path = "runner.rs"]
 mod runner;
-pub(crate) use crate::quests::{SessionSpec, Workplace};
 use crate::quests::session_env;
+pub(crate) use crate::quests::{SessionSpec, Workplace};
 
 #[path = "drive.rs"]
 mod drive;

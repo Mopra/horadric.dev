@@ -65,8 +65,8 @@ pub mod loot;
 pub mod mac_keys;
 pub mod motion;
 pub mod palette;
-pub mod paste;
 pub mod particles;
+pub mod paste;
 pub mod paths;
 pub mod pick;
 pub mod plist;
@@ -168,11 +168,11 @@ mod folio;
 #[cfg(any(windows, target_os = "macos"))]
 mod folio_session;
 // Ungated: `folio_text` reads it, and builds everywhere.
-#[cfg_attr(not(windows), allow(dead_code))]
-mod folio_review;
 #[cfg(any(windows, target_os = "macos"))]
 #[cfg_attr(not(windows), allow(dead_code))]
 mod folio_cli;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod folio_review;
 #[cfg(any(windows, target_os = "macos"))]
 #[cfg_attr(not(windows), allow(dead_code))]
 mod folio_rewind;
@@ -205,13 +205,13 @@ mod project;
 #[cfg(windows)]
 mod questlog;
 // The quest log runner and Warriv, shared by both apps.
+#[cfg(windows)]
+mod light;
 #[cfg(any(windows, target_os = "macos"))]
 #[cfg_attr(not(windows), allow(dead_code))]
 mod quests;
 #[cfg(windows)]
 mod recent;
-#[cfg(windows)]
-mod light;
 #[cfg(windows)]
 mod render;
 #[cfg(windows)]
@@ -255,10 +255,10 @@ mod watch;
 #[cfg(windows)]
 mod web;
 // WebKit's stand in for the DevTools protocol, pure and tested on Windows.
-#[cfg(any(test, target_os = "macos"))]
-mod webkit_devtools;
 #[cfg(windows)]
 mod web_window;
+#[cfg(any(test, target_os = "macos"))]
+mod webkit_devtools;
 #[cfg(windows)]
 mod window;
 #[cfg(windows)]

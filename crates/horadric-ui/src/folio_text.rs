@@ -102,7 +102,11 @@ pub fn paragraphs_reviewed<'a>(
                     }
                     None => push(
                         Style::Ask,
-                        format!("Claude asks to use {tool}{}\n{}", said(*state), shown.trim()),
+                        format!(
+                            "Claude asks to use {tool}{}\n{}",
+                            said(*state),
+                            shown.trim()
+                        ),
                     ),
                 }
             }
@@ -149,7 +153,10 @@ pub fn paragraphs_reviewed<'a>(
                     Ending::Stopped => "Stopped",
                     Ending::Failed => "Failed",
                 };
-                push(Style::Footer, format!("{how} in {}", duration(*duration_ms)))
+                push(
+                    Style::Footer,
+                    format!("{how} in {}", duration(*duration_ms)),
+                )
             }
             Block::Aside {
                 question,
@@ -248,7 +255,10 @@ fn diff(e: &FileEdit, review: Option<&Review>, push: &mut impl FnMut(Style, Stri
         push(style, text);
     }
     if rows.len() > DIFF_SHOWN {
-        push(Style::Kept, format!("     ({} more rows)", rows.len() - DIFF_SHOWN));
+        push(
+            Style::Kept,
+            format!("     ({} more rows)", rows.len() - DIFF_SHOWN),
+        );
     }
     for c in review.map(|r| r.comments.as_slice()).unwrap_or_default() {
         let place = shown_place(&rows, c.from, c.to);
@@ -429,7 +439,10 @@ mod tests {
         }]);
         let p = paragraphs(&f);
         assert_eq!(p[0].style, Style::Ask);
-        assert_eq!(p[0].text, "Claude asks to use Bash, and waits for you\nls -la");
+        assert_eq!(
+            p[0].text,
+            "Claude asks to use Bash, and waits for you\nls -la"
+        );
     }
 
     #[test]
@@ -471,7 +484,13 @@ mod tests {
         let styles: Vec<Style> = p.iter().map(|p| p.style).collect();
         assert_eq!(
             styles,
-            [Style::Ask, Style::Kept, Style::Removed, Style::Added, Style::Comment]
+            [
+                Style::Ask,
+                Style::Kept,
+                Style::Removed,
+                Style::Added,
+                Style::Comment
+            ]
         );
         assert_eq!(p[2].text, "   2 - b");
         assert_eq!(p[4].text, "Removed line 2: Why c?");

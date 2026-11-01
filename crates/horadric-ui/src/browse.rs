@@ -413,10 +413,7 @@ mod tests {
             Ok(Call::Open(Some("http://localhost:3000".into())))
         );
         assert!(p(json!({ "op": "navigate" })).is_err());
-        assert_eq!(
-            p(json!({ "op": "back" })),
-            Ok(Call::History(Step::Back))
-        );
+        assert_eq!(p(json!({ "op": "back" })), Ok(Call::History(Step::Back)));
         assert_eq!(
             p(json!({ "op": "devtools", "method": "Runtime.evaluate" })),
             Ok(Call::DevTools("Runtime.evaluate".into(), json!({})))

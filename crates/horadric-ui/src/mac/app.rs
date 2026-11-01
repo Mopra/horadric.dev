@@ -252,7 +252,12 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
     let registry = Arc::new(Mutex::new(registry));
     let requests: Arc<Mutex<Vec<Command>>> = Arc::new(Mutex::new(Vec::new()));
     let usage = Arc::new(Mutex::new(saved.usage.clone()));
-    listen(port, Arc::clone(&registry), Arc::clone(&requests), Arc::clone(&usage));
+    listen(
+        port,
+        Arc::clone(&registry),
+        Arc::clone(&requests),
+        Arc::clone(&usage),
+    );
 
     let how = saved.carry(reload);
     let carry = if how.resumes() {
@@ -672,10 +677,8 @@ impl App {
         let mut all = self.defaults.flags(&own);
         all.extend(super::web::claude_args());
         all.extend(own.iter().cloned());
-        let flags = horadric_core::folio::headless_args(
-            &all,
-            Some(horadric_core::folio::SUBAGENT_PROMPT),
-        );
+        let flags =
+            horadric_core::folio::headless_args(&all, Some(horadric_core::folio::SUBAGENT_PROMPT));
         let options = horadric_pty::headless::Options {
             args: flags,
             env_set: vec![
@@ -799,8 +802,7 @@ impl App {
                 session.status = Some(status);
             }
             let resync = state.live && self.resync.remove(id);
-            if let Some(event) = state.event(&session.phase, session.waits_on.as_deref(), resync)
-            {
+            if let Some(event) = state.event(&session.phase, session.waits_on.as_deref(), resync) {
                 r.apply(id, &event, now);
             }
         }
@@ -1269,8 +1271,7 @@ impl App {
             let shown = if collapsed { 0 } else { mine.len() };
             let body = self.files.body(&c.key, &m).filter(|_| !collapsed);
             let layout = layout::cluster(&m, shown, 0, collapsed, None, None, body);
-            let files = (layout.files.as_ref())
-                .and_then(|f| self.files.view(&c.key, f.rows.len()));
+            let files = (layout.files.as_ref()).and_then(|f| self.files.view(&c.key, f.rows.len()));
             let (hot, pressed) = c.hover();
             let on_stage = stage_key.as_deref() == Some(c.key.as_str());
             let selected = focused
@@ -1349,7 +1350,8 @@ impl App {
             .map(|(session, project)| horadric_core::presence::Seen { session, project })
             .collect();
         let start = self.run.update(&seen, SystemTime::now());
-        let activity = horadric_core::presence::presence(&seen, stage.as_deref(), self.discord, start);
+        let activity =
+            horadric_core::presence::presence(&seen, stage.as_deref(), self.discord, start);
         self.rich
             .get_or_insert_with(crate::discord::Discord::start)
             .set(activity);
@@ -1408,7 +1410,12 @@ impl App {
         }
         // The project's browser, last.
         if let Some(c) = super::web::console_of(key) {
-            panes.push(Pane::new(super::web::pane_id(key), "Browser".into(), c, accent));
+            panes.push(Pane::new(
+                super::web::pane_id(key),
+                "Browser".into(),
+                c,
+                accent,
+            ));
         }
         panes
     }
@@ -1930,7 +1937,10 @@ impl App {
                 }
             }
             Pick::Discord(d) => {
-                if let Some(i) = horadric_core::saved::Discord::ALL.iter().position(|x| *x == d) {
+                if let Some(i) = horadric_core::saved::Discord::ALL
+                    .iter()
+                    .position(|x| *x == d)
+                {
                     self.menu_pick(DISCORD_TAG + i);
                 }
             }
@@ -2310,7 +2320,10 @@ impl App {
         // Drawn whether or not it is open: a window need not be on screen
         // to be drawn into a bitmap, and opening it would take the keys.
         let values = self.settings_values();
-        out.push(("settings".into(), super::settings::content(self.mtm, &values)));
+        out.push((
+            "settings".into(),
+            super::settings::content(self.mtm, &values),
+        ));
         let values = self.usage_values();
         out.push(("usage".into(), super::usage::content(self.mtm, &values)));
         out

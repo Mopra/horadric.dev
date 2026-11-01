@@ -306,7 +306,11 @@ impl Listener {
         for i in 0..most {
             // The prompt goes in whole, then one token a step: the
             // decoder keeps the rest.
-            let fresh = if i == 0 { &tokens[..] } else { &tokens[tokens.len() - 1..] };
+            let fresh = if i == 0 {
+                &tokens[..]
+            } else {
+                &tokens[tokens.len() - 1..]
+            };
             let mut logits = self.decoder.next(fresh, &features)?.broadcast_add(&mask)?;
             if i == 0 && forced.is_empty() {
                 logits = logits.broadcast_add(&begin)?;

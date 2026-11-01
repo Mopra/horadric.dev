@@ -348,6 +348,9 @@ mod tests {
             socket_places(2, var),
             ["/var/folders/xy/T/discord-ipc-2", "/tmp/discord-ipc-2"]
         );
-        assert_eq!(socket_places(0, |_| Some("/tmp".into())), ["/tmp/discord-ipc-0"]);
+        assert_eq!(
+            socket_places(0, |_| Some("/tmp".into())),
+            ["/tmp/discord-ipc-0"]
+        );
     }
 }

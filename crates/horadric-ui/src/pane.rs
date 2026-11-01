@@ -1904,7 +1904,12 @@ impl Pane {
         let chord = dictate::chord();
         let win = unsafe { GetKeyState(VK_LWIN.0 as i32) < 0 || GetKeyState(VK_RWIN.0 as i32) < 0 };
         let held = (mods.ctrl, mods.alt, mods.shift, win)
-            == (chord.mods.ctrl, chord.mods.alt, chord.mods.shift, chord.mods.win);
+            == (
+                chord.mods.ctrl,
+                chord.mods.alt,
+                chord.mods.shift,
+                chord.mods.win,
+            );
         if vk.0 != chord.key || !held || !ours {
             return false;
         }

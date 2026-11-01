@@ -29,8 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use horadric_core::folio::{
-    prompt_line, AskState, Block, FileEdit, Folio, ImageData, McpWant, Priority, Reply,
-    SignInState,
+    prompt_line, AskState, Block, FileEdit, Folio, ImageData, McpWant, Priority, Reply, SignInState,
 };
 use horadric_core::trust;
 use horadric_pty::headless::Options;
@@ -39,10 +38,10 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSAutoresizingMaskOptions, NSBezelStyle, NSButton, NSEventModifierFlags,
-    NSFont, NSFontAttributeName, NSFontWeightRegular, NSForegroundColorAttributeName,
-    NSLineBreakMode, NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSResponder,
-    NSScrollView, NSText, NSTextDelegate, NSTextField, NSTextView, NSTextViewDelegate, NSView,
+    NSApplication, NSAutoresizingMaskOptions, NSBezelStyle, NSButton, NSEventModifierFlags, NSFont,
+    NSFontAttributeName, NSFontWeightRegular, NSForegroundColorAttributeName, NSLineBreakMode,
+    NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSResponder, NSScrollView, NSText,
+    NSTextDelegate, NSTextField, NSTextView, NSTextViewDelegate, NSView,
 };
 use objc2_foundation::{
     NSAttributedString, NSDictionary, NSMutableAttributedString, NSObject, NSPoint, NSRange,
@@ -358,7 +357,11 @@ impl Chat {
                     }
                     return (
                         format!("Claude asks to use {tool}."),
-                        vec![Act::Deny(id.clone()), Act::Always(id.clone()), Act::Allow(id)],
+                        vec![
+                            Act::Deny(id.clone()),
+                            Act::Always(id.clone()),
+                            Act::Allow(id),
+                        ],
                     );
                 }
                 Block::Plan {
@@ -421,7 +424,10 @@ impl Chat {
             }
         }
         if self.ended {
-            return ("The session ended. Click its tile to resume it.".into(), Vec::new());
+            return (
+                "The session ended. Click its tile to resume it.".into(),
+                Vec::new(),
+            );
         }
         if !self.live || self.loading.is_some() {
             return ("Reading the conversation\u{2026}".into(), Vec::new());
@@ -1231,7 +1237,10 @@ define_class!(
 impl ComposerText {
     /// A composer for session `id` in a scroll view of its own, made as
     /// `scrollableTextView` makes one, since that cannot make a subclass.
-    fn scrolled(mtm: MainThreadMarker, id: &str) -> (Retained<NSScrollView>, Retained<ComposerText>) {
+    fn scrolled(
+        mtm: MainThreadMarker,
+        id: &str,
+    ) -> (Retained<NSScrollView>, Retained<ComposerText>) {
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, COMPOSER_H));
         let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), frame);
         scroll.setHasVerticalScroller(true);

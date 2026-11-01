@@ -1064,7 +1064,9 @@ fn pick(chat: &mut Chat, how: How) -> bool {
             }
             // The list opens as the command is put in, to be filtered.
             if picker::HISTORY_COMMANDS.contains(&item.value.as_str()) {
-                chat.input.ed.replace(menu.start, caret, &format!("/{} ", item.value));
+                chat.input
+                    .ed
+                    .replace(menu.start, caret, &format!("/{} ", item.value));
                 chat.input.edited();
                 follow_menu(chat);
                 return true;

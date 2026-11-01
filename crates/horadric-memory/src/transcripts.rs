@@ -351,10 +351,7 @@ fn known_secrets() -> Arc<Vec<String>> {
     if let Some((_, values)) = read.as_ref().filter(|(at, _)| at.elapsed() < SECRETS_FRESH) {
         return values.clone();
     }
-    let mut values: Vec<String> = source()
-        .into_iter()
-        .flat_map(|v| secrets_in(&v))
-        .collect();
+    let mut values: Vec<String> = source().into_iter().flat_map(|v| secrets_in(&v)).collect();
     values.sort_by_key(|v| std::cmp::Reverse(v.len()));
     values.dedup();
     let values = Arc::new(values);
@@ -391,7 +388,10 @@ pub fn redact(text: &str) -> String {
 /// [`redact`] with `known` as the kept secrets, longest first.
 pub fn redact_known(text: &str, known: &[String]) -> String {
     let mut cut = None;
-    for value in known.iter().filter(|v| v.chars().count() >= SHORTEST_SECRET) {
+    for value in known
+        .iter()
+        .filter(|v| v.chars().count() >= SHORTEST_SECRET)
+    {
         let from = cut.as_deref().unwrap_or(text);
         if from.contains(value.as_str()) {
             cut = Some(from.replace(value.as_str(), MASK));
@@ -779,7 +779,8 @@ mod tests {
             redact_known("the passphrase is correct horse battery staple, ok", &known),
             "the passphrase is [secret], ok"
         );
-        let login = secrets_in(r#"{"accessToken": "plainwordtoken", "expiresAt": 17, "scope": "x"}"#);
+        let login =
+            secrets_in(r#"{"accessToken": "plainwordtoken", "expiresAt": 17, "scope": "x"}"#);
         assert_eq!(login, ["plainwordtoken"]);
         assert_eq!(redact_known("sent plainwordtoken", &login), "sent [secret]");
         assert!(secrets_in("short").is_empty());

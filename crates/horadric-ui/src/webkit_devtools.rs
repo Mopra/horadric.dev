@@ -360,9 +360,10 @@ mod tests {
 
     #[test]
     fn an_expression_runs_as_it_is_and_statements_through_eval() {
-        let Ok(Plan::Script { body, fallback }) =
-            plan("Runtime.evaluate", &json!({ "expression": "document.title" }))
-        else {
+        let Ok(Plan::Script { body, fallback }) = plan(
+            "Runtime.evaluate",
+            &json!({ "expression": "document.title" }),
+        ) else {
             panic!("not a script");
         };
         assert!(body.contains("v = await (\ndocument.title\n);"));

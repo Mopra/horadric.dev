@@ -14,18 +14,17 @@ use std::cell::{Cell, RefCell};
 
 use windows::core::{Interface, Result};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_ALPHA_MODE_UNKNOWN, D2D1_COLOR_F,
-    D2D1_COMPOSITE_MODE_PLUS, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_ALPHA_MODE_UNKNOWN, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_PLUS,
+    D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    CLSID_D2D1ColorMatrix, CLSID_D2D1GaussianBlur, ID2D1BitmapRenderTarget,
-    ID2D1DeviceContext, ID2D1Effect, ID2D1Image, ID2D1RenderTarget,
-    D2D1_BUFFER_PRECISION_16BPC_FLOAT, D2D1_COLORMATRIX_PROP_COLOR_MATRIX,
-    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_INTERPOLATION_MODE_LINEAR,
-    D2D1_PRIMITIVE_BLEND_ADD, D2D1_PROPERTY_PRECISION, D2D1_PROPERTY_TYPE_FLOAT,
-    D2D1_PROPERTY_TYPE_MATRIX_5X4, D2D1_PROPERTY_TYPE_UNKNOWN, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_HARDWARE, D2D1_RENDER_TARGET_USAGE_NONE,
+    CLSID_D2D1ColorMatrix, CLSID_D2D1GaussianBlur, ID2D1BitmapRenderTarget, ID2D1DeviceContext,
+    ID2D1Effect, ID2D1Image, ID2D1RenderTarget, D2D1_BUFFER_PRECISION_16BPC_FLOAT,
+    D2D1_COLORMATRIX_PROP_COLOR_MATRIX, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PRIMITIVE_BLEND_ADD, D2D1_PROPERTY_PRECISION,
+    D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_MATRIX_5X4, D2D1_PROPERTY_TYPE_UNKNOWN,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_HARDWARE, D2D1_RENDER_TARGET_USAGE_NONE,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_UNKNOWN,
@@ -173,7 +172,12 @@ impl Light {
             Some(a) => {
                 let x = a.x.min(r.x);
                 let y = a.y.min(r.y);
-                Rect::new(x, y, a.right().max(r.right()) - x, a.bottom().max(r.bottom()) - y)
+                Rect::new(
+                    x,
+                    y,
+                    a.right().max(r.right()) - x,
+                    a.bottom().max(r.bottom()) - y,
+                )
             }
         };
         self.lit.set(Some(joined));
@@ -247,9 +251,10 @@ impl Light {
 /// A light layer the size of `rt`, in half floats where the device takes
 /// them, else eight bits.
 unsafe fn make_layer(rt: &ID2D1RenderTarget, size: D2D_SIZE_U) -> Result<Layer> {
-    let floats = rt
-        .cast::<ID2D1DeviceContext>()
-        .is_ok_and(|dc| dc.IsBufferPrecisionSupported(D2D1_BUFFER_PRECISION_16BPC_FLOAT).as_bool());
+    let floats = rt.cast::<ID2D1DeviceContext>().is_ok_and(|dc| {
+        dc.IsBufferPrecisionSupported(D2D1_BUFFER_PRECISION_16BPC_FLOAT)
+            .as_bool()
+    });
     let make = |format| {
         let format = D2D1_PIXEL_FORMAT {
             format,

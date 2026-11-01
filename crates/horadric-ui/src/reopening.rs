@@ -102,8 +102,11 @@ impl App {
             return;
         }
         let Some(closed) = with(|s| reopen::take(&mut s.closed, project, conversation)) else {
-            self.toasts
-                .show(Kind::Info, "Nothing to reopen", "No closed session is kept.");
+            self.toasts.show(
+                Kind::Info,
+                "Nothing to reopen",
+                "No closed session is kept.",
+            );
             return;
         };
         with(|s| s.last = Some(now));

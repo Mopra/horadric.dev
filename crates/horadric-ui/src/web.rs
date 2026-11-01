@@ -69,14 +69,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetForegroundWindow, GetParent, PostMessageW, GA_ROOT,
 };
 
-
 // Kept reachable here for the callers from before it moved.
+use crate::app::{self, Input, WebAsk};
 #[allow(unused_imports)]
 pub use crate::browse::{
     address, after_close, after_move, cycled, pick_tab, tab_name, Pick, Step, AGENT_PROMPT,
 };
 use crate::browse::{is_blank, KEEP_CONSOLE};
-use crate::app::{self, Input, WebAsk};
 use crate::favicon::{self, Favicon};
 use crate::store;
 use crate::terminal::WM_STAGE_LAYOUT;
@@ -422,7 +421,6 @@ fn add_tab(key: &str, tab: Tab, front: bool) {
     show(key);
     make(key, id);
 }
-
 
 /// The tab `session`'s agent works in, opening one for it when `make` and
 /// it has none to take (see [`pick_tab`]). A tab whose session is not
@@ -887,7 +885,6 @@ pub fn tab(key: &str, step: TabStep) {
     }
 }
 
-
 /// The titles of the project's tabs, or their addresses where a page has
 /// none yet, and which one is shown.
 pub fn tabs(key: &str) -> Option<(Vec<String>, usize)> {
@@ -974,7 +971,6 @@ pub fn drivers(key: &str) -> Vec<Option<String>> {
             .unwrap_or_default()
     })
 }
-
 
 /// The size the project's page lays out at, in CSS pixels, or None when
 /// it fills its pane.
@@ -1481,7 +1477,6 @@ pub fn find(key: &str, term: &str) {
     focus(key);
 }
 
-
 /// Makes the tab's WebView, making the shared environment first when it
 /// is not there yet.
 fn make(key: &str, id: u64) {
@@ -1683,7 +1678,6 @@ fn begin(view: &ICoreWebView2, opener: Option<Opener>, pending: Option<String>) 
         None => navigate_view(view, pending.as_deref().unwrap_or("about:blank")),
     }
 }
-
 
 fn listen(key: &str, id: u64, view: &ICoreWebView2) {
     let owned = key.to_string();
@@ -2053,7 +2047,6 @@ fn changed(key: &str, id: Option<u64>, set: impl FnOnce(&mut Tab)) {
     }
     retiled(key);
 }
-
 
 #[cfg(test)]
 mod tests {

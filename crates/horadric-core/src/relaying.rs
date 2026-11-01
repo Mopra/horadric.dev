@@ -147,7 +147,11 @@ pub fn pc_dial(relay: &str, secret: &str, signed: Option<(&str, &str)>) -> Dial 
 /// Linux node pairs no phones, so it never dials so.
 pub fn taking_asks(mut d: Dial) -> Dial {
     if d.headers.iter().any(|h| h.0 == "Authorization") {
-        d.url.push_str(if d.url.contains('?') { "&asks=1" } else { "?asks=1" });
+        d.url.push_str(if d.url.contains('?') {
+            "&asks=1"
+        } else {
+            "?asks=1"
+        });
     }
     d
 }
@@ -159,7 +163,11 @@ pub fn taking_asks(mut d: Dial) -> Dial {
 /// Mac and a Linux node do not know teams yet, so never dial so.
 pub fn knowing_teams(mut d: Dial) -> Dial {
     if d.headers.iter().any(|h| h.0 == "Authorization") {
-        d.url.push_str(if d.url.contains('?') { "&team=1" } else { "?team=1" });
+        d.url.push_str(if d.url.contains('?') {
+            "&team=1"
+        } else {
+            "?team=1"
+        });
     }
     d
 }

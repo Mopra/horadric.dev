@@ -140,7 +140,8 @@ impl Watch {
 
     fn usage(&mut self, u: &Value) {
         let n = |k: &str| u[k].as_u64().unwrap_or_default();
-        let window = n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
+        let window =
+            n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
         if window > 0 {
             self.window = window;
         }
@@ -318,10 +319,22 @@ mod tests {
         let mut ready = explored(150_000);
         start(&mut ready, "e1", "Edit");
         let not = [
-            Moment { quest: false, ..quest(true) },
-            Moment { live: false, ..quest(true) },
-            Moment { asking: true, ..quest(true) },
-            Moment { agents: 1, ..quest(true) },
+            Moment {
+                quest: false,
+                ..quest(true)
+            },
+            Moment {
+                live: false,
+                ..quest(true)
+            },
+            Moment {
+                asking: true,
+                ..quest(true)
+            },
+            Moment {
+                agents: 1,
+                ..quest(true)
+            },
             quest(false),
         ];
         for m in not {

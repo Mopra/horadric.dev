@@ -10,8 +10,7 @@ use windows_numerics::Vector2;
 
 use super::{
     color, Gpu, Painter, Scene, Target, AGENTS_ALONE, BEAM_H, HIRELING_ORBIT, MAX_SPARKS,
-    RUNE_CARVE, RUNE_H, RUNE_SETTLE, RUNE_STROKE, SHIMMER, SPARK_ORBIT, SPARK_REACH,
-    WARRIV_BREATH,
+    RUNE_CARVE, RUNE_H, RUNE_SETTLE, RUNE_STROKE, SHIMMER, SPARK_ORBIT, SPARK_REACH, WARRIV_BREATH,
 };
 use crate::layout::{Metrics, Rect};
 use crate::light::Bloom;
@@ -373,7 +372,12 @@ impl Painter<'_> {
             }
         }
         let rise = 40.0;
-        Some(Rect::new(x - 8.0, base - tall - rise, 16.0, tall + rise + 8.0))
+        Some(Rect::new(
+            x - 8.0,
+            base - tall - rise,
+            16.0,
+            tall + rise + 8.0,
+        ))
     }
 
     /// A light leaving a task's row for the lamp of the session that took
@@ -400,7 +404,12 @@ impl Painter<'_> {
             self.dot(x, y, 1.8, heat_color(c, 1.5));
             if p > 0.8 {
                 let k = (p - 0.8) / 0.2;
-                self.dot(tx, ty, 1.0 + 2.0 * (1.0 - k), heat_color(c, 1.2).fade(1.0 - k));
+                self.dot(
+                    tx,
+                    ty,
+                    1.0 + 2.0 * (1.0 - k),
+                    heat_color(c, 1.2).fade(1.0 - k),
+                );
                 let sparks = Burst::new(n as u64, 6, Kind::Spark);
                 self.burst(&sparks, (tx, ty), k * sparks.span(), c, 1.0);
             }

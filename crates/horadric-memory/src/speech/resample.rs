@@ -18,7 +18,11 @@ pub struct Resampler {
 
 impl Resampler {
     pub fn new(from: f64, to: f64) -> Resampler {
-        let step = if from > 0.0 && to > 0.0 { from / to } else { 1.0 };
+        let step = if from > 0.0 && to > 0.0 {
+            from / to
+        } else {
+            1.0
+        };
         Resampler {
             step,
             at: 0.0,
@@ -36,7 +40,11 @@ impl Resampler {
             self.at += 1.0;
             while self.at >= self.until {
                 // Raising the rate, a sample in makes several out.
-                out.push(if self.n == 0 { s } else { self.sum / self.n as f32 });
+                out.push(if self.n == 0 {
+                    s
+                } else {
+                    self.sum / self.n as f32
+                });
                 self.sum = 0.0;
                 self.n = 0;
                 self.until += self.step;
@@ -71,7 +79,10 @@ mod tests {
         r.push(&tone, &mut out);
         assert!((out.len() as i64 - 16_000).abs() <= 1);
         // A 440 Hz tone still crosses zero about 880 times a second.
-        let crossings = out.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count();
+        let crossings = out
+            .windows(2)
+            .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
+            .count();
         assert!((870..=890).contains(&crossings), "{crossings}");
     }
 

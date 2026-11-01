@@ -37,7 +37,11 @@ pub enum Note {
     Scanned(String, Option<Scan>),
     /// Paths changed under the project, relative to it. `all` when FSEvents
     /// lost track and anything may have.
-    Changed { key: String, paths: Vec<String>, all: bool },
+    Changed {
+        key: String,
+        paths: Vec<String>,
+        all: bool,
+    },
 }
 
 /// What one run of git found.

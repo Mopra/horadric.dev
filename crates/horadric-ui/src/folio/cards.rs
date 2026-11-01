@@ -6,9 +6,9 @@
 use horadric_core::folio::{AskState, Block, FileEdit, SignInState};
 use windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_EMERGENCY_BREAK;
 
+use super::comments::{self, Review};
 use super::flow;
 use super::rich::{Ctx, Scene, F};
-use super::comments::{self, Review};
 use super::transcript::{
     change_field, deny_field, keep_field, note_field, other_field, Act, State,
 };
@@ -235,14 +235,23 @@ pub(super) unsafe fn ask(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
         }
         AskState::Waiting if commenting && review.draft.is_some() => {
             let (from, to) = review.span().unwrap_or_default();
-            let say = format!("Comment on {}", comments::shown_place(&rows, from, to).to_lowercase());
+            let say = format!(
+                "Comment on {}",
+                comments::shown_place(&rows, from, to).to_lowercase()
+            );
             s.line(say, F::Small, Rect::new(PAD, y, inner, 18.0), cx.pal.dim);
             y += 20.0;
             let id = note_field(request_id);
             let hint = "What should change here?";
             y = field(cx, &mut s, st, &id, hint, PAD, y, inner) + 10.0;
-            let say = "Enter adds it, Shift+Enter for a new line, Shift+click a number for more lines";
-            s.line(say, F::Small, Rect::new(PAD, y + 34.0, inner, 18.0), cx.pal.faint);
+            let say =
+                "Enter adds it, Shift+Enter for a new line, Shift+click a number for more lines";
+            s.line(
+                say,
+                F::Small,
+                Rect::new(PAD, y + 34.0, inner, 18.0),
+                cx.pal.faint,
+            );
             let x = button(
                 cx,
                 &mut s,
@@ -351,7 +360,12 @@ unsafe fn notes(
         let top = y;
         let place = comments::shown_place(rows, c.from, c.to);
         let ink = cx.pal.accent.mix(cx.pal.fg, 0.45);
-        s.line(place, F::Small, Rect::new(PAD + 10.0, y, inner - 90.0, 18.0), ink);
+        s.line(
+            place,
+            F::Small,
+            Rect::new(PAD + 10.0, y, inner - 90.0, 18.0),
+            ink,
+        );
         if commenting {
             let drop = Rect::new(PAD + inner - 64.0, y, 64.0, 18.0);
             s.line("Remove", F::Small, drop, cx.pal.faint);

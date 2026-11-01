@@ -120,11 +120,7 @@ impl Login {
             }
             wake();
         });
-        Ok(Login {
-            stdin,
-            child,
-            said,
-        })
+        Ok(Login { stdin, child, said })
     }
 
     /// What it has said so far.
@@ -138,7 +134,9 @@ impl Login {
         let Some(stdin) = self.stdin.as_mut() else {
             return false;
         };
-        writeln!(stdin, "{code}").and_then(|_| stdin.flush()).is_ok()
+        writeln!(stdin, "{code}")
+            .and_then(|_| stdin.flush())
+            .is_ok()
     }
 }
 

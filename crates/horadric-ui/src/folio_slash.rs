@@ -417,7 +417,11 @@ pub fn plugin_actions(id: &str, on: bool) -> Vec<Row> {
     let verb = if on { "disable" } else { "enable" };
     vec![
         row(toggle, "", &format!("run\tplugin {verb} {id}")),
-        row("Update", "Restart to apply", &format!("run\tplugin update {id}")),
+        row(
+            "Update",
+            "Restart to apply",
+            &format!("run\tplugin update {id}"),
+        ),
         row("Uninstall", "", &format!("run\tplugin uninstall {id}")),
     ]
 }
@@ -425,8 +429,16 @@ pub fn plugin_actions(id: &str, on: bool) -> Vec<Row> {
 /// What a marketplace's row opens.
 pub fn market_actions(name: &str) -> Vec<Row> {
     vec![
-        row("Update", "", &format!("run\tplugin marketplace update {name}")),
-        row("Remove", "", &format!("run\tplugin marketplace remove {name}")),
+        row(
+            "Update",
+            "",
+            &format!("run\tplugin marketplace update {name}"),
+        ),
+        row(
+            "Remove",
+            "",
+            &format!("run\tplugin marketplace remove {name}"),
+        ),
     ]
 }
 

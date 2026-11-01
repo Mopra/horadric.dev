@@ -155,7 +155,11 @@ impl Project {
             Shared::open(&self.memory, self.place.key(), &self.me).map_err(|e| e.to_string())?;
         let talkers = talkers(shared.log());
         drop(shared);
-        let entries = from_team(brethren::entries_of(&json!({"b64": b64})), &self.me, &talkers);
+        let entries = from_team(
+            brethren::entries_of(&json!({"b64": b64})),
+            &self.me,
+            &talkers,
+        );
         self.take_in(entries, now).map(|_| ())
     }
 
@@ -297,13 +301,7 @@ impl Lores {
 
     /// [`Lores::import`] of what a teammate's machine sent, for a project
     /// `shared` says is switched on for teammates.
-    pub fn import_team(
-        &self,
-        project: &Value,
-        b64: &str,
-        now: u64,
-        shared: impl Fn(&str) -> bool,
-    ) {
+    pub fn import_team(&self, project: &Value, b64: &str, now: u64, shared: impl Fn(&str) -> bool) {
         let Some(ours) = self.find(project).filter(|p| shared(p.place.key())) else {
             return;
         };
@@ -508,8 +506,10 @@ mod tests {
         let sent = for_team(
             vec![
                 entry(json!({"by": "me", "n": 1, "said": {"text": "secret", "time": 1}})),
-                entry(json!({"by": "me", "n": 2, "note": {"text": "a note", "at": 2,
-                    "sources": [stamp("me", 1)], "replaces": [stamp("me", 0), stamp("desk", 4)]}})),
+                entry(
+                    json!({"by": "me", "n": 2, "note": {"text": "a note", "at": 2,
+                    "sources": [stamp("me", 1)], "replaces": [stamp("me", 0), stamp("desk", 4)]}}),
+                ),
                 entry(json!({"by": "me", "n": 3, "forget": {"of": stamp("desk", 4), "at": 3}})),
                 entry(json!({"by": "me", "n": 4, "forget": {"of": stamp("me", 2), "at": 4}})),
                 entry(json!({"by": "me", "n": 5, "newer": "kind"})),
@@ -517,8 +517,13 @@ mod tests {
             ],
             "me",
         );
-        assert_eq!(sent.iter().map(|e| e.n).collect::<Vec<_>>(), [1, 2, 3, 4, 5]);
-        assert!(sent.iter().all(|e| e.by == "me" && e.said.is_none() && e.rest.is_empty()));
+        assert_eq!(
+            sent.iter().map(|e| e.n).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+        assert!(sent
+            .iter()
+            .all(|e| e.by == "me" && e.said.is_none() && e.rest.is_empty()));
         let note = sent[1].note.as_ref().unwrap();
         assert!(note.sources.is_empty());
         assert_eq!(note.replaces.len(), 1);
@@ -533,14 +538,18 @@ mod tests {
                 entry(json!({"by": "me", "n": 9, "note": {"text": "as me", "at": 1}})),
                 entry(json!({"by": "desk", "n": 9, "note": {"text": "as desk", "at": 1}})),
                 entry(json!({"by": "ann", "n": 1, "said": {"text": "hers", "time": 1}})),
-                entry(json!({"by": "ann", "n": 2, "forget": {"of": {"by": "desk", "n": 1}, "at": 2}})),
+                entry(
+                    json!({"by": "ann", "n": 2, "forget": {"of": {"by": "desk", "n": 1}, "at": 2}}),
+                ),
                 entry(json!({"by": "ann", "n": 3, "note": {"text": "hers", "at": 3}})),
             ],
             "me",
             &talkers,
         );
         assert_eq!(taken.iter().map(|e| e.n).collect::<Vec<_>>(), [1, 2, 3]);
-        assert!(taken.iter().all(|e| e.by == "ann" && e.said.is_none() && e.forget.is_none()));
+        assert!(taken
+            .iter()
+            .all(|e| e.by == "ann" && e.said.is_none() && e.forget.is_none()));
         assert!(taken[2].note.is_some());
     }
 

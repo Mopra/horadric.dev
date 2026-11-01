@@ -48,8 +48,8 @@ use crate::hotkey::{Action, Chord};
 use windows::core::{GUID, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, PROPERTYKEY, WPARAM};
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, PlaySoundW, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
-    MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+    eCapture, eConsole, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
+    MMDeviceEnumerator, PlaySoundW, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
     DEVICE_STATE_ACTIVE, SND_ASYNC, SND_MEMORY, SND_NODEFAULT, WAVEFORMATEX,
 };
@@ -328,7 +328,13 @@ fn tidy(raw: &str) -> Option<String> {
     let mut c = std::process::Command::new(horadric_pty::headless::claude_exe()?);
     c.arg("-p")
         .arg(speech::tidy::prompt(raw))
-        .args(["--model", speech::tidy::MODEL, "--tools", "", "--strict-mcp-config"])
+        .args([
+            "--model",
+            speech::tidy::MODEL,
+            "--tools",
+            "",
+            "--strict-mcp-config",
+        ])
         .arg("--no-session-persistence")
         .args(["--settings", r#"{"disableAllHooks":true}"#])
         .args(["--system-prompt", speech::tidy::SYSTEM])
@@ -1319,7 +1325,10 @@ mod tests {
     fn two_drafts_settle_the_words_they_share() {
         assert_eq!(agreed("", "move the panes"), "");
         assert_eq!(agreed("move the pan", "move the panes to"), "move the");
-        assert_eq!(agreed("move the panes to", "move the panes to the left"), "move the panes to");
+        assert_eq!(
+            agreed("move the panes to", "move the panes to the left"),
+            "move the panes to"
+        );
         // The newest last word may be cut off, so it never settles.
         assert_eq!(agreed("move the", "move the"), "move");
         let mut take = Take::default();
@@ -1330,7 +1339,10 @@ mod tests {
         take.drafted("often".into());
         assert_eq!(take.settled, "open the");
         take.phrase_done("open the settings.");
-        assert_eq!((take.said.as_str(), take.settled.as_str()), ("open the settings.", ""));
+        assert_eq!(
+            (take.said.as_str(), take.settled.as_str()),
+            ("open the settings.", "")
+        );
     }
 
     #[test]

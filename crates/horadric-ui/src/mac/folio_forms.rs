@@ -3,9 +3,7 @@
 //! an MCP server's form or page. AppKit's own alerts, with fields laid in
 //! as their accessory view, so nothing is drawn.
 
-use horadric_core::folio::{
-    Block, ElicitAction, ElicitField, Elicitation, FieldKind, ELICIT_SEP,
-};
+use horadric_core::folio::{Block, ElicitAction, ElicitField, Elicitation, FieldKind, ELICIT_SEP};
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{

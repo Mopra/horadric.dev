@@ -102,7 +102,12 @@ pub fn withdraw(token: u64) {
 /// Presses Cancel on every window of thread `thread`: its box.
 fn cancel(thread: u32) {
     unsafe extern "system" fn press(hwnd: HWND, _: LPARAM) -> BOOL {
-        let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(IDCANCEL.0 as usize), LPARAM(0));
+        let _ = PostMessageW(
+            Some(hwnd),
+            WM_COMMAND,
+            WPARAM(IDCANCEL.0 as usize),
+            LPARAM(0),
+        );
         true.into()
     }
     unsafe {

@@ -13,8 +13,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 
 use super::cards::picks_of;
-use super::flow::{self, Pos};
 use super::comments;
+use super::flow::{self, Pos};
 use super::transcript::{
     change_field, deny_field, keep_field, note_field, other_field, Act, Find, State, FIND_FIELD,
     SHOWN,

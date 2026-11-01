@@ -43,7 +43,11 @@ fn words(s: &str) -> Vec<String> {
 /// thrown away and `raw` typed as it is.
 pub fn tidied(raw: &str, reply: &str) -> Option<String> {
     let mut text = reply.trim();
-    for (open, close) in [("<dictation>", "</dictation>"), ("```", "```"), ("\"", "\"")] {
+    for (open, close) in [
+        ("<dictation>", "</dictation>"),
+        ("```", "```"),
+        ("\"", "\""),
+    ] {
         if let Some(inner) = text.strip_prefix(open).and_then(|t| t.strip_suffix(close)) {
             text = inner.trim();
         }
@@ -91,8 +95,17 @@ mod tests {
 
     #[test]
     fn an_answer_instead_of_a_tidy_is_not() {
-        assert_eq!(tidied("what is the capital of France", "Paris is the capital of France, a city on the Seine known for the Eiffel Tower."), None);
-        assert_eq!(tidied(RAW, "I'm sorry, I can't help with that request."), None);
+        assert_eq!(
+            tidied(
+                "what is the capital of France",
+                "Paris is the capital of France, a city on the Seine known for the Eiffel Tower."
+            ),
+            None
+        );
+        assert_eq!(
+            tidied(RAW, "I'm sorry, I can't help with that request."),
+            None
+        );
         assert_eq!(tidied(RAW, "   "), None);
     }
 

@@ -36,7 +36,6 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, PostMessageW, SetTimer};
 
 use super::{unix_now, App, PORTAL_TIMER, WM_HORADRIC_PORTAL};
-use crate::quests::Runner as _;
 use crate::brothers;
 use crate::console::GridSize;
 use crate::portal::{self, Sender};
@@ -46,6 +45,7 @@ use crate::portal_link::{Incoming, Link};
 use crate::portal_pair::pc_name;
 use crate::portal_push::{self, Subs};
 use crate::project::{folder_key, project_key, project_name};
+use crate::quests::Runner as _;
 use crate::sharing;
 use crate::town;
 
@@ -241,9 +241,7 @@ impl App {
                     }
                 }
                 Incoming::Ask(ch, email) => p.ask_opened(ch, &email, now),
-                Incoming::Sealed(ch, plain) if p.asks.is_ask(ch) => {
-                    p.heard_ask(ch, &plain, notify)
-                }
+                Incoming::Sealed(ch, plain) if p.asks.is_ask(ch) => p.heard_ask(ch, &plain, notify),
                 Incoming::Sealed(ch, sealed) => heard_from(p, ch, &sealed, now, &mut pairs),
             }
         }
@@ -471,7 +469,11 @@ impl App {
             Some(b) => b.project.clone(),
             None => project_name(&project_key(&s)),
         };
-        Some(webpush::payload(&to, &s, &project, waiting).to_string().into_bytes())
+        Some(
+            webpush::payload(&to, &s, &project, waiting)
+                .to_string()
+                .into_bytes(),
+        )
     }
 
     /// The quests message: each tile project's log, and what Warriv does
@@ -992,7 +994,14 @@ impl Portal {
             }
         };
         self.config = config;
-        mesh::vouch(&self.dir, Some(&signer), &phone.id, &l.public, &phone.name, now);
+        mesh::vouch(
+            &self.dir,
+            Some(&signer),
+            &phone.id,
+            &l.public,
+            &phone.name,
+            now,
+        );
         let answer = phoning::paired_message("paired", &phone.id, &me, &signer.private);
         self.link.send(ch, &l.key, &answer);
         self.look_at_word();

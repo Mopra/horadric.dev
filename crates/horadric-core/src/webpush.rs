@@ -8,9 +8,9 @@ use std::time::UNIX_EPOCH;
 
 use serde_json::{json, Value};
 
+use crate::afar::remote_id;
 use crate::ask::{Ask, Choice, Kind};
 use crate::portal::sha256;
-use crate::afar::remote_id;
 use crate::session::{waiting_on, Phase, Session, WaitReason};
 
 /// The record size the header announces. One record holds the whole
@@ -111,7 +111,12 @@ pub struct Target<'a> {
 /// brother's sessions too. None for a session no phone could open: a
 /// brother's out of reach, whose phase is only its last heard, or one on a
 /// machine the phone does not know, such as a node reached over ssh alone.
-pub fn target<'a>(s: &'a Session, me: &'a str, name: &'a str, known: &[String]) -> Option<Target<'a>> {
+pub fn target<'a>(
+    s: &'a Session,
+    me: &'a str,
+    name: &'a str,
+    known: &[String],
+) -> Option<Target<'a>> {
     let many = known.len() > 1;
     let Some(b) = &s.brother else {
         return Some(Target {
@@ -371,7 +376,10 @@ mod tests {
             }
         );
         let p = payload(&to, &s, "horadric", 2);
-        assert_eq!((p["pc"].as_str(), p["id"].as_str()), (Some("bbbb"), Some("abc")));
+        assert_eq!(
+            (p["pc"].as_str(), p["id"].as_str()),
+            (Some("bbbb"), Some("abc"))
+        );
         assert_eq!(p["body"], "horadric · fix the tiles · Beta");
         // Out of reach, its phase is old news; a node over ssh alone is
         // no machine the phone dials.

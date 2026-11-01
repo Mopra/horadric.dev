@@ -69,7 +69,9 @@ pub(super) fn open_url(url: &str) {
 }
 
 fn notice(id: &str, text: &str) {
-    with(id, |c| c.notice = (!text.is_empty()).then(|| text.to_string()));
+    with(id, |c| {
+        c.notice = (!text.is_empty()).then(|| text.to_string())
+    });
     refresh(id);
 }
 
@@ -252,7 +254,11 @@ fn act(id: &str, value: &str, view: &FolioView) {
         }
         ["plugin", name, on] => choose(id, view, shared::plugin_actions(name, *on == "true"), ""),
         ["market", name] => choose(id, view, shared::market_actions(name), ""),
-        ["markets"] => hidden(id, &["plugin", "marketplace", "list", "--json"], Then::Markets),
+        ["markets"] => hidden(
+            id,
+            &["plugin", "marketplace", "list", "--json"],
+            Then::Markets,
+        ),
         ["run", words] => {
             let args: Vec<&str> = words.split_whitespace().collect();
             hidden(id, &args, Then::Show(format!("/{words}")));
@@ -613,7 +619,10 @@ pub(super) fn fork_now(id: &str) {
         ..again
     };
     if !with(id, |c| c.let_go(id, Leave::Again(again))).unwrap_or(false) {
-        notice(id, "It started working before the conversation could go back.");
+        notice(
+            id,
+            "It started working before the conversation could go back.",
+        );
     }
 }
 
@@ -647,7 +656,9 @@ pub(super) fn elicit(id: &str, request_id: &str) {
     let Some((action, content)) = super::folio_forms::elicit(&e) else {
         return;
     };
-    folio::answer(id, |c| c.folio.answer_elicitation(request_id, action, content));
+    folio::answer(id, |c| {
+        c.folio.answer_elicitation(request_id, action, content)
+    });
 }
 
 /// The MCP servers in a menu, each with what can be done for it.
@@ -733,10 +744,14 @@ pub(super) fn open_page(id: &str) {
 pub(super) fn send_code(id: &str, code: &str) {
     let code = code.trim();
     if code.is_empty() {
-        return notice(id, "Paste the code the browser shows below, then Send Code.");
+        return notice(
+            id,
+            "Paste the code the browser shows below, then Send Code.",
+        );
     }
-    let Some(Some(run)) = with(id, |c| c.folio.sign_in_card().filter(|k| k.active()).map(|k| k.run))
-    else {
+    let Some(Some(run)) = with(id, |c| {
+        c.folio.sign_in_card().filter(|k| k.active()).map(|k| k.run)
+    }) else {
         return;
     };
     let sent = LOGIN.with(|l| {
@@ -906,11 +921,17 @@ fn attach(id: &str, mtm: MainThreadMarker) {
     let Some(path) = super::dialog::pick_file(mtm, start.as_deref()) else {
         return;
     };
-    match std::fs::read(&path).ok().and_then(|b| ImageData::from_bytes(&b)) {
+    match std::fs::read(&path)
+        .ok()
+        .and_then(|b| ImageData::from_bytes(&b))
+    {
         Some(image) => {
             with(id, |c| c.images.push(image));
         }
-        None => notice(id, "That is not an image Claude reads: PNG, JPEG, GIF or WebP."),
+        None => notice(
+            id,
+            "That is not an image Claude reads: PNG, JPEG, GIF or WebP.",
+        ),
     }
     refresh(id);
 }
