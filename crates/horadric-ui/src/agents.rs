@@ -55,8 +55,8 @@ pub fn adopt(
     asked: &mut Asked,
 ) -> Option<String> {
     let id = event.session_id.as_str();
-    if id.is_empty() || event.hook_event_name == HookEvent::STATUS || !asked.due(id, Instant::now())
-    {
+    let news = [HookEvent::STATUS, HookEvent::SPENT].contains(&event.hook_event_name.as_str());
+    if id.is_empty() || news || !asked.due(id, Instant::now()) {
         return None;
     }
     let list = list()?;

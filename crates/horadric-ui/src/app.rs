@@ -181,6 +181,14 @@ pub(crate) use keeping::{set_auto as set_auto_takeover, set_keeper, tray_state a
 
 pub use runner::ssh_prompt;
 
+/// The settings the app hands every `claude` it starts, its status line
+/// among them, for `horadric run` to hand its own. None until the app has
+/// run once and written them.
+pub fn status_settings_file() -> Option<PathBuf> {
+    let path = store::dir()?.join("claude-settings.json");
+    path.is_file().then_some(path)
+}
+
 /// Hook events changed the registry. What they did waits in [`EVENTS`].
 const WM_HORADRIC_EVENT: u32 = WM_APP + 1;
 /// Events the UI has not taken yet: [`EVENTS_DUE`] once a
@@ -1911,10 +1919,18 @@ fn tile_menu(id: &str) {
     // What Claude Code reckons the conversation cost, said first and
     // apart, since it is no action.
     let cost = with_app(|app| app.cost_of(id)).flatten();
-    let said: Vec<Item> = cost
-        .map(|c| Item::Disabled(format!("{} at API prices", horadric_core::usage::format_cost(c))))
+    let mut said: Vec<Item> = cost
+        .map(|c| {
+            Item::Disabled(format!(
+                "{} at API prices",
+                horadric_core::usage::format_cost(c)
+            ))
+        })
         .into_iter()
         .collect();
+    if let Some(line) = with_app(|app| app.last_turn_line(id)).flatten() {
+        said.push(Item::Disabled(line));
+    }
     let groups = [said, calls, open, doing, end.into_iter().collect()];
     let mut items = Vec::new();
     for group in groups.into_iter().filter(|g| !g.is_empty()) {
@@ -2702,7 +2718,10 @@ fn project_menu(key: &str) {
     items.extend([Item::Separator, Item::action(END_ALL, "End all sessions")]);
     if let Some(c) = with_app(|app| app.project_cost(key)).flatten() {
         items.insert(0, Item::Separator);
-        let line = format!("Sessions cost {} at API prices", horadric_core::usage::format_cost(c));
+        let line = format!(
+            "Sessions cost {} at API prices",
+            horadric_core::usage::format_cost(c)
+        );
         items.insert(0, Item::Disabled(line));
     }
     // The town is not closed but hidden, and only once no session runs
@@ -6882,6 +6901,20 @@ impl App {
     fn cost_of(&self, id: &str) -> Option<f64> {
         let r = self.shared.registry.lock().ok()?;
         r.get(id)?.status.as_ref()?.cost.filter(|&c| c > 0.0)
+    }
+
+    /// What the last turn spent, as OpenTelemetry told it request by
+    /// request: "Last turn $0.31, 12 requests".
+    fn last_turn_line(&self, id: &str) -> Option<String> {
+        let r = self.shared.registry.lock().ok()?;
+        let t = r.get(id)?.turns.last()?.clone();
+        let requests = if t.requests == 1 {
+            "request"
+        } else {
+            "requests"
+        };
+        let cost = horadric_core::usage::format_cost(t.cost);
+        Some(format!("Last turn {cost}, {} {requests}", t.requests))
     }
 
     /// What the project's sessions on the tiles have cost, summed.

@@ -540,6 +540,17 @@ impl Console {
         // unanswered, which behind Windows' own pseudo console it always does.
         let fgbg = palette::colorfgbg(palette::background());
         env_set.push(("COLORFGBG".into(), fgbg.into()));
+        // OpenTelemetry tells each request a turn makes, which the status
+        // line only sums.
+        if claude {
+            let theirs =
+                |k: &str| std::env::var_os(k).is_some() || launch.env.iter().any(|(n, _)| n == k);
+            env_set.extend(horadric_hooks::otel::env(
+                &launch.id,
+                horadric_hooks::port(),
+                theirs,
+            ));
+        }
         env_set.extend(launch.env);
         // The setup runs in the pane, where its output can be read, and
         // the agent starts after it in the same console.

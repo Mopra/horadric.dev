@@ -663,8 +663,14 @@ mod tests {
                 Sequence::Progress(None),
             ]
         );
-        assert_eq!(parse(b"9;4;2"), Some(Sequence::Progress(Some(Progress::Error(0)))));
-        assert_eq!(parse(b"9;4;4;250"), Some(Sequence::Progress(Some(Progress::Paused(100)))));
+        assert_eq!(
+            parse(b"9;4;2"),
+            Some(Sequence::Progress(Some(Progress::Error(0))))
+        );
+        assert_eq!(
+            parse(b"9;4;4;250"),
+            Some(Sequence::Progress(Some(Progress::Paused(100))))
+        );
         assert!(parse(b"9;4;5;1").is_none());
         assert!(parse(b"9;4;x").is_none());
     }
@@ -679,15 +685,28 @@ mod tests {
         assert_eq!(r.summary().unwrap().state, State::Done);
         assert_eq!(r.progress(), Some(Progress::Normal(30)));
         r.hear(&Sequence::Prompt);
-        assert_eq!(r.progress(), None, "a prompt ends a build that never cleared");
+        assert_eq!(
+            r.progress(),
+            None,
+            "a prompt ends a build that never cleared"
+        );
     }
 
     #[test]
     fn the_taskbar_shows_error_over_pause_over_the_slowest_work() {
         use Progress::*;
-        assert_eq!(Progress::most_urgent([Normal(80), Normal(20), Indeterminate]), Some(Normal(20)));
-        assert_eq!(Progress::most_urgent([Normal(20), Paused(90)]), Some(Paused(90)));
-        assert_eq!(Progress::most_urgent([Paused(9), Error(0), Normal(1)]), Some(Error(0)));
+        assert_eq!(
+            Progress::most_urgent([Normal(80), Normal(20), Indeterminate]),
+            Some(Normal(20))
+        );
+        assert_eq!(
+            Progress::most_urgent([Normal(20), Paused(90)]),
+            Some(Paused(90))
+        );
+        assert_eq!(
+            Progress::most_urgent([Paused(9), Error(0), Normal(1)]),
+            Some(Error(0))
+        );
         assert_eq!(Progress::most_urgent([]), None);
     }
 }

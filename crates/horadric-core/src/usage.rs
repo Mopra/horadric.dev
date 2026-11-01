@@ -329,6 +329,78 @@ impl Status {
     }
 }
 
+/// One API request of a session, from Claude Code's OpenTelemetry
+/// `api_request` event.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Spent {
+    /// The turn it belongs to, OpenTelemetry's `prompt.id`.
+    pub prompt: String,
+    pub model: String,
+    pub cost: f64,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+}
+
+/// What one turn spent: every request made between a prompt and the
+/// next, subagents' too.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Turn {
+    pub prompt: String,
+    pub cost: f64,
+    pub requests: u32,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+}
+
+/// A session's spending turn by turn, as OpenTelemetry tells it. Kept in
+/// memory only and only the latest turns: the status line already gives
+/// the running total, and this is for what the last turns cost.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Turns(Vec<Turn>);
+
+/// How many turns a session keeps.
+const KEEP_TURNS: usize = 100;
+
+impl Turns {
+    pub fn hear(&mut self, spent: &[Spent]) {
+        for s in spent {
+            // Batches can come out of order, so a late request still finds
+            // its turn among the last few.
+            let i = match self.0.iter().rposition(|t| t.prompt == s.prompt) {
+                Some(i) => i,
+                None => {
+                    self.0.push(Turn {
+                        prompt: s.prompt.clone(),
+                        ..Turn::default()
+                    });
+                    self.0.len() - 1
+                }
+            };
+            let t = &mut self.0[i];
+            t.cost += s.cost;
+            t.requests += 1;
+            t.input += s.input;
+            t.output += s.output;
+            t.cache_read += s.cache_read;
+            t.cache_creation += s.cache_creation;
+        }
+        let over = self.0.len().saturating_sub(KEEP_TURNS);
+        self.0.drain(..over);
+    }
+
+    pub fn last(&self) -> Option<&Turn> {
+        self.0.last()
+    }
+
+    pub fn all(&self) -> &[Turn] {
+        &self.0
+    }
+}
+
 /// "$0.42", "$12.30", "$1,204": dollars as a menu line says them, cents
 /// only while they still matter.
 pub fn format_cost(usd: f64) -> String {
@@ -953,5 +1025,28 @@ mod tests {
         assert_eq!(format_cost(12.3), "$12.30");
         assert_eq!(format_cost(1204.4), "$1,204");
         assert_eq!(format_cost(1234567.0), "$1,234,567");
+    }
+
+    #[test]
+    fn requests_add_up_by_turn_and_old_turns_go() {
+        let spent = |prompt: &str, cost: f64| Spent {
+            prompt: prompt.into(),
+            cost,
+            output: 10,
+            ..Spent::default()
+        };
+        let mut t = Turns::default();
+        t.hear(&[spent("a", 0.1), spent("a", 0.2), spent("b", 1.0)]);
+        t.hear(&[spent("a", 0.3)]);
+        assert_eq!(t.all().len(), 2);
+        assert!((t.all()[0].cost - 0.6).abs() < 1e-9);
+        assert_eq!(t.all()[0].requests, 3);
+        assert_eq!(t.last().map(|l| l.output), Some(10));
+        let many: Vec<Spent> = (0..KEEP_TURNS + 5)
+            .map(|i| spent(&i.to_string(), 0.0))
+            .collect();
+        t.hear(&many);
+        assert_eq!(t.all().len(), KEEP_TURNS);
+        assert_eq!(t.last().map(|l| l.prompt.as_str()), Some("104"));
     }
 }

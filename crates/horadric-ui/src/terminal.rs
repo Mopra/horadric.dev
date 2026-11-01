@@ -1898,13 +1898,16 @@ pub fn show_progress(hwnd: HWND, progress: Option<Progress>) {
     };
     TASKBAR.with(|t| {
         let mut t = t.borrow_mut();
-        if t.as_ref().is_some_and(|(_, h, p)| *h == hwnd.0 as isize && *p == progress) {
+        if t.as_ref()
+            .is_some_and(|(_, h, p)| *h == hwnd.0 as isize && *p == progress)
+        {
             return;
         }
         let list = match t.take() {
             Some((list, _, _)) => list,
             None => unsafe {
-                let Ok(list) = CoCreateInstance::<_, ITaskbarList3>(&TaskbarList, None, CLSCTX_INPROC_SERVER)
+                let Ok(list) =
+                    CoCreateInstance::<_, ITaskbarList3>(&TaskbarList, None, CLSCTX_INPROC_SERVER)
                 else {
                     return;
                 };
@@ -1925,7 +1928,8 @@ pub fn show_progress(hwnd: HWND, progress: Option<Progress>) {
         // Before the button exists both fail; the next change tries again.
         let shown = unsafe {
             let set = value.map_or(Ok(()), |v| list.SetProgressValue(hwnd, u64::from(v), 100));
-            set.and_then(|()| list.SetProgressState(hwnd, state)).is_ok()
+            set.and_then(|()| list.SetProgressState(hwnd, state))
+                .is_ok()
         };
         let last = if shown { progress } else { None };
         *t = Some((list, if shown { hwnd.0 as isize } else { 0 }, last));

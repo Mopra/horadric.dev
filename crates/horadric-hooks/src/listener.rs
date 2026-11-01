@@ -26,9 +26,9 @@ use horadric_core::{HookEvent, Limits, Status};
 use serde_json::{json, Value};
 
 use crate::{
-    checkpoint, client, pace, transcript, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH, HEAVY_PATH,
-    HOOK_PATH, KNOW_PATH, NEW_PATH, OWNER_HEADER, RECALL_PATH, RELOAD_PATH, SESSION_HEADER,
-    STATE_HEADER, STATUS_PATH, TASKS_PATH,
+    checkpoint, client, otel, pace, transcript, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH,
+    HEAVY_PATH, HOOK_PATH, KNOW_PATH, NEW_PATH, OWNER_HEADER, RECALL_PATH, RELOAD_PATH,
+    SESSION_HEADER, STATE_HEADER, STATUS_PATH, TASKS_PATH,
 };
 
 /// A hook event together with the Horadric session id from the header.
@@ -356,6 +356,8 @@ fn handle(
         GLOW_PATH,
         RECALL_PATH,
         HEAVY_PATH,
+        otel::LOGS_PATH,
+        otel::METRICS_PATH,
     ];
     if method != "POST" || !paths.contains(&path) {
         return respond(&stream, "404 Not Found");
@@ -391,6 +393,18 @@ fn handle(
                 event,
                 limits,
             });
+        }
+        return Ok(());
+    }
+
+    if path == otel::LOGS_PATH || path == otel::METRICS_PATH {
+        if from_browser {
+            return respond(&stream, "403 Forbidden");
+        }
+        // An empty object is a full success to an OTLP exporter.
+        respond(&stream, "200 OK")?;
+        if path == otel::LOGS_PATH && !horadric_id.is_empty() {
+            spent(&horadric_id, &body, tx);
         }
         return Ok(());
     }
@@ -813,6 +827,31 @@ fn pace() -> &'static Mutex<pace::Pace> {
 fn claims() -> &'static Mutex<Claims> {
     static CLAIMS: OnceLock<Mutex<Claims>> = OnceLock::new();
     CLAIMS.get_or_init(Default::default)
+}
+
+/// Passes on what an OTLP export says the session tagged `horadric_id`
+/// spent, one event per conversation in it, which picks its tile as a
+/// status line's id does.
+fn spent(horadric_id: &str, body: &[u8], tx: &Sender<Tagged>) {
+    let mut by: Vec<(String, Vec<horadric_core::usage::Spent>)> = Vec::new();
+    for (session, s) in otel::api_requests(body) {
+        match by.iter_mut().find(|(id, _)| *id == session) {
+            Some((_, list)) => list.push(s),
+            None => by.push((session, vec![s])),
+        }
+    }
+    for (session_id, spent) in by {
+        let event = HookEvent {
+            session_id,
+            spent,
+            ..HookEvent::synthetic(HookEvent::SPENT)
+        };
+        let _ = tx.send(Tagged {
+            horadric_id: horadric_id.to_string(),
+            event,
+            limits: None,
+        });
+    }
 }
 
 fn respond(stream: &TcpStream, status: &str) -> io::Result<()> {

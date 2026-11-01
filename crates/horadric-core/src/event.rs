@@ -102,6 +102,10 @@ pub struct HookEvent {
     /// Horadric's own `Status` event only: what the status line was told.
     #[serde(skip)]
     pub status: Option<Status>,
+    /// Horadric's own `Spent` event only: the API requests OpenTelemetry
+    /// told of.
+    #[serde(skip)]
+    pub spent: Vec<crate::usage::Spent>,
 }
 
 /// One subagent or teammate as Horadric's Claude mod reports it, from
@@ -158,6 +162,10 @@ impl HookEvent {
     /// a slot, or has stopped waiting: `tool_input` holds a
     /// [`crate::heavy::Queued`]. It never changes a phase.
     pub const HEAVY: &'static str = "HoradricHeavy";
+
+    /// What Claude Code's OpenTelemetry export said a session's API
+    /// requests cost, read by the listener's OTLP receiver.
+    pub const SPENT: &'static str = "HoradricSpent";
 
     /// An event Horadric makes up itself, with every optional field empty.
     pub fn synthetic(hook_event_name: &str) -> Self {

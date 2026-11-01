@@ -154,6 +154,9 @@ pub struct Session {
     /// context is. Gone with the process, so never saved.
     #[serde(skip)]
     pub status: Option<Status>,
+    /// What its latest turns spent, from OpenTelemetry. In memory only.
+    #[serde(skip)]
+    pub turns: crate::usage::Turns,
     /// The tool the turn is in, from the last tool event, until the turn
     /// ends. Only for the tile's icon, so it is not saved.
     #[serde(skip)]
@@ -274,6 +277,7 @@ impl Session {
             last_turn: None,
             created: now,
             status: None,
+            turns: Default::default(),
             tool: None,
             waits_on: None,
             ask: None,
@@ -403,6 +407,15 @@ impl Session {
                 .and_then(|v| serde_json::from_value::<crate::heavy::Queued>(v).ok())
                 .filter(|q| q.waiting)
                 .map(|q| (q, now));
+            return false;
+        }
+        // Sent by the exporter on its own clock, so not the session being
+        // heard from either, and only ever about the conversation it holds.
+        if event.hook_event_name == HookEvent::SPENT {
+            let ours = self.claude_session_id.as_deref();
+            if event.session_id.is_empty() || ours.is_none_or(|id| id == event.session_id) {
+                self.turns.hear(&event.spent);
+            }
             return false;
         }
         // Horadric's own events carry no id. A different id is someone

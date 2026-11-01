@@ -159,6 +159,23 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if let Some(prompt) = horadric_ui::app::ssh_prompt(&cwd) {
         command.arg("--append-system-prompt").arg(prompt);
     }
+    // The tile's context bar and cost come from the status line, so this
+    // `claude` gets the one the app's own get, unless it was handed
+    // settings of its own: Claude Code takes one `--settings`.
+    #[cfg(windows)]
+    if let Some(settings) = horadric_ui::app::status_settings_file().filter(|_| {
+        !passthrough
+            .iter()
+            .any(|a| a == "--settings" || a.starts_with("--settings="))
+    }) {
+        command.arg("--settings").arg(settings);
+    }
+    let theirs = |k: &str| std::env::var_os(k).is_some();
+    command.envs(horadric_hooks::otel::env(
+        &id,
+        horadric_hooks::port(),
+        theirs,
+    ));
     let status = command
         .args(&passthrough)
         .current_dir(&cwd)
