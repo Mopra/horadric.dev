@@ -1,9 +1,10 @@
 # GPU light: every glow, shadow and spark drawn the way a game draws them
 
-Proposed 2026-10-31. The first piece is built: a working session's lamp
-surges with real bloom (`render/bloom.rs`, commit `11fe3c1`, the lore
-has how). The human looked at it and called it much better. This part
-takes the rest of Horadric the same way.
+Proposed 2026-10-31. Built so far: the working lamp's surge (the human
+called it much better), the light module every window can keep
+(`crate::light`), particles (`particles.rs`) and the cluster's moving
+light (`render/shine.rs`). The lore has how. This part takes the rest of
+Horadric the same way.
 
 ## Why
 
@@ -60,40 +61,6 @@ Three tools, used everywhere, replacing every fake.
 
 ## Architecture
 
-### One light module for every window
-
-`render/bloom.rs` moves up to `crate::light` and serves all three
-drawing stacks: the cluster's `Painter` (`render.rs`), the panes'
-(`glyphs.rs`) and the Folio's `Gfx` (`folio/view.rs`). Each window's
-target keeps a `Light`:
-
-- `begin(size)` hands back the light layer to draw emitters into, made
-  once per size and cleared each frame.
-- `present(dc, look)` blurs and adds it over the target.
-- Nothing is made or blurred in a frame with no emitter, so a quiet
-  window costs nothing. The surge already works this way.
-
-`look` is a `Bloom { near, far, far_passes, gain }`, per window and per
-theme (below), so the stage's glass can bloom softer than a tile.
-
-### High dynamic range
-
-The light layer becomes 16 bit float (`DXGI_FORMAT_R16G16B16A16_FLOAT`)
-instead of 8 bit. In 8 bits two lights over 1.0 clip, and the bloom of
-a clipped core is flat. In float they sum past 1.0 and the bloom
-carries the extra out, which is what makes a lamp core read white hot
-with colour round it. A tone curve (a `ColorMatrix` or the
-`D2D1_TONEMAP` effect where present) brings it back into range before
-it is added. Falls back to 8 bit where the device refuses float.
-
-### Blur only what is lit
-
-The bloom blurs the whole window today. Each emitter reports its
-bounds; the light layer's dirty rectangle is their union, grown by
-three times the wide sigma, and only that is blurred and added
-(`imageRectangle` on `DrawImage`). A window with one working tile blurs
-a strip 40 DIPs wide, not 300 by 900.
-
 ### Light that holds still
 
 A lamp lit at rest (a finished turn's green, a waiting amber) does not
@@ -105,79 +72,49 @@ casts to a device context the same way. So:
   no per frame cost.
 - Moving light: the per frame light layer, as the surge is.
 
-### Particles
-
-A pure module, `particles.rs` in the pure half of `horadric-ui`
-(beside `motion.rs` and `folio_look.rs`), with tests:
-
-- A `Burst` is a seed, a birth time, a count and a `Kind` (spark, mote,
-  ember, ash, streak). A particle's place, size, heat and life at time
-  `t` are a function of the seed and `t` alone, as `folio_look::ember`
-  is, so nothing is stepped or stored per particle.
-- Trails are the same particle sampled at a few earlier times, each
-  fainter. In the light layer the bloom joins them into a streak.
-- Heat, from 0 to over 1, maps to colour through one ramp: the phase
-  colour when cool, through its hot mix, to white. Every emitter uses
-  the same ramp, so all of Horadric's fire looks like one fire.
-
 ### Frame scheduling
 
 Unchanged. The vsync clock (`vsync.rs`) beats while anything moves; a
 covered or minimised cluster skips its frame (the lore has the
 performance passes). Particles only ask for frames while a
-burst is alive.
-
-### When there is no GPU
-
-On a remote desktop or a software device, Direct2D falls back to WARP
-and a blur is CPU work. `Light` checks the device once. Without a
-hardware device it draws the emitters sharp with no bloom, which still
-reads, and the shadow effect falls back to today's stacked `cast`.
+burst is alive (`Burst::alive`).
 
 ## Inventory and migration
 
 Counted on 2026-10-31: 37 fake light or soft edge calls in `render.rs`,
 5 in `render/stone.rs` and `render/questlog.rs`, 3 in `folio/view.rs`,
 the pane's own set in `glyphs.rs`, and 20 in the macOS port. Each step
-below ends with a dev build the human looks at, and is committed only
-when they like it. Steps 1 to 4 are the cluster window, since that is
-where the human looks most.
+below ends with a dev build the human looks at. Steps 2 to 4 are the
+cluster window, since that is where the human looks most.
 
-### Step 1: the light module
+### Waiting on the human
 
-- Move `render/bloom.rs` to `crate::light`, with `begin`, `present` and
-  the `Bloom` look.
-- Float light layer with a tone curve, and the 8 bit fallback.
-- Dirty rectangle from emitter bounds.
-- The software fallback.
+Steps 1 and 2 are built and committed (2026-11-01) but not yet seen.
+Before step 3, the human looks at a dev build with tiles working,
+waiting, finishing and ending, subagents running and a task handed out,
+in all three themes, and says what to keep. Two checks are left from
+step 1:
+
 - Measure: forty tiles, ten of them working, on a release build. The
   UI thread's share of a core with the bloom must stay within one point
   of without it. Write the numbers into the lore.
+- Check a screenshot (`CopyFromScreen`) and a remote desktop session
+  once: the float layer should capture, and the software fallback
+  should draw the emitters sharp.
 
-### Step 2: the cluster's moving light
-
-All in `render.rs`, drawn per frame in `light()` today:
-
-| Today | Shows | Becomes |
-|---|---|---|
-| `halo`, breathing | a waiting tile needs you | the key's rim as an emitter, amber, breathing; bloom spills it onto the plate |
-| beckon (`halo` + `lamp`, `motion::beacon`) | a parked tile calls | the same rim, flashing |
-| arrival ring | the moment a tile starts waiting | a ring of light leaving the rim, bloomed |
-| `sparks` | subagents at work, no band | spark particles orbiting the lamp with trails |
-| `hirelings` | each subagent's rune | the rune's strokes as emitters, carving with a hot cutting point; settling into the lamp as a burst of embers |
-| `shimmer` | a context meter nearly full | a hot glint running along the meter's lit part |
-| `power_down` | a session ended | the lamp's light collapsing to its middle and leaving as a few embers, no picture tube |
-| `beams` | a finished turn, loot dropping | a shaft of light up off the key with motes rising in it |
-| `flights` | a task flying to the lamp that took it | a streak particle with a trail, flaring as it lands |
-| `astir` | Warriv at work on the quests tile | the tile's rim in gold, breathing, as an emitter |
-| `busy_wash` | a project busy | stays a wash: it is a tint, not a light |
+Step 3 wants the still layer to keep its own `Light` (still light is
+baked in there), and the shadow effect has no helper yet.
 
 ### Step 3: the cluster's still light and shadow
 
 Drawn into the kept layer today:
 
 - `lamp` at rest: its four spill rings and hot core become the lit
-  glass as an emitter, bloomed into the still layer.
+  glass as an emitter, bloomed into the still layer. The breathing and
+  beckoning lamp, still drawn per frame in `Painter::light`, takes the
+  same glass in the moving layer.
+- `halo`: only the still waiting tile with animations off uses it now;
+  it becomes the rim emitter baked into the still layer.
 - `key` and `cast`: the eight step shadow becomes the shadow effect.
   The ledge (the key's side) stays: it is geometry, not light.
 - `inner`, `hollow`, `latched`, `sunk`, `screen`: bevel and hollow
@@ -272,5 +209,3 @@ Each theme gets its own `Bloom` look:
 - **Dark versus light themes.** Additive light on a light background
   washes out. Every theme today is dark; a light one would need the
   bloom off or inverted.
-- **Recording and screenshots.** Float layers and effects should
-  capture fine through DWM, but check `CopyFromScreen` once.
