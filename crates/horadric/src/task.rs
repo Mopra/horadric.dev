@@ -910,6 +910,11 @@ fn spend(cwd: &Path) -> Result<(), String> {
     }
     let quests = chronicle::quests(&horadric_ui::chronicle_all(), &[], &key, &list);
     println!("{}", pack::compare(&quests));
+    println!("{}", pack::uptake(&quests).line("Packs as given"));
+    println!(
+        "{}",
+        pack::replay(&quests, &pack::TUNING).line("Packs as drawn now")
+    );
     println!("\n{}", recall_uptake(&project, &quests));
     Ok(())
 }

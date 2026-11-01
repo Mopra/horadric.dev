@@ -21,8 +21,10 @@ use crate::tasks::Task;
 /// list.
 pub const MOST: usize = 12;
 
-/// How many finished quests a pack is drawn from.
-const LIKE: usize = 3;
+/// How many finished quests a pack is drawn from. Five rather than three
+/// named a little more of what quests touched and used a little more of
+/// what they were given, at every pack size [`replay`] tried (2026-11-01).
+const LIKE: usize = 5;
 
 /// The files a quest's conversations read and changed, relative to the
 /// tree they worked in, each once, in the order first touched.
@@ -228,6 +230,27 @@ fn named(notes: &[String]) -> Vec<String> {
 /// the same quest, and the same plan parts named. Two shared words, or one
 /// such link, make a quest alike at all.
 pub fn pack(task: &Task, quests: &[Quest]) -> Vec<Hint> {
+    pack_with(task, quests, &TUNING)
+}
+
+/// How a pack is drawn: its most files, from how many quests alike, and
+/// what a change weighs against a read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tuning {
+    pub most: usize,
+    pub like: usize,
+    pub changed: f64,
+}
+
+pub const TUNING: Tuning = Tuning {
+    most: MOST,
+    like: LIKE,
+    changed: 2.0,
+};
+
+/// [`pack`] drawn by `tuning`, so another can be tried on the quests
+/// already done with [`replay`].
+pub fn pack_with(task: &Task, quests: &[Quest], tuning: &Tuning) -> Vec<Hint> {
     let mut out: Vec<Hint> = Vec::new();
     let named = named(&task.notes);
     for f in &named {
@@ -283,7 +306,7 @@ pub fn pack(task: &Task, quests: &[Quest]) -> Vec<Hint> {
         }
     }
     alike.sort_by(|a, b| b.0.total_cmp(&a.0));
-    alike.truncate(LIKE);
+    alike.truncate(tuning.like);
     // Score each file by the quests that needed it, a change counting
     // double a read, and remember who to name as the reason.
     let mut files: Vec<(String, f64, Option<&str>, Option<&str>)> = Vec::new();
@@ -306,14 +329,14 @@ pub fn pack(task: &Task, quests: &[Quest]) -> Vec<Hint> {
                 }
             };
             let e = &mut files[i];
-            e.1 += if changed { 2.0 * score } else { *score };
+            e.1 += if changed { tuning.changed * score } else { *score };
             let by = if changed { &mut e.2 } else { &mut e.3 };
             by.get_or_insert(q.title.as_str());
         }
     }
     files.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     for (file, _, changed, read) in files {
-        if out.len() >= MOST {
+        if out.len() >= tuning.most {
             break;
         }
         let why = match (changed, read) {
@@ -323,7 +346,7 @@ pub fn pack(task: &Task, quests: &[Quest]) -> Vec<Hint> {
         };
         out.push(Hint { file, why });
     }
-    out.truncate(MOST);
+    out.truncate(tuning.most);
     out
 }
 
@@ -399,6 +422,126 @@ pub fn compare(quests: &[Quest]) -> String {
         line("With a pack", group(true)),
         line("Without", group(false))
     )
+}
+
+/// What packs held against what their quests then touched.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Uptake {
+    pub packs: usize,
+    /// Files packed, and of them those the quest then read or changed,
+    /// by their place in the pack.
+    pub by_place: Vec<(usize, usize)>,
+    /// Files the quests touched, and of them those their pack named.
+    pub touched: usize,
+    pub named: usize,
+}
+
+impl Uptake {
+    fn add(&mut self, packed: &[String], touched: &Touched) {
+        let all: BTreeSet<&String> = (touched.read.iter())
+            .chain(&touched.changed)
+            .filter(|f| *f != "CLAUDE.md")
+            .collect();
+        if all.is_empty() || packed.is_empty() {
+            return;
+        }
+        self.packs += 1;
+        for (i, f) in packed.iter().enumerate() {
+            if self.by_place.len() <= i {
+                self.by_place.resize(i + 1, (0, 0));
+            }
+            self.by_place[i].0 += 1;
+            if all.contains(f) {
+                self.by_place[i].1 += 1;
+            }
+        }
+        self.touched += all.len();
+        self.named += packed.iter().filter(|f| all.contains(f)).count();
+    }
+
+    /// Of the files packed, the share used, in percent.
+    pub fn precision(&self) -> usize {
+        let (n, used) = self.sum(0..self.by_place.len());
+        (used * 100).checked_div(n).unwrap_or(0)
+    }
+
+    /// Of the files the quests touched, the share their packs named.
+    pub fn recall(&self) -> usize {
+        (self.named * 100).checked_div(self.touched).unwrap_or(0)
+    }
+
+    fn sum(&self, places: std::ops::Range<usize>) -> (usize, usize) {
+        (self.by_place.get(places).unwrap_or_default().iter())
+            .fold((0, 0), |a, p| (a.0 + p.0, a.1 + p.1))
+    }
+
+    /// One line: packs, the share of their files used, by thirds of the
+    /// pack, and the share of what the quests touched that the packs named.
+    pub fn line(&self, label: &str) -> String {
+        if self.packs == 0 {
+            return format!("{label}: no packs yet");
+        }
+        let third = |from: usize, to: usize| {
+            let (n, used) = self.sum(from.min(self.by_place.len())..to.min(self.by_place.len()));
+            match (used * 100).checked_div(n) {
+                Some(p) => format!("{p}%"),
+                None => "none".into(),
+            }
+        };
+        format!(
+            "{label}: {} packs, {}% of their files used (places 1 to 4 {}, 5 to 8 {}, 9 to 12 {}), \
+             naming {}% of the files the quests touched",
+            self.packs,
+            self.precision(),
+            third(0, 4),
+            third(4, 8),
+            third(8, 12),
+            self.recall()
+        )
+    }
+}
+
+/// How the packs the done quests started with were used.
+pub fn uptake(quests: &[Quest]) -> Uptake {
+    let mut u = Uptake::default();
+    for q in quests.iter().filter(|q| q.outcome == Outcome::Done) {
+        if let (Some(packed), Some(touched)) = (&q.packed, &q.touched) {
+            u.add(packed, touched);
+        }
+    }
+    u
+}
+
+/// The packs `tuning` would have given each done quest, drawn from the
+/// quests done before it was accepted, against what it then touched: a
+/// way to try a tuning on the quests there are without waiting for more.
+pub fn replay(quests: &[Quest], tuning: &Tuning) -> Uptake {
+    let mut u = Uptake::default();
+    for q in quests.iter().filter(|q| q.outcome == Outcome::Done) {
+        let (Some(touched), Some(accepted)) = (&q.touched, q.accepted) else {
+            continue;
+        };
+        let before: Vec<Quest> = (quests.iter())
+            .filter(|o| o.ended.is_some_and(|e| e < accepted))
+            .cloned()
+            .collect();
+        let task = Task {
+            line: 0,
+            mark: crate::tasks::Mark::Open,
+            title: q.title.clone(),
+            holder: None,
+            reason: None,
+            wait: None,
+            since: None,
+            ask: None,
+            notes: q.notes.clone(),
+        };
+        let packed: Vec<String> = (pack_with(&task, &before, tuning).into_iter())
+            .map(|h| h.file)
+            .collect();
+        u.add(&packed, touched);
+    }
+    u
 }
 
 #[cfg(test)]
@@ -542,6 +685,31 @@ mod tests {
         let quests = [done("Speed up the board paint", &[], &many, &[])];
         let p = pack(&task("Speed up the board paint again", &[]), &quests);
         assert_eq!(p.len(), MOST);
+    }
+
+    #[test]
+    fn uptake_counts_the_packed_files_a_quest_then_touched_by_place() {
+        let mut q = done("Paint", &[], &["a.rs", "CLAUDE.md"], &["b.rs", "c.rs"]);
+        q.packed = Some(vec!["b.rs".into(), "x.rs".into(), "a.rs".into()]);
+        let mut unpacked = done("Other", &[], &["a.rs"], &[]);
+        unpacked.packed = None;
+        let u = uptake(&[q, unpacked]);
+        assert_eq!(u.packs, 1);
+        assert_eq!(u.by_place, vec![(1, 1), (1, 0), (1, 1)]);
+        assert_eq!(u.precision(), 66);
+        // CLAUDE.md is never packed, so it is not counted as missed.
+        assert_eq!((u.named, u.touched), (2, 3));
+    }
+
+    #[test]
+    fn a_replay_draws_each_pack_from_the_quests_done_before() {
+        let mut first = done("Speed up the board paint", &[], &["src/board.rs"], &[]);
+        (first.accepted, first.ended) = (Some(1), Some(2));
+        let mut second = done("Speed up the board paint again", &[], &["src/board.rs"], &[]);
+        (second.accepted, second.ended) = (Some(3), Some(4));
+        let u = replay(&[first, second], &TUNING);
+        assert_eq!(u.packs, 1, "the first had nothing before it");
+        assert_eq!(u.precision(), 100);
     }
 
     #[test]
