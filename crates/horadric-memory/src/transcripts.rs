@@ -10,6 +10,8 @@
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -313,9 +315,89 @@ fn pieces(text: &str, most: usize) -> Vec<String> {
 
 const MASK: &str = "[secret]";
 
-/// `text` with anything that looks like a secret replaced by `[secret]`.
+/// The secret values Horadric itself keeps, as the app reads them: the
+/// backup's passphrase, sign in tokens, and the vault's values once there
+/// is one (docs/plan/secrets.md).
+pub type SecretSource = fn() -> Vec<String>;
+
+static SECRETS: OnceLock<SecretSource> = OnceLock::new();
+
+/// Gives the memory the secrets Horadric keeps, so a transcript that
+/// shows one has it cut whatever it looks like: a passphrase that reads
+/// as words passes every pattern below.
+pub fn set_secret_source(f: SecretSource) {
+    let _ = SECRETS.set(f);
+}
+
+/// How long the values read are trusted: reading them asks Windows'
+/// credential store, and a backfill keeps thousands of transcripts.
+const SECRETS_FRESH: Duration = Duration::from_secs(60);
+
+/// Shorter than this a value would cut ordinary words, and no kept
+/// secret is that short.
+const SHORTEST_SECRET: usize = 8;
+
+/// The kept secrets now, longest first so one holding another is cut
+/// whole.
+fn known_secrets() -> Arc<Vec<String>> {
+    type Read = Option<(Instant, Arc<Vec<String>>)>;
+    static READ: Mutex<Read> = Mutex::new(None);
+    let Some(source) = SECRETS.get() else {
+        return Arc::default();
+    };
+    let Ok(mut read) = READ.lock() else {
+        return Arc::default();
+    };
+    if let Some((_, values)) = read.as_ref().filter(|(at, _)| at.elapsed() < SECRETS_FRESH) {
+        return values.clone();
+    }
+    let mut values: Vec<String> = source()
+        .into_iter()
+        .flat_map(|v| secrets_in(&v))
+        .collect();
+    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    values.dedup();
+    let values = Arc::new(values);
+    *read = Some((Instant::now(), values.clone()));
+    values
+}
+
+/// The values in a kept secret: every string in it if it is JSON (a
+/// login's tokens), else the text itself. Too short ones are left out.
+pub fn secrets_in(kept: &str) -> Vec<String> {
+    fn strings(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::String(s) => out.push(s.clone()),
+            Value::Array(a) => a.iter().for_each(|v| strings(v, out)),
+            Value::Object(o) => o.values().for_each(|v| strings(v, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    match serde_json::from_str::<Value>(kept.trim()) {
+        Ok(v @ (Value::Object(_) | Value::Array(_))) => strings(&v, &mut out),
+        _ => out.push(kept.trim().to_string()),
+    }
+    out.retain(|v| v.chars().count() >= SHORTEST_SECRET);
+    out
+}
+
+/// `text` with anything that looks like a secret, or is one Horadric
+/// keeps, replaced by `[secret]`.
 pub fn redact(text: &str) -> String {
-    let text = cut_private_keys(text);
+    redact_known(text, &known_secrets())
+}
+
+/// [`redact`] with `known` as the kept secrets, longest first.
+pub fn redact_known(text: &str, known: &[String]) -> String {
+    let mut cut = None;
+    for value in known.iter().filter(|v| v.chars().count() >= SHORTEST_SECRET) {
+        let from = cut.as_deref().unwrap_or(text);
+        if from.contains(value.as_str()) {
+            cut = Some(from.replace(value.as_str(), MASK));
+        }
+    }
+    let text = cut_private_keys(cut.as_deref().unwrap_or(text));
     let mut out = String::with_capacity(text.len());
     let mut after_bearer = false;
     // The last word was named like a secret and a `:` or `=` followed.
@@ -688,6 +770,20 @@ mod tests {
         assert_eq!(redact(open), "x [secret]");
         let cert = "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----";
         assert_eq!(redact(cert), cert);
+    }
+
+    #[test]
+    fn a_kept_secret_is_cut_whatever_it_looks_like() {
+        let known = secrets_in("correct horse battery staple");
+        assert_eq!(
+            redact_known("the passphrase is correct horse battery staple, ok", &known),
+            "the passphrase is [secret], ok"
+        );
+        let login = secrets_in(r#"{"accessToken": "plainwordtoken", "expiresAt": 17, "scope": "x"}"#);
+        assert_eq!(login, ["plainwordtoken"]);
+        assert_eq!(redact_known("sent plainwordtoken", &login), "sent [secret]");
+        assert!(secrets_in("short").is_empty());
+        assert_eq!(redact_known("nothing here", &known), "nothing here");
     }
 
     #[test]

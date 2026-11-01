@@ -631,6 +631,22 @@ static EVENT_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
 /// A recall found `ids` in `project`: the mind lights them, and every
 /// sanctuary on the stage draws again.
+/// The secrets Horadric keeps, for the memory to cut from transcripts
+/// whatever they look like: the backup's passphrase and the kept logins'
+/// tokens. Google's and WorkOS's tokens are random enough for its
+/// patterns. The vault of docs/plan/secrets.md belongs here once built.
+fn kept_secrets() -> Vec<String> {
+    let mut out: Vec<String> = accounts::load()
+        .list
+        .iter()
+        .map(|a| a.oauth.to_string())
+        .collect();
+    out.extend(crate::backup::credential::read(
+        crate::backup::credential::PASSPHRASE,
+    ));
+    out
+}
+
 fn recalled(project: &str, ids: &[String]) {
     crate::mind::fire(project, ids);
     crate::glows::stir();
@@ -824,6 +840,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     // would point it at a build about to be replaced, and a fake install
     // with its own APPDATA has a first run of its own but shares the value.
     crate::memory::set_fetch(crate::net::get);
+    crate::memory::set_secret_source(kept_secrets);
     EVENT_WINDOW.store(notify_id, Ordering::Release);
     crate::memory::set_fired(recalled);
     crate::memory::set_across(saved.recall_across);

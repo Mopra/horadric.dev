@@ -95,6 +95,13 @@ in the Secrets row: narrow tokens over passwords (a fine grained GitHub
 token for one repository, an API key with one scope), so a leak costs
 little and a revoke is a click on the provider's site.
 
+**The memory cuts them too.** The memory keeps transcripts for years and
+cuts what it knows Horadric keeps, whatever it looks like
+(`transcripts::set_secret_source`, fed by `kept_secrets` in the app:
+today the backup passphrase and the kept logins). The sealed file's
+values join that list when it is built, so a value an agent saw anyway
+is not kept.
+
 **Later, not in the first cut.**
 
 - **Git over HTTPS.** `horadric secret git` as a credential helper, so a

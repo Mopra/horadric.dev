@@ -7,9 +7,6 @@ holds only what is still not done.
 
 ## Not done
 
-- **Redaction does not know the vault's own secrets.** `redact` catches
-  token shapes and secret-sounding names, but not the values kept in the
-  vault (see [secrets.md](secrets.md)). It should cut those too.
 - **Nothing distills the day's dialogue any more.** Warriv's daily look
   back handed it each day's passages to keep as notes; it went with the
   rounds (2026-10-30). A note names passages as sources only when a

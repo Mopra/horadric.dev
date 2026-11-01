@@ -68,6 +68,8 @@ const REST: Duration = Duration::from_millis(100);
 /// (a stat of each file) but not free, and recalls come in bursts.
 const SYNC_EVERY: Duration = Duration::from_secs(30);
 
+pub use crate::transcripts::{set_secret_source, SecretSource};
+
 /// The code of the project a folder is in, as the memory keeps it.
 pub type CodeSource = fn(&Path) -> Result<Vec<CodeFile>, String>;
 
