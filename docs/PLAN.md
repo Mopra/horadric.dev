@@ -59,7 +59,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Lore](plan/lore.md): when to compact a quest, and tuning the context pack.
 - [Memory](plan/memory.md): the small gaps left in long term memory.
 - [The agent's cursor](plan/the-agent-s-cursor.md): agents testing without taking the human's mouse. Proposed.
-- [The Brotherhood](plan/the-brotherhood.md): steps 1 to 18 are built; left: renaming a brother, lore catch up from Drive, the Mac as a brother, remote files, quests moving with sessions, teams.
+- [The Brotherhood](plan/the-brotherhood.md): built; left: the rest of the Mac as a brother (brothers' tiles, handing off, its files) and the rest of teams.
 - [Secrets](plan/secrets.md): tokens for quests that push, call APIs or deploy.
 - [Identities](plan/identities.md): each project's gh, git, npm and Vercel logins, so no session switches another's account.
 - [Signals](plan/signals.md): status line cost, refresh and outside sessions, OpenTelemetry export, and OSC 9;4 progress.
@@ -67,7 +67,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Dictation](plan/dictation.md): Ctrl+Space dictation with Whisper is built; left: faster drafts, cleanup, a personal dictionary, Settings, outside Horadric, macOS.
 - [Ghostty's terminal core](plan/ghostty.md): move the grid from `alacritty_terminal` to libghostty, after a trial.
 - [The Forge](plan/the-forge.md): files worked on with Claude beside the session (decks, artefacts, markdown, images), pinned, edited by hand, versioned and exported. Proposed.
-- [The hirelings](plan/hirelings.md): left of the subagent views: an on-screen check, and open questions (typing to one, agent teams, nesting).
+- [The hirelings](plan/hirelings.md): built; left: an on-screen check, and open questions (typing to one, agent teams, nesting).
 - [GPU light](plan/gpu-light.md): every glow, shadow and spark drawn with real bloom, the shadow effect and particles instead of stacked shapes, window by window, then the Mac. The working lamp is built; next the light module.
 
 ## Reference
