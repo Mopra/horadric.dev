@@ -11,9 +11,6 @@ holds only what is still not done.
   back handed it each day's passages to keep as notes; it went with the
   rounds (2026-10-30). A note names passages as sources only when a
   session chooses to.
-- **The yardstick has no validity questions.** Nothing measures recall
-  of replaced notes, `history`, or "what is true now" against "what was
-  said then".
 - **The model choice may reopen.** EmbeddingGemma beat MiniLM on dialogue
   alone (81.8 % against 72.7 %); its code was removed, so a switch means
   writing it again.

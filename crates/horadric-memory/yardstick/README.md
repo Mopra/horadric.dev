@@ -18,6 +18,11 @@ change to recall against the same questions.
   `from` is the kind of chunk the question was written from. `answers`
   lists every chunk that answers it, of any kind.
 - `build.py`: makes `corpus.jsonl`. Run it with `python -I build.py`.
+- `lore.jsonl`: notes whose fact changed, each pair a current note
+  (`{"id": "note:...", "note": {...}}`) and the one it replaced
+  (`{"id": "past:...", "past": {...}}`), as the lore keeps them.
+- `validity.jsonl`: questions whose answer changed,
+  `{"q": "...", "now": "<note id>", "then": "<past id>"}`.
 
 ## Where the corpus came from
 
@@ -88,6 +93,16 @@ questions offered an answer, the share of offered hits that are answers
 share of `chatter.jsonl` offered anything. That file holds prompts the
 corpus has nothing for: approvals, orders and questions about other
 things, the bulk of what a human types. The bar in use is marked `<`.
+
+## Validity
+
+Last, the run asks `validity.jsonl`'s questions of the corpus with
+`lore.jsonl`'s notes added: is the note true now in the first five as
+recall is asked by default, and with `history`, is the note it replaced
+found too and does what is true now come above what was said then. The
+twelve pairs were picked on 2026-11-01 from this project's lore, where a
+later note changed the fact rather than reworded it. They set the weight
+a replaced note gets (`recall.rs`, the `current` factor).
 
 ## Horadrim
 

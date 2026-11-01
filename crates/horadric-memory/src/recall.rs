@@ -340,8 +340,12 @@ pub fn weight(c: &Candidate, now: u64, stale: bool) -> f64 {
     let age = 0.7 + 0.3 * 0.5f64.powf(days / 90.0);
     let fresh = if stale { 0.8 } else { 1.0 };
     // What was true before comes below what is true now, asked for or not.
+    // The yardstick's validity questions set it: 0.7 found a replaced note
+    // in the first five for 3 of 12 when history was asked, 0.85 for 8
+    // with the note true now still above it every time, 0.9 let one
+    // replaced note above its successor.
     let current = match c.source {
-        Source::Past(_) => 0.7,
+        Source::Past(_) => 0.85,
         _ => 1.0,
     };
     project * kind * age * fresh * current

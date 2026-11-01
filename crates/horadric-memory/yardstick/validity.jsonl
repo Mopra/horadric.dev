@@ -1,0 +1,12 @@
+{"q": "Does Horadric answer an alert or a confirm dialog in the browser pane for an agent, and why?", "now": "note:horadric.dev#428", "then": "past:horadric.dev#427"}
+{"q": "Does a dev instance start quests from the real project's quest log?", "now": "note:horadric.dev#439", "then": "past:horadric.dev#51"}
+{"q": "What happens to a Warriv wake that was in the middle of a turn when Horadric reloads?", "now": "note:horadric.dev#656", "then": "past:horadric.dev#652"}
+{"q": "If a keeper restarts while the owner brother is dead, can it still take over the owner's sessions?", "now": "note:horadric.dev#497", "then": "past:horadric.dev#495"}
+{"q": "Does a lore note shared between a Windows checkout with CRLF and a Linux node with LF show as maybe stale?", "now": "note:horadric.dev#512", "then": "past:horadric.dev#508"}
+{"q": "How many sessions on the machine can run horadric heavy at the same time?", "now": "note:horadric.dev#627", "then": "past:horadric.dev#612"}
+{"q": "What does cross building the Linux node on Windows need?", "now": "note:horadric.dev#499", "then": "past:horadric.dev#478"}
+{"q": "Which threads does the memory embed on in the background, and how fast?", "now": "note:horadric.dev#622", "then": "past:horadric.dev#195"}
+{"q": "How many tokens does the context pack save a quest?", "now": "note:horadric.dev#660", "then": "past:horadric.dev#319"}
+{"q": "Does headless claude.exe need -p or an initialize request to start?", "now": "note:horadric.dev#572", "then": "past:horadric.dev#504"}
+{"q": "How long without input before Horadric counts me as away?", "now": "note:horadric.dev#444", "then": "past:horadric.dev#186"}
+{"q": "Does the PC pair phones the v3 way yet?", "now": "note:horadric.dev#636", "then": "past:horadric.dev#602"}

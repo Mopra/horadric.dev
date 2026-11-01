@@ -6,7 +6,8 @@
 //! app is down) and with MiniLM's meaning, cut as the keeper cuts it,
 //! where the bar of a recall nobody asked for sits,
 //! and what a prompt recall offers at each cosine bar, on the questions
-//! and on `chatter.jsonl`, prompts it has nothing for.
+//! and on `chatter.jsonl`, prompts it has nothing for. Last, validity:
+//! whether what is true now is found over what was said then.
 //!
 //! `cargo run --release -p horadric-memory --example yardstick`
 //! The model is read from `%APPDATA%\Horadric-dev\models\<folder>`, and
@@ -17,7 +18,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use horadric_core::lore::words;
+use horadric_core::lore::{words, Note, Past};
 use horadric_memory::horadrim::{self, Lexicon};
 use horadric_memory::recall::{self, Ask, Bm25, Candidate};
 use horadric_memory::store::{self, ChunkId, Month};
@@ -246,6 +247,7 @@ fn main() {
         })
         .collect();
     unasked(&cands, &questions, &answers, &scored, &chatter, &idle);
+    validity(&set, &e, &cands, &docs);
     inscribe(
         &cands,
         &found,
@@ -260,6 +262,120 @@ fn main() {
 #[derive(Deserialize)]
 struct Chatter {
     q: String,
+}
+
+/// A question whose answer changed: `now` is the note true now, `then`
+/// the note it replaced, both in `lore.jsonl`.
+#[derive(Deserialize)]
+struct Changed {
+    q: String,
+    now: String,
+    then: String,
+}
+
+/// A note of `lore.jsonl`: current, or replaced.
+#[derive(Deserialize)]
+struct LoreLine {
+    id: String,
+    note: Option<Note>,
+    past: Option<Past>,
+}
+
+/// Validity: the corpus with `lore.jsonl`'s notes added, current ones
+/// and the ones they replaced, asked `validity.jsonl`'s questions. As
+/// recall is asked by default, is the note true now in the first five?
+/// With `history`, is the replaced one in the first five too, and does
+/// what is true now come above what was said then?
+fn validity(set: &Path, e: &Embedder, base: &[Candidate], docs: &[Vec<f32>]) {
+    let lore: Vec<LoreLine> = lines(&set.join("lore.jsonl"));
+    let changed: Vec<Changed> = lines(&set.join("validity.jsonl"));
+    // Of time 0 like the corpus, so age weighs nothing and only being
+    // current does.
+    let notes: Vec<(&str, Note)> = lore
+        .iter()
+        .filter_map(|l| Some((l.id.as_str(), l.note.clone()?)))
+        .map(|(id, mut n)| {
+            n.at = 0;
+            n.since = None;
+            (id, n)
+        })
+        .collect();
+    let pasts: Vec<(&str, Past)> = lore
+        .iter()
+        .filter_map(|l| Some((l.id.as_str(), l.past.clone()?)))
+        .map(|(id, mut p)| {
+            p.note.at = 0;
+            p.note.since = None;
+            (id, p)
+        })
+        .collect();
+    let mut cands: Vec<Candidate> = base.to_vec();
+    let mut ids: HashMap<&str, usize> = HashMap::new();
+    for (id, n) in &notes {
+        ids.insert(id, cands.len());
+        cands.push(Candidate::note(n));
+    }
+    let current = cands.len();
+    for (id, p) in &pasts {
+        ids.insert(id, cands.len());
+        cands.push(Candidate::past(p));
+    }
+    let mut vectors: Vec<Vec<f32>> = docs.to_vec();
+    for c in &cands[base.len()..] {
+        vectors.push(e.document(c.text()).expect("embed"));
+    }
+    let index = |id: &str| *ids.get(id).unwrap_or_else(|| panic!("no note {id}"));
+    let place = |found: &[usize], i: usize| found.iter().take(5).position(|&c| c == i);
+    let (mut now_off, mut now_on, mut then_on, mut first) = (0, 0, 0, 0);
+    for c in &changed {
+        let q = e.query(&c.q).expect("embed");
+        let (now, then) = (index(&c.now), index(&c.then));
+        let found = |history: bool| -> Vec<usize> {
+            let pool = if history { cands.len() } else { current };
+            let mut s: Vec<(f32, usize)> = vectors[..pool]
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (similarity(&q, v), i))
+                .filter(|(cos, _)| *cos >= recall::LEAST_COSINE)
+                .collect();
+            s.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            let meaning: Vec<usize> = s
+                .into_iter()
+                .take(recall::MOST_BY_MEANING)
+                .map(|(_, i)| i)
+                .collect();
+            let ask = Ask {
+                query: c.q.clone(),
+                history,
+                ..Ask::default()
+            };
+            recall::rank(&ask, &cands[..pool], &meaning, |_| false)
+                .into_iter()
+                .map(|(i, _)| i)
+                .collect()
+        };
+        let (off, on) = (found(false), found(true));
+        now_off += usize::from(place(&off, now).is_some());
+        now_on += usize::from(place(&on, now).is_some());
+        then_on += usize::from(place(&on, then).is_some());
+        let above = match (place(&on, now), place(&on, then)) {
+            (Some(n), Some(t)) => n < t,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        first += usize::from(above);
+    }
+    let pct = |n: usize| 100.0 * n as f64 / changed.len().max(1) as f64;
+    println!(
+        "\nvalidity, {} questions whose answer changed, at 5:\n  \
+         true now found {:.1}%; with history: true now {:.1}%, replaced found {:.1}%, \
+         true now above what was said then {:.1}%",
+        changed.len(),
+        pct(now_off),
+        pct(now_on),
+        pct(then_on),
+        pct(first),
+    );
 }
 
 /// What recall would put before an agent unasked, at bars around
