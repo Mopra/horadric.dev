@@ -162,6 +162,8 @@ mod link_interop;
 pub use horadric_memory::service as memory;
 #[cfg(windows)]
 mod folio;
+#[cfg(any(windows, target_os = "macos"))]
+mod folio_session;
 #[cfg(windows)]
 mod menu;
 #[cfg(windows)]
