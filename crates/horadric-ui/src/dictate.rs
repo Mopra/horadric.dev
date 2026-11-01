@@ -38,13 +38,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use horadric_memory::speech::{self, Listener};
-use windows::core::{GUID, HSTRING};
+use windows::core::{GUID, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, PROPERTYKEY, WPARAM};
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
+    eCapture, eConsole, PlaySoundW, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
     MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-    DEVICE_STATE_ACTIVE, WAVEFORMATEX,
+    DEVICE_STATE_ACTIVE, SND_ASYNC, SND_MEMORY, SND_NODEFAULT, WAVEFORMATEX,
 };
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
 use windows::Win32::System::Com::{
@@ -589,6 +589,7 @@ fn listen(id: u64, pane: isize, stop: &AtomicBool, keep: &AtomicBool) {
     let send = |job: Job| {
         let _ = writer().send(job);
     };
+    tick(true);
     let heard = record(stop, &mut |chunk: &[f32]| {
         let at = pcm.len();
         pcm.extend_from_slice(chunk);
@@ -625,6 +626,7 @@ fn listen(id: u64, pane: isize, stop: &AtomicBool, keep: &AtomicBool) {
         ear.hushed(end)
     });
     LEVEL.store(0, Ordering::Relaxed);
+    tick(false);
     if !keep.load(Ordering::Acquire) {
         return;
     }
@@ -649,6 +651,43 @@ fn listen(id: u64, pane: isize, stop: &AtomicBool, keep: &AtomicBool) {
             note(pane, Note::Done(Err(e)));
         }
     }
+}
+
+/// A soft tick as the microphone opens, higher, and as it closes, lower,
+/// so the human hears when to talk and that it stopped without looking.
+/// Not held back in a presentation as the loot sounds are: the human just
+/// pressed the key.
+fn tick(open: bool) {
+    // Played asynchronously, the buffer has to outlive the call.
+    static OPEN: OnceLock<Vec<u8>> = OnceLock::new();
+    static CLOSE: OnceLock<Vec<u8>> = OnceLock::new();
+    let wav = if open {
+        OPEN.get_or_init(|| crate::loot::wav(&tick_samples(1320.0)))
+    } else {
+        CLOSE.get_or_init(|| crate::loot::wav(&tick_samples(880.0)))
+    };
+    unsafe {
+        let _ = PlaySoundW(
+            PCWSTR(wav.as_ptr().cast()),
+            None,
+            SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
+        );
+    }
+}
+
+/// A short, quiet sine at `pitch` that falls away quickly, at the loot
+/// sounds' rate. Quiet so a laptop's microphone hears little of it.
+fn tick_samples(pitch: f32) -> Vec<i16> {
+    let rate = crate::loot::RATE as f32;
+    let n = (0.07 * rate) as usize;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / rate;
+            let attack = (t / 0.003).min(1.0);
+            let v = (std::f32::consts::TAU * pitch * t).sin() * attack * (-t / 0.018).exp() * 0.12;
+            (v * i16::MAX as f32) as i16
+        })
+        .collect()
 }
 
 /// Cuts a recording into phrases at its pauses, and tells speech from the
@@ -1122,6 +1161,15 @@ mod tests {
         assert_eq!(take.settled, "open the");
         take.phrase_done("open the settings.");
         assert_eq!((take.said.as_str(), take.settled.as_str()), ("open the settings.", ""));
+    }
+
+    #[test]
+    fn a_tick_is_short_quiet_and_ends_in_silence() {
+        let s = tick_samples(1320.0);
+        assert!(s.len() < crate::loot::RATE as usize / 10);
+        let loudest = s.iter().map(|v| v.unsigned_abs()).max().unwrap();
+        assert!(loudest < i16::MAX as u16 / 6, "{loudest}");
+        assert!(s.last().unwrap().unsigned_abs() < 200);
     }
 
     #[test]
