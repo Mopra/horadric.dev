@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use horadric_core::portal::{frame, unframe};
 use horadric_core::relaying::{
-    after_failure, after_link, closed_word, pc_dial, refresh_message, silent, Dial, Refresh,
-    PING_SECS,
+    after_failure, after_link, closed_word, pc_dial, refresh_message, silent, taking_asks, Dial,
+    Refresh, PING_SECS,
 };
 use horadric_core::release::split_url;
 use windows::core::{w, HSTRING, PCWSTR};
@@ -45,6 +45,10 @@ pub enum Incoming {
     Sealed(u32, Vec<u8>),
     /// The relay connection came up, or went down.
     Connected(bool),
+    /// A phone signed in as this PC's human asks to be let in on this
+    /// channel (pairing v4), as the relay says it signed in. Its frames
+    /// are plain until the human's yes, and never a paired phone's.
+    Ask(u32, String),
 }
 
 /// The relay's frames are at most 1 MB.
@@ -141,11 +145,11 @@ impl Link {
             let exp = token.as_deref().and_then(horadric_core::workos::expiry);
             *dial_refresh.lock().unwrap() = Refresh::dialled(exp.unwrap_or(0));
             let name = crate::portal_pair::pc_name();
-            pc_dial(
+            taking_asks(pc_dial(
                 &relay,
                 &secret,
                 token.as_deref().map(|t| (t, name.as_str())),
-            )
+            ))
         };
         let dialed = Arc::new(AtomicU64::new(0));
         {
@@ -205,6 +209,21 @@ impl Link {
     /// the relay is not connected by the time it is sent.
     pub fn send(&self, ch: u32, key: &[u8; 32], msg: &serde_json::Value) {
         self.outbox().send(ch, key, msg);
+    }
+
+    /// Sends `msg` to the phone on `ch` unsealed: an ask channel's
+    /// handshake, before there is a key.
+    pub fn plain(&self, ch: u32, msg: &serde_json::Value) {
+        if let Some(out) = &self.out {
+            let _ = out.send((false, frame(ch, msg.to_string().as_bytes())));
+        }
+    }
+
+    /// Sends the relay itself `msg`, as text.
+    pub fn text(&self, msg: &serde_json::Value) {
+        if let Some(out) = &self.out {
+            let _ = out.send((true, msg.to_string().into_bytes()));
+        }
     }
 
     /// A way to send that another thread can keep, for an answer that
@@ -450,6 +469,10 @@ fn close_code(s: &Socket) -> Option<u16> {
 fn incoming(text: bool, data: &[u8]) -> Option<Incoming> {
     if text {
         let v: serde_json::Value = serde_json::from_slice(data).ok()?;
+        if let Some(ch) = v.get("ask").and_then(|c| c.as_u64()) {
+            let email = v.get("email").and_then(|e| e.as_str()).unwrap_or_default();
+            return Some(Incoming::Ask(ch as u32, email.to_string()));
+        }
         if let Some(ch) = v.get("open").and_then(|c| c.as_u64()) {
             return Some(Incoming::Open(ch as u32));
         }
@@ -689,6 +712,12 @@ mod tests {
     fn relay_control_and_sealed_frames_read() {
         assert_eq!(incoming(true, br#"{"open":7}"#), Some(Incoming::Open(7)));
         assert_eq!(incoming(true, br#"{"close":7}"#), Some(Incoming::Close(7)));
+        assert_eq!(
+            incoming(true, br#"{"ask":9,"email":"x@y.com"}"#),
+            Some(Incoming::Ask(9, "x@y.com".into()))
+        );
+        // An ask the relay names no channel for is no ask.
+        assert_eq!(incoming(true, br#"{"ask":"9","email":"x@y.com"}"#), None);
         assert_eq!(incoming(true, br#"{"what":1}"#), None);
         assert_eq!(incoming(true, br#"{"pong":1}"#), None);
         assert_eq!(

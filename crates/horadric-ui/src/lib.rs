@@ -174,6 +174,8 @@ mod pane;
 #[cfg(windows)]
 mod picker;
 #[cfg(windows)]
+mod portal_ask;
+#[cfg(windows)]
 pub mod portal_crypto;
 #[cfg(windows)]
 pub mod portal_link;

@@ -162,12 +162,30 @@ impl Config {
         public: &str,
         derive: impl FnOnce(&str) -> Option<[u8; 32]>,
     ) -> Paired {
-        let Some(t) = self.ticket.as_mut().filter(|t| now < t.until) else {
+        let Some(t) = self.ticket.as_ref().filter(|t| now < t.until) else {
             return Paired::Expired;
         };
         if t.used {
             return Paired::Used;
         }
+        let paired = self.let_in(name, random, now, public, derive);
+        if let (Paired::New(_), Some(t)) = (&paired, self.ticket.as_mut()) {
+            t.used = true;
+        }
+        paired
+    }
+
+    /// A phone paired without the ticket, since its human said yes to it
+    /// on this PC (pairing v4): [`Config::pair_keyed`] past the ticket.
+    /// Only `New` or `BadKey`.
+    pub fn let_in(
+        &mut self,
+        name: &str,
+        random: &[u8; 40],
+        now: u64,
+        public: &str,
+        derive: impl FnOnce(&str) -> Option<[u8; 32]>,
+    ) -> Paired {
         let id = b64url(&random[..8]);
         let key = if public.is_empty() {
             b64url(&random[8..])
@@ -177,7 +195,6 @@ impl Config {
                 None => return Paired::BadKey,
             }
         };
-        t.used = true;
         let name: String = name.trim().chars().take(60).collect();
         let phone = Phone {
             id,

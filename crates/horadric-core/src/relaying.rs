@@ -142,6 +142,16 @@ pub fn pc_dial(relay: &str, secret: &str, signed: Option<(&str, &str)>) -> Dial 
     Dial { url, headers }
 }
 
+/// `d` saying the machine takes asks from its human's phones (pairing
+/// v4), when it is signed in: the relay lists only those to a phone. A
+/// Linux node pairs no phones, so it never dials so.
+pub fn taking_asks(mut d: Dial) -> Dial {
+    if d.headers.iter().any(|h| h.0 == "Authorization") {
+        d.url.push_str(if d.url.contains('?') { "&asks=1" } else { "?asks=1" });
+    }
+    d
+}
+
 /// Whether the relay has been quiet too long, both in milliseconds.
 pub fn silent(now: u64, heard: u64) -> bool {
     now.saturating_sub(heard) > SILENT_SECS * 1000
@@ -264,6 +274,15 @@ mod tests {
                 ("Authorization", "Bearer h.p.s".to_string()),
                 ("X-Horadric-Refresh", "1".to_string()),
             ]
+        );
+        assert_eq!(
+            taking_asks(signed.clone()).url,
+            "wss://r.dev/pc?name=Big%20PC&asks=1"
+        );
+        assert_eq!(taking_asks(signed.clone()).headers, signed.headers);
+        assert_eq!(
+            taking_asks(pc_dial("wss://r.dev", "s", None)).url,
+            "wss://r.dev/pc"
         );
         // Nothing that proves the machine is in the address, which a
         // proxy logs.

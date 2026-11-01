@@ -281,7 +281,7 @@ pub fn introduced_key(shared: &[u8; 32], a: (&str, &[u8]), b: (&str, &[u8])) -> 
 }
 
 /// Six digits from a digest, in two groups of three.
-fn code_of(digest: &[u8; 32]) -> String {
+pub(crate) fn code_of(digest: &[u8; 32]) -> String {
     let n = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1_000_000;
     format!("{:03} {:03}", n / 1000, n % 1000)
 }

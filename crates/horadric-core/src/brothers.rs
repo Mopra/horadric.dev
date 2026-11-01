@@ -1292,8 +1292,9 @@ impl Brothers {
     }
 
     /// This machine's key pair, made and kept the first time it is
-    /// needed.
-    fn identity(&mut self) -> Option<(Vec<u8>, [u8; 96])> {
+    /// needed. Public so a phone's ask (pairing v4) makes it here too:
+    /// made elsewhere, this store, which saves whole, would write it away.
+    pub fn identity(&mut self) -> Option<(Vec<u8>, [u8; 96])> {
         if let Some(me) = &self.store.me {
             return me.keys();
         }

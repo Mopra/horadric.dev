@@ -23,6 +23,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use horadric_core::asking::{self, Answer, Asks, LetIn, Step};
 use horadric_core::mesh;
 use horadric_core::phoning::{self, Keyed, Keys};
 use horadric_core::portal::{b64url, unb64url, Config, Kind, Paired};
@@ -39,6 +40,7 @@ use super::{unix_now, App, PORTAL_TIMER, WM_HORADRIC_PORTAL};
 use crate::brothers;
 use crate::console::GridSize;
 use crate::portal::{self, Sender};
+use crate::portal_ask;
 use crate::portal_crypto;
 use crate::portal_link::{Incoming, Link};
 use crate::portal_pair::pc_name;
@@ -93,6 +95,9 @@ pub(super) struct Portal {
     /// sent last, by fingerprint, so it hears the list again only when it
     /// changed.
     told: HashMap<u32, u64>,
+    /// The channels phones signed in as this PC's human ask on (pairing
+    /// v4), whose frames are plain and never a paired phone's.
+    asks: Asks,
 }
 
 /// What this PC tells its brothers it is doing, as Windows says: one of
@@ -143,6 +148,9 @@ impl App {
                 p.config = config;
                 p.look_at_word();
                 p.unpair_forgotten();
+                for (_, token) in p.asks.expire(now) {
+                    token.map(portal_ask::withdraw);
+                }
                 self.portal_tell_brothers();
                 return;
             }
@@ -173,6 +181,7 @@ impl App {
             keys: Keys::default(),
             served: Vec::new(),
             told: HashMap::new(),
+            asks: Asks::tokens_from(micros(SystemTime::now())),
         });
         if let Some(p) = self.portal.as_mut() {
             p.look_at_word();
@@ -192,6 +201,7 @@ impl App {
 
     fn portal_stop(&mut self) {
         if let Some(mut p) = self.portal.take() {
+            p.asks.clear().into_iter().for_each(portal_ask::withdraw);
             p.server.release(&mut Here(self));
             unsafe {
                 let _ = KillTimer(Some(self.notify), PORTAL_TIMER);
@@ -201,6 +211,7 @@ impl App {
 
     /// Takes what the link heard, then sends what changed.
     pub(super) fn portal_drain(&mut self) {
+        let notify = self.notify.0 as isize;
         let Some(p) = self.portal.as_mut() else {
             return;
         };
@@ -210,10 +221,12 @@ impl App {
         for incoming in heard {
             match incoming {
                 Incoming::Open(ch) => {
+                    p.asks.close(ch).map(portal_ask::withdraw);
                     p.phones.insert(ch, None);
                     p.server.open(ch);
                 }
                 Incoming::Close(ch) => {
+                    p.asks.close(ch).map(portal_ask::withdraw);
                     p.phones.remove(&ch);
                     p.told.remove(&ch);
                     p.server.close(ch);
@@ -221,14 +234,22 @@ impl App {
                 Incoming::Connected(up) => {
                     p.relay_up = up;
                     if !up {
+                        p.asks.clear().into_iter().for_each(portal_ask::withdraw);
                         p.phones.clear();
                         p.told.clear();
                         p.brothers.clear();
                         p.server.clear();
                     }
                 }
+                Incoming::Ask(ch, email) => p.ask_opened(ch, &email, now),
+                Incoming::Sealed(ch, plain) if p.asks.is_ask(ch) => {
+                    p.heard_ask(ch, &plain, notify)
+                }
                 Incoming::Sealed(ch, sealed) => heard_from(p, ch, &sealed, now, &mut pairs),
             }
+        }
+        for (ch, token, yes) in portal_ask::take() {
+            p.answered(ch, token, yes, now);
         }
         for (ch, name, key, public) in pairs {
             p.pair(ch, &name, key, &public, now);
@@ -866,6 +887,98 @@ impl Portal {
             self.told.remove(&ch);
             self.server.open(ch);
         }
+    }
+
+    /// The relay opened `ch` as an ask from a phone signed in as `email`.
+    fn ask_opened(&mut self, ch: u32, email: &str, now: u64) {
+        let (held, old) = self.asks.open(ch, email, now);
+        old.map(portal_ask::withdraw);
+        if !held {
+            self.refuse(ch);
+        }
+    }
+
+    /// Refuses the ask on `ch` and closes its channel.
+    fn refuse(&self, ch: u32) {
+        self.link.plain(ch, &json!({"t": "refused"}));
+        self.link.text(&json!({"close": ch}));
+    }
+
+    /// One plain frame on ask channel `ch`. A PC with no key pair makes
+    /// one when the phone's `ask` comes, as it would to join a brother.
+    fn heard_ask(&mut self, ch: u32, frame: &[u8], notify: isize) {
+        let (dir, me) = (self.dir.clone(), self.me());
+        let own = || {
+            if Signer::of(&dir, &me, &brothers::Cng).is_none() {
+                brothers::identity();
+            }
+            let s = Signer::of(&dir, &me, &brothers::Cng)?;
+            Some(asking::Me {
+                id: me.clone(),
+                name: pc_name(),
+                private: s.private,
+            })
+        };
+        match self.asks.heard(ch, frame, &brothers::Cng, own) {
+            Step::Nothing => {}
+            Step::Send(msg) => self.link.plain(ch, &msg),
+            Step::Refuse => self.refuse(ch),
+            Step::Ask(q) => {
+                let wake = Box::new(move || unsafe {
+                    let _ = PostMessageW(
+                        Some(HWND(notify as *mut _)),
+                        WM_HORADRIC_PORTAL,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                });
+                portal_ask::ask(ch, q.token, q.text, wake);
+            }
+            Step::Dropped(token) => {
+                token.map(portal_ask::withdraw);
+            }
+        }
+    }
+
+    /// The human answered the box `token` of the ask on `ch`.
+    fn answered(&mut self, ch: u32, token: u64, yes: bool, now: u64) {
+        match self.asks.answer(ch, token, yes) {
+            None => {}
+            Some(Answer::No) => self.link.plain(ch, &json!({"t": "refused"})),
+            Some(Answer::Yes(l)) => self.let_in(ch, &l, now),
+        }
+    }
+
+    /// Pairs the phone its human let in on ask channel `ch` as a v3
+    /// pairing does, and tells it so sealed with the ask key, which only
+    /// the phone that showed the same code has. One that cannot be paired
+    /// hears it was refused, rather than wait for an answer that never
+    /// comes.
+    fn let_in(&mut self, ch: u32, l: &LetIn, now: u64) {
+        let me = self.me();
+        let Some(signer) = self.signer(&me) else {
+            self.link.plain(ch, &json!({"t": "refused"}));
+            return;
+        };
+        // Read again: `horadric portal` may have written since the last look.
+        let mut config = Config::load(&self.dir).unwrap_or_else(|| self.config.clone());
+        let mut random = [0u8; 40];
+        portal_crypto::random(&mut random);
+        let paired = config.let_in(&l.name, &random, now, &l.public, |id| {
+            phoning::derive(&signer.private, &l.public, id, &me, &brothers::Cng)
+        });
+        let phone = match paired {
+            Paired::New(phone) if config.save(&self.dir).is_ok() => phone,
+            _ => {
+                self.link.plain(ch, &json!({"t": "refused"}));
+                return;
+            }
+        };
+        self.config = config;
+        mesh::vouch(&self.dir, Some(&signer), &phone.id, &l.public, &phone.name, now);
+        let answer = phoning::paired_message("paired", &phone.id, &me, &signer.private);
+        self.link.send(ch, &l.key, &answer);
+        self.look_at_word();
     }
 
     /// A phone pairing with the ticket. One with a key pair of its own

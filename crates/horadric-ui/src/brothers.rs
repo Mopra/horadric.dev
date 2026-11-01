@@ -113,7 +113,7 @@ impl Boxes {
 }
 
 /// Presses No on every window of thread `thread`: its question box.
-fn dismiss(thread: u32) {
+pub(crate) fn dismiss(thread: u32) {
     unsafe extern "system" fn no(hwnd: HWND, _: LPARAM) -> BOOL {
         let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(IDNO.0 as usize), LPARAM(0));
         true.into()
@@ -302,6 +302,14 @@ pub fn binary(generation: u64, ch: u32, payload: &[u8]) -> bool {
 pub fn listed() -> Option<Vec<Listed>> {
     let held = STATE.lock().unwrap_or_else(|e| e.into_inner());
     held.as_ref().and_then(|(_, b)| b.listed())
+}
+
+/// Makes this PC's key pair if it has none, through the brothers of the
+/// link that runs now, which keep `brothers.json`. False when there is
+/// no such link or no key pair could be made.
+pub fn identity() -> bool {
+    let mut held = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    held.as_mut().is_some_and(|(_, b)| b.identity().is_some())
 }
 
 /// Asks the brother with this id to let this PC in. What follows is on
