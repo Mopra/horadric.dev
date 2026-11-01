@@ -22,6 +22,7 @@ mod queue;
 mod snapshot;
 mod stage;
 mod update;
+mod usage;
 
 use crate::console::Note;
 

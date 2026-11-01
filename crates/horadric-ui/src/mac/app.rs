@@ -138,6 +138,7 @@ const NEXT_WAITING: usize = 12;
 /// Claude in a terminal, where New Session opens a Folio.
 const NEW_CLI_SESSION: usize = 13;
 const SETTINGS: usize = 14;
+const USAGE: usize = 15;
 const THEME_TAG: usize = 50;
 const DISCORD_TAG: usize = 60;
 const RECENT_TAG: usize = 100;
@@ -194,6 +195,8 @@ pub struct App {
     /// The model, effort and permission mode every session starts with,
     /// unless its own arguments say otherwise.
     defaults: horadric_core::Defaults,
+    /// The account's limits as last heard from a session's status line.
+    usage: Arc<Mutex<Option<horadric_core::Usage>>>,
 }
 
 /// A file shown read only on the stage, a pane with no program behind it
@@ -238,7 +241,8 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
     }
     let registry = Arc::new(Mutex::new(registry));
     let requests: Arc<Mutex<Vec<Command>>> = Arc::new(Mutex::new(Vec::new()));
-    listen(port, Arc::clone(&registry), Arc::clone(&requests));
+    let usage = Arc::new(Mutex::new(saved.usage.clone()));
+    listen(port, Arc::clone(&registry), Arc::clone(&requests), Arc::clone(&usage));
 
     let how = saved.carry(reload);
     let carry = if how.resumes() {
@@ -295,6 +299,7 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
             ..Default::default()
         },
         defaults: saved.defaults.clone(),
+        usage,
     };
     app.attach_hosts();
     app.reattach_folios();
@@ -358,7 +363,12 @@ fn tick_soon() {
 
 /// The listener on its thread, and the feeder that applies its events to
 /// the registry and wakes the app.
-fn listen(port: u16, registry: Arc<Mutex<Registry>>, requests: Arc<Mutex<Vec<Command>>>) {
+fn listen(
+    port: u16,
+    registry: Arc<Mutex<Registry>>,
+    requests: Arc<Mutex<Vec<Command>>>,
+    usage: Arc<Mutex<Option<horadric_core::Usage>>>,
+) {
     let (tx, rx) = mpsc::channel::<Tagged>();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
     thread::spawn(move || {
@@ -371,6 +381,21 @@ fn listen(port: u16, registry: Arc<Mutex<Registry>>, requests: Arc<Mutex<Vec<Com
             // The Mac has no sanctuary to light yet.
             if t.event.hook_event_name == HookEvent::GLOW {
                 continue;
+            }
+            // The limits are the account's, so every session's reading
+            // counts, the truer of each kept, as on Windows.
+            if let Some(limits) = t.limits.as_ref().filter(|l| !l.is_empty()) {
+                let now = unix_now();
+                if let Ok(mut u) = usage.lock() {
+                    let merged = match u.as_ref() {
+                        Some(held) => held.limits.merge(limits, now),
+                        None => limits.clone(),
+                    };
+                    *u = Some(horadric_core::Usage {
+                        limits: merged,
+                        at: now,
+                    });
+                }
             }
             let target =
                 registry
@@ -1744,6 +1769,7 @@ impl App {
             .collect();
         items.push(Item::Sub("Show on Discord".into(), discord));
         items.push(Item::checked("Open at Login", LOGIN, autostart::enabled()));
+        items.push(Item::pick("Usage\u{2026}", USAGE));
         items.push(Item::pick("Settings\u{2026}", SETTINGS));
         match self.update.offer() {
             Some(v) => items.push(Item::pick(format!("Update to {v}\u{2026}"), INSTALL_UPDATE)),
@@ -1777,6 +1803,15 @@ impl App {
             Item::pick("Bring Tiles to Front", FRONT),
         ];
         menu::set_main(self.mtm, &app_items, &session_items);
+    }
+
+    /// What the usage window shows.
+    fn usage_values(&self) -> super::usage::Values {
+        super::usage::Values {
+            usage: self.usage.lock().ok().and_then(|u| u.clone()),
+            account: super::usage::account(),
+            now: unix_now(),
+        }
     }
 
     /// What the Settings window shows.
@@ -1872,6 +1907,7 @@ impl App {
                 self.reconcile();
             }
             SETTINGS => super::settings::show(self.mtm, &self.settings_values()),
+            USAGE => super::usage::show(self.mtm, &self.usage_values()),
             CHECK_UPDATE => self.update.check(true),
             INSTALL_UPDATE => self.install_update(),
             ABOUT => dialog::about(),
@@ -1979,6 +2015,7 @@ impl App {
             }
         }
         self.reload_views();
+        super::usage::refresh(&self.usage_values());
         self.update.tick();
         super::brothers::refresh(self);
         if let Some(checked) = self.update.take_checked() {
@@ -2068,6 +2105,7 @@ impl App {
             update_told: self.update.told(),
             discord: self.discord,
             defaults: self.defaults.clone(),
+            usage: self.usage.lock().ok().and_then(|u| u.clone()),
             ..Default::default()
         }
     }
@@ -2173,6 +2211,8 @@ impl App {
         // to be drawn into a bitmap, and opening it would take the keys.
         let values = self.settings_values();
         out.push(("settings".into(), super::settings::content(self.mtm, &values)));
+        let values = self.usage_values();
+        out.push(("usage".into(), super::usage::content(self.mtm, &values)));
         out
     }
 }
