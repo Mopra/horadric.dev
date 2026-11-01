@@ -39,6 +39,55 @@ pub use sky::{graph_at, sanctuary, sky, town_graph};
 const MOST_FILES: usize = 20_000;
 
 /// Answers a lore tool, or None when `name` is not one.
+/// `horadric distill`: hands the day's dialogue of this project to the
+/// session that runs it, with what to do with it, and `--done` marks it
+/// distilled. An errand the human arms runs it daily; the app starts
+/// nothing for it by itself.
+pub fn distill(args: &[String]) -> Result<(), String> {
+    let place = Place::here()?;
+    let key = place.key().to_string();
+    let memory = horadric_hooks::state_dir()
+        .ok_or("there is no state folder")?
+        .join("memory");
+    if args.first().map(String::as_str) == Some("--done") {
+        let marked = distill::distilled(&memory, &key).map_err(|e| e.to_string())?;
+        println!(
+            "{}",
+            if marked {
+                "Marked distilled: the next day starts after it."
+            } else {
+                "Nothing was handed over to mark."
+            }
+        );
+        return Ok(());
+    }
+    let (day, path) = distill::hand_over(&memory, &key, now()).map_err(|e| e.to_string())?;
+    if day.passages == 0 {
+        println!("No dialogue of this project since it was last distilled.");
+        let _ = distill::distilled(&memory, &key);
+        return Ok(());
+    }
+    let left = if day.left_out > 0 {
+        format!(" ({} older ones did not fit and are skipped)", day.left_out)
+    } else {
+        String::new()
+    };
+    println!(
+        "The day's dialogue, {} passages of what the human and the sessions said{left}, \
+         is in {}, each headed by its id. Read it for what was decided and what was learned \
+         that the next session would otherwise have to find out again: a choice and its \
+         reason, a trap, how a part works or is run. Leave out what the code, the plan or git \
+         already say, and what was only tried on the way. For each, ask lore_recall first, \
+         then keep it with lore_note, one fact a note, naming the passages it came from in \
+         sources and the files it is about. Where it contradicts or outdates a note, name \
+         that note in replaces, so the old one is kept as history with when it stopped being \
+         true. Then run `horadric distill --done` and say how many notes the day gave.",
+        day.passages,
+        path.display()
+    );
+    Ok(())
+}
+
 pub fn tool(name: &str, args: &Value) -> Option<Result<String, String>> {
     match name {
         "lore_note" => Some(note(args)),

@@ -3,6 +3,16 @@
     "cargo check --workspace --all-targets"
   ],
   "runewords": {
+    "Distill the day": {
+      "about": "Turns the day's dialogue into lore notes with horadric distill. Does nothing until armed",
+      "every": "day 04:00",
+      "for": "30m",
+      "steps": [
+        {
+          "say": "Run `horadric distill` and do what it says."
+        }
+      ]
+    },
     "Ship Local": {
       "about": "Ships the work on main to this machine only, as CLAUDE.md describes",
       "steps": [

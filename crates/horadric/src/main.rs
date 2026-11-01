@@ -103,6 +103,9 @@ Usage:
                                machine runs one; alone, say who runs one now
   horadric sanctuary             Lay out this project's Arcane Sanctuary graph from where
                                it was left, keep it, and say how large it is
+  horadric distill [--done]      Write this project's dialogue not yet distilled into lore
+                               notes to a file and say how to distill it; --done marks it
+                               distilled, so the next starts after it (a daily errand)
   horadric sky                   Chart every known project into Tristram's sky, each a
                                galaxy, and say how large and how quick it is
   horadric runeword list         Every stone of this project's Runetome: its runeword name,
@@ -258,6 +261,8 @@ fn main() -> ExitCode {
         Some("mcp") => mcp::run(),
         #[cfg(windows)]
         Some("portal") => portal::run(&args[1..]),
+        #[cfg(windows)]
+        Some("distill") => lore::distill(&args[1..]),
         #[cfg(windows)]
         Some("sanctuary") => lore::sanctuary(),
         #[cfg(windows)]
