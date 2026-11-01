@@ -27,3 +27,14 @@ v3"; the decisions and traps are in the lore.
   by Beta and a dev node, forgotten on Beta, cut off by all three. Not
   run yet. The node's phone serving (`node_relay.rs`) was not compiled
   for Linux here; CI is the first to.
+
+## Signing in (asked 2026-11-01, being built)
+
+A phone pairs by signing in on the page instead of scanning a QR code.
+The login finds the human's PCs; one of them lets the phone in after its
+human compares a six digit code, the same rule as a brother joining
+(lore #431: a login only finds devices, it is never what they trust).
+After the yes the phone is a v3 pairing like any other. The QR code
+stays as the way in without an account. The protocol is PORTAL.md,
+"Pairing v4". Needs a relay deploy and the page's redirect URI in
+WorkOS (production and staging) before it works live.

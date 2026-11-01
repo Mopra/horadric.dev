@@ -1147,6 +1147,93 @@ only, so a brother that may only watch is answered too.
   session, one ask at a time, given up after 30 seconds unanswered. A
   machine older than this ignores both asks and its tiles show no files.
 
+## Pairing v4: signed in, let in on a PC
+
+Added after 0.39.1 (docs/plan/one-portal.md, "Signing in"). A phone
+pairs without a QR code: it signs in, picks one of its human's PCs, and
+that PC's human lets it in after comparing a six digit code. **The login
+only finds the PCs; it is never what they trust.** What the PC trusts is
+its human's yes, given after the code on the PC matched the code on the
+phone, which a relay in the middle cannot make match. The QR code (v3)
+stays for anyone not signed in.
+
+**Signing in, on the page.** The page makes a PKCE verifier (32 random
+bytes, b64url) and a `state` (16 random bytes, b64url), keeps both in
+`sessionStorage`, and goes to
+`/signin?challenge=<b64url SHA-256 of the verifier>&state=<state>`. The
+relay answers 302 to
+`https://api.workos.com/user_management/authorize?client_id=<its page
+client>&redirect_uri=<its origin>/&response_type=code&provider=authkit
+&code_challenge=<challenge>&code_challenge_method=S256&state=<state>`.
+The page client is `WORKOS_PAGE_CLIENT_ID`, else the first of
+`WORKOS_CLIENT_ID`; the origin is `PUBLIC_ORIGIN`, else
+`https://portal.horadric.dev`. WorkOS sends the browser back to
+`/?code=<code>&state=<state>`; the page drops a `state` it did not make,
+wipes both from the address bar and goes on with the code. Nothing of
+the login is kept on the phone: the code is used once, right away.
+
+**`/ask`, on the relay.** The page opens `wss://<relay>/ask` and sends,
+as text, `{"code","verifier"}`. The relay posts
+`{"client_id","grant_type":"authorization_code","code","code_verifier"}`
+(and `"client_secret"` when `WORKOS_API_KEY` is set) to
+`https://api.workos.com/user_management/authenticate`, checks the
+access token it gets as it checks a PC's, and answers
+`{"machines":[{"id","name"}],"email"}`: every PC connected now signed in
+as the same user that said it takes asks (it dialled `/pc` with
+`asks=1`). Or `{"error":"<why>"}` and it closes. A socket that sends no
+good code in 30 seconds is closed; one is closed 5 minutes after it
+opened, whatever it is doing. `{"list":1}` asks for the machines again.
+
+- `{"ask":"<pc id>"}` from the phone, for a PC in that list: the relay
+  opens a channel on it and tells it, as text, `{"ask":<ch>,"email"}`
+  (never `open`, so a PC knows this channel is an ask). From then on
+  the phone's binary frames go to that channel and the PC's frames on it
+  come back to the phone, as a phone channel's do, but never a broadcast.
+  A second `ask` closes the first channel (`{"close":<ch>}` to its PC).
+  The socket closing closes it too, and the PC's socket going tells the
+  phone `{"relay":"offline"}`.
+- A PC dials `/pc` with `asks=1` only while it is signed in and runs
+  this version, so an older PC or a Linux node is never listed.
+
+**The handshake, on the ask channel.** Frames are binary, UTF-8 JSON,
+plain until the key. Byte strings are b64url. Keys are P-256
+uncompressed points (65 bytes), nonces 16 random bytes. `derive(label,
+parts)` is joining's: SHA-256 over the label's bytes, then each part led
+by its length as 4 bytes big endian.
+
+1. Phone: `{"t":"ask","v":1,"name":"<what the phone calls itself>",
+   "commit":"<derive('horadric ask commit v1', [phone pub, phone nonce])>"}`.
+2. PC: `{"t":"asking","v":1,"name":"<pc name>","brother":"<its relay
+   id>","pub":"<its public key>","nonce"}`. A PC with no key pair yet
+   makes one first (the one `brothers.json` keeps as `me`).
+3. Phone: `{"t":"reveal","pub","nonce"}`. The PC answers
+   `{"t":"refused"}` and closes the channel if it does not hash to
+   `commit`, or if `pub` is its own.
+4. Both: the ECDH secret `s` (the x coordinate, 32 bytes). With
+   `parts = [s, phone pub, phone nonce, pc pub, pc nonce]`, the code is
+   the first 4 bytes of `derive('horadric ask code v1', parts)`, big
+   endian, mod 1,000,000, as six digits in two groups ("587 941"), and
+   the ask key is `derive('horadric ask key v1', parts)`.
+5. The PC asks its human, No the default: "iPhone, Safari wants to use
+   Town Portal, signed in as x@y.com. Does the phone show 587 941? Yes
+   lets it see and type in this PC's sessions and every brother's." The
+   phone shows the same code, "Desktop asks you about this phone. Say
+   yes there only if it shows the same code", and Yes and No of its own.
+   Its human must say yes on the phone too: otherwise a relay playing
+   the PC would be believed.
+6. On the PC's yes it pairs the phone as a v3 pairing does (a new phone
+   id, the key derived with the phone's public key, `portal.json`,
+   vouched for in the signed word) and sends `{"t":"paired","phone",
+   "brother","bkey"}` sealed with the ask key (AES-256-GCM as every
+   sealed frame, no additional data). On no it sends plain
+   `{"t":"refused"}`. The phone, whose own human also said yes, takes
+   `paired` only if the ask key opens it, then keeps the PC as a v3
+   pairing keeps it, closes `/ask` and dials `/phone?id=` as ever. A
+   phone whose human said no sends plain `{"t":"refused"}` and closes.
+7. The PC drops an ask channel's state when it closes, when 5 minutes
+   pass, or on any frame out of order. It holds at most 3 asks at once
+   and refuses more.
+
 ## Proposed: teams
 
 Not on the relay yet: what a relay grouping a WorkOS organization's
