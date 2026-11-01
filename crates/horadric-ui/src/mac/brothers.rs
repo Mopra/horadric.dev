@@ -167,6 +167,8 @@ pub(super) fn start() {
         sign_in,
         human: Box::new(Alerts),
         listener: Box::new(ToApp),
+        // The Mac pairs phones of its own through no relay link yet.
+        phones: None,
         log: |line| eprintln!("horadric brothers: {line}"),
     };
     match Link::start(setup) {

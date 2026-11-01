@@ -2,11 +2,9 @@
 //! docs/plan/the-brotherhood.md, "Linux nodes on the relay"): the same
 //! `/pc` endpoint, secret and id, signed in with its WorkOS access token,
 //! so a PC cannot tell it from another PC but by what its hello says. The
-//! joining, the handshake and the sealed frames are
-//! `horadric_core::brothers`, run here on `horadric-link`'s crypto; the
-//! socket is `horadric-link`'s WebSocket, kept open on threads of its own
-//! with the ping, the silence and the backoff rules a PC keeps
-//! (`horadric_core::relaying`).
+//! link, its threads and the ping, silence, backoff and refresh rules are
+//! `horadric_link::relay`, which the Mac runs too; this is what a node
+//! hands it: its sign in, its human and the phones it serves.
 //!
 //! What linked channels carry goes to the serving thread: a brother's asks
 //! into the node's one `Server`, as a viewer's on the unix socket do, and
@@ -14,58 +12,19 @@
 //! answer goes to a terminal attached over the control socket
 //! (`control`), and with none attached the node says no.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-use horadric_core::brothers::{Brothers, Event as Link, Hands, Listener, Relay};
-use horadric_core::joining::{Crypto, Listed, Store};
+use horadric_core::brothers::{Brothers, Event as LinkEvent, Listener};
+use horadric_core::joining::{Listed, Store};
 use horadric_core::phoning::{self, Chans, Heard};
-use horadric_core::portal::{frame, unframe, Config};
-use horadric_core::relaying::{
-    after_failure, after_link, closed_word, pc_dial, refresh_message, Refresh, PING_SECS,
-    SILENT_SECS,
-};
-use horadric_link::ws::Socket;
-use serde_json::{json, Value};
+use horadric_core::portal::frame;
+use horadric_link::relay::{self, Link, Setup};
+use serde_json::Value;
+
+pub(super) use horadric_link::relay::{now, LinkCrypto};
 
 use super::{control, signin, Event};
-
-/// The crypto joining needs, from `horadric-link`, byte for byte what a
-/// Windows PC makes with CNG.
-pub(super) struct LinkCrypto;
-
-impl Crypto for LinkCrypto {
-    fn random(&self, buf: &mut [u8]) {
-        horadric_link::random(buf);
-    }
-
-    fn pair(&self) -> Option<[u8; 96]> {
-        Some(horadric_link::ecdh::pair())
-    }
-
-    fn ecdh(&self, private: &[u8; 96], peer: &[u8]) -> Option<[u8; 32]> {
-        horadric_link::ecdh::agree(private, peer).ok()
-    }
-
-    fn seal_bound(&self, key: &[u8; 32], plain: &[u8], aad: &[u8]) -> Vec<u8> {
-        horadric_link::seal_bound(key, plain, aad)
-    }
-
-    fn open_bound(&self, key: &[u8; 32], sealed: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
-        horadric_link::open_bound(key, sealed, aad)
-    }
-
-    fn sign(&self, private: &[u8; 96], msg: &[u8]) -> Option<[u8; 64]> {
-        horadric_link::ecdsa::sign(private, msg)
-    }
-
-    fn verify(&self, public: &[u8], msg: &[u8], sig: &[u8]) -> bool {
-        horadric_link::ecdsa::verify(public, msg, sig)
-    }
-}
 
 /// Where a relay channel sits among the serving thread's channels: past
 /// every number the unix socket's viewers get, so the two never meet.
@@ -122,97 +81,110 @@ pub(super) enum Said {
 /// viewer's name, so control can tell it from them.
 pub(super) const PHONE: &str = "phone:";
 
+/// The node's relay link, once started.
+static LINK: OnceLock<Link> = OnceLock::new();
+
 /// The phones on the relay link: a node pairs none, but serves each the
-/// signed word vouches for (docs/plan/one-portal.md).
+/// signed word vouches for (docs/plan/one-portal.md). Shared by the link,
+/// which hears them, and the serving thread, which answers them.
 struct Phones {
-    chans: Chans,
-    out: Sender<(bool, Vec<u8>)>,
+    chans: Mutex<Chans>,
     events: Mutex<Sender<Event>>,
     name: String,
 }
 
-static PHONES: Mutex<Option<Phones>> = Mutex::new(None);
+static PHONES: OnceLock<Arc<Phones>> = OnceLock::new();
 
-fn phones() -> MutexGuard<'static, Option<Phones>> {
-    PHONES.lock().unwrap_or_else(|e| e.into_inner())
+impl Phones {
+    fn chans(&self) -> MutexGuard<'_, Chans> {
+        self.chans.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn tell(&self, said: Said) {
+        let tx = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = tx.send(Event::Relay(said));
+    }
+}
+
+/// Lets the link hand the channels no brother takes to the one [`Phones`].
+struct ToPhones(Arc<Phones>);
+
+impl relay::Phones for ToPhones {
+    fn open(&self, ch: u32) {
+        self.0.chans().open(ch);
+    }
+
+    fn close(&self, ch: u32) {
+        let was = self.0.chans().close(ch);
+        if was {
+            self.0.tell(Said::PhoneDown { ch });
+        }
+    }
+
+    /// What a phone asks goes to the serving thread; a forget is signed
+    /// here, so every brother drops the phone, and cut off at once.
+    fn frame(&self, link: &Link, ch: u32, payload: &[u8]) {
+        let heard = self.0.chans().frame(ch, payload, &LinkCrypto);
+        match heard {
+            Heard::Nothing => {}
+            Heard::Asked { id, msg } => self.0.tell(Said::Phone { ch, id, msg }),
+            Heard::Forget { id, public } => {
+                if let (Some(dir), Some(me)) = (horadric_hooks::state_dir(), me()) {
+                    let signer = horadric_core::said::Signer::of(&dir, &me, &LinkCrypto);
+                    if !public.is_empty() {
+                        horadric_core::mesh::forget(&dir, signer.as_ref(), &id, &public, now());
+                    }
+                }
+                self.look(link);
+            }
+        }
+    }
+
+    /// Reads the signed word for the phones it serves: each channel of one
+    /// it no longer serves is told so and dropped, and every greeted phone
+    /// hears the brothers when they changed.
+    fn look(&self, link: &Link) {
+        let (Some(dir), Some(me)) = (horadric_hooks::state_dir(), me()) else {
+            return;
+        };
+        let held = horadric_core::mesh::load_held(&dir);
+        let signer = horadric_core::said::Signer::of(&dir, &me, &LinkCrypto);
+        let linked: Vec<String> = link
+            .with(|b| b.linked().into_iter().map(|(_, id)| id).collect())
+            .unwrap_or_default();
+        let roster =
+            horadric_core::rostering::served(&dir, &me, &self.0.name, &LinkCrypto, &linked)
+                .unwrap_or_default();
+        let state = |id: &str| -> &'static str {
+            if linked.iter().any(|l| l == id) {
+                "live"
+            } else {
+                "away"
+            }
+        };
+        let list = phoning::brothers_message(&roster, &me, state, |_| None);
+        let mut chans = self.0.chans();
+        let cut = chans.look(&held, &me, signer.as_ref().map(|s| &s.private), &LinkCrypto);
+        let told = chans.tell(&list, &LinkCrypto);
+        drop(chans);
+        for (ch, sealed) in cut {
+            link.send_binary(frame(ch, &sealed));
+            self.0.tell(Said::PhoneDown { ch });
+        }
+        for (ch, sealed) in told {
+            link.send_binary(frame(ch, &sealed));
+        }
+    }
 }
 
 /// Seals `msg` for the phone on relay channel `ch` and sends it.
 pub(super) fn phone_reply(ch: u32, msg: &Value) {
-    if let Some(p) = phones().as_ref() {
-        if let Some(sealed) = p.chans.seal(ch, msg, &LinkCrypto) {
-            let _ = p.out.send((false, frame(ch, &sealed)));
-        }
-    }
-}
-
-/// A phone's frame: what it asks to the serving thread; a forget is
-/// signed here, so every brother drops the phone, and cut off at once.
-fn phone_frame(ch: u32, payload: &[u8]) {
-    let heard = match phones().as_mut() {
-        Some(p) => p.chans.frame(ch, payload, &LinkCrypto),
-        None => return,
-    };
-    match heard {
-        Heard::Nothing => {}
-        Heard::Asked { id, msg } => {
-            if let Some(p) = phones().as_ref() {
-                let tx = p.events.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = tx.send(Event::Relay(Said::Phone { ch, id, msg }));
-            }
-        }
-        Heard::Forget { id, public } => {
-            if let (Some(dir), Some(me)) = (horadric_hooks::state_dir(), me()) {
-                let signer = horadric_core::said::Signer::of(&dir, &me, &LinkCrypto);
-                if !public.is_empty() {
-                    horadric_core::mesh::forget(&dir, signer.as_ref(), &id, &public, now());
-                }
-            }
-            look_at_phones();
-        }
-    }
-}
-
-/// Reads the signed word for the phones it serves: each channel of one
-/// it no longer serves is told so and dropped, and every greeted phone
-/// hears the brothers when they changed. Every two seconds, and after a
-/// forget.
-fn look_at_phones() {
-    let (Some(dir), Some(me)) = (horadric_hooks::state_dir(), me()) else {
+    let (Some(p), Some(link)) = (PHONES.get(), LINK.get()) else {
         return;
     };
-    let held = horadric_core::mesh::load_held(&dir);
-    let signer = horadric_core::said::Signer::of(&dir, &me, &LinkCrypto);
-    let linked: Vec<String> =
-        with(|b| b.linked().into_iter().map(|(_, id)| id).collect()).unwrap_or_default();
-    let name = phones()
-        .as_ref()
-        .map(|p| p.name.clone())
-        .unwrap_or_default();
-    let roster = horadric_core::rostering::served(&dir, &me, &name, &LinkCrypto, &linked)
-        .unwrap_or_default();
-    let state = |id: &str| -> &'static str {
-        if linked.iter().any(|l| l == id) {
-            "live"
-        } else {
-            "away"
-        }
-    };
-    let list = phoning::brothers_message(&roster, &me, state, |_| None);
-    let mut held_p = phones();
-    let Some(p) = held_p.as_mut() else {
-        return;
-    };
-    let cut = p
-        .chans
-        .look(&held, &me, signer.as_ref().map(|s| &s.private), &LinkCrypto);
-    for (ch, sealed) in cut {
-        let _ = p.out.send((false, frame(ch, &sealed)));
-        let tx = p.events.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = tx.send(Event::Relay(Said::PhoneDown { ch }));
-    }
-    for (ch, sealed) in p.chans.tell(&list, &LinkCrypto) {
-        let _ = p.out.send((false, frame(ch, &sealed)));
+    let sealed = p.chans().seal(ch, msg, &LinkCrypto);
+    if let Some(sealed) = sealed {
+        link.send_binary(frame(ch, &sealed));
     }
 }
 
@@ -220,355 +192,83 @@ fn look_at_phones() {
 struct ToServing(Mutex<Sender<Event>>);
 
 impl Listener for ToServing {
-    fn event(&self, e: Link) {
+    fn event(&self, e: LinkEvent) {
         let said = match e {
-            Link::Up { ch, id, name } => Said::Up { ch, id, name },
-            Link::Asked { ch, id, msg } => Said::Asked { ch, id, msg },
-            Link::Heard { ch, msg } => Said::Heard { ch, msg },
-            Link::Down { ch } => Said::Down { ch },
-            Link::Gone { id } => Said::Gone { id },
-            Link::Moved { owners } => Said::Moved { owners },
+            LinkEvent::Up { ch, id, name } => Said::Up { ch, id, name },
+            LinkEvent::Asked { ch, id, msg } => Said::Asked { ch, id, msg },
+            LinkEvent::Heard { ch, msg } => Said::Heard { ch, msg },
+            LinkEvent::Down { ch } => Said::Down { ch },
+            LinkEvent::Gone { id } => Said::Gone { id },
+            LinkEvent::Moved { owners } => Said::Moved { owners },
         };
         let tx = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let _ = tx.send(Event::Relay(said));
     }
 }
 
-/// The relay link's sending half: queued for the writer thread, never
-/// blocking on the network.
-struct ToRelay(Sender<(bool, Vec<u8>)>);
-
-impl Relay for ToRelay {
-    fn text(&self, msg: &Value) {
-        let _ = self.0.send((true, msg.to_string().into_bytes()));
-    }
-
-    fn binary(&self, frame: Vec<u8>) {
-        let _ = self.0.send((false, frame));
-    }
-}
-
-/// The brothers of this node's relay link, once it started.
-static STATE: Mutex<Option<Brothers>> = Mutex::new(None);
-
-/// Whether the relay is reached now, for the control socket.
-static UP: AtomicBool = AtomicBool::new(false);
-
-/// Goes up on every sign in and sign out, so the link connects again as
-/// the node it now is.
-static SIGNED: AtomicU64 = AtomicU64::new(0);
-
-fn state() -> MutexGuard<'static, Option<Brothers>> {
-    STATE.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// Runs `f` on the brothers, None before the link started.
 pub(super) fn with<R>(f: impl FnOnce(&mut Brothers) -> R) -> Option<R> {
-    state().as_mut().map(f)
+    LINK.get()?.with(f)
 }
 
 /// This node's relay id, which brothers and the roster know it by.
 pub(super) fn me() -> Option<String> {
-    let dir = horadric_hooks::state_dir()?;
-    Config::load(&dir).map(|c| horadric_core::portal::id(&c.secret))
-}
-
-/// This node's secret, made and kept (owner only) the first time it is
-/// needed, as `portal.json` keeps a PC's.
-fn config() -> Result<Config, String> {
-    let dir = horadric_hooks::state_dir().ok_or("cannot find the state folder")?;
-    if let Some(c) = Config::load(&dir) {
-        return Ok(c);
-    }
-    let mut secret = [0u8; 32];
-    horadric_link::random(&mut secret);
-    let mut c = Config::fresh(&secret);
-    // A node pairs no phones; the relay's address is all it needs.
-    c.enabled = false;
-    if let Ok(relay) = std::env::var("HORADRIC_RELAY") {
-        if !relay.trim().is_empty() {
-            c.relay = relay.trim().to_string();
-        }
-    }
-    c.save(&dir)
-        .map_err(|e| format!("cannot keep the node's secret: {e}"))?;
-    Ok(c)
+    relay::me(&horadric_hooks::state_dir()?)
 }
 
 /// Starts the relay link: made once, kept up for as long as the node
 /// runs, connected while the node is signed in.
 pub(super) fn start(name: String, events: Sender<Event>) -> Result<(), String> {
-    let config = config()?;
-    let phone_events = events.clone();
-    let dir = horadric_hooks::state_dir();
-    let (out, rx) = mpsc::channel::<(bool, Vec<u8>)>();
-    let hands = Hands {
-        crypto: Box::new(LinkCrypto),
-        relay: Box::new(ToRelay(out.clone())),
-        human: Box::new(control::Human),
-        listener: Box::new(ToServing(Mutex::new(events))),
-        clock: now,
-        process: horadric_core::mesh::process(),
-    };
-    let me = horadric_core::portal::id(&config.secret);
-    *state() = Some(Brothers::new(&me, &name, dir, hands));
-    *phones() = Some(Phones {
-        chans: Chans::default(),
-        out: out.clone(),
-        events: Mutex::new(phone_events),
+    let dir = horadric_hooks::state_dir().ok_or("cannot find the state folder")?;
+    let phones = Arc::new(Phones {
+        chans: Mutex::new(Chans::default()),
+        events: Mutex::new(events.clone()),
         name: name.clone(),
     });
-    let slot: Slot = Arc::default();
-    {
-        let slot = Arc::clone(&slot);
-        thread::Builder::new()
-            .name("relay-send".into())
-            .spawn(move || write_loop(rx, slot))
-            .map_err(|e| e.to_string())?;
-    }
-    {
-        let (slot, out) = (Arc::clone(&slot), out.clone());
-        thread::Builder::new()
-            .name("relay-ping".into())
-            .spawn(move || ping_loop(&slot, &out))
-            .map_err(|e| e.to_string())?;
-    }
-    thread::Builder::new()
-        .name("relay-read".into())
-        .spawn(move || read_loop(&config.relay, &config.secret, &name, &slot))
-        .map_err(|e| e.to_string())?;
+    let _ = PHONES.set(Arc::clone(&phones));
+    let setup = Setup {
+        dir,
+        name,
+        sign_in: signin::workos()?,
+        human: Box::new(control::Human),
+        listener: Box::new(ToServing(Mutex::new(events))),
+        phones: Some(Box::new(ToPhones(phones))),
+        log: |line| eprintln!("horadric node: {line}"),
+    };
+    let link = Link::start(setup)?;
+    let _ = LINK.set(link);
     Ok(())
-}
-
-/// The socket while connected, and the sign in it was dialled under.
-type Slot = Arc<Mutex<Option<(Socket, u64)>>>;
-
-/// Where the link's in-band token refresh stands: the token the relay
-/// holds runs out at its `exp`, which moves only on the relay's `ok`.
-static REFRESH: Mutex<Refresh> = Mutex::new(Refresh {
-    exp: 0,
-    sent: 0,
-    after: 0,
-});
-
-fn write_loop(rx: Receiver<(bool, Vec<u8>)>, slot: Slot) {
-    for (text, frame) in rx {
-        let socket = slot
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|(s, _)| s.clone());
-        if let Some(s) = socket {
-            s.send(text, &frame);
-        }
-    }
-}
-
-/// Pings while connected, and closes a link gone quiet or dialled under
-/// an older sign in, which sends the reader round to connect again.
-fn ping_loop(slot: &Slot, out: &Sender<(bool, Vec<u8>)>) {
-    let mut since = 0;
-    loop {
-        thread::sleep(Duration::from_secs(1));
-        let held = slot
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|(s, g)| (s.clone(), *g));
-        let Some((socket, signed)) = held else {
-            since = 0;
-            continue;
-        };
-        since += 1;
-        if since % 2 == 0 {
-            look_at_phones();
-        }
-        if since >= PING_SECS {
-            since = 0;
-            let _ = out.send((true, br#"{"ping":1}"#.to_vec()));
-        }
-        let at = now();
-        let due = *REFRESH.lock().unwrap_or_else(|e| e.into_inner());
-        if due.due(at) {
-            let fresh = signin::access_token()
-                .ok()
-                .filter(|t| horadric_core::workos::expiry(t).is_some_and(|e| e > due.exp));
-            if let Some(token) = fresh {
-                REFRESH.lock().unwrap_or_else(|e| e.into_inner()).sent(at);
-                let _ = out.send((true, refresh_message(&token)));
-            }
-        }
-        let renewed = signed != SIGNED.load(Ordering::SeqCst);
-        if renewed || socket.quiet() > Duration::from_secs(SILENT_SECS) {
-            socket.close();
-        }
-    }
-}
-
-fn read_loop(relay: &str, secret: &str, name: &str, slot: &Slot) {
-    let debug = std::env::var_os("HORADRIC_DEBUG").is_some();
-    let mut backoff = 1;
-    loop {
-        let signed = SIGNED.load(Ordering::SeqCst);
-        // A node not signed in has no brothers to find and no phones to
-        // serve: it waits to be signed in.
-        if signin::user().is_none() {
-            wait_for_sign_in(signed);
-            continue;
-        }
-        let dial = match signin::access_token() {
-            Ok(token) => {
-                let exp = horadric_core::workos::expiry(&token).unwrap_or(0);
-                *REFRESH.lock().unwrap_or_else(|e| e.into_inner()) = Refresh::dialled(exp);
-                pc_dial(relay, secret, Some((&token, name)))
-            }
-            Err(e) => {
-                eprintln!("horadric node: {e}");
-                let (wait, next) = after_failure(backoff.max(5));
-                backoff = next;
-                sleep_unless_renewed(wait, signed);
-                continue;
-            }
-        };
-        let headers: Vec<(&str, &str)> =
-            dial.headers.iter().map(|(n, v)| (*n, v.as_str())).collect();
-        let wait = match Socket::connect_with(&dial.url, &headers) {
-            Ok(socket) => {
-                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((socket.clone(), signed));
-                let began = Instant::now();
-                UP.store(true, Ordering::SeqCst);
-                with(|b| b.connected(true));
-                if debug {
-                    eprintln!("horadric node: the relay is reached");
-                }
-                while let Some((text, data)) = socket.receive() {
-                    heard(&socket, text, &data);
-                }
-                let code = socket.close_code();
-                *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                UP.store(false, Ordering::SeqCst);
-                with(|b| b.connected(false));
-                if let Some(word) = closed_word(code) {
-                    eprintln!("horadric node: {word}");
-                }
-                let (wait, next, stale) = after_link(began.elapsed().as_secs(), code, backoff);
-                if stale {
-                    signin::forget_access();
-                }
-                eprintln!("horadric node: the relay link closed ({code:?}), again in {wait} s");
-                backoff = next;
-                wait
-            }
-            Err(e) => {
-                eprintln!("horadric node: cannot reach the relay: {e}");
-                let (wait, next) = after_failure(backoff);
-                backoff = next;
-                wait
-            }
-        };
-        sleep_unless_renewed(wait, signed);
-    }
-}
-
-/// One frame from the relay: what is for brothers to them, what is for
-/// phones to [`phone_frame`]. A node pairs no phone, but serves those the
-/// signed word vouches for.
-fn heard(socket: &Socket, text: bool, data: &[u8]) {
-    if text {
-        let Ok(v) = serde_json::from_slice::<Value>(data) else {
-            return;
-        };
-        // The relay's answer to a fresh token: a refused one is forgotten,
-        // so the next is new.
-        let answer = REFRESH
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .answer(&v, now());
-        if let Some(refused) = answer {
-            if refused {
-                signin::forget_access();
-            }
-            return;
-        }
-        if with(|b| b.text(&v)).unwrap_or(false) {
-            return;
-        }
-        if let Some(ch) = v.get("open").and_then(Value::as_u64) {
-            match phones().as_mut() {
-                Some(p) => p.chans.open(ch as u32),
-                None => {
-                    socket.send(true, json!({ "close": ch }).to_string().as_bytes());
-                }
-            }
-        }
-        if let Some(ch) = v.get("close").and_then(Value::as_u64) {
-            if let Some(p) = phones().as_mut() {
-                if p.chans.close(ch as u32) {
-                    let tx = p.events.lock().unwrap_or_else(|e| e.into_inner());
-                    let _ = tx.send(Event::Relay(Said::PhoneDown { ch: ch as u32 }));
-                }
-            }
-        }
-        return;
-    }
-    if let Some((ch, payload)) = unframe(data) {
-        if !with(|b| b.binary(ch, payload)).unwrap_or(false) {
-            phone_frame(ch, payload);
-        }
-    }
-}
-
-fn sleep_unless_renewed(secs: u64, signed: u64) {
-    for _ in 0..secs * 10 {
-        if SIGNED.load(Ordering::SeqCst) != signed {
-            return;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-}
-
-fn wait_for_sign_in(signed: u64) {
-    while SIGNED.load(Ordering::SeqCst) == signed {
-        thread::sleep(Duration::from_millis(500));
-        if signin::user().is_some() {
-            return;
-        }
-    }
-}
-
-/// Now, in Unix seconds.
-pub(super) fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 /// Makes the link connect again, signed in now or not: after
 /// `horadric node signin` or `signout` in a terminal.
 pub(super) fn renew() {
-    signin::forget_access();
-    SIGNED.fetch_add(1, Ordering::SeqCst);
+    if let Some(link) = LINK.get() {
+        link.renew();
+    }
 }
 
 /// Whether the relay is reached now.
 pub(super) fn up() -> bool {
-    UP.load(Ordering::SeqCst)
+    LINK.get().is_some_and(Link::up)
 }
 
 /// Seals `msg` for the brother on relay channel `ch` and sends it. False
 /// when that link is gone.
 pub(super) fn reply(ch: u32, msg: &Value) -> bool {
-    with(|b| b.reply(ch, msg)).unwrap_or(false)
+    LINK.get().is_some_and(|l| l.reply(ch, msg))
 }
 
 /// The brothers the relay lists now, None while it is not reached.
 pub(super) fn listed() -> Option<Vec<Listed>> {
-    with(|b| b.listed()).flatten()
+    LINK.get()?.listed()
 }
 
-/// The joined brothers as kept.
+/// The joined brothers as kept, read from the folder before the link
+/// starts.
 pub(super) fn store() -> Store {
-    with(|b| b.store().clone())
+    LINK.get()
+        .map(Link::store)
         .or_else(|| horadric_hooks::state_dir().and_then(|d| Store::load(&d)))
         .unwrap_or_default()
 }

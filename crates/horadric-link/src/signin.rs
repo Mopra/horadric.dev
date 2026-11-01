@@ -1,8 +1,7 @@
 //! Signing a machine in to the brotherhood with WorkOS's device code flow,
-//! for a machine with no sign in of its own: the Mac. What
-//! `crates/horadric/src/node_signin.rs` does for a Linux node, with the
-//! state folder handed in and the link and code given to the caller to
-//! show, not printed. The refresh token goes in `workos.json` in the state
+//! for a machine with no sign in of its own: the Mac and a Linux node. The
+//! state folder is handed in and the link and code given to the caller to
+//! show, in an alert or a terminal. The refresh token goes in `workos.json` in the state
 //! folder, readable by its owner alone. The pure half is
 //! `horadric_core::workos`.
 //!

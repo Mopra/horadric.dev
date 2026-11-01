@@ -1,7 +1,7 @@
 //! A machine's link to the relay as a brother, for a machine whose
-//! platform has no link of its own: what `crates/horadric/src/node_relay.rs`
-//! does for a Linux node, with the sign in, the human and the listener
-//! handed in, so the Mac runs the same threads. The joining, the handshake
+//! platform has no link of its own: the Mac and a Linux node run the same
+//! threads, each handing in its sign in, its human, its listener and, for a
+//! node, the phones it serves. The joining, the handshake
 //! and the sealed frames are `horadric_core::brothers`; the backoff, ping,
 //! silence and token refresh rules are `horadric_core::relaying`. What a
 //! linked channel carries goes to the [`Listener`] the caller gave, which
@@ -70,6 +70,22 @@ pub trait SignIn: Send + Sync {
     fn forget_access(&self);
 }
 
+/// What a link does with the channels no brother takes: the phones a
+/// machine serves on the signed word's say, though it pairs none (a Linux
+/// node, docs/plan/one-portal.md). A link with none closes them. Called on
+/// the link's own threads, never with the brothers held.
+pub trait Phones: Send + Sync {
+    /// The relay opened channel `ch` and no brother took it.
+    fn open(&self, ch: u32);
+    /// The relay closed channel `ch`, which may be no phone's.
+    fn close(&self, ch: u32);
+    /// A frame on channel `ch` that no brother took.
+    fn frame(&self, link: &Link, ch: u32, payload: &[u8]);
+    /// Every two seconds while the relay is reached, to read the signed
+    /// word for the phones it still serves.
+    fn look(&self, link: &Link);
+}
+
 /// What a link is started with.
 pub struct Setup {
     /// The state folder, where `brothers.json` and `roster.json` live.
@@ -79,6 +95,7 @@ pub struct Setup {
     pub sign_in: Arc<dyn SignIn>,
     pub human: Box<dyn Human>,
     pub listener: Box<dyn Listener>,
+    pub phones: Option<Box<dyn Phones>>,
     /// Where the link says what happened to it, a log line each.
     pub log: fn(&str),
 }
@@ -128,6 +145,9 @@ struct Shared {
     /// Where the in-band token refresh stands.
     refresh: Mutex<Refresh>,
     sign_in: Arc<dyn SignIn>,
+    phones: Option<Box<dyn Phones>>,
+    /// The writer thread's queue, for a phone's frames.
+    out: Mutex<Sender<(bool, Vec<u8>)>>,
     log: fn(&str),
 }
 
@@ -161,6 +181,8 @@ impl Link {
             signed: AtomicU64::new(0),
             refresh: Mutex::new(Refresh::default()),
             sign_in: setup.sign_in,
+            phones: setup.phones,
+            out: Mutex::new(out.clone()),
             log: setup.log,
         }));
         let slot: Slot = Arc::default();
@@ -216,6 +238,12 @@ impl Link {
         self.with(|b| b.reply(ch, msg)).unwrap_or(false)
     }
 
+    /// Sends a frame as it is, already sealed: a phone's.
+    pub fn send_binary(&self, frame: Vec<u8>) {
+        let out = self.0.out.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = out.send((false, frame));
+    }
+
     /// The brothers the relay lists now, None while it is not reached.
     pub fn listed(&self) -> Option<Vec<Listed>> {
         self.with(|b| b.listed()).flatten()
@@ -247,6 +275,11 @@ impl Link {
                 continue;
             };
             since += 1;
+            if since % 2 == 0 {
+                if let Some(p) = &self.0.phones {
+                    p.look(self);
+                }
+            }
             if since >= PING_SECS {
                 since = 0;
                 let _ = out.send((true, br#"{"ping":1}"#.to_vec()));
@@ -339,8 +372,8 @@ impl Link {
         }
     }
 
-    /// One frame from the relay: what is for brothers to them; a phone,
-    /// which this link never pairs, is closed.
+    /// One frame from the relay: what is for brothers to them, the rest to
+    /// the phones, or closed where there are none.
     fn heard(&self, socket: &Socket, text: bool, data: &[u8]) {
         if text {
             let Ok(v) = serde_json::from_slice::<Value>(data) else {
@@ -364,12 +397,23 @@ impl Link {
                 return;
             }
             if let Some(ch) = v.get("open").and_then(Value::as_u64) {
-                socket.send(true, json!({ "close": ch }).to_string().as_bytes());
+                match &self.0.phones {
+                    Some(p) => p.open(ch as u32),
+                    None => {
+                        socket.send(true, json!({ "close": ch }).to_string().as_bytes());
+                    }
+                }
+            }
+            if let (Some(ch), Some(p)) = (v.get("close").and_then(Value::as_u64), &self.0.phones) {
+                p.close(ch as u32);
             }
             return;
         }
         if let Some((ch, payload)) = unframe(data) {
-            self.with(|b| b.binary(ch, payload));
+            let taken = self.with(|b| b.binary(ch, payload)).unwrap_or(false);
+            if let (false, Some(p)) = (taken, &self.0.phones) {
+                p.frame(self, ch, payload);
+            }
         }
     }
 
