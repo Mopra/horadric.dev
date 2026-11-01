@@ -6,28 +6,26 @@ that runs on the machine.
 
 Built: Ctrl+Space dictates with distil-small.en through candle into a
 stage pane, a terminal session or the Folio, live as it is said, with a
-microphone picked in Settings. How it works, what was measured and why
-the prompt stays short are in the lore (ask about `dictate.rs` and
-`speech.rs`). What follows is what is left.
+microphone picked in Settings. Since 2026-11-01 also: a cached, eight bit
+decoder (twice as fast on long phrases), drafts that settle
+(LocalAgreement), a tick at start and stop, a personal word list, an
+opt in Haiku tidy, both chords in Settings, Keys, and Ctrl+Alt+D typing
+into any program. How it works, what was measured and why are in the
+lore (ask about `dictate.rs`, `anywhere.rs` and `speech.rs`). What
+follows is what is left.
 
 ## Next
 
-- **Faster drafts.** A key value cache in the decoder (candle's
-  Whisper reruns every token each step) or a quantized model (candle has
-  `quantized_model`, needs a GGUF of the weights). Faster also means a
-  bigger model fits: distil-large-v3 hears better and may take a
-  longer prompt without looping.
-- **Draft that settles.** LocalAgreement (whisper_streaming): words two
-  drafts agree on stop changing, so only the tail flickers.
-- **Feedback.** A soft tick at start and stop.
-- **Clean up.** Wispr's edge is an LLM pass: filler words, "scratch
-  that", lists. A small local model or Haiku, behind a switch.
-- **Words it should know.** The prompt did not fix "pains" or
-  "horridrick". A personal dictionary as Wispr has, applied to the
-  words after Whisper, is surer: "pains" to "panes" in this project.
-- **Settings.** The chord in the Settings window beside the global
-  shortcuts, and Danish (a multilingual model, about twice the size).
-- **Outside Horadric.** A global chord that types into whatever app has
-  focus, as Wispr does. Needs a low level keyboard hook for hold to
-  talk and SendInput or the clipboard to type. Bigger, later.
-- **macOS.** AVAudioEngine for the microphone; the model side is shared.
+- **A bigger model.** The decoder is no longer the slow half; the
+  encoder is (1.3 s of 2.3 s on 16.7 s of speech). distil-large-v3
+  hears better and may take a longer prompt without looping, but its
+  encoder is about three times the work: try it once quantized, or with
+  the encoder in eight bits.
+- **Danish.** A multilingual model, about twice the size, picked in the
+  Dictation section.
+- **Seen outside Horadric.** Dictating into another program shows
+  nothing but the ticks: a small plate near the caret with the level and
+  the draft, as Wispr has.
+- **macOS.** The microphone is written (`mac/microphone.rs`, not yet
+  built on a Mac); the stage still needs the key, the draft and the
+  ticks, and the tidy needs `claude` found the Mac's way.
