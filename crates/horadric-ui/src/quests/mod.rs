@@ -62,6 +62,9 @@ pub(crate) trait Host: Sized {
     fn closed(&self) -> &HashSet<String>;
     /// The recent folders, whose lists are read with no session in them.
     fn recent(&self) -> &[String];
+    /// The keys of the tiles shown, whose lists are read even with no
+    /// session in them and their folder gone from the recent list.
+    fn tiles(&self) -> Vec<String>;
 
     /// What the hooks say of each session.
     fn registry(&self) -> &Arc<Mutex<Registry>>;

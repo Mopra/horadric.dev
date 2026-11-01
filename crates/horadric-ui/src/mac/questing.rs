@@ -123,6 +123,9 @@ impl Host for App {
     fn recent(&self) -> &[String] {
         &self.recent
     }
+    fn tiles(&self) -> Vec<String> {
+        self.clusters.iter().map(|c| c.key.clone()).collect()
+    }
     fn registry(&self) -> &Arc<Mutex<Registry>> {
         &self.registry
     }
