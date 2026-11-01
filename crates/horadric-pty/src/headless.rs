@@ -1,11 +1,15 @@
 //! A headless `claude.exe` on pipes, speaking stream-json. The session's
 //! conversation is drawn by Horadric (the Folio), not a terminal. See
-//! docs/plan/headless.md.
+//! docs/plan/headless.md. On a Mac the same, with a process group where
+//! Windows has a job.
 
 use std::collections::VecDeque;
+#[cfg(windows)]
 use std::ffi::c_void;
 use std::io::{self, BufRead, BufReader, Read, Write};
+#[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -16,12 +20,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
 use windows::Win32::Foundation::HANDLE;
+#[cfg(windows)]
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
+#[cfg(windows)]
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 /// The flags every headless start passes. Values always in the `--x=value`
@@ -83,9 +90,9 @@ pub struct Options {
 pub struct Headless {
     /// Taken by Drop, which hands it to a thread that waits for the end.
     child: Option<Child>,
-    /// Holds claude.exe and everything it starts. Closing it ends them all,
-    /// so a Headless dropped, or a Horadric that dies, leaves nothing behind.
-    job: Option<OwnedHandle>,
+    /// Holds claude.exe and everything it starts, so ending it ends them
+    /// all and a Headless dropped leaves nothing behind.
+    job: Option<Tree>,
     /// To the writer thread, which owns stdin, so a CLI that stops reading
     /// can never block the caller.
     input: Mutex<Option<Sender<Vec<u8>>>>,
@@ -124,8 +131,15 @@ impl Headless {
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .creation_flags(CREATE_NO_WINDOW.0);
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW.0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // A group of its own, so the tools claude starts end with it.
+            command.process_group(0);
+        }
         for name in ENV_REMOVE {
             command.env_remove(name);
         }
@@ -136,24 +150,19 @@ impl Headless {
             command.env(k, v);
         }
 
-        let job = kill_on_close_job();
+        let job = Tree::new();
         if let Err(e) = &job {
             eprintln!(
                 "horadric: no kill-on-close job for claude.exe, so it may outlive Horadric: {e}"
             );
         }
-        let job = job.ok();
+        let mut job = job.ok();
         let mut child = command.spawn()?;
-        // Assigned after the start, which only misses what claude.exe starts
-        // in its first instants, before it has read its settings. The child
-        // kill in Drop covers it if this fails.
-        if let Some(job) = &job {
-            unsafe {
-                let _ = AssignProcessToJobObject(
-                    HANDLE(job.as_raw_handle()),
-                    HANDLE(child.as_raw_handle()),
-                );
-            }
+        // Taken in after the start, which on Windows only misses what
+        // claude.exe starts in its first instants, before it has read its
+        // settings. The child kill in Drop covers it if this fails.
+        if let Some(job) = &mut job {
+            job.adopt(&child);
         }
 
         let stdin = child.stdin.take().expect("stdin is piped");
@@ -254,9 +263,7 @@ impl Headless {
     /// grace period first; this is for when that has run out.
     pub fn kill(&mut self) {
         if let Some(job) = &self.job {
-            unsafe {
-                let _ = TerminateJobObject(HANDLE(job.as_raw_handle()), 1);
-            }
+            job.end();
         }
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
@@ -300,9 +307,7 @@ impl Drop for Headless {
                 thread::sleep(Duration::from_millis(50));
             }
             if let Some(job) = &job {
-                unsafe {
-                    let _ = TerminateJobObject(HANDLE(job.as_raw_handle()), 1);
-                }
+                job.end();
             }
             let _ = child.kill();
             let _ = child.wait();
@@ -344,6 +349,7 @@ pub fn control_request(request_id: String, subtype: &str) -> String {
 /// The installed `claude.exe`: on `PATH`, then where the native installer
 /// and winget put it. Never the npm `.cmd` shim, which needs a console and
 /// a command interpreter between us and the pipes.
+#[cfg(windows)]
 pub fn claude_exe() -> Option<PathBuf> {
     let var = |name| std::env::var_os(name).map(PathBuf::from);
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -356,6 +362,27 @@ pub fn claude_exe() -> Option<PathBuf> {
     }
     let joined = std::env::join_paths(dirs).ok()?;
     crate::find_program("claude", &joined, &[".exe"], Path::is_file)
+}
+
+/// The installed `claude`: on `PATH` (the Mac app adopts its login shell's
+/// first), then where its native installer, npm, Homebrew and Bun put it.
+#[cfg(unix)]
+pub fn claude_exe() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(h) = &home {
+        dirs.push(h.join(".local/bin"));
+        dirs.push(h.join(".claude/local"));
+        dirs.push(h.join(".npm-global/bin"));
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    if let Some(h) = &home {
+        dirs.push(h.join(".bun/bin"));
+    }
+    let joined = std::env::join_paths(dirs).ok()?;
+    crate::find_program("claude", &joined, &[""], Path::is_file)
 }
 
 /// Calls `each` with every line of `from`, without its line end. No length
@@ -379,20 +406,68 @@ fn read_lines(from: impl Read, mut each: impl FnMut(String)) {
     }
 }
 
-/// A job that ends everything in it when its last handle closes.
-fn kill_on_close_job() -> windows::core::Result<OwnedHandle> {
-    unsafe {
-        let job = CreateJobObjectW(None, None)?;
-        let job = OwnedHandle::from_raw_handle(job.0);
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(
-            HANDLE(job.as_raw_handle()),
-            JobObjectExtendedLimitInformation,
-            &limits as *const _ as *const c_void,
-            std::mem::size_of_val(&limits) as u32,
-        )?;
-        Ok(job)
+/// A job that ends everything in it when its last handle closes, so even
+/// a host that dies takes claude.exe with it.
+#[cfg(windows)]
+struct Tree(OwnedHandle);
+
+#[cfg(windows)]
+impl Tree {
+    fn new() -> windows::core::Result<Tree> {
+        unsafe {
+            let job = CreateJobObjectW(None, None)?;
+            let job = OwnedHandle::from_raw_handle(job.0);
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                HANDLE(job.as_raw_handle()),
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const c_void,
+                std::mem::size_of_val(&limits) as u32,
+            )?;
+            Ok(Tree(job))
+        }
+    }
+
+    fn adopt(&mut self, child: &Child) {
+        unsafe {
+            let _ = AssignProcessToJobObject(
+                HANDLE(self.0.as_raw_handle()),
+                HANDLE(child.as_raw_handle()),
+            );
+        }
+    }
+
+    fn end(&self) {
+        unsafe {
+            let _ = TerminateJobObject(HANDLE(self.0.as_raw_handle()), 1);
+        }
+    }
+}
+
+/// The child's process group, which it leads from its start. Unlike a
+/// job nothing ends it when the host dies unannounced; the host's own
+/// ends (a close, claude ending, a drop) all come through [`Tree::end`].
+#[cfg(unix)]
+struct Tree(Option<libc::pid_t>);
+
+#[cfg(unix)]
+impl Tree {
+    fn new() -> io::Result<Tree> {
+        Ok(Tree(None))
+    }
+
+    fn adopt(&mut self, child: &Child) {
+        self.0 = Some(child.id() as libc::pid_t);
+    }
+
+    fn end(&self) {
+        if let Some(group) = self.0 {
+            // SAFETY: a plain signal to the group this process started.
+            unsafe {
+                libc::killpg(group, libc::SIGKILL);
+            }
+        }
     }
 }
 

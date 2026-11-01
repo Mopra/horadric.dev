@@ -342,7 +342,6 @@ fn host(mode: Option<&str>) -> Result<(), String> {
     std::io::stdin()
         .read_to_end(&mut json)
         .map_err(|e| e.to_string())?;
-    #[cfg(windows)]
     if mode == Some("--headless") {
         let spec: horadric_pty::headless_host::HeadlessSpec =
             serde_json::from_slice(&json).map_err(|e| format!("host: {e}"))?;

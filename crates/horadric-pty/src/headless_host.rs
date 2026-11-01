@@ -774,9 +774,31 @@ impl Incoming {
 mod tests {
     use super::*;
 
-    /// The host run in this process on threads, with cmd.exe standing in
-    /// for claude: it runs each stdin line as a command and echoes it.
-    /// Start, send, detach, attach again for the backlog, close.
+    /// A shell standing in for claude: it runs each stdin line as a
+    /// command and ends on stdin's end. cmd.exe takes claude's flags and
+    /// ignores them; sh reads its commands from stdin with `-s` and takes
+    /// them as its arguments after the end of its options.
+    fn stand_in() -> Options {
+        #[cfg(windows)]
+        let (program, before) = (
+            std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()),
+            Vec::new(),
+        );
+        #[cfg(unix)]
+        let (program, before) = (
+            "/bin/sh".to_string(),
+            vec!["-s".to_string(), "--".to_string()],
+        );
+        Options {
+            program: Some(program.into()),
+            before,
+            ..Options::default()
+        }
+    }
+
+    /// The host run in this process on threads, with a shell standing in
+    /// for claude. Start, send, detach, attach again for the backlog,
+    /// close.
     #[test]
     fn a_headless_host_keeps_lines_for_the_next_client_and_ends_on_close() {
         let instance = format!("test{}", std::process::id());
@@ -785,14 +807,7 @@ mod tests {
             pipe: headless_pipe_name(&instance, id),
             cwd: std::env::temp_dir(),
             resume: None,
-            options: Options {
-                program: Some(
-                    std::env::var("ComSpec")
-                        .unwrap_or_else(|_| "cmd.exe".into())
-                        .into(),
-                ),
-                ..Options::default()
-            },
+            options: stand_in(),
             tag: "project-a".into(),
         };
         let host = Host::start(&spec).unwrap();
@@ -848,7 +863,7 @@ mod tests {
         assert_eq!(
             rest.last(),
             Some(&Event::End(Some(0))),
-            "cmd ends on stdin's end"
+            "the shell ends on stdin's end"
         );
         assert!(!second.running());
         assert!(second.send_line("echo too late").is_err());
@@ -865,14 +880,7 @@ mod tests {
             pipe: headless_pipe_name(&instance, id),
             cwd: std::env::temp_dir(),
             resume: None,
-            options: Options {
-                program: Some(
-                    std::env::var("ComSpec")
-                        .unwrap_or_else(|_| "cmd.exe".into())
-                        .into(),
-                ),
-                ..Options::default()
-            },
+            options: stand_in(),
             tag: "project-a".into(),
         };
         let host = Host::start(&spec).unwrap();

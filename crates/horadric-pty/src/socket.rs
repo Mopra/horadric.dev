@@ -189,6 +189,13 @@ impl Pipe {
             let _ = s.shutdown(Shutdown::Both);
         }
     }
+
+    /// Client side: ends a read blocked on another thread, as a headless
+    /// client's detach needs. A shut down socket reads as its end, the
+    /// same as Windows' cancelled read.
+    pub fn cancel(&self) {
+        self.disconnect();
+    }
 }
 
 /// The session ids of every live host whose socket name starts with
