@@ -1072,11 +1072,6 @@ impl Pane {
         true
     }
 
-    /// Lays the war table over the glass, as asked from the session's tile.
-    pub fn open_war_table(&self) {
-        self.war_table(Some(true));
-    }
-
     /// Opens the war table, lays it down, or with None turns it over.
     fn war_table(&self, open: Option<bool>) {
         if let Some(r) = self.retinue.borrow().as_ref() {

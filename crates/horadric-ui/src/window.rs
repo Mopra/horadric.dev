@@ -1828,7 +1828,9 @@ impl Cluster {
                     app::push(Input::TaskApprove(self.key.clone(), item.line, item.title));
                 }
             }
-            Hit::Tile(i) => {
+            // The hirelings' line is the tile too: a click meant for the
+            // session that opened the war table instead was a trap.
+            Hit::Tile(i) | Hit::Band(i) => {
                 // Tiles are laid out in registry order, the same order
                 // `sessions` returns.
                 if let Some(s) = self.sessions().get(i) {
@@ -1838,11 +1840,6 @@ impl Cluster {
             Hit::Lamp(i) => {
                 if let Some(s) = self.sessions().get(i) {
                     app::push(Input::Park(s.id.clone()));
-                }
-            }
-            Hit::Band(i) => {
-                if let Some(s) = self.sessions().get(i) {
-                    app::push(Input::WarTable(s.id.clone()));
                 }
             }
             Hit::Browser(i) => {

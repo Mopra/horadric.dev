@@ -3790,7 +3790,7 @@ impl Painter<'_> {
                 bottom.w -= word_w + gap;
             }
         }
-        // Lit under the cursor, as a click on it opens the war table.
+        // Lit under the cursor with the rest of the tile it belongs to.
         let last_c = if scene.button(Hit::Band(i)) == Button::Idle {
             theme::text_dim()
         } else {

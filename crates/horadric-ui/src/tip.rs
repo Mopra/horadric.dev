@@ -181,7 +181,7 @@ pub fn cluster(hit: Hit) -> Option<&'static str> {
         Hit::Page(_) => "Show this tab on the stage",
         Hit::Add => "Start a Claude Code session in a terminal in this project",
         Hit::Shell => "Open a terminal in this project (Ctrl+Shift+T on the stage)",
-        Hit::Band(_) => "Open the war table: this turn and its hirelings over time",
+        Hit::Band(_) => "Show this session on the stage",
         Hit::Folio => "Start a Claude session in this project as a chat. Right click the header for the CLI or a terminal",
         Hit::FilesHeader => "Fold or unfold the changed files",
         Hit::File(_) => "Open on the stage, or with Ctrl in your editor. A folder opens or closes",

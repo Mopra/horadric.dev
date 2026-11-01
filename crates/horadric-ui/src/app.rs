@@ -458,9 +458,6 @@ pub(crate) enum Input {
     /// A portrait in a pane's retinue: show the conversation of the hireling
     /// with the second id, of the session with the first, beside it.
     OpenHireling(String, String),
-    /// A tile's line counting its hirelings: show the session and lay its
-    /// war table over its pane.
-    WarTable(String),
     /// A hireling's pane's cross or Esc, by its Folio's id.
     CloseWatch(String),
     /// The chat button under a project's tiles: a new Folio, a headless
@@ -2110,16 +2107,41 @@ fn found_project(id: &str) {
     with_app(|app| app.send_prompt(id, &text));
 }
 
-/// A session pane's cross, which ends at once as the tile menu's End does,
-/// or its selection's menu.
+/// A session pane's cross, which ends as the tile menu's End does, or its
+/// selection's menu.
 fn pane_ask(id: &str, what: PaneAsk) {
     match what {
-        PaneAsk::End => {
+        PaneAsk::End if confirm_end_busy(id) => {
             with_app(|app| app.close_by_hand(id));
         }
+        PaneAsk::End => {}
         PaneAsk::Hand => hand_menu(id),
         PaneAsk::Theme => open_settings_in(settings::Section::Appearance, None),
     }
+}
+
+/// Asks before the cross ends a session whose agent or hirelings are at
+/// work, as the cross is where a quick click meant for something else
+/// lands. An idle one closes at once.
+fn confirm_end_busy(id: &str) -> bool {
+    let now = std::time::SystemTime::now();
+    let busy = with_app(|app| {
+        app.shared.registry.lock().is_ok_and(|r| {
+            r.get(id)
+                .is_some_and(|s| s.phase.mid_turn() || s.band.count(now).0 > 0)
+        })
+    });
+    if busy != Some(true) {
+        return true;
+    }
+    ask(&Dialog {
+        tone: Tone::Warning,
+        title: "End this session?",
+        text: "It is still working, or its hirelings are. Ending it stops them.",
+        buttons: &["Cancel", "End"],
+        default: 0,
+        check: None,
+    }) == Some(1)
 }
 
 /// The agents on the stage, when it shows the project `key`, or whatever
@@ -9595,14 +9617,6 @@ impl App {
                 Input::Reopen => self.reopen_closed(None, None),
                 Input::CloseSky(key) => self.close_sky(&key),
                 Input::OpenHireling(session, agent) => self.open_hireling(&session, &agent),
-                Input::WarTable(id) => {
-                    self.reveal(&id, false);
-                    // A session that is resumed or attached first has no
-                    // pane yet, and shows without its table.
-                    if let Some(stage) = &self.stage {
-                        stage.war_table(&id);
-                    }
-                }
                 Input::CloseWatch(id) => self.close_watch(&id),
                 Input::Folio(key) => self.open_folio(&key),
                 Input::CloseFolio(id) => self.close_folio(&id),
