@@ -78,6 +78,8 @@ pub enum Input {
     FilesDue(String),
     /// The wheel over a files tile: points or lines, and which.
     FilesWheel(String, f64, bool),
+    /// A control in the Settings window was used.
+    Setting(super::settings::Pick),
 }
 
 thread_local! {
@@ -135,6 +137,7 @@ const NEW_TERMINAL: usize = 11;
 const NEXT_WAITING: usize = 12;
 /// Claude in a terminal, where New Session opens a Folio.
 const NEW_CLI_SESSION: usize = 13;
+const SETTINGS: usize = 14;
 const THEME_TAG: usize = 50;
 const DISCORD_TAG: usize = 60;
 const RECENT_TAG: usize = 100;
@@ -188,6 +191,9 @@ pub struct App {
     views: HashMap<String, View>,
     /// Each project's files tile.
     files: super::files::Files,
+    /// The model, effort and permission mode every session starts with,
+    /// unless its own arguments say otherwise.
+    defaults: horadric_core::Defaults,
 }
 
 /// A file shown read only on the stage, a pane with no program behind it
@@ -288,6 +294,7 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
                 .collect(),
             ..Default::default()
         },
+        defaults: saved.defaults.clone(),
     };
     app.attach_hosts();
     app.reattach_folios();
@@ -478,6 +485,7 @@ impl App {
                 }
             }
             Input::FilesDue(key) => self.files.due(&key),
+            Input::Setting(pick) => self.setting(pick),
             Input::FilesWheel(key, dy, precise) => {
                 if self.files.wheel(&key, dy, precise) {
                     self.reconcile();
@@ -625,8 +633,10 @@ impl App {
         self.remember(&dir);
         self.register_folio(id, &dir, name, resume.as_deref());
         let key = self.project_of(id).unwrap_or_default();
+        let mut all = self.defaults.flags(&own);
+        all.extend(own.iter().cloned());
         let flags = horadric_core::folio::headless_args(
-            &own,
+            &all,
             Some(horadric_core::folio::SUBAGENT_PROMPT),
         );
         let options = horadric_pty::headless::Options {
@@ -644,7 +654,10 @@ impl App {
                     "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".to_string(),
                     "1".to_string(),
                 ),
-            ],
+            ]
+            .into_iter()
+            .chain(self.defaults.env())
+            .collect(),
             ..Default::default()
         };
         let tag = crate::folio_session::Tag {
@@ -887,10 +900,11 @@ impl App {
         if !console::is_claude(program) || args.iter().any(|a| a == "--settings") {
             return Vec::new();
         }
-        match &self.status_settings {
-            Some(path) => vec!["--settings".into(), path.to_string_lossy().into_owned()],
-            None => Vec::new(),
+        let mut extra = self.defaults.flags(args);
+        if let Some(path) = &self.status_settings {
+            extra.extend(["--settings".into(), path.to_string_lossy().into_owned()]);
         }
+        extra
     }
 
     /// Resumes a paused session in the same tile, with its conversation.
@@ -1730,6 +1744,7 @@ impl App {
             .collect();
         items.push(Item::Sub("Show on Discord".into(), discord));
         items.push(Item::checked("Open at Login", LOGIN, autostart::enabled()));
+        items.push(Item::pick("Settings\u{2026}", SETTINGS));
         match self.update.offer() {
             Some(v) => items.push(Item::pick(format!("Update to {v}\u{2026}"), INSTALL_UPDATE)),
             None => items.push(Item::pick("Check for Updates", CHECK_UPDATE)),
@@ -1749,6 +1764,8 @@ impl App {
             ),
             Item::pick("Check for Updates", CHECK_UPDATE),
             Item::Separator,
+            Item::keyed("Settings\u{2026}", SETTINGS, ","),
+            Item::Separator,
             Item::keyed("Quit Horadric", QUIT, "q"),
         ];
         let session_items = [
@@ -1760,6 +1777,45 @@ impl App {
             Item::pick("Bring Tiles to Front", FRONT),
         ];
         menu::set_main(self.mtm, &app_items, &session_items);
+    }
+
+    /// What the Settings window shows.
+    fn settings_values(&self) -> super::settings::Values {
+        super::settings::Values {
+            theme: theme::current(),
+            discord: self.discord,
+            login: autostart::enabled(),
+            defaults: self.defaults.clone(),
+        }
+    }
+
+    /// Applies what a control in the Settings window picked. The theme,
+    /// Discord and login go the way their menu items go, so both ways in
+    /// do the same.
+    fn setting(&mut self, pick: super::settings::Pick) {
+        use super::settings::Pick;
+        match pick {
+            Pick::Theme(t) => {
+                if let Some(i) = theme::Theme::ALL.iter().position(|x| *x == t) {
+                    self.menu_pick(THEME_TAG + i);
+                }
+            }
+            Pick::Discord(d) => {
+                if let Some(i) = horadric_core::saved::Discord::ALL.iter().position(|x| *x == d) {
+                    self.menu_pick(DISCORD_TAG + i);
+                }
+            }
+            Pick::Login(on) => {
+                if on != autostart::enabled() {
+                    self.menu_pick(LOGIN);
+                }
+            }
+            Pick::Default(s, value) => {
+                self.defaults.set(s, value);
+                self.save();
+            }
+        }
+        super::settings::refresh(&self.settings_values());
     }
 
     fn menu_pick(&mut self, tag: usize) {
@@ -1800,6 +1856,7 @@ impl App {
                     }
                 }
                 self.menus();
+                super::settings::refresh(&self.settings_values());
             }
             t if (THEME_TAG..THEME_TAG + theme::Theme::ALL.len()).contains(&t) => {
                 theme::set(theme::Theme::ALL[t - THEME_TAG]);
@@ -1814,6 +1871,7 @@ impl App {
                 // Reconciles, which hands the client the new setting.
                 self.reconcile();
             }
+            SETTINGS => super::settings::show(self.mtm, &self.settings_values()),
             CHECK_UPDATE => self.update.check(true),
             INSTALL_UPDATE => self.install_update(),
             ABOUT => dialog::about(),
@@ -2009,6 +2067,7 @@ impl App {
             live: !self.quit,
             update_told: self.update.told(),
             discord: self.discord,
+            defaults: self.defaults.clone(),
             ..Default::default()
         }
     }
@@ -2110,6 +2169,10 @@ impl App {
         if self.stage.is_visible() {
             out.push(("stage".into(), self.stage.view().retain()));
         }
+        // Drawn whether or not it is open: a window need not be on screen
+        // to be drawn into a bitmap, and opening it would take the keys.
+        let values = self.settings_values();
+        out.push(("settings".into(), super::settings::content(self.mtm, &values)));
         out
     }
 }

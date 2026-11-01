@@ -76,7 +76,7 @@ if osascript -e 'tell application "System Events" to keystroke "echo TYPED-OK"' 
 else
   echo "WARN: System Events may not type here: $(cat "$OUT/osascript.log")"
 fi
-for f in stage cluster-0 cluster-1; do
+for f in stage cluster-0 cluster-1 settings; do
   [ -s "$HORADRIC_SNAPSHOT/$f.png" ] || fail "no $f.png"
 done
 hosts=$(pgrep -f "horadric host" | wc -l | tr -d ' ')

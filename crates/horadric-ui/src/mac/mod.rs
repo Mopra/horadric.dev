@@ -17,6 +17,7 @@ mod menu;
 mod microphone;
 mod paint;
 mod path;
+mod settings;
 mod queue;
 mod snapshot;
 mod stage;
