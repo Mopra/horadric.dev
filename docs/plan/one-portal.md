@@ -12,10 +12,6 @@ v3"; the decisions and traps are in the lore.
 
 ## Left
 
-- **The tray's Other PCs.** The Town Portal key's menu now holds the
-  brothers too; the tray still has its own Other PCs submenu, kept since
-  it also holds signing in, Linux nodes and keeping. Whether to trim it
-  is the human's call.
 - **Verified on screen and by a script phone**: paired with Alpha, served
   by Beta and a dev node, forgotten on Beta, cut off by all three. Not
   run yet. The node's phone serving (`node_relay.rs`) was not compiled

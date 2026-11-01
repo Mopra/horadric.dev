@@ -416,36 +416,21 @@ pub fn menu(m: Menu) -> Option<Choice> {
         items.push(Item::Submenu("Accounts".into(), account_items(logins)));
     }
 
-    // Every other PC, and every way of linking to one, under one line.
+    // Signing in, handing off, keeping and Linux nodes. The brothers
+    // themselves are in the Town Portal key's menu only, since finding
+    // them takes the portal open anyway.
     let mut machines = Vec::new();
-    let mut brothers = Vec::new();
     let keeping = crate::app::keeping_tray();
-    let standing = horadric_hooks::state_dir()
-        .map(|d| crate::standing::Standing::load(&d))
-        .unwrap_or_default();
-    let joined: Vec<(String, String, bool)> = keeping
-        .0
-        .iter()
-        .map(|(id, name)| (id.clone(), name.clone(), standing.controls(id)))
-        .collect();
     let user = crate::workos::user();
     if let Some(user) = &user {
         machines.push(Item::Disabled(format!("Signed in as {}", user.email)));
         machines.push(Item::Separator);
-        let listed = crate::brothers::listed();
-        machines.extend(brother_items(
-            listed.as_deref(),
-            &joined,
-            &crate::far_node::folded_ids(),
-        ));
-        brothers = listed.unwrap_or_default();
         let mut handing: Vec<Item> = crate::app::leaving_menu().into_iter().collect();
         handing.extend(keeping_items(&keeping));
         if !handing.is_empty() {
-            machines.push(Item::Separator);
             machines.extend(handing);
+            machines.push(Item::Separator);
         }
-        machines.push(Item::Separator);
     }
     let nodes = horadric_hooks::state_dir()
         .map(|d| crate::far_node::load(&d))
@@ -502,12 +487,6 @@ pub fn menu(m: Menu) -> Option<Choice> {
         RENAME => Some(Choice::Rename),
         NO_KEEPER => Some(Choice::Keeper(None)),
         AUTO_TAKEOVER => Some(Choice::AutoTakeover(!keeping.2)),
-        i if (CONTROL..CONTROL + RIGHTS).contains(&i) => joined
-            .get(i - CONTROL)
-            .map(|(id, _, on)| Choice::Control(id.clone(), !on)),
-        i if (CAST_OUT..CAST_OUT + RIGHTS).contains(&i) => joined
-            .get(i - CAST_OUT)
-            .map(|(id, name, _)| Choice::CastOut(id.clone(), name.clone())),
         i if (KEEPER..KEEPER + KEEPERS).contains(&i) => keeping
             .0
             .get(i - KEEPER)
@@ -529,12 +508,6 @@ pub fn menu(m: Menu) -> Option<Choice> {
                 !d.drive.as_ref().is_some_and(|d| d.ships_public),
             )
         }),
-        i if (BROTHER..QUEST_LOG).contains(&i) => {
-            if let Some(b) = brothers.get(i - BROTHER) {
-                crate::brothers::ask(&b.id);
-            }
-            None
-        }
         i if i >= DRIVE => driven
             .get(i - DRIVE)
             .map(|d| Choice::Drive(d.key.clone(), d.drive.is_none())),
@@ -548,9 +521,8 @@ pub fn menu(m: Menu) -> Option<Choice> {
     }
 }
 
-/// The brothers' lines as the tray's Other PCs shows them, for the Town
-/// Portal key's menu, which holds the brothers and the phones together,
-/// and what a pick among them means.
+/// The brothers' lines for the Town Portal key's menu, which holds the
+/// brothers and the phones together, and what a pick among them means.
 pub(crate) struct BrotherLines {
     pub items: Vec<Item>,
     joined: Vec<(String, String, bool)>,
