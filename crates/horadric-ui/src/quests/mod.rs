@@ -20,7 +20,10 @@ use crate::board::{Board, Ink};
 pub(crate) mod runner;
 pub(crate) mod warriv;
 
-pub(crate) use runner::{Menu, Merge, Runner, State};
+pub(crate) use runner::{Menu, Runner, State};
+// Only the Windows stones name it; the Mac's menu goes through `Menu`.
+#[cfg(windows)]
+pub(crate) use runner::Merge;
 pub(crate) use warriv::Warriv;
 
 /// How a notification looks, as each app shows it.
