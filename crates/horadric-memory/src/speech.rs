@@ -184,6 +184,18 @@ impl Listener {
     /// `prompt` is read as what came before it: the words said earlier
     /// and names the speech may use, so they are spelled the same.
     pub fn transcribe(&mut self, pcm: &[f32], prompt: &str) -> Result<String, String> {
+        self.transcribe_from(pcm, prompt, "")
+    }
+
+    /// [`Listener::transcribe`], told the speech starts with the words
+    /// `start`: words a live draft has settled on are kept as they are,
+    /// and only what follows them is written again.
+    pub fn transcribe_from(
+        &mut self,
+        pcm: &[f32],
+        prompt: &str,
+        start: &str,
+    ) -> Result<String, String> {
         if is_silent(pcm) {
             return Ok(String::new());
         }
@@ -196,6 +208,7 @@ impl Listener {
         let bare = [self.sot, self.no_timestamps];
         let mut prefix = self.prompt(prompt);
         prefix.extend(bare);
+        let mut forced = self.forced(start);
         let mut text = String::new();
         let mut seek = 0;
         while seek < spoken {
@@ -208,10 +221,12 @@ impl Listener {
             let most = (frames / 100 * TOKENS_A_SECOND + 16).min(MOST_TOKENS);
             // A prompt sometimes sends Whisper round in a loop; without
             // one it seldom does, and a loop left anyway is cut off.
-            let mut said = self.window(&window, &prefix, most).map_err(err)?;
+            let mut said = self.window(&window, &prefix, &forced, most).map_err(err)?;
             if said.1 && prefix.len() > bare.len() {
-                said = self.window(&window, &bare, most).map_err(err)?;
+                said = self.window(&window, &bare, &forced, most).map_err(err)?;
             }
+            // The settled words begin the first window, not the next.
+            forced.clear();
             let (mut tokens, looped) = said;
             if looped {
                 tokens.truncate(loop_start(&tokens));
@@ -247,12 +262,25 @@ impl Listener {
         out
     }
 
-    /// The tokens Whisper writes for `mel` after `prompt`, at most `most`,
-    /// and whether it went round in a loop or ran past `most` doing so.
+    /// The tokens of `start`, as Whisper would go on after them.
+    fn forced(&self, start: &str) -> Vec<u32> {
+        if start.trim().is_empty() {
+            return Vec::new();
+        }
+        self.tokenizer
+            .encode(format!(" {}", start.trim()), false)
+            .map(|e| e.get_ids().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// The tokens Whisper writes for `mel` after `prompt`, beginning with
+    /// `forced`, at most `most` more, and whether it went round in a loop
+    /// or ran past `most` doing so.
     fn window(
         &mut self,
         mel: &Tensor,
         prompt: &[u32],
+        forced: &[u32],
         most: usize,
     ) -> candle_core::Result<(Vec<u32>, bool)> {
         let features = self.encoder.forward(mel, true)?;
@@ -270,13 +298,14 @@ impl Listener {
         }
         let begin = Tensor::new(begin.as_slice(), &Device::Cpu)?;
         let mut tokens = prompt.to_vec();
+        tokens.extend_from_slice(forced);
         self.decoder.reset();
         for i in 0..most {
             // The prompt goes in whole, then one token a step: the
             // decoder keeps the rest.
             let fresh = if i == 0 { &tokens[..] } else { &tokens[tokens.len() - 1..] };
             let mut logits = self.decoder.next(fresh, &features)?.broadcast_add(&mask)?;
-            if i == 0 {
+            if i == 0 && forced.is_empty() {
                 logits = logits.broadcast_add(&begin)?;
             }
             let next = logits.argmax(D::Minus1)?.to_scalar::<u32>()?;

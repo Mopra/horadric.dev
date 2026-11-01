@@ -755,6 +755,10 @@ struct Take {
     hints: String,
     /// The phrases written for good.
     said: String,
+    /// The last draft of the phrase being spoken, and the words at its
+    /// start two drafts in a row agreed on, which no later draft changes.
+    draft: String,
+    settled: String,
 }
 
 impl Take {
@@ -771,6 +775,38 @@ impl Take {
     fn with(&self, more: &str) -> String {
         join(&self.said, more)
     }
+
+    /// A new draft of the phrase being spoken came: what two drafts now
+    /// agree on is settled for the rest of it.
+    fn drafted(&mut self, text: String) {
+        let agreed = agreed(&self.draft, &text);
+        if agreed.len() > self.settled.len() {
+            self.settled = agreed;
+        }
+        self.draft = text;
+    }
+
+    /// The phrase was written for good: the next starts with nothing
+    /// settled.
+    fn phrase_done(&mut self, text: &str) {
+        self.said = self.with(text);
+        self.draft.clear();
+        self.settled.clear();
+    }
+}
+
+/// The words `old` and `new` start with alike (LocalAgreement, as
+/// whisper_streaming does it), less the last word of `new`, which may be
+/// a word cut off as it was said.
+fn agreed(old: &str, new: &str) -> String {
+    let new: Vec<&str> = new.split_whitespace().collect();
+    let firm = &new[..new.len().saturating_sub(1)];
+    let same = old
+        .split_whitespace()
+        .zip(firm)
+        .take_while(|(a, b)| a == *b)
+        .count();
+    firm[..same].join(" ")
 }
 
 fn join(a: &str, b: &str) -> String {
@@ -805,7 +841,7 @@ fn writer() -> &'static Sender<Job> {
                         *id,
                         Take {
                             hints: hints.clone(),
-                            said: String::new(),
+                            ..Take::default()
                         },
                     );
                 }
@@ -827,9 +863,11 @@ fn writer() -> &'static Sender<Job> {
                     Job::Prepare(_) => note(pane, Note::Ready),
                     Job::Begin { .. } => {}
                     Job::Draft { id, pcm, .. } => {
-                        if let Some(take) = takes.get(&id) {
-                            if let Ok(text) = l.transcribe(&pcm, &take.prompt()) {
+                        if let Some(take) = takes.get_mut(&id) {
+                            let prompt = take.prompt();
+                            if let Ok(text) = l.transcribe_from(&pcm, &prompt, &take.settled) {
                                 note(pane, Note::Draft(id, take.with(&text)));
+                                take.drafted(text);
                             }
                         }
                         DRAFTING.store(false, Ordering::Release);
@@ -841,10 +879,10 @@ fn writer() -> &'static Sender<Job> {
                         let text = if pcm.is_empty() {
                             Ok(String::new())
                         } else {
-                            l.transcribe(&pcm, &take.prompt())
+                            l.transcribe_from(&pcm, &take.prompt(), &take.settled)
                         };
                         match text {
-                            Ok(text) => take.said = take.with(&text),
+                            Ok(text) => take.phrase_done(&text),
                             Err(e) => {
                                 takes.remove(&id);
                                 note(pane, Note::Done(Err(e)));
@@ -1066,6 +1104,24 @@ mod tests {
     fn the_tail_starts_at_a_word() {
         assert_eq!(tail("short", 10), "short");
         assert_eq!(tail("one two three four", 9), "…four");
+    }
+
+    #[test]
+    fn two_drafts_settle_the_words_they_share() {
+        assert_eq!(agreed("", "move the panes"), "");
+        assert_eq!(agreed("move the pan", "move the panes to"), "move the");
+        assert_eq!(agreed("move the panes to", "move the panes to the left"), "move the panes to");
+        // The newest last word may be cut off, so it never settles.
+        assert_eq!(agreed("move the", "move the"), "move");
+        let mut take = Take::default();
+        take.drafted("open the".into());
+        take.drafted("open the sett".into());
+        assert_eq!(take.settled, "open the");
+        // A worse draft takes back nothing already settled.
+        take.drafted("often".into());
+        assert_eq!(take.settled, "open the");
+        take.phrase_done("open the settings.");
+        assert_eq!((take.said.as_str(), take.settled.as_str()), ("open the settings.", ""));
     }
 
     #[test]
