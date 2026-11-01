@@ -24,6 +24,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -428,7 +429,7 @@ impl Store {
             let chunk = if hidden.contains(&id) {
                 None
             } else {
-                serde_json::from_slice(line).ok()
+                parse_chunk(line)
             };
             seg.chunks.push(chunk);
             seg.read_to += line.len() as u64 + 1;
@@ -945,7 +946,7 @@ pub fn read_tail(dir: &Path, month: Month, at: Tail) -> io::Result<Option<TailRe
                 month,
                 n: tail.lines,
             };
-            if let Ok(c) = serde_json::from_slice(line) {
+            if let Some(c) = parse_chunk(line) {
                 chunks.push((id, c));
             }
             tail.lines += 1;
@@ -989,12 +990,72 @@ pub fn read_chunks(dir: &Path, ids: &BTreeSet<ChunkId>) -> io::Result<HashMap<Ch
             if !ids.contains(&id) || hidden.contains(&id) {
                 continue;
             }
-            if let Ok(c) = serde_json::from_slice(line) {
+            if let Some(c) = parse_chunk(line) {
                 found.insert(id, c);
             }
         }
     }
     Ok(found)
+}
+
+/// A chunk's line as read, its project moved home if it was a worktree
+/// deleted since ([`home`]).
+fn parse_chunk(line: &[u8]) -> Option<Chunk> {
+    let mut c: Chunk = serde_json::from_slice(line).ok()?;
+    if let Some(key) = home(&c.project) {
+        c.project = key;
+    }
+    Some(c)
+}
+
+/// The project key a chunk kept under `project` belongs to, when that is
+/// another: a transcript's project is the one git names for its folder,
+/// and a worktree deleted before its transcript was read had no git to
+/// ask, so its own folder became the key and its dialogue was found
+/// under no project. Asked of the disk once per key: a store holds
+/// a few hundred.
+pub fn home(project: &str) -> Option<String> {
+    static HOMES: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    let mut homes = HOMES.get_or_init(Default::default).lock().ok()?;
+    homes
+        .entry(project.to_string())
+        .or_insert_with(|| {
+            gone_tree_home(Path::new(project), |p| p.exists()).map(|p| project_key(&p))
+        })
+        .clone()
+}
+
+/// A path as a project key: forward slashes, lower case, no slash at the
+/// end, as the lore spells them.
+fn project_key(p: &Path) -> String {
+    p.to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_lowercase()
+}
+
+/// The main working tree a folder that is gone was a worktree of, by
+/// where worktrees are made: beside the main tree as `<main>.<quest>`
+/// (a quest's), or inside it (`.claude/worktrees/<name>`). The main tree
+/// is the one with a `.git` folder; a linked worktree has a `.git` file.
+/// None for a folder still there, which git answers for, and for one no
+/// tree claims.
+pub fn gone_tree_home(folder: &Path, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    if !folder.is_absolute() || exists(folder) {
+        return None;
+    }
+    let is_main = |p: &Path| exists(&p.join(".git").join("HEAD"));
+    let parent = folder.parent()?;
+    let name = folder.file_name()?.to_string_lossy().into_owned();
+    // The longest first, so `site.web.quest` goes to `site.web` before `site`.
+    for (i, _) in name.match_indices('.').collect::<Vec<_>>().into_iter().rev() {
+        let main = parent.join(&name[..i]);
+        if is_main(&main) {
+            return Some(main);
+        }
+    }
+    let inside = folder.ancestors().skip(1).find(|a| exists(a))?;
+    inside.ancestors().find(|a| is_main(a)).map(Path::to_path_buf)
 }
 
 fn newer(path: &Path) -> io::Error {
@@ -1530,6 +1591,29 @@ mod tests {
         let exact: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
         assert!((dot(&a, &quantize(&b)) - exact).abs() < 0.01);
         assert_eq!(quantize(&[1.0, -1.0, 2.0]), [127, -127, 127]);
+    }
+
+    #[test]
+    fn a_gone_worktree_finds_its_main_tree() {
+        let there = |p: &Path| {
+            let p = p.to_string_lossy().replace('\\', "/");
+            [
+                "c:/g/site/.git/HEAD",
+                "c:/g/site.web/.git/HEAD",
+                "c:/g/site",
+                "c:/g/site.web",
+                "c:/g/site/.claude/worktrees",
+                "c:/g",
+            ]
+            .contains(&p.as_str())
+        };
+        let home = |f: &str| gone_tree_home(Path::new(f), there).map(|p| project_key(&p));
+        assert_eq!(home("c:/g/site.fix-the-tiles"), Some("c:/g/site".into()));
+        assert_eq!(home("c:/g/site.web.new-page"), Some("c:/g/site.web".into()));
+        assert_eq!(home("c:/g/site/.claude/worktrees/x"), Some("c:/g/site".into()));
+        assert_eq!(home("c:/g/site"), None, "a folder still there");
+        assert_eq!(home("c:/g/other.quest"), None, "no tree claims it");
+        assert_eq!(home("p"), None, "not a folder");
     }
 
     #[test]

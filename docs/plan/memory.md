@@ -17,10 +17,6 @@ holds only what is still not done.
 - **The yardstick has no validity questions.** Nothing measures recall
   of replaced notes, `history`, or "what is true now" against "what was
   said then".
-- **A deleted worktree's dialogue keeps its own key.** A transcript's
-  project is the one git names for its folder; a worktree since deleted
-  falls back to its own folder, so its dialogue is not found under the
-  main project.
 - **The model choice may reopen.** EmbeddingGemma beat MiniLM on dialogue
   alone (81.8 % against 72.7 %); its code was removed, so a switch means
   writing it again.

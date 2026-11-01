@@ -398,7 +398,10 @@ impl Projects {
     fn of(&mut self, cwd: &str) -> Option<String> {
         self.0
             .entry(cwd.to_lowercase())
-            .or_insert_with(|| Place::of(Path::new(cwd)).ok().map(|p| p.key().to_string()))
+            .or_insert_with(|| {
+                crate::store::home(cwd)
+                    .or_else(|| Place::of(Path::new(cwd)).ok().map(|p| p.key().to_string()))
+            })
             .clone()
     }
 }
