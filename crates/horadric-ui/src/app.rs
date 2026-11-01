@@ -67,7 +67,7 @@ use horadric_core::{
 };
 use horadric_hooks::listener::{self, Command, KnowCall, Reload, Tagged};
 use horadric_hooks::transcript::{self, Past};
-use horadric_hooks::{install, TASKS_ENV};
+use horadric_hooks::install;
 use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -142,6 +142,7 @@ use crate::{
 #[path = "runner.rs"]
 mod runner;
 pub(crate) use crate::quests::{SessionSpec, Workplace};
+use crate::quests::session_env;
 
 #[path = "drive.rs"]
 mod drive;
@@ -10396,30 +10397,6 @@ struct ClaudeStart {
     /// Its first prompt, sent once: last on a terminal's command line, as
     /// the first message in a Folio.
     prompt: Option<String>,
-}
-
-/// The environment session `id` in `cwd` gets beside its tag, terminal or
-/// Folio: its worktree's ports, and which quest log `horadric quest` works
-/// on.
-fn session_env(id: &str, own_tree: Option<&Worktree>, cwd: &Path) -> Vec<(String, String)> {
-    own_tree
-        .map(|w| {
-            let mut env = w.ports.map(tree::env).unwrap_or_default();
-            // `horadric quest` finds the list in the main tree.
-            env.push((TASKS_ENV.into(), folder_key(&cwd.to_string_lossy())));
-            env
-        })
-        // Empty, so one this Horadric was started with, as a dev instance
-        // from a quest's worktree is, never sends `horadric quest` to
-        // another project's list. Warriv works on its own project's list
-        // from wherever its shell has wandered.
-        .unwrap_or_else(|| {
-            let main = match horadric_core::warriv::is_warriv(id) {
-                true => folder_key(&cwd.to_string_lossy()),
-                false => String::new(),
-            };
-            vec![(TASKS_ENV.into(), main)]
-        })
 }
 
 /// A Claude session's own arguments as a chat takes them: without the

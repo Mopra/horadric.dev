@@ -17,9 +17,15 @@ its own step:
   favicons, history suggestions, downloads, the keys for tabs, and
   `browser_devtools` beyond the calls the tools make. A page's events
   are its own there, not the user's (`isTrusted` is false).
-- **The quest log runner and Warriv.** `runner.rs` and `warriv.rs` sit
-  on the Windows `App`; the Mac needs them behind something both apps
-  give, not a copy.
+- **The quest log's rest.** The runner and Warriv run on the Mac: their
+  logic is `quests/` (`Runner`, `Warriv`), shared, and each app gives a
+  `quests::Host` (lore has how). Quests start in terminals, in worktrees
+  of their own, and land as on Windows. The Mac drives a log from a
+  project's menu, Quest log. Still Windows only: the quests tile (the
+  menu stands in), the quest log window, notifications you can click
+  (the Mac's go to stderr, the Dock and the menu's last five lines),
+  editing a quest's notes, runewords and errands, a quest in a Folio,
+  and a project kept up by its list alone with no session in it.
 - **Switching accounts.** The usage window is on the Mac (limits and
   whose account it is); switching is not. Claude Code keeps a Mac's login
   in the Keychain, not in `.credentials.json`, so the Mac needs its own

@@ -33,6 +33,10 @@ use super::look::Scene;
 use super::menu::{self, Item, Status};
 use super::stage::{self, Pane, Stage};
 use super::{autostart, dialog, path, queue, snapshot, update};
+use crate::quests::Runner as _;
+
+#[path = "questing.rs"]
+mod questing;
 
 /// Between a tile column's windows, and round the edge of the screen.
 const GAP: f32 = 8.0;
@@ -198,6 +202,8 @@ pub struct App {
     /// The account's limits as last heard from a session's status line,
     /// or from a brother's.
     pub(super) usage: Arc<Mutex<Option<horadric_core::Usage>>>,
+    /// The quest logs, their runner and Warriv.
+    quests: questing::Quests,
 }
 
 /// A file shown read only on the stage, a pane with no program behind it
@@ -292,6 +298,7 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
         rich: None,
         run: Default::default(),
         views: HashMap::new(),
+        quests: questing::Quests::new(&saved),
         files: super::files::Files {
             folded: (saved.clusters.iter())
                 .filter(|c| c.files_collapsed)
@@ -867,12 +874,16 @@ impl App {
             })?,
             Run::Shell => console::shell_program().ok_or("no shell found (set HORADRIC_SHELL)")?,
         };
-        self.remember(&cwd);
+        let fresh = self.quests.take_tree(id);
+        if fresh.is_none() {
+            self.remember(&cwd);
+        }
         let register = HookEvent {
             cwd: cwd.to_string_lossy().to_string(),
             name: Some(name.to_string()),
             ..HookEvent::synthetic(HookEvent::REGISTER)
         };
+        let mut own_tree = None;
         let was_known = self
             .registry
             .lock()
@@ -881,11 +892,19 @@ impl App {
                 r.apply(id, &register, SystemTime::now());
                 if let Some(s) = r.get_mut(id) {
                     s.shell = shell;
+                    if let Some((w, _)) = &fresh {
+                        s.worktree = Some(w.clone());
+                    }
+                    own_tree = s.worktree.clone();
                 }
                 known
             })
             .unwrap_or(false);
-        let extra = self.extra_args(&program, &args);
+        let extra = match shell {
+            true => Vec::new(),
+            false => self.claude_extra(id, &program, &args, &cwd),
+        };
+        let env = crate::quests::session_env(id, own_tree.as_ref(), &cwd);
         let serial = self.next_serial;
         self.next_serial += 1;
         let console = Console::spawn(
@@ -897,8 +916,8 @@ impl App {
                 extra,
                 cwd,
                 shell,
-                env: vec![(TASKS_ENV.into(), String::new())],
-                setup: Vec::new(),
+                env,
+                setup: fresh.map(|(_, setup)| setup).unwrap_or_default(),
             },
             super::Notify,
         )
@@ -910,8 +929,8 @@ impl App {
                         &HookEvent::synthetic(HookEvent::PAUSE),
                         SystemTime::now(),
                     );
-                } else {
-                    r.remove(id);
+                } else if let Some(w) = r.remove(id).and_then(|s| s.worktree) {
+                    crate::worktree::remove(w);
                 }
             }
             format!("could not start the agent: {e}")
@@ -919,23 +938,6 @@ impl App {
         self.consoles.insert(id.to_string(), console);
         self.reconcile();
         Ok(())
-    }
-
-    /// Horadric's status line for Claude Code, unless the session brought
-    /// settings of its own, and the browser pane's tools either way.
-    fn extra_args(&self, program: &Path, args: &[String]) -> Vec<String> {
-        if !console::is_claude(program) {
-            return Vec::new();
-        }
-        if args.iter().any(|a| a == "--settings") {
-            return super::web::claude_args();
-        }
-        let mut extra = self.defaults.flags(args);
-        if let Some(path) = &self.status_settings {
-            extra.extend(["--settings".into(), path.to_string_lossy().into_owned()]);
-        }
-        extra.extend(super::web::claude_args());
-        extra
     }
 
     /// Resumes a paused session in the same tile, with its conversation.
@@ -1091,8 +1093,11 @@ impl App {
             }
         }
         self.paused.remove(id);
-        if let Ok(mut r) = self.registry.lock() {
-            r.remove(id);
+        let own_tree = (self.registry.lock().ok())
+            .and_then(|mut r| r.remove(id))
+            .and_then(|s| Some((project_key(&s), s.worktree?)));
+        if let Some((key, w)) = own_tree {
+            self.remove_tree(key, w);
         }
     }
 
@@ -1543,6 +1548,7 @@ impl App {
             Item::pick("Open file\u{2026}", OPEN_FILE),
             Item::pick("Open browser", BROWSER),
             Item::pick("Show in Finder", REVEAL),
+            Item::Sub("Quest log".into(), self.quest_items(key)),
             Item::Separator,
             Item::pick("End every session in this project", END_ALL),
         ];
@@ -1553,6 +1559,7 @@ impl App {
                 }
             }
             Some(SHELL) => self.open_shell(key),
+            Some(t) if t >= questing::QUEST_TAG => self.quest_pick(key, t),
             Some(OPEN_FILE) => self.pick_file(key),
             Some(BROWSER) => super::web::open_for_user(self, key),
             Some(REVEAL) => {
@@ -1986,9 +1993,10 @@ impl App {
                     let _ = super::handing::recall(call);
                 }
                 Command::Browser(call) => super::web::call(self, call),
-                // The quest log and overlaps are not on the Mac yet; a
-                // Know call is dropped as a Recall is.
-                Command::Tasks(_) | Command::Overlap(_) | Command::Know(_) => {}
+                Command::Tasks(t) => self.quest_command(&t),
+                // Overlaps are not on the Mac yet; a Know call is dropped
+                // as a Recall is.
+                Command::Overlap(_) | Command::Know(_) => {}
             }
         }
     }
@@ -2044,6 +2052,7 @@ impl App {
             }
         }
         self.reload_views();
+        self.tick_quests();
         super::usage::refresh(&self.usage_values());
         self.update.tick();
         super::brothers::refresh(self);
@@ -2110,7 +2119,7 @@ impl App {
             frame.size.width as i32,
             frame.size.height as i32,
         ];
-        SavedState {
+        let mut saved = SavedState {
             clusters: self
                 .clusters
                 .iter()
@@ -2136,7 +2145,9 @@ impl App {
             defaults: self.defaults.clone(),
             usage: self.usage.lock().ok().and_then(|u| u.clone()),
             ..Default::default()
-        }
+        };
+        self.quests.keep(&mut saved);
+        saved
     }
 
     fn save(&mut self) {

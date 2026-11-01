@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use horadric_core::warriv::Drive;
+use horadric_core::worktree::Worktree;
 use horadric_core::{Registry, Usage};
 
 use crate::board::{Board, Ink};
@@ -216,4 +217,38 @@ impl SessionSpec {
             quiet: false,
         }
     }
+}
+
+/// The environment session `id` in `cwd` gets beside its tag, terminal or
+/// Folio: its worktree's ports, and which quest log `horadric quest` works
+/// on.
+pub(crate) fn session_env(
+    id: &str,
+    own_tree: Option<&Worktree>,
+    cwd: &Path,
+) -> Vec<(String, String)> {
+    own_tree
+        .map(|w| {
+            let mut env = w
+                .ports
+                .map(horadric_core::worktree::env)
+                .unwrap_or_default();
+            // `horadric quest` finds the list in the main tree.
+            env.push((
+                horadric_hooks::TASKS_ENV.into(),
+                crate::project::folder_key(&cwd.to_string_lossy()),
+            ));
+            env
+        })
+        // Empty, so one this Horadric was started with, as a dev instance
+        // from a quest's worktree is, never sends `horadric quest` to
+        // another project's list. Warriv works on its own project's list
+        // from wherever its shell has wandered.
+        .unwrap_or_else(|| {
+            let main = match horadric_core::warriv::is_warriv(id) {
+                true => crate::project::folder_key(&cwd.to_string_lossy()),
+                false => String::new(),
+            };
+            vec![(horadric_hooks::TASKS_ENV.into(), main)]
+        })
 }
