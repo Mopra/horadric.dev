@@ -4,14 +4,20 @@ The Mac's core loop shipped in 0.17.0 (tiles, stage, hosts, resume,
 menu bar, install, updater). What is still not built on the Mac, each
 its own step:
 
-- **The Folio.** New Claude sessions on Windows open as a Folio; the
-  Mac still starts every session in a terminal.
+- **The rest of the Folio.** New Claude sessions open as a Folio on the
+  Mac too, in AppKit text views (lore has how). Still Windows only:
+  slash commands, images, `!` commands, review, the sign in card, MCP
+  forms, undo, handing over to a terminal, and a smoke step with a fake
+  headless claude so CI sees one.
 - **The browser pane**, as a `WKWebView` (WebView2's counterpart).
-- **The quest log runner and Warriv.**
-- **The files tile and the file viewer.**
+- **The quest log runner and Warriv.** `runner.rs` and `warriv.rs` sit
+  on the Windows `App`; the Mac needs them behind something both apps
+  give, not a copy.
+- **The files tile.** The viewer is on the Mac (a project's menu, Open
+  file); the tile that lists a project's changed files is not.
 - **The usage window and accounts.**
-- **Discord.**
-- **The Settings window.**
+- **The Settings window.** The Mac's few settings are in its menu bar
+  menu meanwhile.
 
 The Mac release notes and the site say these are missing, rather than
 showing features that do nothing. Keep saying so until each lands.
