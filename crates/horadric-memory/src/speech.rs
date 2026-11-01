@@ -20,6 +20,8 @@ use tokenizers::Tokenizer;
 use crate::models::{self, File, Pinned};
 
 mod decoder;
+pub mod tidy;
+pub mod words;
 use decoder::Decoder;
 
 pub const MODEL: Pinned = Pinned {

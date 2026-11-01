@@ -68,6 +68,7 @@ pub enum Section {
     Sessions,
     Projects,
     Keys,
+    Dictation,
     Memory,
     Backup,
     About,
@@ -75,12 +76,13 @@ pub enum Section {
 
 impl Section {
     /// Most used first, About last, as Windows' own Settings has it.
-    pub const ALL: [Section; 8] = [
+    pub const ALL: [Section; 9] = [
         Section::General,
         Section::Appearance,
         Section::Sessions,
         Section::Projects,
         Section::Keys,
+        Section::Dictation,
         Section::Memory,
         Section::Backup,
         Section::About,
@@ -93,6 +95,7 @@ impl Section {
             Section::Sessions => "Sessions",
             Section::Projects => "Projects",
             Section::Keys => "Keys",
+            Section::Dictation => "Dictation",
             Section::Memory => "Memory",
             Section::Backup => "Backup",
             Section::About => "About",
@@ -115,6 +118,10 @@ pub enum Field {
     Sounds,
     /// What Ctrl+Space dictation listens to.
     Microphone,
+    /// Opens the words dictation should know.
+    DictationWords,
+    /// Whether Haiku tidies what was dictated.
+    TidyDictation,
     /// A default for the sessions Horadric starts, the same value the
     /// usage window's rows show.
     Default(Setting),
@@ -176,7 +183,9 @@ impl Field {
             Field::Animations => "Runes, breathing lights and moving tiles",
             Field::Notify => "A Windows notification when a session needs you",
             Field::Sounds => "A soft sound when a turn finishes or work lands",
-            Field::Microphone => "What Ctrl+Space dictation listens to",
+            Field::Microphone => "What dictation listens to",
+            Field::DictationWords => "Names it mishears, and what you meant",
+            Field::TidyDictation => "Haiku drops the ums and carries out \"scratch that\"",
             Field::Default(Setting::Model) => "The model new sessions start on",
             Field::Default(Setting::Effort) => "How long new sessions think before they answer",
             Field::Default(Setting::Permissions) => "What new sessions may do without asking",
@@ -270,6 +279,8 @@ pub struct Values {
     pub sounds: bool,
     /// The microphone dictation listens to, by name.
     pub microphone: String,
+    /// Haiku tidies what was dictated before it is typed.
+    pub tidy: bool,
     /// Tristram's tile shows.
     pub town: bool,
     pub animations: bool,
@@ -452,17 +463,24 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                 line(Field::Notify, "Notify when a session waits", notify, n),
                 line(Field::Sounds, "Loot sounds", sounds, s),
                 line(
-                    Field::Microphone,
-                    "Microphone",
-                    &v.microphone,
-                    Control::List,
-                ),
-                line(
                     Field::Discord,
                     "Show on Discord",
                     v.discord.label(),
                     Control::List,
                 ),
+            ]
+        }
+        Section::Dictation => {
+            let (tidy, t) = switch(v.tidy);
+            vec![
+                line(
+                    Field::Microphone,
+                    "Microphone",
+                    &v.microphone,
+                    Control::List,
+                ),
+                line(Field::DictationWords, "Words it should know", "Edit", Control::Button),
+                line(Field::TidyDictation, "Tidy with Haiku", tidy, t),
             ]
         }
         Section::Sessions => {
@@ -1531,6 +1549,7 @@ mod tests {
             notify: true,
             sounds: false,
             microphone: "Windows default".into(),
+            tidy: false,
             town: true,
             animations: true,
             defaults: Defaults {
@@ -1631,8 +1650,15 @@ mod tests {
                 Field::Explorer,
                 Field::Notify,
                 Field::Sounds,
-                Field::Microphone,
                 Field::Discord
+            ]
+        );
+        assert_eq!(
+            fields(Section::Dictation, &v),
+            [
+                Field::Microphone,
+                Field::DictationWords,
+                Field::TidyDictation
             ]
         );
         assert_eq!(fields(Section::About, &v), [Field::Version, Field::Updates]);
@@ -1780,7 +1806,7 @@ mod tests {
         assert_eq!(n[2].control, Control::Switch(true));
         assert_eq!(n[2].value, "On");
         assert_eq!(n[3].control, Control::Switch(false));
-        assert_eq!(n[5].value, "Without project names");
+        assert_eq!(n[4].value, "Without project names");
     }
 
     #[test]

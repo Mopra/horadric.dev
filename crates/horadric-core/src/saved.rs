@@ -127,6 +127,9 @@ pub struct SavedState {
     /// Settings. None is Windows' default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub microphone: Option<String>,
+    /// Dictation is tidied by Haiku before it is typed, from Settings.
+    #[serde(default)]
+    pub dictation_tidy: bool,
     /// Tristram's tile is hidden, from its header menu or the Settings
     /// window. It shows again while a session runs in the town.
     #[serde(default)]

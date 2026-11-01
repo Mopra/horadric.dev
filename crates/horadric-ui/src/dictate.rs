@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use horadric_memory::speech::{self, Listener};
+use horadric_memory::speech::{self, words::Words, Listener};
 use windows::core::{GUID, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, PROPERTYKEY, WPARAM};
 use windows::Win32::Media::Audio::{
@@ -135,6 +135,14 @@ const READY: &str = "Dictation is ready. Press Ctrl+Space and talk.";
 
 const TO_STOP: &str = "Listening. Ctrl+Space to stop, Esc to drop it.";
 
+/// Whether what was said is tidied by Haiku before it is typed
+/// ([`speech::tidy`]), from Settings. Off at first: the words leave the
+/// machine for it.
+static TIDY: AtomicBool = AtomicBool::new(false);
+
+/// Tidying waits this long for Haiku before the words go in as said.
+const TIDY_LONGEST: Duration = Duration::from_secs(12);
+
 /// The microphone picked in Settings, by its endpoint id. None, or one
 /// unplugged since, is the one Windows records from by default.
 static MIC: Mutex<Option<String>> = Mutex::new(None);
@@ -181,8 +189,14 @@ enum Job {
     /// Fetch and load the model, nothing to write yet.
     Prepare(isize),
     /// A dictation began: load the model while the human talks, and keep
-    /// the names its speech may use.
-    Begin { id: u64, pane: isize, hints: String },
+    /// the names its speech may use. `project` is the project folder's
+    /// name, for the words only it should know.
+    Begin {
+        id: u64,
+        pane: isize,
+        hints: String,
+        project: Option<String>,
+    },
     /// The phrase being spoken so far, written for the draft.
     Draft { id: u64, pane: isize, pcm: Vec<f32> },
     /// A phrase that ended, written for good. The last one finishes the
@@ -221,11 +235,96 @@ fn models() -> Option<PathBuf> {
     Some(horadric_hooks::state_dir()?.join("models"))
 }
 
+/// The human's list of words dictation should know ([`speech::words`]),
+/// read again at each dictation so an edit counts from the next.
+pub fn words_file() -> Option<PathBuf> {
+    Some(horadric_hooks::state_dir()?.join("dictation-words.txt"))
+}
+
+/// Opens the list of words in the human's editor for text, made with its
+/// explaining header first if there is none yet.
+pub fn edit_words() {
+    let Some(path) = words_file() else { return };
+    if !path.exists() {
+        let _ = std::fs::write(&path, speech::words::HEADER);
+    }
+    unsafe {
+        windows::Win32::UI::Shell::ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            &HSTRING::from(path.as_os_str()),
+            None,
+            None,
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        );
+    }
+}
+
 /// A recording device plugged in now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Microphone {
     pub id: String,
     pub name: String,
+}
+
+/// Whether dictation is tidied by Haiku before it is typed.
+pub fn tidies() -> bool {
+    TIDY.load(Ordering::Relaxed)
+}
+
+pub fn use_tidy(on: bool) {
+    TIDY.store(on, Ordering::Relaxed);
+}
+
+/// `raw` tidied by Haiku through the human's own `claude`, run with no
+/// tools, hooks, MCP servers or saved session, so it is no session of
+/// theirs. None when it cannot be asked, is too slow, or answers with
+/// something that is not `raw` tidied.
+fn tidy(raw: &str) -> Option<String> {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
+    let mut c = std::process::Command::new(horadric_pty::headless::claude_exe()?);
+    c.arg("-p")
+        .arg(speech::tidy::prompt(raw))
+        .args(["--model", speech::tidy::MODEL, "--tools", "", "--strict-mcp-config"])
+        .arg("--no-session-persistence")
+        .args(["--settings", r#"{"disableAllHooks":true}"#])
+        .args(["--system-prompt", speech::tidy::SYSTEM])
+        .current_dir(std::env::temp_dir())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+    for k in horadric_pty::headless::ENV_REMOVE {
+        c.env_remove(k);
+    }
+    for (k, _) in std::env::vars() {
+        if k.starts_with("HORADRIC_") {
+            c.env_remove(k);
+        }
+    }
+    let mut child = c.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stdout.read_to_string(&mut s);
+        s
+    });
+    let began = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(None) if began.elapsed() < TIDY_LONGEST => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    speech::tidy::tidied(raw, &reader.join().ok()?)
 }
 
 /// Dictation listens to the microphone `id` from now on, None for
@@ -323,7 +422,10 @@ pub fn press(pane: HWND, dir: Option<&Path>, before: &str) {
                 AFTER.with(|f| f.borrow_mut().take());
                 let here = models().is_some_and(|m| speech::is_fetched(&m));
                 *n = Some(if here {
-                    start(pane.0 as isize, hints(dir, before))
+                    let project = dir
+                        .and_then(|d| d.file_name())
+                        .map(|n| n.to_string_lossy().into_owned());
+                    start(pane.0 as isize, hints(dir, before), project)
                 } else {
                     prepare(pane.0 as isize)
                 });
@@ -559,13 +661,18 @@ fn branch(dir: &Path) -> Option<String> {
     Some(name.replace(['-', '_', '/'], " "))
 }
 
-fn start(pane: isize, hints: String) -> Now {
+fn start(pane: isize, hints: String, project: Option<String>) -> Now {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let stop = Arc::new(AtomicBool::new(false));
     let keep = Arc::new(AtomicBool::new(true));
     let (s, k) = (stop.clone(), keep.clone());
     LEVEL.store(0, Ordering::Relaxed);
-    let _ = writer().send(Job::Begin { id, pane, hints });
+    let _ = writer().send(Job::Begin {
+        id,
+        pane,
+        hints,
+        project,
+    });
     thread::spawn(move || listen(id, pane, &s, &k));
     Now {
         pane,
@@ -765,11 +872,11 @@ impl Ear {
             None
         } else if self.peak < NO_SOUND {
             Some(format!(
-                "No sound came from {mic}. Pick your microphone in Settings, under General."
+                "No sound came from {mic}. Pick your microphone in Settings, under Dictation."
             ))
         } else {
             Some(format!(
-                "Heard no speech from {mic}. Speak closer, or pick another microphone in Settings, under General."
+                "Heard no speech from {mic}. Speak closer, or pick another microphone in Settings, under Dictation."
             ))
         }
     }
@@ -798,6 +905,9 @@ struct Take {
     /// start two drafts in a row agreed on, which no later draft changes.
     draft: String,
     settled: String,
+    /// The human's fixes, made on what is shown and typed but not on what
+    /// Whisper is told, which is its own spelling.
+    words: Words,
 }
 
 impl Take {
@@ -875,11 +985,18 @@ fn writer() -> &'static Sender<Job> {
                         continue;
                     }
                 };
-                if let Job::Begin { id, hints, .. } = &job {
+                if let Job::Begin {
+                    id, hints, project, ..
+                } = &job
+                {
+                    let words = words_file()
+                        .map(|f| Words::load(&f, project.as_deref()))
+                        .unwrap_or_default();
                     takes.insert(
                         *id,
                         Take {
                             hints: hints.clone(),
+                            words,
                             ..Take::default()
                         },
                     );
@@ -905,7 +1022,7 @@ fn writer() -> &'static Sender<Job> {
                         if let Some(take) = takes.get_mut(&id) {
                             let prompt = take.prompt();
                             if let Ok(text) = l.transcribe_from(&pcm, &prompt, &take.settled) {
-                                note(pane, Note::Draft(id, take.with(&text)));
+                                note(pane, Note::Draft(id, take.words.apply(&take.with(&text))));
                                 take.drafted(text);
                             }
                         }
@@ -929,20 +1046,31 @@ fn writer() -> &'static Sender<Job> {
                             }
                         }
                         match last {
-                            None => note(pane, Note::Draft(id, take.said.clone())),
+                            None => note(pane, Note::Draft(id, take.words.apply(&take.said))),
                             Some(why) => {
-                                let said = takes.remove(&id).map(|t| t.said).unwrap_or_default();
-                                note(
-                                    pane,
-                                    Note::Done(match (said.is_empty(), why) {
-                                        (false, _) => Ok(said),
-                                        (true, Some(why)) => Err(why),
-                                        (true, None) => Err(
-                                            "Heard no words. Speak closer to the microphone, or pick another in Settings, under General."
+                                let take = takes.remove(&id).unwrap_or_default();
+                                let said = take.words.apply(&take.said);
+                                match (said.is_empty(), why) {
+                                    (false, _) if tidies() => {
+                                        // Haiku takes seconds, and the next
+                                        // dictation should not wait on it.
+                                        thread::spawn(move || {
+                                            let tidied = tidy(&said)
+                                                .map(|t| take.words.apply(&t))
+                                                .unwrap_or(said);
+                                            note(pane, Note::Done(Ok(tidied)));
+                                        });
+                                    }
+                                    (false, _) => note(pane, Note::Done(Ok(said))),
+                                    (true, Some(why)) => note(pane, Note::Done(Err(why))),
+                                    (true, None) => note(
+                                        pane,
+                                        Note::Done(Err(
+                                            "Heard no words. Speak closer to the microphone, or pick another in Settings, under Dictation."
                                                 .to_string(),
-                                        ),
-                                    }),
-                                );
+                                        )),
+                                    ),
+                                }
                             }
                         }
                     }

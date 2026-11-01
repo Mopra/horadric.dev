@@ -920,6 +920,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     town::make();
     crate::backdrop::set_still(saved.still);
     crate::dictate::use_microphone(saved.microphone.clone());
+    crate::dictate::use_tidy(saved.dictation_tidy);
     let usage_window = match UsageWindow::create(
         Rc::clone(&shared),
         saved.usage_window.as_ref().is_some_and(|p| p.collapsed),
@@ -5974,6 +5975,7 @@ impl App {
             notify: !self.quiet,
             sounds: self.sounds,
             microphone: self.microphone_name(),
+            tidy: crate::dictate::tidies(),
             town: !self.town_hidden,
             animations: !self.still,
             switch_accounts: self.switch_accounts,
@@ -6630,6 +6632,11 @@ impl App {
             }
             Field::TerminalSessions => {
                 self.chat_sessions = !self.chat_sessions;
+                self.save();
+            }
+            Field::DictationWords => crate::dictate::edit_words(),
+            Field::TidyDictation => {
+                crate::dictate::use_tidy(!crate::dictate::tidies());
                 self.save();
             }
             Field::Sounds => {
@@ -8844,6 +8851,7 @@ impl App {
             quiet: self.quiet,
             sounds: self.sounds,
             microphone: self.microphone.clone(),
+            dictation_tidy: crate::dictate::tidies(),
             town_hidden: self.town_hidden,
             still: self.still,
             switch_accounts: self.switch_accounts,
