@@ -5,20 +5,13 @@ the phone sees every brother and every session, as tabs. Built on
 2026-11-01: pairing v3 with the phone's key pair and derived keys,
 vouching on pair, forgetting by signed word, a Linux node serving vouched
 phones, the `brothers` list, the upgrade, the typing switch, the page's
-socket per brother, and the Town Portal key as the menu of brothers and
-phones with "Forget everywhere". The protocol is in PORTAL.md, "Pairing
+socket per brother, the Town Portal key as the menu of brothers and
+phones with "Forget everywhere", and push for every brother's waiting
+sessions from the PC holding the phone's subscription. The protocol is in PORTAL.md, "Pairing
 v3"; the decisions and traps are in the lore.
 
 ## Left
 
-- **Push for every brother's sessions.** A browser holds one push
-  subscription, so only the brother the phone paired with pushes. It
-  should push for a waiting session on any brother, as it sees them on
-  its stage, naming the brother when there is more than one. Today
-  `portal_waiting` and `portal_push_payload` in `portaling.rs` take only
-  this PC's own sessions, and the push's tap opens a session by this PC's
-  id, where a brother's session needs its owner's relay id and its own
-  id there.
 - **The tray's Other PCs.** The Town Portal key's menu now holds the
   brothers too; the tray still has its own Other PCs submenu, kept since
   it also holds signing in, Linux nodes and keeping. Whether to trim it
