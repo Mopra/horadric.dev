@@ -20,6 +20,7 @@
 
 pub mod afar;
 pub mod backlog;
+pub mod compaction;
 mod edits;
 mod launch;
 mod map;
