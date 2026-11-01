@@ -130,6 +130,7 @@ const NEXT_WAITING: usize = 12;
 /// Claude in a terminal, where New Session opens a Folio.
 const NEW_CLI_SESSION: usize = 13;
 const THEME_TAG: usize = 50;
+const DISCORD_TAG: usize = 60;
 const RECENT_TAG: usize = 100;
 
 /// How a console is started.
@@ -171,6 +172,11 @@ pub struct App {
     folio_args: HashMap<String, Vec<String>>,
     /// Folios reattached whose replay has not said where they stand yet.
     resync: HashSet<String>,
+    /// "Show on Discord", the client while it is on, and the run of work
+    /// the profile counts up from.
+    discord: horadric_core::saved::Discord,
+    rich: Option<crate::discord::Discord>,
+    run: horadric_core::presence::Run,
 }
 
 /// Runs the app until it quits.
@@ -252,6 +258,9 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
         kin: super::brothers::Kin::default(),
         folio_args: HashMap::new(),
         resync: HashSet::new(),
+        discord: saved.discord,
+        rich: None,
+        run: Default::default(),
     };
     app.attach_hosts();
     app.reattach_folios();
@@ -1117,6 +1126,7 @@ impl App {
         self.place_clusters();
         self.sync_stage(&sessions);
         self.attention(&sessions);
+        self.sync_discord(&sessions);
         self.menus();
         self.save();
     }
@@ -1142,6 +1152,37 @@ impl App {
         };
         app.dockTile().setBadgeLabel(badge.as_deref());
         self.waiting = waiting;
+    }
+
+    /// Hands the Discord client what the profile should say now; it drops
+    /// what did not change, and only ever takes it on a channel, so a hung
+    /// Discord never holds the app.
+    fn sync_discord(&mut self, sessions: &[horadric_core::Session]) {
+        if self.discord.is_off() || self.frozen {
+            // Dropped, not stopped: the client clears and closes on its
+            // own thread.
+            self.rich = None;
+            self.run = Default::default();
+            return;
+        }
+        let stage = self
+            .stage
+            .key()
+            .filter(|_| self.stage.is_visible())
+            .map(|k| project_name(&k));
+        let named: Vec<(&horadric_core::Session, String)> = sessions
+            .iter()
+            .map(|s| (s, project_name(&project_key(s))))
+            .collect();
+        let seen: Vec<horadric_core::presence::Seen> = named
+            .iter()
+            .map(|(session, project)| horadric_core::presence::Seen { session, project })
+            .collect();
+        let start = self.run.update(&seen, SystemTime::now());
+        let activity = horadric_core::presence::presence(&seen, stage.as_deref(), self.discord, start);
+        self.rich
+            .get_or_insert_with(crate::discord::Discord::start)
+            .set(activity);
     }
 
     fn redraw_clusters(&mut self) {
@@ -1525,6 +1566,12 @@ impl App {
             .map(|(i, t)| Item::checked(t.label(), THEME_TAG + i, theme::current() == *t))
             .collect();
         items.push(Item::Sub("Theme".into(), themes));
+        let discord: Vec<Item> = horadric_core::saved::Discord::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, d)| Item::checked(d.label(), DISCORD_TAG + i, self.discord == *d))
+            .collect();
+        items.push(Item::Sub("Show on Discord".into(), discord));
         items.push(Item::checked("Open at Login", LOGIN, autostart::enabled()));
         match self.update.offer() {
             Some(v) => items.push(Item::pick(format!("Update to {v}\u{2026}"), INSTALL_UPDATE)),
@@ -1602,6 +1649,13 @@ impl App {
                 self.reconcile();
                 self.stage.refresh(|_| {});
                 self.menus();
+            }
+            t if (DISCORD_TAG..DISCORD_TAG + horadric_core::saved::Discord::ALL.len())
+                .contains(&t) =>
+            {
+                self.discord = horadric_core::saved::Discord::ALL[t - DISCORD_TAG];
+                // Reconciles, which hands the client the new setting.
+                self.reconcile();
             }
             CHECK_UPDATE => self.update.check(true),
             INSTALL_UPDATE => self.install_update(),
@@ -1701,6 +1755,13 @@ impl App {
                 c.redraw();
             }
             self.save();
+            // A run of work on the profile ends on time.
+            if !self.discord.is_off() {
+                let sessions: Vec<horadric_core::Session> = (self.registry.lock())
+                    .map(|r| r.all().cloned().collect())
+                    .unwrap_or_default();
+                self.sync_discord(&sessions);
+            }
         }
         self.update.tick();
         super::brothers::refresh(self);
@@ -1789,6 +1850,7 @@ impl App {
             accents: theme::accents(),
             live: !self.quit,
             update_told: self.update.told(),
+            discord: self.discord,
             ..Default::default()
         }
     }

@@ -8,6 +8,9 @@
 //! Discord being closed is the normal case, not an error: the pipes are
 //! tried again every [`RETRY`] while there is something to show, and
 //! nothing is said about it.
+//!
+//! Windows speaks to Discord on a named pipe, a Mac on a Unix socket in
+//! the temporary folder; the frames are the same.
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -17,6 +20,7 @@ use std::time::{Duration, Instant};
 use horadric_core::discord::{
     close, decode, handshake, pong, set_activity, Activity, Frame, Op, Pace, CLIENT_ID, RETRY,
 };
+#[cfg(windows)]
 use horadric_pty::pipe::Pipe;
 
 /// Discord answers the handshake at once. A pipe that has not by then is
@@ -82,6 +86,56 @@ impl Drop for Discord {
     fn drop(&mut self) {
         let _ = self.tx.send(Msg::Stop);
     }
+}
+
+/// Discord's socket on a Mac, with the calls the client makes of the pipe
+/// on Windows.
+#[cfg(unix)]
+struct Pipe(std::os::unix::net::UnixStream);
+
+#[cfg(unix)]
+impl Pipe {
+    fn connect(path: &str) -> std::io::Result<Pipe> {
+        std::os::unix::net::UnixStream::connect(path).map(Pipe)
+    }
+
+    fn read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(&mut &self.0, buf)
+    }
+
+    fn write_all(&self, bytes: &[u8]) -> std::io::Result<()> {
+        std::io::Write::write_all(&mut &self.0, bytes)
+    }
+}
+
+/// Where Discord listens as its `n`th instance.
+#[cfg(windows)]
+fn places(n: u64) -> Vec<String> {
+    vec![format!(r"\\.\pipe\discord-ipc-{n}")]
+}
+
+#[cfg(unix)]
+fn places(n: u64) -> Vec<String> {
+    socket_places(n, |name| std::env::var(name).ok())
+}
+
+/// Where Discord's socket may be on a Mac or Linux: in the first of these
+/// folders it found set, which for a Mac app is `TMPDIR`, a folder of the
+/// user's own, so every one is tried before `/tmp`.
+#[cfg_attr(windows, allow(dead_code))]
+fn socket_places(n: u64, var: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let dirs = ["XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"]
+        .iter()
+        .filter_map(|v| var(v).filter(|d| !d.is_empty()))
+        .chain(std::iter::once("/tmp".to_string()));
+    for dir in dirs {
+        let path = format!("{}/discord-ipc-{n}", dir.trim_end_matches('/'));
+        if !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out
 }
 
 struct Conn {
@@ -220,7 +274,7 @@ fn earliest(a: Option<Instant>, b: Instant) -> Option<Instant> {
 /// reading its answers. `None` when Discord is not running.
 fn connect(client_id: &str, number: u64, tx: &Sender<Msg>) -> Option<Conn> {
     for n in 0..10 {
-        let Ok(pipe) = Pipe::connect(&format!(r"\\.\pipe\discord-ipc-{n}")) else {
+        let Some(pipe) = places(n).iter().find_map(|p| Pipe::connect(p).ok()) else {
             continue;
         };
         if pipe.write_all(&handshake(client_id)).is_err() {
@@ -276,5 +330,24 @@ fn read(pipe: &Pipe, number: u64, tx: &Sender<Msg>) {
 fn debug(line: &str) {
     if std::env::var_os("HORADRIC_DEBUG").is_some() {
         eprintln!("{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_socket_is_looked_for_in_each_temporary_folder_then_tmp() {
+        let var = |name: &str| match name {
+            "TMPDIR" => Some("/var/folders/xy/T/".to_string()),
+            "TMP" => Some(String::new()),
+            _ => None,
+        };
+        assert_eq!(
+            socket_places(2, var),
+            ["/var/folders/xy/T/discord-ipc-2", "/tmp/discord-ipc-2"]
+        );
+        assert_eq!(socket_places(0, |_| Some("/tmp".into())), ["/tmp/discord-ipc-0"]);
     }
 }

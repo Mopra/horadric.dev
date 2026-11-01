@@ -128,7 +128,7 @@ pub mod credential;
 mod dialog;
 #[cfg(windows)]
 mod dictate;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub mod discord;
 #[cfg(windows)]
 pub use dialog::error_alone;
