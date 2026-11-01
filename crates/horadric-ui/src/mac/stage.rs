@@ -648,8 +648,16 @@ impl StageView {
                 app::input(Input::Focused(id));
             }
         }
-        if let Some(w) = self.window() {
-            w.makeFirstResponder(Some(self));
+        let folio = (self.ivars().panes.borrow().get(i))
+            .filter(|p| p.console.folio.is_some())
+            .map(|p| p.id.clone());
+        match (folio, self.window()) {
+            // Its composer takes the keys, not the stage.
+            (Some(id), _) => super::folio::focus(&id),
+            (None, Some(w)) => {
+                w.makeFirstResponder(Some(self));
+            }
+            (None, None) => {}
         }
         self.setNeedsDisplay(true);
     }
@@ -684,8 +692,17 @@ impl StageView {
                 p.rect = Rect::new(l as f32, t as f32, (r - l) as f32, (bt - t) as f32);
             }
         }
+        // A Folio's chat is a view of its own over the glass.
+        let folios: Vec<(String, Rect)> = panes
+            .iter()
+            .filter(|p| p.rect.w > 0.0 && p.console.folio.is_some())
+            .map(|p| (p.id.clone(), p.grid_rect()))
+            .collect();
         let font = self.ivars().font.borrow();
-        for p in panes.iter().filter(|p| p.rect.w > 0.0) {
+        for p in panes
+            .iter()
+            .filter(|p| p.rect.w > 0.0 && p.console.folio.is_none())
+        {
             let g = p.grid_rect();
             let size = GridSize {
                 cols: ((g.w / font.cell_w).floor() as u16).max(2),
@@ -697,6 +714,7 @@ impl StageView {
         }
         drop(font);
         drop(panes);
+        super::folio::place(self, &folios);
         self.setNeedsDisplay(true);
     }
 
@@ -760,18 +778,25 @@ impl StageView {
 
     fn paint_pane(&self, p: &Painter, font: &TermFont, pane: &Pane, focused: bool) {
         let r = pane.rect;
-        if let Some(wait) = pane.console.flush_sync() {
+        let folio = pane.console.folio.is_some();
+        if let Some(wait) = pane.console.flush_sync().filter(|_| !folio) {
             let me = self.retain();
             super::queue::after_main(wait, move || me.setNeedsDisplay(true));
         }
-        let built = pane.console.screen.lock().ok().map(|s| {
-            let frame = frame::build(&s.term, focused, true, |c, style| font.glyph(c, style));
-            (frame, frame::cursor_cell(&s.term))
-        });
-        let Some((frame, cursor)) = built else {
-            return;
+        // A Folio has no grid: its chat is a view of its own on the glass.
+        let built = match folio {
+            true => None,
+            false => pane.console.screen.lock().ok().map(|s| {
+                let frame = frame::build(&s.term, focused, true, |c, style| font.glyph(c, style));
+                (frame, frame::cursor_cell(&s.term))
+            }),
         };
-        let bg = rgb(frame.background);
+        if built.is_none() && !folio {
+            return;
+        }
+        let bg = built
+            .as_ref()
+            .map_or_else(theme::screen, |(f, _)| rgb(f.background));
         p.fill_rounded(&r, RADIUS, bg);
         // The header: who it is and what it does.
         let head = Rect::new(r.x, r.y, r.w, HEADER_H);
@@ -788,10 +813,11 @@ impl StageView {
         } else {
             theme::text_dim()
         };
-        let detail = match (pane.console.exit_code(), pane.console.title()) {
-            (Some(code), _) => format!("exited {code}"),
-            (None, Some(t)) => t.trim().to_string(),
-            (None, None) => String::new(),
+        let detail = match (folio, pane.console.exit_code(), pane.console.title()) {
+            (true, _, _) => super::folio::detail(&pane.id),
+            (false, Some(code), _) => format!("exited {code}"),
+            (false, None, Some(t)) => t.trim().to_string(),
+            (false, None, None) => String::new(),
         };
         let name_w = measure(Font::Header, &pane.name).min(r.w * 0.5);
         p.text(
@@ -821,6 +847,9 @@ impl StageView {
         };
         p.stroke_rounded(&r.inset(0.5), RADIUS, edge, if focused { 1.5 } else { 1.0 });
 
+        let Some((frame, cursor)) = built else {
+            return;
+        };
         let g = pane.grid_rect();
         p.save();
         p.clip_rect(&g);
@@ -1087,6 +1116,13 @@ impl Stage {
     pub fn present(&self) {
         self.window.makeKeyAndOrderFront(None);
         self.window.makeFirstResponder(Some(&*self.view));
+        let iv = self.view.ivars();
+        let folio = (iv.panes.borrow().get(iv.focused.get()))
+            .filter(|p| p.console.folio.is_some())
+            .map(|p| p.id.clone());
+        if let Some(id) = folio {
+            super::folio::focus(&id);
+        }
     }
 
     pub fn frame(&self) -> NSRect {

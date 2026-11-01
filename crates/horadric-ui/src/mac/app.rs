@@ -70,6 +70,8 @@ pub enum Input {
     Kin(super::brothers::Note),
     /// The brothers' server looks for what changed.
     KinTick,
+    /// A Folio's stream moved its tile: busy, asking, ended.
+    FolioState(String, crate::folio_session::State),
 }
 
 thread_local! {
@@ -125,6 +127,8 @@ const ABOUT: usize = 9;
 const QUIT: usize = 10;
 const NEW_TERMINAL: usize = 11;
 const NEXT_WAITING: usize = 12;
+/// Claude in a terminal, where New Session opens a Folio.
+const NEW_CLI_SESSION: usize = 13;
 const THEME_TAG: usize = 50;
 const RECENT_TAG: usize = 100;
 
@@ -163,6 +167,10 @@ pub struct App {
     update: update::Updater,
     /// What the Mac keeps of its brothers, the server they ask included.
     pub(super) kin: super::brothers::Kin,
+    /// Each Folio's own arguments, as a chat takes them, for its resume.
+    folio_args: HashMap<String, Vec<String>>,
+    /// Folios reattached whose replay has not said where they stand yet.
+    resync: HashSet<String>,
 }
 
 /// Runs the app until it quits.
@@ -242,8 +250,11 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
         frozen: false,
         update: update::Updater::new(saved.update_told.clone()),
         kin: super::brothers::Kin::default(),
+        folio_args: HashMap::new(),
+        resync: HashSet::new(),
     };
     app.attach_hosts();
+    app.reattach_folios();
     for id in &carry {
         let heard = app
             .registry
@@ -419,6 +430,7 @@ impl App {
             Input::Tick => self.tick(),
             Input::Kin(note) => super::brothers::heard(self, note),
             Input::KinTick => super::brothers::tick(self),
+            Input::FolioState(id, state) => self.folio_state(&id, state),
         }
     }
 
@@ -492,8 +504,15 @@ impl App {
             .unwrap_or_else(|| "session".into());
         let base = name.clone().unwrap_or_else(|| folder.clone());
         let id = self.unique_id(&base);
+        // A bare Claude opens as a Folio, as on Windows; one with a name or
+        // arguments of its own was asked for as a terminal.
+        let chat = agent == Agent::Claude && name.is_none() && args.is_empty();
         let shown = name.unwrap_or(folder);
-        if let Err(e) = self.launch(&id, &shown, cwd, args, Run::Agent(agent)) {
+        let started = match chat {
+            true => self.open_chat(&id, &shown, cwd, None, Vec::new(), false),
+            false => self.launch(&id, &shown, cwd, args, Run::Agent(agent)),
+        };
+        if let Err(e) = started {
             dialog::error("Horadric could not start a session", &e);
             return;
         }
@@ -512,6 +531,205 @@ impl App {
         let id = self.unique_id(&base);
         self.launch(&id, &base, cwd, Vec::new(), Run::Agent(Agent::Claude))?;
         Ok(id)
+    }
+
+    /// Starts Claude in a terminal in a new session in `cwd`, for New CLI
+    /// Session, where a bare start opens a Folio.
+    fn start_cli(&mut self, cwd: PathBuf) {
+        let base = cwd
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "session".into());
+        let id = self.unique_id(&base);
+        if let Err(e) = self.launch(&id, &base, cwd, Vec::new(), Run::Agent(Agent::Claude)) {
+            dialog::error("Horadric could not start a session", &e);
+            return;
+        }
+        if let Some(key) = self.project_of(&id) {
+            self.show_project(&key, Some(&id));
+        }
+    }
+
+    /// Starts session `id`, named `name`, as a Folio in `dir` on `own`,
+    /// its own arguments as a chat takes them, carrying on `resume`. A
+    /// tile that `existed` stays, paused, when it does not start.
+    fn open_chat(
+        &mut self,
+        id: &str,
+        name: &str,
+        dir: PathBuf,
+        resume: Option<String>,
+        own: Vec<String>,
+        existed: bool,
+    ) -> Result<(), String> {
+        if horadric_pty::headless::claude_exe().is_none() {
+            return Err(
+                "claude was not found. Install it, or check it is on the PATH your login shell sets."
+                    .into(),
+            );
+        }
+        // An ended chat of the same tile, kept for its last words, goes.
+        super::folio::close(id);
+        self.remember(&dir);
+        self.register_folio(id, &dir, name, resume.as_deref());
+        let key = self.project_of(id).unwrap_or_default();
+        let flags = horadric_core::folio::headless_args(
+            &own,
+            Some(horadric_core::folio::SUBAGENT_PROMPT),
+        );
+        let options = horadric_pty::headless::Options {
+            args: flags,
+            env_set: vec![
+                (horadric_hooks::SESSION_ENV.to_string(), id.to_string()),
+                (
+                    horadric_hooks::OWNER_ENV.to_string(),
+                    horadric_hooks::port().to_string(),
+                ),
+                (TASKS_ENV.to_string(), String::new()),
+                // The CLI keeps what each prompt's edits overwrote only when
+                // told to off a terminal.
+                (
+                    "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".to_string(),
+                    "1".to_string(),
+                ),
+            ],
+            ..Default::default()
+        };
+        let tag = crate::folio_session::Tag {
+            key,
+            name: name.to_string(),
+            resume,
+            history: 0,
+            at: None,
+        };
+        if let Err(e) = super::folio::open(id, &dir, tag, &options) {
+            if let Ok(mut r) = self.registry.lock() {
+                if existed {
+                    r.apply(
+                        id,
+                        &HookEvent::synthetic(HookEvent::PAUSE),
+                        SystemTime::now(),
+                    );
+                } else {
+                    r.remove(id);
+                }
+            }
+            return Err(e);
+        }
+        let serial = self.next_serial;
+        self.next_serial += 1;
+        self.consoles.insert(
+            id.to_string(),
+            Console::folio(id.to_string(), serial, id.to_string()),
+        );
+        self.folio_args.insert(id.to_string(), own);
+        self.reconcile();
+        Ok(())
+    }
+
+    /// Gives a Folio its tile, as `launch` does a terminal session's.
+    fn register_folio(&mut self, id: &str, dir: &Path, name: &str, resume: Option<&str>) {
+        let register = HookEvent {
+            cwd: dir.to_string_lossy().to_string(),
+            name: Some(name.to_string()),
+            ..HookEvent::synthetic(HookEvent::REGISTER)
+        };
+        if let Ok(mut r) = self.registry.lock() {
+            r.apply(id, &register, SystemTime::now());
+            if let Some(s) = r.get_mut(id) {
+                s.shell = false;
+                if let Some(conversation) = resume {
+                    s.claude_session_id = Some(conversation.to_string());
+                    s.prompted = true;
+                }
+            }
+        }
+    }
+
+    /// Finds the Folios whose hosts ran on while no app did, after a
+    /// reload, a crash or a Quit that kept them, and gives each its tile
+    /// and pane again. Their phase follows as their replay comes in.
+    fn reattach_folios(&mut self) {
+        for found in super::folio::reattach() {
+            let super::folio::Found { id, dir, tag } = found;
+            // Saved as a paused chat too: the host it still has wins.
+            if let Some(saved) = self.paused.remove(&id) {
+                self.folio_args.insert(id.clone(), saved.args);
+            }
+            self.register_folio(&id, &dir, &tag.name, tag.resume.as_deref());
+            self.resync.insert(id.clone());
+            let serial = self.next_serial;
+            self.next_serial += 1;
+            self.consoles
+                .insert(id.clone(), Console::folio(id.clone(), serial, id));
+        }
+    }
+
+    /// A Folio's tile follows what its stream says, where its hooks say
+    /// nothing: an ask, which headless never posts as a hook, and where a
+    /// turn stands after a reattach, since hooks went nowhere meanwhile.
+    fn folio_state(&mut self, id: &str, state: crate::folio_session::State) {
+        let conversation = super::folio::conversation(id);
+        {
+            let Ok(mut r) = self.registry.lock() else {
+                return;
+            };
+            let Some(session) = r.get_mut(id) else {
+                return;
+            };
+            let now = SystemTime::now();
+            if let Some(c) = conversation {
+                session.follow(&c, now);
+            }
+            // Once no background task runs, the turn's end is not a wait
+            // on one.
+            if state.background == Some(0) {
+                session.loot.outstanding.clear();
+            }
+            session.stream_agents = state.agents.clone();
+            if let (Some(t), None) = (&state.title, &session.title) {
+                session.title = Some(horadric_core::title::Title {
+                    text: t.clone(),
+                    custom: false,
+                });
+            }
+            if let Some(status) = state.status() {
+                session.status = Some(status);
+            }
+            let resync = state.live && self.resync.remove(id);
+            if let Some(event) = state.event(&session.phase, session.waits_on.as_deref(), resync)
+            {
+                r.apply(id, &event, now);
+            }
+        }
+        if state.gone {
+            self.folio_gone(id);
+        }
+        self.reconcile();
+    }
+
+    /// A Folio whose claude ended on its own pauses, as a terminal that
+    /// crashed does, so its tile resumes the conversation. The pane stays
+    /// for what it last said to be read.
+    fn folio_gone(&mut self, id: &str) {
+        if self.paused.contains_key(id) {
+            return;
+        }
+        let args = self.folio_args.get(id).cloned().unwrap_or_default();
+        if let Ok(mut r) = self.registry.lock() {
+            if let Some(s) = r.get(id) {
+                let saved = SavedSession {
+                    chat: true,
+                    ..SavedSession::from_session(s, args, false)
+                };
+                self.paused.insert(id.to_string(), saved);
+                r.apply(
+                    id,
+                    &HookEvent::synthetic(HookEvent::PAUSE),
+                    SystemTime::now(),
+                );
+            }
+        }
     }
 
     fn open_shell(&mut self, key: &str) {
@@ -630,7 +848,11 @@ impl App {
         };
         self.consoles.remove(id);
         let cwd = PathBuf::from(&saved.cwd);
-        let result = if cwd.is_dir() {
+        let result = if cwd.is_dir() && saved.chat {
+            let conversation = (saved.claude_session_id.clone()).filter(|_| saved.prompted);
+            let own = saved.args.clone();
+            self.open_chat(id, &saved.name, cwd, conversation, own, true)
+        } else if cwd.is_dir() {
             let run = if saved.shell {
                 Run::Shell
             } else {
@@ -755,7 +977,10 @@ impl App {
     /// Takes a session off the tiles for good.
     fn forget(&mut self, id: &str) {
         if let Some(c) = self.consoles.remove(id) {
-            if c.exit_code().is_none() {
+            if c.folio.is_some() {
+                super::folio::close(id);
+                self.folio_args.remove(id);
+            } else if c.exit_code().is_none() {
                 c.kill();
             }
         }
@@ -772,6 +997,17 @@ impl App {
             return;
         }
         match self.consoles.get(id) {
+            // A Folio's claude gets its stdin closed and ends itself, and
+            // no exit comes back to a console: the tile goes now.
+            Some(c) if c.folio.is_some() => {
+                super::folio::close(id);
+                self.consoles.remove(id);
+                self.folio_args.remove(id);
+                self.paused.remove(id);
+                if let Ok(mut r) = self.registry.lock() {
+                    r.apply(id, &HookEvent::synthetic("SessionEnd"), SystemTime::now());
+                }
+            }
             Some(c) if c.exit_code().is_none() => {
                 // A clean end: the tile goes when the exit arrives.
                 self.ending.insert(id.to_string());
@@ -1313,6 +1549,7 @@ impl App {
         ];
         let session_items = [
             Item::keyed("New Session\u{2026}", NEW_SESSION, "n"),
+            Item::pick("New CLI Session\u{2026}", NEW_CLI_SESSION),
             Item::pick("New Terminal", NEW_TERMINAL),
             Item::keyed("Next Waiting Session", NEXT_WAITING, "j"),
             Item::Separator,
@@ -1328,6 +1565,12 @@ impl App {
         }
         match tag {
             NEW_SESSION => self.pick_and_start(),
+            NEW_CLI_SESSION => {
+                let start = self.recent.first().map(PathBuf::from);
+                if let Some(dir) = dialog::pick_folder(self.mtm, start.as_deref()) {
+                    self.start_cli(dir);
+                }
+            }
             NEW_TERMINAL => {
                 if let Some(key) = self.stage.key() {
                     self.open_shell(&key);
@@ -1501,7 +1744,18 @@ impl App {
                     sessions.push(SavedSession::from_session(s, p.args.clone(), false));
                 } else if let Some(c) = self.consoles.get(&s.id) {
                     if c.exit_code().is_none() && s.phase != Phase::Ended {
-                        sessions.push(SavedSession::from_session(s, c.args.clone(), true));
+                        sessions.push(match c.folio.is_some() {
+                            // It resumes as a chat whatever new ones open as.
+                            true => SavedSession {
+                                chat: true,
+                                ..SavedSession::from_session(
+                                    s,
+                                    self.folio_args.get(&s.id).cloned().unwrap_or_default(),
+                                    true,
+                                )
+                            },
+                            false => SavedSession::from_session(s, c.args.clone(), true),
+                        });
                     }
                 }
             }
@@ -1579,6 +1833,7 @@ impl App {
         };
         self.quit = true;
         if stop {
+            super::folio::close_all();
             for c in self.consoles.values() {
                 if c.exit_code().is_none() {
                     c.kill();
@@ -1590,7 +1845,7 @@ impl App {
             // The kills go out on threads that end with this process.
             let deadline = std::time::Instant::now() + Duration::from_secs(3);
             while std::time::Instant::now() < deadline
-                && self.consoles.values().any(|c| c.exit_code().is_none())
+                && (self.consoles.values()).any(|c| c.folio.is_none() && c.exit_code().is_none())
             {
                 thread::sleep(Duration::from_millis(20));
             }
@@ -1616,10 +1871,14 @@ impl App {
     /// Every session's screen as text, by id, whether the stage shows it
     /// or not.
     pub(crate) fn texts(&self) -> Vec<(String, String)> {
-        self.consoles
+        let mut out: Vec<(String, String)> = self
+            .consoles
             .iter()
+            .filter(|(_, c)| c.folio.is_none())
             .map(|(id, c)| (id.clone(), stage::screen_text(c)))
-            .collect()
+            .collect();
+        out.extend(super::folio::texts());
+        out
     }
 
     /// Every window's view, named for the snapshot files.

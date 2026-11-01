@@ -10,6 +10,7 @@ mod far;
 mod cluster;
 mod delegate;
 mod dialog;
+mod folio;
 mod look;
 mod menu;
 mod paint;
