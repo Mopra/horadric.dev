@@ -687,32 +687,10 @@ pub(super) fn release_lapsed(chat: &mut Chat) {
 /// reason, or None when it has none. Reads the file once, to say where in
 /// it each comment is.
 fn notes_reason(c: &Chat, id: &str, extra: &str) -> Option<String> {
-    let review = c.tr.state.reviews.get(id).filter(|r| !r.is_empty())?;
-    let (tool, input) = c.folio.blocks.iter().find_map(|b| match b {
-        Block::Ask {
-            request_id,
-            tool,
-            input,
-            ..
-        } if request_id == id => Some((tool, input)),
-        _ => None,
-    })?;
-    let e = horadric_core::folio::FileEdit::from_input(tool, input)?;
-    let rows = flow::diff_rows(&e);
-    let before = if !e.hunks.is_empty() {
-        vec![Some(0); e.hunks.len()]
-    } else {
-        match tool.as_str() {
-            "Write" => vec![Some(0)],
-            "Edit" | "MultiEdit" => match std::fs::read_to_string(&e.path) {
-                Ok(file) => comments::lines_before(&file, &e.changes),
-                Err(_) => vec![None; e.changes.len()],
-            },
-            _ => vec![None; e.changes.len()],
-        }
-    };
-    let path = flow::project_path(&c.dir, &e.path).unwrap_or_else(|| e.path.clone());
-    Some(comments::reason(&path, &rows, &before, &review.comments, extra))
+    let review = c.tr.state.reviews.get(id)?;
+    comments::edit_reason(&c.folio.blocks, id, review, extra, |p| {
+        flow::project_path(&c.dir, p)
+    })
 }
 
 fn field_mut<'a>(chat: &'a mut Chat, id: &str) -> Option<&'a mut Field> {

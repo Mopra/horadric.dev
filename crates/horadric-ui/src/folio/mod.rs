@@ -31,8 +31,9 @@ mod backdrop;
 pub mod band;
 mod banish;
 mod cards;
-mod comments;
 mod composer;
+// The review model is shared with the Mac's Folio.
+use crate::folio_review as comments;
 mod controls;
 mod editor;
 mod flow;

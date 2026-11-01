@@ -2,10 +2,14 @@
 //! diff, or a run of rows, says something about it, and once there are
 //! some sends them all back as the denial, each quoting the lines it is
 //! about with where they are in the file, so Claude can revise.
+//!
+//! Shared by both faces: Windows draws the diff as rows with numbers to
+//! click, the Mac lists them in its transcript and takes the rows in a
+//! dialog. The model, the rows and the denial are the same.
 
-use horadric_core::folio::Change;
+use std::path::Path;
 
-use super::flow::DiffRow;
+use horadric_core::folio::{line_diff, Block, Change, DiffLine, FileEdit};
 
 /// The most of a comment's rows quoted back. A comment on a whole Write
 /// would otherwise send the file again.
@@ -182,6 +186,141 @@ pub fn reason(
         out.push_str(&format!("\nAlso: {extra}\n"));
     }
     out.trim_end().to_string()
+}
+
+/// One row of a diff as shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffRow {
+    /// Line numbers before and after; None on the side it is not on.
+    pub old: Option<u32>,
+    pub new: Option<u32>,
+    /// '+', '-', ' ', or '~' for the gap between hunks.
+    pub mark: char,
+    pub text: String,
+}
+
+/// An edit's diff as rows, from the CLI's hunks when it gave them, else
+/// from the strings the tool swaps (numbered from 1, since where they sit
+/// in the file is not known).
+pub fn diff_rows(edit: &FileEdit) -> Vec<DiffRow> {
+    let mut rows = Vec::new();
+    if !edit.hunks.is_empty() {
+        for (k, h) in edit.hunks.iter().enumerate() {
+            if k > 0 {
+                rows.push(gap_row());
+            }
+            let (mut o, mut n) = (h.old_start, h.new_start);
+            for l in &h.lines {
+                let mut cs = l.chars();
+                let mark = cs.next().unwrap_or(' ');
+                let text = cs.as_str().to_string();
+                let (old, new) = match mark {
+                    '+' => {
+                        n += 1;
+                        (None, Some(n - 1))
+                    }
+                    '-' => {
+                        o += 1;
+                        (Some(o - 1), None)
+                    }
+                    _ => {
+                        o += 1;
+                        n += 1;
+                        (Some(o - 1), Some(n - 1))
+                    }
+                };
+                let mark = if matches!(mark, '+' | '-') { mark } else { ' ' };
+                rows.push(DiffRow {
+                    old,
+                    new,
+                    mark,
+                    text,
+                });
+            }
+        }
+        return rows;
+    }
+    for (k, c) in edit.changes.iter().enumerate() {
+        if k > 0 {
+            rows.push(gap_row());
+        }
+        let (mut o, mut n) = (1, 1);
+        for l in line_diff(&c.old, &c.new) {
+            let (old, new, mark, text) = match l {
+                DiffLine::Same(t) => {
+                    o += 1;
+                    n += 1;
+                    (Some(o - 1), Some(n - 1), ' ', t)
+                }
+                DiffLine::Removed(t) => {
+                    o += 1;
+                    (Some(o - 1), None, '-', t)
+                }
+                DiffLine::Added(t) => {
+                    n += 1;
+                    (None, Some(n - 1), '+', t)
+                }
+            };
+            rows.push(DiffRow {
+                old,
+                new,
+                mark,
+                text: text.to_string(),
+            });
+        }
+    }
+    rows
+}
+
+fn gap_row() -> DiffRow {
+    DiffRow {
+        old: None,
+        new: None,
+        mark: '~',
+        text: String::new(),
+    }
+}
+
+
+/// The denial for the comments `review` holds on the edit ask
+/// `request_id` of `blocks`, with `extra` typed as the reason, or None
+/// when it has none. Reads the file once, to say where in it each
+/// comment is. `shown` gives the path as the human sees it.
+pub fn edit_reason(
+    blocks: &[Block],
+    request_id: &str,
+    review: &Review,
+    extra: &str,
+    shown: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
+    if review.is_empty() {
+        return None;
+    }
+    let (tool, input) = blocks.iter().find_map(|b| match b {
+        Block::Ask {
+            request_id: r,
+            tool,
+            input,
+            ..
+        } if r == request_id => Some((tool, input)),
+        _ => None,
+    })?;
+    let e = FileEdit::from_input(tool, input)?;
+    let rows = diff_rows(&e);
+    let before = if !e.hunks.is_empty() {
+        vec![Some(0); e.hunks.len()]
+    } else {
+        match tool.as_str() {
+            "Write" => vec![Some(0)],
+            "Edit" | "MultiEdit" => match std::fs::read_to_string(Path::new(&e.path)) {
+                Ok(file) => lines_before(&file, &e.changes),
+                Err(_) => vec![None; e.changes.len()],
+            },
+            _ => vec![None; e.changes.len()],
+        }
+    };
+    let path = shown(&e.path).unwrap_or_else(|| e.path.clone());
+    Some(reason(&path, &rows, &before, &review.comments, extra))
 }
 
 #[cfg(test)]

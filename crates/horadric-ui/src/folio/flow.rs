@@ -7,9 +7,7 @@
 
 use std::ops::Range;
 
-use horadric_core::folio::{
-    line_diff, DiffLine, Ending, FileEdit, Lane, Notice, Todo, TodoStatus, TurnUsage,
-};
+use horadric_core::folio::{Ending, Lane, Notice, Todo, TodoStatus, TurnUsage};
 use horadric_core::markdown::{self as md, Align, Inline};
 use serde_json::Value;
 
@@ -478,98 +476,7 @@ pub fn notice(n: &Notice) -> String {
     }
 }
 
-/// One row of a diff as shown.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiffRow {
-    /// Line numbers before and after; None on the side it is not on.
-    pub old: Option<u32>,
-    pub new: Option<u32>,
-    /// '+', '-', ' ', or '~' for the gap between hunks.
-    pub mark: char,
-    pub text: String,
-}
-
-/// An edit's diff as rows, from the CLI's hunks when it gave them, else
-/// from the strings the tool swaps (numbered from 1, since where they sit
-/// in the file is not known).
-pub fn diff_rows(edit: &FileEdit) -> Vec<DiffRow> {
-    let mut rows = Vec::new();
-    if !edit.hunks.is_empty() {
-        for (k, h) in edit.hunks.iter().enumerate() {
-            if k > 0 {
-                rows.push(gap_row());
-            }
-            let (mut o, mut n) = (h.old_start, h.new_start);
-            for l in &h.lines {
-                let mut cs = l.chars();
-                let mark = cs.next().unwrap_or(' ');
-                let text = cs.as_str().to_string();
-                let (old, new) = match mark {
-                    '+' => {
-                        n += 1;
-                        (None, Some(n - 1))
-                    }
-                    '-' => {
-                        o += 1;
-                        (Some(o - 1), None)
-                    }
-                    _ => {
-                        o += 1;
-                        n += 1;
-                        (Some(o - 1), Some(n - 1))
-                    }
-                };
-                let mark = if matches!(mark, '+' | '-') { mark } else { ' ' };
-                rows.push(DiffRow {
-                    old,
-                    new,
-                    mark,
-                    text,
-                });
-            }
-        }
-        return rows;
-    }
-    for (k, c) in edit.changes.iter().enumerate() {
-        if k > 0 {
-            rows.push(gap_row());
-        }
-        let (mut o, mut n) = (1, 1);
-        for l in line_diff(&c.old, &c.new) {
-            let (old, new, mark, text) = match l {
-                DiffLine::Same(t) => {
-                    o += 1;
-                    n += 1;
-                    (Some(o - 1), Some(n - 1), ' ', t)
-                }
-                DiffLine::Removed(t) => {
-                    o += 1;
-                    (Some(o - 1), None, '-', t)
-                }
-                DiffLine::Added(t) => {
-                    n += 1;
-                    (None, Some(n - 1), '+', t)
-                }
-            };
-            rows.push(DiffRow {
-                old,
-                new,
-                mark,
-                text: text.to_string(),
-            });
-        }
-    }
-    rows
-}
-
-fn gap_row() -> DiffRow {
-    DiffRow {
-        old: None,
-        new: None,
-        mark: '~',
-        text: String::new(),
-    }
-}
+pub use crate::folio_review::{diff_rows, DiffRow};
 
 /// The last `n` lines of a shell step's output, and how many were left
 /// out above them.
@@ -740,7 +647,7 @@ pub fn shown_from(prompts: &[usize], end: usize, want: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horadric_core::folio::{Change, Hunk};
+    use horadric_core::folio::{Change, FileEdit, Hunk};
 
     fn text_of(p: &Para) -> &str {
         match &p.kind {
