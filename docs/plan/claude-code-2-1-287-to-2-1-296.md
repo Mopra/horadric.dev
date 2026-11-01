@@ -23,8 +23,19 @@ agent view covers only background sessions on this machine
 may never list cloud sessions. Check the doc on each upgrade too, and
 if it still says so, look for another source before waiting longer:
 the `ccr.session.id` attribute in OpenTelemetry (see
-[signals.md](signals.md)) or Remote Control's session list. Neither is
-verified.
+[signals.md](signals.md)) or Remote Control's session list.
+
+**Rechecked 2026-11-01 on 2.1.316: still no source.** `claude agents
+--json --all` listed only `interactive` sessions (no cloud session was
+started for the check, so this alone proves little), and the agent view doc
+still says the list covers sessions on this machine, with `kind` only
+`interactive` or `background`; cloud sessions belong to Projects there.
+`ccr.session.id` is no source either: the monitoring doc sets it only on
+sessions that run in a cloud environment, and such a session exports to
+the endpoint configured in that environment, never to a listener on this
+machine. Horadric now receives OpenTelemetry from its own sessions, which
+are all local. Remote Control's session list is the one lead left
+unchecked.
 
 **Open questions for the human**, for when the list appears:
 
