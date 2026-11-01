@@ -1836,6 +1836,7 @@ impl Pane {
                 CharAction::NewShell => app::push(Input::Shell(None)),
                 CharAction::Browse => app::push(Input::Browse),
                 CharAction::Sanctuary => app::push(Input::Sanctuary),
+                CharAction::Reopen => app::push(Input::Reopen),
                 _ => folio::char(key, c, mods),
             }
             return;
@@ -1845,6 +1846,7 @@ impl Pane {
                 CharAction::NewShell => app::push(Input::Shell(None)),
                 CharAction::Browse => app::push(Input::Browse),
                 CharAction::Sanctuary => app::push(Input::Sanctuary),
+                CharAction::Reopen => app::push(Input::Reopen),
                 _ if matches!(c, 'm' | 'M')
                     && !mods.ctrl
                     && !mods.alt
@@ -1865,6 +1867,7 @@ impl Pane {
                 CharAction::NewShell => app::push(Input::Shell(None)),
                 CharAction::Browse => app::push(Input::Browse),
                 CharAction::Sanctuary => app::push(Input::Sanctuary),
+                CharAction::Reopen => app::push(Input::Reopen),
                 _ => {}
             }
             return;
@@ -1883,6 +1886,7 @@ impl Pane {
             CharAction::NewShell => app::push(Input::Shell(None)),
             CharAction::Browse => app::push(Input::Browse),
             CharAction::Sanctuary => app::push(Input::Sanctuary),
+            CharAction::Reopen => app::push(Input::Reopen),
         }
     }
 

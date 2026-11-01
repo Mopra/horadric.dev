@@ -176,6 +176,9 @@ mod folio_tile;
 
 #[path = "steering.rs"]
 mod steering;
+
+#[path = "reopening.rs"]
+mod reopening;
 pub(crate) use handing::{leaving_menu, leaving_pick};
 pub(crate) use keeping::{set_auto as set_auto_takeover, set_keeper, tray_state as keeping_tray};
 
@@ -444,6 +447,9 @@ pub(crate) enum Input {
     /// Ctrl+Shift+G in a pane: the Arcane Sanctuary of the project on the
     /// stage, opened or given the keyboard.
     Sanctuary,
+    /// Ctrl+Shift+R in a pane: the newest session the human closed, back
+    /// with its conversation.
+    Reopen,
     /// A sanctuary's cross: close the one of the project with this key.
     CloseSky(String),
     /// A portrait in a pane's retinue: show the conversation of the hireling
@@ -913,6 +919,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         warriv_line: RefCell::new(HashMap::new()),
     });
     menu::init(Rc::clone(&shared));
+    reopening::load(&saved.reopen);
     let toasts = Toasts::new(Rc::clone(&shared), notify, WM_HORADRIC_TRAY);
     // From the hosts' copy, since a session that outlives this app keeps
     // running the status line from wherever it pointed.
@@ -1993,7 +2000,7 @@ fn tile_menu(id: &str) {
             with_app(|app| app.reveal(id, false));
         }
         Some(END) => {
-            with_app(|app| app.end(id));
+            with_app(|app| app.close_by_hand(id));
         }
         Some(RENAME) => rename_session(id),
         Some(FOUND) => found_project(id),
@@ -2085,7 +2092,7 @@ fn found_project(id: &str) {
 fn pane_ask(id: &str, what: PaneAsk) {
     match what {
         PaneAsk::End => {
-            with_app(|app| app.end(id));
+            with_app(|app| app.close_by_hand(id));
         }
         PaneAsk::Hand => hand_menu(id),
         PaneAsk::Theme => open_settings_in(settings::Section::Appearance, None),
@@ -2611,6 +2618,8 @@ fn project_menu(key: &str) {
     const MERGE_END: usize = 400;
     const PAST: usize = 600;
     const TEAM_SHARE: usize = 18;
+    const REOPEN: usize = 700;
+    const REOPEN_END: usize = 710;
     let dir = with_app(|app| app.project_dir(key)).flatten();
     // Reading transcripts and asking git are the slow part of opening the
     // menu, so they are done side by side.
@@ -2663,8 +2672,20 @@ fn project_menu(key: &str) {
     if own_trees == Some(false) {
         items.push(Item::action(ADD_TREE, "New session in its own worktree"));
     }
+    items.push(Item::Submenu("History".into(), history_items(&past, PAST)));
+    // Closed by the human here, newest first: the newest is one click.
+    let reopen = reopening::listed(key, REOPEN_END - REOPEN);
+    match reopen.as_slice() {
+        [] => {}
+        [_] => items.push(Item::action(REOPEN, "Reopen closed session	Ctrl+Shift+R")),
+        _ => {
+            let sub = (reopen.iter().enumerate())
+                .map(|(i, (_, label))| Item::action(REOPEN + i, label.clone()))
+                .collect();
+            items.push(Item::Submenu("Reopen closed session".into(), sub));
+        }
+    }
     items.extend([
-        Item::Submenu("History".into(), history_items(&past, PAST)),
         Item::action(QUESTS, "Quest log..."),
         Item::action(CONTEXT, "Context..."),
         Item::action(START_BATCH, format!("Start {BATCH} sessions")),
@@ -2785,6 +2806,10 @@ fn project_menu(key: &str) {
         Some(CLOSE) => app.close_project(key),
         Some(HIDE_TOWN) => app.hide_town(true),
         Some(SHELL) => app.open_shell(key),
+        Some(i) if (REOPEN..REOPEN_END).contains(&i) => {
+            let conversation = reopen.get(i - REOPEN).map(|(c, _)| c.as_str());
+            app.reopen_closed(Some(key), conversation);
+        }
         Some(BROWSE) => app.open_web(key, None),
         Some(SANCTUARY) => app.open_sky(key),
         Some(i) if (SSH..SSH_END).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
@@ -6821,6 +6846,14 @@ impl App {
         self.reconcile(false);
     }
 
+    /// Ends a session the human closed, kept for "Reopen closed session".
+    /// Only the human's closing: a session ended by a runner or an errand
+    /// is meant to go.
+    fn close_by_hand(&mut self, id: &str) {
+        self.remember_closed(id);
+        self.end(id);
+    }
+
     /// Deletes the checkpoints of a session that ends for good, on a thread
     /// since it runs git.
     fn drop_turns(&self, id: &str) {
@@ -6907,6 +6940,7 @@ impl App {
             Err(_) => return,
         };
         for id in &ids {
+            self.remember_closed(id);
             self.forget(id);
         }
         self.reconcile(false);
@@ -8457,6 +8491,7 @@ impl App {
 
     /// A Folio's cross: the session ends, tile and pane.
     fn close_folio(&mut self, id: &str) {
+        self.remember_closed(id);
         self.forget(id);
         self.reconcile(false);
         self.sync_stage();
@@ -8822,6 +8857,7 @@ impl App {
                 closed
             },
             far_hidden: self.far_hidden.clone(),
+            reopen: reopening::saved(),
             autostart_offered: self.autostart_offered,
             explorer_offered: self.explorer_offered,
             stage: self
@@ -9533,6 +9569,7 @@ impl App {
                         self.open_sky(&key);
                     }
                 }
+                Input::Reopen => self.reopen_closed(None, None),
                 Input::CloseSky(key) => self.close_sky(&key),
                 Input::OpenHireling(session, agent) => self.open_hireling(&session, &agent),
                 Input::WarTable(id) => {

@@ -254,6 +254,10 @@ pub enum CharAction {
     /// Ctrl+Shift+G: the project's Arcane Sanctuary, its graph. Plain
     /// Ctrl+G still reaches the program.
     Sanctuary,
+    /// Ctrl+Shift+R: the newest session the human closed, back. Not
+    /// Ctrl+Shift+T as in a browser, which is the new terminal. Plain
+    /// Ctrl+R still reaches the program, Claude Code's history search.
+    Reopen,
 }
 
 /// Maps a `WM_CHAR` (or `WM_SYSCHAR` when `mods.alt`) to its bytes.
@@ -266,6 +270,7 @@ pub fn char_action(c: char, mods: Mods) -> CharAction {
         '\u{14}' if mods.shift && mods.ctrl => return CharAction::NewShell,
         '\u{2}' if mods.shift && mods.ctrl => return CharAction::Browse,
         '\u{7}' if mods.shift && mods.ctrl => return CharAction::Sanctuary,
+        '\u{12}' if mods.shift && mods.ctrl => return CharAction::Reopen,
         // Meta+Enter is the newline Claude Code understands everywhere.
         '\r' if mods.shift => out.extend_from_slice(b"\x1b\r"),
         '\t' if mods.shift => out.extend_from_slice(b"\x1b[Z"),
@@ -671,6 +676,7 @@ mod tests {
         };
         assert_eq!(char_action('\u{3}', ctrl_shift), CharAction::Copy);
         assert_eq!(char_action('\u{14}', ctrl_shift), CharAction::NewShell);
+        assert_eq!(char_action('\u{12}', ctrl_shift), CharAction::Reopen);
         assert_eq!(char_action('\u{14}', CTRL), CharAction::Send(vec![0x14]));
         assert_eq!(char_action('\u{2}', ctrl_shift), CharAction::Browse);
         assert_eq!(char_action('\u{7}', ctrl_shift), CharAction::Sanctuary);
