@@ -20,8 +20,9 @@ What is left is below.
   `sworn` and `afar_tiles`), all unverified until a Mac run tries it.
   Left: the Mac naming a keeper and sending it snapshots (its turn ends
   reach no keeping yet), taking a silent brother's session over on the
-  Mac, handing off a Folio (only a session in a pane goes), brothers'
-  usage limits, and lore, which waits for the Mac to have a lore at all.
+  Mac, handing off a Folio (only a session in a pane goes), and lore,
+  which waits for the Mac to have a lore at all. Brothers' limits of the
+  Mac's own account show in its usage window.
 - **Teams, the rest.** Built and the relay deployed (docs/PORTAL.md,
   "Teams"). Left: a real organization in WorkOS production with two
   people in it (the human's call, since inviting sends mail), and a run

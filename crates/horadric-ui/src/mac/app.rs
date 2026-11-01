@@ -195,8 +195,9 @@ pub struct App {
     /// The model, effort and permission mode every session starts with,
     /// unless its own arguments say otherwise.
     defaults: horadric_core::Defaults,
-    /// The account's limits as last heard from a session's status line.
-    usage: Arc<Mutex<Option<horadric_core::Usage>>>,
+    /// The account's limits as last heard from a session's status line,
+    /// or from a brother's.
+    pub(super) usage: Arc<Mutex<Option<horadric_core::Usage>>>,
 }
 
 /// A file shown read only on the stage, a pane with no program behind it

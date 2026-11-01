@@ -284,13 +284,45 @@ pub(super) fn heard(app: &mut App, ch: u32, msg: &Value) {
                 .into_iter()
                 .fold(false, |changed, (k, l)| sessions(app, &k, &l) || changed)
         }
-        // The Mac keeps no lore and shows no usage yet.
+        Heard::Usage(told) => {
+            usage(app, told);
+            false
+        }
+        // The Mac keeps no lore yet.
         _ => false,
     };
     if changed {
         app.reconcile();
     }
     reveal_started(app);
+}
+
+/// Takes in the limits a brother told: a reading of the account Claude
+/// Code uses on the Mac (or of any while none is known) merges into what
+/// the usage window shows, since a limit is the account's and work on a
+/// brother runs it down too. Another account's is not the Mac's to show.
+fn usage(app: &mut App, told: Vec<horadric_core::usage::Told>) {
+    let here = super::usage::account();
+    let now = app::unix_now();
+    for t in told {
+        if t.agent != horadric_core::Agent::Claude {
+            continue;
+        }
+        let mine = match (&here, &t.email) {
+            (None, _) => true,
+            (Some(a), Some(e)) => a == e || a.starts_with(&format!("{e}, ")),
+            (Some(_), None) => false,
+        };
+        if !mine {
+            continue;
+        }
+        if let Ok(mut u) = app.usage.lock() {
+            *u = Some(
+                u.as_ref()
+                    .map_or(t.usage.clone(), |h| h.merge(&t.usage, now)),
+            );
+        }
+    }
 }
 
 /// The answer to hello: the brother serves this link, and panes open
