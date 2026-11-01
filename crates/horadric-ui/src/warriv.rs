@@ -275,7 +275,14 @@ impl App {
         let now = warriv::events(&b.tasks, b.mode, &asks, &b.aims);
         let mut camp = self.tasks.warriv.camps.remove(key).unwrap_or_default();
         self.hear_answers(key, b, &mut camp);
-        if let Some(a) = camp.awake.take_if(|a| !self.live(&a.id)) {
+        // A wake kept in state.json may be followed long after, as when
+        // Warriv was off at start: its id, made from the time of day, may
+        // name another project's wake by then, which is not this one's to
+        // close.
+        let gone = |a: &Awake| {
+            !self.live(&a.id) || (a.adopted && self.project_of(&a.id).as_deref() != Some(key))
+        };
+        if let Some(a) = camp.awake.take_if(|a| gone(a)) {
             let (handed, stuck) = camp.retire(&a, &now, b);
             self.record_wake(key, &a.id, Happened::slept(&a.id, "", true, handed));
             self.keep_memory(key);
