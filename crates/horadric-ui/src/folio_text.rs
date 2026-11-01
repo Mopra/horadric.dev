@@ -6,8 +6,11 @@
 //! Pure, so how each block reads is tested here on any machine.
 
 use horadric_core::folio::{
-    api_error_title, AskState, Block, Ending, Folio, Notice, Step, StepState,
+    api_error_title, AskState, Block, Ending, FileEdit, Folio, Notice, SignIn, SignInState, Step,
+    StepState,
 };
+
+use crate::folio_review::{diff_rows, shown_place, Review};
 
 /// What a paragraph is, which the face turns into a font and a colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +30,13 @@ pub enum Style {
     Footer,
     /// A `!` command and its output.
     Shell,
+    /// A row of an edit's diff that waits for the human: added, removed,
+    /// or kept around them.
+    Added,
+    Removed,
+    Kept,
+    /// A line comment on an edit under review.
+    Comment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,9 +49,21 @@ pub struct Paragraph {
 const THINKING_SHOWN: usize = 400;
 /// How much of a step's or a shell's output shows.
 const OUTPUT_SHOWN: usize = 600;
+/// How many rows of a waiting edit's diff show.
+const DIFF_SHOWN: usize = 300;
 
 /// The whole conversation, oldest first, then what Claude does now.
 pub fn paragraphs(folio: &Folio) -> Vec<Paragraph> {
+    paragraphs_reviewed(folio, |_| None)
+}
+
+/// [`paragraphs`], with the line comments `review` gives for each edit
+/// ask by its request id. A waiting edit shows its diff with each row
+/// numbered from 1, the numbers a comment names its rows by.
+pub fn paragraphs_reviewed<'a>(
+    folio: &Folio,
+    review: impl Fn(&str) -> Option<&'a Review>,
+) -> Vec<Paragraph> {
     let mut out = Vec::new();
     let mut push = |style, text: String| {
         if !text.trim().is_empty() {
@@ -60,11 +82,30 @@ pub fn paragraphs(folio: &Folio) -> Vec<Paragraph> {
                 }
             }
             Block::Ask {
-                tool, shown, state, ..
-            } => push(
-                Style::Ask,
-                format!("Claude asks to use {tool}{}\n{}", said(*state), shown.trim()),
-            ),
+                request_id,
+                tool,
+                shown,
+                input,
+                state,
+                ..
+            } => {
+                let edit = (*state == AskState::Waiting)
+                    .then(|| FileEdit::from_input(tool, input))
+                    .flatten();
+                match edit {
+                    Some(e) => {
+                        push(
+                            Style::Ask,
+                            format!("Claude asks to change {}{}", e.path, said(*state)),
+                        );
+                        diff(&e, review(request_id), &mut push);
+                    }
+                    None => push(
+                        Style::Ask,
+                        format!("Claude asks to use {tool}{}\n{}", said(*state), shown.trim()),
+                    ),
+                }
+            }
             Block::Question {
                 questions,
                 answers,
@@ -155,17 +196,13 @@ pub fn paragraphs(folio: &Folio) -> Vec<Paragraph> {
                     format!("{}: {}", api_error_title(kind), text.trim()),
                 ),
             },
-            Block::SignIn(s) => push(
-                Style::Error,
-                format!(
-                    "Claude needs you to sign in{}. Run `claude` in a terminal and type /login, then start this session again.",
-                    if s.why.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", s.why.trim())
-                    }
-                ),
-            ),
+            Block::SignIn(s) => {
+                let style = match s.state {
+                    SignInState::Done(_) => Style::Notice,
+                    _ => Style::Error,
+                };
+                push(style, sign_in(s))
+            }
             Block::Mcp(card) => {
                 let mut text = "MCP servers".to_string();
                 for s in &card.servers {
@@ -176,10 +213,13 @@ pub fn paragraphs(folio: &Folio) -> Vec<Paragraph> {
                 }
                 push(Style::Notice, text)
             }
-            Block::Elicitation(e) => push(
-                Style::Ask,
-                format!("{} asks{}\n{}", e.server, said(e.state), e.message.trim()),
-            ),
+            Block::Elicitation(e) => {
+                let mut text = format!("{} asks{}\n{}", e.server, said(e.state), e.message.trim());
+                if let Some(url) = &e.url {
+                    text.push_str(&format!("\n{url}"));
+                }
+                push(Style::Ask, text)
+            }
             Block::Raw(s) => push(Style::Notice, s.clone()),
         }
     }
@@ -189,6 +229,61 @@ pub fn paragraphs(folio: &Folio) -> Vec<Paragraph> {
         }
     }
     out
+}
+
+/// A waiting edit's diff, a paragraph a row, numbered, then the comments
+/// on it.
+fn diff(e: &FileEdit, review: Option<&Review>, push: &mut impl FnMut(Style, String)) {
+    let rows = diff_rows(e);
+    for (n, r) in rows.iter().enumerate().take(DIFF_SHOWN) {
+        let style = match r.mark {
+            '+' => Style::Added,
+            '-' => Style::Removed,
+            _ => Style::Kept,
+        };
+        let text = match r.mark {
+            '~' => format!("{:>4}   \u{22ef}", n + 1),
+            m => format!("{:>4} {m} {}", n + 1, r.text),
+        };
+        push(style, text);
+    }
+    if rows.len() > DIFF_SHOWN {
+        push(Style::Kept, format!("     ({} more rows)", rows.len() - DIFF_SHOWN));
+    }
+    for c in review.map(|r| r.comments.as_slice()).unwrap_or_default() {
+        let place = shown_place(&rows, c.from, c.to);
+        push(Style::Comment, format!("{place}: {}", c.text.trim()));
+    }
+}
+
+/// What a sign-in card says, by where it stands.
+fn sign_in(s: &SignIn) -> String {
+    let why = match s.why.trim() {
+        "" => String::new(),
+        w => format!(" ({w})"),
+    };
+    match &s.state {
+        SignInState::Needed => format!("Claude needs you to log in{why}."),
+        SignInState::Starting => "Starting the login\u{2026}".to_string(),
+        SignInState::Waiting => {
+            let mut text = "Log in to Claude in your browser.".to_string();
+            if s.asks_code {
+                text.push_str(" Then paste the code it shows below and press Send Code.");
+            }
+            if s.bad_code {
+                text.push_str(" That code was not whole: paste it again.");
+            }
+            if let Some(url) = &s.url {
+                text.push_str(&format!("\n{url}"));
+            }
+            text
+        }
+        SignInState::Checking => "Checking the code\u{2026}".to_string(),
+        SignInState::Done(Some(email)) => format!("Logged in as {email}."),
+        SignInState::Done(None) => "Logged in.".to_string(),
+        SignInState::Failed(why) => format!("The login did not work: {why}"),
+        SignInState::Cancelled => "The login was cancelled.".to_string(),
+    }
 }
 
 /// One step and, under it, what its subagent did, indented by `depth`.
@@ -356,6 +451,41 @@ mod tests {
         assert_eq!(p[0].style, Style::StepFailed);
         assert!(p[0].text.starts_with("\u{2717} Bash cargo test\n\u{2026}"));
         assert!(p[0].text.ends_with("last line"));
+    }
+
+    #[test]
+    fn a_waiting_edit_shows_its_rows_numbered_and_its_comments() {
+        let f = folio(vec![Block::Ask {
+            request_id: "r".into(),
+            tool: "Edit".into(),
+            summary: String::new(),
+            shown: String::new(),
+            input: serde_json::json!({"file_path": "a.rs", "old_string": "a\nb", "new_string": "a\nc"}),
+            suggestions: serde_json::Value::Null,
+            state: AskState::Waiting,
+        }]);
+        let mut review = Review::default();
+        review.pick(1, false);
+        review.add("Why c?");
+        let p = paragraphs_reviewed(&f, |id| (id == "r").then_some(&review));
+        let styles: Vec<Style> = p.iter().map(|p| p.style).collect();
+        assert_eq!(
+            styles,
+            [Style::Ask, Style::Kept, Style::Removed, Style::Added, Style::Comment]
+        );
+        assert_eq!(p[2].text, "   2 - b");
+        assert_eq!(p[4].text, "Removed line 2: Why c?");
+    }
+
+    #[test]
+    fn a_sign_in_says_where_it_stands() {
+        let mut s = SignIn::needed("token expired");
+        assert_eq!(sign_in(&s), "Claude needs you to log in (token expired).");
+        s.begin(1);
+        s.state = SignInState::Waiting;
+        s.asks_code = true;
+        s.url = Some("https://claude.ai/x".into());
+        assert!(sign_in(&s).ends_with("Send Code.\nhttps://claude.ai/x"));
     }
 
     #[test]

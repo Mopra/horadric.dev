@@ -167,7 +167,7 @@ pub use horadric_memory::service as memory;
 mod folio;
 #[cfg(any(windows, target_os = "macos"))]
 mod folio_session;
-#[cfg(any(windows, target_os = "macos"))]
+// Ungated: `folio_text` reads it, and builds everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod folio_review;
 #[cfg(any(windows, target_os = "macos"))]
@@ -176,6 +176,9 @@ mod folio_cli;
 #[cfg(any(windows, target_os = "macos"))]
 #[cfg_attr(not(windows), allow(dead_code))]
 mod folio_rewind;
+#[cfg(any(windows, target_os = "macos"))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod folio_slash;
 #[cfg(windows)]
 mod menu;
 #[cfg(windows)]
