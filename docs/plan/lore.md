@@ -11,12 +11,8 @@ over 125 quests, so it had no job.
 
 ## Not done
 
-- **Compaction at the right moment.** A quest that ends at a 180k window
-  could go on from a 40k summary after its exploration. Quests now run
-  as Folios, so the interface question is answered: Horadric can send
-  `/compact` as a prompt and sees `compact_boundary` come back. Left is
-  when to send it (after the pack is read, before the edits) and how to
-  tell that moment from the stream.
-- **Tuning the context pack.** Run `horadric quest spend` again once more
-  than 30 quests have run with a pack, before changing the pack's size or
-  weights.
+- **Compaction, tried for real.** A quest's Folio now compacts itself
+  once as its first edit starts at a window of 100k or more
+  (`folio::compaction`). It has only run in unit tests: watch the first
+  quests that do it, that the stopped turn goes on after `/compact`, and
+  compare their spend with `horadric quest spend`.
