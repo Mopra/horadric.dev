@@ -36,9 +36,9 @@ use horadric_core::keeping::{
     self, auto_due, keep_messages, kept_full, kept_of, restored_heard, stores, takeover_message,
     waited, words_of, Book, Holding, Untakeable,
 };
-use horadric_core::mesh::Trust;
-use horadric_core::said::{Signer, Word};
+use horadric_core::said::Word;
 use horadric_core::serving::Job;
+use horadric_core::sworn::Sworn;
 use horadric_core::{mesh, rostering, Phase};
 use serde_json::Value;
 
@@ -131,20 +131,19 @@ pub(super) fn turn_ended(id: &str, transcript: &str) {
 /// this node's own, its brothers hear it ended, so its owner can go from
 /// every roster once all have heard (see `horadric_core::mesh`).
 pub(super) fn ended(id: &str) {
-    if trusted(|d, s, t| mesh::end(d, s, t, id, relay::now())).unwrap_or(false) {
+    if sworn().is_some_and(|w| w.end(id, relay::now())) {
         debug(&format!("{id} ended for good"));
     }
 }
 
-/// Runs `f` with what this node judges the brotherhood's word by and
-/// signs its own with (none before it has a key pair). None without a
-/// state folder or a relay id.
-fn trusted<R>(f: impl FnOnce(&Path, Option<&Signer>, &Trust) -> R) -> Option<R> {
-    let (dir, me) = (horadric_hooks::state_dir()?, relay::me()?);
-    let crypto = relay::LinkCrypto;
-    let t = Trust::load(&dir, &me, &crypto);
-    let signer = Signer::of(&dir, &me, &crypto);
-    Some(f(&dir, signer.as_ref(), &t))
+/// This node's word on whose its sessions are. None without a state
+/// folder or a relay id.
+fn sworn() -> Option<Sworn<'static>> {
+    Sworn::new(
+        horadric_hooks::state_dir()?,
+        relay::me()?,
+        &relay::LinkCrypto,
+    )
 }
 
 /// Sessions handed here that run now, with the roster number they run
@@ -185,7 +184,7 @@ impl Machine {
     /// claimed is claimed here first, signed, so the handoff has an owner
     /// to build on.
     pub(super) fn keeping_number(&self, id: &str) -> u64 {
-        trusted(|d, s, t| mesh::own(d, s, t, id, relay::now())).unwrap_or(1)
+        sworn().map_or(1, |w| w.number(id, relay::now()))
     }
 
     /// This node's signed word that it hands session `id`, numbered `n`,
@@ -195,9 +194,8 @@ impl Machine {
         if relay::store().get(to).is_none() {
             return Vec::new();
         }
-        let n = n.saturating_add(1);
-        trusted(|d, s, _| s.map(|s| mesh::handing_word(d, s, id, to, n, relay::now())))
-            .flatten()
+        sworn()
+            .map(|w| w.handing(id, to, n, relay::now()))
             .unwrap_or_default()
     }
 
@@ -205,8 +203,9 @@ impl Machine {
     /// back (the roster keeps it pending), so a receiver that lands it late
     /// does not run it, and the next try counts.
     pub(super) fn keeping_recall(&mut self, id: &str) {
-        let now = relay::now();
-        trusted(|d, s, t| s.map(|s| mesh::recall(d, s, t, id, now)));
+        if let Some(w) = sworn() {
+            w.recall(id, relay::now());
+        }
     }
 
     /// Whether this node may run session `id`, handed here under `n` with
@@ -217,7 +216,7 @@ impl Machine {
         words: &[Word],
         n: u64,
     ) -> Result<(), String> {
-        trusted(|d, _, t| mesh::may_arrive(d, t, words, id, n)).unwrap_or(Ok(()))
+        sworn().map_or(Ok(()), |w| w.may_arrive(id, words, n))
     }
 
     /// A handoff moved session `id` to brother `to` (None for this node)
@@ -226,8 +225,7 @@ impl Machine {
     /// `ssh` is no brother of the roster.
     pub(super) fn keeping_handed(&mut self, id: &str, to: Option<&str>, n: u64, words: &[Word]) {
         let Some(to) = to else {
-            let now = relay::now();
-            if !trusted(|d, s, t| mesh::arrived(d, s, words, t, id, n, now)).unwrap_or(false) {
+            if !sworn().is_some_and(|w| w.arrived(id, n, words, relay::now())) {
                 debug(&format!(
                     "{id} runs here, but its sender's word was not believed"
                 ));
@@ -239,7 +237,9 @@ impl Machine {
         }
         self.keep.book.forget(id);
         self.save_book();
-        trusted(|d, _, t| mesh::hand(d, t, id, to, n));
+        if let Some(w) = sworn() {
+            w.hand(id, to, n);
+        }
     }
 
     /// Whether this node may take over brother `from`'s session `session`
@@ -251,9 +251,9 @@ impl Machine {
         holding: &Holding,
     ) -> Result<u64, Untakeable> {
         let listed = self.keeping_listers(session);
-        let r = &holding.record;
-        trusted(|d, _, t| mesh::takeable_in(d, t, session, from, r.n, &r.said, &listed))
-            .unwrap_or(Err(Untakeable::Unheard))
+        sworn().map_or(Err(Untakeable::Unheard), |w| {
+            w.takeable(session, from, holding, &listed)
+        })
     }
 
     /// The brothers linked and awake now whose list shows `session`.
@@ -376,11 +376,9 @@ impl Machine {
             return;
         };
         self.keep.cutting.insert(id.to_string());
-        let owner_n = trusted(|d, s, t| mesh::own(d, s, t, id, relay::now())).unwrap_or(1);
+        let owner_n = self.keeping_number(id);
         // The owner's own word that it owns it, with the snapshot.
-        record.said = horadric_hooks::state_dir()
-            .map(|d| mesh::chain(&mesh::load_held(&d), id, &relay::me().unwrap_or_default()))
-            .unwrap_or_default();
+        record.said = sworn().map(|w| w.chain(id)).unwrap_or_default();
         let next = self.keep.book.next(id, &keeper, owner_n);
         self.save_book();
         let id = id.to_string();
@@ -536,7 +534,7 @@ impl Machine {
     /// The signed word a brother told with `takeover`: sessions of this
     /// node taken over meanwhile stop and keep their work on a branch.
     fn keeping_owners(&mut self, words: &[Word]) {
-        let heard = trusted(|d, _, t| mesh::told(d, words, t)).unwrap_or_default();
+        let heard = sworn().map(|w| w.told(words)).unwrap_or_default();
         for (id, o, ran, n) in &heard.twice {
             eprintln!(
                 "horadric node: {id} is {}'s, but it also ran on {} (from its number {n}), which stops its copy once it hears",
@@ -616,12 +614,9 @@ impl Machine {
         if due.is_empty() {
             return;
         }
-        let Some(me) = relay::me() else {
+        let Some(words) = sworn().map(|w| w.mine()) else {
             return;
         };
-        let words = horadric_hooks::state_dir()
-            .map(|d| mesh::mine(&mesh::load_held(&d), &me))
-            .unwrap_or_default();
         let msg = takeover_message(&words);
         for id in due {
             self.keep.told.insert(id.clone());
@@ -892,20 +887,7 @@ impl Machine {
         }
         let listed = self.keeping_listers(&id);
         let now = relay::now();
-        let taken = trusted(|d, s, t| {
-            let s = s.ok_or(Untakeable::Unheard)?;
-            mesh::take(
-                d,
-                s,
-                t,
-                &id,
-                &holding.from,
-                record.n,
-                &record.said,
-                &listed,
-                now,
-            )
-        });
+        let taken = sworn().and_then(|w| w.take(&id, &holding.from, &record, &listed, now));
         let words = match taken {
             Some(Ok((_, words))) => words,
             // It moved on while the session started: it stops again, its
@@ -954,32 +936,14 @@ impl Machine {
                 .to_string(),
             _ => id.to_string(),
         };
-        let drop = |what: &str| {
-            debug(&format!("{name} {what}, its snapshots go"));
+        let (text, behind) = keeping::untakeable_text(name, why, "node", named);
+        if behind {
+            debug(&format!("{text}, its snapshots go"));
             if let Err(e) = store.prune() {
                 eprintln!("horadric node: cannot drop the snapshots of {name}: {e}");
             }
-        };
-        match why {
-            Untakeable::Stuck => format!("{name} has a number that cannot go up"),
-            Untakeable::MovedOn(o) => {
-                let owner = named(&o.brother);
-                drop(&format!("is {owner}'s since"));
-                format!("{name} is {owner}'s now, moved on since its last snapshot here")
-            }
-            Untakeable::Ended => {
-                drop("ended for good");
-                format!("{name} was ended for good on its brother")
-            }
-            Untakeable::Listed(b) => format!("{name} runs on {} now", named(b)),
-
-            Untakeable::Unheard => {
-                format!("nothing its owner signed says whose {name} is yet")
-            }
-            Untakeable::NotKeeper => {
-                format!("{name}'s brother does not name this node its keeper any more")
-            }
         }
+        text
     }
 }
 

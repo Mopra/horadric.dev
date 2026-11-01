@@ -39,9 +39,9 @@ use horadric_core::keeping::{
     self, auto_due, keep_messages, kept_entry, kept_full, kept_of, restored_heard, seen_due,
     stores, takeover_message, waited, words_of, Book, Holding, Next, Seen, Untakeable,
 };
-use horadric_core::mesh::Trust;
-use horadric_core::said::{Signer, Word};
+use horadric_core::said::Word;
 use horadric_core::serving::Job;
+use horadric_core::sworn::Sworn;
 use horadric_core::{mesh, Phase};
 use serde_json::Value;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -214,22 +214,14 @@ fn names(me: &str) -> Roster {
         .unwrap_or_default()
 }
 
-/// Runs `f` with what this PC judges the brotherhood's word by and signs
-/// its own with (none before it has a key pair). None without a state
-/// folder or a relay id.
-fn trusted<R>(f: impl FnOnce(&Path, Option<&Signer>, &Trust) -> R) -> Option<R> {
+/// This PC's word on whose its sessions are. None without a state folder
+/// or a relay id.
+fn sworn() -> Option<Sworn<'static>> {
     let dir = horadric_hooks::state_dir()?;
-    let me = with(|s| s.me.clone());
-    if me.is_empty() {
-        return None;
-    }
-    let crypto = crate::brothers::Cng;
-    let t = Trust::load(&dir, &me, &crypto);
-    let signer = Signer::of(&dir, &me, &crypto);
-    Some(f(&dir, signer.as_ref(), &t))
+    Sworn::new(dir, with(|s| s.me.clone()), &crate::brothers::Cng)
 }
 
-/// What the tray's keeping lines show: each joined brother (id, name),
+/// What the tray's keeping lines show/// What the tray's keeping lines show: each joined brother (id, name),
 /// the first keeper, and whether it takes over by itself.
 pub(crate) fn tray_state() -> (Vec<(String, String)>, Option<String>, bool) {
     let book = horadric_hooks::state_dir()
@@ -284,33 +276,16 @@ fn held_of(from: &str, remote: &str) -> Option<(Store, Holding)> {
 /// moved on since its snapshot goes from the store: it is behind for good.
 fn untakeable(store: &Store, name: &str, why: &Untakeable) -> String {
     let me = with(|s| s.me.clone());
-    let named = |id: &str| names(&me).name(id).to_string();
-    let drop = |what: &str| {
-        debug(&format!("{name} {what}, its snapshots go"));
+    let roster = names(&me);
+    let (text, behind) =
+        keeping::untakeable_text(name, why, "PC", |id| roster.name(id).to_string());
+    if behind {
+        debug(&format!("{text}, its snapshots go"));
         if let Err(e) = store.prune() {
             eprintln!("horadric: cannot drop the snapshots of {name}: {e}");
         }
-    };
-    match why {
-        Untakeable::Stuck => format!("{name} has a number that cannot go up."),
-        Untakeable::MovedOn(o) => {
-            let owner = named(&o.brother);
-            drop(&format!("is {owner}'s since"));
-            format!("{name} is {owner}'s now, moved on since its last snapshot here.")
-        }
-        Untakeable::Ended => {
-            drop("ended for good");
-            format!("{name} was ended for good on its brother.")
-        }
-        Untakeable::Listed(b) => format!("{name} runs on {} now.", named(b)),
-
-        Untakeable::Unheard => {
-            format!("Nothing its owner signed says whose {name} is yet, so no brother would believe the takeover.")
-        }
-        Untakeable::NotKeeper => {
-            format!("{name}'s brother does not name this PC its keeper any more.")
-        }
     }
+    format!("{text}.")
 }
 
 /// Drops everything this PC keeps of brother `from`, which named
@@ -346,8 +321,7 @@ impl App {
     /// a brother's tile owns nothing here: neither changes anything.
     pub(super) fn keeping_ended(&mut self, id: &str) {
         let handed = with(|s| s.handed.remove(id));
-        let ended =
-            !handed && trusted(|d, s, t| mesh::end(d, s, t, id, unix_now())).unwrap_or(false);
+        let ended = !handed && sworn().is_some_and(|w| w.end(id, unix_now()));
         if ended {
             debug(&format!("{id} ended for good"));
         }
@@ -357,7 +331,7 @@ impl App {
     /// receiver owns it one higher. One never claimed is claimed here
     /// first, signed, so the handoff has an owner to build on.
     pub(super) fn keeping_number(&self, id: &str) -> u64 {
-        trusted(|d, s, t| mesh::own(d, s, t, id, unix_now())).unwrap_or(1)
+        sworn().map_or(1, |w| w.number(id, unix_now()))
     }
 
     /// This PC's signed word that it hands session `id`, numbered `n`, to
@@ -368,9 +342,8 @@ impl App {
         let Some(to) = id_of(to) else {
             return Vec::new();
         };
-        let n = n.saturating_add(1);
-        trusted(|d, s, _| s.map(|s| mesh::handing_word(d, s, id, &to, n, unix_now())))
-            .flatten()
+        sworn()
+            .map(|w| w.handing(id, &to, n, unix_now()))
             .unwrap_or_default()
     }
 
@@ -378,8 +351,9 @@ impl App {
     /// back (the roster keeps it pending), so a receiver that lands it late
     /// does not run it, and the next try, to any brother, counts.
     pub(super) fn keeping_recall(&mut self, id: &str) {
-        let now = unix_now();
-        trusted(|d, s, t| s.map(|s| mesh::recall(d, s, t, id, now)));
+        if let Some(w) = sworn() {
+            w.recall(id, unix_now());
+        }
         debug(&format!("the handoff of {id} is recalled"));
     }
 
@@ -392,7 +366,7 @@ impl App {
         words: &[Word],
         n: u64,
     ) -> Result<(), String> {
-        trusted(|d, _, t| mesh::may_arrive(d, t, words, id, n)).unwrap_or(Ok(()))
+        sworn().map_or(Ok(()), |w| w.may_arrive(id, words, n))
     }
 
     /// A handoff moved session `id` to brother `to` (its name, None for
@@ -402,8 +376,7 @@ impl App {
     /// roster from either end.
     pub(super) fn keeping_handed(&mut self, id: &str, to: Option<&str>, n: u64, words: &[Word]) {
         let Some(name) = to else {
-            let now = unix_now();
-            let ok = trusted(|d, s, t| mesh::arrived(d, s, words, t, id, n, now)).unwrap_or(false);
+            let ok = sworn().is_some_and(|w| w.arrived(id, n, words, unix_now()));
             if !ok {
                 debug(&format!(
                     "{id} runs here, but its sender's word was not believed"
@@ -421,7 +394,9 @@ impl App {
                 save(&s.book);
             }
         });
-        trusted(|d, _, t| mesh::hand(d, t, id, &to, n));
+        if let Some(w) = sworn() {
+            w.hand(id, &to, n);
+        }
     }
 
     /// Whether this PC may take over brother `from`'s session `remote` as
@@ -435,9 +410,9 @@ impl App {
         holding: &Holding,
     ) -> Result<u64, Untakeable> {
         let listed = self.keeping_listers(remote);
-        let r = &holding.record;
-        trusted(|d, _, t| mesh::takeable_in(d, t, remote, from, r.n, &r.said, &listed))
-            .unwrap_or(Err(Untakeable::Unheard))
+        sworn().map_or(Err(Untakeable::Unheard), |w| {
+            w.takeable(remote, from, holding, &listed)
+        })
     }
 
     /// The brothers linked and awake now whose list shows session
@@ -766,13 +741,10 @@ impl App {
         let Some(mut record) = record else {
             return;
         };
-        let owner_n = trusted(|d, s, t| mesh::own(d, s, t, id, unix_now())).unwrap_or(1);
+        let owner_n = self.keeping_number(id);
         // The owner's own word that it owns it, with the snapshot: what
         // lets its keeper take over even before its roster came.
-        let me = with(|s| s.me.clone());
-        record.said = horadric_hooks::state_dir()
-            .map(|d| mesh::chain(&mesh::load_held(&d), id, &me))
-            .unwrap_or_default();
+        record.said = sworn().map(|w| w.chain(id)).unwrap_or_default();
         let next: Next = with(|s| {
             s.cutting.insert(id.to_string());
             let next = s.book.next(id, &keeper, owner_n);
@@ -961,7 +933,7 @@ impl App {
     /// branch; once the keeper has spoken, the sessions held back at start
     /// run on.
     fn keeping_owners(&mut self, who: &str, words: &[Word]) {
-        let heard = trusted(|d, _, t| mesh::told(d, words, t)).unwrap_or_default();
+        let heard = sworn().map(|w| w.told(words)).unwrap_or_default();
         for (id, o, ran, n) in &heard.twice {
             let owner = crate::project::brother_name(&o.brother);
             let ran = crate::project::brother_name(ran);
@@ -1070,10 +1042,7 @@ impl App {
         if due.is_empty() {
             return;
         }
-        let me = with(|s| s.me.clone());
-        let mine = horadric_hooks::state_dir()
-            .map(|d| mesh::mine(&mesh::load_held(&d), &me))
-            .unwrap_or_default();
+        let mine = sworn().map(|w| w.mine()).unwrap_or_default();
         let msg = with(|s| {
             for n in &due {
                 s.told.insert(n.clone());
@@ -1300,20 +1269,7 @@ impl App {
         with(|s| s.taking.remove(&tile));
         let listed = self.keeping_listers(&id);
         let now = unix_now();
-        let taken = trusted(|d, s, t| {
-            let s = s.ok_or(Untakeable::Unheard)?;
-            mesh::take(
-                d,
-                s,
-                t,
-                &id,
-                &holding.from,
-                record.n,
-                &record.said,
-                &listed,
-                now,
-            )
-        });
+        let taken = sworn().and_then(|w| w.take(&id, &holding.from, &record, &listed, now));
         let words = match taken {
             Some(Ok((_, words))) => words,
             // It moved on while the session started: it stops again, its
