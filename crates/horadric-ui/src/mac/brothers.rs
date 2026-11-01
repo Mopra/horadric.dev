@@ -91,6 +91,11 @@ pub enum Note {
     SignedIn(Result<String, String>),
     /// The brothers or the relay changed: the menu lists them anew.
     Changed,
+    /// A roster says sessions of the Mac's are another's now.
+    Moved(Vec<(String, horadric_core::brotherhood::Owner)>),
+    /// Work a thread hands back to the main thread (a packed or landed
+    /// session, a place readied).
+    Run(Box<dyn FnOnce(&mut App) + Send>),
 }
 
 /// What a yes or no to a question goes to.
@@ -209,9 +214,7 @@ impl Listener for ToApp {
             Event::Down { ch } => Note::Down { ch },
             Event::Heard { ch, msg } => Note::Heard { ch, msg },
             Event::Gone { id } => Note::Gone { id },
-            // The Mac hands off and keeps nothing yet, so whose a session
-            // is now changes nothing it shows; the menu lists brothers anew.
-            Event::Moved { .. } => Note::Changed,
+            Event::Moved { owners } => Note::Moved(owners),
         };
         tell_app(note);
     }
@@ -343,6 +346,7 @@ pub(super) fn heard(app: &mut App, note: Note) {
             app.kin = kin;
             eprintln!("horadric brothers: linked to {name}");
             super::far::up(app, ch, &id, &name);
+            super::keeping::linked(app, &id);
             menu_changed(app);
             pump(app);
         }
@@ -415,7 +419,17 @@ pub(super) fn heard(app: &mut App, note: Note) {
             menu_changed(app);
         }
         Note::Changed => menu_changed(app),
+        Note::Moved(owners) => {
+            super::keeping::moved(app, owners);
+            menu_changed(app);
+        }
+        Note::Run(f) => f(app),
     }
+}
+
+/// The Mac's relay id, which its brothers know it by.
+pub(super) fn me_id() -> Option<String> {
+    relay::me(&dir()?)
 }
 
 /// Asks the human, then gives the answer to the brothers. A question void
@@ -493,6 +507,7 @@ fn read_listed() -> (bool, Vec<Listed>) {
 /// with no event of its own, so the menu is built again when it did.
 pub(super) fn refresh(app: &mut App) {
     super::far::tick(app);
+    super::handing::tick(app);
     let (up, listed) = read_listed();
     if up != app.kin.up || listed != app.kin.listed {
         app.kin.up = up;
@@ -805,6 +820,18 @@ impl Serve for Here<'_> {
             Some(dir) => horadric_core::afar_files::read(&project, &dir, &path),
             None => afar_files_error(&project, &path, NOT_SHOWN),
         })
+    }
+
+    fn handoff(&mut self, id: &str, to: &str) -> Result<(), String> {
+        super::handing::handoff_to(self.0, id, to, false)
+    }
+
+    fn handing(&mut self, who: &str, msg: &Value) -> Option<Job> {
+        super::handing::serve(self.0, who, msg)
+    }
+
+    fn keeping(&mut self, who: &str, msg: &Value) -> Option<Job> {
+        super::keeping::serve(self.0, who, msg)
     }
 
     fn stop(&mut self, id: &str) -> Result<(), String> {

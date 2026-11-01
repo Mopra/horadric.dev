@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertStyle, NSApplication,
-    NSModalResponseOK, NSOpenPanel, NSTextField,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertStyle,
+    NSAlertThirdButtonReturn, NSApplication, NSModalResponseOK, NSOpenPanel, NSTextField,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL};
 
@@ -54,6 +54,21 @@ pub fn choose(title: &str, text: &str, yes: &str, no: &str) -> bool {
     a.runModal() == NSAlertSecondButtonReturn
 }
 
+/// Asks with up to three buttons, the first the default: which was
+/// pressed, None for none.
+pub fn buttons(title: &str, text: &str, labels: &[&str]) -> Option<usize> {
+    let a = alert(title, text);
+    for l in labels.iter().take(3) {
+        a.addButtonWithTitle(&NSString::from_str(l));
+    }
+    match a.runModal() {
+        r if r == NSAlertFirstButtonReturn => Some(0),
+        r if r == NSAlertSecondButtonReturn => Some(1),
+        r if r == NSAlertThirdButtonReturn => Some(2),
+        _ => None,
+    }
+}
+
 /// Asks for a line of text, starting from `initial`. None for Cancel.
 pub fn ask(title: &str, text: &str, initial: &str) -> Option<String> {
     let mtm = mtm();
@@ -94,14 +109,38 @@ pub fn quit(running: usize) -> Option<bool> {
 
 /// A folder picked for a new session, starting in `start`.
 pub fn pick_folder(mtm: MainThreadMarker, start: Option<&Path>) -> Option<PathBuf> {
+    folder_panel(
+        mtm,
+        start,
+        "Start Session",
+        "Pick the project folder to start a session in.",
+    )
+}
+
+/// Where a session a brother hands the Mac goes, for a project it has no
+/// checkout of: a folder that holds it, or one to put it in.
+pub fn pick_place(start: Option<&Path>) -> Option<PathBuf> {
+    folder_panel(
+        mtm(),
+        start,
+        "Put It Here",
+        "Pick where the handed off session goes: a folder that holds its project, or one to put it in.",
+    )
+}
+
+fn folder_panel(
+    mtm: MainThreadMarker,
+    start: Option<&Path>,
+    prompt: &str,
+    message: &str,
+) -> Option<PathBuf> {
     let panel = NSOpenPanel::openPanel(mtm);
     panel.setCanChooseDirectories(true);
     panel.setCanChooseFiles(false);
     panel.setAllowsMultipleSelection(false);
-    panel.setPrompt(Some(&NSString::from_str("Start Session")));
-    panel.setMessage(Some(&NSString::from_str(
-        "Pick the project folder to start a session in.",
-    )));
+    panel.setCanCreateDirectories(true);
+    panel.setPrompt(Some(&NSString::from_str(prompt)));
+    panel.setMessage(Some(&NSString::from_str(message)));
     if let Some(dir) = start {
         let url = NSURL::fileURLWithPath(&NSString::from_str(&dir.to_string_lossy()));
         panel.setDirectoryURL(Some(&url));

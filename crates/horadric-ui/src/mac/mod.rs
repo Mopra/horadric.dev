@@ -12,6 +12,8 @@ mod cluster;
 mod delegate;
 mod dialog;
 mod folio;
+mod handing;
+mod keeping;
 mod look;
 mod menu;
 mod microphone;

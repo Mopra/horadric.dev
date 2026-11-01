@@ -64,6 +64,9 @@ pub(super) struct Far {
     /// Sessions to bring onto the stage once they run: started or resumed
     /// from here.
     showing: HashSet<String>,
+    /// Tiles that went a moment ago, for a handed off session to come back
+    /// into where it stood.
+    places: afar_tiles::Places,
 }
 
 impl Far {
@@ -82,7 +85,7 @@ fn far(app: &mut App) -> &mut Far {
 
 /// Seconds local time is ahead of UTC now, for the time a silent
 /// brother's tiles say they last heard it.
-fn utc_offset(now: u64) -> i64 {
+pub(super) fn utc_offset(now: u64) -> i64 {
     let t = now as libc::time_t;
     // SAFETY: `tm` is plain data that localtime_r fills in.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
@@ -210,6 +213,9 @@ pub(super) fn heard(app: &mut App, ch: u32, msg: &Value) {
     if let Some(p) = far(app).peers.get_mut(&id) {
         p.heard.last = app::unix_now();
     }
+    if super::handing::heard(app, &id, msg) {
+        return;
+    }
     let changed = match afar::hear(msg) {
         Heard::Hello { control, v, .. } => hello(app, &id, msg, control, v),
         Heard::Sessions(list) => {
@@ -333,10 +339,11 @@ fn sessions(app: &mut App, id: &str, list: &[afar::Entry]) -> bool {
         .get(id)
         .map_or_else(|| crate::project::brother_name(id), |p| p.name.clone());
     let now = SystemTime::now();
+    let places = &mut app.kin.far.places;
     let (changed, mut gone) = app
         .registry
         .lock()
-        .map(|mut r| afar_tiles::hold_list(&mut r, id, &name, &list, now))
+        .map(|mut r| afar_tiles::hold_placed(&mut r, id, &name, &list, now, places, project_key))
         .unwrap_or_default();
     // A pane whose session stopped running there has nothing more to show
     // until it runs again.
@@ -565,6 +572,58 @@ pub(super) fn stop(app: &mut App, id: &str) -> bool {
         send(app, &brother, json!({"t": "stop", "id": remote}));
     }
     true
+}
+
+/// The brothers a session can be handed to now, by relay id: linked,
+/// answering, and letting the Mac act. In the order of their names.
+pub(super) fn takers(app: &App) -> Vec<String> {
+    let mut ids: Vec<(&str, &String)> = app
+        .kin
+        .far
+        .peers
+        .iter()
+        .filter(|(_, p)| p.ch.is_some() && p.client.ready() && p.control)
+        .map(|(id, p)| (p.name.as_str(), id))
+        .collect();
+    ids.sort();
+    ids.into_iter().map(|(_, id)| id.clone()).collect()
+}
+
+/// A brother by its relay id or, when only one goes by it, its name.
+pub(super) fn id_of(app: &App, to: &str) -> Option<String> {
+    let peers = &app.kin.far.peers;
+    if peers.contains_key(to) {
+        return Some(to.to_string());
+    }
+    let mut named = peers.iter().filter(|(_, p)| p.name == to);
+    let (id, _) = named.next()?;
+    named.next().is_none().then(|| id.clone())
+}
+
+/// The brother that owns tile `id`, for a Claude Code session of theirs
+/// with a conversation to carry on.
+pub(super) fn owner_of(app: &App, id: &str) -> Option<String> {
+    let r = app.registry.lock().ok()?;
+    let s = r.get(id)?;
+    let b = s.brother.as_ref()?;
+    (!s.shell && s.prompted).then(|| b.id.clone())
+}
+
+/// Sends `msg` to brother `id` on its channel, while linked.
+pub(super) fn tell(app: &mut App, id: &str, msg: Value) {
+    send(app, id, msg);
+}
+
+/// The Mac's own session `id` goes because it was handed to a brother:
+/// its tile's place is kept for it to come back as that brother's.
+pub(super) fn left(app: &mut App, id: &str) {
+    let now = SystemTime::now();
+    let places = &mut app.kin.far.places;
+    if let Ok(mut r) = app.registry.lock() {
+        if let Some(home) = r.get(id).map(project_key) {
+            places.leave(&mut r, id, &home, now);
+        }
+    }
 }
 
 /// Names a brother's session there; the name comes back in its list.

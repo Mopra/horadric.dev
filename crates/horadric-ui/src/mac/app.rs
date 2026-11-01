@@ -163,7 +163,7 @@ pub struct App {
     stage: Stage,
     status: Status,
     requests: Arc<Mutex<Vec<Command>>>,
-    recent: Vec<String>,
+    pub(super) recent: Vec<String>,
     status_settings: Option<PathBuf>,
     font_size: f32,
     last_saved: Option<SavedState>,
@@ -934,6 +934,10 @@ impl App {
 
     /// Resumes a paused session in the same tile, with its conversation.
     pub(super) fn resume(&mut self, id: &str, show: bool) -> Result<(), String> {
+        // Taken over on a brother: it runs there, and two must not run.
+        if let Some(line) = super::keeping::fenced(id) {
+            return Err(line);
+        }
         let Some(saved) = self.paused.remove(id) else {
             return Ok(());
         };
@@ -1071,7 +1075,7 @@ impl App {
     }
 
     /// Takes a session off the tiles for good.
-    fn forget(&mut self, id: &str) {
+    pub(super) fn forget(&mut self, id: &str) {
         if let Some(c) = self.consoles.remove(id) {
             if c.folio.is_some() {
                 super::folio::close(id);
@@ -1585,10 +1589,10 @@ impl App {
         )];
         // The groups of the Windows tile menu in its order (calls to action,
         // open, what the session is doing, end), so a line the port gains
-        // lands where it is on Windows. The port has no calls to action or
-        // doing lines yet; an empty group is left out.
+        // lands where it is on Windows. The port has no calls to action
+        // yet; an empty group is left out.
         let calls: Vec<Item> = Vec::new();
-        let doing: Vec<Item> = Vec::new();
+        let doing: Vec<Item> = super::handing::menu(self, id);
         let mut items = Vec::new();
         for group in [calls, open, doing, end] {
             if group.is_empty() {
@@ -1636,7 +1640,10 @@ impl App {
                     self.end(id);
                 }
             }
-            _ => {}
+            Some(tag) => {
+                super::handing::picked(self, id, tag);
+            }
+            None => {}
         }
     }
 
@@ -1951,15 +1958,19 @@ impl App {
                     self.start(name, PathBuf::from(n.cwd), n.args, Agent::Claude);
                 }
                 Command::Reload(r) => self.reload(r),
-                // The quest log, overlaps, the browser pane and the memory
-                // are not on the Mac yet. Dropping a Know or Recall call
-                // closes its reply, so the caller hears no answer at once
-                // instead of waiting (a recall then answers by words).
+                // A session that just moved here is told so first. The
+                // memory is not on the Mac yet: dropping any other Recall
+                // call closes its reply, so the caller hears no answer at
+                // once instead of waiting (it then answers by words).
+                Command::Recall(call) => {
+                    let _ = super::handing::recall(call);
+                }
+                // The quest log, overlaps and the browser pane are not on
+                // the Mac yet; a Know call is dropped as a Recall is.
                 Command::Tasks(_)
                 | Command::Overlap(_)
                 | Command::Browser(_)
-                | Command::Know(_)
-                | Command::Recall(_) => {}
+                | Command::Know(_) => {}
             }
         }
     }
