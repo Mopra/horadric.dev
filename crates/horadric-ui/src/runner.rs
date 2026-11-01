@@ -754,10 +754,15 @@ impl App {
 
     /// What a Claude Code session started with `args` is given for its
     /// quest's `Model:` line, read as the line is now, so a resume takes a
-    /// model Warriv wrote since. Nothing when its own `args` chose one.
+    /// model Warriv wrote since, and a wake Warriv's own model. Nothing
+    /// when its own `args` chose one.
     pub(super) fn quest_model_args(&self, id: &str, args: &[String]) -> Vec<String> {
         if Agent::Claude.chosen(Setting::Model, args) {
             return Vec::new();
+        }
+        let wake = horadric_core::warriv::model_args(id);
+        if !wake.is_empty() {
+            return wake;
         }
         self.shared
             .boards

@@ -1058,6 +1058,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         app.count_experience();
         app.attach_hosts();
         app.reattach_folios();
+        let lost = app.drop_lost_wakes();
+        let carry: Vec<String> = carry.into_iter().filter(|id| !lost.contains(id)).collect();
         app.restore_webs(&pages);
         app.carry_on(&carry, on_stage.as_deref());
         // Written before anything resumed can crash it, so that crash is
@@ -4224,6 +4226,23 @@ impl App {
         {
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// After a restart, closes the Warriv sessions no host brought back,
+    /// which are the ones still waiting in `paused` once hosts and Folios
+    /// are attached. Says which, so nothing resumes them.
+    fn drop_lost_wakes(&mut self) -> Vec<String> {
+        let lost: Vec<String> = (self.paused.keys())
+            .filter(|id| !horadric_core::warriv::comes_back(id, false))
+            .cloned()
+            .collect();
+        for id in &lost {
+            self.forget(id);
+        }
+        if !lost.is_empty() {
+            self.reconcile(true);
+        }
+        lost
     }
 
     /// After a reload or a crash: starts again the sessions that were running

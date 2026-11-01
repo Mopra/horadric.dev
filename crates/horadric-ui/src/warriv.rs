@@ -620,6 +620,18 @@ impl App {
         given: Vec<Event>,
     ) -> Option<Awake> {
         let dir = self.project_dir(key)?;
+        // A wake is never carried on, so one left paused would only stand
+        // beside this one. A live one, as after a reload, is left alone.
+        let left: Vec<String> = (self.shared.registry.lock().ok())
+            .map(|r| r.all().map(|s| s.id.clone()).collect())
+            .unwrap_or_default();
+        for old in left {
+            if self.project_of(&old).as_deref() == Some(key)
+                && warriv::left_over(&old, self.live(&old))
+            {
+                self.forget(&old);
+            }
+        }
         let id = self.unique_id(warriv::ID);
         let spec = SessionSpec {
             id: Some(id.clone()),

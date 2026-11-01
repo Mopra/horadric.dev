@@ -36,6 +36,37 @@ pub fn is_warriv(id: &str) -> bool {
     made_from(id, ID) || is_reviewer(id)
 }
 
+/// The model a wake runs on, as Claude Code's `--model` takes it. Its
+/// turns are short and many, so Opus costs more than it gives, and most
+/// traps found in wakes (commands behind `cd` or `&`, relative paths, a
+/// brief read as leave to build) were Haiku's.
+pub const MODEL: &str = "sonnet";
+
+/// The flags that choose session `id`'s model when it is a wake. A
+/// reviewer keeps the human's default, since it reads a whole diff once.
+pub fn model_args(id: &str) -> Vec<String> {
+    if made_from(id, ID) {
+        vec!["--model".into(), MODEL.into()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether a saved session comes back at start, `hosted` when its host
+/// still runs. A wake or a review whose host is gone does not: neither is
+/// ever carried on, and the next event starts a fresh one, which would
+/// stand beside it. One whose host outlived a reload is left alone.
+pub fn comes_back(id: &str, hosted: bool) -> bool {
+    hosted || !is_warriv(id)
+}
+
+/// Whether session `id` of a project is a wake left over, closed as a new
+/// wake starts there: one that is not `live`, such as a wake brought back
+/// paused by a Horadric that kept it.
+pub fn left_over(id: &str, live: bool) -> bool {
+    made_from(id, ID) && !live
+}
+
 /// What a notes line Warriv wrote starts with, so the next wake reads what
 /// was decided before.
 pub const NOTE: &str = "Warriv: ";
@@ -2168,6 +2199,34 @@ not green."
         assert!(!is_warriv("warrivs-1"));
         assert!(!is_warriv("fix-warriv-1"));
         assert!(!is_warriv("warriv-s-rounds-the-whole-project-looked-70758"));
+    }
+
+    #[test]
+    fn a_wake_runs_on_sonnet_and_nothing_else_is_chosen_for() {
+        assert_eq!(model_args("warriv-51234"), ["--model", "sonnet"]);
+        assert!(model_args("warriv-review-4100").is_empty());
+        assert!(model_args("warriv-s-rounds-the-whole-project-looked-70758").is_empty());
+        assert!(model_args("fix-the-tiles-1").is_empty());
+    }
+
+    #[test]
+    fn a_restart_brings_back_no_wake_but_a_reload_keeps_a_live_one() {
+        // A real restart: no host runs any more.
+        assert!(!comes_back("warriv-51234", false));
+        assert!(!comes_back("warriv-review-4100", false));
+        assert!(comes_back("fix-the-tiles-1", false));
+        assert!(comes_back("warriv-s-rounds-the-whole-project-looked-70758", false));
+        // A reload: the host outlived it.
+        assert!(comes_back("warriv-51234", true));
+        assert!(comes_back("warriv-review-4100", true));
+    }
+
+    #[test]
+    fn a_new_wake_closes_only_paused_wakes() {
+        assert!(left_over("warriv-51234", false));
+        assert!(!left_over("warriv-51234", true));
+        assert!(!left_over("warriv-review-4100", false));
+        assert!(!left_over("fix-the-tiles-1", false));
     }
 
     #[test]
