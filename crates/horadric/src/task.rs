@@ -1007,8 +1007,8 @@ fn start(cwd: &Path) -> Result<(), String> {
             chars(&horadric_core::heavy::system_prompt(horadric)),
         ),
     ];
-    // The browser pane and the MCP server exist on Windows only.
-    #[cfg(windows)]
+    // The browser pane and the MCP server exist on Windows and the Mac.
+    #[cfg(any(windows, target_os = "macos"))]
     pieces.extend([
         (
             "Horadric's browser pane prompt".into(),

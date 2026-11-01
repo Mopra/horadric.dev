@@ -32,7 +32,7 @@ mod install;
 mod install;
 #[cfg(not(target_os = "macos"))]
 mod lore;
-#[cfg(not(target_os = "macos"))]
+// The Mac serves the browser tools; the lore is not on it yet.
 mod mcp;
 #[cfg(target_os = "linux")]
 mod node;
@@ -257,7 +257,6 @@ fn main() -> ExitCode {
         Some("release") => release::run(&args[1..]),
         Some("status") => status::run(),
         Some("name") => name_command(&args[1..]),
-        #[cfg(not(target_os = "macos"))]
         Some("mcp") => mcp::run(),
         #[cfg(windows)]
         Some("portal") => portal::run(&args[1..]),

@@ -24,6 +24,7 @@ mod queue;
 mod snapshot;
 mod stage;
 mod update;
+mod web;
 mod usage;
 
 use crate::console::Note;

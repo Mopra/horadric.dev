@@ -73,3 +73,5 @@ objc2-app-kit = "0.3"
 objc2-core-foundation = "0.3"
 objc2-core-graphics = "0.3"
 objc2-core-text = "0.3"
+# The browser pane, WebView2's counterpart on the Mac.
+objc2-web-kit = "0.3"

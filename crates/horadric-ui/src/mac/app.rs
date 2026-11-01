@@ -527,7 +527,7 @@ impl App {
             .or_else(|| self.kin.far.console_by_serial(serial))
     }
 
-    fn project_of(&self, id: &str) -> Option<String> {
+    pub(super) fn project_of(&self, id: &str) -> Option<String> {
         let r = self.registry.lock().ok()?;
         r.get(id).map(project_key)
     }
@@ -660,6 +660,7 @@ impl App {
         self.register_folio(id, &dir, name, resume.as_deref());
         let key = self.project_of(id).unwrap_or_default();
         let mut all = self.defaults.flags(&own);
+        all.extend(super::web::claude_args());
         all.extend(own.iter().cloned());
         let flags = horadric_core::folio::headless_args(
             &all,
@@ -921,15 +922,19 @@ impl App {
     }
 
     /// Horadric's status line for Claude Code, unless the session brought
-    /// settings of its own.
+    /// settings of its own, and the browser pane's tools either way.
     fn extra_args(&self, program: &Path, args: &[String]) -> Vec<String> {
-        if !console::is_claude(program) || args.iter().any(|a| a == "--settings") {
+        if !console::is_claude(program) {
             return Vec::new();
+        }
+        if args.iter().any(|a| a == "--settings") {
+            return super::web::claude_args();
         }
         let mut extra = self.defaults.flags(args);
         if let Some(path) = &self.status_settings {
             extra.extend(["--settings".into(), path.to_string_lossy().into_owned()]);
         }
+        extra.extend(super::web::claude_args());
         extra
     }
 
@@ -1336,6 +1341,10 @@ impl App {
                 .unwrap_or_else(|| id.clone());
             panes.push(Pane::new(id.clone(), name, Arc::clone(&v.console), accent));
         }
+        // The project's browser, last.
+        if let Some(c) = super::web::console_of(key) {
+            panes.push(Pane::new(super::web::pane_id(key), "Browser".into(), c, accent));
+        }
         panes
     }
 
@@ -1410,6 +1419,9 @@ impl App {
             n += (self.views.iter())
                 .filter(|(id, v)| v.key == key && self.stage.shows(id))
                 .count();
+            n += usize::from(
+                super::web::is_open(&key) && self.stage.shows(&super::web::pane_id(&key)),
+            );
             n == want.len()
         };
         if !(shown_all && same_count) {
@@ -1524,10 +1536,12 @@ impl App {
         const REVEAL: usize = 3;
         const END_ALL: usize = 4;
         const OPEN_FILE: usize = 5;
+        const BROWSER: usize = 6;
         let items = [
             Item::pick("New session", NEW),
             Item::pick("New terminal", SHELL),
             Item::pick("Open file\u{2026}", OPEN_FILE),
+            Item::pick("Open browser", BROWSER),
             Item::pick("Show in Finder", REVEAL),
             Item::Separator,
             Item::pick("End every session in this project", END_ALL),
@@ -1540,6 +1554,7 @@ impl App {
             }
             Some(SHELL) => self.open_shell(key),
             Some(OPEN_FILE) => self.pick_file(key),
+            Some(BROWSER) => super::web::open_for_user(self, key),
             Some(REVEAL) => {
                 if let Some(dir) = self.project_dir(key) {
                     let _ = std::process::Command::new("/usr/bin/open").arg(dir).spawn();
@@ -1649,6 +1664,10 @@ impl App {
     }
 
     fn pane_menu(&mut self, id: &str, at: NSPoint) {
+        // A browser pane's own bar has what it can do.
+        if super::web::owns(id) {
+            return;
+        }
         let Some(view) = self.views.get(id) else {
             self.tile_menu(id, at);
             return;
@@ -1680,7 +1699,7 @@ impl App {
     }
 
     fn close_pane(&mut self, id: &str) {
-        if super::far::close(self, id) {
+        if super::far::close(self, id) || super::web::close_pane(self, id) {
             return;
         }
         if self.views.remove(id).is_some() {
@@ -1966,12 +1985,10 @@ impl App {
                 Command::Recall(call) => {
                     let _ = super::handing::recall(call);
                 }
-                // The quest log, overlaps and the browser pane are not on
-                // the Mac yet; a Know call is dropped as a Recall is.
-                Command::Tasks(_)
-                | Command::Overlap(_)
-                | Command::Browser(_)
-                | Command::Know(_) => {}
+                Command::Browser(call) => super::web::call(self, call),
+                // The quest log and overlaps are not on the Mac yet; a
+                // Know call is dropped as a Recall is.
+                Command::Tasks(_) | Command::Overlap(_) | Command::Know(_) => {}
             }
         }
     }

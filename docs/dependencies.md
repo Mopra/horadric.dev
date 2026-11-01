@@ -34,4 +34,4 @@ Microsoft's ConPTY package, the pseudo console that passes `CSI c`
 through so OSC 7501 works (see
 `crates/horadric-pty/conpty/README.md`). Adding one is a decision, not a reflex.
 
-On macOS (`horadric-ui/src/mac/`) the UI uses `objc2` with `objc2-foundation`, `objc2-app-kit`, `objc2-core-foundation`, `objc2-core-graphics` and `objc2-core-text`, the Objective-C and AppKit bindings that stand in for the `windows` crate. `libc` is used in `horadric`, `horadric-pty` and `horadric-ui` for the Unix side of the pty and process code.
+On macOS (`horadric-ui/src/mac/`) the UI uses `objc2` with `objc2-foundation`, `objc2-app-kit`, `objc2-core-foundation`, `objc2-core-graphics` and `objc2-core-text`, the Objective-C and AppKit bindings that stand in for the `windows` crate, and `objc2-web-kit` for the browser pane, WKWebView as `webview2-com` is WebView2 (the Mac side of the one web view decided 2026-09-29, no new decision; it brings `objc2-javascript-core` and `objc2-security`, WebKit's own bindings). `libc` is used in `horadric`, `horadric-pty` and `horadric-ui` for the Unix side of the pty and process code.

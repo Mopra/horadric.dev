@@ -9,7 +9,14 @@ its own step:
   slash commands, images, `!` commands, review, the sign in card, MCP
   forms, undo, handing over to a terminal, and a smoke step with a fake
   headless claude so CI sees one.
-- **The browser pane**, as a `WKWebView` (WebView2's counterpart).
+- **The browser pane's rest.** It is on the Mac as a `WKWebView` per
+  tab (`mac/web.rs`, lore has how): tabs per project, an address bar,
+  and the `browser_*` tools, whose DevTools calls WebKit stands in for
+  with script in the page (`webkit_devtools.rs`). Still Windows only:
+  pages kept over a restart, docking and popping out, zoom, find,
+  favicons, history suggestions, downloads, the keys for tabs, and
+  `browser_devtools` beyond the calls the tools make. A page's events
+  are its own there, not the user's (`isTrusted` is false).
 - **The quest log runner and Warriv.** `runner.rs` and `warriv.rs` sit
   on the Windows `App`; the Mac needs them behind something both apps
   give, not a copy.

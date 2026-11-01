@@ -648,6 +648,13 @@ impl StageView {
                 app::input(Input::Focused(id));
             }
         }
+        // A browser pane's page takes the keys, not the stage.
+        let web = (self.ivars().panes.borrow().get(i)).and_then(|p| p.console.web.clone());
+        if let Some(key) = web {
+            super::web::focus(&key);
+            self.setNeedsDisplay(true);
+            return;
+        }
         let folio = (self.ivars().panes.borrow().get(i))
             .filter(|p| p.console.folio.is_some())
             .map(|p| p.id.clone());
@@ -698,6 +705,12 @@ impl StageView {
             .filter(|p| p.rect.w > 0.0 && p.console.folio.is_some())
             .map(|p| (p.id.clone(), p.grid_rect()))
             .collect();
+        // So is a browser pane's page, by its project.
+        let webs: Vec<(String, Rect)> = panes
+            .iter()
+            .filter(|p| p.rect.w > 0.0)
+            .filter_map(|p| Some((p.console.web.clone()?, p.grid_rect())))
+            .collect();
         let font = self.ivars().font.borrow();
         for p in panes
             .iter()
@@ -715,6 +728,7 @@ impl StageView {
         drop(font);
         drop(panes);
         super::folio::place(self, &folios);
+        super::web::place(self, &webs);
         self.setNeedsDisplay(true);
     }
 
@@ -778,7 +792,9 @@ impl StageView {
 
     fn paint_pane(&self, p: &Painter, font: &TermFont, pane: &Pane, focused: bool) {
         let r = pane.rect;
-        let folio = pane.console.folio.is_some();
+        let web = pane.console.web.as_deref();
+        // A Folio or a browser pane has a view of its own over the glass.
+        let folio = pane.console.folio.is_some() || web.is_some();
         if let Some(wait) = pane.console.flush_sync().filter(|_| !folio) {
             let me = self.retain();
             super::queue::after_main(wait, move || me.setNeedsDisplay(true));
@@ -814,6 +830,7 @@ impl StageView {
             theme::text_dim()
         };
         let detail = match (folio, pane.console.exit_code(), pane.console.title()) {
+            (true, _, _) if web.is_some() => super::web::detail(web.unwrap_or_default()),
             (true, _, _) => super::folio::detail(&pane.id),
             (false, Some(code), _) => format!("exited {code}"),
             (false, None, Some(t)) => t.trim().to_string(),

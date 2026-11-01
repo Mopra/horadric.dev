@@ -38,6 +38,10 @@ const APP_WAIT: Duration = Duration::from_secs(100);
 /// before it makes the call again and does not act twice.
 const MAY_HAVE_RUN: &str = "It may still have run in the page: look (browser_snapshot or browser_evaluate) before you make it again.";
 
+/// Whether this build keeps a lore. The Mac has no code index yet, so it
+/// serves the browser tools only.
+const HAS_LORE: bool = cfg!(not(target_os = "macos"));
+
 /// The most text a tool answers with, so one call can not fill the context.
 const MOST_TEXT: usize = 60_000;
 
@@ -56,10 +60,13 @@ pub fn run() -> Result<(), String> {
     let top: OnceCell<Option<PathBuf>> = OnceCell::new();
     let mut server = Server {
         // A Linux node has no stage, so no browser pane: only the lore.
-        browser: cfg!(windows) && session.is_some(),
+        browser: cfg!(any(windows, target_os = "macos")) && session.is_some(),
         app: move |body: Value| ask_app(owner, session.as_deref(), &body),
         settle: Duration::from_millis(400),
+        #[cfg(not(target_os = "macos"))]
         lore: crate::lore::tool,
+        #[cfg(target_os = "macos")]
+        lore: |_, _| None,
     };
     let mut out = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
@@ -204,12 +211,12 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
                     .unwrap_or(PROTOCOL),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "horadric", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": if self.browser {
-                    format!("{INSTRUCTIONS}
+                "instructions": match (self.browser, HAS_LORE) {
+                    (true, true) => format!("{INSTRUCTIONS}
 
-{LORE}")
-                } else {
-                    LORE.to_string()
+{LORE}"),
+                    (true, false) => INSTRUCTIONS.to_string(),
+                    (false, _) => LORE.to_string(),
                 },
             })),
             "ping" => Ok(json!({})),
@@ -739,7 +746,7 @@ fn tools() -> Vec<Value> {
     vec![
         tool(
             "browser_open",
-            "Open this project's browser pane in Horadric, and a tab of your own in it, at url when given. It is a real browser (Edge WebView2) beside the user's terminals, logged in wherever the user logged in. Open it when a task needs a web page; it stays open until closed. Use it in place of Playwright, Puppeteer, a Chrome DevTools MCP or a Chrome or headless browser of your own.",
+            "Open this project's browser pane in Horadric, and a tab of your own in it, at url when given. It is a real browser (Edge WebView2 on Windows, WebKit on the Mac) beside the user's terminals, logged in wherever the user logged in. Open it when a task needs a web page; it stays open until closed. Use it in place of Playwright, Puppeteer, a Chrome DevTools MCP or a Chrome or headless browser of your own.",
             json!({ "url": { "type": "string", "description": "Where to go; a bare host like localhost:3000 is fine" } }),
             &[],
         ),
@@ -894,6 +901,9 @@ fn tools() -> Vec<Value> {
 }
 
 fn lore_tools() -> Vec<Value> {
+    if !HAS_LORE {
+        return Vec::new();
+    }
     let files =
         |what: &str| json!({ "type": "array", "items": { "type": "string" }, "description": what });
     vec![

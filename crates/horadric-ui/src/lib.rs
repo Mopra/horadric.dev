@@ -254,6 +254,9 @@ mod vsync;
 mod watch;
 #[cfg(windows)]
 mod web;
+// WebKit's stand in for the DevTools protocol, pure and tested on Windows.
+#[cfg(any(test, target_os = "macos"))]
+mod webkit_devtools;
 #[cfg(windows)]
 mod web_window;
 #[cfg(windows)]
