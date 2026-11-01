@@ -1297,12 +1297,30 @@ pub(crate) trait Runner: Host {
 
     fn add_task(&mut self, key: &str, title: &str, notes: &str) {
         let title = tasks::one_line(title);
-        let Some(dir) = self.project_dir(key).filter(|_| !title.is_empty()) else {
+        if title.is_empty() {
+            return;
+        }
+        // A quest typed and then lost without a word reads as a dead Enter,
+        // so every way it can fail says so.
+        let Some(dir) = self.project_dir(key) else {
+            eprintln!("horadric: no folder known for the project {key}");
+            self.toast(
+                Toast::Failed,
+                "Quest not added",
+                &format!("Horadric does not know the folder of {key}."),
+            );
             return;
         };
         let add = |text: &str| Some(tasks::append_with_notes(text, &title, notes));
         if let Err(e) = file::update(&dir, add) {
-            eprintln!("horadric: cannot write {}: {e}", file::file(&dir).display());
+            let path = file::file(&dir);
+            eprintln!("horadric: cannot write {}: {e}", path.display());
+            self.toast(
+                Toast::Failed,
+                "Quest not added",
+                &format!("Cannot write {}: {e}", path.display()),
+            );
+            return;
         }
         self.refresh_boards(true);
         self.run_tasks();
