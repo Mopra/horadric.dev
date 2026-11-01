@@ -53,6 +53,10 @@ pub struct SavedState {
     /// them off screen.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub far_hidden: Vec<String>,
+    /// The sessions the human closed, newest first, for "Reopen closed
+    /// session". See [`crate::reopen`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reopen: Vec<crate::reopen::Closed>,
     /// Start with Windows is switched on once, the first time Horadric runs.
     /// After that it is the user's call, so this remembers it was offered.
     #[serde(default)]
