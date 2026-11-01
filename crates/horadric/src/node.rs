@@ -491,25 +491,8 @@ fn subfolders(root: &Path) -> Vec<wire::Folder> {
 /// Tells Claude Code it may trust `dir`, since nobody sits at a server to
 /// answer its trust prompt.
 fn trust(dir: &Path) {
-    let Some(home) = horadric_hooks::home() else {
-        return;
-    };
-    let path = Path::new(&home).join(".claude.json");
-    let mut config: Value = match std::fs::read(&path) {
-        Ok(bytes) => match serde_json::from_slice(&bytes) {
-            Ok(v) => v,
-            // Half written by Claude Code: not ours to replace with less.
-            Err(_) => return,
-        },
-        Err(_) => Value::Null,
-    };
-    let key = horadric_core::trust::project_key(&dir.to_string_lossy());
-    if horadric_core::trust::trust(&mut config, &key) {
-        let tmp = path.with_extension("json.horadric-tmp");
-        let text = serde_json::to_string_pretty(&config).unwrap_or_default();
-        if std::fs::write(&tmp, text).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
-        }
+    if let Some(home) = horadric_hooks::home() {
+        horadric_core::trust::trust_folder(Path::new(&home), dir);
     }
 }
 

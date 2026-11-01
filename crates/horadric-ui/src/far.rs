@@ -25,8 +25,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::afar::{self, Client, Fit, Heard, Streams};
+use horadric_core::afar_tiles::{went, Placed};
 use horadric_core::brotherhood::{self, Said as State};
-use horadric_core::Registry;
 use serde_json::{json, Value};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
@@ -1571,36 +1571,6 @@ impl App {
             .map(|(id, c)| (c.serial, id.clone()))
             .collect()
     }
-}
-
-/// A tile to put in a cluster's order: its id, the cluster, the place it
-/// takes when nothing stands there, and the tile whose place it takes.
-type Placed = (String, String, Option<usize>, String);
-
-/// Tile `gone` (session `remote`) went, leaving `left`. When the same
-/// session arrived on another brother a moment before, that tile takes
-/// its place now, and says where to put it; else the place is kept for
-/// it to arrive.
-fn went(
-    r: &mut Registry,
-    arrived: &mut HashMap<String, (String, SystemTime)>,
-    kept: &mut HashMap<String, afar::Left>,
-    remote: &str,
-    gone: &str,
-    left: afar::Left,
-) -> Option<Placed> {
-    let early = arrived
-        .get(remote)
-        .filter(|(id, _)| id != gone)
-        .map(|(id, ..)| id.clone());
-    if let Some(s) = early.as_deref().and_then(|id| r.get_mut(id)) {
-        afar::take_place(s, &left);
-        arrived.remove(remote);
-        let home = left.home.clone();
-        return Some((s.id.clone(), home, left.slot, gone.to_string()));
-    }
-    kept.insert(remote.to_string(), left);
-    None
 }
 
 /// The tile menu's id for ending a brother's session there.

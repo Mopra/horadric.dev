@@ -18,6 +18,7 @@ use crate::handing::{
 use crate::handoff::{self, moved_line, moved_plain_line, split, Package, Record, RepoId};
 use crate::placing::{self, Placement};
 use crate::serving::Job;
+use crate::worktree::Worktree;
 use crate::Session;
 
 /// The handoffs going out, and the bookkeeping of those that came in.
@@ -274,6 +275,16 @@ pub fn checkout_among(folders: Vec<String>, repo: &RepoId, fold: bool) -> Option
         .filter_map(|f| Some((f.clone(), handoff::repo_id(Path::new(&f))?)))
         .collect();
     handoff::find_project(repo, &mine).map(PathBuf::from)
+}
+
+/// Removes a handed off session's worktree and its branch, its work being
+/// on its receiver now.
+pub fn discard(w: &Worktree) {
+    let main = Path::new(&w.main);
+    let git = |args: &[&str]| handoff::git(main, args, &[]).is_ok();
+    if git(&["worktree", "remove", "--force", &w.path]) {
+        git(&["branch", "-D", &w.branch]);
+    }
 }
 
 /// Where a project this machine has no checkout of goes, as its human (or,

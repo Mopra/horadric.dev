@@ -92,6 +92,29 @@ pub fn trust(config: &mut Value, key: &str) -> bool {
     true
 }
 
+/// Tells Claude Code, in `home`'s `.claude.json`, that it may trust
+/// `dir`: a session landed there by a handoff has nobody at the machine
+/// to answer its trust prompt. A file Claude Code is halfway through
+/// writing is left alone.
+pub fn trust_folder(home: &std::path::Path, dir: &std::path::Path) {
+    let path = home.join(".claude.json");
+    let mut config: Value = match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(_) => return,
+        },
+        Err(_) => Value::Null,
+    };
+    let key = project_key(&dir.to_string_lossy());
+    if trust(&mut config, &key) {
+        let tmp = path.with_extension("json.horadric-tmp");
+        let text = serde_json::to_string_pretty(&config).unwrap_or_default();
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
