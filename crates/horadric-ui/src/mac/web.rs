@@ -30,12 +30,11 @@ use horadric_hooks::listener::{BrowserCall, Reply};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{
-    define_class, msg_send, sel, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly,
-    Message,
+    define_class, msg_send, sel, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
 };
 use objc2_app_kit::{
-    NSBackingStoreType, NSBezelStyle, NSBitmapImageFileType, NSBitmapImageRep, NSButton,
-    NSFont, NSImage, NSLineBreakMode, NSResponder, NSTextField, NSView, NSWindow,
+    NSBackingStoreType, NSBezelStyle, NSBitmapImageFileType, NSBitmapImageRep, NSButton, NSFont,
+    NSImage, NSLineBreakMode, NSResponder, NSTextField, NSView, NSWindow,
     NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_foundation::{
@@ -211,8 +210,7 @@ pub fn place(stage: &NSView, shown: &[(String, Rect)]) {
             if at.is_some() && web.pane.is_none() {
                 web.pane = Some(WebPane::new(mtm, &key));
             }
-            let views: Vec<Retained<WKWebView>> =
-                web.tabs.iter().map(|t| t.view.clone()).collect();
+            let views: Vec<Retained<WKWebView>> = web.tabs.iter().map(|t| t.view.clone()).collect();
             (web.pane.clone(), views, web.active)
         });
         let Some(pane) = pane else {
@@ -666,16 +664,20 @@ fn retiled(key: &str) {
     pane.refresh();
 }
 
+/// What runs when a load ends, taken out once so it runs only once, and
+/// shared by each look until then.
+type AfterLoad = Rc<RefCell<Option<Box<dyn FnOnce(bool)>>>>;
+
 /// Runs `f` once the tab's load ends: true when it ended well, false when
 /// it failed or did not end in [`LOAD_WAIT`]. Looked at, rather than told,
 /// so a load within the page, which WebKit says nothing of, ends too.
 fn after_load(key: &str, id: u64, f: impl FnOnce(bool) + 'static) {
     let started = Instant::now();
-    let f: Rc<RefCell<Option<Box<dyn FnOnce(bool)>>>> = Rc::new(RefCell::new(Some(Box::new(f))));
+    let f: AfterLoad = Rc::new(RefCell::new(Some(Box::new(f))));
     look(key.to_string(), id, started, f);
 }
 
-fn look(key: String, id: u64, started: Instant, f: Rc<RefCell<Option<Box<dyn FnOnce(bool)>>>>) {
+fn look(key: String, id: u64, started: Instant, f: AfterLoad) {
     queue::after_main(LOOK, move || {
         let state = read_tab(&key, Some(id), |t| {
             (unsafe { t.view.isLoading() }, t.failed, t.pending.is_some())
@@ -718,8 +720,8 @@ fn heard(view: &WKWebView, failed: Option<bool>) {
         return;
     };
     WEBS.with(|w| {
-        if let Some(t) = (w.borrow_mut().get_mut(&key))
-            .and_then(|web| web.tabs.iter_mut().find(|t| t.id == id))
+        if let Some(t) =
+            (w.borrow_mut().get_mut(&key)).and_then(|web| web.tabs.iter_mut().find(|t| t.id == id))
         {
             t.pending = None;
             if let Some(f) = failed {
@@ -965,7 +967,9 @@ fn snapshot(
 
 /// `image` as a PNG, in base64.
 fn png(image: &NSImage) -> Result<String, String> {
-    let tiff = image.TIFFRepresentation().ok_or("the picture has no bitmap")?;
+    let tiff = image
+        .TIFFRepresentation()
+        .ok_or("the picture has no bitmap")?;
     let rep = NSBitmapImageRep::imageRepWithData(&tiff).ok_or("the picture has no bitmap")?;
     let props = NSDictionary::new();
     let data = unsafe {

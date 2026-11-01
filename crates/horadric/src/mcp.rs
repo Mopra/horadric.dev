@@ -216,7 +216,8 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
 
 {LORE}"),
                     (true, false) => INSTRUCTIONS.to_string(),
-                    (false, _) => LORE.to_string(),
+                    (false, true) => LORE.to_string(),
+                    (false, false) => NOTHING.to_string(),
                 },
             })),
             "ping" => Ok(json!({})),
@@ -968,6 +969,10 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     })
 }
 
+/// Said to a session that is offered no tools: one Horadric did not start,
+/// where this build keeps no lore either.
+const NOTHING: &str = "This session was not started by Horadric, so it has no browser pane, and this build keeps no lore: there are no tools here.";
+
 pub(crate) const LORE: &str = "Horadric keeps notes shared by every session of this project, the lore. Before you explore a part of the code, ask lore_recall about it (words or files): another session may already have found out what you need. When you find out something the next session would otherwise have to find out again, leave it with lore_note, naming its files and, in backticks, the functions and types it is about. A note marked maybe stale is a lead, not a fact: check it, and when it is wrong or outdated leave the right one with replaces. It also keeps an index of the project's code: ask lore_find where a name is defined, lore_calls who calls it, and lore_outline what a file holds, before you grep or read whole files. Every line a Read returns stays in your context window for the rest of the session, and whole files are most of what fills it: outline a file first, then Read the lines you need with offset and limit, and send a search that would read many files to a subagent, whose window dies with it.";
 
 pub(crate) const INSTRUCTIONS: &str = "Horadric gives this session a browser, and it is the one to use: a pane on the Horadric stage beside the user's terminals, one per project with tabs, shared by the project's sessions. You work in a tab of your own: the first page you open becomes yours (the tab shown when it is blank, else a new one), and your calls stay in it whichever tab the user shows. A page the user is on is theirs: you can read it and act on it while it is shown, but opening a page never takes it. A popup your click opens becomes yours until it closes. The user sees the page you drive. Whenever a task needs the web (trying a page you built, testing a local server, reading docs, a login, a screenshot of a page), use these tools rather than Playwright, Puppeteer, the Chrome DevTools MCP, Claude in Chrome, or starting Chrome, Edge or a headless browser yourself, unless the user asks for one of those. When a task means changing a setting in a web service's dashboard (sign-in methods in Clerk, an environment variable in Vercel, a DNS record, an OAuth app), do it yourself in this browser rather than writing the user a list of steps: they are usually logged in already. Stop and ask only when a login needs their password or a code, or before a step that costs money, deletes something or cannot be undone. Open it with browser_open or browser_navigate, read it with browser_snapshot, act with browser_click, browser_type, browser_select (for a dropdown) and browser_press, and look \
@@ -1331,18 +1336,22 @@ B.";
             .iter()
             .map(|t| t["name"].clone())
             .collect();
-        assert_eq!(
-            names,
-            [
-                "lore_note",
-                "lore_recall",
-                "lore_find",
-                "lore_calls",
-                "lore_outline"
-            ]
-        );
+        let lore = [
+            "lore_note",
+            "lore_recall",
+            "lore_find",
+            "lore_calls",
+            "lore_outline",
+        ];
+        // The Mac keeps no lore yet, so there it is offered nothing.
+        let (want, said): (&[&str], _) = if HAS_LORE {
+            (&lore, LORE)
+        } else {
+            (&[], NOTHING)
+        };
+        assert_eq!(names, want);
         let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
-        assert_eq!(s.handle(&init).unwrap()["result"]["instructions"], LORE);
+        assert_eq!(s.handle(&init).unwrap()["result"]["instructions"], said);
     }
 
     #[test]

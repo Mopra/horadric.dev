@@ -1048,14 +1048,22 @@ pub fn gone_tree_home(folder: &Path, exists: impl Fn(&Path) -> bool) -> Option<P
     let parent = folder.parent()?;
     let name = folder.file_name()?.to_string_lossy().into_owned();
     // The longest first, so `site.web.quest` goes to `site.web` before `site`.
-    for (i, _) in name.match_indices('.').collect::<Vec<_>>().into_iter().rev() {
+    for (i, _) in name
+        .match_indices('.')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
         let main = parent.join(&name[..i]);
         if is_main(&main) {
             return Some(main);
         }
     }
     let inside = folder.ancestors().skip(1).find(|a| exists(a))?;
-    inside.ancestors().find(|a| is_main(a)).map(Path::to_path_buf)
+    inside
+        .ancestors()
+        .find(|a| is_main(a))
+        .map(Path::to_path_buf)
 }
 
 fn newer(path: &Path) -> io::Error {
@@ -1595,24 +1603,28 @@ mod tests {
 
     #[test]
     fn a_gone_worktree_finds_its_main_tree() {
-        let there = |p: &Path| {
-            let p = p.to_string_lossy().replace('\\', "/");
-            [
-                "c:/g/site/.git/HEAD",
-                "c:/g/site.web/.git/HEAD",
-                "c:/g/site",
-                "c:/g/site.web",
-                "c:/g/site/.claude/worktrees",
-                "c:/g",
-            ]
-            .contains(&p.as_str())
-        };
-        let home = |f: &str| gone_tree_home(Path::new(f), there).map(|p| project_key(&p));
-        assert_eq!(home("c:/g/site.fix-the-tiles"), Some("c:/g/site".into()));
-        assert_eq!(home("c:/g/site.web.new-page"), Some("c:/g/site.web".into()));
-        assert_eq!(home("c:/g/site/.claude/worktrees/x"), Some("c:/g/site".into()));
-        assert_eq!(home("c:/g/site"), None, "a folder still there");
-        assert_eq!(home("c:/g/other.quest"), None, "no tree claims it");
+        // A drive letter is not absolute off Windows, so the root is each
+        // system's own.
+        let root = if cfg!(windows) { "c:/g" } else { "/g" };
+        let at = |rest: &str| format!("{root}{rest}");
+        let there: Vec<String> = [
+            "/site/.git/HEAD",
+            "/site.web/.git/HEAD",
+            "/site",
+            "/site.web",
+            "/site/.claude/worktrees",
+            "",
+        ]
+        .iter()
+        .map(|r| at(r))
+        .collect();
+        let there = |p: &Path| there.contains(&p.to_string_lossy().replace('\\', "/"));
+        let home = |f: &str| gone_tree_home(Path::new(f), &there).map(|p| project_key(&p));
+        assert_eq!(home(&at("/site.fix-the-tiles")), Some(at("/site")));
+        assert_eq!(home(&at("/site.web.new-page")), Some(at("/site.web")));
+        assert_eq!(home(&at("/site/.claude/worktrees/x")), Some(at("/site")));
+        assert_eq!(home(&at("/site")), None, "a folder still there");
+        assert_eq!(home(&at("/other.quest")), None, "no tree claims it");
         assert_eq!(home("p"), None, "not a folder");
     }
 
@@ -1630,9 +1642,7 @@ mod tests {
         let dir = temp("prefilter");
         let mut store = Store::open(&dir).unwrap();
         let n = PREFILTER_FROM + 10;
-        let ids = store
-            .add_all(&vec![chunk("x"); n], OCT)
-            .unwrap();
+        let ids = store.add_all(&vec![chunk("x"); n], OCT).unwrap();
         // Spread out by a small hash, so the vectors point all ways.
         let mut seed = 7u64;
         let mut next = move || {
@@ -1641,7 +1651,9 @@ mod tests {
             seed ^= seed << 17;
             (seed % 2001) as f32 / 1000.0 - 1.0
         };
-        let vectors: Vec<Vec<f32>> = (0..n).map(|_| unit(&(0..32).map(|_| next()).collect::<Vec<_>>())).collect();
+        let vectors: Vec<Vec<f32>> = (0..n)
+            .map(|_| unit(&(0..32).map(|_| next()).collect::<Vec<_>>()))
+            .collect();
         let rows = ids
             .iter()
             .zip(&vectors)

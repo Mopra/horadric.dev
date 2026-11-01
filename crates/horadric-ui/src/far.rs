@@ -1752,6 +1752,7 @@ pub(super) fn forget_node(name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use horadric_core::Registry;
 
     fn labels(items: &[Item]) -> Vec<String> {
         items

@@ -38,11 +38,11 @@ pub use sky::{graph_at, sanctuary, sky, town_graph};
 /// that is not a project (a home folder) does not take minutes.
 const MOST_FILES: usize = 20_000;
 
-/// Answers a lore tool, or None when `name` is not one.
 /// `horadric distill`: hands the day's dialogue of this project to the
 /// session that runs it, with what to do with it, and `--done` marks it
 /// distilled. An errand the human arms runs it daily; the app starts
-/// nothing for it by itself.
+/// nothing for it by itself. Errands are Windows only, and so is this.
+#[cfg(windows)]
 pub fn distill(args: &[String]) -> Result<(), String> {
     let place = Place::here()?;
     let key = place.key().to_string();
@@ -88,6 +88,7 @@ pub fn distill(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Answers a lore tool, or None when `name` is not one.
 pub fn tool(name: &str, args: &Value) -> Option<Result<String, String>> {
     match name {
         "lore_note" => Some(note(args)),
