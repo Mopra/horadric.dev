@@ -18,6 +18,7 @@ use crate::portal::{
     answer_version, asked_size, fingerprint, fresh_message, newly_waiting, out_messages,
     session_name, size_message, size_owner, Kind, Viewer,
 };
+use crate::team::Kin;
 
 /// Work that would hold the server up, such as git over a big tree: run
 /// it off the serving thread and send what it answers to the channel. A
@@ -173,11 +174,21 @@ pub trait Serve {
     }
     /// Takes in the entries a brother sent, `b64` as `entries` carries it.
     fn lore_import(&mut self, _project: &Value, _b64: &str) {}
-    /// Whether lore goes to and comes from brother `who` at all: not with
-    /// a teammate's machine (see `team`).
-    fn shares_lore(&self, _who: &str) -> bool {
-        true
+    /// Whose machine brother `who` is, which decides what lore crosses:
+    /// all of it with the human's own, with a teammate's only through
+    /// [`Serve::lore_export_team`] and [`Serve::lore_import_team`].
+    fn lore_kin(&self, _who: &str) -> Kin {
+        Kin::Own
     }
+    /// [`Serve::lore_export`] for a teammate's machine: only this
+    /// machine's own notes and quest summaries, never a conversation, and
+    /// only of a project switched on for teammates. None by default.
+    fn lore_export_team(&mut self, _project: &Value, _theirs: &mut Value) -> Option<Job> {
+        None
+    }
+    /// [`Serve::lore_import`] for a teammate's machine, which takes only
+    /// its notes, and only for a project switched on for teammates.
+    fn lore_import_team(&mut self, _project: &Value, _b64: &str) {}
     /// `handoff`: hand session `id` to the brother named `to` once its
     /// turn ends (see `crate::handing`).
     fn handoff(&mut self, _id: &str, _to: &str) -> Result<(), String> {
@@ -659,21 +670,20 @@ impl Server {
             }
         }
         for (who, project, b64) in &asked.entries {
-            if serve.shares_lore(who) {
-                serve.lore_import(project, b64);
+            match serve.lore_kin(who) {
+                Kin::Own => serve.lore_import(project, b64),
+                Kin::Team => serve.lore_import_team(project, b64),
             }
         }
         for (ch, key) in asked.lores {
             let Some(c) = self.clients.get_mut(&ch) else {
                 continue;
             };
-            if !serve.shares_lore(&c.who) {
-                continue;
-            }
+            let kin = serve.lore_kin(&c.who);
             let Some((project, theirs)) = c.lore.get_mut(&key) else {
                 continue;
             };
-            if let Some(job) = serve.lore_export(project, theirs) {
+            if let Some(job) = export_lore(serve, kin, project, theirs) {
                 out.later.push((ch, job));
             }
         }
@@ -963,12 +973,28 @@ impl Server {
         }
         self.lore_looked = Some(Instant::now());
         for (&ch, c) in self.clients.iter_mut().filter(|(_, c)| c.brother()) {
+            // The kin is asked here too: this timer once sent a teammate
+            // everything once it had told a `lore`.
+            let kin = serve.lore_kin(&c.who);
             for (project, theirs) in c.lore.values_mut() {
-                if let Some(job) = serve.lore_export(project, theirs) {
+                if let Some(job) = export_lore(serve, kin, project, theirs) {
                     out.later.push((ch, job));
                 }
             }
         }
+    }
+}
+
+/// The export a brother of `kin` gets for a project it told its `lore` of.
+fn export_lore(
+    serve: &mut impl Serve,
+    kin: Kin,
+    project: &Value,
+    theirs: &mut Value,
+) -> Option<Job> {
+    match kin {
+        Kin::Own => serve.lore_export(project, theirs),
+        Kin::Team => serve.lore_export_team(project, theirs),
     }
 }
 
@@ -1214,8 +1240,12 @@ mod tests {
         fn handing_answer(&mut self, who: &str, msg: &Value) {
             self.answers.push((who.into(), msg.clone()));
         }
-        fn shares_lore(&self, who: &str) -> bool {
-            who != "Mate"
+        fn lore_kin(&self, who: &str) -> Kin {
+            if who == "Mate" {
+                Kin::Team
+            } else {
+                Kin::Own
+            }
         }
         fn tree(&self, project: &str) -> Job {
             let project = project.to_string();
@@ -1691,7 +1721,7 @@ mod tests {
     }
 
     #[test]
-    fn a_teammates_machine_is_sent_no_lore_and_its_lore_is_not_taken() {
+    fn a_teammates_machine_gets_and_gives_lore_only_the_team_way() {
         let mut serve = Fake::default();
         let hello = json!({"t": "hello", "v": 3, "kind": "brother"});
         let (mut server, _) = greeted(&mut serve, "Mate", hello);
@@ -1707,6 +1737,11 @@ mod tests {
         let entries = json!({"t": "entries", "project": "repo", "b64": "eA"});
         as_mate(&mut server, &mut serve, 2, entries);
         assert!(serve.imported.is_empty());
+        // Nor does the timer send it the whole lore later.
+        server.lore_looked = None;
+        let mut out = Out::default();
+        server.look(&mut serve, &mut out);
+        assert!(out.later.is_empty());
     }
 
     #[test]

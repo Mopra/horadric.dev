@@ -152,6 +152,18 @@ pub fn taking_asks(mut d: Dial) -> Dial {
     d
 }
 
+/// `d` saying the machine knows teams (`team`): it treats a machine the
+/// relay marks `"kin":"team"` as a teammate's. The relay lists teammates
+/// only between machines that dial so, since one that does not would take
+/// a teammate's machine for the human's own and give it every right. The
+/// Mac and a Linux node do not know teams yet, so never dial so.
+pub fn knowing_teams(mut d: Dial) -> Dial {
+    if d.headers.iter().any(|h| h.0 == "Authorization") {
+        d.url.push_str(if d.url.contains('?') { "&team=1" } else { "?team=1" });
+    }
+    d
+}
+
 /// Whether the relay has been quiet too long, both in milliseconds.
 pub fn silent(now: u64, heard: u64) -> bool {
     now.saturating_sub(heard) > SILENT_SECS * 1000
@@ -280,6 +292,14 @@ mod tests {
             "wss://r.dev/pc?name=Big%20PC&asks=1"
         );
         assert_eq!(taking_asks(signed.clone()).headers, signed.headers);
+        assert_eq!(
+            knowing_teams(taking_asks(signed.clone())).url,
+            "wss://r.dev/pc?name=Big%20PC&asks=1&team=1"
+        );
+        assert_eq!(
+            knowing_teams(pc_dial("wss://r.dev", "s", None)).url,
+            "wss://r.dev/pc"
+        );
         assert_eq!(
             taking_asks(pc_dial("wss://r.dev", "s", None)).url,
             "wss://r.dev/pc"

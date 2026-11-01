@@ -9,7 +9,7 @@
 //! that brother was sent anything: the mark of the lore file, the log and
 //! the store's newest month.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -109,13 +109,22 @@ impl Project {
     /// then kept by `token`. Null when it lacks nothing or the lore cannot
     /// be read.
     pub fn export(&self, project: &Value, theirs: &Have, token: &str) -> Value {
+        self.export_as(project, theirs, token, false)
+    }
+
+    /// [`Project::export`], for a teammate's machine as [`for_team`] cuts
+    /// it when `team`.
+    fn export_as(&self, project: &Value, theirs: &Have, token: &str, team: bool) -> Value {
         let run = || -> Result<Value, String> {
             let mut shared = Shared::open(&self.memory, self.place.key(), &self.me)
                 .map_err(|e| e.to_string())?;
             let lore = self.place.read()?;
-            let entries = shared
+            let mut entries = shared
                 .stamp_and_export(&lore, theirs, usize::MAX)
                 .map_err(|e| e.to_string())?;
+            if team {
+                entries = for_team(entries, &self.me);
+            }
             let held = reached(theirs, &entries);
             let mut sent = self.sent.lock().unwrap_or_else(|e| e.into_inner());
             sent.insert(token.to_string(), (held, self.mark()));
@@ -137,6 +146,17 @@ impl Project {
     pub fn import(&self, b64: &str, now: u64) -> Result<(), String> {
         self.take_in(brethren::entries_of(&json!({"b64": b64})), now)
             .map(|_| ())
+    }
+
+    /// [`Project::import`] of what a teammate's machine sent, cut by
+    /// [`from_team`] against what this copy already holds.
+    pub fn import_team(&self, b64: &str, now: u64) -> Result<(), String> {
+        let shared =
+            Shared::open(&self.memory, self.place.key(), &self.me).map_err(|e| e.to_string())?;
+        let talkers = talkers(shared.log());
+        drop(shared);
+        let entries = from_team(brethren::entries_of(&json!({"b64": b64})), &self.me, &talkers);
+        self.take_in(entries, now).map(|_| ())
     }
 
     /// Takes in what the copy of this project's shared lore in the memory
@@ -226,7 +246,32 @@ impl Lores {
     /// `theirs` what it lacks, when anything changed since the last one.
     /// `theirs` is kept by the server and updated here.
     pub fn export(&self, project: &Value, theirs: &mut Value) -> Option<Job> {
+        self.export_as(project, theirs, |_| true, false)
+    }
+
+    /// [`Lores::export`] for a teammate's machine: only this brother's own
+    /// notes and quest summaries ([`for_team`]), and only of a project
+    /// whose lore key `shared` says is switched on for teammates.
+    pub fn export_team(
+        &self,
+        project: &Value,
+        theirs: &mut Value,
+        shared: impl Fn(&str) -> bool,
+    ) -> Option<Job> {
+        self.export_as(project, theirs, shared, true)
+    }
+
+    fn export_as(
+        &self,
+        project: &Value,
+        theirs: &mut Value,
+        shared: impl Fn(&str) -> bool,
+        team: bool,
+    ) -> Option<Job> {
         let ours = self.find(project)?;
+        if !shared(ours.place.key()) {
+            return None;
+        }
         let mut t = Theirs::of(theirs);
         t.learn(ours.sent(&t.token));
         let due = t.due(&ours.mark());
@@ -235,7 +280,41 @@ impl Lores {
             return None;
         }
         let project = project.clone();
-        Some(Box::new(move || ours.export(&project, &t.have, &t.token)))
+        Some(Box::new(move || {
+            ours.export_as(&project, &t.have, &t.token, team)
+        }))
+    }
+
+    /// [`Lores::told`] of only the projects `shared` says are switched on
+    /// for teammates, for asking a teammate's machine.
+    pub fn told_team(&self, shared: impl Fn(&str) -> bool) -> Vec<(Value, Value)> {
+        self.0
+            .iter()
+            .filter(|(_, p)| shared(p.place.key()))
+            .map(|(repo, p)| (json!(repo), json!(p.have())))
+            .collect()
+    }
+
+    /// [`Lores::import`] of what a teammate's machine sent, for a project
+    /// `shared` says is switched on for teammates.
+    pub fn import_team(
+        &self,
+        project: &Value,
+        b64: &str,
+        now: u64,
+        shared: impl Fn(&str) -> bool,
+    ) {
+        let Some(ours) = self.find(project).filter(|p| shared(p.place.key())) else {
+            return;
+        };
+        let b64 = b64.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = ours.import_team(&b64, now) {
+                if std::env::var_os("HORADRIC_DEBUG").is_some() {
+                    eprintln!("horadric: a teammate's lore did not go in: {e}");
+                }
+            }
+        });
     }
 
     /// What `lore_import` does: takes in what a brother sent, on a thread,
@@ -264,6 +343,66 @@ fn one_each<K: PartialEq, T>(all: impl IntoIterator<Item = (K, T)>) -> Vec<(K, T
         }
     }
     out
+}
+
+/// What a teammate's machine is sent of `entries`: only those brother
+/// `me` wrote itself, so nothing another brother wrote reaches a teammate
+/// through this one. A passage of dialogue goes as an empty entry, its
+/// number without its text, so the teammate's count still moves past it
+/// (a count stops at the first number it lacks). A note goes without the
+/// passages it came from and replacing only `me`'s own notes, and a
+/// forgetting of another brother's entry goes empty too.
+pub fn for_team(entries: Vec<Entry>, me: &str) -> Vec<Entry> {
+    entries
+        .into_iter()
+        .filter(|e| e.by == me)
+        .map(|e| team_cut(e, me))
+        .collect()
+}
+
+/// What this machine takes of `entries` a teammate's machine sent: only
+/// entries of a writer that is neither this brother `me` nor one of
+/// `talkers`, the writers whose dialogue this copy holds, which are the
+/// human's own brothers (a teammate's dialogue never comes, so its writer
+/// never becomes one). So a teammate cannot take a number of the human's
+/// own writers and block what they send, nor forget or replace what they
+/// wrote. What is taken is cut as [`for_team`] cuts what is sent: no
+/// dialogue, notes replacing and forgettings naming only their own
+/// writer's entries.
+pub fn from_team(entries: Vec<Entry>, me: &str, talkers: &BTreeSet<String>) -> Vec<Entry> {
+    entries
+        .into_iter()
+        .filter(|e| e.by != me && !talkers.contains(&e.by))
+        .map(|e| {
+            let by = e.by.clone();
+            team_cut(e, &by)
+        })
+        .collect()
+}
+
+/// An entry as it crosses between teammates, `own` the writer whose
+/// entries it may name.
+fn team_cut(mut e: Entry, own: &str) -> Entry {
+    e.said = None;
+    e.kept = None;
+    // A kind a newer Horadric added is not known to be meant for others.
+    e.rest.clear();
+    if let Some(note) = e.note.as_mut() {
+        note.sources.clear();
+        note.replaces.retain(|s| s.by == own);
+    }
+    if e.forget.as_ref().is_some_and(|f| f.of.by != own) {
+        e.forget = None;
+    }
+    e
+}
+
+/// The writers whose dialogue `log` holds.
+pub fn talkers(log: &brethren::Log) -> BTreeSet<String> {
+    log.entries()
+        .filter(|e| e.said_fingerprint().is_some())
+        .map(|e| e.by.clone())
+        .collect()
 }
 
 /// What a brother holding `have` holds once it has `entries` too: each
@@ -357,6 +496,52 @@ mod tests {
 
     fn have(pairs: &[(&str, u64)]) -> Have {
         pairs.iter().map(|(b, n)| (b.to_string(), *n)).collect()
+    }
+
+    fn entry(v: Value) -> Entry {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn a_teammate_gets_only_this_brothers_notes_and_dialogue_as_bare_numbers() {
+        let stamp = |by: &str, n: u64| json!({"by": by, "n": n});
+        let sent = for_team(
+            vec![
+                entry(json!({"by": "me", "n": 1, "said": {"text": "secret", "time": 1}})),
+                entry(json!({"by": "me", "n": 2, "note": {"text": "a note", "at": 2,
+                    "sources": [stamp("me", 1)], "replaces": [stamp("me", 0), stamp("desk", 4)]}})),
+                entry(json!({"by": "me", "n": 3, "forget": {"of": stamp("desk", 4), "at": 3}})),
+                entry(json!({"by": "me", "n": 4, "forget": {"of": stamp("me", 2), "at": 4}})),
+                entry(json!({"by": "me", "n": 5, "newer": "kind"})),
+                entry(json!({"by": "desk", "n": 1, "note": {"text": "desk's", "at": 1}})),
+            ],
+            "me",
+        );
+        assert_eq!(sent.iter().map(|e| e.n).collect::<Vec<_>>(), [1, 2, 3, 4, 5]);
+        assert!(sent.iter().all(|e| e.by == "me" && e.said.is_none() && e.rest.is_empty()));
+        let note = sent[1].note.as_ref().unwrap();
+        assert!(note.sources.is_empty());
+        assert_eq!(note.replaces.len(), 1);
+        assert!(sent[2].forget.is_none() && sent[3].forget.is_some());
+    }
+
+    #[test]
+    fn a_teammate_cannot_write_as_the_humans_own_brothers() {
+        let talkers: BTreeSet<String> = ["desk".to_string()].into();
+        let taken = from_team(
+            vec![
+                entry(json!({"by": "me", "n": 9, "note": {"text": "as me", "at": 1}})),
+                entry(json!({"by": "desk", "n": 9, "note": {"text": "as desk", "at": 1}})),
+                entry(json!({"by": "ann", "n": 1, "said": {"text": "hers", "time": 1}})),
+                entry(json!({"by": "ann", "n": 2, "forget": {"of": {"by": "desk", "n": 1}, "at": 2}})),
+                entry(json!({"by": "ann", "n": 3, "note": {"text": "hers", "at": 3}})),
+            ],
+            "me",
+            &talkers,
+        );
+        assert_eq!(taken.iter().map(|e| e.n).collect::<Vec<_>>(), [1, 2, 3]);
+        assert!(taken.iter().all(|e| e.by == "ann" && e.said.is_none() && e.forget.is_none()));
+        assert!(taken[2].note.is_some());
     }
 
     #[test]

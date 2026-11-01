@@ -343,10 +343,28 @@ impl App {
         Here(self).lore_projects()
     }
 
-    /// Takes in entries a brother sent this PC's client.
-    pub(super) fn portal_lore_take(&mut self, project: &Value, b64: &str) {
+    /// Takes in entries a brother sent this PC's client, a teammate's as
+    /// only a teammate's are.
+    pub(super) fn portal_lore_take(&mut self, project: &Value, b64: &str, team: bool) {
         if self.portal.is_some() {
-            Here(self).lore_import(project, b64);
+            if team {
+                Here(self).lore_import_team(project, b64);
+            } else {
+                Here(self).lore_import(project, b64);
+            }
+        }
+    }
+
+    /// [`App::portal_lore`] of only the projects switched on for
+    /// teammates, for its client of a teammate's machine to say.
+    pub(super) fn portal_lore_team(&mut self) -> Vec<(Value, Value)> {
+        if self.portal.is_none() {
+            return Vec::new();
+        }
+        Here(self).lore_projects();
+        match (team_now(), self.portal.as_ref()) {
+            (Some(team), Some(p)) => p.lore.told_team(|key| team.shares(key)),
+            _ => Vec::new(),
         }
     }
 
@@ -1210,9 +1228,27 @@ impl Serve for Here<'_> {
         }
     }
 
-    fn shares_lore(&self, who: &str) -> bool {
-        horadric_hooks::state_dir()
-            .is_none_or(|d| horadric_core::team::Team::load(&d).kin(who).shares_lore())
+    fn lore_kin(&self, who: &str) -> horadric_core::team::Kin {
+        horadric_hooks::state_dir().map_or(horadric_core::team::Kin::Own, |d| {
+            horadric_core::team::Team::load(&d).kin(who)
+        })
+    }
+
+    fn lore_export_team(&mut self, project: &Value, theirs: &mut Value) -> Option<Job> {
+        let team = team_now()?;
+        self.0
+            .portal
+            .as_ref()?
+            .lore
+            .export_team(project, theirs, |key| team.shares(key))
+    }
+
+    fn lore_import_team(&mut self, project: &Value, b64: &str) {
+        let (Some(team), Some(p)) = (team_now(), self.0.portal.as_ref()) else {
+            return;
+        };
+        p.lore
+            .import_team(project, b64, unix_now(), |key| team.shares(key));
     }
 
     fn handoff(&mut self, id: &str, to: &str) -> Result<(), String> {
@@ -1579,4 +1615,10 @@ fn git_init(dir: &Path) {
         .current_dir(dir)
         .creation_flags(CREATE_NO_WINDOW)
         .status();
+}
+
+/// Who is a teammate and which projects they share, as `team.json` says
+/// now. None without a state folder, which shares nothing with them.
+fn team_now() -> Option<horadric_core::team::Team> {
+    horadric_hooks::state_dir().map(|d| horadric_core::team::Team::load(&d))
 }

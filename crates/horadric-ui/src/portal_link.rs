@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use horadric_core::portal::{frame, unframe};
 use horadric_core::relaying::{
-    after_failure, after_link, closed_word, pc_dial, refresh_message, silent, taking_asks, Dial,
-    Refresh, PING_SECS,
+    after_failure, after_link, closed_word, knowing_teams, pc_dial, refresh_message, silent,
+    taking_asks, Dial, Refresh, PING_SECS,
 };
 use horadric_core::release::split_url;
 use windows::core::{w, HSTRING, PCWSTR};
@@ -145,11 +145,11 @@ impl Link {
             let exp = token.as_deref().and_then(horadric_core::workos::expiry);
             *dial_refresh.lock().unwrap() = Refresh::dialled(exp.unwrap_or(0));
             let name = crate::portal_pair::pc_name();
-            taking_asks(pc_dial(
+            knowing_teams(taking_asks(pc_dial(
                 &relay,
                 &secret,
                 token.as_deref().map(|t| (t, name.as_str())),
-            ))
+            )))
         };
         let dialed = Arc::new(AtomicU64::new(0));
         {

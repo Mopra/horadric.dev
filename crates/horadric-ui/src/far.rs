@@ -472,6 +472,16 @@ impl App {
         own && afar::takes_entries(matches!(via, Via::Node(_)), held, controls)
     }
 
+    /// Whether brother `key`, reached through the relay, is a teammate's
+    /// machine, with which only the notes of projects switched on for
+    /// teammates cross, whatever it may control.
+    fn far_teammate(&self, via: Via, key: &str) -> bool {
+        !matches!(via, Via::Node(_))
+            && horadric_hooks::state_dir().is_some_and(|d| {
+                horadric_core::team::Team::load(&d).kin(key) == horadric_core::team::Kin::Team
+            })
+    }
+
     /// Tells brother `key`, reached through the relay, what this PC holds
     /// of each lore it shares, so its server sends what this PC lacks of
     /// the projects both have: at hello, when the brother says its own
@@ -481,10 +491,14 @@ impl App {
         let Some(via) = self.far.peers.get(key).and_then(|p| p.via) else {
             return;
         };
-        if !self.far_takes_lore(via, key) {
+        let told = if self.far_teammate(via, key) {
+            self.portal_lore_team()
+        } else if self.far_takes_lore(via, key) {
+            self.portal_lore()
+        } else {
             return;
-        }
-        for (project, have) in self.portal_lore() {
+        };
+        for (project, have) in told {
             self.far_send(key, json!({"t": "lore", "project": project, "have": have}));
         }
     }
@@ -916,6 +930,10 @@ impl App {
                 false
             }
             Heard::Entries { project, b64 } => {
+                if self.far_teammate(via, &name) {
+                    self.portal_lore_take(&project, &b64, true);
+                    return false;
+                }
                 if !self.far_takes_lore(via, &name) {
                     eprintln!(
                         "horadric: lore from {} is not taken: it may not control this PC",
@@ -926,7 +944,7 @@ impl App {
                 if matches!(via, Via::Node(_)) {
                     self.far.lore.import(&project, &b64, unix_now());
                 } else {
-                    self.portal_lore_take(&project, &b64);
+                    self.portal_lore_take(&project, &b64, false);
                 }
                 false
             }

@@ -541,7 +541,15 @@ impl BrotherLines {
             .map(|(id, name)| (id.clone(), name.clone(), standing.controls(id)))
             .collect();
         let listed = crate::brothers::listed();
-        let items = brother_items(listed.as_deref(), &joined, &crate::far_node::folded_ids());
+        let team: Vec<String> = horadric_hooks::state_dir()
+            .map(|d| horadric_core::team::Team::load(&d).mates.into_iter().collect())
+            .unwrap_or_default();
+        let items = brother_items(
+            listed.as_deref(),
+            &joined,
+            &crate::far_node::folded_ids(),
+            &team,
+        );
         BrotherLines {
             items,
             joined,
@@ -584,12 +592,24 @@ const RIGHTS: usize = 80;
 /// `None` is a portal that is closed or not through yet. `joined` is
 /// (id, name, whether it may control this PC). `ssh` are the brothers
 /// that are a Linux node reached over `ssh` too: one machine, one line,
-/// which says the `ssh` link waits behind the relay one.
+/// which says the `ssh` link waits behind the relay one. `team` are the
+/// machines the relay said are a teammate's, each line saying so, since
+/// such a machine gets less here and its human is someone else.
 fn brother_items(
     listed: Option<&[joining::Listed]>,
     joined: &[(String, String, bool)],
     ssh: &[String],
+    team: &[String],
 ) -> Vec<Item> {
+    let mate = |id: &str, label: String| {
+        if !team.iter().any(|t| t == id) {
+            return label;
+        }
+        match label.split_once('\t') {
+            Some((name, how)) => format!("{name}\tteammate, {how}"),
+            None => format!("{label}\tteammate"),
+        }
+    };
     let joined = &joined[..joined.len().min(RIGHTS)];
     let rights = |j: usize, label: String| {
         let (_, name, on) = &joined[j];
@@ -621,6 +641,7 @@ fn brother_items(
                 } else {
                     b.label()
                 };
+                let label = mate(&b.id, label);
                 match (at(&b.id), b.joined || b.linked) {
                     (Some(j), _) => rights(j, label),
                     (None, true) => Item::Disabled(label),
@@ -640,7 +661,7 @@ fn brother_items(
             } else {
                 "joined"
             };
-            rights(j, format!("{name}\t{how}"))
+            rights(j, mate(id, format!("{name}\t{how}")))
         })
         .collect();
     if !away.is_empty() {
@@ -648,6 +669,38 @@ fn brother_items(
         items.extend(away);
     }
     items
+}
+
+/// The project menu's switch for sharing the notes of the project in
+/// `dir` with teammates, as an item with id `id`, and the project's lore
+/// key to flip. Only once the relay has said some machine is a teammate's,
+/// so a human without a team never sees it.
+pub(crate) fn team_share(dir: &std::path::Path, id: usize) -> Option<(Item, String)> {
+    let team = horadric_core::team::Team::load(&horadric_hooks::state_dir()?);
+    if team.mates.is_empty() {
+        return None;
+    }
+    let key = horadric_hooks::lore::Place::of(dir).ok()?.key().to_string();
+    let item = Item::Action {
+        id,
+        label: "Teammates get its notes".into(),
+        checked: team.shares(&key),
+        bold: false,
+    };
+    Some((item, key))
+}
+
+/// Flips [`team_share`]'s switch for the project of lore key `key`.
+pub(crate) fn flip_team_share(key: &str) {
+    let Some(dir) = horadric_hooks::state_dir() else {
+        return;
+    };
+    let mut team = horadric_core::team::Team::load(&dir);
+    let on = !team.shares(key);
+    team.set_shared(key, on);
+    if let Err(e) = team.save(&dir) {
+        eprintln!("horadric: cannot keep what teammates get: {e}");
+    }
 }
 
 /// Where the keeping lines' ids start, past the Leaving menu's.
@@ -861,7 +914,7 @@ mod tests {
             ("d".to_string(), "Desktop".to_string(), false),
             ("v".to_string(), "Vps".to_string(), true),
         ];
-        let items = brother_items(Some(&listed), &joined, &[]);
+        let items = brother_items(Some(&listed), &joined, &[], &[]);
         let Item::Submenu(label, rights) = &items[0] else {
             panic!("a joined brother is a submenu");
         };
@@ -893,13 +946,17 @@ mod tests {
                 ..
             }
         ));
-        let closed = brother_items(None, &joined, &[]);
+        let closed = brother_items(None, &joined, &[], &[]);
         assert_eq!(closed.len(), 4);
-        assert!(brother_items(Some(&[]), &[], &[]).len() == 1);
+        assert!(brother_items(Some(&[]), &[], &[], &[]).len() == 1);
         // A brother that is a node over ssh too says so, once.
-        let both = brother_items(Some(&listed), &joined, &["d".into(), "v".into()]);
+        let both = brother_items(Some(&listed), &joined, &["d".into(), "v".into()], &[]);
         assert!(matches!(&both[0], Item::Submenu(l, _) if l == "Desktop\tlinked, ssh standby"));
         assert!(matches!(&both[3], Item::Submenu(l, _) if l == "Vps\tover ssh"));
+        // A teammate's machine says whose it is.
+        let mates = brother_items(Some(&listed), &joined, &[], &["d".into(), "v".into()]);
+        assert!(matches!(&mates[0], Item::Submenu(l, _) if l == "Desktop\tteammate, linked"));
+        assert!(matches!(&mates[3], Item::Submenu(l, _) if l == "Vps\tteammate, joined"));
     }
 
     const BROTHER_1: usize = BROTHER + 1;

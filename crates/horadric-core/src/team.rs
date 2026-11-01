@@ -47,9 +47,10 @@ impl Kin {
         self == Kin::Own
     }
 
-    /// Whether this machine sends a brother its lore for a project. A
-    /// teammate gets none until conversations can be held back from what
-    /// is sent: notes and quest summaries are meant for others, a
+    /// Whether this machine shares all its lore for a project with a
+    /// brother, conversations too. A teammate gets at most the notes and
+    /// quest summaries, and only of a project the human switched on for
+    /// teammates ([`Team::shares`]): those are meant for others, a
     /// conversation is not.
     pub fn shares_lore(self) -> bool {
         self == Kin::Own
@@ -81,6 +82,12 @@ const FILE: &str = "team.json";
 pub struct Team {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub mates: BTreeSet<String>,
+    /// The projects, by lore key, whose notes and quest summaries go to
+    /// teammates and whose teammates' notes come in. Off for every project
+    /// until the human turns it on, both ways at once, since a teammate's
+    /// notes are read by this machine's agents with full rights.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub shared: BTreeSet<String>,
 }
 
 impl Team {
@@ -104,6 +111,19 @@ impl Team {
         let before = self.mates.len();
         self.mates.extend(ids);
         self.mates.len() != before
+    }
+
+    /// Whether teammates get project `key`'s notes, and give theirs.
+    pub fn shares(&self, key: &str) -> bool {
+        self.shared.contains(key)
+    }
+
+    pub fn set_shared(&mut self, key: &str, on: bool) {
+        if on {
+            self.shared.insert(key.to_string());
+        } else {
+            self.shared.remove(key);
+        }
     }
 
     pub fn kin(&self, id: &str) -> Kin {
@@ -154,6 +174,8 @@ mod tests {
         assert!(!t.learn(Vec::new()));
         assert_eq!(t.kin("b"), Kin::Team);
         assert_eq!(t.kin("a"), Kin::Own);
+        t.set_shared("repo", true);
+        assert!(t.shares("repo") && !t.shares("other"));
         let dir = std::env::temp_dir().join(format!("horadric-team-{}", std::process::id()));
         t.save(&dir).unwrap();
         assert_eq!(Team::load(&dir), t);

@@ -2572,6 +2572,7 @@ fn project_menu(key: &str) {
     const MERGE: usize = 300;
     const MERGE_END: usize = 400;
     const PAST: usize = 600;
+    const TEAM_SHARE: usize = 18;
     let dir = with_app(|app| app.project_dir(key)).flatten();
     // Reading transcripts and asking git are the slow part of opening the
     // menu, so they are done side by side.
@@ -2676,9 +2677,12 @@ fn project_menu(key: &str) {
         },
         Item::action(EXPLORE, "Open in Explorer"),
         Item::action(SETTINGS, "Project settings\u{2026}"),
-        Item::Separator,
-        Item::action(END_ALL, "End all sessions"),
     ]);
+    let team_share = dir
+        .as_deref()
+        .and_then(|d| crate::tray::team_share(d, TEAM_SHARE));
+    items.extend(team_share.as_ref().map(|(item, _)| item.clone()));
+    items.extend([Item::Separator, Item::action(END_ALL, "End all sessions")]);
     if let Some(c) = with_app(|app| app.project_cost(key)).flatten() {
         items.insert(0, Item::Separator);
         let line = format!("Sessions cost {} at API prices", horadric_core::usage::format_cost(c));
@@ -2701,6 +2705,12 @@ fn project_menu(key: &str) {
         (Some(QUESTS), _) => return push(Input::QuestLog(questlog::Ask::Open(key.into()))),
         (Some(CONTEXT), _) => return push(Input::Context(contextpanel::Ask::Open(key.into()))),
         (Some(SETTINGS), _) => return open_settings(Some(key.to_string())),
+        (Some(TEAM_SHARE), _) => {
+            if let Some((_, lore)) = &team_share {
+                crate::tray::flip_team_share(lore);
+            }
+            return;
+        }
         _ => {}
     }
     let ending = matches!(picked, Some(START_OVER | END_ALL | CLOSE));
