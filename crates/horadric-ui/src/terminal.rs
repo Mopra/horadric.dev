@@ -23,6 +23,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use horadric_core::program_status::Progress;
+
 use windows::core::{w, Result, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
@@ -1877,4 +1879,55 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         Some(r) => r,
         None => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
+}
+
+thread_local! {
+    /// The taskbar, and what the stage's button last showed, so output that
+    /// changes nothing does not call into the shell.
+    static TASKBAR: RefCell<Option<(windows::Win32::UI::Shell::ITaskbarList3, isize, Option<Progress>)>> =
+        const { RefCell::new(None) };
+}
+
+/// Shows `progress` on the stage's taskbar button, as Windows Terminal
+/// shows a tab's OSC 9;4: the stage is many terminals with one button.
+pub fn show_progress(hwnd: HWND, progress: Option<Progress>) {
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::{
+        ITaskbarList3, TaskbarList, TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL,
+        TBPF_PAUSED,
+    };
+    TASKBAR.with(|t| {
+        let mut t = t.borrow_mut();
+        if t.as_ref().is_some_and(|(_, h, p)| *h == hwnd.0 as isize && *p == progress) {
+            return;
+        }
+        let list = match t.take() {
+            Some((list, _, _)) => list,
+            None => unsafe {
+                let Ok(list) = CoCreateInstance::<_, ITaskbarList3>(&TaskbarList, None, CLSCTX_INPROC_SERVER)
+                else {
+                    return;
+                };
+                if list.HrInit().is_err() {
+                    return;
+                }
+                list
+            },
+        };
+        let (state, value) = match progress {
+            None => (TBPF_NOPROGRESS, None),
+            Some(Progress::Indeterminate) => (TBPF_INDETERMINATE, None),
+            Some(Progress::Normal(v)) => (TBPF_NORMAL, Some(v)),
+            Some(Progress::Paused(v)) => (TBPF_PAUSED, Some(v)),
+            // A red button with no bar to colour shows nothing, so a full one.
+            Some(Progress::Error(v)) => (TBPF_ERROR, Some(if v == 0 { 100 } else { v })),
+        };
+        // Before the button exists both fail; the next change tries again.
+        let shown = unsafe {
+            let set = value.map_or(Ok(()), |v| list.SetProgressValue(hwnd, u64::from(v), 100));
+            set.and_then(|()| list.SetProgressState(hwnd, state)).is_ok()
+        };
+        let last = if shown { progress } else { None };
+        *t = Some((list, if shown { hwnd.0 as isize } else { 0 }, last));
+    });
 }

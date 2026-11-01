@@ -9,6 +9,13 @@
 //! <https://superlogical.com/rex/docs/build/program-status>. In short:
 //! `OSC 7501 ; key=value:key=value ST`, where ST is `ESC \` or BEL, and
 //! `OSC 7501 ; ? ST` asks whether the terminal speaks it.
+//!
+//! OSC 9;4, ConEmu's progress sequence that Windows Terminal draws on its
+//! tab, is read beside it for the same reason: a program sends it on
+//! purpose. Claude Code sends it (`terminalProgressBarEnabled`), and so do
+//! builds and installers in a plain terminal, which has no hooks. Where a
+//! program speaks OSC 7501 too, that is the one heard: it says more.
+//! <https://learn.microsoft.com/windows/terminal/tutorials/progress-bar-sequences>
 
 use crate::session::{Phase, WaitReason};
 
@@ -37,6 +44,8 @@ const MAX_APP: usize = 32;
 const REPORT: &[u8] = b"7501;";
 /// OSC 133 A, a shell prompt beginning, ends what the last command said.
 const PROMPT: &[u8] = b"133;A";
+/// OSC 9;4, progress. OSC 9 alone is a notification, not ours.
+const PROGRESS: &[u8] = b"9;4;";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -78,6 +87,74 @@ pub enum Sequence {
     Query,
     /// A shell prompt began (OSC 133 A).
     Prompt,
+    /// OSC 9;4, None when it clears the progress.
+    Progress(Option<Progress>),
+}
+
+/// What OSC 9;4 says, in the order a taskbar button ranks them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Progress {
+    /// Working, with no telling how far.
+    Indeterminate,
+    /// Working, this many percent done.
+    Normal(u8),
+    /// Halted or warning, at this many percent.
+    Paused(u8),
+    Error(u8),
+}
+
+impl Progress {
+    /// The one a single taskbar button shows for many terminals: an error
+    /// over a pause over work, and of two at work, the one furthest from
+    /// done, since the button is done only when they all are.
+    pub fn most_urgent(all: impl IntoIterator<Item = Progress>) -> Option<Progress> {
+        all.into_iter().max_by_key(|p| match *p {
+            Progress::Normal(v) => (1, 100 - v),
+            Progress::Indeterminate => (0, 0),
+            Progress::Paused(_) => (2, 0),
+            Progress::Error(_) => (3, 0),
+        })
+    }
+
+    /// As a record of its own, for a terminal whose program says nothing
+    /// in OSC 7501.
+    fn report(self) -> Report {
+        let (state, progress) = match self {
+            Progress::Indeterminate => (State::Working, None),
+            Progress::Normal(v) | Progress::Paused(v) => (State::Working, Some(v)),
+            Progress::Error(_) => (State::Error, None),
+        };
+        Report {
+            id: String::new(),
+            state,
+            kind: None,
+            progress,
+            app: None,
+            title: None,
+            msg: None,
+        }
+    }
+}
+
+/// `st;pr` after `9;4;`. None for clearing, Some for the rest, and the
+/// outer None for what does not parse.
+fn parse_progress(rest: &[u8]) -> Option<Option<Progress>> {
+    let rest = std::str::from_utf8(rest).ok()?;
+    let mut parts = rest.splitn(2, ';');
+    let state: u8 = parts.next()?.parse().ok()?;
+    // Windows Terminal takes a missing or empty value as 0.
+    let value = match parts.next() {
+        None | Some("") => 0,
+        Some(v) => v.parse::<u8>().ok()?.min(100),
+    };
+    Some(match state {
+        0 => None,
+        1 => Some(Progress::Normal(value)),
+        2 => Some(Progress::Error(value)),
+        3 => Some(Progress::Indeterminate),
+        4 => Some(Progress::Paused(value)),
+        _ => return None,
+    })
 }
 
 impl Report {
@@ -123,8 +200,12 @@ impl Report {
 }
 
 /// Parses what came between `ESC ]` and ST. None for anything that is not
-/// OSC 7501 or OSC 133 A, and for a report the spec says to discard.
+/// OSC 7501, OSC 133 A or OSC 9;4, and for a report the spec says to
+/// discard.
 pub fn parse(body: &[u8]) -> Option<Sequence> {
+    if let Some(rest) = body.strip_prefix(PROGRESS) {
+        return parse_progress(rest).map(Sequence::Progress);
+    }
     if let Some(rest) = body.strip_prefix(PROMPT) {
         return (rest.is_empty() || rest[0] == b';').then_some(Sequence::Prompt);
     }
@@ -296,46 +377,62 @@ impl Scanner {
             let n = self.body.len().min(p.len());
             self.body[..n] == p[..n]
         };
-        if self.body.len() > MAX_SEQUENCE || !(ours(REPORT) || ours(PROMPT)) {
+        if self.body.len() > MAX_SEQUENCE || !(ours(REPORT) || ours(PROMPT) || ours(PROGRESS)) {
             self.skip = true;
             self.body.clear();
         }
     }
 }
 
-/// The records a terminal holds, one per id, as the spec keeps them.
+/// The records a terminal holds, one per id, as the spec keeps them, and
+/// the last OSC 9;4 apart from them.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Records(Vec<Report>);
+pub struct Records {
+    reports: Vec<Report>,
+    progress: Option<Progress>,
+}
 
 impl Records {
     /// Takes a sequence. True when the records changed.
     pub fn hear(&mut self, seq: &Sequence) -> bool {
-        let before = self.0.clone();
+        let before = self.clone();
         match seq {
             Sequence::Report(r) if r.state == State::Clear => {
                 let id = &r.id;
-                self.0
+                self.reports
                     .retain(|old| !(id.is_empty() || beneath(&old.id, id)));
             }
             Sequence::Report(r) => {
                 // The newest last, so it wins a tie in urgency.
-                self.0.retain(|old| old.id != r.id);
-                self.0.push(r.clone());
+                self.reports.retain(|old| old.id != r.id);
+                self.reports.push(r.clone());
             }
             // A prompt drops what was in flight. Done and error stay
             // until seen.
-            Sequence::Prompt => self
-                .0
-                .retain(|r| matches!(r.state, State::Done | State::Error)),
+            Sequence::Prompt => {
+                self.reports
+                    .retain(|r| matches!(r.state, State::Done | State::Error));
+                self.progress = self.progress.filter(|p| matches!(p, Progress::Error(_)));
+            }
+            Sequence::Progress(p) => self.progress = *p,
             Sequence::Query => {}
         }
-        self.0 != before
+        *self != before
     }
 
     /// The record that says the most to the human: one blocked on them
-    /// over a failure, over work, over a result, over rest.
-    pub fn summary(&self) -> Option<&Report> {
-        self.0.iter().max_by_key(|r| r.urgency())
+    /// over a failure, over work, over a result, over rest. OSC 9;4 speaks
+    /// only when OSC 7501 says nothing.
+    pub fn summary(&self) -> Option<Report> {
+        match self.reports.iter().max_by_key(|r| r.urgency()) {
+            Some(r) => Some(r.clone()),
+            None => self.progress.map(Progress::report),
+        }
+    }
+
+    /// What OSC 9;4 last said, for the taskbar button.
+    pub fn progress(&self) -> Option<Progress> {
+        self.progress
     }
 }
 
@@ -554,5 +651,43 @@ mod tests {
         hear(&mut r, "7501;state=working:msg=YQ");
         hear(&mut r, "7501;state=idle");
         assert_eq!(r.summary().unwrap().msg, None);
+    }
+
+    #[test]
+    fn osc_9_4_is_found_and_read() {
+        assert_eq!(
+            scan(&[b"\x1b]9;4;3;0\x07\x1b]9;4;1;40\x1b\\\x1b]9;4;0\x07\x1b]9;hi\x07"]),
+            [
+                Sequence::Progress(Some(Progress::Indeterminate)),
+                Sequence::Progress(Some(Progress::Normal(40))),
+                Sequence::Progress(None),
+            ]
+        );
+        assert_eq!(parse(b"9;4;2"), Some(Sequence::Progress(Some(Progress::Error(0)))));
+        assert_eq!(parse(b"9;4;4;250"), Some(Sequence::Progress(Some(Progress::Paused(100)))));
+        assert!(parse(b"9;4;5;1").is_none());
+        assert!(parse(b"9;4;x").is_none());
+    }
+
+    #[test]
+    fn osc_9_4_speaks_only_when_osc_7501_is_silent() {
+        let mut r = Records::default();
+        assert!(r.hear(&Sequence::Progress(Some(Progress::Normal(30)))));
+        let s = r.summary().unwrap();
+        assert_eq!((s.phase(), s.line()), (Phase::Working, Some("30%".into())));
+        hear(&mut r, "7501;state=done");
+        assert_eq!(r.summary().unwrap().state, State::Done);
+        assert_eq!(r.progress(), Some(Progress::Normal(30)));
+        r.hear(&Sequence::Prompt);
+        assert_eq!(r.progress(), None, "a prompt ends a build that never cleared");
+    }
+
+    #[test]
+    fn the_taskbar_shows_error_over_pause_over_the_slowest_work() {
+        use Progress::*;
+        assert_eq!(Progress::most_urgent([Normal(80), Normal(20), Indeterminate]), Some(Normal(20)));
+        assert_eq!(Progress::most_urgent([Normal(20), Paused(90)]), Some(Paused(90)));
+        assert_eq!(Progress::most_urgent([Paused(9), Error(0), Normal(1)]), Some(Error(0)));
+        assert_eq!(Progress::most_urgent([]), None);
     }
 }

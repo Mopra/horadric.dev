@@ -34,7 +34,7 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor};
 use horadric_core::agent::Agent;
-use horadric_core::program_status::{self, Records, Scanner, Sequence};
+use horadric_core::program_status::{self, Progress, Records, Scanner, Sequence};
 use horadric_core::worktree::SETUP_ENV;
 use horadric_core::Phase;
 use horadric_hooks::{OWNER_ENV, SESSION_ENV};
@@ -716,7 +716,7 @@ impl Console {
         post(notify, Note::Exit, self.serial);
     }
 
-    /// Takes the OSC 7501 sequences in output. The grid's parser passes them
+    /// Takes the OSC 7501 and OSC 9;4 sequences in output. The grid's parser passes them
     /// by, so they are read here, from the same bytes.
     fn hear_program(&self, seqs: impl Iterator<Item = Sequence>) {
         for seq in seqs {
@@ -742,6 +742,14 @@ impl Console {
         }
         let records = self.program.lock().ok()?;
         Some(records.summary().map(|r| (r.phase(), r.line())))
+    }
+
+    /// What the program last said with OSC 9;4, while it runs.
+    pub fn progress(&self) -> Option<Progress> {
+        if self.exit_code().is_some() {
+            return None;
+        }
+        self.program.lock().ok()?.progress()
     }
 
     /// A console with no program, showing the file at `path` read only.

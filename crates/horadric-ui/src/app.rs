@@ -4312,6 +4312,7 @@ impl App {
             t.refresh(serial);
         }
         let said = console.take_program();
+        let heard = said.is_some();
         let mut changed = false;
         if let Ok(mut r) = self.shared.registry.lock() {
             if let Some(s) = r.get_mut(&console.id).filter(|s| s.background.is_none()) {
@@ -4336,8 +4337,21 @@ impl App {
                 }
             }
         }
+        if heard {
+            self.show_progress();
+        }
         if changed {
             post_event(APP_WINDOW.with(Cell::get), true);
+        }
+    }
+
+    /// The most urgent OSC 9;4 of every running terminal on the stage's
+    /// taskbar button, whichever project it shows.
+    fn show_progress(&self) {
+        if let Some(stage) = &self.stage {
+            let all = self.consoles.values().filter_map(|c| c.progress());
+            let urgent = horadric_core::program_status::Progress::most_urgent(all);
+            terminal::show_progress(stage.hwnd, urgent);
         }
     }
 
@@ -4351,6 +4365,7 @@ impl App {
         let Some(console) = self.console_by_serial(serial).cloned() else {
             return;
         };
+        self.show_progress();
         if self.to_folio.remove(&console.id) {
             let id = console.id.clone();
             let conversation = (self.shared.registry.lock().ok())
