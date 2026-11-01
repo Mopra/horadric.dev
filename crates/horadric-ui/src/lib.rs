@@ -39,6 +39,8 @@
 pub mod anim;
 pub mod art;
 pub mod board;
+pub mod browse;
+pub use browse::AGENT_PROMPT;
 pub mod columns;
 pub mod field;
 pub mod files;
@@ -245,8 +247,6 @@ mod vsync;
 mod watch;
 #[cfg(windows)]
 mod web;
-#[cfg(windows)]
-pub use web::AGENT_PROMPT;
 #[cfg(windows)]
 mod web_window;
 #[cfg(windows)]

@@ -19,7 +19,8 @@ use serde_json::{json, Value};
 
 use super::{App, WEB};
 use crate::console::Console;
-use crate::web::{self, Step};
+use crate::browse::{self, closed, error, Call};
+use crate::web;
 use crate::window::project_name;
 
 impl App {
@@ -33,15 +34,16 @@ impl App {
             return reply.send(error("this session has no project in Horadric"));
         };
         let session = call.session.as_str();
-        let body = &call.body;
-        let text = |k: &str| body.get(k).and_then(Value::as_str).map(str::to_string);
+        let what = match Call::parse(&call.body) {
+            Ok(c) => c,
+            Err(e) => return reply.send(error(&e)),
+        };
         // Its own tab, whichever tab the user shows: see `web::pick_tab`.
         let live = self.live_sessions();
         let tab = |make: bool| web::agent_tab(&key, session, |s| live.contains(s), make);
-        match text("op").as_deref() {
-            Some("info") => reply.send(info(&key, tab(false))),
-            Some("open") => {
-                let url = text("url").and_then(|u| web::address(&u));
+        match what {
+            Call::Info => reply.send(info(&key, tab(false))),
+            Call::Open(url) => {
                 let had = web::is_open(&key).then(|| tab(false)).flatten();
                 let Some(id) = self.open_web_for_agent(&key, session, url.as_deref()) else {
                     return reply.send(closed());
@@ -53,33 +55,24 @@ impl App {
                     web::with_view(&key, id, move |_| reply.send(info(&k, Some(id))));
                 }
             }
-            Some("navigate") => {
-                let Some(url) = text("url").and_then(|u| web::address(&u)) else {
-                    return reply.send(error("say where: a url"));
-                };
+            Call::Navigate(url) => {
                 let Some(id) = self.open_web_for_agent(&key, session, Some(&url)) else {
                     return reply.send(closed());
                 };
                 answer_after_load(&key, id, reply);
             }
-            Some(step @ ("back" | "forward" | "reload")) => {
+            Call::History(step) => {
                 let Some(id) = tab(false) else {
                     return reply.send(closed());
                 };
                 let (back, forward) = web::history_of(&key, Some(id));
-                let step = match step {
-                    "back" if !back => return reply.send(error("there is nothing to go back to")),
-                    "forward" if !forward => {
-                        return reply.send(error("there is nothing to go forward to"))
-                    }
-                    "back" => Step::Back,
-                    "forward" => Step::Forward,
-                    _ => Step::Reload,
-                };
+                if let Err(e) = browse::can_step(step, back, forward) {
+                    return reply.send(error(&e));
+                }
                 web::go_in(&key, Some(id), step);
                 answer_after_load(&key, id, reply);
             }
-            Some("close") => {
+            Call::Close => {
                 // Only its own tab: the others are the user's or another
                 // agent's.
                 let own = web::drivers(&key)
@@ -92,14 +85,10 @@ impl App {
                 }
                 reply.send(json!({ "closed": closed }));
             }
-            Some("devtools") => {
-                let Some(method) = text("method") else {
-                    return reply.send(error("say which DevTools method"));
-                };
+            Call::DevTools(method, params) => {
                 let Some(id) = tab(false) else {
                     return reply.send(closed());
                 };
-                let params = body.get("params").cloned().unwrap_or_else(|| json!({}));
                 // A tab still being made holds the call until it is, which
                 // may be after its agent gave up on it.
                 let k = key.clone();
@@ -118,7 +107,6 @@ impl App {
                     });
                 });
             }
-            _ => reply.send(error("unknown browser call")),
         }
     }
 
@@ -178,21 +166,12 @@ fn info(key: &str, tab: Option<u64>) -> Value {
         .and_then(|id| web::label_of(key, Some(id)))
         .unwrap_or_default();
     let place = tab.and_then(|id| web::place_of(key, id));
-    json!({
-        "open": web::is_open(key),
-        "shown": web::is_shown(key) && place.is_some_and(|(_, _, front)| front),
-        "project": project_name(key),
-        "tab": place.map(|(at, _, _)| at + 1),
-        "tabs": place.map(|(_, n, _)| n),
-        "url": url,
-        "title": title,
-    })
-}
-
-fn closed() -> Value {
-    error("the browser is not open; open it first")
-}
-
-fn error(why: &str) -> Value {
-    json!({ "error": why })
+    browse::info(
+        web::is_open(key),
+        web::is_shown(key),
+        &project_name(key),
+        place,
+        &title,
+        &url,
+    )
 }
