@@ -11,12 +11,17 @@ What is left is below.
 ## Still to do
 
 - **The Mac as a brother, the rest.** The Mac signs in, joins, serves
-  its sessions and files and shows brothers' tiles and panes
-  (`mac/brothers.rs`, `mac/far.rs`), all unverified until a Mac build
-  runs it. Left: handing off and keeping (the Mac sends no `handoff`,
-  takes no `bases`/`bundle`, keeps no one's sessions and asks no keeper),
-  a handed off tile keeping its place, and lore, which waits for the
-  Mac to have a lore at all.
+  its sessions and files, shows brothers' tiles and panes, hands its
+  sessions off and takes them in (asking its human where a project
+  goes), keeps a handed off tile's place, files a brother's snapshots as
+  its keeper and is fenced when a session of its own is taken over
+  elsewhere (`mac/brothers.rs`, `mac/far.rs`, `mac/handing.rs`,
+  `mac/keeping.rs`, the shared part in `horadric_core::handoffs`,
+  `sworn` and `afar_tiles`), all unverified until a Mac run tries it.
+  Left: the Mac naming a keeper and sending it snapshots (its turn ends
+  reach no keeping yet), taking a silent brother's session over on the
+  Mac, handing off a Folio (only a session in a pane goes), brothers'
+  usage limits, and lore, which waits for the Mac to have a lore at all.
 - **Teams, the rest.** Built and the relay deployed (docs/PORTAL.md,
   "Teams"). Left: a real organization in WorkOS production with two
   people in it (the human's call, since inviting sends mail), and a run
