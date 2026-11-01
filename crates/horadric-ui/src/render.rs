@@ -2483,33 +2483,12 @@ impl Painter<'_> {
                 self.lamp(&lamp_rect(&r), c, on);
                 continue;
             }
-            match phase {
-                Phase::Working => {
-                    // Its lamp's surge is light, drawn by the bloom.
-                    let context = s.status.as_ref().and_then(|st| st.context);
-                    if let Some(c) = context.filter(|&c| c >= 75.0) {
-                        let (ix, iy) = icon_centre(&r);
-                        let track = Rect::new(ix - 10.0, iy + 14.0, 20.0, 3.0);
-                        let t = motion::cycle(look.phase_age, SHIMMER);
-                        self.shimmer(&track, look.context, t, theme::fullness_color(c));
-                    }
-                    let n = s.subagents(scene.now).min(MAX_SPARKS);
-                    let lamp = lamp_rect(&r);
-                    self.hirelings(&lamp, s, scene.now, c, n, look.phase_age, look.enter);
-                }
-                Phase::Waiting(_) => {
-                    let breath = motion::waiting_breath(look.phase_age);
-                    let level = (0.55 + 0.45 * breath) * look.enter;
-                    self.lamp(&lamp_rect(&r), c, level);
-                    let c = theme::phase_color(&Phase::Working);
-                    let lamp = lamp_rect(&r);
-                    self.hirelings(&lamp, s, scene.now, c, 0, look.phase_age, look.enter);
-                }
-                _ => {
-                    let n = s.agents_alone(scene.now).min(MAX_SPARKS);
-                    let (c, age) = (theme::phase_color(&Phase::Working), look.phase_age / 2);
-                    self.hirelings(&lamp_rect(&r), s, scene.now, c, n, age, AGENTS_ALONE);
-                }
+            // A working lamp's surge, its context glint and every
+            // hireling's rune are light, drawn by the bloom.
+            if phase.is_waiting() {
+                let breath = motion::waiting_breath(look.phase_age);
+                let level = (0.55 + 0.45 * breath) * look.enter;
+                self.lamp(&lamp_rect(&r), c, level);
             }
         }
     }
@@ -2897,84 +2876,6 @@ impl Painter<'_> {
         self.fill_rounded(&r.inset(1.0), (round - 1.0).max(0.5), hot);
     }
 
-    /// A rune for each hireling, circling the lamp: carving itself while
-    /// it works, held still at the top and beating while it waits on a
-    /// permission, settling into the lamp as it finishes, and cracked in
-    /// the error colour where it failed. A session the band knows nothing
-    /// of (a mod too old, a headless stream) keeps the `n` plain sparks.
-    #[allow(clippy::too_many_arguments)]
-    unsafe fn hirelings(
-        &self,
-        r: &Rect,
-        s: &Session,
-        now: SystemTime,
-        c: Color,
-        n: usize,
-        age: Duration,
-        strength: f32,
-    ) {
-        use horadric_core::hireling::{rune_of, Lot};
-        if s.band.hirelings.is_empty() {
-            self.sparks(r, c, n, age, strength);
-            return;
-        }
-        let shown = s.band.shown(now, false);
-        let shown = &shown[..shown.len().min(MAX_SPARKS)];
-        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-        let (rx, ry) = (SPARK_REACH + 1.0, r.h / 2.0 + 3.0);
-        let turn = motion::cycle(age, HIRELING_ORBIT);
-        let count = shown.len().max(1) as f32;
-        let since = |t: SystemTime| now.duration_since(t).unwrap_or_default();
-        for (k, h) in shown.iter().enumerate() {
-            let spot = k as f32 / count;
-            let around = |turn: f32| {
-                let a = std::f32::consts::TAU * (turn + spot);
-                (cx + rx * a.cos(), cy + ry * a.sin())
-            };
-            let (at, ink, drawn) = match h.lot_at(now) {
-                Lot::Working => {
-                    let carve = motion::cycle(since(h.started), RUNE_CARVE);
-                    (around(turn), c.fade(strength), (carve * 1.6).min(1.0))
-                }
-                Lot::Waiting => {
-                    let beat = motion::waiting_breath(since(h.heard));
-                    let ink = theme::waiting().fade((0.5 + 0.5 * beat) * strength.max(0.6));
-                    ((cx, cy - ry), ink, 1.0)
-                }
-                Lot::Done => {
-                    let t = since(h.ended.unwrap_or(h.heard)).as_secs_f32() / RUNE_SETTLE;
-                    if t >= 1.0 {
-                        continue;
-                    }
-                    let (x, y) = around(turn);
-                    let ease = motion::ease_out(t);
-                    let at = (x + (cx - x) * ease, y + (cy - y) * ease);
-                    let ink = theme::done().fade((1.0 - t) * strength.max(0.6));
-                    (at, ink, 1.0)
-                }
-                // Stopped where it fell, which is its own spot, not moving.
-                Lot::Failed => (around(0.0), theme::error().fade(0.9), 1.0),
-            };
-            self.rune(rune_of(&h.kind), at, RUNE_H, ink, drawn);
-            if h.lot_at(now) == Lot::Failed {
-                let half = RUNE_H / 2.0;
-                self.rt.DrawLine(
-                    Vector2 {
-                        X: at.0 - half * 0.6,
-                        Y: at.1 - half,
-                    },
-                    Vector2 {
-                        X: at.0 + half * 0.6,
-                        Y: at.1 + half,
-                    },
-                    self.brush,
-                    RUNE_STROKE,
-                    None,
-                );
-            }
-        }
-    }
-
     /// One of the twelve runes, `h` tall, centred on `at`, `drawn` of its
     /// strokes cut so far, in the order a hand would cut them. Leaves the
     /// brush in `ink`.
@@ -2982,7 +2883,8 @@ impl Painter<'_> {
         self.rune_cut(rune, at, h, ink, drawn, RUNE_STROKE);
     }
 
-    /// [`Self::rune`] cut `stroke` wide, for one drawn larger.
+    /// [`Self::rune`] cut `stroke` wide, for one drawn larger. Where the
+    /// cut has got to, while it is not done.
     unsafe fn rune_cut(
         &self,
         rune: usize,
@@ -2991,7 +2893,7 @@ impl Painter<'_> {
         ink: Color,
         drawn: f32,
         stroke: f32,
-    ) {
+    ) -> Option<(f32, f32)> {
         let strokes = crate::sparks::RUNES[rune % crate::sparks::RUNES.len()];
         let place = |(u, v): (f32, f32)| Vector2 {
             X: at.0 + u * h,
@@ -3017,8 +2919,13 @@ impl Painter<'_> {
             );
             self.rt
                 .DrawLine(place(seg[0]), place(end), self.brush, stroke, None);
+            if f < 1.0 {
+                let p = place(end);
+                return Some((p.X, p.Y));
+            }
             left -= l;
         }
+        None
     }
 
     /// The retinue: a column of portraits, the war table's glyph atop
@@ -3260,24 +3167,6 @@ impl Painter<'_> {
         }
     }
 
-    /// A spark for each subagent at work, circling the lamp, spaced evenly
-    /// round the loop so two read as two.
-    unsafe fn sparks(&self, r: &Rect, c: Color, n: usize, age: Duration, strength: f32) {
-        if n == 0 {
-            return;
-        }
-        let white = Color::rgb(0xFFFFFF);
-        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-        let (rx, ry) = (SPARK_REACH, r.h / 2.0 + 3.0);
-        let turn = motion::cycle(age, SPARK_ORBIT);
-        for k in 0..n {
-            let a = std::f32::consts::TAU * (turn + k as f32 / n as f32);
-            let (x, y) = (cx + rx * a.cos(), cy + ry * a.sin());
-            self.glow_dot(x, y, 5.0, c.mix(white, 0.4), 0.8 * strength);
-            self.glow_dot(x, y, 1.6, white, strength);
-        }
-    }
-
     /// A lamp switched off like an old picture tube, `t` of the way
     /// through: its light squeezes to a bright line across its middle, the
     /// line to a dot, and the dot goes out.
@@ -3341,19 +3230,6 @@ impl Painter<'_> {
                 self.fill_rounded(&lit, 1.0, c);
             }
         }
-    }
-
-    /// A glint running along the lit part of a context meter that is
-    /// nearly full, `t` of the way through its run.
-    unsafe fn shimmer(&self, r: &Rect, fraction: f32, t: f32, c: Color) {
-        let lit = r.w * fraction.clamp(0.0, 1.0);
-        if lit <= 0.0 {
-            return;
-        }
-        let white = Color::rgb(0xFFFFFF);
-        let x = r.x + lit * motion::ease_in_out(t);
-        let fade = (std::f32::consts::PI * t).sin();
-        self.glow_dot(x, r.y + r.h / 2.0, 5.0, c.mix(white, 0.5), 0.7 * fade);
     }
 
     /// `r`'s shadow, moved by `(dx, dy)` and blurred `blur` wide: the same

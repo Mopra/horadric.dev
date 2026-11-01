@@ -228,6 +228,12 @@ pub fn heat_color(base: Color, heat: f32) -> Color {
     }
 }
 
+/// A burst's seed from something it belongs to (a session's id, a
+/// hireling's), so the same burst looks the same every frame.
+pub fn seed_of(text: &str) -> u64 {
+    hash(&text.bytes().map(u64::from).collect::<Vec<_>>())
+}
+
 /// FNV-1a over the words, stable across runs and builds.
 fn hash(words: &[u64]) -> u64 {
     words.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &w| {
