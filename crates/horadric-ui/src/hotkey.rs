@@ -1,4 +1,4 @@
-//! The app's three global shortcuts: what each does, the chord it has
+//! The app's shortcuts, global but for dictation's in Horadric: what each does, the chord it has
 //! until the human sets another, and a chord as state.json keeps it and
 //! the Settings window shows it ("Ctrl+Alt+Space"), both the same text.
 //!
@@ -17,13 +17,31 @@ pub enum Action {
     Stop,
     /// The list of Claude accounts to switch to.
     Account,
+    /// Dictates into the stage pane or Folio with the keyboard. Not
+    /// global: other programs keep the chord, Ctrl+Space in an editor.
+    Dictate,
+    /// Dictates into whatever program has the keyboard.
+    DictateAnywhere,
 }
 
-/// How many global shortcuts there are.
-pub const COUNT: usize = 4;
+/// How many shortcuts there are.
+pub const COUNT: usize = 6;
 
 impl Action {
-    pub const ALL: [Action; COUNT] = [Action::Next, Action::Listen, Action::Stop, Action::Account];
+    pub const ALL: [Action; COUNT] = [
+        Action::Next,
+        Action::Listen,
+        Action::Stop,
+        Action::Account,
+        Action::Dictate,
+        Action::DictateAnywhere,
+    ];
+
+    /// Registered with Windows for every program, rather than read by the
+    /// stage's own panes.
+    pub fn is_global(self) -> bool {
+        self != Action::Dictate
+    }
 
     /// Its place in [`Action::ALL`], which is also its hotkey id less one.
     pub fn index(self) -> usize {
@@ -46,6 +64,8 @@ impl Action {
             Action::Listen => "listen",
             Action::Stop => "stop",
             Action::Account => "account",
+            Action::Dictate => "dictate",
+            Action::DictateAnywhere => "dictate_anywhere",
         }
     }
 
@@ -55,6 +75,8 @@ impl Action {
             Action::Listen => "Stay a while and listen",
             Action::Stop => "Stop Warriv",
             Action::Account => "Switch account",
+            Action::Dictate => "Dictate",
+            Action::DictateAnywhere => "Dictate in any program",
         }
     }
 
@@ -62,12 +84,25 @@ impl Action {
     /// so it never fights the installed Horadric for it. AltGr is
     /// Ctrl+Alt, and AltGr+Space or AltGr+K types nothing on the layouts
     /// that matter here, where AltGr+A types a letter in Polish.
+    /// Dictation in Horadric is Ctrl+Space, which types nothing in a
+    /// terminal; it is no global, so dev and installed share it.
     pub fn default_chord(self, dev: bool) -> Chord {
+        if self == Action::Dictate {
+            return Chord {
+                mods: Mods {
+                    ctrl: true,
+                    ..Mods::default()
+                },
+                key: VK_SPACE,
+            };
+        }
         let key = match self {
             Action::Next => VK_SPACE,
             Action::Listen => VK_HOME,
             Action::Stop => u16::from(b'W'),
             Action::Account => u16::from(b'K'),
+            Action::DictateAnywhere => u16::from(b'D'),
+            Action::Dictate => VK_SPACE,
         };
         Chord {
             mods: Mods {
@@ -289,7 +324,9 @@ mod tests {
                 "Ctrl+Alt+Space",
                 "Ctrl+Alt+Home",
                 "Ctrl+Alt+W",
-                "Ctrl+Alt+K"
+                "Ctrl+Alt+K",
+                "Ctrl+Space",
+                "Ctrl+Alt+D"
             ]
         );
         assert_eq!(

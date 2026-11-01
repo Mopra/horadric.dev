@@ -25,6 +25,11 @@
 //! which owns the microphone and cuts the phrases; and one that keeps the
 //! model loaded between dictations and writes down what each recording
 //! heard. The last two reach the pane with [`WM_DICTATE`].
+//!
+//! The chord is set in Settings, under Keys. A second, global one
+//! dictates into any program ([`anywhere`]).
+
+pub mod anywhere;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -38,6 +43,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use horadric_memory::speech::{self, words::Words, Listener};
+
+use crate::hotkey::{Action, Chord};
 use windows::core::{GUID, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, PROPERTYKEY, WPARAM};
 use windows::Win32::Media::Audio::{
@@ -131,9 +138,44 @@ struct Now {
 /// How long a failure, or word that the model is ready, stays shown.
 const AFTER_FOR: Duration = Duration::from_secs(8);
 
-const READY: &str = "Dictation is ready. Press Ctrl+Space and talk.";
+/// The chord that dictates in a pane, Ctrl+Space until Settings sets
+/// another.
+static CHORD: Mutex<Option<Chord>> = Mutex::new(None);
 
-const TO_STOP: &str = "Listening. Ctrl+Space to stop, Esc to drop it.";
+/// The chord that dictates in a stage pane or a Folio from now on.
+pub fn use_chord(chord: Chord) {
+    if let Ok(mut c) = CHORD.lock() {
+        *c = Some(chord);
+    }
+}
+
+pub fn chord() -> Chord {
+    CHORD
+        .lock()
+        .ok()
+        .and_then(|c| *c)
+        .unwrap_or_else(|| Action::Dictate.default_chord(false))
+}
+
+/// Whether `key` coming up ends a hold of the chord: its key or any of
+/// its modifiers.
+pub fn lets_go(key: u16) -> bool {
+    let c = chord();
+    // VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN.
+    key == c.key
+        || (c.mods.shift && key == 0x10)
+        || (c.mods.ctrl && key == 0x11)
+        || (c.mods.alt && key == 0x12)
+        || (c.mods.win && (key == 0x5B || key == 0x5C))
+}
+
+fn ready() -> String {
+    format!("Dictation is ready. Press {} and talk.", chord().name())
+}
+
+fn to_stop() -> String {
+    format!("Listening. {} to stop, Esc to drop it.", chord().name())
+}
 
 /// Whether what was said is tidied by Haiku before it is typed
 /// ([`speech::tidy`]), from Settings. Off at first: the words leave the
@@ -488,7 +530,7 @@ pub fn status(pane: HWND) -> Option<String> {
     match shown(pane) {
         Some(Shown::Listening(level)) => Some(match said {
             Some(said) => format!("{} {said}", meter(level)),
-            None => format!("{} {TO_STOP}", meter(level)),
+            None => format!("{} {}", meter(level), to_stop()),
         }),
         Some(Shown::Writing) => Some(match said {
             Some(said) => format!("Writing it down: {said}"),
@@ -511,7 +553,7 @@ pub fn notice(pane: HWND) -> Option<String> {
         return after;
     };
     Some(match shown {
-        Shown::Listening(_) => TO_STOP.to_string(),
+        Shown::Listening(_) => to_stop(),
         Shown::Fetching(f) if f < 1.0 => {
             let mb = speech::download_size() / 1_000_000;
             format!(
@@ -589,7 +631,7 @@ pub fn take(pane: HWND) -> Option<Result<String, String>> {
             }),
             Note::Ready => {
                 end(pane);
-                linger(pane, READY.to_string());
+                linger(pane, ready());
             }
             Note::Done(r) => {
                 end(pane);

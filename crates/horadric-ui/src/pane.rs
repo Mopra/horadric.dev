@@ -45,7 +45,7 @@ use windows::Win32::UI::Input::Ime::{
     ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+    GetAsyncKeyState, VK_LBUTTON, VK_LWIN, VK_MBUTTON, VK_RBUTTON, VK_RWIN,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, MapVirtualKeyW, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent,
@@ -1886,9 +1886,9 @@ impl Pane {
         }
     }
 
-    /// Ctrl+Space dictates into the session, and Esc drops what is being
-    /// heard. The chord types nothing, so it is the stage's in every
-    /// program.
+    /// Dictation's chord (Ctrl+Space unless Settings set another)
+    /// dictates into the session, and Esc drops what is being heard.
+    /// Ctrl+Space types nothing, so it is the stage's in every program.
     fn dictate_key(&self, vk: VIRTUAL_KEY, repeat: bool) -> bool {
         let mods = Self::mods();
         if vk == VK_ESCAPE && dictate::cancel(self.hwnd) {
@@ -1897,7 +1897,11 @@ impl Pane {
             return true;
         }
         let ours = self.is_session() || self.console.folio.is_some();
-        if vk != VK_SPACE || !mods.ctrl || mods.alt || mods.shift || !ours {
+        let chord = dictate::chord();
+        let win = unsafe { GetKeyState(VK_LWIN.0 as i32) < 0 || GetKeyState(VK_RWIN.0 as i32) < 0 };
+        let held = (mods.ctrl, mods.alt, mods.shift, win)
+            == (chord.mods.ctrl, chord.mods.alt, chord.mods.shift, chord.mods.win);
+        if vk.0 != chord.key || !held || !ours {
             return false;
         }
         self.drop_char();
@@ -3567,7 +3571,7 @@ impl Pane {
                 if wparam.0 == VK_CONTROL.0 as usize {
                     self.hover(None);
                 }
-                if wparam.0 == VK_CONTROL.0 as usize || wparam.0 == VK_SPACE.0 as usize {
+                if dictate::lets_go(wparam.0 as u16) {
                     dictate::release(self.hwnd);
                 }
                 self.on_key_up(wparam.0 as u16, Self::mods());

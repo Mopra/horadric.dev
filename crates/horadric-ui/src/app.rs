@@ -731,6 +731,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     let saved = store::load();
     let keys = chords(&saved.hotkeys);
     let keys_live = Action::ALL.map(|a| register_key(notify, a, keys[a.index()]));
+    crate::dictate::use_chord(keys[Action::Dictate.index()]);
     web::set_sizes(&saved.page_sizes);
     theme::set_accents(&saved.accents);
     web::set_docks(&saved.page_docks);
@@ -1154,6 +1155,9 @@ fn chords(saved: &BTreeMap<String, String>) -> [Chord; hotkey::COUNT] {
 /// Registers `action`'s shortcut on `chord`. False when another program
 /// holds the chord.
 fn register_key(hwnd: HWND, action: Action, chord: Chord) -> bool {
+    if !action.is_global() {
+        return true;
+    }
     let mods = HOT_KEY_MODIFIERS(chord.mods.flags()) | MOD_NOREPEAT;
     let ok = unsafe { RegisterHotKey(Some(hwnd), action.id(), mods, u32::from(chord.key)) };
     if let Err(e) = &ok {
@@ -4059,6 +4063,10 @@ impl App {
                 Some(Action::Listen) => self.listen_on_demand(),
                 Some(Action::Stop) => self.stop_warriv(),
                 Some(Action::Account) => post(self.notify.0 as isize, WM_HORADRIC_ACCOUNT_MENU, 0),
+                Some(Action::DictateAnywhere) => {
+                    crate::dictate::anywhere::press(self.keys[Action::DictateAnywhere.index()].key)
+                }
+                Some(Action::Dictate) => {}
                 None => {}
             },
             WM_TIMER if wparam == GLIDE_TIMER => {
@@ -6153,6 +6161,7 @@ impl App {
             self.keys[i] = chord;
             self.register_keys();
             if self.keys_live[i] {
+                crate::dictate::use_chord(self.keys[Action::Dictate.index()]);
                 self.save();
             } else {
                 // Keeps the chord it had rather than one that does nothing.
