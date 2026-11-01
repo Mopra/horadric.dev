@@ -276,6 +276,11 @@ pub struct Status {
     /// How full the context window is, in percent.
     pub context: Option<f32>,
     pub limits: Limits,
+    /// What the conversation has cost so far in US dollars, as Claude Code
+    /// reckons it at list prices. A subscription pays none of it, so it
+    /// reads as what the work would have cost on the API. `/clear` starts
+    /// it over.
+    pub cost: Option<f64>,
 }
 
 impl Status {
@@ -300,6 +305,10 @@ impl Status {
                 seven_day: limit("seven_day"),
                 spend: limit("spend_limit"),
             },
+            cost: v
+                .pointer("/cost/total_cost_usd")
+                .and_then(Value::as_f64)
+                .filter(|c| c.is_finite() && *c >= 0.0),
         })
     }
 
@@ -318,6 +327,26 @@ impl Status {
         }
         parts.join(" \u{00B7} ")
     }
+}
+
+/// "$0.42", "$12.30", "$1,204": dollars as a menu line says them, cents
+/// only while they still matter.
+pub fn format_cost(usd: f64) -> String {
+    if usd > 0.0 && usd < 0.005 {
+        return "under $0.01".into();
+    }
+    if usd < 1000.0 {
+        return format!("${usd:.2}");
+    }
+    let whole = format!("{:.0}", usd);
+    let mut out = String::new();
+    for (i, c) in whole.chars().enumerate() {
+        if i > 0 && (whole.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    format!("${out}")
 }
 
 /// "40 min", "2 h 10 min", "3 d 4 h". Only as fine as a reset needs.
@@ -571,6 +600,7 @@ mod tests {
             })
         );
         assert_eq!(s.limits.seven_day.map(|l| l.used), Some(12.0));
+        assert_eq!(s.cost, Some(0.42));
         assert_eq!(s.limits.spend, None);
         let names: Vec<&str> = s.limits.named().iter().map(|(n, _)| *n).collect();
         assert_eq!(names, ["Session", "Week"]);
@@ -913,5 +943,15 @@ mod tests {
         };
         let back: Usage = serde_json::from_str(&serde_json::to_string(&u).unwrap()).unwrap();
         assert_eq!(back, u);
+    }
+
+    #[test]
+    fn a_cost_reads_in_dollars_and_cents_while_they_matter() {
+        assert_eq!(format_cost(0.0), "$0.00");
+        assert_eq!(format_cost(0.001), "under $0.01");
+        assert_eq!(format_cost(0.42), "$0.42");
+        assert_eq!(format_cost(12.3), "$12.30");
+        assert_eq!(format_cost(1204.4), "$1,204");
+        assert_eq!(format_cost(1234567.0), "$1,234,567");
     }
 }

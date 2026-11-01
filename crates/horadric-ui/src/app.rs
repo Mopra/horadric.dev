@@ -1891,7 +1891,14 @@ fn tile_menu(id: &str) {
         doing.push(Item::action(UNDO, "Undo last turn"));
     }
 
-    let groups = [calls, open, doing, end.into_iter().collect()];
+    // What Claude Code reckons the conversation cost, said first and
+    // apart, since it is no action.
+    let cost = with_app(|app| app.cost_of(id)).flatten();
+    let said: Vec<Item> = cost
+        .map(|c| Item::Disabled(format!("{} at API prices", horadric_core::usage::format_cost(c))))
+        .into_iter()
+        .collect();
+    let groups = [said, calls, open, doing, end.into_iter().collect()];
     let mut items = Vec::new();
     for group in groups.into_iter().filter(|g| !g.is_empty()) {
         if !items.is_empty() {
@@ -2672,6 +2679,11 @@ fn project_menu(key: &str) {
         Item::Separator,
         Item::action(END_ALL, "End all sessions"),
     ]);
+    if let Some(c) = with_app(|app| app.project_cost(key)).flatten() {
+        items.insert(0, Item::Separator);
+        let line = format!("Sessions cost {} at API prices", horadric_core::usage::format_cost(c));
+        items.insert(0, Item::Disabled(line));
+    }
     // The town is not closed but hidden, and only once no session runs
     // there, or the hide would not show.
     if !town::is(key) {
@@ -6836,6 +6848,24 @@ impl App {
             self.forget(id);
         }
         self.reconcile(false);
+    }
+
+    /// What the session's conversation has cost so far, by its last
+    /// status line. None before it has spent anything.
+    fn cost_of(&self, id: &str) -> Option<f64> {
+        let r = self.shared.registry.lock().ok()?;
+        r.get(id)?.status.as_ref()?.cost.filter(|&c| c > 0.0)
+    }
+
+    /// What the project's sessions on the tiles have cost, summed.
+    fn project_cost(&self, key: &str) -> Option<f64> {
+        let r = self.shared.registry.lock().ok()?;
+        let sum: f64 = r
+            .all()
+            .filter(|s| project_key(s) == key)
+            .filter_map(|s| s.status.as_ref()?.cost)
+            .sum();
+        (sum > 0.0).then_some(sum)
     }
 
     /// How many sessions the registry has in the project.
