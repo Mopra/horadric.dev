@@ -177,6 +177,17 @@ pub struct App {
     discord: horadric_core::saved::Discord,
     rich: Option<crate::discord::Discord>,
     run: horadric_core::presence::Run,
+    /// Files shown read only on the stage, by pane id: the project each
+    /// is shown with, its console, and when the file last changed.
+    views: HashMap<String, View>,
+}
+
+/// A file shown read only on the stage, a pane with no program behind it
+/// and no tile.
+struct View {
+    key: String,
+    console: Arc<Console>,
+    changed: Option<SystemTime>,
 }
 
 /// Runs the app until it quits.
@@ -261,6 +272,7 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
         discord: saved.discord,
         rich: None,
         run: Default::default(),
+        views: HashMap::new(),
     };
     app.attach_hosts();
     app.reattach_folios();
@@ -403,6 +415,11 @@ fn default_stage_frame(mtm: MainThreadMarker, saved: &SavedState) -> NSRect {
         NSPoint::new(x as f64, bottom as f64),
         NSSize::new(width as f64, (h - 2.0 * GAP) as f64),
     )
+}
+
+/// When the file at `path` last changed, None when it cannot be read.
+fn file_changed(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -928,6 +945,11 @@ impl App {
     }
 
     fn output(&mut self, serial: usize) {
+        if self.views.values().any(|v| v.console.serial == serial) {
+            // A file's colours came in.
+            self.stage.output(serial);
+            return;
+        }
         let Some(console) = self.console_by_serial(serial).cloned() else {
             return;
         };
@@ -1212,7 +1234,8 @@ impl App {
         let mut mine: Vec<&horadric_core::Session> =
             sessions.iter().filter(|s| project_key(s) == key).collect();
         mine.sort_by_key(|s| s.created);
-        mine.into_iter()
+        let mut panes: Vec<Pane> = mine
+            .into_iter()
             .filter_map(|s| {
                 let c = self
                     .consoles
@@ -1224,7 +1247,65 @@ impl App {
                     (theme::edge_strength(&s.phase) > 0.0).then(|| theme::phase_color(&s.phase));
                 Some(pane)
             })
-            .collect()
+            .collect();
+        // The files open in the project, after its sessions, by name.
+        let mut views: Vec<(&String, &View)> =
+            self.views.iter().filter(|(_, v)| v.key == key).collect();
+        views.sort_by(|a, b| a.0.cmp(b.0));
+        for (id, v) in views {
+            let name = (v.console.path())
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| id.clone());
+            panes.push(Pane::new(id.clone(), name, Arc::clone(&v.console), accent));
+        }
+        panes
+    }
+
+    /// Shows the file at `path` read only on the stage, with the project
+    /// `key`, or brings it forward when it shows already.
+    fn open_file(&mut self, key: &str, path: PathBuf) {
+        let id = format!("view:{}", path.display());
+        if !self.views.contains_key(&id) {
+            let serial = self.next_serial;
+            self.next_serial += 1;
+            let detail = (path.parent())
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let changed = file_changed(&path);
+            let console = Console::view(id.clone(), serial, path, detail, super::Notify);
+            self.views.insert(
+                id.clone(),
+                View {
+                    key: key.to_string(),
+                    console,
+                    changed,
+                },
+            );
+        }
+        self.show_project(key, Some(&id));
+    }
+
+    /// Asks for a file in the project `key` and shows it.
+    fn pick_file(&mut self, key: &str) {
+        let start = self.project_dir(key);
+        if let Some(path) = dialog::pick_file(self.mtm, start.as_deref()) {
+            self.open_file(key, path);
+        }
+    }
+
+    /// Reads again each file shown whose file changed since.
+    fn reload_views(&mut self) {
+        for v in self.views.values_mut() {
+            let Some(path) = v.console.path() else {
+                continue;
+            };
+            let now = file_changed(&path);
+            if now != v.changed {
+                v.changed = now;
+                v.console.reload(super::Notify);
+                self.stage.output(v.console.serial);
+            }
+        }
     }
 
     /// Keeps the stage's panes the project's consoles, and its colours
@@ -1248,6 +1329,9 @@ impl App {
                     n += 1;
                 }
             }
+            n += (self.views.iter())
+                .filter(|(id, v)| v.key == key && self.stage.shows(id))
+                .count();
             n == want.len()
         };
         if !(shown_all && same_count) {
@@ -1356,9 +1440,11 @@ impl App {
         const SHELL: usize = 2;
         const REVEAL: usize = 3;
         const END_ALL: usize = 4;
+        const OPEN_FILE: usize = 5;
         let items = [
             Item::pick("New session", NEW),
             Item::pick("New terminal", SHELL),
+            Item::pick("Open file\u{2026}", OPEN_FILE),
             Item::pick("Show in Finder", REVEAL),
             Item::Separator,
             Item::pick("End every session in this project", END_ALL),
@@ -1370,6 +1456,7 @@ impl App {
                 }
             }
             Some(SHELL) => self.open_shell(key),
+            Some(OPEN_FILE) => self.pick_file(key),
             Some(REVEAL) => {
                 if let Some(dir) = self.project_dir(key) {
                     let _ = std::process::Command::new("/usr/bin/open").arg(dir).spawn();
@@ -1476,11 +1563,42 @@ impl App {
     }
 
     fn pane_menu(&mut self, id: &str, at: NSPoint) {
-        self.tile_menu(id, at);
+        let Some(view) = self.views.get(id) else {
+            self.tile_menu(id, at);
+            return;
+        };
+        const REVEAL: usize = 1;
+        const OPEN: usize = 2;
+        const CLOSE: usize = 3;
+        let path = view.console.path();
+        let key = view.key.clone();
+        let items = [
+            Item::pick("Show in Finder", REVEAL),
+            Item::pick("Open Another File\u{2026}", OPEN),
+            Item::Separator,
+            Item::pick("Close", CLOSE),
+        ];
+        match menu::popup(self.mtm, &items, at) {
+            Some(REVEAL) => {
+                if let Some(p) = path {
+                    let _ = std::process::Command::new("/usr/bin/open")
+                        .arg("-R")
+                        .arg(p)
+                        .spawn();
+                }
+            }
+            Some(OPEN) => self.pick_file(&key),
+            Some(CLOSE) => self.close_pane(id),
+            _ => {}
+        }
     }
 
     fn close_pane(&mut self, id: &str) {
         if super::far::close(self, id) {
+            return;
+        }
+        if self.views.remove(id).is_some() {
+            self.reconcile();
             return;
         }
         let live = self
@@ -1763,6 +1881,7 @@ impl App {
                 self.sync_discord(&sessions);
             }
         }
+        self.reload_views();
         self.update.tick();
         super::brothers::refresh(self);
         if let Some(checked) = self.update.take_checked() {

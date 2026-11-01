@@ -114,6 +114,25 @@ pub fn pick_folder(mtm: MainThreadMarker, start: Option<&Path>) -> Option<PathBu
     Some(PathBuf::from(url.path()?.to_string()))
 }
 
+/// A file picked to show read only, starting in `start`.
+pub fn pick_file(mtm: MainThreadMarker, start: Option<&Path>) -> Option<PathBuf> {
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(false);
+    panel.setCanChooseFiles(true);
+    panel.setAllowsMultipleSelection(false);
+    panel.setPrompt(Some(&NSString::from_str("Open")));
+    if let Some(dir) = start {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&dir.to_string_lossy()));
+        panel.setDirectoryURL(Some(&url));
+    }
+    NSApplication::sharedApplication(mtm).activate();
+    if panel.runModal() != NSModalResponseOK {
+        return None;
+    }
+    let url = panel.URL()?;
+    Some(PathBuf::from(url.path()?.to_string()))
+}
+
 pub fn about() {
     let a = alert(
         &format!("Horadric {}", env!("CARGO_PKG_VERSION")),
