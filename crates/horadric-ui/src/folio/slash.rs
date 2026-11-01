@@ -7,13 +7,10 @@
 //! A list's rows carry what picking them does in their value, as words
 //! split by tabs, read back by [`act`].
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use horadric_core::folio::Block;
-use horadric_hooks::transcript::Past;
 use serde_json::Value;
 
 use super::composer::{choose, notice, put, session_id};
@@ -91,11 +88,6 @@ pub(super) fn run_shell(chat: &mut Chat, command: &str) {
     });
 }
 
-thread_local! {
-    /// The conversations a `/resume` list offered, by session.
-    static OFFERED: RefCell<HashMap<String, Vec<Past>>> = RefCell::new(HashMap::new());
-}
-
 /// Runs native command `name` with the `words` typed after it.
 pub(super) fn run(chat: &mut Chat, id: &str, name: &str, words: &str) {
     match name {
@@ -157,30 +149,6 @@ pub(super) fn run(chat: &mut Chat, id: &str, name: &str, words: &str) {
             hidden(chat, id, &args, Then::Show(format!("/plugin {words}")));
         }
         "theme" => app::push(Input::PaneAsk(id.to_string(), app::PaneAsk::Theme)),
-        "resume" => {
-            let dir = chat.dir.to_string_lossy().into_owned();
-            // Not the one this chat holds: it is already open.
-            let held: Vec<String> = chat.folio.session_id.iter().cloned().collect();
-            let past = horadric_hooks::transcript::history(&dir, &held, 10);
-            let now = std::time::SystemTime::now();
-            let rows = (past.iter().enumerate())
-                .map(|(i, p)| {
-                    let ago = now.duration_since(p.modified).unwrap_or_default();
-                    let (title, when) = crate::history::label(&p.title.text, ago)
-                        .split_once('\t')
-                        .map(|(a, b)| (a.to_string(), b.to_string()))
-                        .unwrap_or_default();
-                    Item {
-                        label: title,
-                        detail: when,
-                        value: format!("resume\t{i}"),
-                        ..Default::default()
-                    }
-                })
-                .collect();
-            OFFERED.with(|o| o.borrow_mut().insert(id.to_string(), past));
-            choose(chat, rows, "No earlier conversations in this folder.");
-        }
         "export" => export(chat, words),
         "add-dir" => add_dir(chat, id, words),
         "exit" => app::push(Input::CloseFolio(id.to_string())),
@@ -210,15 +178,6 @@ pub(super) fn act(chat: &mut Chat, value: &str) {
                     Err(e) => format!("Not saved: {e}"),
                 },
             );
-        }
-        ["resume", i] => {
-            let past = OFFERED.with(|o| {
-                let o = o.borrow();
-                o.get(&id)?.get(i.parse::<usize>().ok()?).cloned()
-            });
-            if let Some(p) = past {
-                app::push(Input::Resume(chat.dir.clone(), p));
-            }
         }
         ["plugin", id_, on] => {
             let toggle = if *on == "true" { "Turn off" } else { "Turn on" };

@@ -1499,6 +1499,12 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.with(|a| a.try_borrow_mut().ok()?.as_mut().map(f))
 }
 
+/// The conversations tiles hold, for a Folio's history list to mark.
+/// None are known while the app is busy.
+pub(crate) fn conversations_held() -> Vec<String> {
+    with_app(|app| app.held_conversations()).unwrap_or_default()
+}
+
 /// Whether any brother's tile is hidden here, for the tray's way back.
 pub(crate) fn tiles_hidden() -> bool {
     with_app(|app| !app.far_hidden.is_empty()).unwrap_or_default()
@@ -1823,6 +1829,7 @@ fn tile_menu(id: &str) {
     const TAKE_OVER: usize = 8;
     const TERMINAL: usize = 9;
     const AS_CHAT: usize = 10;
+    const HISTORY_LIST: usize = 4;
     const UNDO: usize = 50;
     /// The opening group for a session of this `kind`, a plain terminal
     /// with `shell`, and the line that ends it, if it has one.
@@ -1886,6 +1893,16 @@ fn tile_menu(id: &str) {
         let (open, end) = tile_items(id, kind, shell, rename);
         (open, end, live, shell)
     };
+    // Any Claude tile but a brother's: a Folio's history list is where an
+    // earlier conversation of the project is found.
+    let mut open = open;
+    let far = matches!(
+        with_app(|app| app.tile_kind(id)).flatten(),
+        Some((TileKind::Far, _))
+    );
+    if !shell && !far {
+        open.push(Item::action(HISTORY_LIST, "History\u{2026}"));
+    }
 
     // The same groups in the same order on every tile, an empty one left
     // out, so a line is always where it was last time.
@@ -2015,6 +2032,9 @@ fn tile_menu(id: &str) {
         }
         Some(TERMINAL) => {
             with_app(|app| app.folio_to_terminal(id));
+        }
+        Some(HISTORY_LIST) => {
+            with_app(|app| app.history_list(id));
         }
         _ => {}
     }
@@ -9605,10 +9625,7 @@ impl App {
                     self.folio_restart(&id, true);
                 }
                 Input::Resume(dir, past) => {
-                    // One conversation in two sessions would fork it.
-                    if !self.held_conversations().contains(&past.id) {
-                        self.reopen(&dir, &[past], history::Pick::Past(0));
-                    }
+                    self.carry_on_conversation(dir, past.id, None, Some(past.title), true);
                 }
                 Input::WebTab(key, step) => web::tab(&key, step),
                 Input::WebAsk(key, what) => {

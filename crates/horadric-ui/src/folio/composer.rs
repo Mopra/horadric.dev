@@ -11,11 +11,12 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::folio::{
     effort_line, prompt_line, shell_command, typed, Block, ImageData, Priority, Typed,
 };
+use horadric_hooks::transcript::Past;
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -47,7 +48,7 @@ use windows_numerics::Vector2;
 
 use super::controls;
 use super::editor::{Editor, History};
-use super::picker::{self, Item, Menu, MenuKind};
+use super::picker::{self, Conversation, Held, Item, Menu, MenuKind};
 use super::view::{d2d, rounded, scroll_by, view_of, Gfx, Hit, Palette, View, CARET_W};
 use super::{redraw, with, Chat};
 use crate::clipboard;
@@ -83,6 +84,9 @@ const IMAGE_MAX: u64 = 5 * 1024 * 1024 / 4 * 3;
 const TOO_BIG: &str = "That image is too big to send whole (the most is 3.75 MB).";
 /// History entries longer than this are not kept, so the file stays small.
 const HISTORY_ENTRY_MAX: usize = 20_000;
+/// Earlier conversations the history list offers at most; the transcript
+/// folder is read no further back than that anyway.
+const PAST_MAX: usize = 40;
 
 const PLACEHOLDER: &str =
     "Write to the Horadrim. Shift+Enter for a new line, / for commands, @ for files";
@@ -212,6 +216,12 @@ pub(super) struct Input {
     editing: Option<Editing>,
     /// Each edit waits for the human; kept with the draft.
     pub(super) review: bool,
+    /// The folder's earlier conversations while the history list is
+    /// open, read once as it opens rather than on every key.
+    past: Option<(Vec<Conversation>, Vec<Past>)>,
+    /// What the composer held when a tile's menu opened the history list,
+    /// back once the list closes.
+    aside: Option<Editor>,
 }
 
 impl Input {
@@ -242,6 +252,8 @@ impl Input {
             ime: None,
             editing: None,
             review: false,
+            past: None,
+            aside: None,
         }
     }
 
@@ -689,6 +701,13 @@ fn run_native(chat: &mut Chat, name: &str, text: &str) {
         "login" => super::sign_in::log_in(chat, &id, None),
         "mcp" => super::mcp::show(chat),
         "logout" => super::sign_in::log_out(chat, &id),
+        // Sent with no row to pick, as when nothing matched: the list
+        // comes back with the words, to be typed on.
+        "history" | "resume" => {
+            put(chat, &format!("/{name} {words}"));
+            chat.input.quiet = None;
+            follow_menu(chat);
+        }
         _ => super::slash::run(chat, &id, name, words),
     }
 }
@@ -809,6 +828,11 @@ fn follow_menu(chat: &mut Chat) {
     if inp.menu.as_ref().is_some_and(|m| m.kind.is_picker()) {
         return;
     }
+    if let Some(words) = picker::history_command(inp.ed.text()).map(str::to_string) {
+        follow_history(chat, &words);
+        return;
+    }
+    inp.past = None;
     let (start, word) = inp.ed.word_at_caret();
     let word = word.to_string();
     let kind = if start == 0 && word.starts_with('/') {
@@ -846,6 +870,93 @@ fn follow_menu(chat: &mut Chat) {
         return;
     }
     inp.menu = Some(Menu::new(kind, items, start));
+}
+
+/// Opens or filters the history list by the `words` typed after
+/// `/history` or `/resume`.
+fn follow_history(chat: &mut Chat, words: &str) {
+    if chat.input.quiet == Some((MenuKind::History, 0)) {
+        return;
+    }
+    chat.input.quiet = None;
+    if chat.input.past.is_none() {
+        load_history(chat, &crate::app::conversations_held());
+    }
+    let items = match &chat.input.past {
+        Some((all, _)) if !all.is_empty() => picker::history_items(all, words),
+        _ => {
+            chat.input.menu = None;
+            notice(chat, "No earlier conversations in this folder.");
+            return;
+        }
+    };
+    chat.input.menu = Some(Menu::new(MenuKind::History, items, 0));
+}
+
+/// Reads the folder's earlier conversations for the history list, each
+/// marked by whether this chat or another tile holds it, `held` being the
+/// ones tiles hold. Subagents' transcripts sit in folders of their own and
+/// are never among them.
+fn load_history(chat: &mut Chat, held: &[String]) {
+    let dir = chat.dir.to_string_lossy().into_owned();
+    let here = chat.folio.session_id.clone();
+    let past = horadric_hooks::transcript::history(&dir, &[], PAST_MAX);
+    let now = SystemTime::now();
+    let all = (past.iter())
+        .map(|p| {
+            let ago = now.duration_since(p.modified).unwrap_or_default();
+            let ago = crate::history::label("", ago)
+                .split_once('\t')
+                .map(|(_, a)| a.to_string())
+                .unwrap_or_default();
+            Conversation {
+                id: p.id.clone(),
+                title: p.title.text.clone(),
+                ago,
+                held: if here.as_deref() == Some(p.id.as_str()) {
+                    Held::Here
+                } else if held.contains(&p.id) {
+                    Held::Open
+                } else {
+                    Held::No
+                },
+            }
+        })
+        .collect();
+    chat.input.past = Some((all, past));
+}
+
+/// Opens the history list in session `key`'s composer, as typing
+/// `/history` does, for a tile's menu. `held` are the conversations tiles
+/// hold, given since the app is busy asking. What the composer held waits
+/// aside until the list closes.
+pub fn open_history(key: &str, held: &[String]) {
+    with(key, |chat| {
+        chat.input.ensure(key);
+        let inp = &mut chat.input;
+        let typed = picker::history_command(inp.ed.text()).is_some();
+        if !typed && !inp.ed.is_empty() && inp.aside.is_none() {
+            inp.aside = Some(std::mem::take(&mut inp.ed));
+        }
+        inp.menu = None;
+        inp.quiet = None;
+        load_history(chat, held);
+        put(chat, "/history ");
+        follow_menu(chat);
+    });
+    redraw(key);
+}
+
+/// What the composer held before the history list opened, back in it.
+fn bring_back_aside(chat: &mut Chat) {
+    match chat.input.aside.take() {
+        Some(ed) => {
+            chat.input.ed = ed;
+            chat.input.edited();
+        }
+        None => put(chat, ""),
+    }
+    chat.input.past = None;
 }
 
 /// Lists the project's files in the background, unless a list is fresh.
@@ -951,6 +1062,13 @@ fn pick(chat: &mut Chat, how: How) -> bool {
                 to_terminal(chat, &item.label);
                 return true;
             }
+            // The list opens as the command is put in, to be filtered.
+            if picker::HISTORY_COMMANDS.contains(&item.value.as_str()) {
+                chat.input.ed.replace(menu.start, caret, &format!("/{} ", item.value));
+                chat.input.edited();
+                follow_menu(chat);
+                return true;
+            }
             let needs_words = picker::native_hint(&item.value).is_some_and(|(_, n)| n);
             if let Some(name) = native_command(&format!("/{}", item.value)).filter(|_| !needs_words)
             {
@@ -990,6 +1108,17 @@ fn pick(chat: &mut Chat, how: How) -> bool {
         MenuKind::Effort => set_effort(chat, &item.value),
         MenuKind::Tasks => show_task(chat, &item.value),
         MenuKind::Choice => super::slash::act(chat, &item.value),
+        MenuKind::History => {
+            let past = (chat.input.past.as_ref())
+                .and_then(|(_, all)| all.iter().find(|p| p.id == item.value).cloned());
+            let here = chat.folio.session_id.as_deref() == Some(item.value.as_str());
+            bring_back_aside(chat);
+            if here {
+                notice(chat, "That is this chat.");
+            } else if let Some(p) = past {
+                crate::app::push(crate::app::Input::Resume(chat.dir.clone(), p));
+            }
+        }
         MenuKind::Settings => match item.value.as_str() {
             "mode" => open_picker(chat, MenuKind::Mode),
             "model" => open_picker(chat, MenuKind::Model),
@@ -1276,7 +1405,12 @@ pub(super) fn on_char(key: &str, c: char, mods: Mods) {
             '\u{1b}' => {
                 edit = false;
                 if let Some(m) = chat.input.menu.take() {
-                    if matches!(m.kind, MenuKind::Slash | MenuKind::Files) {
+                    if m.kind == MenuKind::History && chat.input.aside.is_some() {
+                        bring_back_aside(chat);
+                    } else if matches!(
+                        m.kind,
+                        MenuKind::Slash | MenuKind::Files | MenuKind::History
+                    ) {
                         chat.input.quiet = Some((m.kind, m.start));
                     }
                 } else if !chat.input.ed.field.selected().is_empty() {

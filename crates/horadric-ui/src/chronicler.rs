@@ -256,16 +256,6 @@ impl App {
         let Some((conversation, cwd)) = q.conversation.clone() else {
             return;
         };
-        let holds = |c: &Option<String>| c.as_deref() == Some(conversation.as_str());
-        let holder = self.shared.registry.lock().ok().and_then(|r| {
-            r.all()
-                .find(|s| holds(&s.claude_session_id))
-                .map(|s| s.id.clone())
-        });
-        if let Some(h) = holder {
-            self.reveal(&h, false);
-            return;
-        }
         let dir = Some(PathBuf::from(&cwd))
             .filter(|d| d.is_dir())
             .or_else(|| self.project_dir(key));
@@ -273,16 +263,44 @@ impl App {
             return;
         };
         let name = Some(q.name.clone()).filter(|n| !n.trim().is_empty());
+        let title = q.main.then(|| horadric_core::Title {
+            text: q.title.clone(),
+            custom: false,
+        });
+        self.carry_on_conversation(dir, conversation, name, title, self.chat_sessions);
+    }
+
+    /// Carries on conversation `id` in `dir` in a new tile, a Folio with
+    /// `chat`. One a tile holds already is shown instead: two agents on
+    /// one conversation would write over each other. The quest log and a
+    /// Folio's history list both come here.
+    pub(super) fn carry_on_conversation(
+        &mut self,
+        dir: PathBuf,
+        id: String,
+        name: Option<String>,
+        title: Option<horadric_core::Title>,
+        chat: bool,
+    ) {
+        let holder = self.shared.registry.lock().ok().and_then(|r| {
+            r.all()
+                .find(|s| s.claude_session_id.as_deref() == Some(id.as_str()))
+                .map(|s| s.id.clone())
+        });
+        if let Some(h) = holder {
+            self.reveal(&h, false);
+            return;
+        }
         let started = self.start_session(SessionSpec {
             name,
-            resume: Some(conversation.clone()),
+            resume: Some(id.clone()),
             show: true,
-            ..SessionSpec::new(dir, self.chat_sessions)
+            ..SessionSpec::new(dir, chat)
         });
         let started = match started {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("horadric: cannot carry on the quest: {e}");
+                eprintln!("horadric: cannot carry on the conversation: {e}");
                 return;
             }
         };
@@ -290,15 +308,37 @@ impl App {
         // would otherwise resume nothing and start afresh.
         if let Ok(mut r) = self.shared.registry.lock() {
             if let Some(s) = r.get_mut(&started) {
-                s.claude_session_id = Some(conversation);
+                s.claude_session_id = Some(id);
                 s.prompted = true;
-                if q.main {
-                    s.title = Some(horadric_core::Title {
-                        text: q.title.clone(),
-                        custom: false,
-                    });
+                if title.is_some() {
+                    s.title = title;
                 }
             }
+        }
+    }
+
+    /// A tile menu's History: the Folio's history list on the stage. A
+    /// terminal tile has no composer, so a Folio of its project shows
+    /// the list, or the quest log when the project has none.
+    pub(super) fn history_list(&mut self, id: &str) {
+        let key = self.project_of(id);
+        let folio = if self.folios.contains_key(id) {
+            Some(id.to_string())
+        } else {
+            let mut mine: Vec<&String> = (self.folios.keys())
+                .filter(|f| key.is_some() && self.project_of(f) == key)
+                .collect();
+            mine.sort();
+            mine.first().map(|f| f.to_string())
+        };
+        match (folio, key) {
+            (Some(f), _) => {
+                let held = self.held_conversations();
+                self.reveal(&f, false);
+                crate::folio::open_history(&f, &held);
+            }
+            (None, Some(k)) => self.open_quest_log(&k),
+            (None, None) => {}
         }
     }
 

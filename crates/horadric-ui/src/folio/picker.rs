@@ -29,6 +29,7 @@ pub const NATIVE: &[(&str, &str)] = &[
     ("permissions", "The allow, ask and deny rules"),
     ("plugin", "Plugins and marketplaces"),
     ("theme", "Horadric's theme, in Settings"),
+    ("history", "Find an earlier conversation and carry it on"),
     ("resume", "Carry on an earlier conversation"),
     ("export", "Save the conversation as markdown"),
     ("add-dir", "Let Claude work in another folder too"),
@@ -42,6 +43,8 @@ pub const NATIVE_HINTS: &[(&str, &str, bool)] = &[
     ("all", "<prompt>", true),
     ("btw", "<question>", true),
     ("export", "[file]", false),
+    ("history", "[words]", false),
+    ("resume", "[words]", false),
     ("permissions", "[allow|ask|deny <rule>]", false),
     ("plugin", "[install|uninstall|marketplace ...]", false),
 ];
@@ -76,13 +79,83 @@ pub enum MenuKind {
     /// A native command's list: picking a row does what its value says
     /// (see `slash::act`).
     Choice,
+    /// The folder's earlier conversations, filtered by the words after
+    /// `/history` or `/resume`: picking one carries it on.
+    History,
 }
 
 impl MenuKind {
     /// Opened from the header's button rather than by typing.
     pub fn is_picker(self) -> bool {
-        !matches!(self, MenuKind::Slash | MenuKind::Files)
+        !matches!(self, MenuKind::Slash | MenuKind::Files | MenuKind::History)
     }
+}
+
+/// The commands that open the history list. `/resume` is Claude Code's
+/// name for it, `/history` the one people look for.
+pub const HISTORY_COMMANDS: [&str; 2] = ["history", "resume"];
+
+/// The words that filter the history list, when the whole of `text` is
+/// one of [`HISTORY_COMMANDS`] and what follows it.
+pub fn history_command(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('/')?;
+    HISTORY_COMMANDS.iter().find_map(|c| {
+        let after = rest.strip_prefix(c)?;
+        match after.chars().next() {
+            None => Some(""),
+            Some(w) if w.is_whitespace() => Some(after.trim()),
+            Some(_) => None,
+        }
+    })
+}
+
+/// Whether a session holds an earlier conversation now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Held {
+    No,
+    /// The chat the list is open in.
+    Here,
+    /// Another tile: picking it shows that tile.
+    Open,
+}
+
+/// An earlier conversation as the history list shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Conversation {
+    pub id: String,
+    pub title: String,
+    /// How long ago it was last written to, as words.
+    pub ago: String,
+    pub held: Held,
+}
+
+/// The history list for the words typed: the conversations no tile holds
+/// first, newest first as given, then the ones a tile holds, marked, so
+/// the top row is never the chat already in front of you. Typing ranks
+/// them by how well their titles match instead.
+pub fn history_items(all: &[Conversation], typed: &str) -> Vec<Item> {
+    let mut order: Vec<&Conversation> = all.iter().filter(|c| c.held == Held::No).collect();
+    order.extend(all.iter().filter(|c| c.held != Held::No));
+    let ranked = rank(typed, &order, |c, q| score(q, &c.title));
+    ranked
+        .into_iter()
+        .map(|i| {
+            let c = order[i];
+            Item {
+                label: c.title.clone(),
+                hint: match c.held {
+                    Held::No => String::new(),
+                    Held::Here => "this chat".to_string(),
+                    Held::Open => "open in a tile".to_string(),
+                },
+                detail: c.ago.clone(),
+                value: c.id.clone(),
+                // Dimmed: picking it opens nothing new.
+                terminal: c.held != Held::No,
+                current: false,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -443,6 +516,39 @@ mod tests {
         assert_eq!(some[0].value, "compact");
         let co = slash_items(&info, "co");
         assert_eq!(co[0].value, "compact");
+    }
+
+    #[test]
+    fn history_and_resume_take_the_words_after_them() {
+        assert_eq!(history_command("/history"), Some(""));
+        assert_eq!(history_command("/history  auth bug "), Some("auth bug"));
+        assert_eq!(history_command("/resume tiles"), Some("tiles"));
+        assert_eq!(history_command("/historyx"), None);
+        assert_eq!(history_command("history"), None);
+        assert_eq!(history_command("/his"), None);
+    }
+
+    #[test]
+    fn the_history_list_puts_what_no_tile_holds_first() {
+        let c = |id: &str, title: &str, held| Conversation {
+            id: id.into(),
+            title: title.into(),
+            ago: String::new(),
+            held,
+        };
+        let all = vec![
+            c("a", "Fix the tile menu", Held::Here),
+            c("b", "Resume the stage", Held::Open),
+            c("c", "Draw the runes", Held::No),
+            c("d", "Fix the hooks", Held::No),
+        ];
+        let ids = |items: Vec<Item>| items.into_iter().map(|i| i.value).collect::<Vec<_>>();
+        let items = history_items(&all, "");
+        assert_eq!(items[0].hint, "");
+        assert_eq!(items[2].hint, "this chat");
+        assert!(items[3].terminal);
+        assert_eq!(ids(items), vec!["c", "d", "a", "b"]);
+        assert_eq!(ids(history_items(&all, "fix")), vec!["d", "a"]);
     }
 
     #[test]
