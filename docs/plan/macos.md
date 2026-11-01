@@ -13,11 +13,15 @@ its own step:
 - **The quest log runner and Warriv.** `runner.rs` and `warriv.rs` sit
   on the Windows `App`; the Mac needs them behind something both apps
   give, not a copy.
-- **The files tile.** The viewer is on the Mac (a project's menu, Open
-  file); the tile that lists a project's changed files is not.
-- **The usage window and accounts.**
-- **The Settings window.** The Mac's few settings are in its menu bar
-  menu meanwhile.
+- **Switching accounts.** The usage window is on the Mac (limits and
+  whose account it is); switching is not. Claude Code keeps a Mac's login
+  in the Keychain, not in `.credentials.json`, so the Mac needs its own
+  way to read and put it, and to keep the logins aside.
+- **The rest of Settings.** The Mac's Settings window has the theme,
+  Discord, Open at Login and the session defaults. Not yet: tiles on
+  which screen, code font, notifications, sounds, dictation, memory,
+  backup, keys, and the per project settings, each as its feature lands
+  on the Mac.
 
 The Mac release notes and the site say these are missing, rather than
 showing features that do nothing. Keep saying so until each lands.
