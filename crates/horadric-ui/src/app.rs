@@ -101,6 +101,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
+use crate::quests::{Runner as _, Warriv as _};
 use crate::accounts;
 use crate::agents;
 use crate::appear;
@@ -140,6 +141,7 @@ use crate::{
 
 #[path = "runner.rs"]
 mod runner;
+pub(crate) use crate::quests::{SessionSpec, Workplace};
 
 #[path = "drive.rs"]
 mod drive;
@@ -182,7 +184,7 @@ mod reopening;
 pub(crate) use handing::{leaving_menu, leaving_pick};
 pub(crate) use keeping::{set_auto as set_auto_takeover, set_keeper, tray_state as keeping_tray};
 
-pub use runner::ssh_prompt;
+pub use crate::quests::runner::ssh_prompt;
 
 /// The settings the app hands every `claude` it starts, its status line
 /// among them, for `horadric run` to hand its own. None until the app has
@@ -997,7 +999,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             key_listening: None,
             keys_note: None,
             drives: saved.drives.clone(),
-            tasks: runner::State::after(&saved.warriv_heard),
+            tasks: crate::quests::State::after(&saved.warriv_heard),
             stopped: saved.stopped.iter().cloned().collect(),
             away: Absence::default(),
             spectating: Default::default(),
@@ -2647,7 +2649,7 @@ fn project_menu(key: &str) {
     let (past, mut merges, own_trees) = match &dir {
         Some(d) => std::thread::scope(|scope| {
             let past = scope.spawn(|| past_in(d, &held, HISTORY));
-            let merges = scope.spawn(|| runner::merges(d));
+            let merges = scope.spawn(|| crate::quests::runner::merges(d));
             // Only a repository's main tree can add worktrees.
             let own_trees = worktree::main_tree(d)
                 .is_some()
@@ -3904,7 +3906,7 @@ struct App {
     /// primary one.
     screen: Option<String>,
     /// The task lists: what was read, and what the runner is up to.
-    tasks: runner::State,
+    tasks: crate::quests::State,
     /// Runewords cast on projects, and what casting keeps on the way.
     tome: runner::runeword::Tome,
     /// Worktrees just added for sessions about to start, by session id,
@@ -7727,11 +7729,11 @@ impl App {
 
     fn open_alert(&mut self) {
         if let Some(m) = self.tasks.merge_for.take() {
-            runner::ask_for(self, runner::Menu::Merge(m));
+            runner::ask_for(self, crate::quests::Menu::Merge(m));
             return;
         }
         if let Some(key) = self.tasks.ship_for.take() {
-            runner::ask_for(self, runner::Menu::Ship(key));
+            runner::ask_for(self, crate::quests::Menu::Ship(key));
             return;
         }
         match self.alert_for.take() {
@@ -9713,10 +9715,10 @@ impl App {
                     self.set_task(&key, line, &title, horadric_core::tasks::Mark::Done)
                 }
                 Input::TaskMenu(key, line, title) => {
-                    runner::ask_for(self, runner::Menu::Item(key, line, title))
+                    runner::ask_for(self, crate::quests::Menu::Item(key, line, title))
                 }
-                Input::TasksMode(key) => runner::ask_for(self, runner::Menu::Mode(key)),
-                Input::TaskAdd(key) => runner::ask_for(self, runner::Menu::Add(key)),
+                Input::TasksMode(key) => runner::ask_for(self, crate::quests::Menu::Mode(key)),
+                Input::TaskAdd(key) => runner::ask_for(self, crate::quests::Menu::Add(key)),
                 Input::GiveQuests(key) => self.give_quests(&key),
                 Input::QuestLog(ask) => self.quest_log_asks(ask),
                 Input::Context(ask) => self.context_asks(ask),
@@ -10394,63 +10396,6 @@ struct ClaudeStart {
     /// Its first prompt, sent once: last on a terminal's command line, as
     /// the first message in a Folio.
     prompt: Option<String>,
-}
-
-/// Where a new session works.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Workplace {
-    /// In the folder it is given.
-    Here,
-    /// In a worktree of its own unless the project works in one tree, as
-    /// a session the human starts does.
-    Project,
-    /// In a worktree of its own wherever there is a repository.
-    OwnTree,
-}
-
-/// A Claude session to start with [`App::start_session`].
-pub(crate) struct SessionSpec {
-    /// A new one when None. A tile's id carries that tile on.
-    pub id: Option<String>,
-    /// What its tile is called, the folder's name when None. A tile carried
-    /// on keeps its own.
-    pub name: Option<String>,
-    pub dir: PathBuf,
-    /// Its own arguments, as a terminal's command line holds them.
-    pub args: Vec<String>,
-    /// The conversation it carries on.
-    pub resume: Option<String>,
-    /// Its first prompt, a quest's or an errand's first step.
-    pub prompt: Option<String>,
-    pub place: Workplace,
-    /// The branch of a worktree of its own, the name when None.
-    pub branch: Option<String>,
-    /// A Folio rather than a terminal.
-    pub chat: bool,
-    /// Shown on the stage with the keyboard.
-    pub show: bool,
-    /// Started by automation, which tells of a failure its own way: no
-    /// dialog waits for a human who may be away, once per retry.
-    pub quiet: bool,
-}
-
-impl SessionSpec {
-    /// A new session in `dir`, a Folio when `chat`, with nothing more.
-    pub(crate) fn new(dir: PathBuf, chat: bool) -> SessionSpec {
-        SessionSpec {
-            id: None,
-            name: None,
-            dir,
-            args: Vec::new(),
-            resume: None,
-            prompt: None,
-            place: Workplace::Here,
-            branch: None,
-            chat,
-            show: false,
-            quiet: false,
-        }
-    }
 }
 
 /// The environment session `id` in `cwd` gets beside its tag, terminal or

@@ -36,6 +36,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, PostMessageW, SetTimer};
 
 use super::{unix_now, App, PORTAL_TIMER, WM_HORADRIC_PORTAL};
+use crate::quests::Runner as _;
 use crate::brothers;
 use crate::console::GridSize;
 use crate::portal::{self, Sender};

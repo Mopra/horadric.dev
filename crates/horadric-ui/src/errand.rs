@@ -20,6 +20,7 @@ use horadric_core::{ship, warriv};
 use super::cast_key;
 use crate::app::{self, unix_now, App, SessionSpec};
 use crate::dialog::{Dialog, Tone};
+use crate::quests::{Runner as _, Warriv as _};
 use crate::store;
 use crate::toast::Kind;
 use crate::window::project_name;

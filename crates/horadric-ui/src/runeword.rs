@@ -22,11 +22,11 @@ use horadric_core::tasks::one_line;
 use horadric_core::Session;
 use windows::Win32::Foundation::POINT;
 
-use super::Merge;
 use crate::app::{self, unix_now, App, Input, Run, SessionSpec};
 use crate::console;
 use crate::dialog::{Dialog, Tone};
 use crate::menu::{self, Item};
+use crate::quests::{Merge, Runner as _};
 use crate::render::{ErrandRing, TomeStone};
 use crate::store;
 use crate::toast::Kind;
@@ -1140,7 +1140,10 @@ impl App {
         let global = horadric_hooks::tasks::runewords_file()
             .map(|f| slashed(&f))
             .unwrap_or_else(|| "runewords.json beside Horadric's state".into());
-        let (horadric, config) = (super::horadric_command(), horadric_core::tasks::CONFIG_FILE);
+        let (horadric, config) = (
+            crate::quests::runner::horadric_command(),
+            horadric_core::tasks::CONFIG_FILE,
+        );
         let file = change.and_then(|label| {
             let stone = self.any_stone(key, label)?;
             Some((label, slashed(&self.stone_file(key, &stone)?)))

@@ -3,6 +3,7 @@
 //! the part that runs `git`.
 
 use std::collections::HashMap;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -16,6 +17,7 @@ use horadric_core::merge;
 use horadric_core::worktree::{self, Place, Ports, Worktree};
 use horadric_hooks::tasks as file;
 
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// How often ending a session tries to remove its worktree. The agent was
 /// just killed, and its files can stay locked for a moment after.
@@ -480,13 +482,11 @@ pub fn count(w: &Worktree) -> Option<Diff> {
 
 /// Runs git in `dir`: what it printed, or what it said when it failed.
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("cannot run git: {e}"))?;
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(dir).stdin(Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let out = cmd.output().map_err(|e| format!("cannot run git: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
@@ -636,21 +636,32 @@ fn conflict_side(tree: &Path, branch: &str, into: &str, all: Vec<String>) -> mer
     }
 }
 
-/// Runs `command` with `cmd /c` in `dir`, with no window: what it printed
-/// when it exits 0, else what it printed, stdout and stderr as they came.
+/// Runs `command` with `cmd /c` in `dir`, `sh -c` on a Mac, with no
+/// window: what it printed when it exits 0, else what it printed, stdout
+/// and stderr as they came.
 fn shell(dir: &Path, command: &str) -> Result<String, String> {
     let (mut read, write) = std::io::pipe().map_err(|e| format!("cannot run {command}: {e}"))?;
     let err = write
         .try_clone()
         .map_err(|e| format!("cannot run {command}: {e}"))?;
-    let mut cmd = Command::new("cmd.exe");
-    cmd.arg("/d").arg("/c").raw_arg(command);
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut cmd = Command::new("cmd.exe");
+        cmd.arg("/d").arg("/c").raw_arg(command);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(command);
+        cmd
+    };
     let child = cmd
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(write)
         .stderr(err)
-        .creation_flags(CREATE_NO_WINDOW)
         .spawn();
     // The pipe ends only once every writer is gone, ours included.
     drop(cmd);

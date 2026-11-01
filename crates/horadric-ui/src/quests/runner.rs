@@ -1,0 +1,2578 @@
+//! The app's side of the task list: reading each project's list when it
+//! changes, starting a session on an item, and the runner that works down
+//! a list by itself in review and auto mode.
+//!
+//! The file is the state. Taking an item writes its session beside it
+//! before the session starts, so a list read a moment later already says
+//! the item is taken, and the runner can never start it twice. The runner
+//! holds one item per project at a time, or with `"parallel"` in the
+//! config several, each in a worktree of its own while the list stays in
+//! the main tree. It starts at most one session per project every few
+//! seconds, and never resumes a paused one by itself:
+//! a runner that starts agents is the one piece of Horadric that could run
+//! away, and each of those rules is a fuse against it.
+//!
+//! What the runner does on each look, per project:
+//! - a session whose item is done, and that is not mid turn, closes;
+//! - a session whose turn ended without a report is asked, once, whether
+//!   it is finished;
+//! - review, blocked and unanswered items are announced once each;
+//! - with nothing in hand, the next open item starts;
+//! - while a usage limit is used up nothing starts, and a session the
+//!   limit stopped is told to go on once it has reset;
+//! - while one is 90 % used nothing starts either, so the sessions
+//!   running have what is left to finish their turns.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
+
+use horadric_core::chronicle::{self, Happened};
+use horadric_core::escalate;
+use horadric_core::handoff;
+use horadric_core::journal::{self, Commit, Entry, What};
+use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
+use horadric_core::usage::{self, format_until};
+use horadric_core::worktree::{self, Worktree};
+use horadric_core::{fleet, merge, pack, ship, ssh, Agent, Phase, SavedState, Setting};
+use horadric_hooks::tasks as file;
+
+use super::warriv::{self, Warriv};
+use super::{unix_now, Host, SessionSpec, Toast, Workplace};
+use crate::board::{self, Board, RowState};
+use crate::project::{folder_key, project_key, project_name};
+use crate::store;
+use crate::worktree::Landing;
+
+/// The least time between two sessions the runner starts in one project.
+const START_GAP: Duration = Duration::from_secs(10);
+/// How long after the nudge's text its Enter goes, so the agent's input
+/// box takes the text as typed rather than as one paste with a newline.
+const ENTER_AFTER: Duration = Duration::from_millis(400);
+/// How long past a limit's reset the runner waits before it goes on, in
+/// seconds, so a clock a little ahead of Anthropic's is not refused again.
+const AFTER_RESET: u64 = 60;
+/// Set on a dev instance to let its runner work the projects the installed
+/// Horadric knows, for a test of the runner itself.
+const DEV_QUESTS_ENV: &str = "HORADRIC_DEV_QUESTS";
+/// How long an item's session must have been gone before the runner puts
+/// the item back as open. Long enough for a reload or a restart to attach
+/// the sessions again first.
+const GONE_FOR: Duration = Duration::from_secs(180);
+/// How often a dev instance reads again which projects the installed
+/// Horadric knows.
+const INSTALLED_EVERY: Duration = Duration::from_secs(30);
+/// How long a session mending a landing handed back to it holds its
+/// project's other landings, so one that never lands does not hold them
+/// for ever.
+const HOLDS_LANDINGS_FOR: Duration = Duration::from_secs(60 * 60);
+/// How many times a landing goes back to its session before a fix-up
+/// quest for a fresh one takes it over.
+const HAND_BACKS: u32 = 3;
+
+/// What the app keeps for the task lists.
+#[derive(Default)]
+pub(crate) struct State {
+    /// When each project's list and config last changed on disk, as last
+    /// read, so an unchanged file is not read again.
+    stamps: HashMap<String, Stamp>,
+    /// The first prompt of a session about to start on an item, taken by
+    /// the launch.
+    pub(crate) prompts: HashMap<String, String>,
+    /// Sessions already asked whether they are finished, and when.
+    pub(crate) nudged: HashMap<String, SystemTime>,
+    /// Nudges whose Enter is still to be sent.
+    pub(crate) enters: Vec<(String, Instant)>,
+    /// What has been announced and still holds, so each is said once.
+    announced: HashSet<String>,
+    /// Projects whose runner started or closed a session on an item, so
+    /// the end of the list is worth saying.
+    ran: HashSet<String>,
+    /// When the runner last started a session, by project.
+    started: HashMap<String, Instant>,
+    /// Sessions holding an item that a usage limit stopped mid turn.
+    refused: HashMap<String, Refused>,
+    /// Menus and dialogs waiting for the app's window to show them.
+    pub(crate) menu: Option<Menu>,
+    /// What was typed for a new or edited quest before the input was
+    /// clicked away from, filled back in next time. Only Windows asks in
+    /// a window of its own that loses what was typed.
+    #[cfg(windows)]
+    pub(crate) drafts: HashMap<String, crate::ask::Draft>,
+    /// Worktrees whose branch stayed when their session ended, with the
+    /// session's project, back from the thread that removed them.
+    pub(crate) kept: Arc<Mutex<Vec<(String, Worktree)>>>,
+    /// The finished branch the last notification offered to merge, which
+    /// a click on it asks about.
+    pub(crate) merge_for: Option<Merge>,
+    /// The project the last notification proposed shipping, by key, whose
+    /// "Ship Local" stone a click on it casts.
+    pub(crate) ship_for: Option<String>,
+    /// The landing count each project was last proposed a ship at, by
+    /// key, so a count is proposed once.
+    ship_proposed: HashMap<String, usize>,
+    /// Auto mode merges that came out, back from the threads that ran them.
+    landed: Arc<Mutex<Vec<Landed>>>,
+    /// Running sessions whose worktree conflicts with what just landed, found
+    /// by a thread, not yet told.
+    drifted: Arc<Mutex<Vec<Drift>>>,
+    /// Notices found, waiting for their session to end its turn.
+    drift_waiting: Vec<Drift>,
+    /// Held by the thread merging into a project, so two fast forwards of
+    /// one `main` never race.
+    merging: HashMap<String, Arc<Mutex<()>>>,
+    /// The done quests whose merge has not come out yet, by project, each
+    /// with the session that held it.
+    landing: HashMap<String, Vec<(String, String)>>,
+    /// The worktrees landing while their session still runs, by path, and
+    /// whether the session ended meanwhile: the landing removes the tree,
+    /// not the session's end.
+    owned: HashMap<String, bool>,
+    /// The worktrees whose landing already dealt with them, by path, so
+    /// their session's end later does not land them again.
+    handled: HashSet<String>,
+    /// Failed landings handed back to the session that finished the quest,
+    /// by its worktree's path, until it lands or ends.
+    resolving: HashMap<String, Resolving>,
+    /// What the waits that need git or a command last came to, by project
+    /// and wait, filled in by the threads that look.
+    checks: Arc<Mutex<HashMap<(String, String), Check>>>,
+    /// Set while the runner acts. Starting a session reconciles, and
+    /// nothing in there may start the runner again.
+    busy: bool,
+    /// Each project's Warriv, and what it told quests' sessions.
+    pub(crate) warriv: warriv::State,
+    /// Since when each started item's session has been gone, by project
+    /// and title.
+    gone_since: HashMap<(String, String), Instant>,
+    /// The projects the installed Horadric knows, as last read. Only a
+    /// dev instance looks.
+    installed: Option<(Instant, HashSet<String>)>,
+}
+
+/// Whether a dev instance leaves a project's list to the installed
+/// Horadric. A dev instance started to try a build must not take quests
+/// from the real log: its session dies with it and the quest sits taken.
+fn dev_leaves(dev: bool, opted_in: bool, key: &str, installed: &HashSet<String>) -> bool {
+    dev && !opted_in && installed.contains(key)
+}
+
+/// The projects the installed Horadric lists as recent, as project keys.
+fn installed_projects() -> HashSet<String> {
+    let Some(dir) = store::dir() else {
+        return HashSet::new();
+    };
+    let Some(base) = dir.parent() else {
+        return HashSet::new();
+    };
+    std::fs::read(base.join("Horadric").join("state.json"))
+        .map(|b| SavedState::read(&b).0.recent)
+        .unwrap_or_default()
+        .iter()
+        .map(|p| folder_key(p))
+        .collect()
+}
+
+/// The titles of the started items whose session has been gone for
+/// `GONE_FOR`, given since when each has been.
+fn orphans(
+    key: &str,
+    tasks: &[Task],
+    holder: impl Fn(&str) -> Holder,
+    since: &mut HashMap<(String, String), Instant>,
+    now: Instant,
+) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for t in tasks.iter().filter(|t| t.mark == Mark::Working) {
+        let gone = t
+            .holder
+            .as_deref()
+            .is_none_or(|h| holder(h) == Holder::Gone);
+        let id = (key.to_string(), t.title.clone());
+        if !gone {
+            continue;
+        }
+        let first = *since.entry(id.clone()).or_insert(now);
+        seen.insert(id);
+        if now.duration_since(first) >= GONE_FOR {
+            out.push((t.line, t.title.clone()));
+        }
+    }
+    since.retain(|id, _| id.0 != key || seen.contains(id));
+    out
+}
+
+impl State {
+    /// The runner of a run that follows one which heard `heard`.
+    pub(crate) fn after(
+        heard: &std::collections::BTreeMap<String, horadric_core::warriv::Heard>,
+    ) -> State {
+        State {
+            warriv: warriv::State::after(heard),
+            ..State::default()
+        }
+    }
+}
+
+/// The last look at a wait that git or a command answers.
+#[derive(Clone, Copy)]
+pub(crate) struct Check {
+    at: Instant,
+    met: bool,
+    /// A thread is looking now.
+    running: bool,
+}
+
+/// The least time between two looks at a wait that runs git or a command.
+const CHECK_GAP: Duration = Duration::from_secs(15);
+/// How long a wait's command may run before it counts as not met.
+const CHECK_LONGEST: Duration = Duration::from_secs(30);
+
+pub(crate) type Stamp = [Option<(SystemTime, u64)>; 2];
+
+/// A session a usage limit stopped.
+pub(crate) struct Refused {
+    /// When it was stopped, so a second refusal after going on counts anew.
+    since: SystemTime,
+    /// When it can go on, in Unix seconds, none when no reset is known and
+    /// only the human can tell.
+    at: Option<u64>,
+    /// Already told to go on.
+    told: bool,
+}
+
+/// A menu or dialog asked for from a cluster.
+pub(crate) enum Menu {
+    /// What can be done with an item, by its line and title.
+    Item(String, usize, String),
+    /// An item's title and notes, read before it is accepted.
+    Brief(String, usize, String),
+    /// The project's mode.
+    Mode(String),
+    /// A new item's title.
+    Add(String),
+    /// Whether to merge a finished item's branch.
+    Merge(Merge),
+    /// Casting the project's "Ship Local" stone, by project key.
+    Ship(String),
+}
+
+/// A running session that `main` moved under, and what to type to it.
+pub(crate) struct Drift {
+    session: String,
+    text: String,
+}
+
+/// A finished quest's merge by itself, done on its thread.
+pub(crate) struct Landed {
+    /// The files the branch changed, read before the merge since a merged
+    /// branch no longer differs from `into`.
+    files: Vec<String>,
+    key: String,
+    /// The project's folder, where its list is.
+    dir: PathBuf,
+    w: Worktree,
+    title: String,
+    /// What the main tree has checked out, merged into.
+    into: String,
+    landing: crate::worktree::Landing,
+    /// The session that finished the quest, when it still ran as the
+    /// landing started.
+    live: Option<String>,
+}
+
+/// A failed landing its own session is mending.
+pub(crate) struct Resolving {
+    key: String,
+    dir: PathBuf,
+    holder: String,
+    title: String,
+    w: Worktree,
+    into: String,
+    why: merge::Failure,
+    out: String,
+    theirs: merge::Theirs,
+    since: Instant,
+    /// How many times it went back.
+    tries: u32,
+}
+
+/// A finished item's branch, still to merge into the main tree.
+#[derive(Clone)]
+pub(crate) struct Merge {
+    pub main: PathBuf,
+    pub branch: String,
+    pub title: String,
+}
+
+fn stamp(dir: &Path) -> Stamp {
+    let of = |p: PathBuf| {
+        let m = std::fs::metadata(p).ok()?;
+        Some((m.modified().ok()?, m.len()))
+    };
+    [of(file::file(dir)), of(file::config_file(dir))]
+}
+
+/// What to write under a quest of the list in a project folder: the run
+/// that ended, or, for None, that it starts over.
+type RunChange = (PathBuf, String, Option<escalate::Run>);
+
+/// The changes to runs between two reads of the list of `key`, in `dir`,
+/// at `now`, each run with what the chronicle knows of it. A landing
+/// mode's done is left to the landing, which knows the checks.
+/// `keep_spend` is called for each run that ended, with its holder and
+/// title, before the chronicle is read: a run's tokens are its spend less
+/// the one kept when the run before it ended, so every run's end keeps one.
+fn run_changes(
+    key: &str,
+    dir: &Path,
+    old: &[Task],
+    new: &[Task],
+    now: u64,
+    keep_spend: impl Fn(&str, &str),
+) -> Vec<RunChange> {
+    let changes = escalate::changes(old, new, file::mode(dir).lands());
+    if changes.is_empty() {
+        return Vec::new();
+    }
+    let holder = |title: &str| {
+        old.iter()
+            .find(|t| t.title == title)
+            .and_then(|t| t.holder.clone())
+            .unwrap_or_default()
+    };
+    for (title, change) in &changes {
+        if matches!(change, escalate::Change::Ended(_)) {
+            keep_spend(&holder(title), title);
+        }
+    }
+    let records = store::chronicle_all();
+    changes
+        .into_iter()
+        .map(|(title, change)| {
+            let run = match change {
+                escalate::Change::Ended(ending) => {
+                    Some(run_of(&records, key, &holder(&title), ending, now))
+                }
+                escalate::Change::StartsOver => None,
+            };
+            (dir.to_path_buf(), title, run)
+        })
+        .collect()
+}
+
+/// The run of the quest held by `holder` that ended so at `now`: the
+/// model its session was launched on, how long since it was last taken,
+/// and what it spent in that time.
+pub(crate) fn run_of(
+    records: &[chronicle::Record],
+    key: &str,
+    holder: &str,
+    ending: escalate::Ending,
+    now: u64,
+) -> escalate::Run {
+    let (model, escalated) = chronicle::launched(records, key, holder)
+        .unwrap_or_else(|| (escalate::DEFAULT.to_string(), false));
+    escalate::Run {
+        model,
+        escalated,
+        minutes: chronicle::taken_at(records, key, holder).map(|at| now.saturating_sub(at) / 60),
+        ending,
+        tokens: chronicle::run_tokens(records, key, holder),
+    }
+}
+
+/// Writes `run` under the quest `title`, or for None, its escalation when
+/// it starts over after a run that struggled.
+pub(crate) fn write_run(dir: &Path, title: &str, run: Option<&escalate::Run>) {
+    let wrote = file::update(dir, |text| match run {
+        Some(r) => escalate::record(text, title, r),
+        None => escalate::starts_over(text, title),
+    });
+    if let Err(e) = wrote {
+        eprintln!("horadric: cannot write how \"{title}\" ran: {e}");
+    }
+}
+
+fn read_board(dir: &Path) -> Board {
+    // Items side by side in one tree would edit the same files, so they
+    // get worktrees of their own even in trunk mode, and only a repository
+    // can give them.
+    let own_trees = crate::worktree::main_tree(dir).is_some();
+    let text = file::read(dir);
+    Board {
+        mode: file::mode(dir),
+        tasks: tasks::parse(&text),
+        aims: horadric_core::aim::open(&text),
+        parallel: if own_trees { file::parallel(dir) } else { 1 },
+        own_trees,
+        orchestrator: file::orchestrator(dir),
+    }
+}
+
+/// How the agent runs this Horadric from its shell: the full path, since
+/// the `horadric` on `PATH` may be another build. Forward slashes work in
+/// both Git Bash and PowerShell, and quotes only when a space needs them.
+pub(crate) fn command_for(exe: &str) -> String {
+    let exe = exe.replace('\\', "/");
+    if exe.contains(' ') {
+        format!("\"{exe}\"")
+    } else {
+        exe
+    }
+}
+
+/// Whether `program` run in `dir` with no window exits 0 within
+/// `CHECK_LONGEST`. `cmd.exe` takes its one argument as the command to run,
+/// as typed, since its quoting is not a C program's; a Mac's `sh -c` takes
+/// it as one argument anyway.
+pub(crate) fn exits_zero(program: &str, args: &[String], dir: &Path) -> bool {
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        if program == "cmd.exe" {
+            cmd.arg("/d").arg("/c");
+            for a in args {
+                cmd.raw_arg(a);
+            }
+        } else {
+            cmd.args(args);
+        }
+    }
+    #[cfg(not(windows))]
+    cmd.args(args);
+    let Ok(mut child) = cmd
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if start.elapsed() < CHECK_LONGEST => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+/// The claude.ai connectors of the account, by the names Claude Code
+/// gives them, which a lean quest denies by name. Read from Claude Code's
+/// own list rather than a transcript, since a lean quest's transcript has
+/// none of them.
+fn known_connectors() -> Option<Vec<String>> {
+    let known = crate::inventory::servers(&crate::inventory::claude_dir());
+    (!known.is_empty()).then_some(known)
+}
+
+pub(crate) fn horadric_command() -> String {
+    std::env::current_exe()
+        .map(|p| command_for(&p.to_string_lossy()))
+        .unwrap_or_else(|_| "horadric".into())
+}
+
+/// What an agent started in `dir` is told about the project's hosts and
+/// fleet, with the Windows `ssh` it should run, the one an SSH terminal
+/// runs.
+pub fn ssh_prompt(dir: &Path) -> Option<String> {
+    let ssh = crate::console::ssh_program()
+        .map(|p| command_for(&p.to_string_lossy()))
+        .unwrap_or_else(|| "ssh".into());
+    let fleet = file::fleet(dir).map(|(path, devices)| {
+        fleet::system_prompt(&path.to_string_lossy().replace('\\', "/"), &devices)
+    });
+    ssh::system_prompt(&file::hosts(dir), &ssh, fleet)
+}
+
+pub(crate) trait Runner: Host {
+    /// Reads again every project's list that changed on disk, or all of
+    /// them with `force`, and makes the clusters match: a list with work
+    /// left brings its project's cluster up even with no session in it.
+    fn refresh_boards(&mut self, force: bool) {
+        if self.read_boards(force) {
+            self.reconcile();
+        }
+    }
+
+    /// The projects shown for their list alone, with no session needed.
+    fn listed(&self) -> HashSet<String> {
+        self.boards()
+            .borrow()
+            .iter()
+            .filter(|(k, b)| !self.closed().contains(*k) && tasks::unfinished(&b.tasks))
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// Reads the lists of the projects with a session and of the recent
+    /// ones, and resizes the clusters whose tile changed. True when a
+    /// project gained or lost the work that keeps its cluster up.
+    fn read_boards(&mut self, force: bool) -> bool {
+        let before = self.listed();
+        let mut keys: Vec<(String, PathBuf)> = self
+            .registry()
+            .lock()
+            .map(|r| {
+                r.all()
+                    .filter(|s| !s.cwd.is_empty())
+                    .map(|s| (project_key(s), PathBuf::from(&s.cwd)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        keys.extend(
+            self.recent()
+                .iter()
+                .map(|p| (folder_key(p), PathBuf::from(p))),
+        );
+        let mut seen = HashSet::new();
+        keys.retain(|(k, _)| seen.insert(k.clone()));
+        // A session in a worktree of its own has no list there, or an old
+        // copy: the list is the project's, in the main tree.
+        for (key, dir) in &mut keys {
+            if let Some(d) = self.project_dir(key) {
+                *dir = d;
+            }
+        }
+        let mut changed = Vec::new();
+        let mut ended = Vec::new();
+        for (key, dir) in &keys {
+            let now = stamp(dir);
+            if !force && self.tasks().stamps.get(key) == Some(&now) {
+                continue;
+            }
+            self.tasks_mut().stamps.insert(key.clone(), now);
+            let fresh = read_board(dir);
+            let mut boards = self.boards().borrow_mut();
+            if boards.get(key) != Some(&fresh) {
+                let at = unix_now();
+                if let Some(old) = boards.get(key) {
+                    // Before the marks are kept: a quest sent back is taken
+                    // again, which would make its run look a moment long.
+                    let keep = |holder: &str, title: &str| self.keep_spend(key, holder, title, at);
+                    let runs = run_changes(key, dir, &old.tasks, &fresh.tasks, at, keep);
+                    ended.extend(runs.into_iter().map(|r| (key.clone(), r)));
+                    for r in chronicle::marks(key, &old.tasks, &fresh.tasks, at) {
+                        store::chronicle(&r);
+                    }
+                }
+                let mut lines = boards
+                    .get(key)
+                    .map(|old| journal::marks(key, &old.tasks, &fresh.tasks, at))
+                    .unwrap_or_default();
+                for e in &mut lines {
+                    if let What::Finished { title, commits } = &mut e.what {
+                        *commits = self.commits_under(key, dir, &e.session, title);
+                        if !commits.is_empty() {
+                            store::chronicle(&chronicle::Record {
+                                at,
+                                project: key.clone(),
+                                quest: e.session.clone(),
+                                title: title.clone(),
+                                what: Happened::Commits {
+                                    commits: commits.clone(),
+                                },
+                            });
+                        }
+                        self.keep_spend(key, &e.session, title, at);
+                    }
+                    store::journal(e);
+                }
+                boards.insert(key.clone(), fresh);
+                changed.push(key.clone());
+            }
+        }
+        let listed: HashSet<String> = {
+            let mut boards = self.boards().borrow_mut();
+            boards.retain(|k, _| seen.contains(k));
+            boards.keys().cloned().collect()
+        };
+        self.tasks_mut().stamps.retain(|k, _| listed.contains(k));
+        // Written after the read, so the next read sees the lines and no
+        // mark changed: each run is written once, and by one Horadric.
+        if !ended.is_empty() {
+            let left = self.dev_leaves_to_installed();
+            for (key, (dir, title, run)) in ended {
+                if !left.contains(&key) {
+                    write_run(&dir, &title, run.as_ref());
+                }
+            }
+        }
+        self.lists_changed(&changed);
+        self.listed() != before
+    }
+
+    /// The commits made under the item `title` of `key` that just
+    /// finished: those on the branch of the session that held it, since
+    /// the item was taken. The main tree `dir` when that session is gone.
+    fn commits_under(&self, key: &str, dir: &Path, session: &str, title: &str) -> Vec<Commit> {
+        let Some(since) = journal::started_at(&store::journal_since(0), key, title) else {
+            return Vec::new();
+        };
+        let tree = self
+            .registry()
+            .lock()
+            .ok()
+            .and_then(|r| r.get(session).map(|s| PathBuf::from(&s.cwd)))
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| dir.to_path_buf());
+        crate::worktree::commits_since(&tree, since)
+    }
+
+    /// Keeps what the item `title` that just finished spent, when `horadric
+    /// quest done` did not: the human or the runner marked it. Its
+    /// sessions still running are counted too, since a turn the human cut
+    /// short is in no turn record yet.
+    fn keep_spend(&self, key: &str, session: &str, title: &str, at: u64) {
+        if session.is_empty() {
+            return;
+        }
+        let records = store::chronicle_all();
+        if chronicle::spent_since_taken(&records, key, session) {
+            return;
+        }
+        let live: Vec<(String, String)> = self
+            .registry()
+            .lock()
+            .map(|r| {
+                r.all()
+                    .filter(|s| s.id == session)
+                    .filter_map(|s| Some((s.claude_session_id.clone()?, s.cwd.clone())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(r) = store::spent(&records, key, session, title, live, at) {
+            store::chronicle(&r);
+        }
+    }
+
+    /// The phase of a session, none when it is gone.
+    fn phase_of(&self, id: &str) -> Option<Phase> {
+        Some(self.registry().lock().ok()?.get(id)?.phase.clone())
+    }
+
+    fn holder(&self, id: &str) -> Holder {
+        if self
+            .tasks()
+            .landing
+            .values()
+            .flatten()
+            .any(|(_, h)| h == id)
+        {
+            return Holder::Live;
+        }
+        match self.phase_of(id) {
+            None => Holder::Gone,
+            Some(Phase::Paused) => Holder::Paused,
+            Some(_) => Holder::Live,
+        }
+    }
+
+    fn live(&self, id: &str) -> bool {
+        self.runs_here(id)
+    }
+
+    /// Whether session `id` holds an item of a list.
+    fn holds_quest(&self, id: &str) -> bool {
+        self.held_quest(id).is_some()
+    }
+
+    /// The project, by key, and the quest session `id` holds there.
+    fn quest_held_by(&self, id: &str) -> Option<(String, Task)> {
+        self.boards().borrow().iter().find_map(|(key, b)| {
+            b.tasks
+                .iter()
+                .find(|t| t.mark.held() && t.holder.as_deref() == Some(id))
+                .map(|t| (key.clone(), t.clone()))
+        })
+    }
+
+    /// The title of the item session `id` holds.
+    fn held_quest(&self, id: &str) -> Option<String> {
+        self.boards()
+            .borrow()
+            .values()
+            .flat_map(|b| &b.tasks)
+            .find(|t| t.mark.held() && t.holder.as_deref() == Some(id))
+            .map(|t| t.title.clone())
+    }
+
+    /// The settings that keep a quest's session lean: its claude.ai
+    /// connectors off but those its `Connectors:` lines ask for. None for a
+    /// session that works no quest, or is Warriv's, a reviewer or an
+    /// errand, which keep what the human gave every session.
+    fn quest_lean(&self, id: &str) -> Option<serde_json::Value> {
+        if horadric_core::warriv::is_reviewer(id)
+            || horadric_core::warriv::is_warriv(id)
+            || horadric_core::runeword::is_errand(id)
+        {
+            return None;
+        }
+        let (key, wanted) = self.boards().borrow().iter().find_map(|(key, b)| {
+            b.tasks
+                .iter()
+                .find(|t| t.mark.held() && t.holder.as_deref() == Some(id))
+                .map(|t| (key.clone(), t.connectors()))
+        })?;
+        let some = !wanted.is_empty() && !wanted.iter().any(|w| w.eq_ignore_ascii_case("all"));
+        let lean = if !some {
+            horadric_core::context::lean(&[], &wanted)
+        } else {
+            // Naming the ones to keep means denying the rest by name, which
+            // takes the account's list. Without it, keep them all rather
+            // than guess which to deny.
+            match known_connectors() {
+                Some(known) => horadric_core::context::lean(&known, &wanted),
+                None => serde_json::json!({}),
+            }
+        };
+        // The quest's worktree has no copy of the project's settings when
+        // they are not committed, so the project's switches go with it.
+        let own = crate::inventory::switches(std::path::Path::new(&key));
+        Some(crate::store::merge_settings(&own, &lean))
+    }
+
+    /// What a Claude Code session started with `args` is given for its
+    /// quest's `Model:` line, read as the line is now, so a resume takes a
+    /// model Warriv wrote since, and a wake Warriv's own model. Nothing
+    /// when its own `args` chose one.
+    fn quest_model_args(&self, id: &str, args: &[String]) -> Vec<String> {
+        if Agent::Claude.chosen(Setting::Model, args) {
+            return Vec::new();
+        }
+        let wake = horadric_core::warriv::model_args(id);
+        if !wake.is_empty() {
+            return wake;
+        }
+        self.boards()
+            .borrow()
+            .values()
+            .flat_map(|b| &b.tasks)
+            .find(|t| t.mark.held() && t.holder.as_deref() == Some(id))
+            .map(|t| t.model_args())
+            .unwrap_or_default()
+    }
+
+    /// Keeps the model session `id`, started or resumed on `args` with
+    /// `extra` before them, runs its quest on, so the run's outcome names
+    /// the model it ran on rather than what the notes say by then. Nothing
+    /// for a session that holds no quest.
+    fn record_launch(&self, id: &str, args: &[String], extra: &[String]) {
+        let all: Vec<String> = extra.iter().chain(args).cloned().collect();
+        let model = escalate::launched_model(&all).unwrap_or(escalate::DEFAULT);
+        // Escalated only when the quest's own line chose it, not the
+        // session's arguments.
+        let chosen = Agent::Claude.chosen(Setting::Model, args);
+        self.keep_launch(id, model, |task| {
+            !chosen && task.model() == Some(model) && escalate::chosen_by_escalation(&task.notes)
+        });
+    }
+
+    /// Keeps that session `id` runs its quest on another agent than Claude
+    /// Code, `name`, which names no quest model, so the run is left out of
+    /// what Warriv is told by model rather than credited to one it never
+    /// ran on.
+    fn record_agent_launch(&self, id: &str, name: &str) {
+        self.keep_launch(id, name, |_| false);
+    }
+
+    fn keep_launch(&self, id: &str, model: &str, escalated: impl Fn(&Task) -> bool) {
+        let held = self.boards().borrow().iter().find_map(|(key, b)| {
+            b.tasks
+                .iter()
+                .find(|t| t.mark.held() && t.holder.as_deref() == Some(id))
+                .map(|t| (key.clone(), t.clone()))
+        });
+        let Some((key, task)) = held else {
+            return;
+        };
+        let escalated = escalated(&task);
+        store::chronicle(&chronicle::Record {
+            at: unix_now(),
+            project: key,
+            quest: id.to_string(),
+            title: task.title.clone(),
+            what: Happened::Launched {
+                model: model.to_string(),
+                escalated,
+            },
+        });
+    }
+
+    /// Whether session `id` starts with permission prompts bypassed.
+    fn bypasses_prompts(&self, id: &str) -> bool {
+        let own_tree = self
+            .registry()
+            .lock()
+            .is_ok_and(|r| r.get(id).is_some_and(|s| s.worktree.is_some()));
+        tasks::bypasses_prompts(self.holds_quest(id), own_tree) || self.errand_bypasses(id)
+    }
+
+    /// What to add to a session's command line started in `cwd`: what it
+    /// is told about the browser pane, about the quest log (all of it when
+    /// it holds an item, how to read and add to it otherwise), about its own
+    /// worktree when it has one and about the project's hosts when it has
+    /// some, as one system prompt since Claude
+    /// Code takes only one. Read as it is now, so a resume sees the hosts
+    /// of today. The item as its first prompt is [`App::claude_start`]'s.
+    fn task_args(&mut self, id: &str, program: &Path, cwd: &Path) -> Vec<String> {
+        let holds = self.holds_quest(id);
+        let batch = horadric_pty::is_batch(program);
+        let mut system = Vec::new();
+        system.extend(self.browser_prompt());
+        let own_tree = self
+            .registry()
+            .lock()
+            .ok()
+            .and_then(|r| r.get(id)?.worktree.clone());
+        let mut allowed = Vec::new();
+        let special = horadric_core::warriv::is_reviewer(id)
+            || horadric_core::warriv::is_warriv(id)
+            || horadric_core::runeword::is_errand(id);
+        if horadric_core::warriv::is_reviewer(id) {
+            let (flags, prompt) = self.reviewer_args(cwd);
+            allowed = flags;
+            system.push(prompt);
+        } else if horadric_core::warriv::is_warriv(id) {
+            let (flags, prompt) = self.warriv_args(cwd);
+            allowed = flags;
+            system.push(prompt);
+        } else if horadric_core::runeword::is_errand(id) {
+            let (flags, prompt) = self.errand_args(id, cwd);
+            allowed = flags;
+            system.push(prompt);
+        }
+        if holds {
+            let main = folder_key(&cwd.to_string_lossy());
+            let rel = file::rel(Path::new(&main));
+            let list = own_tree.as_ref().map(|_| format!("{main}/{rel}"));
+            system.push(tasks::system_prompt(
+                &horadric_command(),
+                rel,
+                list.as_deref(),
+            ));
+            if self.drives().contains_key(&main) {
+                system.push(tasks::driven_prompt(&horadric_command()));
+            }
+        } else if !special {
+            let main = folder_key(&cwd.to_string_lossy());
+            system.push(tasks::log_prompt(
+                &horadric_command(),
+                file::rel(Path::new(&main)),
+            ));
+        }
+        match &own_tree {
+            Some(w) => system.push(worktree::system_prompt(w)),
+            None => {
+                if let Some(place) = crate::worktree::main_tree(cwd) {
+                    let top = Path::new(&place.top);
+                    let branch = crate::worktree::checked_out(top);
+                    system.push(worktree::trunk_prompt(
+                        &place.top.replace('\\', "/"),
+                        branch.as_deref(),
+                    ));
+                }
+            }
+        }
+        system.push(horadric_core::heavy::system_prompt(&horadric_command()));
+        // The config may be kept out of git, so a worktree reads its
+        // project's from the main tree.
+        system.extend(ssh_prompt(Path::new(&folder_key(&cwd.to_string_lossy()))));
+        // Its list of tools takes every word up to the next flag.
+        let mut out = allowed;
+        if !system.is_empty() {
+            out.push("--append-system-prompt".into());
+            // `cmd.exe` ends a command line at a newline.
+            out.push(system.join(if batch { " " } else { "\n\n" }));
+        }
+        out
+    }
+
+    /// Starts a session on the open item on `line` titled `title`, in a
+    /// worktree of its own when the project runs several at once. With
+    /// `show`, its project comes onto the stage with it typing.
+    fn take_task(
+        &mut self,
+        key: &str,
+        line: usize,
+        title: &str,
+        show: bool,
+    ) -> Result<String, String> {
+        let dir = self.project_dir(key).ok_or("the project has no folder")?;
+        let task = tasks::parse(&file::read(&dir))
+            .into_iter()
+            .find(|t| t.line == line && t.title == title && t.mark == Mark::Open)
+            .ok_or("the list changed, so that item is not there to take")?;
+        let id = self.unique_id(&tasks::slug(title));
+        let taken = file::update(&dir, |text| tasks::take(text, line, title, &id))
+            .map_err(|e| format!("cannot write {}: {e}", file::file(&dir).display()))?;
+        if !taken {
+            return Err("the list changed, so that item is not there to take".into());
+        }
+        let recalled = self.take_recall(&dir, &tasks::recall_query(&task));
+        let (pack, packed) = context_pack(key, &dir, &task, recalled);
+        self.light_pack(key, &id, &packed);
+        record_pack(key, &id, title, packed);
+        let prompt = tasks::prompt(&task, &pack, &horadric_command(), file::rel(&dir));
+        self.refresh_boards(true);
+        let parallel = self
+            .boards()
+            .borrow()
+            .get(key)
+            .is_some_and(|b| b.parallel > 1);
+        // A Folio unless Settings says new sessions open in a terminal:
+        // automation follows the human's one switch back.
+        let spec = SessionSpec {
+            id: Some(id.clone()),
+            name: Some(title.to_string()),
+            prompt: Some(prompt),
+            place: if parallel {
+                Workplace::OwnTree
+            } else {
+                Workplace::Here
+            },
+            branch: Some(tasks::slug(title)),
+            quiet: true,
+            ..SessionSpec::new(dir.clone(), self.chat_sessions())
+        };
+        if let Err(e) = self.start_session(spec) {
+            let _ = file::update(&dir, |text| tasks::set_mark(text, line, title, Mark::Open));
+            self.refresh_boards(true);
+            return Err(e);
+        }
+        if parallel {
+            if let Some(s) = self
+                .registry()
+                .lock()
+                .ok()
+                .as_mut()
+                .and_then(|r| r.get_mut(&id))
+            {
+                s.loot.batch = true;
+            }
+        }
+        if show {
+            self.show_session(key, &id);
+        }
+        Ok(id)
+    }
+
+    /// Has memory recall for `task` on its own thread, and says whether it
+    /// is answered. A project without a folder has nothing to recall.
+    fn prepare_recall(&self, key: &str, task: &Task) -> bool {
+        match self.project_dir(key) {
+            Some(dir) => self.recall_ready(&dir, &tasks::recall_query(task)),
+            None => true,
+        }
+    }
+
+    /// The item on `line` titled `title` in the project's list as last read.
+    fn task_at(&self, key: &str, line: usize, title: &str) -> Option<Task> {
+        let boards = self.boards().borrow();
+        boards
+            .get(key)?
+            .tasks
+            .iter()
+            .find(|t| t.line == line && t.title == title)
+            .cloned()
+    }
+
+    fn row_state(&self, task: &Task) -> RowState {
+        match self.registry().lock() {
+            Ok(r) => board::state_in(task, &r),
+            Err(_) => board::row_state(task, None),
+        }
+    }
+
+    /// A row clicked: an item that would start is briefed first, since
+    /// one click must not set an agent off on a quest nobody has read,
+    /// and any other shows its session. A blocked item is answered in its
+    /// session, so a click takes the human there, or, with the session
+    /// gone, offers to start it again.
+    fn task_clicked(&mut self, key: &str, line: usize, title: &str) {
+        let Some(task) = self.task_at(key, line, title) else {
+            return;
+        };
+        let brief = |app: &mut Self| {
+            // The human reads the brief while memory recalls for it.
+            app.prepare_recall(key, &task);
+            app.ask(Menu::Brief(key.to_string(), line, title.to_string()))
+        };
+        match self.row_state(&task) {
+            RowState::Open | RowState::Gone => brief(self),
+            _ => match self.held_session(&task) {
+                Some(h) => self.reveal(&h),
+                None if task.mark == Mark::Blocked => brief(self),
+                None => self.carry_on_held(key, &task),
+            },
+        }
+    }
+
+    /// Shows the session working an item, or, with that session gone, its
+    /// last conversation again in a new tile, as History would.
+    fn show_quest(&mut self, key: &str, task: &Task) {
+        match self.held_session(task) {
+            Some(h) => self.reveal(&h),
+            None => self.carry_on_held(key, task),
+        }
+    }
+
+    /// Carries on the conversation an item's gone session held, as the
+    /// quest log's Carry on does: a quest waiting on review ended in it.
+    fn carry_on_held(&self, key: &str, task: &Task) {
+        if let Some(h) = task.holder.as_deref() {
+            self.carry_on(key, h);
+        }
+    }
+
+    /// The session to show for an item: its holder's, none when that
+    /// session is gone.
+    fn held_session(&self, task: &Task) -> Option<String> {
+        let h = task.holder.as_deref()?;
+        (self.holder(h) != Holder::Gone).then(|| h.to_string())
+    }
+
+    /// An item accepted: an open one starts, and one whose session is
+    /// gone, a blocked one too, starts again.
+    fn accept_task(&mut self, key: &str, line: usize, title: &str) {
+        let Some(task) = self.task_at(key, line, title) else {
+            return;
+        };
+        let result = match self.row_state(&task) {
+            RowState::Open => self.take_task(key, line, title, true).map(drop),
+            RowState::Gone => self.start_again(key, line, title, true),
+            RowState::Blocked | RowState::Waits if self.held_session(&task).is_none() => {
+                self.start_again(key, line, title, true)
+            }
+            _ => Ok(()),
+        };
+        if let Err(e) = result {
+            eprintln!("horadric: cannot start the task: {e}");
+        }
+    }
+
+    /// Starts an item whose session is gone again. With `show`, its
+    /// project comes onto the stage.
+    fn start_again(
+        &mut self,
+        key: &str,
+        line: usize,
+        title: &str,
+        show: bool,
+    ) -> Result<(), String> {
+        self.set_task(key, line, title, Mark::Open);
+        self.take_task(key, line, title, show).map(drop)
+    }
+
+    /// Whether what the blocked `t` of project `key` waits on is over. The
+    /// list and the clock answer at once, a file by a look at the disk;
+    /// git and a command run on a thread at most every `CHECK_GAP`, and
+    /// until one has answered the wait is not over.
+    fn wait_met(&self, key: &str, t: &Task, now: u64) -> bool {
+        let Some(wait) = &t.wait else {
+            return false;
+        };
+        if let Some(met) = wait.met(now) {
+            return met;
+        }
+        let Some(dir) = self.project_dir(key) else {
+            return false;
+        };
+        let (program, args): (&str, Vec<String>) = match wait {
+            Wait::File(f) => return dir.join(f).exists(),
+            Wait::Main(r) => (
+                "git",
+                vec![
+                    "merge-base".into(),
+                    "--is-ancestor".into(),
+                    r.clone(),
+                    "HEAD".into(),
+                ],
+            ),
+            #[cfg(windows)]
+            Wait::Cmd(c) => ("cmd.exe", vec![c.clone()]),
+            #[cfg(not(windows))]
+            Wait::Cmd(c) => ("sh", vec!["-c".into(), c.clone()]),
+            Wait::After | Wait::Quest(_) | Wait::Until(_) | Wait::Outside(_) => return false,
+        };
+        let id = (key.to_string(), wait.spell());
+        let Ok(mut checks) = self.tasks().checks.lock() else {
+            return false;
+        };
+        let last = checks.get(&id).copied();
+        if last.is_some_and(|c| c.running || c.at.elapsed() < CHECK_GAP) {
+            return last.is_some_and(|c| c.met);
+        }
+        checks.insert(
+            id.clone(),
+            Check {
+                at: Instant::now(),
+                met: last.is_some_and(|c| c.met),
+                running: true,
+            },
+        );
+        // The runner looks every second, so it hears the answer without
+        // being told.
+        let checks = Arc::clone(&self.tasks().checks);
+        std::thread::spawn(move || {
+            let met = exits_zero(program, &args, &dir);
+            if let Ok(mut c) = checks.lock() {
+                let at = Instant::now();
+                c.insert(
+                    id,
+                    Check {
+                        at,
+                        met,
+                        running: false,
+                    },
+                );
+            }
+        });
+        last.is_some_and(|c| c.met)
+    }
+
+    /// A blocked item whose wait is over: a session still there is told to
+    /// go on, typed into its terminal between turns, and an item whose
+    /// session is gone starts again.
+    fn resume_blocked(&mut self, key: &str, t: &Task) {
+        if t.wait.is_none() {
+            return;
+        }
+        // A session that ended, or whose terminal exited, is as gone as one
+        // the registry no longer has.
+        let h = t.holder.clone().filter(|h| {
+            self.holder(h) != Holder::Gone
+                && self.phase_of(h) != Some(Phase::Ended)
+                && !self.exited(h)
+        });
+        match h {
+            None => {
+                if let Err(e) = self.start_again(key, t.line, &t.title, false) {
+                    eprintln!(
+                        "horadric: the runner cannot start \"{}\" again: {e}",
+                        t.title
+                    );
+                    return;
+                }
+            }
+            Some(h) => {
+                // Typed only into a terminal that is there and between turns,
+                // so going on never starts an agent.
+                if !self.live(&h) || self.phase_of(&h).is_none_or(|p| p.mid_turn()) {
+                    return;
+                }
+                self.set_task(key, t.line, &t.title, Mark::Working);
+                if !self.send_prompt(&h, &tasks::waited(&horadric_command(), t)) {
+                    return;
+                }
+                self.tasks_mut().nudged.remove(&h);
+            }
+        }
+        self.tasks_mut().ran.insert(key.to_string());
+        if !self.quiet() {
+            self.toast(
+                Toast::Info,
+                &format!("Quest goes on: {}", t.title),
+                &t.over(),
+            );
+        }
+    }
+
+    /// Sets an item's mark in the file and looks again.
+    fn set_task(&mut self, key: &str, line: usize, title: &str, mark: Mark) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        if let Err(e) = file::update(&dir, |text| tasks::set_mark(text, line, title, mark)) {
+            eprintln!("horadric: cannot write {}: {e}", file::file(&dir).display());
+        }
+        self.refresh_boards(true);
+        self.run_tasks();
+    }
+
+    /// Puts an item back as open and ends the session that had it, which
+    /// would otherwise go on working an item nobody holds.
+    fn put_back(&mut self, key: &str, line: usize, title: &str) {
+        let holder = self.task_at(key, line, title).and_then(|t| t.holder);
+        if let Some(h) = holder {
+            self.end(&h);
+        }
+        self.set_task(key, line, title, Mark::Open);
+    }
+
+    fn set_mode(&mut self, key: &str, mode: Mode) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        // A mode picked by the human is what the runner does now, also
+        // after Warriv's drive was stopped.
+        if self.stopped_mut().remove(key) {
+            self.save();
+        }
+        if let Err(e) = file::set_mode(&dir, mode) {
+            eprintln!(
+                "horadric: cannot write {}: {e}",
+                file::config_file(&dir).display()
+            );
+        }
+        self.refresh_boards(true);
+        self.run_tasks();
+    }
+
+    fn set_parallel(&mut self, key: &str, n: usize) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        if let Err(e) = file::set_parallel(&dir, n) {
+            eprintln!(
+                "horadric: cannot write {}: {e}",
+                file::config_file(&dir).display()
+            );
+        }
+        self.refresh_boards(true);
+        self.run_tasks();
+    }
+
+    /// Writes a change to a project's list made from its tile, and looks
+    /// at it again: a quest moved to the top may be the next to start.
+    fn change_list(&mut self, key: &str, change: impl FnOnce(&str) -> Option<String>) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        if let Err(e) = file::update(&dir, change) {
+            eprintln!("horadric: cannot write {}: {e}", file::file(&dir).display());
+        }
+        self.refresh_boards(true);
+        self.run_tasks();
+    }
+
+    /// Session `id` was handed to brother `to`: the quest it held here
+    /// goes with it, so it is let go of here rather than started again
+    /// once the session is missed.
+    fn quest_moved_away(&mut self, id: &str, to: &str) {
+        let Some((key, _)) = self.quest_held_by(id) else {
+            return;
+        };
+        let to = crate::project::brother_name(to);
+        self.change_list(&key, |text| tasks::moved_away(text, id, &to, unix_now()));
+    }
+
+    /// Session `id` landed here from brother `from` in a worktree of the
+    /// checkout in `main`, with the quest it worked there: filed in that
+    /// checkout's quest log, held by it, so `horadric quest` from it lands
+    /// here. Before it runs, so it starts as a quest's session would.
+    fn quest_arrived(&mut self, id: &str, main: &Path, from: &str, q: &handoff::Carried) {
+        let filed = file::update(main, |text| {
+            tasks::arrive(text, &q.title, &q.notes, id, q.review)
+        });
+        match filed {
+            Ok(true) => self.refresh_boards(true),
+            Ok(false) => self.toast(
+                Toast::Failed,
+                "Its quest stayed behind",
+                &format!(
+                    "\"{}\" came from {from}, but this quest log has a quest of that name \
+                     already held or done, so it was not filed again.",
+                    q.title
+                ),
+            ),
+            Err(e) => eprintln!("horadric: cannot write {}: {e}", file::file(main).display()),
+        }
+    }
+
+    fn add_task(&mut self, key: &str, title: &str, notes: &str) {
+        let title = tasks::one_line(title);
+        let Some(dir) = self.project_dir(key).filter(|_| !title.is_empty()) else {
+            return;
+        };
+        let add = |text: &str| Some(tasks::append_with_notes(text, &title, notes));
+        if let Err(e) = file::update(&dir, add) {
+            eprintln!("horadric: cannot write {}: {e}", file::file(&dir).display());
+        }
+        self.refresh_boards(true);
+        self.run_tasks();
+    }
+
+    /// The gold ! on the tile: starts a session in the project that
+    /// suggests quests and adds the ones the human picks, and puts it on
+    /// the stage, since it asks.
+    fn give_quests(&mut self, key: &str) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        let id = self.unique_id("quest-giver");
+        let spec = SessionSpec {
+            id: Some(id),
+            name: Some("Quest Giver".into()),
+            prompt: Some(tasks::giver_prompt(&horadric_command(), file::rel(&dir))),
+            show: true,
+            quiet: true,
+            ..SessionSpec::new(dir, self.chat_sessions())
+        };
+        if let Err(e) = self.start_session(spec) {
+            eprintln!("horadric: cannot start the quest giver: {e}");
+            self.toast(Toast::Failed, "Cannot start the quest giver", &e);
+        }
+    }
+
+    /// Once a second: the Enter of a nudge that is due, and a look at the
+    /// lists in case one changed.
+    fn tick_tasks(&mut self) {
+        let due: Vec<String> = {
+            let now = Instant::now();
+            let (due, later) = std::mem::take(&mut self.tasks_mut().enters)
+                .into_iter()
+                .partition(|(_, at)| now.duration_since(*at) >= ENTER_AFTER);
+            self.tasks_mut().enters = later;
+            due.into_iter().map(|(id, _)| id).collect()
+        };
+        for id in due {
+            self.press_enter(&id);
+        }
+        self.refresh_boards(false);
+        self.run_tasks();
+        self.tick_stones();
+    }
+
+    /// The projects this dev instance leaves alone: those the installed
+    /// Horadric knows, unless `HORADRIC_DEV_QUESTS` is set. Empty for an
+    /// installed Horadric.
+    fn dev_leaves_to_installed(&mut self) -> HashSet<String> {
+        if !horadric_hooks::dev() || std::env::var_os(DEV_QUESTS_ENV).is_some() {
+            return HashSet::new();
+        }
+        let stale = self
+            .tasks()
+            .installed
+            .as_ref()
+            .is_none_or(|(at, _)| at.elapsed() >= INSTALLED_EVERY);
+        if stale {
+            self.tasks_mut().installed = Some((Instant::now(), installed_projects()));
+        }
+        let installed = self.tasks().installed.as_ref().map(|(_, s)| s);
+        self.boards()
+            .borrow()
+            .keys()
+            .filter(|k| installed.is_some_and(|i| dev_leaves(true, false, k, i)))
+            .cloned()
+            .collect()
+    }
+
+    /// Puts back as open a started item whose session is gone and held by
+    /// no running Horadric, so the runner starts it again instead of the
+    /// list sitting stuck on it. Only where the list runs by itself.
+    fn release_orphans(&mut self, key: &str, b: &Board) {
+        let now = Instant::now();
+        if !b.mode.runs() {
+            self.tasks_mut().gone_since.retain(|id, _| id.0 != key);
+            return;
+        }
+        let mut since = std::mem::take(&mut self.tasks_mut().gone_since);
+        let gone = orphans(key, &b.tasks, |id| self.holder(id), &mut since, now);
+        self.tasks_mut().gone_since = since;
+        for (line, title) in gone {
+            eprintln!("horadric: \"{title}\" has had no session for a while, so it is open again");
+            self.tasks_mut()
+                .gone_since
+                .remove(&(key.to_string(), title.clone()));
+            self.set_task(key, line, &title, Mark::Open);
+        }
+    }
+
+    /// One look by the runner at every project's list.
+    fn run_tasks(&mut self) {
+        if self.holding_still() || self.tasks().busy {
+            return;
+        }
+        self.tasks_mut().busy = true;
+        let leave = self.dev_leaves_to_installed();
+        let boards: Vec<(String, Board)> = self
+            .boards()
+            .borrow()
+            .iter()
+            .filter(|(k, _)| !self.closed().contains(*k) && !leave.contains(*k))
+            .map(|(k, b)| {
+                let mut b = b.clone();
+                if let Some(l) = self.tasks().landing.get(k) {
+                    let titles: Vec<String> = l.iter().map(|(t, _)| t.clone()).collect();
+                    b.tasks = merge::while_landing(&b.tasks, &titles);
+                }
+                (k.clone(), b)
+            })
+            .collect();
+        let now = unix_now();
+        self.watch_refusals(&boards, now);
+        let held = self.held_until(now);
+        let paced = self.too_full(now);
+        let mut closed = false;
+        let mut said = Vec::new();
+        let mut waiting = false;
+        for (key, b) in &boards {
+            // Closing a quest may start its merge, which this pass's copy
+            // of the list does not know of yet, so nothing starts beside it
+            // until the next pass.
+            let just_closed = self.close_finished(key, b);
+            if just_closed {
+                closed = true;
+                if b.mode.runs() {
+                    self.tasks_mut().ran.insert(key.clone());
+                }
+            }
+            self.nudge(b);
+            self.release_orphans(key, b);
+            // Warriv hears first, so what it has is not said as well.
+            closed |= self.orchestrate(key, b);
+            closed |= self.warriv_reviews(key, b);
+            said.extend(self.worth_saying(key, b));
+            // A stopped drive lets what is in hand finish and starts nothing.
+            if just_closed || self.stopped().contains(key) {
+                continue;
+            }
+            if held.is_none() && paced.is_none() {
+                self.start_next(key, b);
+            } else if b.mode.runs() {
+                waiting |= matches!(
+                    tasks::next(
+                        &b.tasks,
+                        b.mode,
+                        b.parallel,
+                        self.drives().contains_key(key),
+                        |id| self.holder(id),
+                        |t| self.wait_met(key, t, now),
+                    ),
+                    Next::Start(_) | Next::Resume(_)
+                ) || b.tasks.iter().any(|t| {
+                    t.holder
+                        .as_ref()
+                        .is_some_and(|h| self.tasks().refused.contains_key(h))
+                });
+            }
+        }
+        if let (Some(at), true) = (held, waiting) {
+            said.push((
+                format!("limit:{at}"),
+                "Usage limit reached".to_string(),
+                format!(
+                    "The quest log goes on in {}, once it resets.",
+                    format_until(at.saturating_sub(now))
+                ),
+            ));
+        }
+        if let (None, Some((name, used)), true) = (held, paced, waiting) {
+            // One key while it holds, so it is said once however the
+            // percent moves.
+            said.push((
+                "pace".to_string(),
+                "Quests wait on usage".to_string(),
+                format!(
+                    "The {} limit is at {used:.0} %. No quest starts until it is under {:.0} %.",
+                    name.to_lowercase(),
+                    usage::PACE_AT
+                ),
+            ));
+        }
+        self.announce_tasks(said);
+        self.deliver_tells();
+        self.deliver_drift();
+        self.tasks_mut().busy = false;
+        if closed {
+            self.reconcile();
+        }
+    }
+
+    /// Keeps track of the sessions on an item that a usage limit stopped,
+    /// and tells each to go on once its limit has reset. Only typed into a
+    /// running terminal, so it can never start an agent.
+    fn watch_refusals(&mut self, boards: &[(String, Board)], now: u64) {
+        let limits = self
+            .usage()
+            .lock()
+            .ok()
+            .and_then(|u| u.as_ref().map(|u| u.limits.clone()))
+            .unwrap_or_default();
+        let working: Vec<String> = boards
+            .iter()
+            .flat_map(|(_, b)| &b.tasks)
+            .filter(|t| t.mark == Mark::Working)
+            .filter_map(|t| t.holder.clone())
+            .collect();
+        let stopped: HashMap<String, SystemTime> = {
+            let Ok(r) = self.registry().lock() else {
+                return;
+            };
+            working
+                .iter()
+                .filter_map(|h| {
+                    let s = r.get(h)?;
+                    s.limited().then(|| (h.clone(), s.since))
+                })
+                .collect()
+        };
+        self.tasks_mut()
+            .refused
+            .retain(|h, r| stopped.get(h) == Some(&r.since));
+        for (h, since) in stopped {
+            self.tasks_mut()
+                .refused
+                .entry(h)
+                .or_insert_with(|| Refused {
+                    since,
+                    at: limits.out_until(now, true).map(|t| t + AFTER_RESET),
+                    told: false,
+                });
+        }
+        let due: Vec<String> = self
+            .tasks()
+            .refused
+            .iter()
+            .filter(|(_, r)| !r.told && r.at.is_some_and(|t| t <= now))
+            .map(|(h, _)| h.clone())
+            .collect();
+        for h in due {
+            if !self.send_prompt(&h, &tasks::go_on(&horadric_command())) {
+                continue;
+            }
+            if let Some(r) = self.tasks_mut().refused.get_mut(&h) {
+                r.told = true;
+            }
+        }
+    }
+
+    /// Until when, in Unix seconds, the runner starts nothing: a limit the
+    /// numbers say is used up, or one that stopped a session and has not
+    /// reset yet.
+    fn held_until(&self, now: u64) -> Option<u64> {
+        let heard = self
+            .usage()
+            .lock()
+            .ok()
+            // Looked at a margin earlier, so the hold lasts past the reset.
+            .and_then(|u| {
+                u.as_ref()?
+                    .limits
+                    .out_until(now.saturating_sub(AFTER_RESET), false)
+            })
+            .map(|t| t + AFTER_RESET);
+        let refused = self.tasks().refused.values().filter_map(|r| r.at);
+        heard.into_iter().chain(refused).filter(|&t| t > now).max()
+    }
+
+    /// The limit too full for the runner to start anything, as the status
+    /// line last reported it.
+    fn too_full(&self, now: u64) -> Option<(&'static str, f32)> {
+        self.usage().lock().ok()?.as_ref()?.limits.too_full(now)
+    }
+
+    /// Ends the sessions whose items are done, once they are not mid turn:
+    /// the agent reports done from inside its turn, and gets to finish it.
+    /// Where finished quests land, a session in a worktree of its own stays
+    /// while its branch lands, so a conflict or a red check can go back to
+    /// the one that knows what the work meant. That waits while another
+    /// session of the project mends a landing.
+    fn close_finished(&mut self, key: &str, b: &Board) -> bool {
+        let finished: Vec<Task> = b
+            .tasks
+            .iter()
+            .filter(|t| t.mark == Mark::Done)
+            .filter(|t| {
+                t.holder.as_deref().is_some_and(|h| {
+                    self.live(h) && self.phase_of(h).is_some_and(|p| !p.mid_turn())
+                })
+            })
+            .cloned()
+            .collect();
+        let mut closed = false;
+        for t in finished {
+            let h = t.holder.clone().unwrap_or_default();
+            let lands = b
+                .mode
+                .lands()
+                .then(|| self.tree_of(&h))
+                .flatten()
+                .and_then(|w| {
+                    let into = crate::worktree::checked_out(Path::new(&w.main))?;
+                    Some((self.project_dir(key)?, w, into))
+                });
+            if let Some((dir, w, into)) = lands {
+                if self.landings_held(key, b, &h, &t.title) {
+                    continue;
+                }
+                self.tasks_mut().owned.insert(w.path.clone(), false);
+                self.land(key.to_string(), dir, w, t, into, true);
+            } else {
+                self.forget(&h);
+                self.tasks_mut().nudged.remove(&h);
+            }
+            closed = true;
+        }
+        closed
+    }
+
+    /// The worktree session `id` works in, None when it shares the main
+    /// tree.
+    fn tree_of(&self, id: &str) -> Option<Worktree> {
+        self.registry().lock().ok()?.get(id)?.worktree.clone()
+    }
+
+    /// Whether a session other than `h`, done with the quest `title`, holds
+    /// the landings of the project `key`, so `main` does not move under the
+    /// merge it mends: one a failed landing went back to, or one working a
+    /// fix-up quest. One mending a landing itself passes, or two would wait
+    /// on each other.
+    fn landings_held(&self, key: &str, b: &Board, h: &str, title: &str) -> bool {
+        if merge::is_fix_up(title) || self.tasks().resolving.values().any(|r| r.holder == h) {
+            return false;
+        }
+        let mending = self.tasks().resolving.values().any(|r| {
+            r.key == key
+                && r.holder != h
+                && self.live(&r.holder)
+                && r.since.elapsed() < HOLDS_LANDINGS_FOR
+        });
+        mending
+            || b.tasks.iter().any(|t| {
+                t.mark == Mark::Working
+                    && merge::is_fix_up(&t.title)
+                    && t.holder.as_deref().is_some_and(|f| f != h && self.live(f))
+            })
+    }
+
+    /// Asks a session whose turn ended without a report whether it is
+    /// finished. Once: after that, a stop is a question for the human.
+    fn nudge(&mut self, b: &Board) {
+        if !b.mode.runs() {
+            return;
+        }
+        let holders: Vec<String> = b
+            .tasks
+            .iter()
+            .filter(|t| t.mark == Mark::Working)
+            .filter_map(|t| t.holder.clone())
+            .collect();
+        for h in holders {
+            // A landing session waits on its landing, not on itself.
+            if self.tasks().nudged.contains_key(&h)
+                || self
+                    .tasks()
+                    .landing
+                    .values()
+                    .flatten()
+                    .any(|(_, l)| *l == h)
+                || self.phase_of(&h) != Some(Phase::Done)
+                || self.waiting_on_own_work(&h)
+            {
+                continue;
+            }
+            if !self.send_prompt(&h, &tasks::nudge(&horadric_command())) {
+                continue;
+            }
+            self.tasks_mut().nudged.insert(h, SystemTime::now());
+        }
+    }
+
+    /// The session stopped its turn with background work of its own still
+    /// running: it waits, which is neither a miss to nudge nor a stop to count.
+    fn waiting_on_own_work(&self, id: &str) -> bool {
+        self.registry()
+            .lock()
+            .is_ok_and(|r| r.get(id).is_some_and(|s| s.loot.waiting_on_own_work()))
+    }
+
+    /// The session was nudged and stopped again after that without a
+    /// report: whatever it said, it is the human's turn.
+    fn stopped_after_nudge(&self, id: &str) -> bool {
+        let Some(&at) = self.tasks().nudged.get(id) else {
+            return false;
+        };
+        let Ok(r) = self.registry().lock() else {
+            return false;
+        };
+        r.get(id).is_some_and(|s| {
+            s.phase == Phase::Done && s.since > at && !s.loot.waiting_on_own_work()
+        })
+    }
+
+    /// What about this list the human should hear, as keys that stay the
+    /// same while it holds, each with its title and text.
+    fn worth_saying(&self, key: &str, b: &Board) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        let warriv = self.warriv_shown().borrow();
+        let has = |title: &str| warriv.get(key).is_some_and(|w| w.contains(title));
+        // An After: line no quest finishing can free waits forever unless
+        // somebody hears of it.
+        for (t, r) in b.tasks.iter().zip(tasks::readiness(&b.tasks)) {
+            if matches!(t.mark, Mark::Open | Mark::Blocked) && r.tangled() && !has(&t.title) {
+                out.push((
+                    format!("tangled:{key}:{}", t.title),
+                    format!("Cannot start: {}", t.title),
+                    r.why(),
+                ));
+            }
+        }
+        for t in &b.tasks {
+            let Some(h) = t.holder.as_deref() else {
+                continue;
+            };
+            if has(&t.title) {
+                continue;
+            }
+            match t.mark {
+                // The reviewer has it, and says what it can not settle.
+                Mark::Review if b.mode == Mode::Warriv && self.reviewing(key, &t.title) => {}
+                Mark::Review => out.push((
+                    format!("review:{h}"),
+                    "Ready for review".to_string(),
+                    t.title.clone(),
+                )),
+                // One that waits on a check needs nobody.
+                Mark::Blocked if t.wait.is_none() => {
+                    let (title, text) = horadric_core::warriv::for_human(t);
+                    out.push((format!("blocked:{h}"), title, text));
+                }
+                Mark::Working if b.mode.runs() && self.stopped_after_nudge(h) => out.push((
+                    format!("asks:{h}"),
+                    format!("{} needs you", t.title),
+                    "It stopped without saying the quest is completed.".to_string(),
+                )),
+                _ => {}
+            }
+        }
+        if b.mode.runs() && self.tasks().ran.contains(key) {
+            let finished = tasks::next(
+                &b.tasks,
+                b.mode,
+                b.parallel,
+                self.drives().contains_key(key),
+                |_| Holder::Live,
+                |_| false,
+            );
+            if let Next::Finished = finished {
+                out.push((
+                    format!("finished:{key}"),
+                    "Quest log completed".to_string(),
+                    format!("Every quest in {} is completed.", project_name(key)),
+                ));
+            }
+        }
+        out
+    }
+
+    fn announce_tasks(&mut self, said: Vec<(String, String, String)>) {
+        let now: HashSet<String> = said.iter().map(|(k, _, _)| k.clone()).collect();
+        let new: Vec<&(String, String, String)> = said
+            .iter()
+            .filter(|(k, _, _)| !self.tasks().announced.contains(k))
+            .collect();
+        for (k, _, _) in &new {
+            if let Some(key) = k.strip_prefix("finished:") {
+                self.tasks_mut().ran.remove(key);
+            }
+        }
+        if !self.quiet() {
+            match new.as_slice() {
+                [] => {}
+                [(_, title, text)] => self.toast(Toast::Waiting, title, text),
+                many => self.toast(
+                    Toast::Waiting,
+                    &format!("{} quests need you", many.len()),
+                    &many
+                        .iter()
+                        .map(|(_, t, _)| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+            }
+        }
+        self.tasks_mut().announced = now;
+    }
+
+    /// Starts the next open item when the list runs by itself and nothing
+    /// is in hand, or wakes the blocked one whose wait is over.
+    fn start_next(&mut self, key: &str, b: &Board) {
+        let now = unix_now();
+        let next = tasks::next(
+            &b.tasks,
+            b.mode,
+            b.parallel,
+            self.drives().contains_key(key),
+            |id| self.holder(id),
+            |t| self.wait_met(key, t, now),
+        );
+        let (Next::Start(i) | Next::Resume(i)) = next else {
+            return;
+        };
+        if self
+            .tasks()
+            .started
+            .get(key)
+            .is_some_and(|at| at.elapsed() < START_GAP)
+        {
+            return;
+        }
+        let t = &b.tasks[i];
+        // The runner looks every second, so it starts the item on the first
+        // look after the recall is in, not before.
+        if matches!(next, Next::Start(_)) && !self.prepare_recall(key, t) {
+            return;
+        }
+        self.tasks_mut()
+            .started
+            .insert(key.to_string(), Instant::now());
+        if let Next::Resume(_) = next {
+            self.resume_blocked(key, t);
+            return;
+        }
+        match self.take_task(key, t.line, &t.title, false) {
+            Ok(_) => {
+                self.tasks_mut().ran.insert(key.to_string());
+            }
+            Err(e) => eprintln!("horadric: the runner cannot start \"{}\": {e}", t.title),
+        }
+    }
+
+    /// Removes a session's worktree, and has the app hear of a branch that
+    /// stayed, so a finished item's branch can be offered for merging. In
+    /// auto mode a finished item's branch merges by itself first.
+    fn remove_tree(&mut self, key: String, w: Worktree) {
+        if let Some(ended) = self.tasks_mut().owned.get_mut(&w.path) {
+            *ended = true;
+            return;
+        }
+        if self.tasks_mut().handled.remove(&w.path) {
+            return;
+        }
+        if let Some(r) = self.tasks_mut().resolving.remove(&w.path) {
+            if self.resolver_gone(r) {
+                return;
+            }
+        }
+        if let Some((dir, quest, into)) = self.to_land(&key, &w) {
+            self.land(key, dir, w, quest, into, false);
+            return;
+        }
+        let kept = Arc::clone(&self.tasks().kept);
+        let wake = self.waker();
+        crate::worktree::remove_then(w, move |w| {
+            if let Ok(mut k) = kept.lock() {
+                k.push((key, w));
+            }
+            wake();
+        });
+    }
+
+    /// The branches that stayed as their sessions ended: one whose item is
+    /// done is offered for merging, in a notification a click answers.
+    fn offer_merges(&mut self) {
+        self.after_landing();
+        let kept = self
+            .tasks()
+            .kept
+            .lock()
+            .map(|mut k| std::mem::take(&mut *k))
+            .unwrap_or_default();
+        for (key, w) in kept {
+            let dir = self
+                .project_dir(&key)
+                .unwrap_or_else(|| PathBuf::from(&key));
+            let list = tasks::parse(&file::read(&dir));
+            let Some((branch, title)) = worktree::finished(&list, &[w.branch]).pop() else {
+                continue;
+            };
+            let main = PathBuf::from(&w.main);
+            let into = crate::worktree::checked_out(&main).unwrap_or_else(|| "main".into());
+            if !self.quiet() {
+                self.toast_click(
+                    Toast::Done,
+                    &format!("Finished: {}", tasks::one_line(&title)),
+                    &format!("Click to merge {branch} into {into}."),
+                );
+            }
+            self.tasks_mut().ship_for = None;
+            self.tasks_mut().merge_for = Some(Merge {
+                main,
+                branch,
+                title,
+            });
+        }
+    }
+
+    /// Merges a finished branch and says how it went. True when it merged.
+    fn merge(&mut self, m: &Merge) -> bool {
+        let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
+        match crate::worktree::merge(&m.main, &m.branch) {
+            Ok(()) => {
+                self.merged(&m.main, &m.branch, &m.title, &into, "");
+                true
+            }
+            Err(e) => {
+                eprintln!("horadric: cannot merge {}: {e}", m.branch);
+                self.toast(
+                    Toast::Failed,
+                    &format!("Cannot merge {}", m.branch),
+                    &merge_failed(&e),
+                );
+                false
+            }
+        }
+    }
+
+    /// Journals and says that `branch`, the item `title`'s, is in `into`,
+    /// where the checks passed on the commit `checked`, if any ran.
+    fn merged(&mut self, main: &Path, branch: &str, title: &str, into: &str, checked: &str) {
+        self.landed(main, branch);
+        self.tasks_mut().merge_for = None;
+        self.tasks_mut().ship_for = None;
+        let project = folder_key(&main.to_string_lossy());
+        store::journal(&Entry {
+            at: unix_now(),
+            session: String::new(),
+            name: String::new(),
+            project: project.clone(),
+            what: What::Merged {
+                branch: branch.to_string(),
+                title: title.to_string(),
+            },
+        });
+        // The list still holds the finished item, and its holder is the
+        // quest the chronicle knows it by.
+        let quest = self
+            .boards()
+            .borrow()
+            .get(&project)
+            .and_then(|b| b.tasks.iter().find(|t| t.title == title))
+            .and_then(|t| t.holder.clone())
+            .unwrap_or_default();
+        store::chronicle(&chronicle::Record {
+            at: unix_now(),
+            project: project.clone(),
+            quest,
+            title: title.to_string(),
+            what: Happened::Merged {
+                branch: branch.to_string(),
+                checked: checked.to_string(),
+            },
+        });
+        self.toast(
+            Toast::Done,
+            &format!("Merged {branch}"),
+            &format!("{} is in {into}.", tasks::one_line(title)),
+        );
+        self.errand_event(Some(&project), horadric_core::runeword::Event::Landed);
+        self.propose_ship(&project, main);
+    }
+
+    /// Proposes shipping the project at `key` local once enough quests
+    /// landed since its last ship and the checks passed on its `main`, the
+    /// tree at `main`. Only a project with a "Ship Local" stone is asked.
+    fn propose_ship(&mut self, key: &str, main: &Path) {
+        if self.quiet() || !self.has_stone(key, ship::STONE) {
+            return;
+        }
+        let records = store::chronicle_all();
+        let log = store::dir()
+            .and_then(|d| std::fs::read_to_string(d.join("reload.log")).ok())
+            .unwrap_or_default();
+        let landed = ship::landed_since(key, &records, ship::last(key, &log, &records));
+        let head = crate::worktree::head(main).unwrap_or_default();
+        let checked = ship::checked(key, &records, &head);
+        let proposed = self.tasks().ship_proposed.get(key).copied();
+        let Some(n) = ship::propose(landed, checked, proposed) else {
+            return;
+        };
+        self.tasks_mut().ship_proposed.insert(key.to_string(), n);
+        self.toast_click(
+            Toast::Done,
+            &ship::title(n),
+            &format!("The checks passed on main. Click to cast {}.", ship::STONE),
+        );
+        self.tasks_mut().ship_for = Some(key.to_string());
+    }
+
+    /// The project folder, the finished item's title and the branch to
+    /// merge into, when `w` holds an item finished in auto mode.
+    fn to_land(&self, key: &str, w: &Worktree) -> Option<(PathBuf, Task, String)> {
+        let dir = self.project_dir(key)?;
+        if !file::mode(&dir).lands() {
+            return None;
+        }
+        let list = tasks::parse(&file::read(&dir));
+        let (_, title) = worktree::finished(&list, std::slice::from_ref(&w.branch)).pop()?;
+        let quest = list
+            .into_iter()
+            .find(|t| t.title == title && t.mark == Mark::Done)?;
+        let into = crate::worktree::checked_out(Path::new(&w.main))?;
+        Some((dir, quest, into))
+    }
+
+    /// Merges a finished item's branch on a thread of its own, one at a
+    /// time per project, and has the app hear how it came out. `live` when
+    /// the quest's session still runs.
+    fn land(
+        &mut self,
+        key: String,
+        dir: PathBuf,
+        w: Worktree,
+        quest: Task,
+        into: String,
+        live: bool,
+    ) {
+        let title = quest.title;
+        let holder = quest.holder.unwrap_or_default();
+        let live = live.then(|| holder.clone());
+        self.tasks_mut()
+            .landing
+            .entry(key.clone())
+            .or_default()
+            .push((title.clone(), holder));
+        let one = Arc::clone(self.tasks_mut().merging.entry(key.clone()).or_default());
+        let landed = Arc::clone(&self.tasks().landed);
+        let wake = self.waker();
+        let checks = file::checks(&dir);
+        std::thread::spawn(move || {
+            let files = crate::worktree::changed_since(Path::new(&w.main), &into, &w.branch);
+            let landing = {
+                let _one = one.lock();
+                crate::worktree::land(&w, &into, &checks, live.is_some())
+            };
+            if let Ok(mut l) = landed.lock() {
+                l.push(Landed {
+                    files,
+                    key,
+                    dir,
+                    w,
+                    title,
+                    into,
+                    landing,
+                    live,
+                });
+            }
+            wake();
+        });
+    }
+
+    /// What came of the merges by themselves: a merged branch goes with its
+    /// worktree and its session, one a worker can fix goes back to the
+    /// session that finished it while that still runs, else gets a fix-up
+    /// quest right below its own that the quests after it wait for, and
+    /// anything else is left to the human's click.
+    fn after_landing(&mut self) {
+        let landed = self
+            .tasks()
+            .landed
+            .lock()
+            .map(|mut l| std::mem::take(&mut *l))
+            .unwrap_or_default();
+        for l in landed {
+            let mut holder = String::new();
+            if let Some(titles) = self.tasks_mut().landing.get_mut(&l.key) {
+                if let Some((_, h)) = titles.iter().find(|(t, _)| *t == l.title) {
+                    holder = h.clone();
+                }
+                titles.retain(|(t, _)| *t != l.title);
+            }
+            let ended = self.tasks_mut().owned.remove(&l.w.path).unwrap_or(true);
+            let session = l.live.clone().filter(|h| !ended && self.live(h));
+            let tries = self.tasks().resolving.get(&l.w.path).map_or(0, |r| r.tries);
+            let said = match (&l.landing, &session) {
+                (Landing::Failed(why, _, theirs), Some(_)) if tries < HAND_BACKS => {
+                    merge::hand_back(&l.w.branch, &l.into, why, theirs, &horadric_command())
+                }
+                _ => None,
+            };
+            // The day's look back counts these, to see what keeps failing.
+            if let Landing::Failed(why, output, _) = &l.landing {
+                store::chronicle(&chronicle::Record {
+                    at: unix_now(),
+                    project: l.key.clone(),
+                    quest: holder.clone(),
+                    title: l.title.clone(),
+                    what: Happened::NotMerged {
+                        branch: l.w.branch.clone(),
+                        failure: why.clone(),
+                        files: match why {
+                            merge::Failure::Conflict => merge::conflicted(output),
+                            _ => Vec::new(),
+                        },
+                    },
+                });
+            }
+            // A landing that went back to its session ends this run as it
+            // failed, and the run that mends it gets an outcome of its own.
+            let ending = match &l.landing {
+                Landing::Merged(checked) if checked.is_empty() => Some(escalate::Ending::Landed),
+                Landing::Merged(_) => Some(escalate::Ending::Green),
+                Landing::Failed(merge::Failure::Red(_), ..) => Some(escalate::Ending::Red),
+                Landing::Failed(merge::Failure::Conflict, ..) => Some(escalate::Ending::Conflict),
+                // Left to the human's merge, which says nothing of the work.
+                Landing::Failed(..) => None,
+            };
+            // The fix-up's model is read from the quest as it stands before
+            // its outcome is written, and climbs from the model it ran on.
+            let mut fix_model = None;
+            if let Some(ending) = ending {
+                let run = run_of(&store::chronicle_all(), &l.key, &holder, ending, unix_now());
+                if let Landing::Failed(merge::Failure::Red(check), ..) = &l.landing {
+                    let red = escalate::Struggle::Red(check.clone());
+                    fix_model = tasks::parse(&file::read(&l.dir))
+                        .into_iter()
+                        .find(|t| t.title == l.title)
+                        .and_then(|t| escalate::carried(&t, &run.model, &red));
+                }
+                write_run(&l.dir, &l.title, Some(&run));
+            }
+            if let (Some(said), Some(h)) = (said, &session) {
+                self.give_back(l, h, said, tries + 1);
+                continue;
+            }
+            let mended = self.tasks_mut().resolving.remove(&l.w.path).is_some();
+            // Its session's end, now or when one that exited by itself is
+            // tidied away, leaves the tree to this landing.
+            if l.live.is_some() && !ended {
+                self.tasks_mut().handled.insert(l.w.path.clone());
+            }
+            if let Some(h) = &session {
+                self.forget(h);
+                self.tasks_mut().nudged.remove(h);
+            }
+            let main = PathBuf::from(&l.w.main);
+            let branch = l.w.branch.clone();
+            crate::worktree::remove(l.w);
+            match l.landing {
+                Landing::Merged(checked) => {
+                    self.warn_drifted(&main, &branch, &l.into, l.files);
+                    self.count_red(&l.key, false, None);
+                    if mended {
+                        self.merge_event(
+                            &l.dir,
+                            &l.title,
+                            format!("{branch} landed after its own session mended it."),
+                        );
+                    }
+                    self.merged(&main, &branch, &l.title, &l.into, &checked)
+                }
+                Landing::Failed(why, out, theirs) if why.fixable() => {
+                    self.file_merge_fix_up(
+                        &l.key, &l.dir, &l.title, &branch, &l.into, &why, &out, &theirs, fix_model,
+                    );
+                }
+                Landing::Failed(_, out, _) => {
+                    eprintln!("horadric: cannot merge {branch} by itself: {out}");
+                    self.merge_event(
+                        &l.dir,
+                        &l.title,
+                        format!("{branch} waits for a merge by hand: {}", merge_failed(&out)),
+                    );
+                    self.toast_click(
+                        Toast::Failed,
+                        &format!("Cannot merge {branch} by itself"),
+                        &format!("{} Click to merge it by hand.", merge_failed(&out)),
+                    );
+                    self.tasks_mut().ship_for = None;
+                    self.tasks_mut().merge_for = Some(Merge {
+                        main,
+                        branch,
+                        title: l.title,
+                    });
+                }
+            }
+        }
+    }
+
+    /// After `branch` landed in `into` with `files` changed, looks for the
+    /// other worktree sessions of the repository at `main` whose branch
+    /// changed some of them and would now conflict, on a thread since each
+    /// look runs git. Those hear of it between turns, so a conflict is
+    /// resolved while it is small. No overlap, no message.
+    fn warn_drifted(&mut self, main: &Path, branch: &str, into: &str, files: Vec<String>) {
+        if files.is_empty() {
+            return;
+        }
+        let project = folder_key(&main.to_string_lossy());
+        let running: Vec<(String, String)> = match self.registry().lock() {
+            Ok(r) => r
+                .all()
+                .filter_map(|s| {
+                    let w = s.worktree.as_ref()?;
+                    (w.branch != branch && folder_key(&w.main) == project)
+                        .then(|| (s.id.clone(), w.branch.clone()))
+                })
+                .collect(),
+            Err(_) => return,
+        };
+        if running.is_empty() {
+            return;
+        }
+        let drifted = Arc::clone(&self.tasks().drifted);
+        let (main, into) = (main.to_path_buf(), into.to_string());
+        std::thread::spawn(move || {
+            for (session, theirs) in running {
+                let mine = crate::worktree::changed_since(&main, &into, &theirs);
+                let both = horadric_core::worktree::overlap(&files, &mine);
+                if both.is_empty() || !crate::worktree::would_conflict(&main, &into, &theirs) {
+                    continue;
+                }
+                if let Ok(mut d) = drifted.lock() {
+                    d.push(Drift {
+                        session,
+                        text: horadric_core::worktree::main_moved(&into, &both),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Types each notice of a moved `main` into its session once that is
+    /// live and has ended its turn. Only into a terminal that is there, so
+    /// it never starts an agent; a session that is gone hears nothing.
+    fn deliver_drift(&mut self) {
+        let fresh = self
+            .tasks()
+            .drifted
+            .lock()
+            .map(|mut d| std::mem::take(&mut *d))
+            .unwrap_or_default();
+        self.tasks_mut().drift_waiting.extend(fresh);
+        let waiting = std::mem::take(&mut self.tasks_mut().drift_waiting);
+        for d in waiting {
+            if !self.live(&d.session) {
+                continue;
+            }
+            if self.phase_of(&d.session) != Some(Phase::Done) {
+                self.tasks_mut().drift_waiting.push(d);
+                continue;
+            }
+            if self.send_prompt(&d.session, &d.text) {
+                self.tasks_mut().nudged.remove(&d.session);
+            }
+        }
+    }
+
+    /// Files the fix-up quest for `branch`, the finished quest `title`'s,
+    /// whose landing failed for `why` with no session to hand it back to,
+    /// right below the quest. `model` is the fix-up's `Model:` line, when
+    /// it climbs.
+    #[allow(clippy::too_many_arguments)]
+    fn file_merge_fix_up(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        title: &str,
+        branch: &str,
+        into: &str,
+        why: &merge::Failure,
+        out: &str,
+        theirs: &merge::Theirs,
+        model: Option<String>,
+    ) {
+        eprintln!("horadric: cannot merge {branch}: {why:?}");
+        let mut fix = merge::fix_up(title, branch, into, why, out, theirs);
+        if let Some(up) = model {
+            fix.notes.push('\n');
+            fix.notes.push_str(&up);
+        }
+        // A conflict says nothing of the checks either way.
+        if matches!(why, merge::Failure::Red(_)) {
+            self.count_red(key, true, Some(&fix.title));
+        }
+        self.merge_event(
+            dir,
+            title,
+            format!(
+                "{:?} on {branch}. Added the fix-up quest \"{}\" below it.",
+                why, fix.title
+            ),
+        );
+        let added = file::update(dir, |text| merge::add_fix_up(text, title, &fix));
+        if let Err(e) = added {
+            eprintln!("horadric: cannot add \"{}\": {e}", fix.title);
+        }
+        self.tasks_mut().merge_for = None;
+        self.tasks_mut().ship_for = None;
+        self.toast(
+            Toast::Failed,
+            &format!("Cannot merge {branch}"),
+            &format!("Added the quest \"{}\" below it.", fix.title),
+        );
+        self.refresh_boards(false);
+    }
+
+    /// Hands a failed landing back to `h`, the session that finished its
+    /// quest: the quest is in its hands again, it is told `said`, what went
+    /// wrong and what the other side meant, and it holds the project's
+    /// landings until it lands or ends. Its worktree stays.
+    fn give_back(&mut self, l: Landed, h: &str, said: String, tries: u32) {
+        let Landing::Failed(why, out, theirs) = l.landing else {
+            return;
+        };
+        let branch = l.w.branch.clone();
+        eprintln!("horadric: {why:?} on {branch}, handed back to its session");
+        if matches!(why, merge::Failure::Red(_)) {
+            // Counted, but no hold names the quest: if its session ends
+            // before it lands, a fix-up of another title takes it over.
+            self.count_red(&l.key, true, None);
+        }
+        self.merge_event(
+            &l.dir,
+            &l.title,
+            format!("{why:?} on {branch}. Handed back to its own session to mend."),
+        );
+        let reopened = file::update(&l.dir, |text| {
+            let t = tasks::parse(text)
+                .into_iter()
+                .find(|t| t.title == l.title && t.mark == Mark::Done)?;
+            tasks::set_mark(text, t.line, &l.title, Mark::Working)
+        });
+        if let Err(e) = reopened {
+            eprintln!("horadric: cannot hand \"{}\" back: {e}", l.title);
+        }
+        self.send_prompt(h, &said);
+        self.tasks_mut().nudged.remove(h);
+        self.toast(
+            Toast::Failed,
+            &format!("{branch} did not land"),
+            "Handed back to its session to mend.",
+        );
+        self.tasks_mut().resolving.insert(
+            l.w.path.clone(),
+            Resolving {
+                key: l.key,
+                dir: l.dir,
+                holder: h.to_string(),
+                title: l.title,
+                w: l.w,
+                into: l.into,
+                why,
+                out,
+                theirs,
+                since: Instant::now(),
+                tries,
+            },
+        );
+        self.refresh_boards(false);
+    }
+
+    /// The session a failed landing went back to ended before it said
+    /// done again: its quest is done as it was, and the fix-up a fresh
+    /// session takes goes below it. False when there is nothing to mend
+    /// any more, such as when it said done and its landing is still to
+    /// come, so its end goes the usual way.
+    fn resolver_gone(&mut self, r: Resolving) -> bool {
+        let done = file::update(&r.dir, |text| {
+            let t = tasks::parse(text).into_iter().find(|t| {
+                t.title == r.title
+                    && t.mark == Mark::Working
+                    && t.holder.as_deref() == Some(r.holder.as_str())
+            })?;
+            tasks::set_mark(text, t.line, &r.title, Mark::Done)
+        });
+        if !matches!(done, Ok(true)) {
+            return false;
+        }
+        self.file_merge_fix_up(
+            &r.key,
+            &r.dir,
+            &r.title,
+            &r.w.branch,
+            &r.into,
+            &r.why,
+            &r.out,
+            &r.theirs,
+            None,
+        );
+        crate::worktree::remove(r.w);
+        true
+    }
+
+    /// Gilds every session that worked on `branch` of the repository at
+    /// `main`, now that it is merged.
+    fn landed(&mut self, main: &Path, branch: &str) {
+        let Ok(mut r) = self.registry().lock() else {
+            return;
+        };
+        let project = folder_key(&main.to_string_lossy());
+        let ids: Vec<String> = r
+            .all()
+            .filter(|s| {
+                s.worktree
+                    .as_ref()
+                    .is_some_and(|w| w.branch == branch && folder_key(&w.main) == project)
+            })
+            .map(|s| s.id.clone())
+            .collect();
+        let mut rune = false;
+        for id in ids {
+            if let Some(s) = r.get_mut(&id) {
+                rune |= !s.loot.landed;
+                s.loot.committed = true;
+                s.loot.landed = true;
+            }
+        }
+        drop(r);
+        if rune {
+            self.sound(crate::loot::Loot::Rune);
+        }
+        self.redraw_tiles();
+    }
+
+    /// Opens the list in VS Code, or whatever opens Markdown.
+    fn edit_list(&self, key: &str) {
+        if let Some(dir) = self.project_dir(key) {
+            if !file::file(&dir).is_file() {
+                let _ = file::update(&dir, |_| Some(String::new()));
+            }
+            self.open_list(&dir, file::rel(&dir));
+        }
+    }
+}
+
+impl<T: Host> Runner for T {}
+
+/// Why a merge failed, short enough for a notification: the conflict
+/// git found, or else the first thing it said.
+pub(crate) fn merge_failed(git: &str) -> String {
+    let lines: Vec<&str> = git
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let why = lines
+        .iter()
+        .find(|l| l.starts_with("CONFLICT"))
+        .or(lines.first())
+        .copied()
+        .unwrap_or("git refused");
+    format!("{why} The merge was undone and the branch kept.")
+}
+
+/// The finished branches of a project not merged yet, for its menu.
+pub(crate) fn merges(dir: &Path) -> Vec<Merge> {
+    let Some(place) = crate::worktree::main_tree(dir) else {
+        return Vec::new();
+    };
+    let main = PathBuf::from(&place.top);
+    let list = tasks::parse(&file::read(dir));
+    worktree::finished(&list, &crate::worktree::unmerged(&main))
+        .into_iter()
+        .map(|(branch, title)| Merge {
+            main: main.clone(),
+            branch,
+            title,
+        })
+        .collect()
+}
+
+/// The context pack for `task` from the project's finished quests (Lore
+/// part 2), files no longer there left out, and beside it what memory
+/// recalls of the quest (Memory part 9), `recalled`, when
+/// [`Runner::prepare_recall`] had it ready: the text for its prompt, and
+/// the pack's files.
+pub(crate) fn context_pack(
+    key: &str,
+    dir: &Path,
+    task: &Task,
+    recalled: Option<String>,
+) -> (String, Vec<String>) {
+    let list = tasks::parse(&file::read(dir));
+    let quests = chronicle::quests(&store::chronicle_all(), &[], key, &list);
+    let mut hints = pack::pack(task, &quests);
+    hints.retain(|h| dir.join(&h.file).exists());
+    let mut text = pack::render(&hints);
+    if let Some(recalled) = recalled {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&tasks::recalled(&recalled));
+    }
+    (text, hints.into_iter().map(|h| h.file).collect())
+}
+
+/// Keeps which files the quest `id` was started with, so its spend can be
+/// set beside that of quests started without.
+pub(crate) fn record_pack(key: &str, id: &str, title: &str, files: Vec<String>) {
+    if files.is_empty() {
+        return;
+    }
+    store::chronicle(&chronicle::Record {
+        at: unix_now(),
+        project: key.to_string(),
+        quest: id.to_string(),
+        title: title.to_string(),
+        what: Happened::Packed { files },
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dev_instance_leaves_only_the_projects_the_installed_one_knows() {
+        let installed: HashSet<String> = ["a".to_string()].into();
+        assert!(dev_leaves(true, false, "a", &installed));
+        assert!(!dev_leaves(true, false, "b", &installed));
+        assert!(!dev_leaves(true, true, "a", &installed));
+        assert!(!dev_leaves(false, false, "a", &installed));
+    }
+
+    #[test]
+    fn a_started_item_is_orphaned_once_its_session_has_been_gone_long_enough() {
+        let list = tasks::parse(
+            "- [/] One @s1
+- [ ] Two
+",
+        );
+        let mut since = HashMap::new();
+        let t0 = Instant::now();
+        let gone = |_: &str| Holder::Gone;
+        assert!(orphans("k", &list, gone, &mut since, t0).is_empty());
+        assert!(orphans("k", &list, gone, &mut since, t0 + GONE_FOR / 2).is_empty());
+        let out = orphans("k", &list, gone, &mut since, t0 + GONE_FOR);
+        assert_eq!(out, vec![(0, "One".to_string())]);
+        // A session that came back resets the clock.
+        assert!(orphans("k", &list, |_| Holder::Live, &mut since, t0 + GONE_FOR).is_empty());
+        assert!(since.is_empty());
+    }
+
+    #[test]
+    fn the_agent_runs_this_build_by_its_full_path() {
+        assert_eq!(
+            command_for(r"C:\Users\me\AppData\Local\Programs\Horadric\horadric.exe"),
+            "C:/Users/me/AppData/Local/Programs/Horadric/horadric.exe"
+        );
+        assert_eq!(
+            command_for(r"C:\Program Files\Horadric\horadric.exe"),
+            "\"C:/Program Files/Horadric/horadric.exe\""
+        );
+    }
+
+    #[test]
+    fn a_failed_merge_says_the_conflict_or_what_git_said_first() {
+        let conflict = "Auto-merging src/a.rs\n\
+                        CONFLICT (content): Merge conflict in src/a.rs\n\
+                        Automatic merge failed; fix conflicts and then commit the result.";
+        assert_eq!(
+            merge_failed(conflict),
+            "CONFLICT (content): Merge conflict in src/a.rs The merge was undone and the branch kept."
+        );
+        assert!(
+            merge_failed("error: Your local changes would be overwritten\nPlease commit")
+                .starts_with("error: Your local changes would be overwritten ")
+        );
+        assert!(merge_failed("").starts_with("git refused "));
+    }
+}

@@ -20,16 +20,15 @@ use horadric_core::warriv::{
 use horadric_core::{escalate, ship, Phase};
 use horadric_hooks::tasks as file;
 
-use super::{horadric_command, Board};
-use crate::app::{unix_now, App, SessionSpec};
-use crate::board::Ink;
+use super::runner::{horadric_command, Runner};
+use super::{unix_now, Host, SessionSpec, Toast};
+use crate::board::{Board, Ink};
+use crate::project::{folder_key, project_name};
 use crate::store;
-use crate::toast::Kind as Toast;
-use crate::window::{folder_key, project_name};
 
 /// What a project's Warriv has heard, and the session awake now.
 #[derive(Default)]
-pub(in crate::app) struct Camp {
+pub(crate) struct Camp {
     desk: Desk,
     awake: Option<Awake>,
     /// The questions Warriv handed to the human, by quest, until the
@@ -42,7 +41,7 @@ pub(in crate::app) struct Camp {
 
 /// A question Warriv handed on, and since when Horadric knows of it, so
 /// only a prompt after that is the human's answer.
-struct Asked {
+pub(crate) struct Asked {
     question: String,
     holder: String,
     since: SystemTime,
@@ -53,7 +52,7 @@ const MEMORY_COMMIT: &str = "Warriv's memory after a wake\n\n\
     What Warriv did and learned, kept with the project so the next wake reads it.";
 
 /// A Warriv session at work.
-struct Awake {
+pub(crate) struct Awake {
     id: String,
     /// When it was last given events, so a stop before that is not the
     /// end of the turn they started.
@@ -165,7 +164,7 @@ impl Camp {
 }
 
 /// The line for a wake given `events`.
-fn woke(id: &str, events: &[Event]) -> Happened {
+pub(crate) fn woke(id: &str, events: &[Event]) -> Happened {
     Happened::WarrivWoke {
         wake: id.to_string(),
         conversation: String::new(),
@@ -181,7 +180,7 @@ fn woke(id: &str, events: &[Event]) -> Happened {
 
 /// What Warriv told a quest's session, waiting until that is between
 /// turns.
-pub(in crate::app) struct Tell {
+pub(crate) struct Tell {
     key: String,
     title: String,
     text: String,
@@ -194,13 +193,13 @@ pub(in crate::app) struct Tell {
 /// A project's reviews in "Warriv reviews" mode, and the reviewer reading
 /// one now.
 #[derive(Default)]
-struct Reviewing {
+pub(crate) struct Reviewing {
     reviews: Reviews,
     reviewer: Option<Reviewer>,
 }
 
 /// A reviewer session at work.
-struct Reviewer {
+pub(crate) struct Reviewer {
     id: String,
     /// When it started, so a stop before that is not the end of its turn.
     started: SystemTime,
@@ -208,7 +207,7 @@ struct Reviewer {
 
 /// Camps by project, the tells not typed yet, and reviews by project.
 #[derive(Default)]
-pub(in crate::app) struct State {
+pub(crate) struct State {
     camps: HashMap<String, Camp>,
     tells: Vec<Tell>,
     reviewing: HashMap<String, Reviewing>,
@@ -217,7 +216,7 @@ pub(in crate::app) struct State {
 impl State {
     /// Camps that remember what the run before this one heard, so a reload
     /// does not wake Warriv for every event that still stands.
-    pub(in crate::app) fn after(heard: &BTreeMap<String, Heard>) -> State {
+    pub(crate) fn after(heard: &BTreeMap<String, Heard>) -> State {
         State {
             camps: heard
                 .iter()
@@ -235,7 +234,7 @@ impl State {
     }
 
     /// What each project's Warriv has heard, for `state.json`.
-    pub(in crate::app) fn heard(&self) -> BTreeMap<String, Heard> {
+    pub(crate) fn heard(&self) -> BTreeMap<String, Heard> {
         self.camps
             .iter()
             .map(|(key, c)| {
@@ -248,18 +247,18 @@ impl State {
     }
 }
 
-impl App {
+pub(crate) trait Warriv: Host {
     /// One look at a project's events with Warriv on. True when its
     /// session closed, which the clusters have to hear.
-    pub(super) fn orchestrate(&mut self, key: &str, b: &Board) -> bool {
+    fn orchestrate(&mut self, key: &str, b: &Board) -> bool {
         // Before Warriv's own look, since the human is asked whether or
         // not it is on.
         self.ask_stale(key, b);
-        let drive = self.drives.get(key).cloned();
+        let drive = self.drives().get(key).cloned();
         if !warriv::orchestrates(b.orchestrator, drive.is_some()) {
-            self.shared.warriv_line.borrow_mut().remove(key);
-            let astir = self.shared.astir.borrow_mut().remove(key);
-            return self.shared.warriv.borrow_mut().remove(key).is_some() | astir;
+            self.warriv_line().borrow_mut().remove(key);
+            let astir = self.astir().borrow_mut().remove(key);
+            return self.warriv_shown().borrow_mut().remove(key).is_some() | astir;
         }
         let asks: Vec<String> = b
             .tasks
@@ -273,7 +272,12 @@ impl App {
             .map(|t| t.title.clone())
             .collect();
         let now = warriv::events(&b.tasks, b.mode, &asks, &b.aims);
-        let mut camp = self.tasks.warriv.camps.remove(key).unwrap_or_default();
+        let mut camp = self
+            .tasks_mut()
+            .warriv
+            .camps
+            .remove(key)
+            .unwrap_or_default();
         self.hear_answers(key, b, &mut camp);
         // A wake kept in state.json may be followed long after, as when
         // Warriv was off at start: its id, made from the time of day, may
@@ -302,12 +306,12 @@ impl App {
             _ => Ink::Quiet,
         };
         let line = warriv::line(
-            watch.map(|w| w.words(crate::app::local_secs(), unix_now())),
+            watch.map(|w| w.words(self.local_secs(), unix_now())),
             drive.as_ref(),
         )
         .map(|words| (words, ink));
-        self.tasks.warriv.camps.insert(key.to_string(), camp);
-        let mut lines = self.shared.warriv_line.borrow_mut();
+        self.tasks_mut().warriv.camps.insert(key.to_string(), camp);
+        let mut lines = self.warriv_line().borrow_mut();
         if lines.get(key) != line.as_ref() {
             match line {
                 Some(l) => lines.insert(key.to_string(), l),
@@ -317,7 +321,7 @@ impl App {
         }
         drop(lines);
         // The quests tile starts or stops breathing.
-        let mut astir = self.shared.astir.borrow_mut();
+        let mut astir = self.astir().borrow_mut();
         closed |= if awake {
             astir.insert(key.to_string())
         } else {
@@ -325,7 +329,7 @@ impl App {
         };
         drop(astir);
         // The rows of what changed hands read anew.
-        let mut shown = self.shared.warriv.borrow_mut();
+        let mut shown = self.warriv_shown().borrow_mut();
         if shown.get(key) != Some(&holding) {
             shown.insert(key.to_string(), holding);
             closed = true;
@@ -336,7 +340,7 @@ impl App {
     fn wake(&mut self, key: &str, b: &Board, camp: &mut Camp, now: &[Event]) -> bool {
         // Awake, it hears more only once the turn it was given ends.
         if let Some(a) = &camp.awake {
-            let stopped = self.shared.registry.lock().is_ok_and(|r| {
+            let stopped = self.registry().lock().is_ok_and(|r| {
                 r.get(&a.id)
                     .is_some_and(|s| warriv::turn_over(&s.phase, s.since > a.told_at, a.adopted))
             });
@@ -380,8 +384,8 @@ impl App {
                 }
             }
             Wake::Tired { first, .. } => {
-                if first && !self.quiet {
-                    self.toasts.show(
+                if first && !self.quiet() {
+                    self.toast(
                         Toast::Waiting,
                         "Warriv rests",
                         &warriv::tired(&project_name(key)),
@@ -410,7 +414,7 @@ impl App {
 
     /// Commits what a Warriv session wrote to its memory, off the UI
     /// thread.
-    pub(in crate::app) fn keep_memory(&self, key: &str) {
+    fn keep_memory(&self, key: &str) {
         let Some(dir) = self.project_dir(key) else {
             return;
         };
@@ -458,7 +462,7 @@ impl App {
             }
         }
         let mut heard = Vec::new();
-        if let Ok(r) = self.shared.registry.lock() {
+        if let Ok(r) = self.registry().lock() {
             camp.asked.retain(|title, a| {
                 let said = r
                     .get(&a.holder)
@@ -500,9 +504,9 @@ impl App {
 
     /// The app is going and its sessions with it: each wake still awake
     /// is cut short and kept no more, so the next app follows none.
-    pub(in crate::app) fn cut_wakes_short(&mut self) {
+    fn cut_wakes_short(&mut self) {
         let awake: Vec<(String, String)> = self
-            .tasks
+            .tasks_mut()
             .warriv
             .camps
             .iter_mut()
@@ -517,8 +521,7 @@ impl App {
     /// has one.
     fn record_wake(&self, key: &str, id: &str, mut what: Happened) {
         let known = self
-            .shared
-            .registry
+            .registry()
             .lock()
             .ok()
             .and_then(|r| r.get(id)?.claude_session_id.clone());
@@ -549,7 +552,7 @@ impl App {
                     .find(|t| !e.title.is_empty() && t.title == e.title);
                 let last_turn = t
                     .and_then(|t| t.holder.as_deref())
-                    .and_then(|h| self.shared.registry.lock().ok()?.get(h)?.last_turn.clone());
+                    .and_then(|h| self.registry().lock().ok()?.get(h)?.last_turn.clone());
                 Brief {
                     event: Some(e.clone()),
                     notes: t.map(|t| t.notes.clone()).unwrap_or_default(),
@@ -568,11 +571,11 @@ impl App {
     /// reload of its build that rolled back since they were last read
     /// holds shipping and files a quest with the log, and a hold whose
     /// quest landed on green is lifted.
-    pub(in crate::app) fn ship_rails(&mut self, key: &str) {
+    fn ship_rails(&mut self, key: &str) {
         let Some(main) = self.project_dir(key) else {
             return;
         };
-        let Some(mut d) = self.drives.get(key).cloned() else {
+        let Some(mut d) = self.drives().get(key).cloned() else {
             return;
         };
         let log = reload_log();
@@ -584,8 +587,8 @@ impl App {
             if ship::resumes(&h, &records, ship::checked(key, &records, &head)) {
                 d.held = None;
                 d.red = 0;
-                if !self.quiet {
-                    self.toasts.show(
+                if !self.quiet() {
+                    self.toast(
                         Toast::Done,
                         &format!("Shipping goes on: {}", project_name(key)),
                         &format!("\"{}\" landed and the checks passed.", h.quest),
@@ -606,7 +609,7 @@ impl App {
         }
         d.judged = ship::newest(&log).unwrap_or(d.judged).max(d.judged);
         if d != before {
-            self.drives.insert(key.to_string(), d);
+            self.drives_mut().insert(key.to_string(), d);
             self.save();
             self.refresh_boards(false);
         }
@@ -614,7 +617,7 @@ impl App {
 
     /// A rail holds shipping in the project `key` until the quest `quest`
     /// lands on green.
-    pub(super) fn hold_shipping(
+    fn hold_shipping(
         &mut self,
         key: &str,
         d: &mut Drive,
@@ -622,8 +625,8 @@ impl App {
         quest: String,
         now: u64,
     ) {
-        if !self.quiet {
-            self.toasts.show(
+        if !self.quiet() {
+            self.toast(
                 Toast::Failed,
                 &format!("Shipping held: {}", project_name(key)),
                 &format!(
@@ -642,8 +645,8 @@ impl App {
     /// A landing in a project Warriv drives: checks red on `RED` in a row
     /// hold shipping until `fix`, the fix-up quest the last one filed,
     /// lands.
-    pub(super) fn count_red(&mut self, key: &str, failed: bool, fix: Option<&str>) {
-        let Some(mut d) = self.drives.get(key).cloned() else {
+    fn count_red(&mut self, key: &str, failed: bool, fix: Option<&str>) {
+        let Some(mut d) = self.drives().get(key).cloned() else {
             return;
         };
         let before = d.clone();
@@ -652,7 +655,7 @@ impl App {
             self.hold_shipping(key, &mut d, hold, fix.to_string(), unix_now());
         }
         if d != before {
-            self.drives.insert(key.to_string(), d);
+            self.drives_mut().insert(key.to_string(), d);
             self.save();
         }
     }
@@ -669,7 +672,7 @@ impl App {
         let dir = self.project_dir(key)?;
         // A wake is never carried on, so one left paused would only stand
         // beside this one. A live one, as after a reload, is left alone.
-        let left: Vec<String> = (self.shared.registry.lock().ok())
+        let left: Vec<String> = (self.registry().lock().ok())
             .map(|r| r.all().map(|s| s.id.clone()).collect())
             .unwrap_or_default();
         for old in left {
@@ -685,11 +688,11 @@ impl App {
             name: Some("Warriv".into()),
             prompt: Some(warriv::prompt(briefs)),
             quiet: true,
-            ..SessionSpec::new(dir, self.chat_sessions)
+            ..SessionSpec::new(dir, self.chat_sessions())
         };
         if let Err(e) = self.start_session(spec) {
             eprintln!("horadric: cannot start Warriv: {e}");
-            self.toasts.show(Toast::Failed, "Cannot start Warriv", &e);
+            self.toast(Toast::Failed, "Cannot start Warriv", &e);
             return None;
         }
         self.record_wake(key, &id, woke(&id, &given));
@@ -703,7 +706,7 @@ impl App {
     fn ask_stale(&mut self, key: &str, b: &Board) {
         let now = unix_now();
         // Quiet shows no toast, so asking now would mark it asked unheard.
-        if self.quiet || !b.tasks.iter().any(|t| t.stale(now)) {
+        if self.quiet() || !b.tasks.iter().any(|t| t.stale(now)) {
             return;
         }
         let Some(dir) = self.project_dir(key) else {
@@ -721,15 +724,15 @@ impl App {
         }
         for t in &asked {
             let (title, text) = warriv::still_needed(t, now);
-            self.toasts.show(Toast::Waiting, &title, &text);
+            self.toast(Toast::Waiting, &title, &text);
         }
     }
 
     /// Warriv woke for the aims three times in a row and filed nothing,
     /// so the human is asked what comes next.
     fn ask_aims(&mut self, key: &str, b: &Board, stuck: bool) {
-        if stuck && !self.quiet {
-            self.toasts.show(
+        if stuck && !self.quiet() {
+            self.toast(
                 Toast::Waiting,
                 &format!("Warriv asks: {}", project_name(key)),
                 &warriv::stuck(&b.aims),
@@ -739,12 +742,12 @@ impl App {
 
     /// The flags a Warriv session starts with: the one command it may run
     /// without asking, before its system prompt, which ends that list.
-    pub(super) fn warriv_args(&self, cwd: &Path) -> (Vec<String>, String) {
+    fn warriv_args(&self, cwd: &Path) -> (Vec<String>, String) {
         let horadric = horadric_command();
         let key = folder_key(&cwd.to_string_lossy());
         let mut prompt = warriv::system_prompt(&horadric, file::rel(Path::new(&key)));
         let mut tools = memory_tools(&horadric);
-        if self.drives.contains_key(&key) {
+        if self.drives().contains_key(&key) {
             prompt.push_str("\n\n");
             prompt.push_str(&warriv::driven_prompt(&horadric));
             tools.extend(warriv::cast_tools(&horadric));
@@ -767,7 +770,7 @@ impl App {
     /// The flags an errand's session starts with: the quest commands it may
     /// run without asking, as Warriv may, and its system prompt with the
     /// `From:` lines the log holds as it starts.
-    pub(super) fn errand_args(&self, id: &str, cwd: &Path) -> (Vec<String>, String) {
+    fn errand_args(&self, id: &str, cwd: &Path) -> (Vec<String>, String) {
         let horadric = horadric_command();
         let main = PathBuf::from(folder_key(&cwd.to_string_lossy()));
         let label = self
@@ -787,17 +790,11 @@ impl App {
 
     /// `quest tell` heard: kept until the quest's session is between
     /// turns. A Warriv tells each quest once a wake.
-    pub(in crate::app) fn hear_tell(
-        &mut self,
-        dir: &str,
-        title: &str,
-        text: &str,
-        by: Option<&str>,
-    ) {
+    fn hear_tell(&mut self, dir: &str, title: &str, text: &str, by: Option<&str>) {
         let key = folder_key(dir);
         // A tell from the human to a quest Warriv handed on is the answer;
         // Warriv's own is not.
-        let asked = self.tasks.warriv.camps.get_mut(&key).and_then(|c| {
+        let asked = self.tasks_mut().warriv.camps.get_mut(&key).and_then(|c| {
             let a = c.asked.remove(title)?;
             c.answered.insert((title.to_string(), a.question.clone()));
             Some(a)
@@ -807,7 +804,7 @@ impl App {
         }
         if let Some(by) = by.filter(|b| warriv::is_warriv(b)) {
             let awake = self
-                .tasks
+                .tasks_mut()
                 .warriv
                 .camps
                 .get_mut(&key)
@@ -821,11 +818,11 @@ impl App {
                 a.settled.insert(title.to_string());
             }
         }
-        self.tasks
+        self.tasks_mut()
             .warriv
             .tells
             .retain(|t| !(t.key == key && t.title == title));
-        self.tasks.warriv.tells.push(Tell {
+        self.tasks_mut().warriv.tells.push(Tell {
             key,
             title: title.to_string(),
             text: text.to_string(),
@@ -836,13 +833,13 @@ impl App {
 
     /// The human answered a quest's question on the away card: told as
     /// `quest tell` tells it, in the human's name.
-    pub(in crate::app) fn human_tell(&mut self, dir: &str, title: &str, text: &str) {
+    fn human_tell(&mut self, dir: &str, title: &str, text: &str) {
         let key = folder_key(dir);
-        self.tasks
+        self.tasks_mut()
             .warriv
             .tells
             .retain(|t| !(t.key == key && t.title == title));
-        self.tasks.warriv.tells.push(Tell {
+        self.tasks_mut().warriv.tells.push(Tell {
             key,
             title: title.to_string(),
             text: text.to_string(),
@@ -854,9 +851,9 @@ impl App {
     /// The human overrules what was `assumed` on the quest `title`: its
     /// session is told, a quest nobody took yet gets a note, and one done
     /// or gone gets a new quest to change it.
-    pub(in crate::app) fn overrule(&mut self, dir: &str, title: &str, assumed: &str, text: &str) {
+    fn overrule(&mut self, dir: &str, title: &str, assumed: &str, text: &str) {
         let key = folder_key(dir);
-        let task = self.shared.boards.borrow().get(&key).and_then(|b| {
+        let task = self.boards().borrow().get(&key).and_then(|b| {
             let i = tasks::find(&b.tasks, title).ok()?;
             Some(b.tasks[i].clone())
         });
@@ -880,12 +877,11 @@ impl App {
     /// Types each tell into its quest's session once that is live and has
     /// ended its turn. A blocked quest goes on. One whose session is gone
     /// keeps the words as a note and starts again; one done hears nothing.
-    pub(super) fn deliver_tells(&mut self) {
-        let tells = std::mem::take(&mut self.tasks.warriv.tells);
+    fn deliver_tells(&mut self) {
+        let tells = std::mem::take(&mut self.tasks_mut().warriv.tells);
         for tell in tells {
             let task = self
-                .shared
-                .boards
+                .boards()
                 .borrow()
                 .get(&tell.key)
                 .and_then(|b| b.tasks.iter().find(|t| t.title == tell.title).cloned());
@@ -893,7 +889,7 @@ impl App {
                 continue;
             };
             if !self.type_tell(&tell, &t) {
-                self.tasks.warriv.tells.push(tell);
+                self.tasks_mut().warriv.tells.push(tell);
             }
         }
     }
@@ -938,9 +934,9 @@ impl App {
         if !self.send_prompt(&h, &text) {
             return false;
         }
-        self.tasks.nudged.remove(&h);
-        if !self.quiet && !tell.human {
-            self.toasts.show(
+        self.tasks_mut().nudged.remove(&h);
+        if !self.quiet() && !tell.human {
+            self.toast(
                 Toast::Info,
                 &format!("{said}: {}", tasks::one_line(&t.title)),
                 &tell.text,
@@ -964,8 +960,7 @@ impl App {
         self.refresh_boards(true);
         if t.mark == Mark::Blocked {
             let fresh = self
-                .shared
-                .boards
+                .boards()
                 .borrow()
                 .get(&tell.key)
                 .and_then(|b| b.tasks.iter().find(|x| x.title == t.title).cloned());
@@ -978,13 +973,13 @@ impl App {
     }
 
     /// A finished quest that did not merge by itself, for Warriv to hear.
-    pub(super) fn merge_event(&mut self, dir: &Path, title: &str, detail: String) {
+    fn merge_event(&mut self, dir: &Path, title: &str, detail: String) {
         self.unlogged_event(dir, Kind::Merge, title, detail);
     }
 
     /// A quest just filed that may cover another's ground, for Warriv to
     /// hear before two sessions do the same work.
-    pub(in crate::app) fn overlap_event(&mut self, dir: &Path, title: &str, detail: String) {
+    fn overlap_event(&mut self, dir: &Path, title: &str, detail: String) {
         self.unlogged_event(dir, Kind::Overlap, title, detail);
     }
 
@@ -992,10 +987,10 @@ impl App {
     /// on the desk of the project's Warriv.
     fn unlogged_event(&mut self, dir: &Path, kind: Kind, title: &str, detail: String) {
         let key = folder_key(&dir.to_string_lossy());
-        if !warriv::orchestrates(file::orchestrator(dir), self.drives.contains_key(&key)) {
+        if !warriv::orchestrates(file::orchestrator(dir), self.drives().contains_key(&key)) {
             return;
         }
-        self.tasks
+        self.tasks_mut()
             .warriv
             .camps
             .entry(key)
@@ -1012,11 +1007,16 @@ impl App {
     /// going `[?]` queues, and one reviewer a project reads them in turn,
     /// a fresh session each, which closes once its turn ends. True when a
     /// reviewer closed, which the clusters have to hear.
-    pub(super) fn warriv_reviews(&mut self, key: &str, b: &Board) -> bool {
-        let mut r = self.tasks.warriv.reviewing.remove(key).unwrap_or_default();
+    fn warriv_reviews(&mut self, key: &str, b: &Board) -> bool {
+        let mut r = self
+            .tasks_mut()
+            .warriv
+            .reviewing
+            .remove(key)
+            .unwrap_or_default();
         let mut closed = false;
         if let Some(rv) = r.reviewer.take() {
-            let stopped = self.shared.registry.lock().is_ok_and(|reg| {
+            let stopped = self.registry().lock().is_ok_and(|reg| {
                 reg.get(&rv.id)
                     .is_some_and(|s| s.phase == Phase::Done && s.since > rv.started)
             });
@@ -1043,14 +1043,14 @@ impl App {
         } else {
             r.reviews.stop();
         }
-        self.tasks.warriv.reviewing.insert(key.to_string(), r);
+        self.tasks_mut().warriv.reviewing.insert(key.to_string(), r);
         closed
     }
 
     /// Whether the quest `title` is being reviewed or waits to be, so the
     /// human need not hear it is ready.
-    pub(super) fn reviewing(&self, key: &str, title: &str) -> bool {
-        self.tasks
+    fn reviewing(&self, key: &str, title: &str) -> bool {
+        self.tasks()
             .warriv
             .reviewing
             .get(key)
@@ -1082,12 +1082,11 @@ impl App {
             name: Some("Warriv reviews".into()),
             prompt: Some(prompt),
             quiet: true,
-            ..SessionSpec::new(dir, self.chat_sessions)
+            ..SessionSpec::new(dir, self.chat_sessions())
         };
         if let Err(e) = self.start_session(spec) {
             eprintln!("horadric: cannot start a reviewer: {e}");
-            self.toasts
-                .show(Toast::Failed, "Cannot start a reviewer", &e);
+            self.toast(Toast::Failed, "Cannot start a reviewer", &e);
             return None;
         }
         Some(Reviewer { id, started })
@@ -1095,7 +1094,7 @@ impl App {
 
     /// The flags a reviewer starts with: the quest commands and the git
     /// that reads, before its system prompt, which ends that list.
-    pub(super) fn reviewer_args(&self, cwd: &Path) -> (Vec<String>, String) {
+    fn reviewer_args(&self, cwd: &Path) -> (Vec<String>, String) {
         let horadric = horadric_command();
         let mut allowed = memory_tools(&horadric);
         for git in ["git diff", "git log", "git show"] {
@@ -1114,8 +1113,7 @@ impl App {
     fn branch_of(&self, main: &Path, t: &Task) -> Option<String> {
         let h = t.holder.as_deref()?;
         let live = self
-            .shared
-            .registry
+            .registry()
             .lock()
             .ok()
             .and_then(|r| Some(r.get(h)?.worktree.as_ref()?.branch.clone()));
@@ -1132,11 +1130,10 @@ impl App {
 
     /// `quest fix` heard: the quest's session hears what is wrong once it
     /// is between turns, or, gone, a fix-up quest is filed below it.
-    pub(in crate::app) fn hear_fix(&mut self, dir: &str, title: &str, what: &str) {
+    fn hear_fix(&mut self, dir: &str, title: &str, what: &str) {
         let key = folder_key(dir);
         let t = self
-            .shared
-            .boards
+            .boards()
             .borrow()
             .get(&key)
             .and_then(|b| b.tasks.iter().find(|t| t.title == title).cloned());
@@ -1148,11 +1145,11 @@ impl App {
             self.file_fix_up(&key, &t, what);
             return;
         }
-        self.tasks
+        self.tasks_mut()
             .warriv
             .tells
             .retain(|x| !(x.key == key && x.title == title));
-        self.tasks.warriv.tells.push(Tell {
+        self.tasks_mut().warriv.tells.push(Tell {
             key,
             title: title.to_string(),
             text: what.to_string(),
@@ -1172,7 +1169,7 @@ impl App {
         // Its session is gone, so the fix-up is the fresh start the
         // escalation waits for.
         let holder = t.holder.clone().unwrap_or_default();
-        let run = super::run_of(
+        let run = super::runner::run_of(
             &store::chronicle_all(),
             key,
             &holder,
@@ -1183,13 +1180,13 @@ impl App {
             fix.notes.push('\n');
             fix.notes.push_str(&up);
         }
-        super::write_run(&main, &t.title, Some(&run));
+        super::runner::write_run(&main, &t.title, Some(&run));
         if let Err(e) = file::update(&main, |text| warriv::send_back(text, &t.title, &fix).ok()) {
             eprintln!("horadric: cannot add \"{}\": {e}", fix.title);
             return;
         }
-        if !self.quiet {
-            self.toasts.show(
+        if !self.quiet() {
+            self.toast(
                 Toast::Info,
                 &format!("Warriv sent back: {}", tasks::one_line(&t.title)),
                 &format!("Added the quest \"{}\" below it.", fix.title),
@@ -1198,47 +1195,27 @@ impl App {
         self.refresh_boards(true);
     }
 
-    /// The projects the tray's "Warriv drives" lists: each with a quest
-    /// log, and each Warriv drives, by name.
-    pub(in crate::app) fn driven(&self) -> Vec<crate::tray::Driven> {
-        let mut keys: Vec<String> = self.shared.boards.borrow().keys().cloned().collect();
-        keys.extend(self.drives.keys().cloned());
-        keys.sort();
-        keys.dedup();
-        let mut out: Vec<crate::tray::Driven> = keys
-            .into_iter()
-            .map(|key| crate::tray::Driven {
-                name: project_name(&key),
-                drive: self.drive_of(&key),
-                key,
-            })
-            .collect();
-        out.sort_by_key(|d| d.name.to_lowercase());
-        out
-    }
-
     /// Whether Warriv drives the project `key`, and how.
-    pub(in crate::app) fn drive_of(&self, key: &str) -> Option<Drive> {
-        self.drives.get(key).cloned()
+    fn drive_of(&self, key: &str) -> Option<Drive> {
+        self.drives().get(key).cloned()
     }
 
     /// "Warriv drives" flipped by the human. On, the runner works the log
     /// in auto mode, since Warriv runs the project alone, and a stop
     /// before is lifted. Off, it ends as the stop key ends it.
-    pub(in crate::app) fn set_drive(&mut self, key: &str, on: bool) {
+    fn set_drive(&mut self, key: &str, on: bool) {
         if !on {
             self.stop_drive(key);
             self.save();
             return;
         }
         // A rollback from before the drive is not this drive's to hold on.
-        let d = self.drives.entry(key.to_string()).or_default();
+        let d = self.drives_mut().entry(key.to_string()).or_default();
         d.judged = d.judged.max(ship::newest(&reload_log()).unwrap_or(0));
-        self.stopped.remove(key);
+        self.stopped_mut().remove(key);
         self.save();
         let auto = self
-            .shared
-            .boards
+            .boards()
             .borrow()
             .get(key)
             .is_some_and(|b| b.mode == tasks::Mode::Auto);
@@ -1252,8 +1229,8 @@ impl App {
     }
 
     /// "and ships public" flipped by the human, only while Warriv drives.
-    pub(in crate::app) fn set_ships_public(&mut self, key: &str, on: bool) {
-        if let Some(d) = self.drives.get_mut(key) {
+    fn set_ships_public(&mut self, key: &str, on: bool) {
+        if let Some(d) = self.drives_mut().get_mut(key) {
             d.ships_public = on;
             self.save();
             self.run_tasks();
@@ -1264,11 +1241,11 @@ impl App {
     /// The quests in hand finish and land as in auto mode, but the runner
     /// starts nothing new in those projects until the human picks a mode
     /// or lets Warriv drive again.
-    pub(in crate::app) fn stop_warriv(&mut self) {
-        let keys: Vec<String> = self.drives.keys().cloned().collect();
+    fn stop_warriv(&mut self) {
+        let keys: Vec<String> = self.drives().keys().cloned().collect();
         if keys.is_empty() {
-            if !self.quiet {
-                self.toasts.show(
+            if !self.quiet() {
+                self.toast(
                     Toast::Info,
                     "Warriv is not driving",
                     "There was nothing to stop.",
@@ -1281,7 +1258,7 @@ impl App {
         }
         self.save();
         let names: Vec<String> = keys.iter().map(|k| project_name(k)).collect();
-        self.toasts.show(
+        self.toast(
             Toast::Done,
             "Warriv stopped",
             &format!(
@@ -1291,19 +1268,19 @@ impl App {
         );
         self.refresh_boards(true);
         self.run_tasks();
-        self.reconcile(false);
+        self.reconcile();
     }
 
     /// One project's drive ends: the switch goes off, its Warriv session
     /// and the errands running there stop, and its runner starts nothing
     /// new.
     fn stop_drive(&mut self, key: &str) {
-        if self.drives.remove(key).is_none() {
+        if self.drives_mut().remove(key).is_none() {
             return;
         }
-        self.stopped.insert(key.to_string());
+        self.stopped_mut().insert(key.to_string());
         let awake = self
-            .tasks
+            .tasks_mut()
             .warriv
             .camps
             .get_mut(key)
@@ -1315,6 +1292,8 @@ impl App {
         self.halt_errands(key);
     }
 }
+
+impl<T: Host> Warriv for T {}
 
 /// The quest commands Warriv's sessions may run without asking, and its
 /// memory, the one file they may edit. An Edit rule covers every tool

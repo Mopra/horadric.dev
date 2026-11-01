@@ -201,6 +201,10 @@ pub mod portal_push;
 mod project;
 #[cfg(windows)]
 mod questlog;
+// The quest log runner and Warriv, shared by both apps.
+#[cfg(any(windows, target_os = "macos"))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod quests;
 #[cfg(windows)]
 mod recent;
 #[cfg(windows)]
@@ -253,5 +257,6 @@ mod web_window;
 mod window;
 #[cfg(windows)]
 pub mod workos;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
+#[cfg_attr(not(windows), allow(dead_code))]
 mod worktree;
