@@ -8152,6 +8152,7 @@ impl App {
         // `/clear` it is the stream that says the conversation changed,
         // so the new one's hooks and hirelings come to this tile.
         let conversation = crate::folio::conversation(id);
+        crate::folio::set_quest(id, self.holds_quest(id));
         let Ok(mut r) = self.shared.registry.lock() else {
             return;
         };

@@ -57,7 +57,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use horadric_core::folio::backlog::{self, Kept};
-use horadric_core::folio::Folio;
+use horadric_core::folio::compaction::{Act, Moment, Watch};
+use horadric_core::folio::{Block, Folio, Notice};
 use horadric_core::usage::Status;
 use horadric_core::{HookEvent, Phase, WaitReason};
 use horadric_pty::headless::Options;
@@ -197,6 +198,10 @@ struct Chat {
     first: Option<String>,
     /// The quest and shared files above the composer, as the app last said.
     band: band::Band,
+    /// It holds a quest, as the app last said: only a quest is compacted
+    /// by [`tend_compaction`].
+    quest: bool,
+    compaction: Watch,
 }
 
 /// What the app hears of a Folio, for its tile's phase.
@@ -332,6 +337,8 @@ impl Chat {
             tr: transcript::Ui::default(),
             watch: None,
             first: None,
+            quest: false,
+            compaction: Watch::default(),
         }
     }
 
@@ -1165,6 +1172,12 @@ fn drain() {
                     continue;
                 };
                 chat.folio = history;
+                // A compaction in the history counts: once per quest.
+                if (chat.folio.blocks.iter())
+                    .any(|b| matches!(b, Block::Notice(Notice::Compacted { .. })))
+                {
+                    chat.compaction.compacted = true;
+                }
                 chat.tr.state.from = None;
                 chat.loading = None;
                 if let Some(said) = chat.greeting.take() {
@@ -1192,7 +1205,10 @@ fn drain() {
                 // A replay's lines are old, and when they came is lost.
                 chat.folio.clock = chat.live.then(unix_ms);
                 match event {
-                    Event::Out(l) => moved |= chat.folio.feed(&l),
+                    Event::Out(l) => {
+                        chat.compaction.feed(&l);
+                        moved |= chat.folio.feed(&l);
+                    }
                     Event::Sent(l) => moved |= chat.folio.feed_sent(&l),
                     Event::Dropped(n) => {
                         eprintln!("horadric: folio {id} lost its {n} oldest lines");
@@ -1259,6 +1275,9 @@ fn drain() {
             select::release_lapsed(chat);
             composer::tend(id, chat);
             mcp::tend(chat);
+            // Before the state goes out, so the tile never sees the turn it
+            // stops end as Done, which the runner would nudge.
+            moved |= tend_compaction(chat);
             chat.note_busy();
             if banished.last() == Some(id) {
                 // The runes behind flare up as the page burns, and cool.
@@ -1363,6 +1382,35 @@ fn answer_with(id: &str, make: impl FnOnce(&mut Folio) -> Option<String>) {
         select::release_lapsed(c);
     });
     redraw(id);
+}
+
+/// Steps a quest's compaction on, see [`Watch::step`]. True when it sent
+/// something, so the page shows it.
+fn tend_compaction(chat: &mut Chat) -> bool {
+    let m = Moment {
+        quest: chat.quest,
+        live: chat.live
+            && chat.loading.is_none()
+            && chat.hosted.is_some()
+            && !(chat.ended || chat.to_terminal || chat.restarting || chat.winding),
+        busy: chat.folio.busy,
+        asking: chat.asking(),
+        agents: chat.folio.agents_at_work(),
+    };
+    let went = match chat.compaction.step(&m) {
+        None => return false,
+        Some(Act::Interrupt) => chat.hosted.as_ref().is_some_and(|h| h.interrupt().is_ok()),
+        Some(Act::Send(text)) => composer::prompt(chat, text),
+    };
+    if !went {
+        chat.compaction.give_up();
+    }
+    went
+}
+
+/// Whether session `id` holds a quest, which only the app knows.
+pub fn set_quest(id: &str, quest: bool) {
+    with(id, |c| c.quest = quest);
 }
 
 fn interrupt(id: &str) {

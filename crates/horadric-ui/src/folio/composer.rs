@@ -564,6 +564,9 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
     if text.is_empty() && chat.input.images.is_empty() {
         return;
     }
+    // Whatever the human sends, the session is theirs from now on, and a
+    // compaction is theirs to ask for.
+    chat.compaction.human = true;
     if let Some(block) = chat.input.editing.as_ref().map(|e| e.block) {
         if !text.is_empty() && fork(chat, block, Some(&text)) {
             chat.input.history.push(&text);
