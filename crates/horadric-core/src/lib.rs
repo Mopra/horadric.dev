@@ -19,6 +19,7 @@ mod brotherhood_sim;
 #[cfg(test)]
 mod brotherhood_wired;
 pub mod brothers;
+pub mod changes;
 pub mod checkpoint;
 pub mod chronicle;
 pub mod context;

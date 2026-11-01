@@ -3,7 +3,8 @@
 //! does, lets a brother in on the six digit code its human sees, and
 //! serves its own sessions to its brothers through the one
 //! `horadric_core::serving::Server`, so a PC shows the Mac's tiles and
-//! panes as it shows a Linux node's. It shows no brother's tiles yet.
+//! panes as it shows a Linux node's, and a project's files read only
+//! (`tree`, `read`, `changes`). It shows no brother's tiles yet.
 //!
 //! The link, its threads and its sign in are `horadric_link::relay` and
 //! `horadric_link::signin`. What the link hears comes to the main thread
@@ -17,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use horadric_core::brothers::{Asking, Event, Human, Listener};
 use horadric_core::joining::Listed;
 use horadric_core::portal::{b64url, Kind};
-use horadric_core::serving::{answers, Job, Running, Serve, Server, LOOK_EVERY};
+use horadric_core::serving::{afar_files_error, answers, Job, Running, Serve, Server, LOOK_EVERY};
 use horadric_core::standing::Standing;
 use horadric_core::{rostering, Phase};
 use horadric_link::relay::{self, Link, LinkCrypto, Setup};
@@ -546,6 +547,19 @@ fn sign_in(app: &mut App) {
         .ok();
 }
 
+/// Why a brother may not read a project's files.
+const NOT_SHOWN: &str = "That project is not on the Mac's tiles.";
+
+/// The folder of a tile project of the Mac's, as `projects` spelled it:
+/// a brother reads the files of those and of nothing else.
+fn project_dir(app: &App, project: &str) -> Option<PathBuf> {
+    app.clusters
+        .iter()
+        .filter(|c| horadric_core::afar::split_key(&c.key).is_none() && !crate::town::is(&c.key))
+        .filter_map(|c| app.project_dir(&c.key))
+        .find(|dir| dir.to_string_lossy() == project)
+}
+
 /// The Mac's sessions as the server sees them.
 struct Here<'a>(&'a mut App);
 
@@ -727,6 +741,37 @@ impl Serve for Here<'_> {
         }
         self.0.reconcile();
         Ok(())
+    }
+
+    fn changes(&self, id: &str, path: Option<&str>) -> Job {
+        let session = self.0.registry.lock().ok().and_then(|r| {
+            r.get(id)
+                .filter(|s| portal::served(s))
+                .map(|s| (PathBuf::from(&s.cwd), s.worktree.clone()))
+        });
+        let (id, path) = (id.to_string(), path.map(str::to_string));
+        Box::new(move || match session {
+            Some((cwd, tree)) => portal::changes_reply(&id, &cwd, tree.as_ref(), path.as_deref()),
+            None => json!({"t": "error", "text": "That session is not on the Mac."}),
+        })
+    }
+
+    fn tree(&self, project: &str) -> Job {
+        let dir = project_dir(&*self.0, project);
+        let project = project.to_string();
+        Box::new(move || match dir {
+            Some(dir) => horadric_core::afar_files::tree(&project, &dir),
+            None => afar_files_error(&project, "", NOT_SHOWN),
+        })
+    }
+
+    fn read(&self, project: &str, path: &str) -> Job {
+        let dir = project_dir(&*self.0, project);
+        let (project, path) = (project.to_string(), path.to_string());
+        Box::new(move || match dir {
+            Some(dir) => horadric_core::afar_files::read(&project, &dir, &path),
+            None => afar_files_error(&project, &path, NOT_SHOWN),
+        })
     }
 
     fn stop(&mut self, id: &str) -> Result<(), String> {

@@ -30,7 +30,6 @@ use horadric_core::portal::{b64url, unb64url, Config, Kind, Paired};
 use horadric_core::said::Signer;
 use horadric_core::serving::{answers, Job, Out, Running, Serve, Server};
 use horadric_core::webpush;
-use horadric_core::worktree::Worktree;
 use horadric_core::{Phase, Session};
 use serde_json::{json, Value};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -48,7 +47,6 @@ use crate::portal_push::{self, Subs};
 use crate::project::{folder_key, project_key, project_name};
 use crate::sharing;
 use crate::town;
-use crate::worktree;
 
 /// How often `portal.json` is read, so `horadric portal` takes hold soon.
 const CHECK_EVERY: Duration = Duration::from_secs(2);
@@ -1294,7 +1292,7 @@ impl Serve for Here<'_> {
         let id = id.to_string();
         let path = path.map(str::to_string);
         Box::new(move || match session {
-            Some((cwd, tree)) => changes_reply(&id, &cwd, tree.as_ref(), path.as_deref()),
+            Some((cwd, tree)) => portal::changes_reply(&id, &cwd, tree.as_ref(), path.as_deref()),
             None => json!({"t": "error", "text": "That session is not on the PC."}),
         })
     }
@@ -1500,29 +1498,6 @@ fn rgb(c: crate::theme::Color) -> u32 {
 
 /// Why a brother may not read a project's files.
 const NOT_SHOWN: &str = "That project is not on this PC's tiles.";
-
-/// The answer to `changes`, or to `diff` for `path`. A session outside a
-/// repository has changed nothing a phone can see; a path that is not one
-/// of its changed files gets an error, not the file.
-fn changes_reply(id: &str, cwd: &Path, tree: Option<&Worktree>, path: Option<&str>) -> Value {
-    let Some((top, base)) = worktree::changes_base(cwd, tree) else {
-        return match path {
-            None => portal::changes_message(id, &[]),
-            Some(_) => json!({"t": "error", "text": "That session is not in a git repository."}),
-        };
-    };
-    let files = worktree::changed_files(&top, &base).unwrap_or_default();
-    let Some(path) = path else {
-        return portal::changes_message(id, &files);
-    };
-    if !portal::listed(&files, path) {
-        return json!({"t": "error", "text": "That file has no changes now."});
-    }
-    match worktree::file_diff(&top, &base, path) {
-        Some(text) => portal::diff_message(id, path, &text),
-        None => json!({"t": "error", "text": "git could not diff that file."}),
-    }
-}
 
 /// The folders in `root` a session could start in, newest first: hidden
 /// ones and dot folders left out.

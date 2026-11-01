@@ -466,7 +466,7 @@ pub fn count(w: &Worktree) -> Option<Diff> {
         .map(|out| diff::parse_numstat(&out))
     };
     let mut uncommitted = numstat("HEAD").ok()?;
-    uncommitted.extend(untracked(top));
+    uncommitted.extend(horadric_core::changes::untracked(top));
     // The main tree may have moved on since; `...` counts from where the
     // branch left it.
     let committed = git(Path::new(&w.main), &["rev-parse", "HEAD"])
@@ -476,108 +476,6 @@ pub fn count(w: &Worktree) -> Option<Diff> {
         uncommitted,
         committed,
     })
-}
-
-/// The files git does not track yet in `top`, each counted as all added.
-fn untracked(top: &Path) -> Vec<diff::FileDiff> {
-    let others = git(
-        top,
-        &[
-            "--no-optional-locks",
-            "ls-files",
-            "-z",
-            "--others",
-            "--exclude-standard",
-        ],
-    )
-    .unwrap_or_default();
-    others
-        .split('\0')
-        .filter(|p| !p.is_empty())
-        .map(|path| {
-            let content = std::fs::read(top.join(path)).unwrap_or_default();
-            diff::untracked(path, &content)
-        })
-        .collect()
-}
-
-/// Where a phone reads what a session changed: the top of its tree, and
-/// the commit the changes count from. For a session in a worktree that is
-/// where its branch left the main tree, so its commits count too; for any
-/// other, its tree's last commit. None outside a repository, or in one
-/// with no commit yet.
-pub fn changes_base(cwd: &Path, w: Option<&Worktree>) -> Option<(PathBuf, String)> {
-    let top = match w {
-        Some(w) => PathBuf::from(&w.path),
-        None => PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"]).ok()?.trim()),
-    };
-    let head = git(&top, &["rev-parse", "HEAD"]).ok()?.trim().to_string();
-    let base = w
-        .and_then(|w| git(Path::new(&w.main), &["rev-parse", "HEAD"]).ok())
-        .and_then(|main| git(&top, &["merge-base", main.trim(), &head]).ok())
-        .map_or(head, |b| b.trim().to_string());
-    Some((top, base))
-}
-
-/// Every file changed in `top` since `base`, committed or not, untracked
-/// ones included, with the lines each added and removed.
-pub fn changed_files(top: &Path, base: &str) -> Option<Vec<diff::FileDiff>> {
-    let out = git(
-        top,
-        &[
-            "--no-optional-locks",
-            "diff",
-            "--numstat",
-            "-z",
-            "--no-renames",
-            base,
-        ],
-    )
-    .ok()?;
-    let mut files = diff::parse_numstat(&out);
-    files.extend(untracked(top));
-    Some(files)
-}
-
-/// One file's diff since `base`, as `git diff` prints it, without colour.
-/// A file git does not track is diffed against nothing, all added.
-pub fn file_diff(top: &Path, base: &str, path: &str) -> Option<String> {
-    let tracked = git(
-        top,
-        &[
-            "--no-optional-locks",
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-renames",
-            base,
-            "--",
-            path,
-        ],
-    )
-    .ok()?;
-    if !tracked.is_empty() {
-        return Some(tracked);
-    }
-    // `git diff --no-index` exits 1 when the files differ, which they do.
-    let out = Command::new("git")
-        .args([
-            "--no-optional-locks",
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-index",
-            "--",
-            "/dev/null",
-            path,
-        ])
-        .current_dir(top)
-        .stdin(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-    matches!(out.status.code(), Some(0 | 1))
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Runs git in `dir`: what it printed, or what it said when it failed.
@@ -918,41 +816,5 @@ mod tests {
         assert_eq!(log.trim(), "first");
         let _ = std::fs::remove_dir_all(&path);
         let _ = std::fs::remove_dir_all(&top);
-    }
-
-    #[test]
-    fn a_phone_sees_tracked_and_untracked_changes() {
-        let top = std::env::temp_dir().join(format!("horadric-changes-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&top);
-        std::fs::create_dir_all(top.join("src")).unwrap();
-        run(&top, &["init", "-q", "--template="]);
-        run(&top, &["config", "user.email", "t@example.com"]);
-        run(&top, &["config", "user.name", "t"]);
-        std::fs::write(top.join("src/a.txt"), "one\ntwo\n").unwrap();
-        run(&top, &["add", "."]);
-        run(&top, &["commit", "-q", "-m", "first"]);
-        std::fs::write(top.join("src/a.txt"), "one\nthree\nfour\n").unwrap();
-        std::fs::write(top.join("new.txt"), "fresh\n").unwrap();
-
-        // Asked from a subfolder, the answer is about the whole tree.
-        let (found, base) = changes_base(&top.join("src"), None).expect("a repository");
-        let files = changed_files(&found, &base).unwrap();
-        let mut paths: Vec<_> = files.iter().map(|f| (f.path.as_str(), f.lines)).collect();
-        paths.sort();
-        assert_eq!(
-            paths,
-            vec![("new.txt", Some((1, 0))), ("src/a.txt", Some((2, 1)))]
-        );
-
-        let tracked = file_diff(&found, &base, "src/a.txt").unwrap();
-        assert!(tracked.contains("-two\n+three\n+four\n"), "{tracked}");
-        let fresh = file_diff(&found, &base, "new.txt").unwrap();
-        assert!(fresh.contains("+fresh"), "{fresh}");
-
-        let outside = std::env::temp_dir().join(format!("horadric-norepo-{}", std::process::id()));
-        std::fs::create_dir_all(&outside).unwrap();
-        assert!(changes_base(&outside, None).is_none(), "no repository");
-        let _ = std::fs::remove_dir_all(&top);
-        let _ = std::fs::remove_dir_all(&outside);
     }
 }

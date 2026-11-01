@@ -187,6 +187,20 @@ impl Serve for Machine {
         wire::projects(n.registry.all(), &n.recent)
     }
 
+    fn changes(&self, id: &str, path: Option<&str>) -> Job {
+        let session = lock(&self.node)
+            .registry
+            .get(id)
+            .map(|s| (PathBuf::from(&s.cwd), s.worktree.clone()));
+        let (id, path) = (id.to_string(), path.map(str::to_string));
+        Box::new(move || match session {
+            Some((cwd, tree)) => {
+                horadric_core::changes::changes_reply(&id, &cwd, tree.as_ref(), path.as_deref())
+            }
+            None => json!({"t": "error", "text": "That session is not on this node."}),
+        })
+    }
+
     fn tree(&self, project: &str) -> Job {
         let dir = self.project_dir(project);
         let project = project.to_string();
