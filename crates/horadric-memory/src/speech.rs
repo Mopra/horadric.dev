@@ -9,12 +9,18 @@
 
 use std::path::{Path, PathBuf};
 
-use candle_core::{Device, IndexOp, Tensor, D};
+use candle_core::{Device, Tensor, D};
 use candle_nn::VarBuilder;
-use candle_transformers::models::whisper::{self as w, audio, model::Whisper};
+use candle_transformers::models::whisper::{
+    self as w, audio,
+    model::{AudioEncoder, Whisper},
+};
 use tokenizers::Tokenizer;
 
 use crate::models::{self, File, Pinned};
+
+mod decoder;
+use decoder::Decoder;
 
 pub const MODEL: Pinned = Pinned {
     repo: "distil-whisper/distil-small.en",
@@ -102,7 +108,9 @@ const MOST_PROMPT: usize = 40;
 const TOKENS_A_SECOND: usize = 10;
 
 pub struct Listener {
-    model: Whisper,
+    encoder: AudioEncoder,
+    decoder: Decoder,
+    config: w::Config,
     tokenizer: Tokenizer,
     filters: Vec<f32>,
     sot: u32,
@@ -151,9 +159,16 @@ impl Listener {
             )
             .map_err(err)?
         };
-        let model = Whisper::load(&vb, config).map_err(err)?;
+        let decoder = Decoder::load(vb.pp("model.decoder"), &config).map_err(err)?;
+        // candle's decoder is dropped for ours, which caches what it has
+        // read; its encoder has no loader of its own.
+        let Whisper {
+            encoder, config, ..
+        } = Whisper::load(&vb, config).map_err(err)?;
         Ok(Listener {
-            model,
+            encoder,
+            decoder,
+            config,
             tokenizer,
             filters,
             sot,
@@ -173,8 +188,8 @@ impl Listener {
             return Ok(String::new());
         }
         let err = |e: candle_core::Error| e.to_string();
-        let bins = self.model.config.num_mel_bins;
-        let mel = audio::pcm_to_mel(&self.model.config, pcm, &self.filters);
+        let bins = self.config.num_mel_bins;
+        let mel = audio::pcm_to_mel(&self.config, pcm, &self.filters);
         let frames = mel.len() / bins;
         let mel = Tensor::from_vec(mel, (1, bins, frames), &Device::Cpu).map_err(err)?;
         let spoken = pcm.len() / w::HOP_LENGTH;
@@ -240,8 +255,8 @@ impl Listener {
         prompt: &[u32],
         most: usize,
     ) -> candle_core::Result<(Vec<u32>, bool)> {
-        let features = self.model.encoder.forward(mel, true)?;
-        let vocab = self.model.config.vocab_size;
+        let features = self.encoder.forward(mel, true)?;
+        let vocab = self.config.vocab_size;
         let mut mask = vec![0f32; vocab];
         for &t in &self.suppress {
             if let Some(m) = mask.get_mut(t as usize) {
@@ -255,17 +270,12 @@ impl Listener {
         }
         let begin = Tensor::new(begin.as_slice(), &Device::Cpu)?;
         let mut tokens = prompt.to_vec();
+        self.decoder.reset();
         for i in 0..most {
-            let input = Tensor::new(tokens.as_slice(), &Device::Cpu)?.unsqueeze(0)?;
-            let ys = self.model.decoder.forward(&input, &features, i == 0)?;
-            let (_, len, _) = ys.dims3()?;
-            let logits = self
-                .model
-                .decoder
-                .final_linear(&ys.i((..1, len - 1..))?)?
-                .i(0)?
-                .i(0)?;
-            let mut logits = logits.broadcast_add(&mask)?;
+            // The prompt goes in whole, then one token a step: the
+            // decoder keeps the rest.
+            let fresh = if i == 0 { &tokens[..] } else { &tokens[tokens.len() - 1..] };
+            let mut logits = self.decoder.next(fresh, &features)?.broadcast_add(&mask)?;
             if i == 0 {
                 logits = logits.broadcast_add(&begin)?;
             }
