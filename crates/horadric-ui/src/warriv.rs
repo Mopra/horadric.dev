@@ -15,7 +15,7 @@ use std::time::SystemTime;
 use horadric_core::chronicle::{self, Happened, Woken};
 use horadric_core::tasks::{self, Mark, Mode, Task};
 use horadric_core::warriv::{
-    self, Brief, Desk, Dried, Drive, Event, Heard, Kind, Review, Reviews, Wake,
+    self, Brief, Desk, Dried, Drive, Event, Heard, Kept, Kind, Review, Reviews, Wake,
 };
 use horadric_core::{escalate, ship, Phase};
 use horadric_hooks::tasks as file;
@@ -69,6 +69,8 @@ struct Awake {
     /// a dry log, so its end tells whether it moved anything.
     filed: usize,
     aims: Vec<String>,
+    /// Followed from the build before a reload, until it is given more.
+    adopted: bool,
 }
 
 impl Awake {
@@ -81,6 +83,38 @@ impl Awake {
             settled: HashSet::new(),
             filed: warriv::filed_count(&b.tasks),
             aims: b.aims.clone(),
+            adopted: false,
+        }
+    }
+
+    /// The wake the build before kept, to follow on. When it was last
+    /// told is lost, so any stop it makes from now on ends its turn.
+    fn after(k: Kept) -> Self {
+        Awake {
+            id: k.id,
+            told_at: SystemTime::UNIX_EPOCH,
+            told: k.told.into_iter().collect(),
+            given: k.given,
+            settled: k.settled.into_iter().collect(),
+            filed: k.filed,
+            aims: k.aims,
+            adopted: true,
+        }
+    }
+
+    fn kept(&self) -> Kept {
+        let mut told: Vec<String> = self.told.iter().cloned().collect();
+        let mut settled: Vec<String> = self.settled.iter().cloned().collect();
+        // Sorted, so an unchanged wake saves the same and writes nothing.
+        told.sort();
+        settled.sort();
+        Kept {
+            id: self.id.clone(),
+            given: self.given.clone(),
+            settled,
+            told,
+            filed: self.filed,
+            aims: self.aims.clone(),
         }
     }
 }
@@ -190,6 +224,7 @@ impl State {
                 .map(|(key, h)| {
                     let camp = Camp {
                         desk: Desk::after(h.clone()),
+                        awake: h.awake.clone().map(Awake::after),
                         ..Camp::default()
                     };
                     (key.clone(), camp)
@@ -203,7 +238,11 @@ impl State {
     pub(in crate::app) fn heard(&self) -> BTreeMap<String, Heard> {
         self.camps
             .iter()
-            .map(|(key, c)| (key.clone(), c.desk.heard()))
+            .map(|(key, c)| {
+                let mut h = c.desk.heard();
+                h.awake = c.awake.as_ref().map(Awake::kept);
+                (key.clone(), h)
+            })
             .filter(|(_, h)| !h.is_empty())
             .collect()
     }
@@ -292,7 +331,7 @@ impl App {
         if let Some(a) = &camp.awake {
             let stopped = self.shared.registry.lock().is_ok_and(|r| {
                 r.get(&a.id)
-                    .is_some_and(|s| s.phase == Phase::Done && s.since > a.told_at)
+                    .is_some_and(|s| warriv::turn_over(&s.phase, s.since > a.told_at, a.adopted))
             });
             if !stopped {
                 return false;
@@ -315,6 +354,7 @@ impl App {
                         }
                         self.record_wake(key, &a.id, woke(&a.id, &events));
                         a.told_at = SystemTime::now();
+                        a.adopted = false;
                         for e in &events {
                             a.told.remove(&e.title);
                             a.settled.remove(&e.title);
@@ -451,15 +491,15 @@ impl App {
         }
     }
 
-    /// The app is going: each wake still awake is cut short, since the
-    /// next app knows nothing of it.
+    /// The app is going and its sessions with it: each wake still awake
+    /// is cut short and kept no more, so the next app follows none.
     pub(in crate::app) fn cut_wakes_short(&mut self) {
         let awake: Vec<(String, String)> = self
             .tasks
             .warriv
             .camps
-            .iter()
-            .filter_map(|(key, c)| Some((key.clone(), c.awake.as_ref()?.id.clone())))
+            .iter_mut()
+            .filter_map(|(key, c)| Some((key.clone(), c.awake.take()?.id)))
             .collect();
         for (key, id) in awake {
             self.record_wake(&key, &id, Happened::slept(&id, "", true, Vec::new()));

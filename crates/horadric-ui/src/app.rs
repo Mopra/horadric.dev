@@ -8808,8 +8808,12 @@ impl App {
 
     /// Saves one last time and stops saving.
     fn freeze(&mut self) {
+        // A wake whose host may run on is kept, so the next app follows
+        // it, or, once its host is gone, hands what it left to the human.
+        if self.quit && self.stop_on_exit {
+            self.cut_wakes_short();
+        }
         self.save();
-        self.cut_wakes_short();
         // A Folio's host runs on, as a terminal's does, and the next start
         // attaches to it. Unless the sessions end with the app.
         if self.quit && self.stop_on_exit {

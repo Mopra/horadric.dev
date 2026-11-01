@@ -216,7 +216,7 @@ impl Kind {
 }
 
 /// Something in a project's quest log that wakes Warriv.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     pub kind: Kind,
     /// The quest it is about, empty for one about the whole log.
@@ -360,11 +360,46 @@ pub struct Heard {
     pub seen: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub human: Vec<String>,
+    /// The wake at work, so the build after a reload follows its session,
+    /// whose host outlived the reload, rather than start a second beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awake: Option<Kept>,
 }
 
 impl Heard {
     pub fn is_empty(&self) -> bool {
-        self.seen.is_empty() && self.human.is_empty()
+        self.seen.is_empty() && self.human.is_empty() && self.awake.is_none()
+    }
+}
+
+/// A wake at work as `state.json` keeps it: what the next run needs to
+/// hand the human what it leaves unsettled once it ends.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Kept {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub given: Vec<Event>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settled: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub told: Vec<String>,
+    #[serde(default)]
+    pub filed: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aims: Vec<String>,
+}
+
+/// Whether a wake's turn is over, its session in `phase` since after it
+/// was last given events (`since_told`). One followed after a reload
+/// (`adopted`) also counts as over when idle: its hooks went unheard
+/// while no build listened, and the build after says idle for a session
+/// between turns. A fresh wake is idle too before its first prompt runs,
+/// so that never counts for one.
+pub fn turn_over(phase: &crate::Phase, since_told: bool, adopted: bool) -> bool {
+    match phase {
+        crate::Phase::Done => since_told,
+        crate::Phase::Idle => adopted,
+        _ => false,
     }
 }
 
@@ -402,6 +437,7 @@ impl Desk {
                 .cloned()
                 .collect(),
             human: self.human.iter().cloned().collect(),
+            awake: None,
         }
     }
 
@@ -2219,6 +2255,43 @@ not green."
         // A reload: the host outlived it.
         assert!(comes_back("warriv-51234", true));
         assert!(comes_back("warriv-review-4100", true));
+    }
+
+    #[test]
+    fn a_wake_followed_after_a_reload_ends_when_idle_and_a_fresh_one_does_not() {
+        use crate::Phase;
+        assert!(turn_over(&Phase::Done, true, false));
+        assert!(!turn_over(&Phase::Done, false, false));
+        assert!(!turn_over(&Phase::Idle, true, false));
+        assert!(turn_over(&Phase::Idle, false, true));
+        assert!(!turn_over(&Phase::Working, true, true));
+        assert!(!turn_over(&Phase::Paused, true, true));
+    }
+
+    #[test]
+    fn the_wake_at_work_is_kept_across_a_reload() {
+        let heard = Heard {
+            awake: Some(Kept {
+                id: "warriv-51234".into(),
+                given: vec![Event {
+                    kind: Kind::Blocked,
+                    title: "Pick a colour".into(),
+                    detail: "Which one?".into(),
+                }],
+                settled: vec!["Pick a colour".into()],
+                told: Vec::new(),
+                filed: 3,
+                aims: vec!["Ship it".into()],
+            }),
+            ..Heard::default()
+        };
+        assert!(!heard.is_empty());
+        let json = serde_json::to_string(&heard).unwrap();
+        assert_eq!(serde_json::from_str::<Heard>(&json).unwrap(), heard);
+        // A state.json from before has no wake in it.
+        let old: Heard = serde_json::from_str(r#"{"seen":["x"]}"#).unwrap();
+        assert_eq!(old.awake, None);
+        assert!(!serde_json::to_string(&Heard::default()).unwrap().contains("awake"));
     }
 
     #[test]
