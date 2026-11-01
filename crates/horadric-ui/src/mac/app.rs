@@ -423,7 +423,10 @@ impl App {
     }
 
     fn console_by_serial(&self, serial: usize) -> Option<&Arc<Console>> {
-        self.consoles.values().find(|c| c.serial == serial)
+        self.consoles
+            .values()
+            .find(|c| c.serial == serial)
+            .or_else(|| self.kin.far.console_by_serial(serial))
     }
 
     fn project_of(&self, id: &str) -> Option<String> {
@@ -764,6 +767,10 @@ impl App {
 
     /// Ends a session: its program is told to stop, and its tile goes.
     pub(super) fn end(&mut self, id: &str) {
+        // A brother's session runs there: its tile menu asks it to end.
+        if super::far::is_brothers(self, id) {
+            return;
+        }
         match self.consoles.get(id) {
             Some(c) if c.exit_code().is_none() => {
                 // A clean end: the tile goes when the exit arrives.
@@ -930,7 +937,10 @@ impl App {
         mine.sort_by_key(|s| s.created);
         mine.into_iter()
             .filter_map(|s| {
-                let c = self.consoles.get(&s.id)?;
+                let c = self
+                    .consoles
+                    .get(&s.id)
+                    .or_else(|| self.kin.far.console(&s.id))?;
                 let mut pane =
                     Pane::new(s.id.clone(), s.label().to_string(), Arc::clone(c), accent);
                 pane.phase =
@@ -955,10 +965,9 @@ impl App {
         let same_count = {
             let mut n = 0;
             for s in sessions {
-                if project_key(s) == key
-                    && self.consoles.contains_key(&s.id)
-                    && self.stage.shows(&s.id)
-                {
+                let console =
+                    self.consoles.contains_key(&s.id) || self.kin.far.console(&s.id).is_some();
+                if project_key(s) == key && console && self.stage.shows(&s.id) {
                     n += 1;
                 }
             }
@@ -981,7 +990,7 @@ impl App {
     }
 
     /// Shows the project with this key on the stage and brings it forward.
-    fn show_project(&mut self, key: &str, focus: Option<&str>) {
+    pub(super) fn show_project(&mut self, key: &str, focus: Option<&str>) {
         let sessions: Vec<horadric_core::Session> = self
             .registry
             .lock()
@@ -1011,6 +1020,7 @@ impl App {
                 let Some(id) = ids.get(i).cloned() else {
                     return;
                 };
+                super::far::reveal(self, &id);
                 if self.paused.contains_key(&id) {
                     if let Err(e) = self.resume(&id, true) {
                         dialog::error("Horadric could not resume the session", &e);
@@ -1020,6 +1030,9 @@ impl App {
                 }
             }
             Hit::Add => {
+                if super::far::start(self, key) {
+                    return;
+                }
                 if let Some(dir) = self.project_dir(key) {
                     self.start(None, dir, Vec::new(), Agent::Claude);
                 }
@@ -1146,6 +1159,7 @@ impl App {
         }
         match menu::popup(self.mtm, &items, at) {
             Some(SHOW) => {
+                super::far::reveal(self, id);
                 if let Some(key) = self.project_of(id) {
                     self.show_project(&key, Some(id));
                 }
@@ -1165,15 +1179,21 @@ impl App {
                 if let Some(name) =
                     dialog::ask("Rename session", "A name for its tile and pane.", &now)
                 {
-                    if let Ok(mut r) = self.registry.lock() {
-                        if let Some(s) = r.get_mut(id) {
-                            s.rename(Some(name.trim()).filter(|n| !n.is_empty()));
+                    if !super::far::rename(self, id, name.trim()) {
+                        if let Ok(mut r) = self.registry.lock() {
+                            if let Some(s) = r.get_mut(id) {
+                                s.rename(Some(name.trim()).filter(|n| !n.is_empty()));
+                            }
                         }
+                        self.reconcile();
                     }
-                    self.reconcile();
                 }
             }
-            Some(END) => self.end(id),
+            Some(END) => {
+                if !super::far::stop(self, id) {
+                    self.end(id);
+                }
+            }
             _ => {}
         }
     }
@@ -1183,6 +1203,9 @@ impl App {
     }
 
     fn close_pane(&mut self, id: &str) {
+        if super::far::close(self, id) {
+            return;
+        }
         let live = self
             .consoles
             .get(id)

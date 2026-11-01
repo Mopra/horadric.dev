@@ -4,7 +4,8 @@
 //! serves its own sessions to its brothers through the one
 //! `horadric_core::serving::Server`, so a PC shows the Mac's tiles and
 //! panes as it shows a Linux node's, and a project's files read only
-//! (`tree`, `read`, `changes`). It shows no brother's tiles yet.
+//! (`tree`, `read`, `changes`). Its client of each brother, which shows
+//! the brother's tiles and panes here, is `far.rs`.
 //!
 //! The link, its threads and its sign in are `horadric_link::relay` and
 //! `horadric_link::signin`. What the link hears comes to the main thread
@@ -61,6 +62,17 @@ pub enum Note {
     Down {
         ch: u32,
     },
+    /// A brother's answer to what the Mac's client of it asked.
+    Heard {
+        ch: u32,
+        msg: Value,
+    },
+    /// Brother `id` was cast out.
+    Gone {
+        id: String,
+    },
+    /// What a brother's pane here asked, for that brother.
+    FarAsk(String, crate::console::FarAsk),
     /// A job's answer for channel `ch`.
     Answer {
         ch: u32,
@@ -112,6 +124,8 @@ pub(super) struct Kin {
     signing_in: bool,
     /// The pump runs.
     pumping: bool,
+    /// The Mac as a client of each brother.
+    pub(super) far: super::far::Far,
 }
 
 /// The state folder, where `brothers.json` and the sign in live.
@@ -193,11 +207,11 @@ impl Listener for ToApp {
             Event::Up { ch, id, name } => Note::Up { ch, id, name },
             Event::Asked { ch, id, msg } => Note::Asked { ch, id, msg },
             Event::Down { ch } => Note::Down { ch },
-            // The Mac shows no brother's tiles and hands off nothing yet,
-            // so whose a session is now changes nothing it shows; the menu
-            // still lists brothers anew.
-            Event::Heard { .. } => return,
-            Event::Gone { .. } | Event::Moved { .. } => Note::Changed,
+            Event::Heard { ch, msg } => Note::Heard { ch, msg },
+            Event::Gone { id } => Note::Gone { id },
+            // The Mac hands off and keeps nothing yet, so whose a session
+            // is now changes nothing it shows; the menu lists brothers anew.
+            Event::Moved { .. } => Note::Changed,
         };
         tell_app(note);
     }
@@ -308,6 +322,13 @@ fn send_out(out: horadric_core::serving::Out) {
     }
 }
 
+/// Sends `msg` to the brother on channel `ch`, sealed.
+pub(super) fn reply(ch: u32, msg: &Value) {
+    if let Some(link) = link() {
+        link.reply(ch, msg);
+    }
+}
+
 fn run_job(ch: u32, job: Job) {
     std::thread::spawn(move || tell_app(Note::Answer { ch, msg: job() }));
 }
@@ -321,6 +342,7 @@ pub(super) fn heard(app: &mut App, note: Note) {
             kin.linked.insert(ch, id);
             app.kin = kin;
             eprintln!("horadric brothers: linked to {name}");
+            super::far::up(app, ch, &id, &name);
             menu_changed(app);
             pump(app);
         }
@@ -345,8 +367,15 @@ pub(super) fn heard(app: &mut App, note: Note) {
         Note::Down { ch } => {
             app.kin.server.close(ch);
             app.kin.linked.remove(&ch);
+            super::far::down(app, ch);
             menu_changed(app);
         }
+        Note::Heard { ch, msg } => super::far::heard(app, ch, &msg),
+        Note::Gone { id } => {
+            super::far::gone(app, &id);
+            menu_changed(app);
+        }
+        Note::FarAsk(id, ask) => super::far::ask(app, &id, ask),
         // A lore catch up is several messages, and a job with nothing to
         // say answers null, which is no message.
         Note::Answer { ch, msg } => {
@@ -463,6 +492,7 @@ fn read_listed() -> (bool, Vec<Listed>) {
 /// From the app's tick: the relay's list of brothers comes and changes
 /// with no event of its own, so the menu is built again when it did.
 pub(super) fn refresh(app: &mut App) {
+    super::far::tick(app);
     let (up, listed) = read_listed();
     if up != app.kin.up || listed != app.kin.listed {
         app.kin.up = up;
@@ -593,6 +623,7 @@ impl Serve for Here<'_> {
             .0
             .clusters
             .iter()
+            .filter(|c| horadric_core::afar::split_key(&c.key).is_none())
             .filter_map(|c| {
                 let dir = self.0.project_dir(&c.key)?;
                 Some((dir.to_string_lossy().into_owned(), project_name(&c.key)))
