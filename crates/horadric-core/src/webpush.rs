@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use crate::ask::{Ask, Choice, Kind};
 use crate::portal::sha256;
+use crate::afar::remote_id;
 use crate::session::{waiting_on, Phase, Session, WaitReason};
 
 /// The record size the header announces. One record holds the whole
@@ -91,15 +92,57 @@ pub fn header(salt: &[u8; 16], as_public: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Where a push's tap opens a waiting session, as the phone page opens a
+/// session from a brother's tab: the relay id of the machine that runs it
+/// and its id there.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Target<'a> {
+    pub pc: &'a str,
+    pub id: &'a str,
+    /// The machine's name, when the phone sees more than one, so the
+    /// notification says which.
+    pub machine: Option<&'a str>,
+}
+
+/// Where the push about `s`, a session on this PC's stage, sends the tap.
+/// `me` and `name` are this PC's relay id and name, and `known` the relay
+/// ids its `brothers` message names, every machine the phone dials. One
+/// PC holds the browser's one push subscription, so it pushes for every
+/// brother's sessions too. None for a session no phone could open: a
+/// brother's out of reach, whose phase is only its last heard, or one on a
+/// machine the phone does not know, such as a node reached over ssh alone.
+pub fn target<'a>(s: &'a Session, me: &'a str, name: &'a str, known: &[String]) -> Option<Target<'a>> {
+    let many = known.len() > 1;
+    let Some(b) = &s.brother else {
+        return Some(Target {
+            pc: me,
+            id: &s.id,
+            machine: many.then_some(name),
+        });
+    };
+    if !b.reach || b.id == me || !known.contains(&b.id) {
+        return None;
+    }
+    Some(Target {
+        pc: &b.id,
+        id: remote_id(&s.id, &b.id)?,
+        machine: many.then_some(b.name.as_str()),
+    })
+}
+
 /// What the notification says about a waiting session: a title short
 /// enough for a lock screen, such as "Allow Bash?", and a body naming the
-/// session, then what it said where the title does not already say it.
-pub fn wait_text(s: &Session, project: &str) -> (String, String) {
-    let who = if project.is_empty() || project == s.label() {
+/// session and, among several, the machine it runs on, then what it said
+/// where the title does not already say it.
+pub fn wait_text(s: &Session, project: &str, machine: Option<&str>) -> (String, String) {
+    let mut who = if project.is_empty() || project == s.label() {
         s.label().to_string()
     } else {
         format!("{project} · {}", s.label())
     };
+    if let Some(m) = machine {
+        who = format!("{who} · {m}");
+    }
     let tool = s
         .waits_on
         .as_deref()
@@ -129,8 +172,8 @@ pub fn wait_text(s: &Session, project: &str) -> (String, String) {
 /// sessions wait in all, for the app badge, and the answers a notification
 /// can offer as buttons, with when the wait began so a late tap cannot
 /// answer a later one.
-pub fn payload(pc: &str, s: &Session, project: &str, waiting: usize) -> Value {
-    let (title, body) = wait_text(s, project);
+pub fn payload(to: &Target, s: &Session, project: &str, waiting: usize) -> Value {
+    let (title, body) = wait_text(s, project, to.machine);
     let options: Vec<Value> = s
         .ask
         .as_ref()
@@ -145,8 +188,8 @@ pub fn payload(pc: &str, s: &Session, project: &str, waiting: usize) -> Value {
         .and_then(|a| a.since.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_secs());
     json!({
-        "pc": pc,
-        "id": s.id,
+        "pc": to.pc,
+        "id": to.id,
         "project": project,
         "title": cut(&title, 120),
         "body": cut(&body, 600),
@@ -261,7 +304,7 @@ mod tests {
             "waiting on Bash",
         );
         assert_eq!(
-            wait_text(&s, "horadric"),
+            wait_text(&s, "horadric", None),
             ("Allow Bash?".into(), "horadric · fix the tiles".into())
         );
         let s = session(
@@ -269,7 +312,7 @@ mod tests {
             Some("mcp__horadric__browser_click"),
             "",
         );
-        assert_eq!(wait_text(&s, "horadric").0, "Allow browser_click?");
+        assert_eq!(wait_text(&s, "horadric", None).0, "Allow browser_click?");
     }
 
     #[test]
@@ -280,7 +323,7 @@ mod tests {
             "Which colour should the tile be?",
         );
         assert_eq!(
-            wait_text(&s, "horadric"),
+            wait_text(&s, "horadric", None),
             (
                 "Waiting for you".into(),
                 "horadric · fix the tiles\nWhich colour should the tile be?".into()
@@ -288,16 +331,72 @@ mod tests {
         );
         let s = session(Phase::Waiting(WaitReason::Error("x".into())), None, "");
         assert_eq!(
-            wait_text(&s, "fix the tiles"),
+            wait_text(&s, "fix the tiles", None),
             ("The turn failed".into(), "fix the tiles".into())
         );
+    }
+
+    fn here() -> Target<'static> {
+        Target {
+            pc: "0123",
+            id: "abc",
+            machine: None,
+        }
+    }
+
+    fn on(brother: &str, reach: bool) -> Session {
+        let mut s = session(Phase::Waiting(WaitReason::Input), None, "");
+        s.id = crate::afar::local_id(brother, "abc");
+        s.brother = Some(crate::afar::OnBrother {
+            id: brother.into(),
+            name: "Beta".into(),
+            project: "horadric".into(),
+            reach,
+            home: None,
+        });
+        s
+    }
+
+    #[test]
+    fn a_brothers_session_opens_on_the_brother_by_its_own_id() {
+        let known = ["aaaa".to_string(), "bbbb".to_string()];
+        let s = on("bbbb", true);
+        let to = target(&s, "aaaa", "Alpha", &known).unwrap();
+        assert_eq!(
+            to,
+            Target {
+                pc: "bbbb",
+                id: "abc",
+                machine: Some("Beta"),
+            }
+        );
+        let p = payload(&to, &s, "horadric", 2);
+        assert_eq!((p["pc"].as_str(), p["id"].as_str()), (Some("bbbb"), Some("abc")));
+        assert_eq!(p["body"], "horadric · fix the tiles · Beta");
+        // Out of reach, its phase is old news; a node over ssh alone is
+        // no machine the phone dials.
+        assert_eq!(target(&on("bbbb", false), "aaaa", "Alpha", &known), None);
+        assert_eq!(target(&on("node-vps", true), "aaaa", "Alpha", &known), None);
+    }
+
+    #[test]
+    fn this_pcs_own_session_names_the_pc_only_among_several() {
+        let s = session(Phase::Waiting(WaitReason::Input), None, "");
+        let alone = target(&s, "aaaa", "Alpha", &[]).unwrap();
+        assert_eq!((alone.pc, alone.id, alone.machine), ("aaaa", "abc", None));
+        let known = ["aaaa".to_string(), "bbbb".to_string()];
+        let among = target(&s, "aaaa", "Alpha", &known).unwrap();
+        assert_eq!(among.machine, Some("Alpha"));
+        // Before it joined any brother a PC shows no brother's session to
+        // a phone, which knows only it.
+        assert_eq!(target(&on("bbbb", true), "aaaa", "Alpha", &[]), None);
     }
 
     #[test]
     fn the_payload_fits_one_record() {
         let long = "ö".repeat(5000);
         let s = session(Phase::Waiting(WaitReason::Input), None, &long);
-        let p = payload("0123", &s, "horadric", 3);
+        let p = payload(&here(), &s, "horadric", 3);
         assert_eq!(p["pc"], "0123");
         assert_eq!(p["id"], "abc");
         assert_eq!(p["waiting"], 3);
@@ -341,12 +440,12 @@ mod tests {
     #[test]
     fn the_payload_carries_the_buttons_and_when_the_wait_began() {
         let mut s = session(Phase::Waiting(WaitReason::Permission), Some("Bash"), "");
-        let p = payload("0123", &s, "horadric", 1);
+        let p = payload(&here(), &s, "horadric", 1);
         assert_eq!(p["options"], json!([]));
         assert_eq!(p["since"], 0);
         let long = "a".repeat(100);
         s.ask = Some(asking(Kind::Question, &[&long, "Postgres", "Both"]));
-        let p = payload("0123", &s, "horadric", 1);
+        let p = payload(&here(), &s, "horadric", 1);
         assert_eq!(p["since"], 1_760_000_000);
         assert_eq!(p["options"][1], json!({"label": "Postgres", "keys": "2"}));
         assert_eq!(p["options"].as_array().unwrap().len(), 2);

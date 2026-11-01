@@ -98,6 +98,17 @@ fn is_in(r: &Roster, b: &Brother) -> bool {
     !b.cast_out && !r.outcast.contains(&b.key) && !r.contested.contains(&b.key)
 }
 
+/// The relay ids of the members in, in roster order and once each: the
+/// machines a v3 phone learns from [`brothers_message`] and dials.
+pub fn members(r: &Roster) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    r.brothers
+        .iter()
+        .filter(|b| is_in(r, b) && seen.insert(b.id.clone()))
+        .map(|b| b.id.clone())
+        .collect()
+}
+
 /// The `brothers` message a phone learns every brother from: each
 /// member in, in roster order, with its relay id, name, public key,
 /// `mark` (its colour as 0xRRGGBB, where this machine draws one) and

@@ -410,24 +410,30 @@ impl App {
 
     /// What a push about session `id` says, as JSON, with `waiting`
     /// sessions waiting in all. Empty when the session is gone, which
-    /// pushes as older PCs did.
-    fn portal_push_payload(&self, id: &str, waiting: usize) -> Vec<u8> {
-        let Some(p) = self.portal.as_ref() else {
-            return Vec::new();
+    /// pushes as older PCs did. None for a brother's session no phone
+    /// could open (see `webpush::target`), which is not pushed at all.
+    fn portal_push_payload(&self, id: &str, waiting: usize) -> Option<Vec<u8>> {
+        let p = self.portal.as_ref()?;
+        let me = p.me();
+        // Read at each push, which is rare, rather than at each look at
+        // who waits, which is every tick.
+        let known = p
+            .roster()
+            .filter(|r| r.brothers.iter().any(|b| b.id == me))
+            .map(|r| horadric_core::phoning::members(&r))
+            .unwrap_or_default();
+        let name = pc_name();
+        let r = self.shared.registry.lock().ok()?;
+        let Some(s) = r.all().find(|s| s.id == id) else {
+            return Some(Vec::new());
         };
-        let pc = horadric_core::portal::id(&p.config.secret);
-        self.shared
-            .registry
-            .lock()
-            .ok()
-            .and_then(|r| {
-                let s = r.all().filter(|s| portal::served(s)).find(|s| s.id == id)?;
-                let s = self.folio_asking(s);
-                let project = project_name(&project_key(&s));
-                Some(webpush::payload(&pc, &s, &project, waiting).to_string())
-            })
-            .unwrap_or_default()
-            .into_bytes()
+        let s = self.folio_asking(s);
+        let to = webpush::target(&s, &me, &name, &known)?;
+        let project = match &s.brother {
+            Some(b) => b.project.clone(),
+            None => project_name(&project_key(&s)),
+        };
+        Some(webpush::payload(&to, &s, &project, waiting).to_string().into_bytes())
     }
 
     /// The quests message: each tile project's log, and what Warriv does
@@ -512,14 +518,16 @@ impl App {
         heard.or_else(|| horadric_hooks::transcript::last_reply(&cwd, &claude?))
     }
 
-    /// The ids of the sessions waiting for the human now.
+    /// The ids of the sessions waiting for the human now, a reachable
+    /// brother's too, since the phone's one push subscription is held by
+    /// one PC, which pushes for every brother it shows.
     fn portal_waiting(&self) -> HashSet<String> {
         self.shared
             .registry
             .lock()
             .map(|r| {
                 r.all()
-                    .filter(|s| portal::served(s))
+                    .filter(|s| s.brother.as_ref().is_none_or(|b| b.reach))
                     .filter(|s| matches!(s.phase, Phase::Waiting(_)))
                     .map(|s| s.id.clone())
                     .collect()
@@ -1219,7 +1227,9 @@ impl Serve for Here<'_> {
     }
 
     fn push(&mut self, id: &str, waiting: usize) {
-        let payload = self.0.portal_push_payload(id, waiting);
+        let Some(payload) = self.0.portal_push_payload(id, waiting) else {
+            return;
+        };
         if let Some(p) = &self.0.portal {
             portal_push::send_all(&p.dir, &p.config, payload);
         }
