@@ -19,6 +19,14 @@ extern "C" {
     );
 }
 
+/// The main queue, for a C API that calls back on a queue it is given
+/// (FSEvents does).
+pub fn main_queue() -> *const c_void {
+    #[allow(unused_unsafe)]
+    let q = unsafe { &raw const _dispatch_main_q };
+    q.cast()
+}
+
 type Job = Box<dyn FnOnce() + Send>;
 
 /// Runs `f` on the main thread, soon, after whatever it is doing now.

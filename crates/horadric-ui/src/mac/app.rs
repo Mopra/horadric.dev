@@ -72,6 +72,12 @@ pub enum Input {
     KinTick,
     /// A Folio's stream moved its tile: busy, asking, ended.
     FolioState(String, crate::folio_session::State),
+    /// A files tile's scan came back, or its folder changed.
+    Files(super::files::Note),
+    /// A files tile's booked scan is due.
+    FilesDue(String),
+    /// The wheel over a files tile: points or lines, and which.
+    FilesWheel(String, f64, bool),
 }
 
 thread_local! {
@@ -180,6 +186,8 @@ pub struct App {
     /// Files shown read only on the stage, by pane id: the project each
     /// is shown with, its console, and when the file last changed.
     views: HashMap<String, View>,
+    /// Each project's files tile.
+    files: super::files::Files,
 }
 
 /// A file shown read only on the stage, a pane with no program behind it
@@ -273,6 +281,13 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
         rich: None,
         run: Default::default(),
         views: HashMap::new(),
+        files: super::files::Files {
+            folded: (saved.clusters.iter())
+                .filter(|c| c.files_collapsed)
+                .map(|c| c.key.clone())
+                .collect(),
+            ..Default::default()
+        },
     };
     app.attach_hosts();
     app.reattach_folios();
@@ -457,6 +472,17 @@ impl App {
             Input::Kin(note) => super::brothers::heard(self, note),
             Input::KinTick => super::brothers::tick(self),
             Input::FolioState(id, state) => self.folio_state(&id, state),
+            Input::Files(note) => {
+                if self.files.heard(note) {
+                    self.reconcile();
+                }
+            }
+            Input::FilesDue(key) => self.files.due(&key),
+            Input::FilesWheel(key, dy, precise) => {
+                if self.files.wheel(&key, dy, precise) {
+                    self.reconcile();
+                }
+            }
         }
     }
 
@@ -1113,6 +1139,10 @@ impl App {
         let stage_key = self.stage.key().filter(|_| self.stage.is_visible());
         let focused = self.stage.focused_id();
         let m = Metrics::default();
+        let dirs: Vec<(String, PathBuf)> = (keys.iter())
+            .filter_map(|k| Some((k.clone(), self.project_dir(k)?)))
+            .collect();
+        self.files.keep(&dirs);
         for c in &mut self.clusters {
             let mut mine: Vec<horadric_core::Session> = sessions
                 .iter()
@@ -1123,7 +1153,10 @@ impl App {
             let collapsed = self.collapsed.contains(&c.key);
             c.collapsed = collapsed;
             let shown = if collapsed { 0 } else { mine.len() };
-            let layout = layout::cluster(&m, shown, 0, collapsed, None, None, None);
+            let body = self.files.body(&c.key, &m).filter(|_| !collapsed);
+            let layout = layout::cluster(&m, shown, 0, collapsed, None, None, body);
+            let files = (layout.files.as_ref())
+                .and_then(|f| self.files.view(&c.key, f.rows.len()));
             let (hot, pressed) = c.hover();
             let on_stage = stage_key.as_deref() == Some(c.key.as_str());
             let selected = focused
@@ -1143,6 +1176,7 @@ impl App {
                 selected,
                 now,
                 ambient: true,
+                files,
             });
         }
         self.place_clusters();
@@ -1406,6 +1440,11 @@ impl App {
                 self.reconcile();
             }
             Hit::New => self.pick_and_start(),
+            Hit::FilesHeader | Hit::File(_) => match self.files.click(key, hit) {
+                super::files::Click::Redraw => self.reconcile(),
+                super::files::Click::Open(path) => self.open_file(key, path),
+                super::files::Click::Nothing => {}
+            },
             _ => {
                 let _ = at;
             }
@@ -1954,7 +1993,7 @@ impl App {
                 .map(|c| horadric_core::SavedCluster {
                     key: c.key.clone(),
                     collapsed: c.collapsed,
-                    files_collapsed: false,
+                    files_collapsed: self.files.folded.contains(&c.key),
                     tasks_collapsed: false,
                     tome_collapsed: false,
                 })

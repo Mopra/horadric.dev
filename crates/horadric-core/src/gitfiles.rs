@@ -3,7 +3,7 @@
 //! serves the same to a machine showing one of its projects (`afar_files`),
 //! so both read git alike.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// What git says about one file.
@@ -167,6 +167,36 @@ pub fn status(dir: &Path, prefix: &str) -> Option<Vec<(String, Change)>> {
         ],
     )
     .map(|out| parse_status(&out, prefix))
+}
+
+/// What git ignores in `dir`, a folder ending in a slash, for a watcher
+/// to skip: every `cargo build` would otherwise rescan a hundred times.
+pub fn ignored(dir: &Path) -> Vec<String> {
+    git(
+        dir,
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ],
+    )
+    .map(|out| parse_list(&out))
+    .unwrap_or_default()
+}
+
+/// The repository's git folder when it is not the project's own `.git`:
+/// the project is a subfolder of the repository, or a worktree, whose
+/// `.git` is a file pointing into the main repository. A watcher watches
+/// it too, or staging and committing would go unseen.
+pub fn outside_git_dir(dir: &Path) -> Option<PathBuf> {
+    let out = git(dir, &["rev-parse", "--absolute-git-dir"])?;
+    let git_dir = PathBuf::from(String::from_utf8_lossy(&out).trim_end());
+    let git_dir = std::fs::canonicalize(git_dir).ok()?;
+    let own = std::fs::canonicalize(dir.join(".git")).ok();
+    (own.as_ref() != Some(&git_dir)).then_some(git_dir)
 }
 
 #[cfg(test)]

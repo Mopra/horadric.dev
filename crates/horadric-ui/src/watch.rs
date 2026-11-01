@@ -13,7 +13,6 @@ use std::collections::HashSet;
 use std::ffi::{c_void, OsStr};
 use std::io::Read;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -33,11 +32,12 @@ use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SW_SHOWNORMAL};
 
+use horadric_core::gitfiles;
+
 use crate::files::{self, Tree};
 use crate::links::{self, Target};
 use crate::viewer;
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// How long the files must be quiet before git runs again.
 const SETTLE: Duration = Duration::from_millis(300);
 /// The least time between two scans, however busy the folder is.
@@ -76,17 +76,16 @@ pub fn start(dir: PathBuf, hwnd: HWND, msg: u32, slot: Slot) -> Option<Watcher> 
 }
 
 fn run(dir: &Path, hwnd: isize, msg: u32, slot: &Slot, stop: &Event) {
-    let Some(prefix) = git(dir, &["rev-parse", "--show-prefix"]) else {
+    let Some(prefix) = gitfiles::prefix(dir) else {
         return;
     };
-    let prefix = String::from_utf8_lossy(&prefix).trim_end().to_string();
     let mut changes: Vec<DirChanges> = DirChanges::open(dir, true, "").into_iter().collect();
     // A session in a subfolder of a repository, or in a worktree, has its
     // index and HEAD outside the folder. Their changes are named as if they
     // were in `.git`, so `files::relevant` treats both cases alike. Only
     // the top of it is watched: objects and refs churn on every git command.
     if !changes.is_empty() {
-        if let Some(git_dir) = outside_git_dir(dir) {
+        if let Some(git_dir) = gitfiles::outside_git_dir(dir) {
             changes.extend(DirChanges::open(&git_dir, false, ".git/"));
         }
     }
@@ -141,68 +140,10 @@ fn run(dir: &Path, hwnd: isize, msg: u32, slot: &Slot, stop: &Event) {
 
 /// The tree, and what git ignores, which the watcher skips.
 fn scan(dir: &Path, prefix: &str) -> Option<(Tree, HashSet<String>)> {
-    let listed = git(
-        dir,
-        &[
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-    )?;
-    let status = git(
-        dir,
-        &[
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--",
-            ".",
-        ],
-    )?;
-    let ignored = git(
-        dir,
-        &[
-            "ls-files",
-            "-z",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--directory",
-        ],
-    )
-    .unwrap_or_default();
-    let tree = Tree::build(
-        &files::parse_list(&listed),
-        &files::parse_status(&status, prefix),
-    );
-    Some((tree, files::parse_list(&ignored).into_iter().collect()))
-}
-
-/// The repository's git folder when it is not the project's own `.git`:
-/// the project is a subfolder of the repository, or a worktree, whose
-/// `.git` is a file pointing into the main repository.
-fn outside_git_dir(dir: &Path) -> Option<PathBuf> {
-    let out = git(dir, &["rev-parse", "--absolute-git-dir"])?;
-    let git_dir = PathBuf::from(String::from_utf8_lossy(&out).trim_end());
-    let git_dir = std::fs::canonicalize(git_dir).ok()?;
-    let own = std::fs::canonicalize(dir.join(".git")).ok();
-    (own.as_ref() != Some(&git_dir)).then_some(git_dir)
-}
-
-fn git(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let out = Command::new("git")
-        .arg("--no-optional-locks")
-        .args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-    out.status.success().then_some(out.stdout)
+    let listed = gitfiles::listed(dir)?;
+    let status = gitfiles::status(dir, prefix)?;
+    let tree = Tree::build(&listed, &status);
+    Some((tree, gitfiles::ignored(dir).into_iter().collect()))
 }
 
 /// Opens a file of the project in VS Code, in the window that has the

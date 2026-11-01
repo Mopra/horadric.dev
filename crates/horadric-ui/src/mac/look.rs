@@ -8,10 +8,11 @@ use horadric_core::diff::Diff;
 use horadric_core::{format_age, Phase, Session};
 
 use crate::anim::{Look, Stance};
-use crate::layout::{self, Button, ClusterLayout, Hit, Metrics, Rect};
+use crate::layout::{self, Button, ClusterLayout, FilesLayout, Hit, Metrics, Rect};
 use crate::motion::{self, ORBIT};
 use crate::theme::{self, Color};
 
+use super::files::FilesView;
 use super::paint::{measure, Font, Painter};
 
 /// Where the name and the lines under it start in a tile, after the icon.
@@ -49,6 +50,8 @@ pub struct Scene {
     pub now: SystemTime,
     /// Whether light that never stops may move.
     pub ambient: bool,
+    /// The files tile's rows, none for no tile.
+    pub files: Option<FilesView>,
 }
 
 impl Scene {
@@ -73,6 +76,9 @@ pub fn draw(p: &Painter, m: &Metrics, s: &Scene) {
     }
     if let Some(shell) = &s.layout.shell {
         add_button(p, m, shell, s.button(Hit::Shell), theme::SHELL_ICON);
+    }
+    if let (Some(l), Some(f)) = (&s.layout.files, &s.files) {
+        files(p, m, l, f);
     }
     if s.ambient {
         light(p, m, s);
@@ -663,4 +669,82 @@ fn add_button(p: &Painter, m: &Metrics, r: &Rect, b: Button, glyph: char) {
         }
     }
     p.icon(glyph, ink, 11.0, *r);
+}
+
+/// The project's files as VS Code's explorer shows them, as on Windows:
+/// folders with a chevron, names in the colour of their change, the change
+/// letter at the right edge, a dot on a folder holding one.
+fn files(p: &Painter, m: &Metrics, l: &FilesLayout, f: &FilesView) {
+    sunk(p, &l.rect, m.tile_radius, theme::screen());
+    let pad = INNER_PAD;
+    let h = l.header;
+    let chevron = if f.folded { '\u{E76C}' } else { '\u{E70D}' };
+    p.icon(
+        chevron,
+        theme::text_dim(),
+        9.0,
+        Rect::new(h.x + pad - 2.0, h.y, 14.0, h.h),
+    );
+    p.text_kerned(
+        Font::Chip,
+        theme::text_dim(),
+        "FILES",
+        Rect::new(h.x + pad + 14.0, h.y, h.w * 0.5, h.h),
+        Some(1.2),
+    );
+    let (summary, c) = match f.changed {
+        0 => ("no changes".to_string(), theme::text_dim()),
+        n => (format!("{n} changed"), theme::git_modified()),
+    };
+    p.text(
+        Font::SmallRight,
+        c,
+        &summary,
+        Rect::new(h.x, h.y, h.w - pad, h.h),
+    );
+
+    let badge_w = 18.0;
+    for (r, line) in l.rows.iter().zip(&f.lines) {
+        let x = r.x + pad + line.depth as f32 * m.file_indent;
+        if line.dir {
+            let chevron = if line.open { '\u{E70D}' } else { '\u{E76C}' };
+            p.icon(
+                chevron,
+                theme::text_dim().with_alpha(0.8),
+                8.0,
+                Rect::new(x - 2.0, r.y, 14.0, r.h),
+            );
+        }
+        let name_c = line.change.map_or(theme::text(), theme::change_color);
+        let name_x = x + 14.0;
+        let name = Rect::new(name_x, r.y, r.right() - pad - badge_w - name_x, r.h);
+        p.text(Font::Small, name_c, &line.label, name);
+        let Some(change) = line.change else {
+            continue;
+        };
+        let badge = Rect::new(r.right() - pad - badge_w, r.y, badge_w, r.h);
+        if line.dir {
+            let (dx, dy) = (badge.right() - 4.0, badge.y + badge.h / 2.0);
+            p.glow_dot(dx, dy, 6.0, theme::change_color(change), 0.35);
+            p.fill_ellipse(dx, dy, 2.5, 2.5, theme::change_color(change));
+        } else {
+            let ink = theme::change_color(change);
+            p.text(Font::SmallRight, ink, change.letter(), badge);
+        }
+    }
+
+    // Where the view is in a list longer than the tile.
+    let shown = l.rows.len();
+    if shown > 0 && f.total > shown {
+        let body = l.body();
+        let track = shown as f32 * m.file_row_h;
+        let total = f.total as f32;
+        let thumb_h = (track * shown as f32 / total).max(12.0);
+        let thumb_y = body.y + (track - thumb_h) * f.scroll as f32 / (total - shown as f32);
+        p.fill_rounded(
+            &Rect::new(body.right() - 4.0, thumb_y, 3.0, thumb_h),
+            1.5,
+            theme::text_dim().with_alpha(0.5),
+        );
+    }
 }

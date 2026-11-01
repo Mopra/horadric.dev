@@ -115,6 +115,20 @@ define_class!(
             }
         }
 
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            // Only the files tile scrolls.
+            let at = self.convertPoint_fromView(event.locationInWindow(), None);
+            let over = self.ivars().scene.borrow().as_ref().is_some_and(|s| {
+                (s.layout.files.as_ref()).is_some_and(|f| f.body().contains(at.x as f32, at.y as f32))
+            });
+            if over {
+                let key = self.ivars().key.borrow().clone();
+                let precise = event.hasPreciseScrollingDeltas();
+                app::input(Input::FilesWheel(key, event.scrollingDeltaY(), precise));
+            }
+        }
+
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &NSEvent) {
             let hit = self.hit_of(event);

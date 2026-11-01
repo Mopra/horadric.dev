@@ -7,6 +7,7 @@ mod app;
 pub mod autostart;
 mod brothers;
 mod far;
+mod files;
 mod cluster;
 mod delegate;
 mod dialog;
