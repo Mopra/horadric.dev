@@ -31,11 +31,13 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use horadric_core::handing::{
-    self, bases_answer, bases_ask_placing, bases_placing, bases_refused, between_turns, refused,
-    took_message, Arriving, Do, Landed, Outgoing, PlaceAsk,
+    self, bases_answer, refused, took_message, Do, Landed, Outgoing, PlaceAsk,
 };
-use horadric_core::handoff::{self, moved_line, moved_plain_line, split, Record, RepoId};
-use horadric_core::placing::{self, Placement};
+use horadric_core::handoff::{self, Record, RepoId};
+use horadric_core::handoffs::{
+    self, arrive, model_of, record_of, Arrived, Handoffs, Packed, Place, Places, Said,
+};
+use horadric_core::placing;
 use horadric_core::saved::SavedSession;
 use horadric_core::worktree::Worktree;
 use horadric_core::Agent;
@@ -53,13 +55,6 @@ use crate::toast::Kind;
 /// sender is told it did not.
 const ADOPT_WAIT: Duration = Duration::from_secs(60);
 
-/// Where a session arrived: a worktree of a checkout, or a folder holding
-/// a plain copy.
-enum Arrived {
-    Git(Landed),
-    Plain(PathBuf),
-}
-
 /// A landed session waiting for the UI thread to adopt it, and where to
 /// say how that went.
 struct Landing {
@@ -68,51 +63,9 @@ struct Landing {
     done: mpsc::Sender<Result<String, String>>,
 }
 
-/// Where a project this PC has no checkout of goes, as its human said.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Place {
-    /// The human is asked, or the clone runs.
-    Asking,
-    /// It goes here: a checkout of the project, or for a plain copy a new
-    /// or empty folder.
-    Ready(PathBuf),
-    /// Not here, and why.
-    No(String),
-}
-
-/// Each arriving session's place, by its id, with when it was first
-/// asked. Threads clone and fill it, so it is not the UI thread's alone.
-static PLACING: Mutex<Vec<(String, Place, u64)>> = Mutex::new(Vec::new());
-
-fn place_of(id: &str) -> Option<Place> {
-    let p = PLACING.lock().ok()?;
-    p.iter()
-        .find(|(i, _, _)| i == id)
-        .map(|(_, p, _)| p.clone())
-}
-
-fn set_place(id: &str, place: Place) {
-    if let Ok(mut p) = PLACING.lock() {
-        match p.iter_mut().find(|(i, _, _)| i == id) {
-            Some(entry) => entry.1 = place,
-            None => p.push((id.to_string(), place, unix_now())),
-        }
-    }
-}
-
-/// How many places are being asked about or readied now.
-fn asking() -> usize {
-    PLACING.lock().map_or(usize::MAX, |p| {
-        p.iter().filter(|(_, p, _)| *p == Place::Asking).count()
-    })
-}
-
-fn drop_place(id: &str) {
-    if let Ok(mut p) = PLACING.lock() {
-        p.retain(|(i, _, _)| i != id);
-    }
-}
-
+/// Each arriving session's place, by its id. Threads clone and fill it,
+/// so it is not the UI thread's alone.
+static PLACING: Places = Places::new();
 /// A question for the human: where the project of a session `from` hands
 /// here goes.
 struct Question {
@@ -146,21 +99,14 @@ static LEAVING: Mutex<(Vec<String>, Option<String>)> = Mutex::new((Vec::new(), N
 
 #[derive(Default)]
 struct State {
-    out: HashMap<String, Outgoing>,
-    arriving: Arriving,
+    hand: Handoffs,
     /// The line each adopted session's next prompt starts with.
     first: HashMap<String, String>,
-    /// The roster's number of each session handed here, to say `took`
-    /// again to a sender whose link dropped before it heard it.
-    took: HashMap<String, u64>,
     /// The brother every session is leaving for.
     leaving: Option<String>,
     /// Sessions whose handoff failed while leaving, so they are not tried
     /// again and again.
     stuck: HashSet<String>,
-    /// Each outgoing session's ask for commits, made once since the
-    /// sender asks again and again while the receiver's human decides.
-    asks: HashMap<String, Value>,
     /// Brothers' sessions this PC asked their owner to hand on, by the
     /// tile's id here, to say why when the owner refuses.
     asked: HashMap<String, String>,
@@ -264,21 +210,12 @@ pub(crate) fn far_targets(owner: &str, takers: &[String], me: &str) -> Vec<(Stri
     out
 }
 
-/// The model a session was started with, from its arguments.
-fn model_of(args: &[String]) -> Option<String> {
-    args.iter().enumerate().find_map(|(i, a)| {
-        a.strip_prefix("--model=")
-            .map(str::to_string)
-            .or_else(|| (a == "--model").then(|| args.get(i + 1).cloned()).flatten())
-    })
-}
-
 impl App {
     /// The tile menu's handoff line for session `id`: the brothers it can
     /// go to, or "Now" while it waits for its turn to end. None for a
     /// session that cannot be handed off.
     pub(super) fn handoff_menu(&self, id: &str) -> Option<Item> {
-        if let Some(o) = with(|s| s.out.get(id).cloned()) {
+        if let Some(o) = with(|s| s.hand.going(id).cloned()) {
             let mut items = vec![Item::Disabled(shown_line(&o))];
             if !o.now && !o.stopped() {
                 items.push(Item::action(HANDOFF, "Now"));
@@ -411,7 +348,7 @@ impl App {
             return true;
         }
         if picked == HANDOFF {
-            with(|s| s.out.get_mut(id).map(Outgoing::hurry));
+            with(|s| s.hand.hurry(id));
             self.handing_tick();
             return true;
         }
@@ -461,11 +398,7 @@ impl App {
                 crate::project::brother_name(to)
             ));
         }
-        with(|s| {
-            s.out
-                .entry(id.to_string())
-                .or_insert_with(|| Outgoing::new(id, to, now));
-        });
+        with(|s| s.hand.start(id, to, now));
         self.handing_tick();
         Ok(())
     }
@@ -474,7 +407,7 @@ impl App {
     /// handoff is under way: the receiver owns it a moment before its
     /// `took` comes, and that is the handoff, not a takeover to fence.
     pub(super) fn handing_out_to(&self, id: &str) -> Option<String> {
-        with(|s| s.out.get(id).map(|o| o.to.clone()))
+        with(|s| s.hand.to(id))
     }
 
     /// Starts or stops handing every session to `to`.
@@ -492,10 +425,7 @@ impl App {
     pub(super) fn handing_tick(&mut self) {
         self.handing_back();
         // A place nobody comes for any more: the sender gave up.
-        if let Ok(mut p) = PLACING.lock() {
-            let now = unix_now();
-            p.retain(|(_, _, since)| now.saturating_sub(*since) < handing::PLACE_SECS + 120);
-        }
+        PLACING.expire(unix_now());
         let takers = self.far_takers();
         let leaving = with(|s| s.leaving.clone());
         if let Ok(mut l) = LEAVING.lock() {
@@ -504,7 +434,7 @@ impl App {
         if let Some(to) = &leaving {
             self.leave_next(to);
         }
-        let ids: Vec<String> = with(|s| s.out.keys().cloned().collect());
+        let ids: Vec<String> = with(|s| s.hand.ids());
         let now = unix_now();
         for id in ids {
             let phase = self
@@ -513,20 +443,11 @@ impl App {
                 .lock()
                 .ok()
                 .and_then(|r| r.get(&id).map(|s| s.phase.clone()));
-            let Some(phase) = phase else {
-                with(|s| {
-                    s.out.remove(&id);
-                    s.asks.remove(&id);
-                });
+            let linked = with(|s| s.hand.to(&id)).is_some_and(|to| takers.contains(&to));
+            let Some((o, step)) = with(|s| s.hand.tick(&id, phase.as_ref(), linked, now)) else {
                 continue;
             };
-            let Some(mut o) = with(|s| s.out.get(&id).cloned()) else {
-                continue;
-            };
-            let linked = takers.contains(&o.to);
-            let step = o.tick(between_turns(&phase), linked, now);
             let line = shown_line(&o);
-            with(|s| s.out.insert(id.clone(), o.clone()));
             self.handing_line(&id, &line);
             self.handing_do(&id, &o, step);
         }
@@ -535,7 +456,7 @@ impl App {
     /// Hands the next session over while leaving, one at a time, and says
     /// when none is left.
     fn leave_next(&mut self, to: &str) {
-        if with(|s| !s.out.is_empty()) {
+        if with(|s| !s.hand.is_empty()) {
             return;
         }
         let ids: Vec<String> = match self.shared.registry.lock() {
@@ -552,7 +473,7 @@ impl App {
             .find(|id| !stuck.contains(id) && self.handable(id).is_ok());
         match next {
             Some(id) => {
-                with(|s| s.out.insert(id.clone(), Outgoing::new(&id, to, false)));
+                with(|s| s.hand.start(&id, to, false));
             }
             None => {
                 with(|s| s.leaving = None);
@@ -593,22 +514,14 @@ impl App {
                 // The agent stops first, so nothing changes the tree or
                 // the transcript while they travel. Halted, it pauses.
                 self.halt(id);
-                let ask = match with(|s| s.asks.get(id).cloned()) {
-                    Some(ask) => ask,
-                    None => {
-                        let ask = self.bases_ask_for(id);
-                        with(|s| s.asks.insert(id.to_string(), ask.clone()));
-                        ask
-                    }
-                };
+                let ask = with(|s| s.hand.ask(id, || self.bases_ask_for(id)));
                 self.far_tell(&o.to, ask);
             }
             Do::Pack { known, clean } => self.handing_pack(id, &o.to, known, clean),
             Do::LetGo(n) => self.let_go(id, &o.to, n),
             Do::Fail(why) => {
                 with(|s| {
-                    s.out.remove(id);
-                    s.asks.remove(id);
+                    s.hand.drop(id);
                     s.stuck.insert(id.to_string());
                 });
                 self.keeping_recall(id);
@@ -619,43 +532,18 @@ impl App {
     }
 
     /// The ask for a receiver's commits of session `id`'s repository, with
-    /// what its human needs to place the project should it have none: the
-    /// URL to clone, the folder's name, or that it is a folder without git.
+    /// what its human needs to place the project should it have none.
     fn bases_ask_for(&self, id: &str) -> Value {
-        let (cwd, name, top) = self
-            .shared
+        let me = crate::portal_pair::pc_name();
+        self.shared
             .registry
             .lock()
             .ok()
-            .and_then(|r| {
-                let s = r.get(id)?;
-                let top = s
-                    .worktree
-                    .as_ref()
-                    .map_or_else(|| s.cwd.clone(), |w| w.main.clone());
-                Some((s.cwd.clone(), s.name.clone(), top))
-            })
-            .unwrap_or_default();
-        let dir = Path::new(&cwd);
-        let repo = handoff::repo_id(dir);
-        let url = repo
-            .as_ref()
-            .and_then(|_| placing::clone_url(&handoff::remote_urls(dir)));
-        let folder = Path::new(&top)
-            .file_name()
-            .map(|n| placing::folder_name(&n.to_string_lossy()))
-            .unwrap_or_default();
-        let place = PlaceAsk {
-            url,
-            name,
-            folder,
-            plain: repo.is_none() && dir.is_dir(),
-            from: crate::portal_pair::pc_name(),
-        };
-        bases_ask_placing(id, &repo.unwrap_or_default(), &place)
+            .and_then(|r| r.get(id).map(|s| handoffs::bases_ask_of(s, &me)))
+            .unwrap_or_else(|| handing::bases_ask(id, &RepoId::default()))
     }
 
-    /// Packs session `id` on a thread for its receiver `to`, which has
+    /// Packs session `id` on a thread for its receiver    /// Packs session `id` on a thread for its receiver `to`, which has
     /// `known`. The record carries this PC's signed word that it hands the
     /// session to `to`, so `to` owns it on that word as soon as it runs.
     fn handing_pack(&mut self, id: &str, to: &str, known: Vec<String>, clean: bool) {
@@ -676,25 +564,14 @@ impl App {
             review: t.mark == horadric_core::tasks::Mark::Review,
         });
         let record = self.shared.registry.lock().ok().and_then(|r| {
-            let s = r.get(id)?;
             Some(Record {
-                session: s.claude_session_id.clone()?,
-                id: id.to_string(),
-                name: s.name.clone(),
-                project: s
-                    .worktree
-                    .as_ref()
-                    .map_or_else(|| s.cwd.clone(), |w| w.main.clone()),
-                cwd: s.cwd.clone(),
-                agent: "claude".into(),
                 model: model_of(&args),
-                from: crate::portal_pair::pc_name(),
                 interrupted: !clean,
                 n,
                 said,
                 chat,
                 carried,
-                ..Record::default()
+                ..record_of(r.get(id)?, &crate::portal_pair::pc_name())?
             })
         });
         let notify = self.notify.0 as isize;
@@ -726,41 +603,27 @@ impl App {
             Err(_) => return,
         };
         for (id, result) in packed {
-            let Some(mut o) = with(|s| s.out.get(&id).cloned()) else {
-                continue;
-            };
-            match result {
-                Ok(bytes) => {
-                    for part in split(&id, &bytes) {
-                        let msg = serde_json::to_value(&part).unwrap_or(Value::Null);
-                        self.far_tell(&o.to, msg);
+            match with(|s| s.hand.packed(&id, result, unix_now())) {
+                Packed::Gone => {}
+                Packed::Send(to, parts) => {
+                    for msg in parts {
+                        self.far_tell(&to, msg);
                     }
-                    o.sent(unix_now());
-                    with(|s| s.out.insert(id.clone(), o));
                 }
-                Err(e) => {
-                    let o = o.clone();
-                    self.handing_do(&id, &o, Do::Fail(format!("cannot pack it: {e}")));
-                }
+                Packed::Fail(o, step) => self.handing_do(&id, &o, step),
             }
         }
         let me = crate::portal_pair::pc_name();
         for l in landings {
             let r = &l.record;
+            let first = l.arrived.first_line(r, &r.from, &me);
             let result = match l.arrived {
-                Arrived::Git(landed) => {
-                    let first = moved_line(&r.from, &me, &landed.worktree.path, !r.interrupted);
-                    self.adopt_landed(r, landed, first)
-                }
-                Arrived::Plain(cwd) => {
-                    let folder = cwd.to_string_lossy().into_owned();
-                    let first = moved_plain_line(&r.from, &me, &folder, !r.interrupted, &r.left);
-                    self.adopt_at(r, cwd, None, first)
-                }
+                Arrived::Git(landed) => self.adopt_landed(r, landed, first),
+                Arrived::Plain(cwd) => self.adopt_at(r, cwd, None, first),
             };
             if let Ok(id) = &result {
                 let n = l.record.n.saturating_add(1);
-                with(|s| s.took.insert(id.clone(), n));
+                with(|s| s.hand.took(id, n));
                 self.keeping_handed(id, None, n, &l.record.said);
             }
             let _ = l.done.send(result);
@@ -770,10 +633,7 @@ impl App {
     /// The receiver runs the session: the tile goes, and its worktree with
     /// it, since the work is on the receiver now.
     fn let_go(&mut self, id: &str, to: &str, n: u64) {
-        with(|s| {
-            s.out.remove(id);
-            s.took.remove(id);
-        });
+        with(|s| s.hand.let_go(id));
         self.keeping_handed(id, Some(to), n, &[]);
         let (tree, cwd, session) = match self.shared.registry.lock() {
             Ok(mut r) => match r.get_mut(id) {
@@ -798,7 +658,6 @@ impl App {
         if let Some(session) = session {
             handing::forget_ref(dir, &session);
         }
-        with(|s| s.asks.remove(id));
         // Its tile's place, for the session to come back into as the
         // receiver's.
         self.far_left(id);
@@ -816,8 +675,7 @@ impl App {
         let name = &crate::project::brother_name(key);
         let t = msg["t"].as_str().unwrap_or("");
         let about = |f: &str| msg["for"] == f;
-        if !(t == "bases" || t == "took" || (t == "error" && (about("bundle") || about("handoff"))))
-        {
+        if !handoffs::is_answer(msg) {
             return false;
         }
         let Some(id) = msg["id"].as_str().map(str::to_string) else {
@@ -839,33 +697,9 @@ impl App {
                 return true;
             }
         }
-        let Some(mut o) = with(|s| s.out.get(&id).cloned()).filter(|o| o.to == key) else {
+        let Some((o, step)) = with(|s| s.hand.answer(key, name, msg, unix_now())) else {
             return t != "error";
         };
-        let step = match t {
-            "bases" => match handing::heard_bases(msg) {
-                (known, true) => o.heard_bases(known),
-                _ if handing::heard_placing(msg) => {
-                    o.heard_placing(unix_now());
-                    Do::Wait
-                }
-                (_, false) if matches!(o.stage, handing::Stage::Bases(_)) || o.placing() => {
-                    Do::Fail(match msg["text"].as_str() {
-                        Some(why) => format!("{name} says {why}"),
-                        None => format!("{name} has no checkout of this project"),
-                    })
-                }
-                // The ask again after a drop, from a receiver that does
-                // not run it (yet): the time limit decides.
-                (_, false) => Do::Wait,
-            },
-            "took" => o.heard_took(handing::heard_took(msg)),
-            _ => Do::Fail(format!(
-                "{name} says {}",
-                msg["text"].as_str().unwrap_or("no")
-            )),
-        };
-        with(|s| s.out.insert(id.clone(), o.clone()));
         self.handing_do(&id, &o, step);
         true
     }
@@ -886,8 +720,8 @@ impl App {
                 .registry
                 .lock()
                 .is_ok_and(|r| r.get(&id).is_some_and(|s| s.brother.is_none()));
-            if let Some(n) = with(|s| s.took.get(&id).copied()).filter(|_| runs) {
-                return Some(Box::new(move || took_message(&id, n)));
+            if let Some(took) = with(|s| s.hand.took_again(&id, runs)) {
+                return Some(Box::new(move || took));
             }
             let repo: RepoId = serde_json::from_value(msg["repo"].clone()).unwrap_or_default();
             let place = handing::heard_place(msg);
@@ -900,7 +734,7 @@ impl App {
                 bases_answer(&id, checkout.map(|c| handoff::known_commits(&c)))
             }));
         }
-        let package = match with(|s| s.arriving.take(who, msg, unix_now())) {
+        let package = match with(|s| s.hand.arriving.take(who, msg, unix_now())) {
             Ok(None) => return None,
             Ok(Some(p)) => p,
             Err(e) => return Some(Box::new(move || refused(&id, &e))),
@@ -917,14 +751,11 @@ impl App {
             .registry
             .lock()
             .is_ok_and(|r| r.get(&id).is_some());
-        let placed = match place_of(&id) {
-            Some(Place::Ready(dir)) => Some(dir),
-            _ => None,
-        };
-        let checkout = if record.plain {
+        let placed = PLACING.ready(&id);
+        let checkout = if record.plain || placed.is_some() {
             None
         } else {
-            placed.clone().or_else(|| self.checkout_of(&record.repo))
+            self.checkout_of(&record.repo)
         };
         let projects = horadric_hooks::transcript::projects();
         let notify = self.notify.0 as isize;
@@ -932,25 +763,9 @@ impl App {
             if taken || id.is_empty() {
                 return refused(&id, "a session of that id is here already");
             }
-            let Some(projects) = projects else {
-                return refused(&id, "Claude Code's folder was not found");
-            };
-            let arrived = if record.plain {
-                let Some(folder) = placed else {
-                    return refused(&id, "no folder was picked for it here");
-                };
-                match placing::land_plain(&package, &folder, &projects) {
-                    Ok(cwd) => Arrived::Plain(cwd),
-                    Err(e) => return refused(&id, &format!("cannot land it: {e}")),
-                }
-            } else {
-                let Some(repo) = checkout else {
-                    return refused(&id, "no checkout of this project here");
-                };
-                match handing::land(&package, &repo, &projects) {
-                    Ok(l) => Arrived::Git(l),
-                    Err(e) => return refused(&id, &format!("cannot land it: {e}")),
-                }
+            let arrived = match arrive(&package, placed, checkout, projects) {
+                Ok(a) => a,
+                Err(e) => return refused(&id, &e),
             };
             let (done, told) = mpsc::channel();
             if let Ok(mut b) = BACK.lock() {
@@ -963,7 +778,7 @@ impl App {
             wake(notify);
             match told.recv_timeout(ADOPT_WAIT) {
                 Ok(Ok(_)) => {
-                    drop_place(&id);
+                    PLACING.forget(&id);
                     took_message(&id, record.n.saturating_add(1))
                 }
                 Ok(Err(e)) => refused(&id, &format!("cannot resume it: {e}")),
@@ -985,13 +800,7 @@ impl App {
                 );
             }
         }
-        let mut seen = HashSet::new();
-        folders.retain(|f| seen.insert(f.to_lowercase()) && Path::new(f).is_dir());
-        let mine: Vec<(String, RepoId)> = folders
-            .into_iter()
-            .filter_map(|f| Some((f.clone(), handoff::repo_id(Path::new(&f))?)))
-            .collect();
-        handoff::find_project(repo, &mine).map(PathBuf::from)
+        handoffs::checkout_among(folders, repo, true)
     }
 
     /// The answer to a `bases` ask for session `id` of a project this PC
@@ -1005,49 +814,22 @@ impl App {
         ask: PlaceAsk,
     ) -> Box<dyn FnOnce() -> Value + Send> {
         let id = id.to_string();
-        if id.is_empty() {
-            return Box::new(move || bases_answer(&id, None));
-        }
-        match place_of(&id) {
-            Some(Place::Ready(dir)) => {
-                let plain = ask.plain;
-                Box::new(move || {
-                    let commits = if plain {
-                        Vec::new()
-                    } else {
-                        handoff::known_commits(&dir)
-                    };
-                    bases_answer(&id, Some(commits))
-                })
+        let (job, ask_now) = PLACING.answer(&id, ask.plain, unix_now());
+        if ask_now {
+            if let Ok(mut q) = QUESTIONS.lock() {
+                q.push(Question {
+                    id: id.to_string(),
+                    from: who.to_string(),
+                    ask,
+                    repo,
+                });
             }
-            Some(Place::No(why)) => {
-                drop_place(&id);
-                Box::new(move || bases_refused(&id, &why))
-            }
-            Some(Place::Asking) => Box::new(move || bases_placing(&id)),
-            // As many questions as the human can answer at once: the
-            // sender asks again every few seconds, so one more waits its
-            // turn rather than piling a dialog on the screen.
-            None if asking() >= placing::MOST_PLACING => Box::new(move || bases_placing(&id)),
-            None => {
-                set_place(&id, Place::Asking);
-                if let Ok(mut q) = QUESTIONS.lock() {
-                    q.push(Question {
-                        id: id.clone(),
-                        from: who.to_string(),
-                        ask,
-                        repo,
-                    });
-                }
-                unsafe {
-                    let _ =
-                        PostMessageW(Some(self.notify), WM_HORADRIC_PLACE, WPARAM(0), LPARAM(0));
-                }
-                Box::new(move || bases_placing(&id))
+            unsafe {
+                let _ = PostMessageW(Some(self.notify), WM_HORADRIC_PLACE, WPARAM(0), LPARAM(0));
             }
         }
+        job
     }
-
     /// Takes in a handed off or taken over session that has landed: a
     /// tile under its own id in its new worktree, resumed with its
     /// conversation, its next prompt starting with `first_line`. Returns
@@ -1143,13 +925,6 @@ impl App {
     }
 }
 
-/// What the human said about where an arriving project goes.
-enum Said {
-    Clone(String, PathBuf),
-    Folder(PathBuf),
-    No,
-}
-
 /// Asks the human where each arriving project goes, outside the app's
 /// borrow: clone it beside the other checkouts, or pick a folder; with no
 /// remote, only a folder. Then clones, starts or makes it on a thread and
@@ -1161,19 +936,10 @@ pub(super) fn place_ask(hwnd: HWND) {
         .unwrap_or_default();
     for q in questions {
         match ask_place(hwnd, &q) {
-            Said::No => set_place(&q.id, Place::No("its human said no".into())),
+            Said::No => PLACING.set(&q.id, Place::No("its human said no".into()), unix_now()),
             said => place_on_thread(q, said),
         }
     }
-}
-
-/// The folder name an arriving project gets: its clone's, else the
-/// sender's.
-fn name_for(ask: &PlaceAsk) -> String {
-    ask.url
-        .as_deref()
-        .map(placing::clone_name)
-        .unwrap_or_else(|| placing::folder_name(&ask.folder))
 }
 
 fn ask_place(hwnd: HWND, q: &Question) -> Said {
@@ -1184,25 +950,14 @@ fn ask_place(hwnd: HWND, q: &Question) -> Said {
         .collect();
     let home = std::env::var("USERPROFILE").ok();
     let parent = placing::checkouts_parent(&recent, home.as_deref(), |p| Path::new(p).is_dir());
-    let session = if q.ask.name.is_empty() {
-        "a session".to_string()
-    } else {
-        format!("\u{201C}{}\u{201D}", q.ask.name)
-    };
-    let from = if q.ask.from.is_empty() {
-        &q.from
-    } else {
-        &q.ask.from
-    };
-    let title = format!("{from} hands {session} to this PC");
+    let from = crate::project::brother_name(&q.from);
+    let question = handoffs::question(&q.ask, &from, "PC", parent.as_deref(), |f| {
+        Path::new(f).exists()
+    });
+    let (title, text) = (&question.title, &question.text);
     let start = parent.clone().map(PathBuf::from);
-    match (&q.ask.url, &parent) {
-        (Some(url), Some(parent)) if !q.ask.plain && placing::cloneable(url) => {
-            let dest = placing::free_folder(parent, &name_for(&q.ask), |f| Path::new(f).exists());
-            let text = format!(
-                "This PC has no checkout of its project. Clone {url} into {dest}?\n\n\
-                 Or pick a folder: one that holds the project already, or where it should go."
-            );
+    match question.clone {
+        Some((url, dest)) => {
             let pressed = super::ask(&Dialog {
                 tone: Tone::Question,
                 title: &title,
@@ -1212,20 +967,12 @@ fn ask_place(hwnd: HWND, q: &Question) -> Said {
                 check: None,
             });
             match pressed {
-                Some(0) => Said::Clone(url.clone(), PathBuf::from(dest)),
+                Some(0) => Said::Clone(url, PathBuf::from(dest)),
                 Some(1) => pick(hwnd, start.as_deref()),
                 _ => Said::No,
             }
         }
-        _ => {
-            let text = if q.ask.plain {
-                "Its folder has no git, so it comes as a copy of the folder's files. \
-                 Pick a folder to put it in: an empty one, or one it gets a new folder inside."
-            } else {
-                "This PC has no checkout of its project, and the project has no remote to \
-                 clone. Pick a folder: one that holds the project already, or where its \
-                 history should go."
-            };
+        None => {
             let pressed = super::ask(&Dialog {
                 tone: Tone::Question,
                 title: &title,
@@ -1252,41 +999,13 @@ fn pick(hwnd: HWND, start: Option<&Path>) -> Said {
 fn place_on_thread(q: Question, said: Said) {
     let notify = with_app(|app| app.notify.0 as isize).unwrap_or(0);
     std::thread::spawn(move || {
-        let place = match ready_place(&q, said) {
+        let place = match handoffs::ready_place(&q.ask, &q.repo, said) {
             Ok(dir) => Place::Ready(dir),
             Err(e) => Place::No(e),
         };
-        set_place(&q.id, place);
+        PLACING.set(&q.id, place, unix_now());
         wake(notify);
     });
-}
-
-fn ready_place(q: &Question, said: Said) -> Result<PathBuf, String> {
-    let picked = match said {
-        Said::Clone(url, dest) => {
-            placing::clone_into(&url, &dest).map_err(|e| format!("the clone failed: {e}"))?;
-            return Ok(dest);
-        }
-        Said::Folder(dir) => dir,
-        Said::No => return Err("its human said no".into()),
-    };
-    let wanted = (!q.ask.plain).then_some(&q.repo);
-    let holds = placing::picked(&picked, wanted);
-    let picked_text = picked.to_string_lossy();
-    let dest = match placing::placement(&picked_text, holds, &name_for(&q.ask), |f| {
-        Path::new(f).exists()
-    }) {
-        Placement::Use(dir) => return Ok(PathBuf::from(dir)),
-        Placement::Into(dir) => PathBuf::from(dir),
-    };
-    match (&q.ask.url, q.ask.plain) {
-        (_, true) => std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?,
-        (Some(url), false) => {
-            placing::clone_into(url, &dest).map_err(|e| format!("the clone failed: {e}"))?
-        }
-        (None, false) => placing::init_at(&dest)?,
-    }
-    Ok(dest)
 }
 
 #[cfg(test)]
@@ -1327,32 +1046,5 @@ mod tests {
             ]
         );
         assert_eq!(far_targets("Beta", &[], "Me").len(), 1);
-    }
-
-    #[test]
-    fn an_arriving_project_is_named_after_its_clone_or_its_folder() {
-        let mut ask = PlaceAsk {
-            url: Some("git@h:a/proj.git".into()),
-            folder: "other".into(),
-            ..Default::default()
-        };
-        assert_eq!(name_for(&ask), "proj");
-        ask.url = None;
-        assert_eq!(name_for(&ask), "other");
-    }
-
-    #[test]
-    fn a_sessions_model_is_read_either_way() {
-        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(
-            model_of(&a(&["--model", "haiku"])).as_deref(),
-            Some("haiku")
-        );
-        assert_eq!(
-            model_of(&a(&["-p", "--model=opus"])).as_deref(),
-            Some("opus")
-        );
-        assert_eq!(model_of(&a(&["--model"])), None);
-        assert_eq!(model_of(&a(&[])), None);
     }
 }

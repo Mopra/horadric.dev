@@ -597,6 +597,40 @@ pub fn offer(heard: Heard, me_name: &str, now: u64) -> Option<String> {
     offers_takeover(heard.presence(now)).then(|| format!("Take over on {me_name}"))
 }
 
+/// Why session `name` is not taken over on this machine (`here`: "PC",
+/// "node", "Mac"), brothers named by `named`, and whether what is kept of
+/// it goes: one that moved on since its snapshot, or ended, is behind for
+/// good.
+pub fn untakeable_text(
+    name: &str,
+    why: &Untakeable,
+    here: &str,
+    named: impl Fn(&str) -> String,
+) -> (String, bool) {
+    match why {
+        Untakeable::Stuck => (format!("{name} has a number that cannot go up"), false),
+        Untakeable::MovedOn(o) => (
+            format!(
+                "{name} is {}'s now, moved on since its last snapshot here",
+                named(&o.brother)
+            ),
+            true,
+        ),
+        Untakeable::Ended => (format!("{name} was ended for good on its brother"), true),
+        Untakeable::Listed(b) => (format!("{name} runs on {} now", named(b)), false),
+        Untakeable::Unheard => (
+            format!(
+                "Nothing its owner signed says whose {name} is yet, so no brother would believe the takeover"
+            ),
+            false,
+        ),
+        Untakeable::NotKeeper => (
+            format!("{name}'s brother does not name this {here} its keeper any more"),
+            false,
+        ),
+    }
+}
+
 /// Everything a takeover lands from what the keeper holds: the record,
 /// the transcript as `<claude id>.jsonl`, and the work as a bundle of the
 /// conversation's handoff ref, so landing is a handoff's.
