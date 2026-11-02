@@ -60,6 +60,13 @@ pub const ENV_REMOVE: &[&str] = &[
     "AI_AGENT",
 ];
 
+/// Names the Folio to Anthropic as its own app. Left unset, claude.exe on
+/// stream-json calls itself `sdk-cli`, which the 5 hour limit meters at
+/// about twice the rate of `cli` (pingdotgg/t3code#24649), while a label of
+/// an app's own is metered like `cli`. Take this out once Anthropic meters
+/// `sdk-cli` the same.
+pub const ENTRYPOINT: (&str, &str) = ("CLAUDE_CODE_ENTRYPOINT", "horadric");
+
 /// How long a dropped session gets to end on its own.
 const GRACE: Duration = Duration::from_secs(3);
 
@@ -146,6 +153,7 @@ impl Headless {
         for name in &options.env_remove {
             command.env_remove(name);
         }
+        command.env(ENTRYPOINT.0, ENTRYPOINT.1);
         for (k, v) in &options.env_set {
             command.env(k, v);
         }
