@@ -362,6 +362,9 @@ const TICK_TIMER: usize = 1;
 /// Fires once, a moment after a screen change, to lay the tiles out again
 /// once Windows has finished moving windows off a screen that went away.
 const SCREEN_TIMER: usize = 2;
+/// The same, later: on an undock or a wake from sleep, Windows can take
+/// seconds to move windows off a screen that went away.
+const SCREEN_LATE_TIMER: usize = 7;
 /// Runs while a window glides to its place in the columns.
 const GLIDE_TIMER: usize = 3;
 /// Runs while a session works, to breathe the tray icon's light.
@@ -1264,6 +1267,10 @@ unsafe extern "system" fn app_proc(
                 }
                 windows::Win32::UI::WindowsAndMessaging::PBT_APMRESUMESUSPEND
                 | windows::Win32::UI::WindowsAndMessaging::PBT_APMRESUMEAUTOMATIC => {
+                    // Unplugged while asleep: the screens are not what the
+                    // windows were placed for.
+                    SetTimer(Some(hwnd), SCREEN_TIMER, 1000, None);
+                    SetTimer(Some(hwnd), SCREEN_LATE_TIMER, 5000, None);
                     with_app(|app| app.portal_power("awake"))
                 }
                 _ => None,
@@ -1277,6 +1284,7 @@ unsafe extern "system" fn app_proc(
         {
             with_app(App::screen_changed);
             SetTimer(Some(hwnd), SCREEN_TIMER, 1000, None);
+            SetTimer(Some(hwnd), SCREEN_LATE_TIMER, 5000, None);
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
         // Menus and dialogs run modal loops that dispatch messages, including
@@ -4154,9 +4162,9 @@ impl App {
                 self.tray.step();
                 self.breathe_stage();
             }
-            WM_TIMER if wparam == SCREEN_TIMER => {
+            WM_TIMER if wparam == SCREEN_TIMER || wparam == SCREEN_LATE_TIMER => {
                 unsafe {
-                    let _ = KillTimer(Some(self.notify), SCREEN_TIMER);
+                    let _ = KillTimer(Some(self.notify), wparam);
                 }
                 self.screen_changed();
             }
@@ -10179,26 +10187,46 @@ impl App {
     }
 
     /// A screen came or went, or the taskbar moved: the columns fit the new
-    /// work area, and a stage left off every screen or over the tiles docks
-    /// beside them again.
+    /// work area, a stage left off every screen or over the tiles docks
+    /// beside them again, and one sized for a bigger screen shrinks to the
+    /// one it is on now, open or closed.
     fn screen_changed(&mut self) {
         self.arrange_with(false);
-        self.stage_rect = self.stage_rect.filter(|r| on_screen(r[0], r[1]));
+        self.stage_rect = self
+            .stage_rect
+            .filter(|r| on_screen(r[0], r[1]))
+            .map(|r| work_of(r).map_or(r, |w| layout::fit(r, w, self.px(8))));
         let Some(stage) = &self.stage else {
             return;
         };
+        if stage.rect().is_none() {
+            return;
+        }
         let Ok(r) = snapping::visible_rect(stage.hwnd) else {
             return;
         };
         let rect = [r.left, r.top, r.right, r.bottom];
-        let covers =
-            |t: &[i32; 4]| rect[0] < t[2] && t[0] < rect[2] && rect[1] < t[3] && t[1] < rect[3];
-        if on_one_screen(rect) && !self.tile_rects().iter().any(covers) {
+        let fitted = match work_of(rect) {
+            Some(w) if on_screen(rect[0], rect[1]) => layout::fit(rect, w, 1),
+            _ => {
+                let (area, tiles_left) = self.stage_area();
+                layout::square(area, tiles_left)
+            }
+        };
+        let covers = |t: &[i32; 4]| {
+            fitted[0] < t[2] && t[0] < fitted[2] && fitted[1] < t[3] && t[1] < fitted[3]
+        };
+        let to = if self.tile_rects().iter().any(covers) {
+            let (area, tiles_left) = self.stage_area();
+            layout::square(area, tiles_left)
+        } else {
+            fitted
+        };
+        if to == rect {
             return;
         }
-        let (area, tiles_left) = self.stage_area();
         if let Some(stage) = &self.stage {
-            stage.set_visible_rect(layout::square(area, tiles_left));
+            stage.set_visible_rect(to);
         }
     }
 }
@@ -10381,9 +10409,8 @@ fn on_screen(x: i32, y: i32) -> bool {
     !unsafe { MonitorFromPoint(p, MONITOR_DEFAULTTONULL) }.is_invalid()
 }
 
-/// Whether a rect lies inside the work area of one screen, a pixel either
-/// way allowed.
-fn on_one_screen(r: [i32; 4]) -> bool {
+/// The work area of the screen a rect lies most on.
+fn work_of(r: [i32; 4]) -> Option<[i32; 4]> {
     let rect = RECT {
         left: r[0],
         top: r[1],
@@ -10397,11 +10424,9 @@ fn on_one_screen(r: [i32; 4]) -> bool {
     let found =
         unsafe { GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &mut info) };
     let w = info.rcWork;
-    found.as_bool()
-        && r[0] >= w.left - 1
-        && r[1] >= w.top - 1
-        && r[2] <= w.right + 1
-        && r[3] <= w.bottom + 1
+    found
+        .as_bool()
+        .then_some([w.left, w.top, w.right, w.bottom])
 }
 
 /// What [`App::claude_start`] gives a Claude session.

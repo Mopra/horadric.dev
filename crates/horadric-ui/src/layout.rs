@@ -2208,6 +2208,24 @@ pub fn square(area: [i32; 4], tiles_left: bool) -> [i32; 4] {
     dock((side, side), area, tiles_left)
 }
 
+/// A window brought inside a work area: shrunk to it where it is bigger,
+/// then moved in. A window that already fits stays as it is. `slack` lets
+/// it hang over each edge by that much, for the invisible borders of a
+/// window rect. All as (left, top, right, bottom).
+pub fn fit(rect: [i32; 4], work: [i32; 4], slack: i32) -> [i32; 4] {
+    let work = [
+        work[0] - slack,
+        work[1] - slack,
+        work[2] + slack,
+        work[3] + slack,
+    ];
+    let w = (rect[2] - rect[0]).min(work[2] - work[0]);
+    let h = (rect[3] - rect[1]).min(work[3] - work[1]);
+    let l = rect[0].min(work[2] - w).max(work[0]);
+    let t = rect[1].min(work[3] - h).max(work[1]);
+    [l, t, l + w, t + h]
+}
+
 /// Where the stage goes when the columns of tiles change width: its left
 /// edge on `edge`, the first pixel the tiles leave free, when the tiles now
 /// reach under it or when it stood against them at `was`, so a sized stage
@@ -3177,6 +3195,22 @@ mod tests {
         let area = [304, 12, 1908, 1068];
         assert_eq!(square(area, true), [304, 12, 1360, 1068]);
         assert_eq!(square(area, false), [852, 12, 1908, 1068]);
+    }
+
+    #[test]
+    fn fit_shrinks_a_window_from_a_bigger_screen() {
+        // A stage sized on a 4k screen, left on a laptop's 1920 by 1200.
+        let laptop = [0, 0, 1920, 1152];
+        assert_eq!(fit([300, 100, 3500, 2000], laptop, 0), laptop);
+        assert_eq!(fit([-200, 50, 800, 900], laptop, 0), [0, 50, 1000, 900]);
+        assert_eq!(fit([1500, 50, 2300, 900], laptop, 0), [1120, 50, 1920, 900]);
+    }
+
+    #[test]
+    fn fit_leaves_a_window_that_fits() {
+        let work = [0, 0, 1920, 1152];
+        assert_eq!(fit([300, 100, 1500, 900], work, 0), [300, 100, 1500, 900]);
+        assert_eq!(fit([-7, 0, 1927, 1159], work, 8), [-7, 0, 1927, 1159]);
     }
 
     #[test]
