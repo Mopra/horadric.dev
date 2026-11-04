@@ -1,7 +1,7 @@
 //! The icon's rune stone turning, for a hireling's portrait in the
 //! retinue and a session's tile. Ray marched like the icon, so baked:
 //! `bake.py turning` renders the stone at every [`STEP_DEG`] round from the
-//! icon's own angle, and `bake.py tumbling` it rolling forward once from
+//! icon's own angle, and `bake.py tumbling` it rolling away once from
 //! each quarter of that turn, each frame as the stone and, apart, the
 //! light of its runes, so it is lit in its state's colour.
 
@@ -18,7 +18,7 @@ static DATA: &[u8] = include_bytes!("../assets/icon/turning.bin");
 pub const TUMBLE_QUARTERS: usize = 4;
 pub const TUMBLE_STEPS: usize = 18;
 
-/// The stone rolling forward: for each quarter of its turn, the frames
+/// The stone rolling away: for each quarter of its turn, the frames
 /// after it stands, as `DATA` holds them.
 static TUMBLE: &[u8] = include_bytes!("../assets/icon/tumbling.bin");
 
@@ -30,7 +30,7 @@ pub fn frame_at(deg: f32) -> usize {
     ((deg / STEP_DEG).round() as i64).rem_euclid(FRAMES as i64) as usize
 }
 
-/// The frame of a stone `step` of [`TUMBLE_STEPS`] round its forward roll
+/// The frame of a stone `step` of [`TUMBLE_STEPS`] round its roll away
 /// from quarter `quarter` of its turn. Step 0 and a whole roll are the
 /// stone standing, which is a frame of the turn.
 pub fn tumble_at(quarter: usize, step: usize) -> usize {

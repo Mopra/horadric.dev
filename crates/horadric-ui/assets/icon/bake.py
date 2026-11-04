@@ -113,7 +113,7 @@ def turning():
         f.write(out)
 
 
-# The tiles' stone tumbling forward once round from each quarter of its
+# The tiles' stone tumbling away once round from each quarter of its
 # turn, TUMBLE_STEPS frames apart. Must match turning.rs.
 TUMBLE_QUARTERS = 4
 TUMBLE_STEPS = 18
@@ -121,7 +121,7 @@ TUMBLE_STEPS = 18
 
 def tumbling(only=None):
     """Writes `tumbling.bin`: for each quarter turn, the stone tumbling once
-    forward, leaving out the first frame, the stone standing, which
+    away, leaving out the first frame, the stone standing, which
     turning.bin has. `only` renders just that many frames of the first
     quarter, to look at, and writes them as PNGs instead."""
     out = bytearray()
@@ -130,10 +130,10 @@ def tumbling(only=None):
             if only is not None:
                 if q > 0 or i > only:
                     return
-                im = shrink(render(TURN_SIZE * 4, "white", zoom=1.3, bright=1.6, yaw=REST_YAW, tumble=i * 360 / TUMBLE_STEPS), TURN_SIZE)
+                im = shrink(render(TURN_SIZE * 4, "white", zoom=1.3, bright=1.6, yaw=REST_YAW, tumble=-i * 360 / TUMBLE_STEPS), TURN_SIZE)
                 im.convert("RGBA").save(os.path.join(os.environ.get("TEMP", HERE), f"tumble-{i}.png"))
                 continue
-            out += frame(REST_YAW + q * 90, tumble=i * 360 / TUMBLE_STEPS)
+            out += frame(REST_YAW + q * 90, tumble=-i * 360 / TUMBLE_STEPS)
             print(f"tumble {q + 1}.{i}/{TUMBLE_STEPS - 1}", flush=True)
     with open(os.path.join(HERE, "tumbling.bin"), "wb") as f:
         f.write(out)

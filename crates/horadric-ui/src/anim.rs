@@ -71,7 +71,7 @@ pub struct Look {
     /// How far round its rune stone has turned, in degrees past the icon's
     /// angle: it spins slowly while its agent works.
     pub yaw: f32,
-    /// How far through tumbling forward for a new tool, 0 to 1, or 0.
+    /// How far through rolling away for a new tool, 0 to 1, or 0.
     pub tumble: f32,
     /// How much of a new tool's tumble is still to come: 1 the moment the
     /// icon changed, 0 once the stone stands again.
@@ -154,9 +154,12 @@ struct State {
     icon: char,
     was_icon: char,
     /// Where its stone has spun to, and where it was when the last tool
-    /// came, for squaring up before it tumbles.
+    /// came, for squaring up before it rolls or turning it aside.
     yaw: f32,
     yaw_from: f32,
+    /// Whether the last tool rolled the stone away rather than turned it
+    /// aside, picked at random so the moves do not fall into a beat.
+    rolls: bool,
     flipped: Instant,
     context: f32,
     changed: Instant,
@@ -169,6 +172,13 @@ struct State {
 pub struct Tiles {
     states: HashMap<String, State>,
     last: Option<Instant>,
+}
+
+/// Heads or tails, from the hasher's per-process random keys: a stone's
+/// moves want to look unplanned, not be unguessable.
+fn coin() -> bool {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new().build_hasher().finish() & 1 == 1
 }
 
 impl Tiles {
@@ -198,6 +208,7 @@ impl Tiles {
                         was_icon: t.icon,
                         yaw: 0.0,
                         yaw_from: 0.0,
+                        rolls: false,
                         flipped: long_ago,
                         // Already there on the first frame; a new session's
                         // first reading fills up from empty.
@@ -215,7 +226,11 @@ impl Tiles {
                 if s.icon != t.icon {
                     s.was_icon = std::mem::replace(&mut s.icon, t.icon);
                     s.yaw_from = s.yaw;
-                    s.yaw = tilecube::quarter(s.yaw);
+                    s.rolls = coin();
+                    // Aside is always onward, a quarter past the square
+                    // one behind, never back against the spin.
+                    let behind = (s.yaw / 90.0).floor() * 90.0;
+                    s.yaw = if s.rolls { tilecube::quarter(s.yaw) } else { behind + 90.0 };
                     s.flipped = now;
                 }
                 // A tile born this frame starts where it was put.
@@ -232,8 +247,8 @@ impl Tiles {
                 }
                 s.hover = motion::fade(s.hover, if t.hot { 1.0 } else { 0.0 }, dt, HOVER);
                 let since = now.duration_since(s.changed);
-                // The stone spins while its agent works, but stands for a
-                // tumble, which starts from a square quarter.
+                // The stone spins while its agent works, but holds still for
+                // a tool's move, so it never turns on two axes at once.
                 let stirred = now.duration_since(s.flipped);
                 if *t.phase == Phase::Working && stirred >= STONE_TURN {
                     // A long gap between frames is time nothing was drawn,
@@ -245,6 +260,7 @@ impl Tiles {
                     s.yaw_from,
                     s.yaw,
                     stirred.as_secs_f32() / STONE_TURN.as_secs_f32(),
+                    s.rolls,
                 );
                 Look {
                     y: s.y,

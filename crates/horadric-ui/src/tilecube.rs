@@ -1,5 +1,5 @@
 //! Where a session tile's rune stone and its subagents' little stones
-//! stand: the stone turns a quarter for each new tool, and a little stone
+//! stand: for each new tool the stone rolls away or turns a quarter aside, and a little stone
 //! circles it for each subagent. Pure, so every frame is a function of
 //! its inputs alone; the drawing is in `render::keycube`.
 
@@ -8,8 +8,8 @@ use std::f32::consts::TAU;
 /// How fast a working session's stone spins, in degrees a second.
 pub const SPIN: f32 = 24.0;
 
-/// Of a new tool's tumble, the share spent squaring the stone up to the
-/// nearest quarter of its spin before it rolls forward.
+/// Of a new tool's roll, the share spent squaring the stone up to the
+/// nearest quarter of its spin before it rolls away.
 const SQUARE_UP: f32 = 0.3;
 
 /// The quarter of a turn nearest `yaw`, which the stone tumbles from: the
@@ -18,15 +18,20 @@ pub fn quarter(yaw: f32) -> f32 {
     (yaw / 90.0).round() * 90.0
 }
 
-/// How the stone stands `p` of the way through a new tool's tumble (0 at
-/// the change, 1 and on once over), having spun to `from` and squaring up
-/// to `to`: its spin in degrees, and how far round its forward roll, 0 to
-/// 1. Eased, so it sets off and settles like something heavy.
-pub fn stone_pose(from: f32, to: f32, p: f32) -> (f32, f32) {
+/// How the stone stands `p` of the way through a new tool's move (0 at
+/// the change, 1 and on once over), having spun to `from` and coming to
+/// `to`: its spin in degrees, and how far round its roll away, 0 to 1.
+/// A roll squares up first; a turn aside is the spin alone, so the stone
+/// only ever turns on one axis at a time. Eased, so it sets off and
+/// settles like something heavy.
+pub fn stone_pose(from: f32, to: f32, p: f32, rolls: bool) -> (f32, f32) {
     if p >= 1.0 {
         return (to, 0.0);
     }
     let p = p.max(0.0);
+    if !rolls {
+        return (from + (to - from) * ease_in_out(p), 0.0);
+    }
     if p < SQUARE_UP {
         return (from + (to - from) * ease_in_out(p / SQUARE_UP), 0.0);
     }
@@ -81,12 +86,19 @@ mod tests {
     fn a_new_tool_squares_the_stone_up_then_rolls_it_once() {
         assert_eq!(quarter(130.0), 90.0);
         assert_eq!(quarter(140.0), 180.0);
-        assert_eq!(stone_pose(130.0, 90.0, 0.0), (130.0, 0.0));
-        let (yaw, roll) = stone_pose(130.0, 90.0, 0.15);
+        assert_eq!(stone_pose(130.0, 90.0, 0.0, true), (130.0, 0.0));
+        let (yaw, roll) = stone_pose(130.0, 90.0, 0.15, true);
         assert!(yaw < 130.0 && yaw > 90.0 && roll == 0.0, "squaring up first");
-        let (yaw, roll) = stone_pose(130.0, 90.0, 0.65);
+        let (yaw, roll) = stone_pose(130.0, 90.0, 0.65, true);
         assert!(yaw == 90.0 && roll > 0.3 && roll < 0.7, "then rolling");
-        assert_eq!(stone_pose(130.0, 90.0, 1.0), (90.0, 0.0));
+        assert_eq!(stone_pose(130.0, 90.0, 1.0, true), (90.0, 0.0));
+    }
+
+    #[test]
+    fn a_turn_aside_never_rolls() {
+        let (yaw, roll) = stone_pose(130.0, 180.0, 0.5, false);
+        assert!(yaw > 130.0 && yaw < 180.0 && roll == 0.0);
+        assert_eq!(stone_pose(130.0, 180.0, 1.0, false), (180.0, 0.0));
     }
 
     #[test]

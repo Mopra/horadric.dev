@@ -179,7 +179,7 @@ impl Painter<'_> {
 }
 
 /// The two baked frames a stone spun `yaw` degrees and `tumble` of the way
-/// round its forward roll falls between, and how far to the second.
+/// round its roll away falls between, and how far to the second.
 fn frames(yaw: f32, tumble: f32) -> (usize, usize, f32) {
     use crate::turning::{frame_at, tumble_at, STEP_DEG, TUMBLE_STEPS};
     if tumble > 0.0 {

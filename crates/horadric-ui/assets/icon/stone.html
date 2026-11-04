@@ -89,8 +89,9 @@ float mapO(vec3 p) {
   d += (1. - smoothstep(w * .5, w, runeDO(p))) * .085;
   return d;
 }
-// The stone tumbled forward by the tumble angle about the view's right, for the
-// tiles' tumbling stone: world to the stone's own space.
+// The stone tumbled by the tumble angle about its own level axis nearest the
+// view's right, for the tiles' tumbling stone: world to the stone's own space.
+// About the view's right itself, a stone standing at an angle wobbles on two axes.
 vec3 tAxis = vec3(1, 0, 0);
 vec3 obj(vec3 p) {
   float c = cos(tumble), s = sin(tumble);
@@ -119,7 +120,8 @@ void main() {
   float cy = cos(yaw), sy = sin(yaw), cp = cos(pitch), sp = sin(pitch);
   vec3 ro = 6.2 * vec3(cp * sy, sp, -cp * cy);
   vec3 fw = normalize(-ro), rt = normalize(cross(vec3(0,1,0), fw)), up = cross(fw, rt);
-  tAxis = rt;
+  float alongX = step(abs(rt.z), abs(rt.x));
+  tAxis = vec3(alongX * sign(rt.x), 0., (1. - alongX) * sign(rt.z));
   // Seen from above, the stone's middle is below the view's; zoomed in, that shows, so lift it back.
   uv.y -= (zoom - 1.) * .21;
   vec3 rd = normalize(fw + (uv.x * rt + uv.y * up) * .3 / zoom);
