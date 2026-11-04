@@ -926,19 +926,6 @@ impl Target {
                 bitmap.EndDraw(None, None)?;
                 *layer = Some((bitmap, size));
             }
-            // Every turn and tumble of the tiles' rune stone, made once:
-            // frames, so a turn never waits on one.
-            {
-                let mut stones = self.stones.borrow_mut();
-                for f in 0..crate::turning::ALL {
-                    if let std::collections::hash_map::Entry::Vacant(e) = stones.entry(f) {
-                        let (stone, light) = crate::turning::frame(f);
-                        let size = crate::turning::SIZE as u32;
-                        e.insert((self.bitmap(size, &stone)?, self.bitmap(size, &light)?));
-                    }
-                }
-            }
-
             self.rt.BeginDraw();
             if let Some((bitmap, _)) = layer.as_ref() {
                 let still = bitmap.GetBitmap()?;
@@ -953,7 +940,7 @@ impl Target {
             // A failed bloom leaves the frame without its glow, never
             // without its frame.
             let _ = self.bloom(gpu, m, scene);
-            self.painter(&self.rt).key_stones(scene, &self.stones.borrow());
+            self.painter(&self.rt).key_stones(scene, &self.stones);
             if scene.ambient {
                 self.painter(&self.rt).light(scene);
             }
@@ -1135,27 +1122,34 @@ impl Target {
 
     /// A `size` square bitmap of premultiplied BGRA pixels, on this target.
     fn bitmap(&self, size: u32, bgra: &[u8]) -> Result<ID2D1Bitmap> {
-        let props = D2D1_BITMAP_PROPERTIES {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-        };
-        unsafe {
-            self.rt.CreateBitmap(
-                D2D_SIZE_U {
-                    width: size,
-                    height: size,
-                },
-                Some(bgra.as_ptr() as *const _),
-                size * 4,
-                &props,
-            )
-        }
+        bitmap_on(&self.rt, size, bgra)
     }
+}
 
+/// A `size` square bitmap of premultiplied BGRA pixels, on `rt`.
+fn bitmap_on(rt: &ID2D1RenderTarget, size: u32, bgra: &[u8]) -> Result<ID2D1Bitmap> {
+    let props = D2D1_BITMAP_PROPERTIES {
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+    };
+    unsafe {
+        rt.CreateBitmap(
+            D2D_SIZE_U {
+                width: size,
+                height: size,
+            },
+            Some(bgra.as_ptr() as *const _),
+            size * 4,
+            &props,
+        )
+    }
+}
+
+impl Target {
     fn painter<'a>(&'a self, rt: &'a ID2D1RenderTarget) -> Painter<'a> {
         Painter {
             rt,
@@ -1200,6 +1194,22 @@ impl RetinueRow {
 /// The turning stone's frames a target has made, by frame: the stone, and
 /// its runes' light as a mask to fill with the state's colour.
 pub type Stones = HashMap<usize, (ID2D1Bitmap, ID2D1Bitmap)>;
+
+/// Baked stone frame `f` from `stones`, made on `rt` the first time it is
+/// drawn: there are hundreds, and a window draws few of them.
+fn stone_frame(
+    rt: &ID2D1RenderTarget,
+    stones: &RefCell<Stones>,
+    f: usize,
+) -> Option<(ID2D1Bitmap, ID2D1Bitmap)> {
+    let mut stones = stones.borrow_mut();
+    if let std::collections::hash_map::Entry::Vacant(e) = stones.entry(f) {
+        let (stone, light) = crate::turning::frame(f);
+        let size = crate::turning::SIZE as u32;
+        e.insert((bitmap_on(rt, size, &stone).ok()?, bitmap_on(rt, size, &light).ok()?));
+    }
+    stones.get(&f).cloned()
+}
 
 /// A pane's retinue: a portrait per hireling, the one under the cursor,
 /// and its size in DIPs.

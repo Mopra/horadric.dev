@@ -68,12 +68,12 @@ pub struct Look {
     pub flip: f32,
     /// The icon it is turning over from.
     pub was_icon: char,
-    /// How far round its rune stone has turned, in degrees past the icon's
-    /// angle: it spins slowly while its agent works.
-    pub yaw: f32,
-    /// How far through rolling away for a new tool, 0 to 1, or 0.
-    pub tumble: f32,
-    /// How much of a new tool's tumble is still to come: 1 the moment the
+    /// How its rune stone stands this frame: spinning slowly while its
+    /// agent works, turning aside or rolling away for each new tool.
+    pub stone: tilecube::Pose,
+    /// Where that leaves it, for a frame drawn without motion.
+    pub rest: tilecube::Stand,
+    /// How much of a new tool's move is still to come: 1 the moment the
     /// icon changed, 0 once the stone stands again.
     pub stir: f32,
     /// How full its context bar stands, rising and falling to the level
@@ -139,8 +139,8 @@ impl Look {
             was: Stance::of(&Phase::Idle),
             flip: 0.0,
             was_icon: ' ',
-            yaw: 0.0,
-            tumble: 0.0,
+            stone: tilecube::Pose::Spun(tilecube::STANDING),
+            rest: tilecube::STANDING,
             stir: 0.0,
             context: 0.0,
             context_to: 0.0,
@@ -153,13 +153,12 @@ struct State {
     was: Phase,
     icon: char,
     was_icon: char,
-    /// Where its stone has spun to, and where it was when the last tool
-    /// came, for squaring up before it rolls or turning it aside.
-    yaw: f32,
-    yaw_from: f32,
-    /// Whether the last tool rolled the stone away rather than turned it
-    /// aside, picked at random so the moves do not fall into a beat.
-    rolls: bool,
+    /// Where its stone has come to, where it stood when the last tool
+    /// came, and how that tool moved it: picked at random, so the moves
+    /// do not fall into a beat.
+    stand: tilecube::Stand,
+    stood: tilecube::Stand,
+    moved: tilecube::Move,
     flipped: Instant,
     context: f32,
     changed: Instant,
@@ -206,9 +205,9 @@ impl Tiles {
                         was: t.phase.clone(),
                         icon: t.icon,
                         was_icon: t.icon,
-                        yaw: 0.0,
-                        yaw_from: 0.0,
-                        rolls: false,
+                        stand: tilecube::STANDING,
+                        stood: tilecube::STANDING,
+                        moved: tilecube::Move::Aside,
                         flipped: long_ago,
                         // Already there on the first frame; a new session's
                         // first reading fills up from empty.
@@ -225,12 +224,9 @@ impl Tiles {
                 }
                 if s.icon != t.icon {
                     s.was_icon = std::mem::replace(&mut s.icon, t.icon);
-                    s.yaw_from = s.yaw;
-                    s.rolls = coin();
-                    // Aside is always onward, a quarter past the square
-                    // one behind, never back against the spin.
-                    let behind = (s.yaw / 90.0).floor() * 90.0;
-                    s.yaw = if s.rolls { tilecube::quarter(s.yaw) } else { behind + 90.0 };
+                    s.stood = s.stand;
+                    s.moved = if coin() { tilecube::Move::Away } else { tilecube::Move::Aside };
+                    s.stand = tilecube::after(s.stood, s.moved);
                     s.flipped = now;
                 }
                 // A tile born this frame starts where it was put.
@@ -254,14 +250,14 @@ impl Tiles {
                     // A long gap between frames is time nothing was drawn,
                     // not time it spun.
                     let dt = dt.min(Duration::from_millis(100)).as_secs_f32();
-                    s.yaw = (s.yaw + tilecube::SPIN * dt).rem_euclid(360.0);
+                    s.stand.yaw = (s.stand.yaw + tilecube::SPIN * dt).rem_euclid(360.0);
                 }
-                let (yaw, tumble) = tilecube::stone_pose(
-                    s.yaw_from,
-                    s.yaw,
-                    stirred.as_secs_f32() / STONE_TURN.as_secs_f32(),
-                    s.rolls,
-                );
+                let stone = if stirred >= STONE_TURN {
+                    tilecube::Pose::Spun(s.stand)
+                } else {
+                    let p = stirred.as_secs_f32() / STONE_TURN.as_secs_f32();
+                    tilecube::pose(s.stood, s.moved, p)
+                };
                 Look {
                     y: s.y,
                     enter: motion::ease_out(motion::progress(now.duration_since(s.born), ENTER)),
@@ -272,8 +268,8 @@ impl Tiles {
                     was: Stance::of(&s.was),
                     flip: 1.0 - motion::progress(now.duration_since(s.flipped), FLIP),
                     was_icon: s.was_icon,
-                    yaw,
-                    tumble,
+                    stone,
+                    rest: s.stand,
                     stir: 1.0 - motion::progress(stirred, STONE_TURN),
                     context: s.context,
                     context_to: level,

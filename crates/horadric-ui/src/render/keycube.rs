@@ -4,11 +4,12 @@
 //! subagent. It moves every frame, so it is drawn over the still layer
 //! rather than into it.
 
+use std::cell::RefCell;
 use std::time::{Duration, SystemTime};
 
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_OPACITY_MASK_CONTENT_GRAPHICS,
+    ID2D1Bitmap, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_OPACITY_MASK_CONTENT_GRAPHICS,
 };
 
 use super::{color, rect, Painter, Scene, Stones, HIRELING_ORBIT, MAX_SPARKS, RUNE_SETTLE};
@@ -57,7 +58,7 @@ struct Mini {
 
 impl Painter<'_> {
     /// Every agent tile's stone and its little ones, over the still layer.
-    pub(super) unsafe fn key_stones(&self, scene: &Scene, stones: &Stones) {
+    pub(super) unsafe fn key_stones(&self, scene: &Scene, stones: &RefCell<Stones>) {
         for (r, s, look) in super::tiles(scene) {
             if !has_stone(s) {
                 continue;
@@ -106,8 +107,12 @@ impl Painter<'_> {
                 Phase::Done => theme::phase_color(lit),
                 _ => theme::text_dim().fade(0.45),
             };
-            let tumble = if scene.ambient { look.tumble } else { 0.0 };
-            let pose = frames(look.yaw, tumble);
+            let stone = if scene.ambient {
+                look.stone
+            } else {
+                tilecube::Pose::Spun(look.rest)
+            };
+            let pose = frames(stone);
             let minis = minis(s, scene.now);
             let small = |m: &Mini, behind: bool| {
                 let o = tilecube::orbit(m.turn, REACH, m.gather);
@@ -122,7 +127,7 @@ impl Painter<'_> {
                     size,
                 );
                 let fade = if behind { 0.8 } else { 1.0 };
-                let pose = frames(m.spin, 0.0);
+                let pose = frames(tilecube::Pose::Spun(tilecube::Stand { up: 0, yaw: m.spin }));
                 self.rune_stone(stones, pose, &at, m.ink, presence.max(0.6) * fade);
             };
             for m in &minis {
@@ -141,27 +146,27 @@ impl Painter<'_> {
     /// either side makes a slow spin glide rather than tick.
     unsafe fn rune_stone(
         &self,
-        stones: &Stones,
+        stones: &RefCell<Stones>,
         (a, b, k): (usize, usize, f32),
         at: &Rect,
         ink: Color,
         opacity: f32,
     ) {
-        let (Some((stone_a, light_a)), Some((stone_b, light_b))) = (stones.get(&a), stones.get(&b))
-        else {
+        let frame = |f| super::stone_frame(self.rt, stones, f);
+        let (Some((stone_a, light_a)), Some((stone_b, light_b))) = (frame(a), frame(b)) else {
             return;
         };
         let dest = rect(at);
-        let draw = |stone, o: f32| {
+        let draw = |stone: &ID2D1Bitmap, o: f32| {
             if o > 0.0 {
                 self.rt.DrawBitmap(stone, Some(&dest), o, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
             }
         };
-        draw(stone_a, opacity);
-        draw(stone_b, opacity * k);
+        draw(&stone_a, opacity);
+        draw(&stone_b, opacity * k);
         // An opacity mask draws only without antialiasing.
         self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
-        for (light, o) in [(light_a, 1.0 - k), (light_b, k)] {
+        for (light, o) in [(&light_a, 1.0 - k), (&light_b, k)] {
             if o <= 0.0 {
                 continue;
             }
@@ -178,20 +183,17 @@ impl Painter<'_> {
     }
 }
 
-/// The two baked frames a stone spun `yaw` degrees and `tumble` of the way
-/// round its roll away falls between, and how far to the second.
-fn frames(yaw: f32, tumble: f32) -> (usize, usize, f32) {
-    use crate::turning::{frame_at, tumble_at, STEP_DEG, TUMBLE_STEPS};
-    if tumble > 0.0 {
-        let quarter = ((yaw / 90.0).round() as i64).rem_euclid(4) as usize;
-        let at = tumble.clamp(0.0, 1.0) * TUMBLE_STEPS as f32;
-        let step = at.floor();
-        let a = tumble_at(quarter, step as usize);
-        return (a, tumble_at(quarter, step as usize + 1), at - step);
-    }
-    let at = yaw / STEP_DEG;
-    let step = at.floor();
-    (frame_at(step * STEP_DEG), frame_at((step + 1.0) * STEP_DEG), at - step)
+/// The two baked frames a stone in `pose` falls between, and how far to
+/// the second.
+fn frames(pose: tilecube::Pose) -> (usize, usize, f32) {
+    use crate::turning::{rolled_at, spun_at, ROLL_STEP_DEG, STEP_DEG};
+    let (at_deg, step_deg, at): (f32, f32, &dyn Fn(f32) -> usize) = match pose {
+        tilecube::Pose::Spun(s) => (s.yaw, STEP_DEG, &move |d| spun_at(s.up, d)),
+        tilecube::Pose::Rolling { group, deg } => (deg, ROLL_STEP_DEG, &move |d| rolled_at(group, d)),
+    };
+    let x = at_deg / step_deg;
+    let step = x.floor();
+    (at(step * step_deg), at((step + 1.0) * step_deg), x - step)
 }
 
 /// The little stones this frame: one per hireling the band knows of, its

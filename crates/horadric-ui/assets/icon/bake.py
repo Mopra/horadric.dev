@@ -1,8 +1,8 @@
 """Bakes the Horadric icon from stone.html, the ray marched rune stone.
 
 Run it after changing the stone: `python crates/horadric-ui/assets/icon/bake.py`,
-and `bake.py turning` for the turning stone, `bake.py tumbling` for its
-forward tumble.
+and `bake.py turning` for the turning stone, `bake.py poses` for the tiles'
+stone in every pose it can stand in.
 Needs Microsoft Edge or Google Chrome (it renders the page headless, on the GPU) and Pillow.
 
 Writes, beside this file:
@@ -15,6 +15,7 @@ Writes, beside this file:
 
 import base64
 import io
+import math
 import os
 import re
 import subprocess
@@ -44,14 +45,16 @@ def bright(size):
     return 2.2 if size <= SIMPLE_BELOW else 1.6 if size <= 64 else 1.0
 
 
-def render(px, light, simple=False, zoom=1.0, bright=1.0, yaw=None, tumble=None):
-    """The page rendered at `px` square, premultiplied."""
+def render(px, light, simple=False, zoom=1.0, bright=1.0, yaw=None, poses=None, cols=1):
+    """The page rendered at `px` square, premultiplied, or with `poses` an
+    atlas of them, `cols` square, each (turn, pose) as POSES says."""
     url = "file:///" + os.path.join(HERE, "stone.html").replace("\\", "/")
     url += f"?bake=1&px={px}&light={light}&simple={1 if simple else 0}&zoom={zoom}&bright={bright}"
     if yaw is not None:
         url += f"&yaw={yaw}"
-    if tumble is not None:
-        url += f"&tumble={tumble}"
+    if poses is not None:
+        url += f"&cols={cols}&poses=" + ";".join(
+            ",".join(f"{v:.6g}" for v in [t, *(x for row in m for x in row)]) for t, m in poses)
     found = None
     # Edge's headless mode sometimes returns an empty page while Edge itself
     # runs, so Chrome is the fallback.
@@ -69,8 +72,8 @@ def render(px, light, simple=False, zoom=1.0, bright=1.0, yaw=None, tumble=None)
     if not found:
         sys.exit(f"no image from the page for {px} {light}")
     im = Image.open(io.BytesIO(base64.b64decode(found.group(1)))).convert("RGBA")
-    if im.size != (px, px):
-        sys.exit(f"asked for {px}, got {im.size}")
+    if im.size != (px * cols, px * cols):
+        sys.exit(f"asked for {px * cols}, got {im.size}")
     return im.convert("RGBa")
 
 
@@ -88,11 +91,9 @@ TURN_SIZE = 64
 REST_YAW = 52
 
 
-def frame(yaw, tumble=None):
-    """One frame: per pixel, the stone premultiplied as red, green, blue and
-    alpha, then its runes' light."""
-    stone = shrink(render(TURN_SIZE * 4, "none", zoom=1.3, bright=1.6, yaw=yaw, tumble=tumble), TURN_SIZE)
-    lit = shrink(render(TURN_SIZE * 4, "white", zoom=1.3, bright=1.6, yaw=yaw, tumble=tumble), TURN_SIZE)
+def frame_bytes(stone, lit):
+    """Per pixel, the stone premultiplied as red, green, blue and alpha,
+    then its runes' light."""
     out = bytearray()
     s, w = stone.tobytes(), lit.tobytes()
     for j in range(0, len(s), 4):
@@ -101,6 +102,12 @@ def frame(yaw, tumble=None):
         glow = min(255, max(0, (wr - sr + wg - sg + wb - sb) // 3) * 2)
         out += bytes([sr, sg, sb, sa, glow])
     return out
+
+
+def frame(yaw):
+    stone = shrink(render(TURN_SIZE * 4, "none", zoom=1.3, bright=1.6, yaw=yaw), TURN_SIZE)
+    lit = shrink(render(TURN_SIZE * 4, "white", zoom=1.3, bright=1.6, yaw=yaw), TURN_SIZE)
+    return frame_bytes(stone, lit)
 
 
 def turning():
@@ -113,29 +120,66 @@ def turning():
         f.write(out)
 
 
-# The tiles' stone tumbling away once round from each quarter of its
-# turn, TUMBLE_STEPS frames apart. Must match turning.rs.
-TUMBLE_QUARTERS = 4
-TUMBLE_STEPS = 18
+# The tiles' stone stands in any of a cube's 24 poses: it turns aside about
+# the upright and rolls away about the level axis nearest the view's right,
+# a quarter at a time. Every pose is one of these six turned about the
+# upright, by which face is up, and one of the other six rolled, by which
+# face is on that axis. Each matrix takes the stone's own space to the
+# world's, row by row. Must match tilecube.rs.
+SPUN = [
+    [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    [[1, 0, 0], [0, 0, -1], [0, 1, 0]],
+    [[1, 0, 0], [0, -1, 0], [0, 0, -1]],
+    [[1, 0, 0], [0, 0, 1], [0, -1, 0]],
+    [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
+    [[0, 1, 0], [-1, 0, 0], [0, 0, 1]],
+]
+ROLLED = [
+    [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    [[0, 0, 1], [0, 1, 0], [-1, 0, 0]],
+    [[-1, 0, 0], [0, 1, 0], [0, 0, -1]],
+    [[0, 0, -1], [0, 1, 0], [1, 0, 0]],
+    [[1, 0, 0], [0, 0, -1], [0, 1, 0]],
+    [[1, 0, 0], [0, 0, 1], [0, -1, 0]],
+]
+# A roll's frames, ROLL_STEP degrees apart: a roll is quick, so they can be
+# further apart than a spin's. Must match turning.rs.
+ROLL_STEP = 10
+ATLAS = 8
 
 
-def tumbling(only=None):
-    """Writes `tumbling.bin`: for each quarter turn, the stone tumbling once
-    away, leaving out the first frame, the stone standing, which
-    turning.bin has. `only` renders just that many frames of the first
-    quarter, to look at, and writes them as PNGs instead."""
+def roll_by(deg, m):
+    """`m` rolled away `deg` degrees: about the world's z, the level axis
+    nearest the view's right at REST_YAW."""
+    a = math.radians(deg)
+    c, s = math.cos(a), math.sin(a)
+    rz = [[c, -s, 0], [s, c, 0], [0, 0, 1]]
+    return [[sum(rz[i][k] * m[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+
+
+def poses(only=None):
+    """Writes `poses.bin`: the turn of each pose group but the first, which
+    turning.bin has, then each roll group's whole roll. `only` renders that
+    many frames of the first roll as one PNG to look at instead."""
+    frames = [(REST_YAW + k * TURN_STEP, m) for m in SPUN[1:] for k in range(TURN_FRAMES)]
+    rolls = [(REST_YAW, roll_by(k * ROLL_STEP, m)) for m in ROLLED for k in range(360 // ROLL_STEP)]
+    if only is not None:
+        im = render(TURN_SIZE * 2, "white", zoom=1.3, bright=1.6, poses=rolls[:only], cols=math.ceil(math.sqrt(only)))
+        im.convert("RGBA").save(os.path.join(os.environ.get("TEMP", HERE), "rolls.png"))
+        return
+    frames += rolls
     out = bytearray()
-    for q in range(TUMBLE_QUARTERS):
-        for i in range(1, TUMBLE_STEPS):
-            if only is not None:
-                if q > 0 or i > only:
-                    return
-                im = shrink(render(TURN_SIZE * 4, "white", zoom=1.3, bright=1.6, yaw=REST_YAW, tumble=-i * 360 / TUMBLE_STEPS), TURN_SIZE)
-                im.convert("RGBA").save(os.path.join(os.environ.get("TEMP", HERE), f"tumble-{i}.png"))
-                continue
-            out += frame(REST_YAW + q * 90, tumble=-i * 360 / TUMBLE_STEPS)
-            print(f"tumble {q + 1}.{i}/{TUMBLE_STEPS - 1}", flush=True)
-    with open(os.path.join(HERE, "tumbling.bin"), "wb") as f:
+    per = ATLAS * ATLAS
+    big = TURN_SIZE * 4
+    for start in range(0, len(frames), per):
+        batch = frames[start:start + per]
+        layers = [render(big, light, zoom=1.3, bright=1.6, poses=batch, cols=ATLAS) for light in ("none", "white")]
+        for i in range(len(batch)):
+            x, y = (i % ATLAS) * big, (i // ATLAS) * big
+            stone, lit = (shrink(l.crop((x, y, x + big, y + big)), TURN_SIZE) for l in layers)
+            out += frame_bytes(stone, lit)
+        print(f"poses {start + len(batch)}/{len(frames)}", flush=True)
+    with open(os.path.join(HERE, "poses.bin"), "wb") as f:
         f.write(out)
 
 
@@ -169,7 +213,7 @@ def main():
 if __name__ == "__main__":
     if sys.argv[1:] == ["turning"]:
         turning()
-    elif sys.argv[1:2] == ["tumbling"]:
-        tumbling(int(sys.argv[2]) if len(sys.argv) > 2 else None)
+    elif sys.argv[1:2] == ["poses"]:
+        poses(int(sys.argv[2]) if len(sys.argv) > 2 else None)
     else:
         main()

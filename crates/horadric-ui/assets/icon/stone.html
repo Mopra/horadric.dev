@@ -36,7 +36,9 @@ const FS = `#version 300 es
 precision highp float;
 uniform vec2 res;
 uniform vec3 lightCol;
-uniform float tumble, yaw, pitch, rough, chips, glowK, seed, simple, stoneOnly, zoom, bright;
+uniform mat3 orient;
+uniform vec2 origin;
+uniform float yaw, pitch, rough, chips, glowK, seed, simple, stoneOnly, zoom, bright;
 out vec4 frag;
 
 float h31(vec3 p) { p = fract(p * .3183099 + .1); p *= 17.; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
@@ -89,14 +91,9 @@ float mapO(vec3 p) {
   d += (1. - smoothstep(w * .5, w, runeDO(p))) * .085;
   return d;
 }
-// The stone tumbled by the tumble angle about its own level axis nearest the
-// view's right, for the tiles' tumbling stone: world to the stone's own space.
-// About the view's right itself, a stone standing at an angle wobbles on two axes.
-vec3 tAxis = vec3(1, 0, 0);
-vec3 obj(vec3 p) {
-  float c = cos(tumble), s = sin(tumble);
-  return p * c + cross(tAxis, p) * s + tAxis * dot(tAxis, p) * (1. - c);
-}
+// World to the stone's own space: the stone turned to any pose, for the
+// tiles' stone, which rolls and turns from face to face.
+vec3 obj(vec3 p) { return orient * p; }
 float map(vec3 p) { return mapO(obj(p)); }
 float runeD(vec3 p) { return runeDO(obj(p)); }
 vec3 normalAt(vec3 p) {
@@ -116,12 +113,10 @@ float occlusion(vec3 p, vec3 n) {
 vec3 aces(vec3 x) { return clamp((x * (2.51 * x + .03)) / (x * (2.43 * x + .59) + .14), 0., 1.); }
 
 void main() {
-  vec2 uv = (gl_FragCoord.xy * 2. - res) / res.y;
+  vec2 uv = ((gl_FragCoord.xy - origin) * 2. - res) / res.y;
   float cy = cos(yaw), sy = sin(yaw), cp = cos(pitch), sp = sin(pitch);
   vec3 ro = 6.2 * vec3(cp * sy, sp, -cp * cy);
   vec3 fw = normalize(-ro), rt = normalize(cross(vec3(0,1,0), fw)), up = cross(fw, rt);
-  float alongX = step(abs(rt.z), abs(rt.x));
-  tAxis = vec3(alongX * sign(rt.x), 0., (1. - alongX) * sign(rt.z));
   // Seen from above, the stone's middle is below the view's; zoomed in, that shows, so lift it back.
   uv.y -= (zoom - 1.) * .21;
   vec3 rd = normalize(fw + (uv.x * rt + uv.y * up) * .3 / zoom);
@@ -193,16 +188,24 @@ const U = n => gl.getUniformLocation(prog, n);
 const val = id => +document.getElementById(id).value;
 // The turn bake.py asks for, past the slider's quarter turn.
 let yawOver = null;
-// The forward tumble bake.py asks for, in degrees.
-let tumbleOver = 0;
+const STANDING = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+// The stone's pose, row by row as a matrix from its own space to the
+// world's, and where in the canvas it goes; bake.py's atlas sets these.
+let poseOver = STANDING;
+let tile = [0, 0], canvasPx = null;
 function renderGL(px, light, simple, stoneOnly = false, zoom = 1, bright = 1) {
-  glc.width = glc.height = px;
-  gl.viewport(0, 0, px, px);
-  gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+  if (canvasPx === null) {
+    glc.width = glc.height = px;
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+  gl.viewport(tile[0], tile[1], px, px);
+  gl.uniform2f(U('origin'), tile[0], tile[1]);
   gl.uniform2f(U('res'), px, px);
   gl.uniform3fv(U('lightCol'), LIGHTS[light]);
   gl.uniform1f(U('yaw'), (yawOver ?? val('yaw')) * Math.PI / 180);
-  gl.uniform1f(U('tumble'), tumbleOver * Math.PI / 180);
+  // Row major from the stone to the world reads, column major, as its
+  // transpose: from the world to the stone.
+  gl.uniformMatrix3fv(U('orient'), false, poseOver);
   gl.uniform1f(U('pitch'), val('pitch') * Math.PI / 180);
   gl.uniform1f(U('rough'), val('rough') / 60);
   gl.uniform1f(U('chips'), val('chips') / 55);
@@ -267,8 +270,25 @@ if (q.has('bake')) {
   // Used by bake.py: render one layer and leave it in the page as a data URL.
   const px = +q.get('px'), light = q.get('light');
   if (q.has('yaw')) yawOver = +q.get('yaw');
-  if (q.has('tumble')) tumbleOver = +q.get('tumble');
-  renderGL(px, light, q.get('simple') === '1', light === 'none', +(q.get('zoom') || 1), +(q.get('bright') || 1));
+  const args = [light, q.get('simple') === '1', light === 'none', +(q.get('zoom') || 1), +(q.get('bright') || 1)];
+  if (q.has('poses')) {
+    // An atlas: each pose a tile, left to right then down, each given as
+    // its turn in degrees and nine numbers of its pose.
+    const poses = q.get('poses').split(';').map(t => t.split(',').map(Number));
+    const cols = +q.get('cols');
+    canvasPx = px * cols;
+    glc.width = glc.height = canvasPx;
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    poses.forEach((p, i) => {
+      yawOver = p[0];
+      poseOver = p.slice(1);
+      // The canvas counts rows from the bottom.
+      tile = [(i % cols) * px, canvasPx - (Math.floor(i / cols) + 1) * px];
+      renderGL(px, ...args);
+    });
+  } else {
+    renderGL(px, ...args);
+  }
   const out = document.createElement('pre'); out.id = 'baked';
   out.textContent = glc.toDataURL('image/png');
   document.body.append(out);
