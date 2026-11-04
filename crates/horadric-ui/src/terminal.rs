@@ -1069,6 +1069,36 @@ impl TerminalWindow {
         unsafe { GetForegroundWindow() == self.hwnd }
     }
 
+    /// Down to its taskbar button, which takes the tiles with it.
+    pub fn minimize(&self) {
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_MINIMIZE);
+        }
+    }
+
+    /// Whether any of it can be seen, neither minimized nor covered whole.
+    pub fn in_sight(&self) -> bool {
+        !crate::window::out_of_sight(self.hwnd)
+    }
+
+    /// Flashes the taskbar button until the stage is next in front. With
+    /// the tiles put away, the button is what is left to tell a session
+    /// is waiting.
+    pub fn flash(&self) {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            FlashWindowEx, FLASHWINFO, FLASHW_TIMERNOFG, FLASHW_TRAY,
+        };
+        unsafe {
+            let _ = FlashWindowEx(&FLASHWINFO {
+                cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+                hwnd: self.hwnd,
+                dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+                uCount: 0,
+                dwTimeout: 0,
+            });
+        }
+    }
+
     /// The faceplate behind the panes, the same as a cluster's: lighter at
     /// the top where the light falls, and no seam, so the stage reads as
     /// near frameless. The panes paint
@@ -1681,7 +1711,10 @@ impl TerminalWindow {
             }
             // Minimized, the client area is empty and there is nothing to
             // lay out; the restore brings its own WM_SIZE.
-            WM_SIZE if wparam.0 == SIZE_MINIMIZED as usize => None,
+            WM_SIZE if wparam.0 == SIZE_MINIMIZED as usize => {
+                app::push(Input::StageMinimized);
+                None
+            }
             WM_SIZE => {
                 // A new session wobbles the stage's size as it shows, which
                 // would stop its panes mid glide. An edge dragged by hand
@@ -1881,13 +1914,59 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// What the stage's button last wore as a badge, so a waiting count that
+    /// changes nothing does not call into the shell.
+    static BADGE: Cell<(isize, bool)> = const { Cell::new((0, false)) };
+}
+
+/// Puts the waiting badge on the stage's taskbar button, or takes it off.
+pub fn show_badge(hwnd: HWND, waiting: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::DestroyIcon;
+    if BADGE.with(Cell::get) == (hwnd.0 as isize, waiting) {
+        return;
+    }
+    TASKBAR.with(|t| {
+        if t.borrow().is_none() {
+            let Some(list) = taskbar() else {
+                return;
+            };
+            *t.borrow_mut() = Some((list, 0, None));
+        }
+        let t = t.borrow();
+        let Some((list, _, _)) = t.as_ref() else {
+            return;
+        };
+        let icon = waiting.then(crate::tray::badge_icon).unwrap_or_default();
+        let set = unsafe { list.SetOverlayIcon(hwnd, icon, w!("A session is waiting")) };
+        if !icon.is_invalid() {
+            unsafe {
+                let _ = DestroyIcon(icon);
+            }
+        }
+        // Before the button exists it fails, and the next change tries again.
+        if set.is_ok() {
+            BADGE.with(|b| b.set((hwnd.0 as isize, waiting)));
+        }
+    });
+}
+
+fn taskbar() -> Option<windows::Win32::UI::Shell::ITaskbarList3> {
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
+    unsafe {
+        let list: ITaskbarList3 =
+            CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER).ok()?;
+        list.HrInit().ok()?;
+        Some(list)
+    }
+}
+
 /// Shows `progress` on the stage's taskbar button, as Windows Terminal
 /// shows a tab's OSC 9;4: the stage is many terminals with one button.
 pub fn show_progress(hwnd: HWND, progress: Option<Progress>) {
-    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
     use windows::Win32::UI::Shell::{
-        ITaskbarList3, TaskbarList, TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL,
-        TBPF_PAUSED,
+        TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL, TBPF_PAUSED,
     };
     TASKBAR.with(|t| {
         let mut t = t.borrow_mut();
@@ -1898,16 +1977,9 @@ pub fn show_progress(hwnd: HWND, progress: Option<Progress>) {
         }
         let list = match t.take() {
             Some((list, _, _)) => list,
-            None => unsafe {
-                let Ok(list) =
-                    CoCreateInstance::<_, ITaskbarList3>(&TaskbarList, None, CLSCTX_INPROC_SERVER)
-                else {
-                    return;
-                };
-                if list.HrInit().is_err() {
-                    return;
-                }
-                list
+            None => match taskbar() {
+                Some(list) => list,
+                None => return,
             },
         };
         let (state, value) = match progress {

@@ -218,6 +218,7 @@ impl Field {
             Field::Key(Action::Account) => "The accounts to switch to",
             Field::Key(Action::Dictate) => "Talk into a session or chat, tap or hold",
             Field::Key(Action::DictateAnywhere) => "Talk into the program you are in, tap or hold",
+            Field::Key(Action::Toggle) => "Puts the terminal and tiles away, or brings them back",
             _ => "",
         }
     }
@@ -1700,6 +1701,7 @@ mod tests {
                 Field::Key(Action::Account),
                 Field::Key(Action::Dictate),
                 Field::Key(Action::DictateAnywhere),
+                Field::Key(Action::Toggle),
                 Field::KeysNote
             ]
         );
@@ -1715,8 +1717,8 @@ mod tests {
                 Field::ShipsPublic
             ]
         );
-        // A project's rows, the tallest section.
-        assert_eq!(tallest(&v), PROJECT_ROWS as f32 * 52.0);
+        // The shortcuts, the tallest section.
+        assert_eq!(tallest(&v), height(Section::Keys, &v));
     }
 
     #[test]
@@ -1792,8 +1794,8 @@ mod tests {
         let rows = lines(Section::Projects, &v);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].control, Control::Fixed);
-        // A project's rows, the tallest section.
-        assert_eq!(tallest(&v), PROJECT_ROWS as f32 * 52.0);
+        // The shortcuts, the tallest section.
+        assert_eq!(tallest(&v), height(Section::Keys, &v));
     }
 
     #[test]
@@ -1880,16 +1882,16 @@ mod tests {
         assert_eq!(keys[2].value, "Ctrl+Alt+W");
         assert_eq!(keys[4].value, "Ctrl+Space");
         assert_eq!(keys[0].control, Control::Button);
-        assert_eq!(keys[6].control, Control::Note);
-        assert_eq!(keys[6].value, "Click a shortcut, then press its new keys");
+        assert_eq!(keys[7].control, Control::Note);
+        assert_eq!(keys[7].value, "Click a shortcut, then press its new keys");
         v.listening = Some(Action::Listen);
         let keys = lines(Section::Keys, &v);
         assert_eq!(keys[1].value, "Press the keys\u{2026}");
         assert_eq!(keys[0].value, "Ctrl+Alt+Space");
-        assert!(keys[6].value.starts_with("Esc keeps it"));
+        assert!(keys[7].value.starts_with("Esc keeps it"));
         v.keys_note = Some("Hold Ctrl, Alt or Win with the key".into());
         assert_eq!(
-            lines(Section::Keys, &v)[6].value,
+            lines(Section::Keys, &v)[7].value,
             "Hold Ctrl, Alt or Win with the key"
         );
     }
@@ -1916,7 +1918,7 @@ mod tests {
         v.keys[1].live = false;
         let keys = lines(Section::Keys, &v);
         assert_eq!(keys[1].value, "Ctrl+Alt+Home, taken");
-        assert_eq!(keys[6].value, "Ctrl+Alt+Home is taken by another program");
+        assert_eq!(keys[7].value, "Ctrl+Alt+Home is taken by another program");
     }
 
     #[test]

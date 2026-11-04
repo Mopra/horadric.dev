@@ -816,6 +816,17 @@ fn make_icon(size: i32, flame: Option<usize>) -> HICON {
         Some(f) => icon::burning(size as u32, light, f as f32 / FLAME_FRAMES as f32),
         None => icon::lit(size as u32, light),
     };
+    from_pixels(size, &pixels)
+}
+
+/// The badge on the stage's taskbar button while a session waits: the
+/// waiting amber, ringed dark so it reads over the gold of the cube.
+pub fn badge_icon() -> HICON {
+    let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
+    from_pixels(size, &icon::badge(size as u32))
+}
+
+fn from_pixels(size: i32, pixels: &[u32]) -> HICON {
     unsafe {
         let info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {

@@ -42,7 +42,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_EXSTYLE, GW_HWNDPREV, HWND_NOTOPMOST,
     HWND_TOPMOST, IDC_ARROW, IDC_HAND, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND,
+    SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
     WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
@@ -486,6 +486,19 @@ impl Cluster {
                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE,
             );
         }
+    }
+
+    /// Shows or hides the window, never activating it: the tiles go away
+    /// with the stage and come back with it.
+    pub fn set_shown(&self, shown: bool) {
+        unsafe {
+            let _ = ShowWindow(self.hwnd, if shown { SW_SHOWNOACTIVATE } else { SW_HIDE });
+        }
+    }
+
+    /// Whether any of it can be seen.
+    pub fn in_sight(&self) -> bool {
+        !out_of_sight(self.hwnd)
     }
 
     /// Brings the window above other windows without activating it. The
@@ -1932,7 +1945,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 /// Whether nothing of `hwnd` can be seen: minimised, hidden, off every
 /// screen, or under one window that covers it whole, as a maximised one
 /// does. A window that may be see-through never counts as covering.
-fn out_of_sight(hwnd: HWND) -> bool {
+pub(crate) fn out_of_sight(hwnd: HWND) -> bool {
     unsafe {
         if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
             return true;

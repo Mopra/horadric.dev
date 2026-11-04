@@ -78,6 +78,28 @@ pub fn lit(size: u32, light: u32) -> Vec<u32> {
 /// cool and white where it is hottest, and short tongues lick up off the
 /// strokes. The tongues stay on the stone, since colour is clamped to its
 /// alpha.
+/// A disc for a taskbar badge: `AMBER` inside a dark ring, its edge
+/// smoothed, as straight ARGB.
+pub fn badge(size: u32) -> Vec<u32> {
+    let r = size as f32 / 2.0;
+    let ring = (size as f32 / 8.0).max(1.5);
+    (0..size * size)
+        .map(|i| {
+            let (x, y) = ((i % size) as f32 + 0.5 - r, (i / size) as f32 + 0.5 - r);
+            let d = (x * x + y * y).sqrt();
+            let alpha = (r - d).clamp(0.0, 1.0);
+            let inner = (r - ring - d).clamp(0.0, 1.0);
+            let rgb = |c: u32, k: u32| ((c >> k & 0xFF) as f32 * inner + (DARK >> k & 0xFF) as f32 * (1.0 - inner)) as u32;
+            let a = (alpha * 255.0).round() as u32;
+            a << 24 | rgb(AMBER, 16) << 16 | rgb(AMBER, 8) << 8 | rgb(AMBER, 0)
+        })
+        .collect()
+}
+
+/// The waiting colour of a tile.
+const AMBER: u32 = 0xF2A33A;
+const DARK: u32 = 0x1A1410;
+
 pub fn burning(size: u32, light: u32, phase: f32) -> Vec<u32> {
     let size = size.max(1);
     let phase = phase.rem_euclid(1.0);

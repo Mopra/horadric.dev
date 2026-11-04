@@ -22,10 +22,12 @@ pub enum Action {
     Dictate,
     /// Dictates into whatever program has the keyboard.
     DictateAnywhere,
+    /// Puts the terminal and the tiles away, or brings them back.
+    Toggle,
 }
 
 /// How many shortcuts there are.
-pub const COUNT: usize = 6;
+pub const COUNT: usize = 7;
 
 impl Action {
     pub const ALL: [Action; COUNT] = [
@@ -35,6 +37,7 @@ impl Action {
         Action::Account,
         Action::Dictate,
         Action::DictateAnywhere,
+        Action::Toggle,
     ];
 
     /// Registered with Windows for every program, rather than read by the
@@ -66,6 +69,7 @@ impl Action {
             Action::Account => "account",
             Action::Dictate => "dictate",
             Action::DictateAnywhere => "dictate_anywhere",
+            Action::Toggle => "toggle",
         }
     }
 
@@ -77,6 +81,7 @@ impl Action {
             Action::Account => "Switch account",
             Action::Dictate => "Dictate",
             Action::DictateAnywhere => "Dictate in any program",
+            Action::Toggle => "Show or hide Horadric",
         }
     }
 
@@ -102,6 +107,7 @@ impl Action {
             Action::Stop => u16::from(b'W'),
             Action::Account => u16::from(b'K'),
             Action::DictateAnywhere => u16::from(b'D'),
+            Action::Toggle => u16::from(b'H'),
             Action::Dictate => VK_SPACE,
         };
         Chord {
@@ -326,7 +332,8 @@ mod tests {
                 "Ctrl+Alt+W",
                 "Ctrl+Alt+K",
                 "Ctrl+Space",
-                "Ctrl+Alt+D"
+                "Ctrl+Alt+D",
+                "Ctrl+Alt+H"
             ]
         );
         assert_eq!(

@@ -619,6 +619,8 @@ pub(crate) enum Input {
     /// The stage came to the front, from the taskbar, alt-tab or a click:
     /// the tiles come with it, so Horadric shows as one app.
     StageActive,
+    /// The stage went down to its taskbar button: the tiles go with it.
+    StageMinimized,
 }
 
 thread_local! {
@@ -1040,6 +1042,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             autostart_offered,
             explorer_offered,
             quiet: saved.quiet,
+            tiles_away: false,
             sounds: saved.sounds,
             microphone: saved.microphone.clone(),
             town_hidden: saved.town_hidden,
@@ -1292,10 +1295,11 @@ unsafe extern "system" fn app_proc(
         // are handled rather than bounced.
         WM_HORADRIC_TRAY => {
             let mouse = lparam.0 as u32;
-            // Left click shows what is most wanted, the sessions; with
-            // none to show, it opens the menu as right click does.
+            // Left click puts Horadric away or brings it back, as its
+            // taskbar button does; with nothing to show, it opens the menu
+            // as right click does.
             if mouse == WM_LBUTTONUP {
-                if !with_app(App::show_all).unwrap_or(false) {
+                if !with_app(App::toggle).unwrap_or(false) {
                     tray_menu(hwnd);
                 }
             } else if mouse == WM_RBUTTONUP {
@@ -3902,6 +3906,9 @@ struct App {
     alert_for: Option<String>,
     /// No notifications, from the Settings window.
     quiet: bool,
+    /// The tiles are put away: the stage was minimized, or the human
+    /// hid Horadric. They come back with the stage.
+    tiles_away: bool,
     /// Loot sounds, from the Settings window.
     sounds: bool,
     /// The microphone dictation listens to, None for Windows' default.
@@ -4143,6 +4150,9 @@ impl App {
                 Some(Action::Account) => post(self.notify.0 as isize, WM_HORADRIC_ACCOUNT_MENU, 0),
                 Some(Action::DictateAnywhere) => {
                     crate::dictate::anywhere::press(self.keys[Action::DictateAnywhere.index()].key)
+                }
+                Some(Action::Toggle) => {
+                    self.toggle();
                 }
                 Some(Action::Dictate) => {}
                 None => {}
@@ -7382,6 +7392,7 @@ impl App {
         if let Some(stage) = &self.stage {
             stage.show(key, &project_name(key), sessions);
         }
+        self.badge();
         self.portal_show();
         self.mark_staged();
         if switched {
@@ -7572,6 +7583,14 @@ impl App {
         }
     }
 
+    /// The stage's taskbar button wears a badge while any session waits,
+    /// which still tells it with the tiles put away.
+    fn badge(&self) {
+        if let Some(stage) = &self.stage {
+            terminal::show_badge(stage.hwnd, !self.waiting.is_empty());
+        }
+    }
+
     /// Says when a session starts waiting on you, unless you are looking at
     /// it: the stage in front with that session in it. The tiles light up
     /// too, but an editor may be covering them.
@@ -7612,6 +7631,12 @@ impl App {
         };
         drop(r);
         self.waiting = now;
+        self.badge();
+        if alert.is_some() {
+            if let Some(stage) = self.stage.as_ref().filter(|s| !s.is_foreground()) {
+                stage.flash();
+            }
+        }
         if let Some(a) = alert {
             self.alert_for = about;
             self.tasks.merge_for = None;
@@ -8748,9 +8773,67 @@ impl App {
         if self.consoles.is_empty() && self.clusters.is_empty() {
             return false;
         }
+        self.show_tiles();
         self.raise();
         self.show_stage();
         true
+    }
+
+    /// The tray's left click and the hotkey: puts Horadric away when any
+    /// of it can be seen, and brings it all to the front when not. False
+    /// when there is nothing to show.
+    fn toggle(&mut self) -> bool {
+        if self.in_sight() {
+            self.put_away();
+            true
+        } else {
+            self.show_all()
+        }
+    }
+
+    /// Whether the stage or a tile can be seen, not minimized, hidden or
+    /// covered whole.
+    fn in_sight(&self) -> bool {
+        if self.stage.as_ref().is_some_and(|s| s.in_sight()) {
+            return true;
+        }
+        !self.tiles_away && self.clusters.iter().any(|c| c.in_sight())
+    }
+
+    /// The stage to its taskbar button, the tiles hidden.
+    fn put_away(&mut self) {
+        self.hide_tiles();
+        if let Some(stage) = &self.stage {
+            stage.minimize();
+        }
+    }
+
+    fn hide_tiles(&mut self) {
+        if self.tiles_away {
+            return;
+        }
+        self.tiles_away = true;
+        self.set_tiles_shown(false);
+    }
+
+    fn show_tiles(&mut self) {
+        if !self.tiles_away {
+            return;
+        }
+        self.tiles_away = false;
+        self.set_tiles_shown(true);
+    }
+
+    fn set_tiles_shown(&self, shown: bool) {
+        if let Some(u) = &self.usage_window {
+            u.set_shown(shown);
+        }
+        if let Some(s) = &self.start_window {
+            s.set_shown(shown);
+        }
+        for c in &self.clusters {
+            c.set_shown(shown);
+        }
     }
 
     fn fit_stage(&mut self) {
@@ -9173,6 +9256,9 @@ impl App {
                         c.set_tasks_collapsed(place.tasks_collapsed);
                         c.set_tome_collapsed(place.tome_collapsed);
                     }
+                    if self.tiles_away {
+                        c.set_shown(false);
+                    }
                     self.clusters.push(c);
                     created = true;
                 }
@@ -9524,7 +9610,11 @@ impl App {
                 }
                 Input::Expand(id) => self.reveal(&id, true),
                 Input::Park(id) => self.park(&id),
-                Input::StageActive => self.raise(),
+                Input::StageActive => {
+                    self.show_tiles();
+                    self.raise();
+                }
+                Input::StageMinimized => self.hide_tiles(),
                 Input::TileMenu(id) => {
                     self.menu_for = Some(id);
                     post(self.notify.0 as isize, WM_HORADRIC_TILE_MENU, 0);
@@ -9558,13 +9648,13 @@ impl App {
                         self.open_shell(&key);
                     }
                 }
+                // Closing the stage puts Horadric away rather than ending
+                // the stage: its taskbar button stays, the one way back.
                 Input::Close(hwnd) => {
-                    if self
-                        .stage
-                        .as_ref()
-                        .is_some_and(|s| s.hwnd.0 as isize == hwnd)
-                    {
-                        self.close_stage();
+                    if let Some(stage) = &self.stage {
+                        if stage.hwnd.0 as isize == hwnd {
+                            stage.minimize();
+                        }
                     }
                 }
                 Input::Swap(a, b) => self.swap(&a, &b),
@@ -9778,7 +9868,12 @@ impl App {
             }
             None => {
                 match StartWindow::create(Rc::clone(&self.shared), &self.recent, -10_000, -10_000) {
-                    Ok(s) => self.start_window = Some(s),
+                    Ok(s) => {
+                        if self.tiles_away {
+                            s.set_shown(false);
+                        }
+                        self.start_window = Some(s);
+                    }
                     Err(e) => eprintln!("horadric: cannot create the start window: {e}"),
                 }
             }
