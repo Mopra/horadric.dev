@@ -56,7 +56,13 @@ fn cast(name: &str) -> Result<(), String> {
     if heard != Some(200) {
         return Err("Horadric did not hear it: is it running?".into());
     }
-    println!("Horadric casts \"{}\".", stone.label);
+    // The app decides on its own thread after this answer, and may refuse
+    // (a ship without Warriv driving, a stone changed since the human cast
+    // it), so heard is all that can be said here.
+    println!(
+        "Asked Horadric to cast \"{}\". It decides on its own: a toast on the desktop says if it refused.",
+        stone.label
+    );
     Ok(())
 }
 

@@ -762,6 +762,17 @@ impl App {
         self.tome.cast.get(&cast_key(key, &stone.label)) != Some(&runeword::fingerprint(runes))
     }
 
+    /// Why a shell may not cast this stone: it came with the project and
+    /// the human has neither cast nor armed it with the steps it has now.
+    /// A click asks first for such a stone; a shell has nobody to ask, and
+    /// a session that edited the config could otherwise run what it wrote.
+    fn unproven(&self, key: &str, label: &str) -> Option<String> {
+        let stone = self.stone(key, label)?;
+        (self.changed(key, &stone) && self.armed(key, &stone).is_none()).then(|| {
+            "its steps are not the ones last cast from the tile; cast it there once first".into()
+        })
+    }
+
     /// The stone of this label the project with this key has, when it
     /// parses.
     fn stone(&self, key: &str, label: &str) -> Option<Stone> {
@@ -1026,7 +1037,8 @@ impl App {
             .or_else(|| {
                 (!self.has_stone(&key, label)).then(|| "the project has no such stone".into())
             })
-            .or_else(|| self.ship_refused(&key, label, None));
+            .or_else(|| self.ship_refused(&key, label, None))
+            .or_else(|| self.unproven(&key, label));
         if let Some(why) = refused {
             eprintln!("horadric: not casting \"{label}\": {why}");
             self.toasts

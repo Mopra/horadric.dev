@@ -695,16 +695,22 @@ pub fn driven_prompt(horadric: &str) -> String {
     )
 }
 
-/// Whether a stone `label` cast from a shell goes ahead. The human's own
-/// casts always do. A Warriv's only while it drives the project, the
-/// public release only with "and ships public" on, since every install
-/// sees it, and neither ship while shipping is held.
+/// Whether a stone `label` cast from a shell goes ahead. A Warriv's only
+/// while it drives the project. A ship stone's from anyone only while
+/// Warriv drives, since who asks is an environment variable any session
+/// can unset: the human ships with a click. The public release needs
+/// "and ships public" on besides, since every install sees it, and
+/// neither ship while shipping is held.
 pub fn may_cast(by_warriv: bool, drive: Option<&Drive>, label: &str) -> Result<(), String> {
-    if !by_warriv {
+    let ship = label == crate::ship::STONE || label == crate::ship::PUBLIC;
+    if !by_warriv && !ship {
         return Ok(());
     }
-    let ship = label == crate::ship::STONE || label == crate::ship::PUBLIC;
     match drive {
+        None if ship => Err(format!(
+            "\"{label}\" is cast from a shell only while Warriv drives the project; \
+             cast it from the tile instead"
+        )),
         None => Err("Warriv casts stones only while it drives the project".into()),
         Some(Drive { held: Some(h), .. }) if ship => Err(format!(
             "shipping is held until \"{}\" lands and the checks pass",
@@ -1704,11 +1710,26 @@ mod tests {
             ships_public: true,
             ..Drive::default()
         };
-        assert!(may_cast(false, None, "Ship Public").is_ok());
         assert!(may_cast(true, None, "Ship Local").is_err());
         assert!(may_cast(true, Some(&local), "Ship Local").is_ok());
         assert!(may_cast(true, Some(&local), "Ship Public").is_err());
         assert!(may_cast(true, Some(&public), "Ship Public").is_ok());
+    }
+
+    #[test]
+    fn a_ship_from_a_shell_needs_warriv_driving_whoever_asks() {
+        let local = Drive::default();
+        let public = Drive {
+            ships_public: true,
+            ..Drive::default()
+        };
+        // A session that unset its own name looks like the human.
+        assert!(may_cast(false, None, "Ship Public").is_err());
+        assert!(may_cast(false, None, "Ship Local").is_err());
+        assert!(may_cast(false, Some(&local), "Ship Public").is_err());
+        assert!(may_cast(false, Some(&local), "Ship Local").is_ok());
+        assert!(may_cast(false, Some(&public), "Ship Public").is_ok());
+        assert!(may_cast(false, None, "Mail").is_ok());
     }
 
     #[test]
@@ -1726,7 +1747,7 @@ mod tests {
         assert!(refused.contains("until \"Fix the build that rolled back\" lands"));
         assert!(may_cast(true, Some(&held), "Ship Public").is_err());
         assert!(may_cast(true, Some(&held), "Mail").is_ok());
-        assert!(may_cast(false, Some(&held), "Ship Local").is_ok());
+        assert!(may_cast(false, Some(&held), "Ship Local").is_err());
         assert_eq!(
             line(Some("Warriv: settling".into()), Some(&held)).as_deref(),
             Some("Warriv drives, shipping held, settling")
