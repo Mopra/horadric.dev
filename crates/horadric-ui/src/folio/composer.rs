@@ -195,6 +195,8 @@ pub(super) struct Input {
     notice: Option<String>,
     files: Arc<Mutex<Listing>>,
     files_seen: u64,
+    /// The model's titles made when the history list was read.
+    titles_seen: u64,
     hover: Option<Act>,
     tracking: bool,
     /// The level last picked; the CLI does not say.
@@ -243,6 +245,7 @@ impl Input {
             notice: None,
             files: Arc::default(),
             files_seen: 0,
+            titles_seen: 0,
             hover: None,
             tracking: false,
             effort: None,
@@ -944,7 +947,9 @@ fn follow_history(chat: &mut Chat, words: &str) {
 fn load_history(chat: &mut Chat, held: &[String]) {
     let dir = chat.dir.to_string_lossy().into_owned();
     let here = chat.folio.session_id.clone();
+    chat.input.titles_seen = crate::titler::made();
     let past = horadric_hooks::transcript::history(&dir, &[], PAST_MAX);
+    crate::titler::want(&past, chat.view.map_or(0, |v| v.0 as isize));
     let now = SystemTime::now();
     let all = (past.iter())
         .map(|p| {
@@ -969,6 +974,33 @@ fn load_history(chat: &mut Chat, held: &[String]) {
         })
         .collect();
     chat.input.past = Some((all, past));
+}
+
+/// The open history list read again for titles the model made since,
+/// filtered as before and on the same row.
+fn retitled(chat: &mut Chat) {
+    let held: Vec<String> = match &chat.input.past {
+        Some((all, _)) => (all.iter())
+            .filter(|c| c.held == Held::Open)
+            .map(|c| c.id.clone())
+            .collect(),
+        None => Vec::new(),
+    };
+    load_history(chat, &held);
+    let words = picker::history_command(chat.input.ed.text())
+        .unwrap_or("")
+        .to_string();
+    let Some((all, _)) = &chat.input.past else {
+        return;
+    };
+    let items = picker::history_items(all, &words);
+    let (selected, top) = (chat.input.menu.as_ref()).map_or((0, 0), |m| (m.selected, m.top));
+    let mut menu = Menu::new(MenuKind::History, items, 0);
+    if selected < menu.items.len() {
+        menu.selected = selected;
+        menu.top = top;
+    }
+    chat.input.menu = Some(menu);
 }
 
 /// Opens the history list in session `key`'s composer, as typing
@@ -2335,6 +2367,11 @@ impl View {
         cw: f32,
         hits: &mut Vec<(Rect, Hit)>,
     ) {
+        if crate::titler::made() != chat.input.titles_seen
+            && (chat.input.menu.as_ref()).is_some_and(|m| m.kind == MenuKind::History)
+        {
+            retitled(chat);
+        }
         // A file list that came after the menu opened is filtered now.
         let made = chat.input.files.lock().map(|l| l.made).unwrap_or(0);
         if made != chat.input.files_seen

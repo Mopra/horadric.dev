@@ -10,7 +10,7 @@ use std::time::SystemTime;
 
 use horadric_core::pack;
 use horadric_core::spend::{self, Spend};
-use horadric_core::{title, Title};
+use horadric_core::{retitle, title, Title};
 
 /// Claude Code repeats the title every few turns, so the end of the file
 /// nearly always has it. A transcript is megabytes by the end of a long day.
@@ -120,6 +120,12 @@ pub struct Past {
     pub title: Title,
     /// The last thing the human typed in it, empty when unknown.
     pub asked: String,
+    /// Whether the title is one a model wrote from the whole conversation,
+    /// not Claude Code's or the first prompt.
+    pub retitled: bool,
+    pub path: PathBuf,
+    /// How long the transcript is, which says when to title it again.
+    pub len: u64,
     pub modified: SystemTime,
     /// When it started, as near as the file system says.
     pub started: SystemTime,
@@ -145,6 +151,9 @@ pub fn history(cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
 }
 
 fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
+    let made = crate::state_dir()
+        .map(|d| retitle::Titles::load(&d))
+        .unwrap_or_default();
     let mut files: Vec<(PathBuf, SystemTime, u64, SystemTime)> = folders(root, cwd)
         .iter()
         .filter_map(|dir| std::fs::read_dir(dir).ok())
@@ -168,11 +177,19 @@ fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
         .filter(|(_, id, ..)| !skip.contains(id))
         .take(LOOKED_AT)
         .filter_map(|(path, id, modified, len, started)| {
-            let (title, asked) = kept_summary(&path, modified, len)?;
+            let (mut title, asked) = kept_summary(&path, modified, len)?;
+            // A /rename is the human's word and beats a model's.
+            let better = made.title(&id).filter(|_| !title.custom);
+            if let Some(t) = better {
+                title.text = t.to_string();
+            }
             Some(Past {
                 id,
                 title,
                 asked,
+                retitled: better.is_some(),
+                path,
+                len,
                 modified,
                 started,
             })
@@ -285,6 +302,21 @@ fn summary(path: &Path) -> Option<(Title, String)> {
         }
     };
     Some((title, asked))
+}
+
+/// What a model is shown to title the conversation in `path`: its prompts
+/// and the end of its last reply. None when it can not be read or holds
+/// no prompt.
+pub fn retitle_input(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let bytes = read_from(&mut file, len.saturating_sub(WHOLE))?;
+    let prompts = title::prompts(&bytes);
+    if prompts.is_empty() {
+        return None;
+    }
+    let reply = title::last_reply(&bytes).unwrap_or_default();
+    Some(retitle::prompt(&prompts, &reply))
 }
 
 /// The title from the end of the file only, for a menu that is opening

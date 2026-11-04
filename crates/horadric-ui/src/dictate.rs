@@ -323,56 +323,13 @@ pub fn use_tidy(on: bool) {
 /// theirs. None when it cannot be asked, is too slow, or answers with
 /// something that is not `raw` tidied.
 fn tidy(raw: &str) -> Option<String> {
-    use std::io::Read;
-    use std::os::windows::process::CommandExt;
-    let mut c = std::process::Command::new(horadric_pty::headless::claude_exe()?);
-    c.arg("-p")
-        .arg(speech::tidy::prompt(raw))
-        .args([
-            "--model",
-            speech::tidy::MODEL,
-            "--tools",
-            "",
-            "--strict-mcp-config",
-        ])
-        .arg("--no-session-persistence")
-        .args(["--settings", r#"{"disableAllHooks":true}"#])
-        .args(["--system-prompt", speech::tidy::SYSTEM])
-        .current_dir(std::env::temp_dir())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
-    for k in horadric_pty::headless::ENV_REMOVE {
-        c.env_remove(k);
-    }
-    for (k, _) in std::env::vars() {
-        if k.starts_with("HORADRIC_") {
-            c.env_remove(k);
-        }
-    }
-    let mut child = c.spawn().ok()?;
-    let mut stdout = child.stdout.take()?;
-    let reader = thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stdout.read_to_string(&mut s);
-        s
-    });
-    let began = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(None) if began.elapsed() < TIDY_LONGEST => {
-                thread::sleep(Duration::from_millis(50));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-    speech::tidy::tidied(raw, &reader.join().ok()?)
+    let reply = crate::haiku::ask(
+        speech::tidy::MODEL,
+        speech::tidy::SYSTEM,
+        &speech::tidy::prompt(raw),
+        TIDY_LONGEST,
+    )?;
+    speech::tidy::tidied(raw, &reply)
 }
 
 /// Dictation listens to the microphone `id` from now on, None for

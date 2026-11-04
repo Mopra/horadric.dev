@@ -65,6 +65,7 @@ pub mod registry;
 pub mod relaying;
 pub mod release;
 pub mod reopen;
+pub mod retitle;
 pub mod rostering;
 pub mod runeword;
 pub mod said;

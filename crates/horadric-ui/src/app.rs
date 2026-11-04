@@ -3210,7 +3210,9 @@ fn add_host(dir: &Path, host: &str) {
 /// The past conversations in `dir`, the newest `limit`, newest first,
 /// leaving out the ones in `held`.
 fn past_in(dir: &Path, held: &[String], limit: usize) -> Vec<Past> {
-    transcript::history(&dir.to_string_lossy(), held, limit)
+    let past = transcript::history(&dir.to_string_lossy(), held, limit);
+    crate::titler::want(&past, 0);
+    past
 }
 
 /// The lines of a History menu: each past conversation, `first` on, then

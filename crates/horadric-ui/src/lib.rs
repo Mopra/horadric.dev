@@ -131,6 +131,10 @@ pub mod credential;
 mod dialog;
 #[cfg(windows)]
 mod dictate;
+#[cfg(windows)]
+mod haiku;
+#[cfg(windows)]
+mod titler;
 #[cfg(any(windows, target_os = "macos"))]
 pub mod discord;
 #[cfg(windows)]

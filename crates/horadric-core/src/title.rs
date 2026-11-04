@@ -145,6 +145,12 @@ pub fn last_prompt(transcript: &[u8]) -> Option<String> {
         .map(|t| shorten(&t, LAST_PROMPT))
 }
 
+/// Everything the human typed, in order: what a model is shown to title
+/// the conversation.
+pub fn prompts(transcript: &[u8]) -> Vec<String> {
+    (transcript.split(|&b| b == b'\n')).filter_map(typed).collect()
+}
+
 /// What the human typed on one transcript line, whitespace folded, or
 /// None for anything else: replies, tool results, commands and their
 /// caveats, subagents' prompts.
