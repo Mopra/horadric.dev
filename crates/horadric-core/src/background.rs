@@ -163,7 +163,13 @@ impl<T> Held<T> {
     pub fn take(&mut self, id: &str, now: Instant) -> Vec<T> {
         self.age(now);
         match self.by_id.iter().position(|(i, _)| i == id) {
-            Some(at) => self.by_id.remove(at).1.into_iter().map(|(_, t)| t).collect(),
+            Some(at) => self
+                .by_id
+                .remove(at)
+                .1
+                .into_iter()
+                .map(|(_, t)| t)
+                .collect(),
             None => Vec::new(),
         }
     }

@@ -268,15 +268,24 @@ mod tests {
         use crate::turning::{rolled_at, spun_at};
         for up in 0..6 {
             for q in 0..4 {
-                let from = Stand { up, yaw: 90.0 * q as f32 };
+                let from = Stand {
+                    up,
+                    yaw: 90.0 * q as f32,
+                };
                 let to = after(from, Move::Away);
                 let (group, n) = find(&ROLLED, AWAY, standing(from));
                 let start = rolled_at(group, 90.0 * n as f32);
                 let end = rolled_at(group, 90.0 * (n + 1) as f32);
-                let (a, b) = (apart(start, spun_at(up, from.yaw)), apart(end, spun_at(to.up, to.yaw)));
+                let (a, b) = (
+                    apart(start, spun_at(up, from.yaw)),
+                    apart(end, spun_at(to.up, to.yaw)),
+                );
                 assert!(a < 2.0 && b < 2.0, "pose {up}.{q}: {a} {b}");
                 // And a different pose is far from it, or the check proves nothing.
-                assert!(apart(end, spun_at(up, from.yaw)) > 4.0, "pose {up}.{q} rolled looks unrolled");
+                assert!(
+                    apart(end, spun_at(up, from.yaw)) > 4.0,
+                    "pose {up}.{q} rolled looks unrolled"
+                );
             }
         }
     }

@@ -86,7 +86,8 @@ pub fn turn_ended(path: &str) {
     if !q.busy.iter().any(|b| b == id) {
         q.busy.push(id.to_string());
         // Ahead of a history list's backlog: it is the one on screen.
-        q.waiting.push_front((id.to_string(), path.to_path_buf(), len));
+        q.waiting
+            .push_front((id.to_string(), path.to_path_buf(), len));
     }
     start(&mut q);
 }

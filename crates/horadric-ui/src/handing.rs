@@ -30,9 +30,7 @@ use std::sync::mpsc;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-use horadric_core::handing::{
-    self, bases_answer, refused, Do, Landed, Outgoing, PlaceAsk,
-};
+use horadric_core::handing::{self, bases_answer, refused, Do, Landed, Outgoing, PlaceAsk};
 use horadric_core::handoff::{self, Record, RepoId};
 use horadric_core::handoffs::{
     self, arrive, model_of, record_of, Arrived, Handoffs, Packed, Place, Places, Said,

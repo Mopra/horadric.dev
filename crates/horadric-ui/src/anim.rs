@@ -11,7 +11,7 @@ use horadric_core::Phase;
 
 use crate::layout::Hit;
 use crate::motion::{
-    self, ARRIVAL, ENTER, FLIP, STONE_TURN, FRAME_BREATH, FRAME_FAST, FRAME_ORBIT, HOVER, SETTLE,
+    self, ARRIVAL, ENTER, FLIP, FRAME_BREATH, FRAME_FAST, FRAME_ORBIT, HOVER, SETTLE, STONE_TURN,
 };
 use crate::theme;
 use crate::tilecube;
@@ -177,7 +177,11 @@ pub struct Tiles {
 /// moves want to look unplanned, not be unguessable.
 fn coin() -> bool {
     use std::hash::{BuildHasher, Hasher};
-    std::collections::hash_map::RandomState::new().build_hasher().finish() & 1 == 1
+    std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
+        & 1
+        == 1
 }
 
 impl Tiles {
@@ -225,7 +229,11 @@ impl Tiles {
                 if s.icon != t.icon {
                     s.was_icon = std::mem::replace(&mut s.icon, t.icon);
                     s.stood = s.stand;
-                    s.moved = if coin() { tilecube::Move::Away } else { tilecube::Move::Aside };
+                    s.moved = if coin() {
+                        tilecube::Move::Away
+                    } else {
+                        tilecube::Move::Aside
+                    };
                     s.stand = tilecube::after(s.stood, s.moved);
                     s.flipped = now;
                 }

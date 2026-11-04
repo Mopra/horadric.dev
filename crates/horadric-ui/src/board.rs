@@ -75,7 +75,9 @@ impl Board {
     pub fn why(&self, task: &Task) -> Option<String> {
         match &task.wait {
             Some(Wait::Cmd(c)) if task.mark == Mark::Blocked && self.unapproved.contains(c) => {
-                Some(format!("Waits on a command not approved on this machine: {c}"))
+                Some(format!(
+                    "Waits on a command not approved on this machine: {c}"
+                ))
             }
             _ => why(task).map(str::to_string),
         }

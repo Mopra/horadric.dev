@@ -338,13 +338,9 @@ impl Machine {
         // act here; the node pairs no phones of its own.
         if let Some(phone) = who.strip_prefix(relay::PHONE) {
             return match (horadric_hooks::state_dir(), relay::me()) {
-                (Some(dir), Some(me)) => horadric_core::mesh::phone_controls(
-                    &dir,
-                    &me,
-                    &relay::LinkCrypto,
-                    phone,
-                    false,
-                ),
+                (Some(dir), Some(me)) => {
+                    horadric_core::mesh::phone_controls(&dir, &me, &relay::LinkCrypto, phone, false)
+                }
                 _ => false,
             };
         }

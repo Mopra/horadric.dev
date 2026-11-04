@@ -16,8 +16,8 @@ use windows::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, RegisterClassW, WINDOW_EX_STYLE, WM_POWERBROADCAST,
-    WNDCLASSW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, RegisterClassW, WINDOW_EX_STYLE, WM_POWERBROADCAST, WNDCLASSW,
+    WS_POPUP,
 };
 
 static LOCKED: AtomicBool = AtomicBool::new(false);

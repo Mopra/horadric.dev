@@ -940,7 +940,10 @@ impl Server {
     /// Asks again whether each phone may act. A brother's is asked when
     /// the roster changes, which a phone is never sent.
     fn phones_control(&mut self, serve: &mut impl Serve) {
-        if self.control_looked.is_some_and(|at| at.elapsed() < CONTROL_EVERY) {
+        if self
+            .control_looked
+            .is_some_and(|at| at.elapsed() < CONTROL_EVERY)
+        {
             return;
         }
         self.control_looked = Some(Instant::now());

@@ -29,8 +29,8 @@ use crate::quests::runner::{
     unapproved_wait,
 };
 use crate::quests::{self, Host, Menu, Runner, SessionSpec, Toast, Warriv, Workplace};
-use horadric_hooks::tasks as file;
 use crate::{console, store};
+use horadric_hooks::tasks as file;
 
 /// How many of the runner's words the menu keeps.
 const TOLD: usize = 5;
@@ -566,7 +566,9 @@ impl App {
         if let Some(not) = dir.as_ref().and_then(|d| file::checks(d).err()) {
             items.push(Item::pick(approve_checks_label(&not), CHECKS));
         }
-        let repo_warriv = dir.as_ref().is_some_and(|d| file::suggested_orchestrator(d));
+        let repo_warriv = dir
+            .as_ref()
+            .is_some_and(|d| file::suggested_orchestrator(d));
         items.push(Item::checked(
             orchestrator_label(board.orchestrator, repo_warriv),
             ORCHESTRATOR,
@@ -608,7 +610,12 @@ impl App {
                 }
             }
             ORCHESTRATOR => {
-                let on = self.quests.boards.borrow().get(key).is_some_and(|b| b.orchestrator);
+                let on = self
+                    .quests
+                    .boards
+                    .borrow()
+                    .get(key)
+                    .is_some_and(|b| b.orchestrator);
                 self.set_orchestrator(key, !on);
             }
             DRIVES => {
@@ -633,7 +640,12 @@ impl App {
             }
             SUGGEST => {
                 let dir = self.project_dir(key);
-                let own = self.quests.boards.borrow().get(key).is_some_and(|b| b.own_trees);
+                let own = self
+                    .quests
+                    .boards
+                    .borrow()
+                    .get(key)
+                    .is_some_and(|b| b.own_trees);
                 if let Some(s) = dir.and_then(|d| suggestion(&d, own)) {
                     self.take_suggestion(key, s);
                 }
@@ -688,7 +700,11 @@ impl App {
 /// Whether the human approves running `commands`, which came with the
 /// repository. Shown whole, and Return cancels: this is the consent.
 fn confirm_approve(checks: bool, commands: &[String]) -> bool {
-    let title = if checks { "Approve checks" } else { "Approve and run" };
+    let title = if checks {
+        "Approve checks"
+    } else {
+        "Approve and run"
+    };
     dialog::choose(title, &approve_text(checks, commands), "Approve", "Cancel")
 }
 

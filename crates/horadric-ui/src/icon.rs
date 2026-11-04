@@ -89,7 +89,9 @@ pub fn badge(size: u32) -> Vec<u32> {
             let d = (x * x + y * y).sqrt();
             let alpha = (r - d).clamp(0.0, 1.0);
             let inner = (r - ring - d).clamp(0.0, 1.0);
-            let rgb = |c: u32, k: u32| ((c >> k & 0xFF) as f32 * inner + (DARK >> k & 0xFF) as f32 * (1.0 - inner)) as u32;
+            let rgb = |c: u32, k: u32| {
+                ((c >> k & 0xFF) as f32 * inner + (DARK >> k & 0xFF) as f32 * (1.0 - inner)) as u32
+            };
             let a = (alpha * 255.0).round() as u32;
             a << 24 | rgb(AMBER, 16) << 16 | rgb(AMBER, 8) << 8 | rgb(AMBER, 0)
         })

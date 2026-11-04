@@ -132,12 +132,12 @@ pub mod credential;
 mod dialog;
 #[cfg(windows)]
 mod dictate;
+#[cfg(any(windows, target_os = "macos"))]
+pub mod discord;
 #[cfg(windows)]
 mod haiku;
 #[cfg(windows)]
 mod titler;
-#[cfg(any(windows, target_os = "macos"))]
-pub mod discord;
 #[cfg(windows)]
 pub use dialog::error_alone;
 /// For `horadric quest`, which writes the chronicle from a session's shell

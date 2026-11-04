@@ -117,7 +117,10 @@ fn spelled_local(path: &str) -> Option<PathBuf> {
     if path.split(sep).any(|part| part == "..") {
         return None;
     }
-    if candidate.components().any(|c| matches!(c, Component::ParentDir)) {
+    if candidate
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
         return None;
     }
     Some(candidate.to_path_buf())

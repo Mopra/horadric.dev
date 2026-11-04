@@ -1206,7 +1206,10 @@ fn stone_frame(
     if let std::collections::hash_map::Entry::Vacant(e) = stones.entry(f) {
         let (stone, light) = crate::turning::frame(f);
         let size = crate::turning::SIZE as u32;
-        e.insert((bitmap_on(rt, size, &stone).ok()?, bitmap_on(rt, size, &light).ok()?));
+        e.insert((
+            bitmap_on(rt, size, &stone).ok()?,
+            bitmap_on(rt, size, &light).ok()?,
+        ));
     }
     stones.get(&f).cloned()
 }

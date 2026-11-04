@@ -344,7 +344,10 @@ pub fn warm() {
 pub fn keep(job: Keep) {
     // The path came from a hook event; what is read here ends up in the
     // lore, and a share would stall this thread or leak the hash.
-    let trusted = job.path.to_str().and_then(horadric_hooks::transcript::trusted);
+    let trusted = job
+        .path
+        .to_str()
+        .and_then(horadric_hooks::transcript::trusted);
     if trusted.is_none() {
         return;
     }

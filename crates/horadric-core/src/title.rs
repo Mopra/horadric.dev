@@ -148,7 +148,9 @@ pub fn last_prompt(transcript: &[u8]) -> Option<String> {
 /// Everything the human typed, in order: what a model is shown to title
 /// the conversation.
 pub fn prompts(transcript: &[u8]) -> Vec<String> {
-    (transcript.split(|&b| b == b'\n')).filter_map(typed).collect()
+    (transcript.split(|&b| b == b'\n'))
+        .filter_map(typed)
+        .collect()
 }
 
 /// What the human typed on one transcript line, whitespace folded, or

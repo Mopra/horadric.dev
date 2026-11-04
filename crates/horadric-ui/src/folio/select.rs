@@ -791,9 +791,7 @@ pub(super) fn key(key: &str, vk: u16, mods: Mods) -> bool {
             v if v == VK_DELETE.0 => f.delete(word),
             // Up and Down stay in a card's field: past it they would move
             // the composer's caret or bring back its history out of sight.
-            v if (v == VK_UP.0 || v == VK_DOWN.0) && f.multiline => {
-                f.line(v == VK_DOWN.0, extend)
-            }
+            v if (v == VK_UP.0 || v == VK_DOWN.0) && f.multiline => f.line(v == VK_DOWN.0, extend),
             v if v == VK_UP.0 => f.home(true, extend),
             v if v == VK_DOWN.0 => f.end(true, extend),
             _ => return false,

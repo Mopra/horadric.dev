@@ -540,7 +540,11 @@ fn confirm_delete(title: &str) -> bool {
 fn confirm_approve(checks: bool, commands: &[String]) -> bool {
     let pressed = super::ask(&crate::dialog::Dialog {
         tone: crate::dialog::Tone::Warning,
-        title: if checks { "Approve checks" } else { "Approve and run" },
+        title: if checks {
+            "Approve checks"
+        } else {
+            "Approve and run"
+        },
         text: &quests::runner::approve_text(checks, commands),
         buttons: &["Approve", "Cancel"],
         default: 1,

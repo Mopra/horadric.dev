@@ -1362,7 +1362,10 @@ pub(crate) trait Runner: Host {
             return;
         };
         if let Err(e) = file::set_orchestrator(&dir, on) {
-            eprintln!("horadric: cannot turn Warriv {}: {e}", if on { "on" } else { "off" });
+            eprintln!(
+                "horadric: cannot turn Warriv {}: {e}",
+                if on { "on" } else { "off" }
+            );
         }
         self.refresh_boards(true);
         self.run_tasks();

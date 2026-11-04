@@ -42,10 +42,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_EXSTYLE, GW_HWNDPREV, HWND_NOTOPMOST,
     HWND_TOPMOST, IDC_ARROW, IDC_HAND, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
-    WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SHOWWINDOW, WM_SIZE, WM_TIMER, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+    SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SHOWWINDOW, WM_SIZE, WM_TIMER,
+    WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::anim::{self, TileIn};
@@ -1132,19 +1133,15 @@ impl Cluster {
         // turning (`stir`, and `flip` for the glyph it stands in for) only
         // wants frames, not the whole layer drawn again for each of them.
         // The stone's test is `keycube::has_stone`.
-        let moving = looks
-            .iter()
-            .zip(&inputs)
-            .zip(&sessions)
-            .any(|((l, t), s)| {
-                let stone = !s.shell && s.ssh.is_none();
-                let still = anim::Look {
-                    stir: 0.0,
-                    flip: if stone { 0.0 } else { l.flip },
-                    ..*l
-                };
-                still.moving(t.y)
-            });
+        let moving = looks.iter().zip(&inputs).zip(&sessions).any(|((l, t), s)| {
+            let stone = !s.shell && s.ssh.is_none();
+            let still = anim::Look {
+                stir: 0.0,
+                flip: if stone { 0.0 } else { l.flip },
+                ..*l
+            };
+            still.moving(t.y)
+        });
         let finishing = items
             .as_ref()
             .is_some_and(|items| items.iter().any(|i| i.finish.is_some()));

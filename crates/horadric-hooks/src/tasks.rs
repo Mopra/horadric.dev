@@ -113,7 +113,10 @@ fn local_file() -> Option<PathBuf> {
 fn local_key(project: &Path) -> String {
     let path = fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
     let text = path.to_string_lossy().replace('\\', "/");
-    let text = text.strip_prefix("//?/").unwrap_or(&text).trim_end_matches('/');
+    let text = text
+        .strip_prefix("//?/")
+        .unwrap_or(&text)
+        .trim_end_matches('/');
     if cfg!(windows) {
         text.to_lowercase()
     } else {
@@ -146,7 +149,10 @@ fn change_local(project: &Path, change: impl FnOnce(&str) -> String) -> io::Resu
     let _lock = Lock::take(&path.with_extension("lock"))?;
     let store = read_text(&path);
     let entry = tasks::local_entry(&store, &key).unwrap_or_else(|| first_entry(project));
-    write(&path, &tasks::with_local_entry(&store, &key, &change(&entry)))
+    write(
+        &path,
+        &tasks::with_local_entry(&store, &key, &change(&entry)),
+    )
 }
 
 /// The entry a project starts with. Only a git work tree can tell the

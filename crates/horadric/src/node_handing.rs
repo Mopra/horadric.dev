@@ -18,8 +18,8 @@
 //! hello gave, this node by the name the PC's hello says it has there
 //! ("vps"), else its host name.
 
-use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -284,7 +284,11 @@ impl Machine {
                     .copied()
                     .filter(|_| n.registry.get(&id).is_some())
             };
-            let hand = self.hand.hands.lock().map_or(0, |h| h.get(&id).copied().unwrap_or(0));
+            let hand = self
+                .hand
+                .hands
+                .lock()
+                .map_or(0, |h| h.get(&id).copied().unwrap_or(0));
             if let Some(took) = ran.and_then(|n| handoffs::took_again_of(&id, n, hand, msg)) {
                 return Some(Box::new(move || took));
             }

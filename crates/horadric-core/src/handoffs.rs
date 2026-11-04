@@ -787,7 +787,10 @@ mod tests {
         let mut r = Handoffs::default();
         r.took_hand("s1", 4, 0);
         let ask = json!({"t": "bases", "id": "s1", "hand": 77});
-        assert_eq!(r.took_again_for("s1", true, &ask), Some(took_message("s1", 4)));
+        assert_eq!(
+            r.took_again_for("s1", true, &ask),
+            Some(took_message("s1", 4))
+        );
         assert_eq!(r.took_again_for("s1", false, &ask), None);
     }
 

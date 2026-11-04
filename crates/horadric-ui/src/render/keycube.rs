@@ -8,8 +8,8 @@ use std::cell::RefCell;
 use std::time::{Duration, SystemTime};
 
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    ID2D1Bitmap, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_OPACITY_MASK_CONTENT_GRAPHICS,
+    ID2D1Bitmap, D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_OPACITY_MASK_CONTENT_GRAPHICS,
 };
 
 use super::{color, rect, Painter, Scene, Stones, HIRELING_ORBIT, MAX_SPARKS, RUNE_SETTLE};
@@ -120,12 +120,7 @@ impl Painter<'_> {
                     return;
                 }
                 let size = MINI * o.scale * (1.0 - 0.5 * m.gather);
-                let at = Rect::new(
-                    cx + o.dx - size / 2.0,
-                    cy + o.dy - size / 2.0,
-                    size,
-                    size,
-                );
+                let at = Rect::new(cx + o.dx - size / 2.0, cy + o.dy - size / 2.0, size, size);
                 let fade = if behind { 0.8 } else { 1.0 };
                 let pose = frames(tilecube::Pose::Spun(tilecube::Stand { up: 0, yaw: m.spin }));
                 self.rune_stone(stones, pose, &at, m.ink, presence.max(0.6) * fade);
@@ -159,7 +154,13 @@ impl Painter<'_> {
         let dest = rect(at);
         let draw = |stone: &ID2D1Bitmap, o: f32| {
             if o > 0.0 {
-                self.rt.DrawBitmap(stone, Some(&dest), o, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+                self.rt.DrawBitmap(
+                    stone,
+                    Some(&dest),
+                    o,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    None,
+                );
             }
         };
         draw(&stone_a, opacity);
@@ -189,7 +190,9 @@ fn frames(pose: tilecube::Pose) -> (usize, usize, f32) {
     use crate::turning::{rolled_at, spun_at, ROLL_STEP_DEG, STEP_DEG};
     let (at_deg, step_deg, at): (f32, f32, &dyn Fn(f32) -> usize) = match pose {
         tilecube::Pose::Spun(s) => (s.yaw, STEP_DEG, &move |d| spun_at(s.up, d)),
-        tilecube::Pose::Rolling { group, deg } => (deg, ROLL_STEP_DEG, &move |d| rolled_at(group, d)),
+        tilecube::Pose::Rolling { group, deg } => {
+            (deg, ROLL_STEP_DEG, &move |d| rolled_at(group, d))
+        }
     };
     let x = at_deg / step_deg;
     let step = x.floor();
@@ -201,7 +204,9 @@ fn frames(pose: tilecube::Pose) -> (usize, usize, f32) {
 /// work where the band knows nothing (a mod too old, a headless run).
 fn minis(s: &Session, now: SystemTime) -> Vec<Mini> {
     use horadric_core::hireling::Lot;
-    let clock = now.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+    let clock = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
     let turn = motion::cycle(clock, HIRELING_ORBIT);
     let spin = |seed: u64| 360.0 * motion::cycle(clock, MINI_SPIN) + (seed % 360) as f32;
     if s.band.hirelings.is_empty() {
@@ -229,7 +234,12 @@ fn minis(s: &Session, now: SystemTime) -> Vec<Mini> {
         .filter_map(|(k, h)| {
             // Its place from the order it came in, not from how many
             // there are now, so none jumps as others come and go.
-            let order = s.band.hirelings.iter().position(|x| x.id == h.id).unwrap_or(k);
+            let order = s
+                .band
+                .hirelings
+                .iter()
+                .position(|x| x.id == h.id)
+                .unwrap_or(k);
             let spot = tilecube::spot(order);
             let young = since(h.started).as_secs_f32() / EMERGE;
             let rising = 1.0 - motion::ease_out(young.min(1.0));
@@ -247,7 +257,12 @@ fn minis(s: &Session, now: SystemTime) -> Vec<Mini> {
                 }
                 Lot::Failed => (theme::error(), spot, 0.0),
             };
-            Some(Mini { ink, turn, gather, spin: spin(seed) })
+            Some(Mini {
+                ink,
+                turn,
+                gather,
+                spin: spin(seed),
+            })
         })
         .collect()
 }

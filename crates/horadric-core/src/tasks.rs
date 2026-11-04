@@ -3528,7 +3528,8 @@ Kept.
 
     #[test]
     fn only_what_this_machine_changed_moves_into_the_local_entry() {
-        let committed = r#"{"tasks":{"mode":"auto","parallel":16},"orchestrator":true,"checks":["evil"]}"#;
+        let committed =
+            r#"{"tasks":{"mode":"auto","parallel":16},"orchestrator":true,"checks":["evil"]}"#;
         // A clone as it came: nothing takes effect.
         let entry = local_from(committed, committed);
         assert_eq!(mode(&entry), Mode::Manual);
