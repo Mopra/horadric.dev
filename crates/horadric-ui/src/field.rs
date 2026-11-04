@@ -16,6 +16,73 @@ pub struct Field {
     pub multiline: bool,
     /// In characters. Past it, typing and pasting are cut short.
     pub max: usize,
+    /// Set for a field that must give back exactly what it was given, a
+    /// file's text to change: see [`Field::verbatim`].
+    pub verbatim: Option<Verbatim>,
+    history: History,
+}
+
+/// What a verbatim field was given, so [`Field::value`] can hand an
+/// unedited text back byte for byte and an edited one with its line breaks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Verbatim {
+    original: String,
+    crlf: bool,
+}
+
+/// Each change to the text, for Ctrl+Z and Ctrl+Y. A change is kept as what
+/// it took out and put in, not a copy of the text, since a field can hold a
+/// whole file.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct History {
+    undo: Vec<Edit>,
+    redo: Vec<Edit>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Edit {
+    at: usize,
+    removed: String,
+    inserted: String,
+    /// The caret and anchor before it, where an undo puts them back.
+    caret: usize,
+    anchor: usize,
+}
+
+const UNDO_DEPTH: usize = 500;
+
+impl History {
+    fn record(&mut self, e: Edit) {
+        self.redo.clear();
+        if let Some(last) = self.undo.last_mut() {
+            // Typing a run, or holding Backspace or Delete, undoes as one.
+            let typed = |x: &Edit| x.removed.is_empty() && x.inserted.chars().count() == 1;
+            let erased = |x: &Edit| x.inserted.is_empty() && !x.removed.is_empty();
+            if typed(&e)
+                && !last.inserted.is_empty()
+                && last.removed.is_empty()
+                && e.at == last.at + last.inserted.len()
+                && e.inserted != "\n"
+                && !last.inserted.ends_with('\n')
+            {
+                last.inserted.push_str(&e.inserted);
+                return;
+            }
+            if erased(&e) && erased(last) && e.at + e.removed.len() == last.at {
+                last.removed.insert_str(0, &e.removed);
+                last.at = e.at;
+                return;
+            }
+            if erased(&e) && erased(last) && e.at == last.at {
+                last.removed.push_str(&e.removed);
+                return;
+            }
+        }
+        if self.undo.len() == UNDO_DEPTH {
+            self.undo.remove(0);
+        }
+        self.undo.push(e);
+    }
 }
 
 impl Field {
@@ -28,10 +95,58 @@ impl Field {
             anchor: 0,
             multiline,
             max,
+            verbatim: None,
+            history: History::default(),
         };
         f.insert(text);
         f.anchor = 0;
+        f.history = History::default();
         f
+    }
+
+    /// A multiline field for text that must come back exactly as given, a
+    /// file Claude is about to write: tabs and control characters are kept
+    /// and [`Field::value`] restores the line breaks. None when `text` is
+    /// over `max`, since cutting it would cut the file. The caret starts at
+    /// the top with nothing selected, so a stray key cannot replace it all.
+    pub fn verbatim(text: &str, max: usize) -> Option<Self> {
+        if text.chars().count() > max {
+            return None;
+        }
+        let breaks = text.matches('\n').count();
+        let crlf = breaks > 0 && text.matches("\r\n").count() * 2 > breaks;
+        let mut f = Field {
+            text: String::new(),
+            caret: 0,
+            anchor: 0,
+            multiline: true,
+            max,
+            verbatim: Some(Verbatim {
+                original: text.to_string(),
+                crlf,
+            }),
+            history: History::default(),
+        };
+        f.insert(text);
+        f.set_caret(0, false);
+        f.history = History::default();
+        Some(f)
+    }
+
+    /// What the field holds, for sending. A verbatim field gives back what
+    /// it was given when it was not changed, and otherwise uses the line
+    /// breaks most of the original used.
+    pub fn value(&self) -> String {
+        let Some(v) = &self.verbatim else {
+            return self.text.clone();
+        };
+        if self.text == clean_verbatim(&v.original) {
+            v.original.clone()
+        } else if v.crlf {
+            self.text.replace('\n', "\r\n")
+        } else {
+            self.text.clone()
+        }
     }
 
     /// The selection, start first.
@@ -57,17 +172,96 @@ impl Field {
         }
     }
 
-    /// Types or pastes `s` over the selection, fitted to the field.
+    /// Types or pastes `s` over the selection, fitted to the field. A
+    /// verbatim field takes all of it or, when it would not fit, none.
     pub fn insert(&mut self, s: &str) {
         let (a, b) = self.selection();
         let room = self
             .max
             .saturating_sub(self.text.chars().count() - self.text[a..b].chars().count());
-        let s = clean(s, self.multiline);
-        let s: String = s.chars().take(room).collect();
+        let s: String = if self.verbatim.is_some() {
+            let s = clean_verbatim(s);
+            if s.chars().count() > room {
+                return;
+            }
+            s
+        } else {
+            clean(s, self.multiline).chars().take(room).collect()
+        };
+        if a == b && s.is_empty() {
+            return;
+        }
+        self.history.record(Edit {
+            at: a,
+            removed: self.text[a..b].to_string(),
+            inserted: s.clone(),
+            caret: self.caret,
+            anchor: self.anchor,
+        });
         self.text.replace_range(a..b, &s);
         self.caret = a + s.len();
         self.anchor = self.caret;
+    }
+
+    /// Ctrl+Z. False when there is nothing to undo.
+    pub fn undo(&mut self) -> bool {
+        let Some(e) = self.history.undo.pop() else {
+            return false;
+        };
+        let end = e.at + e.inserted.len();
+        // The text is public: one set from outside makes the history moot.
+        if self.text.get(e.at..end) != Some(e.inserted.as_str()) {
+            self.history = History::default();
+            return false;
+        }
+        self.text.replace_range(e.at..end, &e.removed);
+        self.caret = e.caret;
+        self.anchor = e.anchor;
+        self.history.redo.push(e);
+        true
+    }
+
+    /// Ctrl+Y. False when there is nothing to redo.
+    pub fn redo(&mut self) -> bool {
+        let Some(e) = self.history.redo.pop() else {
+            return false;
+        };
+        let end = e.at + e.removed.len();
+        if self.text.get(e.at..end) != Some(e.removed.as_str()) {
+            self.history = History::default();
+            return false;
+        }
+        self.text.replace_range(e.at..end, &e.inserted);
+        self.caret = e.at + e.inserted.len();
+        self.anchor = self.caret;
+        self.history.undo.push(e);
+        true
+    }
+
+    /// Up or Down: the same column of the line before or after, or the
+    /// start or end of the text from the first or last line. Lines are the
+    /// text's, not the wrapped ones on screen.
+    pub fn line(&mut self, down: bool, extend: bool) {
+        let start = self.text[..self.caret].rfind('\n').map_or(0, |i| i + 1);
+        let col = self.text[start..self.caret].chars().count();
+        let target = if down {
+            match self.text[self.caret..].find('\n') {
+                Some(i) => self.caret + i + 1,
+                None => return self.set_caret(self.text.len(), extend),
+            }
+        } else if start == 0 {
+            return self.set_caret(0, extend);
+        } else {
+            self.text[..start - 1].rfind('\n').map_or(0, |i| i + 1)
+        };
+        let end = self.text[target..]
+            .find('\n')
+            .map_or(self.text.len(), |i| target + i);
+        let at = self.text[target..end]
+            .char_indices()
+            .nth(col)
+            .map_or(end, |(i, _)| target + i);
+        self.set_caret(at, extend);
     }
 
     /// Takes the selection out, for a cut.
@@ -181,6 +375,12 @@ fn clean(s: &str, multiline: bool) -> String {
             c => Some(c),
         })
         .collect()
+}
+
+/// `s` as a verbatim field takes it: only the line breaks made one, so the
+/// caret never stands inside a CR LF. [`Field::value`] puts them back.
+fn clean_verbatim(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn floor_boundary(s: &str, mut at: usize) -> usize {
@@ -381,6 +581,86 @@ mod tests {
         f.set_caret(4, true);
         assert_eq!(f.cut(), " this");
         assert_eq!(f.text, "keep");
+    }
+
+    #[test]
+    fn a_verbatim_field_gives_back_tabs_and_crlf_unchanged() {
+        let make = "all:\r\n\tcc -o a a.c\r\n\r\nclean:\r\n\trm a\x0c\r\n";
+        let f = Field::verbatim(make, 1000).unwrap();
+        assert!(f.text.contains('\t'));
+        assert!(!f.text.contains('\r'));
+        assert_eq!(f.value(), make);
+        assert_eq!((f.caret, f.anchor), (0, 0));
+        // Mixed endings come back as they were when nothing changed.
+        let mixed = "a\r\nb\nc\r";
+        assert_eq!(Field::verbatim(mixed, 100).unwrap().value(), mixed);
+    }
+
+    #[test]
+    fn an_edited_verbatim_field_keeps_the_original_line_breaks() {
+        let mut f = Field::verbatim("one\r\n\ttwo\r\n", 1000).unwrap();
+        f.end(false, false);
+        f.insert("\n\tnew");
+        assert_eq!(f.value(), "one\r\n\tnew\r\n\ttwo\r\n");
+        let mut f = Field::verbatim("x\ny\n", 1000).unwrap();
+        f.insert("\t");
+        assert_eq!(f.value(), "\tx\ny\n");
+    }
+
+    #[test]
+    fn a_verbatim_field_refuses_rather_than_cuts() {
+        assert!(Field::verbatim("abcdef", 5).is_none());
+        let mut f = Field::verbatim("abcd", 5).unwrap();
+        f.insert("xy");
+        assert_eq!(f.text, "abcd");
+        f.insert("x");
+        assert_eq!(f.text, "xabcd");
+    }
+
+    #[test]
+    fn undo_and_redo_step_through_runs_of_typing_and_erasing() {
+        let mut f = Field::verbatim("ab", 100).unwrap();
+        f.end(true, false);
+        for c in ["c", "d", "e"] {
+            f.insert(c);
+        }
+        f.backspace(false);
+        f.backspace(false);
+        assert_eq!(f.text, "abc");
+        assert!(f.undo());
+        assert_eq!(f.text, "abcde");
+        assert!(f.undo());
+        assert_eq!((f.text.as_str(), f.caret), ("ab", 2));
+        assert!(!f.undo());
+        assert!(f.redo());
+        assert_eq!(f.text, "abcde");
+        f.insert("z");
+        assert!(!f.redo(), "a new edit drops what could be redone");
+        // Text set from outside: undo gives up rather than garbles.
+        f.text = String::from("other");
+        assert!(!f.undo());
+        assert_eq!(f.text, "other");
+    }
+
+    #[test]
+    fn up_and_down_keep_the_column_across_lines() {
+        let mut f = Field::new("hello\nhi\nworld", true, 200);
+        f.set_caret(4, false);
+        f.line(true, false);
+        assert_eq!(f.caret, 8, "past a short line's end, to its end");
+        f.line(true, false);
+        assert_eq!(f.caret, 11);
+        f.line(true, true);
+        assert_eq!(f.caret, f.text.len());
+        f.set_caret(4, false);
+        f.line(false, false);
+        assert_eq!(f.caret, 0);
+        let mut f = Field::new("ab\n\ncd", true, 200);
+        f.set_caret(6, false);
+        f.line(false, false);
+        assert_eq!(f.caret, 3);
+        f.line(false, false);
+        assert_eq!(f.caret, 0);
     }
 
     #[test]

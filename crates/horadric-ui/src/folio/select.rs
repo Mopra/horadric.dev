@@ -26,6 +26,9 @@ use crate::clipboard;
 use crate::field::Field;
 use crate::keys::Mods;
 
+/// The most characters an edit's text may have to be changed on its card.
+const CHANGE_MAX: usize = 4 << 20;
+
 /// A click on one of the transcript's own buttons.
 pub(super) fn act(key: &str, a: Act) {
     match a {
@@ -72,17 +75,23 @@ pub(super) fn act(key: &str, a: Act) {
                         _ => None,
                     });
                     let wrote = wrote?;
+                    // Room for a whole file, which a Write holds. Verbatim,
+                    // so tabs and line breaks land as Claude wrote them.
+                    let Some(f) = Field::verbatim(&wrote, CHANGE_MAX) else {
+                        let say = "Too long to change here. Deny it and say what to change.";
+                        super::composer::notice(c, say);
+                        return None;
+                    };
+                    let st = &mut c.tr.state;
                     st.denying.remove(&id);
                     st.changing.insert(id.clone());
-                    // Room for a whole file, which a Write holds.
-                    st.fields
-                        .insert(field.clone(), Field::new(&wrote, true, 4 << 20));
+                    st.fields.insert(field.clone(), f);
                     st.focus = Some(field.clone());
                     None
                 } else {
                     st.changing.remove(&id);
                     st.focus = None;
-                    st.fields.remove(&field).map(|f| f.text)
+                    st.fields.remove(&field).map(|f| f.value())
                 }
             })
             .flatten();
@@ -572,14 +581,26 @@ pub(super) fn char(key: &str, c: char, mods: Mods) -> bool {
         }
         return false;
     };
+    // A changed edit is a file being written, so Enter and Tab type into
+    // it like an editor's and only Ctrl+Enter or the button allows it.
+    let change = focus.starts_with("change:");
     match c {
-        '\r' if mods.shift && (focus.starts_with("change:") || focus.starts_with("note:")) => {
+        '\r' if change || (mods.shift && focus.starts_with("note:")) => {
             with(key, |chat| {
                 if let Some(f) = field_mut(chat, &focus) {
                     f.insert("\n");
                 }
             });
         }
+        '\t' if change && !mods.shift => {
+            with(key, |chat| {
+                if let Some(f) = field_mut(chat, &focus) {
+                    f.insert("\t");
+                }
+            });
+        }
+        // Ctrl+Enter.
+        '\n' => submit(key, &focus, false),
         '\r' => {
             let shift = mods.shift;
             submit(key, &focus, shift);
@@ -613,6 +634,15 @@ pub(super) fn char(key: &str, c: char, mods: Mods) -> bool {
                     '\u{8}' => f.backspace(false),
                     '\u{7f}' => f.backspace(true),
                     '\u{1}' => f.select_all(),
+                    '\u{1a}' if mods.shift => {
+                        f.redo();
+                    }
+                    '\u{1a}' => {
+                        f.undo();
+                    }
+                    '\u{19}' => {
+                        f.redo();
+                    }
                     '\u{3}' => {
                         if !f.selected().is_empty() {
                             clipboard::set_text(f.selected());
@@ -759,6 +789,13 @@ pub(super) fn key(key: &str, vk: u16, mods: Mods) -> bool {
             v if v == VK_HOME.0 => f.home(word, extend),
             v if v == VK_END.0 => f.end(word, extend),
             v if v == VK_DELETE.0 => f.delete(word),
+            // Up and Down stay in a card's field: past it they would move
+            // the composer's caret or bring back its history out of sight.
+            v if (v == VK_UP.0 || v == VK_DOWN.0) && f.multiline => {
+                f.line(v == VK_DOWN.0, extend)
+            }
+            v if v == VK_UP.0 => f.home(true, extend),
+            v if v == VK_DOWN.0 => f.end(true, extend),
             _ => return false,
         }
         true
