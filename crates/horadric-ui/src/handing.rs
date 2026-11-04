@@ -432,7 +432,7 @@ impl App {
     /// Why session `id` may not be resumed now, if it may not: while its
     /// handoff is under way the receiver may already run it, and a `took`
     /// coming in would discard what ran here meanwhile.
-    pub(super) fn resume_blocked(&self, id: &str) -> Option<&'static str> {
+    pub(super) fn handing_holds_resume(&self, id: &str) -> Option<&'static str> {
         with(|s| s.hand.going(id).is_some()).then_some("it is being handed off to a brother")
     }
 

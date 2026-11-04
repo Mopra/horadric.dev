@@ -1131,6 +1131,15 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         // Written before anything resumed can crash it, so that crash is
         // known for what it is.
         app.save();
+        if let Some(crash) = crate::crashlog::take_last_crash() {
+            let log = crate::crashlog::log_path()
+                .map_or_else(|| "horadric.log".to_string(), |p| p.display().to_string());
+            app.toasts.show(
+                Kind::Failed,
+                "Horadric closed unexpectedly last time",
+                &format!("{crash}\nThe log is in {log}"),
+            );
+        }
         *a.borrow_mut() = Some(app);
     });
 
@@ -1149,6 +1158,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             DispatchMessageW(&msg);
         }
     }
+    crate::crashlog::clean_exit();
     APP.with(|a| {
         if let Some(mut app) = a.borrow_mut().take() {
             app.freeze();
@@ -5143,6 +5153,9 @@ impl App {
         if let Some(line) = self.keeping_fenced(id) {
             return Err(line);
         }
+        if let Some(why) = self.handing_holds_resume(id) {
+            return Err(why.to_string());
+        }
         let Some(saved) = self.paused.remove(id) else {
             return Ok(());
         };
@@ -7241,6 +7254,7 @@ impl App {
         if self.paused.contains_key(id) {
             if let Err(e) = self.resume(id, true) {
                 eprintln!("horadric: cannot resume {id}: {e}");
+                self.toasts.show(Kind::Failed, "Not resumed", &e);
             }
             return;
         }
