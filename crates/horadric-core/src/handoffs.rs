@@ -27,9 +27,13 @@ pub struct Handoffs {
     out: HashMap<String, Outgoing>,
     /// Bundles arriving, part by part.
     pub arriving: Arriving,
-    /// The roster's number of each session handed here, to say `took`
-    /// again to a sender whose link dropped before it heard it.
-    took: HashMap<String, u64>,
+    /// The roster's number of each session handed here, and the sender's
+    /// try it came by, to say `took` again to a sender whose link dropped
+    /// before it heard it, and only about that try.
+    took: HashMap<String, (u64, u64)>,
+    /// Each outgoing session's try, new each time it starts, so a `took`
+    /// from a try that failed never lets go of the next one.
+    hands: HashMap<String, u64>,
     /// Each outgoing session's ask for commits, made once: the sender asks
     /// again and again while the receiver's human decides, and the ask
     /// reads the disk.
@@ -51,9 +55,17 @@ impl Handoffs {
     /// Hands session `id` to `to` once its turn ends, or at once with
     /// `now`. One already going keeps going where it goes.
     pub fn start(&mut self, id: &str, to: &str, now: bool) {
-        self.out
-            .entry(id.to_string())
-            .or_insert_with(|| Outgoing::new(id, to, now));
+        if self.out.contains_key(id) {
+            return;
+        }
+        self.out.insert(id.to_string(), Outgoing::new(id, to, now));
+        self.hands.insert(id.to_string(), new_hand());
+    }
+
+    /// Which try at handing session `id` this is, while it goes: the
+    /// record carries it, and the receiver says it back with `took`.
+    pub fn hand_of(&self, id: &str) -> Option<u64> {
+        self.out.get(id).and(self.hands.get(id).copied())
     }
 
     /// The handoff of session `id`, while it goes.
@@ -108,13 +120,24 @@ impl Handoffs {
     /// The ask for session `id`'s receiver's commits, made by `make` the
     /// first time.
     pub fn ask(&mut self, id: &str, make: impl FnOnce() -> Value) -> Value {
-        self.asks.entry(id.to_string()).or_insert_with(make).clone()
+        let hand = self.hands.get(id).copied();
+        self.asks
+            .entry(id.to_string())
+            .or_insert_with(|| {
+                let mut ask = make();
+                if let (Some(hand), Some(o)) = (hand, ask.as_object_mut()) {
+                    o.insert("hand".into(), hand.into());
+                }
+                ask
+            })
+            .clone()
     }
 
     /// Session `id` went, or its handoff failed: it is no longer going.
     pub fn drop(&mut self, id: &str) {
         self.out.remove(id);
         self.asks.remove(id);
+        self.hands.remove(id);
     }
 
     /// Session `id`'s receiver runs it: it goes from here, and nothing
@@ -154,7 +177,13 @@ impl Handoffs {
         at: u64,
     ) -> Option<(Outgoing, Do)> {
         let id = msg["id"].as_str()?;
+        let hand = self.hands.get(id).copied();
         let o = self.out.get_mut(id).filter(|o| o.to == who)?;
+        // A `took` of an earlier try, which failed and was recalled: the
+        // session ran here since, and letting go would discard that.
+        if msg["t"] == "took" && !same_hand(msg, hand) {
+            return Some((o.clone(), Do::Wait));
+        }
         let says = |none: &str| match msg["text"].as_str() {
             Some(why) => format!("{name} says {why}"),
             None => none.to_string(),
@@ -183,15 +212,74 @@ impl Handoffs {
 
     /// Session `id` landed here and runs, as the roster's number `n`.
     pub fn took(&mut self, id: &str, n: u64) {
-        self.took.insert(id.to_string(), n);
+        self.took_hand(id, n, 0);
+    }
+
+    /// Session `id` landed here and runs, as the roster's number `n`, by
+    /// its sender's try `hand`.
+    pub fn took_hand(&mut self, id: &str, n: u64, hand: u64) {
+        self.took.insert(id.to_string(), (n, hand));
+    }
+
+    /// Session `id` handed here no longer runs here as handed (it was
+    /// fenced, or its handoff recalled): no `took` of it is said again.
+    pub fn forget_took(&mut self, id: &str) {
+        self.took.remove(id);
     }
 
     /// The `took` to say again to a sender that asks for commits of a
     /// session that runs here already (`runs`): its link dropped before it
     /// heard it.
     pub fn took_again(&self, id: &str, runs: bool) -> Option<Value> {
-        let n = self.took.get(id).copied().filter(|_| runs)?;
-        Some(handing::took_message(id, n))
+        self.took_again_for(id, runs, &Value::Null)
+    }
+
+    /// [`Handoffs::took_again`] for the sender's `ask`: only when the ask
+    /// is of the try that landed here. A sender that took its handoff back
+    /// and tries again asks anew, and must not hear the old `took`.
+    pub fn took_again_for(&self, id: &str, runs: bool, ask: &Value) -> Option<Value> {
+        let &(n, hand) = self.took.get(id).filter(|_| runs)?;
+        if ask["hand"].as_u64().is_some_and(|a| a != hand) {
+            return None;
+        }
+        Some(took_of(id, n, hand))
+    }
+}
+
+/// The `took` for session `id`, run here as the roster's number `n`, by
+/// the sender's try `hand` (0 when it did not say).
+pub fn took_of(id: &str, n: u64, hand: u64) -> Value {
+    let mut took = handing::took_message(id, n);
+    if hand != 0 {
+        took["hand"] = hand.into();
+    }
+    took
+}
+
+/// Whether a `took` is of try `hand`. One that names no try comes from a
+/// receiver that does not tell, and is believed as before.
+fn same_hand(msg: &Value, hand: Option<u64>) -> bool {
+    match msg["hand"].as_u64() {
+        None => true,
+        said => said == hand,
+    }
+}
+
+/// A try's number, never 0 and never the same twice on this machine,
+/// across restarts too.
+fn new_hand() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(1, |d| d.as_nanos() as u64);
+    let mut last = LAST.load(Ordering::Relaxed);
+    loop {
+        let next = now.max(last + 1);
+        match LAST.compare_exchange(last, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(seen) => last = seen,
+        }
     }
 }
 
@@ -637,6 +725,49 @@ mod tests {
         assert!(is_answer(&json!({"t": "took"})));
         assert!(is_answer(&json!({"t": "error", "for": "handoff"})));
         assert!(!is_answer(&json!({"t": "error", "for": "attach"})));
+    }
+
+    #[test]
+    fn a_took_of_an_earlier_try_never_lets_go_of_the_next() {
+        // The sender: its first try fails, the session runs here again,
+        // and a second try starts.
+        let mut h = Handoffs::default();
+        h.start("s1", "b", false);
+        let first = h.hand_of("s1").unwrap();
+        h.tick("s1", Some(&Phase::Idle), true, 10);
+        let ask = h.ask("s1", || json!({"t": "bases", "id": "s1"}));
+        assert_eq!(ask["hand"], first);
+        h.drop("s1");
+        h.start("s1", "b", false);
+        let second = h.hand_of("s1").unwrap();
+        assert_ne!(first, second);
+        h.tick("s1", Some(&Phase::Idle), true, 20);
+        let ask = h.ask("s1", || json!({"t": "bases", "id": "s1"}));
+        assert_eq!(ask["hand"], second);
+
+        // The receiver landed the first try late: asked about the second,
+        // it says nothing, and its old `took` is not heard.
+        let mut r = Handoffs::default();
+        r.took_hand("s1", 4, first);
+        assert_eq!(r.took_again_for("s1", true, &ask), None);
+        let (_, step) = h.answer("b", "B", &took_of("s1", 4, first), 21).unwrap();
+        assert_eq!(step, Do::Wait);
+        assert!(h.going("s1").is_some());
+
+        // A `took` of this try lets go; one naming no try is believed.
+        let (_, step) = h.answer("b", "B", &took_of("s1", 4, second), 22).unwrap();
+        assert_eq!(step, Do::LetGo(4));
+        let (_, step) = h.answer("b", "B", &took_message("s1", 4), 22).unwrap();
+        assert_eq!(step, Do::LetGo(4));
+
+        // Asked about the try that landed, or by a sender that does not
+        // tell, it says `took` again; once fenced, never.
+        r.took_hand("s1", 5, second);
+        let again = r.took_again_for("s1", true, &ask);
+        assert_eq!(again, Some(took_of("s1", 5, second)));
+        assert!(r.took_again("s1", true).is_some());
+        r.forget_took("s1");
+        assert_eq!(r.took_again_for("s1", true, &ask), None);
     }
 
     #[test]

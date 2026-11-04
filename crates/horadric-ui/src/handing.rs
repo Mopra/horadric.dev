@@ -31,7 +31,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use horadric_core::handing::{
-    self, bases_answer, refused, took_message, Do, Landed, Outgoing, PlaceAsk,
+    self, bases_answer, refused, Do, Landed, Outgoing, PlaceAsk,
 };
 use horadric_core::handoff::{self, Record, RepoId};
 use horadric_core::handoffs::{
@@ -178,6 +178,24 @@ fn shown_line(o: &Outgoing) -> String {
 pub(crate) const HANDOFF: usize = 2000;
 /// Where a brother's tile's handoff ids start: a brother, or this PC, each.
 pub(crate) const HANDOFF_FAR: usize = 2200;
+
+/// Saves what session `id`'s worktree `w` holds beyond what its handoff
+/// carried (the conversation `session`'s), before the worktree is
+/// discarded: the ref it is kept on, if anything was. An error means
+/// nothing was saved, so the worktree must stay. One already gone holds
+/// nothing to save.
+fn keep_unhanded(w: &Worktree, id: &str, session: Option<&str>) -> Result<Option<String>, String> {
+    let dir = Path::new(&w.path);
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    let safe: String = id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let name = format!("{safe}-{}", unix_now());
+    handoff::keep_unhanded(dir, session.unwrap_or(""), &name)
+}
 
 /// What the sender's tile says once the receiver runs the session: and
 /// that its changes stay where they were too, when it ran in the human's
@@ -411,6 +429,13 @@ impl App {
         with(|s| s.hand.to(id))
     }
 
+    /// Why session `id` may not be resumed now, if it may not: while its
+    /// handoff is under way the receiver may already run it, and a `took`
+    /// coming in would discard what ran here meanwhile.
+    pub(super) fn resume_blocked(&self, id: &str) -> Option<&'static str> {
+        with(|s| s.hand.going(id).is_some()).then_some("it is being handed off to a brother")
+    }
+
     /// Starts or stops handing every session to `to`.
     pub(super) fn leave_for(&mut self, to: Option<String>) {
         with(|s| {
@@ -559,6 +584,7 @@ impl App {
         let chat = self.paused.get(id).is_some_and(|p| p.chat) || self.folios.contains_key(id);
         let n = self.keeping_number(id);
         let said = self.keeping_handing(id, to, n);
+        let hand = with(|s| s.hand.hand_of(id)).unwrap_or(0);
         let carried = self.quest_held_by(id).map(|(_, t)| handoff::Carried {
             title: t.title,
             notes: t.notes,
@@ -569,6 +595,7 @@ impl App {
                 model: model_of(&args),
                 interrupted: !clean,
                 n,
+                hand,
                 said,
                 chat,
                 carried,
@@ -624,7 +651,7 @@ impl App {
             };
             if let Ok(id) = &result {
                 let n = l.record.n.saturating_add(1);
-                with(|s| s.hand.took(id, n));
+                with(|s| s.hand.took_hand(id, n, l.record.hand));
                 self.keeping_handed(id, None, n, &l.record.said);
             }
             let _ = l.done.send(result);
@@ -654,7 +681,25 @@ impl App {
             && dir.is_dir()
             && (handoff::repo_id(dir).is_none() || handoff::has_changes(dir)))
         .then_some(cwd.as_str());
-        let text = let_go_text(&crate::project::brother_name(to), stays);
+        let mut text = let_go_text(&crate::project::brother_name(to), stays);
+        // Before the handoff ref goes, which is what was handed to compare
+        // against: anything done here since would go with the worktree.
+        let tree = tree.and_then(|w| match keep_unhanded(&w, id, session.as_deref()) {
+            Ok(kept) => {
+                if let Some(kept) = kept {
+                    text.push_str(&format!(" What was done here since is kept on {kept}."));
+                }
+                Some(w)
+            }
+            Err(e) => {
+                text.push_str(&format!(
+                    " Its worktree at {} stays, since what was done there since could not be \
+                     kept: {e}",
+                    w.path
+                ));
+                None
+            }
+        });
         self.quest_moved_away(id, to);
         if let Some(session) = session {
             handing::forget_ref(dir, &session);
@@ -716,12 +761,17 @@ impl App {
         if msg["t"] == "bases" {
             // A session handed here already: the sender asks again because
             // its link dropped before it heard `took`.
+            // One fenced here since runs elsewhere now: its old `took`
+            // would have the sender discard what it holds.
+            if self.keeping_fenced(&id).is_some() {
+                with(|s| s.hand.forget_took(&id));
+            }
             let runs = self
                 .shared
                 .registry
                 .lock()
                 .is_ok_and(|r| r.get(&id).is_some_and(|s| s.brother.is_none()));
-            if let Some(took) = with(|s| s.hand.took_again(&id, runs)) {
+            if let Some(took) = with(|s| s.hand.took_again_for(&id, runs, msg)) {
                 return Some(Box::new(move || took));
             }
             let repo: RepoId = serde_json::from_value(msg["repo"].clone()).unwrap_or_default();
@@ -780,7 +830,7 @@ impl App {
             match told.recv_timeout(ADOPT_WAIT) {
                 Ok(Ok(_)) => {
                     PLACING.forget(&id);
-                    took_message(&id, record.n.saturating_add(1))
+                    handoffs::took_of(&id, record.n.saturating_add(1), record.hand)
                 }
                 Ok(Err(e)) => refused(&id, &format!("cannot resume it: {e}")),
                 Err(_) => refused(&id, "it did not start in time"),

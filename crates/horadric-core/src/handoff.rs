@@ -144,6 +144,37 @@ fn commit_in(dir: &Path, refname: &str, message: &str, index: &str) -> Result<St
     Ok(commit)
 }
 
+/// Where work a handed off session's worktree holds beyond what was handed
+/// is kept, as `refs/horadric/kept/<name>`. Refs live in the main
+/// repository, so it outlives the worktree.
+pub const KEPT_REFS: &str = "refs/horadric/kept/";
+
+/// Saves what the worktree at `dir` holds that session `session`'s handoff
+/// did not carry, before the worktree is removed: its commits and its
+/// changes, untracked files too, as one commit on a ref named after
+/// `name`. The ref, or None when the tree is just what was handed. With no
+/// handoff commit to compare against, the work is kept anyway. An error
+/// means nothing was saved, and the worktree must stay.
+pub fn keep_unhanded(dir: &Path, session: &str, name: &str) -> Result<Option<String>, String> {
+    let handed = handoff_ref(session).and_then(|r| rev(dir, &r));
+    let kept = private_ref(KEPT_REFS, name).ok_or("not a name for a ref")?;
+    let message = "Work left in a handed off session's worktree";
+    commit_work(dir, &kept, message)?;
+    let tree = |c: &str| git(dir, &["rev-parse", &format!("{c}^{{tree}}")], &[]).ok();
+    // The handed commit is a commit of everything, so the same tree means
+    // nothing was done here since, whatever HEAD says.
+    let same = handed.is_some_and(|h| tree(&h).is_some_and(|t| Some(t) == tree(&kept)));
+    if same {
+        git(dir, &["update-ref", "-d", &kept], &[])?;
+        return Ok(None);
+    }
+    Ok(Some(kept))
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 /// Copies a git index keeping its modified time. Git trusts a file's
 /// cached stat only when the file is older than the index, so a file
 /// changed within the clock tick of the last write (Linux stamps files
@@ -822,6 +853,12 @@ pub struct Record {
     /// The roster's number for the session, one higher once it runs here.
     #[serde(default)]
     pub n: u64,
+    /// Which try at handing it this is, from the sender's
+    /// [`crate::handoffs::Handoffs`], said back with `took` so a `took`
+    /// from an earlier try never answers this one. 0 from a sender that
+    /// does not tell.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub hand: u64,
     /// Its last turn was interrupted for the move rather than ending by
     /// itself, which its first line tells it.
     #[serde(default)]
@@ -1076,6 +1113,28 @@ pub(crate) mod tests {
         assert_eq!(std::fs::metadata(&to).unwrap().modified().unwrap(), old);
         assert_eq!(std::fs::read(&to).unwrap(), b"x");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn work_done_after_the_handoff_is_kept_before_the_worktree_goes() {
+        let r = Repo::new("keep");
+        r.commit("a.txt", "a");
+        let handed = handoff_ref("s1").unwrap();
+        r.write("b.txt", "handed");
+        commit_work(&r.0, &handed, "handoff").unwrap();
+        // Nothing since the handoff: nothing to keep.
+        assert_eq!(keep_unhanded(&r.0, "s1", "s1-1"), Ok(None));
+        assert!(rev(&r.0, "refs/horadric/kept/s1-1").is_none());
+        // A commit and an untracked file after it are kept.
+        r.commit("c.txt", "later");
+        r.write("d.txt", "untracked");
+        let kept = keep_unhanded(&r.0, "s1", "s1-2").unwrap().unwrap();
+        assert_eq!(kept, "refs/horadric/kept/s1-2");
+        let files = r.git(&["ls-tree", "--name-only", &kept]);
+        assert!(files.contains("c.txt") && files.contains("d.txt"));
+        // Never handed: kept anyway.
+        assert!(keep_unhanded(&r.0, "s2", "s2-1").unwrap().is_some());
+        assert!(keep_unhanded(&r.0, "s1", "../x").is_err());
     }
 
     /// A fresh repository in the temp folder, with one commit, removed
