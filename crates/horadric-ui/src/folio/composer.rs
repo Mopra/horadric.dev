@@ -90,8 +90,7 @@ const PAST_MAX: usize = 40;
 
 const PLACEHOLDER: &str =
     "Write to the Horadrim. Shift+Enter for a new line, / for commands, @ for files";
-const PLACEHOLDER_BUSY: &str =
-    "The Horadrim are at work. Enter steers them, Ctrl+Enter stops them and sends at once, Esc stops them";
+const PLACEHOLDER_BUSY: &str = "Enter steers, Ctrl+Enter sends now, Esc stops";
 const PLACEHOLDER_ENDED: &str = "This session has ended.";
 
 /// What a click on the composer does.
