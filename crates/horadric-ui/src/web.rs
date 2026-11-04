@@ -29,7 +29,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs;
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -218,6 +217,9 @@ enum Env {
 
 thread_local! {
     static ENV: RefCell<Env> = const { RefCell::new(Env::None) };
+    /// Whether the browser was started with an older Horadric's DevTools
+    /// port, see [`legacy_port`].
+    static LEGACY: Cell<bool> = const { Cell::new(false) };
     static WEBS: RefCell<HashMap<String, Web>> = RefCell::new(HashMap::new());
     static NEXT_TAB: Cell<u64> = const { Cell::new(1) };
     /// Each project's page size in CSS pixels, where it has one. Kept
@@ -344,23 +346,34 @@ fn profile() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|a| PathBuf::from(a).join(r"Horadric\web"))
 }
 
-/// The DevTools port, chosen the first time and kept beside the profile.
-pub fn devtools_port() -> Option<u16> {
-    let path = profile()?.join("devtools-port");
-    if let Some(port) = fs::read_to_string(&path)
+/// The DevTools port a Horadric from before 2026-11-04 opened on the
+/// shared browser, if one ever ran here. Never made anew: an open port let
+/// any local program read every login in the profile. It is read only to
+/// join such a Horadric's browser while it still runs, since WebView2
+/// refuses a second start with other arguments.
+fn legacy_port() -> Option<u16> {
+    fs::read_to_string(profile()?.join("devtools-port"))
+        .ok()?
+        .trim()
+        .parse()
         .ok()
-        .and_then(|s| s.trim().parse().ok())
-    {
-        return Some(port);
+}
+
+/// What WebView2 answers when the shared browser already runs with other
+/// arguments: HRESULT_FROM_WIN32(ERROR_INVALID_STATE).
+fn other_arguments(e: &windows::core::Error) -> bool {
+    e.code().0 as u32 == 0x8007_139F
+}
+
+/// Starts the browser again with an older Horadric's arguments, after a
+/// start without them met its browser. Says whether it did; once only.
+fn join_legacy() -> bool {
+    if LEGACY.with(Cell::get) || legacy_port().is_none() {
+        return false;
     }
-    let port = TcpListener::bind("127.0.0.1:0")
-        .ok()?
-        .local_addr()
-        .ok()?
-        .port();
-    let _ = fs::create_dir_all(path.parent()?);
-    fs::write(&path, port.to_string()).ok()?;
-    Some(port)
+    LEGACY.with(|l| l.set(true));
+    eprintln!("horadric: an older Horadric's browser runs with a DevTools port; joining it");
+    true
 }
 
 /// Opens the project's browser, at `url` when given. A browser it has
@@ -1511,11 +1524,18 @@ fn start_env() {
         return fail("no LOCALAPPDATA".into());
     };
     let options = CoreWebView2EnvironmentOptions::default();
-    if let Some(port) = devtools_port() {
-        unsafe { options.set_additional_browser_arguments(args(port)) };
+    if let Some(port) = LEGACY.with(Cell::get).then(legacy_port).flatten() {
+        unsafe { options.set_additional_browser_arguments(legacy_args(port)) };
     }
     let options: ICoreWebView2EnvironmentOptions = options.into();
     let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(|result, env| {
+        if let Err(e) = &result {
+            // The tabs keep waiting, on the browser started the old way.
+            if other_arguments(e) && join_legacy() {
+                start_env();
+                return Ok(());
+            }
+        }
         let waiting = ENV.with(|e| {
             let mut e = e.borrow_mut();
             let waiting = match &mut *e {
@@ -1546,14 +1566,17 @@ fn start_env() {
             &handler,
         )
     };
-    if let Err(e) = started {
-        fail(e.to_string());
+    match started {
+        Err(e) if other_arguments(&e) && join_legacy() => start_env(),
+        Err(e) => fail(e.to_string()),
+        Ok(()) => {}
     }
 }
 
-/// What the browser starts with. The same for every Horadric, or they
-/// could not share it.
-fn args(port: u16) -> String {
+/// What an older Horadric started the shared browser with. Every
+/// Horadric must start it alike to share it, so this is what joining one
+/// takes.
+fn legacy_args(port: u16) -> String {
     format!("--remote-debugging-port={port} --remote-debugging-address=127.0.0.1")
 }
 
@@ -1567,6 +1590,7 @@ fn make_controller(env: &ICoreWebView2Environment, key: &str, id: u64) {
         move |result, controller| {
             match (result, controller) {
                 (Ok(()), Some(c)) => ready(&owned, id, c),
+                (Err(e), _) if other_arguments(&e) && restart_legacy(&owned, id) => {}
                 (r, _) => {
                     eprintln!("horadric: cannot open the browser pane: {r:?}");
                     lost(&owned, id);
@@ -1578,6 +1602,34 @@ fn make_controller(env: &ICoreWebView2Environment, key: &str, id: u64) {
     if let Err(e) = unsafe { env.CreateCoreWebView2Controller(parent, &handler) } {
         eprintln!("horadric: cannot open the browser pane: {e}");
         lost(key, id);
+    }
+}
+
+/// WebView2 may only find out when making a tab that the browser already
+/// runs with an older Horadric's arguments. The tab then waits on a
+/// browser started the old way. Says whether it does.
+fn restart_legacy(key: &str, id: u64) -> bool {
+    let waiting = ENV.with(|e| {
+        let mut e = e.borrow_mut();
+        match &mut *e {
+            Env::Starting(w) => {
+                w.push((key.to_string(), id));
+                Some(false)
+            }
+            Env::Ready(_) if join_legacy() => {
+                *e = Env::Starting(vec![(key.to_string(), id)]);
+                Some(true)
+            }
+            _ => None,
+        }
+    });
+    match waiting {
+        Some(true) => {
+            start_env();
+            true
+        }
+        Some(false) => true,
+        None => false,
     }
 }
 
@@ -2061,9 +2113,9 @@ mod tests {
     }
 
     #[test]
-    fn every_horadric_starts_the_browser_alike() {
+    fn an_older_horadric_is_joined_with_its_own_arguments() {
         assert_eq!(
-            args(9333),
+            legacy_args(9333),
             "--remote-debugging-port=9333 --remote-debugging-address=127.0.0.1"
         );
     }

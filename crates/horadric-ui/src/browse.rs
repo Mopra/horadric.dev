@@ -224,11 +224,96 @@ impl Call {
             Some("devtools") => {
                 let method = text("method").ok_or("say which DevTools method")?;
                 let params = body.get("params").cloned().unwrap_or_else(|| json!({}));
+                let params = devtools_allowed(method, params)?;
                 Call::DevTools(method.to_string(), params)
             }
             _ => return Err("unknown browser call".into()),
         })
     }
+}
+
+/// Whole DevTools domains an agent may use: each acts on its own tab's
+/// page and nothing beyond it.
+const PAGE_DOMAINS: &[&str] = &[
+    "Accessibility",
+    "Animation",
+    "Console",
+    "CSS",
+    "Debugger",
+    "DOM",
+    "DOMDebugger",
+    "DOMSnapshot",
+    "Emulation",
+    "HeapProfiler",
+    "Input",
+    "LayerTree",
+    "Log",
+    "Overlay",
+    "Performance",
+    "Profiler",
+    "Runtime",
+];
+
+/// Single methods of domains that also reach the whole browser (Page,
+/// Network), picked one by one.
+const PAGE_METHODS: &[&str] = &[
+    "Page.enable",
+    "Page.disable",
+    "Page.navigate",
+    "Page.reload",
+    "Page.stopLoading",
+    "Page.captureScreenshot",
+    "Page.getLayoutMetrics",
+    "Page.getFrameTree",
+    "Page.getResourceTree",
+    "Page.getResourceContent",
+    "Page.getNavigationHistory",
+    "Page.printToPDF",
+    "Page.bringToFront",
+    "Page.handleJavaScriptDialog",
+    "Network.enable",
+    "Network.disable",
+    "Network.getResponseBody",
+    "Network.getRequestPostData",
+    "Network.setCacheDisabled",
+    "Network.setBypassServiceWorker",
+    "Network.emulateNetworkConditions",
+    "Network.setExtraHTTPHeaders",
+    "Network.setUserAgentOverride",
+    "Network.getCookies",
+];
+
+/// Whether an agent may send DevTools `method`, and the params it goes
+/// with. The pane holds the user's own logins for every site, and an
+/// agent can be talked into anything by a page it reads, so only what
+/// acts on its own tab passes: no cookie jar, storage, downloads, other
+/// targets or the browser itself.
+pub fn devtools_allowed(method: &str, params: Value) -> Result<Value, String> {
+    let refuse = |why: &str| Err(format!("{method} is not allowed for agents: {why}"));
+    let Some((domain, name)) = method.split_once('.') else {
+        return Err(format!("{method} is not a DevTools method (Domain.method)"));
+    };
+    if name == "setDownloadBehavior" {
+        return refuse("it would send the user's downloads elsewhere");
+    }
+    match domain {
+        "Storage" | "Browser" | "Target" | "Fetch" | "SystemInfo" => {
+            return refuse("it reaches past this tab into the whole browser")
+        }
+        _ => {}
+    }
+    if method == "Network.getCookies" {
+        // With no urls it answers for the tab's current page only, the
+        // same cookies that page already sends.
+        return Ok(json!({}));
+    }
+    if PAGE_DOMAINS.contains(&domain) || PAGE_METHODS.contains(&method) {
+        return Ok(params);
+    }
+    if domain == "Network" && name.to_ascii_lowercase().contains("cookie") {
+        return refuse("it reads or changes the user's logins on other sites");
+    }
+    refuse("only methods that act on this tab's page are (Runtime, DOM, CSS, Input, Emulation, Log, Console, Performance, Accessibility, and Page and Network calls on this page)")
 }
 
 /// Whether `step` can be taken in a tab whose history goes `back` and
@@ -420,6 +505,59 @@ mod tests {
         );
         assert!(p(json!({ "op": "devtools" })).is_err());
         assert!(p(json!({ "op": "fly" })).is_err());
+        assert!(p(json!({ "op": "devtools", "method": "Network.getAllCookies" })).is_err());
+    }
+
+    #[test]
+    fn agents_get_devtools_only_for_their_own_page() {
+        let ok = |m: &str| devtools_allowed(m, json!({ "x": 1 }));
+        for m in [
+            "Runtime.evaluate",
+            "Input.dispatchMouseEvent",
+            "Input.insertText",
+            "Page.captureScreenshot",
+            "Page.getLayoutMetrics",
+            "Page.navigate",
+            "DOM.getDocument",
+            "Emulation.setDeviceMetricsOverride",
+            "Network.getResponseBody",
+            "Page.printToPDF",
+        ] {
+            assert_eq!(ok(m), Ok(json!({ "x": 1 })), "{m}");
+        }
+        for m in [
+            "Network.getAllCookies",
+            "Network.setCookie",
+            "Network.setCookies",
+            "Network.deleteCookies",
+            "Network.clearBrowserCookies",
+            "Storage.getCookies",
+            "Browser.setDownloadBehavior",
+            "Page.setDownloadBehavior",
+            "Browser.close",
+            "Target.createTarget",
+            "Target.attachToTarget",
+            "Fetch.enable",
+            "SystemInfo.getInfo",
+            "Network.loadNetworkResource",
+            "Page.addScriptToEvaluateOnNewDocument",
+            "Tracing.start",
+            "evaluate",
+        ] {
+            let e = ok(m).unwrap_err();
+            assert!(e.contains(m), "{m}: {e}");
+        }
+    }
+
+    #[test]
+    fn cookies_are_read_only_for_the_page_the_tab_is_on() {
+        assert_eq!(
+            devtools_allowed(
+                "Network.getCookies",
+                json!({ "urls": ["https://mail.google.com"] })
+            ),
+            Ok(json!({}))
+        );
     }
 
     #[test]

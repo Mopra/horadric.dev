@@ -890,8 +890,12 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "browser_devtools",
-            "Call any Chrome DevTools protocol method on the page, like Network.getCookies, \
-             Emulation.setDeviceMetricsOverride or Page.printToPDF, and get its result.",
+            "Call a Chrome DevTools protocol method on your tab's page, like \
+             Emulation.setDeviceMetricsOverride, DOM.getDocument or Page.printToPDF, and get its \
+             result. Only methods that act on this page are allowed (Runtime, DOM, CSS, Input, \
+             Emulation, Log, Console, Performance, Accessibility, and some Page and Network \
+             calls); ones that reach the user's cookies, storage, downloads or other tabs are \
+             refused.",
             json!({
                 "method": { "type": "string" },
                 "params": { "type": "object" },
