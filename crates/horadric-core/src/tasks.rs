@@ -1563,6 +1563,119 @@ pub fn parallel(config: &str) -> usize {
         .map_or(1, |n| (n as usize).clamp(1, MOST_PARALLEL))
 }
 
+// The settings that let the runner act by itself (its mode, how many
+// quests at once, Warriv's orchestrator) and the commands it may run
+// live on this machine, one entry per project in the app's state folder.
+// A repository's `config.json` is anyone's to commit, so what it says of
+// them is a suggestion: a clone must not start agents that skip their
+// permission prompts, or run its commands, before its human said so here.
+// An entry has a config's shape, so `mode`, `parallel` and `warriv::on`
+// read it as they read one, plus `"approved"`, the exact command texts the
+// human allowed for the project.
+
+/// A project's entry in the local store, by its key. None when the project
+/// was never seen, which is when its old settings may move in.
+pub fn local_entry(store: &str, key: &str) -> Option<String> {
+    let v = serde_json::from_str::<Value>(store).ok()?;
+    let entry = v.get(key)?;
+    entry.is_object().then(|| entry.to_string())
+}
+
+/// `store` with the entry of `key` set to `entry`. A store that is not a
+/// JSON object starts afresh.
+pub fn with_local_entry(store: &str, key: &str, entry: &str) -> String {
+    let mut root = match serde_json::from_str::<Value>(store) {
+        Ok(Value::Object(m)) => m,
+        _ => Map::new(),
+    };
+    let entry = match serde_json::from_str::<Value>(entry) {
+        Ok(v @ Value::Object(_)) => v,
+        _ => Value::Object(Map::new()),
+    };
+    root.insert(key.into(), entry);
+    let mut out = serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_default();
+    out.push('\n');
+    out
+}
+
+/// The command texts the human approved in a local entry.
+pub fn approved(entry: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(entry)
+        .ok()
+        .and_then(|v| {
+            v.get("approved")?.as_array().map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| s.trim().to_string())
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// `entry` with `command` approved, once.
+pub fn with_approved(entry: &str, command: &str) -> String {
+    let mut root = match serde_json::from_str::<Value>(entry) {
+        Ok(Value::Object(m)) => m,
+        _ => Map::new(),
+    };
+    let mut list = approved(entry);
+    let command = command.trim().to_string();
+    if !command.is_empty() && !list.contains(&command) {
+        list.push(command);
+    }
+    root.insert("approved".into(), Value::from(list));
+    Value::Object(root).to_string()
+}
+
+/// Of `commands`, those `entry` has not approved, in order. Matched on the
+/// whole text, so a check edited in the repository after it was approved
+/// is a new one.
+pub fn unapproved(commands: &[String], entry: &str) -> Vec<String> {
+    let ok = approved(entry);
+    commands
+        .iter()
+        .filter(|c| !ok.iter().any(|a| a == c.trim()))
+        .cloned()
+        .collect()
+}
+
+/// The entry a project starts with, from its `config.json` as it is in the
+/// working tree and as `committed` holds it in HEAD. Only what this machine
+/// changed carries over: a setting the commit holds as it stands came from
+/// whoever made the commit, and stays a suggestion. Before settings moved
+/// here the app wrote them into that file, so a value that differs from the
+/// commit is the human's own.
+pub fn local_from(config: &str, committed: &str) -> String {
+    let now = serde_json::from_str::<Value>(config).unwrap_or(Value::Null);
+    let then = serde_json::from_str::<Value>(committed).unwrap_or(Value::Null);
+    let own = |path: &[&str]| -> Option<Value> {
+        let at = |v: &Value| path.iter().try_fold(v.clone(), |v, k| v.get(*k).cloned());
+        let mine = at(&now)?;
+        (at(&then).as_ref() != Some(&mine)).then_some(mine)
+    };
+    let mut root = Map::new();
+    let mut tasks = Map::new();
+    for key in ["mode", "parallel"] {
+        if let Some(v) = own(&["tasks", key]) {
+            tasks.insert(key.into(), v);
+        }
+    }
+    if !tasks.is_empty() {
+        root.insert("tasks".into(), Value::Object(tasks));
+    }
+    if let Some(v) = own(&["orchestrator"]) {
+        root.insert("orchestrator".into(), v);
+    }
+    let mut entry = Value::Object(root).to_string();
+    if own(&["checks"]).is_some() {
+        for c in crate::merge::checks(config) {
+            entry = with_approved(&entry, &c);
+        }
+    }
+    entry
+}
+
 /// Whether the list still has work in it, which keeps its project's
 /// tile up with no session running. A list of done items is history.
 pub fn unfinished(tasks: &[Task]) -> bool {
@@ -3396,5 +3509,42 @@ Kept.
             "- [x] A @a\n  A note.\n  Dropped: no longer needed\n- [ ] B\n"
         );
         assert_eq!(drop_quest(text, 0, "Other", "x"), None);
+    }
+
+    #[test]
+    fn only_what_this_machine_changed_moves_into_the_local_entry() {
+        let committed = r#"{"tasks":{"mode":"auto","parallel":16},"orchestrator":true,"checks":["evil"]}"#;
+        // A clone as it came: nothing takes effect.
+        let entry = local_from(committed, committed);
+        assert_eq!(mode(&entry), Mode::Manual);
+        assert_eq!(parallel(&entry), 1);
+        assert!(!crate::warriv::on(&entry));
+        assert_eq!(unapproved(&["evil".into()], &entry), vec!["evil"]);
+        // The human picked another mode and checks here before the move.
+        let mine = r#"{"tasks":{"mode":"review","parallel":16},"checks":["cargo check"]}"#;
+        let entry = local_from(mine, committed);
+        assert_eq!(mode(&entry), Mode::Review);
+        assert_eq!(parallel(&entry), 1);
+        assert!(unapproved(&["cargo check".into()], &entry).is_empty());
+        // A config never committed is all the human's.
+        let entry = local_from(committed, "");
+        assert_eq!(mode(&entry), Mode::Auto);
+        assert_eq!(parallel(&entry), 16);
+        assert!(crate::warriv::on(&entry));
+        assert!(unapproved(&["evil".into()], &entry).is_empty());
+    }
+
+    #[test]
+    fn a_command_runs_only_as_approved_word_for_word() {
+        let entry = with_approved("{}", " cargo test ");
+        let entry = with_approved(&entry, "cargo test");
+        assert_eq!(approved(&entry), vec!["cargo test"]);
+        let asked = vec!["cargo test".to_string(), "cargo test --all".to_string()];
+        assert_eq!(unapproved(&asked, &entry), vec!["cargo test --all"]);
+        let store = with_local_entry("not json", "c:/p", &with_mode(&entry, Mode::Auto));
+        let back = local_entry(&store, "c:/p").unwrap();
+        assert_eq!(mode(&back), Mode::Auto);
+        assert_eq!(approved(&back), vec!["cargo test"]);
+        assert_eq!(local_entry(&store, "c:/other"), None);
     }
 }

@@ -38,24 +38,138 @@ pub fn read(project: &Path) -> String {
     read_text(&file(project))
 }
 
-/// The project's mode. No config, or one that says nothing, is manual.
+/// The project's mode as the human set it on this machine. Never set is
+/// manual, whatever the repository's config suggests.
 pub fn mode(project: &Path) -> Mode {
+    tasks::mode(&local(project))
+}
+
+/// How many items the project's runner holds at once, as set on this
+/// machine.
+pub fn parallel(project: &Path) -> usize {
+    tasks::parallel(&local(project))
+}
+
+/// Whether the project has Warriv on, as set on this machine.
+pub fn orchestrator(project: &Path) -> bool {
+    warriv::on(&local(project))
+}
+
+/// The mode the repository's config suggests, for the UI to offer. It
+/// takes no effect until the human picks it.
+pub fn suggested_mode(project: &Path) -> Mode {
     tasks::mode(&read_text(&config_file(project)))
 }
 
-/// How many items the project's runner holds at once.
-pub fn parallel(project: &Path) -> usize {
+/// How many at once the repository's config suggests, as
+/// [`suggested_mode`].
+pub fn suggested_parallel(project: &Path) -> usize {
     tasks::parallel(&read_text(&config_file(project)))
 }
 
-/// Whether the project has Warriv on.
-pub fn orchestrator(project: &Path) -> bool {
-    warriv::on(&read_text(&config_file(project)))
+/// The commands a finished quest must pass before it merges by itself, or
+/// as the error those of them the human has not approved on this machine.
+/// They come from the repository, so none runs unapproved.
+pub fn checks(project: &Path) -> Result<Vec<String>, Vec<String>> {
+    let all = merge::checks(&read_text(&config_file(project)));
+    let not = tasks::unapproved(&all, &local(project));
+    if not.is_empty() {
+        Ok(all)
+    } else {
+        Err(not)
+    }
 }
 
-/// The commands a finished quest must pass before it merges by itself.
-pub fn checks(project: &Path) -> Vec<String> {
-    merge::checks(&read_text(&config_file(project)))
+/// Whether the human approved `command` for the project on this machine,
+/// as a check or a quest's `{on cmd: ...}` wait.
+pub fn approved(project: &Path, command: &str) -> bool {
+    tasks::unapproved(&[command.to_string()], &local(project)).is_empty()
+}
+
+/// Approves `command` for the project on this machine: the human's
+/// consent, or a wait a session here set itself.
+pub fn approve(project: &Path, command: &str) -> io::Result<()> {
+    change_local(project, |e| tasks::with_approved(e, command))
+}
+
+/// The local store: settings that make the runner act by itself, which a
+/// repository may suggest but only the human may set. Beside the app's
+/// state, so a dev instance keeps its own.
+fn local_file() -> Option<PathBuf> {
+    if cfg!(test) {
+        return Some(std::env::temp_dir().join("horadric-test-local.json"));
+    }
+    crate::state_dir().map(|d| d.join("local.json"))
+}
+
+/// The project's key in the local store: its folder, the same however a
+/// caller spelled it.
+fn local_key(project: &Path) -> String {
+    let path = fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let text = path.to_string_lossy().replace('\\', "/");
+    let text = text.strip_prefix("//?/").unwrap_or(&text).trim_end_matches('/');
+    if cfg!(windows) {
+        text.to_lowercase()
+    } else {
+        text.to_string()
+    }
+}
+
+/// The project's local entry, made the first time it is asked for.
+fn local(project: &Path) -> String {
+    let Some(path) = local_file() else {
+        return String::new();
+    };
+    let key = local_key(project);
+    if let Some(entry) = tasks::local_entry(&read_text(&path), &key) {
+        return entry;
+    }
+    change_local(project, |e| e.to_string()).ok();
+    tasks::local_entry(&read_text(&path), &key).unwrap_or_default()
+}
+
+/// Rewrites the project's local entry with `change`, under the store's
+/// lock. A project not in it yet starts with what this machine changed in
+/// its config before settings moved here, see `tasks::local_from`.
+fn change_local(project: &Path, change: impl FnOnce(&str) -> String) -> io::Result<()> {
+    let path = local_file().ok_or_else(|| io::Error::other("no state folder"))?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let key = local_key(project);
+    let _lock = Lock::take(&path.with_extension("lock"))?;
+    let store = read_text(&path);
+    let entry = tasks::local_entry(&store, &key).unwrap_or_else(|| first_entry(project));
+    write(&path, &tasks::with_local_entry(&store, &key, &change(&entry)))
+}
+
+/// The entry a project starts with. Only a git work tree can tell the
+/// human's changes from the commit's, so anything else (a folder unpacked
+/// from a download, say) starts with nothing.
+fn first_entry(project: &Path) -> String {
+    let config = read_text(&config_file(project));
+    if config.is_empty() || git(project, &["rev-parse", "--is-inside-work-tree"]).is_none() {
+        return "{}".into();
+    }
+    let spec = format!("HEAD:{CONFIG_FILE}");
+    let committed = git(project, &["show", &spec]).unwrap_or_default();
+    let committed = committed.strip_prefix('\u{feff}').unwrap_or(&committed);
+    tasks::local_from(&config, committed)
+}
+
+/// What git printed, None when it failed or could not run.
+fn git(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = crate::no_window(&mut std::process::Command::new("git"))
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// The project's SSH hosts, none without a config.
@@ -179,17 +293,16 @@ pub fn set_worktrees(project: &Path, enabled: bool) -> io::Result<()> {
     write(&path, &worktree::with_enabled(&old, enabled))
 }
 
+/// Sets the project's mode on this machine. Never in the repository's
+/// config: there it would reach every clone and start their agents.
 pub fn set_mode(project: &Path, mode: Mode) -> io::Result<()> {
-    let path = config_file(project);
-    let old = read_text(&path);
-    write(&path, &tasks::with_mode(&old, mode))
+    change_local(project, |e| tasks::with_mode(e, mode))
 }
 
-/// How many items the runner holds at once, each in a worktree of its own.
+/// How many items the runner holds at once, each in a worktree of its own,
+/// set on this machine as [`set_mode`] is.
 pub fn set_parallel(project: &Path, n: usize) -> io::Result<()> {
-    let path = config_file(project);
-    let old = read_text(&path);
-    write(&path, &tasks::with_parallel(&old, n))
+    change_local(project, |e| tasks::with_parallel(e, n))
 }
 
 /// Reads the list, lets `change` rewrite it and writes the result back.
@@ -367,10 +480,13 @@ mod tests {
     }
 
     #[test]
-    fn parallel_is_read_from_the_config() {
+    fn parallel_is_set_here_and_only_suggested_by_the_config() {
         let dir = scratch("parallel");
         assert_eq!(parallel(&dir), 1);
         write(&config_file(&dir), "{\"tasks\":{\"parallel\":3}}").unwrap();
+        assert_eq!(suggested_parallel(&dir), 3);
+        assert_eq!(parallel(&dir), 1);
+        set_parallel(&dir, 3).unwrap();
         assert_eq!(parallel(&dir), 3);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -453,11 +569,31 @@ gw-1 ansible_host=10.0.0.1
     }
 
     #[test]
-    fn the_mode_is_kept_in_the_config() {
+    fn the_mode_is_kept_on_this_machine_not_in_the_config() {
         let dir = scratch("mode");
         assert_eq!(mode(&dir), Mode::Manual);
         set_mode(&dir, Mode::Auto).unwrap();
         assert_eq!(mode(&dir), Mode::Auto);
+        assert!(!read_text(&config_file(&dir)).contains("auto"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_repository_suggests_but_does_not_set_or_run() {
+        let dir = scratch("suggest");
+        write(
+            &config_file(&dir),
+            "{\"tasks\":{\"mode\":\"auto\",\"parallel\":16},\"checks\":[\"evil\"]}",
+        )
+        .unwrap();
+        assert_eq!(suggested_mode(&dir), Mode::Auto);
+        assert_eq!(suggested_parallel(&dir), 16);
+        assert_eq!(mode(&dir), Mode::Manual);
+        assert_eq!(parallel(&dir), 1);
+        assert_eq!(checks(&dir), Err(vec!["evil".to_string()]));
+        approve(&dir, "evil").unwrap();
+        assert_eq!(checks(&dir), Ok(vec!["evil".to_string()]));
+        assert!(!approved(&dir, "evil --more"));
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -471,7 +607,7 @@ gw-1 ansible_host=10.0.0.1
         )
         .unwrap();
         assert_eq!(tasks::parse(&read(&dir))[0].title, "First");
-        assert_eq!(mode(&dir), Mode::Auto);
+        assert_eq!(suggested_mode(&dir), Mode::Auto);
         fs::remove_dir_all(&dir).unwrap();
     }
 

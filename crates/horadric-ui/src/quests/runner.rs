@@ -1114,6 +1114,8 @@ pub(crate) trait Runner: Host {
                     "HEAD".into(),
                 ],
             ),
+            // The command came with the quest log, which a clone brings.
+            Wait::Cmd(c) if !file::approved(&dir, c) => return false,
             #[cfg(windows)]
             Wait::Cmd(c) => ("cmd.exe", vec![c.clone()]),
             #[cfg(not(windows))]
@@ -2075,7 +2077,14 @@ pub(crate) trait Runner: Host {
             let files = crate::worktree::changed_since(Path::new(&w.main), &into, &w.branch);
             let landing = {
                 let _one = one.lock();
-                crate::worktree::land(&w, &into, &checks, live.is_some())
+                match &checks {
+                    Ok(checks) => crate::worktree::land(&w, &into, checks, live.is_some()),
+                    Err(not) => Landing::Failed(
+                        merge::Failure::Refused,
+                        unapproved_checks(not),
+                        merge::Theirs::default(),
+                    ),
+                }
             };
             if let Ok(mut l) = landed.lock() {
                 l.push(Landed {
@@ -2469,6 +2478,16 @@ pub(crate) trait Runner: Host {
 }
 
 impl<T: Host> Runner for T {}
+
+/// Why a landing did not run the project's checks: they come from the
+/// repository, and these are not approved on this machine. One line, as
+/// [`merge_failed`] shows the first.
+pub(crate) fn unapproved_checks(not: &[String]) -> String {
+    format!(
+        "Checks not approved on this machine, so none ran: {}.",
+        not.join(", ")
+    )
+}
 
 /// Why a merge failed, short enough for a notification: the conflict
 /// git found, or else the first thing it said.
