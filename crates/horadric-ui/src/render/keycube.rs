@@ -21,11 +21,11 @@ use horadric_core::session::{Phase, Session};
 /// The square the big stone's frame is drawn into, in DIPs. The baked
 /// frame leaves a margin round the stone, so the stone itself is a little
 /// smaller. It fills the tile's left end, where the lamp was.
-const STONE: f32 = 46.0;
+const STONE: f32 = 39.0;
 /// The square a little stone's frame is drawn into.
-const MINI: f32 = 15.0;
+const MINI: f32 = 13.0;
 /// How far out the little stones circle, across and up and down.
-const REACH: (f32, f32) = (17.0, 6.0);
+const REACH: (f32, f32) = (15.0, 5.0);
 /// A working stone's runes brighten and dim this slowly, so a turn at
 /// work is seen moving between tools.
 const WORK_PULSE: Duration = Duration::from_millis(2400);
