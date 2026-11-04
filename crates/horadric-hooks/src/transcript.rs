@@ -84,6 +84,55 @@ pub fn projects() -> Option<PathBuf> {
     )
 }
 
+/// `path` when it is a transcript Claude Code keeps on this machine, the
+/// only kind a hook may name for reading. Any page can post a hook to
+/// localhost, and a path to a network share would have Windows hand it
+/// the user's NTLM hash, or stall the reader on a host that never answers,
+/// and its text would land in the lore. Decided on the spelling alone, so
+/// nothing is touched before it is.
+pub fn trusted(path: &str) -> Option<PathBuf> {
+    trusted_in(&projects()?, path)
+}
+
+fn trusted_in(root: &Path, path: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let sep = |c: char| c == '/' || c == '\\';
+    let mut lead = path.chars();
+    // A share, a device path, `\\?\` and `\??\` all start this way.
+    if lead.next().is_some_and(sep) && lead.next().is_some_and(|c| sep(c) || c == '?') {
+        return None;
+    }
+    if path.contains('\0') {
+        return None;
+    }
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() || candidate.extension().is_none_or(|e| e != "jsonl") {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in candidate.components() {
+        match part {
+            Component::ParentDir => return None,
+            Component::CurDir => {}
+            other => parts.push(other.as_os_str().to_string_lossy().into_owned()),
+        }
+    }
+    let base: Vec<String> = root
+        .components()
+        .filter(|c| !matches!(c, Component::CurDir))
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let same = |a: &String, b: &String| {
+        if cfg!(windows) {
+            a.eq_ignore_ascii_case(b)
+        } else {
+            a == b
+        }
+    };
+    let inside = parts.len() > base.len() && base.iter().zip(&parts).all(|(a, b)| same(a, b));
+    inside.then(|| candidate.to_path_buf())
+}
+
 /// The transcript of the conversation `id` held in `cwd`, if it is on
 /// disk. A quest's worktree may be long gone, and with it the spelling of
 /// its folder, so failing that every folder is looked in.
@@ -478,6 +527,38 @@ mod tests {
             Some(Path::new("C:/Users/x").join(".claude").join("projects"))
         );
         assert_eq!(projects_root(None, None), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_a_transcript_under_the_projects_folder_is_trusted() {
+        let root = Path::new(r"C:\Users\x\.claude\projects");
+        let ok = |p: &str| trusted_in(root, p).is_some();
+        assert!(ok(r"C:\Users\x\.claude\projects\C--work\a.jsonl"));
+        assert!(ok(r"c:\users\X\.claude\projects\C--work\a.jsonl"));
+        assert!(ok("C:/Users/x/.claude/projects/C--work/a.jsonl"));
+        assert!(!ok(r"\\evil.host@80\s\t.jsonl"));
+        assert!(!ok(r"//evil.host/s/t.jsonl"));
+        assert!(!ok(r"\\?\C:\Users\x\.claude\projects\C--work\a.jsonl"));
+        assert!(!ok(r"\??\C:\Users\x\.claude\projects\C--work\a.jsonl"));
+        assert!(!ok(r"C:\Users\x\.claude\projects\..\..\secret.jsonl"));
+        assert!(!ok(r"C:\Users\x\.claude\projects-evil\a.jsonl"));
+        assert!(!ok(r"C:\Users\x\.claude\projects\C--work\a.txt"));
+        assert!(!ok(r"C:\Users\x\.claude\projects"));
+        assert!(!ok(r"Users\x\.claude\projects\C--work\a.jsonl"));
+        assert!(!ok(""));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn only_a_transcript_under_the_projects_folder_is_trusted() {
+        let root = Path::new("/home/x/.claude/projects");
+        let ok = |p: &str| trusted_in(root, p).is_some();
+        assert!(ok("/home/x/.claude/projects/-work/a.jsonl"));
+        assert!(!ok("//evil.host/s/t.jsonl"));
+        assert!(!ok("/home/x/.claude/projects/../../secret.jsonl"));
+        assert!(!ok("/home/x/.claude/projects-evil/a.jsonl"));
+        assert!(!ok("/home/X/.claude/projects/-work/a.jsonl"));
     }
 
     #[test]

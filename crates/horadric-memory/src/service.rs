@@ -342,6 +342,12 @@ pub fn warm() {
 /// Keeps what a transcript gained, on the memory's thread. Told by the
 /// Stop, PreCompact and SessionEnd hooks.
 pub fn keep(job: Keep) {
+    // The path came from a hook any page can post; what is read here ends
+    // up in the lore, and a share would stall this thread or leak the hash.
+    let trusted = job.path.to_str().and_then(horadric_hooks::transcript::trusted);
+    if trusted.is_none() {
+        return;
+    }
     let _ = sender().send(Msg::Keep(job));
 }
 

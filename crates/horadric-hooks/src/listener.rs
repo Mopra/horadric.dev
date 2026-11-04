@@ -309,8 +309,9 @@ fn handle(
     // it, or is reset when that child exits, though its call ran.
     let mut reader = BufReader::new(&stream);
 
-    let mut request_line = String::new();
-    reader.read_line(&mut request_line)?;
+    let Some(request_line) = read_capped(&mut reader)? else {
+        return respond(&stream, "431 Request Header Fields Too Large");
+    };
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let path = parts.next().unwrap_or("");
@@ -321,11 +322,16 @@ fn handle(
     let mut command = String::new();
     let mut state = String::new();
     let mut from_browser = false;
+    let mut foreign_host = false;
+    let mut count = 0;
     loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            break;
+        count += 1;
+        if count > MAX_HEADERS {
+            return respond(&stream, "431 Request Header Fields Too Large");
         }
+        let Some(line) = read_capped(&mut reader)? else {
+            return respond(&stream, "431 Request Header Fields Too Large");
+        };
         let line = line.trim_end();
         if line.is_empty() {
             break;
@@ -339,10 +345,19 @@ fn handle(
                 n if n == OWNER_HEADER => owner = value.parse::<u16>().ok(),
                 n if n == COMMAND_HEADER => command = value.to_string(),
                 n if n == STATE_HEADER => state = value.to_string(),
-                "origin" => from_browser = true,
+                "host" => foreign_host = !local_host(value, port),
+                n if n == "origin" || n.starts_with("sec-fetch-") => from_browser = true,
                 _ => {}
             }
         }
+    }
+
+    // Every path, hooks included: a page can post a hook with a no-cors
+    // fetch that needs no preflight, and Claude Code, its exporter and
+    // Horadric's own client never send an Origin. A Host that is not this
+    // machine is a page whose name was rebound to 127.0.0.1.
+    if from_browser || foreign_host {
+        return respond(&stream, "403 Forbidden");
     }
 
     let paths = [
@@ -474,7 +489,7 @@ fn handle(
     // that just edited a file another session is still changing. A
     // prompt's reply waits for the memory instead, after the event is
     // handed on, so the tile turns to working at once.
-    let parsed = HookEvent::from_json(&body).ok();
+    let parsed = HookEvent::from_json(&body).ok().and_then(sane);
     // A turn's checkpoint is taken before the agent hears back, so its
     // first edit cannot come before it. Only the app keeps them, and only
     // for sessions it holds: an event passed on is the owner's to keep.
@@ -561,6 +576,22 @@ fn handle(
         (Some(_), None) => respond(&stream, "200 OK"),
         (None, _) => Ok(()),
     }
+}
+
+/// The event as far as it may be believed, or None when it is no event of
+/// Claude Code's. Its session id names files and its transcript is read,
+/// so an id that is not a plain name is dropped and a transcript outside
+/// Claude Code's projects folder is forgotten; everything after reads the
+/// path from here, the memory keeper included.
+fn sane(mut event: HookEvent) -> Option<HookEvent> {
+    let plain = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    if event.session_id.len() > 128 || !event.session_id.chars().all(plain) {
+        return None;
+    }
+    if !event.transcript_path.is_empty() && transcript::trusted(&event.transcript_path).is_none() {
+        event.transcript_path.clear();
+    }
+    Some(event)
 }
 
 /// What the memory is asked on a Claude Code prompt of session
@@ -856,6 +887,32 @@ fn spent(horadric_id: &str, body: &[u8], tx: &Sender<Tagged>) {
     }
 }
 
+/// Longer than any header Claude Code or Horadric sends; a line past it is
+/// not read on, so a client cannot make a thread hold megabytes.
+const MAX_LINE: u64 = 8 * 1024;
+const MAX_HEADERS: usize = 64;
+
+/// One line of the head, or None when it runs past [`MAX_LINE`]. Empty at
+/// the end of the stream.
+fn read_capped(reader: &mut impl BufRead) -> io::Result<Option<String>> {
+    let mut line = String::new();
+    let read = reader.take(MAX_LINE).read_line(&mut line)?;
+    Ok((read < MAX_LINE as usize || line.ends_with('\n')).then_some(line))
+}
+
+/// Whether a Host header names this machine on `port`. A bare address is
+/// what Horadric's own client sends.
+fn local_host(value: &str, port: u16) -> bool {
+    let (name, at) = match value.rsplit_once(':') {
+        Some((n, p)) if !n.is_empty() && !p.contains(']') => (n, Some(p)),
+        _ => (value, None),
+    };
+    let named = ["127.0.0.1", "localhost", "[::1]"]
+        .iter()
+        .any(|h| name.eq_ignore_ascii_case(h));
+    named && at.is_none_or(|p| p.parse::<u16>() == Ok(port))
+}
+
 fn respond(stream: &TcpStream, status: &str) -> io::Result<()> {
     respond_with(stream, status, "{}")
 }
@@ -918,7 +975,7 @@ mod tests {
     fn post(port: u16, headers: &str, body: &str) -> String {
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let req = format!(
-            "POST {HOOK_PATH} HTTP/1.1\r\nHost: x\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+            "POST {HOOK_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Content-Length: {}\r\n\r\n{body}",
             body.len()
         );
         s.write_all(req.as_bytes()).unwrap();
@@ -956,6 +1013,66 @@ mod tests {
         let got = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(got.horadric_id, "tile-7");
         assert_eq!(got.event.hook_event_name, "Stop");
+    }
+
+    #[test]
+    fn a_hook_from_a_web_page_or_a_rebound_name_is_refused() {
+        let (port, rx) = start();
+        let body = r#"{"session_id":"c","hook_event_name":"Stop"}"#;
+        for headers in [
+            "X-Horadric-Session: t\r\nOrigin: https://a.b\r\n".to_string(),
+            "X-Horadric-Session: t\r\nSec-Fetch-Mode: no-cors\r\n".to_string(),
+        ] {
+            assert!(post(port, &headers, body).starts_with("HTTP/1.1 403"));
+        }
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let req = format!(
+            "POST {HOOK_PATH} HTTP/1.1\r\nHost: evil.example:{port}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        s.write_all(req.as_bytes()).unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        assert!(out.starts_with("HTTP/1.1 403"), "{out}");
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn only_this_machine_on_this_port_is_a_local_host() {
+        assert!(local_host("127.0.0.1", 43117));
+        assert!(local_host("127.0.0.1:43117", 43117));
+        assert!(local_host("LocalHost:43117", 43117));
+        assert!(local_host("[::1]:43117", 43117));
+        assert!(local_host("[::1]", 43117));
+        assert!(!local_host("127.0.0.1:43118", 43117));
+        assert!(!local_host("evil.example:43117", 43117));
+        assert!(!local_host("127.0.0.1.evil.example", 43117));
+        assert!(!local_host("", 43117));
+    }
+
+    #[test]
+    fn an_odd_session_id_is_dropped_and_a_foreign_transcript_forgotten() {
+        let (port, rx) = start();
+        post(
+            port,
+            "X-Horadric-Session: t\r\n",
+            r#"{"session_id":"..\\x","hook_event_name":"Stop"}"#,
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+        post(
+            port,
+            "X-Horadric-Session: t\r\n",
+            r#"{"session_id":"c","hook_event_name":"Stop","transcript_path":"\\\\evil@80\\s\\t.jsonl"}"#,
+        );
+        let got = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(got.event.transcript_path, "");
+    }
+
+    #[test]
+    fn an_endless_header_line_is_refused() {
+        let (port, _rx) = start();
+        let long = format!("X-Pad: {}\r\n", "a".repeat(MAX_LINE as usize));
+        assert!(post(port, &long, "{}").starts_with("HTTP/1.1 431"));
     }
 
     #[test]
@@ -1053,7 +1170,7 @@ mod tests {
     fn post_to(port: u16, path: &str, headers: &str, body: &str) -> String {
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let req = format!(
-            "POST {path} HTTP/1.1\r\nHost: x\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Content-Length: {}\r\n\r\n{body}",
             body.len()
         );
         s.write_all(req.as_bytes()).unwrap();
@@ -1458,7 +1575,7 @@ Origin: https://a.b
     fn wrong_path_is_404() {
         let (port, _rx) = start();
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        s.write_all(b"GET /nope HTTP/1.1\r\nHost: x\r\n\r\n")
+        s.write_all(b"GET /nope HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
             .unwrap();
         let mut out = String::new();
         s.read_to_string(&mut out).unwrap();
