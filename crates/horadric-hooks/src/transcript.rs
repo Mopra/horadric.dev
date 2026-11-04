@@ -127,11 +127,16 @@ fn spelled_local(path: &str) -> Option<PathBuf> {
 }
 
 /// The drive letter `path` starts with, as `GetDriveTypeW` wants its root.
+#[cfg(windows)]
 fn drive_root(path: &str) -> Option<[u16; 4]> {
     let b = path.as_bytes();
     let letter = *b.first()?;
-    (letter.is_ascii_alphabetic() && b.get(1) == Some(&b':'))
-        .then(|| [letter as u16, ':' as u16, '\\' as u16, 0])
+    (letter.is_ascii_alphabetic() && b.get(1) == Some(&b':')).then_some([
+        letter as u16,
+        ':' as u16,
+        '\\' as u16,
+        0,
+    ])
 }
 
 /// Whether `path` is on a mapped network drive, which spells like a local
