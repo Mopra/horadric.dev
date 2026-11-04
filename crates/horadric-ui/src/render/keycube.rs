@@ -23,9 +23,12 @@ use horadric_core::session::{Phase, Session};
 /// smaller. It fills the tile's left end, where the lamp was.
 const STONE: f32 = 39.0;
 /// The square a little stone's frame is drawn into.
-const MINI: f32 = 13.0;
-/// How far out the little stones circle, across and up and down.
-const REACH: (f32, f32) = (15.0, 5.0);
+const MINI: f32 = 11.0;
+/// How far the little stones swing across, and over and under the stone:
+/// clear of its top and bottom edge, inside the tile.
+const REACH: (f32, f32) = (7.0, 24.0);
+/// A new little stone rising out of the big one onto its ring.
+const EMERGE: f32 = 0.6;
 /// A working stone's runes brighten and dim this slowly, so a turn at
 /// work is seen moving between tools.
 const WORK_PULSE: Duration = Duration::from_millis(2400);
@@ -103,8 +106,8 @@ impl Painter<'_> {
                 Phase::Done => theme::phase_color(lit),
                 _ => theme::text_dim().fade(0.45),
             };
-            let turn = if scene.ambient { look.turn } else { 0.0 };
-            let deg = tilecube::stone_deg(look.turns, turn);
+            let tumble = if scene.ambient { look.tumble } else { 0.0 };
+            let pose = frames(look.yaw, tumble);
             let minis = minis(s, scene.now);
             let small = |m: &Mini, behind: bool| {
                 let o = tilecube::orbit(m.turn, REACH, m.gather);
@@ -119,45 +122,76 @@ impl Painter<'_> {
                     size,
                 );
                 let fade = if behind { 0.8 } else { 1.0 };
-                self.rune_stone(stones, m.spin, &at, m.ink, presence.max(0.6) * fade);
+                let pose = frames(m.spin, 0.0);
+                self.rune_stone(stones, pose, &at, m.ink, presence.max(0.6) * fade);
             };
             for m in &minis {
                 small(m, true);
             }
             let at = Rect::new(cx - STONE / 2.0, cy - STONE / 2.0, STONE, STONE);
-            self.rune_stone(stones, deg, &at, ink, presence);
+            self.rune_stone(stones, pose, &at, ink, presence);
             for m in &minis {
                 small(m, false);
             }
         }
     }
 
-    /// The baked stone turned `deg` past the icon's angle, filling `at`,
-    /// its runes lit in `ink`.
-    unsafe fn rune_stone(&self, stones: &Stones, deg: f32, at: &Rect, ink: Color, opacity: f32) {
-        let Some((stone, light)) = stones.get(&crate::turning::frame_at(deg)) else {
+    /// The baked stone between frames `a` and `b`, `k` of the way to `b`,
+    /// filling `at`, its runes lit in `ink`. Blending the two frames
+    /// either side makes a slow spin glide rather than tick.
+    unsafe fn rune_stone(
+        &self,
+        stones: &Stones,
+        (a, b, k): (usize, usize, f32),
+        at: &Rect,
+        ink: Color,
+        opacity: f32,
+    ) {
+        let (Some((stone_a, light_a)), Some((stone_b, light_b))) = (stones.get(&a), stones.get(&b))
+        else {
             return;
         };
         let dest = rect(at);
-        self.rt.DrawBitmap(
-            stone,
-            Some(&dest),
-            opacity,
-            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-            None,
-        );
+        let draw = |stone, o: f32| {
+            if o > 0.0 {
+                self.rt.DrawBitmap(stone, Some(&dest), o, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+            }
+        };
+        draw(stone_a, opacity);
+        draw(stone_b, opacity * k);
         // An opacity mask draws only without antialiasing.
         self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
-        self.brush.SetColor(&color(ink.fade(opacity)));
-        self.rt.FillOpacityMask(
-            light,
-            self.brush,
-            D2D1_OPACITY_MASK_CONTENT_GRAPHICS,
-            Some(&dest),
-            None,
-        );
+        for (light, o) in [(light_a, 1.0 - k), (light_b, k)] {
+            if o <= 0.0 {
+                continue;
+            }
+            self.brush.SetColor(&color(ink.fade(opacity * o)));
+            self.rt.FillOpacityMask(
+                light,
+                self.brush,
+                D2D1_OPACITY_MASK_CONTENT_GRAPHICS,
+                Some(&dest),
+                None,
+            );
+        }
         self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     }
+}
+
+/// The two baked frames a stone spun `yaw` degrees and `tumble` of the way
+/// round its forward roll falls between, and how far to the second.
+fn frames(yaw: f32, tumble: f32) -> (usize, usize, f32) {
+    use crate::turning::{frame_at, tumble_at, STEP_DEG, TUMBLE_STEPS};
+    if tumble > 0.0 {
+        let quarter = ((yaw / 90.0).round() as i64).rem_euclid(4) as usize;
+        let at = tumble.clamp(0.0, 1.0) * TUMBLE_STEPS as f32;
+        let step = at.floor();
+        let a = tumble_at(quarter, step as usize);
+        return (a, tumble_at(quarter, step as usize + 1), at - step);
+    }
+    let at = yaw / STEP_DEG;
+    let step = at.floor();
+    (frame_at(step * STEP_DEG), frame_at((step + 1.0) * STEP_DEG), at - step)
 }
 
 /// The little stones this frame: one per hireling the band knows of, its
@@ -178,7 +212,7 @@ fn minis(s: &Session, now: SystemTime) -> Vec<Mini> {
         return (0..n)
             .map(|k| Mini {
                 ink: theme::working(),
-                turn: turn + k as f32 / n as f32,
+                turn: turn + tilecube::spot(k),
                 gather: 0.0,
                 spin: spin(k as u64 * 97),
             })
@@ -186,18 +220,22 @@ fn minis(s: &Session, now: SystemTime) -> Vec<Mini> {
     }
     let shown = s.band.shown(now, false);
     let shown = &shown[..shown.len().min(MAX_SPARKS)];
-    let n = shown.len().max(1) as f32;
     let since = |t: SystemTime| now.duration_since(t).unwrap_or(Duration::ZERO);
     shown
         .iter()
         .enumerate()
         .filter_map(|(k, h)| {
-            let spot = k as f32 / n;
+            // Its place from the order it came in, not from how many
+            // there are now, so none jumps as others come and go.
+            let order = s.band.hirelings.iter().position(|x| x.id == h.id).unwrap_or(k);
+            let spot = tilecube::spot(order);
+            let young = since(h.started).as_secs_f32() / EMERGE;
+            let rising = 1.0 - motion::ease_out(young.min(1.0));
             let seed = crate::particles::seed_of(&h.id);
             let (ink, turn, gather) = match h.lot_at(now) {
-                Lot::Working => (theme::accent(&h.kind), turn + spot, 0.0),
-                // Stopped in front, low, where it is seen first.
-                Lot::Waiting => (theme::waiting(), 0.25, 0.0),
+                Lot::Working => (theme::accent(&h.kind), turn + spot, rising),
+                // Stopped in front, where it is seen first.
+                Lot::Waiting => (theme::waiting(), 0.25, rising),
                 Lot::Done => {
                     let t = since(h.ended.unwrap_or(h.heard)).as_secs_f32() / RUNE_SETTLE;
                     if t >= 1.0 {

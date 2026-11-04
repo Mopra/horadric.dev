@@ -14,6 +14,7 @@ use crate::motion::{
     self, ARRIVAL, ENTER, FLIP, STONE_TURN, FRAME_BREATH, FRAME_FAST, FRAME_ORBIT, HOVER, SETTLE,
 };
 use crate::theme;
+use crate::tilecube;
 
 /// How long a bay's key takes to rise: slower than a fade, since it is a
 /// stone being lifted.
@@ -67,12 +68,14 @@ pub struct Look {
     pub flip: f32,
     /// The icon it is turning over from.
     pub was_icon: char,
-    /// How many times its icon has changed: its rune stone stands that
-    /// many quarter turns round, so each new tool brings another face.
-    pub turns: u32,
-    /// How far the stone still has to go to its quarter: 1 the moment the
-    /// icon changed, 0 once it stands.
-    pub turn: f32,
+    /// How far round its rune stone has turned, in degrees past the icon's
+    /// angle: it spins slowly while its agent works.
+    pub yaw: f32,
+    /// How far through tumbling forward for a new tool, 0 to 1, or 0.
+    pub tumble: f32,
+    /// How much of a new tool's tumble is still to come: 1 the moment the
+    /// icon changed, 0 once the stone stands again.
+    pub stir: f32,
     /// How full its context bar stands, rising and falling to the level
     /// the status line gave like a liquid finding its level.
     pub context: f32,
@@ -118,7 +121,7 @@ impl Look {
             || self.arrival > 0.0
             || self.settle > 0.0
             || self.flip > 0.0
-            || self.turn > 0.0
+            || self.stir > 0.0
             || self.context != self.context_to
             || (self.hover > 0.0 && self.hover < 1.0)
             || self.y != y
@@ -136,8 +139,9 @@ impl Look {
             was: Stance::of(&Phase::Idle),
             flip: 0.0,
             was_icon: ' ',
-            turns: 0,
-            turn: 0.0,
+            yaw: 0.0,
+            tumble: 0.0,
+            stir: 0.0,
             context: 0.0,
             context_to: 0.0,
         }
@@ -149,7 +153,10 @@ struct State {
     was: Phase,
     icon: char,
     was_icon: char,
-    turns: u32,
+    /// Where its stone has spun to, and where it was when the last tool
+    /// came, for squaring up before it tumbles.
+    yaw: f32,
+    yaw_from: f32,
     flipped: Instant,
     context: f32,
     changed: Instant,
@@ -189,7 +196,8 @@ impl Tiles {
                         was: t.phase.clone(),
                         icon: t.icon,
                         was_icon: t.icon,
-                        turns: 0,
+                        yaw: 0.0,
+                        yaw_from: 0.0,
                         flipped: long_ago,
                         // Already there on the first frame; a new session's
                         // first reading fills up from empty.
@@ -206,7 +214,8 @@ impl Tiles {
                 }
                 if s.icon != t.icon {
                     s.was_icon = std::mem::replace(&mut s.icon, t.icon);
-                    s.turns = s.turns.wrapping_add(1);
+                    s.yaw_from = s.yaw;
+                    s.yaw = tilecube::quarter(s.yaw);
                     s.flipped = now;
                 }
                 // A tile born this frame starts where it was put.
@@ -223,6 +232,20 @@ impl Tiles {
                 }
                 s.hover = motion::fade(s.hover, if t.hot { 1.0 } else { 0.0 }, dt, HOVER);
                 let since = now.duration_since(s.changed);
+                // The stone spins while its agent works, but stands for a
+                // tumble, which starts from a square quarter.
+                let stirred = now.duration_since(s.flipped);
+                if *t.phase == Phase::Working && stirred >= STONE_TURN {
+                    // A long gap between frames is time nothing was drawn,
+                    // not time it spun.
+                    let dt = dt.min(Duration::from_millis(100)).as_secs_f32();
+                    s.yaw = (s.yaw + tilecube::SPIN * dt).rem_euclid(360.0);
+                }
+                let (yaw, tumble) = tilecube::stone_pose(
+                    s.yaw_from,
+                    s.yaw,
+                    stirred.as_secs_f32() / STONE_TURN.as_secs_f32(),
+                );
                 Look {
                     y: s.y,
                     enter: motion::ease_out(motion::progress(now.duration_since(s.born), ENTER)),
@@ -233,8 +256,9 @@ impl Tiles {
                     was: Stance::of(&s.was),
                     flip: 1.0 - motion::progress(now.duration_since(s.flipped), FLIP),
                     was_icon: s.was_icon,
-                    turns: s.turns,
-                    turn: 1.0 - motion::progress(now.duration_since(s.flipped), STONE_TURN),
+                    yaw,
+                    tumble,
+                    stir: 1.0 - motion::progress(stirred, STONE_TURN),
                     context: s.context,
                     context_to: level,
                 }

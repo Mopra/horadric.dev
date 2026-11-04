@@ -926,11 +926,11 @@ impl Target {
                 bitmap.EndDraw(None, None)?;
                 *layer = Some((bitmap, size));
             }
-            // Every turn of the tiles' rune stone, made once: 72 small
+            // Every turn and tumble of the tiles' rune stone, made once:
             // frames, so a turn never waits on one.
             {
                 let mut stones = self.stones.borrow_mut();
-                for f in 0..crate::turning::FRAMES {
+                for f in 0..crate::turning::ALL {
                     if let std::collections::hash_map::Entry::Vacant(e) = stones.entry(f) {
                         let (stone, light) = crate::turning::frame(f);
                         let size = crate::turning::SIZE as u32;

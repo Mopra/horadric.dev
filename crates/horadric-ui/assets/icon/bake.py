@@ -1,7 +1,8 @@
 """Bakes the Horadric icon from stone.html, the ray marched rune stone.
 
 Run it after changing the stone: `python crates/horadric-ui/assets/icon/bake.py`,
-and `bake.py turning` for the hirelings' turning stone.
+and `bake.py turning` for the turning stone, `bake.py tumbling` for its
+forward tumble.
 Needs Microsoft Edge or Google Chrome (it renders the page headless, on the GPU) and Pillow.
 
 Writes, beside this file:
@@ -43,12 +44,14 @@ def bright(size):
     return 2.2 if size <= SIMPLE_BELOW else 1.6 if size <= 64 else 1.0
 
 
-def render(px, light, simple=False, zoom=1.0, bright=1.0, yaw=None):
+def render(px, light, simple=False, zoom=1.0, bright=1.0, yaw=None, tumble=None):
     """The page rendered at `px` square, premultiplied."""
     url = "file:///" + os.path.join(HERE, "stone.html").replace("\\", "/")
     url += f"?bake=1&px={px}&light={light}&simple={1 if simple else 0}&zoom={zoom}&bright={bright}"
     if yaw is not None:
         url += f"&yaw={yaw}"
+    if tumble is not None:
+        url += f"&tumble={tumble}"
     found = None
     # Edge's headless mode sometimes returns an empty page while Edge itself
     # runs, so Chrome is the fallback.
@@ -85,22 +88,54 @@ TURN_SIZE = 64
 REST_YAW = 52
 
 
+def frame(yaw, tumble=None):
+    """One frame: per pixel, the stone premultiplied as red, green, blue and
+    alpha, then its runes' light."""
+    stone = shrink(render(TURN_SIZE * 4, "none", zoom=1.3, bright=1.6, yaw=yaw, tumble=tumble), TURN_SIZE)
+    lit = shrink(render(TURN_SIZE * 4, "white", zoom=1.3, bright=1.6, yaw=yaw, tumble=tumble), TURN_SIZE)
+    out = bytearray()
+    s, w = stone.tobytes(), lit.tobytes()
+    for j in range(0, len(s), 4):
+        sr, sg, sb, sa = s[j:j + 4]
+        wr, wg, wb, _ = w[j:j + 4]
+        glow = min(255, max(0, (wr - sr + wg - sg + wb - sb) // 3) * 2)
+        out += bytes([sr, sg, sb, sa, glow])
+    return out
+
+
 def turning():
-    """Writes `turning.bin`: per frame, per pixel, the stone premultiplied as
-    red, green, blue and alpha, then its runes' light."""
+    """Writes `turning.bin`, the stone turned round."""
     out = bytearray()
     for i in range(TURN_FRAMES):
-        yaw = REST_YAW + i * TURN_STEP
-        stone = shrink(render(TURN_SIZE * 4, "none", zoom=1.3, bright=1.6, yaw=yaw), TURN_SIZE)
-        lit = shrink(render(TURN_SIZE * 4, "white", zoom=1.3, bright=1.6, yaw=yaw), TURN_SIZE)
-        s, w = stone.tobytes(), lit.tobytes()
-        for j in range(0, len(s), 4):
-            sr, sg, sb, sa = s[j:j + 4]
-            wr, wg, wb, _ = w[j:j + 4]
-            glow = min(255, max(0, (wr - sr + wg - sg + wb - sb) // 3) * 2)
-            out += bytes([sr, sg, sb, sa, glow])
+        out += frame(REST_YAW + i * TURN_STEP)
         print(f"turn {i + 1}/{TURN_FRAMES}", flush=True)
     with open(os.path.join(HERE, "turning.bin"), "wb") as f:
+        f.write(out)
+
+
+# The tiles' stone tumbling forward once round from each quarter of its
+# turn, TUMBLE_STEPS frames apart. Must match turning.rs.
+TUMBLE_QUARTERS = 4
+TUMBLE_STEPS = 18
+
+
+def tumbling(only=None):
+    """Writes `tumbling.bin`: for each quarter turn, the stone tumbling once
+    forward, leaving out the first frame, the stone standing, which
+    turning.bin has. `only` renders just that many frames of the first
+    quarter, to look at, and writes them as PNGs instead."""
+    out = bytearray()
+    for q in range(TUMBLE_QUARTERS):
+        for i in range(1, TUMBLE_STEPS):
+            if only is not None:
+                if q > 0 or i > only:
+                    return
+                im = shrink(render(TURN_SIZE * 4, "white", zoom=1.3, bright=1.6, yaw=REST_YAW, tumble=i * 360 / TUMBLE_STEPS), TURN_SIZE)
+                im.convert("RGBA").save(os.path.join(os.environ.get("TEMP", HERE), f"tumble-{i}.png"))
+                continue
+            out += frame(REST_YAW + q * 90, tumble=i * 360 / TUMBLE_STEPS)
+            print(f"tumble {q + 1}.{i}/{TUMBLE_STEPS - 1}", flush=True)
+    with open(os.path.join(HERE, "tumbling.bin"), "wb") as f:
         f.write(out)
 
 
@@ -134,5 +169,7 @@ def main():
 if __name__ == "__main__":
     if sys.argv[1:] == ["turning"]:
         turning()
+    elif sys.argv[1:2] == ["tumbling"]:
+        tumbling(int(sys.argv[2]) if len(sys.argv) > 2 else None)
     else:
         main()
