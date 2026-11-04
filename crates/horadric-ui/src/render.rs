@@ -926,6 +926,18 @@ impl Target {
                 bitmap.EndDraw(None, None)?;
                 *layer = Some((bitmap, size));
             }
+            // Every turn of the tiles' rune stone, made once: 72 small
+            // frames, so a turn never waits on one.
+            {
+                let mut stones = self.stones.borrow_mut();
+                for f in 0..crate::turning::FRAMES {
+                    if let std::collections::hash_map::Entry::Vacant(e) = stones.entry(f) {
+                        let (stone, light) = crate::turning::frame(f);
+                        let size = crate::turning::SIZE as u32;
+                        e.insert((self.bitmap(size, &stone)?, self.bitmap(size, &light)?));
+                    }
+                }
+            }
 
             self.rt.BeginDraw();
             if let Some((bitmap, _)) = layer.as_ref() {
@@ -941,6 +953,7 @@ impl Target {
             // A failed bloom leaves the frame without its glow, never
             // without its frame.
             let _ = self.bloom(gpu, m, scene);
+            self.painter(&self.rt).key_stones(scene, &self.stones.borrow());
             if scene.ambient {
                 self.painter(&self.rt).light(scene);
             }
@@ -3611,13 +3624,14 @@ impl Painter<'_> {
             let level = if ambient { look.context } else { c / 100.0 };
             self.tank(&track, level, ink.fade(presence), 5);
         }
-        // An agent's icon is on a cube that rolls to the next tool, with
-        // its subagents circling it. A plain terminal has no agent, so it
-        // keeps the flat glyph, turned over like a card.
+        // An agent's place here is its rune stone, which moves every frame
+        // and so is drawn over this layer by `key_stones`. A plain
+        // terminal has no agent, so it keeps the flat glyph, turned over
+        // like a card; so does a tile on its way out, which has no stone.
         let icon_r = Rect::new(ix - 14.0, iy - 14.0, 28.0, 28.0);
         let icon_ink = icon_c.fade(presence);
-        if !s.shell && s.ssh.is_none() {
-            self.key_cube(gpu, s, look, (ix, iy), icon_c, c, presence, scene.now, ambient);
+        if keycube::has_stone(s) && i != usize::MAX {
+            // Left clear for the stone.
         } else if ambient && look.flip > 0.0 {
             let t = 1.0 - look.flip;
             let (glyph, squash) = if t < 0.5 {
@@ -4423,7 +4437,8 @@ fn tiles<'a>(scene: &'a Scene) -> impl Iterator<Item = (Rect, &'a Session, Look)
 }
 
 fn icon_centre(r: &Rect) -> (f32, f32) {
-    (r.x + 33.0, r.y + r.h / 2.0)
+    // Far enough from the lamp that the rune stone stands clear of it.
+    (r.x + 35.0, r.y + r.h / 2.0)
 }
 
 /// Where a tile's lamp sits: a slot down its left edge.

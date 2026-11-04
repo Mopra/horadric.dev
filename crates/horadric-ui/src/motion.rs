@@ -20,6 +20,9 @@ pub const SETTLE: Duration = Duration::from_millis(450);
 pub const LEAVE: Duration = Duration::from_millis(320);
 /// A tile's icon turning over to show another tool.
 pub const FLIP: Duration = Duration::from_millis(280);
+/// A tile's rune stone turning a quarter to bring the next face round:
+/// slower than the flip, as stone is heavier than a card.
+pub const STONE_TURN: Duration = Duration::from_millis(520);
 /// A finished task's row: struck through, then folded away.
 pub const TASK_DONE: Duration = Duration::from_millis(900);
 /// Of [`TASK_DONE`], how much the strike takes before the row folds.

@@ -11,7 +11,7 @@ use horadric_core::Phase;
 
 use crate::layout::Hit;
 use crate::motion::{
-    self, ARRIVAL, ENTER, FLIP, FRAME_BREATH, FRAME_FAST, FRAME_ORBIT, HOVER, SETTLE,
+    self, ARRIVAL, ENTER, FLIP, STONE_TURN, FRAME_BREATH, FRAME_FAST, FRAME_ORBIT, HOVER, SETTLE,
 };
 use crate::theme;
 
@@ -67,6 +67,12 @@ pub struct Look {
     pub flip: f32,
     /// The icon it is turning over from.
     pub was_icon: char,
+    /// How many times its icon has changed: its rune stone stands that
+    /// many quarter turns round, so each new tool brings another face.
+    pub turns: u32,
+    /// How far the stone still has to go to its quarter: 1 the moment the
+    /// icon changed, 0 once it stands.
+    pub turn: f32,
     /// How full its context bar stands, rising and falling to the level
     /// the status line gave like a liquid finding its level.
     pub context: f32,
@@ -112,6 +118,7 @@ impl Look {
             || self.arrival > 0.0
             || self.settle > 0.0
             || self.flip > 0.0
+            || self.turn > 0.0
             || self.context != self.context_to
             || (self.hover > 0.0 && self.hover < 1.0)
             || self.y != y
@@ -129,6 +136,8 @@ impl Look {
             was: Stance::of(&Phase::Idle),
             flip: 0.0,
             was_icon: ' ',
+            turns: 0,
+            turn: 0.0,
             context: 0.0,
             context_to: 0.0,
         }
@@ -140,6 +149,7 @@ struct State {
     was: Phase,
     icon: char,
     was_icon: char,
+    turns: u32,
     flipped: Instant,
     context: f32,
     changed: Instant,
@@ -179,6 +189,7 @@ impl Tiles {
                         was: t.phase.clone(),
                         icon: t.icon,
                         was_icon: t.icon,
+                        turns: 0,
                         flipped: long_ago,
                         // Already there on the first frame; a new session's
                         // first reading fills up from empty.
@@ -195,6 +206,7 @@ impl Tiles {
                 }
                 if s.icon != t.icon {
                     s.was_icon = std::mem::replace(&mut s.icon, t.icon);
+                    s.turns = s.turns.wrapping_add(1);
                     s.flipped = now;
                 }
                 // A tile born this frame starts where it was put.
@@ -221,6 +233,8 @@ impl Tiles {
                     was: Stance::of(&s.was),
                     flip: 1.0 - motion::progress(now.duration_since(s.flipped), FLIP),
                     was_icon: s.was_icon,
+                    turns: s.turns,
+                    turn: 1.0 - motion::progress(now.duration_since(s.flipped), STONE_TURN),
                     context: s.context,
                     context_to: level,
                 }
