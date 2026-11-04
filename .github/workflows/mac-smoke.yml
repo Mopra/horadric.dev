@@ -2,12 +2,10 @@ name: Mac smoke
 # The Mac app run for real on a Mac: windows drawn, a session in a pty,
 # the host outliving the app. The PNGs it leaves are the Mac's "verified
 # on screen", looked at from the run's artifacts.
+# Runs on the release tag only, like CI, not on every push to main.
 on:
   push:
-    branches: [main]
-    # Notes and the quest log change nothing it runs, and a run they
-    # started would cancel the one for the last change to the code.
-    paths-ignore: ["**.md", "docs/**", ".horadric/**"]
+    tags: ["v*"]
   workflow_dispatch:
 # Only the newest commit's run matters; an older one still queued is
 # dropped so the Mac runners are not spent on it.

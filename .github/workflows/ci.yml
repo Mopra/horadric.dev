@@ -1,8 +1,10 @@
 name: CI
+# Runs once per release, on the tag ship public pushes, not on every
+# commit: trunk mode pushes after each small commit and a run per push
+# was hundreds of runs a week.
 on:
   push:
-    branches: [main]
-  pull_request:
+    tags: ["v*"]
   workflow_dispatch:
 jobs:
   test:
