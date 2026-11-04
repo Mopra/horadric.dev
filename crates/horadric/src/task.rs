@@ -401,6 +401,14 @@ fn report(cwd: &Path, blocked: Option<Blocked>, summary: &str) -> Result<(), Str
     if !changed {
         return Err(format!("the quest held by {id} is already completed"));
     }
+    // A wait a session set on this machine is the local agent's own
+    // command, so it needs no second consent; only text pulled in from
+    // the repo does.
+    if let Some(On::Check(Wait::Cmd(c))) = &wait {
+        if let Err(e) = file::approve(&project, c) {
+            eprintln!("could not approve the wait command: {e}");
+        }
+    }
     sweep(&project);
     tell_app(&project);
     match (why, wait, mark) {
