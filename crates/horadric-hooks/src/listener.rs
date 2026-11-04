@@ -580,9 +580,10 @@ fn handle(
 
 /// The event as far as it may be believed, or None when it is no event of
 /// Claude Code's. Its session id names files and its transcript is read,
-/// so an id that is not a plain name is dropped and a transcript outside
-/// Claude Code's projects folder is forgotten; everything after reads the
-/// path from here, the memory keeper included.
+/// so an id that is not a plain name is dropped and a transcript that is
+/// not a local `.jsonl` is forgotten; everything after reads the paths
+/// from here, the memory keeper and the folio's watch of a subagent's
+/// transcript included.
 fn sane(mut event: HookEvent) -> Option<HookEvent> {
     let plain = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
     if event.session_id.len() > 128 || !event.session_id.chars().all(plain) {
@@ -590,6 +591,13 @@ fn sane(mut event: HookEvent) -> Option<HookEvent> {
     }
     if !event.transcript_path.is_empty() && transcript::trusted(&event.transcript_path).is_none() {
         event.transcript_path.clear();
+    }
+    if event
+        .agent_transcript_path
+        .as_deref()
+        .is_some_and(|p| !p.is_empty() && transcript::trusted(p).is_none())
+    {
+        event.agent_transcript_path = None;
     }
     Some(event)
 }
@@ -1066,6 +1074,13 @@ mod tests {
         );
         let got = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(got.event.transcript_path, "");
+        post(
+            port,
+            "X-Horadric-Session: t\r\n",
+            r#"{"session_id":"c","hook_event_name":"SubagentStop","agent_transcript_path":"//evil/s/a.jsonl"}"#,
+        );
+        let got = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(got.event.agent_transcript_path, None);
     }
 
     #[test]

@@ -84,21 +84,24 @@ pub fn projects() -> Option<PathBuf> {
     )
 }
 
-/// `path` when it is a transcript Claude Code keeps on this machine, the
-/// only kind a hook may name for reading. Any page can post a hook to
-/// localhost, and a path to a network share would have Windows hand it
-/// the user's NTLM hash, or stall the reader on a host that never answers,
-/// and its text would land in the lore. Decided on the spelling alone, so
-/// nothing is touched before it is.
+/// `path` when it is a local `.jsonl` file, the only kind a hook may name
+/// for reading. Pages can no longer post hooks, but a path to a network
+/// share would still have Windows hand over the user's NTLM hash, or
+/// stall the reader on a host that never answers. It is not held to the
+/// projects folder this app sees: a session's claude may see another
+/// `CLAUDE_CONFIG_DIR` (a shell profile, or the macOS app, which never
+/// sees shell exports), and its transcripts are as good. Decided on the
+/// spelling and the drive's kind, so the file is not touched before.
 pub fn trusted(path: &str) -> Option<PathBuf> {
-    trusted_in(&projects()?, path)
+    let candidate = spelled_local(path)?;
+    (!remote_drive(path)).then_some(candidate)
 }
 
-fn trusted_in(root: &Path, path: &str) -> Option<PathBuf> {
+fn spelled_local(path: &str) -> Option<PathBuf> {
     use std::path::Component;
     let sep = |c: char| c == '/' || c == '\\';
     let mut lead = path.chars();
-    // A share, a device path, `\\?\` and `\??\` all start this way.
+    // A share, `\\.\`, `\\?\` and `\??\` all start this way.
     if lead.next().is_some_and(sep) && lead.next().is_some_and(|c| sep(c) || c == '?') {
         return None;
     }
@@ -109,28 +112,44 @@ fn trusted_in(root: &Path, path: &str) -> Option<PathBuf> {
     if !candidate.is_absolute() || candidate.extension().is_none_or(|e| e != "jsonl") {
         return None;
     }
-    let mut parts = Vec::new();
-    for part in candidate.components() {
-        match part {
-            Component::ParentDir => return None,
-            Component::CurDir => {}
-            other => parts.push(other.as_os_str().to_string_lossy().into_owned()),
-        }
+    // A `..` is refused even where it would land inside, as nothing Claude
+    // Code writes has one; split by hand since Unix keeps `\` in a name.
+    if path.split(sep).any(|part| part == "..") {
+        return None;
     }
-    let base: Vec<String> = root
-        .components()
-        .filter(|c| !matches!(c, Component::CurDir))
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    let same = |a: &String, b: &String| {
-        if cfg!(windows) {
-            a.eq_ignore_ascii_case(b)
-        } else {
-            a == b
-        }
+    if candidate.components().any(|c| matches!(c, Component::ParentDir)) {
+        return None;
+    }
+    Some(candidate.to_path_buf())
+}
+
+/// The drive letter `path` starts with, as `GetDriveTypeW` wants its root.
+fn drive_root(path: &str) -> Option<[u16; 4]> {
+    let b = path.as_bytes();
+    let letter = *b.first()?;
+    (letter.is_ascii_alphabetic() && b.get(1) == Some(&b':'))
+        .then(|| [letter as u16, ':' as u16, '\\' as u16, 0])
+}
+
+/// Whether `path` is on a mapped network drive, which spells like a local
+/// one but reaches the share all the same.
+#[cfg(windows)]
+fn remote_drive(path: &str) -> bool {
+    const DRIVE_REMOTE: u32 = 4;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDriveTypeW(root: *const u16) -> u32;
+    }
+    let Some(root) = drive_root(path) else {
+        return false;
     };
-    let inside = parts.len() > base.len() && base.iter().zip(&parts).all(|(a, b)| same(a, b));
-    inside.then(|| candidate.to_path_buf())
+    // SAFETY: `root` is a NUL ended UTF-16 string that outlives the call.
+    unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE }
+}
+
+#[cfg(not(windows))]
+fn remote_drive(_path: &str) -> bool {
+    false
 }
 
 /// The transcript of the conversation `id` held in `cwd`, if it is on
@@ -531,34 +550,65 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn only_a_transcript_under_the_projects_folder_is_trusted() {
-        let root = Path::new(r"C:\Users\x\.claude\projects");
-        let ok = |p: &str| trusted_in(root, p).is_some();
+    fn a_local_transcript_is_trusted_wherever_its_config_dir_is() {
+        let ok = |p: &str| spelled_local(p).is_some();
         assert!(ok(r"C:\Users\x\.claude\projects\C--work\a.jsonl"));
-        assert!(ok(r"c:\users\X\.claude\projects\C--work\a.jsonl"));
         assert!(ok("C:/Users/x/.claude/projects/C--work/a.jsonl"));
+        // A CLAUDE_CONFIG_DIR this app never saw.
+        assert!(ok(r"D:\elsewhere\claude-config\projects\C--work\a.jsonl"));
+        assert!(trusted(r"C:\Users\x\.claude\projects\C--work\a.jsonl").is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_share_or_device_path_is_refused() {
+        let ok = |p: &str| spelled_local(p).is_some();
         assert!(!ok(r"\\evil.host@80\s\t.jsonl"));
         assert!(!ok(r"//evil.host/s/t.jsonl"));
-        assert!(!ok(r"\\?\C:\Users\x\.claude\projects\C--work\a.jsonl"));
-        assert!(!ok(r"\??\C:\Users\x\.claude\projects\C--work\a.jsonl"));
+        assert!(!ok(r"/\evil.host\s\t.jsonl"));
+        assert!(!ok(r"\\?\C:\Users\x\a.jsonl"));
+        assert!(!ok(r"\\?\UNC\evil\s\a.jsonl"));
+        assert!(!ok(r"\??\C:\Users\x\a.jsonl"));
+        assert!(!ok(r"\\.\C:\Users\x\a.jsonl"));
+        assert!(!ok(r"\\.\pipe\a.jsonl"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_parent_step_a_relative_path_or_another_file_is_refused() {
+        let ok = |p: &str| spelled_local(p).is_some();
         assert!(!ok(r"C:\Users\x\.claude\projects\..\..\secret.jsonl"));
-        assert!(!ok(r"C:\Users\x\.claude\projects-evil\a.jsonl"));
+        assert!(!ok("C:/Users/x/../a.jsonl"));
         assert!(!ok(r"C:\Users\x\.claude\projects\C--work\a.txt"));
+        assert!(!ok(r"C:\Users\x\.claude\projects\C--work\a.jsonl.txt"));
         assert!(!ok(r"C:\Users\x\.claude\projects"));
         assert!(!ok(r"Users\x\.claude\projects\C--work\a.jsonl"));
+        assert!(!ok(r"C:a.jsonl"));
+        assert!(!ok("C:\\a\0.jsonl"));
         assert!(!ok(""));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_letter_names_its_root_and_a_fixed_drive_is_not_remote() {
+        let root = |p: &str| drive_root(p).map(|r| String::from_utf16_lossy(&r[..3]));
+        assert_eq!(root(r"C:\a.jsonl").as_deref(), Some(r"C:\"));
+        assert_eq!(root("z:/a.jsonl").as_deref(), Some(r"z:\"));
+        assert_eq!(root(r"\\h\s\a.jsonl"), None);
+        let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        assert!(!remote_drive(&format!(r"{system}\a.jsonl")));
     }
 
     #[cfg(not(windows))]
     #[test]
-    fn only_a_transcript_under_the_projects_folder_is_trusted() {
-        let root = Path::new("/home/x/.claude/projects");
-        let ok = |p: &str| trusted_in(root, p).is_some();
+    fn a_local_transcript_is_trusted_and_a_share_or_parent_step_is_not() {
+        let ok = |p: &str| trusted(p).is_some();
         assert!(ok("/home/x/.claude/projects/-work/a.jsonl"));
+        assert!(ok("/opt/claude-config/projects/-work/a.jsonl"));
         assert!(!ok("//evil.host/s/t.jsonl"));
         assert!(!ok("/home/x/.claude/projects/../../secret.jsonl"));
-        assert!(!ok("/home/x/.claude/projects-evil/a.jsonl"));
-        assert!(!ok("/home/X/.claude/projects/-work/a.jsonl"));
+        assert!(!ok("/home/x/.claude/projects/-work/a.txt"));
+        assert!(!ok("home/x/a.jsonl"));
     }
 
     #[test]

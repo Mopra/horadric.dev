@@ -112,6 +112,70 @@ impl Asked {
     }
 }
 
+/// The hooks of conversations no tile held when they came, kept until
+/// `claude agents` has been asked whether they are background sessions.
+/// The first hook of a new one is often the one that matters, a
+/// permission prompt or a turn's end, and the tile it would have lit only
+/// exists once the answer is in.
+#[derive(Debug)]
+pub struct Held<T> {
+    by_id: Vec<(String, Vec<(Instant, T)>)>,
+}
+
+impl<T> Default for Held<T> {
+    fn default() -> Self {
+        Self { by_id: Vec::new() }
+    }
+}
+
+impl<T> Held<T> {
+    /// Longer than an ask of `claude agents` takes, short enough that a
+    /// plain session's hooks do not pile up.
+    pub const KEEP: Duration = Duration::from_secs(30);
+    /// The newest this many for a conversation; older ones are moot once
+    /// a newer one says where it stands.
+    pub const EACH: usize = 4;
+    /// Conversations held at once. Every plain `claude` posts here, and a
+    /// flood of new ids must not grow this without end.
+    pub const IDS: usize = 32;
+
+    /// Keeps `item` for conversation `id`, dropping the oldest when full.
+    pub fn hold(&mut self, id: &str, item: T, now: Instant) {
+        self.age(now);
+        let at = match self.by_id.iter().position(|(i, _)| i == id) {
+            Some(at) => at,
+            None => {
+                if self.by_id.len() >= Self::IDS {
+                    self.by_id.remove(0);
+                }
+                self.by_id.push((id.to_string(), Vec::new()));
+                self.by_id.len() - 1
+            }
+        };
+        let items = &mut self.by_id[at].1;
+        if items.len() >= Self::EACH {
+            items.remove(0);
+        }
+        items.push((now, item));
+    }
+
+    /// What is held for `id`, oldest first, and forgotten here.
+    pub fn take(&mut self, id: &str, now: Instant) -> Vec<T> {
+        self.age(now);
+        match self.by_id.iter().position(|(i, _)| i == id) {
+            Some(at) => self.by_id.remove(at).1.into_iter().map(|(_, t)| t).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    fn age(&mut self, now: Instant) {
+        for (_, items) in &mut self.by_id {
+            items.retain(|(t, _)| now.saturating_duration_since(*t) < Self::KEEP);
+        }
+        self.by_id.retain(|(_, items)| !items.is_empty());
+    }
+}
+
 /// The background sessions in what `claude agents --json` printed. It also
 /// lists interactive sessions, which are someone's terminal and not ours.
 pub fn parse(json: &[u8]) -> Vec<Background> {
@@ -191,6 +255,36 @@ mod tests {
         // Turned away, not marked: it is asked about once the gap is over.
         assert!(asked.due("c5", t0 + Asked::GAP));
         assert_eq!(asked.at.len(), 2);
+    }
+
+    #[test]
+    fn held_hooks_come_back_oldest_first_and_once() {
+        let mut held = Held::default();
+        let t0 = Instant::now();
+        held.hold("c1", 1, t0);
+        held.hold("c2", 9, t0);
+        held.hold("c1", 2, t0 + Duration::from_secs(1));
+        assert_eq!(held.take("c1", t0 + Duration::from_secs(2)), vec![1, 2]);
+        assert!(held.take("c1", t0 + Duration::from_secs(2)).is_empty());
+        assert_eq!(held.take("c2", t0 + Duration::from_secs(2)), vec![9]);
+    }
+
+    #[test]
+    fn held_hooks_age_out_and_stay_few() {
+        let mut held = Held::default();
+        let t0 = Instant::now();
+        for i in 0..10 {
+            held.hold("c1", i, t0);
+        }
+        assert_eq!(held.take("c1", t0), vec![6, 7, 8, 9]);
+        held.hold("c1", 1, t0);
+        assert!(held.take("c1", t0 + Held::<i32>::KEEP).is_empty());
+        for i in 0..100 {
+            held.hold(&format!("x{i}"), i, t0);
+        }
+        assert_eq!(held.by_id.len(), Held::<i32>::IDS);
+        assert!(held.take("x0", t0).is_empty());
+        assert_eq!(held.take("x99", t0), vec![99]);
     }
 
     #[test]

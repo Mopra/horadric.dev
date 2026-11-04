@@ -1,12 +1,14 @@
 //! Claude Code's background sessions, asked of `claude agents`. Its daemon
 //! runs them, so Horadric only lists them, attaches to them and stops them.
 
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Instant;
 
-use horadric_core::background::{self, Asked, Background};
+use horadric_core::background::{self, Asked, Background, Held};
 use horadric_core::{HookEvent, Registry};
+use horadric_hooks::listener::Tagged;
 
 use crate::console;
 
@@ -46,11 +48,28 @@ pub fn adopt_all(registry: &Arc<Mutex<Registry>>, list: &[Background]) -> bool {
     added
 }
 
-/// What `claude agents` said last, and whether it is being asked now.
+/// What `claude agents` said last, whether it is being asked now, and
+/// the hooks that came before it named their conversation.
 #[derive(Default)]
 struct Seen {
     list: Vec<Background>,
     asking: bool,
+    held: Held<HookEvent>,
+}
+
+/// Where a held hook goes back in once its conversation has a tile: the
+/// feeder's own channel, so it lands as if it had come late.
+fn replay() -> &'static OnceLock<Sender<Tagged>> {
+    static REPLAY: OnceLock<Sender<Tagged>> = OnceLock::new();
+    &REPLAY
+}
+
+/// Has the hooks [`adopt`] could not place yet sent to `tx` once a later
+/// ask of `claude agents` names their conversation. Without it they are
+/// dropped, and a new background session's permission prompt or turn's
+/// end shows only at its next hook.
+pub fn replay_into(tx: Sender<Tagged>) {
+    let _ = replay().set(tx);
 }
 
 fn seen() -> &'static Mutex<Seen> {
@@ -63,7 +82,8 @@ fn seen() -> &'static Mutex<Seen> {
 /// conversation it did not name has it asked again, off this thread, at
 /// most once a minute per conversation and once per [`Asked::GAP`] in all,
 /// since every plain `claude` on the machine posts here and so can any
-/// web page. The answer gives the tile its own, and the hook after finds it.
+/// web page. The answer gives the tile its own, and the hooks held till
+/// then are sent again (see [`replay_into`]).
 pub fn adopt(
     registry: &Arc<Mutex<Registry>>,
     event: &HookEvent,
@@ -74,7 +94,14 @@ pub fn adopt(
     if id.is_empty() || news {
         return None;
     }
-    let known = seen().lock().ok()?.list.iter().find(|b| b.session_id == id).cloned();
+    let known = {
+        let mut s = seen().lock().ok()?;
+        let known = s.list.iter().find(|b| b.session_id == id).cloned();
+        if known.is_none() && replay().get().is_some() {
+            s.held.hold(id, event.clone(), Instant::now());
+        }
+        known
+    };
     let Some(b) = known else {
         if asked.due(id, Instant::now()) {
             refresh(registry);
@@ -89,8 +116,8 @@ pub fn adopt(
     Some(tile)
 }
 
-/// Asks `claude agents` on a thread of its own, one at a time, and gives
-/// each background session it names a tile.
+/// Asks `claude agents` on a thread of its own, one at a time, gives each
+/// background session it names a tile and sends their held hooks again.
 fn refresh(registry: &Arc<Mutex<Registry>>) {
     {
         let Ok(mut s) = seen().lock() else {
@@ -107,11 +134,27 @@ fn refresh(registry: &Arc<Mutex<Registry>>) {
         if let Some(list) = &got {
             adopt_all(&registry, list);
         }
+        let mut again = Vec::new();
         if let Ok(mut s) = seen().lock() {
             if let Some(list) = got {
+                let now = Instant::now();
+                for b in &list {
+                    again.extend(s.held.take(&b.session_id, now));
+                }
                 s.list = list;
             }
             s.asking = false;
+        }
+        // Untagged: the tile just made holds the conversation's id, so the
+        // feeder routes them to it.
+        if let Some(tx) = replay().get() {
+            for event in again {
+                let _ = tx.send(Tagged {
+                    horadric_id: String::new(),
+                    event,
+                    limits: None,
+                });
+            }
         }
     });
 }
