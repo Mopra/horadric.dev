@@ -20,7 +20,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -2944,7 +2944,7 @@ impl Pane {
             return None;
         }
         let (point, _) = self.cell_at(lparam);
-        let probe = |p: &Path| std::fs::metadata(p).ok().map(|m| m.is_dir());
+        let probe = links::disk;
         let (text, points, at, made) = {
             let s = self.console.screen.lock().ok()?;
             let (text, points, at) = links::line_at(&s.term, point)?;

@@ -201,6 +201,9 @@ pub fn split_line(word: &str) -> (&str, Option<u32>) {
 
 fn path_target(raw: &str, line: Option<u32>, base: &Base, probe: &impl Probe) -> Option<Target> {
     let path = resolve(raw, base)?;
+    if !probe_safe(&path) {
+        return None;
+    }
     match probe(&path)? {
         true => Some(Target::Folder(path)),
         false => Some(Target::File(path, line)),
@@ -232,6 +235,49 @@ pub fn resolve(raw: &str, base: &Base) -> Option<PathBuf> {
         return None;
     }
     Some(base.cwd?.join(path))
+}
+
+/// Whether a path may be looked up while the mouse moves over it. Only a
+/// path on a drive letter: looking up `\\host\share` makes Windows sign in
+/// to that host over SMB or WebDAV, handing it the user's NTLM hash, and
+/// blocks the UI for as long as the host takes to answer. Device paths
+/// (`\\?\`, `\\.\`) go the same way, since they can name a share too.
+pub fn probe_safe(path: &Path) -> bool {
+    let s = path.as_os_str().to_string_lossy();
+    if cfg!(windows) {
+        let b = s.as_bytes();
+        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/')
+    } else {
+        !s.starts_with("//")
+    }
+}
+
+/// The probe the pane uses: what is on disk at a path, never asking a
+/// network drive. A mapped drive letter is a share under another name, and
+/// a disconnected one stalls for the SMB timeout.
+pub fn disk(path: &Path) -> Option<bool> {
+    if !probe_safe(path) || remote_drive(path) {
+        return None;
+    }
+    std::fs::metadata(path).ok().map(|m| m.is_dir())
+}
+
+#[cfg(windows)]
+fn remote_drive(path: &Path) -> bool {
+    use windows::core::HSTRING;
+    use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+    // From WindowsProgramming, a feature not worth turning on for one number.
+    const DRIVE_REMOTE: u32 = 4;
+    let Some(letter) = path.as_os_str().to_string_lossy().chars().next() else {
+        return true;
+    };
+    let root = HSTRING::from(format!("{letter}:\\"));
+    unsafe { GetDriveTypeW(&root) == DRIVE_REMOTE }
+}
+
+#[cfg(not(windows))]
+fn remote_drive(_: &Path) -> bool {
+    false
 }
 
 /// The path of a `file:` URI, percent escapes decoded.
@@ -302,25 +348,24 @@ pub fn from_uri(uri: &str, probe: &impl Probe) -> Option<Target> {
     }
 }
 
-/// Files Windows runs rather than shows when opened.
+/// Files Windows runs rather than shows when opened, or that make it run
+/// something: scripts, installers, shortcuts, control panel items, saved
+/// searches that reach out to a share. Windows ignores trailing dots and
+/// spaces in a name, so `a.exe. ` runs as `a.exe` and is judged as one.
 pub fn is_program(path: &Path) -> bool {
-    const RUN: [&str; 12] = [
-        "exe",
-        "com",
-        "bat",
-        "cmd",
-        "msi",
-        "lnk",
-        "ps1",
-        "vbs",
-        "js",
-        "wsf",
-        "scr",
-        "appref-ms",
+    const RUN: &[&str] = &[
+        "exe", "com", "bat", "cmd", "msi", "msp", "lnk", "ps1", "psm1", "vbs", "vbe", "js", "jse",
+        "wsf", "wsh", "ws", "sct", "scr", "pif", "hta", "cpl", "msc", "jar", "reg", "url", "chm",
+        "scf", "inf", "shb", "shs", "gadget", "application", "appref-ms", "appx", "appxbundle",
+        "msix", "msixbundle", "diagcab", "xll", "library-ms", "search-ms", "searchconnector-ms",
+        "settingcontent-ms",
     ];
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| RUN.iter().any(|r| r.eq_ignore_ascii_case(e)))
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let name = name.trim_end_matches(['.', ' ']);
+    name.rsplit_once('.')
+        .is_some_and(|(stem, e)| !stem.is_empty() && RUN.iter().any(|r| r.eq_ignore_ascii_case(e)))
 }
 
 /// The line a point is on, joined across the rows it wraps over: its
@@ -569,6 +614,51 @@ mod tests {
         assert!(is_program(Path::new("x.cmd")));
         assert!(!is_program(Path::new("x.rs")));
         assert!(!is_program(Path::new("exe")));
+    }
+
+    #[test]
+    fn programs_hide_behind_trailing_dots_and_spaces() {
+        assert!(is_program(Path::new("a.exe.")));
+        assert!(is_program(Path::new("a.HTA . ")));
+        assert!(is_program(Path::new("x.search-ms")));
+        assert!(!is_program(Path::new(".exe")));
+        assert!(!is_program(Path::new("notes.txt.")));
+    }
+
+    // Windows paths, which only Windows reads as absolute.
+    #[cfg(windows)]
+    #[test]
+    fn only_drive_paths_are_looked_up() {
+        assert!(probe_safe(Path::new(r"C:\repo\a.rs")));
+        assert!(probe_safe(Path::new("d:/x")));
+        assert!(!probe_safe(Path::new(r"\\attacker\share\a")));
+        assert!(!probe_safe(Path::new("//attacker/share/a")));
+        assert!(!probe_safe(Path::new(r"\\?\UNC\host\share")));
+        assert!(!probe_safe(Path::new(r"\\?\C:\a")));
+        assert!(!probe_safe(Path::new(r"\\.\pipe\x")));
+        assert!(!probe_safe(Path::new("C:")));
+    }
+
+    // Windows paths, which only Windows reads as absolute.
+    #[cfg(windows)]
+    #[test]
+    fn shares_are_never_asked_about() {
+        let asked = std::cell::Cell::new(false);
+        let probe = |_: &Path| {
+            asked.set(true);
+            Some(false)
+        };
+        let at_with = |text: &str, i: usize| find(&chars(text), i, &base(), &probe);
+        assert_eq!(at_with(r"see \\nas\share\x now", 6), None);
+        assert_eq!(at_with("see //nas/share/x now", 6), None);
+        assert_eq!(at_with(r#"see "\\nas\share\a b" now"#, 7), None);
+        assert_eq!(from_uri("file://attacker/share/a", &probe), None);
+        assert_eq!(from_uri("file:////attacker/share/a", &probe), None);
+        assert!(!asked.get());
+        assert_eq!(
+            from_uri("file://localhost/C:/a.txt", &probe),
+            Some(Target::File(r"C:\a.txt".into(), None))
+        );
     }
 
     #[test]
