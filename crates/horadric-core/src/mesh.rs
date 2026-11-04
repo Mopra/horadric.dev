@@ -594,6 +594,29 @@ pub fn phones(h: &Held) -> Vec<said::Phone> {
     said::phones(loose, &tree(h), &standing)
 }
 
+/// Whether phone `phone` may act on machine `me`, from the files in
+/// `dir`: never while "Phones can type here" is off, and otherwise only
+/// when a brother that vouched for it may act here itself, under the key
+/// held for it ([`said::vouched_control`]). A phone the words serve no
+/// vouch for is this machine's own when `paired_here`, and acts then.
+pub fn phone_controls(
+    dir: &Path,
+    me: &str,
+    crypto: &dyn Crypto,
+    phone: &str,
+    paired_here: bool,
+) -> bool {
+    if crate::standing::Standing::load(dir).phones_watch_only {
+        return false;
+    }
+    let t = Trust::load(dir, me, crypto);
+    let served = phones(&load_held(dir));
+    said::vouched_control(&served, phone, |id, key| {
+        t.controls(id) && t.keys.get(id).is_some_and(|k| k == key)
+    })
+    .unwrap_or(paired_here)
+}
+
 /// Of every vouch and forget held, those that are kept: the vouches that
 /// count ([`crate::said::counted_vouches`]); of the forgets, one per
 /// signer's key and phone key (the lowest), every one naming a phone one

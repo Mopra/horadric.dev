@@ -34,6 +34,10 @@ pub const LOOK_EVERY: Duration = Duration::from_millis(240);
 pub const PUSH_GAP: Duration = Duration::from_secs(60);
 /// How often new lore is looked for to send a linked brother.
 pub const LORE_EVERY: Duration = Duration::from_secs(2);
+/// How often a phone's control is asked again, so "Phones can type
+/// here" switched off, or its voucher losing control, bites on a phone
+/// already connected. Not every look: the asking reads files.
+pub const CONTROL_EVERY: Duration = Duration::from_secs(2);
 
 /// Where a session's output is, as far as this machine can serve it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +98,8 @@ pub trait Serve {
     fn hold_size(&mut self, id: &str, size: Option<(u16, u16)>);
 
     /// Whether `who` may type, start and resume, or only look. Asked at
-    /// each hello.
+    /// each hello, for a brother again when the roster changes and for a
+    /// phone every [`CONTROL_EVERY`].
     fn control(&self, _who: &str, _kind: Kind) -> bool {
         true
     }
@@ -340,6 +345,7 @@ pub struct Server {
     /// The state last told the brothers and when, for the heartbeat.
     told: Option<(&'static str, Instant)>,
     lore_looked: Option<Instant>,
+    control_looked: Option<Instant>,
 }
 
 impl Server {
@@ -888,6 +894,7 @@ impl Server {
             serve.push(&id, count);
         }
         self.brothers(serve, out);
+        self.phones_control(serve);
         for (&ch, c) in self.clients.iter_mut() {
             let Some(id) = c.watch.clone() else {
                 continue;
@@ -926,6 +933,20 @@ impl Server {
         for (&ch, _) in self.clients.iter().filter(|(_, c)| c.brother()) {
             for (project, have) in &lore {
                 out.send(ch, lore_message(project, have));
+            }
+        }
+    }
+
+    /// Asks again whether each phone may act. A brother's is asked when
+    /// the roster changes, which a phone is never sent.
+    fn phones_control(&mut self, serve: &mut impl Serve) {
+        if self.control_looked.is_some_and(|at| at.elapsed() < CONTROL_EVERY) {
+            return;
+        }
+        self.control_looked = Some(Instant::now());
+        for c in self.clients.values_mut() {
+            if c.hello() && !c.brother() {
+                c.control = serve.control(&c.who, c.kind);
             }
         }
     }
@@ -1902,6 +1923,21 @@ mod tests {
         let photo = json!({"t": "attach", "id": "s1", "data": "AAAA", "name": "a.png"});
         let msgs = say(&mut server, &mut serve, 6, photo, 0);
         assert_eq!(of(&msgs, "error")[0]["for"], "attach");
+    }
+
+    #[test]
+    fn phones_typing_switched_off_bites_on_a_phone_already_connected() {
+        let mut serve = Fake::default();
+        let (mut server, _) = greeted(&mut serve, "phone", json!({"t": "hello", "v": 3}));
+        let input = json!({"t": "input", "id": "s1", "data": "a"});
+        say(&mut server, &mut serve, 1, input.clone(), 0);
+        assert_eq!(serve.typed.len(), 1);
+        serve.locked = true;
+        server.control_looked = None;
+        server.answer(&mut serve, 0);
+        let msgs = say(&mut server, &mut serve, 2, input, 0);
+        assert_eq!(of(&msgs, "error")[0]["for"], "input");
+        assert_eq!(serve.typed.len(), 1);
     }
 
     #[test]

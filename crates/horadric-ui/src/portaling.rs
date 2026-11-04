@@ -1197,17 +1197,19 @@ impl Serve for Here<'_> {
         }
     }
 
-    /// A phone may act unless "Phones can type here" was switched off. A
-    /// brother may when the roster says so, which is on unless the human
-    /// switched it off.
+    /// A phone may act unless "Phones can type here" was switched off,
+    /// and then only as far as a brother that vouched for it may: one
+    /// paired here is this PC's own. A brother may when the roster says
+    /// so, which is on unless the human switched it off.
     fn control(&self, who: &str, _kind: Kind) -> bool {
         let Some(p) = &self.0.portal else {
             return false;
         };
-        if !p.brothers.values().any(|b| b == who) {
-            return !horadric_core::standing::Standing::load(&p.dir).phones_watch_only;
-        }
         let me = horadric_core::portal::id(&p.config.secret);
+        if !p.brothers.values().any(|b| b == who) {
+            let paired = p.config.phones.iter().any(|ph| ph.id == who);
+            return mesh::phone_controls(&p.dir, &me, &brothers::Cng, who, paired);
+        }
         p.roster().is_some_and(|r| r.control(&me, who))
     }
 

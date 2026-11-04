@@ -848,6 +848,25 @@ pub fn phones<'a>(
     out.into_values().collect()
 }
 
+/// Whether the phone with id `phone` may act on this machine, judged by
+/// who vouched for it: None when `phones` serves no phone by that id.
+/// A phone gets no more than a brother vouching for it has, so it acts
+/// only when one of its vouchers `controls` (the signer's id and key)
+/// says may act here: a teammate or a brother switched to watching only
+/// cannot hand a phone the control it lacks. The id is the voucher's to
+/// name, so every phone served under it must pass: a watching brother
+/// naming its phone like one of ours takes control from both rather
+/// than borrow ours.
+pub fn vouched_control(
+    phones: &[Phone],
+    phone: &str,
+    controls: impl Fn(&str, &str) -> bool,
+) -> Option<bool> {
+    let mut named = phones.iter().filter(|p| p.phone == phone).peekable();
+    named.peek()?;
+    Some(named.all(|p| p.by.iter().any(|(key, id)| controls(id, key))))
+}
+
 /// Whose a session is, worked out from the words held on it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Resolved {
@@ -2316,6 +2335,39 @@ mod tests {
         assert_eq!((p.key.as_str(), p.name.as_str()), ("pa", "a of desk"));
         // A key no admission reaches vouches for nothing.
         assert!(served(&[vouch("nas", "c")], &t, &none).is_empty());
+    }
+
+    #[test]
+    fn a_phone_acts_only_when_a_brother_that_vouched_for_it_may_act() {
+        // Lap is this machine's own brother with control, Desk its own
+        // switched to watching only, Mate a teammate's machine, which
+        // watches until the human says more.
+        let t = tree(&["lap", "desk", "mate"], &[]);
+        let none = Standing::default();
+        let controls = |id: &str, _key: &str| id == "lap";
+        let w = [
+            vouch("lap", "a"),
+            vouch("desk", "b"),
+            vouch("mate", "c"),
+            vouch("desk", "d"),
+            vouch("lap", "d"),
+        ];
+        let p = phones(&w, &t, &none);
+        assert_eq!(vouched_control(&p, "a", controls), Some(true));
+        assert_eq!(vouched_control(&p, "b", controls), Some(false));
+        assert_eq!(vouched_control(&p, "c", controls), Some(false));
+        // One voucher with control is enough for the same phone.
+        assert_eq!(vouched_control(&p, "d", controls), Some(true));
+        assert_eq!(vouched_control(&p, "e", controls), None);
+        // A teammate naming its own phone like Lap's takes control from
+        // the id rather than borrow Lap's.
+        let mut stolen = vouch("mate", "a");
+        if let What::Vouches { key, .. } = &mut stolen.what {
+            *key = "other".into();
+        }
+        let p = phones(&[vouch("lap", "a"), stolen], &t, &none);
+        assert_eq!(p.len(), 2);
+        assert_eq!(vouched_control(&p, "a", controls), Some(false));
     }
 
     #[test]
