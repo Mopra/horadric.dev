@@ -545,8 +545,10 @@ fn handle(
     if let Some(mut event) = parsed {
         if event.may_retitle() {
             event.title = transcript::title(&event.transcript_path);
+            event.title = transcript::best_title(event.title.take(), &event.session_id);
         } else if event.may_peek_title() {
             event.title = transcript::tail_title(std::path::Path::new(&event.transcript_path));
+            event.title = transcript::best_title(event.title.take(), &event.session_id);
         }
         let _ = tx.send(Tagged {
             horadric_id,

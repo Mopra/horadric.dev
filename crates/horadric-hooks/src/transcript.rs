@@ -151,9 +151,7 @@ pub fn history(cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
 }
 
 fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
-    let made = crate::state_dir()
-        .map(|d| retitle::Titles::load(&d))
-        .unwrap_or_default();
+    let made = model_titles();
     let mut files: Vec<(PathBuf, SystemTime, u64, SystemTime)> = folders(root, cwd)
         .iter()
         .filter_map(|dir| std::fs::read_dir(dir).ok())
@@ -302,6 +300,46 @@ fn summary(path: &Path) -> Option<(Title, String)> {
         }
     };
     Some((title, asked))
+}
+
+/// The titles a model wrote, read again only when the file changes: every
+/// hook that carries a title asks.
+pub fn model_titles() -> retitle::Titles {
+    type Kept = Option<(SystemTime, retitle::Titles)>;
+    static KEPT: Mutex<Kept> = Mutex::new(None);
+    let Some(dir) = crate::state_dir() else {
+        return retitle::Titles::default();
+    };
+    let path = retitle::Titles::path(&dir);
+    let Some(modified) = std::fs::metadata(&path).and_then(|m| m.modified()).ok() else {
+        return retitle::Titles::default();
+    };
+    let Ok(mut kept) = KEPT.lock() else {
+        return retitle::Titles::load(&dir);
+    };
+    match &*kept {
+        Some((m, t)) if *m == modified => t.clone(),
+        _ => {
+            let t = retitle::Titles::load(&dir);
+            *kept = Some((modified, t.clone()));
+            t
+        }
+    }
+}
+
+/// `title`, read from conversation `id`'s transcript, with the one a
+/// model wrote in its place unless the human named it with `/rename`.
+pub fn best_title(title: Option<Title>, id: &str) -> Option<Title> {
+    if title.as_ref().is_some_and(|t| t.custom) || id.is_empty() {
+        return title;
+    }
+    match model_titles().title(id) {
+        Some(text) => Some(Title {
+            text: text.to_string(),
+            custom: false,
+        }),
+        None => title,
+    }
 }
 
 /// What a model is shown to title the conversation in `path`: its prompts

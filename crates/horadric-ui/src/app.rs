@@ -765,6 +765,31 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         }
     });
 
+    // A title the model made goes on the tiles holding its conversation
+    // at once, not at their next hook. A /rename stays.
+    let titled = Arc::clone(&registry);
+    crate::titler::on_landed(move |id, title| {
+        let changed = titled.lock().is_ok_and(|mut r| {
+            let ids: Vec<String> = (r.all())
+                .filter(|s| s.claude_session_id.as_deref() == Some(id))
+                .filter(|s| !s.title.as_ref().is_some_and(|t| t.custom))
+                .map(|s| s.id.clone())
+                .collect();
+            for sid in &ids {
+                if let Some(s) = r.get_mut(sid) {
+                    s.title = Some(horadric_core::title::Title {
+                        text: title.to_string(),
+                        custom: false,
+                    });
+                }
+            }
+            !ids.is_empty()
+        });
+        if changed {
+            post_event(notify_id, true);
+        }
+    });
+
     // Feeder thread: apply to the registry, wake the UI. The limits in a
     // status line are the account's, so any session's reading counts, though
     // an idle one's stale numbers never pull the bars back.
@@ -838,6 +863,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             // A turn's end is when its keeper is sent the snapshot.
             if t.event.hook_event_name == "Stop" && t.event.agent_id.is_none() {
                 keeping::turn_ended(&target, &t.event.transcript_path);
+                crate::titler::turn_ended(&t.event.transcript_path);
             }
             post_event(notify_id, changed);
         }
@@ -4070,6 +4096,7 @@ impl App {
                     return;
                 }
                 self.reconcile(events & EVENTS_PHASE != 0);
+                self.name_panes();
                 self.switch_free();
                 self.switch_when_out();
                 self.switch_step();
@@ -7364,6 +7391,23 @@ impl App {
     /// where it was last, or else against the tiles as a square filling top
     /// to bottom. An open stage keeps its place and size. False when the
     /// project has nothing to show.
+    /// The stage's panes named again, for a title that changed since the
+    /// stage was filled: Claude's, a /rename, or one the model made.
+    fn name_panes(&mut self) {
+        let Some(key) = self.stage.as_ref().map(|s| s.project()) else {
+            return;
+        };
+        for id in self.grid_of(&key) {
+            let Some(serial) = self.console_of(&id).map(|c| c.serial) else {
+                continue;
+            };
+            let name = self.name_of(&id);
+            if let Some(stage) = &self.stage {
+                stage.rename(serial, name);
+            }
+        }
+    }
+
     fn fill_stage(&mut self, key: &str) -> bool {
         let ids = self.grid_of(key);
         let sessions: Vec<(Arc<Console>, String)> = ids

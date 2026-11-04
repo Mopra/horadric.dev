@@ -299,6 +299,14 @@ impl TerminalWindow {
         Ok(win)
     }
 
+    /// Gives the pane showing console `serial` the name `name`, when it
+    /// shows it: a session's title changes while its pane stays.
+    pub fn rename(&self, serial: usize, name: String) {
+        if let Some(p) = self.panes.borrow().iter().find(|p| p.serial() == serial) {
+            p.set_name(name);
+        }
+    }
+
     /// Shows these sessions of a project, in this order, each with its
     /// name. A pane already showing a console stays, with its selection and
     /// scroll position; the rest are made or destroyed to match.
