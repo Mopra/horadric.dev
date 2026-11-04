@@ -73,6 +73,7 @@ use crate::portal_key::Look as PortalLook;
 use crate::settings::Control;
 use crate::theme::{self, Color};
 
+mod keycube;
 mod shine;
 mod stone;
 pub(crate) use stone::{StoneLook, StoneState};
@@ -121,13 +122,6 @@ const WARRIV_BREATH: Duration = Duration::from_millis(3200);
 const SHIMMER: Duration = Duration::from_millis(2600);
 /// More subagents than this still draw this many sparks.
 const MAX_SPARKS: usize = 5;
-/// How bright the sparks circle a lamp whose turn is over while its
-/// background agents work on: calmer than a turn at work, and slower.
-const AGENTS_ALONE: f32 = 0.45;
-/// How far out from the lamp's middle the sparks circle, in DIPs.
-const SPARK_REACH: f32 = 7.0;
-/// A spark going once round the lamp.
-const SPARK_ORBIT: Duration = Duration::from_millis(2400);
 /// A hireling's rune going once round the lamp: slower than a spark, so
 /// its strokes can be read.
 const HIRELING_ORBIT: Duration = Duration::from_millis(4800);
@@ -136,8 +130,6 @@ const RUNE_CARVE: Duration = Duration::from_millis(1800);
 /// How long a finished hireling's rune takes to settle into the lamp, in
 /// seconds.
 const RUNE_SETTLE: f32 = 2.0;
-/// A hireling's rune on the tile, DIPs tall, and its cut.
-const RUNE_H: f32 = 7.0;
 const RUNE_STROKE: f32 = 1.1;
 
 /// The Folio's button, a chat bubble.
@@ -3619,11 +3611,14 @@ impl Painter<'_> {
             let level = if ambient { look.context } else { c / 100.0 };
             self.tank(&track, level, ink.fade(presence), 5);
         }
-        // A new tool turns the icon over like a card: the old one folds
-        // away edge on, and the new one opens out.
+        // An agent's icon is on a cube that rolls to the next tool, with
+        // its subagents circling it. A plain terminal has no agent, so it
+        // keeps the flat glyph, turned over like a card.
         let icon_r = Rect::new(ix - 14.0, iy - 14.0, 28.0, 28.0);
         let icon_ink = icon_c.fade(presence);
-        if ambient && look.flip > 0.0 {
+        if !s.shell && s.ssh.is_none() {
+            self.key_cube(gpu, s, look, (ix, iy), icon_c, c, presence, scene.now, ambient);
+        } else if ambient && look.flip > 0.0 {
             let t = 1.0 - look.flip;
             let (glyph, squash) = if t < 0.5 {
                 (look.was_icon, (std::f32::consts::PI * t).cos())

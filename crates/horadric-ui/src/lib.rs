@@ -85,6 +85,7 @@ pub use horadric_core::standing;
 pub mod summon;
 pub mod symbols;
 pub mod theme;
+pub mod tilecube;
 pub mod viewer;
 pub mod viewport;
 

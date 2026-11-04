@@ -8,10 +8,7 @@ use std::time::{Duration, SystemTime};
 use windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE;
 use windows_numerics::Vector2;
 
-use super::{
-    color, Gpu, Painter, Scene, Target, AGENTS_ALONE, BEAM_H, HIRELING_ORBIT, MAX_SPARKS,
-    RUNE_CARVE, RUNE_H, RUNE_SETTLE, RUNE_STROKE, SHIMMER, SPARK_ORBIT, SPARK_REACH, WARRIV_BREATH,
-};
+use super::{color, Gpu, Painter, Scene, Target, BEAM_H, SHIMMER, WARRIV_BREATH};
 use crate::layout::{Metrics, Rect};
 use crate::light::Bloom;
 use crate::motion::{self, ORBIT};
@@ -72,9 +69,7 @@ impl Painter<'_> {
                 continue;
             }
             let lamp = super::lamp_rect(&r);
-            let working = theme::phase_color(&Phase::Working);
-            let now = scene.now;
-            let hired = match s.phase {
+            match s.phase {
                 Phase::Working => {
                     let t = motion::cycle(look.phase_age, ORBIT);
                     self.surge(gpu, &lamp, c, t, look.enter);
@@ -87,37 +82,23 @@ impl Painter<'_> {
                         self.glint(&track, look.context, t, theme::fullness_color(full));
                         lit.push(track);
                     }
-                    let n = s.subagents(now).min(MAX_SPARKS);
-                    self.hirelings(&lamp, s, now, c, n, look.phase_age, look.enter)
                 }
                 Phase::Waiting(_) => {
                     let breath = motion::waiting_breath(look.phase_age);
                     self.rim(&r, radius, c, (0.3 + 0.4 * breath) * look.enter);
                     let spread = self.arrival_ring(&r, radius, c, look.arrival);
                     lit.push(r.inset(-2.0 - spread));
-                    self.hirelings(&lamp, s, now, working, 0, look.phase_age, look.enter)
                 }
                 Phase::Done if look.phase_age < motion::BEAM => {
                     if let Some(shaft) = self.beam(&r, s, look.phase_age, look.enter) {
                         lit.push(shaft);
                     }
-                    let n = s.agents_alone(now).min(MAX_SPARKS);
-                    let age = look.phase_age / 2;
-                    self.hirelings(&lamp, s, now, working, n, age, AGENTS_ALONE)
                 }
                 Phase::Ended if look.settle > 0.0 => {
                     self.power_down(&lamp, s, 1.0 - look.settle);
                     lit.push(lamp.inset(-LAMP_REACH));
-                    false
                 }
-                _ => {
-                    let n = s.agents_alone(now).min(MAX_SPARKS);
-                    let age = look.phase_age / 2;
-                    self.hirelings(&lamp, s, now, working, n, age, AGENTS_ALONE)
-                }
-            };
-            if hired {
-                lit.push(lamp.inset(-LAMP_REACH));
+                _ => {}
             }
         }
         lit
@@ -188,119 +169,6 @@ impl Painter<'_> {
                 self.fill_rounded_gradient(&streak, r.w / 2.0, &stops, strength);
             }
         });
-    }
-
-    /// A rune for each hireling, circling the lamp, cut in light: carving
-    /// itself with a white hot point while it works, held still at the top
-    /// and beating while it waits on a permission, settling into the lamp
-    /// as it finishes and leaving it as a few embers, and cracked in the
-    /// error colour where it failed. A session the band knows nothing of
-    /// (a mod too old, a headless stream) keeps the `n` plain sparks.
-    /// Whether it drew anything.
-    #[allow(clippy::too_many_arguments)]
-    unsafe fn hirelings(
-        &self,
-        r: &Rect,
-        s: &Session,
-        now: SystemTime,
-        c: Color,
-        n: usize,
-        age: Duration,
-        strength: f32,
-    ) -> bool {
-        use horadric_core::hireling::{rune_of, Lot};
-        if s.band.hirelings.is_empty() {
-            self.sparks(r, c, n, age, strength);
-            return n > 0;
-        }
-        let shown = s.band.shown(now, false);
-        let shown = &shown[..shown.len().min(MAX_SPARKS)];
-        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-        let (rx, ry) = (SPARK_REACH + 1.0, r.h / 2.0 + 3.0);
-        let turn = motion::cycle(age, HIRELING_ORBIT);
-        let count = shown.len().max(1) as f32;
-        let since = |t: SystemTime| now.duration_since(t).unwrap_or_default();
-        let white = Color::rgb(0xFFFFFF);
-        for (k, h) in shown.iter().enumerate() {
-            let spot = k as f32 / count;
-            let around = |turn: f32| {
-                let a = std::f32::consts::TAU * (turn + spot);
-                (cx + rx * a.cos(), cy + ry * a.sin())
-            };
-            let lot = h.lot_at(now);
-            let (at, ink, drawn) = match lot {
-                Lot::Working => {
-                    let carve = motion::cycle(since(h.started), RUNE_CARVE);
-                    let ink = heat_color(c, 0.4).fade(strength);
-                    (around(turn), ink, (carve * 1.6).min(1.0))
-                }
-                Lot::Waiting => {
-                    let beat = motion::waiting_breath(since(h.heard));
-                    let ink = theme::waiting().fade((0.5 + 0.5 * beat) * strength.max(0.6));
-                    ((cx, cy - ry), ink, 1.0)
-                }
-                Lot::Done => {
-                    let secs = since(h.ended.unwrap_or(h.heard)).as_secs_f32();
-                    let t = secs / RUNE_SETTLE;
-                    if t >= 1.0 {
-                        continue;
-                    }
-                    // Once it has sunk most of the way in, the lamp gives
-                    // it back as embers.
-                    let burst = Burst::new(particles::seed_of(&h.id), 5, Kind::Ember);
-                    let ember = theme::done();
-                    self.burst(&burst, (cx, cy), secs - 0.4 * RUNE_SETTLE, ember, strength);
-                    let (x, y) = around(turn);
-                    let ease = motion::ease_out(t);
-                    let at = (x + (cx - x) * ease, y + (cy - y) * ease);
-                    let ink = theme::done().fade((1.0 - t) * strength.max(0.6));
-                    (at, ink, 1.0)
-                }
-                // Stopped where it fell, which is its own spot, not moving.
-                Lot::Failed => (around(0.0), theme::error().fade(0.8), 1.0),
-            };
-            let point = self.rune_cut(rune_of(&h.kind), at, RUNE_H, ink, drawn, RUNE_STROKE);
-            if let (Lot::Working, Some((x, y))) = (lot, point) {
-                self.dot(x, y, 1.0, white.fade(strength));
-            }
-            if lot == Lot::Failed {
-                let half = RUNE_H / 2.0;
-                self.rt.DrawLine(
-                    Vector2 {
-                        X: at.0 - half * 0.6,
-                        Y: at.1 - half,
-                    },
-                    Vector2 {
-                        X: at.0 + half * 0.6,
-                        Y: at.1 + half,
-                    },
-                    self.brush,
-                    RUNE_STROKE,
-                    None,
-                );
-            }
-        }
-        true
-    }
-
-    /// A spark for each subagent at work, circling the lamp with a short
-    /// trail, spaced evenly round the loop so two read as two.
-    unsafe fn sparks(&self, r: &Rect, c: Color, n: usize, age: Duration, strength: f32) {
-        const TRAIL: usize = 4;
-        const GAP: f32 = 0.035;
-        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-        let reach = (SPARK_REACH, r.h / 2.0 + 3.0);
-        let period = SPARK_ORBIT.as_secs_f32();
-        let t = age.as_secs_f32();
-        for k in 0..n {
-            for j in (0..=TRAIL).rev() {
-                let p = particles::orbit(k, n, t - j as f32 * GAP, period, reach);
-                let fade = 1.0 - j as f32 / (TRAIL + 1) as f32;
-                let heat = if j == 0 { 1.4 } else { p.heat * fade };
-                let ink = heat_color(c, heat).fade(strength * fade);
-                self.dot(cx + p.x, cy + p.y, 0.6 + 0.6 * fade, ink);
-            }
-        }
     }
 
     /// A hot glint running along the lit part of a context meter that is
