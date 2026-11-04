@@ -68,8 +68,8 @@ pub const LAYERS: [Layer; 3] = [
     // have to read on a bright screen in daylight, so heat adds less on
     // top: more of them and a faster drift tell a turn apart.
     Layer {
-        count: 44,
-        busy: 16,
+        count: 70,
+        busy: 26,
         size: (4.0, 7.0),
         speed: (2.0, 4.5),
         alpha: (0.16, 0.26),
@@ -80,8 +80,8 @@ pub const LAYERS: [Layer; 3] = [
         stroke: 0.18,
     },
     Layer {
-        count: 16,
-        busy: 12,
+        count: 26,
+        busy: 19,
         size: (9.0, 18.0),
         speed: (7.0, 16.0),
         alpha: (0.18, 0.3),
@@ -94,8 +94,8 @@ pub const LAYERS: [Layer; 3] = [
     // A few drifting past close by, big and faint so they never fight
     // the words.
     Layer {
-        count: 4,
-        busy: 3,
+        count: 6,
+        busy: 5,
         size: (30.0, 44.0),
         speed: (24.0, 36.0),
         alpha: (0.08, 0.13),
@@ -410,26 +410,43 @@ pub fn ember(
     runes: usize,
 ) -> Ember {
     let l = &LAYERS[layer];
-    let u = |salt: u64| (hash(&[i as u64, salt, layer as u64]) % 10_000) as f32 / 10_000.0;
+    let unit = |words: &[u64]| (hash(words) % 10_000) as f32 / 10_000.0;
+    let u = |salt: u64| unit(&[i as u64, salt, layer as u64]);
     let share = if i < l.count { 1.0 } else { heat };
     let span = |(lo, hi): (f32, f32), k: f32| lo + (hi - lo) * k;
-    let size = span(l.size, u(6));
+    // The speed is the ember's for good: changing it between passes
+    // would make the position jump when the heat has moved it along.
     let speed = span(l.speed, u(1));
     let margin = margin(l);
     let travel = h + 2.0 * margin;
-    let p = (u(2) * travel + (t + l.warp * warp) * speed).rem_euclid(travel);
-    let sway = (t * (0.2 + 0.2 * u(3)) + u(4) * TAU).sin() * l.sway;
-    let life = (PI * p / travel).sin();
+    // Each pass is a life of its own, a new rune somewhere else after a
+    // rest of its own length, so no column repeats a rune on a beat.
+    let lap = travel * (1.0 + REST);
+    let run = u(2) * lap + (t + l.warp * warp) * speed;
+    let n = (run / lap).floor().max(0.0) as u64;
+    let v = |salt: u64| unit(&[i as u64, salt, layer as u64, n]);
+    let p = run - n as f32 * lap - v(9) * REST * travel;
+    let born = (0.0..travel).contains(&p);
+    let p = if born { p } else { 0.0 };
+    let size = span(l.size, v(6));
+    let rate = 0.12 + 0.3 * v(3);
+    let sway = (t * rate + v(4) * TAU).sin() * l.sway * (0.4 + 0.6 * v(10));
+    let lean = (v(11) - 0.5) * l.sway * (p / travel - 0.5);
+    let life = if born { (PI * p / travel).sin() } else { 0.0 };
     Ember {
-        x: u(5) * w + sway - size / 2.0,
+        x: v(5) * w + sway + lean - size / 2.0,
         y: h + margin - p,
         size,
-        alpha: life * span(l.alpha, u(7)) * (1.0 + l.burn * heat) * share,
-        rune: (hash(&[i as u64, 8, layer as u64]) % runes.max(1) as u64) as usize,
+        alpha: life * span(l.alpha, v(7)) * (1.0 + l.burn * heat) * share,
+        rune: (hash(&[i as u64, 8, layer as u64, n]) % runes.max(1) as u64) as usize,
         sunk: l.sunk,
         stroke: (size * l.stroke).max(0.8),
     }
 }
+
+/// The longest rest an ember takes between passes, as a share of a pass.
+/// The counts are raised to match, so as many show at once as before.
+const REST: f32 = 0.6;
 
 /// Room above and below the glass an ember of `l` is born and dies in, so
 /// it never pops in or out where it can be seen.
@@ -646,10 +663,22 @@ mod tests {
                 for t in [0.0, 3.3, 47.0, 1234.5] {
                     assert_eq!(ember(k, i, (t, 0.0), view, 0.0, 12).alpha, 0.0);
                 }
-                let lit = (0..80).any(|t| ember(k, i, (t as f32, 0.0), view, 1.0, 12).alpha > 0.0);
+                let lit = (0..400).any(|t| ember(k, i, (t as f32, 0.0), view, 1.0, 12).alpha > 0.0);
                 assert!(lit);
             }
         }
+    }
+
+    #[test]
+    fn each_pass_is_a_new_rune_somewhere_else() {
+        let view = (600.0, 400.0);
+        let lit: Vec<_> = (0..4000)
+            .map(|t| ember(1, 0, (t as f32, 0.0), view, 0.0, 12))
+            .filter(|e| e.alpha > 0.0)
+            .collect();
+        let differs = |f: fn(&Ember) -> f32| lit.iter().any(|e| (f(e) - f(&lit[0])).abs() > 20.0);
+        assert!(differs(|e| e.x));
+        assert!(lit.iter().any(|e| e.rune != lit[0].rune));
     }
 
     #[test]
