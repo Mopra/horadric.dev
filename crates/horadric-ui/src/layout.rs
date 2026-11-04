@@ -2943,7 +2943,7 @@ mod tests {
         }
         assert_eq!(folio.y - l.tiles[2].bottom(), m.gap);
         assert_eq!(l.size.1, folio.bottom() + m.pad);
-        assert_eq!(hit(&l, 40.0, l.tiles[2].y + 1.0), Hit::Tile(2));
+        assert_eq!(hit(&l, 70.0, l.tiles[2].y + 1.0), Hit::Tile(2));
         assert_eq!(hit(&l, folio.x + 2.0, folio.y + 1.0), Hit::Folio);
         assert_eq!(hit(&l, 20.0, m.pad + 1.0), Hit::Header);
         assert_eq!(hit(&l, m.width - m.pad - 2.0, m.pad + 1.0), Hit::New);
@@ -2959,7 +2959,7 @@ mod tests {
         assert_eq!(l.pages[1].y - l.pages[0].bottom(), m.gap);
         assert_eq!(l.folio.unwrap().y - l.pages[1].bottom(), m.gap);
         assert_eq!(hit(&l, 20.0, l.pages[1].y + 1.0), Hit::Page(1));
-        assert_eq!(hit(&l, 40.0, l.tiles[1].y + 1.0), Hit::Tile(1));
+        assert_eq!(hit(&l, 70.0, l.tiles[1].y + 1.0), Hit::Tile(1));
         // Folded, no tab shows, as no session does.
         let folded = cluster(&m, 2, 2, true, None, None, None);
         assert!(folded.pages.is_empty());
@@ -3005,7 +3005,7 @@ mod tests {
         assert!(b.y > t.y + t.h / 2.0 - 4.0 && b.bottom() < t.bottom());
         // The button wins over its tile, the rest of the tile is the tile.
         assert_eq!(hit(&l, b.x + 1.0, b.y + 1.0), Hit::Browser(1));
-        assert_eq!(hit(&l, t.x + 30.0, b.y + 1.0), Hit::Tile(1));
+        assert_eq!(hit(&l, t.x + 60.0, b.y + 1.0), Hit::Tile(1));
         let unmarked = l.tiles[0];
         assert_eq!(hit(&l, b.x + 1.0, unmarked.y + 40.0), Hit::Tile(0));
         assert!(Hit::Browser(1).lights());
@@ -3031,8 +3031,8 @@ mod tests {
         let l = cluster(&m, 2, 0, false, None, None, None);
         let t = l.tiles[1];
         assert_eq!(hit(&l, t.x + 1.0, t.y + 1.0), Hit::Lamp(1));
-        assert_eq!(hit(&l, t.x + 14.0, t.bottom() - 1.0), Hit::Lamp(1));
-        assert_eq!(hit(&l, t.x + 21.0, t.y + t.h / 2.0), Hit::Tile(1));
+        assert_eq!(hit(&l, t.x + 50.0, t.bottom() - 1.0), Hit::Lamp(1));
+        assert_eq!(hit(&l, t.x + 53.0, t.y + t.h / 2.0), Hit::Tile(1));
         assert!(Hit::Lamp(1).lights());
     }
 

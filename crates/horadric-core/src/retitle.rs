@@ -89,7 +89,7 @@ pub fn titled(reply: &str) -> Option<String> {
     let refused = ["i ", "i'm", "sorry", "i can", "as an"]
         .iter()
         .any(|s| lower.starts_with(s));
-    if line.is_empty() || words < 2 || words > 12 || line.chars().count() > LONGEST || refused {
+    if line.is_empty() || !(2..=12).contains(&words) || line.chars().count() > LONGEST || refused {
         return None;
     }
     Some(line.to_string())
