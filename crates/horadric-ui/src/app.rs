@@ -758,6 +758,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
 
     // Listener thread: sockets in, tagged events and commands out.
     let (tx, rx) = mpsc::channel::<Tagged>();
+    agents::replay_into(tx.clone());
     let (new_tx, new_rx) = mpsc::channel::<Command>();
     thread::spawn(move || {
         if let Err(e) = listener::serve(port, tx, Some(new_tx)) {
