@@ -42,6 +42,7 @@ pub mod board;
 pub mod browse;
 pub use browse::AGENT_PROMPT;
 pub mod columns;
+pub mod crashlog;
 pub mod field;
 pub mod files;
 pub mod find;

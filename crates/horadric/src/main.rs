@@ -11,6 +11,8 @@
 //! Horadric up on this machine. `host` is not for people: the app starts
 //! one per session to hold its console.
 
+#[cfg(not(target_os = "linux"))]
+mod applog;
 #[cfg(windows)]
 mod backup;
 #[cfg(not(target_os = "macos"))]
@@ -223,6 +225,7 @@ fn main() -> ExitCode {
         // and the process LaunchServices started has to be the app.
         #[cfg(target_os = "macos")]
         None if !std::io::IsTerminal::is_terminal(&std::io::stdout()) => {
+            applog::start();
             horadric_ui::mac::run(horadric_hooks::port(), false)
         }
         #[cfg(target_os = "linux")]
@@ -235,6 +238,7 @@ fn main() -> ExitCode {
             .and_then(|exe| launch(&exe)),
         #[cfg(windows)]
         Some("app") => {
+            applog::start();
             horadric_ui::sanctuary::set_source(lore::graph_at);
             horadric_ui::memory::set_code_source(lore::code_files);
             horadric_ui::memory::set_piece_source(code::pieces);
@@ -245,10 +249,13 @@ fn main() -> ExitCode {
             )
         }
         #[cfg(target_os = "macos")]
-        Some("app") => horadric_ui::mac::run(
-            horadric_hooks::port(),
-            args.get(1).is_some_and(|a| a == "--reload"),
-        ),
+        Some("app") => {
+            applog::start();
+            horadric_ui::mac::run(
+                horadric_hooks::port(),
+                args.get(1).is_some_and(|a| a == "--reload"),
+            )
+        }
         #[cfg(target_os = "macos")]
         Some("bundle") => install::bundle_command(&args[1..]),
         #[cfg(not(target_os = "linux"))]
