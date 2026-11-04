@@ -184,7 +184,7 @@ pub(super) unsafe fn ask(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
             let id = change_field(request_id);
             let hint = "What it writes instead";
             y = field(cx, &mut s, st, &id, hint, PAD, y, inner) + 10.0;
-            let say = "Shift+Enter for a new line";
+            let say = "Ctrl+Enter to allow it as changed";
             s.line(say, F::Small, Rect::new(PAD, y, inner, 18.0), cx.pal.faint);
             let x = button(
                 cx,

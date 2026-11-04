@@ -50,10 +50,11 @@ read from code.
    `exe` spawns that program (`listener.rs:97`, `app.rs:2955`);
    `/horadric/new` starts an agent anywhere. Web pages are kept out by the
    Origin check; other local processes and other Windows users are not.
-4. **Medium: an unauthenticated DevTools port.** WebView2 starts with a
-   remote debugging port on 127.0.0.1 (`web.rs:1045`), written to
-   `devtools-port`. Horadric no longer needs it; any local process can
-   drive the logged in browser through it.
+4. **Fixed: an unauthenticated DevTools port.** WebView2 no longer starts
+   with a remote debugging port. It only reopens one for a single run when
+   a browser started by an older build still holds the shared profile.
+   `browser_devtools` now takes only an allowlist of CDP methods, and
+   `Network.getCookies` answers only for the tab's own page.
 5. **Medium: guessable session ids.** Ids are `<name>-<seconds since
    midnight>` (`session.rs:595`), and the id is the only credential for
    `/horadric/browser`. A child process (an npm postinstall) inherits
