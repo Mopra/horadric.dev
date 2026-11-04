@@ -1628,6 +1628,21 @@ pub fn with_approved(entry: &str, command: &str) -> String {
     Value::Object(root).to_string()
 }
 
+/// `entry` with Warriv's orchestrator on or off. Off takes the key out,
+/// since off is what no key means.
+pub fn with_orchestrator(entry: &str, on: bool) -> String {
+    let mut root = match serde_json::from_str::<Value>(entry) {
+        Ok(Value::Object(m)) => m,
+        _ => Map::new(),
+    };
+    if on {
+        root.insert("orchestrator".into(), Value::Bool(true));
+    } else {
+        root.remove("orchestrator");
+    }
+    Value::Object(root).to_string()
+}
+
 /// Of `commands`, those `entry` has not approved, in order. Matched on the
 /// whole text, so a check edited in the repository after it was approved
 /// is a new one.
@@ -3532,6 +3547,18 @@ Kept.
         assert_eq!(parallel(&entry), 16);
         assert!(crate::warriv::on(&entry));
         assert!(unapproved(&["evil".into()], &entry).is_empty());
+    }
+
+    #[test]
+    fn the_orchestrator_is_set_in_the_local_entry_keeping_the_rest() {
+        let entry = with_approved(&with_mode("{}", Mode::Auto), "make");
+        let on = with_orchestrator(&entry, true);
+        assert!(crate::warriv::on(&on));
+        assert_eq!(mode(&on), Mode::Auto);
+        assert!(unapproved(&["make".into()], &on).is_empty());
+        let off = with_orchestrator(&on, false);
+        assert!(!crate::warriv::on(&off));
+        assert!(!off.contains("orchestrator"));
     }
 
     #[test]

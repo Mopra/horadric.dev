@@ -47,7 +47,7 @@ const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 pub(in crate::app) struct Tome {
     /// Runewords cast on a project rather than on a session.
     pub(in crate::app) projects: Vec<OnProject>,
-    /// The steps each project stone had when last cast, by project key
+    /// The steps each project or global stone had when last cast, by project key
     /// and label, as `runeword::fingerprint`.
     pub(in crate::app) cast: BTreeMap<String, u64>,
     /// Whether a click asks before it casts. A stone whose steps changed
@@ -762,13 +762,19 @@ impl App {
         self.tome.cast.get(&cast_key(key, &stone.label)) != Some(&runeword::fingerprint(runes))
     }
 
-    /// Why a shell may not cast this stone: it came with the project and
+    /// Why a shell may not cast this stone: it is written in a file and
     /// the human has neither cast nor armed it with the steps it has now.
-    /// A click asks first for such a stone; a shell has nobody to ask, and
-    /// a session that edited the config could otherwise run what it wrote.
+    /// A click asks first for a changed project stone; a shell has nobody
+    /// to ask, and a session that edited the project's config or the
+    /// shared runewords.json could otherwise run what it wrote.
     fn unproven(&self, key: &str, label: &str) -> Option<String> {
         let stone = self.stone(key, label)?;
-        (self.changed(key, &stone) && self.armed(key, &stone).is_none()).then(|| {
+        let last = self.tome.cast.get(&cast_key(key, label));
+        let unproven = match (stone.source, stone.runes()) {
+            (Source::BuiltIn, _) | (_, None) => false,
+            (_, Some(runes)) => last != Some(&runeword::fingerprint(runes)),
+        };
+        (unproven && self.armed(key, &stone).is_none()).then(|| {
             "its steps are not the ones last cast from the tile; cast it there once first".into()
         })
     }
@@ -1015,7 +1021,9 @@ impl App {
                 what: Happened::Shipped,
             });
         }
-        if stone.source == Source::Project {
+        // Global stones too, though a click never asks for them: the
+        // fingerprint is what lets a shell cast them after, see `unproven`.
+        if stone.source != Source::BuiltIn {
             self.tome
                 .cast
                 .insert(cast_key(key, label), runeword::fingerprint(&runes));

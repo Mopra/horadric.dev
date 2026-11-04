@@ -25,7 +25,8 @@ use crate::board::{Board, Ink, RowState};
 use crate::mac::dialog;
 use crate::mac::menu::Item;
 use crate::quests::runner::{
-    approve_checks_label, approve_text, suggestion, suggestion_label, unapproved_wait,
+    approve_checks_label, approve_text, orchestrator_label, suggestion, suggestion_label,
+    unapproved_wait,
 };
 use crate::quests::{self, Host, Menu, Runner, SessionSpec, Toast, Warriv, Workplace};
 use horadric_hooks::tasks as file;
@@ -55,6 +56,7 @@ const PUBLIC: usize = ADD + 4;
 const MERGE: usize = ADD + 5;
 const SUGGEST: usize = ADD + 6;
 const CHECKS: usize = ADD + 7;
+const ORCHESTRATOR: usize = ADD + 8;
 const MODE: usize = ADD + 10;
 const PARALLEL: usize = ADD + 20;
 const AT_ONCE: [usize; 5] = [1, 2, 4, 8, 16];
@@ -564,6 +566,12 @@ impl App {
         if let Some(not) = dir.as_ref().and_then(|d| file::checks(d).err()) {
             items.push(Item::pick(approve_checks_label(&not), CHECKS));
         }
+        let repo_warriv = dir.as_ref().is_some_and(|d| file::suggested_orchestrator(d));
+        items.push(Item::checked(
+            orchestrator_label(board.orchestrator, repo_warriv),
+            ORCHESTRATOR,
+            board.orchestrator,
+        ));
         items.push(Item::checked("Warriv drives", DRIVES, drive.is_some()));
         match &drive {
             Some(d) => items.push(Item::checked("and ships public", PUBLIC, d.ships_public)),
@@ -598,6 +606,10 @@ impl App {
                 if let Some(m) = self.quests.state.merge_for.clone() {
                     self.ask(Menu::Merge(m));
                 }
+            }
+            ORCHESTRATOR => {
+                let on = self.quests.boards.borrow().get(key).is_some_and(|b| b.orchestrator);
+                self.set_orchestrator(key, !on);
             }
             DRIVES => {
                 let on = self.drive_of(key).is_none();

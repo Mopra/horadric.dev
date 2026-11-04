@@ -417,6 +417,21 @@ fn read_board(dir: &Path) -> Board {
     }
 }
 
+/// Whether `{on file: f}` may be looked up: a plain path inside the
+/// project. A cloned quest log could name `\\host\share`, which makes
+/// Windows hand that host the user's NTLM hash and stalls the UI while it
+/// answers, or climb out with `..`, or name an alternate data stream.
+pub(crate) fn wait_file_safe(f: &str) -> bool {
+    use std::path::Component;
+    !f.is_empty()
+        && !f.contains(':')
+        && !f.starts_with(['/', '\\'])
+        && f.split(['/', '\\']).all(|part| part != "..")
+        && Path::new(f)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
 /// The command blocked `t` waits on when this machine has not approved it,
 /// so it never runs and the wait never ends by itself.
 pub(crate) fn unapproved_wait<'a>(dir: &Path, t: &'a Task) -> Option<&'a str> {
@@ -445,6 +460,16 @@ pub(crate) fn suggestion_label((mode, n): (Mode, usize)) -> String {
     match n {
         1 => format!("Repo suggests: {}", mode.label()),
         n => format!("Repo suggests: {} \u{d7}{n}", mode.label()),
+    }
+}
+
+/// The mode menu's line that turns Warriv on, saying so when the
+/// repository suggests it and this machine has not taken it.
+pub(crate) fn orchestrator_label(on: bool, suggested: bool) -> &'static str {
+    if suggested && !on {
+        "Warriv answers blocked quests (repo suggests)"
+    } else {
+        "Warriv answers blocked quests"
     }
 }
 
@@ -1171,7 +1196,10 @@ pub(crate) trait Runner: Host {
             return false;
         };
         let (program, args): (&str, Vec<String>) = match wait {
-            Wait::File(f) => return dir.join(f).exists(),
+            // The file name came with the quest log, which a clone brings,
+            // and this runs on the UI thread every second.
+            Wait::File(f) if !wait_file_safe(f) => return false,
+            Wait::File(f) => return crate::links::disk(&dir.join(f)).is_some(),
             Wait::Main(r) => (
                 "git",
                 vec![
@@ -1322,6 +1350,19 @@ pub(crate) trait Runner: Host {
                 "horadric: cannot write {}: {e}",
                 file::config_file(&dir).display()
             );
+        }
+        self.refresh_boards(true);
+        self.run_tasks();
+    }
+
+    /// Turns Warriv on or off for a project, on this machine only: the
+    /// repository's `"orchestrator"` is a suggestion the menu offers.
+    fn set_orchestrator(&mut self, key: &str, on: bool) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        if let Err(e) = file::set_orchestrator(&dir, on) {
+            eprintln!("horadric: cannot turn Warriv {}: {e}", if on { "on" } else { "off" });
         }
         self.refresh_boards(true);
         self.run_tasks();
@@ -2664,6 +2705,28 @@ pub(crate) fn record_pack(key: &str, id: &str, title: &str, files: Vec<String>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wait_file_must_be_a_plain_path_inside_the_project() {
+        for ok in ["done.txt", "out/done", r"out\done", "./x"] {
+            assert!(wait_file_safe(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            r"\\attacker\s\x",
+            "//attacker/s/x",
+            r"\x",
+            "/etc/passwd",
+            r"C:\x",
+            "C:x",
+            "../x",
+            r"a\..\..\x",
+            "done.txt:stream",
+            r"\\?\UNC\h\s",
+        ] {
+            assert!(!wait_file_safe(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn a_long_list_of_checks_is_cut_in_the_label_but_whole_in_the_consent() {

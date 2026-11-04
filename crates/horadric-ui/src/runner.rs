@@ -560,6 +560,7 @@ fn mode_menu(key: &str) {
     const PUBLIC: usize = 13;
     const SUGGEST: usize = 14;
     const CHECKS: usize = 15;
+    const ORCHESTRATOR: usize = 16;
     // Plus how many, so each choice of `AT_ONCE` has an id of its own.
     const PARALLEL: usize = 20;
     let Some(board) = with_app(|app| app.shared.boards.borrow().get(key).cloned()) else {
@@ -578,6 +579,9 @@ fn mode_menu(key: &str) {
         .as_ref()
         .and_then(|d| horadric_hooks::tasks::checks(d).err())
         .unwrap_or_default();
+    let repo_warriv = dir
+        .as_ref()
+        .is_some_and(|d| horadric_hooks::tasks::suggested_orchestrator(d));
     let mut items: Vec<Item> = Mode::ALL
         .iter()
         .enumerate()
@@ -603,6 +607,12 @@ fn mode_menu(key: &str) {
         ));
     }
     items.push(Item::Separator);
+    items.push(Item::Action {
+        id: ORCHESTRATOR,
+        label: quests::runner::orchestrator_label(board.orchestrator, repo_warriv).into(),
+        checked: board.orchestrator,
+        bold: false,
+    });
     items.push(Item::Action {
         id: DRIVES,
         label: "Warriv drives".into(),
@@ -661,6 +671,7 @@ fn mode_menu(key: &str) {
             }
         }
         Some(CHECKS) => app.approve_commands(key, &unapproved),
+        Some(ORCHESTRATOR) => app.set_orchestrator(key, !board.orchestrator),
         Some(i) if i > PARALLEL => app.set_parallel(key, i - PARALLEL),
         Some(i) => {
             if let Some(m) = Mode::ALL.get(i - 1) {

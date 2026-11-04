@@ -61,6 +61,12 @@ pub fn suggested_mode(project: &Path) -> Mode {
     tasks::mode(&read_text(&config_file(project)))
 }
 
+/// Whether the repository's config suggests Warriv on, as
+/// [`suggested_mode`].
+pub fn suggested_orchestrator(project: &Path) -> bool {
+    warriv::on(&read_text(&config_file(project)))
+}
+
 /// How many at once the repository's config suggests, as
 /// [`suggested_mode`].
 pub fn suggested_parallel(project: &Path) -> usize {
@@ -303,6 +309,12 @@ pub fn set_mode(project: &Path, mode: Mode) -> io::Result<()> {
 /// set on this machine as [`set_mode`] is.
 pub fn set_parallel(project: &Path, n: usize) -> io::Result<()> {
     change_local(project, |e| tasks::with_parallel(e, n))
+}
+
+/// Turns Warriv on or off for the project on this machine, as
+/// [`set_mode`]: on, it starts agent sessions by itself.
+pub fn set_orchestrator(project: &Path, on: bool) -> io::Result<()> {
+    change_local(project, |e| tasks::with_orchestrator(e, on))
 }
 
 /// Reads the list, lets `change` rewrite it and writes the result back.
@@ -575,6 +587,19 @@ gw-1 ansible_host=10.0.0.1
         set_mode(&dir, Mode::Auto).unwrap();
         assert_eq!(mode(&dir), Mode::Auto);
         assert!(!read_text(&config_file(&dir)).contains("auto"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn warriv_is_turned_on_here_and_only_suggested_by_the_config() {
+        let dir = scratch("orchestrator");
+        write(&config_file(&dir), "{\"orchestrator\":true}").unwrap();
+        assert!(suggested_orchestrator(&dir));
+        assert!(!orchestrator(&dir));
+        set_orchestrator(&dir, true).unwrap();
+        assert!(orchestrator(&dir));
+        set_orchestrator(&dir, false).unwrap();
+        assert!(!orchestrator(&dir));
         fs::remove_dir_all(&dir).unwrap();
     }
 
