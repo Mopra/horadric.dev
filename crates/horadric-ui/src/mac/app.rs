@@ -332,6 +332,18 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
     }
     app.reconcile();
     app.save();
+    if let Some(crash) = crate::crashlog::take_last_crash() {
+        let log = crate::crashlog::log_path()
+            .map_or_else(|| "horadric.log".to_string(), |p| p.display().to_string());
+        // Once the run loop turns, so the stage is up behind the alert
+        // rather than held back by it.
+        queue::after_main(Duration::from_secs(1), move || {
+            dialog::error(
+                "Horadric closed unexpectedly last time",
+                &format!("{crash}\nThe log is in {log}"),
+            );
+        });
+    }
     app.menus();
     if let Some(key) = saved.on_stage.as_deref().and_then(|id| app.project_of(id)) {
         app.show_project(&key, saved.on_stage.as_deref());
@@ -348,6 +360,7 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
 
     ns_app.activate();
     ns_app.run();
+    crate::crashlog::clean_exit();
     APP.with(|a| {
         if let Some(mut app) = a.borrow_mut().take() {
             app.freeze();
@@ -2242,6 +2255,8 @@ impl App {
     pub(crate) fn quit_now(&mut self) {
         self.quit = true;
         self.freeze();
+        // TerminateNow ends the process without `run` returning.
+        crate::crashlog::clean_exit();
     }
 
     fn ask_quit(&mut self) {

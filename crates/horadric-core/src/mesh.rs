@@ -606,15 +606,72 @@ pub fn phone_controls(
     phone: &str,
     paired_here: bool,
 ) -> bool {
-    if crate::standing::Standing::load(dir).phones_watch_only {
+    // Asked for every phone every two seconds, and the answer only moves
+    // when one of these files does.
+    static GATE: Mutex<Option<PhoneGate>> = Mutex::new(None);
+    let stamps = PhoneGate::stamps(dir);
+    let mut gate = GATE.lock().unwrap_or_else(|e| e.into_inner());
+    if !gate
+        .as_ref()
+        .is_some_and(|g| g.dir == dir && g.me == me && g.stamps == stamps)
+    {
+        *gate = Some(PhoneGate::load(dir, me, crypto, stamps));
+    }
+    let Some(g) = gate.as_ref() else {
+        return false;
+    };
+    if g.watch_only {
         return false;
     }
-    let t = Trust::load(dir, me, crypto);
-    let served = phones(&load_held(dir));
-    said::vouched_control(&served, phone, |id, key| {
-        t.controls(id) && t.keys.get(id).is_some_and(|k| k == key)
+    said::vouched_control(&g.served, phone, |id, key| {
+        g.acting.get(id).is_some_and(|k| k == key)
     })
     .unwrap_or(paired_here)
+}
+
+/// What [`phone_controls`] reads from the files, kept while none of them
+/// changes.
+struct PhoneGate {
+    dir: std::path::PathBuf,
+    me: String,
+    stamps: [Option<(std::time::SystemTime, u64)>; 3],
+    watch_only: bool,
+    served: Vec<said::Phone>,
+    /// The brothers that may act here, each with the key held for it.
+    acting: BTreeMap<String, String>,
+}
+
+impl PhoneGate {
+    /// The standing, the joining store and the roster: all a phone's
+    /// answer is made of. The length too, as a write can land within the
+    /// clock's last tick.
+    fn stamps(dir: &Path) -> [Option<(std::time::SystemTime, u64)>; 3] {
+        ["standing.json", "brothers.json", FILE].map(|f| {
+            let m = std::fs::metadata(dir.join(f)).ok()?;
+            Some((m.modified().ok()?, m.len()))
+        })
+    }
+
+    fn load(
+        dir: &Path,
+        me: &str,
+        crypto: &dyn Crypto,
+        stamps: [Option<(std::time::SystemTime, u64)>; 3],
+    ) -> PhoneGate {
+        let t = Trust::load(dir, me, crypto);
+        let acting = (t.keys.iter())
+            .filter(|(id, _)| t.controls(id))
+            .map(|(id, k)| (id.clone(), k.clone()))
+            .collect();
+        PhoneGate {
+            dir: dir.to_path_buf(),
+            me: me.to_string(),
+            stamps,
+            watch_only: crate::standing::Standing::load(dir).phones_watch_only,
+            served: phones(&load_held(dir)),
+            acting,
+        }
+    }
 }
 
 /// Of every vouch and forget held, those that are kept: the vouches that

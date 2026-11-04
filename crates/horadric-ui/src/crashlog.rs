@@ -42,6 +42,13 @@ pub fn install_panic_hook() {
         let summary = format!("{} panic on thread {name} at {at}: {what}", stamp());
         let trace = std::backtrace::Backtrace::force_capture();
         eprintln!("horadric: {summary}\n{trace}");
+        // Only the main thread, which runs the UI, takes the app down. A
+        // worker's panic leaves it running, and a logoff after that ends
+        // it with no clean quit to clear a marker, so the next start would
+        // call a working app a crash.
+        if name != "main" {
+            return;
+        }
         if let Some(p) = marker_path() {
             let _ = std::fs::write(p, &summary);
         }
@@ -56,8 +63,8 @@ pub fn take_last_crash() -> Option<String> {
     Some(said.trim().to_string())
 }
 
-/// A worker thread can panic and the app live on. Quitting normally after
-/// that is no crash, so the marker it left must not survive the quit.
+/// A quit that got this far was no crash, whatever marker a caught panic
+/// on the main thread may have left behind.
 pub fn clean_exit() {
     if let Some(p) = marker_path() {
         let _ = std::fs::remove_file(p);

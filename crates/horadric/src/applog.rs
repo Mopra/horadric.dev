@@ -5,6 +5,8 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{IsTerminal, Write};
+use std::net::TcpStream;
+use std::time::Duration;
 
 use horadric_ui::crashlog;
 
@@ -25,7 +27,10 @@ pub fn start() {
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    if fs::metadata(&path).is_ok_and(|m| m.len() > CAP) {
+    // A second launch exits once it finds the first, but would have moved
+    // the log out from under it first: the running app would then write
+    // on into `horadric.log.1`, and the next rotation would delete it.
+    if fs::metadata(&path).is_ok_and(|m| m.len() > CAP) && !running() {
         let _ = fs::rename(&path, path.with_extension("log.1"));
     }
     let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) else {
@@ -39,6 +44,12 @@ pub fn start() {
         std::process::id()
     );
     redirect(file);
+}
+
+/// The same probe the app makes before it starts.
+fn running() -> bool {
+    let port = horadric_hooks::port();
+    TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(200)).is_ok()
 }
 
 /// Rust's stderr asks Windows for the handle on every write, so swapping

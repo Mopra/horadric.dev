@@ -28,7 +28,9 @@ const WTS_SESSION_LOCK: usize = 0x7;
 const WTS_SESSION_UNLOCK: usize = 0x8;
 const PBT_POWERSETTINGCHANGE: usize = 0x8013;
 const DEVICE_NOTIFY_WINDOW_HANDLE: u32 = 0;
-const GUID_CONSOLE_DISPLAY_STATE: GUID = GUID::from_u128(0x6fe69556_704a_47a0_8f24_c28d936fda47);
+// The display of this session, not the physical console's: over Remote
+// Desktop the console monitor can sleep while the user watches.
+const GUID_SESSION_DISPLAY_STATUS: GUID = GUID::from_u128(0x2b84c20e_ad23_4ddf_93db_05ffbd7efca5);
 
 #[repr(C)]
 struct PowerSetting {
@@ -92,7 +94,7 @@ fn listen() {
         // change.
         RegisterPowerSettingNotification(
             HANDLE(hwnd.0),
-            &GUID_CONSOLE_DISPLAY_STATE,
+            &GUID_SESSION_DISPLAY_STATUS,
             DEVICE_NOTIFY_WINDOW_HANDLE,
         );
     }
@@ -107,7 +109,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         },
         WM_POWERBROADCAST if wparam.0 == PBT_POWERSETTINGCHANGE && lparam.0 != 0 => {
             let s = &*(lparam.0 as *const PowerSetting);
-            if s.setting == GUID_CONSOLE_DISPLAY_STATE && s.length >= 1 {
+            if s.setting == GUID_SESSION_DISPLAY_STATUS && s.length >= 1 {
                 // 0 is off, 1 on, 2 dimmed, and a dimmed screen is still seen.
                 DARK.store(s.data[0] == 0, Ordering::Relaxed);
             }
