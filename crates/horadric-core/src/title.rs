@@ -128,35 +128,54 @@ const PROMPT_TITLE: usize = 48;
 /// Commands, their caveats and tool results are not typed and are skipped.
 /// Cut at a word, short enough for a pane's header.
 pub fn first_prompt(transcript: &[u8]) -> Option<String> {
-    transcript.split(|&b| b == b'\n').find_map(|line| {
-        if !contains(line, br#""type":"user""#) {
-            return None;
-        }
-        let v = serde_json::from_slice::<serde_json::Value>(line).ok()?;
-        if v["type"] != "user" || v["isMeta"] == true || v["isSidechain"] == true {
-            return None;
-        }
-        let content = &v["message"]["content"];
-        let text = match content.as_str() {
-            Some(t) => t.to_string(),
-            None => {
-                let blocks = content.as_array()?;
-                if blocks.iter().any(|b| b["type"] == "tool_result") {
-                    return None;
-                }
-                (blocks.iter())
-                    .filter(|b| b["type"] == "text")
-                    .filter_map(|b| b["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ")
+    (transcript.split(|&b| b == b'\n'))
+        .find_map(typed)
+        .map(|t| shorten(&t, PROMPT_TITLE))
+}
+
+/// The longest the last prompt runs in a history row, in characters.
+const LAST_PROMPT: usize = 140;
+
+/// The last thing the human typed, cut at a word: what a history row
+/// shows under its title, since a title alone rarely says which of a
+/// dozen alike conversations is the one wanted.
+pub fn last_prompt(transcript: &[u8]) -> Option<String> {
+    (transcript.rsplit(|&b| b == b'\n'))
+        .find_map(typed)
+        .map(|t| shorten(&t, LAST_PROMPT))
+}
+
+/// What the human typed on one transcript line, whitespace folded, or
+/// None for anything else: replies, tool results, commands and their
+/// caveats, subagents' prompts.
+fn typed(line: &[u8]) -> Option<String> {
+    if !contains(line, br#""type":"user""#) {
+        return None;
+    }
+    let v = serde_json::from_slice::<serde_json::Value>(line).ok()?;
+    if v["type"] != "user" || v["isMeta"] == true || v["isSidechain"] == true {
+        return None;
+    }
+    let content = &v["message"]["content"];
+    let text = match content.as_str() {
+        Some(t) => t.to_string(),
+        None => {
+            let blocks = content.as_array()?;
+            if blocks.iter().any(|b| b["type"] == "tool_result") {
+                return None;
             }
-        };
-        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        if text.is_empty() || text.starts_with('<') {
-            return None;
+            (blocks.iter())
+                .filter(|b| b["type"] == "text")
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
         }
-        Some(shorten(&text, PROMPT_TITLE))
-    })
+    };
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() || text.starts_with('<') {
+        return None;
+    }
+    Some(text)
 }
 
 /// `text` cut to at most `most` characters at a word, with an ellipsis
@@ -199,6 +218,18 @@ mod tests {
             Some("I don't feel like the chat input in Folio is\u{2026}")
         );
         assert_eq!(first_prompt(b"{\"type\":\"assistant\"}"), None);
+    }
+
+    #[test]
+    fn the_last_typed_prompt_skips_what_came_after_it() {
+        let t = br#"{"type":"user","message":{"content":"Fix the menu"}}
+{"type":"user","message":{"content":"Now the  tile\ntoo"}}
+{"type":"assistant","message":{"content":"Done"}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}
+{"type":"user","message":{"content":"<command-name>/compact</command-name>"}}
+"#;
+        assert_eq!(last_prompt(t).as_deref(), Some("Now the tile too"));
+        assert_eq!(last_prompt(b"{\"type\":\"assistant\"}"), None);
     }
 
     #[test]

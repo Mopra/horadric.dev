@@ -124,6 +124,8 @@ pub enum Held {
 pub struct Conversation {
     pub id: String,
     pub title: String,
+    /// The last thing the human typed in it, so alike titles tell apart.
+    pub asked: String,
     /// How long ago it was last written to, as words.
     pub ago: String,
     pub held: Held,
@@ -132,11 +134,15 @@ pub struct Conversation {
 /// The history list for the words typed: the conversations no tile holds
 /// first, newest first as given, then the ones a tile holds, marked, so
 /// the top row is never the chat already in front of you. Typing ranks
-/// them by how well their titles match instead.
+/// them by how well their titles, or else their last prompts, match.
 pub fn history_items(all: &[Conversation], typed: &str) -> Vec<Item> {
     let mut order: Vec<&Conversation> = all.iter().filter(|c| c.held == Held::No).collect();
     order.extend(all.iter().filter(|c| c.held != Held::No));
-    let ranked = rank(typed, &order, |c, q| score(q, &c.title));
+    let ranked = rank(typed, &order, |c, q| {
+        // A match in the title beats one found only in the prompt.
+        let title = score(q, &c.title).map(|s| s + 1000);
+        title.max(words_in(q, &c.asked))
+    });
     ranked
         .into_iter()
         .map(|i| {
@@ -148,7 +154,11 @@ pub fn history_items(all: &[Conversation], typed: &str) -> Vec<Item> {
                     Held::Here => "this chat".to_string(),
                     Held::Open => "open in a tile".to_string(),
                 },
-                detail: c.ago.clone(),
+                detail: if c.asked.is_empty() {
+                    c.ago.clone()
+                } else {
+                    format!("{}  \u{00B7}  {}", c.ago, c.asked)
+                },
                 value: c.id.clone(),
                 // Dimmed: picking it opens nothing new.
                 terminal: c.held != Held::No,
@@ -156,6 +166,18 @@ pub fn history_items(all: &[Conversation], typed: &str) -> Vec<Item> {
             }
         })
         .collect()
+}
+
+/// How well `text` holds every word of `query`, each found as typed:
+/// a prompt is long, and letters scattered through it match anything.
+fn words_in(query: &str, text: &str) -> Option<i32> {
+    let text = text.to_lowercase();
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
+        return Some(0);
+    }
+    (words.iter().all(|w| text.contains(w.as_str())))
+        .then(|| words.iter().map(|w| w.len() as i32).sum())
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -533,6 +555,7 @@ mod tests {
         let c = |id: &str, title: &str, held| Conversation {
             id: id.into(),
             title: title.into(),
+            asked: String::new(),
             ago: String::new(),
             held,
         };
@@ -549,6 +572,29 @@ mod tests {
         assert!(items[3].terminal);
         assert_eq!(ids(items), vec!["c", "d", "a", "b"]);
         assert_eq!(ids(history_items(&all, "fix")), vec!["d", "a"]);
+    }
+
+    #[test]
+    fn the_history_list_finds_a_conversation_by_its_last_prompt() {
+        let c = |id: &str, title: &str, asked: &str| Conversation {
+            id: id.into(),
+            title: title.into(),
+            asked: asked.into(),
+            ago: "2 hours ago".into(),
+            held: Held::No,
+        };
+        let all = vec![
+            c("a", "Folio background", "make the runes more random"),
+            c("b", "Runes in the tile", "they glow too much"),
+            c("c", "Window size", "after the monitor unplug"),
+        ];
+        let ids = |items: Vec<Item>| items.into_iter().map(|i| i.value).collect::<Vec<_>>();
+        // The title match comes first, then the prompt that holds the word.
+        assert_eq!(ids(history_items(&all, "runes")), vec!["b", "a"]);
+        assert_eq!(ids(history_items(&all, "monitor unplug")), vec!["c"]);
+        let items = history_items(&all, "");
+        assert!(items[0].detail.starts_with("2 hours ago"));
+        assert!(items[0].detail.ends_with("random"));
     }
 
     #[test]

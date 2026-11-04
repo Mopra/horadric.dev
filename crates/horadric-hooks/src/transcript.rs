@@ -118,18 +118,22 @@ fn path_in(root: &Path, cwd: &str, id: &str) -> Option<PathBuf> {
 pub struct Past {
     pub id: String,
     pub title: Title,
+    /// The last thing the human typed in it, empty when unknown.
+    pub asked: String,
     pub modified: SystemTime,
     /// When it started, as near as the file system says.
     pub started: SystemTime,
 }
 
-/// A menu is not the place for every conversation ever held in a folder,
-/// and each one costs a read.
-const LOOKED_AT: usize = 40;
+/// How far back a history list reaches. Each costs two reads the first
+/// time, remembered after, and a busy folder makes dozens a day, so 40
+/// was barely a few days back.
+const LOOKED_AT: usize = 300;
 
 /// The newest `limit` conversations held in `cwd`, newest first, leaving
-/// out the ids in `skip`. Only ones with a title count: Claude Code writes
-/// one after the first prompt, so one without never got going.
+/// out the ids in `skip`. One Claude Code never titled, as it never does
+/// one held over its SDK, is named by its first prompt; one with neither
+/// never got going.
 pub fn history(cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
     let Some(root) = projects_root(
         std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
@@ -164,10 +168,11 @@ fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
         .filter(|(_, id, ..)| !skip.contains(id))
         .take(LOOKED_AT)
         .filter_map(|(path, id, modified, len, started)| {
-            let title = kept_title(&path, modified, len)?;
+            let (title, asked) = kept_summary(&path, modified, len)?;
             Some(Past {
                 id,
                 title,
+                asked,
                 modified,
                 started,
             })
@@ -236,26 +241,50 @@ fn folder_name(cwd: &str) -> String {
         .collect()
 }
 
-/// [`tail_title`], remembered while the file stays as it was. A menu
-/// opening reads the tails of dozens of transcripts, megabytes, and a
-/// conversation that is over never changes.
-fn kept_title(path: &Path, modified: SystemTime, len: u64) -> Option<Title> {
-    type Kept = HashMap<PathBuf, (SystemTime, u64, Option<Title>)>;
+/// A conversation's title and last prompt for a history row, remembered
+/// while the file stays as it was. A list opening reads dozens of
+/// transcripts, megabytes, and a conversation that is over never changes.
+fn kept_summary(path: &Path, modified: SystemTime, len: u64) -> Option<(Title, String)> {
+    type Kept = HashMap<PathBuf, (SystemTime, u64, Option<(Title, String)>)>;
     static KEPT: OnceLock<Mutex<Kept>> = OnceLock::new();
     let kept = KEPT.get_or_init(Default::default);
     let same = |k: &Kept| {
         k.get(path)
             .filter(|(m, l, _)| (*m, *l) == (modified, len))
-            .map(|(.., t)| t.clone())
+            .map(|(.., s)| s.clone())
     };
-    if let Some(title) = kept.lock().ok().and_then(|k| same(&k)) {
-        return title;
+    if let Some(summary) = kept.lock().ok().and_then(|k| same(&k)) {
+        return summary;
     }
-    let title = tail_title(path);
+    let summary = summary(path);
     if let Ok(mut k) = kept.lock() {
-        k.insert(path.to_path_buf(), (modified, len, title.clone()));
+        k.insert(path.to_path_buf(), (modified, len, summary.clone()));
     }
-    title
+    summary
+}
+
+/// The prompt that opens a conversation sits near the top, after a few
+/// lines of setup.
+const HEAD: u64 = 64 * 1024;
+
+/// The title from the end of the file, else one made from the first
+/// prompt, and the last prompt. No reading a long transcript whole.
+fn summary(path: &Path) -> Option<(Title, String)> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let tail = read_from(&mut file, len.saturating_sub(TAIL))?;
+    let asked = title::last_prompt(&tail).unwrap_or_default();
+    let title = match title::latest(&tail) {
+        Some(t) => t,
+        None => {
+            let head = read_head(&mut file, HEAD)?;
+            Title {
+                text: title::first_prompt(&head)?,
+                custom: false,
+            }
+        }
+    };
+    Some((title, asked))
 }
 
 /// The title from the end of the file only, for a menu that is opening
@@ -382,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn history_is_newest_first_titled_and_skips_the_open_ones() {
+    fn history_is_newest_first_named_and_skips_the_open_ones() {
         let root = std::env::temp_dir().join(format!("horadric-test-root-{}", std::process::id()));
         let upper = root.join("C--work-app");
         let lower = root.join("c--work-app");
@@ -404,14 +433,18 @@ mod tests {
         };
         write(&upper, "old", &titled("Old work"), 1);
         write(&lower, "untitled", r#"{"type":"mode"}"#, 2);
+        let asked = r#"{"type":"user","message":{"content":"Draw the runes"}}"#;
+        write(&upper, "prompted", asked, 2);
         write(&other, "elsewhere", &titled("Another folder"), 3);
         write(&lower, "open", &titled("Open now"), 4);
         write(&upper, "new", &titled("New work"), 5);
 
         let found = list_in(&root, r"C:\work\app", &["open".to_string()], 10);
         let ids: Vec<&str> = found.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["new", "old"]);
+        assert_eq!(ids, vec!["new", "prompted", "old"]);
         assert_eq!(found[0].title.text, "New work");
+        assert_eq!(found[1].title.text, "Draw the runes");
+        assert_eq!(found[1].asked, "Draw the runes");
         assert_eq!(list_in(&root, r"C:\work\app", &[], 1).len(), 1);
         let _ = std::fs::remove_dir_all(root);
     }

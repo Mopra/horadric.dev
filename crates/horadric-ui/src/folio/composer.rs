@@ -84,9 +84,9 @@ const IMAGE_MAX: u64 = 5 * 1024 * 1024 / 4 * 3;
 const TOO_BIG: &str = "That image is too big to send whole (the most is 3.75 MB).";
 /// History entries longer than this are not kept, so the file stays small.
 const HISTORY_ENTRY_MAX: usize = 20_000;
-/// Earlier conversations the history list offers at most; the transcript
-/// folder is read no further back than that anyway.
-const PAST_MAX: usize = 40;
+/// Earlier conversations the history list offers at most, so a search
+/// reaches weeks back, not only the last few days.
+const PAST_MAX: usize = 300;
 
 const PLACEHOLDER: &str =
     "Write to the Horadrim. Shift+Enter for a new line, / for commands, @ for files";
@@ -956,6 +956,7 @@ fn load_history(chat: &mut Chat, held: &[String]) {
             Conversation {
                 id: p.id.clone(),
                 title: p.title.text.clone(),
+                asked: p.asked.clone(),
                 ago,
                 held: if here.as_deref() == Some(p.id.as_str()) {
                     Held::Here
