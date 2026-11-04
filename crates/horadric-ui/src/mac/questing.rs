@@ -24,7 +24,11 @@ use super::{App, Run};
 use crate::board::{Board, Ink, RowState};
 use crate::mac::dialog;
 use crate::mac::menu::Item;
+use crate::quests::runner::{
+    approve_checks_label, approve_text, suggestion, suggestion_label, unapproved_wait,
+};
 use crate::quests::{self, Host, Menu, Runner, SessionSpec, Toast, Warriv, Workplace};
+use horadric_hooks::tasks as file;
 use crate::{console, store};
 
 /// How many of the runner's words the menu keeps.
@@ -41,6 +45,7 @@ const DONE: usize = 3;
 const BACK: usize = 4;
 const UP: usize = 5;
 const DOWN: usize = 6;
+const RUN: usize = 7;
 // Tags past the quests, by what they do.
 const ADD: usize = QUEST_TAG + LISTED * PER_QUEST;
 const GIVE: usize = ADD + 1;
@@ -48,6 +53,8 @@ const EDIT: usize = ADD + 2;
 const DRIVES: usize = ADD + 3;
 const PUBLIC: usize = ADD + 4;
 const MERGE: usize = ADD + 5;
+const SUGGEST: usize = ADD + 6;
+const CHECKS: usize = ADD + 7;
 const MODE: usize = ADD + 10;
 const PARALLEL: usize = ADD + 20;
 const AT_ONCE: [usize; 5] = [1, 2, 4, 8, 16];
@@ -495,6 +502,7 @@ impl App {
                 Item::pick("Give quests", GIVE),
             ];
         };
+        let dir = self.project_dir(key);
         let mut items = Vec::new();
         let listed: Vec<_> = (board.tasks.iter())
             .filter(|t| t.mark != Mark::Done || t.holder.is_some())
@@ -517,6 +525,12 @@ impl App {
             }
             if t.holder.is_some() {
                 sub.push(Item::pick("Put back in the log", base + BACK));
+            }
+            if let Some(c) = dir.as_ref().and_then(|d| unapproved_wait(d, t)) {
+                sub.push(Item::disabled(format!(
+                    "Waits on a command not approved on this machine: {c}"
+                )));
+                sub.push(Item::pick("Approve and run", base + RUN));
             }
             if i > 0 {
                 sub.push(Item::pick("Move up", base + UP));
@@ -543,6 +557,12 @@ impl App {
         let drive = self.drive_of(key);
         if self.quests.stopped.contains(key) {
             items.push(Item::disabled("Warriv was stopped: pick a mode to go on"));
+        }
+        if let Some(s) = dir.as_ref().and_then(|d| suggestion(d, board.own_trees)) {
+            items.push(Item::pick(suggestion_label(s), SUGGEST));
+        }
+        if let Some(not) = dir.as_ref().and_then(|d| file::checks(d).err()) {
+            items.push(Item::pick(approve_checks_label(&not), CHECKS));
         }
         items.push(Item::checked("Warriv drives", DRIVES, drive.is_some()));
         match &drive {
@@ -599,6 +619,19 @@ impl App {
                     self.set_ships_public(key, !public);
                 }
             }
+            SUGGEST => {
+                let dir = self.project_dir(key);
+                let own = self.quests.boards.borrow().get(key).is_some_and(|b| b.own_trees);
+                if let Some(s) = dir.and_then(|d| suggestion(&d, own)) {
+                    self.take_suggestion(key, s);
+                }
+            }
+            CHECKS => {
+                let not = self.project_dir(key).and_then(|d| file::checks(&d).err());
+                if let Some(not) = not.filter(|n| confirm_approve(true, n)) {
+                    self.approve_commands(key, &not);
+                }
+            }
             t if t >= PARALLEL => self.set_parallel(key, t - PARALLEL),
             t if t >= MODE => {
                 if let Some(m) = Mode::ALL.get(t - MODE) {
@@ -628,9 +661,23 @@ impl App {
             BACK => self.put_back(key, line, &title),
             UP => self.change_list(key, |text| tasks::shift(text, line, &title, true)),
             DOWN => self.change_list(key, |text| tasks::shift(text, line, &title, false)),
+            RUN => {
+                let dir = self.project_dir(key);
+                let c = dir.and_then(|d| unapproved_wait(&d, &t).map(str::to_string));
+                if let Some(c) = c.map(|c| vec![c]).filter(|c| confirm_approve(false, c)) {
+                    self.approve_commands(key, &c);
+                }
+            }
             _ => {}
         }
     }
+}
+
+/// Whether the human approves running `commands`, which came with the
+/// repository. Shown whole, and Return cancels: this is the consent.
+fn confirm_approve(checks: bool, commands: &[String]) -> bool {
+    let title = if checks { "Approve checks" } else { "Approve and run" };
+    dialog::choose(title, &approve_text(checks, commands), "Approve", "Cancel")
 }
 
 /// How a quest stands, as a mark before its title in the menu.

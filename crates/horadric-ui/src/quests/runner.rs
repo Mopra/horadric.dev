@@ -409,7 +409,74 @@ fn read_board(dir: &Path) -> Board {
         parallel: if own_trees { file::parallel(dir) } else { 1 },
         own_trees,
         orchestrator: file::orchestrator(dir),
+        unapproved: tasks::parse(&text)
+            .iter()
+            .filter_map(|t| unapproved_wait(dir, t))
+            .map(str::to_string)
+            .collect(),
     }
+}
+
+/// The command blocked `t` waits on when this machine has not approved it,
+/// so it never runs and the wait never ends by itself.
+pub(crate) fn unapproved_wait<'a>(dir: &Path, t: &'a Task) -> Option<&'a str> {
+    match &t.wait {
+        Some(Wait::Cmd(c)) if t.mark == Mark::Blocked && !file::approved(dir, c) => Some(c),
+        _ => None,
+    }
+}
+
+/// What the repository's config suggests for the runner, when it differs
+/// from what this machine set, for the mode menu to offer. A config that
+/// says nothing suggests manual one at a time, which is no offer.
+pub(crate) fn suggestion(dir: &Path, own_trees: bool) -> Option<(Mode, usize)> {
+    let at_once = |n: usize| if own_trees { n } else { 1 };
+    let repo = (
+        file::suggested_mode(dir),
+        at_once(file::suggested_parallel(dir)),
+    );
+    let here = (file::mode(dir), at_once(file::parallel(dir)));
+    (repo != (Mode::Manual, 1) && repo != here).then_some(repo)
+}
+
+/// The mode menu's line for [`suggestion`], named as the repository's so
+/// it does not read as a setting of this machine.
+pub(crate) fn suggestion_label((mode, n): (Mode, usize)) -> String {
+    match n {
+        1 => format!("Repo suggests: {}", mode.label()),
+        n => format!("Repo suggests: {} \u{d7}{n}", mode.label()),
+    }
+}
+
+/// The menu line that approves the project's unapproved checks, cut short:
+/// the confirm that follows shows each in full.
+pub(crate) fn approve_checks_label(not: &[String]) -> String {
+    const LONGEST: usize = 50;
+    let all = not.join(", ");
+    match all.char_indices().nth(LONGEST) {
+        Some((at, _)) => format!("Approve checks: {}\u{2026}", &all[..at]),
+        None => format!("Approve checks: {all}"),
+    }
+}
+
+/// What the confirm before approving `commands` says. It is the consent
+/// to run what a repository wrote, so it shows every command whole.
+pub(crate) fn approve_text(checks: bool, commands: &[String]) -> String {
+    let what = if checks {
+        "The repository asks Horadric to run these checks before a finished quest merges \
+         by itself:"
+            .to_string()
+    } else {
+        format!(
+            "This quest waits until this command succeeds, which Horadric runs every {} s:",
+            CHECK_GAP.as_secs()
+        )
+    };
+    format!(
+        "{what}\n\n{}\n\nThey run on this machine with your rights. They came with the \
+         repository, so approve them only if you trust it.",
+        commands.join("\n")
+    )
 }
 
 /// How the agent runs this Horadric from its shell: the full path, since
@@ -1255,6 +1322,28 @@ pub(crate) trait Runner: Host {
                 "horadric: cannot write {}: {e}",
                 file::config_file(&dir).display()
             );
+        }
+        self.refresh_boards(true);
+        self.run_tasks();
+    }
+
+    /// Takes what the repository suggests, see [`suggestion`].
+    fn take_suggestion(&mut self, key: &str, (mode, n): (Mode, usize)) {
+        self.set_parallel(key, n);
+        self.set_mode(key, mode);
+    }
+
+    /// Approves `commands` for the project on this machine, the human
+    /// having read them in full, and looks again: a wait on one may be
+    /// over now.
+    fn approve_commands(&mut self, key: &str, commands: &[String]) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        for c in commands {
+            if let Err(e) = file::approve(&dir, c) {
+                eprintln!("horadric: cannot approve {c}: {e}");
+            }
         }
         self.refresh_boards(true);
         self.run_tasks();
@@ -2214,10 +2303,18 @@ pub(crate) trait Runner: Host {
                         &l.title,
                         format!("{branch} waits for a merge by hand: {}", merge_failed(&out)),
                     );
+                    let text = if out.starts_with(UNAPPROVED) {
+                        format!(
+                            "{out} Pick \"Approve checks\" in the quest log's mode menu to let \
+                             them run, or click to merge it by hand."
+                        )
+                    } else {
+                        format!("{} Click to merge it by hand.", merge_failed(&out))
+                    };
                     self.toast_click(
                         Toast::Failed,
                         &format!("Cannot merge {branch} by itself"),
-                        &format!("{} Click to merge it by hand.", merge_failed(&out)),
+                        &text,
                     );
                     self.tasks_mut().ship_for = None;
                     self.tasks_mut().merge_for = Some(Merge {
@@ -2483,11 +2580,12 @@ impl<T: Host> Runner for T {}
 /// repository, and these are not approved on this machine. One line, as
 /// [`merge_failed`] shows the first.
 pub(crate) fn unapproved_checks(not: &[String]) -> String {
-    format!(
-        "Checks not approved on this machine, so none ran: {}.",
-        not.join(", ")
-    )
+    format!("{UNAPPROVED}, so none ran: {}.", not.join(", "))
 }
+
+/// How [`unapproved_checks`] starts, for the notification to tell that
+/// failure from git's and say where to approve.
+const UNAPPROVED: &str = "Checks not approved on this machine";
 
 /// Why a merge failed, short enough for a notification: the conflict
 /// git found, or else the first thing it said.
@@ -2566,6 +2664,24 @@ pub(crate) fn record_pack(key: &str, id: &str, title: &str, files: Vec<String>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_list_of_checks_is_cut_in_the_label_but_whole_in_the_consent() {
+        let not = vec!["cargo check --workspace --all-targets".to_string(); 3];
+        let label = approve_checks_label(&not);
+        assert!(label.ends_with('\u{2026}'));
+        assert!(label.chars().count() < 70);
+        assert_eq!(
+            approve_checks_label(&["make".into()]),
+            "Approve checks: make"
+        );
+        let text = approve_text(true, &not);
+        assert_eq!(text.matches(not[0].as_str()).count(), 3);
+        assert_eq!(
+            suggestion_label((Mode::Auto, 4)),
+            "Repo suggests: Auto \u{d7}4"
+        );
+    }
 
     #[test]
     fn a_dev_instance_leaves_only_the_projects_the_installed_one_knows() {

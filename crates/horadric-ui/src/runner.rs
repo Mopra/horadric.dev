@@ -311,8 +311,12 @@ fn item_menu(key: &str, line: usize, title: &str) {
     const DOWN: usize = 9;
     const DELETE: usize = 10;
     const LOG: usize = 11;
-    let Some((state, t, (first, last))) = with_app(|app| {
+    const RUN: usize = 12;
+    let Some((state, t, (first, last), unapproved)) = with_app(|app| {
         let t = app.task_at(key, line, title)?;
+        let unapproved = app
+            .project_dir(key)
+            .and_then(|d| quests::runner::unapproved_wait(&d, &t).map(str::to_string));
         let boards = app.shared.boards.borrow();
         let board = boards.get(key)?;
         let ends = (
@@ -320,7 +324,7 @@ fn item_menu(key: &str, line: usize, title: &str) {
             board.tasks.last().is_some_and(|l| l.line == line),
         );
         drop(boards);
-        Some((app.row_state(&t), t, ends))
+        Some((app.row_state(&t), t, ends, unapproved))
     })
     .flatten() else {
         return;
@@ -339,6 +343,9 @@ fn item_menu(key: &str, line: usize, title: &str) {
     }
     if holder.is_some() {
         items.push(Item::action(BACK, "Put back in the log"));
+    }
+    if unapproved.is_some() {
+        items.push(Item::action(RUN, "Approve and run"));
     }
     items.push(Item::Separator);
     items.push(Item::action(REWRITE, "Edit quest"));
@@ -360,6 +367,13 @@ fn item_menu(key: &str, line: usize, title: &str) {
         Some(REWRITE) => return rewrite(key, &t),
         Some(LOG) => return push(Input::QuestLog(Ask::Open(key.to_string()))),
         Some(DELETE) if !confirm_delete(title) => return,
+        Some(RUN) => {
+            let commands: Vec<String> = unapproved.into_iter().collect();
+            if confirm_approve(false, &commands) {
+                with_app(|app| app.approve_commands(key, &commands));
+            }
+            return;
+        }
         _ => {}
     }
     with_app(|app| match picked {
@@ -521,6 +535,20 @@ fn confirm_delete(title: &str) -> bool {
     pressed == Some(0)
 }
 
+/// Whether the human approves running `commands`, which came with the
+/// repository. Shown whole, Cancel the default: this is the consent.
+fn confirm_approve(checks: bool, commands: &[String]) -> bool {
+    let pressed = super::ask(&crate::dialog::Dialog {
+        tone: crate::dialog::Tone::Warning,
+        title: if checks { "Approve checks" } else { "Approve and run" },
+        text: &quests::runner::approve_text(checks, commands),
+        buttons: &["Approve", "Cancel"],
+        default: 1,
+        check: None,
+    });
+    pressed == Some(0)
+}
+
 /// How many at once the mode menu offers. The config takes up to
 /// `tasks::MOST_PARALLEL`.
 const AT_ONCE: [usize; 5] = [1, 2, 4, 8, 16];
@@ -530,6 +558,8 @@ fn mode_menu(key: &str) {
     const LOG: usize = 11;
     const DRIVES: usize = 12;
     const PUBLIC: usize = 13;
+    const SUGGEST: usize = 14;
+    const CHECKS: usize = 15;
     // Plus how many, so each choice of `AT_ONCE` has an id of its own.
     const PARALLEL: usize = 20;
     let Some(board) = with_app(|app| app.shared.boards.borrow().get(key).cloned()) else {
@@ -538,6 +568,16 @@ fn mode_menu(key: &str) {
     let board = board.unwrap_or_default();
     let (drive, stopped) =
         with_app(|app| (app.drive_of(key), app.stopped.contains(key))).unwrap_or_default();
+    // Read each time the menu opens: the repository's config may have
+    // changed since, and the menu is where the human acts on it.
+    let dir = with_app(|app| app.project_dir(key)).flatten();
+    let suggested = dir
+        .as_ref()
+        .and_then(|d| quests::runner::suggestion(d, board.own_trees));
+    let unapproved = dir
+        .as_ref()
+        .and_then(|d| horadric_hooks::tasks::checks(d).err())
+        .unwrap_or_default();
     let mut items: Vec<Item> = Mode::ALL
         .iter()
         .enumerate()
@@ -551,6 +591,15 @@ fn mode_menu(key: &str) {
     if stopped {
         items.push(Item::Disabled(
             "Warriv was stopped: pick a mode to go on".into(),
+        ));
+    }
+    if let Some(s) = suggested {
+        items.push(Item::action(SUGGEST, quests::runner::suggestion_label(s)));
+    }
+    if !unapproved.is_empty() {
+        items.push(Item::action(
+            CHECKS,
+            quests::runner::approve_checks_label(&unapproved),
         ));
     }
     items.push(Item::Separator);
@@ -599,10 +648,19 @@ fn mode_menu(key: &str) {
     if picked == Some(PUBLIC) && !public && !ships_public(key) {
         return;
     }
+    if picked == Some(CHECKS) && !confirm_approve(true, &unapproved) {
+        return;
+    }
     with_app(|app| match picked {
         Some(EDIT) => app.edit_list(key),
         Some(DRIVES) => app.set_drive(key, drive.is_none()),
         Some(PUBLIC) => app.set_ships_public(key, !public),
+        Some(SUGGEST) => {
+            if let Some(s) = suggested {
+                app.take_suggestion(key, s);
+            }
+        }
+        Some(CHECKS) => app.approve_commands(key, &unapproved),
         Some(i) if i > PARALLEL => app.set_parallel(key, i - PARALLEL),
         Some(i) => {
             if let Some(m) = Mode::ALL.get(i - 1) {

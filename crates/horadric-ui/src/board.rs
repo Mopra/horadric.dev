@@ -2,7 +2,7 @@
 //! how each item reads on a row, given how the session holding it is doing.
 
 use horadric_core::registry::Registry;
-use horadric_core::tasks::{self, Mark, Mode, Ready, Task, Waits};
+use horadric_core::tasks::{self, Mark, Mode, Ready, Task, Wait, Waits};
 use horadric_core::Phase;
 
 use crate::theme::{self, Color};
@@ -22,6 +22,9 @@ pub struct Board {
     pub orchestrator: bool,
     /// The aims at the top of the log not reached yet, in order.
     pub aims: Vec<String>,
+    /// The commands blocked quests wait on that this machine has not
+    /// approved, so they never run. They came with the log.
+    pub unapproved: Vec<String>,
 }
 
 impl Board {
@@ -63,6 +66,18 @@ impl Board {
         match self.shown().len() {
             0 => String::new(),
             n => n.to_string(),
+        }
+    }
+
+    /// What a blocked quest's row says on hover, as [`why`] does, except
+    /// that a wait on a command this machine has not approved says so
+    /// first: nothing else would tell the human why it never ends.
+    pub fn why(&self, task: &Task) -> Option<String> {
+        match &task.wait {
+            Some(Wait::Cmd(c)) if task.mark == Mark::Blocked && self.unapproved.contains(c) => {
+                Some(format!("Waits on a command not approved on this machine: {c}"))
+            }
+            _ => why(task).map(str::to_string),
         }
     }
 
@@ -281,6 +296,7 @@ mod tests {
             own_trees: false,
             orchestrator: false,
             aims: Vec::new(),
+            unapproved: Vec::new(),
         }
     }
 

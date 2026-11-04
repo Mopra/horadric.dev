@@ -664,7 +664,7 @@ impl Cluster {
                     note: board::row_note(t, &ready[i], state, now),
                     finish: None,
                     holder: t.holder.clone(),
-                    why: board::why(t).map(str::to_string),
+                    why: b.why(t),
                 }
             })
             .collect();
