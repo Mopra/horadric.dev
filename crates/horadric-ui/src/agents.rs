@@ -1,7 +1,8 @@
 //! Claude Code's background sessions, asked of `claude agents`. Its daemon
 //! runs them, so Horadric only lists them, attaches to them and stops them.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
 use std::time::Instant;
 
 use horadric_core::background::{self, Asked, Background};
@@ -45,10 +46,24 @@ pub fn adopt_all(registry: &Arc<Mutex<Registry>>, list: &[Background]) -> bool {
     added
 }
 
+/// What `claude agents` said last, and whether it is being asked now.
+#[derive(Default)]
+struct Seen {
+    list: Vec<Background>,
+    asking: bool,
+}
+
+fn seen() -> &'static Mutex<Seen> {
+    static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
+    SEEN.get_or_init(Mutex::default)
+}
+
 /// The tile for the conversation of an event no tile holds, when it is a
-/// background session. Asks `claude agents` at most once a minute for the
-/// same conversation, since every plain `claude` on the machine posts here
-/// too.
+/// background session. Answered from what `claude agents` said last; a
+/// conversation it did not name has it asked again, off this thread, at
+/// most once a minute per conversation and once per [`Asked::GAP`] in all,
+/// since every plain `claude` on the machine posts here and so can any
+/// web page. The answer gives the tile its own, and the hook after finds it.
 pub fn adopt(
     registry: &Arc<Mutex<Registry>>,
     event: &HookEvent,
@@ -56,17 +71,49 @@ pub fn adopt(
 ) -> Option<String> {
     let id = event.session_id.as_str();
     let news = [HookEvent::STATUS, HookEvent::SPENT].contains(&event.hook_event_name.as_str());
-    if id.is_empty() || news || !asked.due(id, Instant::now()) {
+    if id.is_empty() || news {
         return None;
     }
-    let list = list()?;
-    let b = list.iter().find(|b| b.session_id == id)?;
+    let known = seen().lock().ok()?.list.iter().find(|b| b.session_id == id).cloned();
+    let Some(b) = known else {
+        if asked.due(id, Instant::now()) {
+            refresh(registry);
+        }
+        return None;
+    };
     let tile = background::tile_id(&b.id);
     let mut r = registry.lock().ok()?;
     if r.get(&tile).is_none() {
         r.add(b.session());
     }
     Some(tile)
+}
+
+/// Asks `claude agents` on a thread of its own, one at a time, and gives
+/// each background session it names a tile.
+fn refresh(registry: &Arc<Mutex<Registry>>) {
+    {
+        let Ok(mut s) = seen().lock() else {
+            return;
+        };
+        if s.asking {
+            return;
+        }
+        s.asking = true;
+    }
+    let registry = Arc::clone(registry);
+    thread::spawn(move || {
+        let got = list();
+        if let Some(list) = &got {
+            adopt_all(&registry, list);
+        }
+        if let Ok(mut s) = seen().lock() {
+            if let Some(list) = got {
+                s.list = list;
+            }
+            s.asking = false;
+        }
+    });
 }
 
 /// Whether the background session with this short id still runs. None

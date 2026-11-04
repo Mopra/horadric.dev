@@ -79,6 +79,7 @@ pub fn is_tile(id: &str) -> bool {
 #[derive(Debug, Default)]
 pub struct Asked {
     at: HashMap<String, Instant>,
+    last: Option<Instant>,
 }
 
 impl Asked {
@@ -86,14 +87,27 @@ impl Asked {
     /// short enough that one sent to the background shows soon after.
     pub const AGAIN: Duration = Duration::from_secs(60);
 
-    /// True when `id` is due to be asked about, which marks it asked.
+    /// Between any two asks, whatever conversation they are for. A web
+    /// page can post hooks with a new id each time, and without this each
+    /// would start a node process.
+    pub const GAP: Duration = Duration::from_secs(10);
+
+    /// True when `id` is due to be asked about, which marks it asked. One
+    /// turned away by [`Self::GAP`] is not marked, so its next hook asks.
     pub fn due(&mut self, id: &str, now: Instant) -> bool {
         self.at
             .retain(|_, t| now.saturating_duration_since(*t) < Self::AGAIN);
         if self.at.contains_key(id) {
             return false;
         }
+        if self
+            .last
+            .is_some_and(|t| now.saturating_duration_since(t) < Self::GAP)
+        {
+            return false;
+        }
         self.at.insert(id.to_string(), now);
+        self.last = Some(now);
         true
     }
 }
@@ -161,8 +175,21 @@ mod tests {
         let t0 = Instant::now();
         assert!(asked.due("c1", t0));
         assert!(!asked.due("c1", t0 + Duration::from_secs(59)));
-        assert!(asked.due("c2", t0 + Duration::from_secs(59)));
+        assert!(asked.due("c2", t0 + Duration::from_secs(49)));
         assert!(asked.due("c1", t0 + Asked::AGAIN));
+        assert_eq!(asked.at.len(), 2);
+    }
+
+    #[test]
+    fn new_conversations_flooding_in_are_asked_about_once_a_gap() {
+        let mut asked = Asked::default();
+        let t0 = Instant::now();
+        assert!(asked.due("c0", t0));
+        for i in 1..1000 {
+            assert!(!asked.due(&format!("c{i}"), t0 + Duration::from_millis(i)));
+        }
+        // Turned away, not marked: it is asked about once the gap is over.
+        assert!(asked.due("c5", t0 + Asked::GAP));
         assert_eq!(asked.at.len(), 2);
     }
 
