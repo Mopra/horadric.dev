@@ -108,6 +108,9 @@ pub(super) enum Act {
     Open(usize),
     Unattach(usize),
     Unqueue(usize),
+    /// Stops the turn so what waits runs at once, rather than at the
+    /// turn's next step or its end.
+    SendNow,
 }
 
 /// An image waiting to go with the prompt.
@@ -204,6 +207,9 @@ pub(super) struct Input {
     busy_was: bool,
     /// Stopped by the human: the queue comes back at the turn's end.
     held: bool,
+    /// Stopped by the human to send what waits at once: it runs as one
+    /// prompt once the turn ends, instead of coming back into the text.
+    flush: bool,
     /// The queue came back from disk: once the session is live it waits
     /// for the turn running, or with none it goes back into the text.
     restored: bool,
@@ -245,6 +251,7 @@ impl Input {
             bypass: false,
             busy_was: false,
             held: false,
+            flush: false,
             restored: false,
             dirty: false,
             top: 0.0,
@@ -349,6 +356,25 @@ impl Input {
         }
     }
 
+    /// What waits becomes one prompt, so a burst of corrections is one turn.
+    fn merge_queue(&mut self) {
+        if self.queue.len() < 2 {
+            return;
+        }
+        let waiting = std::mem::take(&mut self.queue);
+        let mut texts = Vec::new();
+        let mut images = Vec::new();
+        for w in waiting {
+            texts.push(w.text);
+            images.extend(w.images);
+        }
+        self.queue.push(Waiting {
+            text: texts.join("\n\n"),
+            images,
+        });
+        self.changed();
+    }
+
     /// What waits goes back into the text, as when Claude is stopped.
     pub(super) fn fold_queue(&mut self) {
         if self.queue.is_empty() {
@@ -442,7 +468,11 @@ pub(super) fn tend(id: &str, chat: &mut Chat) {
                 images,
             });
         }
-        chat.input.fold_queue();
+        if chat.input.flush {
+            chat.input.merge_queue();
+        } else {
+            chat.input.fold_queue();
+        }
     }
     // Once per claude.exe: a reattach's replay says whether it went.
     if chat.live && !chat.folio.initialized {
@@ -476,6 +506,7 @@ pub(super) fn tend(id: &str, chat: &mut Chat) {
         }
         // Claude was stopped: what waited goes back into the composer
         // rather than run, as the CLI does.
+        chat.input.flush = false;
         if std::mem::take(&mut chat.input.held) {
             chat.input.fold_queue();
         } else if !chat.input.queue.is_empty() {
@@ -493,6 +524,20 @@ pub(super) fn tend(id: &str, chat: &mut Chat) {
 pub(super) fn hold(chat: &mut Chat) {
     if chat.folio.busy {
         chat.input.held = true;
+    }
+}
+
+/// Stops Claude for what waits, which then runs as the next prompt: a
+/// correction that cannot wait for the turn's next step.
+fn send_now(chat: &mut Chat) {
+    if !chat.folio.busy {
+        return;
+    }
+    chat.input.held = false;
+    chat.input.flush = true;
+    chat.input.merge_queue();
+    if let Some(h) = &chat.hosted {
+        let _ = h.interrupt();
     }
 }
 
@@ -2168,6 +2213,26 @@ impl View {
         hits.push((b, Hit::Input(Act::Settings)));
     }
 
+    /// A queued row's send button, at its right end: the turn stops and
+    /// what waits goes at once.
+    unsafe fn send_now_button(
+        &self,
+        gfx: &Gfx,
+        chat: &Chat,
+        pal: &Palette,
+        row: &Rect,
+        hits: &mut Vec<(Rect, Hit)>,
+    ) {
+        let b = Rect::new(row.right() - 26.0, row.y + 3.0, 20.0, 20.0);
+        let hot = chat.input.hover == Some(Act::SendNow);
+        if hot {
+            gfx.fill_round(&b, 10.0, pal.fg.with_alpha(0.1));
+        }
+        let color = if hot { pal.accent } else { pal.dim };
+        gfx.text_in("\u{E724}", &gfx.icon, &b, color);
+        hits.push((b, Hit::Input(Act::SendNow)));
+    }
+
     /// The notice and the queued prompts, stacked up from `bottom`.
     /// Returns the top of what it drew.
     #[allow(clippy::too_many_arguments)]
@@ -2199,9 +2264,10 @@ impl View {
             gfx.text_in(
                 &one_line(&q.text),
                 &gfx.small,
-                &Rect::new(row.x + 28.0, y, row.w - 36.0, ROW_H),
+                &Rect::new(row.x + 28.0, y, row.w - 64.0, ROW_H),
                 pal.dim,
             );
+            self.send_now_button(gfx, chat, pal, &row, hits);
         }
         for (i, q) in chat.input.queue.iter().enumerate().rev() {
             y -= ROW_H + 4.0;
@@ -2221,12 +2287,18 @@ impl View {
                     if q.images.len() == 1 { "" } else { "s" }
                 );
             }
+            let busy = chat.folio.busy;
+            let room = if busy { 92.0 } else { 64.0 };
             gfx.text_in(
                 &said,
                 &gfx.small,
-                &Rect::new(row.x + 28.0, y, row.w - 64.0, ROW_H),
+                &Rect::new(row.x + 28.0, y, row.w - room, ROW_H),
                 pal.dim,
             );
+            if busy {
+                let left = Rect::new(row.x, row.y, row.w - 26.0, row.h);
+                self.send_now_button(gfx, chat, pal, &left, hits);
+            }
             let x = Rect::new(row.right() - 26.0, y + 3.0, 20.0, 20.0);
             if chat.input.hover == Some(Act::Unqueue(i)) {
                 gfx.fill_round(&x, 10.0, pal.fg.with_alpha(0.1));
@@ -2503,6 +2575,7 @@ impl View {
                         chat.input.images.remove(i);
                     }
                 }
+                Act::SendNow => send_now(chat),
                 Act::Unqueue(i) => {
                     if i < chat.input.queue.len() {
                         chat.input.queue.remove(i);
