@@ -69,7 +69,10 @@ impl Painter<'_> {
                 continue;
             }
             let lamp = super::lamp_rect(&r);
+            let stone = super::keycube::has_stone(s);
             match s.phase {
+                // A rune stone carries its own light; it has no lamp.
+                Phase::Working | Phase::Ended if stone => {}
                 Phase::Working => {
                     let t = motion::cycle(look.phase_age, ORBIT);
                     self.surge(gpu, &lamp, c, t, look.enter);
@@ -221,7 +224,11 @@ impl Painter<'_> {
             return None;
         }
         let c = theme::phase_color(&Phase::Done);
-        let (x, base) = super::icon_centre(r);
+        let (x, base) = if super::keycube::has_stone(s) {
+            super::keycube::centre(r)
+        } else {
+            super::icon_centre(r)
+        };
         let tall = 12.0 + BEAM_H * grown;
         let stops = [(0.0, c.with_alpha(0.0)), (1.0, heat_color(c, 0.8))];
         for (w, a) in [(5.0, 0.3), (1.6, 0.9)] {

@@ -2481,6 +2481,9 @@ impl Painter<'_> {
         for (i, (r, s, look)) in tiles(scene).enumerate() {
             let phase = &s.phase;
             let c = theme::phase_color(phase);
+            if keycube::has_stone(s) {
+                continue;
+            }
             if scene.beckons(i, s) {
                 let on = motion::beacon(look.phase_age) * look.enter;
                 self.lamp(&lamp_rect(&r), c, on);
@@ -3584,19 +3587,31 @@ impl Painter<'_> {
         } else {
             (stance.lamp + 0.3 * arrival) * look.enter * reach
         };
+        // An agent's rune stone says all the lamp would, so it has none;
+        // the stone is the switch instead.
+        let stone = keycube::has_stone(s) && i != usize::MAX;
         // The lamp is a switch too, so it lights under the cursor, and a
         // parked session's sits in a ring: its pane is off the stage.
         if let (Some(fill), _) = theme::button_look(scene.button(Hit::Lamp(i))) {
             let slot = layout::lamp_slot(r);
-            let well = Rect::new(slot.x + 6.0, r.y + 8.0, slot.w - 8.0, r.h - 16.0);
-            self.fill_rounded(&well, 4.0, fill);
+            let well = Rect::new(slot.x + 6.0, r.y + 6.0, slot.w - 8.0, r.h - 12.0);
+            self.fill_rounded(&well, 6.0, fill);
         }
-        // A lamp going out is light, drawn by the bloom.
-        self.lamp(&lamp_rect(r), c, level);
-        if scene.parked.get(i).copied().unwrap_or(false) {
-            let l = lamp_rect(r);
-            let ring = Rect::new(l.x - 3.0, l.y - 3.0, l.w + 6.0, l.h + 6.0);
-            self.stroke_rounded(&ring, 4.0, theme::text_dim().fade(presence), 1.2);
+        let parked = scene.parked.get(i).copied().unwrap_or(false);
+        if stone {
+            if parked {
+                let slot = layout::lamp_slot(r);
+                let ring = Rect::new(slot.x + 6.0, r.y + 6.0, slot.w - 8.0, r.h - 12.0);
+                self.stroke_rounded(&ring, 6.0, theme::text_dim().fade(presence), 1.2);
+            }
+        } else {
+            // A lamp going out is light, drawn by the bloom.
+            self.lamp(&lamp_rect(r), c, level);
+            if parked {
+                let l = lamp_rect(r);
+                let ring = Rect::new(l.x - 3.0, l.y - 3.0, l.w + 6.0, l.h + 6.0);
+                self.stroke_rounded(&ring, 4.0, theme::text_dim().fade(presence), 1.2);
+            }
         }
 
         // The icon: what the agent is doing, in the phase's light.
@@ -3614,7 +3629,7 @@ impl Painter<'_> {
             .as_ref()
             .and_then(|st| st.context)
             .filter(|_| !matches!(phase, Phase::Paused | Phase::Ended));
-        if let Some(c) = context {
+        if let Some(c) = context.filter(|_| !stone) {
             let ink = if c >= 75.0 {
                 theme::fullness_color(c)
             } else {
@@ -3630,7 +3645,7 @@ impl Painter<'_> {
         // like a card; so does a tile on its way out, which has no stone.
         let icon_r = Rect::new(ix - 14.0, iy - 14.0, 28.0, 28.0);
         let icon_ink = icon_c.fade(presence);
-        if keycube::has_stone(s) && i != usize::MAX {
+        if stone {
             // Left clear for the stone.
         } else if ambient && look.flip > 0.0 {
             let t = 1.0 - look.flip;

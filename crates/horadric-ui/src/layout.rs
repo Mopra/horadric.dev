@@ -626,7 +626,8 @@ pub fn band_slot(layout: &ClusterLayout, i: usize) -> Option<Rect> {
 /// The strip down a tile's left edge that takes a click on its lamp: the
 /// whole height, so it is easy to hit, and up to where the icon starts.
 pub fn lamp_slot(tile: &Rect) -> Rect {
-    Rect::new(tile.x, tile.y, 20.0, tile.h)
+    // As wide as the rune stone, which is the switch on an agent's tile.
+    Rect::new(tile.x, tile.y, 52.0, tile.h)
 }
 
 pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {

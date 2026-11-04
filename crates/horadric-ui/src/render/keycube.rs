@@ -19,21 +19,23 @@ use crate::tilecube;
 use horadric_core::session::{Phase, Session};
 
 /// The square the big stone's frame is drawn into, in DIPs. The baked
-/// frame leaves a margin round the stone, so it stands a little smaller
-/// and clear of the lamp.
-const STONE: f32 = 28.0;
-/// How far above the tile's middle the stone stands, so the context
-/// meter under it has room.
-const LIFT: f32 = 2.0;
+/// frame leaves a margin round the stone, so the stone itself is a little
+/// smaller. It fills the tile's left end, where the lamp was.
+const STONE: f32 = 46.0;
 /// The square a little stone's frame is drawn into.
-const MINI: f32 = 12.0;
+const MINI: f32 = 15.0;
 /// How far out the little stones circle, across and up and down.
-const REACH: (f32, f32) = (12.0, 4.5);
-/// The ring's middle sits this far right of the stone's, so a little
-/// stone at its left end stays off the lamp.
-const RING_RIGHT: f32 = 1.5;
+const REACH: (f32, f32) = (17.0, 6.0);
+/// A working stone's runes brighten and dim this slowly, so a turn at
+/// work is seen moving between tools.
+const WORK_PULSE: Duration = Duration::from_millis(2400);
 /// A little stone turning once about itself.
 const MINI_SPIN: Duration = Duration::from_millis(3000);
+
+/// Where a tile's stone stands: in the middle of its switch.
+pub(super) fn centre(r: &Rect) -> (f32, f32) {
+    (r.x + 29.0, r.y + r.h / 2.0)
+}
 
 /// Whether a tile carries a rune stone: one an agent works in. A plain or
 /// SSH terminal keeps its flat glyph.
@@ -64,8 +66,8 @@ impl Painter<'_> {
             } else {
                 0.0
             };
-            let (cx, cy) = super::icon_centre(&r);
-            let cy = cy - LIFT - super::LAND_RISE * landing;
+            let (cx, cy) = centre(&r);
+            let cy = cy - super::LAND_RISE * landing;
             let lit = if s.phase == Phase::Done && !s.unread() {
                 &Phase::Idle
             } else {
@@ -78,7 +80,18 @@ impl Painter<'_> {
             };
             let presence = theme::presence(lit) * look.enter * reach;
             let ink = match lit {
-                Phase::Working => theme::phase_color(lit),
+                Phase::Working => {
+                    let pulse = if scene.ambient {
+                        let clock = scene
+                            .now
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        motion::breathe(clock, WORK_PULSE)
+                    } else {
+                        1.0
+                    };
+                    theme::phase_color(lit).fade(0.6 + 0.4 * pulse)
+                }
                 Phase::Waiting(_) => {
                     let breath = if scene.ambient {
                         motion::waiting_breath(look.phase_age)
@@ -100,7 +113,7 @@ impl Painter<'_> {
                 }
                 let size = MINI * o.scale * (1.0 - 0.5 * m.gather);
                 let at = Rect::new(
-                    cx + RING_RIGHT + o.dx - size / 2.0,
+                    cx + o.dx - size / 2.0,
                     cy + o.dy - size / 2.0,
                     size,
                     size,
