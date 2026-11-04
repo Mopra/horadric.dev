@@ -47,11 +47,15 @@ pub struct Tray {
     tip: String,
 }
 
-/// How many frames one loop of the burning runes takes. At
-/// [`FLAME_STEP_MS`] each a loop lasts about two seconds, and the flames
-/// are drawn to meet themselves at the end, so the seam does not show.
+/// How many frames one loop of the burning runes takes. Stepping
+/// [`FLAME_STRIDE`] of them each [`FLAME_STEP_MS`] a loop lasts about two
+/// seconds, and the flames are drawn to meet themselves at the end, so the
+/// seam does not show.
 pub const FLAME_FRAMES: usize = 32;
-pub const FLAME_STEP_MS: u32 = 60;
+/// Each step goes through the shell and repaints the taskbar, so a 16 px
+/// fire gets 8 of them a second, which it does not look the poorer for.
+pub const FLAME_STEP_MS: u32 = 120;
+const FLAME_STRIDE: usize = 2;
 
 /// What the user picked from the menu.
 pub enum Choice {
@@ -167,10 +171,14 @@ impl Tray {
         Some(on)
     }
 
-    /// Moves the fire on one frame.
+    /// Moves the fire on, unless the screen is locked or dark, when
+    /// nobody would see it.
     pub fn step(&mut self) {
+        if crate::unseen::now() {
+            return;
+        }
         if let Some(f) = self.frame {
-            self.frame = Some((f + 1) % self.frames.len().max(1));
+            self.frame = Some((f + FLAME_STRIDE) % self.frames.len().max(1));
             self.refresh();
         }
     }

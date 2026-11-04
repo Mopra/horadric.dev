@@ -145,6 +145,9 @@ struct Drag {
 pub struct TerminalWindow {
     pub hwnd: HWND,
     shared: Rc<Shared>,
+    /// The icon last put on the taskbar button, so a step of the tray that
+    /// did not move the fire sends nothing.
+    icon: Cell<isize>,
     /// The project key of the sessions shown, and its name.
     project: RefCell<String>,
     project_name: RefCell<String>,
@@ -227,6 +230,7 @@ impl TerminalWindow {
         let mut win = Box::new(TerminalWindow {
             hwnd: HWND::default(),
             shared,
+            icon: Cell::new(0),
             project: RefCell::new(String::new()),
             project_name: RefCell::new(String::new()),
             panes: RefCell::new(Vec::new()),
@@ -1047,6 +1051,9 @@ impl TerminalWindow {
     /// Puts `icon` on the taskbar button, which is how the stage breathes
     /// with the tray while a session works.
     pub fn set_icon(&self, icon: HICON) {
+        if self.icon.replace(icon.0 as isize) == icon.0 as isize {
+            return;
+        }
         unsafe {
             SendMessageW(
                 self.hwnd,

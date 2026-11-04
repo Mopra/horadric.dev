@@ -251,6 +251,8 @@ mod toast;
 #[cfg(windows)]
 mod tray;
 #[cfg(windows)]
+mod unseen;
+#[cfg(windows)]
 pub mod update;
 #[cfg(windows)]
 mod usage;

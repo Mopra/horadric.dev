@@ -44,7 +44,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, IDC_ARROW, IDC_HAND, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
-    WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+    WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SHOWWINDOW, WM_SIZE, WM_TIMER, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
@@ -174,6 +174,10 @@ pub struct Cluster {
     leaving: RefCell<anim::Leaving<(layout::Rect, Rc<Session>)>>,
     /// The frame interval the animation timer runs at, if it runs.
     frames: Cell<Option<Duration>>,
+    /// Frames were wanted but nobody could see them, so the timer was
+    /// stopped. The second's tick or the window being moved or shown
+    /// looks again.
+    asleep: Cell<bool>,
     /// Something besides the moving light changed, so the kept layer of
     /// what holds still has to be drawn again.
     dirty: Cell<bool>,
@@ -399,6 +403,7 @@ impl Cluster {
             handoffs: RefCell::new(anim::Handoffs::default()),
             refit_due: Cell::new(false),
             frames: Cell::new(None),
+            asleep: Cell::new(false),
             dirty: Cell::new(true),
             drawn: RefCell::new(None),
             clock: RefCell::new(Vec::new()),
@@ -853,6 +858,7 @@ impl Cluster {
 
     /// Once a second: draws again only if an age or a trace moved.
     pub fn tick(&self) {
+        self.wake();
         let now = SystemTime::now();
         let clock: Vec<Clock> = self.sessions().iter().map(|s| Clock::of(s, now)).collect();
         if *self.clock.borrow() != clock {
@@ -1121,8 +1127,24 @@ impl Cluster {
             .filter(|_| ambient)
             .map(|((r, s), t)| (r, Session::clone(&s), t))
             .collect();
-        // A tile on its way somewhere changes what holds still.
-        let moving = looks.iter().zip(&inputs).any(|(l, t)| l.moving(t.y));
+        // A tile on its way somewhere changes what holds still. An agent's
+        // rune stone is drawn afresh each frame over the kept layer, so its
+        // turning (`stir`, and `flip` for the glyph it stands in for) only
+        // wants frames, not the whole layer drawn again for each of them.
+        // The stone's test is `keycube::has_stone`.
+        let moving = looks
+            .iter()
+            .zip(&inputs)
+            .zip(&sessions)
+            .any(|((l, t), s)| {
+                let stone = !s.shell && s.ssh.is_none();
+                let still = anim::Look {
+                    stir: 0.0,
+                    flip: if stone { 0.0 } else { l.flip },
+                    ..*l
+                };
+                still.moving(t.y)
+            });
         let finishing = items
             .as_ref()
             .is_some_and(|items| items.iter().any(|i| i.finish.is_some()));
@@ -1227,6 +1249,9 @@ impl Cluster {
         let now = SystemTime::now();
         let astir = ambient && refs.iter().any(|s| s.agents_alone(now) > 0);
         let next = motion::sooner(next, astir.then_some(motion::FRAME_ORBIT));
+        // A paint asked for by anything else picks up where it left off;
+        // the next frame finds out again whether anyone sees it.
+        self.asleep.set(false);
         self.schedule(if ghosts.is_empty() && !finishing {
             next
         } else {
@@ -1235,6 +1260,16 @@ impl Cluster {
         if self.refit_due.replace(false) {
             unsafe {
                 let _ = PostMessageW(Some(self.hwnd), WM_CLUSTER_REFIT, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+
+    /// Takes up the frames it stopped while nobody could see it.
+    fn wake(&self) {
+        if self.asleep.get() && !out_of_sight(self.hwnd) {
+            self.asleep.set(false);
+            unsafe {
+                let _ = InvalidateRect(Some(self.hwnd), None, false);
             }
         }
     }
@@ -1271,16 +1306,25 @@ impl Cluster {
             }
             WM_ERASEBKGND => Some(LRESULT(1)),
             // Only the light moved: the kept layer stays. Nobody sees the
-            // light of a cluster under another window, so it waits there,
-            // and moves on within a frame of coming back into view.
+            // light of a cluster under another window or behind a locked
+            // screen, so its frames stop there rather than ask every frame
+            // whether it is seen yet. It moves on within a second of coming
+            // back into view.
             WM_TIMER if wparam.0 == ANIM_TIMER => {
                 crate::vsync::took(self.hwnd, ANIM_TIMER);
-                if !out_of_sight(self.hwnd) {
+                if out_of_sight(self.hwnd) {
+                    self.schedule(None);
+                    self.asleep.set(true);
+                } else {
                     unsafe {
                         let _ = InvalidateRect(Some(self.hwnd), None, false);
                     }
                 }
                 Some(LRESULT(0))
+            }
+            WM_WINDOWPOSCHANGED | WM_SHOWWINDOW => {
+                self.wake();
+                None
             }
             WM_CLUSTER_REFIT => {
                 self.refit();
@@ -1942,12 +1986,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
-/// Whether nothing of `hwnd` can be seen: minimised, hidden, off every
-/// screen, or under one window that covers it whole, as a maximised one
-/// does. A window that may be see-through never counts as covering.
+/// Whether nothing of `hwnd` can be seen: the screen locked or dark,
+/// minimised, hidden, on another desktop, off every screen, or under one
+/// window that covers it whole, as a maximised one does. A window that may
+/// be see-through never counts as covering.
 pub(crate) fn out_of_sight(hwnd: HWND) -> bool {
+    if crate::unseen::now() {
+        return true;
+    }
     unsafe {
-        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() || cloaked(hwnd) {
             return true;
         }
         let mut mine = RECT::default();
@@ -1964,10 +2012,10 @@ pub(crate) fn out_of_sight(hwnd: HWND) -> bool {
             |ex: u32| ex & (WS_EX_LAYERED | WS_EX_TRANSPARENT).0 != 0 || ex & overlay == overlay;
         let mut above = GetWindow(hwnd, GW_HWNDPREV);
         while let Ok(w) = above {
+            // Cheapest first: most windows above are smaller than this
+            // one, and the cloak query is a call into DWM.
             let covers = IsWindowVisible(w).as_bool()
                 && !IsIconic(w).as_bool()
-                && !see_through(GetWindowLongW(w, GWL_EXSTYLE) as u32)
-                && !cloaked(w)
                 && {
                     let mut r = RECT::default();
                     GetWindowRect(w, &mut r).is_ok()
@@ -1975,7 +2023,9 @@ pub(crate) fn out_of_sight(hwnd: HWND) -> bool {
                         && r.top <= mine.top
                         && r.right >= mine.right
                         && r.bottom >= mine.bottom
-                };
+                }
+                && !see_through(GetWindowLongW(w, GWL_EXSTYLE) as u32)
+                && !cloaked(w);
             if covers {
                 return true;
             }
