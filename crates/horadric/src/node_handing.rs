@@ -19,11 +19,12 @@
 //! ("vps"), else its host name.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use horadric_core::handing::{
-    asks_receiver, bases_answer, refused, took_message, Do, Landed, Outgoing, PlaceAsk,
+    asks_receiver, bases_answer, refused, Do, Landed, Outgoing, PlaceAsk,
 };
 use horadric_core::handoff::{self, Record, RepoId};
 use horadric_core::handoffs::{self, arrive, model_of, record_of, Handoffs, Packed, Place, Places};
@@ -43,6 +44,9 @@ pub(super) struct Handing {
     /// Projects cloned for handoffs here, by session: the sender asks
     /// again every few seconds and hears where each stands.
     places: Arc<Places>,
+    /// The sender's try each session handed here came by, beside the
+    /// node's `took`, so it is said again only to an ask of that try.
+    hands: Arc<Mutex<HashMap<String, u64>>>,
     /// Messages for viewers, by the name each gave in its hello, sent by
     /// the serving thread after each round.
     pub(super) outbox: Vec<(String, Value)>,
@@ -182,6 +186,7 @@ impl Machine {
         let from = self.called_by(&to);
         let number = self.keeping_number(id);
         let said = self.keeping_handing(id, &to, number);
+        let hand = self.hand.go.hand_of(id).unwrap_or(0);
         let record = {
             let n = lock(&self.node);
             n.registry.get(id).and_then(|s| {
@@ -189,6 +194,7 @@ impl Machine {
                     model: model_of(n.args.get(id).map_or(&[][..], Vec::as_slice)),
                     interrupted: !clean,
                     n: number,
+                    hand,
                     said: said.clone(),
                     ..record_of(s, &from)?
                 })
@@ -278,8 +284,9 @@ impl Machine {
                     .copied()
                     .filter(|_| n.registry.get(&id).is_some())
             };
-            if let Some(n) = ran {
-                return Some(Box::new(move || took_message(&id, n)));
+            let hand = self.hand.hands.lock().map_or(0, |h| h.get(&id).copied().unwrap_or(0));
+            if let Some(took) = ran.and_then(|n| handoffs::took_again_of(&id, n, hand, msg)) {
+                return Some(Box::new(move || took));
             }
             let repo: RepoId = serde_json::from_value(msg["repo"].clone()).unwrap_or_default();
             let checkout = checkout_of(&self.node, &repo);
@@ -303,6 +310,7 @@ impl Machine {
         }
         let node = Arc::clone(&self.node);
         let places = Arc::clone(&self.hand.places);
+        let hands = Arc::clone(&self.hand.hands);
         // Named as each side knows the other, for the moved line.
         let from = wire::known_as(Some(&self.shown(who)), &package.record.from);
         let me = self.called_by(who);
@@ -334,8 +342,11 @@ impl Machine {
                     places.forget(&id);
                     let n = record.n.saturating_add(1);
                     lock(&node).took.insert(id.clone(), n);
+                    if let Ok(mut h) = hands.lock() {
+                        h.insert(id.clone(), record.hand);
+                    }
                     super::keeping::landed(&id, n, &record.said);
-                    took_message(&id, n)
+                    handoffs::took_of(&id, n, record.hand)
                 }
                 Err(e) => refused(&id, &format!("cannot resume it: {e}")),
             }

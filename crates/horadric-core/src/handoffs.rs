@@ -239,11 +239,20 @@ impl Handoffs {
     /// and tries again asks anew, and must not hear the old `took`.
     pub fn took_again_for(&self, id: &str, runs: bool, ask: &Value) -> Option<Value> {
         let &(n, hand) = self.took.get(id).filter(|_| runs)?;
-        if ask["hand"].as_u64().is_some_and(|a| a != hand) {
-            return None;
-        }
-        Some(took_of(id, n, hand))
+        took_again_of(id, n, hand, ask)
     }
+}
+
+/// The `took` to say again for session `id`, run here as the roster's
+/// number `n` by the sender's try `hand`, to the sender's `ask`: None when
+/// the ask is of another try. A record that named no try (`hand` 0, from a
+/// sender that did not tell) is matched to any ask, or the sender would
+/// never hear `took` and would hand the session again while it runs here.
+pub fn took_again_of(id: &str, n: u64, hand: u64, ask: &Value) -> Option<Value> {
+    if hand != 0 && ask["hand"].as_u64().is_some_and(|a| a != hand) {
+        return None;
+    }
+    Some(took_of(id, n, hand))
 }
 
 /// The `took` for session `id`, run here as the roster's number `n`, by
@@ -768,6 +777,18 @@ mod tests {
         assert!(r.took_again("s1", true).is_some());
         r.forget_took("s1");
         assert_eq!(r.took_again_for("s1", true, &ask), None);
+    }
+
+    #[test]
+    fn a_took_landed_without_a_try_is_said_again_to_any_ask() {
+        // A sender whose record named no try, though its ask does: the
+        // session runs here, so the sender must hear `took` or it hands
+        // the session again.
+        let mut r = Handoffs::default();
+        r.took_hand("s1", 4, 0);
+        let ask = json!({"t": "bases", "id": "s1", "hand": 77});
+        assert_eq!(r.took_again_for("s1", true, &ask), Some(took_message("s1", 4)));
+        assert_eq!(r.took_again_for("s1", false, &ask), None);
     }
 
     #[test]

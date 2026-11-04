@@ -312,11 +312,13 @@ fn pack(app: &mut App, id: &str, to: &str, known: Vec<String>, clean: bool) {
     let w = sworn();
     let n = w.as_ref().map_or(1, |w| w.number(id, now));
     let said = w.map(|w| w.handing(id, to, n, now)).unwrap_or_default();
+    let hand = with(|s| s.hand.hand_of(id)).unwrap_or(0);
     let record = app.registry.lock().ok().and_then(|r| {
         Some(Record {
             model: model_of(&args),
             interrupted: !clean,
             n,
+            hand,
             said,
             ..record_of(r.get(id)?, &brothers::mac_name())?
         })
@@ -434,7 +436,7 @@ pub(super) fn serve(app: &mut App, who: &str, msg: &Value) -> Option<Job> {
             .registry
             .lock()
             .is_ok_and(|r| r.get(&id).is_some_and(|s| s.brother.is_none()));
-        if let Some(took) = with(|s| s.hand.took_again(&id, runs)) {
+        if let Some(took) = with(|s| s.hand.took_again_for(&id, runs, msg)) {
             return Some(Box::new(move || took));
         }
         let repo: RepoId = serde_json::from_value(msg["repo"].clone()).unwrap_or_default();
@@ -466,6 +468,7 @@ pub(super) fn serve(app: &mut App, who: &str, msg: &Value) -> Option<Job> {
     // Never run a handoff its sender took back, or that another brother
     // already runs: landed late, it would fence the one running it.
     let n = record.n.saturating_add(1);
+    let hand = record.hand;
     if let Err(why) = sworn().map_or(Ok(()), |w| w.may_arrive(&id, &record.said, n)) {
         return Some(Box::new(move || refused(&id, &why)));
     }
@@ -493,7 +496,7 @@ pub(super) fn serve(app: &mut App, who: &str, msg: &Value) -> Option<Job> {
         match told.recv_timeout(ADOPT_WAIT) {
             Ok(Ok(())) => {
                 PLACING.forget(&id);
-                handing::took_message(&id, n)
+                handoffs::took_of(&id, n, hand)
             }
             Ok(Err(e)) => refused(&id, &format!("cannot resume it: {e}")),
             Err(_) => refused(&id, "it did not start in time"),
@@ -554,7 +557,7 @@ fn adopt(app: &mut App, record: &Record, arrived: Arrived, from: &str) -> Result
         return Err(e);
     }
     let n = record.n.saturating_add(1);
-    with(|s| s.hand.took(&id, n));
+    with(|s| s.hand.took_hand(&id, n, record.hand));
     let believed = sworn().is_some_and(|w| w.arrived(&id, n, &record.said, app::unix_now()));
     if !believed {
         eprintln!("horadric: {id} runs here, but its sender's word was not believed");

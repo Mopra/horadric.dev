@@ -86,11 +86,15 @@ struct Back {
     landings: Vec<Landing>,
     /// A session packed for its receiver, or why it could not be.
     packed: Vec<(String, Result<Vec<u8>, String>)>,
+    /// What each let-go's toast says, once its worktree's new work was
+    /// kept and the worktree discarded, or kept since that failed.
+    let_go: Vec<String>,
 }
 
 static BACK: Mutex<Back> = Mutex::new(Back {
     landings: Vec::new(),
     packed: Vec::new(),
+    let_go: Vec::new(),
 });
 
 /// What the tray's Leaving menu offers, kept fresh by the UI thread for
@@ -623,13 +627,17 @@ impl App {
     /// Takes what threads handed back: packed sessions to send, landed
     /// ones to adopt.
     fn handing_back(&mut self) {
-        let (packed, landings) = match BACK.lock() {
+        let (packed, landings, let_go) = match BACK.lock() {
             Ok(mut b) => (
                 std::mem::take(&mut b.packed),
                 std::mem::take(&mut b.landings),
+                std::mem::take(&mut b.let_go),
             ),
             Err(_) => return,
         };
+        for text in let_go {
+            self.toasts.show(Kind::Done, "Handed off", &text);
+        }
         for (id, result) in packed {
             match with(|s| s.hand.packed(&id, result, unix_now())) {
                 Packed::Gone => {}
@@ -682,37 +690,47 @@ impl App {
             && (handoff::repo_id(dir).is_none() || handoff::has_changes(dir)))
         .then_some(cwd.as_str());
         let mut text = let_go_text(&crate::project::brother_name(to), stays);
-        // Before the handoff ref goes, which is what was handed to compare
-        // against: anything done here since would go with the worktree.
-        let tree = tree.and_then(|w| match keep_unhanded(&w, id, session.as_deref()) {
-            Ok(kept) => {
-                if let Some(kept) = kept {
-                    text.push_str(&format!(" What was done here since is kept on {kept}."));
-                }
-                Some(w)
-            }
-            Err(e) => {
-                text.push_str(&format!(
-                    " Its worktree at {} stays, since what was done there since could not be \
-                     kept: {e}",
-                    w.path
-                ));
-                None
-            }
-        });
         self.quest_moved_away(id, to);
-        if let Some(session) = session {
-            handing::forget_ref(dir, &session);
-        }
         // Its tile's place, for the session to come back into as the
         // receiver's.
         self.far_left(id);
         self.forget(id);
-        if let Some(w) = tree {
-            crate::worktree::discard(w);
-        }
         self.reconcile(false);
-        self.toasts.show(Kind::Done, "Handed off", &text);
+        // Keeping a big worktree's work reads all of it, which would freeze
+        // the UI, so it runs on a thread and the toast comes when it is done.
+        let notify = self.notify.0 as isize;
+        let id = id.to_string();
+        std::thread::spawn(move || {
+            // Before the handoff ref goes, which is what was handed to
+            // compare against: anything done here since would go with the
+            // worktree.
+            let tree = tree.and_then(|w| match keep_unhanded(&w, &id, session.as_deref()) {
+                Ok(kept) => {
+                    if let Some(kept) = kept {
+                        text.push_str(&format!(" What was done here since is kept on {kept}."));
+                    }
+                    Some(w)
+                }
+                Err(e) => {
+                    text.push_str(&format!(
+                        " Its worktree at {} stays, since what was done there since could \
+                         not be kept: {e}",
+                        w.path
+                    ));
+                    None
+                }
+            });
+            if let Some(session) = session {
+                handing::forget_ref(Path::new(&cwd), &session);
+            }
+            if let Some(w) = tree {
+                crate::worktree::discard(w);
+            }
+            if let Ok(mut b) = BACK.lock() {
+                b.let_go.push(text);
+            }
+            wake(notify);
+        });
     }
 
     /// Hears what the brother keyed `key` answered about a handoff from
