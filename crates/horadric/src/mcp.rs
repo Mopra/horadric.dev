@@ -894,8 +894,8 @@ fn tools() -> Vec<Value> {
              Emulation.setDeviceMetricsOverride, DOM.getDocument or Page.printToPDF, and get its \
              result. Only methods that act on this page are allowed (Runtime, DOM, CSS, Input, \
              Emulation, Log, Console, Performance, Accessibility, and some Page and Network \
-             calls); ones that reach the user's cookies, storage, downloads or other tabs are \
-             refused.",
+             calls); ones that reach the user's cookies, storage, downloads, files or other \
+             tabs are refused.",
             json!({
                 "method": { "type": "string" },
                 "params": { "type": "object" },

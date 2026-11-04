@@ -376,6 +376,17 @@ fn join_legacy() -> bool {
     true
 }
 
+/// Once a tab opened on a browser started without the port, no older
+/// Horadric's browser runs any more, and the port is not to be opened
+/// again by the next start either.
+fn forget_legacy() {
+    if !LEGACY.with(Cell::get) {
+        if let Some(p) = profile() {
+            let _ = fs::remove_file(p.join("devtools-port"));
+        }
+    }
+}
+
 /// Opens the project's browser, at `url` when given. A browser it has
 /// already takes its shown tab there instead.
 pub fn open(key: &str, url: Option<&str>) {
@@ -542,6 +553,7 @@ pub fn shutdown() {
         end(tab);
     }
     ENV.with(|e| *e.borrow_mut() = Env::None);
+    LEGACY.with(|l| l.set(false));
 }
 
 /// Tells the town's cluster its tabs changed, since each is a tile there.
@@ -1505,6 +1517,9 @@ fn make(key: &str, id: u64) {
             Env::None => {
                 *e = Env::Starting(vec![(key.to_string(), id)]);
                 drop(e);
+                // A fresh environment tries without the port first; the
+                // older browser may be gone since the last one.
+                LEGACY.with(|l| l.set(false));
                 start_env();
                 None
             }
@@ -1589,7 +1604,10 @@ fn make_controller(env: &ICoreWebView2Environment, key: &str, id: u64) {
     let handler = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
         move |result, controller| {
             match (result, controller) {
-                (Ok(()), Some(c)) => ready(&owned, id, c),
+                (Ok(()), Some(c)) => {
+                    forget_legacy();
+                    ready(&owned, id, c)
+                }
                 (Err(e), _) if other_arguments(&e) && restart_legacy(&owned, id) => {}
                 (r, _) => {
                     eprintln!("horadric: cannot open the browser pane: {r:?}");

@@ -280,7 +280,15 @@ const PAGE_METHODS: &[&str] = &[
     "Network.emulateNetworkConditions",
     "Network.setExtraHTTPHeaders",
     "Network.setUserAgentOverride",
-    "Network.getCookies",
+];
+
+/// Methods of the allowed domains that reach the user's files: each puts a
+/// local path into the page, where any site could upload it (the Claude
+/// login in ~/.claude, say).
+const FILE_METHODS: &[&str] = &[
+    "DOM.setFileInputFiles",
+    "DOM.getFileInfo",
+    "Input.dispatchDragEvent",
 ];
 
 /// Whether an agent may send DevTools `method`, and the params it goes
@@ -302,14 +310,15 @@ pub fn devtools_allowed(method: &str, params: Value) -> Result<Value, String> {
         }
         _ => {}
     }
-    if method == "Network.getCookies" {
-        // With no urls it answers for the tab's current page only, the
-        // same cookies that page already sends.
-        return Ok(json!({}));
+    if FILE_METHODS.contains(&method) {
+        return refuse("it hands the page files from the user's disk");
     }
     if PAGE_DOMAINS.contains(&domain) || PAGE_METHODS.contains(&method) {
         return Ok(params);
     }
+    // Even without urls, getCookies answers for every frame on the page,
+    // and the agent can frame or navigate to any site the user is logged
+    // in to, so no cookie call is safe.
     if domain == "Network" && name.to_ascii_lowercase().contains("cookie") {
         return refuse("it reads or changes the user's logins on other sites");
     }
@@ -527,6 +536,12 @@ mod tests {
         }
         for m in [
             "Network.getAllCookies",
+            "Network.getCookies",
+            "DOM.setFileInputFiles",
+            "DOM.getFileInfo",
+            "Input.dispatchDragEvent",
+            "IO.read",
+            "Page.addCompilationCache",
             "Network.setCookie",
             "Network.setCookies",
             "Network.deleteCookies",
@@ -547,17 +562,6 @@ mod tests {
             let e = ok(m).unwrap_err();
             assert!(e.contains(m), "{m}: {e}");
         }
-    }
-
-    #[test]
-    fn cookies_are_read_only_for_the_page_the_tab_is_on() {
-        assert_eq!(
-            devtools_allowed(
-                "Network.getCookies",
-                json!({ "urls": ["https://mail.google.com"] })
-            ),
-            Ok(json!({}))
-        );
     }
 
     #[test]
