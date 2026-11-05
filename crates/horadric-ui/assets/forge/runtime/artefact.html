@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Artefact</title>
+<link rel="stylesheet" href="runtime.css">
+<script src="runtime.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script>
+// Contract: served beside runtime.js on the Forge's virtual host, as
+// artefact.html?src=<url of the .jsx, .tsx or .mmd file>. The page fetches the
+// source itself, so a reload of this page is a reload of the artefact.
+(function () {
+  var src = new URLSearchParams(location.search).get("src");
+  var root = document.getElementById("root");
+  if (!src) {
+    root.textContent = "artefact.html needs ?src=<path of the artefact>";
+    return;
+  }
+  var name = decodeURIComponent(src.split("?")[0].split("/").pop());
+  document.title = name;
+  // Errors are already reported through __forgeRuntime.onError and drawn in
+  // the page; the rejection is only swallowed here so it is not reported twice.
+  window.__forgeRuntime.load(src, root).catch(function () {});
+})();
+</script>
+</body>
+</html>
