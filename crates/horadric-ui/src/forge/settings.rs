@@ -1,5 +1,5 @@
 //! What the Forge keeps over a restart, in `forge.json` beside the app's
-//! state: the projects whose sessions' files do not open by themselves,
+//! state: the projects whose sessions' files open by themselves,
 //! and which folder each file tab's host serves, so a tab saved with the
 //! browser's pages is a file's tab again after a restart.
 
@@ -11,10 +11,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Default, Serialize, Deserialize)]
 struct Kept {
-    /// Projects with the switch off. On is the default, so only these
-    /// are written.
+    /// Projects with the switch on. Off is the default, since a session
+    /// writing code would otherwise open a tab for every file it touches.
+    /// The old `off` list is ignored on read.
     #[serde(default)]
-    off: BTreeSet<String>,
+    on: BTreeSet<String>,
     /// Each host a file tab was served at, and its folder.
     #[serde(default)]
     roots: BTreeMap<String, PathBuf>,
@@ -50,18 +51,18 @@ fn with<T>(f: impl FnOnce(&mut Kept) -> (T, bool)) -> T {
 }
 
 /// Whether a file the project `key`'s sessions write opens in the Forge
-/// by itself. On unless turned off.
+/// by itself. Off unless turned on.
 pub fn auto(key: &str) -> bool {
-    with(|k| (!k.off.contains(key), false))
+    with(|k| (k.on.contains(key), false))
 }
 
 /// Turns the project's switch on or off.
 pub fn set_auto(key: &str, on: bool) {
     with(|k| {
         let changed = if on {
-            k.off.remove(key)
+            k.on.insert(key.to_string())
         } else {
-            k.off.insert(key.to_string())
+            k.on.remove(key)
         };
         ((), changed)
     });
