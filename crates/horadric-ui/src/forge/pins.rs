@@ -175,6 +175,14 @@ pub(super) fn page_pinning(key: &str, tab: u64, on: bool) {
     web::redraw(key);
 }
 
+/// The tab `tab` followed a link to another file: pin mode was for the
+/// file it showed, and the runes drawn are the old page's. The new page
+/// asks for its own on `ready`.
+pub(super) fn tab_moved(key: &str, tab: u64) {
+    set(key, tab, false);
+    web::redraw(key);
+}
+
 /// The page of the tab `tab` loaded: a reload must not lose the runes, nor
 /// pin mode the human turned on.
 pub(super) fn page_ready(key: &str, tab: u64) {
