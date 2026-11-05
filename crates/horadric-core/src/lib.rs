@@ -31,6 +31,7 @@ pub mod event;
 pub mod experience;
 pub mod fleet;
 pub mod folio;
+pub mod forge;
 pub mod gitfiles;
 pub mod glow;
 pub mod google;
