@@ -171,6 +171,9 @@ pub struct Bar<'a> {
     pub icons: &'a [Option<Rc<Favicon>>],
     /// The tab being carried to a new place and how far, in DIPs.
     pub carried: Option<(usize, f32)>,
+    /// The name of the file the shown tab shows, which puts the Forge's
+    /// bar where the address would be. None for a web page.
+    pub forge: Option<&'a str>,
 }
 
 /// The mark on a tab an agent works in: its session's initial on a disc
@@ -2327,6 +2330,11 @@ impl GridTarget {
             theme::text_dim()
         };
         self.pop_icon(l.pop, ink, bar.popped);
+        // Ctrl+L still types an address over a file's tab.
+        if let (Some(name), None) = (bar.forge, bar.edit) {
+            self.forge_bar(gpu, name, l);
+            return;
+        }
 
         let field = D2D_RECT_F {
             left: l.field.0,
@@ -2447,6 +2455,51 @@ impl GridTarget {
             }
         }
         self.rt.PopAxisAlignedClip();
+    }
+
+    /// The Forge's bar in the address field's place: the file's name, then
+    /// the Forge's buttons (`crate::forge::bar`).
+    unsafe fn forge_bar(&self, gpu: &Gpu, name: &str, l: &BarLayout) {
+        let f = crate::forge::bar::layout(l.field, HEADER_H);
+        let left = f.name.0 + BAR_INSET;
+        if f.name.1 - left > 8.0 {
+            if let Ok(layout) = bar_text(gpu, name) {
+                self.rt.PushAxisAlignedClip(
+                    &D2D_RECT_F {
+                        left,
+                        top: 0.0,
+                        right: f.name.1,
+                        bottom: HEADER_H,
+                    },
+                    D2D1_ANTIALIAS_MODE_ALIASED,
+                );
+                self.brush.SetColor(&render::color(theme::text()));
+                self.rt.DrawTextLayout(
+                    Vector2 { X: left, Y: 0.0 },
+                    &layout,
+                    &self.brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+                self.rt.PopAxisAlignedClip();
+            }
+        }
+        self.brush.SetColor(&render::color(theme::text_dim()));
+        for &(b, at) in &f.buttons {
+            let glyph: Vec<u16> = crate::forge::bar::glyph(b).encode_utf16().collect();
+            self.rt.DrawText(
+                &glyph,
+                &gpu.icon_small,
+                &D2D_RECT_F {
+                    left: at,
+                    top: 0.0,
+                    right: at + HEADER_H,
+                    bottom: HEADER_H,
+                },
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
     }
 
     /// The search bar, in the top right corner of the glass: a magnifier,

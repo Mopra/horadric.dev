@@ -1202,9 +1202,16 @@ impl Pane {
             .as_deref()
             .map(web::icons)
             .unwrap_or_default();
+        let forge_name = self
+            .console
+            .web
+            .as_deref()
+            .and_then(crate::forge::shown_file)
+            .and_then(|f| Some(f.file_name()?.to_string_lossy().into_owned()));
         let bar = self.console.web.as_deref().map(|key| {
             let (back, forward) = web::history(key);
             Bar {
+                forge: forge_name.as_deref(),
                 tabs: &tab_names,
                 tab,
                 badges: &badges,
@@ -2363,6 +2370,19 @@ impl Pane {
         glyphs::bar_hit(&self.bar_layout(), self.dip(lparam).0)
     }
 
+    /// While the shown tab is a file and no address is typed, the Forge's
+    /// bar stands in the address field: what of it is under a client
+    /// point, Some(None) for the file's name. None anywhere else.
+    fn forge_at(&self, lparam: LPARAM) -> Option<Option<crate::forge::bar::Button>> {
+        let key = self.console.web.as_deref()?;
+        if self.bar_at(lparam) != Some(BarHit::Field) || self.address.borrow().is_some() {
+            return None;
+        }
+        crate::forge::shown_file(key)?;
+        let l = crate::forge::bar::layout(self.bar_layout().field, HEADER_H);
+        Some(crate::forge::bar::hit(&l, self.dip(lparam).0))
+    }
+
     /// The sanctuary's place button under a client point.
     fn place_at(&self, lparam: LPARAM) -> Option<DockSide> {
         if self.console.sky.is_none() || !self.in_header(lparam) {
@@ -2519,6 +2539,12 @@ impl Pane {
         let Some(key) = &self.console.web else {
             return false;
         };
+        if let Some(hit) = self.forge_at(lparam) {
+            if let (Some(b), Some(file)) = (hit, crate::forge::shown_file(key)) {
+                crate::forge::bar::press(b, &file);
+            }
+            return true;
+        }
         let step = match self.bar_at(lparam) {
             None => return false,
             Some(BarHit::Field) => {
@@ -3017,6 +3043,9 @@ impl Pane {
     /// The line for what in the header or the tab strip is under a client
     /// point, in the order a press there is taken.
     fn tip_at(&self, lparam: LPARAM) -> Option<&'static str> {
+        if let Some(hit) = self.forge_at(lparam) {
+            return hit.map(crate::forge::bar::tip);
+        }
         if let Some(hit) = self.bar_at(lparam) {
             if self.console.web.as_deref().is_some_and(web::is_popped) {
                 return tip::popped_bar(hit);
@@ -3465,7 +3494,8 @@ impl Pane {
                 }
                 let at = LPARAM(((p.y as u16 as isize) << 16) | p.x as u16 as isize);
                 if self.in_header(at) || self.in_tabs(at) {
-                    let cursor = if self.bar_at(at) == Some(BarHit::Field) {
+                    let typed = self.bar_at(at) == Some(BarHit::Field) && self.forge_at(at).is_none();
+                    let cursor = if typed {
                         IDC_IBEAM
                     } else {
                         IDC_ARROW
