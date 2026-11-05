@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Forge test: deck</title>
+<script src="../forge.js"></script>
+<script src="../deck.js"></script>
+<style>
+  body { margin: 0; font-family: "Segoe UI", sans-serif; background: #ddd; }
+  section.slide {
+    width: 1920px; height: 1080px; padding: 120px 160px;
+    background: #fbfaf7; color: #1d2b36; display: flex; flex-direction: column;
+    justify-content: center; margin: 0 0 20px;
+  }
+  section.slide h1 { font-size: 120px; margin: 0 0 40px; }
+  section.slide h2 { font-size: 88px; margin: 0 0 40px; }
+  section.slide p, section.slide li { font-size: 48px; }
+  section.slide.dark { background: #1d2b36; color: #fbfaf7; }
+  .cols { display: flex; gap: 80px; }
+  .cols > div { flex: 1; background: #e6eef4; padding: 40px; border-radius: 16px; }
+</style>
+</head>
+<body>
+<section class="slide dark">
+  <h1>The Forge</h1>
+  <p>A test deck, five slides, with notes.</p>
+  <aside class="notes">Welcome everyone. This is the first slide.</aside>
+</section>
+<section class="slide">
+  <h2>Why</h2>
+  <ul><li>Point at the slide instead of describing it</li><li>See every save at once</li></ul>
+  <aside class="notes">Talk about pointing.</aside>
+</section>
+<section class="slide" id="two-columns">
+  <h2>Two columns</h2>
+  <div class="cols"><div><p>Left box</p></div><div><p>Right box</p></div></div>
+  <aside class="notes">Compare left and right.</aside>
+</section>
+<section class="slide">
+  <h2>A picture</h2>
+  <img src="sample.svg" alt="" style="height: 600px">
+</section>
+<section class="slide dark">
+  <h2>Thanks</h2>
+  <p>Questions?</p>
+  <aside class="notes">Last slide, take questions.</aside>
+</section>
+</body>
+</html>

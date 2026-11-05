@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Forge test: markdown</title>
+<script src="../forge.js"></script>
+<style>
+  body { max-width: 760px; margin: 40px auto; padding: 0 20px; font: 16px/1.6 Georgia, serif; color: #222; }
+  pre { background: #f4f1ea; padding: 12px; overflow: auto; }
+  .tall { height: 900px; background: repeating-linear-gradient(#fff 0 40px, #f7f7f7 40px 80px); }
+</style>
+</head>
+<body>
+<!-- Stands in for what the Forge's markdown renderer makes: each block
+     tagged with the source lines it came from. -->
+<h1 data-lines="1">Quarterly review</h1>
+<p data-lines="3-5">This page tries the Forge on a rendered markdown file. Press P to point,
+hover a block, click it or drag a box, type and press Enter.</p>
+<h2 data-lines="7">Numbers</h2>
+<ul data-lines="9-12">
+  <li data-lines="9">Revenue up 12 percent</li>
+  <li data-lines="10">Churn down to 3 percent</li>
+  <li data-lines="11-12">Two new factories, <a href="https://example.com">one in Aarhus</a></li>
+</ul>
+<pre data-lines="14-18"><code>fn main() {
+    println!("forge");
+}</code></pre>
+<div class="tall" data-lines="20-40"><p>Tall filler block, lines 20 to 40.</p></div>
+<h2 id="end" data-lines="42">The end</h2>
+<p data-lines="44">
+  <button id="boom" onclick="null.nope()">Throw an error</button>
+  <button id="reject" onclick="Promise.reject(new Error('rejected on purpose'))">Reject a promise</button>
+</p>
+<img data-lines="46" src="sample.svg" alt="sample" style="width: 100%; max-width: 600px">
+</body>
+</html>

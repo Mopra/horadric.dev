@@ -1,0 +1,215 @@
+/* The deck shell. Loaded twice by deck.js: into the page, where only the
+   html.forge-deck rules match, and into the controls' shadow root, where
+   only the :host rules do. Slides are styled in place, never moved, so the
+   deck's own selectors keep matching them. */
+
+/* ------------------------------------------------------------ the page */
+
+html.forge-deck aside.notes { display: none !important; }
+
+html.forge-deck section.slide {
+  box-sizing: border-box !important;
+  width: var(--forge-w) !important;
+  height: var(--forge-h) !important;
+  max-width: none !important;
+  max-height: none !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+html.forge-deck.forge-nobg section.slide { background-color: var(--forge-slide-bg); }
+
+/* Screen only, so printing lays every slide out the same whatever the
+   view was. */
+@media screen {
+  /* One slide at a time, centred in what the strip leaves, letterboxed. */
+  html.forge-deck.forge-single,
+  html.forge-deck.forge-single body {
+    overflow: hidden !important;
+    background: #121110 !important;
+  }
+  html.forge-deck.forge-single section.slide:not(.forge-clone) { display: none !important; }
+  html.forge-deck.forge-single section.slide.forge-current:not(.forge-clone) {
+    display: var(--forge-slide-display, block) !important;
+    position: fixed !important;
+    inset: auto !important;
+    left: var(--forge-cx) !important;
+    top: 50% !important;
+    margin: 0 !important;
+    zoom: 1 !important;
+    transform: translate(-50%, -50%) scale(var(--forge-scale)) !important;
+    transform-origin: 50% 50% !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    z-index: 1 !important;
+  }
+
+  /* Every slide in a column, scaled to the pane's width. */
+  html.forge-deck.forge-scroll,
+  html.forge-deck.forge-scroll body {
+    background: #121110 !important;
+  }
+  html.forge-deck.forge-scroll body {
+    margin: 0 !important;
+    padding: 24px 0 24px var(--forge-left) !important;
+  }
+  html.forge-deck.forge-scroll section.slide:not(.forge-clone) {
+    display: var(--forge-slide-display, block) !important;
+    position: relative !important;
+    inset: auto !important;
+    transform: none !important;
+    zoom: var(--forge-scale) !important;
+    margin: 0 auto 24px !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+  }
+
+  html.forge-deck.forge-presenting,
+  html.forge-deck.forge-presenting body { background: #000 !important; cursor: none; }
+}
+
+/* The slide strip: real clones of the slides, so they wear the deck's CSS. */
+html.forge-deck .forge-strip {
+  position: fixed !important;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 2147483640;
+  width: 196px;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 12px 10px 60px 22px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: #1a1714;
+  border-right: 1px solid #2c261f;
+  scrollbar-width: thin;
+  scrollbar-color: #3a3128 transparent;
+}
+html.forge-deck .forge-strip[hidden] { display: none !important; }
+html.forge-deck .forge-thumb {
+  position: relative;
+  width: 164px;
+  margin: 0 0 10px;
+  cursor: pointer;
+  border-radius: 2px;
+  outline: 1px solid #3a3128;
+  outline-offset: 0;
+}
+html.forge-deck .forge-thumb:hover { outline-color: #8a6a3c; }
+html.forge-deck .forge-thumb.forge-on { outline: 2px solid #e8a33d; outline-offset: 1px; }
+html.forge-deck .forge-strip section.slide.forge-clone {
+  display: var(--forge-slide-display, block) !important;
+  position: absolute !important;
+  inset: auto !important;
+  left: 0 !important;
+  top: 0 !important;
+  margin: 0 !important;
+  zoom: 1 !important;
+  transform: scale(var(--forge-thumb-scale)) !important;
+  transform-origin: 0 0 !important;
+  opacity: 1 !important;
+  visibility: visible !important;
+  pointer-events: none !important;
+  animation: none !important;
+  transition: none !important;
+}
+html.forge-deck .forge-strip section.slide.forge-clone * {
+  animation-play-state: paused !important;
+  transition: none !important;
+}
+html.forge-deck .forge-thumb-n {
+  position: absolute;
+  left: -18px;
+  top: 0;
+  width: 14px;
+  text-align: right;
+  color: #8f8270;
+  font: 11px/1 "Segoe UI", system-ui, sans-serif;
+}
+html.forge-deck .forge-thumb > section.slide.forge-clone { clip-path: inset(0); }
+
+/* --------------------------------------------- the controls (shadow) */
+
+:host([hidden]) { display: none !important; }
+/* The host's inline all:initial beats :host, so the type is set here. */
+.bar {
+  font: 12px/1 "Segoe UI", system-ui, sans-serif;
+  color: #efe6d6;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: rgba(23, 19, 14, 0.82);
+  border: 1px solid #3a3128;
+  border-radius: 6px;
+  opacity: 0.55;
+  transition: opacity 0.2s ease;
+}
+.bar:hover { opacity: 1; }
+.btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: #b5a78f;
+  cursor: pointer;
+}
+.btn:hover { background: #2a231b; color: #efe6d6; }
+.btn.on { color: #e8a33d; }
+.btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.count {
+  min-width: 44px;
+  padding: 0 6px 0 4px;
+  text-align: right;
+  color: #b5a78f;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------- print */
+
+/* WebView2's PrintToPdf: one 16:9 page per slide, at the slide's own look. */
+@media print {
+  @page { size: 13.333in 7.5in; margin: 0; }
+  html.forge-deck,
+  html.forge-deck body {
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    background: none !important;
+  }
+  html.forge-deck * {
+    print-color-adjust: exact !important;
+    -webkit-print-color-adjust: exact !important;
+  }
+  html.forge-deck section.slide:not(.forge-clone) {
+    display: var(--forge-slide-display, block) !important;
+    position: relative !important;
+    inset: auto !important;
+    left: auto !important;
+    top: auto !important;
+    margin: 0 !important;
+    transform: none !important;
+    zoom: var(--forge-print-zoom) !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    break-after: page;
+    break-inside: avoid;
+  }
+  html.forge-deck section.slide:not(.forge-clone):last-of-type { break-after: auto; }
+  html.forge-deck .forge-strip,
+  forge-deck-ui,
+  forge-overlay { display: none !important; }
+}

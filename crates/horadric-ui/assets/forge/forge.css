@@ -1,0 +1,248 @@
+/* Lives inside forge.js's closed shadow root, so nothing here reaches the
+   page and nothing of the page's reaches here. Activity is shown with small
+   runes that move, never with glows or gradients. */
+
+:host {
+  --ember: #e8a33d;
+  --ember-dim: rgba(232, 163, 61, 0.55);
+  --ink: #17130e;
+  --ink-2: #221c15;
+  --bone: #efe6d6;
+  --bone-dim: #b5a78f;
+  --blood: #c2533f;
+}
+
+/* The host is reset with all:initial from its inline style, which beats
+   :host, so the type is set on the layers instead. */
+.pins, .flash, .catcher, .hover, .hover-tag, .drag, .ask, .errors {
+  font: 13px/1.35 "Segoe UI", system-ui, sans-serif;
+  color: var(--bone);
+}
+
+.pins, .flash, .hover, .hover-tag, .drag, .ask, .errors {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.hover, .hover-tag, .drag { inset: auto; left: 0; top: 0; }
+
+/* Pin mode: one layer over the page takes the pointer, so the page's own
+   links and handlers never fire while the human is pointing. */
+.catcher {
+  position: absolute;
+  inset: 0;
+  display: none;
+  cursor: crosshair;
+  pointer-events: auto;
+}
+.catcher.on { display: block; }
+
+.hover {
+  display: none;
+  box-sizing: border-box;
+  border: 1.5px solid var(--ember);
+  border-radius: 2px;
+}
+.hover.on { display: block; }
+
+.hover-tag {
+  display: none;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--ink);
+  color: var(--ember);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.hover-tag.on { display: block; }
+
+.drag {
+  display: none;
+  box-sizing: border-box;
+  border: 1.5px dashed var(--ember);
+  background: rgba(232, 163, 61, 0.08);
+}
+.drag.on { display: block; }
+
+/* The spot being pinned and the words for it. */
+.ask { display: none; }
+.ask.on { display: block; }
+.asking-box {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  border: 1.5px dashed var(--ember);
+  animation: march 0.9s linear infinite;
+}
+@keyframes march { 50% { border-color: var(--ember-dim); } }
+
+.ask-form {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 300px;
+  margin: 0;
+  padding: 6px;
+  box-sizing: border-box;
+  background: var(--ink);
+  border: 1px solid var(--ember-dim);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+}
+.ask-form input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid #4a3d2c;
+  border-radius: 4px;
+  background: var(--ink-2);
+  color: var(--bone);
+  font: inherit;
+  outline: none;
+}
+.ask-form input:focus { border-color: var(--ember); }
+.ask-form input::placeholder { color: var(--bone-dim); }
+.ask-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--bone-dim);
+  font-size: 11px;
+}
+
+/* Pin runes: a small stone with its number and one bright stroke running
+   round its edge. */
+.pin-box, .rune {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: none;
+  opacity: 0;
+  transition: opacity 0.6s ease;
+}
+.pin-box.on, .rune.on { display: block; opacity: 1; }
+.pin-box.fading, .rune.fading { opacity: 0; }
+
+.pin-box {
+  box-sizing: border-box;
+  border: 1px dashed var(--ember-dim);
+  border-radius: 2px;
+}
+
+.rune {
+  width: 26px;
+  height: 26px;
+  animation: hover-rune 3.6s ease-in-out infinite;
+}
+@keyframes hover-rune {
+  0%, 100% { margin-top: 0; }
+  50% { margin-top: -2px; }
+}
+.rune svg {
+  position: absolute;
+  inset: 0;
+  width: 26px;
+  height: 26px;
+  overflow: visible;
+}
+.rune .stone {
+  fill: var(--ink);
+  stroke: var(--ember-dim);
+  stroke-width: 1.4;
+}
+.rune .trace {
+  fill: none;
+  stroke: var(--ember);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-dasharray: 16 84;
+  animation: trace 2.8s linear infinite;
+}
+@keyframes trace { to { stroke-dashoffset: -100; } }
+.rune b {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ember);
+  font: 600 11px/1 "Segoe UI", system-ui, sans-serif;
+}
+
+/* goto: shows where it landed for a moment. */
+.flash-box {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  border: 1.5px solid var(--ember);
+  border-radius: 2px;
+  animation: flash-out 1.6s ease forwards;
+}
+@keyframes flash-out {
+  0%, 60% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* Errors: small cards in a corner, out of the content's way. */
+.errors {
+  inset: auto 12px 12px auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+  max-width: min(360px, calc(100vw - 24px));
+}
+.error-card {
+  pointer-events: auto;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px 10px;
+  background: var(--ink);
+  border: 1px solid #5a2a20;
+  border-left: 3px solid var(--blood);
+  border-radius: 5px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+.error-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #e48a76;
+  font-weight: 600;
+  font-size: 12px;
+}
+.error-text {
+  margin: 4px 0 8px;
+  color: var(--bone);
+  font: 12px/1.4 Consolas, "Cascadia Mono", monospace;
+  word-break: break-word;
+}
+.error-card button {
+  font: inherit;
+  cursor: pointer;
+}
+.error-close {
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--bone-dim);
+  font-size: 16px !important;
+  line-height: 1;
+}
+.error-close:hover { color: var(--bone); }
+.error-send {
+  padding: 4px 10px;
+  border: 1px solid var(--ember-dim);
+  border-radius: 4px;
+  background: var(--ink-2);
+  color: var(--ember);
+  font-size: 12px !important;
+}
+.error-send:hover:not(:disabled) { border-color: var(--ember); }
+.error-send:disabled { color: var(--bone-dim); border-color: #4a3d2c; cursor: default; }
+
+@media (prefers-reduced-motion: reduce) {
+  .rune, .rune .trace, .asking-box { animation: none; }
+}

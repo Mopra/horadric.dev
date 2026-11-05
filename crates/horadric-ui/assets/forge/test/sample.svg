@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
+  <rect width="1200" height="800" fill="#e9eef3"/>
+  <rect x="100" y="100" width="400" height="300" fill="#3b6ea5"/>
+  <circle cx="850" cy="300" r="180" fill="#d98c3a"/>
+  <rect x="100" y="500" width="1000" height="200" fill="#5a8f4e"/>
+  <text x="600" y="620" font-family="Segoe UI, sans-serif" font-size="64" text-anchor="middle" fill="#fff">1200 x 800</text>
+</svg>
