@@ -18,6 +18,9 @@ pub struct Question {
 pub struct QuestionOption {
     pub label: String,
     pub description: String,
+    /// What picking it would look like, as monospace markdown: a mockup,
+    /// a snippet, a layout to compare against the others.
+    pub preview: String,
 }
 
 /// The questions in an AskUserQuestion input.
@@ -38,6 +41,7 @@ pub fn questions(input: &Value) -> Vec<Question> {
                 .map(|o| QuestionOption {
                     label: s(o, "label"),
                     description: s(o, "description"),
+                    preview: s(o, "preview"),
                 })
                 .collect(),
         })
@@ -124,10 +128,18 @@ mod tests {
         assert_eq!(q[0].question, "Which?");
         assert!(q[0].multi_select);
         assert_eq!(q[0].options[0].label, "A");
+        assert_eq!(q[0].options[0].preview, "");
         assert_eq!(
             answers_object(&q, &[vec!["A".into(), "B".into()]]),
             json!({"Which?": "A, B"})
         );
+    }
+
+    #[test]
+    fn an_option_keeps_its_preview() {
+        let q = questions(&json!({"questions": [{"question": "Which?", "options": [
+            {"label": "Grid", "description": "g", "preview": "[ a ]\n[ b ]"}]}]}));
+        assert_eq!(q[0].options[0].preview, "[ a ]\n[ b ]");
     }
 
     #[test]

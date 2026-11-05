@@ -324,9 +324,9 @@ pub(super) unsafe fn ask(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
             y += BUTTON_H;
         }
         _ => {
+            let (icon, ink) = settled_mark(cx, *state);
             let said = look::ask_said(*state);
-            s.line(said, F::Line, Rect::new(PAD, y, inner, 22.0), cx.pal.dim);
-            y += 22.0;
+            y = outcome(cx, &mut s, icon, ink, said, cx.pal.dim, y, inner);
         }
     }
     let h = y + PAD;
@@ -383,6 +383,200 @@ unsafe fn notes(
     y
 }
 
+/// The most of an option's preview its row shows: a preview is there to
+/// compare options at a glance, and four long ones would bury the ask.
+const PREVIEW_MAX_H: f32 = 9.0 * super::rich::MONO_LINE;
+
+/// A small rounded label at (`x`, `y`), such as a question's header or
+/// the badge of the option Claude recommends. Returns its right edge.
+fn chip(cx: &Ctx, s: &mut Scene, x: f32, y: f32, text: &str, ink: Color, fill: Color) -> f32 {
+    let tw = cx
+        .one_line(&cx.gfx.small, text)
+        .map_or(text.chars().count() as f32 * 7.0, |l| {
+            render::text_size(&l).0
+        });
+    let r = Rect::new(x, y, tw + 16.0, 20.0);
+    s.fill(r, 10.0, fill);
+    s.line(text, F::Centre, r, ink);
+    r.right()
+}
+
+/// A question's header chip, where it stands among several, and the
+/// question itself: a title while it waits, a quiet line once answered.
+/// Returns the bottom.
+#[allow(clippy::too_many_arguments)]
+unsafe fn heading(
+    cx: &Ctx,
+    s: &mut Scene,
+    question: &horadric_core::folio::Question,
+    q: usize,
+    total: usize,
+    waiting: bool,
+    mut y: f32,
+    inner: f32,
+) -> f32 {
+    let mut x = PAD;
+    if !question.header.is_empty() {
+        let (ink, fill) = if waiting {
+            (
+                cx.pal.accent.mix(cx.pal.fg, 0.55),
+                cx.pal.accent.with_alpha(0.16),
+            )
+        } else {
+            (cx.pal.dim, cx.pal.fg.with_alpha(0.06))
+        };
+        x = chip(cx, s, x, y, &question.header, ink, fill) + 8.0;
+    }
+    if total > 1 {
+        let step = format!("{} of {total}", q + 1);
+        s.line(step, F::Small, Rect::new(x, y, inner, 20.0), cx.pal.faint);
+    }
+    if x > PAD || total > 1 {
+        y += 28.0;
+    }
+    let (font, ink) = if waiting {
+        (&cx.fonts.h3, cx.pal.fg)
+    } else {
+        (&cx.fonts.body, cx.pal.dim)
+    };
+    if let Some(l) = cx.layout(font, &question.question, inner) {
+        s.unit(&l, PAD, y, ink, &question.question);
+        y += render::text_size(&l).1 + if waiting { 12.0 } else { 6.0 };
+    }
+    y
+}
+
+/// One option as a full-width row: a radio or a box to tick, the label
+/// with a badge when Claude recommends it, the description under it, and
+/// its preview when it has one. Returns the row.
+unsafe fn option(
+    cx: &Ctx,
+    s: &mut Scene,
+    opt: &horadric_core::folio::QuestionOption,
+    multi: bool,
+    on: bool,
+    y: f32,
+    inner: f32,
+) -> Rect {
+    let (label, rec) = look::recommended(&opt.label);
+    let badge = "Recommended";
+    let badge_w = match rec {
+        true => cx
+            .one_line(&cx.gfx.small, badge)
+            .map_or(90.0, |l| render::text_size(&l).0 + 16.0),
+        false => 0.0,
+    };
+    let x = PAD + 36.0;
+    let text_w = inner - 48.0;
+    let label_w = if rec { text_w - badge_w - 8.0 } else { text_w };
+    let label_l = cx.layout(&cx.gfx.text, label, label_w);
+    let desc_l = (!opt.description.is_empty())
+        .then(|| cx.layout(&cx.fonts.small_wrap, &opt.description, text_w))
+        .flatten();
+    let preview_l = (!opt.preview.is_empty())
+        .then(|| cx.layout(&cx.fonts.rows, &opt.preview, text_w - 16.0))
+        .flatten();
+    let lh = label_l.as_ref().map_or(18.0, |l| render::text_size(l).1);
+    let dh = desc_l
+        .as_ref()
+        .map_or(0.0, |l| render::text_size(l).1 + 3.0);
+    let ph = preview_l
+        .as_ref()
+        .map_or(0.0, |l| render::text_size(l).1.min(PREVIEW_MAX_H) + 22.0);
+    let r = Rect::new(PAD, y, inner, lh + dh + ph + 20.0);
+    if on {
+        s.fill(r, 8.0, cx.pal.accent.with_alpha(0.14));
+        s.stroke(r, 8.0, cx.pal.accent.with_alpha(0.65), 1.0);
+    } else {
+        s.fill(r, 8.0, cx.pal.fg.with_alpha(0.025));
+        s.stroke(r, 8.0, cx.pal.fg.with_alpha(0.12), 1.0);
+    }
+    let icon = match (multi, on) {
+        (true, true) => "\u{E73A}",
+        (true, false) => "\u{E739}",
+        (false, true) => "\u{ECCB}",
+        (false, false) => "\u{ECCA}",
+    };
+    let icon_ink = if on {
+        cx.pal.accent.mix(cx.pal.fg, 0.3)
+    } else {
+        cx.pal.faint
+    };
+    let first = label_l
+        .as_ref()
+        .and_then(|l| super::rich::first_line(l))
+        .unwrap_or(20.0);
+    s.line(
+        icon,
+        F::Icon,
+        Rect::new(PAD + 12.0, y + 10.0, 16.0, first),
+        icon_ink,
+    );
+    if let Some(l) = &label_l {
+        s.unit(l, x, y + 10.0, cx.pal.fg, label);
+    }
+    if rec {
+        let top = y + 10.0 + (first - 20.0) / 2.0;
+        let (ink, fill) = (
+            theme::done().mix(cx.pal.fg, 0.35),
+            theme::done().with_alpha(0.14),
+        );
+        chip(cx, s, r.right() - 12.0 - badge_w, top, badge, ink, fill);
+    }
+    let mut at = y + 10.0 + lh + 3.0;
+    if let Some(l) = &desc_l {
+        s.unit(l, x, at, cx.pal.dim, &opt.description);
+        at += render::text_size(l).1;
+    }
+    if let Some(l) = &preview_l {
+        let shown = render::text_size(l).1.min(PREVIEW_MAX_H);
+        let pr = Rect::new(x, at + 8.0, text_w, shown + 12.0);
+        s.fill(pr, 6.0, Color::rgb(0).with_alpha(0.25));
+        s.items.push(super::rich::Item::Clip(pr));
+        s.unit(
+            l,
+            x + 8.0,
+            pr.y + 6.0,
+            cx.pal.fg.with_alpha(0.85),
+            &opt.preview,
+        );
+        s.items.push(super::rich::Item::Unclip);
+    }
+    r
+}
+
+/// The mark before a settled ask's outcome: a tick for yes, a cross for
+/// no, a dash for one that lapsed or was answered elsewhere.
+fn settled_mark(cx: &Ctx, state: AskState) -> (&'static str, Color) {
+    match state {
+        AskState::Allowed => ("\u{E73E}", theme::done()),
+        AskState::Denied => ("\u{E711}", cx.pal.faint),
+        _ => ("\u{E738}", cx.pal.faint),
+    }
+}
+
+/// How an ask ended, with a mark before it: what was chosen, or that it
+/// was denied or lapsed. Returns the bottom.
+#[allow(clippy::too_many_arguments)]
+unsafe fn outcome(
+    cx: &Ctx,
+    s: &mut Scene,
+    icon: &str,
+    icon_ink: Color,
+    said: &str,
+    ink: Color,
+    y: f32,
+    inner: f32,
+) -> f32 {
+    let Some(l) = cx.layout(&cx.fonts.body, said, inner - 22.0) else {
+        return y;
+    };
+    let first = super::rich::first_line(&l).unwrap_or(20.0);
+    s.line(icon, F::Icon, Rect::new(PAD, y, 16.0, first), icon_ink);
+    s.unit(&l, PAD + 22.0, y, ink, said);
+    y + render::text_size(&l).1 + 4.0
+}
+
 /// What a question card counts as answered: per question, the labels
 /// picked, or the human's own words when typed.
 pub(super) fn picks_of(b: &Block, st: &State) -> Vec<Vec<String>> {
@@ -415,6 +609,7 @@ pub(super) fn picks_of(b: &Block, st: &State) -> Vec<Vec<String>> {
 /// A question card: each question with its options as buttons (boxes to
 /// tick when several may be picked), a field for an answer of one's own,
 /// and Submit. A single question with one pick answers on the click.
+/// Once settled each question shrinks to the line that answered it.
 pub(super) unsafe fn question(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
     let mut s = Scene::default();
     let Block::Question {
@@ -429,96 +624,61 @@ pub(super) unsafe fn question(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene 
     };
     let inner = w - 2.0 * PAD;
     let waiting = *state == AskState::Waiting;
-    let title = if questions.len() == 1 {
-        "A question"
-    } else {
-        "A few questions"
-    };
-    s.line(title, F::Title, Rect::new(PAD, PAD, inner, 20.0), cx.pal.fg);
-    let mut y = PAD + 28.0;
+    let total = questions.len();
     let picked = st.picks.get(request_id);
+    let mut y = PAD;
     for (q, question) in questions.iter().enumerate() {
-        if !question.header.is_empty() {
-            s.line(
-                question.header.to_uppercase(),
-                F::Small,
-                Rect::new(PAD, y, inner, 16.0),
-                cx.pal.accent.mix(cx.pal.fg, 0.5),
+        if q > 0 {
+            // Several questions read as steps of one ask, each its own
+            // section, rather than one long list of options.
+            let gap = if waiting { 18.0 } else { 10.0 };
+            y += gap - 8.0;
+            s.fill(
+                Rect::new(PAD, y, inner, 1.0),
+                0.0,
+                cx.pal.fg.with_alpha(0.08),
             );
-            y += 18.0;
+            y += gap;
         }
-        if let Some(l) = cx.layout(&cx.fonts.body, &question.question, inner) {
-            s.unit(&l, PAD, y, cx.pal.fg, &question.question);
-            y += render::text_size(&l).1 + 8.0;
-        }
+        y = heading(cx, &mut s, question, q, total, waiting, y, inner);
         if !waiting {
             let said = answers.get(q).map_or("", String::as_str);
-            let said = if said.is_empty() { "No answer" } else { said };
-            if let Some(l) = cx.layout(&cx.fonts.body, said, inner - 22.0) {
-                s.line(
-                    "\u{E73E}",
-                    F::Icon,
-                    Rect::new(PAD, y, 16.0, super::rich::first_line(&l).unwrap_or(20.0)),
-                    theme::done(),
-                );
-                s.unit(&l, PAD + 22.0, y, cx.pal.dim, said);
-                y += render::text_size(&l).1 + 12.0;
+            // A lapsed ask says so once below, not "No answer" per question.
+            if said.is_empty() && *state != AskState::Allowed {
+                continue;
             }
+            let (icon, ink, said) = if said.is_empty() {
+                ("\u{E738}", cx.pal.faint, "No answer".to_string())
+            } else {
+                ("\u{E73E}", theme::done(), look::answer_shown(said))
+            };
+            y = outcome(cx, &mut s, icon, ink, &said, cx.pal.fg, y, inner) + 4.0;
             continue;
         }
+        let picks = picked.and_then(|p| p.get(q));
         for (o, opt) in question.options.iter().enumerate() {
-            let on = picked
-                .and_then(|p| p.get(q))
-                .is_some_and(|p| p.contains(&o));
-            let text_w = inner - 44.0;
-            let label_l = cx.layout(&cx.gfx.text, &opt.label, text_w);
-            let desc_l = (!opt.description.is_empty())
-                .then(|| cx.layout(&cx.fonts.small_wrap, &opt.description, text_w))
-                .flatten();
-            let lh = label_l.as_ref().map_or(18.0, |l| render::text_size(l).1);
-            let dh = desc_l
-                .as_ref()
-                .map_or(0.0, |l| render::text_size(l).1 + 2.0);
-            let r = Rect::new(PAD, y, inner, lh + dh + 16.0);
-            if on {
-                s.fill(r, 8.0, cx.pal.accent.with_alpha(0.18));
-                s.stroke(r, 8.0, cx.pal.accent.with_alpha(0.7), 1.0);
-            } else {
-                s.stroke(r, 8.0, cx.pal.fg.with_alpha(0.16), 1.0);
-            }
-            let icon = match (question.multi_select, on) {
-                (true, true) => "\u{E73A}",
-                (true, false) => "\u{E739}",
-                (false, true) => "\u{ECCB}",
-                (false, false) => "\u{ECCA}",
-            };
-            s.line(
-                icon,
-                F::Icon,
-                Rect::new(r.x + 10.0, y + 8.0, 16.0, lh),
-                cx.pal.dim,
-            );
-            if let Some(l) = &label_l {
-                s.unit(l, r.x + 34.0, y + 8.0, cx.pal.fg, &opt.label);
-            }
-            if let Some(l) = &desc_l {
-                s.unit(
-                    l,
-                    r.x + 34.0,
-                    y + 8.0 + lh + 2.0,
-                    cx.pal.dim,
-                    &opt.description,
-                );
-            }
+            let on = picks.is_some_and(|p| p.contains(&o));
+            let r = option(cx, &mut s, opt, question.multi_select, on, y, inner);
             s.hit(r, Hit::Tr(Act::Pick(request_id.clone(), q, o)));
             y = r.bottom() + 6.0;
         }
         let id = other_field(request_id, q);
-        y = field(cx, &mut s, st, &id, "Or say something else", PAD, y, inner) + 14.0;
+        let hint = "Something else? Type your own answer";
+        y = field(cx, &mut s, st, &id, hint, PAD, y, inner) + 14.0;
     }
     if waiting {
-        let ready = picks_of(b, st).iter().all(|p| !p.is_empty());
+        let picks = picks_of(b, st);
+        let ready = picks.iter().all(|p| !p.is_empty());
+        let answered = picks.iter().filter(|p| !p.is_empty()).count();
+        let multi = questions.first().is_some_and(|q| q.multi_select);
+        let say = look::question_progress(answered, total, multi);
         let r = Rect::new(w - PAD - 96.0, y, 96.0, BUTTON_H);
+        s.line(
+            say,
+            F::Small,
+            Rect::new(PAD, y, inner - r.w - 12.0, BUTTON_H),
+            cx.pal.faint,
+        );
         if ready {
             s.fill(r, 8.0, cx.pal.fg.with_alpha(0.92));
             s.line("Submit", F::Button, r, cx.pal.bg);
@@ -529,13 +689,13 @@ pub(super) unsafe fn question(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene 
         }
         y += BUTTON_H;
     } else if *state != AskState::Allowed {
-        s.line(
-            look::ask_said(*state),
-            F::Line,
-            Rect::new(PAD, y, inner, 22.0),
-            cx.pal.dim,
-        );
-        y += 22.0;
+        let (icon, ink) = settled_mark(cx, *state);
+        // A question is not denied, it goes unanswered.
+        let said = match state {
+            AskState::Denied => "Declined",
+            _ => look::ask_said(*state),
+        };
+        y = outcome(cx, &mut s, icon, ink, said, cx.pal.dim, y, inner);
     }
     let h = y + PAD;
     plate(cx, &mut s, w, h, waiting);
@@ -633,34 +793,15 @@ pub(super) unsafe fn plan(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
             );
             y += BUTTON_H;
         }
-        AskState::Allowed => {
-            s.line(
-                "Approved",
-                F::Line,
-                Rect::new(PAD, y, inner, 22.0),
-                cx.pal.dim,
-            );
-            y += 22.0;
-        }
-        AskState::Denied => {
-            let said = if feedback.trim().is_empty() {
-                "Sent back".to_string()
-            } else {
-                format!("Sent back: {}", feedback.trim())
+        settled => {
+            let said = match settled {
+                AskState::Allowed => "Approved".to_string(),
+                AskState::Denied if feedback.trim().is_empty() => "Sent back".to_string(),
+                AskState::Denied => format!("Sent back: {}", feedback.trim()),
+                _ => look::ask_said(*settled).to_string(),
             };
-            if let Some(l) = cx.layout(&cx.fonts.body, &said, inner) {
-                s.unit(&l, PAD, y, cx.pal.dim, &said);
-                y += render::text_size(&l).1;
-            }
-        }
-        AskState::NotNeeded => {
-            s.line(
-                look::ask_said(*state),
-                F::Line,
-                Rect::new(PAD, y, inner, 22.0),
-                cx.pal.dim,
-            );
-            y += 22.0;
+            let (icon, ink) = settled_mark(cx, *settled);
+            y = outcome(cx, &mut s, icon, ink, &said, cx.pal.dim, y, inner);
         }
     }
     let h = y + PAD;

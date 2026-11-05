@@ -281,6 +281,41 @@ pub fn ask_said(state: AskState) -> &'static str {
     }
 }
 
+/// An option's label without the "(Recommended)" Claude marks its pick
+/// with, and whether it had it: the card shows a badge in its place, and
+/// the answer sent back keeps the label whole.
+pub fn recommended(label: &str) -> (&str, bool) {
+    const MARK: &str = "(recommended)";
+    let t = label.trim_end();
+    let cut = t
+        .len()
+        .checked_sub(MARK.len())
+        .filter(|&at| t.is_char_boundary(at) && t[at..].eq_ignore_ascii_case(MARK));
+    match cut {
+        Some(at) if !t[..at].trim().is_empty() => (t[..at].trim_end(), true),
+        _ => (label, false),
+    }
+}
+
+/// An answer as the card shows it once given: each pick without its
+/// "(Recommended)", since the badge is gone by then.
+pub fn answer_shown(said: &str) -> String {
+    said.split(", ")
+        .map(|p| recommended(p).0)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What a question card says beside Submit while it waits: how to answer
+/// one question, or how far along several are.
+pub fn question_progress(answered: usize, total: usize, multi: bool) -> String {
+    match total {
+        0 | 1 if multi => "Pick any that apply".to_string(),
+        0 | 1 => "Pick one, or type your own".to_string(),
+        _ => format!("{answered} of {total} answered"),
+    }
+}
+
 /// The part of `r` inside `to`, or None when none of it is.
 pub fn clip(r: &Rect, to: &Rect) -> Option<Rect> {
     let (x, y) = (r.x.max(to.x), r.y.max(to.y));
@@ -701,5 +736,21 @@ mod tests {
             (a - b).rem_euclid(view.1 + 2.0 * margin(&LAYERS[k]))
         };
         assert!(moved(2) > moved(1) && moved(1) > moved(0));
+    }
+
+    #[test]
+    fn the_recommended_mark_becomes_a_badge() {
+        assert_eq!(recommended("Grid (Recommended)"), ("Grid", true));
+        assert_eq!(recommended("Grid (recommended) "), ("Grid", true));
+        assert_eq!(recommended("Grid"), ("Grid", false));
+        assert_eq!(recommended("(Recommended)"), ("(Recommended)", false));
+        assert_eq!(recommended("Ægir"), ("Ægir", false));
+        assert_eq!(answer_shown("Grid (Recommended), List"), "Grid, List");
+    }
+
+    #[test]
+    fn question_progress_counts_only_when_there_are_several() {
+        assert_eq!(question_progress(0, 1, true), "Pick any that apply");
+        assert_eq!(question_progress(1, 3, false), "1 of 3 answered");
     }
 }
