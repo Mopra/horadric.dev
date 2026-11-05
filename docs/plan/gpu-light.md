@@ -92,15 +92,17 @@ cluster window, since that is where the human looks most.
 Steps 1 and 2 are built and committed (2026-11-01) but not yet seen.
 Before step 3, the human looks at a dev build with tiles working,
 waiting, finishing and ending, subagents running and a task handed out,
-in all three themes, and says what to keep. Two checks are left from
-step 1:
+in all three themes, and says what to keep. Screenshots of each theme
+were taken for that on 2026-11-06. Two checks are left from step 1:
 
 - Measure: forty tiles, ten of them working, on a release build. The
   UI thread's share of a core with the bloom must stay within one point
-  of without it. Write the numbers into the lore.
-- Check a screenshot (`CopyFromScreen`) and a remote desktop session
-  once: the float layer should capture, and the software fallback
-  should draw the emitters sharp.
+  of without it. Measured on 2026-11-06 it did not hold in the first
+  minute: about 9 % of a core with the bloom against 5 % without (the
+  lore has every sample). Find what the bloom costs the UI thread there.
+- Check a remote desktop session once: the software fallback should
+  draw the emitters sharp. A screenshot (`CopyFromScreen`) captures the
+  float layer.
 
 Step 3 wants the still layer to keep its own `Light` (still light is
 baked in there), and the shadow effect has no helper yet.
