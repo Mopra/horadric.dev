@@ -252,6 +252,12 @@ pub fn newer(key: &str, tab: u64) {
     }
 }
 
+/// The tab followed a link to another file, so the version it showed is
+/// of a file it no longer shows.
+pub(super) fn tab_moved(key: &str, tab: u64) {
+    VIEWING.with(|v| v.borrow_mut().retain(|v| !(v.key == key && v.tab == tab)));
+}
+
 /// Back to the file as it is, out of the history.
 pub fn live(key: &str, tab: u64) {
     VIEWING.with(|v| v.borrow_mut().retain(|v| !(v.key == key && v.tab == tab)));
