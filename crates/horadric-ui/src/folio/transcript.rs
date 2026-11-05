@@ -238,6 +238,9 @@ struct Built {
     /// A reply's paragraphs, each with its scene, so a streaming reply
     /// lays out only the paragraph that changed.
     paras: Vec<(flow::Para, Scene)>,
+    /// The code blocks open when it was built: its paragraphs are not
+    /// kept once that changes, a code block's fold being in its scene.
+    code_open: u64,
 }
 
 /// Decoded thumbnails by block and image, None where one would not decode.
@@ -365,6 +368,9 @@ fn stamp(i: usize, b: &Block, open: bool, st: &State) -> u64 {
         // These only grow while they stream, and a reply settled after
         // an interrupt is a different length.
         Block::Prompt(t) | Block::Reply(t) | Block::Thinking(t) | Block::Raw(t) => {
+            if matches!(b, Block::Reply(_)) {
+                super::code::open_print(&st.all).hash(&mut h);
+            }
             t.len().hash(&mut h);
             let mut end = t.len().saturating_sub(64);
             while !t.is_char_boundary(end) {
@@ -1668,6 +1674,8 @@ impl View {
         for b in &mut blocks[..from] {
             *b = None;
         }
+        super::code::set_open(&st.all);
+        let code_open = super::code::open_print(&st.all);
         for (i, b) in folio.blocks.iter().enumerate().skip(from) {
             // Verbose opens every block but a turn's map.
             let every = st.verbose && !matches!(b, Block::Footer { .. });
@@ -1676,7 +1684,10 @@ impl View {
             if blocks[i].as_ref().is_some_and(|x| x.stamp == stamp) {
                 continue;
             }
-            let old = blocks[i].take().map(|b| b.paras).unwrap_or_default();
+            let old = (blocks[i].take())
+                .filter(|b| b.code_open == code_open)
+                .map(|b| b.paras)
+                .unwrap_or_default();
             let mut paras = Vec::new();
             let scene = match b {
                 Block::Prompt(t) => ctx.prompt(i, t, lw),
@@ -1705,6 +1716,7 @@ impl View {
                 stamp,
                 scene,
                 paras,
+                code_open,
             });
         }
 
