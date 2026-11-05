@@ -56,12 +56,11 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Memory](plan/memory.md): built; left: arming the daily distill.
 - [The Brotherhood](plan/the-brotherhood.md): built, the Mac too; left: the Mac's keeper, taking over and leaving.
 - [Vault](plan/vault.md): each project's identity, its gh, git, npm and Vercel logins and the tokens its quests use without reading them, so no session switches another's account.
-- [Signals](plan/signals.md): built; left: a look on screen, and the Mac's cost lines and progress.
+- [Signals](plan/signals.md): built and seen on screen; left: the Mac's cost lines and progress.
 - [Dictation](plan/dictation.md): built, with a global chord; left: a bigger model, Danish, a plate outside Horadric, and the Mac's key and draft.
 - [Towns](plan/towns.md): several Tristrams, work and private, each with its own Claude login and browser profile. Agreed 2026-11-05, reopening `CLAUDE_CONFIG_DIR` for towns only.
 - [The Forge](plan/the-forge.md): files worked on with Claude beside the session (decks, artefacts, markdown, images), pinned, edited by hand, versioned and exported. Proposed.
-- [The hirelings](plan/hirelings.md): built; left: an on-screen check.
-- [GPU light](plan/gpu-light.md): every glow, shadow and spark drawn with real bloom, the shadow effect and particles instead of stacked shapes, window by window, then the Mac. Steps 1 and 2 are built; step 3 waits on the human's look.
+- [GPU light](plan/gpu-light.md): every glow, shadow and spark drawn with real bloom, the shadow effect and particles instead of stacked shapes, window by window, then the Mac. Steps 1 and 2 are built; step 3 waits on the human's look at the screenshots, and the bloom costs about 4 points of the UI thread in a tile's first minute of work (limit: 1).
 
 ## Reference
 
