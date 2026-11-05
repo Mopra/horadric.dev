@@ -41,6 +41,8 @@ pub fn on_message(key: &str, tab: u64, msg: &Value) {
                 text.chars().take(300).collect::<String>()
             );
         }
+        // Step 6 of the plan, kept in a module of its own.
+        "edit" | "reorder" | "crop" => super::edit::on_message(key, tab, msg),
         _ => {}
     }
 }

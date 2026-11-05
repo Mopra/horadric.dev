@@ -11,7 +11,9 @@
 //! thread, as the browser does.
 
 pub mod bar;
+mod edit;
 pub mod message;
+pub mod pins;
 mod serve;
 mod settings;
 mod watch;
