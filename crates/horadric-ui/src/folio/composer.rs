@@ -13,6 +13,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use horadric_core::forge::{pin_message, Pin};
 use horadric_core::folio::{
     effort_line, prompt_line, shell_command, typed, Block, ImageData, Priority, Typed,
 };
@@ -70,6 +71,9 @@ pub(super) const STRIP_H: f32 = 22.0;
 /// The round key at the right of the field that sends, or stops Claude.
 const KEY: f32 = 26.0;
 const THUMB: f32 = 52.0;
+/// A Forge pin waiting to go, as a chip above the text.
+const CHIP_H: f32 = 24.0;
+const CHIP_TEXT_MAX: f32 = 220.0;
 const ROW_H: f32 = 26.0;
 const MENU_ROW: f32 = 30.0;
 /// A thumbnail is decoded this big, in pixels, and drawn smaller.
@@ -106,6 +110,8 @@ pub(super) enum Act {
     /// An image waiting to go, opened over the glass.
     Open(usize),
     Unattach(usize),
+    /// A Forge pin's chip, taken back.
+    Unpin(usize),
     Unqueue(usize),
     /// Stops the turn so what waits runs at once, rather than at the
     /// turn's next step or its end.
@@ -191,6 +197,10 @@ pub(super) struct Input {
     /// A menu closed with Esc stays closed for the word it was for.
     quiet: Option<(MenuKind, usize)>,
     images: Vec<Attached>,
+    /// Pins from the Forge, sent with the next message as their text and
+    /// their crops. Not kept with the draft: the runes on the file are
+    /// what lasts.
+    pins: Vec<Pin>,
     queue: Vec<Waiting>,
     notice: Option<String>,
     files: Arc<Mutex<Listing>>,
@@ -241,6 +251,7 @@ impl Input {
             menu: None,
             quiet: None,
             images: Vec::new(),
+            pins: Vec::new(),
             queue: Vec::new(),
             notice: None,
             files: Arc::default(),
@@ -620,7 +631,7 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
         return;
     }
     let text = chat.input.ed.expanded().trim().to_string();
-    if text.is_empty() && chat.input.images.is_empty() {
+    if text.is_empty() && chat.input.images.is_empty() && chat.input.pins.is_empty() {
         return;
     }
     // Whatever the human sends, the session is theirs from now on, and a
@@ -672,12 +683,14 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
         chat.input.history.push(&text);
     }
     let images = std::mem::take(&mut chat.input.images);
+    let pins = std::mem::take(&mut chat.input.pins);
     chat.input.ed.clear();
     chat.input.scroll = 0.0;
     chat.input.menu = None;
     chat.input.notice = None;
     chat.input.save();
-    let data: Vec<ImageData> = images.into_iter().map(|a| a.data).collect();
+    let mut data: Vec<ImageData> = images.into_iter().map(|a| a.data).collect();
+    let text = with_pins(&pins, &chat.dir, text, &mut data);
     if !chat.folio.busy {
         deliver(chat, &text, &data);
     } else {
@@ -687,6 +700,27 @@ pub(super) fn send(chat: &mut Chat, now: bool) {
         let line = chat.folio.queue_prompt(&text, &data, priority);
         write(chat, &line);
         chat.follow = true;
+    }
+}
+
+/// The pins' text ahead of the human's own words, and each crop that
+/// is small enough as an image beside them. The text names the crop's
+/// path too, for one that is not.
+fn with_pins(pins: &[Pin], dir: &Path, text: String, images: &mut Vec<ImageData>) -> String {
+    if pins.is_empty() {
+        return text;
+    }
+    for crop in pins.iter().filter_map(|p| p.crop.as_deref()) {
+        let read = small_enough(crop).then(|| std::fs::read(crop).ok()).flatten();
+        if let Some(data) = read.as_deref().and_then(ImageData::from_bytes) {
+            images.push(data);
+        }
+    }
+    let told = pin_message(pins, dir);
+    if text.is_empty() {
+        told
+    } else {
+        format!("{told}\n{text}")
     }
 }
 
@@ -1653,6 +1687,32 @@ pub fn dictated(key: &str, text: &str) {
     redraw(key);
 }
 
+/// A pin from the Forge, gathered as a chip to go with the next message.
+pub fn pinned(key: &str, pin: Pin) {
+    with(key, |chat| {
+        chat.input.ensure(key);
+        chat.input.pins.push(pin);
+    });
+    redraw(key);
+}
+
+/// What a pin's chip says: the file and the human's words, short.
+fn chip_label(pin: &Pin) -> String {
+    const WORDS: usize = 40;
+    let name = (pin.file.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let words = pin.words.split_whitespace().collect::<Vec<_>>().join(" ");
+    let words = match words.char_indices().nth(WORDS) {
+        Some((i, _)) => format!("{}...", &words[..i]),
+        None => words,
+    };
+    match pin.at.slide {
+        Some(n) => format!("{name}, slide {n}: {words}"),
+        None => format!("{name}: {words}"),
+    }
+}
+
 /// A pick handed from elsewhere on the stage, put in at the caret as one
 /// step, set off by spaces so it never runs into a word.
 pub fn handed(key: &str, text: &str) {
@@ -1981,7 +2041,12 @@ impl View {
         } else {
             THUMB + 10.0
         };
-        let bh = PAD + images_h + view_h + PAD;
+        let pins_h = if chat.input.pins.is_empty() {
+            0.0
+        } else {
+            CHIP_H + 8.0
+        };
+        let bh = PAD + images_h + pins_h + view_h + PAD;
         let r = Rect::new(cx, h - BOTTOM - bh, cw, bh);
         chat.input.top = r.y;
         // A card's field or the find bar may have the keys instead: one
@@ -2019,7 +2084,38 @@ impl View {
             x += THUMB + 8.0;
         }
 
-        let (ox, oy) = (r.x + PAD, r.y + PAD + images_h);
+        // Forge pins waiting to go, each a chip with a cross. Those past
+        // the box's edge are still sent, as a count says.
+        let mut x = r.x + PAD;
+        let chip_y = r.y + PAD + images_h;
+        let edge = r.right() - PAD - keys;
+        let count = chat.input.pins.len();
+        for (i, pin) in chat.input.pins.iter().enumerate() {
+            let label = chip_label(pin);
+            let tw = width_of(gpu, &gfx.small, &label).min(CHIP_TEXT_MAX);
+            let chip = Rect::new(x, chip_y, 10.0 + tw + 6.0 + 16.0 + 4.0, CHIP_H);
+            if i > 0 && chip.right() > edge {
+                let more = format!("and {} more", count - i);
+                let mw = width_of(gpu, &gfx.small, &more);
+                let at = Rect::new(x, chip_y, mw + 2.0, CHIP_H);
+                gfx.text_in(&more, &gfx.small, &at, pal.faint);
+                break;
+            }
+            gfx.fill_round(&chip, CHIP_H / 2.0, pal.fg.with_alpha(0.08));
+            let words = Rect::new(chip.x + 10.0, chip.y, tw + 2.0, CHIP_H);
+            gfx.text_in(&label, &gfx.small, &words, pal.fg.fade(0.85));
+            let close = Rect::new(chip.right() - 20.0, chip.y + (CHIP_H - 16.0) / 2.0, 16.0, 16.0);
+            let hot = chat.input.hover == Some(Act::Unpin(i));
+            if hot {
+                gfx.fill_round(&close, 8.0, pal.bg.with_alpha(0.95));
+            }
+            let ink = pal.fg.fade(if hot { 1.0 } else { 0.6 });
+            gfx.text_in("\u{E711}", &gfx.icon, &close, ink);
+            hits.push((close, Hit::Input(Act::Unpin(i))));
+            x = chip.right() + 6.0;
+        }
+
+        let (ox, oy) = (r.x + PAD, r.y + PAD + images_h + pins_h);
         let text_box = Rect::new(ox, oy, inner_w, view_h);
         if empty {
             let guess = (chat.folio.suggestion.as_deref())
@@ -2141,7 +2237,8 @@ impl View {
         let b = Rect::new(r.right() - WELL_INSET - margin - KEY, y, KEY, KEY);
         let busy = chat.folio.busy;
         let act = if busy { Act::Stop } else { Act::Send };
-        let ready = busy || !empty || !chat.input.images.is_empty();
+        let ready =
+            busy || !empty || !chat.input.images.is_empty() || !chat.input.pins.is_empty();
         let lit = ready && chat.input.hover == Some(act);
         round_key(gfx, &b, lit);
         let ink = match (ready, lit) {
@@ -2576,6 +2673,7 @@ impl View {
         }
         // Opened outside the borrow, which the lightbox takes again.
         let mut open = None;
+        let mut unpinned = None;
         with(&key, |chat| {
             if !matches!(act, Act::Pick(_) | Act::Settings | Act::Text) {
                 chat.input.menu = None;
@@ -2612,6 +2710,11 @@ impl View {
                         chat.input.images.remove(i);
                     }
                 }
+                Act::Unpin(i) => {
+                    if i < chat.input.pins.len() {
+                        unpinned = Some(chat.input.pins.remove(i));
+                    }
+                }
                 Act::SendNow => send_now(chat),
                 Act::Unqueue(i) => {
                     if i < chat.input.queue.len() {
@@ -2629,6 +2732,10 @@ impl View {
         });
         if let Some(base64) = open {
             super::lightbox::open(&key, &base64);
+        }
+        // Its rune on the file goes with it.
+        if let Some(pin) = unpinned {
+            crate::forge::pins::unpin(&pin);
         }
         if select {
             if let Some(at) = self.composer_at(x, y) {

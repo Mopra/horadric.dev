@@ -2147,6 +2147,12 @@ fn read(get: impl FnOnce(*mut PWSTR) -> windows::core::Result<()>) -> String {
     s
 }
 
+/// Has the pane showing the project's browser draw its bar again, for
+/// state kept outside the browser (the Forge's pin mode).
+pub fn redraw(key: &str) {
+    changed(key, None, |_| {});
+}
+
 /// Changes the tab `id`, or nothing but the browser with None, and has
 /// the pane showing it draw it again.
 fn changed(key: &str, id: Option<u64>, set: impl FnOnce(&mut Tab)) {

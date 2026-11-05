@@ -147,6 +147,9 @@ pub(crate) use crate::quests::{SessionSpec, Workplace};
 #[path = "drive.rs"]
 mod drive;
 
+#[path = "forge_tools.rs"]
+mod forge_tools;
+
 #[path = "chronicler.rs"]
 mod chronicler;
 
@@ -2203,6 +2206,25 @@ fn stage_agents(key: Option<&str>) -> Vec<(String, String)> {
             .as_ref()
             .filter(|s| key.is_none_or(|k| s.project() == k))
             .map(|s| s.agents())
+    })
+    .flatten()
+    .unwrap_or_default()
+}
+
+/// The agents on the stage while it shows the project `key`, as (id,
+/// name, its Folio's key when it is one), the one that last had the
+/// keyboard first; and whether one ever had it, so that first one is
+/// known rather than just first. Nothing while the app is busy.
+pub(crate) fn forge_agents(key: &str) -> (Vec<(String, String, Option<String>)>, bool) {
+    with_app(|app| {
+        let stage = app.stage.as_ref().filter(|s| s.project() == key)?;
+        let agents = (stage.agents().into_iter())
+            .map(|(id, name)| {
+                let folio = stage.console_of(&id).and_then(|(c, _)| c.folio.clone());
+                (id, name, folio)
+            })
+            .collect();
+        Some((agents, stage.active().is_some()))
     })
     .flatten()
     .unwrap_or_default()

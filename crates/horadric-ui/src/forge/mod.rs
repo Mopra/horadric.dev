@@ -357,6 +357,7 @@ pub fn heard(registry: &Mutex<Registry>, id: &str, event: &HookEvent) {
             .then(|| crate::project::project_key(s))
     });
     let Some(key) = key else { return };
+    pins::wrote(&key, &file, id);
     if let Ok(mut w) = WRITTEN.lock() {
         w.push((key, file));
     }
@@ -373,6 +374,7 @@ pub fn take_written() -> Vec<(String, PathBuf)> {
     let mut out: Vec<(String, PathBuf)> = Vec::new();
     for (key, file) in all {
         if !out.iter().any(|(k, f)| *k == key && same(f, &file)) {
+            pins::written(&key, &file);
             out.push((key, file));
         }
     }
