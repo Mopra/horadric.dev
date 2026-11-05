@@ -53,7 +53,6 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 
 - [One portal](plan/one-portal.md): a phone paired once sees every brother and every session. Built; left: the test with three machines, and pairing a phone by signing in (being built).
 - [macOS](plan/macos.md): for others who want it, the human uses no Mac, so lowest priority. The Folio, browser pane, quests, files, usage, Discord and Settings are built, unverified on a real Mac; left: the rest of each, and switching accounts.
-- [Lore](plan/lore.md): watch quest compaction run for real.
 - [Memory](plan/memory.md): built; left: arming the daily distill.
 - [The Brotherhood](plan/the-brotherhood.md): built, the Mac too; left: the Mac's keeper, taking over and leaving.
 - [Vault](plan/vault.md): each project's identity, its gh, git, npm and Vercel logins and the tokens its quests use without reading them, so no session switches another's account.
