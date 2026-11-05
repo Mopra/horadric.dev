@@ -64,7 +64,6 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Signals](plan/signals.md): built; left: a look on screen, the Mac's cost lines and progress, and traces.
 - [Small local models](plan/local-models.md): static embeddings as memory's first pass, and a small model for the sentence per session.
 - [Dictation](plan/dictation.md): built, with a global chord; left: a bigger model, Danish, a plate outside Horadric, and the Mac's key and draft.
-- [Ghostty's terminal core](plan/ghostty.md): move the grid from `alacritty_terminal` to libghostty, after a trial.
 - [Towns](plan/towns.md): several Tristrams, work and private, each with its own Claude login and browser profile. Agreed 2026-11-05, reopening `CLAUDE_CONFIG_DIR` for towns only.
 - [The Forge](plan/the-forge.md): files worked on with Claude beside the session (decks, artefacts, markdown, images), pinned, edited by hand, versioned and exported. Proposed.
 - [The hirelings](plan/hirelings.md): built; left: an on-screen check, and open questions (typing to one, agent teams, nesting).
