@@ -25,6 +25,7 @@ mod edits;
 mod launch;
 mod map;
 mod mcp;
+mod results;
 mod send;
 mod session;
 mod shell;
@@ -36,6 +37,7 @@ pub use edits::*;
 pub use launch::*;
 pub use map::*;
 pub use mcp::*;
+pub use results::*;
 pub use send::*;
 pub use session::*;
 pub use shell::*;
@@ -61,9 +63,11 @@ pub struct Step {
     pub edit: Option<FileEdit>,
     /// What the subagent an Agent (or Task) step started did.
     pub lane: Option<Lane>,
-    /// The end of its result's text, at most [`OUTPUT_TAIL`] bytes: a
-    /// shell command's last lines, an error.
+    /// The end of its result's text, cleaned (see [`clean_text`]), at most
+    /// [`OUTPUT_TAIL`] bytes: a shell command's last lines, an error.
     pub output: String,
+    /// Its result whole and read into parts, once it came.
+    pub result: Option<ToolResult>,
     /// Images its result carried, such as a screenshot a tool took.
     pub images: Vec<PromptImage>,
     /// When it started and when its result came, in Unix milliseconds:
@@ -623,6 +627,7 @@ fn new_step(id: &str, tool: &str, input: &Value, began: Option<u64>) -> Step {
             ..Lane::default()
         }),
         output: String::new(),
+        result: None,
         images: Vec::new(),
         began,
         ended: None,
@@ -2128,7 +2133,9 @@ impl Folio {
                 continue;
             };
             step.state = state;
-            step.output = tail(&text, OUTPUT_TAIL);
+            let result = read_result(&step.tool, &step.input, &text, failed, detail);
+            step.output = tail(&result.text, OUTPUT_TAIL);
+            step.result = Some(result);
             step.images = result_images(&block["content"]);
             step.ended = clock;
             if let Some(edit) = step.edit.as_mut() {

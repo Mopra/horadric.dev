@@ -15,7 +15,8 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1BitmapRenderTarget, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1RenderTarget,
     ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_CAP_STYLE_ROUND,
-    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_SOLID,
+    D2D1_DRAW_TEXT_OPTIONS, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
     D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
     D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
@@ -73,6 +74,9 @@ const BLINK: usize = 2;
 pub(super) const SETTLE: usize = 3;
 /// The caret in every field that can hold the keys.
 pub(super) const CARET_W: f32 = 1.5;
+/// Emoji in a reply or a prompt draw in their own colours, not as flat
+/// outlines in the ink's.
+pub(super) const TEXT_OPTIONS: D2D1_DRAW_TEXT_OPTIONS = D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT;
 /// Between frames while the background moves. It drifts slowly, so this is
 /// smooth enough and costs a third of the display's rate.
 const FRAME_MS: u32 = 40;
@@ -713,7 +717,7 @@ impl Gfx {
             f,
             &d2d(r),
             &self.brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            TEXT_OPTIONS,
             Default::default(),
         );
     }
@@ -724,7 +728,7 @@ impl Gfx {
             Vector2 { X: x, Y: y },
             l,
             &self.brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            TEXT_OPTIONS,
         );
     }
 
