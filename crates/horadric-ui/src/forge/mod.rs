@@ -15,8 +15,10 @@ mod edit;
 mod export;
 mod history;
 pub mod message;
+mod office;
 pub mod pins;
 mod present;
+mod runtime;
 mod serve;
 mod settings;
 pub mod tools;
@@ -88,12 +90,23 @@ fn wake() {
     }
 }
 
-/// Whether the Forge shows files of this kind yet. The rest come with
-/// later steps of the plan.
+/// Whether the Forge shows files of this kind. Every kind it knows now:
+/// artefacts and diagrams through the bundled runtime, Office files by
+/// conversion.
 pub fn shows(kind: Kind) -> bool {
     matches!(
         kind,
-        Kind::Markdown | Kind::Html | Kind::Deck | Kind::Image | Kind::Svg | Kind::Pdf | Kind::Csv
+        Kind::Markdown
+            | Kind::Html
+            | Kind::Deck
+            | Kind::Image
+            | Kind::Svg
+            | Kind::Pdf
+            | Kind::Csv
+            | Kind::Jsx
+            | Kind::Mermaid
+            | Kind::Pptx
+            | Kind::Docx
     )
 }
 
@@ -351,8 +364,8 @@ pub fn drain() {
 /// Off the feeder thread: a session wrote a file the Forge shows. It is
 /// queued for [`take_written`] and the UI thread woken.
 pub fn heard(registry: &Mutex<Registry>, id: &str, event: &HookEvent) {
-    edit::hooked(event);
     history::heard_tool(event);
+    edit::hooked(event);
     if event.hook_event_name != "PostToolUse" {
         return;
     }

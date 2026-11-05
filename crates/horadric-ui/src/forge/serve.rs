@@ -4,7 +4,11 @@
 //!
 //! Each folder gets a host of its own, `<name>-<hash>.forge.horadric`, so
 //! two projects' `index.html` never share a cache entry or storage.
+//!
+//! Paths under `/__forge/` on every host are the Forge's own, not the
+//! folder's: the artefact runtime and converted Office files.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use horadric_core::forge::Kind;
@@ -163,7 +167,8 @@ pub fn is_subresource(file: &Path) -> bool {
 /// only on the tab's own host, so a link followed out to the web carries
 /// none of it.
 fn script(kind: Option<Kind>) -> String {
-    let deck = matches!(kind, Some(Kind::Html | Kind::Deck));
+    // A converted .pptx is served as a deck of slide pictures.
+    let deck = matches!(kind, Some(Kind::Html | Kind::Deck | Kind::Pptx));
     let assets = serde_json::json!({
         "forgeCss": FORGE_CSS,
         "deckCss": if deck { DECK_CSS } else { "" },
@@ -197,13 +202,16 @@ pub fn prepare(key: &str, id: u64, view: &ICoreWebView2, root: &Path, host: &str
             }
             Err(e) => eprintln!("horadric: this WebView2 cannot serve files: {e}"),
         }
-        for ext in ["md", "markdown", "csv"] {
-            for pattern in [format!("https://{host}/*.{ext}"), format!("https://{host}/*.{ext}?*")] {
-                let _ = view.AddWebResourceRequestedFilter(
-                    &HSTRING::from(pattern),
-                    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
-                );
-            }
+        let mut patterns = vec![format!("https://{host}{RESERVED}*")];
+        for ext in RENDERED {
+            patterns.push(format!("https://{host}/*.{ext}"));
+            patterns.push(format!("https://{host}/*.{ext}?*"));
+        }
+        for pattern in patterns {
+            let _ = view.AddWebResourceRequestedFilter(
+                &HSTRING::from(pattern),
+                COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+            );
         }
         let served = root.to_path_buf();
         let rendered = WebResourceRequestedEventHandler::create(Box::new(move |view, args| {
@@ -233,49 +241,147 @@ pub fn prepare(key: &str, id: u64, view: &ICoreWebView2, root: &Path, host: &str
     }
 }
 
-/// Answers a request for a markdown or CSV file in `root` with the page
-/// rendered from it. Left alone, a request would get the raw text.
+/// The path prefix of the Forge's own files on every host.
+const RESERVED: &str = "/__forge/";
+
+/// The extensions answered by [`answer`] rather than read from the folder
+/// as they are.
+const RENDERED: [&str; 9] = [
+    "md", "markdown", "csv", "jsx", "tsx", "mmd", "mermaid", "pptx", "docx",
+];
+
+/// What a request is answered with.
+pub struct Reply {
+    pub status: u16,
+    pub body: Cow<'static, [u8]>,
+    pub content_type: &'static str,
+    /// Kept a year: only for what never changes at its address.
+    pub cache: bool,
+}
+
+impl Reply {
+    pub fn ok(body: Cow<'static, [u8]>, content_type: &'static str) -> Reply {
+        Reply {
+            status: 200,
+            body,
+            content_type,
+            cache: false,
+        }
+    }
+
+    pub fn html(page: String) -> Reply {
+        Reply::ok(page.into_bytes().into(), "text/html; charset=utf-8")
+    }
+
+    pub fn status(mut self, status: u16) -> Reply {
+        self.status = status;
+        self
+    }
+
+    pub fn cached(mut self) -> Reply {
+        self.cache = true;
+        self
+    }
+
+    fn headers(&self) -> String {
+        let cache = if self.cache {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-store"
+        };
+        format!("Content-Type: {}\r\nCache-Control: {cache}", self.content_type)
+    }
+}
+
+/// The path and query of an address, the path still percent encoded.
+fn path_query(url: &str) -> (&str, &str) {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let rest = rest.find('/').map_or("/", |at| &rest[at..]);
+    let rest = rest.split('#').next().unwrap_or_default();
+    rest.split_once('?').unwrap_or((rest, ""))
+}
+
+/// The answer to `url` on the host serving `root`, None to let the folder
+/// answer as it would.
+pub fn answer(root: &Path, url: &str) -> Option<Reply> {
+    let (path, query) = path_query(url);
+    if let Some(rest) = path.strip_prefix(RESERVED) {
+        let found = if let Some(r) = rest.strip_prefix("runtime/") {
+            super::runtime::asset(r)
+        } else if let Some(r) = rest.strip_prefix("office/") {
+            super::office::asset(r)
+        } else {
+            None
+        };
+        return Some(found.unwrap_or_else(|| {
+            Reply::html("<!doctype html><title>Not found</title>".into()).status(404)
+        }));
+    }
+    let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    // Other files are the folder's, and an HTML file would be read here
+    // only to learn whether it is a deck.
+    if !ext.is_some_and(|e| RENDERED.contains(&e.as_str())) {
+        return None;
+    }
+    let file = file_in(root, url)?;
+    let title = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let kind = horadric_core::forge::kind_of(&file)?;
+    if matches!(kind, Kind::Pptx | Kind::Docx) {
+        return Some(super::office::page(root, &file));
+    }
+    let bytes = match std::fs::read(&file) {
+        Ok(b) => b,
+        Err(e) => {
+            let page = format!(
+                "<!doctype html><title>{t}</title><p>{t} cannot be read: {e}</p>",
+                t = super::runtime::attr(&title)
+            );
+            return Some(Reply::html(page).status(404));
+        }
+    };
+    let src = String::from_utf8_lossy(&bytes);
+    Some(match kind {
+        Kind::Markdown => Reply::html(super::runtime::with_mermaid(
+            horadric_core::forge::markdown_html(&src, &title),
+        )),
+        Kind::Csv => Reply::html(horadric_core::forge::csv_html(&src, &title)),
+        // The artefact page fetches its source with ?raw. Answered here too
+        // rather than left to the folder, so nothing rests on how a filtered
+        // request with no response set falls through.
+        Kind::Jsx | Kind::Mermaid if query.split('&').any(|q| q == "raw") => {
+            Reply::ok(bytes.into(), "text/plain; charset=utf-8")
+        }
+        Kind::Jsx | Kind::Mermaid => Reply::html(super::runtime::artefact_page(path)),
+        _ => return None,
+    })
+}
+
+/// Answers a request [`answer`] has a reply for. Left alone, a request
+/// gets the file's bytes as they are.
 fn render(view: &ICoreWebView2, args: &ICoreWebView2WebResourceRequestedEventArgs, root: &Path) {
     let Ok(request) = (unsafe { args.Request() }) else {
         return;
     };
     let url = read(|p| unsafe { request.Uri(p) });
-    let Some(file) = file_in(root, &url) else {
+    let Some(reply) = answer(root, &url) else {
         return;
     };
-    let title = file
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let (status, reason, body) = match std::fs::read(&file) {
-        Ok(bytes) => {
-            let src = String::from_utf8_lossy(&bytes);
-            let html = match horadric_core::forge::kind_of(&file) {
-                Some(Kind::Markdown) => horadric_core::forge::markdown_html(&src, &title),
-                Some(Kind::Csv) => horadric_core::forge::csv_html(&src, &title),
-                _ => return,
-            };
-            (200, "OK", html)
-        }
-        Err(e) => (
-            404,
-            "Not Found",
-            format!("<!doctype html><title>{title}</title><p>{title} cannot be read: {e}</p>"),
-        ),
-    };
+    let reason = if reply.status == 200 { "OK" } else { "Not Found" };
     unsafe {
         let Ok(env) = view.cast::<ICoreWebView2_2>().and_then(|v| v.Environment()) else {
             return;
         };
-        let Some(stream) = SHCreateMemStream(Some(body.as_bytes())) else {
+        let Some(stream) = SHCreateMemStream(Some(&reply.body)) else {
             return;
         };
-        let headers = "Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store";
         if let Ok(response) = env.CreateWebResourceResponse(
             &stream,
-            status,
+            i32::from(reply.status),
             &HSTRING::from(reason),
-            &HSTRING::from(headers),
+            &HSTRING::from(reply.headers()),
         ) {
             let _ = args.SetResponse(&response);
         }
@@ -316,6 +422,28 @@ mod tests {
         let (r, f) = parse_url(&url, |h| (h == host).then(|| root.to_path_buf())).unwrap();
         assert_eq!(r, root);
         assert_eq!(f, file);
+    }
+
+    #[test]
+    fn artefacts_get_the_runtime_page_and_their_source_raw() {
+        let dir = std::env::temp_dir().join(format!("forge-serve-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("chart.jsx"), "export default () => <p>hi</p>").unwrap();
+        let host = "x.forge.horadric";
+        let page = answer(&dir, &format!("https://{host}/chart.jsx")).unwrap();
+        assert!(page.content_type.starts_with("text/html"));
+        let page = String::from_utf8_lossy(&page.body).into_owned();
+        assert!(page.contains("content=\"/chart.jsx?raw\""));
+        let raw = answer(&dir, &format!("https://{host}/chart.jsx?raw")).unwrap();
+        assert_eq!(&*raw.body, b"export default () => <p>hi</p>");
+        assert!(!raw.cache);
+        let base = super::super::runtime::base();
+        let js = answer(&dir, &format!("https://{host}{base}runtime.js"));
+        assert!(js.is_some_and(|r| r.cache && r.status == 200));
+        assert_eq!(answer(&dir, &format!("https://{host}/__forge/nope")).unwrap().status, 404);
+        // Anything else is the folder's to serve as it is.
+        assert!(answer(&dir, &format!("https://{host}/page.html")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
