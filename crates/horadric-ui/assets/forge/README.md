@@ -7,8 +7,8 @@ dependencies, nothing fetched from the network. The plan is
 
 | File | Injected into | Does |
 |---|---|---|
-| `forge.js`, `forge.css` | every Forge page | scroll keeping, pins, pin runes, goto, errors |
-| `deck.js`, `deck.css` | HTML decks only (`<section class="slide">`), after `forge.js` | the deck shell: scaling, strip, keys, present, print |
+| `forge.js`, `forge.css` | every Forge page | scroll keeping, pins, pin runes, goto, errors, text edits in place, image crop |
+| `deck.js`, `deck.css` | HTML decks only (`<section class="slide">`), after `forge.js` | the deck shell: scaling, strip, keys, present, print, slides moved, duplicated and deleted |
 | `test/` | nothing | pages to try it all by hand, see the end |
 
 ## Injecting
@@ -169,6 +169,55 @@ does not, and the host should make the window full screen itself. The host
 should handle WebView2's `ContainsFullScreenElementChanged` to make the
 pane's window full screen on the chosen monitor.
 
+### `edit`
+The human changed text in place: a double click made a block editable
+(`contenteditable="plaintext-only"`), Enter or leaving it ends the edit,
+Esc puts it back. Not in pin mode, not while presenting.
+```json
+{ "forge": "edit", "id": 3, "file": "/notes.md", "lines": [9, 12],
+  "old": "Revenue up 12 percent", "new": "Revenue up 14 percent" }
+{ "forge": "edit", "id": 4, "file": "/deck.html", "offsets": [812, 830],
+  "old": "Left box", "new": "Left side" }
+```
+- What is edited: a markdown block as a whole (the top-level `[data-lines]`
+  element; Mermaid, tables, rules and pictures are not), else the nearest
+  box that holds only text and inline elements. A whole slide is not.
+- `old`, `new`: the element's text before and after, from its text nodes
+  with `script`, `style`, `template` and `noscript` left out, unfolded.
+- `lines`: markdown only, the block's `data-lines`.
+- `offsets`: HTML and decks, from the element's `data-forge-at`, which the
+  host writes into the served copy of every HTML page (never the file):
+  the byte range of the element's content in the file. Left out when the
+  element has none (made by script, or a tag the file leaves open).
+
+The host answers with `edit-result`. When the text cannot be put back
+exactly, it answers `pin: true` and the page puts the element back as the
+file has it and sends a `pin` instead, with the words `Change this text
+to: "..."`.
+
+### `reorder` (decks)
+The slide strip changed the slides: dragged to a new place, or a thumb's
+duplicate or delete button (delete asks once more).
+```json
+{ "forge": "reorder", "id": "deck-1", "file": "/deck.html", "count": 5, "order": [2, 1, 3, 4, 5] }
+```
+`order` is the new list of the current slides by number. A permutation
+moves; one number left out deletes that slide; one number twice in a row
+duplicates it (the copy goes right after it). `count` is how many slides
+the page had, so a page older than the file is refused.
+
+### `crop`
+On a PNG, JPEG or WebP shown alone: the Crop button or C, a drag draws the
+part to keep, the turn buttons turn it by 90°, Enter or Save sends.
+```json
+{ "forge": "crop", "id": 5, "file": "/shots/a.png", "box": { "x": 10, "y": 20, "w": 400, "h": 300 },
+  "rotate": 90, "data": "data:image/png;base64,..." }
+```
+`box` is in the image's own pixels, `rotate` clockwise degrees, applied
+after the crop. The page encodes the result itself in the file's format
+(`canvas.toDataURL`, JPEG and WebP at 0.92); the host checks that the bytes
+are that format and writes them.
+
 ## Host to page
 
 ### `restore-scroll`
@@ -233,6 +282,17 @@ letterbox, a click or the keys advance.
 ```
 Either field may be left out. Answered with `deck`.
 
+### `edit-result`
+```json
+{ "forge": "edit-result", "what": "edit", "id": 3, "ok": true }
+{ "forge": "edit-result", "what": "edit", "id": 4, "ok": false, "pin": true }
+{ "forge": "edit-result", "what": "reorder", "id": "deck-1", "ok": false, "why": "..." }
+```
+The answer to `edit`, `reorder` or `crop`, by its `id`. On `ok` the file was
+written (or was already so) and the page loads again as the file changes.
+`pin`: see `edit`. `why`: shown in a small note in the corner; the page
+shows the file as it is.
+
 ## The deck shell
 
 - **Views**: `single` (one slide, fitted and centred, letterboxed) and
@@ -253,8 +313,21 @@ Either field may be left out. Answered with `deck`.
   `PrintToPdf` set `PageWidth` 13.333, `PageHeight` 7.5, all margins 0,
   `ShouldPrintBackgrounds` true, `ShouldPrintHeaderAndFooter` false.
 - `window.__forgeDeck`: `goto(n)`, `next()`, `prev()`, `present(on)`,
-  `setMode("single" | "scroll")`, `setStrip(on)`, `rebuildStrip()`, and
-  `current`, `count`, `mode`, `size`.
+  `setMode("single" | "scroll")`, `setStrip(on)`, `rebuildStrip()`,
+  `moveSlide(n, before)`, `duplicateSlide(n)`, `deleteSlide(n)` (each
+  sends a `reorder`), and `current`, `count`, `mode`, `size`.
+- `window.__forge` also has `note(text, bad)`, `edit(el)` (starts an edit
+  where a double click on `el` would) and `crop()`.
+
+## Writing hand edits (host side)
+
+`src/forge/edit.rs`. The source mapping is in `edit/text.rs` (the text a
+reader sees, each character tied to its source bytes; markdown markup and
+HTML tags are skipped, so formatting outside the changed words stays) and
+`edit/html.rs` (element offsets, the served copy's marks, slides). A file
+is written in one go on a thread of its own, never while a session's
+`Edit` or `Write` to it is between `PreToolUse` and `PostToolUse` (waited
+out, at most 20 s). A page can only change its own file.
 
 ## Trying it
 

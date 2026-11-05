@@ -1,7 +1,9 @@
 // The deck shell: shown around an HTML deck (a <section class="slide"> per
 // slide), never written into the file. Scales slides to the pane, one at a
 // time or as a scrolled list, with keys, a slide strip, a counter and
-// present mode. Injected after forge.js; works without it for testing.
+// present mode, and slides moved, duplicated and deleted from the strip
+// (written back to the deck's source by the host). Injected after
+// forge.js; works without it for testing.
 // The protocol is in README.md beside this file.
 (() => {
   "use strict";
@@ -220,6 +222,7 @@
       num.textContent = String(i + 1);
       thumb.append(clone, num);
       thumb.addEventListener("click", () => show(i + 1, "strip"));
+      thumbEdits(thumb, i);
       strip.appendChild(thumb);
     });
     document.body.appendChild(strip);
@@ -238,6 +241,101 @@
         strip.scrollTop = top - (strip.clientHeight - on.offsetHeight) / 2;
       }
     }
+  }
+
+
+  // --------------------------------------------------------- slide edits
+
+  // Each is sent as the new list of the current slides by number; the host
+  // moves whole <section class="slide"> elements in the source and the
+  // page loads again. Nothing moves here first, so a refusal leaves the
+  // strip true to the file.
+  let editSeq = 0;
+  let dragFrom = -1;
+
+  function sendOrder(order) {
+    if (strip) strip.classList.add("forge-saving");
+    post({ forge: "reorder", id: `deck-${++editSeq}`, file: location.pathname, count: slides.length, order });
+  }
+
+  const asIs = () => slides.map((_, i) => i + 1);
+
+  function moveSlide(from, to) {
+    const order = asIs();
+    const [moved] = order.splice(from, 1);
+    order.splice(to > from ? to - 1 : to, 0, moved);
+    if (order.some((k, i) => k !== i + 1)) sendOrder(order);
+  }
+
+  function duplicateSlide(i) {
+    const order = asIs();
+    order.splice(i + 1, 0, i + 1);
+    sendOrder(order);
+  }
+
+  function deleteSlide(i) {
+    if (slides.length < 2) return;
+    sendOrder(asIs().filter((k) => k !== i + 1));
+  }
+
+  function clearDrop() {
+    if (!strip) return;
+    for (const t of strip.children) t.classList.remove("forge-drop-before", "forge-drop-after");
+  }
+
+  function thumbEdits(thumb, i) {
+    thumb.draggable = true;
+    const below = (e) => {
+      const r = thumb.getBoundingClientRect();
+      return e.clientY > r.top + r.height / 2;
+    };
+    thumb.addEventListener("dragstart", (e) => {
+      dragFrom = i;
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(i + 1));
+      thumb.classList.add("forge-dragging");
+    });
+    thumb.addEventListener("dragend", () => {
+      dragFrom = -1;
+      clearDrop();
+      thumb.classList.remove("forge-dragging");
+    });
+    thumb.addEventListener("dragover", (e) => {
+      if (dragFrom < 0) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      clearDrop();
+      thumb.classList.add(below(e) ? "forge-drop-after" : "forge-drop-before");
+    });
+    thumb.addEventListener("drop", (e) => {
+      if (dragFrom < 0) return;
+      e.preventDefault();
+      const from = dragFrom;
+      dragFrom = -1;
+      clearDrop();
+      moveSlide(from, below(e) ? i + 1 : i);
+    });
+
+    const tools = document.createElement("span");
+    tools.className = "forge-thumb-tools";
+    const tool = (label, title, fn) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.title = title;
+      b.draggable = false;
+      b.addEventListener("click", (e) => { e.stopPropagation(); fn(b); });
+      tools.appendChild(b);
+    };
+    tool("⧉", "Duplicate slide", () => duplicateSlide(i));
+    // Two clicks to delete: the first only asks.
+    tool("×", "Delete slide", (b) => {
+      if (b.classList.contains("forge-sure")) { deleteSlide(i); return; }
+      b.classList.add("forge-sure");
+      b.textContent = "Delete?";
+      setTimeout(() => { b.classList.remove("forge-sure"); b.textContent = "×"; }, 2500);
+    });
+    thumb.appendChild(tools);
   }
 
   // ------------------------------------------------------------------ UI
@@ -411,7 +509,13 @@
       announce();
       return true;
     };
+    // The host's answer to a slide edit; forge.js says saved or why not.
+    const onEdited = (m) => {
+      if (m.what === "reorder" && strip) strip.classList.remove("forge-saving");
+      return false;
+    };
     if (window.__forge) {
+      window.__forge.on("edit-result", onEdited);
       window.__forge.on("goto", onGoto);
       window.__forge.on("present", onPresent);
       window.__forge.on("deck-view", onView);
@@ -438,6 +542,9 @@
       get mode() { return mode; },
       get size() { return { ...size }; },
       rebuildStrip: buildStrip,
+      moveSlide: (n, before) => moveSlide(n - 1, before - 1),
+      duplicateSlide: (n) => duplicateSlide(n - 1),
+      deleteSlide: (n) => deleteSlide(n - 1),
     });
   }
 

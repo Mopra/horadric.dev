@@ -14,7 +14,8 @@
 
 /* The host is reset with all:initial from its inline style, which beats
    :host, so the type is set on the layers instead. */
-.pins, .flash, .catcher, .hover, .hover-tag, .drag, .ask, .errors {
+.pins, .flash, .catcher, .hover, .hover-tag, .drag, .ask, .errors,
+.editing, .crop, .notes, .crop-offer {
   font: 13px/1.35 "Segoe UI", system-ui, sans-serif;
   color: var(--bone);
 }
@@ -242,6 +243,94 @@
 }
 .error-send:hover:not(:disabled) { border-color: var(--ember); }
 .error-send:disabled { color: var(--bone-dim); border-color: #4a3d2c; cursor: default; }
+
+/* A hand edit in place: a thin line round the block being typed in. */
+.editing {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: none;
+  box-sizing: border-box;
+  border: 1px dashed var(--ember);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.editing.on { display: block; }
+
+/* Saved, or why not: a word in the bottom left corner, gone by itself. */
+.notes {
+  position: absolute;
+  inset: auto auto 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  max-width: min(420px, calc(100vw - 24px));
+  pointer-events: none;
+}
+.note {
+  padding: 5px 10px;
+  border-radius: 4px;
+  background: var(--ink);
+  border: 1px solid #4a3d2c;
+  color: var(--bone);
+  font-size: 12px;
+  transition: opacity 0.6s ease;
+}
+.note.bad { border-color: #5a2a20; border-left: 3px solid var(--blood); }
+.note.fading { opacity: 0; }
+
+/* Crop: the part kept is clear, the rest dimmed; a small bar of buttons. */
+.crop {
+  position: absolute;
+  inset: 0;
+  display: none;
+  cursor: crosshair;
+  pointer-events: auto;
+}
+.crop.on { display: block; }
+.crop-box {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  border: 1.5px solid var(--ember);
+  box-shadow: 0 0 0 100vmax rgba(10, 8, 6, 0.55);
+}
+.crop-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 6px;
+  background: var(--ink);
+  border: 1px solid #4a3d2c;
+  border-radius: 6px;
+  cursor: default;
+}
+.crop-bar button, .crop-offer {
+  padding: 4px 10px;
+  border: 1px solid #4a3d2c;
+  border-radius: 4px;
+  background: var(--ink-2);
+  color: var(--bone);
+  font: inherit;
+  cursor: pointer;
+}
+.crop-bar button:hover, .crop-offer:hover { border-color: var(--ember-dim); }
+.crop-bar .crop-save { color: var(--ember); border-color: var(--ember-dim); }
+.crop-angle { min-width: 84px; text-align: center; color: var(--bone-dim); font-size: 12px; }
+.crop-offer {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  pointer-events: auto;
+  font: 13px/1.35 "Segoe UI", system-ui, sans-serif;
+}
+.crop.on ~ .crop-offer { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   .rune, .rune .trace, .asking-box { animation: none; }

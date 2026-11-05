@@ -214,6 +214,7 @@ pub fn prepare(key: &str, id: u64, view: &ICoreWebView2, root: &Path, host: &str
         }));
         let mut token = Default::default();
         let _ = view.add_WebResourceRequested(&rendered, &mut token);
+        super::edit::serve(view, host, root);
 
         let owned = key.to_string();
         let said = WebMessageReceivedEventHandler::create(Box::new(move |_, args| {

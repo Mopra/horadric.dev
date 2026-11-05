@@ -38,6 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::web;
 
+pub use edit::source_view;
 pub use settings::{auto, set_auto};
 
 /// A browser tab that shows a file.
@@ -340,6 +341,7 @@ fn roots() -> HashSet<String> {
 /// file, or a file its page loads, changed, and stops watching folders no
 /// tab is served from any more.
 pub fn drain() {
+    edit::drain();
     for (root, rel, all) in watch::take() {
         changed(&root, &rel, all);
     }
@@ -349,6 +351,7 @@ pub fn drain() {
 /// Off the feeder thread: a session wrote a file the Forge shows. It is
 /// queued for [`take_written`] and the UI thread woken.
 pub fn heard(registry: &Mutex<Registry>, id: &str, event: &HookEvent) {
+    edit::hooked(event);
     history::heard_tool(event);
     if event.hook_event_name != "PostToolUse" {
         return;

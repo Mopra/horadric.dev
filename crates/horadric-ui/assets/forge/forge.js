@@ -1,4 +1,5 @@
-// The Forge's page side: scroll keeping, pins, pin runes, goto and errors.
+// The Forge's page side: scroll keeping, pins, pin runes, goto, errors and
+// hand edits (text in place, image crop).
 // Injected into every file shown in the browser pane. The page is the
 // human's content, so everything here hides in one closed shadow root and
 // one global, window.__forge, and touches the page's own DOM only to read it.
@@ -94,6 +95,9 @@
     layer.hoverTag = make("hover-tag");
     layer.drag = make("drag");
     layer.ask = make("ask");
+    layer.editing = make("editing");
+    layer.crop = make("crop");
+    layer.notes = make("notes");
     layer.errors = make("errors");
     // Under <html>, not <body>, so the page's body styles and its
     // `body > *` selectors never reach it.
@@ -384,7 +388,8 @@
     at.selector = selectorFor(el);
     const text = trim(el.innerText || el.textContent, 300);
     if (text) at.text = text;
-    if (kind === "element") at.html = trim(el.outerHTML, 600);
+    // The host's source marks are for edits, not part of the file.
+    if (kind === "element") at.html = trim(el.outerHTML.replace(/ data-forge-at="[^"]*"/g, ""), 600);
     const img = el.localName === "img" ? el : null;
     if (img) {
       const ib = imageBox(img, box);
@@ -586,6 +591,282 @@
     setTimeout(() => { for (const d of going) { d.box.remove(); d.rune.remove(); } }, 700);
   }
 
+
+  // ------------------------------------------------------------- hand edits
+
+  // A small word in the corner that goes by itself: saved, or why not.
+  function note(text, bad) {
+    if (!ensureOverlay()) return;
+    const n = document.createElement("div");
+    n.className = bad ? "note bad" : "note";
+    n.textContent = text;
+    layer.notes.appendChild(n);
+    while (layer.notes.childElementCount > 3) layer.notes.firstChild.remove();
+    setTimeout(() => n.classList.add("fading"), bad ? 6000 : 2200);
+    setTimeout(() => n.remove(), bad ? 6700 : 2900);
+  }
+
+  // The element's text as the host reads the source: script and style
+  // left out, everything else as written.
+  const UNSEEN = new Set(["script", "style", "template", "noscript"]);
+  function plainText(el) {
+    let out = "";
+    const walk = (node) => {
+      for (let c = node.firstChild; c; c = c.nextSibling) {
+        if (c.nodeType === 3) out += c.data;
+        else if (c.nodeType === 1 && !UNSEEN.has(c.localName)) walk(c);
+      }
+    };
+    walk(el);
+    return out;
+  }
+
+  const fold = (s) => (s || "").replace(/\s+/g, " ").trim();
+
+  function inlineBox(el) {
+    const d = getComputedStyle(el).display;
+    return d === "inline" || d === "contents";
+  }
+
+  // What a double click edits: a markdown block as a whole (its source
+  // lines are the unit), else the nearest box holding only text and
+  // inline elements, so one edit never spans two paragraphs.
+  function editTarget(t) {
+    if (!t || t.nodeType !== 1 || isOurs(t)) return null;
+    if (t.closest(".forge-clone, svg, button, input, textarea, select, iframe, video, audio")) return null;
+    const block = t.closest("[data-lines]");
+    if (block) return block.matches("pre.mermaid, hr, img, table") ? null : block;
+    for (let n = t; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+      if (inlineBox(n)) continue;
+      if (n.matches("section.slide")) return null;
+      for (const c of n.querySelectorAll("*")) {
+        if (!inlineBox(c) && !UNSEEN.has(c.localName) && c.localName !== "br") return null;
+      }
+      return n;
+    }
+    return null;
+  }
+
+  let editing = null;
+  let editSeq = 0;
+  const pendingEdits = new Map();
+
+  function followEditing() {
+    if (!editing) { layer.editing.classList.remove("on"); return; }
+    place(layer.editing, rectOf(editing.el));
+    layer.editing.classList.add("on");
+    requestAnimationFrame(followEditing);
+  }
+
+  function startEdit(el) {
+    if (!ensureOverlay()) return;
+    const old = plainText(el);
+    if (!fold(old)) return;
+    // The word the double click chose stays chosen, so typing replaces it.
+    const sel = getSelection();
+    const range = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+    editing = {
+      el, old,
+      html: el.innerHTML,
+      had: el.getAttribute("contenteditable"),
+      onKey: null, onBlur: null,
+    };
+    el.setAttribute("contenteditable", "plaintext-only");
+    editing.onKey = (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); finishEdit(true); }
+      else if (e.key === "Escape") { e.preventDefault(); finishEdit(false); }
+    };
+    editing.onBlur = () => finishEdit(true);
+    el.addEventListener("keydown", editing.onKey, true);
+    el.addEventListener("blur", editing.onBlur);
+    el.focus({ preventScroll: true });
+    if (range && el.contains(range.commonAncestorContainer)) {
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    requestAnimationFrame(followEditing);
+  }
+
+  function finishEdit(keep) {
+    const ed = editing;
+    if (!ed) return;
+    editing = null;
+    const el = ed.el;
+    el.removeEventListener("keydown", ed.onKey, true);
+    el.removeEventListener("blur", ed.onBlur);
+    if (ed.had === null) el.removeAttribute("contenteditable");
+    else el.setAttribute("contenteditable", ed.had);
+    const now = plainText(el);
+    if (fold(now) === fold(ed.old)) return;
+    if (!keep) { el.innerHTML = ed.html; return; }
+    const id = ++editSeq;
+    pendingEdits.set(id, { kind: "text", el, html: ed.html, old: ed.old, now });
+    const msg = { forge: "edit", id, file: location.pathname, old: ed.old, new: now };
+    const lines = el.hasAttribute("data-lines") ? parseLines(el.getAttribute("data-lines")) : null;
+    if (lines) msg.lines = lines;
+    const at = /^(\d+)-(\d+)$/.exec(el.getAttribute("data-forge-at") || "");
+    if (at) msg.offsets = [+at[1], +at[2]];
+    post(msg);
+  }
+
+  // The host could not put the edit back exactly: the page shows the file
+  // as it is again, and the change goes to the session as a pin instead.
+  function editAsPin(p) {
+    p.el.innerHTML = p.html;
+    sendPin(pinForElement(p.el), `Change this text to: "${fold(p.now)}"`);
+    note("Sent to the session as a pin: it could not be written exactly");
+  }
+
+  function editResult(m) {
+    const p = pendingEdits.get(m.id);
+    pendingEdits.delete(m.id);
+    if (m.ok) {
+      note(m.what === "crop" ? "Image saved" : "Saved");
+      return;
+    }
+    if (p && p.kind === "text") {
+      if (m.pin) { editAsPin(p); return; }
+      p.el.innerHTML = p.html;
+    }
+    note(m.why ? `Not saved: ${m.why}` : "Not saved", true);
+  }
+
+  addEventListener("dblclick", (e) => {
+    if (pinning || editing || cropping || e.defaultPrevented) return;
+    if (document.documentElement.classList.contains("forge-presenting")) return;
+    const el = editTarget(e.target);
+    if (el) startEdit(el);
+  }, true);
+
+  // ------------------------------------------------------------ image crop
+
+  // An image shown alone (the browser's own image page): crop and turn by
+  // hand. The page encodes the result, the host checks and writes it.
+  const CROP_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp" };
+  let cropping = null;
+
+  function soleImage() {
+    if (!/^image\//.test(document.contentType || "") || /svg/.test(document.contentType)) return null;
+    const imgs = document.images;
+    return imgs.length === 1 ? imgs[0] : null;
+  }
+
+  function cropType() {
+    const ext = (location.pathname.split(".").pop() || "").toLowerCase();
+    return CROP_TYPES[ext] || null;
+  }
+
+  function startCrop(img) {
+    img = img || soleImage();
+    if (!img || cropping || !ensureOverlay()) return;
+    if (!cropType()) { note("Only PNG, JPEG and WebP pictures can be cropped here", true); return; }
+    const r = img.getBoundingClientRect();
+    cropping = { img, box: { x: r.left, y: r.top, w: r.width, h: r.height }, rotate: 0 };
+    const c = layer.crop;
+    c.replaceChildren();
+    const shade = document.createElement("div");
+    shade.className = "crop-box";
+    const bar = document.createElement("div");
+    bar.className = "crop-bar";
+    const button = (label, title, fn) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.title = title;
+      b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+      bar.appendChild(b);
+      return b;
+    };
+    const angle = document.createElement("span");
+    angle.className = "crop-angle";
+    const showAngle = () => { angle.textContent = cropping.rotate ? `turned ${cropping.rotate}°` : "drag to crop"; };
+    button("⟲", "Turn left", () => { cropping.rotate = (cropping.rotate + 270) % 360; showAngle(); });
+    button("⟳", "Turn right", () => { cropping.rotate = (cropping.rotate + 90) % 360; showAngle(); });
+    bar.appendChild(angle);
+    button("Cancel", "Esc", endCrop);
+    button("Save", "Enter", saveCrop).className = "crop-save";
+    c.append(shade, bar);
+    c.classList.add("on");
+    place(shade, cropping.box);
+    showAngle();
+    // A drag draws the part to keep, inside the picture.
+    let from = null;
+    c.onpointerdown = (e) => {
+      if (e.button !== 0 || e.composedPath().includes(bar)) return;
+      e.preventDefault();
+      c.setPointerCapture(e.pointerId);
+      from = { x: e.clientX, y: e.clientY };
+    };
+    c.onpointermove = (e) => {
+      if (!from) return;
+      const ir = img.getBoundingClientRect();
+      const cl = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+      const x0 = cl(Math.min(from.x, e.clientX), ir.left, ir.right);
+      const y0 = cl(Math.min(from.y, e.clientY), ir.top, ir.bottom);
+      const x1 = cl(Math.max(from.x, e.clientX), ir.left, ir.right);
+      const y1 = cl(Math.max(from.y, e.clientY), ir.top, ir.bottom);
+      cropping.box = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+      place(shade, cropping.box);
+    };
+    c.onpointerup = () => { from = null; };
+  }
+
+  function endCrop() {
+    cropping = null;
+    if (!layer.crop) return;
+    layer.crop.classList.remove("on");
+    layer.crop.replaceChildren();
+  }
+
+  function saveCrop() {
+    const cr = cropping;
+    if (!cr) return;
+    const part = imageBox(cr.img, cr.box);
+    if (!part) { note("Draw the part of the picture to keep", true); return; }
+    const turned = cr.rotate === 90 || cr.rotate === 270;
+    const canvas = document.createElement("canvas");
+    canvas.width = turned ? part.h : part.w;
+    canvas.height = turned ? part.w : part.h;
+    const g = canvas.getContext("2d");
+    g.translate(canvas.width / 2, canvas.height / 2);
+    g.rotate(cr.rotate * Math.PI / 180);
+    g.drawImage(cr.img, part.x, part.y, part.w, part.h, -part.w / 2, -part.h / 2, part.w, part.h);
+    let data;
+    try {
+      data = canvas.toDataURL(cropType(), 0.92);
+    } catch (e) {
+      note(`Cannot read the picture back: ${e.message}`, true);
+      return;
+    }
+    const id = ++editSeq;
+    pendingEdits.set(id, { kind: "crop" });
+    post({
+      forge: "crop", id, file: location.pathname,
+      box: { x: part.x, y: part.y, w: part.w, h: part.h }, rotate: cr.rotate, data,
+    });
+    endCrop();
+  }
+
+  // The way in that shows: a small button on a picture shown alone.
+  function cropButton() {
+    if (!soleImage() || !cropType() || !ensureOverlay() || layer.crop.dataset.offered) return;
+    layer.crop.dataset.offered = "1";
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "crop-offer";
+    b.textContent = "Crop";
+    b.title = "Crop or turn the picture (C)";
+    b.addEventListener("click", () => startCrop());
+    layer.notes.parentNode.appendChild(b);
+  }
+
+  addEventListener("keydown", (e) => {
+    if (!cropping) return;
+    if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); endCrop(); }
+    else if (e.key === "Enter") { e.preventDefault(); e.stopImmediatePropagation(); saveCrop(); }
+  }, true);
+
   // ------------------------------------------------------------------- goto
 
   function flash(el) {
@@ -723,6 +1004,9 @@
     } else if (e.key === "Escape" && pinning) {
       e.preventDefault();
       setPinning(false, true);
+    } else if ((e.key === "c" || e.key === "C") && !pinning && soleImage()) {
+      e.preventDefault();
+      startCrop();
     }
   });
 
@@ -733,6 +1017,7 @@
     "pinning": (m) => setPinning(m.on, false),
     "pins": (m) => drawPins(m.pins),
     "clear-pins": () => clearPins(),
+    "edit-result": (m) => editResult(m),
     "goto": (m) => {
       if (m.slide) gotoSlide(+m.slide);
       else if (m.line) gotoLine(+m.line);
@@ -742,6 +1027,7 @@
 
   function ready() {
     ensureOverlay();
+    cropButton();
     post({
       forge: "ready",
       file: location.pathname,
@@ -769,5 +1055,8 @@
     setPinning: (v) => setPinning(v, true),
     selectorFor,
     report,
+    note,
+    edit: (el) => { const t = editTarget(el); if (t) startEdit(t); return !!t; },
+    crop: startCrop,
   });
 })();

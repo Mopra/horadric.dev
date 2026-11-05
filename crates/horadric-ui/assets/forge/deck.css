@@ -129,6 +129,38 @@ html.forge-deck .forge-thumb-n {
 }
 html.forge-deck .forge-thumb > section.slide.forge-clone { clip-path: inset(0); }
 
+/* Slide edits in the strip: drag to move, small buttons to duplicate and
+   delete, shown on hover. */
+html.forge-deck .forge-thumb.forge-dragging { opacity: 0.4; }
+html.forge-deck .forge-thumb.forge-drop-before { box-shadow: 0 -6px 0 -3px #e8a33d; }
+html.forge-deck .forge-thumb.forge-drop-after { box-shadow: 0 6px 0 -3px #e8a33d; }
+html.forge-deck .forge-strip.forge-saving .forge-thumb { cursor: progress; }
+html.forge-deck .forge-thumb-tools {
+  position: absolute;
+  right: 3px;
+  top: 3px;
+  z-index: 1;
+  display: none;
+  gap: 3px;
+}
+html.forge-deck .forge-thumb:hover .forge-thumb-tools { display: flex; }
+html.forge-deck .forge-thumb-tools button {
+  all: unset;
+  box-sizing: border-box;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: rgba(26, 23, 20, 0.88);
+  border: 1px solid #3a3128;
+  color: #d8ccb8;
+  font: 12px/18px "Segoe UI", system-ui, sans-serif;
+  text-align: center;
+  cursor: pointer;
+}
+html.forge-deck .forge-thumb-tools button:hover { border-color: #8a6a3c; color: #fff; }
+html.forge-deck .forge-thumb-tools button.forge-sure { border-color: #c2533f; color: #f0a090; }
+
 /* --------------------------------------------- the controls (shadow) */
 
 :host([hidden]) { display: none !important; }
