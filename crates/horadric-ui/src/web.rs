@@ -1203,6 +1203,14 @@ pub fn room(key: &str) -> Option<(u32, u32)> {
 /// The pane `hwnd` shows the project's browser now, its page at `bounds`
 /// and `zoom`.
 pub fn attach(key: &str, hwnd: HWND, bounds: RECT, zoom: f64) {
+    if LENT.with(|l| {
+        l.borrow_mut()
+            .get_mut(key)
+            .map(|lent| *lent = (Some(hwnd), bounds, zoom))
+            .is_some()
+    }) {
+        return;
+    }
     let known = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key)?;
@@ -1219,6 +1227,14 @@ pub fn attach(key: &str, hwnd: HWND, bounds: RECT, zoom: f64) {
 
 /// The pane changed size, or the page did.
 pub fn set_bounds(key: &str, bounds: RECT, zoom: f64) {
+    if LENT.with(|l| {
+        l.borrow_mut()
+            .get_mut(key)
+            .map(|lent| (lent.1, lent.2) = (bounds, zoom))
+            .is_some()
+    }) {
+        return;
+    }
     let placed = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key)?;
@@ -1361,6 +1377,20 @@ fn apply(c: &ICoreWebView2Controller, bounds: RECT, zoom: Option<f64>, fitted: b
 /// until a pane shows them again. Only when they are still that pane's,
 /// since a new pane may have taken them first.
 pub fn detach(key: &str, hwnd: HWND) {
+    // A lent page stays where it was lent; only the pane to give it back
+    // to is gone.
+    if LENT.with(|l| {
+        l.borrow_mut()
+            .get_mut(key)
+            .map(|lent| {
+                if lent.0 == Some(hwnd) {
+                    lent.0 = None;
+                }
+            })
+            .is_some()
+    }) {
+        return;
+    }
     let controllers = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key)?;
@@ -1387,6 +1417,52 @@ pub fn detach(key: &str, hwnd: HWND) {
             sleep(&c);
         }
     }
+}
+
+/// The pane, bounds and zoom a lent page goes back to, by project.
+type Lent = (Option<HWND>, RECT, f64);
+
+thread_local! {
+    static LENT: RefCell<HashMap<String, Lent>> = RefCell::new(HashMap::new());
+}
+
+/// Lends the project's pages to a window that is not a pane, the Forge's
+/// present window, at `bounds` in it. Until [`give_back`], the pane they
+/// were in (or one made meanwhile) only keeps where it wants them, so a
+/// stage layout cannot pull the page out of the window it was lent to.
+pub fn lend(key: &str, hwnd: HWND, bounds: RECT) -> bool {
+    if LENT.with(|l| l.borrow().contains_key(key)) {
+        return false;
+    }
+    let had = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let web = w.get_mut(key)?;
+        let had = (web.pane, web.bounds, web.zoom);
+        web.pane = Some(hwnd);
+        web.bounds = bounds;
+        Some(had)
+    });
+    let Some(had) = had else { return false };
+    LENT.with(|l| l.borrow_mut().insert(key.to_string(), had));
+    show(key);
+    true
+}
+
+/// Ends a [`lend`]: the pages go back to the pane that wants them, or wait
+/// hidden when it went meanwhile.
+pub fn give_back(key: &str) {
+    let Some((pane, bounds, zoom)) = LENT.with(|l| l.borrow_mut().remove(key)) else {
+        return;
+    };
+    let pane = pane.filter(|p| unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(*p)) }.as_bool());
+    WEBS.with(|w| {
+        if let Some(web) = w.borrow_mut().get_mut(key) {
+            web.pane = pane;
+            web.bounds = bounds;
+            web.zoom = zoom;
+        }
+    });
+    show(key);
 }
 
 /// Gives the shown page the keyboard, now or once it is made.

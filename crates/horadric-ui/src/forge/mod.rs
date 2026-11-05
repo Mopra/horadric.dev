@@ -12,8 +12,11 @@
 
 pub mod bar;
 mod edit;
+mod export;
+mod history;
 pub mod message;
 pub mod pins;
+mod present;
 mod serve;
 mod settings;
 pub mod tools;
@@ -138,6 +141,7 @@ pub fn open(key: &str, root: Option<&Path>, file: &Path, front: bool) -> Option<
         })
     });
     watch::follow(&root);
+    history::seen(file);
     Some(id)
 }
 
@@ -203,6 +207,7 @@ pub fn restored(key: &str, id: u64, url: &str) {
         return;
     };
     let host = serve::host_for(&root);
+    history::seen(&file);
     TABS.with(|t| {
         t.borrow_mut().push(FileTab {
             key: key.to_string(),
@@ -230,6 +235,7 @@ pub fn ready(key: &str, id: u64, view: &ICoreWebView2) {
         return;
     };
     serve::prepare(key, id, view, &root, &host, kind(&file));
+    present::listen(key, id, view, &host);
 }
 
 /// The page of the tab `id` said something, as JSON. Only a page of the
@@ -278,6 +284,18 @@ fn scroll_of(key: &str, id: u64) -> Option<(f64, f64)> {
 /// tab showing one, or a page that may load one, is loaded again.
 fn changed(root: &Path, rel: &[String], all: bool) {
     prune();
+    // Before the reload, so the bytes it replaced are kept as a version.
+    let own: Vec<PathBuf> = TABS.with(|t| {
+        t.borrow()
+            .iter()
+            .filter(|f| same(&f.root, root))
+            .filter(|f| all || rel.iter().any(|r| same(&f.root.join(r.replace('/', "\\")), &f.file)))
+            .map(|f| f.file.clone())
+            .collect()
+    });
+    for file in own {
+        history::changed(root, &file);
+    }
     let hit: Vec<(String, u64)> = TABS.with(|t| {
         t.borrow()
             .iter()
@@ -331,6 +349,7 @@ pub fn drain() {
 /// Off the feeder thread: a session wrote a file the Forge shows. It is
 /// queued for [`take_written`] and the UI thread woken.
 pub fn heard(registry: &Mutex<Registry>, id: &str, event: &HookEvent) {
+    history::heard_tool(event);
     if event.hook_event_name != "PostToolUse" {
         return;
     }

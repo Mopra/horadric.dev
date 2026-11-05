@@ -1202,16 +1202,15 @@ impl Pane {
             .as_deref()
             .map(web::icons)
             .unwrap_or_default();
-        let forge_name = self
+        let forge_shown = self
             .console
             .web
             .as_deref()
-            .and_then(crate::forge::shown_file)
-            .and_then(|f| Some(f.file_name()?.to_string_lossy().into_owned()));
+            .and_then(crate::forge::bar::shown);
         let bar = self.console.web.as_deref().map(|key| {
             let (back, forward) = web::history(key);
             Bar {
-                forge: forge_name.as_deref(),
+                forge: forge_shown.as_ref(),
                 tabs: &tab_names,
                 tab,
                 badges: &badges,
@@ -2378,8 +2377,8 @@ impl Pane {
         if self.bar_at(lparam) != Some(BarHit::Field) || self.address.borrow().is_some() {
             return None;
         }
-        crate::forge::shown_file(key)?;
-        let l = crate::forge::bar::layout(self.bar_layout().field, HEADER_H);
+        let shown = crate::forge::bar::shown(key)?;
+        let l = crate::forge::bar::layout(self.bar_layout().field, HEADER_H, &shown.buttons);
         Some(crate::forge::bar::hit(&l, self.dip(lparam).0))
     }
 
@@ -2540,8 +2539,8 @@ impl Pane {
             return false;
         };
         if let Some(hit) = self.forge_at(lparam) {
-            if let (Some(b), Some(file)) = (hit, crate::forge::shown_file(key)) {
-                crate::forge::bar::press(b, &file);
+            if let Some(b) = hit {
+                crate::forge::bar::press(b, key);
             }
             return true;
         }

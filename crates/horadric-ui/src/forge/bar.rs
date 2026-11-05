@@ -3,29 +3,125 @@
 //! Laid out here, drawn by `glyphs` with the rest of the header, and
 //! clicked through the pane's bar like its other keys.
 //!
-//! Later steps of the plan add pins, history and export: each is another
-//! [`Button`], put before the ones here.
+//! The buttons change with what the tab shows: the file as it is gets the
+//! history, export and, for a deck, present; a version from the history
+//! gets the steps through it, compare, restore and the way back.
 
+use std::cell::RefCell;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
+use horadric_core::forge::Kind;
 use windows::core::{w, PCWSTR};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
+use crate::web;
+
 /// A button of the Forge's bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
-    /// The program Windows opens the file with.
-    OpenWith,
-    /// The file's folder in Explorer, the file chosen.
-    Explorer,
+    /// Pin mode on or off: click or drag on the page to say what to change.
+    Pin,
+    /// Into the history: the version kept before this one.
+    History,
+    /// PDF, pictures, the clipboard, a real deck, or another program.
+    Export,
+    /// A deck full screen on a chosen screen.
+    Present,
+    /// In the history: one version further back.
+    Older,
+    /// In the history: one version nearer now, then the file itself.
+    Newer,
+    /// In the history: this version beside another.
+    Compare,
+    /// In the history: write this version back over the file.
+    Restore,
+    /// Out of the history, back to the file as it is.
+    Live,
 }
 
-/// The buttons, left to right.
-pub const BUTTONS: [Button; 2] = [Button::OpenWith, Button::Explorer];
+/// What the bar shows for a file's tab: its name, with which version when
+/// the tab shows one, and its buttons left to right.
+pub struct Shown {
+    pub name: String,
+    pub buttons: Vec<Button>,
+    /// Buttons drawn as on: pin mode while it is.
+    pub lit: Vec<Button>,
+}
+
+/// The bar of the project's shown tab, None when it shows a web page.
+pub fn shown(key: &str) -> Option<Shown> {
+    let file = super::shown_file(key)?;
+    let tab = web::shown_tab(key)?;
+    let name = file.file_name()?.to_string_lossy().into_owned();
+    if let Some(label) = super::history::label(key, tab) {
+        return Some(Shown {
+            name: format!("{name}, {label}"),
+            buttons: vec![
+                Button::Older,
+                Button::Newer,
+                Button::Compare,
+                Button::Restore,
+                Button::Live,
+            ],
+            lit: Vec::new(),
+        });
+    }
+    let mut buttons = Vec::new();
+    let mut lit = Vec::new();
+    if can_pin(&file) {
+        buttons.push(Button::Pin);
+        if super::pins::pinning(key) {
+            lit.push(Button::Pin);
+        }
+    }
+    buttons.push(Button::History);
+    buttons.push(Button::Export);
+    if is_deck(&file) {
+        buttons.push(Button::Present);
+    }
+    Some(Shown { name, buttons, lit })
+}
+
+/// Whether the page side can point at what the tab shows: a PDF shows in
+/// WebView2's own viewer, which runs no script of ours.
+fn can_pin(file: &Path) -> bool {
+    !matches!(super::kind(file), Some(Kind::Pdf) | None)
+}
+
+thread_local! {
+    /// Whether a file is a deck, by when it was last written: the bar is
+    /// laid out on every paint, and telling means reading the file.
+    static DECKS: RefCell<Vec<(PathBuf, Option<SystemTime>, bool)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+pub fn is_deck(file: &Path) -> bool {
+    let modified = std::fs::metadata(file).and_then(|m| m.modified()).ok();
+    let known = DECKS.with(|d| {
+        d.borrow()
+            .iter()
+            .find(|(f, m, _)| f == file && *m == modified)
+            .map(|(_, _, deck)| *deck)
+    });
+    if let Some(deck) = known {
+        return deck;
+    }
+    let deck = horadric_core::forge::kind_of(file) == Some(Kind::Deck);
+    DECKS.with(|d| {
+        let mut d = d.borrow_mut();
+        d.retain(|(f, _, _)| f != file);
+        if d.len() > 32 {
+            d.remove(0);
+        }
+        d.push((file.to_path_buf(), modified, deck));
+    });
+    deck
+}
 
 /// What the Forge's bar holds where the address field would be.
 pub struct Layout {
@@ -37,11 +133,11 @@ pub struct Layout {
 }
 
 /// The bar laid out in the address field's place, `field` its left and
-/// right, buttons `square` wide at the right end.
-pub fn layout(field: (f32, f32), square: f32) -> Layout {
+/// right, `buttons` `square` wide at the right end.
+pub fn layout(field: (f32, f32), square: f32, buttons: &[Button]) -> Layout {
     let (left, right) = field;
-    let start = (right - square * BUTTONS.len() as f32).max(left);
-    let buttons = BUTTONS
+    let start = (right - square * buttons.len() as f32).max(left);
+    let buttons = buttons
         .iter()
         .enumerate()
         .map(|(i, b)| (*b, start + i as f32 * square))
@@ -64,45 +160,77 @@ pub fn hit(l: &Layout, x: f32) -> Option<Button> {
 /// The button's mark, in Segoe MDL2 Assets as the bar's others are.
 pub fn glyph(b: Button) -> &'static str {
     match b {
-        Button::OpenWith => "\u{E7AC}",
-        Button::Explorer => "\u{E838}",
+        Button::Pin => "\u{E718}",
+        Button::History => "\u{E81C}",
+        Button::Export => "\u{E72D}",
+        Button::Present => "\u{E786}",
+        Button::Older => "\u{E76B}",
+        Button::Newer => "\u{E76C}",
+        Button::Compare => "\u{E8AB}",
+        Button::Restore => "\u{E777}",
+        Button::Live => "\u{E711}",
     }
 }
 
 /// What the button does, for its tip.
 pub fn tip(b: Button) -> &'static str {
     match b {
-        Button::OpenWith => "Open with the program Windows has for it",
-        Button::Explorer => "Show in Explorer",
+        Button::Pin => "Point at what to change (P)",
+        Button::History => "Earlier versions",
+        Button::Export => "PDF, pictures, copy, To .pptx, open with",
+        Button::Present => "Present full screen",
+        Button::Older => "The version before this one",
+        Button::Newer => "The version after this one",
+        Button::Compare => "Compare",
+        Button::Restore => "Restore this version",
+        Button::Live => "Back to the file as it is",
     }
 }
 
-/// Does what `b` says to the file `file`.
-pub fn press(b: Button, file: &Path) {
+/// Does what `b` says to the project's shown file tab.
+pub fn press(b: Button, key: &str) {
+    let Some(tab) = web::shown_tab(key) else {
+        return;
+    };
+    let Some(file) = super::file_of(key, tab) else {
+        return;
+    };
     match b {
-        Button::OpenWith => {
-            let wide: Vec<u16> = file.as_os_str().encode_wide().chain([0]).collect();
-            unsafe {
-                ShellExecuteW(
-                    None,
-                    w!("open"),
-                    PCWSTR(wide.as_ptr()),
-                    None,
-                    None,
-                    SW_SHOWNORMAL,
-                );
-            }
-        }
-        Button::Explorer => {
-            // Explorer reads its own command line: the path in quotes,
-            // straight after the comma.
-            let spawned = Command::new("explorer.exe")
-                .raw_arg(format!("/select,\"{}\"", file.display()))
-                .spawn();
-            if let Err(e) = spawned {
-                eprintln!("horadric: cannot start Explorer: {e}");
-            }
-        }
+        Button::Pin => super::pins::toggle_pinning(key),
+        Button::History | Button::Older => super::history::older(key, tab),
+        Button::Newer => super::history::newer(key, tab),
+        Button::Compare => super::history::compare(key, tab),
+        Button::Restore => super::history::restore(key, tab),
+        Button::Live => super::history::live(key, tab),
+        Button::Export => super::export::menu(key, tab, &file),
+        Button::Present => super::present::start(key, tab, true),
+    }
+}
+
+/// Opens `file` with the program Windows has for it.
+pub fn open_with(file: &Path) {
+    let wide: Vec<u16> = file.as_os_str().encode_wide().chain([0]).collect();
+    unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(wide.as_ptr()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// Shows `file`'s folder in Explorer, the file chosen.
+pub fn show_in_explorer(file: &Path) {
+    // Explorer reads its own command line: the path in quotes, straight
+    // after the comma.
+    let spawned = Command::new("explorer.exe")
+        .raw_arg(format!("/select,\"{}\"", file.display()))
+        .spawn();
+    if let Err(e) = spawned {
+        eprintln!("horadric: cannot start Explorer: {e}");
     }
 }
 
@@ -112,11 +240,11 @@ mod tests {
 
     #[test]
     fn the_buttons_end_the_field_and_the_name_has_the_rest() {
-        let l = layout((100.0, 400.0), 30.0);
-        assert_eq!(l.buttons, vec![(Button::OpenWith, 340.0), (Button::Explorer, 370.0)]);
+        let l = layout((100.0, 400.0), 30.0, &[Button::History, Button::Export]);
+        assert_eq!(l.buttons, vec![(Button::History, 340.0), (Button::Export, 370.0)]);
         assert_eq!(l.name, (100.0, 336.0));
-        assert_eq!(hit(&l, 345.0), Some(Button::OpenWith));
-        assert_eq!(hit(&l, 399.0), Some(Button::Explorer));
+        assert_eq!(hit(&l, 345.0), Some(Button::History));
+        assert_eq!(hit(&l, 399.0), Some(Button::Export));
         assert_eq!(hit(&l, 200.0), None);
     }
 }

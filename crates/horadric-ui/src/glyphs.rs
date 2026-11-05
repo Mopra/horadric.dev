@@ -171,9 +171,10 @@ pub struct Bar<'a> {
     pub icons: &'a [Option<Rc<Favicon>>],
     /// The tab being carried to a new place and how far, in DIPs.
     pub carried: Option<(usize, f32)>,
-    /// The name of the file the shown tab shows, which puts the Forge's
-    /// bar where the address would be. None for a web page.
-    pub forge: Option<&'a str>,
+    /// The file the shown tab shows, its name and the Forge's buttons,
+    /// which put the Forge's bar where the address would be. None for a
+    /// web page.
+    pub forge: Option<&'a crate::forge::bar::Shown>,
 }
 
 /// The mark on a tab an agent works in: its session's initial on a disc
@@ -2331,8 +2332,8 @@ impl GridTarget {
         };
         self.pop_icon(l.pop, ink, bar.popped);
         // Ctrl+L still types an address over a file's tab.
-        if let (Some(name), None) = (bar.forge, bar.edit) {
-            self.forge_bar(gpu, name, l);
+        if let (Some(shown), None) = (bar.forge, bar.edit) {
+            self.forge_bar(gpu, shown, l);
             return;
         }
 
@@ -2459,8 +2460,9 @@ impl GridTarget {
 
     /// The Forge's bar in the address field's place: the file's name, then
     /// the Forge's buttons (`crate::forge::bar`).
-    unsafe fn forge_bar(&self, gpu: &Gpu, name: &str, l: &BarLayout) {
-        let f = crate::forge::bar::layout(l.field, HEADER_H);
+    unsafe fn forge_bar(&self, gpu: &Gpu, shown: &crate::forge::bar::Shown, l: &BarLayout) {
+        let name = shown.name.as_str();
+        let f = crate::forge::bar::layout(l.field, HEADER_H, &shown.buttons);
         let left = f.name.0 + BAR_INSET;
         if f.name.1 - left > 8.0 {
             if let Ok(layout) = bar_text(gpu, name) {
@@ -2483,8 +2485,13 @@ impl GridTarget {
                 self.rt.PopAxisAlignedClip();
             }
         }
-        self.brush.SetColor(&render::color(theme::text_dim()));
         for &(b, at) in &f.buttons {
+            let ink = if shown.lit.contains(&b) {
+                theme::working()
+            } else {
+                theme::text_dim()
+            };
+            self.brush.SetColor(&render::color(ink));
             let glyph: Vec<u16> = crate::forge::bar::glyph(b).encode_utf16().collect();
             self.rt.DrawText(
                 &glyph,
