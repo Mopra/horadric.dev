@@ -5,14 +5,21 @@
 //! return to the browser pane and writes the files they produce.
 
 mod csv;
+mod diff;
+mod edit;
 mod html;
 mod md;
+mod pins;
+pub mod versions;
 
 use std::io::Read;
 use std::path::Path;
 
 pub use csv::csv_html;
+pub use diff::{diff_lines, DiffLine};
+pub use edit::{replace_lines, replace_range, utf16_to_byte};
 pub use md::markdown_html;
+pub use pins::{pin_message, At, Pin, Rect};
 
 /// What a file is to the Forge, which decides how it is shown and what a
 /// pin on it lands on.
