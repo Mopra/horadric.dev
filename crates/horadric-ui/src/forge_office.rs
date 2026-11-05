@@ -118,17 +118,35 @@ pub fn convert(src: &Path, cache_root: &Path) -> Result<Converted, OfficeError> 
 }
 
 /// [`convert`] on a thread of its own, calling `done` there when finished.
-pub fn convert_async(
-    src: &Path,
-    cache_root: &Path,
-    done: impl FnOnce(Result<Converted, OfficeError>) + Send + 'static,
-) {
+/// When no thread can be started, `done` gets the error on the caller's
+/// thread instead: the caller is a WebView2 callback, where a panic would
+/// take the whole app down.
+pub fn convert_async<F>(src: &Path, cache_root: &Path, done: F)
+where
+    F: FnOnce(Result<Converted, OfficeError>) + Send + 'static,
+{
+    use std::sync::{Arc, Mutex};
     let src = src.to_path_buf();
     let cache_root = cache_root.to_path_buf();
-    std::thread::Builder::new()
+    // Shared so a failed spawn, which drops its closure, still leaves `done`
+    // here to be told.
+    let slot = Arc::new(Mutex::new(Some(done)));
+    let theirs = Arc::clone(&slot);
+    let spawned = std::thread::Builder::new()
         .name("forge-office".into())
-        .spawn(move || done(convert(&src, &cache_root)))
-        .expect("spawning the Office conversion thread");
+        .spawn(move || {
+            let result = convert(&src, &cache_root);
+            let done = theirs.lock().unwrap_or_else(|p| p.into_inner()).take();
+            if let Some(done) = done {
+                done(result);
+            }
+        });
+    if let Err(e) = spawned {
+        let done = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(done) = done {
+            done(Err(OfficeError::Io(e)));
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,7 +209,8 @@ mod win {
     use super::*;
     use std::mem::ManuallyDrop;
     use std::process::Command;
-    use std::sync::{mpsc, Mutex};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use std::sync::{mpsc, Arc, Mutex};
     use std::time::Instant;
 
     use windows::core::{BSTR, GUID, HSTRING, PCWSTR};
@@ -216,6 +235,17 @@ mod win {
     /// not running, both start using the one instance, and the first to
     /// finish would quit it under the other.
     static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    /// Makes each call's work folder name unique within this process.
+    static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// No process recorded in a [`Started`] yet.
+    const NO_PID: u32 = 0;
+
+    /// The Office process this call started, set by the COM thread the
+    /// moment it appears, so the timeout kills that one and never a copy
+    /// the user opened later while the call was waiting.
+    type Started = Arc<AtomicU32>;
 
     const POWERPOINT: &str = "PowerPoint.Application";
     const WORD: &str = "Word.Application";
@@ -252,8 +282,15 @@ mod win {
             return Ok(done);
         }
 
-        let work = cache_root.join(format!("{}.part", hex(&hash)));
-        let _ = std::fs::remove_dir_all(&work);
+        // A folder of this call's own: an Office that hung past the timeout
+        // may still be writing into the folder of the call before, and must
+        // not land its files in ours.
+        let work = cache_root.join(format!(
+            "{}.{}.{}.part",
+            hex(&hash),
+            std::process::id(),
+            WORK_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&work)?;
         // Converting a copy of the hashed bytes keeps the cache true to its
         // name even if the file changes while Office is busy with it.
@@ -272,9 +309,19 @@ mod win {
                 return Err(e);
             }
         };
+        // The rename is what publishes a result. If a finished one is
+        // already there, it wins and this copy is dropped; only an
+        // unfinished leftover is cleared to make room.
+        if let Some(done) = cached(&dir) {
+            let _ = std::fs::remove_dir_all(&work);
+            return Ok(done);
+        }
         std::fs::write(work.join(DONE), done_text(&converted))?;
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::rename(&work, &dir)?;
+        if let Err(e) = std::fs::rename(&work, &dir) {
+            let _ = std::fs::remove_dir_all(&work);
+            return cached(&dir).ok_or(OfficeError::Io(e));
+        }
         cached(&dir).ok_or_else(|| {
             std::io::Error::other("the converted files went missing from the cache").into()
         })
@@ -318,23 +365,27 @@ mod win {
         let before = pids(exe);
         let (tx, rx) = mpsc::channel();
         let (src, out) = (src.to_path_buf(), out.to_path_buf());
-        let before_in = before.clone();
+        let started: Started = Arc::new(AtomicU32::new(NO_PID));
+        let started_in = Arc::clone(&started);
         std::thread::Builder::new()
             .name("forge-office-com".into())
             .spawn(move || {
                 let r = match by {
-                    Converter::PowerPoint => powerpoint(&src, &out, exe, &before_in),
-                    _ => word(&src, &out, exe, &before_in),
+                    Converter::PowerPoint => powerpoint(&src, &out, exe, &before, &started_in),
+                    _ => word(&src, &out, exe, &before, &started_in),
                 };
                 let _ = tx.send(r);
             })?;
         match rx.recv_timeout(TIMEOUT) {
             Ok(r) => r,
             Err(_) => {
-                // Only a process this call started is ours to kill; the
-                // user's own PowerPoint is left alone even when stuck. Killing
-                // ours also frees the worker thread from its COM call.
-                for pid in pids(exe).into_iter().filter(|p| !before.contains(p)) {
+                // Only the process this call started is ours to kill; the
+                // user's own Office, open before or since, is left alone even
+                // when stuck. Killing ours also frees the worker thread from
+                // its COM call. When it was the user's that hung, the thread
+                // is left behind, writing only into this call's own folder.
+                let pid = started.load(Ordering::SeqCst);
+                if pid != NO_PID {
                     kill(pid);
                 }
                 Err(OfficeError::TimedOut(by))
@@ -363,14 +414,27 @@ mod win {
 
     /// Starts the Office app, or attaches to the one already running, and
     /// says whether it is ours: a new process appeared, so nobody else is
-    /// using it and quitting it afterwards is ours to do.
-    fn start(prog_id: &str, exe: &str, before: &[u32], by: Converter) -> Result<(Disp, bool), OfficeError> {
+    /// using it and quitting it afterwards is ours to do. Its id goes into
+    /// `started` at once, while it is the only new one.
+    fn start(
+        prog_id: &str,
+        exe: &str,
+        before: &[u32],
+        started: &Started,
+        by: Converter,
+    ) -> Result<(Disp, bool), OfficeError> {
         let fail = |why: String| OfficeError::Failed { by, why };
         let clsid = unsafe { CLSIDFromProgID(&HSTRING::from(prog_id)) }.map_err(|e| fail(e.message()))?;
         let app: IDispatch = unsafe { CoCreateInstance(&clsid, None, CLSCTX_LOCAL_SERVER) }
             .map_err(|e| fail(e.message()))?;
-        let ours = pids(exe).iter().any(|p| !before.contains(p));
-        Ok((Disp { obj: app, by }, ours))
+        let new: Vec<u32> = pids(exe).into_iter().filter(|p| !before.contains(p)).collect();
+        // Office runs one instance, so exactly one new process is the one
+        // COM started for us. More than one cannot be told apart, and a
+        // wrong guess would kill the user's work, so none is recorded.
+        if let [pid] = new[..] {
+            started.store(pid, Ordering::SeqCst);
+        }
+        Ok((Disp { obj: app, by }, !new.is_empty()))
     }
 
     /// Quits an app this call started, unless the user opened something in
@@ -391,10 +455,16 @@ mod win {
         }
     }
 
-    fn powerpoint(src: &Path, out: &Path, exe: &str, before: &[u32]) -> Result<Converted, OfficeError> {
+    fn powerpoint(
+        src: &Path,
+        out: &Path,
+        exe: &str,
+        before: &[u32],
+        started: &Started,
+    ) -> Result<Converted, OfficeError> {
         let _com = Apartment::enter();
         let by = Converter::PowerPoint;
-        let (app, ours) = start(POWERPOINT, exe, before, by)?;
+        let (app, ours) = start(POWERPOINT, exe, before, started, by)?;
         if ours {
             // ppAlertsNone: a hidden PowerPoint must not stop on a dialog.
             let _ = app.put("DisplayAlerts", Var::int(1));
@@ -452,10 +522,16 @@ mod win {
         Ok(Converted::Slides(files))
     }
 
-    fn word(src: &Path, out: &Path, exe: &str, before: &[u32]) -> Result<Converted, OfficeError> {
+    fn word(
+        src: &Path,
+        out: &Path,
+        exe: &str,
+        before: &[u32],
+        started: &Started,
+    ) -> Result<Converted, OfficeError> {
         let _com = Apartment::enter();
         let by = Converter::Word;
-        let (app, ours) = start(WORD, exe, before, by)?;
+        let (app, ours) = start(WORD, exe, before, started, by)?;
         if ours {
             // wdAlertsNone, for the same reason as PowerPoint's.
             let _ = app.put("DisplayAlerts", Var::int(0));
