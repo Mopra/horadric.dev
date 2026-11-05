@@ -77,6 +77,8 @@ pub(crate) struct State {
     /// When each project's list and config last changed on disk, as last
     /// read, so an unchanged file is not read again.
     stamps: HashMap<String, Stamp>,
+    /// The folders whose stamp is slow to take, each stamped on a thread.
+    slow: SlowStamps,
     /// The first prompt of a session about to start on an item, taken by
     /// the launch.
     pub(crate) prompts: HashMap<String, String>,
@@ -313,6 +315,58 @@ fn stamp(dir: &Path) -> Stamp {
         Some((m.modified().ok()?, m.len()))
     };
     [of(file::file(dir)), of(file::config_file(dir))]
+}
+
+/// A stamp that takes this long is of a folder on a slow drive. A Google
+/// Drive folder answers a look at a missing file in a quarter second, and
+/// the runner looks every second, from the thread that draws: three such
+/// looks a tick left the windows drawing every other second.
+const SLOW_STAMP: Duration = Duration::from_millis(40);
+
+/// The stamps of the folders on slow drives, each taken on a thread of
+/// its own, so a tick never waits on a drive. The tick runs every second,
+/// so it reads the answers instead of being told of them.
+#[derive(Default)]
+struct SlowStamps {
+    /// A folder's last answer, taken by the tick; None while a thread looks.
+    slots: HashMap<String, Arc<Mutex<Option<Stamp>>>>,
+}
+
+impl SlowStamps {
+    fn has(&self, key: &str) -> bool {
+        self.slots.contains_key(key)
+    }
+
+    /// Takes `key`'s folder as slow from now on, and starts its first look.
+    fn add(&mut self, key: &str, dir: &Path, look: fn(&Path) -> Stamp) {
+        let slot = Arc::new(Mutex::new(None));
+        self.slots.insert(key.to_string(), slot.clone());
+        Self::start(slot, dir.to_path_buf(), look);
+    }
+
+    /// The stamp of `key` when its thread has answered, and the next look
+    /// starts at once. None while one is still under way: this tick skips
+    /// the folder and the next asks again.
+    fn take(&mut self, key: &str, dir: &Path, look: fn(&Path) -> Stamp) -> Option<Stamp> {
+        let slot = self.slots.get(key)?.clone();
+        let answer = slot.lock().ok()?.take()?;
+        Self::start(slot, dir.to_path_buf(), look);
+        Some(answer)
+    }
+
+    fn start(slot: Arc<Mutex<Option<Stamp>>>, dir: PathBuf, look: fn(&Path) -> Stamp) {
+        std::thread::spawn(move || {
+            let stamp = look(&dir);
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(stamp);
+            }
+        });
+    }
+
+    /// Forgets the folders no longer listed.
+    fn retain(&mut self, listed: &HashSet<String>) {
+        self.slots.retain(|k, _| listed.contains(k));
+    }
 }
 
 /// What to write under a quest of the list in a project folder: the run
@@ -562,7 +616,22 @@ pub(crate) trait Runner: Host {
         let mut changed = Vec::new();
         let mut ended = Vec::new();
         for (key, dir) in &keys {
-            let now = stamp(dir);
+            let now = if self.tasks().slow.has(key) {
+                match self.tasks_mut().slow.take(key, dir, stamp) {
+                    Some(now) => now,
+                    // A forced read goes on with the stamp it has, so the
+                    // list is read now; the thread's answer comes next tick.
+                    None if force => self.tasks().stamps.get(key).copied().unwrap_or_default(),
+                    None => continue,
+                }
+            } else {
+                let began = Instant::now();
+                let now = stamp(dir);
+                if began.elapsed() >= SLOW_STAMP {
+                    self.tasks_mut().slow.add(key, dir, stamp);
+                }
+                now
+            };
             if !force && self.tasks().stamps.get(key) == Some(&now) {
                 continue;
             }
@@ -613,6 +682,7 @@ pub(crate) trait Runner: Host {
             boards.keys().cloned().collect()
         };
         self.tasks_mut().stamps.retain(|k, _| listed.contains(k));
+        self.tasks_mut().slow.retain(&listed);
         // Written after the read, so the next read sees the lines and no
         // mark changed: each run is written once, and by one Horadric.
         if !ended.is_empty() {
@@ -2547,6 +2617,44 @@ pub(crate) fn record_pack(key: &str, id: &str, title: &str, files: Vec<String>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stamp_of_name(dir: &Path) -> Stamp {
+        std::thread::sleep(Duration::from_millis(20));
+        let len = dir.to_string_lossy().len() as u64;
+        [Some((SystemTime::UNIX_EPOCH, len)), None]
+    }
+
+    #[test]
+    fn a_slow_folder_is_stamped_on_a_thread_and_the_tick_never_waits() {
+        let mut slow = SlowStamps::default();
+        let dir = Path::new("slow-drive");
+        assert!(!slow.has("p"));
+        slow.add("p", dir, stamp_of_name);
+        assert!(slow.has("p"));
+        let began = Instant::now();
+        let first = slow.take("p", dir, stamp_of_name);
+        assert!(
+            began.elapsed() < Duration::from_millis(15),
+            "take waited on the thread"
+        );
+        assert!(first.is_none(), "an answer before the thread had one");
+        let mut answer = None;
+        for _ in 0..200 {
+            std::thread::sleep(Duration::from_millis(5));
+            answer = slow.take("p", dir, stamp_of_name);
+            if answer.is_some() {
+                break;
+            }
+        }
+        assert_eq!(answer, Some([Some((SystemTime::UNIX_EPOCH, 10)), None]));
+        assert!(
+            slow.take("p", dir, stamp_of_name).is_none(),
+            "the next look had not started"
+        );
+        slow.retain(&HashSet::new());
+        assert!(!slow.has("p"));
+        assert!(slow.take("p", dir, stamp_of_name).is_none());
+    }
 
     #[test]
     fn a_dev_instance_leaves_only_the_projects_the_installed_one_knows() {
