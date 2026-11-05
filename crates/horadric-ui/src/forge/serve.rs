@@ -21,8 +21,8 @@ use std::sync::Mutex;
 use horadric_core::forge::Kind;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2Deferral, ICoreWebView2Environment,
-    ICoreWebView2WebResourceRequestedEventArgs, ICoreWebView2_2, ICoreWebView2_3,
-    COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+    ICoreWebView2WebResourceRequestedEventArgs, ICoreWebView2_2,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
     COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
 };
 use webview2_com::{
@@ -219,30 +219,11 @@ fn script(kind: Option<Kind>) -> String {
 pub fn prepare(key: &str, id: u64, view: &ICoreWebView2, root: &Path, host: &str, kind: Option<Kind>) {
     let flat = is_flat(host);
     unsafe {
-        match view.cast::<ICoreWebView2_3>() {
-            Ok(v) => {
-                if let Err(e) = v.SetVirtualHostNameToFolderMapping(
-                    &HSTRING::from(host),
-                    &HSTRING::from(root.as_os_str()),
-                    COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY,
-                ) {
-                    eprintln!("horadric: cannot serve {} to the Forge: {e}", root.display());
-                }
-            }
-            Err(e) => eprintln!("horadric: this WebView2 cannot serve files: {e}"),
-        }
-        // A flat host hears every request, so one into a subfolder is
-        // refused here: the mapping itself would serve the whole tree.
-        let mut patterns = vec![format!("https://{host}{RESERVED}*")];
-        if flat {
-            patterns.push(format!("https://{host}/*"));
-        } else {
-            for ext in RENDERED {
-                patterns.push(format!("https://{host}/*.{ext}"));
-                patterns.push(format!("https://{host}/*.{ext}?*"));
-            }
-        }
-        for pattern in patterns {
+        // No folder mapping: WebView2 answers a mapped host's requests
+        // itself and never raises WebResourceRequested for them, so
+        // markdown came through as plain text. Every request on the host
+        // is answered by `render` instead, from the folder.
+        for pattern in [format!("https://{host}/*")] {
             let _ = view.AddWebResourceRequestedFilter(
                 &HSTRING::from(pattern),
                 COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
@@ -393,12 +374,26 @@ fn plan(root: &Path, url: &str, document: bool, flat: bool) -> Option<Plan> {
         return Some(Plan::Now(not_found()));
     }
     let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
-    // Other files are the folder's, and an HTML file would be read here
-    // only to learn whether it is a deck.
-    if !ext.is_some_and(|e| RENDERED.contains(&e.as_str())) {
-        return None;
+    let Some(file) = file_in(root, url) else {
+        return Some(Plan::Now(not_found()));
+    };
+    if !ext.as_deref().is_some_and(|e| RENDERED.contains(&e)) {
+        // A page is left to edit.rs's handler, which serves it marked
+        // with where each element's text sits; it runs first and passes
+        // on pages too large to mark.
+        let page = matches!(ext.as_deref(), Some("html" | "htm"));
+        let markable = std::fs::metadata(&file).is_ok_and(|m| m.len() <= super::edit::MARK_MAX as u64);
+        if document && page && markable {
+            return None;
+        }
+        if !file.is_file() {
+            return Some(Plan::Now(not_found()));
+        }
+        return Some(Plan::Now(Reply::file(
+            file.clone(),
+            super::history::mime_of(&file),
+        )));
     }
-    let file = file_in(root, url)?;
     let kind = horadric_core::forge::kind_of(&file)?;
     let raw = query.split('&').any(|q| q == "raw");
     if raw || !document {
@@ -673,8 +668,15 @@ mod tests {
         assert!(js.is_some_and(|r| r.cache && r.status == 200));
         let nope = answer(&dir, &format!("https://{host}/__forge/nope"), true, false);
         assert_eq!(nope.unwrap().status, 404);
-        // Anything else is the folder's to serve as it is.
+        // A page is left to edit.rs's marking handler; any other file is
+        // read from the folder as it is, and a missing one is a 404.
+        std::fs::write(dir.join("page.html"), "<p>hi</p>").unwrap();
         assert!(answer(&dir, &format!("https://{host}/page.html"), true, false).is_none());
+        std::fs::write(dir.join("logo.svg"), "<svg/>").unwrap();
+        let svg = answer(&dir, &format!("https://{host}/logo.svg"), false, false).unwrap();
+        assert!(svg.content_type == "image/svg+xml" && matches!(svg.body, Body::File(_)));
+        let gone = answer(&dir, &format!("https://{host}/gone.png"), false, false).unwrap();
+        assert_eq!(gone.status, 404);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -703,7 +705,9 @@ mod tests {
         assert!(matches!(deep, Some(Plan::Now(r)) if r.status == 404));
         let hidden = plan(root, &format!("https://{host}/a%2Fb.png"), false, true);
         assert!(matches!(hidden, Some(Plan::Now(r)) if r.status == 404));
-        assert!(plan(root, &format!("https://{host}/notes.png"), false, true).is_none());
+        // A file at the top passes the subfolder check; this one is missing.
+        let top = plan(root, &format!("https://{host}/notes.png"), false, true);
+        assert!(matches!(top, Some(Plan::Now(r)) if r.status == 404));
     }
 
     #[test]

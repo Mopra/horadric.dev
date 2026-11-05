@@ -395,7 +395,7 @@ pub fn serve(view: &ICoreWebView2, host: &str, root: &Path) {
 
 /// The largest page that is marked; past it the page is served as is and
 /// a text edit becomes a pin.
-const MARK_MAX: usize = 8 << 20;
+pub(super) const MARK_MAX: usize = 8 << 20;
 
 fn marked(view: &ICoreWebView2, args: &ICoreWebView2WebResourceRequestedEventArgs, root: &Path) {
     let Ok(request) = (unsafe { args.Request() }) else { return };

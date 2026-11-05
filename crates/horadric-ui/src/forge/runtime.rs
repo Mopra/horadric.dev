@@ -108,7 +108,7 @@ mod tests {
     fn the_runtime_files_are_served_with_their_types() {
         let js = asset("0000/runtime.js").unwrap();
         assert!(js.content_type.starts_with("text/javascript"));
-        assert_eq!(js.body.len(), RUNTIME_JS.len());
+        assert!(matches!(&js.body, super::super::serve::Body::Bytes(b) if b.len() == RUNTIME_JS.len()));
         assert!(asset("0000/mermaid.js").is_some());
         assert!(asset("0000/runtime.css").unwrap().content_type.starts_with("text/css"));
         assert!(asset("0000/secret.txt").is_none());

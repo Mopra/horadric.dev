@@ -624,7 +624,7 @@ fn rendered(rel: &Path, bytes: Vec<u8>) -> (i32, &'static str, Vec<u8>) {
     }
 }
 
-fn mime_of(rel: &Path) -> &'static str {
+pub(super) fn mime_of(rel: &Path) -> &'static str {
     let ext = rel
         .extension()
         .and_then(|e| e.to_str())
