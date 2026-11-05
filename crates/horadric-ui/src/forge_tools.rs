@@ -30,7 +30,7 @@ impl App {
                     reply.send(error("say which file: path"));
                     return None;
                 };
-                if let Err(e) = showable(&file) {
+                if let Err(e) = showable(root.as_deref(), &file) {
                     reply.send(error(&e));
                     return None;
                 }
@@ -69,7 +69,7 @@ impl App {
                     reply.send(error("say which file: path"));
                     return None;
                 };
-                if let Err(e) = showable(&file) {
+                if let Err(e) = showable(root.as_deref(), &file) {
                     reply.send(error(&e));
                     return None;
                 }
@@ -93,8 +93,16 @@ fn full(root: Option<&Path>, path: &str) -> PathBuf {
     }
 }
 
-/// Why the Forge cannot show `file`, if it cannot.
-fn showable(file: &Path) -> Result<(), String> {
+/// Why the Forge cannot show `file`, if it cannot. A file straight in a
+/// drive's root or the home folder is refused: its folder would be served
+/// to the page, and with it whatever else is kept there.
+fn showable(root: Option<&Path>, file: &Path) -> Result<(), String> {
+    if !forge::can_serve(root, file) {
+        return Err(format!(
+            "the Forge does not show files straight in a drive or the home folder; move {} into a folder of its own",
+            file.display()
+        ));
+    }
     if !file.is_file() {
         return Err(format!("there is no file {}", file.display()));
     }

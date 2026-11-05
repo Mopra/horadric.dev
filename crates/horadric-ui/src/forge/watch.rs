@@ -46,13 +46,21 @@ thread_local! {
     static FOLLOWS: RefCell<HashMap<String, Follow>> = RefCell::new(HashMap::new());
 }
 
-pub fn key_of(root: &Path) -> String {
-    root.to_string_lossy().replace('/', "\\").to_lowercase()
+/// A folder watched with its subfolders (`deep`) and without are watched
+/// apart, so a flat watch never stands in for a deep one.
+pub fn key_of(root: &Path, deep: bool) -> String {
+    let dir = root.to_string_lossy().replace('/', "\\").to_lowercase();
+    if deep {
+        dir
+    } else {
+        format!("flat:{dir}")
+    }
 }
 
-/// Watches `root` unless it is already watched.
-pub fn follow(root: &Path) {
-    let key = key_of(root);
+/// Watches `root`, and its subfolders when `deep`, unless it is already
+/// watched so.
+pub fn follow(root: &Path, deep: bool) {
+    let key = key_of(root, deep);
     if FOLLOWS.with(|f| f.borrow().contains_key(&key)) {
         return;
     }
@@ -63,7 +71,7 @@ pub fn follow(root: &Path) {
     let dir = root.to_path_buf();
     let started = thread::Builder::new()
         .name("horadric-forge".into())
-        .spawn(move || run(&dir, &theirs));
+        .spawn(move || run(&dir, deep, &theirs));
     if started.is_ok() {
         FOLLOWS.with(|f| f.borrow_mut().insert(key, Follow { stop }));
     }
@@ -91,8 +99,8 @@ pub fn touched(root: &Path, rel: String) {
     super::wake();
 }
 
-fn run(dir: &Path, stop: &Event) {
-    let Some(changes) = DirChanges::open(dir, true, "") else {
+fn run(dir: &Path, deep: bool, stop: &Event) {
+    let Some(changes) = DirChanges::open(dir, deep, "") else {
         return;
     };
     let mut watches = [changes];

@@ -51,7 +51,7 @@ pub fn page(root: &Path, file: &Path) -> Reply {
         return Reply::html(message_page(&name, "There is no state folder to convert into.", false));
     };
     let stamp: Stamp = (meta.len(), meta.modified().ok());
-    let key = file.to_string_lossy().to_lowercase();
+    let key = key_of(file);
 
     let mut office = OFFICE.lock().unwrap_or_else(|p| p.into_inner());
     let map = office.get_or_insert_with(HashMap::new);
@@ -68,8 +68,9 @@ pub fn page(root: &Path, file: &Path) -> Reply {
                     }
                 }
                 State::Done(Converted::Pdf(pdf)) => {
-                    if let Ok(bytes) = std::fs::read(pdf) {
-                        return Reply::ok(bytes.into(), "application/pdf");
+                    // Streamed: a long report's PDF is not read on the UI thread.
+                    if pdf.is_file() {
+                        return Reply::file(pdf.clone(), "application/pdf");
                     }
                 }
             }
@@ -117,9 +118,32 @@ pub fn asset(rest: &str) -> Option<Reply> {
         "pdf" => "application/pdf",
         _ => return None,
     };
-    let bytes = std::fs::read(&path).ok()?;
+    if !path.is_file() {
+        return None;
+    }
     // Named by the hash of what it was made from, so it never changes.
-    Some(Reply::ok(bytes.into(), ty).cached())
+    Some(Reply::file(path, ty).cached())
+}
+
+/// Where a file's conversion stands, for a render waiting to picture it.
+pub enum Conversion {
+    Waiting,
+    /// Done, or never asked for: either way the page is what it will be.
+    Ready,
+    Failed(String),
+}
+
+fn key_of(file: &Path) -> String {
+    file.to_string_lossy().replace('/', "\\").to_lowercase()
+}
+
+pub fn conversion(file: &Path) -> Conversion {
+    let office = OFFICE.lock().unwrap_or_else(|p| p.into_inner());
+    match office.as_ref().and_then(|m| m.get(&key_of(file))) {
+        Some((_, State::Converting)) => Conversion::Waiting,
+        Some((_, State::Failed(why))) => Conversion::Failed(why.clone()),
+        _ => Conversion::Ready,
+    }
 }
 
 /// The address a converted file in `cache` is served at.

@@ -7,22 +7,31 @@
 //!
 //! Paths under `/__forge/` on every host are the Forge's own, not the
 //! folder's: the artefact runtime and converted Office files.
+//!
+//! A file outside any project is served from its own folder at a flat
+//! host, which answers nothing in that folder's subfolders.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use horadric_core::forge::Kind;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2, ICoreWebView2WebResourceRequestedEventArgs, ICoreWebView2_2, ICoreWebView2_3,
+    ICoreWebView2, ICoreWebView2Deferral, ICoreWebView2Environment,
+    ICoreWebView2WebResourceRequestedEventArgs, ICoreWebView2_2, ICoreWebView2_3,
     COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
 };
 use webview2_com::{
     AddScriptToExecuteOnDocumentCreatedCompletedHandler, WebMessageReceivedEventHandler,
     WebResourceRequestedEventHandler,
 };
 use windows::core::{Interface, HSTRING, PWSTR};
-use windows::Win32::System::Com::CoTaskMemFree;
-use windows::Win32::UI::Shell::SHCreateMemStream;
+use windows::Win32::System::Com::{CoTaskMemFree, STGM_READ, STGM_SHARE_DENY_NONE};
+use windows::Win32::UI::Shell::{SHCreateMemStream, SHCreateStreamOnFileEx};
 
 /// The suffix every file tab's host ends in.
 pub const SUFFIX: &str = ".forge.horadric";
@@ -54,6 +63,25 @@ pub fn host_for(root: &Path) -> String {
         h = h.wrapping_mul(0x0100_0193);
     }
     format!("{name}-{h:08x}{SUFFIX}")
+}
+
+/// The host the folder `root` is served at when only its own files are
+/// served, not its subfolders, apart from [`host_for`] so the two never
+/// share a cache, and told apart by its ending.
+pub fn host_for_flat(root: &Path) -> String {
+    let host = host_for(root);
+    format!("{}{FLAT}{SUFFIX}", host.trim_end_matches(SUFFIX))
+}
+
+/// What a flat host ends in before [`SUFFIX`]. A deep host ends in eight
+/// hex digits, so never in this.
+const FLAT: &str = "-f";
+
+/// Whether `host` serves only its folder's own files.
+pub fn is_flat(host: &str) -> bool {
+    host.to_ascii_lowercase()
+        .strip_suffix(SUFFIX)
+        .is_some_and(|h| h.ends_with(FLAT))
 }
 
 /// The address of `file` in `root` served at `host`. None for a file
@@ -189,6 +217,7 @@ fn script(kind: Option<Kind>) -> String {
 /// markdown and CSV rendered as they are asked for, the page side's
 /// scripts, and the page's messages routed to the Forge.
 pub fn prepare(key: &str, id: u64, view: &ICoreWebView2, root: &Path, host: &str, kind: Option<Kind>) {
+    let flat = is_flat(host);
     unsafe {
         match view.cast::<ICoreWebView2_3>() {
             Ok(v) => {
@@ -202,10 +231,16 @@ pub fn prepare(key: &str, id: u64, view: &ICoreWebView2, root: &Path, host: &str
             }
             Err(e) => eprintln!("horadric: this WebView2 cannot serve files: {e}"),
         }
+        // A flat host hears every request, so one into a subfolder is
+        // refused here: the mapping itself would serve the whole tree.
         let mut patterns = vec![format!("https://{host}{RESERVED}*")];
-        for ext in RENDERED {
-            patterns.push(format!("https://{host}/*.{ext}"));
-            patterns.push(format!("https://{host}/*.{ext}?*"));
+        if flat {
+            patterns.push(format!("https://{host}/*"));
+        } else {
+            for ext in RENDERED {
+                patterns.push(format!("https://{host}/*.{ext}"));
+                patterns.push(format!("https://{host}/*.{ext}?*"));
+            }
         }
         for pattern in patterns {
             let _ = view.AddWebResourceRequestedFilter(
@@ -213,16 +248,18 @@ pub fn prepare(key: &str, id: u64, view: &ICoreWebView2, root: &Path, host: &str
                 COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
             );
         }
+        // Before ours: handlers run in the order they were added, so a
+        // refusal set by ours is the one that stands.
+        super::edit::serve(view, host, root);
         let served = root.to_path_buf();
         let rendered = WebResourceRequestedEventHandler::create(Box::new(move |view, args| {
             if let (Some(view), Some(args)) = (view, args) {
-                render(&view, &args, &served);
+                render(&view, &args, &served, flat);
             }
             Ok(())
         }));
         let mut token = Default::default();
         let _ = view.add_WebResourceRequested(&rendered, &mut token);
-        super::edit::serve(view, host, root);
 
         let owned = key.to_string();
         let said = WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
@@ -250,10 +287,25 @@ const RENDERED: [&str; 9] = [
     "md", "markdown", "csv", "jsx", "tsx", "mmd", "mermaid", "pptx", "docx",
 ];
 
+/// The largest markdown or CSV file rendered. Rendering runs off the UI
+/// thread, but a page of hundreds of megabytes would still stall the view.
+const LARGEST: u64 = 20 << 20;
+
+/// The most CSV rows put in the table; a sortable table of more is too
+/// slow to be of use.
+const MOST_ROWS: usize = 10_000;
+
+/// What a reply carries.
+pub enum Body {
+    Bytes(Cow<'static, [u8]>),
+    /// A file streamed as WebView2 reads it, never read whole into memory.
+    File(PathBuf),
+}
+
 /// What a request is answered with.
 pub struct Reply {
     pub status: u16,
-    pub body: Cow<'static, [u8]>,
+    pub body: Body,
     pub content_type: &'static str,
     /// Kept a year: only for what never changes at its address.
     pub cache: bool,
@@ -263,7 +315,16 @@ impl Reply {
     pub fn ok(body: Cow<'static, [u8]>, content_type: &'static str) -> Reply {
         Reply {
             status: 200,
-            body,
+            body: Body::Bytes(body),
+            content_type,
+            cache: false,
+        }
+    }
+
+    pub fn file(file: PathBuf, content_type: &'static str) -> Reply {
+        Reply {
+            status: 200,
+            body: Body::File(file),
             content_type,
             cache: false,
         }
@@ -293,6 +354,10 @@ impl Reply {
     }
 }
 
+fn not_found() -> Reply {
+    Reply::html("<!doctype html><title>Not found</title>".into()).status(404)
+}
+
 /// The path and query of an address, the path still percent encoded.
 fn path_query(url: &str) -> (&str, &str) {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
@@ -301,9 +366,18 @@ fn path_query(url: &str) -> (&str, &str) {
     rest.split_once('?').unwrap_or((rest, ""))
 }
 
-/// The answer to `url` on the host serving `root`, None to let the folder
-/// answer as it would.
-pub fn answer(root: &Path, url: &str) -> Option<Reply> {
+/// How a request is to be answered.
+enum Plan {
+    Now(Reply),
+    /// Rendered from the file, which reads it: done off the UI thread.
+    Render(Kind, PathBuf, String),
+}
+
+/// What the request for `url` on the host serving `root` comes to, None
+/// to let the folder answer as it would. Only a `document` request (a
+/// page, or a frame's) is given a rendered page; a script's `fetch` of a
+/// CSV gets the CSV. A `flat` host serves none of its folder's subfolders.
+fn plan(root: &Path, url: &str, document: bool, flat: bool) -> Option<Plan> {
     let (path, query) = path_query(url);
     if let Some(rest) = path.strip_prefix(RESERVED) {
         let found = if let Some(r) = rest.strip_prefix("runtime/") {
@@ -313,9 +387,10 @@ pub fn answer(root: &Path, url: &str) -> Option<Reply> {
         } else {
             None
         };
-        return Some(found.unwrap_or_else(|| {
-            Reply::html("<!doctype html><title>Not found</title>".into()).status(404)
-        }));
+        return Some(Plan::Now(found.unwrap_or_else(not_found)));
+    }
+    if flat && decode(path).trim_start_matches('/').contains(['/', '\\']) {
+        return Some(Plan::Now(not_found()));
     }
     let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
     // Other files are the folder's, and an HTML file would be read here
@@ -324,64 +399,213 @@ pub fn answer(root: &Path, url: &str) -> Option<Reply> {
         return None;
     }
     let file = file_in(root, url)?;
+    let kind = horadric_core::forge::kind_of(&file)?;
+    let raw = query.split('&').any(|q| q == "raw");
+    if raw || !document {
+        // Answered here rather than left to the folder, so nothing rests
+        // on how a filtered request with no response set falls through.
+        return Some(Plan::Now(Reply::file(file, raw_type(kind, raw))));
+    }
+    if matches!(kind, Kind::Pptx | Kind::Docx) {
+        return Some(Plan::Now(super::office::page(root, &file)));
+    }
+    if matches!(kind, Kind::Jsx | Kind::Mermaid) {
+        return Some(Plan::Now(Reply::html(super::runtime::artefact_page(path))));
+    }
     let title = file
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let kind = horadric_core::forge::kind_of(&file)?;
-    if matches!(kind, Kind::Pptx | Kind::Docx) {
-        return Some(super::office::page(root, &file));
+    Some(Plan::Render(kind, file, title))
+}
+
+/// The type a file of `kind` is served as when it is not rendered. The
+/// artefact page asks with `?raw` for its source as text.
+fn raw_type(kind: Kind, raw: bool) -> &'static str {
+    match kind {
+        _ if raw => "text/plain; charset=utf-8",
+        Kind::Markdown => "text/markdown; charset=utf-8",
+        Kind::Csv => "text/csv; charset=utf-8",
+        Kind::Jsx => "text/javascript; charset=utf-8",
+        Kind::Pptx => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        Kind::Docx => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        _ => "text/plain; charset=utf-8",
     }
-    let bytes = match std::fs::read(&file) {
-        Ok(b) => b,
-        Err(e) => {
-            let page = format!(
-                "<!doctype html><title>{t}</title><p>{t} cannot be read: {e}</p>",
-                t = super::runtime::attr(&title)
-            );
-            return Some(Reply::html(page).status(404));
+}
+
+/// The page for a markdown or CSV `file`. Reads the file, so it is for a
+/// worker thread.
+fn rendered(kind: Kind, file: &Path, title: &str) -> Reply {
+    let t = super::runtime::attr(title);
+    let message = |text: String| format!("<!doctype html><title>{t}</title><p>{text}</p>");
+    let read = std::fs::metadata(file).and_then(|meta| {
+        if meta.len() > LARGEST {
+            return Ok(None);
         }
+        std::fs::read(file).map(Some)
+    });
+    let bytes = match read {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            let text = format!("{t} is too large to show here, over {} MB.", LARGEST >> 20);
+            return Reply::html(message(text));
+        }
+        Err(e) => return Reply::html(message(format!("{t} cannot be read: {e}"))).status(404),
     };
     let src = String::from_utf8_lossy(&bytes);
-    Some(match kind {
+    match kind {
         Kind::Markdown => Reply::html(super::runtime::with_mermaid(
-            horadric_core::forge::markdown_html(&src, &title),
+            horadric_core::forge::markdown_html(&src, title),
         )),
-        Kind::Csv => Reply::html(horadric_core::forge::csv_html(&src, &title)),
-        // The artefact page fetches its source with ?raw. Answered here too
-        // rather than left to the folder, so nothing rests on how a filtered
-        // request with no response set falls through.
-        Kind::Jsx | Kind::Mermaid if query.split('&').any(|q| q == "raw") => {
-            Reply::ok(bytes.into(), "text/plain; charset=utf-8")
+        Kind::Csv => {
+            let (src, cut) = first_rows(&src, MOST_ROWS);
+            let mut page = horadric_core::forge::csv_html(src, title);
+            if cut {
+                let note = format!(
+                    "<p class=\"forge-cut\">Only the first {MOST_ROWS} rows are shown.</p>\n</body>"
+                );
+                page = page.replacen("</body>", &note, 1);
+            }
+            Reply::html(page)
         }
-        Kind::Jsx | Kind::Mermaid => Reply::html(super::runtime::artefact_page(path)),
-        _ => return None,
+        _ => not_found(),
+    }
+}
+
+/// The first `rows` lines of `src` (the header among them), and whether
+/// any were left out.
+fn first_rows(src: &str, rows: usize) -> (&str, bool) {
+    match src.match_indices('\n').nth(rows.saturating_sub(1)) {
+        Some((at, _)) if at + 1 < src.len() => (&src[..at + 1], true),
+        _ => (src, false),
+    }
+}
+
+/// The answer to `url` on the host serving `root`, None to let the folder
+/// answer as it would. Reads the file on the calling thread.
+#[cfg(test)]
+fn answer(root: &Path, url: &str, document: bool, flat: bool) -> Option<Reply> {
+    Some(match plan(root, url, document, flat)? {
+        Plan::Now(reply) => reply,
+        Plan::Render(kind, file, title) => rendered(kind, &file, &title),
     })
 }
 
-/// Answers a request [`answer`] has a reply for. Left alone, a request
+/// A request waiting on a worker thread, with what is needed to answer it
+/// on the UI thread.
+struct Waiting {
+    args: ICoreWebView2WebResourceRequestedEventArgs,
+    deferral: ICoreWebView2Deferral,
+    env: ICoreWebView2Environment,
+}
+
+thread_local! {
+    static WAITING: RefCell<HashMap<u64, Waiting>> = RefCell::new(HashMap::new());
+}
+
+/// Pages workers rendered, by the number of the request they answer.
+static RENDERED_PAGES: Mutex<Vec<(u64, Reply)>> = Mutex::new(Vec::new());
+static NEXT: AtomicU64 = AtomicU64::new(1);
+
+/// Answers a request [`plan`] has a reply for. Left alone, a request
 /// gets the file's bytes as they are.
-fn render(view: &ICoreWebView2, args: &ICoreWebView2WebResourceRequestedEventArgs, root: &Path) {
+fn render(view: &ICoreWebView2, args: &ICoreWebView2WebResourceRequestedEventArgs, root: &Path, flat: bool) {
     let Ok(request) = (unsafe { args.Request() }) else {
         return;
     };
     let url = read(|p| unsafe { request.Uri(p) });
-    let Some(reply) = answer(root, &url) else {
+    let mut context = COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL;
+    let _ = unsafe { args.ResourceContext(&mut context) };
+    let document = context == COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT;
+    let Some(plan) = plan(root, &url, document, flat) else {
         return;
     };
-    let reason = if reply.status == 200 { "OK" } else { "Not Found" };
+    let Ok(env) = (unsafe { view.cast::<ICoreWebView2_2>().and_then(|v| v.Environment()) }) else {
+        return;
+    };
+    match plan {
+        Plan::Now(reply) => respond(&env, args, &reply),
+        Plan::Render(kind, file, title) => {
+            let Ok(deferral) = (unsafe { args.GetDeferral() }) else {
+                return respond(&env, args, &rendered(kind, &file, &title));
+            };
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            WAITING.with(|w| {
+                w.borrow_mut().insert(
+                    n,
+                    Waiting {
+                        args: args.clone(),
+                        deferral,
+                        env,
+                    },
+                )
+            });
+            let started = std::thread::Builder::new()
+                .name("horadric-forge-render".into())
+                .spawn(move || {
+                    let reply = rendered(kind, &file, &title);
+                    if let Ok(mut done) = RENDERED_PAGES.lock() {
+                        done.push((n, reply));
+                    }
+                    super::wake();
+                });
+            if started.is_err() {
+                if let Some(w) = WAITING.with(|w| w.borrow_mut().remove(&n)) {
+                    respond(&w.env, &w.args, &not_found());
+                    let _ = unsafe { w.deferral.Complete() };
+                }
+            }
+        }
+    }
+}
+
+/// On the UI thread: answers the requests whose pages the workers have
+/// finished.
+pub fn drain() {
+    let done = RENDERED_PAGES
+        .lock()
+        .map(|mut d| std::mem::take(&mut *d))
+        .unwrap_or_default();
+    for (n, reply) in done {
+        if let Some(w) = WAITING.with(|w| w.borrow_mut().remove(&n)) {
+            respond(&w.env, &w.args, &reply);
+            let _ = unsafe { w.deferral.Complete() };
+        }
+    }
+}
+
+fn respond(env: &ICoreWebView2Environment, args: &ICoreWebView2WebResourceRequestedEventArgs, reply: &Reply) {
+    let stream = match &reply.body {
+        Body::Bytes(b) => unsafe { SHCreateMemStream(Some(b)) },
+        Body::File(file) => unsafe {
+            SHCreateStreamOnFileEx(
+                &HSTRING::from(file.as_os_str()),
+                (STGM_READ | STGM_SHARE_DENY_NONE).0,
+                0,
+                false,
+                None,
+            )
+            .ok()
+        },
+    };
+    let (stream, status, headers) = match stream {
+        Some(s) => (s, reply.status, reply.headers()),
+        None => {
+            let missing = not_found();
+            let Body::Bytes(b) = &missing.body else { return };
+            let Some(s) = (unsafe { SHCreateMemStream(Some(b)) }) else {
+                return;
+            };
+            (s, missing.status, missing.headers())
+        }
+    };
+    let reason = if status == 200 { "OK" } else { "Not Found" };
     unsafe {
-        let Ok(env) = view.cast::<ICoreWebView2_2>().and_then(|v| v.Environment()) else {
-            return;
-        };
-        let Some(stream) = SHCreateMemStream(Some(&reply.body)) else {
-            return;
-        };
         if let Ok(response) = env.CreateWebResourceResponse(
             &stream,
-            i32::from(reply.status),
+            i32::from(status),
             &HSTRING::from(reason),
-            &HSTRING::from(reply.headers()),
+            &HSTRING::from(headers),
         ) {
             let _ = args.SetResponse(&response);
         }
@@ -424,26 +648,80 @@ mod tests {
         assert_eq!(f, file);
     }
 
+    fn bytes(r: &Reply) -> &[u8] {
+        match &r.body {
+            Body::Bytes(b) => b,
+            Body::File(_) => panic!("a file, not bytes"),
+        }
+    }
+
     #[test]
     fn artefacts_get_the_runtime_page_and_their_source_raw() {
         let dir = std::env::temp_dir().join(format!("forge-serve-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("chart.jsx"), "export default () => <p>hi</p>").unwrap();
         let host = "x.forge.horadric";
-        let page = answer(&dir, &format!("https://{host}/chart.jsx")).unwrap();
+        let page = answer(&dir, &format!("https://{host}/chart.jsx"), true, false).unwrap();
         assert!(page.content_type.starts_with("text/html"));
-        let page = String::from_utf8_lossy(&page.body).into_owned();
+        let page = String::from_utf8_lossy(bytes(&page)).into_owned();
         assert!(page.contains("content=\"/chart.jsx?raw\""));
-        let raw = answer(&dir, &format!("https://{host}/chart.jsx?raw")).unwrap();
-        assert_eq!(&*raw.body, b"export default () => <p>hi</p>");
-        assert!(!raw.cache);
+        let raw = answer(&dir, &format!("https://{host}/chart.jsx?raw"), false, false).unwrap();
+        assert!(matches!(&raw.body, Body::File(f) if f == &dir.join("chart.jsx")));
+        assert!(raw.content_type.starts_with("text/plain") && !raw.cache);
         let base = super::super::runtime::base();
-        let js = answer(&dir, &format!("https://{host}{base}runtime.js"));
+        let js = answer(&dir, &format!("https://{host}{base}runtime.js"), false, false);
         assert!(js.is_some_and(|r| r.cache && r.status == 200));
-        assert_eq!(answer(&dir, &format!("https://{host}/__forge/nope")).unwrap().status, 404);
+        let nope = answer(&dir, &format!("https://{host}/__forge/nope"), true, false);
+        assert_eq!(nope.unwrap().status, 404);
         // Anything else is the folder's to serve as it is.
-        assert!(answer(&dir, &format!("https://{host}/page.html")).is_none());
+        assert!(answer(&dir, &format!("https://{host}/page.html"), true, false).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_page_gets_the_rendered_csv() {
+        let dir = std::env::temp_dir().join(format!("forge-serve-csv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("data.csv"), "a,b
+1,2
+").unwrap();
+        let url = "https://x.forge.horadric/data.csv";
+        let page = answer(&dir, url, true, false).unwrap();
+        assert!(page.content_type.starts_with("text/html"));
+        let fetched = answer(&dir, url, false, false).unwrap();
+        assert!(fetched.content_type.starts_with("text/csv"));
+        assert!(matches!(fetched.body, Body::File(_)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_flat_host_serves_no_subfolder() {
+        let root = Path::new(r"C:/Users/me/Desktop");
+        let host = host_for_flat(root);
+        assert!(is_flat(&host) && !is_flat(&host_for(root)));
+        let deep = plan(root, &format!("https://{host}/.ssh/id_rsa"), false, true);
+        assert!(matches!(deep, Some(Plan::Now(r)) if r.status == 404));
+        let hidden = plan(root, &format!("https://{host}/a%2Fb.png"), false, true);
+        assert!(matches!(hidden, Some(Plan::Now(r)) if r.status == 404));
+        assert!(plan(root, &format!("https://{host}/notes.png"), false, true).is_none());
+    }
+
+    #[test]
+    fn a_long_csv_is_cut_to_its_first_rows() {
+        assert_eq!(first_rows("h
+1
+2
+", 2), ("h
+1
+", true));
+        assert_eq!(first_rows("h
+1
+", 2), ("h
+1
+", false));
+        assert_eq!(first_rows("h
+1", 5), ("h
+1", false));
     }
 
     #[test]

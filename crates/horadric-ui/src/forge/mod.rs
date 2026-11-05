@@ -34,7 +34,9 @@ use horadric_core::forge::Kind;
 use horadric_core::{HookEvent, Registry};
 use serde_json::Value;
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2;
-use windows::core::HSTRING;
+use webview2_com::ContentLoadingEventHandler;
+use windows::core::{HSTRING, PWSTR};
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
@@ -49,7 +51,7 @@ struct FileTab {
     id: u64,
     file: PathBuf,
     /// The folder served to it, the project's or, for a file outside the
-    /// project, the file's own.
+    /// project, the file's own without its subfolders.
     root: PathBuf,
     /// The made up host the folder is served at.
     host: String,
@@ -136,11 +138,8 @@ pub fn open(key: &str, root: Option<&Path>, file: &Path, front: bool) -> Option<
         }
         return Some(id);
     }
-    let root = root
-        .filter(|r| inside(r, file))
-        .map(Path::to_path_buf)
-        .or_else(|| file.parent().map(Path::to_path_buf))?;
-    let host = serve::host_for(&root);
+    let (root, host) = served(root, file)?;
+    let deep = !serve::is_flat(&host);
     let url = serve::url_for(&host, &root, file)?;
     settings::remember_root(&host, &root);
     let id = web::open_file_tab(key, &url, front);
@@ -154,9 +153,40 @@ pub fn open(key: &str, root: Option<&Path>, file: &Path, front: bool) -> Option<
             scroll: None,
         })
     });
-    watch::follow(&root);
+    watch::follow(&root, deep);
     history::seen(file);
     Some(id)
+}
+
+/// The folder `file` is served from and the host it is served at: the
+/// project's folder, or for a file outside it the file's own folder
+/// without its subfolders. None when that folder is too broad to serve,
+/// as a page could then read whatever the user keeps there.
+fn served(project: Option<&Path>, file: &Path) -> Option<(PathBuf, String)> {
+    if let Some(root) = project.filter(|r| inside(r, file) && !broad(r)) {
+        return Some((root.to_path_buf(), serve::host_for(root)));
+    }
+    let dir = file.parent()?;
+    if broad(dir) {
+        return None;
+    }
+    Some((dir.to_path_buf(), serve::host_for_flat(dir)))
+}
+
+/// Whether the Forge may serve `file`, given the project's folder.
+pub fn can_serve(project: Option<&Path>, file: &Path) -> bool {
+    served(project, file).is_some()
+}
+
+/// A drive's root, the user's home folder or a folder holding it: served,
+/// any page shown from it could read keys and mail.
+fn broad(dir: &Path) -> bool {
+    if dir.parent().is_none() {
+        return true;
+    }
+    let norm = |p: &Path| p.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    home.is_some_and(|h| norm(&h) == norm(dir) || inside(dir, &h))
 }
 
 /// Whether `file` is in the folder `root`.
@@ -220,7 +250,11 @@ pub fn restored(key: &str, id: u64, url: &str) {
     let Some((root, file)) = serve::parse_url(url, settings::root_of) else {
         return;
     };
-    let host = serve::host_for(&root);
+    let host = settings_host(url, &root);
+    let deep = !serve::is_flat(&host);
+    if broad(&root) {
+        return;
+    }
     history::seen(&file);
     TABS.with(|t| {
         t.borrow_mut().push(FileTab {
@@ -232,7 +266,15 @@ pub fn restored(key: &str, id: u64, url: &str) {
             scroll: None,
         })
     });
-    watch::follow(&root);
+    watch::follow(&root, deep);
+}
+
+/// The host a saved tab's address names, kept as it was: a flat host
+/// stays flat.
+fn settings_host(url: &str, root: &Path) -> String {
+    serve::host_of(url)
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| serve::host_for(root))
 }
 
 /// WebView2 made the tab `id`. When it is a file's, its folder is served
@@ -250,6 +292,44 @@ pub fn ready(key: &str, id: u64, view: &ICoreWebView2) {
     };
     serve::prepare(key, id, view, &root, &host, kind(&file));
     present::listen(key, id, view, &host);
+    let owned = key.to_string();
+    // Before the page's own scripts run, so its ready message already
+    // finds the tab showing the file it is.
+    let loading = ContentLoadingEventHandler::create(Box::new(move |view, _| {
+        if let Some(view) = view {
+            let mut p = PWSTR::null();
+            if unsafe { view.Source(&mut p) }.is_ok() && !p.is_null() {
+                let url = unsafe { p.to_string() }.unwrap_or_default();
+                unsafe { CoTaskMemFree(Some(p.0 as *const _)) };
+                moved(&owned, id, &url);
+            }
+        }
+        Ok(())
+    }));
+    let mut token = Default::default();
+    let _ = unsafe { view.add_ContentLoading(&loading, &mut token) };
+}
+
+/// The tab `id` loaded `url`. A link followed inside its folder makes it
+/// that file's tab: the bar, pins and history then act on the file shown.
+/// A page out on the web leaves it as it was, heard by no one.
+fn moved(key: &str, id: u64, url: &str) {
+    let to = TABS.with(|t| {
+        let mut t = t.borrow_mut();
+        let f = t.iter_mut().find(|f| f.key == key && f.id == id)?;
+        let (root, host) = (f.root.clone(), f.host.clone());
+        let (_, file) = serve::parse_url(url, |h| h.eq_ignore_ascii_case(&host).then(|| root.clone()))?;
+        if same(&file, &f.file) {
+            return None;
+        }
+        f.file = file.clone();
+        f.scroll = None;
+        Some(file)
+    });
+    let Some(file) = to else { return };
+    history::seen(&file);
+    history::tab_moved(key, id);
+    pins::tab_moved(key, id);
 }
 
 /// The page of the tab `id` said something, as JSON. Only a page of the
@@ -345,7 +425,7 @@ fn roots() -> HashSet<String> {
     TABS.with(|t| {
         t.borrow()
             .iter()
-            .map(|f| watch::key_of(&f.root))
+            .map(|f| watch::key_of(&f.root, !serve::is_flat(&f.host)))
             .collect()
     })
 }
@@ -354,6 +434,8 @@ fn roots() -> HashSet<String> {
 /// file, or a file its page loads, changed, and stops watching folders no
 /// tab is served from any more.
 pub fn drain() {
+    serve::drain();
+    tools::drain();
     edit::drain();
     for (root, rel, all) in watch::take() {
         changed(&root, &rel, all);

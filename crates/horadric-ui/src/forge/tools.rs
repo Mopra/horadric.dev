@@ -2,11 +2,18 @@
 //! with: the file drawn in a tab of its own at a fixed size, pictured and
 //! closed again, so the tab the human looks at is never moved or resized.
 
-use std::path::Path;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Mutex;
+use std::time::Duration;
 
+use horadric_core::forge::Kind;
 use serde_json::{json, Value};
 
-use super::{inside, kind, serve, settings, FileTab, TABS};
+use super::office::{self, Conversion};
+use super::{kind, served, settings, FileTab, TABS};
 use crate::web;
 
 /// Told every session given the Horadric tools, after the browser's part.
@@ -44,6 +51,39 @@ const READY: &str = r#"(async (slide) => {
   return { slides: deck.count, shown: deck.current, rect: { x: r.x, y: r.y, width: r.width, height: r.height } };
 })"#;
 
+/// The longest a render may take, an Office file's conversion included.
+const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A render's ending, run once: by the render or by its timeout,
+/// whichever comes first.
+type Finish = Rc<Cell<Option<Box<dyn FnOnce(Result<Value, String>)>>>>;
+
+thread_local! {
+    static RUNNING: RefCell<HashMap<u64, Finish>> = RefCell::new(HashMap::new());
+}
+
+/// Renders whose time ran out, told by the timer threads.
+static TIMED_OUT: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// On the UI thread: ends the renders whose time ran out, closing their
+/// tabs.
+pub(super) fn drain() {
+    let out = TIMED_OUT
+        .lock()
+        .map(|mut t| std::mem::take(&mut *t))
+        .unwrap_or_default();
+    for id in out {
+        if let Some(finish) = RUNNING.with(|r| r.borrow_mut().remove(&id)) {
+            if let Some(f) = finish.take() {
+                f(Err(format!(
+                    "the file was not ready to picture within {} seconds",
+                    TIMEOUT.as_secs()
+                )));
+            }
+        }
+    }
+}
+
 /// Draws `file` in a new tab of the project `key`'s browser, behind the
 /// one shown, pictures it at slide `slide` when it is a deck, closes the
 /// tab and gives `done` the PNG as base64 and what was shown, or why not.
@@ -55,18 +95,39 @@ pub fn render(
     done: impl FnOnce(Result<Value, String>) + 'static,
 ) {
     let Some(id) = open_apart(key, root, file) else {
-        return done(Err("the Forge does not show files of this kind".into()));
+        return done(Err("the Forge does not show this file".into()));
     };
     let k = key.to_string();
-    let finish = move |r: Result<Value, String>| {
+    let once: Finish = Rc::new(Cell::new(Some(Box::new(move |r| {
+        RUNNING.with(|run| run.borrow_mut().remove(&id));
+        // Closed, the tab is out of the browser's saved tabs as well.
         web::close_tab(&k, id);
         super::prune();
         done(r);
+    }))));
+    RUNNING.with(|r| r.borrow_mut().insert(id, Rc::clone(&once)));
+    let timer = std::thread::Builder::new()
+        .name("horadric-forge-render-timeout".into())
+        .spawn(move || {
+            std::thread::sleep(TIMEOUT);
+            if let Ok(mut t) = TIMED_OUT.lock() {
+                t.push(id);
+            }
+            super::wake();
+        });
+    if timer.is_err() {
+        eprintln!("horadric: a forge render runs without a timeout");
+    }
+    let finish = move |r: Result<Value, String>| {
+        if let Some(f) = once.take() {
+            f(r);
+        }
     };
     let k = key.to_string();
-    web::after_load(key, id, move |ok| {
-        if !ok {
-            return finish(Err("the file did not finish loading".into()));
+    let office = matches!(kind(file), Some(Kind::Pptx | Kind::Docx)).then(|| file.to_path_buf());
+    when_shown(key, id, office, move |shown| {
+        if let Err(e) = shown {
+            return finish(Err(e));
         }
         let size = json!({
             "width": WIDTH, "height": HEIGHT, "deviceScaleFactor": 1, "mobile": false
@@ -127,16 +188,37 @@ pub fn render(
     });
 }
 
+/// Runs `then` once the tab `id` has loaded the page to picture: for an
+/// Office file, the one its conversion made, not the page saying it is
+/// under way. The finished conversion reloads the tab.
+fn when_shown(
+    key: &str,
+    id: u64,
+    office: Option<PathBuf>,
+    then: impl FnOnce(Result<(), String>) + 'static,
+) {
+    let k = key.to_string();
+    web::after_load(key, id, move |ok| {
+        if !ok {
+            return then(Err("the file did not finish loading".into()));
+        }
+        let Some(file) = office else {
+            return then(Ok(()));
+        };
+        match office::conversion(&file) {
+            Conversion::Waiting => when_shown(&k, id, Some(file), then),
+            Conversion::Ready => then(Ok(())),
+            Conversion::Failed(why) => then(Err(why)),
+        }
+    });
+}
+
 /// A new tab for `file`, never the one shown and never one it has already:
 /// those are the human's, and a render resizes the page it draws in.
 fn open_apart(key: &str, root: Option<&Path>, file: &Path) -> Option<u64> {
     kind(file)?;
-    let root = root
-        .filter(|r| inside(r, file))
-        .map(Path::to_path_buf)
-        .or_else(|| file.parent().map(Path::to_path_buf))?;
-    let host = serve::host_for(&root);
-    let url = serve::url_for(&host, &root, file)?;
+    let (root, host) = served(root, file)?;
+    let url = super::serve::url_for(&host, &root, file)?;
     settings::remember_root(&host, &root);
     let id = web::open_file_tab(key, &url, false);
     TABS.with(|t| {
