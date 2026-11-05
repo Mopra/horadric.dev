@@ -362,6 +362,12 @@ fn save_crop(answer: &str) -> Option<PathBuf> {
 /// Queues `gift` for the session it is for. Handed out from a timer, not
 /// here: this runs inside WebView2's callbacks, where a picker's menu
 /// loop has no business, and the app may be busy.
+/// Asks the session `file` goes to (the same one a pin would) to do
+/// `text`, as words sent the way a pin is.
+pub fn ask(key: &str, file: &Path, text: &str) {
+    give(key, file, Gift::Text(text.to_string()));
+}
+
 fn give(key: &str, file: &Path, gift: Gift) {
     WAITING.with(|w| {
         w.borrow_mut()

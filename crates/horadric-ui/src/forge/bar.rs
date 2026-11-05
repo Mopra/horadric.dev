@@ -32,6 +32,8 @@ pub enum Button {
     Export,
     /// A deck full screen on a chosen screen.
     Present,
+    /// The file as text, in the editor.
+    Source,
     /// In the history: one version further back.
     Older,
     /// In the history: one version nearer now, then the file itself.
@@ -79,6 +81,7 @@ pub fn shown(key: &str) -> Option<Shown> {
             lit.push(Button::Pin);
         }
     }
+    buttons.push(Button::Source);
     buttons.push(Button::History);
     buttons.push(Button::Export);
     if is_deck(&file) {
@@ -164,6 +167,7 @@ pub fn glyph(b: Button) -> &'static str {
         Button::History => "\u{E81C}",
         Button::Export => "\u{E72D}",
         Button::Present => "\u{E786}",
+        Button::Source => "\u{E943}",
         Button::Older => "\u{E76B}",
         Button::Newer => "\u{E76C}",
         Button::Compare => "\u{E8AB}",
@@ -179,6 +183,7 @@ pub fn tip(b: Button) -> &'static str {
         Button::History => "Earlier versions",
         Button::Export => "PDF, pictures, copy, To .pptx, open with",
         Button::Present => "Present full screen",
+        Button::Source => "Edit the file as text",
         Button::Older => "The version before this one",
         Button::Newer => "The version after this one",
         Button::Compare => "Compare",
@@ -204,6 +209,9 @@ pub fn press(b: Button, key: &str) {
         Button::Live => super::history::live(key, tab),
         Button::Export => super::export::menu(key, tab, &file),
         Button::Present => super::present::start(key, tab, true),
+        Button::Source => {
+            super::source_view(key);
+        }
     }
 }
 

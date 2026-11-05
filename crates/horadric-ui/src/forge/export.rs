@@ -451,19 +451,5 @@ fn to_pptx(key: &str, file: &Path) {
         file.display(),
         stem(file)
     );
-    ask_session(key, file, &text);
-}
-
-/// Puts `text` in the prompt of the session the file's tab is for.
-///
-/// Which session that is the pins know (the one that last wrote the file,
-/// else the one last focused, else a picker), and they do not hand plain
-/// text out yet; until they do, the request goes on the clipboard to be
-/// pasted into the session by hand.
-pub fn ask_session(_key: &str, file: &Path, text: &str) {
-    crate::clipboard::set_text(text);
-    eprintln!(
-        "horadric: the request for {} is on the clipboard to paste into its session",
-        file.display()
-    );
+    super::pins::ask(key, file, &text);
 }
