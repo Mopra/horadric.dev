@@ -200,10 +200,16 @@ fn inside(root: &Path, file: &Path) -> bool {
 /// Forgets file tabs whose browser tab closed. The browser does not say,
 /// so whoever asks after a tab looks first.
 fn prune() {
-    TABS.with(|t| {
-        t.borrow_mut()
-            .retain(|f| web::place_of(&f.key, f.id).is_some())
+    let closed = TABS.with(|t| {
+        let mut t = t.borrow_mut();
+        let before = t.len();
+        t.retain(|f| web::place_of(&f.key, f.id).is_some());
+        t.len() < before
     });
+    // Only when one went: prune runs on every lookup.
+    if closed {
+        history::forget_closed();
+    }
 }
 
 /// The tab of the project `key` showing `file`, if one does.
@@ -436,6 +442,7 @@ fn roots() -> HashSet<String> {
 pub fn drain() {
     serve::drain();
     tools::drain();
+    history::drain();
     edit::drain();
     for (root, rel, all) in watch::take() {
         changed(&root, &rel, all);
