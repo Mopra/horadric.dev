@@ -2211,23 +2211,49 @@ fn stage_agents(key: Option<&str>) -> Vec<(String, String)> {
     .unwrap_or_default()
 }
 
-/// The agents on the stage while it shows the project `key`, as (id,
-/// name, its Folio's key when it is one), the one that last had the
-/// keyboard first; and whether one ever had it, so that first one is
-/// known rather than just first. Nothing while the app is busy.
-pub(crate) fn forge_agents(key: &str) -> (Vec<(String, String, Option<String>)>, bool) {
+/// The project `key`'s agents, as (id, name, its Folio's key when it is
+/// one); and whether the first is the one that last had the keyboard
+/// rather than just first. From the stage while it shows the project, so
+/// that one leads; else from every session the registry puts in the
+/// project, since a pin can come from a browser popped out or while the
+/// stage shows another project. None while the app is busy (a menu it
+/// opened is up), for the caller to try again.
+pub(crate) fn forge_agents(key: &str) -> Option<(Vec<(String, String, Option<String>)>, bool)> {
     with_app(|app| {
-        let stage = app.stage.as_ref().filter(|s| s.project() == key)?;
-        let agents = (stage.agents().into_iter())
-            .map(|(id, name)| {
-                let folio = stage.console_of(&id).and_then(|(c, _)| c.folio.clone());
+        if let Some(stage) = app.stage.as_ref().filter(|s| s.project() == key) {
+            let agents = (stage.agents().into_iter())
+                .map(|(id, name)| {
+                    let folio = stage.console_of(&id).and_then(|(c, _)| c.folio.clone());
+                    (id, name, folio)
+                })
+                .collect();
+            return (agents, stage.active().is_some());
+        }
+        let mut found: Vec<(usize, String, Option<String>)> = {
+            let Ok(r) = app.shared.registry.lock() else {
+                return (Vec::new(), false);
+            };
+            (app.consoles.iter())
+                .chain(&app.folios)
+                .filter(|(_, c)| c.is_agent() && c.exit_code().is_none())
+                .filter(|(id, _)| r.get(id).is_some_and(|s| project_key(s) == key))
+                .map(|(id, c)| (c.serial, id.clone(), c.folio.clone()))
+                .collect()
+        };
+        found.sort();
+        let agents = (found.into_iter())
+            .map(|(_, id, folio)| {
+                let name = app.name_of(&id);
                 (id, name, folio)
             })
             .collect();
-        Some((agents, stage.active().is_some()))
+        (agents, false)
     })
-    .flatten()
-    .unwrap_or_default()
+}
+
+/// Shows a Forge note the human should see, false while the app is busy.
+pub(crate) fn forge_note(title: &str, body: &str) -> bool {
+    with_app(|app| app.toasts.show(Kind::Failed, title, body)).is_some()
 }
 
 /// A line per agent to hand a pick to, numbered from `base`, the one that
@@ -9811,8 +9837,15 @@ impl App {
                 }
                 Input::CloseView(serial) => self.close_view(serial),
                 Input::Hand(id, text) => {
-                    if let Some(stage) = &self.stage {
-                        stage.hand(&id, &text);
+                    let handed = self.stage.as_ref().is_some_and(|s| s.hand(&id, &text));
+                    // A Forge pin can be for a session the stage does not
+                    // show: the stage comes to it, so the human sees where
+                    // the pin went.
+                    if !handed {
+                        self.reveal(&id, false);
+                        if let Some(stage) = &self.stage {
+                            stage.hand(&id, &text);
+                        }
                     }
                 }
                 Input::PaneAsk(id, what) => {

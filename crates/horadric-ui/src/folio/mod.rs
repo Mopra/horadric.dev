@@ -76,7 +76,7 @@ use crate::folio_look as look;
 use crate::folio_session::{catch_up, history_file, start_failure};
 pub use crate::folio_session::{State, Tag};
 
-pub use composer::{before_caret, dictated, dictation, handed, open_history, pinned};
+pub use composer::{before_caret, dictated, dictation, handed, holds_pin, open_history, pinned};
 pub use select::find;
 pub use view::{
     attach, char, key, keyboard_moved, place, place_bar, refont, register_class, summon, wheel,

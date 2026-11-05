@@ -36,6 +36,10 @@ const WAIT_MAX: Duration = Duration::from_secs(20);
 /// The most text a page may send as one edit.
 const TEXT_MAX: usize = 200_000;
 
+/// More slides than any deck has. A page's count is only a claim, and one
+/// near `u64::MAX` must not overflow the check against the new order.
+const SLIDES_MAX: usize = 10_000;
+
 /// Writes by sessions in flight: the file, the tool call and when it began.
 static WRITING: Mutex<Vec<(PathBuf, Option<String>, Instant)>> = Mutex::new(Vec::new());
 
@@ -211,8 +215,17 @@ fn changed(src: &str, change: &Change) -> Result<Option<String>, Failed> {
 pub fn drain() {
     let done = DONE.lock().map(|mut d| std::mem::take(&mut *d)).unwrap_or_default();
     for (key, tab, msg) in done {
-        super::post(&key, tab, &msg);
+        answer(&key, tab, &msg);
     }
+}
+
+/// Posts an edit's answer. One that asks the page to send the edit as a
+/// pin lets that one pin through, though the tab is not in pin mode.
+fn answer(key: &str, tab: u64, msg: &Value) {
+    if msg.get("pin").and_then(Value::as_bool) == Some(true) {
+        super::pins::allow_pin(key, tab);
+    }
+    super::post(key, tab, msg);
 }
 
 /// The file the tab `tab` of `key` shows when the page's `file`
@@ -273,17 +286,26 @@ pub fn on_message(key: &str, tab: u64, msg: &Value) {
         ("edit", Some(Kind::Html | Kind::Deck)) => {
             let (Some(inner), Some(old), Some(new)) = (pair(msg, "offsets"), string(msg, "old"), string(msg, "new")) else {
                 // No offsets: the element is not in the file as written.
-                return super::post(key, tab, &json!({"forge": "edit-result", "what": what, "id": id, "ok": false, "pin": true}));
+                return answer(key, tab, &json!({"forge": "edit-result", "what": what, "id": id, "ok": false, "pin": true}));
             };
             Change::Element { inner, old, new }
         }
         ("reorder", Some(Kind::Html | Kind::Deck)) => {
-            let count = msg.get("count").and_then(Value::as_u64).unwrap_or(0) as usize;
-            let order: Option<Vec<usize>> = msg.get("order").and_then(Value::as_array).map(|a| {
-                a.iter().filter_map(|v| v.as_u64().map(|x| x as usize)).collect()
-            });
+            let count = msg.get("count").and_then(Value::as_u64).unwrap_or(0);
+            let Some(count) = usize::try_from(count).ok().filter(|&c| c <= SLIDES_MAX) else {
+                return refuse("the deck has more slides than can be reordered");
+            };
+            // Checked before collecting, so a page cannot make us hold a
+            // huge list: the order is at most every slide and one doubled.
+            let order: Option<Vec<usize>> = (msg.get("order").and_then(Value::as_array))
+                .filter(|a| !a.is_empty() && a.len() <= count.saturating_add(1))
+                .map(|a| {
+                    (a.iter())
+                        .filter_map(|v| v.as_u64().and_then(|x| usize::try_from(x).ok()))
+                        .collect()
+                });
             match order {
-                Some(order) if !order.is_empty() && order.len() <= count + 1 => Change::Slides { count, order },
+                Some(order) if !order.is_empty() => Change::Slides { count, order },
                 _ => return refuse("the new order of slides is missing"),
             }
         }
@@ -386,6 +408,12 @@ fn marked(view: &ICoreWebView2, args: &ICoreWebView2WebResourceRequestedEventArg
     let Some((_, file)) = super::serve::parse_url(&url, |_| Some(root.to_path_buf())) else {
         return;
     };
+    // Asked before reading, so a huge page is never read only to be
+    // served as is.
+    let small = std::fs::metadata(&file).is_ok_and(|m| m.len() <= MARK_MAX as u64);
+    if !small {
+        return;
+    }
     let Ok(bytes) = std::fs::read(&file) else { return };
     if bytes.len() > MARK_MAX {
         return;

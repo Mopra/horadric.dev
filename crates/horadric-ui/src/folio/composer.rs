@@ -1696,6 +1696,12 @@ pub fn pinned(key: &str, pin: Pin) {
     redraw(key);
 }
 
+/// Whether the Folio `key` still holds `pin` as a chip, unsent. A Folio
+/// that is gone holds nothing.
+pub fn holds_pin(key: &str, pin: &Pin) -> bool {
+    with(key, |chat| chat.input.pins.contains(pin)).unwrap_or(false)
+}
+
 /// What a pin's chip says: the file and the human's words, short.
 fn chip_label(pin: &Pin) -> String {
     const WORDS: usize = 40;

@@ -7,12 +7,17 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::forge::{pin_message, At, Pin, Rect};
 use serde_json::{json, Value};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
+use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::System::SystemInformation::GetTickCount;
+use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, KillTimer, SetTimer,
+};
 
 use crate::app::{push, Input};
 use crate::menu::{self, Item};
@@ -24,6 +29,9 @@ struct Open {
     n: u32,
     pin: Pin,
     anchor: Value,
+    /// The session it was handed to, and the Folio when that is one: only
+    /// that session's write makes it done.
+    handed: Option<(String, Option<String>)>,
 }
 
 /// What goes to a session from a file's tab.
@@ -36,9 +44,14 @@ thread_local! {
     static OPEN: RefCell<Vec<Open>> = const { RefCell::new(Vec::new()) };
     /// File tabs in pin mode, as (project, tab).
     static PINNING: RefCell<Vec<(String, u64)>> = const { RefCell::new(Vec::new()) };
-    /// Gifts waiting for the timer that hands them out, with their project
-    /// and file.
-    static WAITING: RefCell<Vec<(String, PathBuf, Gift)>> = const { RefCell::new(Vec::new()) };
+    /// Gifts waiting for the timer that hands them out, with their project,
+    /// file and when they were first given.
+    static WAITING: RefCell<Vec<(String, PathBuf, Gift, Instant)>> = const { RefCell::new(Vec::new()) };
+    /// One pin each that a tab may send outside pin mode, and since when:
+    /// a hand edit the host could not write goes as a pin.
+    static ALLOWED: RefCell<Vec<(String, u64, Instant)>> = const { RefCell::new(Vec::new()) };
+    /// When each tab last sent an error on.
+    static ERRORS_SENT: RefCell<Vec<(String, u64, Instant)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The session that last wrote each file, by project: the one a pin on it
@@ -55,6 +68,18 @@ const STACK_MAX: usize = 3000;
 const ANCHOR_MAX: usize = 4000;
 /// Crops are for the turn they go with; a week covers looking back.
 const CROPS_KEPT: Duration = Duration::from_secs(7 * 24 * 3600);
+/// How long a hand edit's pin pass lasts: the page sends it on the answer.
+const ALLOWED_FOR: Duration = Duration::from_secs(10);
+/// How soon after the human's own key or click a page may turn pin mode
+/// on, the P key's message being on its way.
+const INPUT_RECENT: Duration = Duration::from_millis(1500);
+/// One error sent on per tab in this long: a click on an error card is
+/// the human's, a stream of them is the page's.
+const ERROR_GAP: Duration = Duration::from_secs(3);
+/// How often, in ms, a gift is tried again while the app is busy or the
+/// project has no session, and when it is given up on, with a note.
+const RETRY: u32 = 500;
+const GIVE_UP: Duration = Duration::from_secs(90);
 
 /// The open pins of the project `key`, of `file` alone when given, in
 /// the order they were made.
@@ -86,19 +111,29 @@ fn writer_of(key: &str, file: &Path) -> Option<String> {
         .map(|(_, _, id)| id.clone())
 }
 
-/// A session's write to `file` landed: it was told what the pins said,
-/// so they are done and their runes fade.
+/// A session's write to `file` landed: the pins it was told of are done
+/// and their runes fade. Pins still waiting for their crop, handed to
+/// another session, or held unsent as a Folio's chips stay.
 pub fn written(key: &str, file: &Path) {
+    let Some(writer) = writer_of(key, file) else {
+        return;
+    };
     let had = OPEN.with(|o| {
         let mut o = o.borrow_mut();
         let before = o.len();
-        o.retain(|p| !(p.key == key && super::same(&p.pin.file, file)));
+        o.retain(|p| {
+            let done = p.key == key
+                && super::same(&p.pin.file, file)
+                && p.handed.as_ref().is_some_and(|(id, folio)| {
+                    *id == writer
+                        && folio.as_deref().is_none_or(|f| !crate::folio::holds_pin(f, &p.pin))
+                });
+            !done
+        });
         o.len() != before
     });
     if had {
-        if let Some(tab) = super::tab_of(key, file) {
-            super::post(key, tab, &json!({"forge": "clear-pins"}));
-        }
+        runes(key, file);
     }
 }
 
@@ -169,10 +204,75 @@ fn set(key: &str, tab: u64, on: bool) {
     });
 }
 
-/// The page turned pin mode on or off itself (the P key, Esc).
+/// The page turned pin mode on or off itself (the P key, Esc). Off is
+/// always heeded. On only when the human just pressed a key or clicked,
+/// with the window holding the tab's pane in front and the tab shown:
+/// pin mode is what lets a page's pins through, so a page must not turn it
+/// on unbidden. Refused, the page is told it is off.
 pub(super) fn page_pinning(key: &str, tab: u64, on: bool) {
+    let on = on && web::shown_tab(key) == Some(tab) && human_at(key);
     set(key, tab, on);
+    if !on {
+        super::post(key, tab, &json!({"forge": "pinning", "on": false}));
+    }
     web::redraw(key);
+}
+
+/// Whether the human just used the keyboard or mouse, and the window in
+/// front is ours and holds the project's browser pane.
+fn human_at(key: &str) -> bool {
+    let Some(pane) = web::pane_rect(key) else {
+        return false;
+    };
+    unsafe {
+        let mut info = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetLastInputInfo(&mut info).as_bool() {
+            return false;
+        }
+        let idle = GetTickCount().wrapping_sub(info.dwTime);
+        if u128::from(idle) > INPUT_RECENT.as_millis() {
+            return false;
+        }
+        let front = GetForegroundWindow();
+        let mut pid = 0;
+        GetWindowThreadProcessId(front, Some(&mut pid));
+        if pid != GetCurrentProcessId() {
+            return false;
+        }
+        let mut r = RECT::default();
+        if GetWindowRect(front, &mut r).is_err() {
+            return false;
+        }
+        let (x, y) = ((pane.left + pane.right) / 2, (pane.top + pane.bottom) / 2);
+        r.left <= x && x < r.right && r.top <= y && y < r.bottom
+    }
+}
+
+/// A hand edit on the tab `tab` could not be written exactly and goes as
+/// a pin: that one pin is let through outside pin mode.
+pub(super) fn allow_pin(key: &str, tab: u64) {
+    ALLOWED.with(|a| {
+        let mut a = a.borrow_mut();
+        a.retain(|(_, _, at)| at.elapsed() < ALLOWED_FOR);
+        a.push((key.to_string(), tab, Instant::now()));
+    });
+}
+
+/// Whether the tab `tab` may send a pin now: it is in pin mode, or holds
+/// a pass from a hand edit, which this uses up.
+fn may_pin(key: &str, tab: u64) -> bool {
+    if PINNING.with(|p| p.borrow().iter().any(|(k, t)| k == key && *t == tab)) {
+        return true;
+    }
+    ALLOWED.with(|a| {
+        let mut a = a.borrow_mut();
+        a.retain(|(_, _, at)| at.elapsed() < ALLOWED_FOR);
+        let i = a.iter().position(|(k, t, _)| k == key && *t == tab);
+        i.map(|i| a.remove(i)).is_some()
+    })
 }
 
 /// The tab `tab` followed a link to another file: pin mode was for the
@@ -180,6 +280,9 @@ pub(super) fn page_pinning(key: &str, tab: u64, on: bool) {
 /// asks for its own on `ready`.
 pub(super) fn tab_moved(key: &str, tab: u64) {
     set(key, tab, false);
+    let other = |(k, t, _): &(String, u64, Instant)| !(k == key && *t == tab);
+    ALLOWED.with(|a| a.borrow_mut().retain(other));
+    ERRORS_SENT.with(|e| e.borrow_mut().retain(other));
     web::redraw(key);
 }
 
@@ -203,6 +306,12 @@ pub(super) fn page_pin(key: &str, tab: u64, msg: &Value) {
     let Some(file) = super::file_of(key, tab) else {
         return;
     };
+    // A pin pastes words into a session's prompt: a page may only send one
+    // the human asked for.
+    if !may_pin(key, tab) {
+        eprintln!("horadric: forge pin from tab {tab} of {key} outside pin mode, refused");
+        return;
+    }
     let words = msg.get("words").and_then(Value::as_str).unwrap_or_default().trim();
     if words.is_empty() {
         return;
@@ -249,6 +358,7 @@ pub(super) fn page_pin(key: &str, tab: u64, msg: &Value) {
             n,
             pin: pin.clone(),
             anchor,
+            handed: None,
         });
         n
     });
@@ -284,6 +394,23 @@ pub(super) fn page_send_error(key: &str, tab: u64, msg: &Value) {
     let Some(file) = super::file_of(key, tab) else {
         return;
     };
+    // The card is clicked in the tab the human sees, and not many times a
+    // second; a page sending errors on by itself is neither.
+    if web::shown_tab(key) != Some(tab) {
+        return;
+    }
+    let too_soon = ERRORS_SENT.with(|e| {
+        let mut e = e.borrow_mut();
+        e.retain(|(_, _, at)| at.elapsed() < ERROR_GAP);
+        if e.iter().any(|(k, t, _)| k == key && *t == tab) {
+            return true;
+        }
+        e.push((key.to_string(), tab, Instant::now()));
+        false
+    });
+    if too_soon {
+        return;
+    }
     let field = |k: &str| msg.get(k).and_then(Value::as_str).unwrap_or_default().trim();
     let message = clip(field("message"), WORDS_MAX);
     if message.is_empty() {
@@ -379,7 +506,7 @@ pub fn ask(key: &str, file: &Path, text: &str) {
 fn give(key: &str, file: &Path, gift: Gift) {
     WAITING.with(|w| {
         w.borrow_mut()
-            .push((key.to_string(), file.to_path_buf(), gift))
+            .push((key.to_string(), file.to_path_buf(), gift, Instant::now()))
     });
     unsafe {
         SetTimer(None, 0, 0, Some(hand_out));
@@ -389,41 +516,91 @@ fn give(key: &str, file: &Path, gift: Gift) {
 unsafe extern "system" fn hand_out(_: HWND, _: u32, id: usize, _: u32) {
     let _ = KillTimer(None, id);
     let all = WAITING.with(|w| std::mem::take(&mut *w.borrow_mut()));
-    for (key, file, gift) in all {
+    let mut again = Vec::new();
+    for (key, file, gift, since) in all {
         match session_for(&key, &file) {
-            Some((id, folio)) => hand(&key, &id, folio.as_deref(), gift),
-            // The pin stays open, drawn and listed for `forge_pins`.
-            None => eprintln!("horadric: forge pin in {key} has no session to go to"),
+            Found::To(id, folio) => hand(&key, &id, folio.as_deref(), gift),
+            // The human closed the picker: not sent, and not lost either,
+            // as a pin stays open, drawn and listed for `forge_pins`.
+            Found::Declined => {}
+            // The app is in a menu of its own, or no session runs yet.
+            Found::Busy | Found::Nobody if since.elapsed() < GIVE_UP => {
+                again.push((key, file, gift, since))
+            }
+            Found::Busy | Found::Nobody => gave_up(&key, &gift),
         }
     }
+    if !again.is_empty() {
+        WAITING.with(|w| {
+            let mut w = w.borrow_mut();
+            // Older first, so they go in the order they were made.
+            again.append(&mut w);
+            *w = again;
+        });
+        SetTimer(None, 0, RETRY, Some(hand_out));
+    }
+}
+
+/// A gift that found no session for long enough is dropped, said where
+/// the human sees it. A pin stays on the page for `forge_pins`.
+fn gave_up(key: &str, gift: &Gift) {
+    let what = match gift {
+        Gift::Pin(_) => "Pin not sent",
+        Gift::Text(_) => "Not sent to a session",
+    };
+    let why = format!("No session of {key} took it. A pin stays on the page, and forge_pins lists it.");
+    if !crate::app::forge_note(what, &why) {
+        eprintln!("horadric: forge: {what}: {why}");
+    }
+}
+
+/// Where a gift goes, or why not yet.
+enum Found {
+    /// The session's id and its Folio's key when it is one.
+    To(String, Option<String>),
+    Busy,
+    Nobody,
+    Declined,
 }
 
 /// Which session a pin on `file` goes to: the one that last wrote it, else
 /// the one that last had the keyboard, else the only one; with several
-/// and no clue, the human picks. Its id and its Folio's key when it is
-/// one.
-fn session_for(key: &str, file: &Path) -> Option<(String, Option<String>)> {
-    let (agents, known) = crate::app::forge_agents(key);
+/// and no clue, the human picks.
+fn session_for(key: &str, file: &Path) -> Found {
+    let Some((agents, known)) = crate::app::forge_agents(key) else {
+        return Found::Busy;
+    };
     let writer = writer_of(key, file);
     let chosen = if let Some(a) = writer.and_then(|w| agents.iter().find(|a| a.0 == w)) {
         a
     } else if agents.len() == 1 || (known && !agents.is_empty()) {
         &agents[0]
     } else if agents.is_empty() {
-        return None;
+        return Found::Nobody;
     } else {
         const FIRST: usize = 1;
         let mut items = vec![Item::Disabled("Send the pin to".into())];
         items.extend(
             (agents.iter().enumerate()).map(|(i, a)| Item::action(FIRST + i, a.1.clone())),
         );
-        let picked = menu::popup(&items)?;
-        agents.get(picked.checked_sub(FIRST)?)?
+        let picked = menu::popup(&items).and_then(|p| agents.get(p.checked_sub(FIRST)?));
+        match picked {
+            Some(a) => a,
+            None => return Found::Declined,
+        }
     };
-    Some((chosen.0.clone(), chosen.2.clone()))
+    Found::To(chosen.0.clone(), chosen.2.clone())
 }
 
 fn hand(key: &str, id: &str, folio: Option<&str>, gift: Gift) {
+    if let Gift::Pin(pin) = &gift {
+        OPEN.with(|o| {
+            let mut o = o.borrow_mut();
+            if let Some(p) = o.iter_mut().find(|p| p.key == key && p.pin == *pin) {
+                p.handed = Some((id.to_string(), folio.map(str::to_string)));
+            }
+        });
+    }
     match (gift, folio) {
         // A Folio gathers pins as chips, to go with the next message.
         (Gift::Pin(pin), Some(f)) => {
