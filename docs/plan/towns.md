@@ -39,8 +39,8 @@ The human names the towns. Tristram stays one of them.
 [Accounts](identities.md) switches the Claude login for every session
 at once, and a `CLAUDE_CONFIG_DIR` per account was turned down (lore
 #268) for two reasons: each home would need the hooks, and a
-conversation could not be resumed on another account. **The human must
-agree to reopening it, for towns only.**
+conversation could not be resumed on another account. **The human
+agreed on 2026-11-05 to reopen it, for towns only.**
 
 Why it holds up for towns: a town's sessions never move to another
 account, so resuming across accounts is not needed there. The hooks are
@@ -116,8 +116,5 @@ town with a home on its own account.
 
 ## Open questions
 
-- Agreement to reopen `CLAUDE_CONFIG_DIR` for towns (above).
-- Whether using the Team seat's connectors for work mail is fine with
-  Optipeople's admin, since they can see what the seat connects to.
 - Whether a project session may hand a question up to a town, and
   which one (still open from Tristram).
