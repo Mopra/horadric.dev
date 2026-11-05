@@ -48,6 +48,7 @@ pub mod files;
 pub mod find;
 pub mod folio_look;
 pub mod folio_text;
+pub mod forge_office;
 pub mod frame;
 pub mod glide;
 pub mod highlight;
