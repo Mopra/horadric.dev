@@ -3,8 +3,9 @@
 //! compares two and restores one (docs/plan/the-forge.md, Versions).
 //!
 //! The watcher only ever sees the new bytes, so the bytes each shown file
-//! had when last seen are held here, read as its tab opens and refreshed
-//! after each change; a change keeps the held bytes as a version.
+//! had when last seen are held by one keeper thread, read as its tab opens
+//! and refreshed after each change; a change keeps the held bytes as a
+//! version.
 //!
 //! A version is shown read only from a host of its own beside the tab's,
 //! `<name>-<hash>.v.forge.horadric`, answered here from the kept bytes.
@@ -15,13 +16,17 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::forge::versions::{self, Version};
 use horadric_core::forge::{DiffLine, Kind};
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2, ICoreWebView2WebResourceRequestedEventArgs, ICoreWebView2_2,
+    ICoreWebView2, ICoreWebView2Deferral, ICoreWebView2Environment,
+    ICoreWebView2WebResourceRequestedEventArgs, ICoreWebView2_2,
     COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
 };
 use webview2_com::WebResourceRequestedEventHandler;
@@ -43,8 +48,6 @@ const LARGEST: u64 = 32 * 1024 * 1024;
 const WRITE_LASTS: Duration = Duration::from_secs(120);
 
 thread_local! {
-    /// The bytes each shown file had when last seen, by its path folded.
-    static SEEN: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
     /// Tabs showing a version instead of the file.
     static VIEWING: RefCell<Vec<Viewing>> = const { RefCell::new(Vec::new()) };
     /// Tabs whose page answers the version host.
@@ -96,49 +99,127 @@ fn read_small(file: &Path) -> Option<Vec<u8>> {
     std::fs::read(file).ok()
 }
 
+/// What the keeper thread is told, in the order it happened.
+enum Job {
+    /// A tab showing the file opened.
+    Seen(PathBuf),
+    /// The file changed on disk; with where to keep what it held, when it
+    /// is in its folder.
+    Changed(PathBuf, Option<(PathBuf, PathBuf)>),
+    /// The files tabs still show, by path folded: the rest are let go.
+    Only(HashSet<String>),
+}
+
+/// Bumped whenever what a tab's history shows may differ: a version kept,
+/// a step through the history, a file changed. The bar lays itself out
+/// again when it moves, and not on every paint.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(super) fn generation() -> u64 {
+    GENERATION.load(Ordering::Acquire)
+}
+
+fn bump() {
+    GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
+thread_local! {
+    static KEEPER: RefCell<Option<Sender<Job>>> = const { RefCell::new(None) };
+}
+
+/// Hands `job` to the one keeper thread, started on first use. One thread,
+/// so keeps land in the order the changes came and never race each other.
+fn send(job: Job) {
+    KEEPER.with(|k| {
+        let mut k = k.borrow_mut();
+        // A keeper that died (a panic) is started again with what it lost.
+        let job = match k.as_ref() {
+            Some(tx) => match tx.send(job) {
+                Ok(()) => return,
+                Err(e) => e.0,
+            },
+            None => job,
+        };
+        let (tx, rx) = mpsc::channel();
+        let started = thread::Builder::new()
+            .name("horadric-forge-keep".into())
+            .spawn(move || keeper(rx));
+        if started.is_ok() && tx.send(job).is_ok() {
+            *k = Some(tx);
+        }
+    });
+}
+
+/// The keeper: holds the bytes each shown file had when last seen, and
+/// reads, keeps and prunes off the UI thread.
+fn keeper(rx: Receiver<Job>) {
+    let mut seen: HashMap<String, Vec<u8>> = HashMap::new();
+    for job in rx {
+        match job {
+            Job::Seen(file) => {
+                let key = fold(&file);
+                if !seen.contains_key(&key) {
+                    if let Some(bytes) = read_small(&file) {
+                        seen.insert(key, bytes);
+                    }
+                }
+            }
+            Job::Changed(file, place) => {
+                let key = fold(&file);
+                let now = read_small(&file);
+                let before = match &now {
+                    Some(b) => seen.insert(key, b.clone()),
+                    None => seen.remove(&key),
+                };
+                let Some(before) = before else { continue };
+                if now.as_deref() == Some(before.as_slice()) {
+                    continue;
+                }
+                let Some((store, rel)) = place else { continue };
+                if let Err(e) = versions::keep(&store, &rel, &before) {
+                    eprintln!("horadric: cannot keep a version of {}: {e}", rel.display());
+                    continue;
+                }
+                if let Err(e) = versions::prune(&store, LIMIT) {
+                    eprintln!("horadric: cannot prune {}: {e}", store.display());
+                }
+                bump();
+            }
+            Job::Only(open) => seen.retain(|k, _| open.contains(k)),
+        }
+    }
+}
+
+/// The files the Forge's tabs show, by path folded.
+fn open_files() -> HashSet<String> {
+    super::TABS.with(|t| t.borrow().iter().map(|f| fold(&f.file)).collect())
+}
+
 /// A tab showing `file` opened: what it holds now is what a change will
 /// keep.
 pub(super) fn seen(file: &Path) {
-    let key = fold(file);
-    if SEEN.with(|s| s.borrow().contains_key(&key)) {
-        return;
-    }
-    if let Some(bytes) = read_small(file) {
-        SEEN.with(|s| s.borrow_mut().insert(key, bytes));
-    }
+    send(Job::Seen(file.to_path_buf()));
 }
 
 /// `file`, shown from `root`, changed on disk: the bytes it had are kept
 /// as a version, unless they are what it holds still.
 pub(super) fn changed(root: &Path, file: &Path) {
-    let key = fold(file);
-    let now = read_small(file);
-    let before = SEEN.with(|s| {
-        let mut s = s.borrow_mut();
-        match &now {
-            Some(b) => s.insert(key, b.clone()),
-            None => s.remove(&key),
-        }
-    });
-    let Some(before) = before else { return };
-    if now.as_deref() == Some(before.as_slice()) {
-        return;
-    }
-    let (Some(store), Some(rel)) = (store(root), rel_of(root, file)) else {
-        return;
-    };
-    // Off the UI thread: a prune walks every version kept.
-    let _ = thread::Builder::new()
-        .name("horadric-forge-keep".into())
-        .spawn(move || {
-            if let Err(e) = versions::keep(&store, &rel, &before) {
-                eprintln!("horadric: cannot keep a version of {}: {e}", rel.display());
-                return;
-            }
-            if let Err(e) = versions::prune(&store, LIMIT) {
-                eprintln!("horadric: cannot prune {}: {e}", store.display());
-            }
-        });
+    let place = store(root).zip(rel_of(root, file));
+    send(Job::Changed(file.to_path_buf(), place));
+    send(Job::Only(open_files()));
+    bump();
+}
+
+/// Tabs closed: lets go of the bytes held for files no tab shows any more,
+/// and of what closed tabs were showing and serving. Call after the tabs
+/// are gone from `TABS`.
+pub(super) fn forget_closed() {
+    send(Job::Only(open_files()));
+    let open: HashSet<(String, u64)> =
+        super::TABS.with(|t| t.borrow().iter().map(|f| (f.key.clone(), f.id)).collect());
+    VIEWING.with(|v| v.borrow_mut().retain(|v| open.contains(&(v.key.clone(), v.tab))));
+    SERVING.with(|s| s.borrow_mut().retain(|k| open.contains(k)));
+    bump();
 }
 
 /// The tab's folder, file, and the file's path in the folder.
@@ -256,11 +337,13 @@ pub fn newer(key: &str, tab: u64) {
 /// of a file it no longer shows.
 pub(super) fn tab_moved(key: &str, tab: u64) {
     VIEWING.with(|v| v.borrow_mut().retain(|v| !(v.key == key && v.tab == tab)));
+    bump();
 }
 
 /// Back to the file as it is, out of the history.
 pub fn live(key: &str, tab: u64) {
     VIEWING.with(|v| v.borrow_mut().retain(|v| !(v.key == key && v.tab == tab)));
+    bump();
     let url = super::TABS.with(|t| {
         t.borrow()
             .iter()
@@ -332,6 +415,7 @@ fn show(key: &str, tab: u64, at: u64) {
             }),
         }
     });
+    bump();
     navigate_served(key, tab, url);
 }
 
@@ -394,7 +478,9 @@ fn serve_versions(view: &ICoreWebView2, root: &Path, host: &str) {
 }
 
 /// What a request to the version host gets: a version of a file, a file as
-/// it is now for what the version's page loads, or a comparison.
+/// it is now for what the version's page loads, or a comparison. Reading
+/// the bytes and building a comparison happen on a worker thread; the
+/// answer goes back from [`drain`] on the UI thread.
 fn answer(
     view: &ICoreWebView2,
     args: &ICoreWebView2WebResourceRequestedEventArgs,
@@ -408,17 +494,89 @@ fn answer(
     if !url.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase()) {
         return;
     }
+    let Ok(env) = (unsafe { view.cast::<ICoreWebView2_2>().and_then(|v| v.Environment()) }) else {
+        return;
+    };
     let path = url[prefix.len()..].split(['?', '#']).next().unwrap_or_default();
-    let mut segs: Vec<String> = path.split('/').map(decode).collect();
+    let segs: Vec<String> = path.split('/').map(decode).collect();
     if segs
         .iter()
         .any(|s| s == ".." || s == "." || s.contains(['\\', '/', ':']))
     {
-        return respond(view, args, 403, "text/plain", b"Not here".to_vec());
+        return respond(&env, args, &(403, "text/plain", b"Not here".to_vec()));
     }
-    let (status, mime, body) = if segs.first().is_some_and(|s| s == "compare") && segs.len() > 3 {
+    let root = root.to_path_buf();
+    let Ok(deferral) = (unsafe { args.GetDeferral() }) else {
+        return respond(&env, args, &reply_for(&root, segs));
+    };
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    WAITING.with(|w| {
+        w.borrow_mut().insert(
+            n,
+            Waiting {
+                args: args.clone(),
+                deferral,
+                env,
+            },
+        )
+    });
+    let started = thread::Builder::new()
+        .name("horadric-forge-version".into())
+        .spawn(move || {
+            let reply = reply_for(&root, segs);
+            if let Ok(mut done) = ANSWERED.lock() {
+                done.push((n, reply));
+            }
+            super::wake();
+        });
+    if started.is_err() {
+        if let Some(w) = WAITING.with(|w| w.borrow_mut().remove(&n)) {
+            respond(&w.env, &w.args, &(404, "text/plain", b"Not kept".to_vec()));
+            let _ = unsafe { w.deferral.Complete() };
+        }
+    }
+}
+
+/// A status, a content type and the body.
+type Reply = (i32, &'static str, Vec<u8>);
+
+/// A request to the version host waiting on its worker.
+struct Waiting {
+    args: ICoreWebView2WebResourceRequestedEventArgs,
+    deferral: ICoreWebView2Deferral,
+    env: ICoreWebView2Environment,
+}
+
+thread_local! {
+    static WAITING: RefCell<HashMap<u64, Waiting>> = RefCell::new(HashMap::new());
+}
+
+/// Answers the workers have made, by the number of the request.
+static ANSWERED: Mutex<Vec<(u64, Reply)>> = Mutex::new(Vec::new());
+static NEXT: AtomicU64 = AtomicU64::new(1);
+
+/// On the UI thread, woken by a worker: answers the requests to the version
+/// host whose bytes are ready.
+pub(super) fn drain() {
+    let done = ANSWERED
+        .lock()
+        .map(|mut d| std::mem::take(&mut *d))
+        .unwrap_or_default();
+    for (n, reply) in done {
+        if let Some(w) = WAITING.with(|w| w.borrow_mut().remove(&n)) {
+            respond(&w.env, &w.args, &reply);
+            let _ = unsafe { w.deferral.Complete() };
+        }
+    }
+}
+
+/// The answer to the path `segs` on the version host. Reads files, so it is
+/// for a worker thread.
+fn reply_for(root: &Path, mut segs: Vec<String>) -> Reply {
+    if segs.first().is_some_and(|s| s == "compare") && segs.len() > 3 {
         let rel: PathBuf = segs[3..].iter().collect();
-        (200, "text/html; charset=utf-8", compare_page(root, &rel, &segs[1], &segs[2]).into_bytes())
+        let page = compare_page(root, &rel, &segs[1], &segs[2]);
+        (200, "text/html; charset=utf-8", page.into_bytes())
     } else if segs.len() > 1 {
         let which = segs.remove(0);
         let rel: PathBuf = segs.iter().collect();
@@ -428,8 +586,7 @@ fn answer(
         }
     } else {
         (404, "text/plain", b"Not kept".to_vec())
-    };
-    respond(view, args, status, mime, body);
+    }
 }
 
 /// The bytes of `rel` kept at `which` (Unix ms), or as it is now for `now`
@@ -514,6 +671,9 @@ fn side_name(which: &str) -> String {
 
 /// Lines of unchanged text shown round each change; longer runs fold.
 const CONTEXT: usize = 3;
+/// Text larger than this is not compared: its table would be too long to
+/// read and too slow for the page to lay out.
+const COMPARE_LARGEST: usize = 4 << 20;
 
 /// The page comparing `rel` at `a` with it at `b`: the lines that changed
 /// for text, the two side by side for a picture or a PDF.
@@ -541,12 +701,20 @@ fn compare_page(root: &Path, rel: &Path, a: &str, b: &str) -> String {
             tag(b)
         ));
     } else {
-        let text = |w: &str| {
-            bytes_at(root, rel, w)
-                .map(|b| String::from_utf8_lossy(&b).into_owned())
-                .unwrap_or_default()
-        };
-        body.push_str(&diff_table(&horadric_core::forge::diff_lines(&text(a), &text(b))));
+        let (ta, tb) = (bytes_at(root, rel, a), bytes_at(root, rel, b));
+        let large = |t: &Option<Vec<u8>>| t.as_ref().is_some_and(|t| t.len() > COMPARE_LARGEST);
+        if large(&ta) || large(&tb) {
+            body.push_str(&format!(
+                "<p class=\"same\">Too large to compare line by line, over {} MB.</p>",
+                COMPARE_LARGEST >> 20
+            ));
+        } else {
+            let text = |t: Option<Vec<u8>>| {
+                t.map(|b| String::from_utf8_lossy(&b).into_owned())
+                    .unwrap_or_default()
+            };
+            body.push_str(&diff_table(&horadric_core::forge::diff_lines(&text(ta), &text(tb))));
+        }
     }
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>{t}</title><style>{CSS}</style>\
@@ -629,24 +797,25 @@ figure{flex:1;margin:0;min-width:0}figcaption{color:var(--dim);margin-bottom:6px
 figure img{max-width:100%;display:block}figure iframe{width:100%;height:85vh;border:0}";
 
 fn respond(
-    view: &ICoreWebView2,
+    env: &ICoreWebView2Environment,
     args: &ICoreWebView2WebResourceRequestedEventArgs,
-    status: i32,
-    mime: &str,
-    body: Vec<u8>,
+    reply: &Reply,
 ) {
-    let reason = if status == 200 { "OK" } else { "Not Found" };
+    let (status, mime, body) = reply;
+    let reason = match status {
+        200 => "OK",
+        403 => "Forbidden",
+        _ => "Not Found",
+    };
     unsafe {
-        let Ok(env) = view.cast::<ICoreWebView2_2>().and_then(|v| v.Environment()) else {
+        let Some(stream) = SHCreateMemStream(Some(body)) else {
             return;
         };
-        let Some(stream) = SHCreateMemStream(Some(&body)) else {
-            return;
-        };
-        let headers = format!("Content-Type: {mime}\r\nCache-Control: no-store");
+        let headers = format!("Content-Type: {mime}
+Cache-Control: no-store");
         if let Ok(response) = env.CreateWebResourceResponse(
             &stream,
-            status,
+            *status,
             &HSTRING::from(reason),
             &HSTRING::from(headers),
         ) {

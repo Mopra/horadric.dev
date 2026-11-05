@@ -55,39 +55,87 @@ pub struct Shown {
     pub lit: Vec<Button>,
 }
 
+/// A tab's bar as last laid out, and what it was laid out from.
+struct Laid {
+    key: String,
+    tab: u64,
+    file: PathBuf,
+    generation: u64,
+    name: String,
+    buttons: Vec<Button>,
+}
+
+thread_local! {
+    /// The bars laid out, one per project: `shown` runs on every paint and
+    /// mouse move, and laying out lists the versions kept and stats the
+    /// file. A change, a step through the history or another tab or file
+    /// lays it out again.
+    static LAID: RefCell<Vec<Laid>> = const { RefCell::new(Vec::new()) };
+}
+
 /// The bar of the project's shown tab, None when it shows a web page.
 pub fn shown(key: &str) -> Option<Shown> {
     let file = super::shown_file(key)?;
     let tab = web::shown_tab(key)?;
+    let generation = super::history::generation();
+    let known = LAID.with(|l| {
+        l.borrow()
+            .iter()
+            .find(|l| l.key == key && l.tab == tab && l.generation == generation && l.file == file)
+            .map(|l| (l.name.clone(), l.buttons.clone()))
+    });
+    let (name, buttons) = match known {
+        Some(laid) => laid,
+        None => {
+            let (name, buttons) = lay_out(key, tab, &file)?;
+            LAID.with(|l| {
+                let mut l = l.borrow_mut();
+                l.retain(|l| l.key != key);
+                l.push(Laid {
+                    key: key.to_string(),
+                    tab,
+                    file: file.clone(),
+                    generation,
+                    name: name.clone(),
+                    buttons: buttons.clone(),
+                });
+            });
+            (name, buttons)
+        }
+    };
+    // Pin mode is a flag in memory, read fresh so a toggle shows at once.
+    let lit = if buttons.contains(&Button::Pin) && super::pins::pinning(key) {
+        vec![Button::Pin]
+    } else {
+        Vec::new()
+    };
+    Some(Shown { name, buttons, lit })
+}
+
+/// The bar's name and buttons for `file` in the tab, read from disk.
+fn lay_out(key: &str, tab: u64, file: &Path) -> Option<(String, Vec<Button>)> {
     let name = file.file_name()?.to_string_lossy().into_owned();
     if let Some(label) = super::history::label(key, tab) {
-        return Some(Shown {
-            name: format!("{name}, {label}"),
-            buttons: vec![
-                Button::Older,
-                Button::Newer,
-                Button::Compare,
-                Button::Restore,
-                Button::Live,
-            ],
-            lit: Vec::new(),
-        });
+        let buttons = vec![
+            Button::Older,
+            Button::Newer,
+            Button::Compare,
+            Button::Restore,
+            Button::Live,
+        ];
+        return Some((format!("{name}, {label}"), buttons));
     }
     let mut buttons = Vec::new();
-    let mut lit = Vec::new();
-    if can_pin(&file) {
+    if can_pin(file) {
         buttons.push(Button::Pin);
-        if super::pins::pinning(key) {
-            lit.push(Button::Pin);
-        }
     }
     buttons.push(Button::Source);
     buttons.push(Button::History);
     buttons.push(Button::Export);
-    if is_deck(&file) {
+    if is_deck(file) {
         buttons.push(Button::Present);
     }
-    Some(Shown { name, buttons, lit })
+    Some((name, buttons))
 }
 
 /// Whether the page side can point at what the tab shows: a PDF shows in

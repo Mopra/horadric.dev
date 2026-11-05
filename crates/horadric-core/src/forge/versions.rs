@@ -38,7 +38,8 @@ pub fn keep(root: &Path, rel_path: &Path, bytes: &[u8]) -> io::Result<Version> {
 pub fn keep_at(root: &Path, rel_path: &Path, bytes: &[u8], now: SystemTime) -> io::Result<Version> {
     let dir = root.join(folder(rel_path));
     if let Some(newest) = list_in(&dir).into_iter().next() {
-        if newest.len == bytes.len() as u64 && fs::read(&newest.file)? == bytes {
+        // Pruned away between the listing and the read: keep it anew.
+        if newest.len == bytes.len() as u64 && fs::read(&newest.file).ok().as_deref() == Some(bytes) {
             return Ok(newest);
         }
     }
@@ -49,16 +50,36 @@ pub fn keep_at(root: &Path, rel_path: &Path, bytes: &[u8], now: SystemTime) -> i
     if let Some(newest) = list_in(&dir).first() {
         ms = ms.max(millis(newest.at) + 1);
     }
-    let file = loop {
+    // The tmp file, made with create_new, is what claims a name: a second
+    // keeper at the same millisecond cannot make it too, and once the first
+    // has renamed it the name is taken by the version instead. Rename
+    // replaces on Windows, so checking the version only before would lose
+    // one of the two.
+    let (file, tmp) = loop {
         let file = dir.join(format!("{ms:013}.{EXT}"));
-        if !file.exists() {
-            break file;
+        let tmp = file.with_extension("tmp");
+        match fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(mut f) if !file.exists() => {
+                if let Err(e) = io::Write::write_all(&mut f, bytes) {
+                    drop(f);
+                    let _ = fs::remove_file(&tmp);
+                    return Err(e);
+                }
+                break (file, tmp);
+            }
+            Ok(f) => {
+                drop(f);
+                let _ = fs::remove_file(&tmp);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
         }
         ms += 1;
     };
-    let tmp = file.with_extension("tmp");
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, &file)?;
+    if let Err(e) = fs::rename(&tmp, &file) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(Version {
         file,
         at: UNIX_EPOCH + Duration::from_millis(ms),
@@ -96,7 +117,15 @@ pub fn prune(root: &Path, max_bytes: u64) -> io::Result<u64> {
         if total <= max_bytes {
             break;
         }
-        fs::remove_file(&v.file)?;
+        // Gone already, to another prune or by hand: it no longer counts.
+        match fs::remove_file(&v.file) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                total -= v.len;
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
         total -= v.len;
         freed += v.len;
         if let Some(dir) = v.file.parent() {
@@ -245,6 +274,36 @@ mod tests {
         assert_eq!(prune(&root, 0).unwrap(), 8);
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         assert_eq!(prune(&root.join("missing"), 0).unwrap(), 0);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn forge_versions_same_millisecond_keeps_all() {
+        let root = tmp("same-ms");
+        let rel = Path::new("a.md");
+        let a = keep_at(&root, rel, b"one", at(5_000)).unwrap();
+        let b = keep_at(&root, rel, b"two", at(5_000)).unwrap();
+        assert_ne!(a.file, b.file);
+        // Keepers racing at one millisecond each get a name of their own.
+        let threads: Vec<_> = (0..8u8)
+            .map(|i| {
+                let root = root.clone();
+                std::thread::spawn(move || keep_at(&root, Path::new("a.md"), &[b'x', i], at(5_000)).unwrap())
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let listed = list(&root, rel);
+        assert_eq!(listed.len(), 10);
+        let mut kept: Vec<Vec<u8>> = listed.iter().map(|v| read(v).unwrap()).collect();
+        kept.sort();
+        kept.dedup();
+        assert_eq!(kept.len(), 10);
+        assert!(fs::read_dir(root.join(folder(rel)))
+            .unwrap()
+            .flatten()
+            .all(|e| e.path().extension().is_some_and(|x| x == EXT)));
         let _ = fs::remove_dir_all(&root);
     }
 }
