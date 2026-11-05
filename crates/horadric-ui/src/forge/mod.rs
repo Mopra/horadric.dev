@@ -14,6 +14,7 @@ pub mod bar;
 mod edit;
 mod export;
 mod history;
+mod home;
 pub mod message;
 mod office;
 pub mod pins;
@@ -57,6 +58,9 @@ struct FileTab {
     host: String,
     /// Where the page was scrolled to, given back after a reload.
     scroll: Option<(f64, f64)>,
+    /// `file` is a folder, shown as the Forge's page of it: no pins, no
+    /// history, no edits, only its own messages.
+    folder: bool,
 }
 
 thread_local! {
@@ -70,6 +74,13 @@ static WAKE_MSG: AtomicU32 = AtomicU32::new(0);
 
 /// Files sessions wrote, by project, waiting for the UI thread.
 static WRITTEN: Mutex<Vec<(String, PathBuf)>> = Mutex::new(Vec::new());
+
+/// The files sessions wrote lately, by project, the newest last: the
+/// Forge's home and the new tab page list them, read on any thread.
+static RECENT: Mutex<Vec<(String, PathBuf)>> = Mutex::new(Vec::new());
+
+/// How many written files [`RECENT`] keeps, across every project.
+const RECENT_KEPT: usize = 64;
 
 /// Called once from the UI thread as the app starts.
 pub fn init(window: isize, msg: u32) {
@@ -151,11 +162,108 @@ pub fn open(key: &str, root: Option<&Path>, file: &Path, front: bool) -> Option<
             root: root.clone(),
             host,
             scroll: None,
+            folder: false,
         })
     });
     watch::follow(&root, deep);
     history::seen(file);
     Some(id)
+}
+
+/// Shows the Forge's home for the project `key`: the page of its folder
+/// `root`, to pick a file from or start one. The home tab it has already,
+/// wherever the human browsed it to, or a new one. None for a project with
+/// no folder the Forge may serve.
+pub fn open_home(key: &str, root: Option<&Path>, front: bool) -> Option<u64> {
+    let root = root.filter(|r| !broad(r))?;
+    prune();
+    let known = TABS.with(|t| {
+        t.borrow()
+            .iter()
+            .find(|f| f.key == key && f.folder)
+            .map(|f| f.id)
+    });
+    if let Some(id) = known {
+        if front {
+            web::select_quiet(key, id);
+        }
+        return Some(id);
+    }
+    let host = serve::host_for(root);
+    settings::remember_root(&host, root);
+    let id = web::open_file_tab(key, &format!("https://{host}/"), front);
+    TABS.with(|t| {
+        t.borrow_mut().push(FileTab {
+            key: key.to_string(),
+            id,
+            file: root.to_path_buf(),
+            root: root.to_path_buf(),
+            host,
+            scroll: None,
+            folder: true,
+        })
+    });
+    watch::follow(root, true);
+    Some(id)
+}
+
+/// The address of the Forge's page of the folder `dir` in `root`, served
+/// at `host`, ending in a slash so the page's links are relative to it.
+/// A flat host has only its top folder.
+fn folder_url(host: &str, root: &Path, dir: &Path) -> Option<String> {
+    if same(dir, root) || serve::is_flat(host) {
+        return Some(format!("https://{host}/"));
+    }
+    serve::url_for(host, root, dir).map(|u| u + "/")
+}
+
+/// Takes the tab `id` to the Forge's page of the folder `dir`, or of its
+/// top folder when None: the way from a file to the others beside it.
+pub fn browse(key: &str, id: u64, dir: Option<&Path>) {
+    let found = TABS.with(|t| {
+        t.borrow()
+            .iter()
+            .find(|f| f.key == key && f.id == id)
+            .map(|f| (f.root.clone(), f.host.clone()))
+    });
+    let Some((root, host)) = found else { return };
+    let dir = dir.filter(|d| inside(&root, d)).unwrap_or(&root);
+    if let Some(url) = folder_url(&host, &root, dir) {
+        web::navigate(key, id, &url);
+    }
+}
+
+/// The folder the tab `id` shows the page of, with its top folder, None
+/// for a file's tab or a web page.
+pub fn folder_of(key: &str, id: u64) -> Option<(PathBuf, PathBuf)> {
+    TABS.with(|t| {
+        t.borrow()
+            .iter()
+            .find(|f| f.key == key && f.id == id && f.folder)
+            .map(|f| (f.root.clone(), f.file.clone()))
+    })
+}
+
+/// The files sessions of the project `key` wrote lately, newest first, at
+/// most `max`. From memory only, never the disk: the new tab page asks on
+/// every paint.
+pub fn recent_files(key: &str, max: usize) -> Vec<PathBuf> {
+    let all = RECENT.lock().map(|r| r.clone()).unwrap_or_default();
+    all.into_iter()
+        .rev()
+        .filter(|(k, _)| k == key)
+        .map(|(_, f)| f)
+        .take(max)
+        .collect()
+}
+
+/// Every file sessions wrote lately, newest last, for the home page to
+/// keep those in its folder.
+fn recent_written() -> Vec<PathBuf> {
+    RECENT
+        .lock()
+        .map(|r| r.iter().map(|(_, f)| f.clone()).collect())
+        .unwrap_or_default()
 }
 
 /// The folder `file` is served from and the host it is served at: the
@@ -218,25 +326,20 @@ pub fn tab_of(key: &str, file: &Path) -> Option<u64> {
     TABS.with(|t| {
         t.borrow()
             .iter()
-            .find(|f| f.key == key && same(&f.file, file))
+            .find(|f| f.key == key && !f.folder && same(&f.file, file))
             .map(|f| f.id)
     })
 }
 
-/// The file the tab `id` of the project `key` shows, None for a web page.
+/// The file the tab `id` of the project `key` shows, None for a web page
+/// or a folder's page.
 pub fn file_of(key: &str, id: u64) -> Option<PathBuf> {
     TABS.with(|t| {
         t.borrow()
             .iter()
-            .find(|f| f.key == key && f.id == id)
+            .find(|f| f.key == key && f.id == id && !f.folder)
             .map(|f| f.file.clone())
     })
-}
-
-/// The file the project's shown tab shows, None when it shows a web page
-/// or there is none.
-pub fn shown_file(key: &str) -> Option<PathBuf> {
-    file_of(key, web::shown_tab(key)?)
 }
 
 /// Sends the page of the tab `id` a message, `{forge: ...}` as
@@ -261,7 +364,10 @@ pub fn restored(key: &str, id: u64, url: &str) {
     if broad(&root) {
         return;
     }
-    history::seen(&file);
+    let folder = file.is_dir();
+    if !folder {
+        history::seen(&file);
+    }
     TABS.with(|t| {
         t.borrow_mut().push(FileTab {
             key: key.to_string(),
@@ -270,6 +376,7 @@ pub fn restored(key: &str, id: u64, url: &str) {
             root: root.clone(),
             host,
             scroll: None,
+            folder,
         })
     });
     watch::follow(&root, deep);
@@ -291,12 +398,12 @@ pub fn ready(key: &str, id: u64, view: &ICoreWebView2) {
         t.borrow()
             .iter()
             .find(|f| f.key == key && f.id == id)
-            .map(|f| (f.root.clone(), f.host.clone(), f.file.clone()))
+            .map(|f| (f.root.clone(), f.host.clone()))
     });
-    let Some((root, host, file)) = found else {
+    let Some((root, host)) = found else {
         return;
     };
-    serve::prepare(key, id, view, &root, &host, kind(&file));
+    serve::prepare(key, id, view, &root, &host);
     present::listen(key, id, view, &host);
     let owned = key.to_string();
     // Before the page's own scripts run, so its ready message already
@@ -318,7 +425,8 @@ pub fn ready(key: &str, id: u64, view: &ICoreWebView2) {
 
 /// The tab `id` loaded `url`. A link followed inside its folder makes it
 /// that file's tab: the bar, pins and history then act on the file shown.
-/// A page out on the web leaves it as it was, heard by no one.
+/// A folder makes it that folder's page, the Forge's home. A page out on
+/// the web leaves it as it was, heard by no one.
 fn moved(key: &str, id: u64, url: &str) {
     let to = TABS.with(|t| {
         let mut t = t.borrow_mut();
@@ -328,12 +436,15 @@ fn moved(key: &str, id: u64, url: &str) {
         if same(&file, &f.file) {
             return None;
         }
+        f.folder = file.is_dir();
         f.file = file.clone();
         f.scroll = None;
-        Some(file)
+        Some((file, f.folder))
     });
-    let Some(file) = to else { return };
-    history::seen(&file);
+    let Some((file, folder)) = to else { return };
+    if !folder {
+        history::seen(&file);
+    }
     history::tab_moved(key, id);
     pins::tab_moved(key, id);
 }
@@ -341,20 +452,26 @@ fn moved(key: &str, id: u64, url: &str) {
 /// The page of the tab `id` said something, as JSON. Only a page of the
 /// tab's own made up host is heard: a file's tab can be taken to any site.
 fn heard_page(key: &str, id: u64, source: &str, json: &str) {
-    let host = TABS.with(|t| {
+    let found = TABS.with(|t| {
         t.borrow()
             .iter()
             .find(|f| f.key == key && f.id == id)
-            .map(|f| f.host.clone())
+            .map(|f| (f.host.clone(), f.folder))
     });
-    let Some(host) = host else { return };
+    let Some((host, folder)) = found else { return };
     if serve::host_of(source).is_none_or(|h| !h.eq_ignore_ascii_case(&host)) {
         return;
     }
     let Ok(msg) = serde_json::from_str::<Value>(json) else {
         return;
     };
-    message::on_message(key, id, &msg);
+    // A folder's page is ours, not a file: pins and edits have nothing to
+    // land on there.
+    if folder {
+        home::on_message(key, id, &msg);
+    } else {
+        message::on_message(key, id, &msg);
+    }
 }
 
 /// Where the page of the tab `id` was scrolled to.
@@ -388,7 +505,7 @@ fn changed(root: &Path, rel: &[String], all: bool) {
     let own: Vec<PathBuf> = TABS.with(|t| {
         t.borrow()
             .iter()
-            .filter(|f| same(&f.root, root))
+            .filter(|f| same(&f.root, root) && !f.folder)
             .filter(|f| all || rel.iter().any(|r| same(&f.root.join(r.replace('/', "\\")), &f.file)))
             .map(|f| f.file.clone())
             .collect()
@@ -414,6 +531,11 @@ fn changed(root: &Path, rel: &[String], all: bool) {
 /// beside it or below that a page loads.
 fn touches(f: &FileTab, rel: &str) -> bool {
     let changed = f.root.join(rel.replace('/', "\\"));
+    // A folder's page is listed again when it is shown again. Loaded again
+    // on a change, it could cancel the way to a file just made from it.
+    if f.folder {
+        return false;
+    }
     if same(&changed, &f.file) {
         return true;
     }
@@ -482,6 +604,12 @@ pub fn heard(registry: &Mutex<Registry>, id: &str, event: &HookEvent) {
     });
     let Some(key) = key else { return };
     pins::wrote(&key, &file, id);
+    if let Ok(mut r) = RECENT.lock() {
+        r.retain(|(k, f)| !(*k == key && same(f, &file)));
+        r.push((key.clone(), file.clone()));
+        let over = r.len().saturating_sub(RECENT_KEPT);
+        r.drain(..over);
+    }
     if let Ok(mut w) = WRITTEN.lock() {
         w.push((key, file));
     }

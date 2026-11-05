@@ -44,6 +44,10 @@ pub enum Button {
     Restore,
     /// Out of the history, back to the file as it is.
     Live,
+    /// The Forge's page of the folder the file is in, to pick another.
+    Files,
+    /// On a folder's page: the project's top folder.
+    Home,
 }
 
 /// What the bar shows for a file's tab: its name, with which version when
@@ -75,8 +79,15 @@ thread_local! {
 
 /// The bar of the project's shown tab, None when it shows a web page.
 pub fn shown(key: &str) -> Option<Shown> {
-    let file = super::shown_file(key)?;
     let tab = web::shown_tab(key)?;
+    if let Some((root, dir)) = super::folder_of(key, tab) {
+        return Some(Shown {
+            name: folder_name(&root, &dir),
+            buttons: vec![Button::Home],
+            lit: Vec::new(),
+        });
+    }
+    let file = super::file_of(key, tab)?;
     let generation = super::history::generation();
     let known = LAID.with(|l| {
         l.borrow()
@@ -125,7 +136,7 @@ fn lay_out(key: &str, tab: u64, file: &Path) -> Option<(String, Vec<Button>)> {
         ];
         return Some((format!("{name}, {label}"), buttons));
     }
-    let mut buttons = Vec::new();
+    let mut buttons = vec![Button::Files];
     if can_pin(file) {
         buttons.push(Button::Pin);
     }
@@ -136,6 +147,21 @@ fn lay_out(key: &str, tab: u64, file: &Path) -> Option<(String, Vec<Button>)> {
         buttons.push(Button::Present);
     }
     Some((name, buttons))
+}
+
+/// A folder's page's name in the bar: the project's folder, then the way
+/// down to it.
+fn folder_name(root: &Path, dir: &Path) -> String {
+    let top = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.display().to_string());
+    match dir.strip_prefix(root) {
+        Ok(rest) if !rest.as_os_str().is_empty() => {
+            format!("{top}/{}", rest.to_string_lossy().replace('\\', "/"))
+        }
+        _ => top,
+    }
 }
 
 /// Whether the page side can point at what the tab shows: a PDF shows in
@@ -221,6 +247,8 @@ pub fn glyph(b: Button) -> &'static str {
         Button::Compare => "\u{E8AB}",
         Button::Restore => "\u{E777}",
         Button::Live => "\u{E711}",
+        Button::Files => "\u{E8B7}",
+        Button::Home => "\u{E80F}",
     }
 }
 
@@ -237,6 +265,8 @@ pub fn tip(b: Button) -> &'static str {
         Button::Compare => "Compare",
         Button::Restore => "Restore this version",
         Button::Live => "Back to the file as it is",
+        Button::Files => "The files beside this one, to open another or start one",
+        Button::Home => "The project's top folder (Ctrl+Shift+O opens the Forge)",
     }
 }
 
@@ -245,10 +275,15 @@ pub fn press(b: Button, key: &str) {
     let Some(tab) = web::shown_tab(key) else {
         return;
     };
+    if b == Button::Home {
+        return super::browse(key, tab, None);
+    }
     let Some(file) = super::file_of(key, tab) else {
         return;
     };
     match b {
+        Button::Files => super::browse(key, tab, file.parent()),
+        Button::Home => {}
         Button::Pin => super::pins::toggle_pinning(key),
         Button::History | Button::Older => super::history::older(key, tab),
         Button::Newer => super::history::newer(key, tab),

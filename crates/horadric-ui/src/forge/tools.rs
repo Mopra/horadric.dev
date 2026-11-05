@@ -229,6 +229,7 @@ fn open_apart(key: &str, root: Option<&Path>, file: &Path) -> Option<u64> {
             root,
             host,
             scroll: None,
+            folder: false,
         })
     });
     Some(id)

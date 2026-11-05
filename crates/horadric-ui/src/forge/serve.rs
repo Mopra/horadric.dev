@@ -106,7 +106,7 @@ pub fn url_for(host: &str, root: &Path, file: &Path) -> Option<String> {
 }
 
 /// A path segment as an address may hold it.
-fn encode(segment: &str) -> String {
+pub(super) fn encode(segment: &str) -> String {
     let mut out = String::new();
     for b in segment.bytes() {
         if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
@@ -193,30 +193,30 @@ pub fn is_subresource(file: &Path) -> bool {
 
 /// What runs first in every page of the tab: the page side of the Forge,
 /// only on the tab's own host, so a link followed out to the web carries
-/// none of it.
-fn script(kind: Option<Kind>) -> String {
-    // A converted .pptx is served as a deck of slide pictures.
-    let deck = matches!(kind, Some(Kind::Html | Kind::Deck | Kind::Pptx));
+/// none of it, and never on a folder's page (its address ends in a
+/// slash), which is the Forge's own and has nothing to pin.
+///
+/// Every page gets the deck shell, whatever the tab opened on: a tab
+/// follows links and the folder pages to any file, and the shell does
+/// nothing on a page with no slides.
+fn script() -> String {
     let assets = serde_json::json!({
         "forgeCss": FORGE_CSS,
-        "deckCss": if deck { DECK_CSS } else { "" },
+        "deckCss": DECK_CSS,
     });
-    let mut s = format!(
+    format!(
         "(function(){{\nif(!location.hostname.toLowerCase().endsWith({suffix:?}))return;\n\
-         window.__forgeAssets={assets};\n(function(){{\n{FORGE_JS}\n}})();\n",
+         if(location.pathname.endsWith('/'))return;\n\
+         window.__forgeAssets={assets};\n(function(){{\n{FORGE_JS}\n}})();\n\
+         (function(){{\n{DECK_JS}\n}})();\n}})();",
         suffix = SUFFIX,
-    );
-    if deck {
-        s.push_str(&format!("(function(){{\n{DECK_JS}\n}})();\n"));
-    }
-    s.push_str("})();");
-    s
+    )
 }
 
 /// Readies the new page of a file tab: `root` mapped to `host` read only,
 /// markdown and CSV rendered as they are asked for, the page side's
 /// scripts, and the page's messages routed to the Forge.
-pub fn prepare(key: &str, id: u64, view: &ICoreWebView2, root: &Path, host: &str, kind: Option<Kind>) {
+pub fn prepare(key: &str, id: u64, view: &ICoreWebView2, root: &Path, host: &str) {
     let flat = is_flat(host);
     unsafe {
         // No folder mapping: WebView2 answers a mapped host's requests
@@ -255,7 +255,7 @@ pub fn prepare(key: &str, id: u64, view: &ICoreWebView2, root: &Path, host: &str
 
         let added =
             AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|_, _| Ok(())));
-        let _ = view.AddScriptToExecuteOnDocumentCreated(&HSTRING::from(script(kind)), &added);
+        let _ = view.AddScriptToExecuteOnDocumentCreated(&HSTRING::from(script()), &added);
     }
 }
 
@@ -350,8 +350,9 @@ fn path_query(url: &str) -> (&str, &str) {
 /// How a request is to be answered.
 enum Plan {
     Now(Reply),
-    /// Rendered from the file, which reads it: done off the UI thread.
-    Render(Kind, PathBuf, String),
+    /// Made from the disk (a rendered file, a folder's listing): done off
+    /// the UI thread.
+    Later(Box<dyn FnOnce() -> Reply + Send>),
 }
 
 /// What the request for `url` on the host serving `root` comes to, None
@@ -373,10 +374,25 @@ fn plan(root: &Path, url: &str, document: bool, flat: bool) -> Option<Plan> {
     if flat && decode(path).trim_start_matches('/').contains(['/', '\\']) {
         return Some(Plan::Now(not_found()));
     }
-    let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
     let Some(file) = file_in(root, url) else {
         return Some(Plan::Now(not_found()));
     };
+    // A folder's page is the Forge's home. Its address ends in a slash so
+    // the names it lists are links relative to it.
+    if document && (path.ends_with('/') || file.is_dir()) {
+        if !path.ends_with('/') {
+            let to = format!("{path}/");
+            return Some(Plan::Now(Reply::html(format!(
+                "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url={}\">",
+                super::runtime::attr(&to)
+            ))));
+        }
+        let (root, written) = (root.to_path_buf(), super::recent_written());
+        return Some(Plan::Later(Box::new(move || {
+            super::home::page(&root, &file, flat, &written)
+        })));
+    }
+    let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
     if !ext.as_deref().is_some_and(|e| RENDERED.contains(&e)) {
         // A page is left to edit.rs's handler, which serves it marked
         // with where each element's text sits; it runs first and passes
@@ -411,7 +427,7 @@ fn plan(root: &Path, url: &str, document: bool, flat: bool) -> Option<Plan> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    Some(Plan::Render(kind, file, title))
+    Some(Plan::Later(Box::new(move || rendered(kind, &file, &title))))
 }
 
 /// The type a file of `kind` is served as when it is not rendered. The
@@ -482,7 +498,7 @@ fn first_rows(src: &str, rows: usize) -> (&str, bool) {
 fn answer(root: &Path, url: &str, document: bool, flat: bool) -> Option<Reply> {
     Some(match plan(root, url, document, flat)? {
         Plan::Now(reply) => reply,
-        Plan::Render(kind, file, title) => rendered(kind, &file, &title),
+        Plan::Later(make) => make(),
     })
 }
 
@@ -520,9 +536,9 @@ fn render(view: &ICoreWebView2, args: &ICoreWebView2WebResourceRequestedEventArg
     };
     match plan {
         Plan::Now(reply) => respond(&env, args, &reply),
-        Plan::Render(kind, file, title) => {
+        Plan::Later(make) => {
             let Ok(deferral) = (unsafe { args.GetDeferral() }) else {
-                return respond(&env, args, &rendered(kind, &file, &title));
+                return respond(&env, args, &make());
             };
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
             WAITING.with(|w| {
@@ -538,7 +554,7 @@ fn render(view: &ICoreWebView2, args: &ICoreWebView2WebResourceRequestedEventArg
             let started = std::thread::Builder::new()
                 .name("horadric-forge-render".into())
                 .spawn(move || {
-                    let reply = rendered(kind, &file, &title);
+                    let reply = make();
                     if let Ok(mut done) = RENDERED_PAGES.lock() {
                         done.push((n, reply));
                     }
@@ -708,6 +724,25 @@ mod tests {
         // A file at the top passes the subfolder check; this one is missing.
         let top = plan(root, &format!("https://{host}/notes.png"), false, true);
         assert!(matches!(top, Some(Plan::Now(r)) if r.status == 404));
+    }
+
+    #[test]
+    fn a_folder_s_page_is_the_forge_s_home() {
+        let dir = std::env::temp_dir().join(format!("forge-serve-dir-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs").join("plan.md"), "# Plan").unwrap();
+        let host = "https://x.forge.horadric";
+        let home = answer(&dir, &format!("{host}/docs/"), true, false).unwrap();
+        assert_eq!(home.status, 200);
+        assert!(String::from_utf8_lossy(bytes(&home)).contains("href=\"plan.md\""));
+        // Without its slash, the page's links would miss the folder.
+        let bare = answer(&dir, &format!("{host}/docs"), true, false).unwrap();
+        assert!(String::from_utf8_lossy(bytes(&bare)).contains("url=/docs/"));
+        let fetched = answer(&dir, &format!("{host}/docs/"), false, false).unwrap();
+        assert_eq!(fetched.status, 404);
+        let climbed = answer(&dir, &format!("{host}/docs/%2E%2E/"), true, false).unwrap();
+        assert_eq!(climbed.status, 404);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
