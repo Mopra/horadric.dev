@@ -33,6 +33,9 @@ impl App {
         let Some(key) = self.project_of(&call.session) else {
             return reply.send(error("this session has no project in Horadric"));
         };
+        let Some(reply) = self.forge_call(&key, &call.body, reply) else {
+            return;
+        };
         let session = call.session.as_str();
         let what = match Call::parse(&call.body) {
             Ok(c) => c,

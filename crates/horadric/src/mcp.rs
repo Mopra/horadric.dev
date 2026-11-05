@@ -27,6 +27,9 @@ use horadric_hooks::{
 };
 use serde_json::{json, Value};
 
+#[path = "mcp_forge.rs"]
+mod forge;
+
 /// What this server speaks when the client does not say.
 const PROTOCOL: &str = "2025-06-18";
 
@@ -222,7 +225,7 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
             })),
             "ping" => Ok(json!({})),
             "tools/list" if self.browser => {
-                Ok(json!({ "tools": tools().into_iter().chain(lore_tools()).collect::<Vec<_>>() }))
+                Ok(json!({ "tools": tool_list() }))
             }
             "tools/list" => Ok(json!({ "tools": lore_tools() })),
             "tools/call" => {
@@ -244,6 +247,9 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
     fn tool(&mut self, name: &str, args: &Value) -> Result<Vec<Value>, String> {
         if let Some(answer) = (self.lore)(name, args) {
             return answer.map(|t| vec![text(t)]);
+        }
+        if let Some(answer) = forge::call(name, args, &mut self.app) {
+            return answer;
         }
         let s = |k: &str| args.get(k).and_then(Value::as_str);
         match name {
@@ -726,9 +732,12 @@ fn char_key(key: &str, shift: bool) -> Option<(String, String, u32, String)> {
 
 /// Every tool the server lists to a Horadric session, for `horadric
 /// quest start` to weigh, which a node has no quests for.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) fn tool_list() -> Value {
-    json!(tools().into_iter().chain(lore_tools()).collect::<Vec<_>>())
+    json!(tools()
+        .into_iter()
+        .chain(forge::tools())
+        .chain(lore_tools())
+        .collect::<Vec<_>>())
 }
 
 fn tools() -> Vec<Value> {
@@ -1376,10 +1385,12 @@ B.";
     #[test]
     fn every_tool_has_a_name_a_description_and_a_schema() {
         assert!(tools().len() >= 15);
-        for t in &[tools(), lore_tools()].concat() {
+        for t in &[tools(), forge::tools(), lore_tools()].concat() {
             let name = t["name"].as_str().unwrap();
             assert!(
-                name.starts_with("browser_") || name.starts_with("lore_"),
+                ["browser_", "forge_", "lore_"]
+                    .iter()
+                    .any(|p| name.starts_with(p)),
                 "{t}"
             );
             assert!(!t["description"].as_str().unwrap().is_empty(), "{t}");

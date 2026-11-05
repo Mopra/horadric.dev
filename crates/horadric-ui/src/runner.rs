@@ -83,7 +83,13 @@ impl Host for App {
         self.chat_sessions
     }
     fn browser_prompt(&self) -> Option<String> {
-        (self.mcp_config.is_some()).then(|| crate::web::AGENT_PROMPT.to_string())
+        (self.mcp_config.is_some()).then(|| {
+            format!(
+                "{} {}",
+                crate::web::AGENT_PROMPT,
+                crate::forge::tools::PROMPT
+            )
+        })
     }
     fn project_dir(&self, key: &str) -> Option<PathBuf> {
         App::project_dir(self, key)

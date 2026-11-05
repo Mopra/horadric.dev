@@ -16,6 +16,7 @@ pub mod message;
 pub mod pins;
 mod serve;
 mod settings;
+pub mod tools;
 mod watch;
 
 use std::cell::RefCell;

@@ -1,0 +1,185 @@
+/* The starting deck's style. Slides are designed at 1920 x 1080 (16:9);
+   the Forge scales them to the pane. Change the variables below to make
+   it a house style, and keep the class names so decks made from it keep
+   working. */
+
+:root {
+  --slide-width: 1920px;
+  --slide-height: 1080px;
+
+  --paper: #faf8f4;
+  --ink: #1d1b18;
+  --muted: #6b665e;
+  --rule: #e2ddd3;
+  --accent: #b4541f;
+  --accent-soft: #f3e3d6;
+  --dark: #1f1d1a;
+  --on-dark: #f4efe7;
+
+  --display: "Georgia", "Cambria", "Times New Roman", serif;
+  --text: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --mono: "Cascadia Code", "Consolas", ui-monospace, monospace;
+
+  --pad-x: 140px;
+  --pad-y: 110px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: #d9d4cb;
+  color: var(--ink);
+  font-family: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Outside the Forge the slides simply stack, each at its full size. */
+section.slide {
+  position: relative;
+  width: var(--slide-width);
+  height: var(--slide-height);
+  margin: 40px auto;
+  padding: var(--pad-y) var(--pad-x);
+  overflow: hidden;
+  background: var(--paper);
+  display: flex;
+  flex-direction: column;
+  font-size: 36px;
+  line-height: 1.45;
+}
+
+aside.notes { display: none; }
+
+/* ---------------------------------------------------------------- type */
+
+.kicker {
+  margin: 0 0 28px;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+h1, h2 {
+  margin: 0;
+  font-family: var(--display);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  line-height: 1.08;
+}
+h1 { font-size: 120px; }
+h2 { font-size: 72px; margin-bottom: 56px; }
+h3 { margin: 0 0 16px; font-size: 38px; font-weight: 600; }
+
+p { margin: 0 0 24px; max-width: 30em; }
+.lead { font-size: 44px; color: var(--muted); max-width: 26em; }
+.small { font-size: 26px; color: var(--muted); }
+code { font-family: var(--mono); font-size: 0.85em; background: var(--accent-soft); padding: 0.05em 0.3em; border-radius: 6px; }
+
+ul, ol { margin: 0; padding-left: 1.1em; max-width: 30em; }
+li { margin: 0 0 22px; padding-left: 0.2em; }
+li::marker { color: var(--accent); }
+
+/* The page number and the deck's name along the foot of every slide. */
+.foot {
+  position: absolute;
+  left: var(--pad-x);
+  right: var(--pad-x);
+  bottom: 56px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 22px;
+  color: var(--muted);
+  border-top: 2px solid var(--rule);
+  padding-top: 20px;
+}
+
+/* ---------------------------------------------------------- slide kinds */
+
+/* Title: the deck's name, low and large, with a band of accent. */
+section.slide.title {
+  justify-content: flex-end;
+  padding-bottom: 160px;
+}
+section.slide.title::before {
+  content: "";
+  position: absolute;
+  left: var(--pad-x);
+  top: var(--pad-y);
+  width: 120px;
+  height: 12px;
+  background: var(--accent);
+}
+section.slide.title h1 { max-width: 14em; margin-bottom: 40px; }
+
+/* Section: a dark break between parts. */
+section.slide.section {
+  background: var(--dark);
+  color: var(--on-dark);
+  justify-content: center;
+}
+section.slide.section .kicker { color: #e59a6a; }
+section.slide.section h1 { font-size: 104px; max-width: 14em; }
+
+/* Columns: two or three side by side. */
+.columns {
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 2), 1fr);
+  gap: 80px;
+  flex: 1;
+}
+.columns.three { --cols: 3; }
+.card {
+  border-top: 8px solid var(--accent);
+  padding-top: 36px;
+  font-size: 32px;
+}
+
+/* Figure: one big number or fact, and what it means. */
+section.slide.figure { justify-content: center; }
+.number {
+  font-family: var(--display);
+  font-size: 300px;
+  line-height: 1;
+  color: var(--accent);
+  margin-bottom: 32px;
+}
+
+/* Quote: someone's words, large, with who said them. */
+section.slide.quote { justify-content: center; background: var(--accent-soft); }
+blockquote {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 76px;
+  line-height: 1.2;
+  max-width: 20em;
+}
+blockquote + .who { margin-top: 48px; font-size: 30px; color: var(--muted); }
+
+/* Image: a picture filling the slide's right half. */
+section.slide.image { padding-right: calc(50% + 60px); justify-content: center; }
+section.slide.image img {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 50%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* End: the ask or the next step, centred. */
+section.slide.end {
+  background: var(--dark);
+  color: var(--on-dark);
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+section.slide.end p { margin-left: auto; margin-right: auto; color: #bdb5a9; }
+
+@media print {
+  html, body { background: none; }
+  section.slide { margin: 0; break-after: page; }
+}
