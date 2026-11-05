@@ -50,7 +50,7 @@ Do not reopen these without asking. They were argued through and chosen.
 
 Pointers, read when your work touches them: [the brotherhood](docs/plan/the-brotherhood.md),
 [its ownership](docs/plan/brotherhood-ownership.md), [one portal](docs/plan/one-portal.md),
-[lore](docs/plan/lore.md), [memory](docs/plan/memory.md), [macOS](docs/plan/macos.md).
+[memory](docs/plan/memory.md), [macOS](docs/plan/macos.md).
 
 ## Conventions
 
