@@ -903,9 +903,20 @@ const MAX_HEADERS: usize = 64;
 /// One line of the head, or None when it runs past [`MAX_LINE`]. Empty at
 /// the end of the stream.
 fn read_capped(reader: &mut impl BufRead) -> io::Result<Option<String>> {
-    let mut line = String::new();
-    let read = reader.take(MAX_LINE).read_line(&mut line)?;
-    Ok((read < MAX_LINE as usize || line.ends_with('\n')).then_some(line))
+    let mut line = Vec::new();
+    let read = reader.take(MAX_LINE).read_until(b'\n', &mut line)?;
+    Ok((read < MAX_LINE as usize || line.ends_with(b"\n")).then(|| header_text(&line)))
+}
+
+/// A line of the head as text. Claude Code sends a header's value as
+/// Latin-1, so a session named after a folder with an å sends one byte
+/// that is not UTF-8. Read as UTF-8 only, the line failed, the connection
+/// closed with no reply, and every hook of that session was lost.
+fn header_text(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => bytes.iter().map(|&b| char::from(b)).collect(),
+    }
 }
 
 /// Whether a Host header names this machine on `port`. A bare address is
@@ -1021,6 +1032,39 @@ mod tests {
         let got = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(got.horadric_id, "tile-7");
         assert_eq!(got.event.hook_event_name, "Stop");
+    }
+
+    #[test]
+    fn a_header_is_read_as_utf8_or_else_as_latin1() {
+        assert_eq!(header_text("stopårsager\r\n".as_bytes()), "stopårsager\r\n");
+        assert_eq!(header_text(b"stop\xe5rsager\r\n"), "stopårsager\r\n");
+        assert_eq!(header_text(b""), "");
+    }
+
+    #[test]
+    fn a_session_with_an_a_ring_in_its_name_is_heard_however_it_is_spelled() {
+        let (port, rx) = start();
+        let body = r#"{"session_id":"c","hook_event_name":"Stop"}"#;
+        let spellings: [&[u8]; 2] = [b"stop\xe5rsager-1", "stopårsager-1".as_bytes()];
+        for name in spellings {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let mut req =
+                format!("POST {HOOK_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Horadric-Session: ")
+                    .into_bytes();
+            req.extend_from_slice(name);
+            req.extend_from_slice(
+                format!("\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes(),
+            );
+            s.write_all(&req).unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).unwrap();
+            assert!(
+                out.starts_with("HTTP/1.1 200"),
+                "no reply for {name:?}: {out:?}"
+            );
+            let got = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(got.horadric_id, "stopårsager-1");
+        }
     }
 
     #[test]
