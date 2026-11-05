@@ -74,31 +74,6 @@ code disagree, one of them is a bug.
 
 - [Who owns a session](plan/brotherhood-ownership.md): the brotherhood's signed word, whose a session is and who is out, with the invariants both simulations check.
 
-## Loose ends
-
-Small things left over from parts that are built.
-
-- **Browser pane:** point at part of a page and send it to a session
-  (screenshot, address, element). And protect the DevTools port: it is
-  on loopback only, so any program on the machine can drive the logged
-  in browser.
-- **Tristram, open questions:** browser tabs as tiles in project clusters
-  too, whether a project session
-  can ask in Tristram, and the town's folder on macOS.
-- **Stay a while and listen:** a sentence per session on what it did,
-  from a small model's summary of the run.
-- **The Arcane Sanctuary:** hover showing who touched a file last.
-- **Keys:** the Kitty keyboard protocol's gaps: the modifier keys
-  themselves under "report all keys", the lock modifiers, the keypad's
-  own codes.
-- **Code signing:** the binaries are unsigned. The updater does not need
-  it, but a hand download does, and so does the Windows 11 short context
-  menu (Windows refused the unsigned package, 2026-10-13). An NSIS
-  installer would go with it.
-- **Never tried for real:** a second Claude subscription,
-  SSH hosts and fleets against a real server, an IME. The lore notes on
-  each part say what was only unit tested.
-
 ## Not in any step yet, but needed before daily use
 
 - **Expanding from a synthetic click can open behind other windows.** Windows

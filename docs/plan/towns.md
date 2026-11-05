@@ -118,3 +118,6 @@ town with a home on its own account.
 
 - Whether a project session may hand a question up to a town, and
   which one (still open from Tristram).
+- Browser tabs as tiles in project clusters too, not only in a town's
+  (moved from PLAN.md's loose ends).
+- Where a town's folder lives on macOS.

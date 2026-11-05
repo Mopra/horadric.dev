@@ -189,6 +189,8 @@ Each is usable on its own, in this order.
    message gather in the composer as chips. Runes on the file until
    Claude's next write. Terminal sessions get the text pasted and the
    crop as a file path.
+   The same pins work on ordinary web pages in the pane: the address,
+   the element and a crop go to the session.
 3. **Decks.** The deck shell: scaling, slide strip, keys, present full
    screen with notes, PDF and PNG export, copy as image, the house style
    folder and `forge_style`.
