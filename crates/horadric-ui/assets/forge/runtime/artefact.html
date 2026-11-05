@@ -13,8 +13,12 @@
 // Contract: served beside runtime.js on the Forge's virtual host, as
 // artefact.html?src=<url of the .jsx, .tsx or .mmd file>. The page fetches the
 // source itself, so a reload of this page is a reload of the artefact.
+// Horadric serves this page at the artefact's own address instead (so the
+// tab stays the file's), with <base> at the runtime folder and the source's
+// address in <meta name="forge-src">.
 (function () {
-  var src = new URLSearchParams(location.search).get("src");
+  var meta = document.querySelector('meta[name="forge-src"]');
+  var src = new URLSearchParams(location.search).get("src") || (meta && meta.content);
   var root = document.getElementById("root");
   if (!src) {
     root.textContent = "artefact.html needs ?src=<path of the artefact>";
@@ -22,6 +26,16 @@
   }
   var name = decodeURIComponent(src.split("?")[0].split("/").pop());
   document.title = name;
+  // The Forge's page side (forge.js) shows a card with "Send to session" for
+  // errors it hears; the runtime's own are caught, so they are handed over.
+  // Kind "runtime" errors were uncaught, and forge.js heard them already.
+  window.__forgeRuntime.onError(function (d) {
+    if (d.kind === "runtime" || !window.__forge || !window.__forge.report) return;
+    // No column: it counts in the compiled line, not the one Claude wrote.
+    var where = (d.file || name) + (d.line ? ":" + d.line : "");
+    var message = where + ": " + d.message;
+    window.__forge.report({ message: message, stack: d.stack || d.componentStack || "" }, message);
+  });
   // Errors are already reported through __forgeRuntime.onError and drawn in
   // the page; the rejection is only swallowed here so it is not reported twice.
   window.__forgeRuntime.load(src, root).catch(function () {});

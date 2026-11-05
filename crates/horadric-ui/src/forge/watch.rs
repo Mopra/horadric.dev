@@ -82,6 +82,15 @@ pub fn take() -> Changes {
         .unwrap_or_default()
 }
 
+/// Off any thread: `rel` in `root` is to be shown again though the disk
+/// may not have changed, as when an Office file's conversion finishes.
+pub fn touched(root: &Path, rel: String) {
+    if let Ok(mut c) = CHANGED.lock() {
+        c.push((root.to_path_buf(), vec![rel], false));
+    }
+    super::wake();
+}
+
 fn run(dir: &Path, stop: &Event) {
     let Some(changes) = DirChanges::open(dir, true, "") else {
         return;
