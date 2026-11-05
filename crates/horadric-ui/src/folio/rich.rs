@@ -42,14 +42,6 @@ use crate::layout::Rect;
 use crate::render::{self, color, Gpu};
 use crate::theme::Color;
 
-/// A code block's padding and its header with the language and Copy.
-const CODE_PAD: f32 = 12.0;
-const CODE_HEAD: f32 = 28.0;
-/// A table cell's padding.
-const CELL_X: f32 = 10.0;
-const CELL_Y: f32 = 6.0;
-/// The narrowest a table column gets.
-const CELL_LEAST: f32 = 64.0;
 /// One line of a diff or of shell output, the same for every line so
 /// rows line up with their backgrounds.
 pub(super) const MONO_LINE: f32 = 19.0;
@@ -243,7 +235,7 @@ impl Fonts {
         })
     }
 
-    fn of(&self, f: Font) -> &IDWriteTextFormat {
+    pub(super) fn of(&self, f: Font) -> &IDWriteTextFormat {
         match f {
             Font::Body => &self.body,
             Font::H1 => &self.h1,
@@ -270,7 +262,7 @@ pub(super) struct Ctx<'a> {
 /// Decoded thumbnails by key, None where one would not decode.
 pub(super) type StepThumbs = RefCell<HashMap<String, Option<(ID2D1Bitmap, u32, u32)>>>;
 
-fn range(r: std::ops::Range<u32>) -> DWRITE_TEXT_RANGE {
+pub(super) fn range(r: std::ops::Range<u32>) -> DWRITE_TEXT_RANGE {
     DWRITE_TEXT_RANGE {
         startPosition: r.start,
         length: r.end - r.start,
@@ -470,154 +462,6 @@ impl Ctx<'_> {
             s.items
                 .insert(0, Item::Fill(r, 1.5, self.pal.accent.with_alpha(0.45)));
         }
-        s
-    }
-
-    /// A fenced code block: the language and a copy button on a header,
-    /// the code coloured as the file viewer colours it.
-    pub(super) unsafe fn code(&self, lang: &str, text: &str, w: f32) -> Scene {
-        let mut s = Scene::default();
-        let inner = w - 2.0 * CODE_PAD;
-        let Some(l) = self.layout(&self.fonts.code, text, inner) else {
-            return s;
-        };
-        colour_code(self, &l, lang, text);
-        let (_, th) = render::text_size(&l);
-        let h = CODE_HEAD + th + CODE_PAD;
-        let plate = Rect::new(0.0, 0.0, w, h);
-        s.fill(plate, 8.0, Color::rgb(0).with_alpha(0.32));
-        s.stroke(plate, 8.0, self.pal.fg.with_alpha(0.07), 1.0);
-        s.fill(
-            Rect::new(0.0, CODE_HEAD - 1.0, w, 1.0),
-            0.0,
-            self.pal.fg.with_alpha(0.06),
-        );
-        let label = if lang.is_empty() { "code" } else { lang };
-        s.line(
-            label,
-            F::Small,
-            Rect::new(CODE_PAD, 0.0, w / 2.0, CODE_HEAD),
-            self.pal.faint,
-        );
-        let copy = Rect::new(w - 70.0, 3.0, 64.0, CODE_HEAD - 6.0);
-        s.line(
-            "\u{E8C8}",
-            F::Icon,
-            Rect::new(copy.x + 4.0, copy.y, 16.0, copy.h),
-            self.pal.dim,
-        );
-        s.line(
-            "Copy",
-            F::Small,
-            Rect::new(copy.x + 24.0, copy.y, 40.0, copy.h),
-            self.pal.dim,
-        );
-        s.hit(copy, Hit::Tr(Act::Copy(text.to_string())));
-        s.unit(
-            &l,
-            CODE_PAD,
-            CODE_HEAD + 6.0,
-            self.pal.fg.with_alpha(0.9),
-            text,
-        );
-        s.h = h + 6.0;
-        s
-    }
-
-    /// A table: columns as wide as their widest cell, the wide ones
-    /// wrapping when the table does not fit.
-    unsafe fn table(
-        &self,
-        header: &[Inline],
-        align: &[Align],
-        rows: &[Vec<Inline>],
-        w: f32,
-    ) -> Scene {
-        let mut s = Scene::default();
-        let cols = header.len();
-        if cols == 0 {
-            return s;
-        }
-        let all = || std::iter::once(header).chain(rows.iter().map(Vec::as_slice));
-        let mut natural = vec![0.0f32; cols];
-        for row in all() {
-            for (c, cell) in row.iter().enumerate().take(cols) {
-                if let Some(l) = self.one_line(&self.fonts.body, &cell.text) {
-                    let bold = row.as_ptr() == header.as_ptr();
-                    if bold {
-                        let _ =
-                            l.SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, range(0..u32::MAX / 2));
-                    }
-                    natural[c] = natural[c].max(render::text_size(&l).0 + 2.0 * CELL_X + 2.0);
-                }
-            }
-        }
-        let widths = flow::table_widths(&natural, CELL_LEAST, w);
-        let mut y = 0.0;
-        let total_w: f32 = widths.iter().sum();
-        for (k, row) in all().enumerate() {
-            let head = k == 0;
-            let mut cell_scene = Scene::default();
-            let mut rh: f32 = 0.0;
-            let mut x = 0.0;
-            for (c, cell) in row.iter().enumerate().take(cols) {
-                let cw = widths[c];
-                let ink = if head {
-                    self.pal.fg
-                } else {
-                    self.pal.fg.with_alpha(0.88)
-                };
-                let a = align.get(c).copied().unwrap_or(Align::None);
-                let mark = cell_scene.units.len();
-                let (h, _) = self.inline(
-                    &mut cell_scene,
-                    cell,
-                    &self.fonts.body,
-                    x + CELL_X,
-                    y + CELL_Y,
-                    cw - 2.0 * CELL_X,
-                    ink,
-                    a,
-                );
-                if head {
-                    if let Some(u) = cell_scene.units.get(mark) {
-                        let _ = u.layout.SetFontWeight(
-                            DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                            range(0..u.text.encode_utf16().count() as u32),
-                        );
-                    }
-                }
-                rh = rh.max(h + 2.0 * CELL_Y);
-                x += cw;
-            }
-            if head {
-                s.fill(
-                    Rect::new(0.0, y, total_w, rh),
-                    0.0,
-                    self.pal.fg.with_alpha(0.06),
-                );
-            } else if k % 2 == 0 {
-                s.fill(
-                    Rect::new(0.0, y, total_w, rh),
-                    0.0,
-                    self.pal.fg.with_alpha(0.025),
-                );
-            }
-            s.append(&cell_scene, 0.0, 0.0);
-            y += rh;
-            s.fill(
-                Rect::new(0.0, y - 1.0, total_w, 1.0),
-                0.0,
-                self.pal.fg.with_alpha(0.09),
-            );
-        }
-        s.stroke(
-            Rect::new(0.0, 0.0, total_w, y),
-            6.0,
-            self.pal.fg.with_alpha(0.14),
-            1.0,
-        );
-        s.h = y + 4.0;
         s
     }
 }
