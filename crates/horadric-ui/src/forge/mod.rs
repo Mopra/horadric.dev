@@ -364,7 +364,6 @@ pub fn drain() {
 /// Off the feeder thread: a session wrote a file the Forge shows. It is
 /// queued for [`take_written`] and the UI thread woken.
 pub fn heard(registry: &Mutex<Registry>, id: &str, event: &HookEvent) {
-    history::heard_tool(event);
     edit::hooked(event);
     if event.hook_event_name != "PostToolUse" {
         return;

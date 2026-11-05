@@ -15,14 +15,11 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::forge::versions::{self, Version};
 use horadric_core::forge::{DiffLine, Kind};
-use horadric_core::HookEvent;
-use serde_json::Value;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2WebResourceRequestedEventArgs, ICoreWebView2_2,
     COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
@@ -53,10 +50,6 @@ thread_local! {
     /// Tabs whose page answers the version host.
     static SERVING: RefCell<HashSet<(String, u64)>> = RefCell::new(HashSet::new());
 }
-
-/// Files a session is writing now, between its PreToolUse and PostToolUse,
-/// so a restore does not land in the middle and get overwritten.
-static WRITING: Mutex<Vec<(PathBuf, Instant)>> = Mutex::new(Vec::new());
 
 struct Viewing {
     key: String,
@@ -146,44 +139,6 @@ pub(super) fn changed(root: &Path, file: &Path) {
                 eprintln!("horadric: cannot prune {}: {e}", store.display());
             }
         });
-}
-
-/// Off the feeder thread: a session started or ended a write, so a restore
-/// waits for it to end.
-pub(super) fn heard_tool(event: &HookEvent) {
-    let pre = match event.hook_event_name.as_str() {
-        "PreToolUse" => true,
-        "PostToolUse" | "PostToolUseFailure" => false,
-        _ => return,
-    };
-    let Some(tool) = event.tool_name.as_deref() else {
-        return;
-    };
-    if !horadric_core::rarity::WRITERS.contains(&tool) {
-        return;
-    }
-    let Some(path) = event
-        .tool_input
-        .as_ref()
-        .and_then(|i| i.get("file_path"))
-        .and_then(Value::as_str)
-    else {
-        return;
-    };
-    let file = PathBuf::from(horadric_core::glow::full(path, &event.cwd).replace('/', "\\"));
-    if let Ok(mut w) = WRITING.lock() {
-        w.retain(|(f, at)| at.elapsed() < WRITE_LASTS && fold(f) != fold(&file));
-        if pre {
-            w.push((file, Instant::now()));
-        }
-    }
-}
-
-fn being_written(file: &Path) -> bool {
-    WRITING.lock().is_ok_and(|w| {
-        w.iter()
-            .any(|(f, at)| at.elapsed() < WRITE_LASTS && fold(f) == fold(file))
-    })
 }
 
 /// The tab's folder, file, and the file's path in the folder.
@@ -754,7 +709,7 @@ pub fn restore(key: &str, tab: u64) {
         .name("horadric-forge-restore".into())
         .spawn(move || {
             let since = Instant::now();
-            while being_written(&file) && since.elapsed() < WRITE_LASTS {
+            while super::edit::being_written(&file) && since.elapsed() < WRITE_LASTS {
                 thread::sleep(Duration::from_millis(100));
             }
             let written = versions::read(&v).and_then(|bytes| std::fs::write(&file, bytes));

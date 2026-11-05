@@ -71,6 +71,12 @@ pub fn hooked(event: &HookEvent) {
     }
 }
 
+/// Whether a session's write to `file` is in flight, so a write of ours
+/// waits for it rather than landing in the middle.
+pub(super) fn being_written(file: &Path) -> bool {
+    WRITING.lock().is_ok_and(|w| busy(&w, file))
+}
+
 fn busy(w: &[(PathBuf, Option<String>, Instant)], file: &Path) -> bool {
     w.iter().any(|e| e.2.elapsed() < WAIT_MAX && super::same(&e.0, file))
 }
