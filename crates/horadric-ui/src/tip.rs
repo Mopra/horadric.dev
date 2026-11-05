@@ -339,6 +339,7 @@ pub fn tab(hit: TabHit) -> &'static str {
         TabHit::Tab(_) => "Show this tab. A middle click closes it. Ctrl+Tab steps through the tabs, Ctrl+1 to 9 jumps to one",
         TabHit::Close(_) => "Close this tab (Ctrl+W)",
         TabHit::New => "Open a new tab (Ctrl+T)",
+        TabHit::Forge => "The Forge: this project's files, to open one or start one (Ctrl+Shift+O)",
     }
 }
 
@@ -839,7 +840,7 @@ mod tests {
         for h in [BarHit::Back, BarHit::Size, BarHit::Place(Side::Top)] {
             lines.extend(bar(h, None));
         }
-        for h in [TabHit::Tab(0), TabHit::Close(0), TabHit::New] {
+        for h in [TabHit::Tab(0), TabHit::Close(0), TabHit::New, TabHit::Forge] {
             lines.push(tab(h));
         }
         for l in lines {

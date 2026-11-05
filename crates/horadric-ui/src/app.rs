@@ -453,6 +453,16 @@ pub(crate) enum Input {
     /// Ctrl+Shift+B in a pane: the browser pane of the project on the
     /// stage, opened or given the keyboard.
     Browse,
+    /// The Forge: Ctrl+Shift+O, the Forge key in a browser pane's tab
+    /// strip, or its row on the new tab page. The Forge's home for the
+    /// project with this key (the one on the stage when None), or `file`
+    /// in it when given. `replace` is a blank tab it was asked from, closed
+    /// once the Forge's tab stands in its place.
+    Forge {
+        key: Option<String>,
+        file: Option<PathBuf>,
+        replace: Option<u64>,
+    },
     /// Ctrl+Shift+G in a pane: the Arcane Sanctuary of the project on the
     /// stage, opened or given the keyboard.
     Sanctuary,
@@ -8089,6 +8099,34 @@ impl App {
         }
     }
 
+    /// Shows the Forge's home for the project, the page of its folder, as
+    /// a tab of its browser pane on the stage with the keyboard: the one it
+    /// has, never a second.
+    fn open_forge_home(&mut self, key: &str) {
+        let root = self.project_dir(key);
+        let id = format!("{WEB}{key}");
+        let new = !self.webs.contains_key(key);
+        if new {
+            let serial = self.next_serial;
+            self.next_serial += 1;
+            let page = Console::web(id.clone(), serial, key.to_string());
+            self.webs.insert(key.to_string(), page);
+        }
+        if crate::forge::open_home(key, root.as_deref(), true).is_none() {
+            if new {
+                self.webs.remove(key);
+            }
+            return;
+        }
+        if let Some(w) = self.web_windows.get(key) {
+            w.front();
+        } else if self.fill_stage(key) {
+            if let Some(stage) = &self.stage {
+                stage.focus_session(&id);
+            }
+        }
+    }
+
     /// Opens `url` in a new tab of the project's browser pane, shown on
     /// the stage with the keyboard.
     fn open_web_tab(&mut self, key: &str, url: &str) {
@@ -9855,6 +9893,20 @@ impl App {
                 Input::Browse => {
                     if let Some(key) = self.stage.as_ref().map(|s| s.project()) {
                         self.open_web(&key, None);
+                    }
+                }
+                Input::Forge { key, file, replace } => {
+                    let key = key.or_else(|| self.stage.as_ref().map(|s| s.project()));
+                    if let Some(key) = key {
+                        match file {
+                            Some(file) => self.open_forge(&key, &file, true),
+                            None => self.open_forge_home(&key),
+                        }
+                        if let Some(blank) = replace {
+                            if web::shown_tab(&key) != Some(blank) {
+                                web::close_tab(&key, blank);
+                            }
+                        }
                     }
                 }
                 // A link may come from a reply a hostile page wrote, and

@@ -6,7 +6,11 @@
 //! The field is the pane's address field, moved: the same keys, the same
 //! suggestions while something is typed. The arrow keys walk the list
 //! while nothing is.
+//!
+//! The list starts with the Forge, the project's files, and the files its
+//! sessions wrote lately, then the pages.
 
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
@@ -39,6 +43,8 @@ const ROW_H: f32 = 34.0;
 const ICON: f32 = 16.0;
 /// Between the field and the first page.
 const LIST_GAP: f32 = 26.0;
+/// How many files sessions wrote lately are listed under the Forge.
+const FORGE_FILES: usize = 3;
 
 /// Where the start page puts its parts, in DIPs.
 #[derive(Debug, Clone, PartialEq)]
@@ -111,14 +117,98 @@ pub fn offset_at(gpu: &Gpu, l: &Layout, text: &str, caret: u32, x: f32) -> u32 {
     render::offset_at(&t, x - text_left(l) + scroll, FIELD_H / 2.0)
 }
 
+/// Where a row of the list leads.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pick {
+    /// A page, opened in the tab.
+    Page(String),
+    /// The Forge's home for the project.
+    Forge,
+    /// A file in the Forge.
+    File(PathBuf),
+}
+
+/// A row of the list: what it says, the text the field shows while the
+/// arrow keys are on it, and where it leads.
+pub struct Entry {
+    pub title: String,
+    pub sub: String,
+    pub text: String,
+    pub pick: Pick,
+}
+
+impl Entry {
+    pub fn row(&self) -> Row {
+        match &self.pick {
+            Pick::Page(url) => Row::new(&self.title, url),
+            Pick::Forge => Row::marked(&self.title, &self.sub, FORGE_GLYPH),
+            Pick::File(_) => Row::marked(&self.title, &self.sub, FILE_GLYPH),
+        }
+    }
+}
+
+/// The Forge's mark, its Files button's, and a file's, in Segoe MDL2
+/// Assets.
+const FORGE_GLYPH: &str = "\u{E8B7}";
+const FILE_GLYPH: &str = "\u{E8A5}";
+
+/// The start page's list for the project `key`: the Forge, the files its
+/// sessions wrote lately, then the pages it went to, [`ROWS`] in all.
+/// From memory only: asked on every paint and mouse move.
+pub fn entries(key: &str) -> Vec<Entry> {
+    let mut out = vec![Entry {
+        title: "The Forge".into(),
+        sub: "Ctrl+Shift+O".into(),
+        text: "The Forge".into(),
+        pick: Pick::Forge,
+    }];
+    for file in crate::forge::recent_files(key, FORGE_FILES) {
+        let name = |p: Option<&std::path::Path>| {
+            p.and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let title = name(Some(&file));
+        out.push(Entry {
+            sub: name(file.parent()),
+            text: title.clone(),
+            title,
+            pick: Pick::File(file),
+        });
+    }
+    let room = ROWS.saturating_sub(out.len());
+    for (title, url) in crate::web::recent(key, room) {
+        out.push(Entry {
+            title,
+            sub: String::new(),
+            text: url.clone(),
+            pick: Pick::Page(url),
+        });
+    }
+    out
+}
+
 /// A page in the list.
 pub struct Row {
     pub title: String,
     pub host: String,
     pub icon: Option<Rc<Favicon>>,
+    /// A mark drawn in the icon's place, for a row that is not a page.
+    pub glyph: Option<&'static str>,
 }
 
 impl Row {
+    /// A row that is not a page: `title`, `sub` dimmer at the right, and
+    /// `glyph` for its mark.
+    pub fn marked(title: &str, sub: &str, glyph: &'static str) -> Row {
+        Row {
+            title: title.to_string(),
+            host: sub.to_string(),
+            icon: None,
+            glyph: Some(glyph),
+        }
+    }
+
     pub fn new(title: &str, url: &str) -> Row {
         let host = horadric_core::history::bare(url);
         let host = horadric_core::history::host(host).to_string();
@@ -132,6 +222,7 @@ impl Row {
             title,
             host,
             icon: favicon::of(url),
+            glyph: None,
         }
     }
 }
@@ -339,8 +430,25 @@ unsafe fn page(
     }
     let mid = (r.top + r.bottom) / 2.0;
     let icon_left = r.left + 14.0;
-    match &row.icon {
-        Some(icon) => favicon::draw(
+    match (&row.icon, row.glyph) {
+        (_, Some(g)) => {
+            let g: Vec<u16> = g.encode_utf16().collect();
+            brush.SetColor(&render::color(theme::text_dim()));
+            rt.DrawText(
+                &g,
+                &gpu.icon_small,
+                &D2D_RECT_F {
+                    left: icon_left - 4.0,
+                    top: r.top,
+                    right: icon_left + ICON + 4.0,
+                    bottom: r.bottom,
+                },
+                brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+        (Some(icon), None) => favicon::draw(
             rt,
             icon,
             D2D_RECT_F {
@@ -350,7 +458,7 @@ unsafe fn page(
                 bottom: mid + ICON / 2.0,
             },
         ),
-        None => {
+        (None, None) => {
             brush.SetColor(&render::color(theme::text_dim().with_alpha(0.5)));
             rt.FillEllipse(
                 &D2D1_ELLIPSE {

@@ -2158,7 +2158,8 @@ fn loaded(key: &str, id: u64, ok: bool) {
 
 /// The page has the keyboard, so the stage's own keys are caught before
 /// it sees them: Ctrl+L for the address and the tab keys, as in a browser,
-/// and Ctrl+Shift+T for a terminal, as in any pane.
+/// Ctrl+Shift+T for a terminal, as in any pane, and Ctrl+Shift+O for the
+/// Forge.
 fn keys(key: &str, controller: &ICoreWebView2Controller) {
     let owned = key.to_string();
     let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
@@ -2178,6 +2179,11 @@ fn keys(key: &str, controller: &ICoreWebView2Controller) {
             (b'L', true, false, false) => Input::WebAsk(owned.clone(), WebAsk::Address),
             (b'T', true, true, false) => Input::Shell(None),
             (b'J', true, false, false) => Input::WebAsk(owned.clone(), WebAsk::Downloads),
+            (b'O', true, true, false) => Input::Forge {
+                key: Some(owned.clone()),
+                file: None,
+                replace: None,
+            },
             _ => match tab_key(VIRTUAL_KEY(vk as u16), ctrl, shift, alt) {
                 Some(step) => Input::WebTab(owned.clone(), step),
                 None => return Ok(()),

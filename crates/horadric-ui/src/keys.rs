@@ -258,6 +258,9 @@ pub enum CharAction {
     /// Ctrl+Shift+T as in a browser, which is the new terminal. Plain
     /// Ctrl+R still reaches the program, Claude Code's history search.
     Reopen,
+    /// Ctrl+Shift+O: the Forge's home for the project, to open a file or
+    /// start one. Plain Ctrl+O still reaches the program.
+    Forge,
 }
 
 /// Maps a `WM_CHAR` (or `WM_SYSCHAR` when `mods.alt`) to its bytes.
@@ -271,6 +274,7 @@ pub fn char_action(c: char, mods: Mods) -> CharAction {
         '\u{2}' if mods.shift && mods.ctrl => return CharAction::Browse,
         '\u{7}' if mods.shift && mods.ctrl => return CharAction::Sanctuary,
         '\u{12}' if mods.shift && mods.ctrl => return CharAction::Reopen,
+        '\u{f}' if mods.shift && mods.ctrl => return CharAction::Forge,
         // Meta+Enter is the newline Claude Code understands everywhere.
         '\r' if mods.shift => out.extend_from_slice(b"\x1b\r"),
         '\t' if mods.shift => out.extend_from_slice(b"\x1b[Z"),
@@ -681,6 +685,8 @@ mod tests {
         assert_eq!(char_action('\u{2}', ctrl_shift), CharAction::Browse);
         assert_eq!(char_action('\u{7}', ctrl_shift), CharAction::Sanctuary);
         assert_eq!(char_action('\u{2}', CTRL), CharAction::Send(vec![0x02]));
+        assert_eq!(char_action('\u{f}', ctrl_shift), CharAction::Forge);
+        assert_eq!(char_action('\u{f}', CTRL), CharAction::Send(vec![0x0f]));
     }
 
     #[test]

@@ -738,12 +738,28 @@ impl Pane {
         self.console.web.as_deref().filter(|k| web::shows_start(k))
     }
 
-    /// Where the start page puts its parts, and the pages it lists, while
-    /// it is shown.
-    fn start_page(&self) -> Option<(new_tab::Layout, Vec<(String, String)>)> {
-        let rows = web::recent(self.start_key()?, new_tab::ROWS);
+    /// Where the start page puts its parts, and what it lists (the Forge,
+    /// files, pages), while it is shown.
+    fn start_page(&self) -> Option<(new_tab::Layout, Vec<new_tab::Entry>)> {
+        let rows = new_tab::entries(self.start_key()?);
         let l = new_tab::layout(self.page_glass(), rows.len());
         Some((l, rows))
+    }
+
+    /// Goes where a row of the start page leads: a page into this tab, or
+    /// the Forge, whose tab then takes this blank one's place.
+    fn start_go(&self, key: &str, pick: &new_tab::Pick) {
+        let blank = web::shown_tab(key).filter(|_| web::shows_start(key));
+        let file = match pick {
+            new_tab::Pick::Page(url) => return web::open(key, Some(url)),
+            new_tab::Pick::Forge => None,
+            new_tab::Pick::File(file) => Some(file.clone()),
+        };
+        app::push(Input::Forge {
+            key: Some(key.to_string()),
+            file,
+            replace: blank,
+        });
     }
 
     /// The arrow keys on the start page walk its list, the field showing
@@ -765,7 +781,7 @@ impl Pane {
         };
         self.start_pick.set(pick);
         let text = match pick {
-            Some(i) => rows[i].1.clone(),
+            Some(i) => rows[i].text.clone(),
             None => self.typed.borrow().clone(),
         };
         if let Some(f) = self.address.borrow_mut().as_mut() {
@@ -791,7 +807,7 @@ impl Pane {
             self.address.take();
             self.start_pick.set(None);
             self.start_hover.set(None);
-            web::open(key, Some(&rows[i].1));
+            self.start_go(key, &rows[i].pick);
             self.focus_page();
             self.invalidate();
             return true;
@@ -1240,12 +1256,7 @@ impl Pane {
         });
         let start_rows: Vec<new_tab::Row> = start_key
             .as_deref()
-            .map(|k| {
-                web::recent(k, new_tab::ROWS)
-                    .iter()
-                    .map(|(title, url)| new_tab::Row::new(title, url))
-                    .collect()
-            })
+            .map(|k| new_tab::entries(k).iter().map(new_tab::Entry::row).collect())
             .unwrap_or_default();
         let start = start_key.as_ref().map(|_| new_tab::Start {
             layout: new_tab::layout(self.page_glass(), start_rows.len()),
@@ -1838,6 +1849,11 @@ impl Pane {
                 CharAction::Browse => app::push(Input::Browse),
                 CharAction::Sanctuary => app::push(Input::Sanctuary),
                 CharAction::Reopen => app::push(Input::Reopen),
+                CharAction::Forge => app::push(Input::Forge {
+                    key: None,
+                    file: None,
+                    replace: None,
+                }),
                 _ => folio::char(key, c, mods),
             }
             return;
@@ -1848,6 +1864,11 @@ impl Pane {
                 CharAction::Browse => app::push(Input::Browse),
                 CharAction::Sanctuary => app::push(Input::Sanctuary),
                 CharAction::Reopen => app::push(Input::Reopen),
+                CharAction::Forge => app::push(Input::Forge {
+                    key: None,
+                    file: None,
+                    replace: None,
+                }),
                 _ if matches!(c, 'm' | 'M')
                     && !mods.ctrl
                     && !mods.alt
@@ -1869,6 +1890,11 @@ impl Pane {
                 CharAction::Browse => app::push(Input::Browse),
                 CharAction::Sanctuary => app::push(Input::Sanctuary),
                 CharAction::Reopen => app::push(Input::Reopen),
+                CharAction::Forge => app::push(Input::Forge {
+                    key: None,
+                    file: None,
+                    replace: None,
+                }),
                 _ => {}
             }
             return;
@@ -1888,6 +1914,11 @@ impl Pane {
             CharAction::Browse => app::push(Input::Browse),
             CharAction::Sanctuary => app::push(Input::Sanctuary),
             CharAction::Reopen => app::push(Input::Reopen),
+            CharAction::Forge => app::push(Input::Forge {
+                key: None,
+                file: None,
+                replace: None,
+            }),
         }
     }
 
@@ -2456,6 +2487,14 @@ impl Pane {
             (Some(TabHit::Tab(i)), false) => TabStep::Select(i),
             (Some(TabHit::Close(i)), false) => TabStep::Close(Some(i)),
             (Some(TabHit::New), false) => TabStep::New,
+            (Some(TabHit::Forge), false) => {
+                app::push(Input::Forge {
+                    key: Some(key.clone()),
+                    file: None,
+                    replace: None,
+                });
+                return true;
+            }
             _ => return true,
         };
         web::tab(key, step);
@@ -2776,6 +2815,16 @@ impl Pane {
             return;
         };
         self.invalidate();
+        // The arrow keys rest on the Forge or one of its files: Enter goes
+        // there, not to what the field says.
+        if let (true, Some(i), Some(key)) = (go, self.start_pick.get(), self.start_key()) {
+            let pick = new_tab::entries(key).into_iter().nth(i).map(|e| e.pick);
+            if let Some(pick) = pick.filter(|p| !matches!(p, new_tab::Pick::Page(_))) {
+                self.start_pick.set(None);
+                self.start_go(key, &pick);
+                return;
+            }
+        }
         // Nothing to go to on the start page: the field keeps the keyboard.
         if go && self.start_key().is_some() && web::address(&f.text).is_none() {
             *self.address.borrow_mut() = Some(f);

@@ -229,6 +229,8 @@ pub struct TabLayout {
     pub crosses: Vec<Option<f32>>,
     /// Where the new tab button starts.
     pub new: f32,
+    /// Where the Forge's button starts, after the new tab button.
+    pub forge: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,13 +238,16 @@ pub enum TabHit {
     Tab(usize),
     Close(usize),
     New,
+    /// The Forge's home for the project, its files.
+    Forge,
 }
 
 /// `count` tabs in a pane `width` DIPs wide: as wide as [`TAB_MAX`] while
-/// they fit, sharing the strip when they do not, then the new tab button.
+/// they fit, sharing the strip when they do not, then the new tab button
+/// and the Forge's.
 pub fn tab_layout(width: f32, count: usize) -> TabLayout {
     let left = BEZEL + TAB_INSET;
-    let room = (width - BEZEL - TAB_INSET - left - TAB_NEW).max(0.0);
+    let room = (width - BEZEL - TAB_INSET - left - 2.0 * TAB_NEW).max(0.0);
     let each = if count == 0 {
         0.0
     } else {
@@ -258,10 +263,12 @@ pub fn tab_layout(width: f32, count: usize) -> TabLayout {
         .iter()
         .map(|&(l, r)| (r - l >= 3.0 * TAB_CROSS).then_some(r - TAB_CROSS))
         .collect();
+    let new = left + count as f32 * each;
     TabLayout {
         tabs,
         crosses,
-        new: left + count as f32 * each,
+        new,
+        forge: new + TAB_NEW,
     }
 }
 
@@ -269,6 +276,9 @@ pub fn tab_layout(width: f32, count: usize) -> TabLayout {
 pub fn tab_hit(l: &TabLayout, x: f32) -> Option<TabHit> {
     if x >= l.new && x < l.new + TAB_NEW {
         return Some(TabHit::New);
+    }
+    if x >= l.forge && x < l.forge + TAB_NEW {
+        return Some(TabHit::Forge);
     }
     let i = l.tabs.iter().position(|&(a, b)| x >= a && x < b)?;
     match l.crosses[i] {
@@ -1471,6 +1481,15 @@ impl GridTarget {
         };
         self.raised_key(&new, d / 2.0);
         glyph("\u{E710}", new.left, new.right, theme::text_dim());
+        let cx = l.forge + TAB_NEW / 2.0;
+        let forge = D2D_RECT_F {
+            left: cx - d / 2.0,
+            right: cx + d / 2.0,
+            ..new
+        };
+        self.raised_key(&forge, d / 2.0);
+        let files = crate::forge::bar::glyph(crate::forge::bar::Button::Files);
+        glyph(files, forge.left, forge.right, theme::text_dim());
     }
 
     /// A key standing off the plate: its shadow on the plate, its side
@@ -2781,7 +2800,7 @@ mod tests {
         let many = tab_layout(400.0, 10);
         let each = many.tabs[1].0 - many.tabs[0].0;
         assert!(each < TAB_MAX);
-        assert!(many.new + TAB_NEW <= 400.0 - BEZEL - TAB_INSET + 0.01);
+        assert!(many.forge + TAB_NEW <= 400.0 - BEZEL - TAB_INSET + 0.01);
         // Too narrow for a cross: a middle click or Ctrl+W closes it.
         assert!(many.crosses.iter().all(Option::is_none));
 
@@ -2797,7 +2816,8 @@ mod tests {
         let cross = l.crosses[2].unwrap();
         assert_eq!(tab_hit(&l, cross + 1.0), Some(TabHit::Close(2)));
         assert_eq!(tab_hit(&l, l.new + 1.0), Some(TabHit::New));
-        assert_eq!(tab_hit(&l, l.new + TAB_NEW + 1.0), None);
+        assert_eq!(tab_hit(&l, l.new + TAB_NEW + 1.0), Some(TabHit::Forge));
+        assert_eq!(tab_hit(&l, l.forge + TAB_NEW + 1.0), None);
         assert_eq!(tab_hit(&l, l.tabs[0].0 - 1.0), None);
     }
 
