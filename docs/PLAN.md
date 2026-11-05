@@ -52,19 +52,17 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 ## Next
 
 - [One portal](plan/one-portal.md): a phone paired once sees every brother and every session. Built; left: the test with three machines, and pairing a phone by signing in (being built).
-- [Headless sessions and the Folio](plan/headless.md): built and the default; left: the later Folio features.
-- [macOS](plan/macos.md): the Folio, browser pane, quests, files, usage, Discord and Settings are built, unverified on a real Mac; left: the rest of each, and switching accounts.
+- [macOS](plan/macos.md): for others who want it, the human uses no Mac, so lowest priority. The Folio, browser pane, quests, files, usage, Discord and Settings are built, unverified on a real Mac; left: the rest of each, and switching accounts.
 - [Lore](plan/lore.md): watch quest compaction run for real.
 - [Memory](plan/memory.md): built; left: arming the daily distill.
-- [The Brotherhood](plan/the-brotherhood.md): built, the Mac and teams too; left: the Mac's keeper, taking over and leaving, and a real two-person team run.
+- [The Brotherhood](plan/the-brotherhood.md): built, the Mac too; left: the Mac's keeper, taking over and leaving.
 - [Secrets](plan/secrets.md): tokens for quests that push, call APIs or deploy.
 - [Identities](plan/identities.md): each project's gh, git, npm and Vercel logins, so no session switches another's account.
-- [Signals](plan/signals.md): built; left: a look on screen, the Mac's cost lines and progress, and traces.
-- [Small local models](plan/local-models.md): static embeddings as memory's first pass, and a small model for the sentence per session.
+- [Signals](plan/signals.md): built; left: a look on screen, and the Mac's cost lines and progress.
 - [Dictation](plan/dictation.md): built, with a global chord; left: a bigger model, Danish, a plate outside Horadric, and the Mac's key and draft.
 - [Towns](plan/towns.md): several Tristrams, work and private, each with its own Claude login and browser profile. Agreed 2026-11-05, reopening `CLAUDE_CONFIG_DIR` for towns only.
 - [The Forge](plan/the-forge.md): files worked on with Claude beside the session (decks, artefacts, markdown, images), pinned, edited by hand, versioned and exported. Proposed.
-- [The hirelings](plan/hirelings.md): built; left: an on-screen check, and open questions (typing to one, agent teams, nesting).
+- [The hirelings](plan/hirelings.md): built; left: an on-screen check.
 - [GPU light](plan/gpu-light.md): every glow, shadow and spark drawn with real bloom, the shadow effect and particles instead of stacked shapes, window by window, then the Mac. Steps 1 and 2 are built; step 3 waits on the human's look.
 
 ## Reference

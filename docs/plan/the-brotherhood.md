@@ -23,12 +23,6 @@ What is left is below.
   Mac, handing off a Folio (only a session in a pane goes), and lore,
   which waits for the Mac to have a lore at all. Brothers' limits of the
   Mac's own account show in its usage window.
-- **Teams, the rest.** Built and the relay deployed (docs/PORTAL.md,
-  "Teams"). Left: a real organization in WorkOS production with two
-  people in it (the human's call, since inviting sends mail), and a run
-  between their two PCs, which nothing has done yet. The Mac and the
-  Linux node do not dial with `team=1`, so they never see a teammate
-  until they apply the team rules themselves.
 
 Each of these is its own decision when it comes.
 

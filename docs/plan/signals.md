@@ -19,6 +19,3 @@ given the status line. Decided then, and why, in the lore too: no
   shows 40 %, `9;4;2` red, `9;4;4` yellow and `9;4;0` clears it.
 - **macOS.** The Mac tile and project menus have no cost lines yet, and
   the Dock has no progress from OSC 9;4.
-- **Traces.** Claude Code's OpenTelemetry traces (beta) have a
-  `tool.blocked_on_user` span. Not asked for: the hooks already say when
-  a session waits on the human. Worth a look if they ever stop saying it.
