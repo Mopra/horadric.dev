@@ -422,6 +422,46 @@ pub fn open_tab(key: &str, url: Option<&str>) {
     add_tab(key, Tab::new(url.map(str::to_string)), true);
 }
 
+/// Opens `url` in a new tab for the Forge, shown when `front`, without the
+/// keyboard: a file opened as a session writes it must not take the keys
+/// from the session. Its id, for the Forge to know the tab by.
+pub fn open_file_tab(key: &str, url: &str, front: bool) -> u64 {
+    let tab = Tab::new(Some(url.to_string()));
+    let id = tab.id;
+    add_tab(key, tab, front);
+    id
+}
+
+/// Shows the tab `id` without giving it the keyboard.
+pub fn select_quiet(key: &str, id: u64) {
+    let found = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let web = w.get_mut(key)?;
+        web.active = web.tabs.iter().position(|t| t.id == id)?;
+        Some(())
+    });
+    if found.is_some() {
+        show(key);
+    }
+}
+
+/// Loads the tab `id`'s page again from disk, past the cache, since a file
+/// the Forge shows changed under it and so may its stylesheet or images.
+pub fn reload_fresh(key: &str, id: u64) {
+    with_view(key, id, |view| {
+        let Some(view) = view else { return };
+        rouse(&view);
+        let done = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+        unsafe {
+            let _ = view.CallDevToolsProtocolMethod(
+                &HSTRING::from("Page.reload"),
+                &HSTRING::from(r#"{"ignoreCache":true}"#),
+                &done,
+            );
+        }
+    });
+}
+
 /// Puts `tab` after the browser's others, shown when `front` or when it is
 /// the only one, making the browser when the project has none, then asks
 /// WebView2 for its page.
@@ -1136,6 +1176,10 @@ pub fn restore(key: &str, saved: &SavedPages) {
         web.active = start + saved.active.min(saved.tabs.len().saturating_sub(1));
         web.tabs[start..].iter().map(|t| t.id).collect()
     });
+    // Before they are made, so a file's tab is served its folder again.
+    for (id, t) in ids.iter().zip(&saved.tabs) {
+        crate::forge::restored(key, *id, &t.url);
+    }
     show(key);
     for id in ids {
         make(key, id);
@@ -1696,6 +1740,8 @@ fn ready(key: &str, id: u64, controller: ICoreWebView2Controller) {
     listen(key, id, &view);
     keys(key, &controller);
     zooms(key, id, &controller);
+    // Its folder, its scripts and its messages, before the first page.
+    crate::forge::ready(key, id, &view);
     // The console is kept from the first page on, so it goes in before it.
     let first = Rc::new(Cell::new(Some((view.clone(), opener, pending))));
     let start = Rc::clone(&first);

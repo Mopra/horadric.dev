@@ -164,6 +164,8 @@ pub enum Field {
     AddHost,
     Drive,
     ShipsPublic,
+    /// Whether files its sessions write open in the Forge by themselves.
+    Forge,
     /// A global shortcut: a click listens for its new chord.
     Key(Action),
     /// What the Keys section has to say: how to set one, or why the last
@@ -212,6 +214,7 @@ impl Field {
             Field::AddHost => "Another machine to reach over ssh",
             Field::Drive => "Warriv works its quest log while you are away",
             Field::ShipsPublic => "Warriv may also cut a public release",
+            Field::Forge => "Pages, documents and pictures a session writes open beside it",
             Field::Key(Action::Next) => "Jumps to the session waiting longest",
             Field::Key(Action::Listen) => "What happened while you were away",
             Field::Key(Action::Stop) => "Stops Warriv in every project at once",
@@ -383,11 +386,13 @@ pub struct Project {
     pub drive: Option<bool>,
     /// Shipping held until a fix lands.
     pub held: bool,
+    /// Whether files its sessions write open in the Forge by themselves.
+    pub forge: bool,
 }
 
 /// The rows the Projects section has with a project picked, which the
 /// window is sized for even before there is one.
-const PROJECT_ROWS: usize = 7;
+const PROJECT_ROWS: usize = 8;
 
 /// The project's hosts in a row's room: a few by name, the rest counted.
 fn hosts_line(hosts: &[String]) -> String {
@@ -660,6 +665,10 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                 ),
                 drive,
                 public,
+                {
+                    let (word, c) = switch(p.forge);
+                    line(Field::Forge, "Show files it writes", word, c)
+                },
             ]
         }
     }
@@ -1592,6 +1601,7 @@ mod tests {
                 log: true,
                 drive: None,
                 held: false,
+                forge: true,
             }),
         }
     }
@@ -1714,11 +1724,12 @@ mod tests {
                 Field::Hosts,
                 Field::AddHost,
                 Field::Drive,
-                Field::ShipsPublic
+                Field::ShipsPublic,
+                Field::Forge
             ]
         );
-        // The shortcuts, the tallest section.
-        assert_eq!(tallest(&v), height(Section::Keys, &v));
+        // A project's settings, the tallest section.
+        assert_eq!(tallest(&v), height(Section::Projects, &v));
     }
 
     #[test]
@@ -1794,8 +1805,8 @@ mod tests {
         let rows = lines(Section::Projects, &v);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].control, Control::Fixed);
-        // The shortcuts, the tallest section.
-        assert_eq!(tallest(&v), height(Section::Keys, &v));
+        // Sized for a project's settings even before there is one.
+        assert_eq!(tallest(&v), height(Section::Projects, &values()));
     }
 
     #[test]
@@ -1945,11 +1956,13 @@ mod tests {
         assert_eq!(focus_step(&rows, None, 1), Some(1));
         assert_eq!(focus_step(&rows, Some(1), 1), Some(1));
         let rows = lines(Section::Projects, &v);
-        // "And ships public" only says while Warriv does not drive.
-        assert_eq!(focus_step(&rows, None, -1), Some(5));
+        // The Forge's switch comes last.
+        assert_eq!(focus_step(&rows, None, -1), Some(7));
         // SSH hosts only says, so Tab steps over it.
         assert_eq!(focus_step(&rows, Some(2), 1), Some(4));
-        assert_eq!(focus_step(&rows, Some(5), 1), Some(0));
+        // "And ships public" only says while Warriv does not drive.
+        assert_eq!(focus_step(&rows, Some(5), 1), Some(7));
+        assert_eq!(focus_step(&rows, Some(7), 1), Some(0));
         assert_eq!(focus_step(&[], None, 1), None);
     }
 

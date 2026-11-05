@@ -284,14 +284,14 @@ pub fn vs_code() -> Option<PathBuf> {
 }
 
 /// A manual reset event, closed when the last side lets go of it.
-struct Event(HANDLE);
+pub(crate) struct Event(pub(crate) HANDLE);
 
 // A kernel handle, usable from any thread.
 unsafe impl Send for Event {}
 unsafe impl Sync for Event {}
 
 impl Event {
-    fn new() -> Option<Self> {
+    pub(crate) fn new() -> Option<Self> {
         unsafe { CreateEventW(None, true, false, None) }
             .ok()
             .map(Event)
@@ -306,7 +306,7 @@ impl Drop for Event {
     }
 }
 
-enum Next {
+pub(crate) enum Next {
     Stop,
     /// The wait ran out with nothing new.
     Quiet,
@@ -319,7 +319,7 @@ enum Next {
 
 /// Waits for the next batch of changes in any of `watches`, `stop`, or
 /// `timeout`.
-fn next(watches: &mut [DirChanges], stop: &Event, timeout: Option<Duration>) -> Next {
+pub(crate) fn next(watches: &mut [DirChanges], stop: &Event, timeout: Option<Duration>) -> Next {
     for w in watches.iter_mut() {
         if !w.arm() {
             return Next::Failed;
@@ -341,7 +341,7 @@ fn next(watches: &mut [DirChanges], stop: &Event, timeout: Option<Duration>) -> 
 
 /// `ReadDirectoryChangesW` on a folder, one read always pending so nothing
 /// is missed between two waits.
-struct DirChanges {
+pub(crate) struct DirChanges {
     dir: HANDLE,
     /// Whether folders inside it count too.
     subtree: bool,
@@ -356,7 +356,7 @@ struct DirChanges {
 }
 
 impl DirChanges {
-    fn open(dir: &Path, subtree: bool, prefix: &'static str) -> Option<Self> {
+    pub(crate) fn open(dir: &Path, subtree: bool, prefix: &'static str) -> Option<Self> {
         let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
         let handle = unsafe {
             CreateFileW(

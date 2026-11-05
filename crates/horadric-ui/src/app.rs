@@ -732,6 +732,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     let notify_id = notify.0 as isize;
     APP_WINDOW.with(|w| w.set(notify_id));
     web::init(notify);
+    crate::forge::init(notify_id, WM_HORADRIC_INPUT);
     // Locking the screen is going away, and unlocking it coming back.
     unsafe {
         let _ = WTSRegisterSessionNotification(notify, NOTIFY_FOR_THIS_SESSION);
@@ -861,6 +862,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 .unwrap_or(false);
             // Woken by the post below whether or not it lit anything.
             crate::glows::hear(&feed_registry, &target, &t.event);
+            crate::forge::heard(&feed_registry, &target, &t.event);
             // A turn's end is when its keeper is sent the snapshot.
             if t.event.hook_event_name == "Stop" && t.event.agent_id.is_none() {
                 keeping::turn_ended(&target, &t.event.transcript_path);
@@ -6237,6 +6239,7 @@ impl App {
             log: self.shared.boards.borrow().contains_key(key),
             drive: drive.as_ref().map(|d| d.ships_public),
             held: drive.is_some_and(|d| d.held.is_some()),
+            forge: crate::forge::auto(key),
         }
     }
 
@@ -6743,6 +6746,12 @@ impl App {
                 if let Some(key) = self.settings_key() {
                     let on = self.drive_of(&key).is_none();
                     self.set_drive(&key, on);
+                }
+            }
+            Field::Forge => {
+                if let Some(key) = self.settings_key() {
+                    crate::forge::set_auto(&key, !crate::forge::auto(&key));
+                    self.refresh_settings();
                 }
             }
             Field::BackupFolder | Field::BackupPassphrase if self.backup_busy.is_none() => {
@@ -7993,6 +8002,42 @@ impl App {
         if new && url.is_none() {
             self.web_ask = Some((key.to_string(), WebAsk::Address));
             post(self.notify.0 as isize, WM_HORADRIC_WEB, 0);
+        }
+    }
+
+    /// Shows `file` in the Forge, a tab of the project's browser pane. Asked
+    /// for (`asked`), the pane comes on the stage with the keyboard, as a
+    /// clicked file does. Written by a session, it opens beside the session
+    /// only where the stage already shows the project, and takes neither
+    /// the stage nor the keyboard.
+    fn open_forge(&mut self, key: &str, file: &Path, asked: bool) {
+        let root = self.project_dir(key);
+        let id = format!("{WEB}{key}");
+        let new = !self.webs.contains_key(key);
+        if new {
+            let serial = self.next_serial;
+            self.next_serial += 1;
+            let page = Console::web(id.clone(), serial, key.to_string());
+            self.webs.insert(key.to_string(), page);
+        }
+        if crate::forge::open(key, root.as_deref(), file, true).is_none() {
+            if new {
+                self.webs.remove(key);
+            }
+            return;
+        }
+        if let Some(w) = self.web_windows.get(key) {
+            if asked {
+                w.front();
+            }
+        } else if asked {
+            if self.fill_stage(key) {
+                if let Some(stage) = &self.stage {
+                    stage.focus_session(&id);
+                }
+            }
+        } else if new && self.stage.as_ref().map(|s| s.project()).as_deref() == Some(key) {
+            self.sync_stage();
         }
     }
 
@@ -9640,6 +9685,13 @@ impl App {
 
     /// Clicks and drags collected by the window procedures.
     fn apply_input(&mut self) {
+        // The Forge's threads wake the app with this message too.
+        crate::forge::drain();
+        for (key, file) in crate::forge::take_written() {
+            if crate::forge::auto(&key) {
+                self.open_forge(&key, &file, false);
+            }
+        }
         let inputs = INPUT.with(|q| std::mem::take(&mut *q.borrow_mut()));
         let mut relayout = false;
         for input in inputs {
@@ -9723,6 +9775,11 @@ impl App {
                 Input::Browser(id) => self.show_browsers(&id),
                 Input::View(key, _, rel, _) if horadric_core::afar::split_key(&key).is_some() => {
                     self.far_read(&key, &rel);
+                }
+                Input::View(key, dir, rel, _)
+                    if crate::forge::kind(&dir.join(rel.replace('/', "\\"))).is_some() =>
+                {
+                    self.open_forge(&key, &dir.join(rel.replace('/', "\\")), true);
                 }
                 Input::View(key, dir, rel, line) => {
                     self.open_view(&key, &dir, &rel);

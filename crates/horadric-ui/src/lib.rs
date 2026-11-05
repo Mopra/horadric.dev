@@ -158,6 +158,8 @@ mod far_node;
 #[cfg(windows)]
 mod far_phone;
 #[cfg(windows)]
+mod forge;
+#[cfg(windows)]
 mod glows;
 #[cfg(windows)]
 mod glyphs;
