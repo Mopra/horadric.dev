@@ -656,7 +656,7 @@ static EVENT_WINDOW: AtomicIsize = AtomicIsize::new(0);
 /// The secrets Horadric keeps, for the memory to cut from transcripts
 /// whatever they look like: the backup's passphrase and the kept logins'
 /// tokens. Google's and WorkOS's tokens are random enough for its
-/// patterns. The vault of docs/plan/secrets.md belongs here once built.
+/// patterns. The Vault (docs/plan/vault.md) belongs here once built.
 fn kept_secrets() -> Vec<String> {
     let mut out: Vec<String> = accounts::load()
         .list

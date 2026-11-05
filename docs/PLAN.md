@@ -56,8 +56,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Lore](plan/lore.md): watch quest compaction run for real.
 - [Memory](plan/memory.md): built; left: arming the daily distill.
 - [The Brotherhood](plan/the-brotherhood.md): built, the Mac too; left: the Mac's keeper, taking over and leaving.
-- [Secrets](plan/secrets.md): tokens for quests that push, call APIs or deploy.
-- [Identities](plan/identities.md): each project's gh, git, npm and Vercel logins, so no session switches another's account.
+- [Vault](plan/vault.md): each project's identity, its gh, git, npm and Vercel logins and the tokens its quests use without reading them, so no session switches another's account.
 - [Signals](plan/signals.md): built; left: a look on screen, and the Mac's cost lines and progress.
 - [Dictation](plan/dictation.md): built, with a global chord; left: a bigger model, Danish, a plate outside Horadric, and the Mac's key and draft.
 - [Towns](plan/towns.md): several Tristrams, work and private, each with its own Claude login and browser profile. Agreed 2026-11-05, reopening `CLAUDE_CONFIG_DIR` for towns only.

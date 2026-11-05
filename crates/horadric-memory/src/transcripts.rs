@@ -311,13 +311,13 @@ fn pieces(text: &str, most: usize) -> Vec<String> {
 // credential is replaced before it is written. The patterns are the
 // well known token shapes and any value named like a secret; they cannot
 // catch a password that looks like a word, which is why the rule in
-// Secrets (docs/plan/secrets.md) is that an agent never sees one.
+// the Vault (docs/plan/vault.md) is that an agent never sees one.
 
 const MASK: &str = "[secret]";
 
 /// The secret values Horadric itself keeps, as the app reads them: the
 /// backup's passphrase, sign in tokens, and the vault's values once there
-/// is one (docs/plan/secrets.md).
+/// is one (docs/plan/vault.md).
 pub type SecretSource = fn() -> Vec<String>;
 
 static SECRETS: OnceLock<SecretSource> = OnceLock::new();

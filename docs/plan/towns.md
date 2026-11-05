@@ -29,14 +29,14 @@ one of it. This part answers the open question "one town or several":
   Gmail, and neither can see the other's.
 - **A browser profile.** The work town's Outlook and Jira logins never
   sit in the private town's browser, and the other way round.
-- **An identity, later.** When [identities](identities.md) is built, a
+- **An identity, later.** When the [Vault](vault.md) is built, a
   town names one like a project does, so `gh` and git follow it too.
 
 The human names the towns. Tristram stays one of them.
 
 ## The decision this reopens
 
-[Accounts](identities.md) switches the Claude login for every session
+[Accounts](vault.md) switches the Claude login for every session
 at once, and a `CLAUDE_CONFIG_DIR` per account was turned down (lore
 #268) for two reasons: each home would need the hooks, and a
 conversation could not be resumed on another account. **The human
