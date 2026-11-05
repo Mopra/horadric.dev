@@ -73,18 +73,3 @@ Specifications of built parts that the code follows. Where one and the
 code disagree, one of them is a bug.
 
 - [Who owns a session](plan/brotherhood-ownership.md): the brotherhood's signed word, whose a session is and who is out, with the invariants both simulations check.
-
-## Not in any step yet, but needed before daily use
-
-- **Expanding from a synthetic click can open behind other windows.** Windows
-  only lets a process take the foreground after real input. A real click on
-  a tile is real input, so this only bites scripted tests.
-- **New tray icons start hidden.** Windows 11 puts them behind the `^`
-  overflow until the user drags them out or turns them on in Settings.
-
-## Open questions
-
-Carried from the concept. The answered ones are in the lore.
-
-- **What about the VS Code extension's Claude?** Still unanswered. Probably
-  the answer is to stop using it.
