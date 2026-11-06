@@ -172,13 +172,18 @@ impl Field {
         }
     }
 
+    /// How many characters typing or pasting over the selection may add.
+    pub fn room(&self) -> usize {
+        let (a, b) = self.selection();
+        self.max
+            .saturating_sub(self.text.chars().count() - self.text[a..b].chars().count())
+    }
+
     /// Types or pastes `s` over the selection, fitted to the field. A
     /// verbatim field takes all of it or, when it would not fit, none.
     pub fn insert(&mut self, s: &str) {
         let (a, b) = self.selection();
-        let room = self
-            .max
-            .saturating_sub(self.text.chars().count() - self.text[a..b].chars().count());
+        let room = self.room();
         let s: String = if self.verbatim.is_some() {
             let s = clean_verbatim(s);
             if s.chars().count() > room {

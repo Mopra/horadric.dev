@@ -42,6 +42,8 @@ pub enum Row {
     AddIdentity,
     /// Said under Add when there is no identity yet.
     NoIdentity,
+    /// Said in place of the rows for a project on a linked machine.
+    Afar,
     /// An identity's name over its rows.
     Heading(u16),
     Name(u16),
@@ -61,6 +63,7 @@ pub fn help(row: Row) -> &'static str {
         Row::AddLogin => "A site its sessions may sign in to in the browser pane",
         Row::AddIdentity => "One of your worlds, with git and logins of its own",
         Row::NoIdentity | Row::Heading(_) => "",
+        Row::Afar => "Its identity and secrets are that machine's",
         Row::Name(_) => "Rename it, or delete it and its logins",
         Row::Git(_) => "The name and email its commits carry, and its GitHub user",
         Row::Claims(_) => "Projects under these folders are its own unless they pick",
@@ -80,6 +83,7 @@ fn label(row: Row) -> &'static str {
         Row::AddLogin => "Add a web login",
         Row::AddIdentity => "Add an identity",
         Row::NoIdentity | Row::Heading(_) => "",
+        Row::Afar => "Vault",
         Row::Name(_) => "Name",
         Row::Git(_) => "Git",
         Row::Claims(_) => "Folders it claims",
@@ -206,8 +210,24 @@ fn rank(owner: &Owner) -> u8 {
     }
 }
 
+/// The identities kept on this machine. None under test, so a test does
+/// not draw whatever this machine's identities file holds.
+fn identities() -> Vec<Identity> {
+    if cfg!(test) {
+        Vec::new()
+    } else {
+        identity::all()
+    }
+}
+
+/// Whether the project `key` lives on a linked machine, whose Vault is
+/// kept there and not here.
+fn afar(key: &str) -> bool {
+    horadric_core::afar::split_key(key).is_some()
+}
+
 fn build(key: &str) -> View {
-    let ids = identity::all();
+    let ids = identities();
     let who = ids
         .iter()
         .map(|i| {
@@ -225,7 +245,9 @@ fn build(key: &str) -> View {
         who,
         ..Default::default()
     };
-    if key.is_empty() {
+    // A linked machine's project reads nothing here: its pick would be
+    // written into this machine's local.json as a project it does not have.
+    if key.is_empty() || afar(key) {
         return v;
     }
     let dir = project_dir(key);
@@ -360,6 +382,13 @@ pub fn project_lines(key: &str) -> Vec<Line> {
     if key.is_empty() {
         return Vec::new();
     }
+    if afar(key) {
+        return vec![line(
+            Row::Afar,
+            "Kept on the machine it runs on".into(),
+            Control::Note,
+        )];
+    }
     with_view(Some(key), |v| {
         let mut rows = vec![line(Row::Pick, pick_value(v), Control::Button)];
         for (i, s) in v.secrets.iter().enumerate() {
@@ -390,6 +419,13 @@ pub fn project_lines(key: &str) -> Vec<Line> {
     })
 }
 
+/// Whether an identity can be made by the name config.json gives: only
+/// one already in slug form, since the slug made would not be the name it
+/// is asked for by, and the project would stay without it.
+fn makeable(file: &str) -> bool {
+    core::slug(file) == file
+}
+
 fn pick_value(v: &View) -> String {
     match v.resolved.as_ref() {
         Some(Resolved::Identity(slug)) => {
@@ -402,7 +438,11 @@ fn pick_value(v: &View) -> String {
                 format!("{name}, by its folder")
             }
         }
-        Some(Resolved::Unknown(slug)) => format!("{slug} in config.json, not on this PC, make it"),
+        Some(Resolved::Unknown(slug)) if makeable(slug) => format!("{slug} in config.json, not on this PC, make it"),
+        Some(Resolved::Unknown(slug)) => format!(
+            "{slug} in config.json is not a slug: fix its identity to one like {}",
+            core::slug(slug)
+        ),
         _ if v.pick.as_deref() == Some("") => "None, picked".into(),
         _ => "None, the machine's logins".into(),
     }
@@ -527,10 +567,44 @@ fn type_in(title: &str, prompt: &str, initial: &str, placeholder: &str, verb: &s
     ask::ask(shared, None, &question).map(|a| a.text)
 }
 
+/// What [`pick_one`] got: one of the offers by its place, or text typed.
+enum Picked {
+    Offer(usize),
+    Typed(String),
+}
+
+/// The labels `offers` show, made unique by their detail where two would
+/// read the same, so the one picked is the one meant.
+fn unique_labels(offers: &[(String, String)]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(offers.len());
+    for (i, (l, d)) in offers.iter().enumerate() {
+        let twin = offers
+            .iter()
+            .enumerate()
+            .any(|(j, (o, _))| j != i && o.eq_ignore_ascii_case(l));
+        let mut label = if twin && !d.is_empty() {
+            format!("{l} ({d})")
+        } else {
+            l.clone()
+        };
+        while out.iter().any(|o| o.eq_ignore_ascii_case(&label)) {
+            label.push_str(&format!(" #{}", i + 1));
+        }
+        out.push(label);
+    }
+    out
+}
+
 /// One of `offers` (label, detail) picked as it is typed, or with `free`
-/// anything typed. The label, or what was typed.
-fn pick_one(title: &str, prompt: &str, verb: &str, offers: &[(String, String)], free: bool) -> Option<String> {
+/// anything typed.
+fn pick_one(title: &str, prompt: &str, verb: &str, offers: &[(String, String)], free: bool) -> Option<Picked> {
     let shared = shared()?;
+    let labels = unique_labels(offers);
+    let offers: Vec<(String, String)> = labels
+        .iter()
+        .zip(offers)
+        .map(|(l, (_, d))| (l.clone(), d.clone()))
+        .collect();
     let suggest = |text: &str| {
         let t = text.trim().to_lowercase();
         offers
@@ -571,8 +645,8 @@ fn pick_one(title: &str, prompt: &str, verb: &str, offers: &[(String, String)], 
     Some(
         offers
             .iter()
-            .find(|(l, _)| l.eq_ignore_ascii_case(text))
-            .map_or_else(|| text.to_string(), |(l, _)| l.clone()),
+            .position(|(l, _)| l.eq_ignore_ascii_case(text))
+            .map_or_else(|| Picked::Typed(text.to_string()), Picked::Offer),
     )
 }
 
@@ -611,7 +685,7 @@ fn act(row: Row) {
                 }
             }
         }
-        Row::NoIdentity | Row::Heading(_) => {}
+        Row::NoIdentity | Row::Heading(_) | Row::Afar => {}
         Row::Name(i) | Row::Git(i) | Row::Claims(i) | Row::Tool(i, _) => {
             let Some((id, who)) = with_view(None, |v| {
                 let id = v.ids.get(i as usize)?.clone();
@@ -641,7 +715,7 @@ enum Choice {
 }
 
 fn pick_identity(key: &str) {
-    if key.is_empty() {
+    if key.is_empty() || afar(key) {
         return;
     }
     let (ids, file) = with_view(Some(key), |v| (v.ids.clone(), v.file.clone()));
@@ -667,7 +741,7 @@ fn pick_identity(key: &str) {
         auto,
         Choice::Auto,
     ));
-    if let Some(slug) = file.filter(|f| !ids.iter().any(|i| i.slug.eq_ignore_ascii_case(f))) {
+    if let Some(slug) = file.filter(|f| makeable(f) && !ids.iter().any(|i| i.slug.eq_ignore_ascii_case(f))) {
         offers.push((
             format!("Make identity {slug}"),
             "as config.json names it".into(),
@@ -675,7 +749,7 @@ fn pick_identity(key: &str) {
         ));
     }
     let shown: Vec<(String, String)> = offers.iter().map(|(l, d, _)| (l.clone(), d.clone())).collect();
-    let Some(picked) = pick_one(
+    let Some(Picked::Offer(i)) = pick_one(
         "Identity",
         "Whose logins its sessions get. Sessions running now keep the one they started with; new ones get this.",
         "pick it",
@@ -684,7 +758,7 @@ fn pick_identity(key: &str) {
     ) else {
         return;
     };
-    let Some((_, _, choice)) = offers.into_iter().find(|(l, _, _)| *l == picked) else {
+    let Some((_, _, choice)) = offers.into_iter().nth(i) else {
         return;
     };
     let result = match choice {
@@ -744,10 +818,11 @@ fn add_secret(key: &str, name: Option<&str>) {
             None => return,
         },
     };
-    let prompt = format!("The value of {name}. Pasting is fine. It is sealed for this Windows user and never shown again.");
+    let prompt = format!("The value of {name}, one line. Pasting is fine. It is sealed for this Windows user and never shown again. More than one line goes in with horadric secret set {name} in a terminal.");
     let Some(value) = type_in("Add a secret", &prompt, "", "", "keep it", true) else {
         return;
     };
+    let value = value.trim().to_string();
     if value.is_empty() {
         return;
     }
@@ -788,8 +863,9 @@ fn kept_secret(key: &str, k: Kept) {
     let pressed = choose(Tone::Question, &k.name, &text, &buttons);
     match pressed.map(|i| buttons[i]) {
         Some("Replace") => {
-            let prompt = format!("The new value of {}. It replaces the old one, which is not shown.", k.name);
+            let prompt = format!("The new value of {}, one line. It replaces the old one, which is not shown. More than one line goes in with horadric secret set in a terminal.", k.name);
             if let Some(value) = type_in(&k.name, &prompt, "", "", "replace it", true) {
+                let value = value.trim().to_string();
                 if !value.is_empty() {
                     done(
                         &k.name,
@@ -843,11 +919,10 @@ fn pick_allowed(name: &str, allowed: &[String], what: &str) -> Option<String> {
         .map(|a| (short(a).to_string(), a.clone()))
         .collect();
     let prompt = format!("Allowed Always for {name}. Pick {what} to ask about again from now on.");
-    let picked = pick_one(name, &prompt, "remove it", &offers, false)?;
-    offers
-        .into_iter()
-        .find(|(l, _)| *l == picked)
-        .map(|(_, a)| a)
+    match pick_one(name, &prompt, "remove it", &offers, false)? {
+        Picked::Offer(i) => allowed.get(i).cloned(),
+        Picked::Typed(_) => None,
+    }
 }
 
 fn kept_login(key: &str, k: Kept) {
@@ -940,11 +1015,22 @@ fn ask_seed(title: &str, replacing: bool) -> Option<Option<String>> {
         if replacing && seed.eq_ignore_ascii_case("none") {
             return Some(Some("none".into()));
         }
-        if web::totp(&seed, 0).is_some() {
+        if seed_ok(&seed) {
             return Some(Some(seed));
         }
-        prompt = "That is not a seed: it is letters A to Z and digits 2 to 7. Empty for none.";
+        prompt = "That is not a seed: it is at least 16 letters A to Z and digits 2 to 7. Empty for none.";
     }
+}
+
+/// Whether `seed` reads as a one time code seed. A site's is at least 80
+/// bits, 16 base32 characters; shorter is a typo or the wrong text copied,
+/// and would make codes the site never accepts.
+fn seed_ok(seed: &str) -> bool {
+    let chars = seed
+        .chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '='))
+        .count();
+    chars >= 16 && web::totp(seed, 0).is_some()
 }
 
 /// The origins a typed site holds: one or more, by spaces or commas, each
@@ -1061,22 +1147,70 @@ fn name_of(id: &Identity) {
                 }
             }
         }
-        Some(1) => {
-            let text = format!(
-                "Deletes {} and its folder of logins on this PC. Projects that were its get this PC's own logins in their next sessions.",
-                id.name
-            );
-            if choose(Tone::Warning, "Delete identity", &text, &["Delete it", "Keep it"]) == Some(0) {
-                done("Delete identity", identity::delete(&id.slug));
-            }
-        }
+        Some(1) => delete_identity(id),
         _ => {}
+    }
+}
+
+/// Deletes `id` after asking, and the secrets and web logins kept as its
+/// with it: left behind they would be nobody's, never used and never
+/// shown, yet still sealed on this PC.
+fn delete_identity(id: &Identity) {
+    const TITLE: &str = "Delete identity";
+    let owner = Owner::Identity(id.slug.clone());
+    let vault = store::read();
+    let secrets = vault.secrets.iter().filter(|s| s.owner == owner).count();
+    let logins = vault.logins.iter().filter(|l| l.owner == owner).count();
+    drop(vault);
+    let mut text = format!(
+        "Deletes {} and its folder of logins on this PC. Projects that were its get this PC's own logins in their next sessions; sessions already running keep it until restarted.",
+        id.name
+    );
+    let kept = secrets + logins;
+    let buttons: &[&str] = if kept == 0 {
+        &["Delete it", "Keep it"]
+    } else {
+        text.push_str(&format!(
+            " It has {} kept as its own, which go with it.",
+            counted(secrets, logins)
+        ));
+        &["Forget them too", "Cancel"]
+    };
+    if choose(Tone::Warning, TITLE, &text, buttons) != Some(0) {
+        return;
+    }
+    if kept > 0 {
+        let forgotten = store::change(|v| {
+            v.secrets.retain(|s| s.owner != owner);
+            v.logins.retain(|l| l.owner != owner);
+        });
+        if let Err(e) = forgotten {
+            return fail(TITLE, &e);
+        }
+    }
+    done(TITLE, identity::delete(&id.slug));
+}
+
+/// "2 secrets and a web login", for what an identity keeps.
+fn counted(secrets: usize, logins: usize) -> String {
+    let one = |n: usize, what: &str| match n {
+        1 => format!("a {what}"),
+        n => format!("{n} {what}s"),
+    };
+    match (secrets, logins) {
+        (s, 0) => one(s, "secret"),
+        (0, l) => one(l, "web login"),
+        (s, l) => format!("{} and {}", one(s, "secret"), one(l, "web login")),
     }
 }
 
 fn git_of(id: &Identity) {
     const TITLE: &str = "Git";
     let old = id.git.clone().unwrap_or_default();
+    let (send, accounts) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(identity::github_accounts());
+    });
     let prompt = format!("The name {}'s commits carry. Empty to use this PC's git as it is.", id.name);
     let Some(name) = type_in(TITLE, &prompt, &old.name, "Full name", "go on", false) else {
         return;
@@ -1089,13 +1223,19 @@ fn git_of(id: &Identity) {
     let Some(email) = type_in(TITLE, "The email its commits carry.", &old.email, "name@example.com", "go on", false) else {
         return;
     };
-    let accounts = identity::github_accounts();
+    // Asked of Git Credential Manager while the name and email were typed:
+    // it is a program run, too slow for the UI thread. Not back yet means
+    // the user is typed in instead.
+    let accounts = accounts.try_recv().unwrap_or_default();
     let prompt = "The GitHub user its pushes go as, from the ones Git Credential Manager keeps. Empty for whichever it picks.";
     let user = if accounts.is_empty() {
         type_in(TITLE, prompt, old.github_user.as_deref().unwrap_or(""), "GitHub user", "keep it", false)
     } else {
         let offers: Vec<(String, String)> = accounts.iter().map(|a| (a.clone(), String::new())).collect();
-        pick_one(TITLE, prompt, "keep it", &offers, true)
+        pick_one(TITLE, prompt, "keep it", &offers, true).map(|p| match p {
+            Picked::Offer(i) => accounts[i].clone(),
+            Picked::Typed(t) => t,
+        })
     };
     let Some(user) = user else {
         return;
@@ -1190,8 +1330,8 @@ fn claims_of(id: &Identity) {
         }
         Some("Remove one") => {
             let offers: Vec<(String, String)> = id.claims.iter().map(|c| (c.clone(), String::new())).collect();
-            if let Some(gone) = pick_one(TITLE, "Which folder it claims no more.", "remove it", &offers, false) {
-                done(TITLE, identity::remove_claim(&id.slug, &gone));
+            if let Some(Picked::Offer(i)) = pick_one(TITLE, "Which folder it claims no more.", "remove it", &offers, false) {
+                done(TITLE, identity::remove_claim(&id.slug, &id.claims[i]));
             }
         }
         _ => {}
@@ -1263,6 +1403,41 @@ mod tests {
         assert_eq!(name_for("https://my-site.example.com"), "EXAMPLE");
         assert_eq!(name_for("http://localhost:3000"), "LOCALHOST");
         assert_eq!(name_for("https://1password.com"), "SITE_1PASSWORD");
+    }
+
+    #[test]
+    fn twin_labels_are_told_apart_by_their_detail() {
+        let offers = [
+            ("main.exe".to_string(), "C:\\a\\main.exe".to_string()),
+            ("main.exe".to_string(), "C:\\b\\main.exe".to_string()),
+            ("git.exe".to_string(), "C:\\git.exe".to_string()),
+        ];
+        assert_eq!(
+            unique_labels(&offers),
+            ["main.exe (C:\\a\\main.exe)", "main.exe (C:\\b\\main.exe)", "git.exe"]
+        );
+        let same = [("x".to_string(), String::new()), ("X".to_string(), String::new())];
+        assert_eq!(unique_labels(&same), ["x", "X #2"]);
+    }
+
+    #[test]
+    fn only_a_slug_in_config_json_is_made() {
+        assert!(makeable("opti-people"));
+        assert!(!makeable("opti_people"));
+    }
+
+    #[test]
+    fn a_seed_is_at_least_sixteen_base32_characters() {
+        assert!(seed_ok("JBSWY3DPEHPK3PXP"));
+        assert!(seed_ok("JBSW Y3DP EHPK 3PXP"));
+        assert!(!seed_ok("JBSWY3DP"));
+    }
+
+    #[test]
+    fn what_an_identity_keeps_is_counted() {
+        assert_eq!(counted(2, 1), "2 secrets and a web login");
+        assert_eq!(counted(1, 0), "a secret");
+        assert_eq!(counted(0, 3), "3 web logins");
     }
 
     #[test]

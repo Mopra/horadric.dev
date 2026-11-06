@@ -56,6 +56,9 @@ pub(crate) const CLASS: PCWSTR = w!("HoradricAsk");
 
 /// Longer than any name worth reading on a tile.
 const MAX_LEN: usize = 200;
+/// A secret is a token or a key pasted whole, and one cut short would
+/// fail later with nothing to say why.
+const MAX_SECRET: usize = 16 * 1024;
 /// Notes go to the agent with the task, so they may run to a few
 /// paragraphs.
 const MAX_NOTES: usize = 4000;
@@ -292,7 +295,8 @@ impl<'a> Popup<'a> {
             Some(d) => (d.text.as_str(), d.notes.as_str()),
             None => (a.initial, notes),
         };
-        let mut first = Field::new(initial, false, MAX_LEN);
+        let max = if a.secret { MAX_SECRET } else { MAX_LEN };
+        let mut first = Field::new(initial, false, max);
         if a.pick.is_some() || draft.is_some() {
             first.end(true, false);
         }
@@ -721,11 +725,14 @@ impl<'a> Popup<'a> {
             VK_UP => self.line(false, shift),
             VK_DOWN => self.line(true, shift),
             VK_BACK => self.edit(|f| f.backspace(ctrl)),
+            // A secret never leaves the field for the clipboard.
+            VK_DELETE if shift && self.secret => {}
             VK_DELETE if shift => self.edit(|f| clipboard::set_text(&f.cut())),
             VK_DELETE => self.edit(|f| f.delete(ctrl)),
             _ if !ctrl => {}
             k => match char::from_u32(k.0 as u32) {
                 Some('A') => self.edit(Field::select_all),
+                Some('C' | 'X') if self.secret => {}
                 Some('C') => {
                     let fields = self.fields.borrow();
                     let s = fields[self.focus.get()].selected();
@@ -740,11 +747,27 @@ impl<'a> Popup<'a> {
                 }),
                 Some('V') => {
                     if let Some(s) = clipboard::get_text() {
-                        self.edit(|f| f.insert(&s));
+                        self.paste(&s);
                     }
                 }
                 _ => {}
             },
+        }
+    }
+
+    /// Pastes `s`. A secret is taken whole or refused with why, since one
+    /// cut short or with its line breaks made spaces would be kept wrong.
+    fn paste(&self, s: &str) {
+        if !self.secret {
+            return self.edit(|f| f.insert(s));
+        }
+        let room = self.fields.borrow()[self.focus.get()].room();
+        match secret_paste(s, room) {
+            Ok(s) => self.edit(|f| f.insert(&s)),
+            Err(why) => {
+                self.refusal.replace(Some(why));
+                self.invalidate();
+            }
         }
     }
 
@@ -763,6 +786,10 @@ impl<'a> Popup<'a> {
             u if u < 0x20 || u == 0x7F => return,
             u => String::from_utf16_lossy(&[u]),
         };
+        if self.secret && self.fields.borrow()[self.focus.get()].room() == 0 {
+            self.refusal.replace(Some(too_long(MAX_SECRET)));
+            return self.invalidate();
+        }
         self.edit(|f| f.insert(&s));
     }
 
@@ -923,6 +950,26 @@ impl<'a> Popup<'a> {
 }
 
 /// The work area of the screen `r` is on, as left, top, right, bottom.
+fn too_long(room: usize) -> String {
+    format!("Longer than the {room} characters there is room for. A longer value goes in with horadric secret set NAME in a terminal")
+}
+
+/// What a paste into a secret field adds, or why it is refused: one line
+/// with what surrounds it trimmed, all of it or none.
+fn secret_paste(s: &str, room: usize) -> std::result::Result<String, String> {
+    let s = s.trim();
+    if s.contains(['\n', '\r']) {
+        return Err("It has line breaks inside. A value of more than one line goes in with horadric secret set NAME in a terminal".into());
+    }
+    if s.chars().any(char::is_control) {
+        return Err("It has a tab or another control character inside, which a secret here cannot hold".into());
+    }
+    if s.chars().count() > room {
+        return Err(too_long(room));
+    }
+    Ok(s.to_string())
+}
+
 fn work_area(r: &RECT) -> [i32; 4] {
     let mut info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -962,5 +1009,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match popup.handle(msg, wparam, lparam) {
         Some(r) => r,
         None => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_paste_is_taken_whole_or_refused() {
+        assert_eq!(secret_paste("  ghp_abc\r\n", 100).unwrap(), "ghp_abc");
+        assert!(secret_paste("line one\nline two", 100).is_err());
+        assert!(secret_paste("a\tb", 100).is_err());
+        assert!(secret_paste("abcdef", 5).is_err());
+        assert_eq!(secret_paste("abcde", 5).unwrap(), "abcde");
     }
 }
