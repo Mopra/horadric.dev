@@ -736,6 +736,10 @@ impl Ctx<'_> {
                 rows,
             } => {
                 s = self.table(header, align, rows, w);
+                // First, so the links and buttons in its cells win a click.
+                if let Some((key, frame)) = super::table::slider(header, rows) {
+                    s.hits.insert(0, (frame, Hit::Tr(Act::Table(key))));
+                }
                 s = moved(s, x);
             }
             Kind::Rule => {

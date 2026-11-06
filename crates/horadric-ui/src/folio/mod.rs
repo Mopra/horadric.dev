@@ -83,7 +83,8 @@ pub use crate::folio_session::{State, Tag};
 pub use composer::{before_caret, dictated, dictation, handed, holds_pin, open_history, pinned};
 pub use select::find;
 pub use view::{
-    attach, char, key, keyboard_moved, place, place_bar, refont, register_class, summon, wheel,
+    attach, char, hwheel, key, keyboard_moved, place, place_bar, refont, register_class, summon,
+    wheel,
 };
 pub use watch::{is_watch, watch, watch_detail, watch_title};
 /// Posted to the pane a Folio is in when what its header says may have

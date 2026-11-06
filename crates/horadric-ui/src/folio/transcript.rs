@@ -127,6 +127,10 @@ pub(super) enum Act {
     SignInCancel(usize),
     /// On an MCP card or an MCP server's question.
     Mcp(super::mcp::Do),
+    /// A table wider than its view, by its slide key: the wheel over it
+    /// slides it sideways. A click on it does nothing of its own, so a
+    /// selection still starts on its cells.
+    Table(String),
     /// More of the conversation above what shows.
     Earlier,
     FindPrev,
@@ -216,6 +220,10 @@ pub(super) struct State {
     pub(super) find: Option<Find>,
     /// A block to bring to the top of the view once it is measured.
     pub(super) reveal: Option<usize>,
+    /// A block folded or opened from near its end, and where on the glass
+    /// its bottom was: it is kept there, so what was clicked stays under
+    /// the pointer rather than the page jumping by the fold.
+    pub(super) anchor: Option<(usize, f32)>,
     /// The first block shown, None until the first frame picks one.
     pub(super) from: Option<usize>,
     /// From the last frame: each block's top in the content, the prompts'
@@ -342,6 +350,11 @@ pub(super) struct Cache {
 }
 
 impl Cache {
+    /// How tall block `block` was last built, None when it is not built.
+    pub(super) fn height(&self, block: usize) -> Option<f32> {
+        Some(self.blocks.get(block)?.as_ref()?.scene.h)
+    }
+
     pub(super) fn unit(&self, block: usize, unit: u32) -> Option<&rich::Unit> {
         let b = self.blocks.get(block)?.as_ref()?;
         b.scene.units.get(unit as usize)
@@ -454,6 +467,7 @@ fn stamp(i: usize, b: &Block, open: bool, live: bool, copy: bool, st: &State) ->
             // Both lay out code blocks, whose fold is in their scene.
             if matches!(b, Block::Reply(_) | Block::Thinking(_)) {
                 super::code::open_print(&st.all).hash(&mut h);
+                super::table::slide_print().hash(&mut h);
             }
             t.len().hash(&mut h);
             let mut end = t.len().saturating_sub(64);
@@ -880,9 +894,9 @@ impl Ctx<'_> {
         let mut old = old.into_iter();
         let mut paras = Vec::new();
         let mut y = 0.0;
-        for p in flow::paras(t) {
+        for p in flow::paras_folding(t) {
             let ps = match old.next() {
-                Some((was, scene)) if was == p => scene,
+                Some((was, scene)) if was == p && !super::table::stale(&p) => scene,
                 _ => self.para(&p, cw),
             };
             y += p.gap;
@@ -986,9 +1000,9 @@ impl Ctx<'_> {
         let w = (cw - NEST - 12.0).max(1.0);
         let mut old = old.into_iter();
         let mut y = LINE_H + 2.0;
-        for p in flow::paras(t) {
+        for p in flow::paras_folding(t) {
             let ps = match old.next() {
-                Some((was, scene)) if was == p => scene,
+                Some((was, scene)) if was == p && !super::table::stale(&p) => scene,
                 _ => {
                     let mut ps = self.para(&p, w);
                     hush(&mut ps, 0.62);
@@ -1665,6 +1679,8 @@ impl View {
                 live,
             });
         }
+        // Every table that slid is now drawn where it is.
+        super::table::settle();
 
         // Measure, then follow the end or keep the scroll in bounds.
         let tail = if chat.folio.busy { 28.0 } else { 0.0 }
@@ -1699,6 +1715,13 @@ impl View {
         if let Some(top) = st.reveal.take().and_then(|i| st.tops.get(i)) {
             chat.scroll = look::clamp_scroll(top - 12.0, content, area.h);
             chat.follow = false;
+        }
+        if let Some((i, was)) = st.anchor.take() {
+            if let (Some(top), Some(Some(b))) = (st.tops.get(i), blocks.get(i)) {
+                let bottom = top + b.scene.h;
+                chat.scroll = look::clamp_scroll(area.y + bottom - was, content, area.h);
+                chat.follow = false;
+            }
         }
         st.area = area;
 
@@ -1801,6 +1824,7 @@ impl View {
         // Whatever button the pointer is on lights up.
         if let Some((mx, my)) = mouse {
             let lit = (hits.iter().rev()).find(|(r, _)| r.contains(mx, my));
+            let lit = lit.filter(|(_, h)| !matches!(h, Hit::Tr(Act::Table(_))));
             if let Some((r, h)) = lit {
                 let text_link = matches!(h, Hit::Tr(Act::Link(_) | Act::Path(..) | Act::Field(_)));
                 if matches!(h, Hit::Tr(Act::Pick(..))) {

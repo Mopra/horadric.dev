@@ -173,7 +173,6 @@ pub fn paras(src: &str) -> Vec<Para> {
 /// [`paras`] with its headings folding their sections too. Only for what
 /// is built again when a fold key is toggled (a reply, a thought): on a
 /// card that is not, a click on a heading would seem to do nothing.
-#[allow(dead_code)] // Until the transcript's replies are laid with it.
 pub fn paras_folding(src: &str) -> Vec<Para> {
     paras_with(src, super::code::is_open, true)
 }

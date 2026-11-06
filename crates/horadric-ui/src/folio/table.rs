@@ -30,8 +30,6 @@ use crate::layout::Rect;
 use crate::render;
 use crate::theme;
 
-// Reached once the transcript and the view wire sliding in.
-#[allow(dead_code)]
 /// The room between two columns, half on each side. The outer edges get
 /// none, so the first column lines up with the prose around the table.
 const CELL_X: f32 = 12.0;
@@ -105,8 +103,6 @@ pub(super) fn slide_key(header: &[Inline], rows: &[Vec<Inline>]) -> String {
     format!("table:{:016x}", h.finish())
 }
 
-// Reached once the transcript and the view wire sliding in.
-#[allow(dead_code)]
 /// Slides table `key` by `by` pixels, right for more than nought. False
 /// when it did not move: it is not wider than its view, or already at
 /// that end, so the caller can leave the input to the page.
@@ -126,16 +122,12 @@ pub(super) fn slide(key: &str, by: f32) -> bool {
     })
 }
 
-// Reached once the transcript and the view wire sliding in.
-#[allow(dead_code)]
 /// The wheel over table `key`, in Windows' units of 120 a notch, more
 /// than nought sliding it right.
 pub(super) fn wheel(key: &str, delta: i32) -> bool {
     slide(key, delta as f32 / 120.0 * NOTCH_X)
 }
 
-// Reached once the transcript and the view wire sliding in.
-#[allow(dead_code)]
 /// Where every table has slid, as one number: a reply is built again when
 /// it changes.
 pub(super) fn slide_print() -> u64 {
@@ -152,8 +144,6 @@ pub(super) fn slide_print() -> u64 {
     })
 }
 
-// Reached once the transcript and the view wire sliding in.
-#[allow(dead_code)]
 /// Whether a paragraph kept from the last build is a table that has slid
 /// since, and so must be built again.
 pub(super) fn stale(p: &Para) -> bool {
@@ -164,8 +154,6 @@ pub(super) fn stale(p: &Para) -> bool {
     SLIDES.with(|m| m.borrow().get(&key).is_some_and(|s| s.moved))
 }
 
-// Reached once the transcript and the view wire sliding in.
-#[allow(dead_code)]
 /// Called once the transcript has built what shows: every table that
 /// moved is drawn where it now is. It is also what turns sliding on.
 pub(super) fn settle() {
@@ -173,8 +161,6 @@ pub(super) fn settle() {
     SLIDES.with(|m| m.borrow_mut().values_mut().for_each(|s| s.moved = false));
 }
 
-// Reached once the transcript and the view wire sliding in.
-#[allow(dead_code)]
 /// The key and frame of a table just built, in its own scene, when it is
 /// wider than its view: what the wheel over that frame slides.
 pub(super) fn slider(header: &[Inline], rows: &[Vec<Inline>]) -> Option<(String, Rect)> {

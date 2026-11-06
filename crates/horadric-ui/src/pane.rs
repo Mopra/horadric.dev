@@ -3240,7 +3240,8 @@ impl Pane {
     fn on_wheel(&self, wparam: WPARAM, lparam: LPARAM) {
         let raw = ((wparam.0 >> 16) & 0xffff) as i16 as i32;
         if let Some(key) = &self.console.folio {
-            if folio::wheel(key, raw, Self::mods().ctrl) {
+            let mods = Self::mods();
+            if folio::wheel(key, raw, mods.ctrl, mods.shift) {
                 return;
             }
         }
@@ -3890,6 +3891,14 @@ impl Pane {
             }
             WM_MOUSEWHEEL => {
                 self.on_wheel(wparam, lparam);
+                Some(LRESULT(0))
+            }
+            // A Folio's wide table slides first; anything else sideways is
+            // the file viewer's.
+            WM_MOUSEHWHEEL
+                if (self.console.folio.as_deref())
+                    .is_some_and(|k| folio::hwheel(k, ((wparam.0 >> 16) & 0xffff) as i16 as i32)) =>
+            {
                 Some(LRESULT(0))
             }
             WM_MOUSEHWHEEL if self.console.is_view() => {

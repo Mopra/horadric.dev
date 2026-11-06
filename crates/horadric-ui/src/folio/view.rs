@@ -377,12 +377,21 @@ pub fn key(key: &str, vk: u16, mods: Mods) -> bool {
 /// The wheel, from the pane, in Windows' units of 120 a notch. False
 /// leaves it to the pane: with Ctrl held, outside an open image, it zooms
 /// the font as over a terminal.
-pub fn wheel(key: &str, delta: i32, ctrl: bool) -> bool {
+///
+/// With Shift held, over a table too wide for its view, it slides the
+/// table instead; the plain wheel always scrolls the page, so a reader
+/// scrolling past a table is never caught in it.
+pub fn wheel(key: &str, delta: i32, ctrl: bool, shift: bool) -> bool {
     if lightbox::wheel(key, delta) {
         return true;
     }
     if ctrl {
         return false;
+    }
+    // Down slides right, as a sideways wheel's right does.
+    if shift && slide_table(key, -delta) {
+        redraw(key);
+        return true;
     }
     let s = view_of(key).map_or(1.0, |v| v.scale());
     // Over an open menu the wheel scrolls the menu, not the conversation.
@@ -410,10 +419,66 @@ pub fn wheel(key: &str, delta: i32, ctrl: bool) -> bool {
     true
 }
 
+/// The sideways wheel, in Windows' units of 120 a notch, more than nought
+/// to the right. False when no table under the pointer moved, leaving it
+/// to the pane.
+pub fn hwheel(key: &str, delta: i32) -> bool {
+    let moved = slide_table(key, delta);
+    if moved {
+        redraw(key);
+    }
+    moved
+}
+
+/// Slides the table under the pointer by `delta` wheel units. False when
+/// there is none, or it is already at that end.
+fn slide_table(key: &str, delta: i32) -> bool {
+    let Some(view) = view_of(key) else {
+        return false;
+    };
+    let mut p = POINT::default();
+    let inside = unsafe { GetCursorPos(&mut p).is_ok() && ScreenToClient(view.hwnd(), &mut p).as_bool() };
+    if !inside {
+        return false;
+    }
+    let (x, y) = (p.x as f32 / view.scale(), p.y as f32 / view.scale());
+    let table = (view.hits.borrow().iter().rev()).find_map(|(r, h)| match h {
+        Hit::Tr(transcript::Act::Table(k)) if r.contains(x, y) => Some(k.clone()),
+        _ => None,
+    });
+    table.is_some_and(|k| super::table::wheel(&k, delta))
+}
+
 pub(super) fn scroll_by(key: &str, by: f32) {
     with(key, |c| {
         c.scroll = look::clamp_scroll(c.scroll + by, c.content_h, c.view_h);
         c.follow = look::at_bottom(c.scroll, c.content_h, c.view_h);
+    });
+}
+
+fn is_table(h: &Hit) -> bool {
+    matches!(h, Hit::Tr(transcript::Act::Table(_)))
+}
+
+/// Before a fold toggles from a click at height `y`: a click in the lower
+/// half of its block (a code block's "show less" foot) keeps the block's
+/// bottom where it is, so the page does not jump by what folded. From the
+/// upper half the block's top already stays put, as nothing above moves.
+fn anchor_fold(key: &str, y: f32) {
+    with(key, |c| {
+        let st = &c.tr.state;
+        let top = st.area.y - c.scroll;
+        let Some(i) = st.tops.partition_point(|t| top + t <= y).checked_sub(1) else {
+            return;
+        };
+        let (Some(&t), Some(h)) = (st.tops.get(i), c.tr.cache.height(i)) else {
+            return;
+        };
+        let (block_top, bottom) = (top + t, top + t + h);
+        c.follow = false;
+        if y > (block_top + bottom) / 2.0 {
+            c.tr.state.anchor = Some((i, bottom));
+        }
     });
 }
 
@@ -1476,17 +1541,19 @@ impl View {
         }
     }
 
+    /// What a click at a point does. A table's frame is only for the
+    /// wheel: under it a click selects, so it is no hit here.
     pub(super) fn hit_at(&self, x: f32, y: f32) -> Option<Hit> {
         // Buttons are pushed after what they sit on, so the last wins.
         (self.hits.borrow().iter().rev())
-            .find(|(r, _)| r.contains(x, y))
+            .find(|(r, h)| r.contains(x, y) && !is_table(h))
             .map(|(_, h)| h.clone())
     }
 
     /// The button under a point, for lighting it.
     pub(super) fn hit_rect(&self, x: f32, y: f32) -> Option<Rect> {
         (self.hits.borrow().iter().rev())
-            .find(|(r, _)| r.contains(x, y))
+            .find(|(r, h)| r.contains(x, y) && !is_table(h))
             .map(|(r, _)| *r)
     }
 
@@ -1520,6 +1587,10 @@ impl View {
         select::unfocus(&key, unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0);
         match hit {
             Some(Hit::Answer(id, allow)) => answer(&key, &id, allow),
+            Some(Hit::Tr(a @ transcript::Act::All(_))) => {
+                anchor_fold(&key, y);
+                select::act(&key, a);
+            }
             Some(Hit::Tr(a)) => select::act(&key, a),
             Some(Hit::Note(note)) => to_note(&key, y, &note),
             Some(Hit::Fold(i)) => {
