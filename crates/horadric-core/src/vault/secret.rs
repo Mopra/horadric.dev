@@ -119,16 +119,55 @@ impl Mask {
 }
 
 /// Programs that run code the agent can write, and so could do anything
-/// with a value: they are only ever offered Once, never Always.
+/// with a value: they are only ever offered Once, never Always. That takes
+/// in tools the Vault is mostly for: `gh` runs aliases (`--shell`) and
+/// extensions, `wrangler`, `vercel` and `netlify` run the project's build,
+/// the cloud CLIs run plugins and hooks. The spec's tradeoff: a token for
+/// them is asked for each time, rather than handed for good to a program
+/// the agent can make run anything.
 const ONCE_ONLY: &[&str] = &[
+    // Shells and interpreters.
     "sh", "bash", "zsh", "fish", "dash", "cmd", "powershell", "pwsh", "python", "python3", "py",
-    "pythonw", "node", "deno", "bun", "bunx", "npm", "npx", "pnpm", "pnpx", "yarn", "uv", "uvx",
-    "make", "just", "cargo", "git", "wsl", "env", "perl", "ruby", "php", "lua", "java", "dotnet",
-    "cscript", "wscript", "mshta", "rundll32", "start", "busybox",
+    "pythonw", "node", "deno", "bun", "bunx", "perl", "ruby", "php", "lua", "java", "dotnet",
+    "go", "rustc", "r", "rscript", "julia", "busybox", "wsl", "env", "time", "start", "xargs",
+    "find", "forfiles",
+    // Package managers and build runners, which run the project's scripts.
+    "npm", "npx", "pnpm", "pnpx", "yarn", "uv", "uvx", "pip", "pipx", "poetry", "conda",
+    "composer", "bundle", "rake", "make", "just", "cargo", "gradle", "mvn", "ant", "msbuild",
+    // Version control and deploy or cloud CLIs, through aliases, hooks,
+    // plugins or the project's own build.
+    "git", "gh", "ssh", "scp", "sftp", "kubectl", "helm", "aws", "az", "gcloud", "terraform",
+    "tofu", "pulumi", "wrangler", "vercel", "netlify", "docker", "podman",
+    // Windows' own ways to run a script or a library.
+    "cscript", "wscript", "mshta", "rundll32", "regsvr32", "certutil", "bitsadmin",
+    "installutil", "msiexec",
 ];
 
+/// An Always as kept in a secret's `allowed` list: for one project, one
+/// program by its canonical path, and that program's content by SHA-256.
+/// The path comes last, so a list that shows an entry by its last part
+/// shows the program's file name.
+pub fn approval(project: &str, program: &str, sha256: &str) -> String {
+    format!(
+        "sha256:{}|{}|{}",
+        sha256.to_ascii_lowercase(),
+        project,
+        program.to_ascii_lowercase()
+    )
+}
+
+/// Whether `allowed` holds an Always for this project, program and
+/// content. Another project's Always, or one for the program before it
+/// changed, is not one: the human is asked again.
+pub fn approved(allowed: &[String], project: &str, program: &str, sha256: &str) -> bool {
+    let want = approval(project, program, sha256);
+    allowed.iter().any(|a| *a == want)
+}
+
 /// Whether the program at this path is a shell, an interpreter, a script
-/// runner or `git`, whose aliases and hooks are shell.
+/// runner, or a tool that runs code of the agent's some other way. Give it
+/// the canonical long path: a short name like `POWERS~1.EXE` is not on the
+/// list, so the caller resolves it first.
 pub fn once_only(program_path: &str) -> bool {
     let file = program_path
         .rsplit(['/', '\\'])
@@ -139,11 +178,16 @@ pub fn once_only(program_path: &str) -> bool {
         Some((s, e)) if !s.is_empty() => (s, e),
         _ => (file.as_str(), ""),
     };
-    if matches!(ext, "bat" | "cmd" | "ps1" | "psm1" | "vbs" | "js" | "py" | "sh") {
+    if matches!(
+        ext,
+        "bat" | "cmd" | "ps1" | "psm1" | "vbs" | "vbe" | "js" | "jse" | "wsf" | "wsh" | "hta"
+            | "py" | "pyw" | "sh" | "rb" | "pl" | "php" | "jar" | "msi"
+    ) {
         return true;
     }
-    // python3.12 and the like.
-    ONCE_ONLY.contains(&stem) || stem.starts_with("python")
+    // python3.12, pip3, node18 and the like.
+    let bare = stem.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-');
+    ONCE_ONLY.contains(&stem) || ONCE_ONLY.contains(&bare) || stem.starts_with("python")
 }
 
 /// One line of `secrets.log`: when, which project and session, which
@@ -361,11 +405,42 @@ mod tests {
         for p in [
             r"C:\Program Files\GitHub CLI\gh.exe",
             r"C:\tools\vercel.exe",
-            r"C:\Windows\System32\curl.exe",
             "/usr/bin/wrangler",
+            r"C:\Program Files\Amazon\AWSCLIV2\aws.exe",
+            r"C:\Windows\System32\rundll32.exe",
+            r"C:\Windows\System32\certutil.exe",
+            r"C:\Program Files\Java\bin\java.exe",
+            r"C:\Go\bin\go.exe",
+            r"C:\R\bin\Rscript.exe",
+            r"C:\R\bin\R.exe",
+            r"C:\Python312\Scripts\pip3.exe",
+            r"C:\Windows\System32\find.exe",
+            r"C:\Windows\System32\msiexec.exe",
+            r"C:\tools\tool.jar",
+        ] {
+            assert!(once_only(p), "{p}");
+        }
+        for p in [
+            r"C:\Windows\System32\curl.exe",
+            r"C:\Program Files\Stripe\stripe.exe",
+            r"C:\tools\gofer.exe",
         ] {
             assert!(!once_only(p), "{p}");
         }
+    }
+
+    #[test]
+    fn an_always_is_for_one_project_one_program_and_its_content() {
+        let gh = r"C:\Program Files\GitHub CLI\gh.exe";
+        let allowed = vec![approval("c:/a", gh, "ABC")];
+        assert!(approved(&allowed, "c:/a", gh, "abc"));
+        assert!(approved(&allowed, "c:/a", &gh.to_uppercase(), "abc"));
+        assert!(!approved(&allowed, "c:/b", gh, "abc"), "another project");
+        assert!(!approved(&allowed, "c:/a", gh, "abd"), "a changed program");
+        assert!(!approved(&allowed, "c:/a", r"C:\x\gh.exe", "abc"), "another program");
+        // A list from before Always was bound, a bare path, matches nothing.
+        assert!(!approved(&[gh.to_ascii_lowercase()], "c:/a", gh, "abc"));
+        assert!(approval("c:/a", gh, "abc").ends_with(r"\gh.exe"));
     }
 
     #[test]
