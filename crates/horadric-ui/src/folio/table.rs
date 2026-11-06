@@ -53,6 +53,9 @@ const NOTCH_X: f32 = 72.0;
 /// The scroll indicator under a sliding table: its room above, its height.
 const BAR_GAP: f32 = 6.0;
 const BAR_H: f32 = 3.0;
+/// How far the indicator's grab band reaches past it above and below:
+/// the bar stays thin, the place to grab it does not.
+pub(super) const BAR_REACH: f32 = 6.0;
 /// The shortest the indicator's thumb gets, so it stays easy to see.
 const THUMB_LEAST: f32 = 28.0;
 /// The fade at an edge the table runs on past, in strips of solid colour
@@ -78,8 +81,9 @@ const COPY_H: f32 = 22.0;
 struct Slide {
     at: f32,
     most: f32,
+    /// How wide its columns are in all.
+    content: f32,
     frame: Rect,
-    #[allow(dead_code)]
     moved: bool,
 }
 
@@ -107,12 +111,31 @@ pub(super) fn slide_key(header: &[Inline], rows: &[Vec<Inline>]) -> String {
 /// when it did not move: it is not wider than its view, or already at
 /// that end, so the caller can leave the input to the page.
 pub(super) fn slide(key: &str, by: f32) -> bool {
+    slide_with(key, |s| s.at + by)
+}
+
+/// Slides table `key` so its indicator's thumb starts `left` into the
+/// track, as a drag of the thumb does. False when it did not move.
+pub(super) fn slide_thumb(key: &str, left: f32) -> bool {
+    slide_with(key, |s| thumb_at(left, s.most, s.frame.w, s.content))
+}
+
+/// Table `key`'s indicator thumb, its left and width within the track.
+pub(super) fn thumb_of(key: &str) -> Option<(f32, f32)> {
+    SLIDES.with(|m| {
+        let m = m.borrow();
+        let s = m.get(key)?;
+        Some(thumb(s.at, s.most, s.frame.w, s.content))
+    })
+}
+
+fn slide_with(key: &str, to: impl FnOnce(&Slide) -> f32) -> bool {
     SLIDES.with(|m| {
         let mut m = m.borrow_mut();
         let Some(s) = m.get_mut(key) else {
             return false;
         };
-        let at = (s.at + by).clamp(0.0, s.most);
+        let at = to(s).clamp(0.0, s.most);
         if (at - s.at).abs() < 0.01 {
             return false;
         }
@@ -182,6 +205,7 @@ fn place(key: &str, total_w: f32, w: f32) -> f32 {
         }
         let s = m.entry(key.to_string()).or_default();
         s.most = most;
+        s.content = total_w;
         s.at = s.at.clamp(0.0, most);
         s.at
     })
@@ -229,6 +253,18 @@ fn thumb(at: f32, most: f32, view: f32, content: f32) -> (f32, f32) {
     let tw = (view * view / content).clamp(THUMB_LEAST.min(view), view);
     let k = (at / most).clamp(0.0, 1.0);
     (k * (view - tw), tw)
+}
+
+/// Where a table slides to with its thumb dragged to `left`, the inverse
+/// of [`thumb`]: the thumb travels less than the table does, so a pixel
+/// of drag moves the table by the ratio of the two.
+fn thumb_at(left: f32, most: f32, view: f32, content: f32) -> f32 {
+    let (_, tw) = thumb(0.0, most, view, content);
+    let travel = view - tw;
+    if travel <= 0.0 {
+        return 0.0;
+    }
+    (left / travel).clamp(0.0, 1.0) * most
 }
 
 /// The height a cell whose lines are `lines` tall is cut to, or None when
@@ -444,7 +480,7 @@ impl Ctx<'_> {
 
         if wide {
             let frame = Rect::new(0.0, top, w, y - top);
-            self.frame(&mut s, frame, (first_item, first_hit), (at, total_w - w), total_w);
+            self.frame(&mut s, &key, frame, (first_item, first_hit), (at, total_w - w), total_w);
             set_frame(&key, frame);
             y += BAR_GAP + BAR_H + 2.0;
         }
@@ -460,6 +496,7 @@ impl Ctx<'_> {
     unsafe fn frame(
         &self,
         s: &mut Scene,
+        key: &str,
         frame: Rect,
         (first_item, first_hit): (usize, usize),
         (at, most): (f32, f32),
@@ -500,6 +537,9 @@ impl Ctx<'_> {
             BAR_H / 2.0,
             self.pal.fg.with_alpha(0.26),
         );
+        // The thumb is dragged, and a press beside it jumps there.
+        let band = Rect::new(frame.x, bar_y - BAR_REACH, frame.w, BAR_H + 2.0 * BAR_REACH);
+        s.hit(band, Hit::Tr(Act::TableBar(key.to_string())));
     }
 
     /// A cell cut to its first lines `h` tall, an ellipsis ending the last
@@ -1017,6 +1057,25 @@ mod tests {
         let (_, w) = thumb(0.0, 9600.0, 400.0, 10000.0);
         assert_eq!(w, THUMB_LEAST);
         assert_eq!(thumb(0.0, 0.0, 400.0, 300.0), (0.0, 400.0));
+    }
+
+    #[test]
+    fn table_thumb_drag_maps_to_the_slide() {
+        // 1000 wide through 400: the thumb is 160 and travels 240 while
+        // the table travels 600, so a pixel of thumb is 2.5 of table.
+        assert_eq!(thumb_at(0.0, 600.0, 400.0, 1000.0), 0.0);
+        assert!((thumb_at(100.0, 600.0, 400.0, 1000.0) - 250.0).abs() < 0.01);
+        assert_eq!(thumb_at(240.0, 600.0, 400.0, 1000.0), 600.0);
+        // Past either end it stays at the end.
+        assert_eq!(thumb_at(-50.0, 600.0, 400.0, 1000.0), 0.0);
+        assert_eq!(thumb_at(900.0, 600.0, 400.0, 1000.0), 600.0);
+        // It is the inverse of where the thumb is drawn.
+        for at in [0.0, 137.0, 420.0, 600.0] {
+            let (x, _) = thumb(at, 600.0, 400.0, 1000.0);
+            assert!((thumb_at(x, 600.0, 400.0, 1000.0) - at).abs() < 0.01);
+        }
+        // A table that fits has nowhere to go.
+        assert_eq!(thumb_at(30.0, 0.0, 400.0, 300.0), 0.0);
     }
 
     #[test]

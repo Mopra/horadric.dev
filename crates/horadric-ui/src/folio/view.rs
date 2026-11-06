@@ -44,7 +44,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetAncestor, GetClientRect, GetCursorPos, GetParent,
     GetWindowLongPtrW, IsIconic, IsWindowVisible, KillTimer, LoadCursorW, RegisterClassW,
     SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, CREATESTRUCTW, CS_DBLCLKS, GA_ROOT,
-    GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, SWP_NOACTIVATE, SWP_NOZORDER,
+    GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, IDC_SIZEWE, SWP_NOACTIVATE, SWP_NOZORDER,
     WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_DESTROY, WM_DROPFILES, WM_ERASEBKGND, WM_LBUTTONDBLCLK,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR,
     WM_SIZE, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
@@ -167,6 +167,7 @@ fn make(key: &str, shared: &Rc<Shared>, parent: HWND, bar: bool) -> Option<HWND>
         track: Cell::new(None),
         grab: Cell::new(None),
         bar_lit: Cell::new(false),
+        table_grab: RefCell::new(None),
         dots: Cell::new(None),
         live: RefCell::new((Rect::new(0.0, 0.0, 0.0, 0.0), Vec::new())),
     });
@@ -599,6 +600,10 @@ pub(super) struct View {
     pub(super) grab: Cell<Option<f32>>,
     /// The mouse is over the scroll bar.
     pub(super) bar_lit: Cell<bool>,
+    /// A wide table's indicator thumb being dragged: the table's slide
+    /// key, the indicator's band on the glass when grabbed, and how far
+    /// into the thumb it was taken.
+    pub(super) table_grab: RefCell<Option<(String, Rect, f32)>>,
     /// Where the dots that pulse while Claude works go, and the area they
     /// are clipped to: they move on every frame, so they are not in the
     /// kept layer.
@@ -1231,6 +1236,7 @@ impl View {
             self.composer_menu(gfx, chat, &pal, cx, cw, &mut composer_hits);
         }
 
+        self.lit_table_bar(gfx, &pal, &hits, &area, chat.tr.state.mouse);
         // Last, so it sits over the composer when it has to go below.
         if let Some((mx, my)) = chat.tr.state.mouse {
             let on_composer = composer_hits.iter().any(|(r, _)| r.contains(mx, my));
@@ -1389,6 +1395,72 @@ impl View {
         let r = Rect::new(track.right() - 4.0 - w, track.y + at, w, len);
         let alpha = if lit { 0.42 } else { 0.2 };
         gfx.fill_round(&r, w / 2.0, pal.fg.with_alpha(alpha));
+    }
+
+    /// A press on a wide table's indicator: on the thumb it takes it where
+    /// it was pressed; beside it, the thumb's middle jumps there first.
+    /// The pointer is held, so the drag goes on outside the table.
+    fn grab_table(&self, key: String, x: f32, y: f32) {
+        let Some(band) = self.hit_rect(x, y) else {
+            return;
+        };
+        let Some((tx, tw)) = super::table::thumb_of(&key) else {
+            return;
+        };
+        let into = x - band.x - tx;
+        let into = if (0.0..=tw).contains(&into) { into } else { tw / 2.0 };
+        *self.table_grab.borrow_mut() = Some((key, band, into));
+        unsafe { SetCapture(self.hwnd()) };
+        self.drag_table(x);
+        redraw(&self.key);
+    }
+
+    fn drag_table(&self, x: f32) {
+        let grab = self.table_grab.borrow().clone();
+        let Some((key, band, into)) = grab else {
+            return;
+        };
+        if super::table::slide_thumb(&key, x - band.x - into) {
+            redraw(&self.key);
+        }
+    }
+
+    /// A wide table's indicator under the pointer or being dragged, drawn
+    /// again a little thicker over the thin one, so it shows it can be
+    /// taken. Only inside the conversation's glass, as the table is.
+    unsafe fn lit_table_bar(
+        &self,
+        gfx: &Gfx,
+        pal: &Palette,
+        hits: &[(Rect, Hit)],
+        area: &Rect,
+        mouse: Option<(f32, f32)>,
+    ) {
+        let held = self.table_grab.borrow().clone();
+        let lit = match held {
+            Some((key, ..)) => (hits.iter()).find(|(_, h)| {
+                matches!(h, Hit::Tr(transcript::Act::TableBar(k)) if *k == key)
+            }),
+            None => {
+                let Some((mx, my)) = mouse else {
+                    return;
+                };
+                (hits.iter().rev()).find(|(r, _)| r.contains(mx, my))
+            }
+        };
+        let Some((band, Hit::Tr(transcript::Act::TableBar(key)))) = lit else {
+            return;
+        };
+        let Some((tx, tw)) = super::table::thumb_of(key) else {
+            return;
+        };
+        if look::clip(band, area).is_none() {
+            return;
+        }
+        let cy = band.y + band.h / 2.0;
+        const THICK: f32 = 6.0;
+        let thumb = Rect::new(band.x + tx, cy - THICK / 2.0, tw, THICK);
+        gfx.fill_round(&thumb, THICK / 2.0, pal.fg.with_alpha(0.42));
     }
 
     fn over_bar(&self, x: f32, y: f32) -> bool {
@@ -1591,6 +1663,7 @@ impl View {
                 anchor_fold(&key, y);
                 select::act(&key, a);
             }
+            Some(Hit::Tr(transcript::Act::TableBar(k))) => self.grab_table(k, x, y),
             Some(Hit::Tr(a)) => select::act(&key, a),
             Some(Hit::Note(note)) => to_note(&key, y, &note),
             Some(Hit::Fold(i)) => {
@@ -1628,6 +1701,10 @@ impl View {
             self.drag_bar(y);
             return;
         }
+        if self.table_grab.borrow().is_some() {
+            self.drag_table(x);
+            return;
+        }
         let over = self.over_bar(x, y);
         if self.bar_lit.replace(over) != over {
             redraw(&self.key);
@@ -1651,6 +1728,8 @@ impl View {
         let id = match self.hit_at(p.x as f32 / s, p.y as f32 / s) {
             _ if boxed.is_some() => boxed.unwrap_or(IDC_ARROW),
             _ if self.over_bar(p.x as f32 / s, p.y as f32 / s) => IDC_ARROW,
+            _ if self.table_grab.borrow().is_some() => IDC_SIZEWE,
+            Some(Hit::Tr(transcript::Act::TableBar(_))) => IDC_SIZEWE,
             Some(Hit::Input(Act::Text)) => IDC_IBEAM,
             Some(_) => IDC_HAND,
             None if !self.bar && select::over_text(&self.key, p.x as f32 / s, p.y as f32 / s) => {
@@ -1720,7 +1799,7 @@ impl View {
                 if !self.bar && lightbox::release(self, x, y) {
                     return Some(LRESULT(0));
                 }
-                if self.grab.take().is_some() {
+                if self.grab.take().is_some() || self.table_grab.take().is_some() {
                     unsafe {
                         let _ = ReleaseCapture();
                     }
@@ -1755,6 +1834,9 @@ impl View {
                 lightbox::lost_capture(&self.key);
                 self.selecting.set(false);
                 self.grab.set(None);
+                if self.table_grab.take().is_some() {
+                    redraw(&self.key);
+                }
                 Some(LRESULT(0))
             }
             WM_SETCURSOR if (lparam.0 & 0xffff) as u32 == HTCLIENT => {

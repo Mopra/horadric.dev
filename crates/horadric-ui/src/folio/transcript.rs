@@ -131,6 +131,9 @@ pub(super) enum Act {
     /// slides it sideways. A click on it does nothing of its own, so a
     /// selection still starts on its cells.
     Table(String),
+    /// A wide table's scroll indicator, by its slide key: its thumb is
+    /// dragged, and a press beside it jumps there. The view handles it.
+    TableBar(String),
     /// More of the conversation above what shows.
     Earlier,
     FindPrev,
@@ -1824,7 +1827,8 @@ impl View {
         // Whatever button the pointer is on lights up.
         if let Some((mx, my)) = mouse {
             let lit = (hits.iter().rev()).find(|(r, _)| r.contains(mx, my));
-            let lit = lit.filter(|(_, h)| !matches!(h, Hit::Tr(Act::Table(_))));
+            // A table's indicator lights its own way, by thickening.
+            let lit = lit.filter(|(_, h)| !matches!(h, Hit::Tr(Act::Table(_) | Act::TableBar(_))));
             if let Some((r, h)) = lit {
                 let text_link = matches!(h, Hit::Tr(Act::Link(_) | Act::Path(..) | Act::Field(_)));
                 if matches!(h, Hit::Tr(Act::Pick(..))) {

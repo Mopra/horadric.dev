@@ -294,6 +294,8 @@ pub(super) fn act(key: &str, a: Act) {
         Act::Mcp(d) => super::mcp::act(key, d),
         // The wheel slides it; a click is the selection's.
         Act::Table(_) => {}
+        // Pressed in the view, which takes the pointer for the drag.
+        Act::TableBar(_) => {}
         Act::FindPrev => jump(key, false),
         Act::FindNext => jump(key, true),
         Act::FindClose => {
