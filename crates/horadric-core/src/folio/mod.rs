@@ -2134,7 +2134,7 @@ impl Folio {
             };
             step.state = state;
             let result = read_result(&step.tool, &step.input, &text, failed, detail);
-            step.output = tail(&result.text, OUTPUT_TAIL);
+            step.output = tail(&result.whole_text(), OUTPUT_TAIL);
             step.result = Some(result);
             step.images = result_images(&block["content"]);
             step.ended = clock;

@@ -9,6 +9,9 @@
 //! `toolUseResult` in a transcript). The account is cleaner, so it wins
 //! where it has a field, and the text is parsed only where it is missing.
 
+use std::borrow::Cow;
+use std::sync::Arc;
+
 use serde_json::Value;
 
 /// How much of a result's text is kept for showing all of it. A Read is
@@ -16,10 +19,16 @@ use serde_json::Value;
 pub const RESULT_CAP: usize = 256 * 1024;
 
 /// A step's result, cleaned and read.
+///
+/// The big texts sit behind an [`Arc`]: a folio is cloned and compared
+/// often over a long session, and each step can hold a quarter megabyte.
+/// Comparing two `Arc<str>` checks the pointer before the bytes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolResult {
-    /// The whole text, cleaned, at most [`RESULT_CAP`] bytes.
-    pub text: String,
+    /// The whole text, cleaned, at most [`RESULT_CAP`] bytes. Empty for a
+    /// shell command whose streams hold its output, which would otherwise
+    /// be kept twice; [`ToolResult::whole_text`] gives it either way.
+    pub text: Arc<str>,
     /// Which end of `text` was cut to fit the cap.
     pub cut: Cut,
     /// The result is an error: the CLI marked it so, or it came wrapped
@@ -36,6 +45,21 @@ pub enum Cut {
     Start,
     /// The end was dropped: a file keeps its start.
     End,
+}
+
+impl ToolResult {
+    /// The whole text: `text`, or for a shell command that keeps its
+    /// output only in its streams, those streams joined.
+    pub fn whole_text(&self) -> Cow<'_, str> {
+        match &self.kind {
+            ResultKind::Shell(sh) if self.text.is_empty() => match (sh.stdout.is_empty(), sh.stderr.is_empty()) {
+                (_, true) => Cow::Borrowed(&sh.stdout),
+                (true, false) => Cow::Borrowed(&sh.stderr),
+                (false, false) => Cow::Owned(format!("{}\n{}", sh.stdout, sh.stderr)),
+            },
+            _ => Cow::Borrowed(&self.text),
+        }
+    }
 }
 
 /// The parts of a result, for the tools whose results have them.
@@ -143,10 +167,13 @@ pub struct ShellResult {
     /// What Claude said the command is for.
     pub description: String,
     pub command: String,
-    pub stdout: String,
+    /// The end of what it printed. With `stderr` at most [`RESULT_CAP`]
+    /// bytes together.
+    pub stdout: Arc<str>,
     /// Empty where the record gives no separate stderr (an error, whose
-    /// one text holds both).
-    pub stderr: String,
+    /// one text holds both). At most a quarter of [`RESULT_CAP`]: errors
+    /// that long are mostly the same line again.
+    pub stderr: Arc<str>,
     /// 0 for a command that succeeded, the code a failed one gave. None
     /// where it is not known: one stopped, sent to the background, or
     /// whose nonzero code the CLI took as no error (see `interpretation`).
@@ -199,7 +226,7 @@ pub fn read_result(
     let (clean, tagged) = clean_text(text);
     let error = failed || tagged;
     let shell = matches!(tool, "Bash" | "PowerShell");
-    let (text, cut) = if shell {
+    let (mut text, mut cut) = if shell {
         keep_end(&clean, RESULT_CAP)
     } else {
         keep_start(&clean, RESULT_CAP)
@@ -211,14 +238,27 @@ pub fn read_result(
             "Read" => read_lines(input, &text, detail).map_or(ResultKind::Plain, ResultKind::Read),
             "Grep" => ResultKind::Grep(grep(&text, detail)),
             "Glob" => ResultKind::Glob(glob(&text, detail)),
-            "Bash" | "PowerShell" => ResultKind::Shell(shell_result(input, &text, error, detail)),
+            "Bash" | "PowerShell" => {
+                let (sh, streams_cut) = shell_result(input, &text, error, detail);
+                // The streams say what the text says, so it is kept once.
+                // The text stays only where they are empty, as when the
+                // command went to the background and the text says so.
+                if !sh.stdout.is_empty() || !sh.stderr.is_empty() {
+                    text.clear();
+                    // Without an account stdout is the text, cut as it was.
+                    if detail.is_object() {
+                        cut = streams_cut;
+                    }
+                }
+                ResultKind::Shell(sh)
+            }
             "WebSearch" => ResultKind::WebSearch(web_search(input, &text, detail)),
             t if t.starts_with("mcp__") => ResultKind::Mcp(mcp(t, &text)),
             _ => ResultKind::Plain,
         }
     };
     ToolResult {
-        text,
+        text: text.into(),
         cut,
         error,
         kind,
@@ -575,35 +615,44 @@ fn glob(text: &str, detail: &Value) -> GlobResult {
     }
 }
 
-fn shell_result(input: &Value, text: &str, error: bool, detail: &Value) -> ShellResult {
+/// The command's parts, and whether its streams lost their start to the cap.
+fn shell_result(input: &Value, text: &str, error: bool, detail: &Value) -> (ShellResult, Cut) {
     let mut r = ShellResult {
         description: str_of(input, "description"),
         command: str_of(input, "command"),
         ..ShellResult::default()
     };
-    if detail.is_object() {
-        let stream = |key: &str| {
+    let mut cut = Cut::None;
+    let mut stdout = if detail.is_object() {
+        let mut stream = |key: &str, max: usize| {
             let (s, _) = clean_text(detail[key].as_str().unwrap_or_default());
-            keep_end(&s, RESULT_CAP).0
+            let (s, c) = keep_end(&s, max);
+            if c != Cut::None {
+                cut = c;
+            }
+            s
         };
-        r.stdout = stream("stdout");
-        r.stderr = stream("stderr");
+        let stderr = stream("stderr", RESULT_CAP / 4);
+        let stdout = stream("stdout", RESULT_CAP - stderr.len());
+        r.stderr = stderr.into();
         r.interrupted = detail["interrupted"].as_bool().unwrap_or(false);
         r.background = detail["backgroundTaskId"].as_str().map(str::to_string);
         r.timed_out_ms = detail["timedOutAfterMs"].as_u64();
         r.interpretation = str_of(detail, "returnCodeInterpretation");
         r.saved_to = detail["persistedOutputPath"].as_str().map(str::to_string);
+        stdout
     } else {
-        r.stdout = text.to_string();
-    }
+        text.to_string()
+    };
     // A failed command's text starts with its code, then its output.
-    if let Some(rest) = r.stdout.strip_prefix("Exit code ") {
+    if let Some(rest) = stdout.strip_prefix("Exit code ") {
         let (code, after) = rest.split_once('\n').unwrap_or((rest, ""));
         if let Ok(code) = code.trim().parse() {
             r.exit_code = Some(code);
-            r.stdout = after.to_string();
+            stdout = after.to_string();
         }
     }
+    r.stdout = stdout.into();
     if r.exit_code.is_none()
         && !error
         && !r.interrupted
@@ -612,7 +661,7 @@ fn shell_result(input: &Value, text: &str, error: bool, detail: &Value) -> Shell
     {
         r.exit_code = Some(0);
     }
-    r
+    (r, cut)
 }
 
 fn web_search(input: &Value, text: &str, detail: &Value) -> WebSearchResult {
@@ -714,7 +763,44 @@ mod tests {
         let big = "x\n".repeat(RESULT_CAP);
         let r = read_result("Bash", &json!({}), &big, false, &Value::Null);
         assert_eq!(r.cut, Cut::Start);
-        assert!(r.text.len() <= RESULT_CAP);
+        assert!(r.whole_text().len() <= RESULT_CAP);
+    }
+
+    #[test]
+    fn a_shell_result_keeps_its_output_once() {
+        let detail = json!({"stdout": "out", "stderr": "err", "interrupted": false});
+        let r = read_result("Bash", &json!({}), "out\nerr", false, &detail);
+        assert!(r.text.is_empty());
+        assert_eq!(r.whole_text(), "out\nerr");
+        // Without an account the text is read into stdout, not kept beside it.
+        let r = read_result("Bash", &json!({}), "Exit code 1\nboom", true, &Value::Null);
+        assert!(r.text.is_empty());
+        assert_eq!(r.whole_text(), "boom");
+        // With nothing in the streams the text is all there is.
+        let detail = json!({"stdout": "", "stderr": "", "interrupted": false, "backgroundTaskId": "b1"});
+        let r = read_result("Bash", &json!({}), "Running in the background", false, &detail);
+        assert_eq!(&*r.text, "Running in the background");
+        assert_eq!(r.whole_text(), "Running in the background");
+    }
+
+    #[test]
+    fn a_shell_result_stays_under_the_cap_in_all() {
+        let big = "x\n".repeat(RESULT_CAP);
+        let detail = json!({"stdout": big, "stderr": big, "interrupted": false});
+        let r = read_result("Bash", &json!({}), &format!("{big}\n{big}"), false, &detail);
+        let ResultKind::Shell(s) = &r.kind else { panic!() };
+        assert!(s.stdout.len() + s.stderr.len() <= RESULT_CAP);
+        assert!(s.stderr.len() <= RESULT_CAP / 4);
+        assert_eq!(r.cut, Cut::Start);
+        assert!(r.text.is_empty());
+    }
+
+    #[test]
+    fn a_cloned_result_shares_its_text() {
+        let r = read_result("Read", &json!({}), "some text", false, &Value::Null);
+        let c = r.clone();
+        assert!(Arc::ptr_eq(&r.text, &c.text));
+        assert_eq!(r, c);
     }
 
     #[test]
@@ -813,8 +899,8 @@ mod tests {
         let r = read_result("Bash", &input, "abc one\nShell cwd was reset", false, &detail);
         let ResultKind::Shell(s) = r.kind else { panic!() };
         assert_eq!((s.command.as_str(), s.description.as_str()), ("git log", "Show history"));
-        assert_eq!(s.stdout, "abc one");
-        assert_eq!(s.stderr, "Shell cwd was reset");
+        assert_eq!(&*s.stdout, "abc one");
+        assert_eq!(&*s.stderr, "Shell cwd was reset");
         assert_eq!(s.exit_code, Some(0));
 
         let text = "Exit code 128\nfatal: pathspec 'x' did not match any files";
@@ -822,7 +908,7 @@ mod tests {
         assert!(r.error);
         let ResultKind::Shell(s) = r.kind else { panic!() };
         assert_eq!(s.exit_code, Some(128));
-        assert_eq!(s.stdout, "fatal: pathspec 'x' did not match any files");
+        assert_eq!(&*s.stdout, "fatal: pathspec 'x' did not match any files");
 
         let detail = json!({"stdout": "", "stderr": "", "interrupted": false, "returnCodeInterpretation": "No matches found"});
         let ResultKind::Shell(s) = read_result("Bash", &input, "", false, &detail).kind else { panic!() };
