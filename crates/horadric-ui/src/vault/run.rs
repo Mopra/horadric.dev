@@ -85,16 +85,31 @@ fn keys_path() -> Option<PathBuf> {
     Some(horadric_hooks::state_dir()?.join("keys.dat"))
 }
 
-/// The keys, read from `keys.dat` the first time. A file that will not
-/// open costs only a restart of the sessions it held, so it is read as
-/// none and written over.
+/// Set when `keys.dat` is there but would not open or read: it is kept as
+/// it is, for whatever made it unreadable may pass (a profile not yet
+/// loaded, a scanner), and new keys live in memory only until a restart.
+static KEYS_UNREADABLE: AtomicBool = AtomicBool::new(false);
+
+/// The keys, read from `keys.dat` the first time. No file is no keys; a
+/// file that will not open is logged and never written over.
 fn with_keys<R>(f: impl FnOnce(&mut HashMap<String, String>) -> R) -> R {
     let mut keys = KEYS.lock().unwrap_or_else(|e| e.into_inner());
     let keys = keys.get_or_insert_with(|| {
-        keys_path()
-            .and_then(|p| store::read_sealed(&p).ok().flatten())
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        let Some(path) = keys_path() else {
+            return HashMap::new();
+        };
+        let read = store::read_sealed(&path).and_then(|b| match b {
+            None => Ok(HashMap::new()),
+            Some(b) => serde_json::from_slice(&b).map_err(|e| e.to_string()),
+        });
+        read.unwrap_or_else(|e| {
+            eprintln!(
+                "horadric: cannot read {}: {e}; it is left as it is and new session keys last until a restart",
+                path.display()
+            );
+            KEYS_UNREADABLE.store(true, Ordering::Relaxed);
+            HashMap::new()
+        })
     });
     f(keys)
 }
@@ -103,6 +118,9 @@ fn with_keys<R>(f: impl FnOnce(&mut HashMap<String, String>) -> R) -> R {
 /// failed write stops nothing; it is logged, and tried once more since
 /// the usual cause (a scanner holding the file) passes in a moment.
 fn save_keys(keys: &HashMap<String, String>) {
+    if KEYS_UNREADABLE.load(Ordering::Relaxed) {
+        return;
+    }
     let (Some(path), Ok(bytes)) = (keys_path(), serde_json::to_vec(keys)) else {
         return;
     };
