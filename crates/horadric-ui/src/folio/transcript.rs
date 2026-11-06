@@ -14,34 +14,31 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
-use horadric_core::folio::{
-    timeline, turn_map, Block, Ending, Lane, ShellRun, Step, StepKind, StepState, TodoStatus,
-};
+use horadric_core::folio::{ timeline, turn_map, Block, Ending, Lane, ShellRun, Step, StepState, TodoStatus};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct2D::{
     ID2D1Bitmap, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
 };
-use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_TRAILING;
 use windows::Win32::UI::WindowsAndMessaging::SetTimer;
 use windows_numerics::Vector2;
 
 use super::cards;
 use super::flow::{self, Pos, Pos2};
-use super::rich::{self, Ctx, Fonts, Item, Scene, F, MONO_LINE};
+use super::rich::{self, Ctx, Fonts, Item, Scene, F};
 use super::view::{self, d2d, text_format, Gfx, Hit, Palette, View, CARET_W, FONT};
 use super::Chat;
 use crate::field::Field;
-use crate::folio_look::{self as look, RunState};
+use crate::folio_look::self as look;
 use crate::layout::Rect;
 use crate::render;
 use crate::theme::{self, Color};
 
 const TOP: f32 = 18.0;
 const GAP: f32 = 18.0;
-const LINE_H: f32 = 26.0;
+pub(super) const LINE_H: f32 = 26.0;
 /// The Resume button under an ended session, with the gap above it.
 const RESUME_H: f32 = 38.0;
-const STEP_H: f32 = 26.0;
+pub(super) const STEP_H: f32 = 26.0;
 const FOOTER_H: f32 = 18.0;
 /// A prompt's plate: the room around its text, and how much of the
 /// column it may take, so the human's turn always sits off to the right.
@@ -49,14 +46,14 @@ const PLATE_X: f32 = 20.0;
 const PLATE_Y: f32 = 14.0;
 const PLATE_SHARE: f32 = 0.72;
 /// How far a step's detail and a lane sit in from their line.
-const NEST: f32 = 22.0;
+pub(super) const NEST: f32 = 22.0;
 /// Shell output shows its last lines until "show all".
-const OUTPUT_LINES: usize = 14;
+pub(super) const OUTPUT_LINES: usize = 14;
 /// A diff shows its first rows until "show all".
-const DIFF_ROWS: usize = 40;
+pub(super) const DIFF_ROWS: usize = 40;
 /// A prompt's thumbnail fits in this, in DIPs.
-const THUMB_W: f32 = 180.0;
-const THUMB_H: f32 = 135.0;
+pub(super) const THUMB_W: f32 = 180.0;
+pub(super) const THUMB_H: f32 = 135.0;
 /// What a raw line shows of itself.
 const RAW_MAX: usize = 400;
 /// The find bar's width.
@@ -478,7 +475,7 @@ fn raw_text(t: &str) -> String {
 }
 
 /// Whether a step opens to more than its line.
-fn has_detail(s: &Step) -> bool {
+pub(super) fn has_detail(s: &Step) -> bool {
     s.edit.is_some()
         || !s.images.is_empty()
         || s.lane.is_some()
@@ -486,7 +483,7 @@ fn has_detail(s: &Step) -> bool {
         || is_shell(&s.tool) && s.input["command"].is_string()
 }
 
-fn is_shell(tool: &str) -> bool {
+pub(super) fn is_shell(tool: &str) -> bool {
     matches!(tool, "Bash" | "PowerShell" | "BashOutput")
 }
 
@@ -510,12 +507,12 @@ pub(super) fn open_path(st: &mut State, steps: &[Step], path: &[String]) {
 
 /// Whether a subagent still works: its step runs, or its task, which goes
 /// on after a background agent's step is done.
-fn at_work(step: &Step, lane: &Lane) -> bool {
+pub(super) fn at_work(step: &Step, lane: &Lane) -> bool {
     step.state == StepState::Running || lane.working
 }
 
 /// Whether a step shows its detail: a failed one does until closed.
-fn step_open(s: &Step, st: &State) -> bool {
+pub(super) fn step_open(s: &Step, st: &State) -> bool {
     let by_default = st.verbose || s.state == StepState::Failed;
     by_default != st.flipped.contains(&s.id)
 }
@@ -537,7 +534,7 @@ pub(super) fn find_step<'a>(blocks: &'a [Block], id: &str) -> Option<&'a Step> {
 }
 
 /// A clock time for a Unix time in milliseconds, in local time.
-fn clock(ms: u64) -> String {
+pub(super) fn clock(ms: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -548,7 +545,7 @@ fn clock(ms: u64) -> String {
 impl Ctx<'_> {
     /// A folded block's one line: its icon, its text, and a chevron saying
     /// a click opens it.
-    fn fold_row(
+    pub(super) fn fold_row(
         &self,
         s: &mut Scene,
         (icon, mark): (char, Color),
@@ -769,184 +766,6 @@ impl Ctx<'_> {
         s
     }
 
-    unsafe fn tools(&self, i: usize, steps: &[Step], open: bool, st: &State, cw: f32) -> Scene {
-        let mut s = Scene::default();
-        let r = Rect::new(0.0, 0.0, cw, LINE_H);
-        let state = look::run_state(steps);
-        let mut text = look::run_summary(steps);
-        // A failure marks the run's icon. The line stays quiet, since a
-        // failed step is often Claude finding its way.
-        let mark = match state {
-            RunState::Running => {
-                text.push_str(" \u{2026}");
-                self.pal.dim
-            }
-            RunState::Stopped => {
-                text.push_str(" \u{b7} stopped");
-                self.pal.faint
-            }
-            RunState::Done(0) => self.pal.dim,
-            RunState::Done(n) => {
-                text.push_str(&format!(" \u{b7} {n} failed"));
-                theme::error().with_alpha(0.9)
-            }
-        };
-        self.fold_row(&mut s, ('\u{E90F}', mark), &text, open, r, self.pal.dim);
-        s.hit(r, Hit::Fold(i));
-        let mut y = LINE_H;
-        if open {
-            for step in steps {
-                y = self.step(&mut s, step, 0.0, y, cw, st);
-            }
-        } else if let Some((id, lane)) = (steps.iter())
-            .filter_map(|s| Some((&s.id, s.lane.as_ref().filter(|l| at_work(s, l))?)))
-            .next()
-        {
-            // A subagent at work says what it is doing even folded.
-            let line = flow::lane_line(lane, true);
-            let r = Rect::new(NEST, y, cw - NEST, 18.0);
-            s.line(line, F::Small, r, self.pal.faint);
-            s.hit(r, Hit::Tr(Act::Agent(i, id.clone())));
-            y += 18.0;
-        }
-        s.h = y;
-        s
-    }
-
-    /// One step's line at `x`, `y`, and its detail when open. Returns
-    /// where the next goes.
-    unsafe fn step(&self, s: &mut Scene, step: &Step, x: f32, y: f32, cw: f32, st: &State) -> f32 {
-        let w = cw - x;
-        let row = Rect::new(x, y, w, STEP_H);
-        let dot = match step.state {
-            StepState::Running => self.pal.accent.mix(self.pal.fg, 0.4),
-            StepState::Stopped => self.pal.faint.with_alpha(0.3),
-            StepState::Done => theme::done().with_alpha(0.8),
-            StepState::Failed => theme::error(),
-        };
-        s.fill(
-            Rect::new(x + 6.0, y + STEP_H / 2.0 - 2.5, 5.0, 5.0),
-            2.5,
-            dot,
-        );
-        let detail = has_detail(step);
-        let open = detail && step_open(step, st);
-        let mut right = w - 4.0;
-        if detail {
-            let chevron = if open { '\u{E70D}' } else { '\u{E76C}' };
-            s.line(
-                chevron.to_string(),
-                F::Icon,
-                Rect::new(x + right - 14.0, y, 14.0, STEP_H),
-                self.pal.faint.with_alpha(0.4),
-            );
-            right -= 22.0;
-        }
-        if let Some(e) = &step.edit {
-            // Only what changed: a new file has nothing removed.
-            let counts = [
-                (e.removed, '-', theme::error().with_alpha(0.85)),
-                (e.added, '+', theme::done().with_alpha(0.9)),
-            ];
-            for (n, sign, ink) in counts {
-                if n > 0 {
-                    let r = Rect::new(x + right - 40.0, y, 40.0, STEP_H);
-                    s.line(format!("{sign}{n}"), F::Right, r, ink);
-                    right -= 44.0;
-                }
-            }
-        }
-        if step.state == StepState::Running {
-            s.line(
-                "\u{2026}",
-                F::Right,
-                Rect::new(x + right - 20.0, y, 20.0, STEP_H),
-                self.pal.faint,
-            );
-            right -= 24.0;
-        }
-        let mut label = if step.summary.is_empty() {
-            step.tool.clone()
-        } else {
-            format!("{}  {}", step.tool, step.summary)
-        };
-        if let Some(at) = step.began.filter(|_| st.verbose) {
-            label = format!("{}  {label}", clock(at));
-        }
-        s.line(
-            label,
-            F::Small,
-            Rect::new(x + 20.0, y, (right - 20.0).max(0.0), STEP_H),
-            self.pal.dim,
-        );
-        if detail {
-            s.hit(row, Hit::Tr(Act::Step(step.id.clone())));
-        }
-        let mut y = y + STEP_H;
-        if !open {
-            if let Some(lane) = step.lane.as_ref().filter(|l| at_work(step, l)) {
-                let line = flow::lane_line(lane, true);
-                s.line(
-                    line,
-                    F::Small,
-                    Rect::new(x + NEST, y - 3.0, w - NEST, 16.0),
-                    self.pal.faint,
-                );
-                y += 14.0;
-            }
-            return y;
-        }
-        let dx = x + NEST;
-        let dw = cw - dx;
-        if let Some(lane) = &step.lane {
-            y = self.lane(s, step, lane, dx, y, cw, st);
-        } else if let Some(e) = &step.edit {
-            y = self.diff(s, &step.id, e, dx, y, dw, st, None);
-        } else {
-            y = self.output(s, step, dx, y, dw, st);
-        }
-        if !step.images.is_empty() {
-            y = self.step_images(s, step, dx, y + 6.0, dw);
-        }
-        y + 6.0
-    }
-
-    /// The images a step's result carried, as thumbnails in rows.
-    unsafe fn step_images(&self, s: &mut Scene, step: &Step, x: f32, y: f32, w: f32) -> f32 {
-        let (mut cx, mut cy, mut row_h) = (x, y, 0.0f32);
-        for (k, img) in step.images.iter().enumerate() {
-            let got = (self.thumbs.borrow_mut())
-                .entry(format!("{}:{k}", step.id))
-                .or_insert_with(|| rich::thumbnail(self.gfx, &img.base64))
-                .clone();
-            let (tw, th) = match &got {
-                Some((_, bw, bh)) => {
-                    let f = (THUMB_W / *bw as f32).min(THUMB_H / *bh as f32).min(0.5);
-                    (*bw as f32 * f, *bh as f32 * f)
-                }
-                None => (THUMB_H, THUMB_H * 0.75),
-            };
-            if cx + tw > x + w && cx > x {
-                cx = x;
-                cy += row_h + 8.0;
-                row_h = 0.0;
-            }
-            let r = Rect::new(cx, cy, tw, th);
-            match got {
-                Some((b, _, _)) => s.items.push(rich::Item::Image(b, r)),
-                None => {
-                    s.fill(r, 8.0, self.pal.fg.with_alpha(0.06));
-                    s.line("Image", F::Centre, r, self.pal.faint);
-                }
-            }
-            s.stroke(r, 6.0, self.pal.fg.with_alpha(0.15), 1.0);
-            s.hit(r, Hit::Tr(Act::StepImage(step.id.clone(), k)));
-            cx += tw + 8.0;
-            row_h = row_h.max(th);
-        }
-        cy + row_h
-    }
-
     /// A question put aside with `/btw`, and its answer, under a quiet
     /// rule so it reads as outside the conversation.
     unsafe fn aside(&self, b: &Block, cw: f32) -> Scene {
@@ -1045,211 +864,10 @@ impl Ctx<'_> {
         s
     }
 
-    /// A map step's colour, by the sort of work it was.
-    fn kind_ink(&self, kind: StepKind, state: StepState) -> Color {
-        if state == StepState::Failed {
-            return theme::error().with_alpha(0.8);
-        }
-        let ink = match kind {
-            StepKind::Read => self.pal.accent.mix(self.pal.fg, 0.55).with_alpha(0.55),
-            StepKind::Edit => theme::done().with_alpha(0.85),
-            StepKind::Shell => self.pal.fg.with_alpha(0.55),
-            StepKind::Search => self.pal.faint.with_alpha(0.7),
-            StepKind::Agent => self.pal.accent.with_alpha(0.85),
-            StepKind::Web => self.pal.accent.mix(theme::done(), 0.5).with_alpha(0.7),
-            StepKind::Other => self.pal.dim.with_alpha(0.6),
-        };
-        if state == StepState::Stopped {
-            ink.with_alpha(0.3)
-        } else {
-            ink
-        }
-    }
-
-    /// A shell step's command and the end of its output, or any step's
-    /// output, in mono on a dark plate.
-    unsafe fn output(&self, s: &mut Scene, step: &Step, x: f32, y: f32, w: f32, st: &State) -> f32 {
-        let all = st.all.contains(&step.id);
-        let command = step.input["command"]
-            .as_str()
-            .filter(|_| is_shell(&step.tool));
-        let (tail, hidden) = if all {
-            (step.output.trim_end().to_string(), 0)
-        } else {
-            flow::last_lines(&step.output, OUTPUT_LINES)
-        };
-        let mut text = String::new();
-        let mut cmd_len = 0;
-        if let Some(c) = command {
-            text = format!("$ {}", c.trim_end().replace('\n', "\n  "));
-            cmd_len = text.encode_utf16().count() as u32;
-            if !tail.is_empty() {
-                text.push('\n');
-            }
-        }
-        text.push_str(&tail);
-        if text.is_empty() {
-            return y;
-        }
-        let Some(l) = self.layout(&self.fonts.rows, &text, w - 20.0) else {
-            return y;
-        };
-        let out_ink = if step.state == StepState::Failed {
-            theme::error().mix(self.pal.fg, 0.35)
-        } else {
-            self.pal.fg.with_alpha(0.62)
-        };
-        self.paint(&l, cmd_len..text.encode_utf16().count() as u32, out_ink);
-        let (_, th) = render::text_size(&l);
-        let mut top = y + 2.0;
-        if hidden > 0 {
-            let r = Rect::new(x, top, w, 20.0);
-            s.line(
-                format!("Show all, {hidden} more lines above"),
-                F::Small,
-                Rect::new(x + 10.0, top, w - 10.0, 20.0),
-                self.link_ink(),
-            );
-            s.hit(r, Hit::Tr(Act::All(step.id.clone())));
-            top += 20.0;
-        } else if all {
-            let r = Rect::new(x, top, w, 20.0);
-            s.line(
-                "Show the end only",
-                F::Small,
-                Rect::new(x + 10.0, top, w - 10.0, 20.0),
-                self.link_ink(),
-            );
-            s.hit(r, Hit::Tr(Act::All(step.id.clone())));
-            top += 20.0;
-        }
-        let plate = Rect::new(x, top, w, th + 16.0);
-        s.fill(plate, 6.0, Color::rgb(0).with_alpha(0.3));
-        s.items.push(rich::Item::Clip(plate));
-        s.unit(&l, x + 10.0, top + 8.0, self.pal.fg.with_alpha(0.9), &text);
-        s.items.push(rich::Item::Unclip);
-        plate.bottom()
-    }
-
-    /// An edit's file, as a link that opens it, and its diff inline. `id`
-    /// is what "Show all" is kept under: the step's, or the ask's. With
-    /// `review`, an edit ask open to comments: each row's numbers take a
-    /// click, and the rows commented on are marked.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) unsafe fn diff(
-        &self,
-        s: &mut Scene,
-        id: &str,
-        e: &horadric_core::folio::FileEdit,
-        x: f32,
-        y: f32,
-        w: f32,
-        st: &State,
-        review: Option<&super::comments::Review>,
-    ) -> f32 {
-        let head = Rect::new(x, y, w, 22.0);
-        let what = if e.created { "Created" } else { "Changed" };
-        s.line(what, F::Small, Rect::new(x, y, 60.0, 22.0), self.pal.faint);
-        let file = Rect::new(x + 60.0, y, (w - 60.0).min(500.0), 22.0);
-        let shown = flow::project_path(self.dir, &e.path).unwrap_or_else(|| e.path.clone());
-        s.line(shown, F::Small, file, self.link_ink());
-        s.hit(file, Hit::Tr(Act::Path(e.path.clone(), None)));
-        let _ = head;
-        let mut y = y + 24.0;
-        let rows = flow::diff_rows(e);
-        if rows.is_empty() {
-            return y;
-        }
-        let all = st.all.contains(id);
-        let shown = if all {
-            rows.len()
-        } else {
-            rows.len().min(DIFF_ROWS)
-        };
-        let digits = (rows.iter())
-            .filter_map(|r| r.old.max(r.new))
-            .max()
-            .unwrap_or(1)
-            .to_string()
-            .len() as f32;
-        let gw = digits * 7.4 + 10.0;
-        let num = |n: Option<u32>| n.map_or(String::new(), |n| n.to_string());
-        let olds: Vec<String> = rows[..shown].iter().map(|r| num(r.old)).collect();
-        let news: Vec<String> = rows[..shown].iter().map(|r| num(r.new)).collect();
-        let text: Vec<String> = (rows[..shown].iter())
-            .map(|r| match r.mark {
-                '~' => "\u{22ef}".to_string(),
-                m => format!("{m} {}", r.text),
-            })
-            .collect();
-        let text = text.join("\n");
-        let plate = Rect::new(x, y, w, shown as f32 * MONO_LINE + 12.0);
-        s.fill(plate, 6.0, Color::rgb(0).with_alpha(0.3));
-        s.items.push(rich::Item::Clip(plate));
-        for (k, r) in rows[..shown].iter().enumerate() {
-            let tint = match r.mark {
-                '+' => theme::done().with_alpha(0.14),
-                '-' => theme::error().with_alpha(0.16),
-                _ => continue,
-            };
-            s.fill(
-                Rect::new(x, y + 6.0 + k as f32 * MONO_LINE, w, MONO_LINE),
-                0.0,
-                tint,
-            );
-        }
-        if let Some(review) = review {
-            for (k, r) in rows[..shown].iter().enumerate() {
-                if r.mark == '~' {
-                    continue;
-                }
-                let row = Rect::new(x, y + 6.0 + k as f32 * MONO_LINE, 2.0 * gw, MONO_LINE);
-                if review.marks(k) {
-                    s.fill(row, 0.0, self.pal.accent.with_alpha(0.22));
-                    s.fill(Rect::new(x, row.y, 2.0, row.h), 0.0, self.pal.accent);
-                }
-                s.hit(row, Hit::Tr(Act::Line(id.to_string(), k)));
-            }
-        }
-        for (k, nums) in [olds, news].iter().enumerate() {
-            if let Some(l) = self.layout(&self.fonts.rows, &nums.join("\n"), gw - 6.0) {
-                let _ = l.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-                s.text(&l, x + k as f32 * gw, y + 6.0, self.pal.faint);
-            }
-        }
-        if let Some(l) = self.layout(&self.fonts.rows, &text, 100_000.0) {
-            s.unit(
-                &l,
-                x + 2.0 * gw + 6.0,
-                y + 6.0,
-                self.pal.fg.with_alpha(0.88),
-                &text,
-            );
-        }
-        s.items.push(rich::Item::Unclip);
-        y = plate.bottom() + 2.0;
-        if rows.len() > DIFF_ROWS {
-            let say = if all {
-                "Show less".to_string()
-            } else {
-                format!("Show all {} rows", rows.len())
-            };
-            s.line(
-                say,
-                F::Small,
-                Rect::new(x + 10.0, y, w - 10.0, 20.0),
-                self.link_ink(),
-            );
-            s.hit(Rect::new(x, y, w, 20.0), Hit::Tr(Act::All(id.to_string())));
-            y += 20.0;
-        }
-        y
-    }
-
     /// A subagent's lane: its type and progress, its steps folded the
     /// same way, and what it reported.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn lane(
+    pub(super) unsafe fn lane(
         &self,
         s: &mut Scene,
         step: &Step,

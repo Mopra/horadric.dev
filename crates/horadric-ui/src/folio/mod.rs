@@ -36,6 +36,7 @@ mod composer;
 // The review model is shared with the Mac's Folio.
 use crate::folio_review as comments;
 mod controls;
+mod diff;
 mod editor;
 mod flow;
 mod lightbox;
@@ -46,6 +47,7 @@ mod select;
 mod table;
 mod sign_in;
 mod slash;
+mod steps;
 mod summon;
 mod transcript;
 mod view;
