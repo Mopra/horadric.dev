@@ -9,6 +9,7 @@ dependencies, nothing fetched from the network. The plan is
 |---|---|---|
 | `forge.js`, `forge.css` | every Forge page | scroll keeping, pins, pin runes, goto, errors, text edits in place, image crop |
 | `deck.js`, `deck.css` | HTML decks only (`<section class="slide">`), after `forge.js` | the deck shell: toolbar, scaling, resizable strip, speaker notes, keys, present, print, slides added, moved, duplicated and deleted |
+| `editor.js`, `editor.css` | every Forge page, after `forge.js` | editing the whole file: markdown and HTML source beside the page, a CSV as a grid |
 | `test/` | nothing | pages to try it all by hand, see the end |
 
 ## Injecting
@@ -18,7 +19,8 @@ Run `forge.js` first, then `deck.js` for decks, with
 or as `<script>` tags. The CSS is found one of two ways:
 
 - **Given**: set `window.__forgeAssets = { forgeCss: "<text of forge.css>",
-  deckCss: "<text of deck.css>" }` before the scripts run. Use this when
+  deckCss: "<text of deck.css>", editorCss: "<text of editor.css>" }`
+  before the scripts run. Use this when
   injecting, since an injected script has no URL to resolve from.
 - **Beside the script**: with no `__forgeAssets`, each script loads its CSS
   from the same folder as its own `src` (how the test pages work).
@@ -338,6 +340,139 @@ shows the file as it is.
 - `window.__forge` also has `note(text, bad)`, `edit(el)` (starts an edit
   where a double click on `el` would) and `crop()`.
 
+## Editing the whole file
+
+`editor.js` makes the shown file editable in the pane, all of it: the
+Edit button on the Forge bar, or E on the page (not while typing in a
+field, not in pin mode or while presenting). What it edits is found from
+the page: `main.forge-md` is markdown, `main.forge-csv` a CSV, a path
+ending `.html` or `.htm` an HTML page (decks included). Anything else
+answers `editing` off with a note.
+
+### `editing`
+```json
+{ "forge": "editing", "on": true }
+```
+Both ways. Host to page: enter or leave edit mode (the bar's Edit
+button). Page to host: the page entered or left by itself (E, its Done
+key, or coming back after a reload), so the bar stays in step. Not sent
+back for the host's own `editing`.
+
+### `write`
+```json
+{ "forge": "write", "id": 3, "file": "/notes.md", "base": "<text it started from>", "text": "<the new full text>" }
+```
+Page to host: write the whole file. `file` is `location.pathname` as in
+every other message. `base` is the text the edit started from; the host
+refuses when the file on disk is no longer `base`. `id` counts up. At
+most one write is in flight; typing meanwhile goes once it is answered.
+Sent 600 ms after typing stops, at once on Ctrl+S, and when edit mode
+ends.
+
+### `write-result`
+```json
+{ "forge": "write-result", "id": 3, "ok": true, "html": "<the markdown rendered again>" }
+{ "forge": "write-result", "id": 4, "ok": false, "why": "changed", "current": "<the file as Claude left it>" }
+{ "forge": "write-result", "id": 5, "ok": false, "why": "the file is read only" }
+```
+Host to page, by `id`. `html` (markdown only) is the inner HTML of the
+reading screen (`main.forge-md`) as `markdown_html` makes it, with
+`data-lines`; the page swaps it in without reloading. `why: "changed"`
+with `current`: someone else (Claude) wrote the file meanwhile. The page
+shows "Claude changed this file" with **Load theirs** (`current` becomes
+the text and the base, through the editor's undo) and **Keep mine** (sent
+again with `base` = `current`). Any other `why` shows as "Not saved: why"
+and the next change tries again. The host does not reload a tab after a
+write the tab made itself.
+
+### Reading the source
+
+- Markdown and CSV: `fetch(location.pathname + "?raw", { cache: "no-store" })`
+  answers the file's text.
+- HTML: `fetch(location.pathname, { cache: "no-store" })`, which is not a
+  document request, so it comes unmarked (no `data-forge-at`, no scripts).
+- Read as bytes and decoded with the BOM kept, so a file that has one
+  keeps it when written back.
+
+### Markdown and HTML
+
+The source on the left, the page on the right, split by a handle that
+remembers its place (`localStorage` `forge-editor-split`). Under 720 px
+wide the pane shows one or the other, with Source and Page keys.
+
+- A plain textarea, so the browser's own undo, selection and IME work.
+  Line numbers follow wrapped lines (files over 4000 lines do not wrap).
+- Tab indents (the selected lines, or a list item as a whole), Shift+Tab
+  outdents; the indent is the file's own (a tab, or its smallest run of
+  spaces). Ctrl+S saves now. Esc leaves the textarea, so E then leaves
+  edit mode.
+- Markdown: Ctrl+B and Ctrl+I wrap the selection in `**` and `*` (again
+  unwraps), Ctrl+K makes it a link with `url` selected. Enter in a list
+  item or quote starts the next one (numbers count up, a task gets `[ ]`);
+  Enter in an empty item ends the list.
+- Markdown: a click on a block in the page puts the cursor on its first
+  `data-lines` line; the cursor's block is outlined in the page. Links in
+  the page do not navigate while editing. A double click would start
+  forge.js's edit in place, a second writer with an older base, so it is
+  put back at once. Mermaid in swapped in `html` stays as its source
+  until the page loads again.
+- HTML: the page beside the source is the same URL with `?preview` in an
+  iframe. **The host must serve `?preview` as the plain path** (with its
+  scripts and `data-forge-at` marks); `editor.js` does nothing inside a
+  frame. After each write the frame alone reloads, keeping its scroll and
+  the deck's slide, so the editor is never interrupted. A click in the
+  frame puts the cursor at the element's `data-forge-at` start; the
+  cursor's element is outlined in the frame, and a deck shows its slide.
+- The page under an HTML editor is the file as it was; leaving edit mode
+  after a write reloads the tab once.
+
+### CSV
+
+The table becomes a grid, drawn again from the file in the file's order
+(sorting is off while editing; a sort is only ever a view). Header cells
+are edited like any other.
+
+- A click edits a cell where it was clicked. Typing on a chosen cell
+  starts editing it with that key; Enter or F2 edits it as it is.
+- Moving: arrows, Tab and Shift+Tab (wrapping to the next row), Shift+Enter
+  up, Home and End. Editing, Enter and Tab keep the cell and move; Up and
+  Down do on a one line cell; Alt+Enter is a line break in the cell; Esc
+  puts it back. Esc with no cell edited lets go of the chosen cell, so E
+  leaves edit mode.
+- Delete or Backspace empties the chosen cell. Ctrl+C copies it. Ctrl+V
+  of a tab separated block (Excel's copy) fills cells from the chosen one
+  down and right, adding rows and columns as it needs. Ctrl+Z and Ctrl+Y
+  undo and redo the grid's changes.
+- Keys on the bar: Row below, Row at end, Column right, Delete row,
+  Delete column.
+- Written back with the file's delimiter (comma, semicolon or tab, found
+  from the first record as `forge/csv.rs` does), line break (CRLF kept)
+  and BOM. A record not changed is written byte for byte as it was read;
+  a changed one quotes the fields that need it (the delimiter, a quote or
+  a line break in them).
+- Leaving edit mode after a write reloads the tab once.
+
+### What it adds
+
+The element `<forge-overlay>` under `<html>` holding the editor in an open
+shadow root (named as forge.js's own, so the deck shell leaves keys typed
+in it alone and exports and print hide it); the classes `forge-editing`,
+`forge-editing-md|html|csv` and `forge-editing-split|source|page` and the
+custom properties `--forge-ed-w`, `--forge-ed-bar` on `<html>`;
+`forge-ed-here` on the block or element at the cursor; for a CSV a
+`table.forge-ed-grid` in `main` while the page's own table is hidden.
+`editor.css` goes into the page and into the editor's shadow root; give
+it the `--hd-` colours as `deck.css` gets them
+(`:host, html.forge-editing { ... }` in front).
+
+Edit mode survives the page loading again (`sessionStorage`
+`forge-editor:<path>`): the view, cursor, scroll, chosen cell, the
+frame's slide, and text not yet written, which comes back as "Claude
+changed this file" when the file moved meanwhile.
+
+`window.__forgeEditor`: `on`, `kind`, `base`, `text()`, `enter()`,
+`leave()`, `save()`.
+
 ## Writing hand edits (host side)
 
 `src/forge/edit.rs`. The source mapping is in `edit/text.rs` (the text a
@@ -364,3 +499,13 @@ __forge.sent.at(-1);   // the last message the page posted
 
 The pin input lives in a closed shadow root, so a test types into it with
 DevTools `Input.insertText` after a real click, not with a selector.
+
+The editor's pages are `edit-markdown.html`, `edit-deck.html` and
+`edit-table.html`. They load `test/host-stub.js` first, which stands in
+for the host: it answers `write` (refusing a stale `base` as `changed`),
+serves `?raw`, renders the markdown and CSV pages from the file text in
+`<script type="text/plain" id="forge-source">`, and colours the editor
+from `test/page.css` (a copy of the core's page look). They need a
+server, since the editor fetches the file; for the deck's preview to show
+saves, one that takes PUT. Press E. `__stub.claude("text")` makes Claude
+write the file, so the next save is refused.

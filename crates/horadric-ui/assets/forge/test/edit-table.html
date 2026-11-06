@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forge test: editing a CSV</title>
+<link rel="stylesheet" href="page.css">
+<script src="host-stub.js"></script>
+<script src="../forge.js"></script>
+<script src="../editor.js"></script>
+</head>
+<body>
+<!-- A Danish Excel export: semicolons, CRLF, a quoted field with the
+     delimiter and one with a line break. host-stub.js renders it into
+     main as csv.rs would. Press E. -->
+<script type="text/plain" id="forge-source">Navn;By;Omsætning;Note
+Optiplast;Aarhus;1250,5;"stor; vigtig"
+Nordmetal;Odense;980;
+Fjordfab;Vejle;2100;"to
+linjer"
+</script>
+<main class="forge-csv"></main>
+<script>
+  // csv.rs writes the file's line breaks as they are; a script tag cannot
+  // hold CR, so the stub's copy is given its CRLF here.
+  const s = document.getElementById("forge-source");
+  s.textContent = s.textContent.replace(/\n/g, "\r\n");
+</script>
+</body>
+</html>

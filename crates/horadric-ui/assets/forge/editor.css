@@ -1,0 +1,316 @@
+/* The Forge's editor. One sheet put in two places: the editor's own shadow
+   root (the forge-ed classes) and the page (only rules under
+   html.forge-editing, and the forge-ed marks editor.js sets on the page's
+   blocks and cells). Nothing here styles the human's content otherwise.
+
+   Drawn in Horadric's skeuomorph: a faceplate with the source on a screen
+   sunk into it, engraved legends, buttons as keys. The colours are the
+   `--hd-` properties the host sets, as for forge.css. Activity is a small
+   rune whose stroke runs round it, never a glow. */
+
+.forge-ed {
+  --forge-ed-raised: inset 0 1px 0 var(--hd-bevel-light), inset 0 -1px 0 var(--hd-bevel-shade),
+    0 6px 16px var(--hd-cast);
+  --forge-ed-sunk: inset 0 2px 7px var(--hd-hollow-shade), inset 0 -1px 0 var(--hd-hollow-light),
+    0 1px 0 var(--hd-engrave-light);
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  background: var(--hd-plate);
+  color: var(--hd-text);
+  font: 13px/1.35 var(--hd-ui);
+  -webkit-font-smoothing: antialiased;
+}
+.forge-ed *, .forge-ed *::before, .forge-ed *::after { box-sizing: border-box; }
+.forge-ed [hidden] { display: none !important; }
+
+/* Markdown: the source plate stands beside the page, its right edge cut
+   as the seam is. */
+.forge-ed-md {
+  box-shadow: inset -1px 0 0 var(--hd-engrave-dark), inset -2px 0 0 var(--hd-engrave-light);
+}
+
+.forge-ed-head {
+  flex: none;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px 0 18px;
+}
+.forge-ed-legend {
+  flex: none;
+  font: 600 11px/1.2 var(--hd-ui);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--hd-legend);
+  text-shadow: 0 -1px 0 var(--hd-engrave-dark), 0 1px 0 var(--hd-engrave-light);
+}
+.forge-ed-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--hd-dim);
+}
+.forge-ed-switch { display: none; gap: 6px; }
+.forge-ed[data-mode="source"] .forge-ed-switch,
+.forge-ed[data-mode="page"] .forge-ed-switch { display: flex; }
+
+/* Keys: the face lit from above, its side showing under it. Pressed, or
+   latched as the view shown, it sits down on the plate. */
+.forge-ed-key {
+  flex: none;
+  font: 500 11px/1 var(--hd-ui);
+  color: var(--hd-text);
+  cursor: pointer;
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 10px 7px;
+  margin: 0 0 2px;
+  background: linear-gradient(var(--hd-key-top), var(--hd-key-low));
+  box-shadow: inset 0 1px 0 var(--hd-bevel-light), inset 0 -1px 0 var(--hd-bevel-shade),
+    0 2px 0 var(--hd-key-side), 0 3px 5px var(--hd-cast);
+  transition: transform 70ms ease, box-shadow 70ms ease;
+}
+.forge-ed-key:hover {
+  background: linear-gradient(var(--hd-hover), var(--hd-hover)),
+    linear-gradient(var(--hd-key-top), var(--hd-key-low));
+}
+.forge-ed-key:active, .forge-ed-key.down {
+  transform: translateY(2px);
+  box-shadow: inset 0 1px 0 var(--hd-bevel-light), 0 0 0 var(--hd-key-side);
+}
+.forge-ed-key.down { color: var(--hd-dim); }
+.forge-ed-key:focus-visible { outline: 1px solid var(--hd-accent); outline-offset: 2px; }
+
+/* The status: a small rune. Its stroke runs round it while a save is on
+   its way, rests whole once the file is written, and turns the waiting
+   colour when Claude wrote the file first. */
+.forge-ed-status {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--hd-dim);
+  white-space: nowrap;
+}
+.forge-ed-status svg { width: 12px; height: 12px; overflow: visible; }
+.forge-ed-status .stone { fill: var(--hd-surface); stroke: var(--hd-engrave-dark); stroke-width: 1.2; }
+.forge-ed-status .trace {
+  fill: none;
+  stroke: var(--hd-legend);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+.forge-ed-status[data-state="saving"] .trace,
+.forge-ed-status[data-state="loading"] .trace {
+  stroke: var(--hd-accent);
+  stroke-dasharray: 22 78;
+  animation: forge-ed-trace 1.4s linear infinite;
+}
+.forge-ed-status[data-state="saved"] .trace { stroke: var(--hd-done); }
+.forge-ed-status[data-state="changed"] { color: var(--hd-waiting); }
+.forge-ed-status[data-state="changed"] .trace {
+  stroke: var(--hd-waiting);
+  stroke-dasharray: 22 78;
+  animation: forge-ed-trace 2.8s linear infinite;
+}
+.forge-ed-status[data-state="failed"] { color: var(--hd-error); }
+.forge-ed-status[data-state="failed"] .trace { stroke: var(--hd-error); }
+@keyframes forge-ed-trace { to { stroke-dashoffset: -100; } }
+
+/* Claude wrote the file: a small plate across the pane with the choice. */
+.forge-ed-conflict {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 10px 8px;
+  padding: 8px 10px 8px 12px;
+  border-radius: 8px;
+  background: var(--hd-surface);
+  box-shadow: var(--forge-ed-raised);
+}
+.forge-ed-conflict-text { flex: 1 1 auto; color: var(--hd-waiting); }
+
+.forge-ed-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  padding: 0 10px 10px;
+}
+.forge-ed-html .forge-ed-body { grid-template-columns: var(--forge-ed-cols, 1fr 10px 1fr); }
+.forge-ed-pane { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+.forge-ed[data-mode="page"] .forge-ed-pane { visibility: hidden; }
+.forge-ed-md[data-mode="page"] .forge-ed-body { display: none; }
+
+/* The source on a screen sunk into the plate. */
+.forge-ed-src {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--hd-screen);
+  box-shadow: var(--forge-ed-sunk);
+}
+.forge-ed-gutter {
+  flex: none;
+  position: relative;
+  overflow: hidden;
+  padding-top: 14px;
+  text-align: right;
+  font: 11px/21px var(--hd-mono);
+  color: var(--hd-legend);
+  user-select: none;
+  border-right: 1px solid var(--hd-engrave-dark);
+  box-shadow: 1px 0 0 var(--hd-engrave-light);
+}
+.forge-ed-nums { padding-right: 0.9ch; will-change: transform; }
+.forge-ed-nums > div { overflow: hidden; }
+.forge-ed-nums > .on { color: var(--hd-text); }
+.forge-ed-text, .forge-ed-mirror {
+  font: 13px/21px var(--hd-mono);
+  tab-size: 4;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  letter-spacing: 0;
+}
+.forge-ed-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  margin: 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  padding: 14px 18px 14px 14px;
+  background: transparent;
+  color: var(--hd-read, var(--hd-text));
+  caret-color: var(--hd-accent);
+  scrollbar-color: var(--hd-lamp-off) transparent;
+}
+.forge-ed-text[wrap="off"] { white-space: pre; overflow-wrap: normal; }
+.forge-ed-text::selection { background: var(--hd-accent-dim); color: var(--hd-text); }
+.forge-ed-mirror {
+  position: absolute;
+  left: 0;
+  top: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* The handle: a groove cut in the plate with a grip of three notches. */
+.forge-ed-handle {
+  position: relative;
+  cursor: col-resize;
+  touch-action: none;
+}
+.forge-ed-handle::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2px;
+  height: 28px;
+  margin: -14px 0 0 -1px;
+  border-radius: 1px;
+  background: var(--hd-engrave-dark);
+  box-shadow: 1px 0 0 var(--hd-engrave-light);
+}
+.forge-ed-handle:hover::before, .forge-ed.dragging .forge-ed-handle::before { background: var(--hd-accent-dim); }
+.forge-ed-md .forge-ed-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+}
+.forge-ed-md[data-mode="source"] .forge-ed-handle { display: none; }
+.forge-ed-html[data-mode="source"] .forge-ed-handle,
+.forge-ed-html[data-mode="page"] .forge-ed-handle { visibility: hidden; }
+/* While dragging, the page's frame must not take the pointer. */
+.forge-ed.dragging iframe { pointer-events: none; }
+
+.forge-ed-frame {
+  min-width: 0;
+  min-height: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--hd-screen);
+  box-shadow: var(--forge-ed-sunk);
+}
+.forge-ed-html[data-mode="source"] .forge-ed-frame { visibility: hidden; }
+.forge-ed-frame iframe { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
+
+/* The CSV's keys: one plate along the bottom of the window. */
+.forge-ed.forge-ed-csv {
+  position: relative;
+  inset: auto;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 10px 18px 12px;
+}
+.forge-ed-tools, .forge-ed-end {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.forge-ed-tools .forge-ed-legend { margin-right: 6px; }
+.forge-ed-end { margin-left: auto; }
+.forge-ed-csv .forge-ed-conflict { margin: 0; padding: 4px 6px 4px 10px; }
+
+/* ----------------------------------------------------------- in the page */
+
+html.forge-editing-md.forge-editing-split body { margin-left: var(--forge-ed-w) !important; }
+html.forge-editing-md.forge-editing-split body::before { left: calc(var(--forge-ed-w) + 5px); }
+html.forge-editing-md.forge-editing-page body { padding-top: 44px !important; }
+html.forge-editing-html, html.forge-editing-html body { overflow: hidden !important; }
+
+/* Where the source's cursor is, in the page: a thin line round the block. */
+html.forge-editing .forge-ed-here {
+  outline: 1px solid var(--hd-accent-dim) !important;
+  outline-offset: 5px;
+  border-radius: 2px;
+}
+html.forge-editing main.forge-md { cursor: default; }
+
+/* The grid: the page's table drawn again from the file, in the file's
+   order, the header as written rather than in capitals. */
+html.forge-editing-csv main.forge-csv { bottom: calc(var(--forge-ed-bar, 64px) + 4px) !important; }
+html.forge-editing-csv main.forge-csv > table:not(.forge-ed-grid) { display: none !important; }
+html.forge-editing-csv table.forge-ed-grid th {
+  cursor: text;
+  user-select: text;
+  text-transform: none;
+  letter-spacing: 0.04em;
+  font-size: 12px;
+}
+html.forge-editing-csv table.forge-ed-grid td { cursor: text; }
+html.forge-editing-csv table.forge-ed-grid tr:hover td { background: transparent; }
+html.forge-editing-csv table.forge-ed-grid .forge-ed-sel {
+  box-shadow: inset 0 0 0 1.5px var(--hd-accent-dim);
+}
+html.forge-editing-csv table.forge-ed-grid .forge-ed-editing {
+  outline: 0;
+  color: var(--hd-text);
+  background: var(--hd-well) !important;
+  box-shadow: inset 0 0 0 1.5px var(--hd-accent), inset 0 2px 5px var(--hd-hollow-shade);
+  white-space: pre-wrap;
+}
+@media print {
+  html.forge-editing-md.forge-editing-split body { margin-left: 0 !important; }
+  html.forge-editing .forge-ed-here { outline: 0 !important; }
+}

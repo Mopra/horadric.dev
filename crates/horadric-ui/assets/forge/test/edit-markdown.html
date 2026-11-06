@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forge test: editing markdown</title>
+<link rel="stylesheet" href="page.css">
+<script src="host-stub.js"></script>
+<script src="../forge.js"></script>
+<script src="../editor.js"></script>
+</head>
+<body>
+<!-- The file as it is on disk; host-stub.js renders it into main as the
+     Forge's markdown renderer would, and answers writes. Press E. -->
+<script type="text/plain" id="forge-source">
+# Quarterly review
+
+This page tries the editor on a markdown file. Press **E** to edit,
+or the Edit button on the Forge bar.
+
+## Numbers
+
+- Revenue up 12 percent
+- Churn down to 3 percent
+- Two new factories, [one in Aarhus](https://example.com)
+
+1. First step
+2. Second step
+
+> A quote that runs
+> over two lines.
+
+```
+fn main() {
+    println!("forge");
+}
+```
+
+## The end
+
+Last words, with *emphasis* and `code`.
+</script>
+<main class="forge-md"></main>
+</body>
+</html>

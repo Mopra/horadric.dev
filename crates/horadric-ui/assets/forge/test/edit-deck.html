@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Forge test: editing a deck</title>
+<script src="host-stub.js"></script>
+<script src="../forge.js"></script>
+<script src="../deck.js"></script>
+<script src="../editor.js"></script>
+<style>
+  body { margin: 0; font-family: "Segoe UI", sans-serif; background: #ddd; }
+  section.slide {
+    width: 1920px; height: 1080px; padding: 120px 160px;
+    background: #fbfaf7; color: #1d2b36; display: flex; flex-direction: column;
+    justify-content: center; margin: 0 0 20px;
+  }
+  section.slide h1 { font-size: 120px; margin: 0 0 40px; }
+  section.slide h2 { font-size: 88px; margin: 0 0 40px; }
+  section.slide p, section.slide li { font-size: 48px; }
+  section.slide.dark { background: #1d2b36; color: #fbfaf7; }
+</style>
+</head>
+<body>
+<!-- Press E: the source on the left, this deck in a frame on the right.
+     Served by a server that takes PUT, a save shows in the frame. -->
+<section class="slide dark">
+  <h1>The Forge</h1>
+  <p>A deck edited in its own source.</p>
+</section>
+<section class="slide">
+  <h2>Why</h2>
+  <ul><li>See every save at once</li><li>Keep the slide you were on</li></ul>
+</section>
+<section class="slide dark">
+  <h2>Thanks</h2>
+  <p>Questions?</p>
+</section>
+</body>
+</html>
