@@ -14,16 +14,16 @@ use std::cell::{Cell, RefCell};
 
 use windows::core::{Interface, Result};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_ALPHA_MODE_UNKNOWN, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_PLUS,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLORMATRIX_ALPHA_MODE_STRAIGHT, D2D1_ALPHA_MODE_UNKNOWN, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_PLUS,
     D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     CLSID_D2D1ColorMatrix, CLSID_D2D1GaussianBlur, ID2D1BitmapRenderTarget, ID2D1DeviceContext,
     ID2D1Effect, ID2D1Image, ID2D1RenderTarget, D2D1_BUFFER_PRECISION_16BPC_FLOAT,
-    D2D1_COLORMATRIX_PROP_COLOR_MATRIX, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+    D2D1_COLORMATRIX_PROP_ALPHA_MODE, D2D1_COLORMATRIX_PROP_COLOR_MATRIX, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
     D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
     D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PRIMITIVE_BLEND_ADD, D2D1_PROPERTY_PRECISION,
-    D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_MATRIX_5X4, D2D1_PROPERTY_TYPE_UNKNOWN,
+    D2D1_PROPERTY_TYPE_ENUM, D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_MATRIX_5X4, D2D1_PROPERTY_TYPE_UNKNOWN,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_HARDWARE, D2D1_RENDER_TARGET_USAGE_NONE,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
@@ -119,6 +119,9 @@ struct Effects {
     gain: ID2D1Effect,
     near: ID2D1Effect,
     far: ID2D1Effect,
+    /// The wide glow scaled by its passes, so it is blurred and added
+    /// once, not once a pass.
+    far_passes: ID2D1Effect,
     look: Bloom,
 }
 
@@ -239,11 +242,16 @@ impl Light {
         }
         e.near.SetInput(0, &source, true);
         add(&e.near.GetOutput()?);
-        e.far.SetInput(0, &source, true);
-        let wide = e.far.GetOutput()?;
-        for _ in 0..look.far_passes {
-            add(&wide);
+        if look.far_passes == 0 {
+            return Ok(());
         }
+        e.far.SetInput(0, &source, true);
+        let mut wide = e.far.GetOutput()?;
+        if look.far_passes > 1 {
+            e.far_passes.SetInput(0, &wide, true);
+            wide = e.far_passes.GetOutput()?;
+        }
+        add(&wide);
         Ok(())
     }
 }
@@ -304,30 +312,46 @@ unsafe fn make_effects(dc: &ID2D1DeviceContext, look: &Bloom, float: bool) -> Re
         e.SetValue(index, D2D1_PROPERTY_TYPE_FLOAT, &sigma.to_le_bytes())?;
         Ok(e)
     };
+    // `straight` scales the premultiplied channels as they are, so light
+    // is `g` times as bright. Without it the effect unpremultiplies first
+    // and scales the alpha too, which comes out `g` squared: the gain was
+    // tuned that way and is kept so.
+    let scale = |g: f32, straight: bool| -> Result<ID2D1Effect> {
+        let e = make(&CLSID_D2D1ColorMatrix)?;
+        #[rustfmt::skip]
+        let matrix: [f32; 20] = [
+            g, 0.0, 0.0, 0.0,
+            0.0, g, 0.0, 0.0,
+            0.0, 0.0, g, 0.0,
+            0.0, 0.0, 0.0, g,
+            0.0, 0.0, 0.0, 0.0,
+        ];
+        let bytes: Vec<u8> = matrix.iter().flat_map(|v| v.to_le_bytes()).collect();
+        e.SetValue(
+            D2D1_COLORMATRIX_PROP_COLOR_MATRIX.0 as u32,
+            D2D1_PROPERTY_TYPE_MATRIX_5X4,
+            &bytes,
+        )?;
+        if straight {
+            let mode = D2D1_COLORMATRIX_ALPHA_MODE_STRAIGHT.0 as u32;
+            e.SetValue(
+                D2D1_COLORMATRIX_PROP_ALPHA_MODE.0 as u32,
+                D2D1_PROPERTY_TYPE_ENUM,
+                &mode.to_le_bytes(),
+            )?;
+        }
+        Ok(e)
+    };
     // The tone curve is the window's own: its eight bit target clips what
     // the float layer carries past one, after the blurs have spread it.
-    // The gain only sets how soon a core gets there. Premultiplied, so all
-    // four channels scale alike.
-    let gain = make(&CLSID_D2D1ColorMatrix)?;
-    let g = look.gain;
-    #[rustfmt::skip]
-    let matrix: [f32; 20] = [
-        g, 0.0, 0.0, 0.0,
-        0.0, g, 0.0, 0.0,
-        0.0, 0.0, g, 0.0,
-        0.0, 0.0, 0.0, g,
-        0.0, 0.0, 0.0, 0.0,
-    ];
-    let bytes: Vec<u8> = matrix.iter().flat_map(|v| v.to_le_bytes()).collect();
-    gain.SetValue(
-        D2D1_COLORMATRIX_PROP_COLOR_MATRIX.0 as u32,
-        D2D1_PROPERTY_TYPE_MATRIX_5X4,
-        &bytes,
-    )?;
+    // The gain only sets how soon a core gets there. Adding the wide glow
+    // n times and adding it once n times as bright clip alike, since light
+    // only adds; once is one blur instead of n.
     Ok(Effects {
-        gain,
+        gain: scale(look.gain, false)?,
         near: blur(look.near)?,
         far: blur(look.far)?,
+        far_passes: scale(look.far_passes as f32, true)?,
         look: *look,
     })
 }

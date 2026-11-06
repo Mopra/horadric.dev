@@ -426,10 +426,13 @@ mod tests {
                 .CreateSolidColorBrush(&color(theme::text()), None)
                 .unwrap();
             let gradients = Gradients::default();
+            let shades = crate::render::shade::Shades::default();
             let p = Painter {
                 rt: &rt,
                 brush: &brush,
                 gradients: &gradients,
+                shades: &shades,
+                emit: None,
             };
             rt.BeginDraw();
             rt.Clear(Some(&color(theme::plate_bottom())));

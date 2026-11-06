@@ -7,9 +7,9 @@
 //!
 //! A cluster is a faceplate on a piece of hardware: matte metal lit from
 //! above, sessions as keys standing up off it, each with a lamp, and a
-//! screen sunk into it for the files. Direct2D's hwnd targets have no blur,
-//! so every soft shadow is a stack of shapes each a little bigger and
-//! fainter (`Painter::cast`, `Painter::hollow`). A session's lamp says what
+//! screen sunk into it for the files. Shadows and shade are the GPU's
+//! shadow effect, baked once per shape (`shade.rs`); light is drawn sharp
+//! and bloomed (`shine.rs`, `crate::light`). A session's lamp says what
 //! it does: a working one has light running up and down it, a waiting one
 //! breathes and backlights its whole key, an ended one is dark and its key
 //! latched down.
@@ -74,6 +74,7 @@ use crate::settings::Control;
 use crate::theme::{self, Color};
 
 mod keycube;
+mod shade;
 mod shine;
 mod stone;
 pub(crate) use stone::{StoneLook, StoneState};
@@ -137,9 +138,6 @@ const FOLIO_ICON: char = '\u{E8F2}';
 /// The button that starts a Claude session as a terminal, code brackets,
 /// so it does not read as the shell's prompt beside it.
 const CLI_ICON: char = '\u{E943}';
-
-/// How many shapes make one soft edge. Fewer shows as bands.
-const BLUR_STEPS: usize = 8;
 
 /// Process wide Direct2D and DirectWrite objects.
 pub struct Gpu {
@@ -790,7 +788,13 @@ pub struct Target {
     /// The theme the layer was drawn in, so a new one draws it again.
     theme: Cell<theme::Theme>,
     gradients: Gradients,
+    shades: shade::Shades,
+    /// The light that moves, bloomed fresh each frame.
     light: crate::light::Light,
+    /// The light that holds still, bloomed into the kept layer.
+    still_light: crate::light::Light,
+    /// The still light as last bloomed, kept while it stays the same.
+    kept_light: RefCell<Option<shine::Kept>>,
     /// The retinue's stones, made as its portraits first need them.
     stones: RefCell<Stones>,
 }
@@ -885,7 +889,10 @@ impl Target {
             layer: RefCell::new(None),
             theme: Cell::new(theme::current()),
             gradients: Gradients::default(),
+            shades: shade::Shades::default(),
             light: crate::light::Light::default(),
+            still_light: crate::light::Light::default(),
+            kept_light: RefCell::new(None),
             stones: RefCell::default(),
         })
     }
@@ -922,7 +929,15 @@ impl Target {
                 };
                 bitmap.SetTextRenderingParams(&gpu.text_params);
                 bitmap.BeginDraw();
-                self.painter(&bitmap).still(gpu, m, scene);
+                let emitters = RefCell::new(Vec::new());
+                Painter {
+                    emit: Some(&emitters),
+                    ..self.painter(&bitmap)
+                }
+                .still(gpu, m, scene);
+                // Still light is light for all that, so a failed bloom
+                // leaves the layer without its glow, never without the layer.
+                let _ = self.still_bloom(&bitmap, &emitters.into_inner(), size);
                 bitmap.EndDraw(None, None)?;
                 *layer = Some((bitmap, size));
             }
@@ -937,13 +952,14 @@ impl Target {
                     None,
                 );
             }
-            // A failed bloom leaves the frame without its glow, never
-            // without its frame.
-            let _ = self.bloom(gpu, m, scene);
             self.painter(&self.rt).key_stones(scene, &self.stones);
             if scene.ambient {
                 self.painter(&self.rt).light(scene);
             }
+            // Light adds over what is drawn, the breathing lamp's glass
+            // included. A failed bloom leaves the frame without its glow,
+            // never without its frame.
+            let _ = self.bloom(gpu, m, scene);
             self.fade_cut();
             self.rt.EndDraw(None, None)
         }
@@ -1155,6 +1171,8 @@ impl Target {
             rt,
             brush: &self.brush,
             gradients: &self.gradients,
+            shades: &self.shades,
+            emit: None,
         }
     }
 }
@@ -1297,9 +1315,21 @@ struct Painter<'a> {
     rt: &'a ID2D1RenderTarget,
     brush: &'a ID2D1SolidColorBrush,
     gradients: &'a Gradients,
+    shades: &'a shade::Shades,
+    /// Where light that holds still goes, while the kept layer is drawn:
+    /// it is bloomed into the layer once the rest is.
+    emit: Option<&'a RefCell<Vec<shine::Emitter>>>,
 }
 
 impl Painter<'_> {
+    /// Light that holds still, for the bloom, when this painter draws the
+    /// kept layer. Elsewhere it has no light to go to and is left out.
+    fn emit(&self, e: shine::Emitter) {
+        if let Some(emitters) = self.emit {
+            emitters.borrow_mut().push(e);
+        }
+    }
+
     /// Everything that holds still between frames.
     unsafe fn still(&self, gpu: &Gpu, m: &Metrics, scene: &Scene) {
         self.plate(m, scene.layout.size);
@@ -2709,7 +2739,7 @@ impl Painter<'_> {
         let d = depth.clamp(0.0, 2.5);
         let side = 1.0 + 2.5 * d;
         let shadow = theme::cast().fade(opacity * (0.35 + 0.35 * d.min(1.0)));
-        self.cast(r, radius, (0.0, side + 1.5 * d), 3.0 + 6.0 * d, shadow);
+        self.cast(gpu, r, radius, (0.0, side + 1.5 * d), 3.0 + 6.0 * d, shadow);
         let below = Rect::new(r.x, r.y + side, r.w, r.h);
         let black = Color::rgb(0);
         self.fill_rounded(&below, radius, face.mix(black, 0.6).fade(opacity));
@@ -2812,7 +2842,8 @@ impl Painter<'_> {
 
     /// A session's lamp in its slot at `r`, burning `level` of full in `c`.
     /// Off, it is dark glass with a glint on it, so an unlit lamp still
-    /// reads as a lamp.
+    /// reads as a lamp. Lit, this is the glass's colour; its light is the
+    /// bloom's, baked with the kept layer or drawn each frame by the shine.
     unsafe fn lamp(&self, r: &Rect, c: Color, level: f32) {
         let round = r.w / 2.0;
         let housing = r.inset(-1.5);
@@ -2825,17 +2856,8 @@ impl Painter<'_> {
             return;
         }
         let level = level.min(1.0);
-        // The light spilling onto the key round it.
-        let rings = 4;
-        for i in 0..rings {
-            let s = 1.5 + i as f32 * 2.0;
-            let k = 1.0 - i as f32 / rings as f32;
-            let spill = c.with_alpha(level * 0.16 * k * k);
-            self.stroke_rounded(&r.inset(-s), round + s, spill, 2.0);
-        }
-        self.fill_rounded(r, round, theme::lamp_off().mix(c, level));
-        let hot = c.mix(Color::rgb(0xFFFFFF), 0.45).fade(level);
-        self.fill_rounded(&r.inset(1.0), (round - 1.0).max(0.5), hot);
+        self.fill_rounded(r, round, theme::lamp_off().mix(c, 0.7 * level));
+        self.emit(shine::Emitter::Glass { r: *r, c, level });
     }
 
     /// One of the twelve runes, `h` tall, centred on `at`, `drawn` of its
@@ -3129,16 +3151,23 @@ impl Painter<'_> {
         }
     }
 
-    /// A small round indicator, lit in `c`.
+    /// A small round indicator, lit in `c`. In the kept layer its glow is
+    /// the bloom's; elsewhere, until those windows take light, a soft dot.
     unsafe fn led(&self, x: f32, y: f32, c: Color) {
-        self.glow_dot(x, y, 6.0, c, 0.45);
+        let hot = c.mix(Color::rgb(0xFFFFFF), 0.3);
+        if self.emit.is_some() {
+            // The dot again as light: lit, it reads brighter than its glass.
+            let c = hot.fade(0.6);
+            self.emit(shine::Emitter::Dot { x, y, radius: 2.5, c });
+        } else {
+            self.glow_dot(x, y, 6.0, c, 0.45);
+        }
         let dot = D2D1_ELLIPSE {
             point: Vector2 { X: x, Y: y },
             radiusX: 2.5,
             radiusY: 2.5,
         };
-        self.brush
-            .SetColor(&color(c.mix(Color::rgb(0xFFFFFF), 0.3)));
+        self.brush.SetColor(&color(hot));
         self.rt.FillEllipse(&dot, self.brush);
     }
 
@@ -3176,86 +3205,15 @@ impl Painter<'_> {
         }
     }
 
-    /// `r`'s shadow, moved by `(dx, dy)` and blurred `blur` wide: the same
-    /// shape again and again, each a little bigger and fainter, which adds
-    /// up to a soft edge.
-    unsafe fn cast(&self, r: &Rect, radius: f32, (dx, dy): (f32, f32), blur: f32, c: Color) {
-        for s in blur_steps(blur) {
-            let e = Rect::new(r.x + dx, r.y + dy, r.w, r.h).inset(-s);
-            if e.w > 0.0 && e.h > 0.0 {
-                self.fill_rounded(&e, radius + s, c.fade(1.0 / BLUR_STEPS as f32));
-            }
-        }
-    }
-
-    /// Light and shade inside `r`, along its edges: `near` on the top left
-    /// rim, `far` on the bottom right, each `offset` deep and `blur` soft.
-    #[allow(clippy::too_many_arguments)]
-    unsafe fn inner(
-        &self,
-        gpu: &Gpu,
-        r: &Rect,
-        radius: f32,
-        (offset, blur): (f32, f32),
-        near: Color,
-        far: Color,
-        opacity: f32,
-    ) {
-        let Ok(mask) = gpu.d2d.CreateRoundedRectangleGeometry(&rounded(r, radius)) else {
-            return;
-        };
-        let Ok(layer) = self.rt.CreateLayer(None) else {
-            return;
-        };
-        let params = D2D1_LAYER_PARAMETERS {
-            contentBounds: rect(r),
-            geometricMask: ManuallyDrop::new(mask.cast::<ID2D1Geometry>().ok()),
-            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-            maskTransform: Matrix3x2::identity(),
-            opacity,
-            opacityBrush: ManuallyDrop::new(None),
-            layerOptions: D2D1_LAYER_OPTIONS_NONE,
-        };
-        self.rt.PushLayer(&params, &layer);
-        self.hollow(r, radius, (offset, offset), blur, near);
-        self.hollow(r, radius, (-offset, -offset), blur, far);
-        self.rt.PopLayer();
-        drop(ManuallyDrop::into_inner(params.geometricMask));
-    }
-
-    /// Everything outside `r` moved by `(dx, dy)`, blurred: inside a clip
-    /// to `r` itself, that is the rim the moved copy leaves uncovered. The
-    /// outside of a rounded rectangle is a stroke on a bigger one, as wide
-    /// as it has to reach.
-    unsafe fn hollow(&self, r: &Rect, radius: f32, (dx, dy): (f32, f32), blur: f32, c: Color) {
-        let reach = 2.0 * (dx.abs().max(dy.abs()) + blur + 2.0);
-        for s in blur_steps(blur) {
-            let e = Rect::new(r.x + dx, r.y + dy, r.w, r.h).inset(-s - reach / 2.0);
-            let corner = (radius + s).max(0.0) + reach / 2.0;
-            self.stroke_rounded(&e, corner, c.fade(1.0 / BLUR_STEPS as f32), reach);
-        }
-    }
-
-    /// A waiting tile's light: its colour spilling out from under it and a
-    /// line round its edge. All of it outside the tile or on its rim, so it
-    /// can be laid over the kept layer every frame.
+    /// A waiting tile's rim, lit, for when nothing may move: light, so it
+    /// is baked with the rest of the still light.
     unsafe fn halo(&self, r: &Rect, radius: f32, c: Color, strength: f32) {
-        if strength <= 0.0 {
-            return;
-        }
-        let rings = 5;
-        for i in 0..rings {
-            let s = 1.0 + i as f32 * 2.0;
-            let k = 1.0 - i as f32 / rings as f32;
-            let a = strength * 0.2 * k * k;
-            self.stroke_rounded(&r.inset(-s), radius + s, c.with_alpha(a), 2.0);
-        }
-        self.stroke_rounded(
-            &r.inset(0.75),
-            radius - 0.75,
-            c.with_alpha(strength * 0.75),
-            1.5,
-        );
+        self.emit(shine::Emitter::Rim {
+            r: *r,
+            radius,
+            c,
+            strength,
+        });
     }
 
     unsafe fn fill_rounded(&self, r: &Rect, radius: f32, c: Color) {
@@ -4474,13 +4432,6 @@ fn lamp_rect(r: &Rect) -> Rect {
     Rect::new(r.x + 12.0, r.y + 14.0, 4.0, r.h - 28.0)
 }
 
-/// How far each of the shapes that make a `blur` wide soft edge grows past
-/// the sharp one, evenly from `-blur / 2` to `blur / 2`, so the edge's
-/// middle stays where the sharp edge was.
-fn blur_steps(blur: f32) -> impl Iterator<Item = f32> {
-    (0..BLUR_STEPS).map(move |i| blur * ((i as f32 + 0.5) / BLUR_STEPS as f32 - 0.5))
-}
-
 /// One line of body text, what a field's placeholder takes up.
 const FIELD_LINE_H: f32 = 19.0;
 
@@ -4624,15 +4575,5 @@ mod tests {
             vec![(290.0, 300.0), (300.0, 290.0)]
         );
         assert_eq!(fade_bands((50.0, 50.0), 300.0, 28.0), vec![]);
-    }
-
-    #[test]
-    fn a_soft_edge_spreads_evenly_about_the_sharp_one() {
-        let steps: Vec<f32> = blur_steps(8.0).collect();
-        assert_eq!(steps.len(), BLUR_STEPS);
-        assert!((steps.iter().sum::<f32>()).abs() < 1e-4);
-        assert!(steps.windows(2).all(|w| w[1] > w[0]));
-        assert!(steps[0] > -4.0 && steps[BLUR_STEPS - 1] < 4.0);
-        assert!(blur_steps(0.0).all(|s| s == 0.0));
     }
 }

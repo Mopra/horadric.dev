@@ -1,11 +1,22 @@
-//! The cluster's moving light: what gives off light each frame, drawn
-//! sharp into the window's light layer (`crate::light`), which blooms it.
+//! The cluster's light: what gives off light, drawn sharp into a light
+//! layer (`crate::light`), which blooms it. Light that moves is drawn each
+//! frame over the window. Light that holds still (a lamp lit at rest, the
+//! header's count lights) is collected as [`Emitter`]s while the kept layer
+//! is drawn and bloomed into it, and bloomed again only when it changes.
 
-use windows::core::Result;
+use windows::core::{Interface, Result};
 
 use std::time::{Duration, SystemTime};
 
-use windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE;
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_PLUS, D2D1_PIXEL_FORMAT,
+    D2D_SIZE_U,
+};
+use windows::Win32::Graphics::Direct2D::{
+    ID2D1BitmapRenderTarget, ID2D1DeviceContext, ID2D1Image,
+    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_INTERPOLATION_MODE_LINEAR,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows_numerics::Vector2;
 
 use super::{color, Gpu, Painter, Scene, Target, BEAM_H, SHIMMER, WARRIV_BREATH};
@@ -19,7 +30,151 @@ use horadric_core::session::{Phase, Session};
 /// How far round a lamp its sparks, runes and embers reach.
 const LAMP_REACH: f32 = 24.0;
 
+/// Something lit that holds still, found while the kept layer is drawn.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Emitter {
+    /// A lamp's glass, lit `level` of full in `c`.
+    Glass { r: Rect, c: Color, level: f32 },
+    /// A key's rim, lit `strength` of full in `c`.
+    Rim {
+        r: Rect,
+        radius: f32,
+        c: Color,
+        strength: f32,
+    },
+    /// A small round light.
+    Dot { x: f32, y: f32, radius: f32, c: Color },
+}
+
+impl Emitter {
+    fn bounds(&self) -> Rect {
+        match *self {
+            Emitter::Glass { r, .. } => r.inset(-1.0),
+            Emitter::Rim { r, .. } => r.inset(-2.0),
+            Emitter::Dot { x, y, radius, .. } => {
+                Rect::new(x - radius, y - radius, 2.0 * radius, 2.0 * radius)
+            }
+        }
+    }
+}
+
+/// The still light, bloomed, and what it was bloomed from.
+pub(super) struct Kept {
+    target: ID2D1BitmapRenderTarget,
+    size: D2D_SIZE_U,
+    signature: Vec<u32>,
+}
+
+/// What a set of still lights looks like once bloomed, to a quarter DIP
+/// and an eight bit colour: the same signature is the same light, so the
+/// kept bloom is reused. Tiles sliding change it; a context bar filling or
+/// a cursor over a key does not.
+fn signature(emitters: &[Emitter], look: &Bloom) -> Vec<u32> {
+    let q = |v: f32| (v * 4.0).round() as i32 as u32;
+    let ink = |c: Color| {
+        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+        byte(c.r) << 24 | byte(c.g) << 16 | byte(c.b) << 8 | byte(c.a)
+    };
+    let level = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let mut sig = vec![
+        look.near.to_bits(),
+        look.far.to_bits(),
+        look.far_passes as u32,
+        look.gain.to_bits(),
+    ];
+    for e in emitters {
+        match *e {
+            Emitter::Glass { r, c, level: l } => {
+                sig.extend([0, q(r.x), q(r.y), q(r.w), q(r.h), ink(c), level(l)])
+            }
+            Emitter::Rim {
+                r,
+                radius,
+                c,
+                strength,
+            } => sig.extend([
+                1,
+                q(r.x),
+                q(r.y),
+                q(r.w),
+                q(r.h),
+                q(radius),
+                ink(c),
+                level(strength),
+            ]),
+            Emitter::Dot { x, y, radius, c } => sig.extend([2, q(x), q(y), q(radius), ink(c)]),
+        }
+    }
+    sig
+}
+
 impl Target {
+    /// Adds the still light to the kept layer `on`, `size` pixels, while it
+    /// is drawn. It is bloomed again only when it differs from last time:
+    /// the layer is redrawn every frame a tile slides or a bar fills, and a
+    /// blur each of those frames is what the kept layer is there to save.
+    pub(super) unsafe fn still_bloom(
+        &self,
+        on: &ID2D1BitmapRenderTarget,
+        emitters: &[Emitter],
+        size: D2D_SIZE_U,
+    ) -> Result<()> {
+        if emitters.is_empty() {
+            return Ok(());
+        }
+        let look = Bloom::tile();
+        let signature = signature(emitters, &look);
+        let mut kept = self.kept_light.borrow_mut();
+        let fresh = kept
+            .as_ref()
+            .is_some_and(|k| k.size == size && k.signature == signature);
+        if !fresh {
+            let target = match kept.take() {
+                Some(k) if k.size == size => k.target,
+                _ => {
+                    let format = D2D1_PIXEL_FORMAT {
+                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                    };
+                    self.rt.CreateCompatibleRenderTarget(
+                        None,
+                        None,
+                        Some(&format),
+                        D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+                    )?
+                }
+            };
+            let layer = self.still_light.begin(&self.rt)?;
+            let p = self.painter(&layer);
+            for e in emitters {
+                p.emitter(e);
+                self.still_light.lit(e.bounds());
+            }
+            target.BeginDraw();
+            target.Clear(Some(&D2D1_COLOR_F::default()));
+            let bloomed = self.still_light.present(&target, &look);
+            target.EndDraw(None, None)?;
+            bloomed?;
+            *kept = Some(Kept {
+                target,
+                size,
+                signature,
+            });
+        }
+        let Some(k) = kept.as_ref() else {
+            return Ok(());
+        };
+        let light: ID2D1Image = k.target.GetBitmap()?.cast()?;
+        on.cast::<ID2D1DeviceContext>()?.DrawImage(
+            &light,
+            None,
+            None,
+            D2D1_INTERPOLATION_MODE_LINEAR,
+            D2D1_COMPOSITE_MODE_PLUS,
+        );
+        Ok(())
+    }
+
     /// Lays the frame's light over what is drawn. Nothing when nothing
     /// shines, so a quiet window costs no blur.
     pub(super) unsafe fn bloom(&self, gpu: &Gpu, m: &Metrics, scene: &Scene) -> Result<()> {
@@ -62,14 +217,19 @@ impl Painter<'_> {
         lit.extend(self.flights(scene));
         for (i, (r, s, look)) in super::tiles(scene).enumerate() {
             let c = theme::phase_color(&s.phase);
+            let lamp = super::lamp_rect(&r);
+            let stone = super::keycube::has_stone(s);
+            // The breathing and beckoning lamps are drawn each frame by
+            // `Painter::light`; their glass is light, so it is drawn here.
             if scene.beckons(i, s) {
                 let on = motion::beacon(look.phase_age) * look.enter;
                 self.rim(&r, radius, c, 0.7 * on);
+                if !stone {
+                    self.glass(&lamp, c, on);
+                }
                 lit.push(r.inset(-2.0));
                 continue;
             }
-            let lamp = super::lamp_rect(&r);
-            let stone = super::keycube::has_stone(s);
             match s.phase {
                 // A rune stone carries its own light; it has no lamp.
                 Phase::Working | Phase::Ended if stone => {}
@@ -89,6 +249,9 @@ impl Painter<'_> {
                 Phase::Waiting(_) => {
                     let breath = motion::waiting_breath(look.phase_age);
                     self.rim(&r, radius, c, (0.3 + 0.4 * breath) * look.enter);
+                    if !stone {
+                        self.glass(&lamp, c, (0.55 + 0.45 * breath) * look.enter);
+                    }
                     let spread = self.arrival_ring(&r, radius, c, look.arrival);
                     lit.push(r.inset(-2.0 - spread));
                 }
@@ -105,6 +268,33 @@ impl Painter<'_> {
             }
         }
         lit
+    }
+
+    /// One still light, sharp, into the light layer.
+    unsafe fn emitter(&self, e: &Emitter) {
+        match *e {
+            Emitter::Glass { r, c, level } => self.glass(&r, c, level),
+            Emitter::Rim {
+                r,
+                radius,
+                c,
+                strength,
+            } => self.rim(&r, radius, c, strength),
+            Emitter::Dot { x, y, radius, c } => self.dot(x, y, radius, c),
+        }
+    }
+
+    /// A lamp's glass lit `level` of full in `c`: its colour, and a hot
+    /// core down its middle that the bloom spills onto the key round it.
+    unsafe fn glass(&self, r: &Rect, c: Color, level: f32) {
+        let level = level.clamp(0.0, 1.0);
+        if level <= 0.0 {
+            return;
+        }
+        let round = r.w / 2.0;
+        self.fill_rounded(r, round, c.fade(0.45 * level));
+        let hot = c.mix(Color::rgb(0xFFFFFF), 0.45);
+        self.fill_rounded(&r.inset(1.0), (round - 1.0).max(0.5), hot.fade(0.5 * level));
     }
 
     /// A key's rim lit in `c`: the line round its edge, which the bloom
@@ -311,5 +501,53 @@ impl Painter<'_> {
         let embers = Burst::new(particles::seed_of(&s.id), 4, Kind::Ember);
         let k = (t - 0.35) / 0.65;
         self.burst(&embers, (cx, cy), k * embers.span(), theme::working(), 1.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn look() -> Bloom {
+        Bloom {
+            near: 1.8,
+            far: 7.0,
+            far_passes: 2,
+            gain: 1.0,
+        }
+    }
+
+    fn lamp(y: f32, level: f32) -> Emitter {
+        Emitter::Glass {
+            r: Rect::new(12.0, y, 4.0, 30.0),
+            c: Color::rgb(0x3FA2FF),
+            level,
+        }
+    }
+
+    #[test]
+    fn the_same_still_light_is_bloomed_once() {
+        let a = [lamp(14.0, 1.0)];
+        // Closer than a quarter DIP and an eight bit level is the same.
+        let b = [lamp(14.05, 0.999)];
+        assert_eq!(signature(&a, &look()), signature(&b, &look()));
+    }
+
+    #[test]
+    fn still_light_that_moves_dims_or_changes_is_bloomed_again() {
+        let a = [lamp(14.0, 1.0)];
+        assert_ne!(signature(&a, &look()), signature(&[lamp(15.0, 1.0)], &look()));
+        assert_ne!(signature(&a, &look()), signature(&[lamp(14.0, 0.5)], &look()));
+        assert_ne!(signature(&a, &look()), signature(&[], &look()));
+        let wider = Bloom { far: 9.0, ..look() };
+        assert_ne!(signature(&a, &look()), signature(&a, &wider));
+        // A dot where a lamp was is not the same light.
+        let dot = [Emitter::Dot {
+            x: 12.0,
+            y: 14.0,
+            radius: 4.0,
+            c: Color::rgb(0x3FA2FF),
+        }];
+        assert_ne!(signature(&a, &look()), signature(&dot, &look()));
     }
 }
