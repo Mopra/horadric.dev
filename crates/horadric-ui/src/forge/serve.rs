@@ -42,9 +42,8 @@ const FORGE_JS: &str = include_str!("../../assets/forge/forge.js");
 const FORGE_CSS: &str = include_str!("../../assets/forge/forge.css");
 const DECK_JS: &str = include_str!("../../assets/forge/deck.js");
 const DECK_CSS: &str = include_str!("../../assets/forge/deck.css");
-// Empty until the page side's editor.js and editor.css land beside these.
-const EDITOR_JS: &str = "";
-const EDITOR_CSS: &str = "";
+const EDITOR_JS: &str = include_str!("../../assets/forge/editor.js");
+const EDITOR_CSS: &str = include_str!("../../assets/forge/editor.css");
 
 /// The host the folder `root` is served at: its name, made safe for a
 /// host, and a hash of its whole path so two folders of one name differ.
@@ -219,7 +218,7 @@ fn script(accent: Color) -> String {
 {FORGE_CSS}"),
         "deckCss": format!(":host, html.forge-deck {{ {look} }}
 {DECK_CSS}"),
-        "editorCss": format!(":host {{ {look} }}
+        "editorCss": format!(":host, html.forge-editing {{ {look} }}
 {EDITOR_CSS}"),
     });
     format!(
