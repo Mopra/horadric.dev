@@ -177,14 +177,18 @@ fn hooks(log: &mut Log) {
 fn start_and_check(dir: &Path, log: &mut Log) -> Result<bool, String> {
     let app = dir.join(BINARIES[0]);
     log.line(&format!("starting {}", app.display()));
-    let mut child = crate::detach(horadric_hooks::no_window(
-        Command::new(&app).args(["app", "--reload"]),
-    ))
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .spawn()
-    .map_err(|e| format!("could not start {}: {e}", app.display()))?;
+    let mut command = Command::new(&app);
+    command.args(["app", "--reload"]);
+    // This chain may go back to an app started inside a session: its
+    // identity would become every project's, its removed tokens stay gone.
+    #[cfg(windows)]
+    horadric_ui::vault::identity::user_env_for(&mut command);
+    let mut child = crate::detach(horadric_hooks::no_window(&mut command))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("could not start {}: {e}", app.display()))?;
     let up = came_up(&mut child);
     if !up {
         let _ = child.kill();

@@ -155,8 +155,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // Not through the app, so the hosts are told here. The task list is
     // not: an item is only ever worked by a session the app started.
     let mut command = Command::new(program);
-    // The project's identity too, as an app session gets it. No secret
-    // key: the app did not start this one, so `horadric secret` refuses it.
+    // The project's identity too, as an app session gets it, after what
+    // another project's session left in this terminal is taken out. No
+    // secret key: the app did not start this one, so `horadric secret`
+    // refuses it.
     #[cfg(windows)]
     {
         let identity = horadric_ui::vault::identity::session_env(&cwd);

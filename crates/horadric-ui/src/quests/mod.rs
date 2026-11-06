@@ -228,8 +228,9 @@ impl SessionSpec {
 /// The environment session `id` in `cwd` gets beside its tag, terminal,
 /// Folio or plain shell: its worktree's ports, which quest log `horadric
 /// quest` works on, and its project's identity. Returns what to set and
-/// what to remove from what it inherits, the machine's tokens when an
-/// identity speaks for it.
+/// what to remove from what it inherits: every identity variable the app
+/// has, whether or not the project has an identity, and the machine's
+/// tokens when one speaks for it.
 pub(crate) fn session_env(
     id: &str,
     own_tree: Option<&Worktree>,

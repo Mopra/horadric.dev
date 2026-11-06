@@ -101,6 +101,21 @@ pub const MACHINE_TOKENS: [&str; 5] = [
     "VERCEL_TOKEN",
 ];
 
+/// The variables [`tool_env`] points a tool at an identity's folder with.
+pub const TOOL_VARS: [&str; 3] = ["GH_CONFIG_DIR", "NPM_CONFIG_USERCONFIG", "XDG_DATA_HOME"];
+
+/// Whether `name` is a variable an identity's session is given. One left
+/// over in a process started from such a session (a `reload`, a dev
+/// instance, a `horadric run`) would make everything it starts that
+/// identity, so they are never inherited, only set.
+pub fn identity_var(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    TOOL_VARS.contains(&n.as_str())
+        || n == "GIT_CONFIG_COUNT"
+        || n.starts_with("GIT_CONFIG_KEY_")
+        || n.starts_with("GIT_CONFIG_VALUE_")
+}
+
 /// A folder name made of `name`: lower case ASCII letters and digits, the
 /// rest one hyphen. Never empty.
 pub fn slug(name: &str) -> String {
@@ -148,6 +163,10 @@ pub fn new_slug(name: &str, all: &[Identity]) -> String {
 /// longest folder claim, else none. A pick of "" is a pick of none, which
 /// beats the file and the claims. A pick of an identity since deleted is
 /// as no pick.
+///
+/// Not a security boundary: it picks whose logins a session starts with,
+/// for the human's convenience. An agent can point `GH_CONFIG_DIR` at any
+/// folder itself, and the config file it can edit names the identity.
 pub fn resolve(pick: Option<&str>, file: Option<&str>, folder: &str, all: &[Identity]) -> Resolved {
     let known = |s: &str| {
         let s = s.trim();
@@ -449,6 +468,23 @@ pub fn with_local_pick(entry: &str, pick: Option<&str>) -> String {
     Value::Object(root).to_string()
 }
 
+/// The keys of the local store's projects whose pick is `slug`, so a
+/// deleted identity's picks go with it and a later one by the same slug
+/// does not inherit them.
+pub fn picks_of(store: &str, slug: &str) -> Vec<String> {
+    let Ok(Value::Object(root)) = serde_json::from_str::<Value>(strip_bom(store)) else {
+        return Vec::new();
+    };
+    root.iter()
+        .filter(|(_, e)| {
+            e.get("identity")
+                .and_then(Value::as_str)
+                .is_some_and(|s| s.trim().eq_ignore_ascii_case(slug.trim()))
+        })
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
 /// `claims` with `folder` added, unless it or the same folder spelled
 /// otherwise is there.
 pub fn with_claim(claims: &[String], folder: &str) -> Vec<String> {
@@ -474,6 +510,33 @@ pub fn without_claim(claims: &[String], folder: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn identity_vars_are_the_ones_env_sets() {
+        let id = Identity {
+            name: "m".into(),
+            slug: "m".into(),
+            tools: Tool::ALL.to_vec(),
+            git: Some(Git {
+                name: "M".into(),
+                email: "m@x".into(),
+                github_user: Some("m".into()),
+            }),
+            ..Default::default()
+        };
+        let (set, _) = env(&id, Path::new("d"));
+        assert!(set.iter().all(|(k, _)| identity_var(k)));
+        assert!(identity_var("git_config_key_7"));
+        assert!(!identity_var("GIT_DIR"));
+        assert!(!identity_var("PATH"));
+    }
+
+    #[test]
+    fn picks_of_finds_only_that_slug() {
+        let store = r#"{"c:/a":{"identity":"Mopra"},"c:/b":{"identity":null},"c:/c":{"identity":"other"},"c:/d":{}}"#;
+        assert_eq!(picks_of(store, "mopra"), vec!["c:/a".to_string()]);
+        assert!(picks_of("not json", "mopra").is_empty());
+    }
 
     fn id(slug: &str, claims: &[&str]) -> Identity {
         Identity {
@@ -509,7 +572,10 @@ mod tests {
             resolve(Some("me"), Some("opti"), "c:/code/app", &all),
             Resolved::Identity("me".into())
         );
-        assert_eq!(resolve(Some(""), Some("opti"), "c:/code/app", &all), Resolved::None);
+        assert_eq!(
+            resolve(Some(""), Some("opti"), "c:/code/app", &all),
+            Resolved::None
+        );
     }
 
     #[test]
@@ -540,11 +606,23 @@ mod tests {
             id("inner", &[r"c:\users\me\documents\github\opti"]),
         ];
         let at = |f| resolve(None, None, f, &all);
-        assert_eq!(at("c:/users/me/documents/github/opti/app"), Resolved::Identity("inner".into()));
-        assert_eq!(at("C:/Users/Me/Documents/Github/OPTI"), Resolved::Identity("inner".into()));
-        assert_eq!(at("c:/users/me/documents/github/optix"), Resolved::Identity("outer".into()));
+        assert_eq!(
+            at("c:/users/me/documents/github/opti/app"),
+            Resolved::Identity("inner".into())
+        );
+        assert_eq!(
+            at("C:/Users/Me/Documents/Github/OPTI"),
+            Resolved::Identity("inner".into())
+        );
+        assert_eq!(
+            at("c:/users/me/documents/github/optix"),
+            Resolved::Identity("outer".into())
+        );
         assert_eq!(at("c:/users/me/documents/other"), Resolved::None);
-        assert_eq!(at(r"\\?\C:\Users\Me\Documents\Github\x"), Resolved::Identity("outer".into()));
+        assert_eq!(
+            at(r"\\?\C:\Users\Me\Documents\Github\x"),
+            Resolved::Identity("outer".into())
+        );
     }
 
     #[test]
@@ -560,7 +638,10 @@ mod tests {
         i.tools = vec![Tool::Gh, Tool::Npm];
         let (set, _) = env(&i, &dir);
         let get = |k: &str| set.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get("GH_CONFIG_DIR"), Some(dir.join("gh").to_string_lossy().into()));
+        assert_eq!(
+            get("GH_CONFIG_DIR"),
+            Some(dir.join("gh").to_string_lossy().into())
+        );
         assert_eq!(
             get("NPM_CONFIG_USERCONFIG"),
             Some(dir.join("npm").join(".npmrc").to_string_lossy().into())
@@ -628,7 +709,11 @@ mod tests {
         let rc = "; comment\nregistry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=npm_abc\n//npm.pkg.github.com/:_authToken=ghp\n//registry.npmjs.org/:_authToken=again\n//empty.example/:_authToken=\n//corp.example/npm/:_auth=Zm9v\n//x.example/:email=a@b\n";
         assert_eq!(
             npm_registries(rc),
-            ["registry.npmjs.org", "npm.pkg.github.com", "corp.example/npm"]
+            [
+                "registry.npmjs.org",
+                "npm.pkg.github.com",
+                "corp.example/npm"
+            ]
         );
         assert!(npm_registries("").is_empty());
     }
@@ -657,7 +742,9 @@ mod tests {
         let lines = prompt_lines(&i, &who);
         let all = lines.join("\n");
         assert!(lines[0].contains("\"Optipeople\""));
-        assert!(all.contains("Git commits as Mo <mo@opti.dk> and pushes to GitHub over HTTPS as MP-OPTI."));
+        assert!(all.contains(
+            "Git commits as Mo <mo@opti.dk> and pushes to GitHub over HTTPS as MP-OPTI."
+        ));
         assert!(all.contains("gh: logged in as MP-OPTI."));
         assert!(all.contains("npm: not logged in for Optipeople."));
         assert!(all.contains("vercel: logged in."));

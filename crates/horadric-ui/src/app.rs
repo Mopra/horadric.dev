@@ -728,6 +728,11 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
     {
         return Err(format!("Horadric is already running (port {port} answers)"));
     }
+    // Started from a session, the app holds that session's identity, and
+    // every session, job and login check it starts would be that identity.
+    if console::under_claude() {
+        crate::vault::identity::reset_inherited();
+    }
     run_app(port, reload).map_err(|e| e.to_string())
 }
 
