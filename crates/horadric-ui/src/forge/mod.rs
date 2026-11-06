@@ -607,6 +607,7 @@ pub fn drain() {
     tools::drain();
     history::drain();
     edit::drain();
+    home::drain();
     for (root, rel, all) in watch::take() {
         changed(&root, &rel, all);
     }

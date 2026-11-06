@@ -415,9 +415,9 @@ fn plan(root: &Path, url: &str, document: bool, flat: bool, accent: Color) -> Op
                 super::runtime::attr(&to)
             ))));
         }
-        let (root, written) = (root.to_path_buf(), super::recent_written());
+        let (root, written, query) = (root.to_path_buf(), super::recent_written(), query.to_string());
         return Some(Plan::Later(Box::new(move || {
-            super::home::page(&root, &file, flat, &written, accent)
+            super::home::page_asked(&root, &file, flat, &written, accent, &query)
         })));
     }
     let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
