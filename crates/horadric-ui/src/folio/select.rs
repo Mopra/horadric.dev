@@ -16,7 +16,8 @@ use super::cards::picks_of;
 use super::comments;
 use super::flow::{self, Pos};
 use super::transcript::{
-    change_field, deny_field, keep_field, note_field, other_field, Act, Find, State, FIND_FIELD,
+    change_field, deny_field, keep_field, note_field, other_field, Act, Copied, Find, State,
+    FIND_FIELD,
     SHOWN,
 };
 use super::view::View;
@@ -32,7 +33,15 @@ const CHANGE_MAX: usize = 4 << 20;
 /// A click on one of the transcript's own buttons.
 pub(super) fn act(key: &str, a: Act) {
     match a {
-        Act::Copy(t) => clipboard::set_text(&t),
+        Act::Copy(t) => {
+            clipboard::set_text(&t);
+            // Its button says Copied for a moment. The click was on it, so
+            // the pointer names the block it is in.
+            with(key, |c| {
+                let block = block_at(c, c.tr.state.mouse);
+                c.tr.state.copied = Some(Copied::new(&t, block, std::time::Instant::now()));
+            });
+        }
         Act::Resume => app::push(Input::Expand(key.to_string())),
         Act::Edit(block) => super::composer::edit_prompt(key, block),
         Act::Rewind(block) => super::composer::rewind_to(key, block),

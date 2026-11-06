@@ -8,7 +8,7 @@
 //! output, its diff or its subagent's lane; asks, questions and plans are
 //! cards ([`cards`]).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -66,6 +66,13 @@ pub(super) const SHOWN: usize = 300;
 const SETTLE_AFTER: Duration = Duration::from_millis(120);
 /// Room for that line at the top.
 const EARLIER_H: f32 = 30.0;
+/// How long a Copy button says Copied after its click.
+const COPIED_FOR: Duration = Duration::from_millis(1500);
+/// The todo list's head, and each of its rows when open.
+const TODO_HEAD: f32 = 34.0;
+const TODO_ROW: f32 = 22.0;
+/// The todo list's progress bar, slim enough to read as a measure.
+const TODO_BAR_W: f32 = 72.0;
 
 /// What a click on a part of the transcript does, beyond folding a block
 /// and answering an ask once.
@@ -214,6 +221,52 @@ pub(super) struct State {
     pub(super) prompts: Vec<usize>,
     pub(super) shown: Vec<(Rect, usize, u32)>,
     pub(super) area: Rect,
+    /// The last thing a Copy button copied, so the button can say so.
+    pub(super) copied: Option<Copied>,
+}
+
+/// What a Copy button copied, from which block, and when.
+pub(super) struct Copied {
+    key: u64,
+    block: Option<usize>,
+    at: Instant,
+}
+
+impl Copied {
+    pub(super) fn new(text: &str, block: Option<usize>, at: Instant) -> Copied {
+        Copied {
+            key: copy_key(text),
+            block,
+            at,
+        }
+    }
+}
+
+thread_local! {
+    /// The copy whose button still says Copied, by [`copy_key`]. Set by
+    /// the transcript before it builds, since a block's scene is built
+    /// from its text alone, as code's fold state is.
+    static COPIED: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+fn copy_key(text: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
+
+/// How much longer a copy made `at` is shown as made, None once it is not.
+fn copy_left(at: Instant, now: Instant) -> Option<Duration> {
+    COPIED_FOR
+        .checked_sub(now.saturating_duration_since(at))
+        .filter(|d| !d.is_zero())
+}
+
+/// Whether a Copy button for `text` should say Copied now. Only the block
+/// the copy was made in is built again when it starts and stops, so this
+/// is read while building.
+pub(super) fn copied(text: &str) -> bool {
+    COPIED.get() == Some(copy_key(text))
 }
 
 impl State {
@@ -238,6 +291,8 @@ struct Built {
     /// The code blocks open when it was built: its paragraphs are not
     /// kept once that changes, a code block's fold being in its scene.
     code_open: u64,
+    /// Built while a Copy button in it said Copied.
+    copy: bool,
 }
 
 /// Decoded thumbnails by block and image, None where one would not decode.
@@ -356,9 +411,12 @@ fn hash_field(h: &mut DefaultHasher, st: &State, id: &str) {
 }
 
 /// What block `b` is built from: when this changes, it is built again.
-fn stamp(i: usize, b: &Block, open: bool, st: &State) -> u64 {
+fn stamp(i: usize, b: &Block, open: bool, live: bool, copy: bool, st: &State) -> u64 {
     let mut h = DefaultHasher::new();
-    open.hash(&mut h);
+    (open, copy).hash(&mut h);
+    if matches!(b, Block::Thinking(_)) {
+        live.hash(&mut h);
+    }
     st.verbose.hash(&mut h);
     std::mem::discriminant(b).hash(&mut h);
     match b {
@@ -472,6 +530,88 @@ fn raw_text(t: &str) -> String {
     let mut s: String = t.chars().take(RAW_MAX).collect();
     s.push('\u{2026}');
     s
+}
+
+/// Every colour in `s` at `k` of its strength, so a scene built as a reply
+/// sits back as an aside.
+fn hush(s: &mut Scene, k: f32) {
+    let quiet = |c: &mut Color| *c = c.with_alpha(c.a * k);
+    for item in s.items.iter_mut().chain(s.hover.iter_mut()) {
+        match item {
+            Item::Fill(_, _, c)
+            | Item::Stroke(_, _, c, _)
+            | Item::Text(_, _, _, c)
+            | Item::Line(_, _, _, c)
+            | Item::Rune(_, _, _, _, c, _) => quiet(c),
+            Item::Image(..) | Item::Clip(_) | Item::Unclip => {}
+        }
+    }
+}
+
+/// A thought folded to a line. Thinking carries no times of its own, so
+/// a finished one is measured in words.
+fn thought_line(t: &str, live: bool) -> String {
+    if live {
+        return "Thinking\u{2026}".to_string();
+    }
+    match t.split_whitespace().count() {
+        0 => "Thought".to_string(),
+        1 => "Thought \u{b7} 1 word".to_string(),
+        n if n < 1000 => format!("Thought \u{b7} {n} words"),
+        n => format!("Thought \u{b7} {} words", flow::tokens(n as u64)),
+    }
+}
+
+/// A glimpse of a thought beside its folded line: where it began, or while
+/// it streams, the line it is on now. Markdown's marks are left off.
+fn thought_glimpse(t: &str, live: bool) -> &str {
+    let mut lines = t
+        .lines()
+        .map(|l| l.trim_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '#' | '_' | '>')))
+        .filter(|l| !l.is_empty());
+    let line = if live { lines.last() } else { lines.next() };
+    line.unwrap_or("")
+}
+
+/// What a lane's head says on its right: the model when the call named
+/// one, how many tools it used, the tokens, and how long it took once done.
+fn lane_meta(model: &str, uses: u64, tokens: u64, took_ms: Option<u64>) -> String {
+    let mut parts = Vec::new();
+    let mut m = model.trim().chars();
+    if let Some(first) = m.next() {
+        parts.push(first.to_uppercase().chain(m).collect::<String>());
+    }
+    if uses > 0 {
+        parts.push(format!(
+            "{uses} tool {}",
+            if uses == 1 { "use" } else { "uses" }
+        ));
+    }
+    if tokens > 0 {
+        parts.push(format!("{} tokens", flow::tokens(tokens)));
+    }
+    if let Some(ms) = took_ms {
+        parts.push(look::footer_line(ms, Ending::Done));
+    }
+    parts.join(" \u{b7} ")
+}
+
+/// The todo list's progress: how many are done, of how many, and what is
+/// being done now (its active form when it has one).
+fn todo_progress(todos: &[horadric_core::folio::Todo]) -> (usize, usize, Option<&str>) {
+    let done = (todos.iter())
+        .filter(|t| t.status == TodoStatus::Completed)
+        .count();
+    let now = (todos.iter())
+        .find(|t| t.status == TodoStatus::InProgress)
+        .map(|t| {
+            if t.active_form.trim().is_empty() {
+                t.content.as_str()
+            } else {
+                t.active_form.as_str()
+            }
+        });
+    (done, todos.len(), now)
 }
 
 /// Whether a step opens to more than its line.
@@ -720,50 +860,123 @@ impl Ctx<'_> {
             y += ps.h;
             paras.push((p, ps));
         }
-        let copy = Rect::new(-6.0, y + 4.0, 64.0, 22.0);
-        s.hover.push(rich::Item::Line(
-            "\u{E8C8}".into(),
-            F::Icon,
-            Rect::new(copy.x + 6.0, copy.y, 16.0, copy.h),
-            self.pal.faint,
-        ));
-        s.hover.push(rich::Item::Line(
-            "Copy".into(),
-            F::Small,
-            Rect::new(copy.x + 26.0, copy.y, 40.0, copy.h),
-            self.pal.faint,
-        ));
+        let copy = Rect::new(-6.0, y + 4.0, 76.0, 22.0);
+        let face = self.copy_face(copy, t, self.pal.faint);
+        // Said while it lasts even once the pointer has moved off.
+        if copied(t) {
+            s.items.extend(face);
+        } else {
+            s.hover.extend(face);
+        }
         s.hover_hits.push((copy, Hit::Tr(Act::Copy(t.to_string()))));
         s.h = y + 26.0;
         (s, paras)
     }
 
-    unsafe fn thinking(&self, i: usize, t: &str, open: bool, cw: f32) -> Scene {
+    /// A Copy button's face in `r`: its icon and word, or a check and
+    /// "Copied" for a moment after it copied `what`.
+    pub(super) fn copy_face(&self, r: Rect, what: &str, ink: Color) -> Vec<Item> {
+        let (icon, word, ink) = if copied(what) {
+            ('\u{E73E}', "Copied", theme::done().mix(self.pal.fg, 0.25))
+        } else {
+            ('\u{E8C8}', "Copy", ink)
+        };
+        vec![
+            Item::Line(
+                icon.to_string(),
+                F::Icon,
+                Rect::new(r.x + 6.0, r.y, 16.0, r.h),
+                ink,
+            ),
+            Item::Line(
+                word.into(),
+                F::Small,
+                Rect::new(r.x + 26.0, r.y, (r.w - 28.0).max(0.0), r.h),
+                ink,
+            ),
+        ]
+    }
+
+    /// Claude's thinking. Folded, one quiet line: how much it thought, or
+    /// while it streams a rune that turns over as the thought grows, with
+    /// the line it is on. Open, the thought as markdown, set back behind a
+    /// rule and hushed so it never reads as the reply.
+    unsafe fn thinking(
+        &self,
+        i: usize,
+        t: &str,
+        open: bool,
+        live: bool,
+        cw: f32,
+        old: Vec<(flow::Para, Scene)>,
+    ) -> (Scene, Vec<(flow::Para, Scene)>) {
         let mut s = Scene::default();
         let r = Rect::new(0.0, 0.0, cw, LINE_H);
-        self.fold_row(
-            &mut s,
-            ('\u{E82F}', self.pal.faint),
-            &look::thinking_line(t),
-            open,
-            r,
-            self.pal.faint,
+        if live {
+            // Each piece that streams in moves it on to another rune.
+            let rune = t.len() / 48;
+            let ink = self.pal.accent.mix(self.pal.fg, 0.35);
+            (s.items).push(Item::Rune(rune, r.x + 8.0, r.y + 7.0, 12.0, ink, 1.4));
+        } else {
+            s.line(
+                '\u{E82F}'.to_string(),
+                F::Icon,
+                Rect::new(r.x, r.y, 16.0, r.h),
+                self.pal.faint,
+            );
+        }
+        let label = thought_line(t, live);
+        let mut x = r.x + 22.0;
+        let room = r.w - 44.0;
+        let lw = (self.one_line(&self.gfx.line, &label))
+            .map_or(room, |l| render::text_size(&l).0)
+            .min(room);
+        s.line(label, F::Line, Rect::new(x, r.y, lw + 2.0, r.h), self.pal.dim);
+        x += lw + 12.0;
+        let glimpse = thought_glimpse(t, live);
+        if !open && !glimpse.is_empty() && x + 40.0 < r.x + 22.0 + room {
+            let w = r.x + 22.0 + room - x;
+            let ink = self.pal.faint.with_alpha(0.7);
+            s.line(glimpse, F::Small, Rect::new(x, r.y + 1.0, w, r.h), ink);
+        }
+        let chevron = if open { '\u{E70D}' } else { '\u{E76C}' };
+        s.line(
+            chevron.to_string(),
+            F::Icon,
+            Rect::new(r.right() - 16.0, r.y, 16.0, r.h),
+            self.pal.faint.with_alpha(0.4),
         );
         s.hit(r, Hit::Fold(i));
         s.h = LINE_H;
-        if open {
-            if let Some(l) = self.layout(&self.gfx.italic, t, cw - NEST) {
-                let (_, h) = render::text_size(&l);
-                s.fill(
-                    Rect::new(7.0, LINE_H + 2.0, 1.5, h + 2.0),
-                    0.0,
-                    self.pal.faint.with_alpha(0.25),
-                );
-                s.unit(&l, NEST, LINE_H + 4.0, self.pal.dim, t);
-                s.h = LINE_H + 8.0 + h;
-            }
+        let mut paras = Vec::new();
+        if !open {
+            return (s, paras);
         }
-        s
+        // Narrower than a reply, so it reads as set aside.
+        let w = (cw - NEST - 12.0).max(1.0);
+        let mut old = old.into_iter();
+        let mut y = LINE_H + 2.0;
+        for p in flow::paras(t) {
+            let ps = match old.next() {
+                Some((was, scene)) if was == p => scene,
+                _ => {
+                    let mut ps = self.para(&p, w);
+                    hush(&mut ps, 0.62);
+                    ps
+                }
+            };
+            y += p.gap;
+            s.append(&ps, NEST, y);
+            y += ps.h;
+            paras.push((p, ps));
+        }
+        s.fill(
+            Rect::new(7.0, LINE_H + 2.0, 1.5, (y - LINE_H).max(0.0)),
+            0.0,
+            self.pal.faint.with_alpha(0.25),
+        );
+        s.h = y + 6.0;
+        (s, paras)
     }
 
     /// A question put aside with `/btw`, and its answer, under a quiet
@@ -877,16 +1090,72 @@ impl Ctx<'_> {
         cw: f32,
         st: &State,
     ) -> f32 {
+        const HEAD_H: f32 = 22.0;
         let top = y;
         let running = at_work(step, lane);
         let w = cw - x;
-        s.line(
-            flow::lane_line(lane, running),
-            F::Small,
-            Rect::new(x + 12.0, y, w - 12.0, 20.0),
-            self.pal.faint,
+        let hx = x + 12.0;
+
+        // Tied back to its step's dot, an elbow into the lane's rail, so a
+        // lane reads as the step's own and not the next thing said.
+        let tie = self.pal.fg.with_alpha(0.14);
+        let dot_x = x - NEST + 8.0;
+        let elbow = top + HEAD_H / 2.0;
+        s.fill(
+            Rect::new(dot_x, top - STEP_H / 2.0 + 5.0, 1.0, elbow - top + STEP_H / 2.0 - 5.0),
+            0.0,
+            tie,
         );
-        let mut y = y + 20.0;
+        s.fill(Rect::new(dot_x, elbow, x + 2.0 - dot_x, 1.0), 0.0, tie);
+
+        // Its head: the agent's type and what it was sent to do, and on
+        // the right what it used and how long it took.
+        let mut tx = hx;
+        if running {
+            // A rune that turns over with each tool it uses.
+            let ink = self.pal.accent.mix(self.pal.fg, 0.35);
+            let rune = lane.tool_uses.max(lane.steps.len() as u64) as usize;
+            (s.items).push(Item::Rune(rune, tx + 5.0, top + 5.0, 11.0, ink, 1.3));
+            tx += 16.0;
+        }
+        let model = step.input["model"].as_str().unwrap_or_default();
+        let uses = lane.tool_uses.max(lane.steps.len() as u64);
+        let took = (step.began.zip(step.ended))
+            .filter(|_| !running)
+            .map(|(a, b)| b.saturating_sub(a));
+        let meta = lane_meta(model, uses, lane.tokens, took);
+        let meta_w = (self.one_line(&self.gfx.small, &meta))
+            .map_or(0.0, |l| render::text_size(&l).0 + 4.0)
+            .min(w * 0.5);
+        if meta_w > 0.0 {
+            let r = Rect::new(x + w - meta_w, top, meta_w, HEAD_H);
+            s.line(meta, F::Right, r, self.pal.faint);
+        }
+        let room = (x + w - meta_w - 12.0 - tx).max(0.0);
+        let who = if lane.agent_type.is_empty() {
+            "Agent"
+        } else {
+            &lane.agent_type
+        };
+        let who_w = (self.one_line(&self.gfx.small, who))
+            .map_or(room, |l| render::text_size(&l).0 + 2.0)
+            .min(room);
+        s.line(who, F::Small, Rect::new(tx, top, who_w, HEAD_H), self.pal.dim);
+        let about = step.input["description"].as_str().unwrap_or_default().trim();
+        if !about.is_empty() && room - who_w > 40.0 {
+            let r = Rect::new(tx + who_w + 8.0, top, room - who_w - 8.0, HEAD_H);
+            s.line(about, F::Small, r, self.pal.faint);
+        }
+        let mut y = top + HEAD_H;
+        let progress = lane.progress.trim();
+        // In italics, as what it says of itself rather than what it did.
+        if let Some(l) = (running && !progress.is_empty())
+            .then(|| self.layout(&self.gfx.italic, progress, w - 12.0))
+            .flatten()
+        {
+            s.unit(&l, hx, y - 2.0, self.pal.faint.with_alpha(0.8), progress);
+            y += render::text_size(&l).1;
+        }
         for ls in &lane.steps {
             y = self.step(s, ls, x + 12.0, y, cw, st);
         }
@@ -904,10 +1173,11 @@ impl Ctx<'_> {
             s.append(&paras, x + 12.0, y);
             y += py;
         }
+        let rail = if running { 0.4 } else { 0.22 };
         s.fill(
-            Rect::new(x + 2.0, top + 2.0, 2.0, y - top - 2.0),
-            1.0,
-            self.pal.accent.with_alpha(0.4),
+            Rect::new(x + 1.5, top + 4.0, 1.5, (y - top - 4.0).max(0.0)),
+            0.75,
+            self.pal.accent.with_alpha(rail),
         );
         y + 4.0
     }
@@ -1175,15 +1445,16 @@ impl View {
     /// every block shown again, which on a long chat takes far longer than
     /// a frame, and a seam or window edge being dragged asks for a new one
     /// at every step. So while the width keeps changing the blocks keep
-    /// the one they were built at, and are built again once it holds.
-    unsafe fn layout_width(&self, cache: &mut Cache, cw: f32) -> f32 {
+    /// the one they were built at, and are built again once it holds: the
+    /// wait for that comes back with it, in milliseconds.
+    fn layout_width(&self, cache: &mut Cache, cw: f32) -> (f32, Option<u32>) {
         let now = Instant::now();
         if cache.asked_w.to_bits() != cw.to_bits() {
             cache.asked_w = cw;
             cache.asked_at = Some(now);
         }
         if cache.built_w.to_bits() == cw.to_bits() {
-            return cw;
+            return (cw, None);
         }
         let built = cache.blocks.iter().any(Option::is_some);
         let held = cache
@@ -1191,12 +1462,11 @@ impl View {
             .map_or(SETTLE_AFTER, |t| now.duration_since(t));
         if built && held < SETTLE_AFTER {
             let wait = (SETTLE_AFTER - held).as_millis() as u32 + 1;
-            SetTimer(Some(self.hwnd()), view::SETTLE, wait, None);
-            return cache.built_w;
+            return (cache.built_w, Some(wait));
         }
         cache.blocks.clear();
         cache.built_w = cw;
-        cw
+        (cw, None)
     }
 
     /// The conversation in `area`, above the composer: built where it
@@ -1232,7 +1502,17 @@ impl View {
                 ..Cache::default()
             };
         }
-        let lw = self.layout_width(cache, cw);
+        let (lw, settle) = self.layout_width(cache, cw);
+        // A Copy button says Copied for a moment; the frame after it is
+        // over says Copy again. One timer serves both waits, so the sooner.
+        let now = Instant::now();
+        let fresh = (st.copied.as_ref()).and_then(|c| Some((c, copy_left(c.at, now)?)));
+        COPIED.set(fresh.map(|(c, _)| c.key));
+        let copy_block = fresh.and_then(|(c, _)| c.block);
+        let copy_wait = fresh.map(|(_, left)| left.as_millis() as u32 + 1);
+        if let Some(wait) = settle.into_iter().chain(copy_wait).min() {
+            SetTimer(Some(self.hwnd()), view::SETTLE, wait, None);
+        }
         if cache.fonts.is_none() {
             cache.fonts = Fonts::new(&self.shared.gpu, &gfx.family).ok();
         }
@@ -1262,9 +1542,9 @@ impl View {
         let todo_h = if chat.folio.todos.is_empty() {
             0.0
         } else if st.todos_open {
-            34.0 + chat.folio.todos.len() as f32 * 22.0 + 8.0
+            TODO_HEAD + chat.folio.todos.len() as f32 * TODO_ROW + 8.0
         } else {
-            34.0
+            TODO_HEAD
         };
         let todo_r = Rect::new(cx - 8.0, area.y + 10.0, cw + 16.0, todo_h);
         if todo_h > 0.0 {
@@ -1298,12 +1578,18 @@ impl View {
             // Verbose opens every block but a turn's map.
             let every = st.verbose && !matches!(b, Block::Footer { .. });
             let open = every != chat.open.contains(&i);
-            let stamp = stamp(i, b, open, st);
+            // Thinking still coming in shows it is, as the last block of a
+            // busy turn.
+            let live = folio.busy && i + 1 == len;
+            let copy = copy_block == Some(i);
+            let stamp = stamp(i, b, open, live, copy, st);
             if blocks[i].as_ref().is_some_and(|x| x.stamp == stamp) {
                 continue;
             }
+            // A paragraph holding the Copy button that changed is built
+            // again, so none are kept across a copy's start or end.
             let old = (blocks[i].take())
-                .filter(|b| b.code_open == code_open)
+                .filter(|b| b.code_open == code_open && !b.copy && !copy)
                 .map(|b| b.paras)
                 .unwrap_or_default();
             let mut paras = Vec::new();
@@ -1316,7 +1602,11 @@ impl View {
                     paras = p;
                     s
                 }
-                Block::Thinking(t) => ctx.thinking(i, t, open, lw),
+                Block::Thinking(t) => {
+                    let (s, p) = ctx.thinking(i, t, open, live, lw, old);
+                    paras = p;
+                    s
+                }
                 Block::Tools(steps) => ctx.tools(i, steps, open, st, lw),
                 Block::Ask { .. } => cards::ask(&ctx, b, st, lw),
                 Block::Question { .. } => cards::question(&ctx, b, st, lw),
@@ -1335,6 +1625,7 @@ impl View {
                 scene,
                 paras,
                 code_open,
+                copy,
             });
         }
 
@@ -1446,9 +1737,11 @@ impl View {
         }
         // One that never started can be tried again just the same.
         if chat.ended {
-            let b = Rect::new(cx, y + LINE_H + 8.0, 96.0, RESUME_H - 8.0);
+            let b = Rect::new(cx, y + LINE_H + 8.0, 108.0, RESUME_H - 8.0);
             gfx.stroke_round(&b, 8.0, pal.fg.with_alpha(0.32), 1.0);
-            let label = Rect::new(b.x + 22.0, b.y + 2.0, b.w - 22.0, LINE_H);
+            let icon = Rect::new(b.x + 14.0, b.y + 2.0, 16.0, LINE_H);
+            gfx.text_in("\u{E768}", &gfx.icon, &icon, pal.accent.mix(pal.fg, 0.4));
+            let label = Rect::new(b.x + 38.0, b.y + 2.0, b.w - 42.0, LINE_H);
             gfx.text_in("Resume", &gfx.line, &label, pal.fg);
             hits.push((b, Hit::Tr(Act::Resume)));
         }
@@ -1521,7 +1814,10 @@ impl View {
         }
     }
 
-    /// The todo list, pinned over the top of the conversation.
+    /// The todo list, pinned over the top of the conversation: how far it
+    /// has come as "3 of 7" over a slim bar, and what is being done now.
+    /// Open, a row a todo: done ones struck through and dimmed, the one in
+    /// hand lit with a rune and its active form, the rest plain.
     unsafe fn todos(
         &self,
         gfx: &Gfx,
@@ -1531,21 +1827,49 @@ impl View {
         r: &Rect,
         hits: &mut Vec<(Rect, Hit)>,
     ) {
-        gfx.fill_round(r, 10.0, pal.bg.mix(pal.fg, 0.06));
-        gfx.stroke_round(r, 10.0, pal.fg.with_alpha(0.1), 1.0);
-        let head = Rect::new(r.x + 12.0, r.y + 2.0, r.w - 24.0, 30.0);
+        let gpu = &self.shared.gpu;
+        let width_of = |f, s: &str| {
+            render::wrapped(gpu, f, s, 10_000.0).map_or(0.0, |l| render::text_size(&l).0)
+        };
+        gfx.fill_round(r, 10.0, pal.bg.mix(pal.fg, 0.05));
+        gfx.stroke_round(r, 10.0, pal.fg.with_alpha(0.09), 1.0);
+        let head = Rect::new(r.x + 14.0, r.y, r.w - 28.0, TODO_HEAD);
+        let (done, total, now) = todo_progress(todos);
+        let all_done = total > 0 && done == total;
+        let mark = if all_done {
+            theme::done().with_alpha(0.85)
+        } else {
+            pal.accent.mix(pal.fg, 0.4)
+        };
         gfx.text_in(
             "\u{E9D5}",
             &gfx.icon,
             &Rect::new(head.x, head.y, 16.0, head.h),
-            pal.accent.mix(pal.fg, 0.4),
+            mark,
         );
-        gfx.text_in(
-            &flow::todo_line(todos),
-            &gfx.line,
-            &Rect::new(head.x + 24.0, head.y, head.w - 48.0, head.h),
-            pal.dim,
-        );
+        let count = format!("{done} of {total}");
+        let mut x = head.x + 24.0;
+        let cw = width_of(&gfx.line, &count) + 2.0;
+        gfx.text_in(&count, &gfx.line, &Rect::new(x, head.y, cw, head.h), pal.fg.with_alpha(0.85));
+        x += cw + 10.0;
+        let bar_w = TODO_BAR_W.min((head.right() - 24.0 - x).max(0.0));
+        if bar_w > 12.0 {
+            let track = Rect::new(x, head.y + head.h / 2.0 - 1.5, bar_w, 3.0);
+            gfx.fill_round(&track, 1.5, pal.fg.with_alpha(0.08));
+            let k = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+            if k > 0.0 {
+                let fill = Rect::new(track.x, track.y, (track.w * k).max(3.0), track.h);
+                gfx.fill_round(&fill, 1.5, mark.with_alpha(0.85));
+            }
+            x += bar_w + 14.0;
+        }
+        // Folded, what is in hand rides along on the head.
+        if let Some(now) = now.filter(|_| !open) {
+            let w = head.right() - 24.0 - x;
+            if w > 40.0 {
+                gfx.text_in(now, &gfx.small, &Rect::new(x, head.y, w, head.h), pal.dim);
+            }
+        }
         let chevron = if open { "\u{E70E}" } else { "\u{E70D}" };
         gfx.text_in(
             chevron,
@@ -1553,32 +1877,45 @@ impl View {
             &Rect::new(head.right() - 16.0, head.y, 16.0, head.h),
             pal.faint,
         );
-        hits.push((Rect::new(r.x, r.y, r.w, 34.0), Hit::Tr(Act::Todos)));
+        hits.push((Rect::new(r.x, r.y, r.w, TODO_HEAD), Hit::Tr(Act::Todos)));
         if !open {
             return;
         }
         for (k, t) in todos.iter().enumerate() {
-            let y = r.y + 34.0 + k as f32 * 22.0;
-            let (icon, ink, text) = match t.status {
-                TodoStatus::Completed => ("\u{E73A}", pal.faint, &t.content),
-                TodoStatus::InProgress => (
-                    "\u{E7C3}",
-                    pal.fg,
-                    if t.active_form.is_empty() {
+            let y = r.y + TODO_HEAD + k as f32 * TODO_ROW;
+            let text_r = Rect::new(head.x + 24.0, y, head.w - 24.0, TODO_ROW);
+            match t.status {
+                TodoStatus::Completed => {
+                    let ink = pal.faint.with_alpha(0.6);
+                    gfx.text_in(
+                        "\u{E73E}",
+                        &gfx.icon,
+                        &Rect::new(head.x, y, 16.0, TODO_ROW),
+                        theme::done().with_alpha(0.55),
+                    );
+                    gfx.text_in(&t.content, &gfx.small, &text_r, ink);
+                    let tw = width_of(&gfx.small, &t.content).min(text_r.w);
+                    let strike = Rect::new(text_r.x, y + TODO_ROW / 2.0, tw, 1.0);
+                    gfx.fill(&strike, ink);
+                }
+                TodoStatus::InProgress => {
+                    let row = Rect::new(head.x - 6.0, y + 1.0, head.w + 12.0, TODO_ROW - 2.0);
+                    gfx.fill_round(&row, 5.0, pal.accent.with_alpha(0.08));
+                    let ink = pal.accent.mix(pal.fg, 0.35);
+                    gfx.rune(k, head.x + 8.0, y + 5.0, 12.0, ink, 1.4);
+                    let what = if t.active_form.trim().is_empty() {
                         &t.content
                     } else {
                         &t.active_form
-                    },
-                ),
-                TodoStatus::Pending => ("\u{E739}", pal.dim, &t.content),
-            };
-            gfx.text_in(icon, &gfx.icon, &Rect::new(head.x, y, 16.0, 22.0), ink);
-            gfx.text_in(
-                text,
-                &gfx.small,
-                &Rect::new(head.x + 24.0, y, head.w - 24.0, 22.0),
-                ink,
-            );
+                    };
+                    gfx.text_in(what, &gfx.small, &text_r, pal.fg);
+                }
+                TodoStatus::Pending => {
+                    let ring = Rect::new(head.x + 3.5, y + TODO_ROW / 2.0 - 4.5, 9.0, 9.0);
+                    gfx.stroke_round(&ring, 4.5, pal.faint.with_alpha(0.6), 1.2);
+                    gfx.text_in(&t.content, &gfx.small, &text_r, pal.dim);
+                }
+            }
         }
     }
 
@@ -1659,7 +1996,7 @@ impl View {
         area: &Rect,
     ) {
         let mid = area.y + area.h / 2.0;
-        let x = area.w / 2.0;
+        let x = area.x + area.w / 2.0;
         gfx.rune(3, x, mid - 70.0, 34.0, pal.accent.with_alpha(0.55), 2.0);
         let name = dir
             .file_name()
@@ -1700,5 +2037,75 @@ fn cache_units(
     move |b, u| {
         let unit = blocks.get(b)?.as_ref()?.scene.units.get(u as usize)?;
         Some((unit.layout.clone(), unit.text.encode_utf16().count() as u32))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use horadric_core::folio::Todo;
+
+    #[test]
+    fn thought_line_counts_words_once_done() {
+        assert_eq!(thought_line("", false), "Thought");
+        assert_eq!(thought_line("hmm", false), "Thought \u{b7} 1 word");
+        assert_eq!(thought_line("a b\nc", false), "Thought \u{b7} 3 words");
+        assert_eq!(thought_line(&"w ".repeat(1500), false), "Thought \u{b7} 1.5k words");
+        assert_eq!(thought_line("a b", true), "Thinking\u{2026}");
+    }
+
+    #[test]
+    fn thought_glimpse_is_the_first_line_or_the_newest() {
+        let t = "\n**Plan** \n\nread the file\n- then edit it\n";
+        assert_eq!(thought_glimpse(t, false), "Plan");
+        assert_eq!(thought_glimpse(t, true), "- then edit it");
+        assert_eq!(thought_glimpse("  \n", true), "");
+    }
+
+    #[test]
+    fn lane_meta_says_only_what_is_known() {
+        assert_eq!(lane_meta("", 0, 0, None), "");
+        assert_eq!(
+            lane_meta("sonnet", 1, 950, Some(2_000)),
+            "Sonnet \u{b7} 1 tool use \u{b7} 950 tokens \u{b7} 2.0 s"
+        );
+        assert_eq!(lane_meta(" ", 3, 12_300, None), "3 tool uses \u{b7} 12.3k tokens");
+    }
+
+    #[test]
+    fn todo_progress_counts_and_names_the_one_in_hand() {
+        let todo = |content: &str, active: &str, status| Todo {
+            content: content.into(),
+            active_form: active.into(),
+            status,
+        };
+        let list = [
+            todo("Read", "Reading", TodoStatus::Completed),
+            todo("Test", "Testing", TodoStatus::InProgress),
+            todo("Ship", "", TodoStatus::Pending),
+        ];
+        assert_eq!(todo_progress(&list), (1, 3, Some("Testing")));
+        let list = [todo("Test", " ", TodoStatus::InProgress)];
+        assert_eq!(todo_progress(&list), (0, 1, Some("Test")));
+        assert_eq!(todo_progress(&[]), (0, 0, None));
+    }
+
+    #[test]
+    fn a_copy_shows_for_a_moment() {
+        let at = Instant::now();
+        assert_eq!(copy_left(at, at), Some(COPIED_FOR));
+        let later = at + Duration::from_millis(1000);
+        assert_eq!(copy_left(at, later), Some(Duration::from_millis(500)));
+        assert_eq!(copy_left(at, at + COPIED_FOR), None);
+        assert_eq!(copy_left(at, at + Duration::from_secs(5)), None);
+    }
+
+    #[test]
+    fn copied_names_only_what_was_copied() {
+        COPIED.set(Some(copy_key("fn main() {}")));
+        assert!(copied("fn main() {}"));
+        assert!(!copied("fn main() { }"));
+        COPIED.set(None);
+        assert!(!copied("fn main() {}"));
     }
 }
