@@ -6313,6 +6313,7 @@ impl App {
         let drive = self.drive_of(key);
         settings::Project {
             index,
+            key: key.to_string(),
             colour: theme::ACCENTS[theme::accent_index(key)].1.to_string(),
             branches,
             hosts: dir
@@ -6903,7 +6904,8 @@ impl App {
                 post(self.notify.0 as isize, WM_HORADRIC_VERSION, 0);
             }
             Field::Updates => self.check_update(true),
-            Field::Version | Field::KeysNote | Field::Lexicon => {}
+            // The Settings window answers a Vault row itself, off the app's borrow.
+            Field::Version | Field::KeysNote | Field::Lexicon | Field::Vault(_) => {}
             Field::Ask => {
                 self.tome.ask = !self.tome.ask;
                 self.save();
