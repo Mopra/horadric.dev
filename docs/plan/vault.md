@@ -187,42 +187,25 @@ third half, below.
   `echo $GITHUB_TOKEN` and it is in the transcript. There is no `secret
   get` that prints a value either.
 - **Asking first.** The first time a project's session uses a secret, its
-  tile raises like a permission question: "Use GITHUB_TOKEN for `gh pr
-  create`?" with Once, Always for `gh`, and No. Always is kept per secret
-  and per program, so allowing `gh` does not allow `curl`. Anything that
-  runs code the agent can write is only ever offered Once, since it can
-  do anything with the value, printing it in a form the mask does not
-  know included: a shell or an interpreter (`sh`, `bash`, `cmd`,
-  `powershell`, `pwsh`, `python`, `node`, `deno`, `bun`), a script runner
-  (`npm`, `npx`, `pnpm`, `yarn`, `uv`, `make`, `just`, `cargo`, whose
-  build scripts run), and `git` (its aliases and hooks are shell). The
-  list is the pure part and grows with what turns up. The deploy and
-  cloud CLIs (`gh`, `vercel`, `wrangler`, `netlify`, `aws`, `az`,
-  `gcloud`) can be made to run other code too, through files of their
-  own (`gh`'s aliases and extensions, aws aliases and
-  `credential_process`) and the git they run in the project. Their
-  Always pins those files by SHA-256, the repository's git config, hooks
-  and attributes and the user's git config included, and any change asks
-  again, naming what changed. An Always is for one subcommand (`gh pr
-  create`) and the `--stdin` names it was given; no subcommand, a flag
-  before it, or arguments that reach past it (`gh --jq`, also inside
-  `-iq`, an extension, another host, a config file flag) leave only
-  Once. The git such a run starts gets an empty hooks folder, no
-  fsmonitor, no bare repository found by itself, and no pager, editor,
-  askpass or browser from the environment. Its attributes come from the
-  empty tree (git 2.40 or later, else Once only), submodules are left
-  alone, and a repository with submodules is Once only. It is told the
-  pinned repository by `GIT_DIR` and `GIT_WORK_TREE`, or finds none,
-  and a `.git` git would pass over leaves only Once. Every setting in
-  the git configs it reads must be on a short list of plain data (no
-  filter, driver, helper but git's own or gh's, sshCommand or proxy),
-  and the proxy, CA and `GIT_*` variables it inherits are in the pin. An npm shim is run as node with its
-  package's script; the package folder, that node and the names in the
-  global `node_modules` are pinned. An Always run gets a PATH without
-  folders the user can write to. `vercel`, `wrangler` and `netlify` may
-  also run the project's build, which no pin can hold, and the question
-  says so. `docker`, `kubectl` and `helm` have too many ways to run
-  other code from their flags and stay Once only (decided 2026-11-06).
+  tile raises like a permission question: "Use STRIPE_KEY for `stripe
+  listen`?" with Once, Always for `stripe listen`, and No. Always is kept
+  per secret, per program and per subcommand, so allowing `stripe` does
+  not allow `curl`. Always is for single-purpose CLIs (`curl`, `stripe`,
+  `aws`, `az`, `gcloud`). Anything that runs code the agent can write is
+  only ever offered Once, since it can do anything with the value: a
+  shell or an interpreter, a script runner whose build scripts run, and
+  anything that runs git (`git`, `gh`, `vercel`, `netlify`, `wrangler`),
+  since git's config, hooks and filters are too many ways to run a
+  program with the secret in reach. Unattended work with those uses the
+  identity's own login (`--on-login gh`), not a Vault secret. The list is
+  the pure part and grows with what turns up. `aws`, `az` and `gcloud`
+  keep Always by pinning their own config, aliases and extensions by
+  SHA-256 (a config that is not readable UTF-8 leaves only Once), with
+  the proxy, CA and home variables they inherit; a change asks again,
+  naming what changed. No subcommand, a flag before it, or arguments
+  that reach past it (a file of arguments, a subcommand that installs
+  code) leave only Once. An Always run gets a PATH without folders the
+  user can write to (decided 2026-11-06).
 - **Adding one.** In Settings, Projects, a Secrets row lists the picked
   project's names, its identity's and the Everywhere ones under them, and
   the names `config.json` asks for that are not kept yet. Add asks for the
