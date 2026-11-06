@@ -323,6 +323,22 @@ pub fn set_orchestrator(project: &Path, on: bool) -> io::Result<()> {
     change_local(project, |e| tasks::with_orchestrator(e, on))
 }
 
+/// The identity the human picked for the project on this machine: a slug,
+/// "" for a pick of none, None for no pick. See
+/// `horadric_core::vault::identity::resolve`.
+pub fn identity(project: &Path) -> Option<String> {
+    horadric_core::vault::identity::local_pick(&local(project))
+}
+
+/// Sets the project's identity on this machine, as [`identity`] reads it.
+/// Here and not in the repository's config, which names the identity for
+/// every clone and so only suggests.
+pub fn set_identity(project: &Path, pick: Option<&str>) -> io::Result<()> {
+    change_local(project, |e| {
+        horadric_core::vault::identity::with_local_pick(e, pick)
+    })
+}
+
 /// Reads the list, lets `change` rewrite it and writes the result back.
 /// Read and written in one go, so an edit made in an editor a moment
 /// before is not lost, and under the list's lock, so the app and every
