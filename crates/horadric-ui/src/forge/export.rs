@@ -44,6 +44,7 @@ const COPY: usize = 4;
 const PPTX: usize = 5;
 const OPEN_WITH: usize = 6;
 const EXPLORER: usize = 7;
+const EDITOR: usize = 8;
 
 /// The export menu for the file `file` shown in the tab `tab`.
 pub fn menu(key: &str, tab: u64, file: &Path) {
@@ -70,6 +71,7 @@ pub fn menu(key: &str, tab: u64, file: &Path) {
     if !items.is_empty() {
         items.push(Item::Separator);
     }
+    items.push(Item::action(EDITOR, "Open in editor"));
     items.push(Item::action(OPEN_WITH, "Open with the program Windows has for it"));
     items.push(Item::action(EXPLORER, "Show in Explorer"));
     let file = file.to_path_buf();
@@ -81,6 +83,9 @@ pub fn menu(key: &str, tab: u64, file: &Path) {
         Some(PPTX) => to_pptx(key, &file),
         Some(OPEN_WITH) => super::bar::open_with(&file),
         Some(EXPLORER) => super::bar::show_in_explorer(&file),
+        Some(EDITOR) => {
+            super::source_view(key);
+        }
         _ => {}
     }
 }

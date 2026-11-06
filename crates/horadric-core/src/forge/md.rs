@@ -22,6 +22,13 @@ const MAX_DEPTH: usize = 24;
 /// draw. Relative image and link paths are kept as written, since the page
 /// is served from the file's folder.
 pub fn markdown_html(src: &str, title: &str) -> String {
+    page(title, "forge-md", &markdown_body(src), "")
+}
+
+/// What [`markdown_html`] puts inside its `<main class="forge-md">`: the
+/// blocks alone, for a page that shows a new text without loading again
+/// (the editor's preview after a write).
+pub fn markdown_body(src: &str) -> String {
     let lines: Vec<String> = src
         .strip_prefix('\u{feff}')
         .unwrap_or(src)
@@ -38,7 +45,7 @@ pub fn markdown_html(src: &str, title: &str) -> String {
     let mut body = String::new();
     let start = front_matter(lines);
     cx.blocks(&lines[start..], Some(start), false, 0, &mut body);
-    page(title, "forge-md", &body, "")
+    body
 }
 
 /// Leading tabs to four spaces, so indentation is one number. Tabs inside

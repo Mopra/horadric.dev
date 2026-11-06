@@ -32,8 +32,9 @@ pub enum Button {
     Export,
     /// A deck full screen on a chosen screen.
     Present,
-    /// The file as text, in the editor.
-    Source,
+    /// Edit mode on or off: the file's text beside its page, or its
+    /// table as cells to type in.
+    Edit,
     /// In the history: one version further back.
     Older,
     /// In the history: one version nearer now, then the file itself.
@@ -55,7 +56,7 @@ pub enum Button {
 pub struct Shown {
     pub name: String,
     pub buttons: Vec<Button>,
-    /// Buttons drawn as on: pin mode while it is.
+    /// Buttons drawn as on: pin mode and edit mode while they are.
     pub lit: Vec<Button>,
 }
 
@@ -114,12 +115,15 @@ pub fn shown(key: &str) -> Option<Shown> {
             (name, buttons)
         }
     };
-    // Pin mode is a flag in memory, read fresh so a toggle shows at once.
-    let lit = if buttons.contains(&Button::Pin) && super::pins::pinning(key) {
-        vec![Button::Pin]
-    } else {
-        Vec::new()
-    };
+    // Pin and edit mode are flags in memory, read fresh so a toggle shows
+    // at once.
+    let mut lit = Vec::new();
+    if buttons.contains(&Button::Pin) && super::pins::pinning(key) {
+        lit.push(Button::Pin);
+    }
+    if buttons.contains(&Button::Edit) && super::edit::editing(key, tab) {
+        lit.push(Button::Edit);
+    }
     Some(Shown { name, buttons, lit })
 }
 
@@ -140,7 +144,9 @@ fn lay_out(key: &str, tab: u64, file: &Path) -> Option<(String, Vec<Button>)> {
     if can_pin(file) {
         buttons.push(Button::Pin);
     }
-    buttons.push(Button::Source);
+    if super::edit::editable(file) {
+        buttons.push(Button::Edit);
+    }
     buttons.push(Button::History);
     buttons.push(Button::Export);
     if is_deck(file) {
@@ -241,7 +247,7 @@ pub fn glyph(b: Button) -> &'static str {
         Button::History => "\u{E81C}",
         Button::Export => "\u{E72D}",
         Button::Present => "\u{E786}",
-        Button::Source => "\u{E943}",
+        Button::Edit => "\u{E70F}",
         Button::Older => "\u{E76B}",
         Button::Newer => "\u{E76C}",
         Button::Compare => "\u{E8AB}",
@@ -259,7 +265,7 @@ pub fn tip(b: Button) -> &'static str {
         Button::History => "Earlier versions",
         Button::Export => "PDF, pictures, copy, To .pptx, open with",
         Button::Present => "Present full screen",
-        Button::Source => "Edit the file as text",
+        Button::Edit => "Edit (E)",
         Button::Older => "The version before this one",
         Button::Newer => "The version after this one",
         Button::Compare => "Compare",
@@ -292,9 +298,7 @@ pub fn press(b: Button, key: &str) {
         Button::Live => super::history::live(key, tab),
         Button::Export => super::export::menu(key, tab, &file),
         Button::Present => super::present::start(key, tab, true),
-        Button::Source => {
-            super::source_view(key);
-        }
+        Button::Edit => super::edit::toggle_editing(key),
     }
 }
 

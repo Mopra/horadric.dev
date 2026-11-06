@@ -220,7 +220,7 @@ pub(super) fn page_pinning(key: &str, tab: u64, on: bool) {
 
 /// Whether the human just used the keyboard or mouse, and the window in
 /// front is ours and holds the project's browser pane.
-fn human_at(key: &str) -> bool {
+pub(super) fn human_at(key: &str) -> bool {
     let Some(pane) = web::pane_rect(key) else {
         return false;
     };

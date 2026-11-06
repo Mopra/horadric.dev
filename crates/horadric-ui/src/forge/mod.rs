@@ -447,6 +447,7 @@ fn moved(key: &str, id: u64, url: &str) {
     }
     history::tab_moved(key, id);
     pins::tab_moved(key, id);
+    edit::page_gone(key, id);
 }
 
 /// The page of the tab `id` said something, as JSON. Only a page of the
@@ -460,6 +461,11 @@ fn heard_page(key: &str, id: u64, source: &str, json: &str) {
     });
     let Some((host, folder)) = found else { return };
     if serve::host_of(source).is_none_or(|h| !h.eq_ignore_ascii_case(&host)) {
+        return;
+    }
+    // The editor's preview frame runs the page side too. Should its posts
+    // ever reach here, its ready or scroll is not the tab's page's.
+    if serve::is_preview(source) {
         return;
     }
     let Ok(msg) = serde_json::from_str::<Value>(json) else {
@@ -499,29 +505,64 @@ fn scroll_of(key: &str, id: u64) -> Option<(f64, f64)> {
 /// Files changed on disk in `root`, as paths relative to it with forward
 /// slashes, or every file there when `all` (the watcher lost count). Each
 /// tab showing one, or a page that may load one, is loaded again.
+///
+/// Except where the page is in the middle of it: a tab whose own editor
+/// wrote its file is left as it is, and a tab in edit mode is told what
+/// the file holds now rather than loaded again, which would throw away
+/// what the human is typing.
 fn changed(root: &Path, rel: &[String], all: bool) {
     prune();
-    // Before the reload, so the bytes it replaced are kept as a version.
-    let own: Vec<PathBuf> = TABS.with(|t| {
+    let own_file = |f: &FileTab| {
+        all || rel.iter().any(|r| same(&f.root.join(r.replace('/', "\\")), &f.file))
+    };
+    let mine: Vec<PathBuf> = TABS.with(|t| {
         t.borrow()
             .iter()
-            .filter(|f| same(&f.root, root) && !f.folder)
-            .filter(|f| all || rel.iter().any(|r| same(&f.root.join(r.replace('/', "\\")), &f.file)))
+            .filter(|f| same(&f.root, root) && !f.folder && own_file(f))
             .map(|f| f.file.clone())
             .collect()
     });
-    for file in own {
-        history::changed(root, &file);
+    // Which tabs' editors wrote what each file holds now, asked once a file.
+    let mut writers: Vec<(PathBuf, Vec<(String, u64)>)> = Vec::new();
+    for file in mine {
+        if writers.iter().any(|(f, _)| same(f, &file)) {
+            continue;
+        }
+        let by = edit::written_by(&file);
+        // Before the reload, so the bytes it replaced are kept as a version.
+        history::changed(root, &file, !by.is_empty());
+        writers.push((file, by));
     }
-    let hit: Vec<(String, u64)> = TABS.with(|t| {
+    let hit: Vec<(String, u64, PathBuf, bool, bool)> = TABS.with(|t| {
         t.borrow()
             .iter()
             .filter(|f| same(&f.root, root))
             .filter(|f| all || rel.iter().any(|r| touches(f, r)))
-            .map(|f| (f.key.clone(), f.id))
+            .map(|f| {
+                let others = all || rel.iter().any(|r| touches(f, r) && !same(&f.root.join(r.replace('/', "\\")), &f.file));
+                (f.key.clone(), f.id, f.file.clone(), !f.folder && own_file(f), others)
+            })
             .collect()
     });
-    for (key, id) in hit {
+    for (key, id, file, mine, others) in hit {
+        let by_itself = mine
+            && writers
+                .iter()
+                .any(|(f, by)| same(f, &file) && by.iter().any(|(k, t)| *k == key && *t == id));
+        if edit::editing(&key, id) {
+            // A stylesheet or picture changing shows in the editor's preview
+            // when it next loads; the page itself stays.
+            if mine && !by_itself {
+                match edit::text_of(&file) {
+                    Some(current) => post(&key, id, &serde_json::json!({"forge": "changed-on-disk", "current": current})),
+                    None => web::reload_fresh(&key, id),
+                }
+            }
+            continue;
+        }
+        if by_itself && !others {
+            continue;
+        }
         web::reload_fresh(&key, id);
     }
 }

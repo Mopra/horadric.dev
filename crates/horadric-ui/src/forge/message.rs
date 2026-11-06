@@ -20,6 +20,7 @@ pub fn on_message(key: &str, tab: u64, msg: &Value) {
         // The page loaded: where it was scrolled to before the reload goes
         // back to it.
         "ready" => {
+            super::edit::page_gone(key, tab);
             if let Some((x, y)) = super::scroll_of(key, tab) {
                 super::post(key, tab, &json!({"forge": "restore-scroll", "x": x, "y": y}));
             }
@@ -48,6 +49,13 @@ pub fn on_message(key: &str, tab: u64, msg: &Value) {
         }
         // Step 6 of the plan, kept in a module of its own.
         "edit" | "reorder" | "crop" => super::edit::on_message(key, tab, msg),
+        // The editor: the whole file written, edit mode on or off.
+        "write" => super::edit::on_write(key, tab, msg),
+        "editing" => {
+            if let Some(on) = msg.get("on").and_then(Value::as_bool) {
+                super::edit::page_editing(key, tab, on);
+            }
+        }
         _ => {}
     }
 }

@@ -46,6 +46,22 @@ const LARGEST: u64 = 32 * 1024 * 1024;
 /// A session's write that never said it ended stops holding a restore
 /// back after this.
 const WRITE_LASTS: Duration = Duration::from_secs(120);
+/// While the human edits a file in its page, a version is kept at most
+/// this often: the editor writes after every pause in typing, and a
+/// version per pause would bury the ones worth going back to.
+const EDITING_KEPT: Duration = Duration::from_secs(30);
+
+/// Whether a change keeps the bytes it replaced as a version, given when
+/// a page's write to the file last kept one (`last`), and what to remember
+/// of that after. A session's or a program's change always keeps, and
+/// ends the run of edits, so the next edit keeps what the session wrote.
+fn coalesce(by_page: bool, last: Option<Instant>, now: Instant) -> (bool, Option<Instant>) {
+    match (by_page, last) {
+        (false, _) => (true, None),
+        (true, Some(at)) if now.saturating_duration_since(at) < EDITING_KEPT => (false, Some(at)),
+        (true, _) => (true, Some(now)),
+    }
+}
 
 thread_local! {
     /// Tabs showing a version instead of the file.
@@ -104,8 +120,8 @@ enum Job {
     /// A tab showing the file opened.
     Seen(PathBuf),
     /// The file changed on disk; with where to keep what it held, when it
-    /// is in its folder.
-    Changed(PathBuf, Option<(PathBuf, PathBuf)>),
+    /// is in its folder, and whether a page's editor wrote it.
+    Changed(PathBuf, Option<(PathBuf, PathBuf)>, bool),
     /// The files tabs still show, by path folded: the rest are let go.
     Only(HashSet<String>),
 }
@@ -154,6 +170,7 @@ fn send(job: Job) {
 /// reads, keeps and prunes off the UI thread.
 fn keeper(rx: Receiver<Job>) {
     let mut seen: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut edited: HashMap<String, Instant> = HashMap::new();
     for job in rx {
         match job {
             Job::Seen(file) => {
@@ -164,15 +181,23 @@ fn keeper(rx: Receiver<Job>) {
                     }
                 }
             }
-            Job::Changed(file, place) => {
+            Job::Changed(file, place, by_page) => {
                 let key = fold(&file);
                 let now = read_small(&file);
                 let before = match &now {
-                    Some(b) => seen.insert(key, b.clone()),
+                    Some(b) => seen.insert(key.clone(), b.clone()),
                     None => seen.remove(&key),
                 };
                 let Some(before) = before else { continue };
                 if now.as_deref() == Some(before.as_slice()) {
+                    continue;
+                }
+                let (keep, last) = coalesce(by_page, edited.get(&key).copied(), Instant::now());
+                match last {
+                    Some(at) => edited.insert(key, at),
+                    None => edited.remove(&key),
+                };
+                if !keep {
                     continue;
                 }
                 let Some((store, rel)) = place else { continue };
@@ -185,7 +210,10 @@ fn keeper(rx: Receiver<Job>) {
                 }
                 bump();
             }
-            Job::Only(open) => seen.retain(|k, _| open.contains(k)),
+            Job::Only(open) => {
+                seen.retain(|k, _| open.contains(k));
+                edited.retain(|k, _| open.contains(k));
+            }
         }
     }
 }
@@ -202,10 +230,11 @@ pub(super) fn seen(file: &Path) {
 }
 
 /// `file`, shown from `root`, changed on disk: the bytes it had are kept
-/// as a version, unless they are what it holds still.
-pub(super) fn changed(root: &Path, file: &Path) {
+/// as a version, unless they are what it holds still or, when a page's
+/// editor wrote it (`by_page`), one was kept moments ago.
+pub(super) fn changed(root: &Path, file: &Path, by_page: bool) {
     let place = store(root).zip(rel_of(root, file));
-    send(Job::Changed(file.to_path_buf(), place));
+    send(Job::Changed(file.to_path_buf(), place, by_page));
     send(Job::Only(open_files()));
     bump();
 }
@@ -955,6 +984,22 @@ mod tests {
         );
         assert_eq!(rel_of(root, Path::new(r"C:\Work\Sitemap\a.md")), None);
         assert_eq!(url_path(Path::new(r"docs\my deck.html")), "docs/my%20deck.html");
+    }
+
+    #[test]
+    fn edits_keep_one_version_per_half_minute() {
+        let t0 = Instant::now();
+        let s = |n: u64| t0 + Duration::from_secs(n);
+        // The first edit keeps what the file held before editing began.
+        assert_eq!(coalesce(true, None, s(0)), (true, Some(s(0))));
+        // Edits after it, within the half minute, keep nothing.
+        assert_eq!(coalesce(true, Some(s(0)), s(10)), (false, Some(s(0))));
+        assert_eq!(coalesce(true, Some(s(0)), s(29)), (false, Some(s(0))));
+        // Past it, the next edit keeps one and starts the next half minute.
+        assert_eq!(coalesce(true, Some(s(0)), s(30)), (true, Some(s(30))));
+        // A session's write always keeps, and the edit after it keeps too.
+        assert_eq!(coalesce(false, Some(s(30)), s(31)), (true, None));
+        assert_eq!(coalesce(true, None, s(32)), (true, Some(s(32))));
     }
 
     #[test]

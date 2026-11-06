@@ -42,6 +42,9 @@ const FORGE_JS: &str = include_str!("../../assets/forge/forge.js");
 const FORGE_CSS: &str = include_str!("../../assets/forge/forge.css");
 const DECK_JS: &str = include_str!("../../assets/forge/deck.js");
 const DECK_CSS: &str = include_str!("../../assets/forge/deck.css");
+// Empty until the page side's editor.js and editor.css land beside these.
+const EDITOR_JS: &str = "";
+const EDITOR_CSS: &str = "";
 
 /// The host the folder `root` is served at: its name, made safe for a
 /// host, and a hash of its whole path so two folders of one name differ.
@@ -202,6 +205,10 @@ pub fn is_subresource(file: &Path) -> bool {
 /// follows links and the folder pages to any file, and the shell does
 /// nothing on a page with no slides.
 ///
+/// The editor runs in the tab's own page only. Its preview of an HTML
+/// file is the file in a frame (`?preview`), which gets the rest so it
+/// looks as the page does, but not a second editor inside the first.
+///
 /// The chrome is drawn in Horadric's look as it was when the tab was made:
 /// its colours go in front of each stylesheet, on the shadow host and on
 /// a deck's root, where only the Forge's `--hd-` names are set.
@@ -212,12 +219,15 @@ fn script(accent: Color) -> String {
 {FORGE_CSS}"),
         "deckCss": format!(":host, html.forge-deck {{ {look} }}
 {DECK_CSS}"),
+        "editorCss": format!(":host {{ {look} }}
+{EDITOR_CSS}"),
     });
     format!(
         "(function(){{\nif(!location.hostname.toLowerCase().endsWith({suffix:?}))return;\n\
          if(location.pathname.endsWith('/'))return;\n\
          window.__forgeAssets={assets};\n(function(){{\n{FORGE_JS}\n}})();\n\
-         (function(){{\n{DECK_JS}\n}})();\n}})();",
+         (function(){{\n{DECK_JS}\n}})();\n\
+         if(window.top===window)(function(){{\n{EDITOR_JS}\n}})();\n}})();",
         suffix = SUFFIX,
     )
 }
@@ -358,6 +368,12 @@ fn path_query(url: &str) -> (&str, &str) {
     let rest = rest.find('/').map_or("/", |at| &rest[at..]);
     let rest = rest.split('#').next().unwrap_or_default();
     rest.split_once('?').unwrap_or((rest, ""))
+}
+
+/// Whether `url` is the editor's preview of an HTML file, the file in a
+/// frame of its own page: served as the page is, but not the tab's page.
+pub fn is_preview(url: &str) -> bool {
+    path_query(url).1.split('&').any(|q| q == "preview" || q.starts_with("preview="))
 }
 
 /// How a request is to be answered.
@@ -838,6 +854,25 @@ mod tests {
         let fetched = answer(&dir, url, false, false).unwrap();
         assert!(fetched.content_type.starts_with("text/csv"));
         assert!(matches!(fetched.body, Body::File(_)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_editor_fetches_a_page_raw_and_its_preview_is_the_page() {
+        let dir = std::env::temp_dir().join(format!("forge-serve-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("page.html"), "<p>hi</p>").unwrap();
+        // A script's fetch gets the file as it is, never the marked copy.
+        let fetched = answer(&dir, "https://x.forge.horadric/page.html", false, false).unwrap();
+        assert!(matches!(fetched.body, Body::File(_)));
+        assert!(fetched.content_type.starts_with("text/html"));
+        // The preview frame is a document: left to edit.rs to mark, as the
+        // tab's page is.
+        assert!(answer(&dir, "https://x.forge.horadric/page.html?preview", true, false).is_none());
+        assert!(is_preview("https://x.forge.horadric/page.html?preview"));
+        assert!(is_preview("https://x.forge.horadric/page.html?a=1&preview=2#s"));
+        assert!(!is_preview("https://x.forge.horadric/page.html"));
+        assert!(!is_preview("https://x.forge.horadric/preview.html"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

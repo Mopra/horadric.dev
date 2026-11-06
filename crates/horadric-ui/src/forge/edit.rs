@@ -10,7 +10,9 @@
 
 mod html;
 mod text;
+mod write;
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Mutex, OnceLock};
@@ -39,6 +41,77 @@ const TEXT_MAX: usize = 200_000;
 /// More slides than any deck has. A page's count is only a claim, and one
 /// near `u64::MAX` must not overflow the check against the new order.
 const SLIDES_MAX: usize = 10_000;
+
+/// The largest file a page's editor may write whole. A deck with its
+/// pictures inline runs to megabytes; past this it is not text to edit.
+const WRITE_MAX: usize = 8 << 20;
+
+/// How long after edit mode ends a page may still write: the editor saves
+/// what was left as it closes, and that message can follow the one saying
+/// it closed.
+const WRITE_AFTER: Duration = Duration::from_secs(5);
+
+/// How long a page's own write is remembered, so the watcher's report of
+/// it is known as the page's and does not load the page again under the
+/// human's hands.
+const OWN_FOR: Duration = Duration::from_secs(30);
+
+/// A page's write, by the bytes it put on disk.
+struct Own {
+    file: PathBuf,
+    hash: u64,
+    key: String,
+    tab: u64,
+    at: Instant,
+}
+
+/// Pages' writes lately. Several per file: the writer may have put the
+/// next before the watcher reports the last.
+static OWN: Mutex<Vec<Own>> = Mutex::new(Vec::new());
+
+fn hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
+}
+
+/// The tabs whose page wrote what `file` holds now, none when a session
+/// or a program did. Reads the file only when a page wrote it lately.
+pub(super) fn written_by(file: &Path) -> Vec<(String, u64)> {
+    let lately: Vec<(u64, String, u64)> = OWN.lock().map_or_else(
+        |_| Vec::new(),
+        |mut o| {
+            o.retain(|w| w.at.elapsed() < OWN_FOR);
+            (o.iter())
+                .filter(|w| super::same(&w.file, file))
+                .map(|w| (w.hash, w.key.clone(), w.tab))
+                .collect()
+        },
+    );
+    if lately.is_empty() {
+        return Vec::new();
+    }
+    let Ok(bytes) = std::fs::read(file) else { return Vec::new() };
+    let now = hash(&bytes);
+    let mut tabs: Vec<(String, u64)> = Vec::new();
+    for (h, key, tab) in lately {
+        if h == now && !tabs.iter().any(|t| t.0 == key && t.1 == tab) {
+            tabs.push((key, tab));
+        }
+    }
+    tabs
+}
+
+/// What `file` holds as text for a page's editor, None when it is too
+/// large or not UTF-8.
+pub(super) fn text_of(file: &Path) -> Option<String> {
+    let small = std::fs::metadata(file).is_ok_and(|m| m.len() <= WRITE_MAX as u64);
+    if !small {
+        return None;
+    }
+    String::from_utf8(std::fs::read(file).ok()?).ok()
+}
 
 /// Writes by sessions in flight: the file, the tool call and when it began.
 static WRITING: Mutex<Vec<(PathBuf, Option<String>, Instant)>> = Mutex::new(Vec::new());
@@ -96,6 +169,8 @@ enum Change {
     Slides { count: usize, order: Vec<usize>, blank: bool },
     /// An image's new bytes.
     Image(Vec<u8>),
+    /// The whole file from the page's editor, if it still holds `base`.
+    Whole { base: String, text: String },
 }
 
 struct Job {
@@ -120,12 +195,26 @@ fn writer() -> Option<Sender<Job>> {
             .spawn(move || {
                 for job in rx {
                     let answer = run(&job);
-                    let mut msg = json!({"forge": "edit-result", "what": job.what, "id": job.id});
+                    let mut msg = if job.what == "write" {
+                        json!({"forge": "write-result", "id": job.id})
+                    } else {
+                        json!({"forge": "edit-result", "what": job.what, "id": job.id})
+                    };
                     match answer {
-                        Ok(()) => msg["ok"] = json!(true),
+                        Ok(html) => {
+                            msg["ok"] = json!(true);
+                            if let Some(html) = html {
+                                msg["html"] = json!(html);
+                            }
+                        }
                         Err(Failed::NotExact) => {
                             msg["ok"] = json!(false);
                             msg["pin"] = json!(true);
+                        }
+                        Err(Failed::Changed(current)) => {
+                            msg["ok"] = json!(false);
+                            msg["why"] = json!("changed");
+                            msg["current"] = json!(current);
                         }
                         Err(Failed::Why(why)) => {
                             msg["ok"] = json!(false);
@@ -146,13 +235,15 @@ fn writer() -> Option<Sender<Job>> {
 enum Failed {
     /// The page's text is not what the source says: a pin instead.
     NotExact,
+    /// The file is no longer what the editor started from: what it holds.
+    Changed(String),
     Why(String),
 }
 
 /// On the writer thread: waits out a session's write, then reads, changes
 /// and writes the file, holding the lock so no write is heard beginning
-/// halfway.
-fn run(job: &Job) -> Result<(), Failed> {
+/// halfway. A markdown file written whole answers with its page's body.
+fn run(job: &Job) -> Result<Option<String>, Failed> {
     let started = Instant::now();
     loop {
         let w = WRITING.lock().map_err(|_| Failed::Why("lock".into()))?;
@@ -162,6 +253,9 @@ fn run(job: &Job) -> Result<(), Failed> {
             continue;
         }
         let bytes = std::fs::read(&job.file).map_err(|e| Failed::Why(format!("cannot read it: {e}")))?;
+        if let Change::Whole { base, text } = &job.change {
+            return run_whole(job, &bytes, base, text);
+        }
         let out = match &job.change {
             Change::Image(new) => new.clone(),
             change => {
@@ -169,18 +263,63 @@ fn run(job: &Job) -> Result<(), Failed> {
                     .map_err(|_| Failed::Why("it is not UTF-8 text".into()))?;
                 match changed(&src, change)? {
                     Some(s) => s.into_bytes(),
-                    None => return Ok(()),
+                    None => return Ok(None),
                 }
             }
         };
         if out == bytes {
-            return Ok(());
+            return Ok(None);
         }
         // One write of the whole file, so a session reading it sees the
         // old or the new, and its next `Edit` sees the change.
         std::fs::write(&job.file, &out).map_err(|e| Failed::Why(format!("cannot write it: {e}")))?;
+        return Ok(None);
+    }
+}
+
+/// The editor's whole file over `bytes`, the file as it is, when that is
+/// still the text the edit began from.
+fn run_whole(job: &Job, bytes: &[u8], base: &str, text: &str) -> Result<Option<String>, Failed> {
+    let disk = std::str::from_utf8(bytes).map_err(|_| Failed::Why("it is not UTF-8 text".into()))?;
+    if !write::unchanged(disk, base) {
+        return Err(Failed::Changed(write::normalise(disk).into_owned()));
+    }
+    let out = write::bytes(disk, text);
+    if out != bytes {
+        remember(job, &out);
+        replace(&job.file, &out).map_err(|e| Failed::Why(format!("cannot write it: {e}")))?;
+    }
+    let markdown = super::kind(&job.file) == Some(Kind::Markdown);
+    Ok(markdown.then(|| horadric_core::forge::markdown_body(text)))
+}
+
+/// Notes the page's write before it lands, so however soon the watcher
+/// reports it, it is known as the page's own.
+fn remember(job: &Job, out: &[u8]) {
+    let Ok(mut o) = OWN.lock() else { return };
+    o.retain(|w| w.at.elapsed() < OWN_FOR);
+    o.push(Own {
+        file: job.file.clone(),
+        hash: hash(out),
+        key: job.key.clone(),
+        tab: job.tab,
+        at: Instant::now(),
+    });
+}
+
+/// `file` replaced by `bytes` in one step: written beside it, then moved
+/// over it, so a session or the watcher never reads half a file. When the
+/// move is refused (another program holds the file open without letting it
+/// be replaced), it is written in place instead.
+fn replace(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let beside = file.with_file_name(format!(".{name}.forge-write"));
+    std::fs::write(&beside, bytes)?;
+    if std::fs::rename(&beside, file).is_ok() {
         return Ok(());
     }
+    let _ = std::fs::remove_file(&beside);
+    std::fs::write(file, bytes)
 }
 
 /// The source after `change`, None when it is the same.
@@ -208,7 +347,7 @@ fn changed(src: &str, change: &Change) -> Result<Option<String>, Failed> {
             out.map(Some)
                 .ok_or_else(|| Failed::Why("that order of slides cannot be written".into()))
         }
-        Change::Image(_) => Ok(None),
+        Change::Image(_) | Change::Whole { .. } => Ok(None),
     }
 }
 
@@ -257,6 +396,114 @@ fn pair(msg: &Value, k: &str) -> Option<(usize, usize)> {
     let n = |i: usize| v.get(i)?.as_u64().and_then(|x| usize::try_from(x).ok());
     let (a, b) = (n(0)?, n(1)?);
     (a <= b).then_some((a, b))
+}
+
+/// The kinds of file the page's editor writes whole.
+pub(super) fn editable(file: &Path) -> bool {
+    matches!(super::kind(file), Some(Kind::Markdown | Kind::Html | Kind::Deck | Kind::Csv))
+}
+
+thread_local! {
+    /// Tabs in edit mode, and tabs that left it and when, for the save
+    /// that follows the leaving.
+    static EDITING: RefCell<Vec<(String, u64, Option<Instant>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Whether the tab's page is in edit mode.
+pub(super) fn editing(key: &str, tab: u64) -> bool {
+    EDITING.with(|e| e.borrow().iter().any(|(k, t, off)| k == key && *t == tab && off.is_none()))
+}
+
+/// Whether the tab's page may write its file: in edit mode, or only just
+/// out of it.
+fn may_write(key: &str, tab: u64) -> bool {
+    EDITING.with(|e| {
+        e.borrow().iter().any(|(k, t, off)| {
+            k == key && *t == tab && off.is_none_or(|at| at.elapsed() < WRITE_AFTER)
+        })
+    })
+}
+
+fn set_editing(key: &str, tab: u64, on: bool) {
+    EDITING.with(|e| {
+        let mut e = e.borrow_mut();
+        let was = e.iter().any(|(k, t, off)| k == key && *t == tab && off.is_none());
+        e.retain(|(k, t, off)| !(k == key && *t == tab) && off.is_none_or(|at| at.elapsed() < WRITE_AFTER));
+        if on {
+            e.push((key.to_string(), tab, None));
+        } else if was {
+            e.push((key.to_string(), tab, Some(Instant::now())));
+        }
+    });
+}
+
+/// The tab's page loaded again or shows another file: whatever edit mode
+/// it was in went with the old page.
+pub(super) fn page_gone(key: &str, tab: u64) {
+    let was = editing(key, tab);
+    EDITING.with(|e| e.borrow_mut().retain(|(k, t, _)| !(k == key && *t == tab)));
+    if was {
+        crate::web::redraw(key);
+    }
+}
+
+/// The bar's Edit button: edit mode on or off in the project's shown tab.
+pub fn toggle_editing(key: &str) {
+    let Some(tab) = crate::web::shown_tab(key) else { return };
+    let Some(file) = super::file_of(key, tab) else { return };
+    if !editable(&file) {
+        return;
+    }
+    let on = !editing(key, tab);
+    set_editing(key, tab, on);
+    super::post(key, tab, &json!({"forge": "editing", "on": on}));
+    crate::web::redraw(key);
+}
+
+/// The page turned edit mode on or off itself (the E key). As with pin
+/// mode, on only with the human at the keys: edit mode is what lets a page
+/// write its file, and a page's own script must not turn it on unbidden.
+pub(super) fn page_editing(key: &str, tab: u64, on: bool) {
+    let fits = super::file_of(key, tab).is_some_and(|f| editable(&f));
+    let on = on && fits && crate::web::shown_tab(key) == Some(tab) && super::pins::human_at(key);
+    set_editing(key, tab, on);
+    if !on {
+        super::post(key, tab, &json!({"forge": "editing", "on": false}));
+    }
+    crate::web::redraw(key);
+}
+
+/// A `forge: "write"` from the page's editor: the whole file, written when
+/// it is still what the edit began from.
+pub fn on_write(key: &str, tab: u64, msg: &Value) {
+    let id = msg.get("id").cloned().unwrap_or(Value::Null);
+    let refuse = |why: &str| {
+        super::post(key, tab, &json!({"forge": "write-result", "id": id, "ok": false, "why": why}));
+    };
+    if !may_write(key, tab) {
+        return refuse("the page is not in edit mode");
+    }
+    let page_file = msg.get("file").and_then(Value::as_str).unwrap_or_default();
+    let Some(file) = own_file(key, tab, page_file) else {
+        return refuse("a page can only change its own file");
+    };
+    if !editable(&file) {
+        return refuse("this kind of file is not edited as text");
+    }
+    let whole = |k: &str| {
+        msg.get(k)
+            .and_then(Value::as_str)
+            .filter(|s| s.len() <= WRITE_MAX)
+            .map(str::to_string)
+    };
+    let (Some(base), Some(text)) = (whole("base"), whole("text")) else {
+        return refuse("the write is missing its text, or it is too large");
+    };
+    let change = Change::Whole { base, text };
+    let job = Job { key: key.to_string(), tab, id: id.clone(), what: "write", file, change };
+    if writer().is_none_or(|tx| tx.send(job).is_err()) {
+        refuse("the Forge's writer is not running");
+    }
 }
 
 /// A `forge: "edit"`, `"reorder"` or `"crop"` message from the page of
