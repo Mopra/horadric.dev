@@ -51,6 +51,10 @@ pub fn on_message(key: &str, tab: u64, msg: &Value) {
         "edit" | "reorder" | "crop" => super::edit::on_message(key, tab, msg),
         // The editor: the whole file written, edit mode on or off.
         "write" => super::edit::on_write(key, tab, msg),
+        // The markdown editor: a block drawn as the saved page draws it, a
+        // picture pasted or dropped kept beside the file.
+        "render" => super::edit::on_render(key, tab, msg),
+        "save-image" => super::edit::on_save_image(key, tab, msg),
         "editing" => {
             if let Some(on) = msg.get("on").and_then(Value::as_bool) {
                 super::edit::page_editing(key, tab, on);

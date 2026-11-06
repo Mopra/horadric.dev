@@ -1,6 +1,7 @@
 // A stand in for the host, for the editor's test pages. Load it before
-// forge.js: it gives the page a fake window.chrome.webview, answers `write`
-// as the Forge would, and serves `?raw` from its own copy of the file.
+// forge.js: it gives the page a fake window.chrome.webview, answers `write`,
+// `render` and `save-image` as the Forge would, and serves `?raw` from its
+// own copy of the file. Pictures are PUT to the server under assets/.
 //
 // The file on "disk" is the text in <script type="text/plain"
 // id="forge-source"> when the page has one (markdown and CSV), else the
@@ -46,6 +47,14 @@
 
   async function onPost(msg) {
     sent.push(msg);
+    if (msg && msg.forge === "render") {
+      deliver({ forge: "rendered", id: msg.id, ok: true, html: renderMarkdown(String(msg.text || "")) });
+      return;
+    }
+    if (msg && msg.forge === "save-image") {
+      deliver({ forge: "image-saved", id: msg.id, ...(await saveImage(msg)) });
+      return;
+    }
     if (!msg || msg.forge !== "write") return;
     await ensureDisk();
     await new Promise((r) => setTimeout(r, stub.delay));
@@ -80,17 +89,26 @@
     return realFetch(input, init);
   };
 
-  // A small markdown renderer that marks each block with its lines, as the
-  // Forge's own does; enough for headings, lists, quotes, code and text.
+  // A small markdown renderer that marks each top-level block with its
+  // lines ("a-b"), as the Forge's own does: headings, lists with tasks,
+  // quotes, code and Mermaid fences, rules, tables, pictures and text.
+  // The real one is horadric_core::forge::markdown_body; this is enough to
+  // try the editor without the app.
   function renderMarkdown(src) {
-    const lines = src.split("\n");
-    const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+    const lines = src.replace(/^﻿/, "").split("\n").map((l) => l.replace(/\r$/, ""));
+    if (lines.length && lines[lines.length - 1] === "") lines.pop();
+    const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
     const inline = (s) => esc(s)
       .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/!\[([^\]]*)\]\(([^)\s]*)\)/g, '<img src="$2" alt="$1">')
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+      .replace(/~~([^~]+)~~/g, "<del>$1</del>")
       .replace(/\[([^\]]*)\]\(([^)]*)\)/g, '<a href="$2">$1</a>');
-    const at = (a, b) => (a === b ? `${a}` : `${a}-${b}`);
+    const at = (a, b) => `data-lines="${a}-${b}"`;
+    const LIST = /^(\s*)([-*+]|\d+[.)])\s+/;
+    const cells = (l) => l.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map((c) => c.trim());
+    const starts = (l) => /^(#{1,6}\s|```|~~~|>)/.test(l) || LIST.test(l) || /^\s*([-*_])(\s*\1){2,}\s*$/.test(l);
     let out = "";
     let i = 0;
     while (i < lines.length) {
@@ -98,38 +116,77 @@
       const n = i + 1;
       if (!l.trim()) { i++; continue; }
       let m;
-      if ((m = /^(#{1,6})\s+(.*)$/.exec(l))) {
-        out += `<h${m[1].length} data-lines="${n}">${inline(m[2])}</h${m[1].length}>\n`;
+      if ((m = /^(#{1,6})(?:\s+(.*))?$/.exec(l))) {
+        out += `<h${m[1].length} ${at(n, n)}>${inline(m[2] || "")}</h${m[1].length}>\n`;
         i++;
-      } else if (/^```/.test(l)) {
+      } else if ((m = /^(`{3,}|~{3,})\s*([^\s`]*)/.exec(l))) {
         let j = i + 1;
-        while (j < lines.length && !/^```/.test(lines[j])) j++;
-        out += `<pre data-lines="${at(n, Math.min(j + 1, lines.length))}"><code>${esc(lines.slice(i + 1, j).join("\n"))}</code></pre>\n`;
+        while (j < lines.length && !lines[j].startsWith(m[1])) j++;
+        const body = esc(lines.slice(i + 1, j).join("\n"));
+        const end = Math.min(j + 1, lines.length);
+        if (m[2] === "mermaid") out += `<pre class="mermaid" ${at(n, end)}>${body}\n</pre>\n`;
+        else out += `<pre ${at(n, end)}><code${m[2] ? ` class="language-${esc(m[2])}"` : ""}>${body}${body ? "\n" : ""}</code></pre>\n`;
         i = j + 1;
-      } else if (/^\s*([-*+]|\d+[.)])\s+/.test(l)) {
+      } else if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(l)) {
+        out += `<hr ${at(n, n)}>\n`;
+        i++;
+      } else if (/^\s*\|/.test(l) && i + 1 < lines.length && /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(lines[i + 1])) {
+        const head = cells(l);
+        let j = i + 2;
+        let body = "";
+        while (j < lines.length && /^\s*\|/.test(lines[j])) {
+          const c = cells(lines[j]);
+          body += `<tr>${head.map((_, k) => `<td>${inline(c[k] || "")}</td>`).join("")}</tr>\n`;
+          j++;
+        }
+        out += `<table ${at(n, j)}>\n<thead>\n<tr>${head.map((h) => `<th>${inline(h)}</th>`).join("")}</tr>\n</thead>\n` +
+          (body ? `<tbody>\n${body}</tbody>\n` : "") + "</table>\n";
+        i = j;
+      } else if (LIST.test(l)) {
         const ordered = /^\s*\d/.test(l);
         let j = i;
         let items = "";
-        while (j < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[j])) {
-          items += `<li data-lines="${j + 1}">${inline(lines[j].replace(/^\s*([-*+]|\d+[.)])\s+/, ""))}</li>`;
+        while (j < lines.length && (LIST.test(lines[j]) || (/^\s+\S/.test(lines[j]) && j > i))) {
+          if (!LIST.test(lines[j])) { j++; continue; }
+          const text = lines[j].replace(LIST, "");
+          const t = /^\[([ xX])\]\s+(.*)$/.exec(text);
+          items += t
+            ? `<li class="task"><input type="checkbox" disabled${t[1] === " " ? "" : " checked"}>${inline(t[2])}</li>\n`
+            : `<li>${inline(text)}</li>\n`;
           j++;
         }
         const tag = ordered ? "ol" : "ul";
-        out += `<${tag} data-lines="${at(n, j)}">${items}</${tag}>\n`;
+        out += `<${tag} ${at(n, j)}>\n${items}</${tag}>\n`;
         i = j;
-      } else if (/^>/.test(l)) {
+      } else if (/^\s*>/.test(l)) {
         let j = i;
-        while (j < lines.length && /^>/.test(lines[j])) j++;
-        out += `<blockquote data-lines="${at(n, j)}"><p>${inline(lines.slice(i, j).map((x) => x.replace(/^>\s?/, "")).join(" "))}</p></blockquote>\n`;
+        while (j < lines.length && /^\s*>/.test(lines[j])) j++;
+        out += `<blockquote ${at(n, j)}>\n<p>${inline(lines.slice(i, j).map((x) => x.replace(/^\s*>\s?/, "")).join("\n"))}</p>\n</blockquote>\n`;
         i = j;
       } else {
         let j = i;
-        while (j < lines.length && lines[j].trim() && !/^(#|```|>|\s*([-*+]|\d+[.)])\s)/.test(lines[j])) j++;
-        out += `<p data-lines="${at(n, j)}">${inline(lines.slice(i, j).join("\n"))}</p>\n`;
+        while (j < lines.length && lines[j].trim() && (j === i || !starts(lines[j]))) j++;
+        out += `<p ${at(n, j)}>${inline(lines.slice(i, j).join("\n"))}</p>\n`;
         i = j;
       }
     }
     return out;
+  }
+
+  // A picture saved as the host saves it: into assets/ beside the file, a
+  // name of its own. PUT to the test server, so the page can show it.
+  const saved = new Set();
+  async function saveImage(msg) {
+    const stem = (msg.name || "image").replace(/\.[^.]*$/, "").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "image";
+    const bytes = Uint8Array.from(atob(msg.data || ""), (c) => c.charCodeAt(0));
+    const ext = bytes[0] === 0x89 ? "png" : bytes[0] === 0xff ? "jpg" : bytes[0] === 0x47 ? "gif" : bytes[0] === 0x52 ? "webp" : null;
+    if (!ext) return { ok: false, why: "only PNG, JPEG, GIF and WebP pictures are saved" };
+    let name = `${stem}.${ext}`;
+    for (let n = 2; saved.has(name); n++) name = `${stem}-${n}.${ext}`;
+    saved.add(name);
+    const dir = path.slice(0, path.lastIndexOf("/") + 1);
+    try { await realFetch(`${dir}assets/${name}`, { method: "PUT", body: bytes }); } catch (_) { /* shown broken */ }
+    return { ok: true, path: `assets/${name}` };
   }
 
   // The CSV page as csv.rs makes it: the first record the header, each

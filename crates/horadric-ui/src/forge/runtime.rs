@@ -82,6 +82,12 @@ pub fn with_mermaid(html: String) -> String {
     }
 }
 
+/// The script that sets Mermaid's look, for a page that loads Mermaid
+/// after it was made (the markdown editor drawing a new diagram).
+pub fn mermaid_look() -> &'static str {
+    MERMAID_LOOK
+}
+
 /// Mermaid drawn in the page's Horadric look rather than its own light
 /// default: keys' faces for nodes, the project's colour round them, the
 /// legends' ink for lines. Read from the page's `--hd-` properties, so a

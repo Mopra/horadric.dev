@@ -9,8 +9,11 @@
 //! pin instead, and Claude makes it.
 
 mod html;
+mod page;
 mod text;
 mod write;
+
+pub use page::{on_render, on_save_image};
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -403,6 +406,24 @@ pub(super) fn editable(file: &Path) -> bool {
     matches!(super::kind(file), Some(Kind::Markdown | Kind::Html | Kind::Deck | Kind::Csv))
 }
 
+/// The kinds of file whose page is always the editor: no edit mode, the
+/// view itself takes the caret.
+pub(super) fn always_editable(file: &Path) -> bool {
+    matches!(super::kind(file), Some(Kind::Markdown | Kind::Csv))
+}
+
+/// How long after the human's last key or click a page that is always
+/// the editor may still write its file: past the autosave's wait, yet
+/// short enough that a page's own script cannot rewrite it unattended.
+const HUMAN_FOR: Duration = Duration::from_secs(10);
+
+/// Whether the tab shows the live file of a kind that is always edited (a
+/// version from the history is only shown).
+fn always_editing(key: &str, tab: u64) -> bool {
+    super::file_of(key, tab).is_some_and(|f| always_editable(&f))
+        && super::history::viewing(key, tab).is_none()
+}
+
 thread_local! {
     /// Tabs in edit mode, and tabs that left it and when, for the save
     /// that follows the leaving.
@@ -411,12 +432,16 @@ thread_local! {
 
 /// Whether the tab's page is in edit mode.
 pub(super) fn editing(key: &str, tab: u64) -> bool {
-    EDITING.with(|e| e.borrow().iter().any(|(k, t, off)| k == key && *t == tab && off.is_none()))
+    always_editing(key, tab)
+        || EDITING.with(|e| e.borrow().iter().any(|(k, t, off)| k == key && *t == tab && off.is_none()))
 }
 
 /// Whether the tab's page may write its file: in edit mode, or only just
 /// out of it.
 fn may_write(key: &str, tab: u64) -> bool {
+    if always_editing(key, tab) {
+        return crate::web::shown_tab(key) == Some(tab) && super::pins::human_within(key, HUMAN_FOR);
+    }
     EDITING.with(|e| {
         e.borrow().iter().any(|(k, t, off)| {
             k == key && *t == tab && off.is_none_or(|at| at.elapsed() < WRITE_AFTER)
@@ -451,7 +476,7 @@ pub(super) fn page_gone(key: &str, tab: u64) {
 pub fn toggle_editing(key: &str) {
     let Some(tab) = crate::web::shown_tab(key) else { return };
     let Some(file) = super::file_of(key, tab) else { return };
-    if !editable(&file) {
+    if !editable(&file) || always_editable(&file) {
         return;
     }
     let on = !editing(key, tab);
@@ -464,6 +489,9 @@ pub fn toggle_editing(key: &str) {
 /// mode, on only with the human at the keys: edit mode is what lets a page
 /// write its file, and a page's own script must not turn it on unbidden.
 pub(super) fn page_editing(key: &str, tab: u64, on: bool) {
+    if always_editing(key, tab) {
+        return;
+    }
     let fits = super::file_of(key, tab).is_some_and(|f| editable(&f));
     let on = on && fits && crate::web::shown_tab(key) == Some(tab) && super::pins::human_at(key);
     set_editing(key, tab, on);
@@ -481,6 +509,9 @@ pub fn on_write(key: &str, tab: u64, msg: &Value) {
         super::post(key, tab, &json!({"forge": "write-result", "id": id, "ok": false, "why": why}));
     };
     if !may_write(key, tab) {
+        if always_editing(key, tab) {
+            return refuse("no key or click in the page lately; type again to save");
+        }
         return refuse("the page is not in edit mode");
     }
     let page_file = msg.get("file").and_then(Value::as_str).unwrap_or_default();

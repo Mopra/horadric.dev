@@ -310,7 +310,205 @@ html.forge-editing-csv table.forge-ed-grid .forge-ed-editing {
   box-shadow: inset 0 0 0 1.5px var(--hd-accent), inset 0 2px 5px var(--hd-hollow-shade);
   white-space: pre-wrap;
 }
+/* The sort key: a small pair of carets beside the header's words. The
+   one lit is the way the view is sorted; the file keeps its order. */
+html.forge-editing-csv table.forge-ed-grid th[data-sort]::after { display: none; }
+html.forge-editing-csv table.forge-ed-grid .forge-ed-th { outline: 0; }
+html.forge-editing-csv table.forge-ed-grid .forge-ed-sort {
+  all: unset;
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-left: 6px;
+  vertical-align: -2px;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0.35;
+}
+html.forge-editing-csv table.forge-ed-grid th:hover .forge-ed-sort,
+html.forge-editing-csv table.forge-ed-grid th[data-sort] .forge-ed-sort { opacity: 1; }
+html.forge-editing-csv table.forge-ed-grid .forge-ed-sort:hover { background: var(--hd-hover); }
+html.forge-editing-csv table.forge-ed-grid .forge-ed-sort svg { display: block; width: 8px; height: 10px; margin: 2px auto; }
+html.forge-editing-csv table.forge-ed-grid .forge-ed-sort path { fill: var(--hd-legend); }
+html.forge-editing-csv table.forge-ed-grid th[data-sort="asc"] .forge-ed-sort .up,
+html.forge-editing-csv table.forge-ed-grid th[data-sort="desc"] .forge-ed-sort .down { fill: var(--hd-accent); }
+
+/* ------------------------------------------------- markdown, written in */
+
+/* What floats over the page: a small plate in the corner with the status
+   and the Source key, the slash menu, a table's keys, a code block's
+   language. Only these take the pointer; the page under them is the
+   editor. */
+.forge-ed.forge-ed-ty {
+  background: none;
+  box-shadow: none;
+  display: block;
+  pointer-events: none;
+}
+.forge-ed-ty > * { pointer-events: auto; }
+.forge-ty-bar {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 5px 5px 11px;
+  border-radius: 9px;
+  background: var(--hd-plate);
+  box-shadow: var(--forge-ed-raised);
+}
+.forge-ty-bar .forge-ed-key { margin: 0 0 2px; }
+.forge-ty-bar .forge-ed-status[data-state="saved"] .forge-ed-status-text { display: none; }
+.forge-ed-ty .forge-ed-conflict {
+  position: absolute;
+  top: 58px;
+  right: 16px;
+  max-width: calc(100% - 32px);
+  margin: 0;
+}
+.forge-ty-menu, .forge-ty-tools {
+  position: absolute;
+  padding: 5px;
+  border-radius: 9px;
+  background: var(--hd-plate);
+  box-shadow: var(--forge-ed-raised);
+}
+.forge-ty-menu {
+  min-width: 220px;
+  max-height: 400px;
+  overflow: auto;
+  scrollbar-color: var(--hd-lamp-off) transparent;
+  scrollbar-width: thin;
+}
+.forge-ty-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  color: var(--hd-read);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.forge-ty-item:hover { background: var(--hd-hover); }
+/* The chosen item: a cut in the project's colour down its edge. */
+.forge-ty-item.on { background: var(--hd-hover); color: var(--hd-text); box-shadow: inset 2px 0 0 var(--hd-accent); }
+.forge-ty-item kbd { margin-left: auto; font: 11px/1 var(--hd-mono); color: var(--hd-legend); }
+.forge-ty-tools { display: flex; gap: 6px; }
+.forge-ty-tools .forge-ed-key { margin: 0 0 2px; }
+.forge-ty-lang {
+  position: absolute;
+  width: 112px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  outline: 0;
+  font: 12px/1.4 var(--hd-mono);
+  color: var(--hd-text);
+  background: var(--hd-well);
+  box-shadow: var(--forge-ed-sunk);
+}
+.forge-ty-lang::placeholder { color: var(--hd-legend); }
+.forge-ty-lang:focus { box-shadow: var(--forge-ed-sunk), inset 0 0 0 1px var(--hd-accent-dim); }
+
+/* In the page: the block the caret is in shows its markdown in the page's
+   own type, the markers faded beside what they do. */
+html.forge-typora main.forge-md { cursor: text; }
+html.forge-typora main.forge-md > [data-lines] { position: relative; }
+html.forge-typora main.forge-md a { cursor: text; }
+html.forge-typora main.forge-md li.task > input { cursor: pointer; }
+html.forge-typora .forge-ty-src {
+  margin: 0 0 14px;
+  min-height: 1.65em;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  tab-size: 4;
+  outline: 0;
+  color: var(--hd-read);
+  caret-color: var(--hd-accent);
+}
+html.forge-typora .forge-ty-src.ty-fenced {
+  font: 13px/19px var(--hd-mono);
+  padding: 12px 136px 12px 14px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid color-mix(in srgb, var(--hd-read) 7%, transparent);
+}
+html.forge-typora .forge-ty-src .ty-mk { color: var(--hd-legend); font-weight: 400; }
+html.forge-typora .forge-ty-src .ty-li, html.forge-typora .forge-ty-src .ty-task {
+  color: color-mix(in srgb, var(--hd-accent) 60%, var(--hd-legend));
+}
+html.forge-typora .forge-ty-src .ty-h { color: var(--hd-text); font-weight: 600; }
+html.forge-typora .forge-ty-src .ty-h1 { font-size: 26px; line-height: 1.3; }
+html.forge-typora .forge-ty-src .ty-h2 { font-size: 21px; line-height: 1.35; }
+html.forge-typora .forge-ty-src .ty-h3 { font-size: 18px; line-height: 1.45; }
+html.forge-typora .forge-ty-src .ty-h4, html.forge-typora .forge-ty-src .ty-h5,
+html.forge-typora .forge-ty-src .ty-h6 {
+  font-size: 13px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--hd-read) 62%, transparent);
+}
+html.forge-typora .forge-ty-src strong { color: var(--hd-text); font-weight: 600; }
+html.forge-typora .forge-ty-src .ty-code {
+  font: 0.84em/1.5 var(--hd-mono);
+  color: var(--hd-code);
+  background: color-mix(in srgb, var(--hd-read) 7.5%, transparent);
+  border-radius: 3px;
+}
+html.forge-typora .forge-ty-src .ty-link {
+  color: color-mix(in srgb, var(--hd-accent) 55%, var(--hd-read));
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--hd-accent) 45%, transparent);
+  text-underline-offset: 3px;
+}
+html.forge-typora .forge-ty-src .ty-url { color: var(--hd-legend); font-size: 0.9em; }
+html.forge-typora .forge-ty-src .ty-alt { color: var(--hd-dim); }
+html.forge-typora .forge-ty-src .ty-codeline { color: color-mix(in srgb, var(--hd-read) 90%, transparent); }
+html.forge-typora .forge-ty-src .ty-lang { color: var(--hd-dim); }
+html.forge-typora .forge-ty-src del { color: color-mix(in srgb, var(--hd-read) 55%, transparent); }
+/* A block on its way to being drawn again: the source, a little quieter. */
+html.forge-typora .forge-ty-pending { opacity: 0.72; }
+
+/* The block written in: a thin line in the gutter in the project's
+   colour, with a small rune at its head. No glow. */
+html.forge-typora .forge-ty-focus::before {
+  content: "";
+  position: absolute;
+  left: -19px;
+  top: 0.45em;
+  bottom: 0.45em;
+  width: 1px;
+  background: var(--hd-accent-dim);
+  pointer-events: none;
+}
+html.forge-typora .forge-ty-focus::after {
+  content: "";
+  position: absolute;
+  left: -22px;
+  top: 0.45em;
+  width: 5px;
+  height: 5px;
+  transform: rotate(45deg);
+  border: 1px solid var(--hd-accent);
+  background: var(--hd-screen);
+  pointer-events: none;
+}
+/* A table cannot carry the gutter's line, so it gets a quiet edge. */
+html.forge-typora table.forge-ty-focus::before, html.forge-typora table.forge-ty-focus::after { display: none; }
+html.forge-typora table.forge-ty-focus { outline: 1px solid var(--hd-accent-dim); outline-offset: 4px; }
+html.forge-typora .forge-ty-cell {
+  outline: 0;
+  color: var(--hd-text);
+  background: var(--hd-well) !important;
+  box-shadow: inset 0 0 0 1.5px var(--hd-accent), inset 0 2px 5px var(--hd-hollow-shade);
+  white-space: pre-wrap;
+}
+html.forge-typora main.forge-md table td, html.forge-typora main.forge-md table th { cursor: text; }
+
 @media print {
   html.forge-editing-md.forge-editing-split body { margin-left: 0 !important; }
   html.forge-editing .forge-ed-here { outline: 0 !important; }
+  html.forge-typora .forge-ty-focus::before, html.forge-typora .forge-ty-focus::after { display: none; }
 }

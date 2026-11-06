@@ -144,7 +144,9 @@ fn lay_out(key: &str, tab: u64, file: &Path) -> Option<(String, Vec<Button>)> {
     if can_pin(file) {
         buttons.push(Button::Pin);
     }
-    if super::edit::editable(file) {
+    // Markdown and CSV are edited where they are shown; only a page with
+    // its source beside it has a mode to go into.
+    if super::edit::editable(file) && !super::edit::always_editable(file) {
         buttons.push(Button::Edit);
     }
     buttons.push(Button::History);

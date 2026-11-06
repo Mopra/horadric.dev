@@ -221,6 +221,12 @@ pub(super) fn page_pinning(key: &str, tab: u64, on: bool) {
 /// Whether the human just used the keyboard or mouse, and the window in
 /// front is ours and holds the project's browser pane.
 pub(super) fn human_at(key: &str) -> bool {
+    human_within(key, INPUT_RECENT)
+}
+
+/// [`human_at`] with a longer reach: the human used the keyboard or mouse
+/// at most `recent` ago and the pane's window is in front.
+pub(super) fn human_within(key: &str, recent: Duration) -> bool {
     let Some(pane) = web::pane_rect(key) else {
         return false;
     };
@@ -233,7 +239,7 @@ pub(super) fn human_at(key: &str) -> bool {
             return false;
         }
         let idle = GetTickCount().wrapping_sub(info.dwTime);
-        if u128::from(idle) > INPUT_RECENT.as_millis() {
+        if u128::from(idle) > recent.as_millis() {
             return false;
         }
         let front = GetForegroundWindow();

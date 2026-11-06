@@ -735,6 +735,8 @@
   addEventListener("dblclick", (e) => {
     if (pinning || editing || cropping || e.defaultPrevented) return;
     if (document.documentElement.classList.contains("forge-presenting")) return;
+    // The editor owns the page: an edit in place would be a second writer.
+    if (document.documentElement.classList.contains("forge-editing")) return;
     const el = editTarget(e.target);
     if (el) startEdit(el);
   }, true);
