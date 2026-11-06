@@ -382,7 +382,6 @@ pub fn page_asked(
 /// commit, for the bar to offer. Git is not asked here, as that would
 /// hold the UI thread: the page itself says when nothing changed or the
 /// folder is in no repository. None for a file outside `root`.
-#[allow(dead_code)] // The bar takes it up once its owner wires the entry.
 pub fn diff_url(root: &Path, file: &Path) -> Option<String> {
     let segs = segments(root, file).filter(|s| !s.is_empty())?;
     // The host the tabs on this folder use: a flat one answers only its

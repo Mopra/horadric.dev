@@ -45,6 +45,7 @@ const PPTX: usize = 5;
 const OPEN_WITH: usize = 6;
 const EXPLORER: usize = 7;
 const EDITOR: usize = 8;
+const CHANGES: usize = 9;
 
 /// The export menu for the file `file` shown in the tab `tab`.
 pub fn menu(key: &str, tab: u64, file: &Path) {
@@ -71,6 +72,16 @@ pub fn menu(key: &str, tab: u64, file: &Path) {
     if !items.is_empty() {
         items.push(Item::Separator);
     }
+    let root = super::TABS.with(|t| {
+        t.borrow()
+            .iter()
+            .find(|f| f.key == key && f.id == tab)
+            .map(|f| f.root.clone())
+    });
+    let changes = root.and_then(|r| super::home::diff_url(&r, file));
+    if changes.is_some() {
+        items.push(Item::action(CHANGES, "Changes since the last commit"));
+    }
     items.push(Item::action(EDITOR, "Open in editor"));
     items.push(Item::action(OPEN_WITH, "Open with the program Windows has for it"));
     items.push(Item::action(EXPLORER, "Show in Explorer"));
@@ -83,6 +94,11 @@ pub fn menu(key: &str, tab: u64, file: &Path) {
         Some(PPTX) => to_pptx(key, &file),
         Some(OPEN_WITH) => super::bar::open_with(&file),
         Some(EXPLORER) => super::bar::show_in_explorer(&file),
+        Some(CHANGES) => {
+            if let Some(url) = &changes {
+                crate::web::navigate(key, tab, url);
+            }
+        }
         Some(EDITOR) => {
             super::source_view(key);
         }
