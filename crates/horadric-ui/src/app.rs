@@ -682,8 +682,8 @@ fn kept_secrets() -> Vec<String> {
 }
 
 /// A new key for Claude session `id`, which `horadric secret` shows the
-/// app to prove it runs in that session. In memory only, so a session
-/// reattached after the app restarts holds a key the app no longer knows.
+/// app to prove it runs in that session. Kept sealed on disk, so a session
+/// reattached after the app restarts still holds a key the app knows.
 fn secret_key(id: &str) -> (String, String) {
     (
         horadric_hooks::SECRET_KEY_ENV.to_string(),
@@ -7478,13 +7478,14 @@ impl App {
     }
 
     /// Why a `horadric secret` call from `session` is refused before the
-    /// Vault sees it: a live session whose key the app does not know was
-    /// started before the app was, and only a new start gives it one.
+    /// Vault sees it. Keys outlive an app restart, so a live session with a
+    /// wrong key either began before the Vault was built or is not the
+    /// session it claims to be; only a new start gives it a key.
     fn secret_unkeyed(&self, session: &str, key: &str) -> Option<&'static str> {
         let live = self.secret_place(session).is_some();
         (live && !crate::vault::run::key_ok(session, key)).then_some(
-            "Refused: this session began before Horadric last started, so Horadric no longer \
-             knows its key. Restart the session (close it and resume it) to use secrets.",
+            "Refused: Horadric does not know this session's key. Restart the session \
+             (close it and resume it) to use secrets.",
         )
     }
 
