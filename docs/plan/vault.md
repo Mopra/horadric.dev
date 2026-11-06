@@ -207,7 +207,8 @@ third half, below.
   No subcommand, a flag before it, or arguments that reach past it
   (another API host, a file of arguments, a subcommand that installs
   code or logs in) leave only Once. An Always run gets a PATH without
-  folders the user can write to. Settings marks an Always for a program
+  folders the user can write to, and its pinned files are held so none
+  can be written until it ends. Settings marks an Always for a program
   no longer on the list as no longer used (decided 2026-11-06).
 - **Adding one.** In Settings, Projects, a Secrets row lists the picked
   project's names, its identity's and the Everywhere ones under them, and

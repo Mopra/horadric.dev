@@ -808,6 +808,8 @@ const QUIET_REMOVED: &[&str] = &[
     "GIT_CURL_VERBOSE",
     "GIT_REDACT_COOKIES",
     "GIT_CONFIG_SYSTEM",
+    // botocore loads models, endpoint rules included, from these folders.
+    "AWS_DATA_PATH",
 ];
 
 /// `GIT_CONFIG_COUNT` and its `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n`.
@@ -846,6 +848,7 @@ fn watched_env(env: &super::identity::SessionEnv) -> Vec<(String, String)> {
         (up.starts_with("GIT_") && !quiet_removed(&up))
             || up.ends_with("_PROXY")
             || up.starts_with("SSL_CERT_")
+            || up.starts_with("AWS_ENDPOINT_URL")
             || NAMED.contains(&up.as_str())
     };
     let mut names: Vec<String> = std::env::vars_os()
@@ -1323,6 +1326,40 @@ fn login_hint(program: &Path) -> String {
     }
 }
 
+/// The pinned files and must-be-empty folders, opened so nobody can
+/// write, swap or delete them until dropped: held from the last hash to
+/// the end of the run, as the program file is. A folder held this way can
+/// still be added to, so it is checked empty again once held. A missing
+/// one cannot be held; one made during the run is the window left. Err
+/// when one is there but cannot be held, or a held folder is not empty.
+fn hold_pins(pins: &[Pin]) -> Result<Vec<File>, String> {
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let mut held = Vec::new();
+    for p in pins {
+        let folder = match p.kind {
+            PinKind::File | PinKind::Text => false,
+            PinKind::Empty => true,
+            PinKind::Tree | PinKind::Names => continue,
+        };
+        let mut open = std::fs::OpenOptions::new();
+        open.read(true).share_mode(FILE_SHARE_READ);
+        if folder {
+            open.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        match open.open(&p.path) {
+            Ok(f) => held.push(f),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("{} cannot be held: {e}", p.path)),
+        }
+        if folder && std::fs::read_dir(&p.path).is_ok_and(|mut d| d.next().is_some()) {
+            return Err(format!("{} holds something, which it would run", p.path));
+        }
+    }
+    Ok(held)
+}
+
 /// Why Always is not offered, None when it is.
 fn once_why(pinned: &Pinned, runs: &Runs, place: &Place) -> Option<String> {
     let path = &pinned.path;
@@ -1337,6 +1374,9 @@ fn once_why(pinned: &Pinned, runs: &Runs, place: &Place) -> Option<String> {
     }
     if let Some(why) = &runs.refused {
         return Some(why.clone());
+    }
+    if runs.pinned && hold_pins(&runs.pins).is_err() {
+        return Some("a file it reads is open for writing elsewhere, so it cannot be held while it runs".into());
     }
     if runs.pinned && runs.fingerprint.is_none() {
         return Some("a file that decides what it runs could not be read through, or is a link".into());
@@ -1805,6 +1845,26 @@ impl Job {
             locked_path(own, node, &[&self.dir, &self.cwd, &temp])
         });
         let quiet = self.always && self.runs.pinned;
+        // Held from here to the end, then hashed once more through the
+        // hold: what the program reads is what was allowed.
+        let mut held = Vec::new();
+        if quiet {
+            held = match hold_pins(&self.runs.pins) {
+                Ok(h) => h,
+                Err(why) => {
+                    out.fail(&format!("Refused: {why}. Run it again; it is offered Once while that lasts."));
+                    return;
+                }
+            };
+            let now = pin_hashes(&self.runs.pins).map(|mut h| {
+                h.extend(watched_env(&self.env));
+                fingerprint(&self.pinned.sha256, &h)
+            });
+            if now.as_deref() != self.runs.fingerprint.as_deref() {
+                out.fail("Refused: a file it reads changed just before the start. Run it again.");
+                return;
+            }
+        }
         let mut child = match self.command(locked.as_ref().map(|(p, _)| p), quiet).spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -1898,6 +1958,7 @@ impl Job {
         }
         out.exit(code);
         drop(tree);
+        drop(held);
         drop(self.pinned);
     }
 }
@@ -2319,6 +2380,34 @@ mod tests {
     }
 
     #[test]
+    fn a_held_pin_can_be_read_but_not_changed() {
+        let root = scratch("pin-hold");
+        let config = root.join("config");
+        let models = root.join("models");
+        std::fs::write(&config, "[default]\n").unwrap();
+        std::fs::create_dir_all(&models).unwrap();
+        let pins = vec![
+            Pin { what: "c".into(), path: config.to_string_lossy().into(), kind: PinKind::Text },
+            Pin { what: "m".into(), path: models.to_string_lossy().into(), kind: PinKind::Empty },
+            Pin { what: "x".into(), path: root.join("missing").to_string_lossy().into(), kind: PinKind::File },
+        ];
+        let held = hold_pins(&pins).unwrap();
+        assert_eq!(held.len(), 2);
+        assert!(pin_hashes(&pins).is_some(), "still readable");
+        assert!(std::fs::write(&config, "[evil]\n").is_err(), "not writable while held");
+        assert!(std::fs::remove_file(&config).is_err(), "not deletable while held");
+        assert!(std::fs::rename(&models, root.join("moved")).is_err(), "the folder stays put");
+        drop(held);
+        // Open for writing elsewhere: it cannot be held.
+        let writer = std::fs::OpenOptions::new().write(true).open(&config).unwrap();
+        assert!(hold_pins(&pins).is_err());
+        drop(writer);
+        std::fs::write(models.join("endpoints.json"), "{}").unwrap();
+        assert!(hold_pins(&pins).is_err(), "a held folder must be empty");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn names_see_a_new_entry_only() {
         let root = scratch("pin-names");
         std::fs::create_dir_all(root.join("m/a")).unwrap();
@@ -2372,6 +2461,8 @@ mod tests {
         let env = super::super::identity::SessionEnv {
             set: vec![
                 ("XDG_CONFIG_HOME".into(), "C:/x".into()),
+                ("AWS_ENDPOINT_URL_BEDROCK_RUNTIME".into(), "https://e".into()),
+                ("AWS_DATA_PATH".into(), "C:/models".into()),
                 ("HTTPS_PROXY".into(), "http://a".into()),
                 ("GIT_TRACE".into(), "1".into()),
                 ("GIT_SSL_CAINFO".into(), "x".into()),
@@ -2383,6 +2474,8 @@ mod tests {
         assert!(watched.contains(&"the variable HTTPS_PROXY".to_string()), "{watched:?}");
         assert!(watched.contains(&"the variable NODE_EXTRA_CA_CERTS".to_string()));
         assert!(watched.contains(&"the variable XDG_CONFIG_HOME".to_string()));
+        assert!(watched.contains(&"the variable AWS_ENDPOINT_URL_BEDROCK_RUNTIME".to_string()));
+        assert!(!watched.iter().any(|w| w.contains("AWS_DATA_PATH")), "taken away, not watched");
         // What the run never gets is not watched.
         assert!(!watched.iter().any(|w| w.contains("GIT_TRACE") || w.contains("GIT_SSL_CAINFO")));
         let other = super::super::identity::SessionEnv {
