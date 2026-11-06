@@ -15,6 +15,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     ID2D1BitmapRenderTarget, ID2D1DeviceContext, ID2D1Image,
     D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_INTERPOLATION_MODE_LINEAR,
+    D2D1_PRIMITIVE_BLEND_COPY, D2D1_PRIMITIVE_BLEND_SOURCE_OVER,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows_numerics::Vector2;
@@ -44,6 +45,9 @@ pub(super) enum Emitter {
     },
     /// A small round light.
     Dot { x: f32, y: f32, radius: f32, c: Color },
+    /// Not light: a key drawn over what came before it, which hides
+    /// their light where it lies. What follows is over it.
+    Cover { r: Rect, radius: f32 },
 }
 
 impl Emitter {
@@ -54,6 +58,7 @@ impl Emitter {
             Emitter::Dot { x, y, radius, .. } => {
                 Rect::new(x - radius, y - radius, 2.0 * radius, 2.0 * radius)
             }
+            Emitter::Cover { r, .. } => r,
         }
     }
 }
@@ -103,12 +108,56 @@ fn signature(emitters: &[Emitter], look: &Bloom) -> Vec<u32> {
                 level(strength),
             ]),
             Emitter::Dot { x, y, radius, c } => sig.extend([2, q(x), q(y), q(radius), ink(c)]),
+            Emitter::Cover { r, radius } => {
+                sig.extend([3, q(r.x), q(r.y), q(r.w), q(r.h), q(radius)])
+            }
         }
     }
     sig
 }
 
 impl Target {
+    /// Blooms `emitters` into `target`, which is drawing, in the order
+    /// they were drawn: each [`Emitter::Cover`] wipes the light so far
+    /// from under its key before what lies over it is added. Without a
+    /// cover that is one bloom, as it is all but always.
+    unsafe fn bloom_still(
+        &self,
+        target: &ID2D1BitmapRenderTarget,
+        emitters: &[Emitter],
+        look: &Bloom,
+    ) -> Result<()> {
+        for (n, group) in emitters.split(|e| matches!(e, Emitter::Cover { .. })).enumerate() {
+            if n > 0 {
+                // The cover that ended the group before this one.
+                let at = emitters
+                    .iter()
+                    .filter(|e| matches!(e, Emitter::Cover { .. }))
+                    .nth(n - 1);
+                if let Some(&Emitter::Cover { r, radius }) = at {
+                    let dc = target.cast::<ID2D1DeviceContext>()?;
+                    dc.SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
+                    self.painter(target).fill_rounded(&r, radius, Color::rgb(0).with_alpha(0.0));
+                    dc.SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+                }
+            }
+            if group.is_empty() {
+                continue;
+            }
+            let layer = self.still_light.begin(&self.rt)?;
+            let p = self.painter(&layer);
+            for e in group {
+                p.emitter(e);
+                self.still_light.lit(e.bounds());
+            }
+            self.still_light.present(target, look)?;
+            // The next group begins by clearing the light layer, which the
+            // blurs just queued still read from.
+            target.Flush(None, None)?;
+        }
+        Ok(())
+    }
+
     /// Adds the still light to the kept layer `on`, `size` pixels, while it
     /// is drawn. It is bloomed again only when it differs from last time:
     /// the layer is redrawn every frame a tile slides or a bar fills, and a
@@ -119,7 +168,7 @@ impl Target {
         emitters: &[Emitter],
         size: D2D_SIZE_U,
     ) -> Result<()> {
-        if emitters.is_empty() {
+        if emitters.iter().all(|e| matches!(e, Emitter::Cover { .. })) {
             return Ok(());
         }
         let look = Bloom::tile();
@@ -144,15 +193,9 @@ impl Target {
                     )?
                 }
             };
-            let layer = self.still_light.begin(&self.rt)?;
-            let p = self.painter(&layer);
-            for e in emitters {
-                p.emitter(e);
-                self.still_light.lit(e.bounds());
-            }
             target.BeginDraw();
             target.Clear(Some(&D2D1_COLOR_F::default()));
-            let bloomed = self.still_light.present(&target, &look);
+            let bloomed = self.bloom_still(&target, emitters, &look);
             target.EndDraw(None, None)?;
             bloomed?;
             *kept = Some(Kept {
@@ -216,6 +259,9 @@ impl Painter<'_> {
         }
         lit.extend(self.flights(scene));
         for (i, (r, s, look)) in super::tiles(scene).enumerate() {
+            if super::under_held(scene, i, &r) {
+                continue;
+            }
             let c = theme::phase_color(&s.phase);
             let lamp = super::lamp_rect(&r);
             let stone = super::keycube::has_stone(s);
@@ -281,6 +327,7 @@ impl Painter<'_> {
                 strength,
             } => self.rim(&r, radius, c, strength),
             Emitter::Dot { x, y, radius, c } => self.dot(x, y, radius, c),
+            Emitter::Cover { .. } => {}
         }
     }
 

@@ -1311,6 +1311,7 @@ pub const TABLE_ROW_H: f32 = 24.0;
 /// The column of names left of the tracks.
 pub const TABLE_LABEL_W: f32 = 170.0;
 
+#[derive(Clone, Copy)]
 struct Painter<'a> {
     rt: &'a ID2D1RenderTarget,
     brush: &'a ID2D1SolidColorBrush,
@@ -1349,7 +1350,10 @@ impl Painter<'_> {
                 ..Look::still(r.y + LEAVE_SINK * k)
             };
             let at = Rect::new(r.x, look.y, r.w, r.h);
-            self.tile(gpu, m, scene, usize::MAX, &at, s, &look);
+            // Its lamp's light would shine through the tiles sliding over
+            // it; it is going out anyway.
+            let dark = Painter { emit: None, ..*self };
+            dark.tile(gpu, m, scene, usize::MAX, &at, s, &look);
         }
         for (i, (r, s, look)) in tiles(scene).enumerate() {
             if scene.held != Some(i) {
@@ -1358,6 +1362,11 @@ impl Painter<'_> {
         }
         if let Some(i) = scene.held {
             if let Some((r, s, look)) = tiles(scene).nth(i) {
+                // The key in hand hides the light of what it is over.
+                self.emit(shine::Emitter::Cover {
+                    r,
+                    radius: m.tile_radius,
+                });
                 self.tile(gpu, m, scene, i, &r, s, &look);
                 // Blue, as a pane is while it is dragged.
                 self.stroke_rounded(&r, m.tile_radius, theme::working().with_alpha(0.7), 1.5);
@@ -2524,7 +2533,7 @@ impl Painter<'_> {
         for (i, (r, s, look)) in tiles(scene).enumerate() {
             let phase = &s.phase;
             let c = theme::phase_color(phase);
-            if keycube::has_stone(s) {
+            if keycube::has_stone(s) || under_held(scene, i, &r) {
                 continue;
             }
             if scene.beckons(i, s) {
@@ -4425,6 +4434,18 @@ fn tiles<'a>(scene: &'a Scene) -> impl Iterator<Item = (Rect, &'a Session, Look)
 fn icon_centre(r: &Rect) -> (f32, f32) {
     // Far enough from the lamp that the rune stone stands clear of it.
     (r.x + 35.0, r.y + r.h / 2.0)
+}
+
+/// Whether tile `i`, at `r`, lies under the key being dragged, which is
+/// drawn over it: light drawn each frame over the kept layer would show
+/// through that key, so such a tile gives none while it is covered.
+fn under_held(scene: &Scene, i: usize, r: &Rect) -> bool {
+    let Some(h) = scene.held.filter(|&h| h != i) else {
+        return false;
+    };
+    tiles(scene).nth(h).is_some_and(|(k, _, _)| {
+        k.x < r.right() && r.x < k.right() && k.y < r.bottom() && r.y < k.bottom()
+    })
 }
 
 /// Where a tile's lamp sits: a slot down its left edge.

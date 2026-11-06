@@ -7,7 +7,7 @@
 //! then on costs one bitmap drawn: a blur on every redraw of the still layer
 //! would cost the UI thread more than the eight shapes did.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 
@@ -30,15 +30,34 @@ use super::{color, rounded, Gpu, Painter};
 use crate::layout::Rect;
 use crate::theme::Color;
 
-/// Baked shades by what they are, kept with a window's target.
+/// Baked shades by what they are, kept with a window's target, each with
+/// when it was last drawn.
 #[derive(Default)]
 pub(super) struct Shades {
-    kept: RefCell<HashMap<Vec<u32>, ID2D1Bitmap>>,
+    kept: RefCell<HashMap<Vec<u32>, (ID2D1Bitmap, u64)>>,
+    clock: Cell<u64>,
 }
 
-/// Enough for every key, field and screen a window has at a few depths and
-/// sub-pixel places. Past it the cache starts over.
+/// Enough for every key, field and screen a window has at each depth and
+/// a few sub-pixel places. Past it the one drawn longest ago goes, so a
+/// full cache never makes every key bake again at once.
 const SHADES_KEPT: usize = 160;
+
+/// How finely a shadow's blur follows a key's depth, in DIPs. A key lifted
+/// under the cursor or landing changes its depth every frame, and a shade
+/// baked per frame is a blur per frame on the UI thread; steps this fine
+/// are not seen.
+const BLUR_STEP: f32 = 1.0;
+
+/// `blur` to the step its shadow is baked at.
+pub(super) fn stepped(blur: f32) -> f32 {
+    (blur.max(0.0) / BLUR_STEP).round() * BLUR_STEP
+}
+
+/// The key of the shade in `kept` drawn longest ago.
+fn oldest<K: Clone, V>(kept: &HashMap<K, (V, u64)>) -> Option<K> {
+    kept.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| k.clone())
+}
 
 /// The Gaussian that softens an edge as much as the old stack of shapes
 /// `blur` wide did: a box that wide has a standard deviation of
@@ -83,6 +102,10 @@ struct Shade<'s> {
     h: f32,
     radius: f32,
     sigma: f32,
+    /// Drawn on whole pixels with the shape placed inside to a quarter
+    /// pixel, for a crisp edge. A soft shadow needs none, and without it
+    /// a key sliding or landing reuses one bitmap.
+    snap: bool,
     /// Shade inside the shape, from everything outside it, rather than the
     /// shape's own shadow outside it.
     inside: bool,
@@ -115,7 +138,8 @@ impl Painter<'_> {
             w: r.w,
             h: r.h,
             radius,
-            sigma: sigma(blur),
+            sigma: sigma(stepped(blur)),
+            snap: false,
             inside: false,
             layers: &[((0.0, 0.0), c.with_alpha(1.0))],
         };
@@ -140,6 +164,7 @@ impl Painter<'_> {
             h: r.h,
             radius,
             sigma: sigma(blur),
+            snap: true,
             inside: true,
             layers: &[((offset, offset), near), ((-offset, -offset), far)],
         };
@@ -156,8 +181,15 @@ impl Painter<'_> {
         let (mut dpi_x, mut dpi_y) = (96.0, 96.0);
         self.rt.GetDpi(&mut dpi_x, &mut dpi_y);
         let scale = dpi_x / 96.0;
-        let (x, phase_x) = snap(at.0 - pad, scale);
-        let (y, phase_y) = snap(at.1 - pad, scale);
+        let place = |at: f32| {
+            if s.snap {
+                snap(at - pad, scale)
+            } else {
+                (at - pad, 0.0)
+            }
+        };
+        let (x, phase_x) = place(at.0);
+        let (y, phase_y) = place(at.1);
         let mut key = vec![
             s.inside as u32,
             quarter(s.w),
@@ -171,17 +203,24 @@ impl Painter<'_> {
         for &((dx, dy), c) in s.layers {
             key.extend([quarter(dx), quarter(dy), key_of(c)]);
         }
+        let now = self.shades.clock.get() + 1;
+        self.shades.clock.set(now);
         let mut kept = self.shades.kept.borrow_mut();
-        if kept.len() > SHADES_KEPT {
-            kept.clear();
-        }
-        let bitmap = match kept.get(&key) {
-            Some(b) => b.clone(),
+        let bitmap = match kept.get_mut(&key) {
+            Some((b, at)) => {
+                *at = now;
+                b.clone()
+            }
             None => {
                 let Ok(b) = self.bake(gpu, s, pad, (phase_x, phase_y)) else {
                     return;
                 };
-                kept.insert(key, b.clone());
+                if kept.len() >= SHADES_KEPT {
+                    if let Some(old) = oldest(&kept) {
+                        kept.remove(&old);
+                    }
+                }
+                kept.insert(key, (b.clone(), now));
                 b
             }
         };
@@ -253,23 +292,9 @@ impl Painter<'_> {
         let out = scratch()?;
         let dc = out.cast::<ID2D1DeviceContext>()?;
         let drawn = (|| -> Result<()> {
-            let clip = if s.inside {
-                let mask = gpu.d2d.CreateRoundedRectangleGeometry(&rounded(&shape, s.radius))?;
-                let layer = out.CreateLayer(None)?;
-                let params = D2D1_LAYER_PARAMETERS {
-                    contentBounds: super::rect(&shape),
-                    geometricMask: ManuallyDrop::new(mask.cast::<ID2D1Geometry>().ok()),
-                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                    maskTransform: Matrix3x2::identity(),
-                    opacity: 1.0,
-                    opacityBrush: ManuallyDrop::new(None),
-                    layerOptions: D2D1_LAYER_OPTIONS_NONE,
-                };
-                out.PushLayer(&params, &layer);
-                Some(params)
-            } else {
-                None
-            };
+            // Everything that can fail comes before the clip is pushed, so
+            // a failure never leaves it pushed.
+            let mut shadows = Vec::new();
             for &((dx, dy), c) in s.layers {
                 let shadow = dc.CreateEffect(&CLSID_D2D1Shadow)?;
                 shadow.SetValue(
@@ -287,18 +312,39 @@ impl Painter<'_> {
                     &rgba,
                 )?;
                 shadow.SetInput(0, &source, true);
-                dc.DrawImage(
-                    &shadow.GetOutput()?,
-                    Some(&Vector2 { X: dx, Y: dy }),
-                    None,
-                    D2D1_INTERPOLATION_MODE_LINEAR,
-                    D2D1_COMPOSITE_MODE_SOURCE_OVER,
-                );
+                shadows.push((shadow.GetOutput()?, Vector2 { X: dx, Y: dy }));
             }
-            if let Some(params) = clip {
-                out.PopLayer();
-                drop(ManuallyDrop::into_inner(params.geometricMask));
+            let draw = || {
+                for (image, at) in &shadows {
+                    dc.DrawImage(
+                        image,
+                        Some(at),
+                        None,
+                        D2D1_INTERPOLATION_MODE_LINEAR,
+                        D2D1_COMPOSITE_MODE_SOURCE_OVER,
+                    );
+                }
+            };
+            if !s.inside {
+                draw();
+                return Ok(());
             }
+            let mask = gpu.d2d.CreateRoundedRectangleGeometry(&rounded(&shape, s.radius))?;
+            let mask = mask.cast::<ID2D1Geometry>()?;
+            let layer = out.CreateLayer(None)?;
+            let params = D2D1_LAYER_PARAMETERS {
+                contentBounds: super::rect(&shape),
+                geometricMask: ManuallyDrop::new(Some(mask)),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: Matrix3x2::identity(),
+                opacity: 1.0,
+                opacityBrush: ManuallyDrop::new(None),
+                layerOptions: D2D1_LAYER_OPTIONS_NONE,
+            };
+            out.PushLayer(&params, &layer);
+            draw();
+            out.PopLayer();
+            drop(ManuallyDrop::into_inner(params.geometricMask));
             Ok(())
         })();
         out.EndDraw(None, None)?;
@@ -332,5 +378,26 @@ mod tests {
         assert!((sigma(12.0) - 12f32.sqrt()).abs() < 1e-5);
         // The pad holds the blur's reach and the move.
         assert!(pad(2.0, 1.5) >= 3.0 * 2.0 + 1.5);
+    }
+
+    #[test]
+    fn a_key_lifting_bakes_its_shadow_a_few_times_not_every_frame() {
+        // Depth runs continuously from rest to lifted; the blur 3 + 6 d.
+        let blurs: std::collections::BTreeSet<u32> = (0..=100)
+            .map(|i| stepped(3.0 + 6.0 * 0.3 * i as f32 / 100.0).to_bits())
+            .collect();
+        assert!(blurs.len() <= 3, "{}", blurs.len());
+        assert_eq!(stepped(-1.0), 0.0);
+        assert!((stepped(4.6) - 4.6).abs() <= BLUR_STEP / 2.0);
+    }
+
+    #[test]
+    fn the_shade_drawn_longest_ago_goes_first() {
+        let mut kept = HashMap::new();
+        kept.insert("a", ((), 5u64));
+        kept.insert("b", ((), 2u64));
+        kept.insert("c", ((), 9u64));
+        assert_eq!(oldest(&kept), Some("b"));
+        assert_eq!(oldest(&HashMap::<&str, ((), u64)>::new()), None);
     }
 }
