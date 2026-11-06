@@ -349,8 +349,29 @@ fn why_and_wait(args: &[String], now: u64) -> Result<(String, Option<On>), Strin
                 "--on-file" => On::Check(Wait::File(value)),
                 "--on-cmd" => On::Check(Wait::Cmd(value)),
                 "--on-outside" => On::Check(Wait::Outside(tasks::you_line(&value))),
-                "--on-secret" => On::Check(Wait::Secret(value.trim().to_string())),
-                "--on-login" => On::Check(Wait::Login(value.trim().to_lowercase())),
+                "--on-secret" => {
+                    let name = value.trim();
+                    if !horadric_core::vault::secret::valid_name(name) {
+                        return Err(format!(
+                            "--on-secret takes a secret's name, upper case letters, digits and _,                              a letter first, not {name}"
+                        ));
+                    }
+                    On::Check(Wait::Secret(name.to_string()))
+                }
+                "--on-login" => {
+                    let Some(tool) = horadric_core::vault::identity::Tool::from_name(&value) else {
+                        let known: Vec<&str> = horadric_core::vault::identity::Tool::ALL
+                            .iter()
+                            .map(|t| t.name())
+                            .collect();
+                        return Err(format!(
+                            "--on-login takes a tool Horadric logs in to ({}), not {}",
+                            known.join(", "),
+                            value.trim()
+                        ));
+                    };
+                    On::Check(Wait::Login(tool.name().to_lowercase()))
+                }
                 "--until" => On::Check(Wait::Until(tasks::parse_when(&value, now).ok_or(
                     format!(
                         "--until takes +30m (or s, h, d), Unix seconds or a UTC time like \
@@ -1478,6 +1499,9 @@ mod tests {
             w(&["--on-login", "Gh"]),
             Ok(("waits".into(), check(Wait::Login("gh".into()))))
         );
+        assert!(w(&["x", "--on-secret", "github_token"]).is_err());
+        assert!(w(&["x", "--on-secret", "MY", "TOKEN"]).is_err());
+        assert!(w(&["x", "--on-login", "gitlab"]).is_err());
     }
 
     #[test]

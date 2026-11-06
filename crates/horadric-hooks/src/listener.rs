@@ -207,6 +207,9 @@ pub struct SecretRun {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretSet {
     pub session: Option<String>,
+    /// The session's `HORADRIC_SECRET_KEY`, empty without one. A call
+    /// that names a session must prove it is that session's.
+    pub key: String,
     /// The folder it was run in, which names the project.
     pub cwd: String,
     pub name: String,
@@ -376,6 +379,45 @@ impl SecretStream {
             state.headed = true;
         }
         (&state.stream).write_all(line.as_bytes())
+    }
+
+    /// Sets `gone` once the CLI has left. It sends nothing after its
+    /// request, so a read that ends or fails means it went away, which
+    /// otherwise shows only when a write fails, and a program that prints
+    /// nothing would run on for nobody. The watch holds the connection
+    /// only weakly, and stops once the run is closed or dropped, so it
+    /// never keeps a CLI waiting on a connection the app is done with.
+    pub fn watch_gone(&self, gone: Arc<AtomicBool>) {
+        let Some(mut peer) = self
+            .inner
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|s| s.stream.try_clone().ok()))
+        else {
+            gone.store(true, Ordering::Relaxed);
+            return;
+        };
+        let _ = peer.set_read_timeout(Some(Duration::from_millis(500)));
+        let run = Arc::downgrade(&self.inner);
+        thread::spawn(move || {
+            let mut buf = [0u8; 256];
+            loop {
+                match peer.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                        let open = run
+                            .upgrade()
+                            .is_some_and(|r| r.lock().is_ok_and(|s| s.is_some()));
+                        if !open {
+                            return;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            gone.store(true, Ordering::Relaxed);
+        });
     }
 
     fn close(self) {
@@ -1096,6 +1138,7 @@ fn secret_set(
     let (reply, rx) = Reply::new();
     let call = SecretSet {
         session: Some(session).filter(|s| !s.is_empty()),
+        key: text("key").unwrap_or_default(),
         cwd,
         name,
         value,
@@ -1669,6 +1712,8 @@ mod tests {
                 assert_eq!(call.names, ["A", "B"]);
                 assert_eq!(call.args, ["pr", "create"]);
                 let mut out = call.out;
+                // A watch must never hold the connection open itself.
+                out.watch_gone(Arc::new(AtomicBool::new(false)));
                 // Written after the listener thread is gone, from a clone.
                 thread::sleep(Duration::from_millis(50));
                 out.clone().err(b"warn").unwrap();
@@ -1689,6 +1734,32 @@ mod tests {
         app.join().unwrap();
         assert_eq!(status, 200);
         reader.lines().map(Result::unwrap).collect()
+    }
+
+    #[test]
+    fn a_secret_run_notices_the_cli_leave() {
+        let (port, rx) = start_with_new();
+        let app = thread::spawn(move || match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Command::SecretRun(call)) => {
+                let gone = Arc::new(AtomicBool::new(false));
+                call.out.watch_gone(Arc::clone(&gone));
+                let mut out = call.out;
+                out.out(b"x").unwrap();
+                let until = std::time::Instant::now() + Duration::from_secs(5);
+                while !gone.load(Ordering::Relaxed) && std::time::Instant::now() < until {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                gone.load(Ordering::Relaxed)
+            }
+            other => panic!("{other:?}"),
+        });
+        let body = json!({ "key": "k", "names": ["A"], "program": "gh", "args": [], "cwd": "C:/x" });
+        let headers = [(COMMAND_HEADER, "secret-run"), (SESSION_HEADER, "tile-s")];
+        let (status, reader) =
+            client::open(port, SECRET_RUN_PATH, &headers, &body.to_string()).unwrap();
+        assert_eq!(status, 200);
+        drop(reader);
+        assert!(app.join().unwrap(), "the app never heard the CLI go");
     }
 
     #[test]

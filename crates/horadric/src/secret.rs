@@ -227,7 +227,10 @@ fn set(args: &[String]) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .to_string_lossy()
         .into_owned();
-    let body = json!({ "cwd": cwd, "name": name, "value": value, "owner": owner });
+    // A session's terminal proves it is that session's, so the human is
+    // told which session asks; any other terminal asks as nobody's.
+    let key = std::env::var(SECRET_KEY_ENV).unwrap_or_default();
+    let body = json!({ "cwd": cwd, "name": name, "value": value, "owner": owner, "key": key });
     let (port, headers) = app("secret-set");
     eprintln!("Confirm it in Horadric.");
     let (status, reply) = client::ask(
