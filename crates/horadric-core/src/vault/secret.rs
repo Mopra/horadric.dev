@@ -353,7 +353,9 @@ const RULES: &[Rules] = &[
         flags: &["--jq", "-q", "--template", "--hostname"],
         flags_but: &[("-t", GH_TITLES)],
         host_flags: &["-R", "--repo"],
-        commands: &["alias", "auth", "extension", "ext", "config set"],
+        // `repo clone` and `repo fork` make or change a repository other
+        // than the one pinned, so the run cannot be held to it.
+        commands: &["alias", "auth", "extension", "ext", "config set", "repo clone", "repo fork"],
         known: Some(GH_COMMANDS),
         url_commands: &["api"],
         no_git_flags: &["repo clone", "repo fork"],
@@ -1340,8 +1342,9 @@ mod tests {
         // gh hands what follows `--` to git as flags.
         assert!(refused("gh", "repo clone o/r -- --config core.hooksPath=x"));
         assert!(refused("gh", "repo fork o/r --clone -- -c x=y"));
-        assert!(!refused("gh", "repo clone o/r"));
-        assert!(!refused("gh", "repo clone o/r --"));
+        assert!(refused("gh", "repo clone o/r"));
+        assert!(refused("gh", "repo fork"));
+        assert!(!refused("gh", "repo view o/r"));
         // A program with no rules of its own is not refused here.
         assert!(!refused("curl", "-t x"));
         assert!(!refused("stripe", ""));

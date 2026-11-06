@@ -211,7 +211,9 @@ third half, below.
   fsmonitor, no bare repository found by itself, and no pager, editor,
   askpass or browser from the environment. Its attributes come from the
   empty tree (git 2.40 or later, else Once only), submodules are left
-  alone, and a repository with submodules is Once only. An npm shim is run as node with its
+  alone, and a repository with submodules is Once only. It is told the
+  pinned repository by `GIT_DIR` and `GIT_WORK_TREE`, or finds none,
+  and a `.git` git would pass over leaves only Once. An npm shim is run as node with its
   package's script; the package folder, that node and the names in the
   global `node_modules` are pinned. An Always run gets a PATH without
   folders the user can write to. `vercel`, `wrangler` and `netlify` may

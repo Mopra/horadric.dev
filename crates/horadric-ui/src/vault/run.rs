@@ -994,6 +994,9 @@ struct Runs {
     /// Why Always is not offered for reasons of its own: its arguments,
     /// a git include too deep to pin, a node folder outside the package.
     refused: Option<String>,
+    /// The repository whose git config was pinned, the only one an Always
+    /// run's git may use.
+    git_repo: Option<GitRepo>,
 }
 
 impl Runs {
@@ -1033,9 +1036,13 @@ impl Runs {
         }
         let is_pinned = pins.is_some();
         let mut pins = pins.unwrap_or_default();
+        let mut git_repo = None;
         if is_pinned {
             match git_pins(cwd, &var) {
-                Ok(more) => pins.extend(more),
+                Ok((more, repo)) => {
+                    pins.extend(more);
+                    git_repo = repo;
+                }
                 Err(why) => refused = refused.or(Some(why)),
             }
         }
@@ -1054,6 +1061,7 @@ impl Runs {
             command: command_path(args),
             stem,
             refused,
+            git_repo,
         }
     }
 
@@ -1118,7 +1126,44 @@ fn git_path(p: &str, base: &Path, var: &dyn Fn(&str) -> Option<String>) -> Optio
 /// `cwd`: the repository's config, hooks and attributes (filters run
 /// commands), the user's own config and what each includes. An include
 /// that includes again is not followed: Err, and only Once.
-fn git_pins(cwd: &Path, var: &dyn Fn(&str) -> Option<String>) -> Result<Vec<Pin>, String> {
+/// The repository [`git_pins`] pinned: its git folder (a worktree's own,
+/// which names the common one) and the top of its work tree.
+#[derive(Clone, Debug, PartialEq)]
+struct GitRepo {
+    dir: PathBuf,
+    top: PathBuf,
+}
+
+/// Where an Always run's git may look for a repository: the one pinned,
+/// by its folders, so no discovery can land on another; with none, no
+/// folder above the run's, so it finds none. What to set, and what of the
+/// app's own to take away.
+fn git_place(repo: Option<&GitRepo>, cwd: &Path) -> (Vec<(&'static str, String)>, Vec<&'static str>) {
+    let shown = |p: &Path| p.to_string_lossy().into_owned();
+    match repo {
+        // A worktree's own git folder names the common one, so
+        // GIT_COMMON_DIR is left to git.
+        Some(r) => (
+            vec![("GIT_DIR", shown(&r.dir)), ("GIT_WORK_TREE", shown(&r.top))],
+            vec!["GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_CEILING_DIRECTORIES", "GIT_OBJECT_DIRECTORY"],
+        ),
+        None => {
+            let ceilings: Vec<String> = cwd.ancestors().skip(1).map(shown).collect();
+            (
+                vec![("GIT_CEILING_DIRECTORIES", ceilings.join(";"))],
+                vec!["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"],
+            )
+        }
+    }
+}
+
+/// Whether `dir` is a git folder git would take: HEAD in it, objects and
+/// refs in it or in the common folder it names.
+fn valid_git_dir(dir: &Path, common: &Path) -> bool {
+    dir.join("HEAD").is_file() && common.join("objects").is_dir() && common.join("refs").is_dir()
+}
+
+fn git_pins(cwd: &Path, var: &dyn Fn(&str) -> Option<String>) -> Result<(Vec<Pin>, Option<GitRepo>), String> {
     let file = |what: &str, path: &Path| Pin {
         what: what.to_string(),
         path: path.to_string_lossy().into_owned(),
@@ -1155,6 +1200,7 @@ fn git_pins(cwd: &Path, var: &dyn Fn(&str) -> Option<String>) -> Result<Vec<Pin>
     }
     let mut hooks: Option<PathBuf> = None;
     let mut extra: Vec<Pin> = Vec::new();
+    let mut repo = None;
     if let Some(top) = top {
         let dot = top.join(".git");
         let gitdir = if dot.is_file() {
@@ -1173,6 +1219,16 @@ fn git_pins(cwd: &Path, var: &dyn Fn(&str) -> Option<String>) -> Result<Vec<Pin>
             Ok(c) => git_path(c.trim(), &gitdir, var).unwrap_or_else(|| gitdir.clone()),
             Err(_) => gitdir.clone(),
         };
+        // Git passes over a `.git` that is no repository and goes on up, to
+        // one nothing here pinned. The run is told which git folder to use,
+        // and this is the backup.
+        if !valid_git_dir(&gitdir, &common) {
+            return Err(format!("{} is not a git repository git would use", top.join(".git").display()));
+        }
+        repo = Some(GitRepo {
+            dir: gitdir.clone(),
+            top: top.to_path_buf(),
+        });
         configs.push(("this repository's git config".into(), common.join("config")));
         configs.push(("this worktree's git config".into(), gitdir.join("config.worktree")));
         // A submodule has a config, hooks and attributes of its own that
@@ -1228,7 +1284,7 @@ fn git_pins(cwd: &Path, var: &dyn Fn(&str) -> Option<String>) -> Result<Vec<Pin>
         });
     }
     pins.extend(extra);
-    Ok(pins)
+    Ok((pins, repo))
 }
 
 /// Each pin's SHA-256, read fresh, never by modified time, which can be
@@ -1815,6 +1871,13 @@ impl Job {
             ),
         );
         c.env("GIT_ATTR_SOURCE", EMPTY_TREE);
+        let (set, remove) = git_place(self.runs.git_repo.as_ref(), &self.cwd);
+        for k in remove {
+            c.env_remove(k);
+        }
+        for (k, v) in set {
+            c.env(k, v);
+        }
         for name in [
             "GIT_SSH_COMMAND",
             "GIT_ASKPASS",
@@ -2433,7 +2496,12 @@ mod tests {
         std::fs::write(home.join("more.gitconfig"), "[alias]\n\tx = !sh\n").unwrap();
         let h = home.to_string_lossy().into_owned();
         let var = |k: &str| (k == "USERPROFILE").then(|| h.clone());
-        let pins = git_pins(&wt.join("sub"), &var).unwrap();
+        std::fs::write(gitdir.join("HEAD"), "ref: refs/heads/wt\n").unwrap();
+        for d in ["objects", "refs"] {
+            std::fs::create_dir_all(common.join(d)).unwrap();
+        }
+        let (pins, repo) = git_pins(&wt.join("sub"), &var).unwrap();
+        assert_eq!(repo, Some(GitRepo { dir: gitdir.clone(), top: wt.clone() }));
         let path_of = |what: &str| pins.iter().find(|p| p.what == what).map(|p| PathBuf::from(&p.path));
         assert_eq!(path_of("this repository's git config"), Some(gitdir.join("../..").join("config")));
         assert_eq!(path_of("this worktree's git config"), Some(gitdir.join("config.worktree")));
@@ -2450,7 +2518,8 @@ mod tests {
         assert!(git_pins(&wt, &var).is_err());
         // Outside a repository only the user's own config counts.
         std::fs::write(home.join("more.gitconfig"), "").unwrap();
-        let outside = git_pins(&home, &var).unwrap();
+        let (outside, none) = git_pins(&home, &var).unwrap();
+        assert_eq!(none, None);
         assert!(outside.iter().all(|p| !p.what.starts_with("this ")));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2523,6 +2592,13 @@ mod tests {
         assert!(git_pins(&bare.join("sub"), &none).is_err());
         let repo = root.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
+        // A `.git` that is no repository is passed over by git, so it is
+        // refused rather than taken.
+        assert!(git_pins(&repo, &none).is_err());
+        for d in ["objects", "refs"] {
+            std::fs::create_dir_all(repo.join(".git").join(d)).unwrap();
+        }
+        std::fs::write(repo.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
         std::fs::write(repo.join(".git").join("config"), "[core]\n\thooksPath = x ; y\n").unwrap();
         assert!(git_pins(&repo, &none).is_err());
         std::fs::write(repo.join(".git").join("config"), "[core]\n\tbare = false\n").unwrap();
@@ -2533,6 +2609,51 @@ mod tests {
         std::fs::remove_file(repo.join(".gitmodules")).unwrap();
         std::fs::create_dir_all(repo.join(".git").join("modules")).unwrap();
         assert!(git_pins(&repo, &none).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_finds_only_the_pinned_repository() {
+        let Some(git) = horadric_pty::find_program("git", &app_path(), &[".exe"], Path::is_file) else {
+            return;
+        };
+        let root = scratch("git-place");
+        let outer = root.join("outer");
+        let inner = outer.join("inner");
+        let run = |cwd: &Path, args: &[&str], env: &(Vec<(&'static str, String)>, Vec<&'static str>)| {
+            let mut c = Command::new(&git);
+            c.args(args).current_dir(cwd).env("GIT_CONFIG_NOSYSTEM", "1");
+            for k in &env.1 {
+                c.env_remove(k);
+            }
+            for (k, v) in &env.0 {
+                c.env(k, v);
+            }
+            c.output().unwrap()
+        };
+        std::fs::create_dir_all(inner.join("sub")).unwrap();
+        assert!(run(&outer, &["init", "-q"], &(vec![], vec![])).status.success());
+        assert!(run(&inner, &["init", "-q"], &(vec![], vec![])).status.success());
+        let none = |_: &str| None;
+        let (_, repo) = git_pins(&inner.join("sub"), &none).unwrap();
+        let repo = repo.unwrap();
+        let env = git_place(Some(&repo), &inner.join("sub"));
+        let top = run(&inner.join("sub"), &["rev-parse", "--show-toplevel"], &env);
+        assert!(top.status.success());
+        assert_eq!(
+            spelled(Path::new(String::from_utf8_lossy(&top.stdout).trim())),
+            spelled(&inner)
+        );
+        assert!(run(&inner.join("sub"), &["status", "--short"], &env).status.success());
+        // A `.git` git would pass over leaves only Once, and with no
+        // repository pinned git finds none, not the one above.
+        std::fs::remove_dir_all(inner.join(".git")).unwrap();
+        std::fs::create_dir_all(inner.join(".git")).unwrap();
+        assert!(git_pins(&inner, &none).is_err());
+        let found = run(&inner, &["rev-parse", "--show-toplevel"], &(vec![], vec![]));
+        assert_eq!(spelled(Path::new(String::from_utf8_lossy(&found.stdout).trim())), spelled(&outer));
+        let env = git_place(None, &inner);
+        assert!(!run(&inner, &["rev-parse", "--show-toplevel"], &env).status.success());
         let _ = std::fs::remove_dir_all(&root);
     }
 
