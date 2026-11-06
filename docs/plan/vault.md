@@ -204,8 +204,12 @@ third half, below.
   Always pins those files by SHA-256, the repository's git config, hooks
   and attributes and the user's git config included, and any change asks
   again, naming what changed. An Always is for one subcommand (`gh pr
-  create`), and arguments that reach past it (`gh --jq`, an extension, a
-  config file flag) leave only Once. An npm shim is run as node with its
+  create`) and the `--stdin` names it was given; no subcommand, a flag
+  before it, or arguments that reach past it (`gh --jq`, also inside
+  `-iq`, an extension, another host, a config file flag) leave only
+  Once. The git such a run starts gets an empty hooks folder, no
+  fsmonitor, no bare repository found by itself, and no pager, editor,
+  askpass or browser from the environment. An npm shim is run as node with its
   package's script; the package folder, that node and the names in the
   global `node_modules` are pinned. An Always run gets a PATH without
   folders the user can write to. `vercel`, `wrangler` and `netlify` may
