@@ -35,8 +35,19 @@ impl App {
         let Some(key) = self.project_of(&call.session) else {
             return reply.send(error("this session has no project in Horadric"));
         };
-        if let Err(e) = vouched(&call.session, call.body["key"].as_str().unwrap_or("")) {
-            return reply.send(error(e));
+        // The session id comes in a header any local program can set, and
+        // a hook can make up a session the registry then adopts, so a call
+        // counts only from a session the app started itself (a terminal or
+        // a Folio it runs) that shows its key. `horadric mcp` sends the key
+        // with every call.
+        let ours =
+            self.consoles.contains_key(&call.session) || self.folios.contains_key(&call.session);
+        if !ours || !run::key_ok(&call.session, call.body["key"].as_str().unwrap_or("")) {
+            return reply.send(error(
+                "Horadric takes browser calls only from a session it started, with that \
+                 session's key. A session begun before Horadric kept keys has no browser until \
+                 it is restarted (close it and resume it).",
+            ));
         }
         let Some(reply) = self.forge_call(&key, &call.body, reply) else {
             return;
@@ -187,22 +198,6 @@ impl App {
         }
         id
     }
-}
-
-/// Whether a browser call naming `session` is that session's own. The
-/// session id comes in a header any local program can set, so without
-/// the key an agent could drive another project's tab by naming one of
-/// its sessions. `horadric mcp` sends its session's key with every call.
-/// A session the app holds no key for (one begun before keys were kept)
-/// still works for now.
-fn vouched(session: &str, key: &str) -> Result<(), &'static str> {
-    if run::has_key(session) && !run::key_ok(session, key) {
-        return Err(
-            "this call did not carry the session's key, so Horadric does not take it for the \
-             session it names",
-        );
-    }
-    Ok(())
 }
 
 /// Answers once the tab's navigation ends, with where it ended up.

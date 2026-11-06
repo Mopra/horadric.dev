@@ -13,7 +13,7 @@
 //! a service worker it left there would hear the password typed.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -105,16 +105,6 @@ const HIDDEN: &str = r#"(() => {
   return here.length > 0 && here.every((f) => f.kind !== "password" || f.e.type === "password");
 })()"#;
 
-/// Whether the page's site has a service worker, controlling this page or
-/// only registered: a registered one still sees the next navigation, the
-/// sign in request among them.
-const WORKERS: &str = r#"(async () => {
-  const s = navigator.serviceWorker;
-  if (!s) return false;
-  if (s.controller) return true;
-  return (await s.getRegistrations()).length > 0;
-})()"#;
-
 #[derive(Default)]
 struct TabState {
     /// The documents (DevTools loader ids) a login was filled in.
@@ -126,8 +116,11 @@ struct TabState {
     tainted: bool,
     /// Runtime reports the tab's contexts to the app (`web::context_of`).
     tracked: bool,
-    /// The origins whose service workers the app cleared before a fill.
-    workers_cleared: Vec<String>,
+    /// The origins whose storage the app cleared before a fill, each with
+    /// the document it was cleared under: a fill goes ahead in a later one.
+    cleared: Vec<(String, String)>,
+    /// Service workers are kept out of the tab's requests.
+    bypass: bool,
     /// The TOTP seeds a code was filled from, by login name, so the codes
     /// near now are masked in what the tab answers.
     seeds: Vec<(String, String)>,
@@ -136,6 +129,8 @@ struct TabState {
 
 thread_local! {
     static TABS: RefCell<HashMap<u64, TabState>> = RefCell::new(HashMap::new());
+    /// The origins the agent's own code ran on, in any tab of any project.
+    static TAINTED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
 fn with_tab<T>(tab: u64, f: impl FnOnce(&mut TabState) -> T) -> T {
@@ -367,7 +362,10 @@ const SHOWN: &str = "a filled password shows on this page, or the field it was f
 /// if the filled page came back meanwhile.
 pub fn devtools(who: Caller, tab: u64, method: String, params: Value, reply: Reply) {
     let marks = !browse::quiet(&method, &params, false);
-    if browse::taints(&method, &params) {
+    // Code the agent runs taints the tab, and the site of the page it ran
+    // on before and after, in every tab (`taint_origin`).
+    let taints = browse::taints(&method, &params);
+    if taints {
         with_tab(tab, |s| s.tainted = true);
     }
     if !ever_filled(tab) {
@@ -375,11 +373,23 @@ pub fn devtools(who: Caller, tab: u64, method: String, params: Value, reply: Rep
             return send(&who, tab, &method, &params, move |a| reply.send(a));
         }
         // A tab never filled has nothing to withhold after the call, so
-        // the page is looked at once, to mark it.
+        // the page is looked at once, to mark it, and once more after code
+        // ran, for the site it may have moved to.
         let k = who.project.clone();
-        return page_of(&k, tab, move |page| {
+        return page_of(&k.clone(), tab, move |page| {
             mark(tab, page.as_ref().map(|p| p.loader.as_str()));
-            send(&who, tab, &method, &params, move |a| reply.send(a));
+            if taints {
+                page.iter().for_each(|p| taint_origin(&p.url));
+            }
+            send(&who, tab, &method, &params, move |a| {
+                if !taints {
+                    return reply.send(a);
+                }
+                page_of(&k, tab, move |after| {
+                    after.iter().for_each(|p| taint_origin(&p.url));
+                    reply.send(a)
+                });
+            });
         });
     }
     let k = who.project.clone();
@@ -387,6 +397,9 @@ pub fn devtools(who: Caller, tab: u64, method: String, params: Value, reply: Rep
         let loader = before.as_ref().map(|p| p.loader.clone());
         if marks {
             mark(tab, loader.as_deref());
+        }
+        if taints {
+            before.iter().for_each(|p| taint_origin(&p.url));
         }
         let now = state(tab, loader.as_deref());
         if let Err(e) = browse::after_fill(&method, &params, now) {
@@ -405,6 +418,9 @@ pub fn devtools(who: Caller, tab: u64, method: String, params: Value, reply: Rep
                 return reply.send(answer);
             }
             page_of(&k, tab, move |after| {
+                if taints {
+                    after.iter().for_each(|p| taint_origin(&p.url));
+                }
                 let loader = after.map(|p| p.loader);
                 if marks {
                     mark(tab, loader.as_deref());
@@ -576,34 +592,105 @@ fn checked(
         req,
         login,
     };
-    if with_tab(tab, |s| s.workers_cleared.contains(&job.origin)) {
+    // The profile is shared by every tab, so code the agent ran on this
+    // site anywhere may have left storage the site's own scripts trust, or
+    // a service worker that would see the sign in request. Such a site has
+    // its storage (all but cookies) cleared by the app, and the page must
+    // be loaded afresh before the fill; in this tab that holds until the
+    // site is tainted again. Workers are found from the browser's own
+    // count, never by asking the page, which a worker could answer for.
+    let cleared = with_tab(tab, |s| {
+        s.cleared.iter().find(|(o, _)| *o == job.origin).map(|(_, l)| l.clone())
+    });
+    match cleared {
+        Some(l) if l != job.loader => return hold_bypass(job),
+        Some(_) => {
+            return job.reply.send(error(
+                "Horadric cleared this site's storage before filling: reload the page \
+                 (browser_history reload) and fill again",
+            ))
+        }
+        None => {}
+    }
+    let tainted = TAINTED.with(|t| t.borrow().contains(&job.origin));
+    let params = json!({ "origin": job.origin }).to_string();
+    let k = job.key.clone();
+    web::devtools(&k, tab, "Storage.getUsageAndQuota", &params, move |r| {
+        // An answer that can not be read counts as a worker: clearing a
+        // site that had none costs only a reload.
+        let workers = r
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| {
+                let list = v["usageBreakdown"].as_array()?.clone();
+                Some(list.iter().any(|u| {
+                    u["storageType"] == "service_workers" && u["usage"].as_f64().unwrap_or(0.0) > 0.0
+                }))
+            })
+            .unwrap_or(true);
+        if !tainted && !workers {
+            return hold_bypass(job);
+        }
+        let params = json!({ "origin": job.origin, "storageTypes": CLEARED_TYPES }).to_string();
+        let k = job.key.clone();
+        web::devtools(&k, tab, "Storage.clearDataForOrigin", &params, move |r| {
+            if r.is_err() {
+                return job.fail("this site's storage could not be cleared");
+            }
+            let (o, l) = (job.origin.clone(), job.loader.clone());
+            with_tab(tab, |s| s.cleared.push((o, l)));
+            log(&job.req, &job.origin, "fill stopped: site storage cleared");
+            job.reply.send(error(
+                "Horadric cleared this site's storage and service workers (not its cookies), \
+                 since code ran on it or a worker could have seen the login sent: reload the \
+                 page (browser_history reload) and fill again",
+            ));
+        });
+    });
+}
+
+/// What the app clears of a site before a fill: everything but cookies,
+/// which hold the user's own logins.
+const CLEARED_TYPES: &str =
+    "local_storage,indexeddb,cache_storage,service_workers,websql,file_systems,shader_cache";
+
+/// Keeps service workers out of the tab's requests from the fill on, so
+/// none sees the sign in request, then goes on with the fill. Held for
+/// the tab's life, which is longer than the page needs but leaves no
+/// moment to get wrong; the agent can not turn it off (`browse`).
+fn hold_bypass(job: Job) {
+    if with_tab(job.tab, |s| std::mem::replace(&mut s.bypass, true)) {
         return ask_then_fill(job);
     }
-    // A service worker the agent registered on this site from another tab
-    // would see the sign in request, password and all. The first fill on
-    // the site in this tab clears the site's workers when it has any; one
-    // the site registers again after the reload is its own, since agent
-    // code in this tab since would have tainted it.
-    let context = job.context();
-    eval(&job.key.clone(), tab, WORKERS.to_string(), context.as_deref(), move |r| match r {
-        Ok(Value::Bool(false)) => ask_then_fill(job),
-        Ok(Value::Bool(true)) => {
-            let params = json!({ "origin": job.origin, "storageTypes": "service_workers" });
-            let k = job.key.clone();
-            web::devtools(&k, tab, "Storage.clearDataForOrigin", &params.to_string(), move |r| {
-                if r.is_err() {
-                    return job.fail("this site's service workers could not be cleared");
-                }
-                with_tab(tab, |s| s.workers_cleared.push(job.origin.clone()));
-                log(&job.req, &job.origin, "fill stopped: service workers cleared");
-                job.reply.send(error(
-                    "Horadric cleared this site's service workers, which could have seen the \
-                     login sent: reload the page (browser_history reload) and fill again",
-                ));
-            });
+    let (k, tab) = (job.key.clone(), job.tab);
+    web::devtools(&k, tab, "Network.enable", "{}", move |r| {
+        if r.is_err() {
+            with_tab(tab, |s| s.bypass = false);
+            return job.fail("the browser would not keep service workers out of this tab");
         }
-        _ => job.fail("the page could not be checked for service workers; try again"),
+        let k = job.key.clone();
+        web::devtools(&k, tab, "Network.setBypassServiceWorker", r#"{"bypass":true}"#, move |r| {
+            if r.is_err() {
+                with_tab(tab, |s| s.bypass = false);
+                return job.fail("the browser would not keep service workers out of this tab");
+            }
+            ask_then_fill(job)
+        });
     });
+}
+
+/// Records that the agent's own code ran on `origin`: storage there may
+/// be poisoned for every tab, so every tab's clearing of it is undone.
+fn taint_origin(url: &str) {
+    let Some(o) = origin(url) else {
+        return;
+    };
+    TABS.with(|t| {
+        for s in t.borrow_mut().values_mut() {
+            s.cleared.retain(|(c, _)| *c != o);
+        }
+    });
+    TAINTED.with(|t| t.borrow_mut().insert(o));
 }
 
 /// Asks the human, unless the login is allowed here for good, and fills.
@@ -933,6 +1020,18 @@ mod tests {
         assert_eq!(state(tab, Some("L1")), Filled::Now);
         assert_eq!(state(tab, Some("L2")), Filled::Before);
         assert_eq!(state(tab, None), Filled::Now);
+    }
+
+    #[test]
+    fn a_site_tainted_again_is_cleared_again_in_every_tab() {
+        let (a, b) = (9_000_003, 9_000_004);
+        let site = "https://taint.example".to_string();
+        with_tab(a, |s| s.cleared.push((site.clone(), "L1".into())));
+        with_tab(b, |s| s.cleared.push((site.clone(), "L2".into())));
+        taint_origin("https://taint.example/login");
+        assert!(TAINTED.with(|t| t.borrow().contains(&site)));
+        assert!(with_tab(a, |s| s.cleared.is_empty()));
+        assert!(with_tab(b, |s| s.cleared.is_empty()));
     }
 
     #[test]

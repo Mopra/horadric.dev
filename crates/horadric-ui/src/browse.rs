@@ -387,8 +387,9 @@ pub fn after_fill(method: &str, params: &Value, state: Filled) -> Result<(), Str
         ));
     }
     // The app pins its checks to the document they were made on through
-    // Runtime's reports, which this would stop.
-    if method == "Runtime.disable" {
+    // Runtime's reports, and keeps service workers out of the tab's
+    // requests through Network, which these would stop.
+    if method == "Runtime.disable" || method == "Network.disable" {
         return Err(format!("{method} is refused in this tab: a login was filled in it"));
     }
     if state == Filled::Now && !quiet(method, params, true) {
@@ -530,31 +531,49 @@ const PAGE_DOMAINS: &[&str] = &[
 ];
 
 /// Single methods of domains that also reach the whole browser (Page,
-/// Network), picked one by one.
-const PAGE_METHODS: &[&str] = &[
-    "Page.enable",
-    "Page.disable",
-    "Page.navigate",
-    "Page.reload",
-    "Page.stopLoading",
-    "Page.captureScreenshot",
-    "Page.getLayoutMetrics",
-    "Page.getFrameTree",
-    "Page.getResourceTree",
-    "Page.getResourceContent",
-    "Page.getNavigationHistory",
-    "Page.printToPDF",
-    "Page.bringToFront",
-    "Page.handleJavaScriptDialog",
-    "Network.enable",
-    "Network.disable",
-    "Network.getResponseBody",
-    "Network.getRequestPostData",
-    "Network.setCacheDisabled",
-    "Network.setBypassServiceWorker",
-    "Network.emulateNetworkConditions",
-    "Network.setExtraHTTPHeaders",
-    "Network.setUserAgentOverride",
+/// Network), picked one by one, each with the parameters it may take. A
+/// parameter not named is refused: Page.reload's `scriptToEvaluateOnLoad`
+/// would put the agent's script into the reloaded page unseen, and
+/// Page.navigate's `frameId` would aim a navigation at a frame. None of
+/// the parameters here takes a script, a file path or a URL to load but
+/// Page.navigate's own, which `no_script` checks. Network.setBypassService
+/// Worker is the app's: it holds it on after a fill.
+const PAGE_METHODS: &[(&str, &[&str])] = &[
+    ("Page.enable", &[]),
+    ("Page.disable", &[]),
+    ("Page.navigate", &["url", "referrer"]),
+    ("Page.reload", &["ignoreCache"]),
+    ("Page.stopLoading", &[]),
+    (
+        "Page.captureScreenshot",
+        &["format", "quality", "clip", "fromSurface", "captureBeyondViewport", "optimizeForSpeed"],
+    ),
+    ("Page.getLayoutMetrics", &[]),
+    ("Page.getFrameTree", &[]),
+    ("Page.getResourceTree", &[]),
+    ("Page.getResourceContent", &["frameId", "url"]),
+    ("Page.getNavigationHistory", &[]),
+    (
+        "Page.printToPDF",
+        &[
+            "landscape", "printBackground", "scale", "paperWidth", "paperHeight", "marginTop",
+            "marginBottom", "marginLeft", "marginRight", "pageRanges", "preferCSSPageSize",
+            "generateTaggedPDF", "generateDocumentOutline",
+        ],
+    ),
+    ("Page.bringToFront", &[]),
+    ("Page.handleJavaScriptDialog", &["accept", "promptText"]),
+    ("Network.enable", &["maxTotalBufferSize", "maxResourceBufferSize", "maxPostDataSize"]),
+    ("Network.disable", &[]),
+    ("Network.getResponseBody", &["requestId"]),
+    ("Network.getRequestPostData", &["requestId"]),
+    ("Network.setCacheDisabled", &["cacheDisabled"]),
+    (
+        "Network.emulateNetworkConditions",
+        &["offline", "latency", "downloadThroughput", "uploadThroughput", "connectionType"],
+    ),
+    ("Network.setExtraHTTPHeaders", &["headers"]),
+    ("Network.setUserAgentOverride", &["userAgent", "acceptLanguage", "platform", "userAgentMetadata"]),
 ];
 
 /// Methods of the allowed domains that reach the user's files: each puts a
@@ -597,7 +616,25 @@ pub fn devtools_allowed(method: &str, params: Value) -> Result<Value, String> {
     if FILE_METHODS.contains(&method) {
         return refuse("it hands the page files from the user's disk");
     }
-    if PAGE_DOMAINS.contains(&domain) || PAGE_METHODS.contains(&method) {
+    if let Some((_, takes)) = PAGE_METHODS.iter().find(|(m, _)| *m == method) {
+        let extra = match &params {
+            Value::Null => None,
+            Value::Object(o) => o.keys().find(|k| !takes.contains(&k.as_str())).cloned(),
+            _ => return refuse("its params must be an object"),
+        };
+        if let Some(k) = extra {
+            return refuse(&format!(
+                "it takes only {} here, not {k}",
+                if takes.is_empty() { "no params".to_string() } else { takes.join(", ") }
+            ));
+        }
+        return Ok(params);
+    }
+    // Audited for parameters that take a script, a URL to load or a file
+    // path: Runtime's run the agent's code and so taint (`taints`), the
+    // DOM's file calls and Input's drag are refused above, and the rest
+    // (CSS text, emulation, overlays, reads) load nothing and run nothing.
+    if PAGE_DOMAINS.contains(&domain) {
         return Ok(params);
     }
     // Even without urls, getCookies answers for every frame on the page,
@@ -808,15 +845,15 @@ mod tests {
             "Runtime.evaluate",
             "Input.dispatchMouseEvent",
             "Input.insertText",
-            "Page.captureScreenshot",
-            "Page.getLayoutMetrics",
-            "Page.navigate",
             "DOM.getDocument",
             "Emulation.setDeviceMetricsOverride",
-            "Network.getResponseBody",
-            "Page.printToPDF",
         ] {
             assert_eq!(ok(m), Ok(json!({ "x": 1 })), "{m}");
+        }
+        for m in ["Page.captureScreenshot", "Page.getLayoutMetrics", "Page.navigate",
+            "Network.getResponseBody", "Page.printToPDF"] {
+            assert_eq!(devtools_allowed(m, json!({})), Ok(json!({})), "{m}");
+            assert!(ok(m).is_err(), "{m} takes no x");
         }
         for m in [
             "Network.getAllCookies",
@@ -937,6 +974,25 @@ mod tests {
             Ok(Call::DevTools("Page.navigate".into(), json!({ "url": "https://a.example" })))
         );
         assert_eq!(address("java\tscript://x%0aalert(1)"), None);
+    }
+
+    #[test]
+    fn page_and_network_calls_take_only_their_own_params() {
+        let a = |m: &str, p: Value| devtools_allowed(m, p);
+        assert!(a("Page.reload", json!({ "ignoreCache": true })).is_ok());
+        assert!(a("Page.reload", json!({ "scriptToEvaluateOnLoad": "alert(1)" })).is_err());
+        assert!(a("Page.navigate", json!({ "url": "https://a.example", "referrer": "https://b.example" })).is_ok());
+        assert!(a("Page.navigate", json!({ "url": "https://a.example", "frameId": "F" })).is_err());
+        assert!(a("Page.navigate", json!({ "url": "https://a.example", "transitionType": "link" })).is_err());
+        assert!(a("Page.handleJavaScriptDialog", json!({ "accept": true, "promptText": "x" })).is_ok());
+        assert!(a("Page.captureScreenshot", json!({ "format": "png", "clip": {}, "captureBeyondViewport": true })).is_ok());
+        assert!(a("Page.printToPDF", json!({ "headerTemplate": "<img src=x>" })).is_err());
+        assert!(a("Page.reload", json!(["x"])).is_err());
+        assert!(a("Page.reload", Value::Null).is_ok());
+        assert!(a("Network.setBypassServiceWorker", json!({ "bypass": false })).is_err());
+        let reload = json!({ "op": "devtools", "method": "Page.reload",
+            "params": { "scriptToEvaluateOnLoad": "addEventListener('input', () => 0)" } });
+        assert!(Call::parse(&reload).is_err());
     }
 
     #[test]
