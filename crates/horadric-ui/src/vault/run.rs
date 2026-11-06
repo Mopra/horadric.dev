@@ -22,7 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::vault::secret::{
     approval, approved, changed_pins, fingerprint, log_line, missing_line, npm_shim, once_only,
-    pinned, runs_builds, valid_name, Mask, Owner, Pin,
+    pinned, plainly, runs_builds, valid_name, Mask, Owner, Pin,
 };
 use horadric_hooks::listener::{SecretNames, SecretRun, SecretSet, SecretStream};
 use serde_json::json;
@@ -1083,7 +1083,7 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
             return;
         }
     };
-    let shown = horadric_pty::command_line(&pinned.path, &args);
+    let shown = plainly(&horadric_pty::command_line(&pinned.path, &args));
     if shown.chars().count() > SHOWN_MAX {
         out.fail(&format!(
             "Refused: the command line is {} characters, longer than the {SHOWN_MAX} the human can be shown. Put the arguments in a file the program reads.",
@@ -1143,12 +1143,12 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
             .filter(|s| unasked.contains(&s.name))
             .map(|s| owned(&s.name, &s.owner))
             .collect();
-        let title = format!("Use {} for `{stem}`?", unasked.join(", "));
+        let title = format!("Use {} for `{}`?", unasked.join(", "), plainly(stem));
         let mut text = format!(
             "{} asks to run this with {} in its environment:\n\n{shown}\n\nProgram: {}",
             asker(&session, Some(&crate::project::project_name(&place.key))),
             whose.join(", "),
-            pinned.path.display(),
+            plainly(&pinned.path.to_string_lossy()),
         );
         let changed: Vec<String> = secrets
             .iter()

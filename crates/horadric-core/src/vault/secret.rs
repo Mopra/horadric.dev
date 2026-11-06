@@ -508,6 +508,47 @@ pub fn prompt_lines(names: &[String], logins: &[String]) -> Vec<String> {
     lines
 }
 
+/// Text from the agent as the human's question shows it: every control,
+/// format, direction and zero-width character written out as `\u{202e}`
+/// (`\n`, `\r` and `\t` as themselves), so a line break, a right-to-left
+/// override or an invisible character cannot make the command read as
+/// another.
+pub fn plainly(text: &str) -> String {
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(
+                c as u32,
+                0x00AD
+                    | 0x034F
+                    | 0x061C
+                    | 0x115F..=0x1160
+                    | 0x17B4..=0x17B5
+                    | 0x180B..=0x180F
+                    | 0x200B..=0x200F
+                    | 0x2028..=0x202E
+                    | 0x2060..=0x206F
+                    | 0x3164
+                    | 0xFE00..=0xFE0F
+                    | 0xFEFF
+                    | 0xFFA0
+                    | 0xFFF9..=0xFFFB
+                    | 0x1D173..=0x1D17A
+                    | 0xE0000..=0xE0FFF
+            )
+    };
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str(r"\n"),
+            '\r' => out.push_str(r"\r"),
+            '\t' => out.push_str(r"\t"),
+            c if hidden(c) => out.push_str(&format!(r"\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// The line a `secret run` fails with when `name` is not kept.
 pub fn missing_line(name: &str) -> String {
     format!(
@@ -763,6 +804,19 @@ mod tests {
         for p in ["curl", "stripe", "nano", "ssh-agent"] {
             assert!(!once_only(p), "{p}");
         }
+    }
+
+    #[test]
+    fn the_question_shows_what_hides_itself() {
+        assert_eq!(plainly("gh pr list"), "gh pr list");
+        assert_eq!(plainly("a\nb\r\tc"), r"a\nb\r\tc");
+        assert_eq!(plainly("gh \u{202e}tsil rp"), r"gh \u{202e}tsil rp");
+        assert_eq!(plainly("x\u{200b}y\u{feff}z\u{2066}"), r"x\u{200b}y\u{feff}z\u{2066}");
+        assert_eq!(plainly("\u{1b}[2J\u{7f}"), r"\u{1b}[2J\u{7f}");
+        assert_eq!(plainly("tag\u{e0041}"), r"tag\u{e0041}");
+        assert_eq!(plainly("line\u{2028}two"), r"line\u{2028}two");
+        // Letters of any script stay as they are.
+        assert_eq!(plainly("café ﷺ 日本"), "café ﷺ 日本");
     }
 
     #[test]
