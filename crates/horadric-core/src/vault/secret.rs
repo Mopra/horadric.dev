@@ -1,0 +1,389 @@
+//! Secrets used, never read: whose a secret is, which one wins, the mask
+//! over a program's output, which programs are only ever offered Once, and
+//! the log line. See docs/plan/vault.md.
+
+use serde::{Deserialize, Serialize};
+
+/// Whose a secret or a web login is.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Owner {
+    /// A project, by its folder key.
+    Project(String),
+    /// An identity, by its slug.
+    Identity(String),
+    Everywhere,
+}
+
+impl Owner {
+    /// How a person or the CLI writes it: `project`, `identity:<slug>` or
+    /// `everywhere`.
+    pub fn label(&self) -> String {
+        match self {
+            Owner::Project(_) => "project".into(),
+            Owner::Identity(slug) => format!("identity:{slug}"),
+            Owner::Everywhere => "everywhere".into(),
+        }
+    }
+}
+
+/// An environment variable's name as a secret may have it: upper case,
+/// digits and `_`, a letter first.
+pub fn valid_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    name.len() <= 64
+        && bytes.next().is_some_and(|b| b.is_ascii_uppercase())
+        && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// The item kept under `name` that a session of `project` with `identity`
+/// gets: the project's own, else its identity's, else an Everywhere one.
+pub fn winner<'a, T>(
+    items: &'a [T],
+    owner_of: impl Fn(&T) -> &Owner,
+    name_of: impl Fn(&T) -> &str,
+    project: &str,
+    identity: Option<&str>,
+    name: &str,
+) -> Option<&'a T> {
+    let rank = |o: &Owner| match o {
+        Owner::Project(p) if p == project => Some(0),
+        Owner::Identity(s) if Some(s.as_str()) == identity => Some(1),
+        Owner::Everywhere => Some(2),
+        _ => None,
+    };
+    items
+        .iter()
+        .filter(|t| name_of(t) == name)
+        .filter_map(|t| rank(owner_of(t)).map(|r| (r, t)))
+        .min_by_key(|(r, _)| *r)
+        .map(|(_, t)| t)
+}
+
+/// Writes `[NAME]` wherever a value would have shown in a stream of bytes.
+/// A value split over two chunks is still caught: a tail that could be the
+/// start of one is held back until the next chunk says whether it is.
+pub struct Mask {
+    /// Longest first, so a value inside another never leaves the rest of
+    /// the longer one showing.
+    values: Vec<(Vec<u8>, Vec<u8>)>,
+    held: Vec<u8>,
+}
+
+impl Mask {
+    pub fn new(values: Vec<(String, String)>) -> Mask {
+        let mut values: Vec<(Vec<u8>, Vec<u8>)> = values
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(n, v)| (v.into_bytes(), format!("[{n}]").into_bytes()))
+            .collect();
+        values.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        Mask {
+            values,
+            held: Vec::new(),
+        }
+    }
+
+    /// What of the stream so far can be passed on.
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
+        self.held.extend_from_slice(chunk);
+        self.run(false)
+    }
+
+    /// The held tail, masked, once the stream has ended.
+    pub fn finish(&mut self) -> Vec<u8> {
+        self.run(true)
+    }
+
+    fn run(&mut self, last: bool) -> Vec<u8> {
+        let buf = std::mem::take(&mut self.held);
+        let mut out = Vec::with_capacity(buf.len());
+        let mut i = 0;
+        'scan: while i < buf.len() {
+            let rest = &buf[i..];
+            for (value, label) in &self.values {
+                if rest.starts_with(value) {
+                    out.extend_from_slice(label);
+                    i += value.len();
+                    continue 'scan;
+                }
+                if !last && rest.len() < value.len() && value.starts_with(rest) {
+                    self.held = rest.to_vec();
+                    return out;
+                }
+            }
+            out.push(buf[i]);
+            i += 1;
+        }
+        out
+    }
+}
+
+/// Programs that run code the agent can write, and so could do anything
+/// with a value: they are only ever offered Once, never Always.
+const ONCE_ONLY: &[&str] = &[
+    "sh", "bash", "zsh", "fish", "dash", "cmd", "powershell", "pwsh", "python", "python3", "py",
+    "pythonw", "node", "deno", "bun", "bunx", "npm", "npx", "pnpm", "pnpx", "yarn", "uv", "uvx",
+    "make", "just", "cargo", "git", "wsl", "env", "perl", "ruby", "php", "lua", "java", "dotnet",
+    "cscript", "wscript", "mshta", "rundll32", "start", "busybox",
+];
+
+/// Whether the program at this path is a shell, an interpreter, a script
+/// runner or `git`, whose aliases and hooks are shell.
+pub fn once_only(program_path: &str) -> bool {
+    let file = program_path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program_path)
+        .to_ascii_lowercase();
+    let (stem, ext) = match file.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, e),
+        _ => (file.as_str(), ""),
+    };
+    if matches!(ext, "bat" | "cmd" | "ps1" | "psm1" | "vbs" | "js" | "py" | "sh") {
+        return true;
+    }
+    // python3.12 and the like.
+    ONCE_ONLY.contains(&stem) || stem.starts_with("python")
+}
+
+/// One line of `secrets.log`: when, which project and session, which
+/// secret, which program, and what came of it. Never the value and never
+/// the command line, which may hold other things worth keeping out.
+pub fn log_line(
+    at: u64,
+    project: &str,
+    session: &str,
+    name: &str,
+    program: &str,
+    outcome: &str,
+) -> String {
+    let clean = |s: &str| s.replace(['\t', '\r', '\n'], " ");
+    format!(
+        "{}\t{}\t{}\t{}\t{}\t{}",
+        utc(at),
+        clean(project),
+        clean(session),
+        clean(name),
+        clean(program),
+        clean(outcome)
+    )
+}
+
+/// Unix seconds as `2026-11-06 12:34:56Z`.
+fn utc(at: u64) -> String {
+    let days = (at / 86_400) as i64;
+    let secs = at % 86_400;
+    // Howard Hinnant's days to civil date.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}Z",
+        secs / 3600,
+        secs / 60 % 60,
+        secs % 60
+    )
+}
+
+/// The lines a session's system prompt gets about the secrets and web
+/// logins it may use: their names, never a value, and how to use them.
+pub fn prompt_lines(names: &[String], logins: &[String]) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !names.is_empty() {
+        lines.push(format!(
+            "Secrets Horadric keeps for this project, by name: {}. Use one without reading it: \
+             `horadric secret run NAME[,NAME] -- program args...` starts the program with the values \
+             in its environment and masks them in its output; `--stdin NAME` also writes that value \
+             to the program's input.",
+            names.join(", ")
+        ));
+    }
+    if !logins.is_empty() {
+        lines.push(format!(
+            "Web logins Horadric keeps for this project, by name: {}. Sign in with the browser tool \
+             `browser_fill_login`, giving the login's name and the refs of the fields from \
+             `browser_snapshot`; you never see the password.",
+            logins.join(", ")
+        ));
+    }
+    if !lines.is_empty() {
+        lines.push(
+            "Never print, write, commit or pass a secret on in any other way, and never try to \
+             read one. When one is missing or refused, ask the human to add or allow it in Project \
+             settings, or block the quest with `horadric quest blocked --on-secret NAME`."
+                .into(),
+        );
+    }
+    lines
+}
+
+/// The line a `secret run` fails with when `name` is not kept.
+pub fn missing_line(name: &str) -> String {
+    format!(
+        "{name} is not kept for this project. Ask the human to add it in Project settings, \
+         or block the quest with --on-secret {name}."
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_are_environment_variables_in_upper_case() {
+        assert!(valid_name("GITHUB_TOKEN"));
+        assert!(valid_name("A"));
+        assert!(valid_name("K8S_CONFIG_2"));
+        assert!(!valid_name(""));
+        assert!(!valid_name("github_token"));
+        assert!(!valid_name("_TOKEN"));
+        assert!(!valid_name("1TOKEN"));
+        assert!(!valid_name("MY-TOKEN"));
+        assert!(!valid_name("MY TOKEN"));
+        assert!(!valid_name(&"A".repeat(65)));
+        assert!(valid_name(&"A".repeat(64)));
+    }
+
+    struct Item(Owner, &'static str, u8);
+
+    fn pick<'a>(items: &'a [Item], project: &str, id: Option<&str>, name: &str) -> Option<u8> {
+        winner(items, |i| &i.0, |i| i.1, project, id, name).map(|i| i.2)
+    }
+
+    #[test]
+    fn the_project_beats_the_identity_beats_everywhere() {
+        let items = [
+            Item(Owner::Everywhere, "T", 3),
+            Item(Owner::Identity("opti".into()), "T", 2),
+            Item(Owner::Project("c:/a".into()), "T", 1),
+            Item(Owner::Project("c:/b".into()), "T", 9),
+            Item(Owner::Identity("other".into()), "T", 8),
+        ];
+        assert_eq!(pick(&items, "c:/a", Some("opti"), "T"), Some(1));
+        assert_eq!(pick(&items, "c:/x", Some("opti"), "T"), Some(2));
+        assert_eq!(pick(&items, "c:/x", None, "T"), Some(3));
+        assert_eq!(pick(&items, "c:/x", Some("nobody"), "T"), Some(3));
+        assert_eq!(pick(&items, "c:/a", None, "U"), None);
+        let only_others = [Item(Owner::Project("c:/b".into()), "T", 9)];
+        assert_eq!(pick(&only_others, "c:/a", None, "T"), None);
+    }
+
+    fn mask(values: &[(&str, &str)], chunks: &[&str]) -> String {
+        let mut m = Mask::new(
+            values
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect(),
+        );
+        let mut out = Vec::new();
+        for c in chunks {
+            out.extend(m.push(c.as_bytes()));
+        }
+        out.extend(m.finish());
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_value_is_masked() {
+        assert_eq!(
+            mask(&[("TOKEN", "s3cret")], &["token=s3cret and s3cret\n"]),
+            "token=[TOKEN] and [TOKEN]\n"
+        );
+    }
+
+    #[test]
+    fn a_value_split_over_chunks_is_caught() {
+        assert_eq!(
+            mask(&[("TOKEN", "s3cret")], &["a s3", "c", "ret b"]),
+            "a [TOKEN] b"
+        );
+        assert_eq!(
+            mask(&[("TOKEN", "s3cret")], &["s", "3", "c", "r", "e", "t"]),
+            "[TOKEN]"
+        );
+    }
+
+    #[test]
+    fn a_held_tail_that_was_not_a_value_comes_out() {
+        let mut m = Mask::new(vec![("TOKEN".into(), "s3cret".into())]);
+        assert_eq!(m.push(b"abc s3c"), b"abc ");
+        assert_eq!(m.push(b"x"), b"s3cx");
+        assert_eq!(m.push(b" s3"), b" ");
+        assert_eq!(m.finish(), b"s3");
+        assert_eq!(m.finish(), b"");
+    }
+
+    #[test]
+    fn the_longest_value_wins_where_they_overlap() {
+        assert_eq!(
+            mask(&[("SHORT", "abc"), ("LONG", "abcdef")], &["xabcdefx abcx"]),
+            "x[LONG]x [SHORT]x"
+        );
+        assert_eq!(
+            mask(&[("A", "abcd"), ("B", "cdef")], &["abcdef"]),
+            "[A]ef"
+        );
+        // A longer value's start held back must not hide a shorter one
+        // that turns out to be all there was.
+        assert_eq!(
+            mask(&[("SHORT", "abc"), ("LONG", "abcdef")], &["abcd", "x"]),
+            "[SHORT]dx"
+        );
+    }
+
+    #[test]
+    fn empty_values_mask_nothing() {
+        assert_eq!(mask(&[("E", "")], &["plain"]), "plain");
+    }
+
+    #[test]
+    fn shells_interpreters_runners_and_git_are_once_only() {
+        for p in [
+            r"C:\Windows\System32\cmd.exe",
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\nodejs\npm.cmd",
+            r"C:\Python312\python.exe",
+            r"C:\Python312\python3.12.exe",
+            r"C:\Program Files\Git\cmd\GIT.EXE",
+            r"C:\tools\deploy.bat",
+            r"C:\tools\deploy.ps1",
+            "/usr/bin/env",
+            "pwsh",
+        ] {
+            assert!(once_only(p), "{p}");
+        }
+        for p in [
+            r"C:\Program Files\GitHub CLI\gh.exe",
+            r"C:\tools\vercel.exe",
+            r"C:\Windows\System32\curl.exe",
+            "/usr/bin/wrangler",
+        ] {
+            assert!(!once_only(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn a_log_line_never_holds_more_than_it_is_given() {
+        let line = log_line(0, "c:/a", "s1", "TOKEN", r"C:\gh.exe", "allowed");
+        assert_eq!(line, "1970-01-01 00:00:00Z\tc:/a\ts1\tTOKEN\tC:\\gh.exe\tallowed");
+        let line = log_line(1_762_432_496, "p\nq", "s", "N", "x", "asked");
+        assert!(line.starts_with("2025-11-06 12:34:56Z\t"), "{line}");
+        assert!(!line.contains('\n'));
+    }
+
+    #[test]
+    fn prompt_lines_name_and_never_value() {
+        assert!(prompt_lines(&[], &[]).is_empty());
+        let lines = prompt_lines(&["GITHUB_TOKEN".into()], &[]);
+        assert!(lines[0].contains("GITHUB_TOKEN"));
+        assert!(lines.iter().any(|l| l.contains("--on-secret")));
+        let lines = prompt_lines(&[], &["OPTICLOUD".into()]);
+        assert!(lines[0].contains("browser_fill_login"));
+    }
+}
