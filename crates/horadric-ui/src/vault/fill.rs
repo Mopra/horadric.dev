@@ -91,19 +91,30 @@ const TYPED: &str = r#"(kind, origin) => {
   return { length: String(a.value).length };
 }"#;
 
-/// Whether the filled page still hides what was filled: some filled field
-/// is still on the page, and every filled password field on it is still a
-/// password field, as the page's own Show password button may change. A
-/// page that took the fields away, or swapped one for a copy, may show
-/// the password anywhere, so that is false too. The fields are known by
-/// the list FIELD keeps as well as by their mark, which the page may drop.
+/// Where the filled fields stand: "revealed" when a filled password field
+/// still on the page is no longer a password field (the page's own Show
+/// password button), "gone" when no filled field is on the page any more
+/// (a sign in that swapped the form out without loading a page), else
+/// "hidden". The fields are known by the list FIELD keeps as well as by
+/// their mark, which the page may drop.
 const HIDDEN: &str = r#"(() => {
   const H = window.__horadric || {};
   const all = (H.filled || []).slice();
   for (const e of document.querySelectorAll("[data-horadric-filled]")) all.push({ e, kind: e.getAttribute("data-horadric-filled") });
   const here = all.filter((f) => f.e && f.e.isConnected);
-  return here.length > 0 && here.every((f) => f.kind !== "password" || f.e.type === "password");
+  if (!here.length) return "gone";
+  return here.every((f) => f.kind !== "password" || f.e.type === "password") ? "hidden" : "revealed";
 })()"#;
+
+/// Whether HIDDEN's answer lets a call through. With the fields gone, the
+/// calls a filled page allows anyway (the mcp's own scripts by ref, plain
+/// clicks and keys, pictures; `browse::after_fill`) still pass, so the
+/// agent can read what the page said after the sign in. Their answers are
+/// masked and a secret field's value is never reported. Only a revealed
+/// password stops them.
+fn passes(r: &Result<Value, String>) -> bool {
+    matches!(r, Ok(Value::String(s)) if s == "hidden" || s == "gone")
+}
 
 #[derive(Default)]
 struct TabState {
@@ -346,8 +357,8 @@ fn pinned(tab: u64, method: &str, params: &Value, page: Option<&Page>) -> Option
 
 const MOVED: &str = "the page is between documents; try again in a moment";
 
-const SHOWN: &str = "a filled password shows on this page, or the field it was filled into is \
-                     gone from it, so Horadric withholds the page: only browser_navigate, \
+const SHOWN: &str = "a filled password shows on this page, so Horadric withholds the page: only \
+                     browser_navigate, \
                      browser_history (back, forward or reload) and browser_close work. Hide the \
                      password again or reload the page.";
 
@@ -449,7 +460,7 @@ fn on_filled(who: Caller, tab: u64, page: Option<Page>, method: String, params: 
     let k = who.project.clone();
     let c = context.clone();
     eval(&k, tab, HIDDEN.to_string(), Some(&context), move |r| {
-        if !matches!(r, Ok(Value::Bool(true))) {
+        if !passes(&r) {
             return reply.send(error(SHOWN));
         }
         let input = method.starts_with("Input.");
@@ -463,9 +474,10 @@ fn on_filled(who: Caller, tab: u64, page: Option<Page>, method: String, params: 
             // a screenshot was taken, say: then its answer is dropped.
             eval(&k, tab, HIDDEN.to_string(), Some(&c), move |r| {
                 drop(held);
-                match r {
-                    Ok(Value::Bool(true)) => reply.send(answer),
-                    _ => reply.send(error(SHOWN)),
+                if passes(&r) {
+                    reply.send(answer)
+                } else {
+                    reply.send(error(SHOWN))
                 }
             });
         });
@@ -1020,6 +1032,15 @@ mod tests {
         assert_eq!(state(tab, Some("L1")), Filled::Now);
         assert_eq!(state(tab, Some("L2")), Filled::Before);
         assert_eq!(state(tab, None), Filled::Now);
+    }
+
+    #[test]
+    fn a_page_whose_fields_went_is_still_read_but_a_revealed_one_is_not() {
+        assert!(passes(&Ok(json!("hidden"))));
+        assert!(passes(&Ok(json!("gone"))));
+        assert!(!passes(&Ok(json!("revealed"))));
+        assert!(!passes(&Ok(json!(true))));
+        assert!(!passes(&Err("the page's script failed".into())));
     }
 
     #[test]

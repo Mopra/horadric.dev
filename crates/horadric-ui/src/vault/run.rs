@@ -158,12 +158,6 @@ pub fn drop_key(session: &str) {
     });
 }
 
-/// Whether the app holds a key for `session`: one it started, whose key
-/// it kept. A call naming such a session must carry that key.
-pub fn has_key(session: &str) -> bool {
-    with_keys(|keys| keys.contains_key(session))
-}
-
 /// Whether `key` is the live session's own. Compared in constant time, so
 /// the time an answer takes says nothing about how much of a guess was
 /// right.

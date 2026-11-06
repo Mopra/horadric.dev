@@ -157,15 +157,15 @@ pub enum Step {
 
 /// What was typed into the address prompt, as an address: as it is with a
 /// scheme, a local server over http, a host over https, anything else a
-/// search.
+/// search. Any scheme is taken as typed: the human may go to edge:// or
+/// view-source: pages. An agent's address passes `agent_address` too.
 pub fn address(typed: &str) -> Option<String> {
-    let t = normalised(typed);
-    let t = t.trim();
+    let t = typed.trim();
     if t.is_empty() {
         return None;
     }
     if t.contains("://") || t.starts_with("about:") || t.starts_with("file:") {
-        return opens(t).then(|| t.to_string());
+        return Some(t.to_string());
     }
     let host = t.split(['/', '?', '#']).next().unwrap_or(t);
     let name = host.rsplit_once(':').map_or(host, |(h, _)| h);
@@ -225,10 +225,10 @@ impl Call {
         let text = |k: &str| body.get(k).and_then(Value::as_str);
         Ok(match text("op") {
             Some("info") => Call::Info,
-            Some("open") => Call::Open(text("url").and_then(address).map(no_script).transpose()?),
-            Some("navigate") => Call::Navigate(no_script(
-                text("url").and_then(address).ok_or("say where: a url")?,
-            )?),
+            Some("open") => Call::Open(text("url").map(agent_address).transpose()?.flatten()),
+            Some("navigate") => {
+                Call::Navigate(text("url").map(agent_address).transpose()?.flatten().ok_or("say where: a url")?)
+            }
             Some("back") => Call::History(Step::Back),
             Some("forward") => Call::History(Step::Forward),
             Some("reload") => Call::History(Step::Reload),
@@ -290,6 +290,12 @@ fn opens(url: &str) -> bool {
         || u.starts_with("https://")
         || u.starts_with("file:")
         || u == "about:blank"
+}
+
+/// An address an agent gave, as `address` reads it once normalised, or
+/// why it is not opened; None for an empty one.
+fn agent_address(typed: &str) -> Result<Option<String>, String> {
+    address(&normalised(typed)).map(no_script).transpose()
 }
 
 fn no_script(url: String) -> Result<String, String> {
@@ -973,7 +979,15 @@ mod tests {
             dev("\thttps://a.example"),
             Ok(Call::DevTools("Page.navigate".into(), json!({ "url": "https://a.example" })))
         );
-        assert_eq!(address("java\tscript://x%0aalert(1)"), None);
+        // The human's address bar goes anywhere; an agent hears why not.
+        assert_eq!(address("edge://settings").as_deref(), Some("edge://settings"));
+        assert_eq!(address("about:version").as_deref(), Some("about:version"));
+        let open = |u: &str| Call::parse(&json!({ "op": "open", "url": u }));
+        let e = open("edge://settings").unwrap_err();
+        assert!(e.contains("only http, https, file and about:blank"), "{e}");
+        assert!(open("view-source:https://a.example").is_err());
+        assert!(open("java\tscript://x%0aalert(1)").is_err());
+        assert_eq!(open("  "), Ok(Call::Open(None)));
     }
 
     #[test]
