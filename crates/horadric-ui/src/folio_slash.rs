@@ -503,6 +503,7 @@ mod tests {
             images: Vec::new(),
             began: None,
             ended: None,
+            result: None,
         };
         let blocks = vec![
             Block::Prompt("Fix the tiles".into()),

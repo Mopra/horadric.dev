@@ -459,6 +459,7 @@ mod tests {
             images: Vec::new(),
             began: None,
             ended: None,
+            result: None,
         };
         let p = paragraphs(&folio(vec![Block::Tools(vec![s])]));
         assert_eq!(p[0].style, Style::StepFailed);
