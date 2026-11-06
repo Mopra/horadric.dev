@@ -7,7 +7,7 @@ use std::f32::consts::{PI, TAU};
 use std::path::Path;
 use std::time::Duration;
 
-use horadric_core::folio::{AskState, Ending, Step, StepState};
+use horadric_core::folio::{AskState, Ending, ResultKind, Step, StepState};
 
 use crate::layout::Rect;
 
@@ -165,6 +165,7 @@ enum Kind {
     Ran,
     Edited,
     Searched,
+    WebSearched,
     Fetched,
     Agent,
     Plan,
@@ -177,7 +178,8 @@ fn kind(tool: &str) -> Kind {
         "Bash" | "PowerShell" | "BashOutput" | "KillShell" => Kind::Ran,
         "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => Kind::Edited,
         "Grep" | "Glob" | "LS" | "ToolSearch" => Kind::Searched,
-        "WebFetch" | "WebSearch" => Kind::Fetched,
+        "WebFetch" => Kind::Fetched,
+        "WebSearch" => Kind::WebSearched,
         "Task" | "Agent" => Kind::Agent,
         "TodoWrite" => Kind::Plan,
         // An MCP tool reads better by its own last part.
@@ -240,6 +242,11 @@ pub fn run_summary(steps: &[Step]) -> String {
                     "" => format!("Searched {n} times"),
                     t => format!("Searched {t}"),
                 },
+                Kind::WebSearched => match times(n) {
+                    "" => format!("Searched the web {n} times"),
+                    _ if n == 1 => "Searched the web".to_string(),
+                    t => format!("Searched the web {t}"),
+                },
                 Kind::Fetched => format!("Fetched {}", plural(n, "page", "pages")),
                 Kind::Agent => format!("Ran {}", plural(n, "agent", "agents")),
                 Kind::Plan => "Updated the plan".to_string(),
@@ -252,6 +259,184 @@ pub fn run_summary(steps: &[Step]) -> String {
         })
         .collect();
     parts.join(" \u{b7} ")
+}
+
+/// How a mark on a step's line reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// Something went wrong: a nonzero exit.
+    Error,
+    /// A plain state: stopped, in the background.
+    Quiet,
+}
+
+/// One step's line, in parts: a small tag before it (an MCP server), the
+/// words, a faint note at the right (a count, a duration) and the marks
+/// beside it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StepLine {
+    pub tag: Option<String>,
+    pub label: String,
+    pub meta: String,
+    pub pills: Vec<(String, Tone)>,
+}
+
+/// What a step's line says, from its result once it came and from its
+/// input before.
+pub fn step_line(step: &Step) -> StepLine {
+    let mut line = StepLine {
+        label: if step.summary.is_empty() {
+            step.tool.clone()
+        } else {
+            format!("{}  {}", step.tool, step.summary)
+        },
+        ..StepLine::default()
+    };
+    let kind = step.result.as_ref().map(|r| &r.kind);
+    match step.tool.as_str() {
+        "Read" => {
+            if let Some(ResultKind::Read(r)) = kind {
+                let name = file_name(&r.path).unwrap_or_else(|| r.path.clone());
+                line.label = format!("Read {name}, {}", r.range_label());
+            } else if let Some(name) = file_name(&step.summary) {
+                line.label = format!("Read {name}");
+            }
+        }
+        "Grep" => {
+            if let Some(ResultKind::Grep(g)) = kind {
+                line.meta = grep_count(g.matches, g.files.len(), &g.mode);
+            }
+        }
+        "Glob" => {
+            if let Some(ResultKind::Glob(g)) = kind {
+                line.meta = match g.total.max(g.files.len()) {
+                    0 => "No files".to_string(),
+                    n => plural(n, "file", "files"),
+                };
+            }
+        }
+        "Bash" | "PowerShell" => {
+            let said = step.input["description"].as_str().unwrap_or_default().trim();
+            if !said.is_empty() {
+                line.label = said.to_string();
+            }
+            if let Some(ResultKind::Shell(r)) = kind {
+                if r.interrupted {
+                    line.pills.push(("interrupted".into(), Tone::Quiet));
+                } else if let Some(ms) = r.timed_out_ms {
+                    let say = format!("background after {}", duration(ms));
+                    line.pills.push((say, Tone::Quiet));
+                } else if r.background.is_some() {
+                    line.pills.push(("in background".into(), Tone::Quiet));
+                }
+                if let Some(code) = r.exit_code.filter(|&c| c != 0) {
+                    line.pills.push((format!("exit {code}"), Tone::Error));
+                }
+            }
+            if let (Some(a), Some(b)) = (step.began, step.ended) {
+                // A moment is not worth a word.
+                if b >= a + 1000 {
+                    line.meta = duration(b - a);
+                }
+            }
+        }
+        "WebSearch" => {
+            let query = step.input["query"].as_str().unwrap_or(&step.summary);
+            line.label = format!("Searched the web  {}", query.trim());
+            if let Some(ResultKind::WebSearch(w)) = kind {
+                line.meta = match w.links.len() {
+                    0 => "No results".to_string(),
+                    n => plural(n, "result", "results"),
+                };
+            }
+        }
+        "WebFetch" => {
+            if let Some(url) = step.input["url"].as_str() {
+                line.label = format!("Fetched {}", domain(url));
+            }
+        }
+        t => {
+            if let Some((server, tool)) = mcp_parts(t) {
+                line.tag = Some(server.to_string());
+                line.label = if step.summary.is_empty() {
+                    tool.to_string()
+                } else {
+                    format!("{tool}  {}", step.summary)
+                };
+            }
+        }
+    }
+    line
+}
+
+/// A Grep's count in words: "12 matches in 4 files", "3 files".
+pub fn grep_count(matches: Option<usize>, files: usize, mode: &str) -> String {
+    let lines = mode != "files_with_matches";
+    match (matches, files) {
+        (Some(0), _) | (None, 0) => "No matches".to_string(),
+        (Some(m), f) if lines && f > 1 => {
+            let (m, f) = (plural(m, "match", "matches"), plural(f, "file", "files"));
+            format!("{m} in {f}")
+        }
+        (Some(m), _) if lines => plural(m, "match", "matches"),
+        (_, f) => plural(f, "file", "files"),
+    }
+}
+
+/// How long something took, short: "0.4 s", "12 s", "2 min 5 s".
+pub fn duration(ms: u64) -> String {
+    if ms < 10_000 {
+        return format!("{:.1} s", ms as f64 / 1000.0);
+    }
+    let secs = (ms + 500) / 1000;
+    if secs < 60 {
+        format!("{secs} s")
+    } else if secs % 60 == 0 {
+        format!("{} min", secs / 60)
+    } else {
+        format!("{} min {} s", secs / 60, secs % 60)
+    }
+}
+
+/// A URL's host without its `www.`, or the URL when it has none.
+pub fn domain(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    if host.is_empty() || host.contains(' ') {
+        url.to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+/// An MCP tool's server and tool, from `mcp__server__tool`.
+pub fn mcp_parts(tool: &str) -> Option<(&str, &str)> {
+    let rest = tool.strip_prefix("mcp__")?;
+    let (server, name) = rest.split_once("__")?;
+    // Connectors come as `claude_ai_Slack`: the prefix says nothing.
+    let server = server.strip_prefix("claude_ai_").unwrap_or(server);
+    (!server.is_empty() && !name.is_empty()).then_some((server, name))
+}
+
+/// Whether fetched text reads as markdown rather than plain words: a
+/// heading, a list, a fence, a quote or a link among its first lines.
+pub fn looks_like_markdown(text: &str) -> bool {
+    let mut marks = 0;
+    for l in text.lines().take(60) {
+        let t = l.trim_start();
+        let digits = t.bytes().take_while(u8::is_ascii_digit).count();
+        let listed = t.starts_with("- ")
+            || t.starts_with("* ")
+            || digits > 0 && digits < 4 && t[digits..].starts_with(". ");
+        let heading = t.starts_with('#') && t.trim_start_matches('#').starts_with(' ');
+        let fenced = t.starts_with("```") || t.starts_with("> ");
+        if heading || fenced || listed || t.contains("](") || t.contains("**") {
+            marks += 1;
+        }
+    }
+    marks >= 2
 }
 
 /// A turn's footer: how it ended and how long it took. No dollars: on a
@@ -343,7 +528,7 @@ pub fn ask_title(tool: &str) -> String {
         Kind::Ran => "Run a command?".to_string(),
         Kind::Edited => "Change a file?".to_string(),
         Kind::Read => "Read a file?".to_string(),
-        Kind::Fetched => "Go online?".to_string(),
+        Kind::Fetched | Kind::WebSearched => "Go online?".to_string(),
         Kind::Other(name) => format!("Use {name}?"),
         _ => format!("Use {tool}?"),
     }
@@ -507,6 +692,7 @@ mod tests {
             edit: None,
             lane: None,
             output: String::new(),
+            result: None,
             images: Vec::new(),
             began: None,
             ended: None,
@@ -752,5 +938,87 @@ mod tests {
     fn question_progress_counts_only_when_there_are_several() {
         assert_eq!(question_progress(0, 1, true), "Pick any that apply");
         assert_eq!(question_progress(1, 3, false), "1 of 3 answered");
+    }
+
+    #[test]
+    fn a_step_line_says_what_its_result_found() {
+        use horadric_core::folio::{GrepResult, ReadResult, ShellResult, ToolResult};
+        let mut read = step("Read", "C:/x/src/markdown.rs", Some(true));
+        read.result = Some(ToolResult {
+            kind: ResultKind::Read(ReadResult {
+                path: "C:/x/src/markdown.rs".into(),
+                start: 163,
+                lines: vec![String::new(); 118],
+                total: Some(900),
+                cut: false,
+            }),
+            ..ToolResult::default()
+        });
+        assert_eq!(step_line(&read).label, "Read markdown.rs, lines 163 to 280");
+        let mut grep = step("Grep", "fn paint", Some(true));
+        grep.result = Some(ToolResult {
+            kind: ResultKind::Grep(GrepResult {
+                mode: "content".into(),
+                files: vec![Default::default(); 4],
+                matches: Some(12),
+                ..GrepResult::default()
+            }),
+            ..ToolResult::default()
+        });
+        let line = step_line(&grep);
+        assert_eq!(line.label, "Grep  fn paint");
+        assert_eq!(line.meta, "12 matches in 4 files");
+        let mut bash = step("Bash", "cargo test", Some(false));
+        bash.input = serde_json::json!({"command": "cargo test", "description": "Run the tests"});
+        bash.began = Some(1_000);
+        bash.ended = Some(13_400);
+        bash.result = Some(ToolResult {
+            kind: ResultKind::Shell(ShellResult {
+                exit_code: Some(101),
+                ..ShellResult::default()
+            }),
+            ..ToolResult::default()
+        });
+        let line = step_line(&bash);
+        assert_eq!(line.label, "Run the tests");
+        assert_eq!(line.meta, "12 s");
+        assert_eq!(line.pills, [("exit 101".to_string(), Tone::Error)]);
+        let line = step_line(&step("mcp__claude_ai_Slack__send_message", "", Some(true)));
+        assert_eq!(line.tag.as_deref(), Some("Slack"));
+        assert_eq!(line.label, "send_message");
+    }
+
+    #[test]
+    fn grep_counts_read_as_words() {
+        assert_eq!(grep_count(Some(12), 4, "content"), "12 matches in 4 files");
+        assert_eq!(grep_count(Some(1), 1, "content"), "1 match");
+        assert_eq!(grep_count(None, 3, "files_with_matches"), "3 files");
+        assert_eq!(grep_count(Some(0), 0, "content"), "No matches");
+        assert_eq!(grep_count(None, 0, "files_with_matches"), "No matches");
+    }
+
+    #[test]
+    fn durations_and_domains_are_short() {
+        assert_eq!(duration(400), "0.4 s");
+        assert_eq!(duration(12_400), "12 s");
+        assert_eq!(duration(125_000), "2 min 5 s");
+        assert_eq!(duration(120_000), "2 min");
+        assert_eq!(domain("https://www.docs.rs/serde/latest"), "docs.rs");
+        assert_eq!(domain("http://user@example.com:8080?q=1"), "example.com:8080");
+        assert_eq!(domain("not a url"), "not a url");
+    }
+
+    #[test]
+    fn markdown_is_told_from_plain_words() {
+        assert!(looks_like_markdown("# Title\n\nSome text.\n\n- one\n- two"));
+        assert!(looks_like_markdown("See [docs](https://x.y).\n\nAnd **this**."));
+        assert!(!looks_like_markdown("Just a plain answer.\nOn two lines."));
+        assert!(!looks_like_markdown("#hashtag\n2024. A year."));
+    }
+
+    #[test]
+    fn a_web_search_counts_on_its_own() {
+        let steps = [step("WebSearch", "rust", Some(true)), step("WebFetch", "u", Some(true))];
+        assert_eq!(run_summary(&steps), "Searched the web \u{b7} Fetched 1 page");
     }
 }
