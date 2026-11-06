@@ -182,7 +182,7 @@ impl Task {
             return None;
         }
         Some(match &self.wait {
-            None => Waits::Human,
+            None | Some(Wait::Secret(_) | Wait::Login(_)) => Waits::Human,
             Some(Wait::Until(_)) => Waits::Time,
             Some(Wait::After | Wait::Quest(_)) => Waits::Quest,
             Some(Wait::Main(_) | Wait::File(_) | Wait::Cmd(_)) => Waits::Check,
@@ -526,6 +526,11 @@ pub enum Wait {
     /// Something outside, as said, that nothing here can check: a reply,
     /// a delivery. Only the human or its own session frees it.
     Outside(String),
+    /// A secret or web login of the Vault, by name, is kept for the
+    /// project and allowed. The app looks; only the human can add one.
+    Secret(String),
+    /// The project's identity has a login for a tool, `gh`.
+    Login(String),
 }
 
 impl Wait {
@@ -539,6 +544,8 @@ impl Wait {
             Wait::Cmd(c) => format!("{{on cmd: {}}}", one_line(c)),
             Wait::Until(t) => format!("{{until: {}}}", utc(*t)),
             Wait::Outside(o) => format!("{{on outside: {}}}", one_line(o)),
+            Wait::Secret(n) => format!("{{on secret: {}}}", one_line(n)),
+            Wait::Login(t) => format!("{{on login: {}}}", one_line(t)),
         }
     }
 
@@ -561,6 +568,8 @@ impl Wait {
             "on cmd" => Some(Wait::Cmd(v)),
             "until" => parse_utc(value).map(Wait::Until),
             "on outside" => Some(Wait::Outside(v)),
+            "on secret" => Some(Wait::Secret(v)),
+            "on login" => Some(Wait::Login(v)),
             _ => None,
         }
     }
@@ -573,6 +582,7 @@ impl Wait {
             Wait::After | Wait::Quest(_) => Some(true),
             Wait::Until(at) => Some(now >= *at),
             Wait::Main(_) | Wait::File(_) | Wait::Cmd(_) => None,
+            Wait::Secret(_) | Wait::Login(_) => None,
             Wait::Outside(_) => Some(false),
         }
     }
@@ -589,6 +599,8 @@ impl Wait {
             Wait::Until(t) if *t > now => format!("in {}", format_until(t - now)),
             Wait::Until(_) => "due".into(),
             Wait::Outside(o) => format!("on {}", short(o)),
+            Wait::Secret(n) => format!("needs {}", short(n)),
+            Wait::Login(t) => format!("needs {} login", short(t)),
         }
     }
 
@@ -602,6 +614,8 @@ impl Wait {
             Wait::Cmd(c) => format!("`{c}` exits 0"),
             Wait::Until(t) => format!("It is past {}", utc(*t)),
             Wait::Outside(o) => format!("{o} is in"),
+            Wait::Secret(n) => format!("{n} is kept for this project now"),
+            Wait::Login(t) => format!("{t} is logged in for this project's identity now"),
         }
     }
 }
@@ -2444,6 +2458,9 @@ mod tests {
             Wait::Cmd("git diff --quiet".into()),
             Wait::Until(1_790_863_500),
             Wait::Until(1_790_863_501),
+            Wait::Outside("the reply".into()),
+            Wait::Secret("GITHUB_TOKEN".into()),
+            Wait::Login("gh".into()),
         ] {
             let line = item_line(Mark::Blocked, "T", Some("t-1"), Some("why"), Some(&w));
             let t = &parse(&line)[0];
@@ -2452,6 +2469,17 @@ mod tests {
         }
         assert_eq!(Wait::read("{until: soon}"), None);
         assert_eq!(Wait::read("{on quest:   }"), None);
+    }
+
+    #[test]
+    fn a_vault_wait_names_what_it_needs_and_the_app_checks_it() {
+        let secret = Wait::Secret("GITHUB_TOKEN".into());
+        let login = Wait::Login("gh".into());
+        assert_eq!(secret.spell(), "{on secret: GITHUB_TOKEN}");
+        assert_eq!(login.spell(), "{on login: gh}");
+        assert_eq!(secret.label(0), "needs GITHUB_TOKEN");
+        assert_eq!(login.label(0), "needs gh login");
+        assert_eq!((secret.met(0), login.met(0)), (None, None));
     }
 
     #[test]

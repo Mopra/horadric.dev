@@ -227,7 +227,27 @@ pub struct SecretNames {
 }
 
 impl SecretRun {
-    fn from_json(session: String, body: &[u8], out: SecretStream) -> Option<SecretRun> {
+    /// Gives the stream back when the body is not one, to answer on.
+    fn from_json(session: String, body: &[u8], out: TcpStream) -> Result<SecretRun, TcpStream> {
+        match SecretRun::fields(body) {
+            Some((key, names, stdin, program, args, cwd)) => Ok(SecretRun {
+                session,
+                key,
+                names,
+                stdin,
+                program,
+                args,
+                cwd,
+                out: SecretStream::new(out),
+            }),
+            None => Err(out),
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn fields(
+        body: &[u8],
+    ) -> Option<(String, Vec<String>, Vec<String>, String, Vec<String>, String)> {
         let v: Value = serde_json::from_slice(body).ok()?;
         let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
         let list = |k: &str| -> Option<Vec<String>> {
@@ -237,16 +257,14 @@ impl SecretRun {
                 Some(_) => None,
             }
         };
-        Some(SecretRun {
-            session,
-            key: text("key").unwrap_or_default(),
-            names: list("names")?,
-            stdin: list("stdin")?,
-            program: text("program")?,
-            args: list("args")?,
-            cwd: text("cwd")?,
-            out,
-        })
+        Some((
+            text("key").unwrap_or_default(),
+            list("names")?,
+            list("stdin")?,
+            text("program")?,
+            list("args")?,
+            text("cwd")?,
+        ))
     }
 }
 
@@ -1048,8 +1066,9 @@ fn secret_run(
                 .to_string(),
         );
     }
-    let Some(call) = SecretRun::from_json(session, body, SecretStream::new(stream)) else {
-        return Ok(());
+    let call = match SecretRun::from_json(session, body, stream) {
+        Ok(call) => call,
+        Err(stream) => return respond(&stream, "400 Bad Request"),
     };
     if let Err(std::sync::mpsc::SendError(Command::SecretRun(call))) =
         commands.send(Command::SecretRun(call))
@@ -1640,6 +1659,88 @@ mod tests {
         app.join().unwrap();
         assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
         assert!(reply.ends_with(r#"{"open":false}"#), "{reply}");
+    }
+
+    fn secret_run_lines(port: u16, rx: mpsc::Receiver<Command>, drop_it: bool) -> Vec<String> {
+        let app = thread::spawn(move || match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Command::SecretRun(call)) => {
+                assert_eq!(call.session, "tile-s");
+                assert_eq!((call.key.as_str(), call.program.as_str()), ("k", "gh"));
+                assert_eq!(call.names, ["A", "B"]);
+                assert_eq!(call.args, ["pr", "create"]);
+                let mut out = call.out;
+                // Written after the listener thread is gone, from a clone.
+                thread::sleep(Duration::from_millis(50));
+                out.clone().err(b"warn").unwrap();
+                out.out(b"[A]\n").unwrap();
+                if !drop_it {
+                    out.exit(7);
+                }
+            }
+            other => panic!("{other:?}"),
+        });
+        let body = json!({
+            "key": "k", "names": ["A", "B"], "program": "gh",
+            "args": ["pr", "create"], "cwd": "C:/x",
+        });
+        let headers = [(COMMAND_HEADER, "secret-run"), (SESSION_HEADER, "tile-s")];
+        let (status, reader) =
+            client::open(port, SECRET_RUN_PATH, &headers, &body.to_string()).unwrap();
+        app.join().unwrap();
+        assert_eq!(status, 200);
+        reader.lines().map(Result::unwrap).collect()
+    }
+
+    #[test]
+    fn a_secret_run_streams_its_output_and_exit_code() {
+        let (port, rx) = start_with_new();
+        let lines = secret_run_lines(port, rx, false);
+        let frames: Vec<_> = lines.iter().map(|l| Frame::parse(l).unwrap()).collect();
+        assert_eq!(
+            frames,
+            [
+                Frame::Err(b"warn".to_vec()),
+                Frame::Out(b"[A]\n".to_vec()),
+                Frame::Exit(7)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_secret_run_the_app_drops_ends_without_an_exit_code() {
+        let (port, rx) = start_with_new();
+        let lines = secret_run_lines(port, rx, true);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines.iter().all(|l| !l.starts_with("x ")));
+    }
+
+    #[test]
+    fn a_secret_run_needs_a_session_and_its_command_header() {
+        let (port, rx) = start_with_new();
+        let body = r#"{"program":"gh","cwd":"C:/x"}"#;
+        let no_session = post_to(port, SECRET_RUN_PATH, "X-Horadric-Command: secret-run\r\n", body);
+        assert!(no_session.starts_with("HTTP/1.1 400"), "{no_session}");
+        let no_command = post_to(port, SECRET_RUN_PATH, "X-Horadric-Session: s\r\n", body);
+        assert!(no_command.starts_with("HTTP/1.1 403"), "{no_command}");
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn a_secret_set_is_answered_with_what_the_app_answers() {
+        let (port, rx) = start_with_new();
+        let app = thread::spawn(move || match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Command::SecretSet(call)) => {
+                assert_eq!(call.session, None);
+                assert_eq!((call.name.as_str(), call.value.as_str()), ("A", "v"));
+                assert_eq!(call.owner, "everywhere");
+                call.reply.send(json!({ "text": "kept" }));
+            }
+            other => panic!("{other:?}"),
+        });
+        let body = r#"{"cwd":"C:/x","name":"A","value":"v","owner":"everywhere"}"#;
+        let reply = post_to(port, SECRET_SET_PATH, "X-Horadric-Command: secret-set\r\n", body);
+        app.join().unwrap();
+        assert!(reply.ends_with(r#"{"text":"kept"}"#), "{reply}");
     }
 
     #[test]

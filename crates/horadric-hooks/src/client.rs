@@ -1,7 +1,7 @@
 //! The sending side, for the command line: one short HTTP POST to the
 //! running app.
 
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
@@ -45,6 +45,46 @@ pub fn ask(
         .map_or("", |(_, b)| b)
         .to_string();
     Ok((code, body))
+}
+
+/// Posts like [`ask`] but hands back the reply's status and the reader at
+/// the start of its body, for a reply that streams until the app closes
+/// it (`secret run`). No read timeout: a program may be quiet for long.
+pub fn open(
+    port: u16,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> io::Result<(u16, BufReader<TcpStream>)> {
+    let mut stream =
+        TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(300))?;
+    let mut req = format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+    for (name, value) in headers {
+        req.push_str(&format!("{name}: {value}\r\n"));
+    }
+    req.push_str(&format!(
+        "Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    ));
+    stream.write_all(req.as_bytes())?;
+    let mut reader = BufReader::new(stream);
+    let mut head = String::new();
+    reader
+        .read_line(&mut head)
+        .map_err(|e| io::Error::new(e.kind(), Sent(e)))?;
+    let code = status(&head).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            Sent(io::Error::new(io::ErrorKind::InvalidData, "not an HTTP reply")),
+        )
+    })?;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 || line.trim().is_empty() {
+            break;
+        }
+    }
+    Ok((code, reader))
 }
 
 /// An error reading the reply to a request that went out whole.

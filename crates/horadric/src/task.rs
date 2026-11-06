@@ -34,6 +34,10 @@ usage: horadric quest done [\"summary\"]  The quest this session works is comple
              [--on-cmd \"command\"]     a command (cmd.exe) exits 0,
              [--until <+30m|UTC time>] or a time comes: then it goes on
              [--on-outside \"what\"]    or something outside nothing here checks
+             [--on-secret NAME]        or until the human keeps that secret or
+                                        web login for this project
+             [--on-login TOOL]         or until the project's identity has a
+                                        login for that tool (gh, npm, vercel)
        horadric quest ask \"title\" \"what the human would do\"
                                         Say it for a quest blocked on the human
        horadric quest drop \"title\" \"why\"  The human dropped a blocked quest: it closes
@@ -345,6 +349,8 @@ fn why_and_wait(args: &[String], now: u64) -> Result<(String, Option<On>), Strin
                 "--on-file" => On::Check(Wait::File(value)),
                 "--on-cmd" => On::Check(Wait::Cmd(value)),
                 "--on-outside" => On::Check(Wait::Outside(tasks::you_line(&value))),
+                "--on-secret" => On::Check(Wait::Secret(value.trim().to_string())),
+                "--on-login" => On::Check(Wait::Login(value.trim().to_lowercase())),
                 "--until" => On::Check(Wait::Until(tasks::parse_when(&value, now).ok_or(
                     format!(
                         "--until takes +30m (or s, h, d), Unix seconds or a UTC time like \
@@ -1463,6 +1469,14 @@ mod tests {
         assert_eq!(
             w(&["x", "--on-outside", "the", "reply"]),
             Ok(("x".into(), check(Wait::Outside("the reply".into()))))
+        );
+        assert_eq!(
+            w(&["x", "--on-secret", "GITHUB_TOKEN"]),
+            Ok(("x".into(), check(Wait::Secret("GITHUB_TOKEN".into()))))
+        );
+        assert_eq!(
+            w(&["--on-login", "Gh"]),
+            Ok(("waits".into(), check(Wait::Login("gh".into()))))
         );
     }
 

@@ -1216,6 +1216,8 @@ pub(crate) trait Runner: Host {
             #[cfg(not(windows))]
             Wait::Cmd(c) => ("sh", vec!["-c".into(), c.clone()]),
             Wait::After | Wait::Quest(_) | Wait::Until(_) | Wait::Outside(_) => return false,
+            // Held until the Vault's look is wired in here.
+            Wait::Secret(_) | Wait::Login(_) => return false,
         };
         let id = (key.to_string(), wait.spell());
         let Ok(mut checks) = self.tasks().checks.lock() else {

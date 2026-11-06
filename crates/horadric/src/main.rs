@@ -47,6 +47,7 @@ mod release;
 #[cfg(not(target_os = "linux"))]
 mod reload;
 mod run;
+mod secret;
 #[cfg(windows)]
 mod runestep;
 #[cfg(windows)]
@@ -94,6 +95,12 @@ Usage:
                                works (connectors, plugins, skills) and what it costs a
                                turn, what went unused in 30 days, and the switch for
                                each; turn one off or on; or one line per project
+  horadric secret run [--stdin NAME] NAME[,NAME...] -- PROGRAM ARGS...
+                               Run PROGRAM with kept secrets in its environment; the
+                               session never sees the values, the output is masked
+  horadric secret set NAME [--everywhere | --identity SLUG]
+                               Keep a secret, the value read without echo
+  horadric secret list           The secret names this session may use
   horadric found <name>          Make a project from the town: folder, git, README, first session
   horadric projects              Every known project: folder, sessions, open quests, last commit
   horadric node [install|--stdio]
@@ -191,6 +198,7 @@ fn main() -> ExitCode {
         Some("new") => run::new(&args[1..]),
         Some("run") => run::run(&args[1..]),
         Some("heavy") => heavy::run(&args[1..]),
+        Some("secret") => secret::run(&args[1..]),
         // Hidden: for checking the headless protocol against the real CLI.
         #[cfg(windows)]
         Some("headless-debug") => headless_debug::run(&args[1..]),
