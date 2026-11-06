@@ -380,6 +380,10 @@ fn hash_step(h: &mut DefaultHasher, s: &Step, st: &State) {
     s.output.len().hash(h);
     s.images.len().hash(h);
     (s.began, s.ended).hash(h);
+    // A result can land without the tail or the state changing.
+    if let Some(r) = &s.result {
+        (r.text.len(), r.error).hash(h);
+    }
     hash_str(h, s.input["command"].as_str().unwrap_or_default());
     if let Some(e) = &s.edit {
         (e.added, e.removed, e.hunks.len(), e.changes.len()).hash(h);
