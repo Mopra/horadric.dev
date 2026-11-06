@@ -91,7 +91,9 @@
     const display = shown ? getComputedStyle(shown).display : "block";
     html.style.setProperty("--forge-slide-display", display === "inline" ? "block" : display);
     // A slide that leaves its background to the body would show the
-    // letterbox through it once it stands alone.
+    // letterbox through it once it stands alone. Asked again once the
+    // deck's own stylesheet has loaded, so the class is cleared first.
+    html.classList.remove("forge-nobg");
     const own = getComputedStyle(slides[0]).backgroundColor;
     if (transparent(own)) {
       let bg = getComputedStyle(document.body).backgroundColor;
@@ -489,6 +491,16 @@
     show(1, "init");
     announce();
     addEventListener("resize", layout);
+    // Runs at DOMContentLoaded, before a linked stylesheet may have
+    // arrived: measured then, a dark deck looked bare and was painted
+    // white. Measured again once everything has loaded.
+    // The size is not asked again: the shell's own rules now pin it.
+    const settle = () => {
+      slideLook();
+      layout();
+    };
+    if (document.readyState === "complete") settle();
+    else addEventListener("load", settle, { once: true });
     addEventListener("keydown", onKey, true);
     // A click on the slide moves on while presenting, as a clicker would.
     document.addEventListener("click", (e) => {
