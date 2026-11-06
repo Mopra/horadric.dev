@@ -297,6 +297,9 @@ struct Question {
     tx: Sender<Option<usize>>,
     gone: Arc<AtomicBool>,
     tries: u32,
+    /// For a first button that leads to a masked field: its prompt, and
+    /// where what the human typed goes, before the button is answered.
+    masked: Option<(String, Sender<Option<String>>)>,
 }
 
 /// The questions not yet shown. Shared, since a worker thread may ask.
@@ -359,7 +362,17 @@ unsafe extern "system" fn waker_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
-fn put(_session: &str, title: &str, text: &str, buttons: Vec<String>) -> Asked {
+fn put(session: &str, title: &str, text: &str, buttons: Vec<String>) -> Asked {
+    put_with(session, title, text, buttons, None)
+}
+
+fn put_with(
+    _session: &str,
+    title: &str,
+    text: &str,
+    buttons: Vec<String>,
+    masked: Option<(String, Sender<Option<String>>)>,
+) -> Asked {
     let (tx, rx) = mpsc::channel();
     let gone = Arc::new(AtomicBool::new(false));
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -371,6 +384,7 @@ fn put(_session: &str, title: &str, text: &str, buttons: Vec<String>) -> Asked {
         tx,
         gone: Arc::clone(&gone),
         tries: 0,
+        masked,
     });
     let hwnd = WAKER.load(Ordering::Acquire);
     if hwnd == 0 {
@@ -439,6 +453,9 @@ unsafe extern "system" fn show_queued(_: HWND, _: u32, id: usize, _: u32) {
             QUEUE.lock().unwrap_or_else(|e| e.into_inner()).push_front(q);
             soon(500);
             break;
+        }
+        if let (Some(0), Some((prompt, typed))) = (pressed, &q.masked) {
+            let _ = typed.send(crate::app::ask_secret(&q.title, prompt, "keep it"));
         }
         // A question that was never shown has no answer, not a No: its
         // asker hears the line hang up and logs it as unanswered.
@@ -1652,6 +1669,7 @@ fn set_off_ui(place: Option<Place>, known: HashSet<String>, req: SecretSet) {
         owner,
         reply,
     } = req;
+    let mut value = value;
     let error = |why: String| reply.send(json!({ "error": why }));
     if let Some(s) = &session {
         if !key_ok(s, &key) {
@@ -1663,7 +1681,7 @@ fn set_off_ui(place: Option<Place>, known: HashSet<String>, req: SecretSet) {
         error(format!("{name} is not a secret's name: upper case letters, digits and _, a letter first."));
         return;
     }
-    if value.is_empty() {
+    if value.is_empty() && session.is_some() {
         error("An empty value is not kept.".into());
         return;
     }
@@ -1713,24 +1731,55 @@ fn set_off_ui(place: Option<Place>, known: HashSet<String>, req: SecretSet) {
         .iter()
         .any(|s| s.name == name && s.owner == owner);
     let title = format!("Keep {name}?");
-    let text = format!(
-        "{} asks to keep {name} for {whose}{}. Keep it only if you typed it yourself.",
-        asker(&session, None),
-        if replaces {
-            ", replacing the value kept now and every Always given to it"
-        } else {
-            ""
-        }
-    );
-    let asked = put(&session, &title, &text, vec!["Keep".into(), "No".into()]);
+    let replacing = if replaces {
+        ", replacing the value kept now and every Always given to it"
+    } else {
+        ""
+    };
+    // A terminal with no session key proves nothing about who is in it:
+    // an agent could run `secret set` there and name any project by its
+    // folder. So its value is not taken; the human types one.
+    let (text, buttons, typed) = if session.is_empty() {
+        let (tx, rx) = mpsc::channel();
+        let text = format!(
+            "{} asks to keep {name} for {whose}{replacing}. It may be an agent rather than you, so the value it sent is not used: if you want {name} kept, type the value yourself in the next step.",
+            asker(&session, None),
+        );
+        let prompt = format!("The value of {name} for {whose}, one line. Type or paste it yourself.");
+        (text, vec!["Type it in".to_string(), "No".to_string()], Some((prompt, tx, rx)))
+    } else {
+        let text = format!(
+            "{} asks to keep {name} for {whose}{replacing}. Keep it only if you typed it yourself.",
+            asker(&session, None),
+        );
+        (text, vec!["Keep".to_string(), "No".to_string()], None)
+    };
+    let (masked, typed) = match typed {
+        Some((prompt, tx, rx)) => (Some((prompt, tx)), Some(rx)),
+        None => (None, None),
+    };
+    let asked = put_with(&session, &title, &text, buttons, masked);
     let project = match &owner {
         Owner::Project(k) => k.clone(),
         o => o.label(),
     };
-    let pressed = match asked.until(SET_WAIT, None) {
+    // Typing the value in comes before the answer, so it gets longer.
+    let wait = if typed.is_some() { SET_WAIT * 3 } else { SET_WAIT };
+    let pressed = match asked.until(wait, None) {
         Waited::Pressed(p) => p,
         _ => None,
     };
+    if let (Some(0), Some(typed)) = (pressed, typed) {
+        // Sent before the button, so it is there already.
+        match typed.recv_timeout(Duration::from_secs(1)).ok().flatten() {
+            Some(v) if !v.trim().is_empty() => value = v.trim().to_string(),
+            _ => {
+                drop(held);
+                reply.send(json!({ "error": format!("{name} was not kept: no value was typed in Horadric.") }));
+                return;
+            }
+        }
+    }
     drop(held);
     let at = now();
     if pressed != Some(0) {

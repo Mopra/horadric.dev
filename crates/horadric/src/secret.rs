@@ -219,8 +219,13 @@ fn set(args: &[String]) -> Result<(), String> {
         }
     }
     let name = name.ok_or(USAGE)?;
-    let value = read_value(&name)?;
-    if value.is_empty() {
+    // Outside a session the app takes no value from here, since anything
+    // could have run this; the human types it into Horadric instead.
+    let value = match session() {
+        Some(_) => read_value(&name)?,
+        None => String::new(),
+    };
+    if value.is_empty() && session().is_some() {
         return Err("no value given, nothing kept".into());
     }
     let cwd = std::env::current_dir()
@@ -232,7 +237,10 @@ fn set(args: &[String]) -> Result<(), String> {
     let key = std::env::var(SECRET_KEY_ENV).unwrap_or_default();
     let body = json!({ "cwd": cwd, "name": name, "value": value, "owner": owner, "key": key });
     let (port, headers) = app("secret-set");
-    eprintln!("Confirm it in Horadric.");
+    match session() {
+        Some(_) => eprintln!("Confirm it in Horadric."),
+        None => eprintln!("Type the value in Horadric when it asks."),
+    }
     let (status, reply) = client::ask(
         port,
         SECRET_SET_PATH,

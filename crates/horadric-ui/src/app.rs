@@ -3147,7 +3147,7 @@ fn settings_ask() {
 
 /// A secret asked of the human, kept out of the app's borrow while it
 /// waits.
-fn ask_secret(title: &str, prompt: &str, verb: &str) -> Option<String> {
+pub(crate) fn ask_secret(title: &str, prompt: &str, verb: &str) -> Option<String> {
     let question = ask::Ask {
         title,
         prompt,

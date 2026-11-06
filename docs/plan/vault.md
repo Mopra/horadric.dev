@@ -215,7 +215,12 @@ third half, below.
   secret has Replace, Forget, Allowed for (the programs, each with a
   cross) and when it was last used and by which session. From a terminal,
   `horadric secret set NAME [--everywhere]` reads the value without
-  echoing it, for a value too long to paste into a field.
+  echoing it, for a value too long to paste into a field. That holds in
+  a session's own terminal, whose key names the session in the question.
+  A terminal with no session key proves nothing about who runs it, so
+  there the app takes no value: the human types it into Horadric's own
+  masked field, and the question says the asker may be an agent
+  (decided 2026-11-06).
 - **The log.** `secrets.log` beside it, a line a use: time, project,
   session, secret, program, and allowed, asked or refused. Never the value
   and never the whole command line, which may hold other things worth
