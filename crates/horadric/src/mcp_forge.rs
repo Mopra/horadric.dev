@@ -164,8 +164,10 @@ fn style(project: Option<&str>) -> Result<String, String> {
             let whose = match (&css, &deck) {
                 (None, None) => format!(
                     "This project has no house style ({} does not hold one), so these are \
-                     Horadric's own. To give it one, copy both into that folder and change the \
-                     variables at the top of the stylesheet.",
+                     Horadric's own: dark, in Horadric's look, with one accent colour (the \
+                     --accent variables) and runes as the only ornament. To give it one, copy \
+                     both into that folder and change the variables at the top of the \
+                     stylesheet.",
                     dir.display()
                 ),
                 _ => format!(

@@ -42,6 +42,8 @@ const WALK_DEPTH: usize = 6;
 
 const DECK: &str = include_str!("../../assets/forge/templates/deck.html");
 const DECK_CSS: &str = include_str!("../../assets/forge/templates/deck.css");
+const NOTE: &str = include_str!("../../assets/forge/templates/note.md");
+const TABLE: &str = include_str!("../../assets/forge/templates/table.csv");
 
 /// A name in a folder's listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -730,9 +732,9 @@ enum New {
 /// gets the house stylesheet beside it unless one is there already.
 fn create(dir: &Path, what: New) -> io::Result<PathBuf> {
     let (stem, ext, body) = match what {
-        New::Note => ("Untitled note", "md", "# Untitled note\n\n"),
+        New::Note => ("Untitled note", "md", NOTE),
         New::Deck => ("Untitled deck", "html", DECK),
-        New::Table => ("Untitled table", "csv", "Name,Notes\n,\n"),
+        New::Table => ("Untitled table", "csv", TABLE),
     };
     for n in 1..1000 {
         let name = if n == 1 {

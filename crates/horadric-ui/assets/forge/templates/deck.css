@@ -1,36 +1,64 @@
-/* The starting deck's style. Slides are designed at 1920 x 1080 (16:9);
-   the Forge scales them to the pane. Change the variables below to make
-   it a house style, and keep the class names so decks made from it keep
-   working. */
+/* The starting deck's style, drawn in Horadric's look: a matte dark
+   faceplate, legends engraved into it, figures and tables on screens sunk
+   into it, runes cut in the accent as the only ornament. No glows and no
+   gradients.
+
+   Slides are designed at 1920 x 1080 (16:9); the Forge scales them to the
+   pane. The deck is presented and printed away from Horadric, so the
+   palette is written out here rather than taken from the app's theme, and
+   only system fonts are named, so nothing is fetched. To make it a house
+   style, change the variables below (the accent is one line) and keep the
+   class names, so decks made from it keep working. */
 
 :root {
   --slide-width: 1920px;
   --slide-height: 1080px;
 
-  --paper: #faf8f4;
-  --ink: #1d1b18;
-  --muted: #6b665e;
-  --rule: #e2ddd3;
-  --accent: #b4541f;
-  --accent-soft: #f3e3d6;
-  --dark: #1f1d1a;
-  --on-dark: #f4efe7;
+  /* The project's colour. Everything lit takes it. */
+  --accent: #3db4ff;
+  --accent-dim: rgb(61 180 255 / 0.45);
+  --accent-faint: rgb(61 180 255 / 0.12);
 
-  --display: "Georgia", "Cambria", "Times New Roman", serif;
-  --text: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
-  --mono: "Cascadia Code", "Consolas", ui-monospace, monospace;
+  --plate: #151619;
+  --surface: #1b1d21;
+  --screen: #08090b;
+  --lamp-off: #2a2c32;
+  --text: #e8e9ed;
+  --read: #d4d5d8;
+  --dim: #8f939e;
+  --legend: #6e727c;
+  --bevel-light: rgb(255 255 255 / 0.09);
+  --cast: rgb(0 0 0 / 0.55);
+  --hollow-shade: rgb(0 0 0 / 0.6);
+  --engrave-dark: rgb(0 0 0 / 0.55);
+  --engrave-light: rgb(255 255 255 / 0.06);
 
-  --pad-x: 140px;
-  --pad-y: 110px;
+  --display: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --text-face: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+
+  --pad-x: 150px;
+  --pad-y: 120px;
+
+  /* Elder runes as Horadric carves them: straight cuts only. Drawn as
+     masks, so a rune takes whatever colour it is given. */
+  --rune-fehu: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='-0.36 -0.08 0.72 1.16'><path d='M-.15 0V1M-.15 .3L.25 0M-.15 .55L.25 .25' fill='none' stroke='black' stroke-width='.085' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  --rune-ansuz: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='-0.36 -0.08 0.72 1.16'><path d='M-.15 0V1M-.15 0L.22 .25M-.15 .3L.22 .55' fill='none' stroke='black' stroke-width='.085' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  --rune-raidho: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='-0.36 -0.08 0.72 1.16'><path d='M-.18 1V0L.2 .22L-.18 .45L.2 1' fill='none' stroke='black' stroke-width='.085' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  --rune-kenaz: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='-0.36 -0.08 0.72 1.16'><path d='M.15 .1L-.15 .5L.15 .9' fill='none' stroke='black' stroke-width='.085' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  --rune-tiwaz: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='-0.36 -0.08 0.72 1.16'><path d='M0 0V1M-.28 .3L0 0L.28 .3' fill='none' stroke='black' stroke-width='.085' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  --rune-sowilo: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='-0.36 -0.08 0.72 1.16'><path d='M.2 0L-.2 .35L.2 .65L-.2 1' fill='none' stroke='black' stroke-width='.085' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  --rune-algiz: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='-0.36 -0.08 0.72 1.16'><path d='M0 0V1M-.28 0L0 .4L.28 0' fill='none' stroke='black' stroke-width='.085' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  --rune-dagaz: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='-0.36 -0.08 0.72 1.16'><path d='M-.25 0V1L.25 0V1Z' fill='none' stroke='black' stroke-width='.085' stroke-linecap='round' stroke-linejoin='round'/></svg>");
 }
 
 * { box-sizing: border-box; }
 
 html, body {
   margin: 0;
-  background: #d9d4cb;
-  color: var(--ink);
-  font-family: var(--text);
+  background: #060708;
+  color: var(--read);
+  font-family: var(--text-face);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -42,144 +70,367 @@ section.slide {
   margin: 40px auto;
   padding: var(--pad-y) var(--pad-x);
   overflow: hidden;
-  background: var(--paper);
+  background: var(--plate);
   display: flex;
   flex-direction: column;
   font-size: 36px;
   line-height: 1.45;
 }
 
+/* The seam every Horadric window has inside its edge: a dark cut with the
+   light catching the lip under it. It frames the slide as the app's
+   windows are framed. */
+section.slide::before {
+  content: "";
+  position: absolute;
+  inset: 22px;
+  border-radius: 20px;
+  border: 2px solid var(--engrave-dark);
+  box-shadow: 0 2px 0 var(--engrave-light), inset 0 2px 0 var(--engrave-light);
+  pointer-events: none;
+}
+
 aside.notes { display: none; }
 
-/* ---------------------------------------------------------------- type */
+/* ----------------------------------------------------------------- runes */
 
-.kicker {
-  margin: 0 0 28px;
-  font-size: 26px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
+.rune {
+  display: inline-block;
+  flex: none;
+  width: 0.62em;
+  height: 1em;
+  background: currentColor;
+  -webkit-mask: var(--rune, var(--rune-tiwaz)) center / contain no-repeat;
+  mask: var(--rune, var(--rune-tiwaz)) center / contain no-repeat;
+  vertical-align: -0.12em;
+}
+.rune.fehu { --rune: var(--rune-fehu); }
+.rune.ansuz { --rune: var(--rune-ansuz); }
+.rune.raidho { --rune: var(--rune-raidho); }
+.rune.kenaz { --rune: var(--rune-kenaz); }
+.rune.tiwaz { --rune: var(--rune-tiwaz); }
+.rune.sowilo { --rune: var(--rune-sowilo); }
+.rune.algiz { --rune: var(--rune-algiz); }
+.rune.dagaz { --rune: var(--rune-dagaz); }
+
+/* A short row of runes, lit in turn from faint to full, as Horadric shows
+   work going on. Still here: a deck does not animate its ornaments. */
+.runes { display: flex; gap: 0.5em; color: var(--accent); font-size: 52px; }
+.runes .rune:nth-child(1) { opacity: 0.3; }
+.runes .rune:nth-child(2) { opacity: 0.6; }
+
+/* A divider: a groove across the plate with a rune cut in its middle. */
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  margin: 8px 0 48px;
+  color: var(--accent);
+  font-size: 34px;
+}
+.divider::before, .divider::after {
+  content: "";
+  flex: 1;
+  height: 4px;
+  border-top: 2px solid var(--engrave-dark);
+  border-bottom: 2px solid var(--engrave-light);
+}
+
+/* ------------------------------------------------------------------ type */
+
+/* Engraved: the plate's shade above the letters, its lit lip below. */
+.kicker, .legend {
+  margin: 0 0 32px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  font: 600 24px/1 var(--text-face);
+  letter-spacing: 0.16em;
   text-transform: uppercase;
+  color: var(--legend);
+  text-shadow: 0 -2px 0 var(--engrave-dark), 0 2px 0 var(--engrave-light);
+}
+.kicker::before {
+  content: "";
+  width: 17px;
+  height: 28px;
+  flex: none;
+  background: var(--accent);
+  -webkit-mask: var(--rune, var(--rune-tiwaz)) center / contain no-repeat;
+  mask: var(--rune, var(--rune-tiwaz)) center / contain no-repeat;
+}
+.legend { margin: 0; font-size: 20px; }
+
+h1, h2, h3 {
+  margin: 0;
+  font-family: var(--display);
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+}
+h1 { font-size: 116px; }
+h2 { font-size: 72px; margin-bottom: 60px; }
+h3 { font-size: 40px; margin-bottom: 18px; letter-spacing: -0.01em; }
+
+p { margin: 0 0 24px; max-width: 30em; }
+.lead { font-size: 42px; line-height: 1.35; color: var(--dim); max-width: 26em; }
+.small { font-size: 26px; color: var(--dim); }
+.accent { color: var(--accent); }
+strong { color: var(--text); font-weight: 600; }
+
+code {
+  font-family: var(--mono);
+  font-size: 0.82em;
+  color: var(--text);
+  background: var(--screen);
+  padding: 0.08em 0.32em;
+  border-radius: 8px;
+}
+
+ul, ol { margin: 0; padding: 0; list-style: none; max-width: 30em; }
+li { position: relative; margin: 0 0 26px; padding-left: 52px; }
+/* A lamp lit beside each point. */
+li::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 0.55em;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+ol { counter-reset: point; }
+ol > li { counter-increment: point; padding-left: 72px; }
+ol > li::before {
+  content: counter(point, decimal-leading-zero);
+  top: 0.32em;
+  left: 0;
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  background: none;
+  font: 500 26px/1 var(--mono);
   color: var(--accent);
 }
 
-h1, h2 {
-  margin: 0;
-  font-family: var(--display);
-  font-weight: 400;
-  letter-spacing: -0.01em;
-  line-height: 1.08;
-}
-h1 { font-size: 120px; }
-h2 { font-size: 72px; margin-bottom: 56px; }
-h3 { margin: 0 0 16px; font-size: 38px; font-weight: 600; }
-
-p { margin: 0 0 24px; max-width: 30em; }
-.lead { font-size: 44px; color: var(--muted); max-width: 26em; }
-.small { font-size: 26px; color: var(--muted); }
-code { font-family: var(--mono); font-size: 0.85em; background: var(--accent-soft); padding: 0.05em 0.3em; border-radius: 6px; }
-
-ul, ol { margin: 0; padding-left: 1.1em; max-width: 30em; }
-li { margin: 0 0 22px; padding-left: 0.2em; }
-li::marker { color: var(--accent); }
-
-/* The page number and the deck's name along the foot of every slide. */
+/* The deck's name and the page number along the foot, a groove between. */
 .foot {
   position: absolute;
   left: var(--pad-x);
   right: var(--pad-x);
-  bottom: 56px;
+  bottom: 64px;
   display: flex;
-  justify-content: space-between;
-  font-size: 22px;
-  color: var(--muted);
-  border-top: 2px solid var(--rule);
-  padding-top: 20px;
+  align-items: center;
+  gap: 28px;
+  font: 600 18px/1 var(--text-face);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--legend);
+  text-shadow: 0 -2px 0 var(--engrave-dark), 0 2px 0 var(--engrave-light);
 }
-
-/* ---------------------------------------------------------- slide kinds */
-
-/* Title: the deck's name, low and large, with a band of accent. */
-section.slide.title {
-  justify-content: flex-end;
-  padding-bottom: 160px;
-}
-section.slide.title::before {
+.foot > :first-child { order: 0; }
+.foot::after {
   content: "";
-  position: absolute;
-  left: var(--pad-x);
-  top: var(--pad-y);
-  width: 120px;
-  height: 12px;
-  background: var(--accent);
+  order: 1;
+  flex: 1;
+  height: 4px;
+  border-top: 2px solid var(--engrave-dark);
+  border-bottom: 2px solid var(--engrave-light);
 }
-section.slide.title h1 { max-width: 14em; margin-bottom: 40px; }
+.foot > :last-child {
+  order: 2;
+  font: 500 20px/1 var(--mono);
+  letter-spacing: 0.04em;
+  color: var(--dim);
+}
 
-/* Section: a dark break between parts. */
-section.slide.section {
-  background: var(--dark);
-  color: var(--on-dark);
-  justify-content: center;
+/* --------------------------------------------------------- the surfaces */
+
+/* A screen sunk into the plate: shade under its top edge, the plate's lit
+   lip along its bottom. Tables, charts, code and pictures sit on one, so
+   what is to be read in detail is set apart from the talk around it. */
+.screen, pre, .picture {
+  background: var(--screen);
+  border-radius: 18px;
+  box-shadow: inset 0 4px 12px var(--hollow-shade), 0 2px 0 var(--engrave-light);
 }
-section.slide.section .kicker { color: #e59a6a; }
-section.slide.section h1 { font-size: 104px; max-width: 14em; }
+
+pre {
+  margin: 0;
+  padding: 40px 48px;
+  font: 28px/1.5 var(--mono);
+  color: var(--read);
+  overflow: hidden;
+}
+pre code { background: none; padding: 0; font-size: inherit; }
+
+/* A plate standing off the page: lit top edge, shadow cast below. */
+.card {
+  background: var(--surface);
+  border-radius: 18px;
+  padding: 44px 48px 48px;
+  font-size: 31px;
+  color: var(--read);
+  box-shadow: inset 0 2px 0 var(--bevel-light), 0 6px 0 rgb(0 0 0 / 0.35), 0 14px 30px var(--cast);
+}
+.card .legend { margin-bottom: 30px; }
+.card p:last-child { margin-bottom: 0; }
+
+/* ------------------------------------------------------------ slide kinds */
+
+/* Title: the runes at the top, the deck's name low and large. */
+section.slide.title { justify-content: flex-end; padding-bottom: 150px; }
+section.slide.title .runes { position: absolute; left: var(--pad-x); top: var(--pad-y); }
+section.slide.title h1 { max-width: 13em; margin-bottom: 40px; }
+section.slide.title .meta {
+  margin: 28px 0 0;
+  font: 24px/1 var(--mono);
+  color: var(--legend);
+}
+
+/* Section: a break between parts, the plate sunk a step. */
+section.slide.section {
+  background: var(--screen);
+  justify-content: center;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.02);
+}
+section.slide.section .part {
+  font: 300 240px/1 var(--display);
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  letter-spacing: -0.03em;
+  margin: 0 0 40px -10px;
+}
+section.slide.section h1 { font-size: 100px; max-width: 14em; }
 
 /* Columns: two or three side by side. */
 .columns {
   display: grid;
   grid-template-columns: repeat(var(--cols, 2), 1fr);
-  gap: 80px;
-  flex: 1;
+  gap: 56px;
+  align-items: start;
 }
 .columns.three { --cols: 3; }
-.card {
-  border-top: 8px solid var(--accent);
-  padding-top: 36px;
-  font-size: 32px;
-}
 
 /* Figure: one big number or fact, and what it means. */
 section.slide.figure { justify-content: center; }
 .number {
-  font-family: var(--display);
-  font-size: 300px;
-  line-height: 1;
+  font: 600 320px/0.9 var(--display);
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
   color: var(--accent);
-  margin-bottom: 32px;
+  margin: 0 0 48px -12px;
 }
+.number .unit { font-size: 0.45em; color: var(--accent-dim); margin-left: 0.06em; }
 
-/* Quote: someone's words, large, with who said them. */
-section.slide.quote { justify-content: center; background: var(--accent-soft); }
+/* Chart: bars on a sunk screen, the one that matters lit in the accent
+   and the rest in its dim, so the eye goes where the point is. */
+.chart { padding: 52px 60px; display: grid; gap: 30px; }
+.chart-row {
+  display: grid;
+  grid-template-columns: 300px 1fr 150px;
+  align-items: center;
+  gap: 36px;
+  font-size: 28px;
+  color: var(--dim);
+}
+.chart-row .track { height: 30px; border-radius: 6px; background: var(--lamp-off); overflow: hidden; }
+.chart-row .fill { width: var(--v, 50%); height: 100%; border-radius: 6px; background: var(--accent-dim); }
+.chart-row .value { font: 500 28px/1 var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
+.chart-row.lit { color: var(--text); }
+.chart-row.lit .fill { background: var(--accent); }
+.chart-row.lit .value { color: var(--accent); }
+.chart + .small, .screen + .small { margin-top: 32px; }
+
+/* Table: on a sunk screen, rows parted by engraved hairlines, figures in
+   mono set right so their digits line up. */
+.screen table { width: 100%; border-collapse: collapse; font-size: 30px; }
+.screen.table { padding: 20px 52px 28px; }
+th {
+  padding: 28px 0 20px;
+  text-align: left;
+  font: 600 20px/1 var(--text-face);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--legend);
+}
+td { padding: 22px 0; color: var(--read); border-top: 2px solid var(--lamp-off); }
+th + th, td + td { padding-left: 40px; }
+th.num, td.num { text-align: right; }
+td.num { font-family: var(--mono); font-size: 28px; font-variant-numeric: tabular-nums; }
+tr.lit td { color: var(--text); }
+tr.lit td:first-child::before {
+  content: "";
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin: 0 22px 0 -36px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: 0.12em;
+}
+tr.lit td.num { color: var(--accent); }
+
+/* Quote: someone's words, large, under the rune of speech. */
+section.slide.quote { justify-content: center; }
+section.slide.quote > .rune { color: var(--accent); font-size: 92px; margin-bottom: 48px; }
 blockquote {
   margin: 0;
-  font-family: var(--display);
-  font-size: 76px;
-  line-height: 1.2;
-  max-width: 20em;
+  font: 400 70px/1.22 var(--display);
+  letter-spacing: -0.015em;
+  color: var(--text);
+  max-width: 21em;
 }
-blockquote + .who { margin-top: 48px; font-size: 30px; color: var(--muted); }
+blockquote + .who { margin-top: 56px; }
 
-/* Image: a picture filling the slide's right half. */
-section.slide.image { padding-right: calc(50% + 60px); justify-content: center; }
-section.slide.image img {
+/* Image: a picture on a screen sunk into the slide's right half. Put an
+   <img> inside .picture; until then it shows its legend. */
+section.slide.image { padding-right: calc(50% + 40px); justify-content: center; }
+.picture {
   position: absolute;
-  top: 0;
-  right: 0;
-  width: 50%;
+  top: var(--pad-y);
+  bottom: calc(var(--pad-y) + 40px);
+  right: var(--pad-x);
+  width: calc(50% - var(--pad-x) - 20px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  overflow: hidden;
+  color: var(--lamp-off);
+}
+.picture .rune { font-size: 80px; }
+.picture img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
   height: 100%;
   object-fit: cover;
 }
 
-/* End: the ask or the next step, centred. */
-section.slide.end {
-  background: var(--dark);
-  color: var(--on-dark);
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-}
-section.slide.end p { margin-left: auto; margin-right: auto; color: #bdb5a9; }
+/* End: the ask or the next step, centred under the runes. */
+section.slide.end { align-items: center; justify-content: center; text-align: center; }
+section.slide.end .runes { margin-bottom: 64px; }
+section.slide.end h2 { margin-bottom: 36px; max-width: 18em; }
+section.slide.end p { margin-left: auto; margin-right: auto; }
+section.slide.end .contact { margin-top: 36px; font: 26px/1.4 var(--mono); color: var(--dim); }
 
+/* ----------------------------------------------------------------- print */
+
+/* One 16:9 page per slide, the same size the Forge prints at, so a deck
+   prints alike in a browser and from the Forge. */
 @media print {
+  @page { size: 13.333in 7.5in; margin: 0; }
   html, body { background: none; }
-  section.slide { margin: 0; break-after: page; }
+  * { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  html:not(.forge-deck) section.slide {
+    margin: 0;
+    zoom: 0.66666;
+    break-after: page;
+    break-inside: avoid;
+  }
+  html:not(.forge-deck) section.slide:last-of-type { break-after: auto; }
 }
