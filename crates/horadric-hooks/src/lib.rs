@@ -96,6 +96,23 @@ pub const HEAVY_PATH: &str = "/horadric/heavy";
 /// the answer, or an error that sends the server back to words.
 pub const RECALL_PATH: &str = "/horadric/recall";
 
+/// Path `horadric secret run` posts to. The app starts the program with
+/// the secrets in its environment and streams its masked output back on
+/// the same connection, see [`listener::SecretStream`].
+pub const SECRET_RUN_PATH: &str = "/horadric/secret/run";
+
+/// Path `horadric secret set` posts to: a value to keep, read from the
+/// human's console. The reply waits on the human confirming it.
+pub const SECRET_SET_PATH: &str = "/horadric/secret/set";
+
+/// Path `horadric secret list` posts to: the names a session may use.
+pub const SECRET_NAMES_PATH: &str = "/horadric/secret/names";
+
+/// Environment variable each session gets its secret key in. The app runs
+/// a program with secrets only for a live session's id and its key, since
+/// a web page may post to localhost too.
+pub const SECRET_KEY_ENV: &str = "HORADRIC_SECRET_KEY";
+
 /// Header a command request must carry. A browser can not send a custom
 /// header to another origin without a preflight we never answer, so this is
 /// what stops a web page from starting processes through localhost.

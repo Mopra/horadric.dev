@@ -28,7 +28,8 @@ use serde_json::{json, Value};
 use crate::{
     checkpoint, client, otel, pace, transcript, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH,
     HEAVY_PATH, HOOK_PATH, KNOW_PATH, NEW_PATH, OWNER_HEADER, RECALL_PATH, RELOAD_PATH,
-    SESSION_HEADER, STATE_HEADER, STATUS_PATH, TASKS_PATH,
+    SECRET_NAMES_PATH, SECRET_RUN_PATH, SECRET_SET_PATH, SESSION_HEADER, STATE_HEADER,
+    STATUS_PATH, TASKS_PATH,
 };
 
 /// A hook event together with the Horadric session id from the header.
@@ -178,6 +179,211 @@ pub struct RecallCall {
     pub reply: Reply,
 }
 
+/// `horadric secret run`: a program the app is to start with secrets in its
+/// environment. The values never leave the app; only the masked output and
+/// the exit code come back, through [`SecretStream`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretRun {
+    /// The session that asked, from its header. Empty means none, which
+    /// the app refuses.
+    pub session: String,
+    /// The session's `HORADRIC_SECRET_KEY`, for the app to check.
+    pub key: String,
+    /// The secrets the program gets, by name.
+    pub names: Vec<String>,
+    /// Of those, the ones also written to its input, in order.
+    pub stdin: Vec<String>,
+    /// The program as typed. The app finds its full path on the session's
+    /// `PATH` itself, never in `cwd`.
+    pub program: String,
+    pub args: Vec<String>,
+    /// The folder the CLI ran in, where the program starts.
+    pub cwd: String,
+    pub out: SecretStream,
+}
+
+/// `horadric secret set`: a value to keep. Any terminal may ask, with or
+/// without a session; the app asks the human before it keeps anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretSet {
+    pub session: Option<String>,
+    /// The folder it was run in, which names the project.
+    pub cwd: String,
+    pub name: String,
+    pub value: String,
+    /// `"project"`, `"everywhere"` or `"identity:<slug>"`.
+    pub owner: String,
+    /// Answer `{"text": "..."}` (printed, optional) or `{"error": "..."}`.
+    pub reply: Reply,
+}
+
+/// `horadric secret list`: the names a session may use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretNames {
+    pub session: String,
+    pub key: String,
+    /// Answer `{"names": ["GITHUB_TOKEN", ...]}` or `{"error": "..."}`.
+    pub reply: Reply,
+}
+
+impl SecretRun {
+    fn from_json(session: String, body: &[u8], out: SecretStream) -> Option<SecretRun> {
+        let v: Value = serde_json::from_slice(body).ok()?;
+        let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+        let list = |k: &str| -> Option<Vec<String>> {
+            match v.get(k) {
+                None | Some(Value::Null) => Some(Vec::new()),
+                Some(Value::Array(a)) => a.iter().map(|s| s.as_str().map(str::to_string)).collect(),
+                Some(_) => None,
+            }
+        };
+        Some(SecretRun {
+            session,
+            key: text("key").unwrap_or_default(),
+            names: list("names")?,
+            stdin: list("stdin")?,
+            program: text("program")?,
+            args: list("args")?,
+            cwd: text("cwd")?,
+            out,
+        })
+    }
+}
+
+/// The connection a [`SecretRun`] answers on, handed to the app so the
+/// listener thread is not held while the program runs. Clones share it, so
+/// a thread for stdout and one for stderr can each write.
+///
+/// The wire, after an `HTTP/1.1 200 OK` head with no length (the body runs
+/// to the close), is lines of one letter, a space and a value:
+///
+/// - `o <base64>`: bytes for stdout, already masked.
+/// - `e <base64>`: bytes for stderr.
+/// - `x <code>`: the program exited with this code. The last line.
+/// - `! <message>`: refused or failed, said to the human. The last line.
+///
+/// A connection that closes with neither `x` nor `!` (the app dropped every
+/// clone, or quit) is a failure to the CLI, never a hang.
+#[derive(Clone)]
+pub struct SecretStream {
+    inner: Arc<Mutex<Option<StreamState>>>,
+}
+
+struct StreamState {
+    stream: TcpStream,
+    /// Whether the HTTP head went out, which waits for the first frame so
+    /// the listener can still answer an error status before handing over.
+    headed: bool,
+}
+
+/// One line of the [`SecretStream`] wire, as the CLI reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Frame {
+    Out(Vec<u8>),
+    Err(Vec<u8>),
+    Exit(i32),
+    Fail(String),
+}
+
+impl Frame {
+    /// Reads one line, without its line end. None for a line no app sends.
+    pub fn parse(line: &str) -> Option<Frame> {
+        let (kind, value) = line.split_once(' ').unwrap_or((line, ""));
+        let bytes = || horadric_core::release::base64_decode(value);
+        Some(match kind {
+            "o" => Frame::Out(bytes()?),
+            "e" => Frame::Err(bytes()?),
+            "x" => Frame::Exit(value.trim().parse().ok()?),
+            "!" => Frame::Fail(value.to_string()),
+            _ => return None,
+        })
+    }
+}
+
+/// The most a stream line carries, so the CLI never holds a huge one.
+const FRAME_BYTES: usize = 3 * 16 * 1024;
+
+impl SecretStream {
+    fn new(stream: TcpStream) -> SecretStream {
+        // The program may say nothing for an hour, and a CLI that stops
+        // reading has gone, which the write learns as a reset.
+        let _ = stream.set_write_timeout(None);
+        SecretStream {
+            inner: Arc::new(Mutex::new(Some(StreamState {
+                stream,
+                headed: false,
+            }))),
+        }
+    }
+
+    /// Writes the program's stdout, masked by the caller.
+    pub fn out(&mut self, b: &[u8]) -> io::Result<()> {
+        for piece in b.chunks(FRAME_BYTES) {
+            self.line(&format!("o {}\n", horadric_core::release::base64_encode(piece)))?;
+        }
+        Ok(())
+    }
+
+    /// Writes the program's stderr, masked by the caller.
+    pub fn err(&mut self, b: &[u8]) -> io::Result<()> {
+        for piece in b.chunks(FRAME_BYTES) {
+            self.line(&format!("e {}\n", horadric_core::release::base64_encode(piece)))?;
+        }
+        Ok(())
+    }
+
+    /// Ends the run with the program's exit code. Clones still writing
+    /// after this get an error.
+    pub fn exit(self, code: i32) {
+        let _ = self.line(&format!("x {code}\n"));
+        self.close();
+    }
+
+    /// Ends the run with why it could not go on, one line for the human.
+    pub fn fail(self, why: &str) {
+        let why = why.replace(['\r', '\n'], " ");
+        let _ = self.line(&format!("! {why}\n"));
+        self.close();
+    }
+
+    fn line(&self, line: &str) -> io::Result<()> {
+        let mut guard = self.inner.lock().map_err(|_| io::ErrorKind::BrokenPipe)?;
+        let Some(state) = guard.as_mut() else {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        };
+        if !state.headed {
+            (&state.stream).write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
+            )?;
+            state.headed = true;
+        }
+        (&state.stream).write_all(line.as_bytes())
+    }
+
+    fn close(self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            if let Some(state) = guard.take() {
+                let _ = state.stream.shutdown(std::net::Shutdown::Write);
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for SecretStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("SecretStream")
+    }
+}
+
+/// Like [`Reply`], not part of what was asked.
+impl PartialEq for SecretStream {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for SecretStream {}
+
 /// Where the app sends its answer, a JSON body. It is not part of what was
 /// asked, so any two are equal.
 #[derive(Debug, Clone)]
@@ -223,6 +429,9 @@ impl Eq for Reply {}
 /// answers, which takes over a second on a busy CI runner.
 const BROWSER_WAIT: Duration = Duration::from_secs(if cfg!(test) { 5 } else { 90 });
 
+/// A `secret set` waits on the human confirming it on the tile.
+const SECRET_SET_WAIT: Duration = Duration::from_secs(if cfg!(test) { 5 } else { 600 });
+
 /// The mod asks again in a few seconds, so an app busy for longer than
 /// this is not worth waiting on.
 const KNOW_WAIT: Duration = Duration::from_secs(2);
@@ -252,6 +461,9 @@ pub enum Command {
     Browser(BrowserCall),
     Know(KnowCall),
     Recall(RecallCall),
+    SecretRun(SecretRun),
+    SecretSet(SecretSet),
+    SecretNames(SecretNames),
 }
 
 /// Starts listening on 127.0.0.1 and forwards every tagged event on `tx`,
@@ -371,6 +583,9 @@ fn handle(
         GLOW_PATH,
         RECALL_PATH,
         HEAVY_PATH,
+        SECRET_RUN_PATH,
+        SECRET_SET_PATH,
+        SECRET_NAMES_PATH,
         otel::LOGS_PATH,
         otel::METRICS_PATH,
     ];
@@ -444,6 +659,9 @@ fn handle(
             GLOW_PATH => "glow",
             RECALL_PATH => "recall",
             HEAVY_PATH => "heavy",
+            SECRET_RUN_PATH => "secret-run",
+            SECRET_SET_PATH => "secret-set",
+            SECRET_NAMES_PATH => "secret-names",
             _ => "reload",
         };
         if from_browser || command != wanted {
@@ -472,6 +690,17 @@ fn handle(
         }
         if path == RECALL_PATH {
             return recall(&stream, &body, commands);
+        }
+        if path == SECRET_SET_PATH {
+            return secret_set(&stream, horadric_id, &body, commands);
+        }
+        if path == SECRET_NAMES_PATH {
+            return secret_names(&stream, horadric_id, &body, commands);
+        }
+        if path == SECRET_RUN_PATH {
+            // The reader borrows the stream, and nothing more is read.
+            drop(reader);
+            return secret_run(stream, horadric_id, &body, commands);
         }
         let request = match path {
             NEW_PATH => NewSession::from_json(&body).map(Command::New),
@@ -794,6 +1023,103 @@ fn browser(
     }
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     match rx.recv_timeout(BROWSER_WAIT) {
+        Ok(answer) => respond_with(stream, "200 OK", &answer),
+        Err(_) => {
+            reply.give_up();
+            respond(stream, "504 Gateway Timeout")
+        }
+    }
+}
+
+/// Hands a `secret run` to the app with the connection itself, which the
+/// app answers on as the program runs. Only a session's: the key is
+/// checked by the app, which knows the live ones.
+fn secret_run(
+    stream: TcpStream,
+    session: String,
+    body: &[u8],
+    commands: &Sender<Command>,
+) -> io::Result<()> {
+    if session.is_empty() {
+        return respond_with(
+            &stream,
+            "400 Bad Request",
+            &json!({ "error": "this terminal was not started by Horadric, so it has no secrets" })
+                .to_string(),
+        );
+    }
+    let Some(call) = SecretRun::from_json(session, body, SecretStream::new(stream)) else {
+        return Ok(());
+    };
+    if let Err(std::sync::mpsc::SendError(Command::SecretRun(call))) =
+        commands.send(Command::SecretRun(call))
+    {
+        call.out.fail("Horadric is not taking commands");
+    }
+    Ok(())
+}
+
+/// Hands a `secret set` to the app and answers with what it answers. The
+/// human confirms first, so this waits long.
+fn secret_set(
+    stream: &TcpStream,
+    session: String,
+    body: &[u8],
+    commands: &Sender<Command>,
+) -> io::Result<()> {
+    let Ok(v) = serde_json::from_slice::<Value>(body) else {
+        return respond(stream, "400 Bad Request");
+    };
+    let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    let (Some(cwd), Some(name), Some(value)) = (text("cwd"), text("name"), text("value")) else {
+        return respond(stream, "400 Bad Request");
+    };
+    let (reply, rx) = Reply::new();
+    let call = SecretSet {
+        session: Some(session).filter(|s| !s.is_empty()),
+        cwd,
+        name,
+        value,
+        owner: text("owner").unwrap_or_else(|| "project".into()),
+        reply: reply.clone(),
+    };
+    wait_reply(stream, Command::SecretSet(call), reply, rx, SECRET_SET_WAIT, commands)
+}
+
+/// Hands a `secret list` to the app and answers with what it answers.
+fn secret_names(
+    stream: &TcpStream,
+    session: String,
+    body: &[u8],
+    commands: &Sender<Command>,
+) -> io::Result<()> {
+    let Ok(v) = serde_json::from_slice::<Value>(body) else {
+        return respond(stream, "400 Bad Request");
+    };
+    let (reply, rx) = Reply::new();
+    let call = SecretNames {
+        session,
+        key: v.get("key").and_then(Value::as_str).unwrap_or_default().to_string(),
+        reply: reply.clone(),
+    };
+    wait_reply(stream, Command::SecretNames(call), reply, rx, KNOW_WAIT * 5, commands)
+}
+
+/// Sends a command carrying `reply` and answers the caller with what comes
+/// back on `rx`, or a timeout.
+fn wait_reply(
+    stream: &TcpStream,
+    command: Command,
+    reply: Reply,
+    rx: Receiver<String>,
+    wait: Duration,
+    commands: &Sender<Command>,
+) -> io::Result<()> {
+    if commands.send(command).is_err() {
+        return respond(stream, "503 Service Unavailable");
+    }
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    match rx.recv_timeout(wait) {
         Ok(answer) => respond_with(stream, "200 OK", &answer),
         Err(_) => {
             reply.give_up();

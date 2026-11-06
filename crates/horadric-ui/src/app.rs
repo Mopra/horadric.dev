@@ -4243,6 +4243,15 @@ impl App {
                                 crate::memory::ask(call);
                             }
                         }
+                        // Until the vault's routes are wired in, the CLI
+                        // hears why at once rather than waiting.
+                        Command::SecretRun(r) => r.out.fail("the Vault is not built yet"),
+                        Command::SecretSet(s) => {
+                            s.reply.send(serde_json::json!({ "error": "the Vault is not built yet" }))
+                        }
+                        Command::SecretNames(n) => {
+                            n.reply.send(serde_json::json!({ "error": "the Vault is not built yet" }))
+                        }
                     }
                 }
             }

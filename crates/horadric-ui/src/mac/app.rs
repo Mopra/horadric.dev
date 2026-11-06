@@ -2080,6 +2080,9 @@ impl App {
                 // Overlaps are not on the Mac yet; a Know call is dropped
                 // as a Recall is.
                 Command::Overlap(_) | Command::Know(_) => {}
+                // No Vault on the Mac yet: dropping these ends the caller's
+                // wait at once with an error.
+                Command::SecretRun(_) | Command::SecretSet(_) | Command::SecretNames(_) => {}
             }
         }
     }
