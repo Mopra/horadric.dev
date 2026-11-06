@@ -2,8 +2,9 @@
 
 Proposed 2026-10-31. Built so far: the working lamp's surge (the human
 called it much better), the light module every window can keep
-(`crate::light`), particles (`particles.rs`) and the cluster's moving
-light (`render/shine.rs`). The lore has how. This part takes the rest of
+(`crate::light`), particles (`particles.rs`), the cluster's moving
+light (`render/shine.rs`) and its still light and shadow
+(`render/shade.rs`). The lore has how. This part takes the rest of
 Horadric the same way.
 
 ## Why
@@ -89,42 +90,26 @@ cluster window, since that is where the human looks most.
 
 ### Waiting on the human
 
-Steps 1 and 2 are built and committed (2026-11-01) but not yet seen.
-Before step 3, the human looks at a dev build with tiles working,
-waiting, finishing and ending, subagents running and a task handed out,
-in all three themes, and says what to keep. Screenshots of each theme
-were taken for that on 2026-11-06. Two checks are left from step 1:
+Steps 1 and 2 were approved by the human on 2026-11-06 from screenshots.
+Step 3 is built (2026-11-06) and waits for the same look, from
+screenshots of all three themes. Two checks are left from step 1:
 
 - Measure: forty tiles, ten of them working, on a release build. The
   UI thread's share of a core with the bloom must stay within one point
   of without it. Measured on 2026-11-06 it did not hold in the first
   minute: about 9 % of a core with the bloom against 5 % without (the
   lore has every sample). Find what the bloom costs the UI thread there.
+  Step 3 drew the wide glow once instead of once a pass; not measured
+  since.
 - Check a remote desktop session once: the software fallback should
   draw the emitters sharp. A screenshot (`CopyFromScreen`) captures the
   float layer.
 
-Step 3 wants the still layer to keep its own `Light` (still light is
-baked in there), and the shadow effect has no helper yet.
-
 ### Step 3: the cluster's still light and shadow
 
-Drawn into the kept layer today:
-
-- `lamp` at rest: its four spill rings and hot core become the lit
-  glass as an emitter, bloomed into the still layer. The breathing and
-  beckoning lamp, still drawn per frame in `Painter::light`, takes the
-  same glass in the moving layer.
-- `halo`: only the still waiting tile with animations off uses it now;
-  it becomes the rim emitter baked into the still layer.
-- `key` and `cast`: the eight step shadow becomes the shadow effect.
-  The ledge (the key's side) stays: it is geometry, not light.
-- `inner`, `hollow`, `latched`, `sunk`, `screen`: bevel and hollow
-  shade through the shadow effect inside a clip.
-- `led`: the header's count lights, a dot and a glow, become a dot as
-  an emitter.
-- The context `tank` and the trace stay as they are: they are marks,
-  not light.
+Built 2026-11-06: still light bloomed into the kept layer and bloomed
+again only when it changes, shadow and shade through the shadow effect
+baked once per shape; the lore has how.
 
 ### Step 4: the other parts of the cluster window
 
