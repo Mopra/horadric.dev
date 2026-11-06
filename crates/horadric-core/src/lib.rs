@@ -86,6 +86,7 @@ pub mod team;
 pub mod title;
 pub mod trust;
 pub mod usage;
+pub mod vault;
 pub mod warriv;
 pub mod webpush;
 pub mod workos;
