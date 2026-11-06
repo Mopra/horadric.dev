@@ -189,23 +189,26 @@ third half, below.
 - **Asking first.** The first time a project's session uses a secret, its
   tile raises like a permission question: "Use STRIPE_KEY for `stripe
   listen`?" with Once, Always for `stripe listen`, and No. Always is kept
-  per secret, per program and per subcommand, so allowing `stripe` does
-  not allow `curl`. Always is for single-purpose CLIs (`curl`, `stripe`,
-  `aws`, `az`, `gcloud`). Anything that runs code the agent can write is
-  only ever offered Once, since it can do anything with the value: a
-  shell or an interpreter, a script runner whose build scripts run, and
-  anything that runs git (`git`, `gh`, `vercel`, `netlify`, `wrangler`),
-  since git's config, hooks and filters are too many ways to run a
-  program with the secret in reach. Unattended work with those uses the
-  identity's own login (`--on-login gh`), not a Vault secret. The list is
-  the pure part and grows with what turns up. `aws`, `az` and `gcloud`
-  keep Always by pinning their own config, aliases and extensions by
-  SHA-256 (a config that is not readable UTF-8 leaves only Once), with
-  the proxy, CA and home variables they inherit; a change asks again,
-  naming what changed. No subcommand, a flag before it, or arguments
-  that reach past it (a file of arguments, a subcommand that installs
-  code) leave only Once. An Always run gets a PATH without folders the
-  user can write to (decided 2026-11-06).
+  per secret, per program, per subcommand and per `--stdin` names, and
+  covers a run only while that run could be allowed Always now. Always
+  is offered only for a short list of single-purpose programs Horadric
+  knows (`stripe`, `aws`, `az`, `gcloud`), each with its pins and refused
+  arguments; everything else is Once only, `curl` included, since a list
+  of what may not would never be complete (an alias, a plugin folder, a
+  project's deploy hook). Anything that runs git (`gh`, `vercel`,
+  `netlify`, `wrangler`) says so, and unattended work with gh or vercel
+  uses the identity's own login (`horadric quest blocked --on-login
+  gh`), not a Vault secret. `docker`, `kubectl`, `helm` and every npm
+  shim, judged by its package rather than its file name, are Once only.
+  The listed programs pin their own config, aliases, extensions and
+  plugins by SHA-256 (a config that is not readable UTF-8, or a plugin
+  folder that is not empty, leaves only Once), with the proxy, CA and
+  home variables they inherit; a change asks again, naming what changed.
+  No subcommand, a flag before it, or arguments that reach past it
+  (another API host, a file of arguments, a subcommand that installs
+  code or logs in) leave only Once. An Always run gets a PATH without
+  folders the user can write to. Settings marks an Always for a program
+  no longer on the list as no longer used (decided 2026-11-06).
 - **Adding one.** In Settings, Projects, a Secrets row lists the picked
   project's names, its identity's and the Everywhere ones under them, and
   the names `config.json` asks for that are not kept yet. Add asks for the

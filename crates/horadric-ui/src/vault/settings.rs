@@ -937,10 +937,18 @@ fn allowed_offer(entry: &str) -> (String, String) {
         .and_then(|rest| rest.split_once('|'))
         .and_then(|(hash, rest)| rest.rsplit_once('|').map(|(project, program)| (hash, project, program)));
     match parts {
-        Some((hash, project, program)) => (
-            short(program).to_string(),
-            format!("for {}, as it was at {}", short(project), hash.get(..8).unwrap_or(hash)),
-        ),
+        // Kept rather than dropped, so the human sees what was allowed;
+        // a program no longer on the list is never run on it.
+        Some((hash, project, program)) => {
+            let used = horadric_core::vault::secret::always_allowed(
+                horadric_core::vault::secret::allowed_program(program),
+            );
+            let mut detail = format!("for {}, as it was at {}", short(project), hash.get(..8).unwrap_or(hash));
+            if !used {
+                detail.push_str(", no longer used: only programs Horadric knows can be allowed always");
+            }
+            (short(program).to_string(), detail)
+        }
         None => (short(entry).to_string(), entry.to_string()),
     }
 }
@@ -1444,8 +1452,11 @@ mod tests {
 
     #[test]
     fn an_always_reads_by_program_project_and_content() {
-        let a = horadric_core::vault::secret::approval("c:/work/app", "c:/tools/gh.exe", "ABCDEF0123456789");
-        assert_eq!(allowed_offer(&a), ("gh.exe".to_string(), "for app, as it was at abcdef01".to_string()));
+        let a = horadric_core::vault::secret::approval("c:/work/app", "c:/tools/aws.exe s3 ls", "ABCDEF0123456789");
+        assert_eq!(allowed_offer(&a), ("aws.exe s3 ls".to_string(), "for app, as it was at abcdef01".to_string()));
+        // One for a program no longer allowed Always says so.
+        let gh = horadric_core::vault::secret::approval("c:/work/app", "c:/tools/gh.exe pr create", "ab");
+        assert!(allowed_offer(&gh).1.contains("no longer used"));
         assert_eq!(allowed_offer("c:/work/site").0, "site");
     }
 

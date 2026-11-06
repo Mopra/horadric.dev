@@ -934,6 +934,9 @@ fn inside(path: &Path, dir: &Path) -> bool {
 /// cmd, so neither its parsing nor a `node` found in the project folder
 /// comes into it.
 struct ShimRun {
+    /// The package's name, `vercel` or `@netlify/cli`: what the shim is,
+    /// whatever its own file is called.
+    name: String,
     node: PathBuf,
     script: PathBuf,
     package: PathBuf,
@@ -962,11 +965,23 @@ fn shim_of(program: &Path) -> Option<ShimRun> {
     } else {
         horadric_pty::find_program("node", &app_path(), &[".exe"], Path::is_file)?
     };
+    let modules = dir.join("node_modules");
+    let name = package
+        .strip_prefix(&modules)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    // The package's own name wins over its folder's, as npm installs it.
+    let name = std::fs::read_to_string(package.join("package.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
+        .unwrap_or(name);
     Some(ShimRun {
+        name,
         node,
         script,
         package,
-        modules: dir.join("node_modules"),
+        modules,
     })
 }
 
@@ -1009,12 +1024,7 @@ impl Runs {
         let mut pins = pinned(&path, &var);
         let mut refused = None;
         if let Some(s) = &shim {
-            let name = s
-                .package
-                .strip_prefix(&s.modules)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default()
-                .replace([',', '=', '|'], "_");
+            let name = s.name.replace([',', '=', '|'], "_");
             pins.get_or_insert_with(Vec::new).extend([
                 Pin {
                     what: format!("the {name} package"),
@@ -1043,6 +1053,14 @@ impl Runs {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
+        // A folder that must be empty and is not holds code the program
+        // would run, put there before any question could show it.
+        let full = pins.iter().find(|p| {
+            p.kind == PinKind::Empty && std::fs::read_dir(&p.path).is_ok_and(|mut d| d.next().is_some())
+        });
+        if let Some(p) = full {
+            refused = refused.or(Some(format!("{} holds something, which it would run", p.path)));
+        }
         let refused = refused.or_else(|| always_refused(&stem, args));
         let fingerprint = pin_hashes(&pins).map(|mut h| {
             if is_pinned {
@@ -1120,6 +1138,10 @@ fn pin_hashes(pins: &[Pin]) -> Option<Vec<(String, String)>> {
                 (Err(_), _) => None,
                 (Ok(_), PinKind::Tree) => watched_tree(path),
                 (Ok(_), PinKind::Names) => hash_names(path),
+                // Empty, or Once only: see `refused` in [`Runs::of`].
+                (Ok(_), PinKind::Empty) => std::fs::read_dir(path)
+                    .ok()
+                    .and_then(|mut d| d.next().is_none().then(|| "empty".to_string())),
                 // A config the program reads, which must read as text: one
                 // that does not is not what this pinned.
                 (Ok(m), PinKind::Text) if m.is_file() && !reparse(&m) => {
@@ -1295,7 +1317,7 @@ fn hash_names(dir: &Path) -> Option<String> {
 fn login_hint(program: &Path) -> String {
     match login_tool(&program.to_string_lossy()) {
         Some(tool) => format!(
-            " For unattended runs, {tool} uses the project's identity login instead of a secret: block the quest with --on-login {tool} until the human logs it in."
+            " For unattended runs, {tool} uses the project's identity login instead of a secret: block the quest with `horadric quest blocked --on-login {tool}` until the human logs it in."
         ),
         None => String::new(),
     }
@@ -1304,10 +1326,11 @@ fn login_hint(program: &Path) -> String {
 /// Why Always is not offered, None when it is.
 fn once_why(pinned: &Pinned, runs: &Runs, place: &Place) -> Option<String> {
     let path = &pinned.path;
-    // A shim is judged by the program it runs: `npm.cmd` is npm.
+    // A shim is judged by its package, never by its file's name, which
+    // can be any alias (`vc` is vercel); no npm package is allowed Always.
     let listed = match &runs.shim {
-        Some(_) => once_reason(&runs.stem),
-        None => once_reason(&path.to_string_lossy()),
+        Some(s) => once_reason(&s.name, true),
+        None => once_reason(&path.to_string_lossy(), false),
     };
     if listed.is_some() {
         return listed;
@@ -1440,10 +1463,16 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
     let held_to = runs.fingerprint.clone().unwrap_or_else(|| "unreadable".into());
     // A library planted where the program runs voids every Always: each
     // secret is asked, Once only.
-    let dll = loose_dll(&cwd);
+    // A stored Always covers this run only while the run is one that
+    // could be allowed Always now: an Always given before a refusal came
+    // in, or for other arguments, is not one.
+    let why_once = match loose_dll(&cwd) {
+        Some(_) => Some("the folder it runs in holds a .dll, which it could load".to_string()),
+        None => once_why(&pinned, &runs, &place),
+    };
     let unasked: Vec<String> = secrets
         .iter()
-        .filter(|s| dll.is_some() || !approved(&s.allowed, &place.key, &bound, &held_to))
+        .filter(|s| why_once.is_some() || !approved(&s.allowed, &place.key, &bound, &held_to))
         .map(|s| s.name.clone())
         .collect();
     let mut held = None;
@@ -1455,10 +1484,6 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
             return;
         };
         held = Some(c);
-        let why_once = match &dll {
-            Some(_) => Some("the folder it runs in holds a .dll, which it could load".to_string()),
-            None => once_why(&pinned, &runs, &place),
-        };
         let stem = &runs.stem;
         let whose: Vec<String> = secrets
             .iter()
@@ -2277,6 +2302,23 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_that_must_be_empty_is_only_while_it_is() {
+        let root = scratch("pin-empty");
+        let plugins = root.join("plugins");
+        let pins = [Pin {
+            what: "p".into(),
+            path: plugins.to_string_lossy().into(),
+            kind: PinKind::Empty,
+        }];
+        assert_eq!(pin_hashes(&pins).unwrap()[0].1, "absent");
+        std::fs::create_dir_all(&plugins).unwrap();
+        assert_eq!(pin_hashes(&pins).unwrap()[0].1, "empty");
+        std::fs::write(plugins.join("stripe-apps.exe"), "x").unwrap();
+        assert!(pin_hashes(&pins).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn names_see_a_new_entry_only() {
         let root = scratch("pin-names");
         std::fs::create_dir_all(root.join("m/a")).unwrap();
@@ -2359,6 +2401,7 @@ mod tests {
         let package = modules.join("@netlify").join("cli");
         std::fs::create_dir_all(&package).unwrap();
         let shim = ShimRun {
+            name: "@netlify/cli".into(),
             node: root.join("node.exe"),
             script: package.join("bin.js"),
             package: package.clone(),
