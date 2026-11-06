@@ -859,15 +859,24 @@ fn kept_secret(key: &str, k: Kept) {
     let pressed = choose(Tone::Question, &k.name, &text, &buttons);
     match pressed.map(|i| buttons[i]) {
         Some("Replace") => {
-            let prompt = format!("The new value of {}, one line. It replaces the old one, which is not shown. More than one line goes in with horadric secret set in a terminal.", k.name);
+            let always = match k.allowed.len() {
+                0 => String::new(),
+                1 => " The program allowed Always is asked again.".to_string(),
+                n => format!(" The {n} programs allowed Always are asked again."),
+            };
+            let prompt = format!("The new value of {}, one line. It replaces the old one, which is not shown.{always} More than one line goes in with horadric secret set in a session's terminal.", k.name);
             if let Some(value) = type_in(&k.name, &prompt, "", "", "replace it", true) {
                 let value = value.trim().to_string();
                 if !value.is_empty() {
                     done(
                         &k.name,
                         store::change(|v| {
+                            // A new value is a new secret, as with secret
+                            // set: what was allowed for the old one is asked
+                            // again.
                             for s in v.secrets.iter_mut().filter(|s| s.name == k.name && s.owner == owner) {
                                 s.value = value.clone();
+                                s.allowed.clear();
                             }
                         }),
                     );
