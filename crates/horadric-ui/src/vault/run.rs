@@ -4,7 +4,7 @@
 //! The values never leave the app. See docs/plan/vault.md.
 
 use std::cell::Cell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{c_void, OsString};
 use std::fs::File;
 use std::io::{Read, Write};
@@ -98,9 +98,22 @@ fn with_keys<R>(f: impl FnOnce(&mut HashMap<String, String>) -> R) -> R {
     f(keys)
 }
 
+/// A key that misses the file still works until the app restarts, so a
+/// failed write stops nothing; it is logged, and tried once more since
+/// the usual cause (a scanner holding the file) passes in a moment.
 fn save_keys(keys: &HashMap<String, String>) {
-    if let (Some(path), Ok(bytes)) = (keys_path(), serde_json::to_vec(keys)) {
-        let _ = store::write_sealed(&path, &bytes);
+    let (Some(path), Ok(bytes)) = (keys_path(), serde_json::to_vec(keys)) else {
+        return;
+    };
+    if let Err(e) = store::write_sealed(&path, &bytes) {
+        eprintln!("horadric: cannot write {}: {e}, trying again", path.display());
+        thread::sleep(Duration::from_millis(100));
+        if let Err(e) = store::write_sealed(&path, &bytes) {
+            eprintln!(
+                "horadric: cannot write {}: {e}; sessions started now lose their secrets on a restart",
+                path.display()
+            );
+        }
     }
 }
 
@@ -408,7 +421,11 @@ unsafe extern "system" fn show_queued(_: HWND, _: u32, id: usize, _: u32) {
             soon(500);
             break;
         }
-        let _ = q.tx.send(pressed);
+        // A question that was never shown has no answer, not a No: its
+        // asker hears the line hang up and logs it as unanswered.
+        if let Some(pressed) = pressed {
+            let _ = q.tx.send(Some(pressed));
+        }
     }
     ASKING.with(|a| a.set(false));
 }
@@ -1282,16 +1299,43 @@ fn project_top(cwd: &str) -> String {
         .map_or_else(|| cwd.to_string(), |d| d.to_string_lossy().into_owned())
 }
 
+/// The project a plain terminal's `secret set` keys a secret to: the one
+/// sessions run there would look under. `known` holds the app's project
+/// keys; the nearest of them at or above `cwd` wins, so a subfolder of a
+/// project that is itself inside another repository still lands on the
+/// project. Failing that, the nearest folder holding `.horadric`, then
+/// the git top.
+fn plain_project_key(cwd: &str, known: &HashSet<String>) -> String {
+    let own = crate::project::folder_key(cwd);
+    if known.contains(&own) {
+        return own;
+    }
+    let path = Path::new(cwd);
+    if let Some(key) = path
+        .ancestors()
+        .map(|d| crate::project::normalise(&d.to_string_lossy()))
+        .find(|k| known.contains(k))
+    {
+        return key;
+    }
+    match path.ancestors().find(|d| d.join(".horadric").is_dir()) {
+        Some(d) => crate::project::folder_key(&d.to_string_lossy()),
+        None => crate::project::folder_key(&project_top(cwd)),
+    }
+}
+
 /// `horadric secret set`: keeps a value once the human says so in the
 /// app, since an agent could otherwise swap a secret for a value of its
 /// own. Call it on the UI thread; it returns at once, and all the work,
-/// git included, is done on a thread of its own.
-pub fn set(req: SecretSet) {
+/// git included, is done on a thread of its own. `place` is the calling
+/// session's, so the secret goes where that session will look for it;
+/// `known` is every project key the app has, for a plain terminal.
+pub fn set(place: Option<Place>, known: HashSet<String>, req: SecretSet) {
     waker();
-    thread::spawn(move || set_off_ui(req));
+    thread::spawn(move || set_off_ui(place, known, req));
 }
 
-fn set_off_ui(req: SecretSet) {
+fn set_off_ui(place: Option<Place>, known: HashSet<String>, req: SecretSet) {
     let SecretSet {
         session,
         key,
@@ -1323,7 +1367,10 @@ fn set_off_ui(req: SecretSet) {
                 error("Run it inside a project's folder on this PC, or give --everywhere.".into());
                 return;
             }
-            let key = crate::project::folder_key(&project_top(&cwd));
+            let key = match (&session, place) {
+                (Some(_), Some(place)) => place.key,
+                _ => plain_project_key(&cwd, &known),
+            };
             if key.is_empty() {
                 error("Run it inside a project's folder, or give --everywhere.".into());
                 return;

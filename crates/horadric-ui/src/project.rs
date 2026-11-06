@@ -132,7 +132,7 @@ pub fn project_name(key: &str) -> String {
 }
 
 /// One spelling for a folder, so the same folder always gives the same key.
-fn normalise(dir: &str) -> String {
+pub(crate) fn normalise(dir: &str) -> String {
     dir.replace('\\', "/")
         .trim_end_matches('/')
         .to_ascii_lowercase()

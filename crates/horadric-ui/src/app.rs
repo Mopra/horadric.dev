@@ -4263,7 +4263,10 @@ impl App {
                             Some(why) => r.out.fail(why),
                             None => crate::vault::run::serve(self.secret_place(&r.session), r),
                         },
-                        Command::SecretSet(s) => crate::vault::run::set(s),
+                        Command::SecretSet(s) => {
+                            let place = s.session.as_deref().and_then(|id| self.secret_place(id));
+                            crate::vault::run::set(place, self.project_keys(), s)
+                        }
                         Command::SecretNames(n) => match self.secret_unkeyed(&n.session, &n.key) {
                             Some(why) => n.reply.send(serde_json::json!({ "error": why })),
                             None => crate::vault::run::names(self.secret_place(&n.session), n),
@@ -7475,6 +7478,17 @@ impl App {
             key,
             cwd,
         })
+    }
+
+    /// Every local project the app knows, by key: those with a cluster
+    /// and those any session it remembers ran in.
+    fn project_keys(&self) -> std::collections::HashSet<String> {
+        let mut keys: std::collections::HashSet<String> =
+            self.clusters.iter().map(|c| c.key.clone()).collect();
+        if let Ok(r) = self.shared.registry.lock() {
+            keys.extend(r.all().filter(|s| s.brother.is_none()).map(project_key));
+        }
+        keys
     }
 
     /// Why a `horadric secret` call from `session` is refused before the
