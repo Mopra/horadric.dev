@@ -33,6 +33,8 @@ use windows::core::{Interface, HSTRING, PWSTR};
 use windows::Win32::System::Com::{CoTaskMemFree, STGM_READ, STGM_SHARE_DENY_NONE};
 use windows::Win32::UI::Shell::{SHCreateMemStream, SHCreateStreamOnFileEx};
 
+use crate::theme::{self, Color};
+
 /// The suffix every file tab's host ends in.
 pub const SUFFIX: &str = ".forge.horadric";
 
@@ -199,10 +201,17 @@ pub fn is_subresource(file: &Path) -> bool {
 /// Every page gets the deck shell, whatever the tab opened on: a tab
 /// follows links and the folder pages to any file, and the shell does
 /// nothing on a page with no slides.
-fn script() -> String {
+///
+/// The chrome is drawn in Horadric's look as it was when the tab was made:
+/// its colours go in front of each stylesheet, on the shadow host and on
+/// a deck's root, where only the Forge's `--hd-` names are set.
+fn script(accent: Color) -> String {
+    let look = super::home::vars(accent);
     let assets = serde_json::json!({
-        "forgeCss": FORGE_CSS,
-        "deckCss": DECK_CSS,
+        "forgeCss": format!(":host {{ {look} }}
+{FORGE_CSS}"),
+        "deckCss": format!(":host, html.forge-deck {{ {look} }}
+{DECK_CSS}"),
     });
     format!(
         "(function(){{\nif(!location.hostname.toLowerCase().endsWith({suffix:?}))return;\n\
@@ -233,9 +242,13 @@ pub fn prepare(key: &str, id: u64, view: &ICoreWebView2, root: &Path, host: &str
         // refusal set by ours is the one that stands.
         super::edit::serve(view, host, root);
         let served = root.to_path_buf();
+        let project = key.to_string();
         let rendered = WebResourceRequestedEventHandler::create(Box::new(move |view, args| {
             if let (Some(view), Some(args)) = (view, args) {
-                render(&view, &args, &served, flat);
+                // Read here, on the UI thread, where the colours projects
+                // were given live, and per request, so a new colour shows
+                // on the next page.
+                render(&view, &args, &served, flat, theme::accent(&project));
             }
             Ok(())
         }));
@@ -255,7 +268,7 @@ pub fn prepare(key: &str, id: u64, view: &ICoreWebView2, root: &Path, host: &str
 
         let added =
             AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|_, _| Ok(())));
-        let _ = view.AddScriptToExecuteOnDocumentCreated(&HSTRING::from(script()), &added);
+        let _ = view.AddScriptToExecuteOnDocumentCreated(&HSTRING::from(script(theme::accent(key))), &added);
     }
 }
 
@@ -359,7 +372,7 @@ enum Plan {
 /// to let the folder answer as it would. Only a `document` request (a
 /// page, or a frame's) is given a rendered page; a script's `fetch` of a
 /// CSV gets the CSV. A `flat` host serves none of its folder's subfolders.
-fn plan(root: &Path, url: &str, document: bool, flat: bool) -> Option<Plan> {
+fn plan(root: &Path, url: &str, document: bool, flat: bool, accent: Color) -> Option<Plan> {
     let (path, query) = path_query(url);
     if let Some(rest) = path.strip_prefix(RESERVED) {
         let found = if let Some(r) = rest.strip_prefix("runtime/") {
@@ -389,7 +402,7 @@ fn plan(root: &Path, url: &str, document: bool, flat: bool) -> Option<Plan> {
         }
         let (root, written) = (root.to_path_buf(), super::recent_written());
         return Some(Plan::Later(Box::new(move || {
-            super::home::page(&root, &file, flat, &written)
+            super::home::page(&root, &file, flat, &written, accent)
         })));
     }
     let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
@@ -496,7 +509,7 @@ fn first_rows(src: &str, rows: usize) -> (&str, bool) {
 /// answer as it would. Reads the file on the calling thread.
 #[cfg(test)]
 fn answer(root: &Path, url: &str, document: bool, flat: bool) -> Option<Reply> {
-    Some(match plan(root, url, document, flat)? {
+    Some(match plan(root, url, document, flat, crate::theme::ACCENTS[0].0)? {
         Plan::Now(reply) => reply,
         Plan::Later(make) => make(),
     })
@@ -520,7 +533,13 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 
 /// Answers a request [`plan`] has a reply for. Left alone, a request
 /// gets the file's bytes as they are.
-fn render(view: &ICoreWebView2, args: &ICoreWebView2WebResourceRequestedEventArgs, root: &Path, flat: bool) {
+fn render(
+    view: &ICoreWebView2,
+    args: &ICoreWebView2WebResourceRequestedEventArgs,
+    root: &Path,
+    flat: bool,
+    accent: Color,
+) {
     let Ok(request) = (unsafe { args.Request() }) else {
         return;
     };
@@ -528,7 +547,7 @@ fn render(view: &ICoreWebView2, args: &ICoreWebView2WebResourceRequestedEventArg
     let mut context = COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL;
     let _ = unsafe { args.ResourceContext(&mut context) };
     let document = context == COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT;
-    let Some(plan) = plan(root, &url, document, flat) else {
+    let Some(plan) = plan(root, &url, document, flat, accent) else {
         return;
     };
     let Ok(env) = (unsafe { view.cast::<ICoreWebView2_2>().and_then(|v| v.Environment()) }) else {
@@ -717,12 +736,12 @@ mod tests {
         let root = Path::new(r"C:/Users/me/Desktop");
         let host = host_for_flat(root);
         assert!(is_flat(&host) && !is_flat(&host_for(root)));
-        let deep = plan(root, &format!("https://{host}/.ssh/id_rsa"), false, true);
+        let deep = plan(root, &format!("https://{host}/.ssh/id_rsa"), false, true, crate::theme::ACCENTS[0].0);
         assert!(matches!(deep, Some(Plan::Now(r)) if r.status == 404));
-        let hidden = plan(root, &format!("https://{host}/a%2Fb.png"), false, true);
+        let hidden = plan(root, &format!("https://{host}/a%2Fb.png"), false, true, crate::theme::ACCENTS[0].0);
         assert!(matches!(hidden, Some(Plan::Now(r)) if r.status == 404));
         // A file at the top passes the subfolder check; this one is missing.
-        let top = plan(root, &format!("https://{host}/notes.png"), false, true);
+        let top = plan(root, &format!("https://{host}/notes.png"), false, true, crate::theme::ACCENTS[0].0);
         assert!(matches!(top, Some(Plan::Now(r)) if r.status == 404));
     }
 

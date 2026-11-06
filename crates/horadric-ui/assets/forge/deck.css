@@ -1,7 +1,11 @@
 /* The deck shell. Loaded twice by deck.js: into the page, where only the
    html.forge-deck rules match, and into the controls' shadow root, where
    only the :host rules do. Slides are styled in place, never moved, so the
-   deck's own selectors keep matching them. */
+   deck's own selectors keep matching them.
+
+   The shell is drawn in Horadric's look: the `--hd-` properties serve.rs
+   puts in front of this sheet, on html.forge-deck and on the controls'
+   host. The slides are the deck's and keep their own look. */
 
 /* ------------------------------------------------------------ the page */
 
@@ -26,7 +30,7 @@ html.forge-deck.forge-nobg section.slide { background-color: var(--forge-slide-b
   html.forge-deck.forge-single,
   html.forge-deck.forge-single body {
     overflow: hidden !important;
-    background: #121110 !important;
+    background: var(--hd-screen) !important;
   }
   html.forge-deck.forge-single section.slide:not(.forge-clone) { display: none !important; }
   html.forge-deck.forge-single section.slide.forge-current:not(.forge-clone) {
@@ -47,7 +51,7 @@ html.forge-deck.forge-nobg section.slide { background-color: var(--forge-slide-b
   /* Every slide in a column, scaled to the pane's width. */
   html.forge-deck.forge-scroll,
   html.forge-deck.forge-scroll body {
-    background: #121110 !important;
+    background: var(--hd-screen) !important;
   }
   html.forge-deck.forge-scroll body {
     margin: 0 !important;
@@ -81,10 +85,12 @@ html.forge-deck .forge-strip {
   padding: 12px 10px 60px 22px;
   overflow-x: hidden;
   overflow-y: auto;
-  background: #1a1714;
-  border-right: 1px solid #2c261f;
+  background: var(--hd-plate);
+  /* The seam between the strip's plate and the screen the slide is on. */
+  border-right: 1px solid var(--hd-engrave-dark);
+  box-shadow: 1px 0 0 var(--hd-engrave-light);
   scrollbar-width: thin;
-  scrollbar-color: #3a3128 transparent;
+  scrollbar-color: var(--hd-surface) transparent;
 }
 html.forge-deck .forge-strip[hidden] { display: none !important; }
 html.forge-deck .forge-thumb {
@@ -93,11 +99,12 @@ html.forge-deck .forge-thumb {
   margin: 0 0 10px;
   cursor: pointer;
   border-radius: 2px;
-  outline: 1px solid #3a3128;
+  outline: 1px solid var(--hd-engrave-dark);
   outline-offset: 0;
+  box-shadow: 0 2px 5px var(--hd-cast);
 }
-html.forge-deck .forge-thumb:hover { outline-color: #8a6a3c; }
-html.forge-deck .forge-thumb.forge-on { outline: 2px solid #e8a33d; outline-offset: 1px; }
+html.forge-deck .forge-thumb:hover { outline-color: var(--hd-accent-dim); }
+html.forge-deck .forge-thumb.forge-on { outline: 2px solid var(--hd-accent); outline-offset: 2px; }
 html.forge-deck .forge-strip section.slide.forge-clone {
   display: var(--forge-slide-display, block) !important;
   position: absolute !important;
@@ -124,16 +131,17 @@ html.forge-deck .forge-thumb-n {
   top: 0;
   width: 14px;
   text-align: right;
-  color: #8f8270;
-  font: 11px/1 "Segoe UI", system-ui, sans-serif;
+  color: var(--hd-legend);
+  font: 600 11px/1 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
 }
 html.forge-deck .forge-thumb > section.slide.forge-clone { clip-path: inset(0); }
 
 /* Slide edits in the strip: drag to move, small buttons to duplicate and
    delete, shown on hover. */
 html.forge-deck .forge-thumb.forge-dragging { opacity: 0.4; }
-html.forge-deck .forge-thumb.forge-drop-before { box-shadow: 0 -6px 0 -3px #e8a33d; }
-html.forge-deck .forge-thumb.forge-drop-after { box-shadow: 0 6px 0 -3px #e8a33d; }
+html.forge-deck .forge-thumb.forge-drop-before { box-shadow: 0 -6px 0 -3px var(--hd-accent); }
+html.forge-deck .forge-thumb.forge-drop-after { box-shadow: 0 6px 0 -3px var(--hd-accent); }
 html.forge-deck .forge-strip.forge-saving .forge-thumb { cursor: progress; }
 html.forge-deck .forge-thumb-tools {
   position: absolute;
@@ -150,31 +158,34 @@ html.forge-deck .forge-thumb-tools button {
   min-width: 20px;
   height: 20px;
   padding: 0 5px;
-  border-radius: 3px;
-  background: rgba(26, 23, 20, 0.88);
-  border: 1px solid #3a3128;
-  color: #d8ccb8;
-  font: 12px/18px "Segoe UI", system-ui, sans-serif;
+  border-radius: 4px;
+  background: linear-gradient(var(--hd-key-top), var(--hd-key-low));
+  box-shadow: inset 0 1px 0 var(--hd-bevel-light), 0 1px 0 var(--hd-key-side),
+    0 2px 4px var(--hd-cast);
+  color: var(--hd-text);
+  font: 12px/20px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   text-align: center;
   cursor: pointer;
 }
-html.forge-deck .forge-thumb-tools button:hover { border-color: #8a6a3c; color: #fff; }
-html.forge-deck .forge-thumb-tools button.forge-sure { border-color: #c2533f; color: #f0a090; }
+html.forge-deck .forge-thumb-tools button:hover { color: var(--hd-accent); }
+html.forge-deck .forge-thumb-tools button.forge-sure { color: var(--hd-error); }
 
 /* --------------------------------------------- the controls (shadow) */
 
 :host([hidden]) { display: none !important; }
 /* The host's inline all:initial beats :host, so the type is set here. */
 .bar {
-  font: 12px/1 "Segoe UI", system-ui, sans-serif;
-  color: #efe6d6;
+  font: 12px/1 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  color: var(--hd-text);
   display: flex;
   align-items: center;
   gap: 2px;
   padding: 3px;
-  background: rgba(23, 19, 14, 0.82);
-  border: 1px solid #3a3128;
-  border-radius: 6px;
+  /* A small plate standing off the slide. */
+  background: var(--hd-plate);
+  border-radius: 7px;
+  box-shadow: inset 0 1px 0 var(--hd-bevel-light), inset 0 -1px 0 var(--hd-bevel-shade),
+    0 4px 12px var(--hd-cast);
   opacity: 0.55;
   transition: opacity 0.2s ease;
 }
@@ -188,11 +199,12 @@ html.forge-deck .forge-thumb-tools button.forge-sure { border-color: #c2533f; co
   border: 0;
   border-radius: 4px;
   background: none;
-  color: #b5a78f;
+  color: var(--hd-dim);
   cursor: pointer;
 }
-.btn:hover { background: #2a231b; color: #efe6d6; }
-.btn.on { color: #e8a33d; }
+.btn:hover { background: var(--hd-hover); color: var(--hd-text); }
+.btn:active { background: var(--hd-press); }
+.btn.on { color: var(--hd-accent); }
 .btn svg {
   width: 16px;
   height: 16px;
@@ -206,7 +218,7 @@ html.forge-deck .forge-thumb-tools button.forge-sure { border-color: #c2533f; co
   min-width: 44px;
   padding: 0 6px 0 4px;
   text-align: right;
-  color: #b5a78f;
+  color: var(--hd-dim);
   font-variant-numeric: tabular-nums;
 }
 

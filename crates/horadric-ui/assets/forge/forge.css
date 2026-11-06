@@ -1,23 +1,32 @@
 /* Lives inside forge.js's closed shadow root, so nothing here reaches the
    page and nothing of the page's reaches here. Activity is shown with small
-   runes that move, never with glows or gradients. */
+   runes that move, never with glows or gradients.
+
+   Drawn in Horadric's skeuomorph: panels are small plates standing off the
+   page, fields and screens are sunk into them, buttons are keys. The
+   colours are the `--hd-` properties serve.rs sets on the host from the
+   theme and the project's colour, so marks are in the project's colour. */
 
 :host {
-  --ember: #e8a33d;
-  --ember-dim: rgba(232, 163, 61, 0.55);
-  --ink: #17130e;
-  --ink-2: #221c15;
-  --bone: #efe6d6;
-  --bone-dim: #b5a78f;
-  --blood: #c2533f;
+  --hd-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --hd-mono: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+  /* A plate off the page: lit top edge, shade under it, cast below. */
+  --hd-raised: inset 0 1px 0 var(--hd-bevel-light), inset 0 -1px 0 var(--hd-bevel-shade),
+    0 6px 16px var(--hd-cast);
+  /* A key: its side showing under the face. */
+  --hd-key: inset 0 1px 0 var(--hd-bevel-light), 0 2px 0 var(--hd-key-side),
+    0 3px 5px var(--hd-cast);
+  --hd-key-down: inset 0 1px 0 var(--hd-bevel-light), 0 1px 0 var(--hd-key-side);
+  /* Sunk: shade under the top edge, the lit lip along the bottom. */
+  --hd-sunk: inset 0 2px 4px var(--hd-hollow-shade), 0 1px 0 var(--hd-engrave-light);
 }
 
 /* The host is reset with all:initial from its inline style, which beats
    :host, so the type is set on the layers instead. */
 .pins, .flash, .catcher, .hover, .hover-tag, .drag, .ask, .errors,
 .editing, .crop, .notes, .crop-offer {
-  font: 13px/1.35 "Segoe UI", system-ui, sans-serif;
-  color: var(--bone);
+  font: 13px/1.35 var(--hd-ui);
+  color: var(--hd-text);
 }
 
 .pins, .flash, .hover, .hover-tag, .drag, .ask, .errors {
@@ -41,18 +50,19 @@
 .hover {
   display: none;
   box-sizing: border-box;
-  border: 1.5px solid var(--ember);
+  border: 1.5px solid var(--hd-accent);
   border-radius: 2px;
 }
 .hover.on { display: block; }
 
 .hover-tag {
   display: none;
-  padding: 1px 6px;
-  border-radius: 3px;
-  background: var(--ink);
-  color: var(--ember);
-  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--hd-plate);
+  box-shadow: var(--hd-raised);
+  color: var(--hd-accent);
+  font: 11px/1.35 var(--hd-mono);
   white-space: nowrap;
 }
 .hover-tag.on { display: block; }
@@ -60,8 +70,8 @@
 .drag {
   display: none;
   box-sizing: border-box;
-  border: 1.5px dashed var(--ember);
-  background: rgba(232, 163, 61, 0.08);
+  border: 1.5px dashed var(--hd-accent);
+  background: var(--hd-accent-faint);
 }
 .drag.on { display: block; }
 
@@ -73,10 +83,10 @@
   left: 0;
   top: 0;
   box-sizing: border-box;
-  border: 1.5px dashed var(--ember);
+  border: 1.5px dashed var(--hd-accent);
   animation: march 0.9s linear infinite;
 }
-@keyframes march { 50% { border-color: var(--ember-dim); } }
+@keyframes march { 50% { border-color: var(--hd-accent-dim); } }
 
 .ask-form {
   position: absolute;
@@ -84,36 +94,36 @@
   top: 0;
   width: 300px;
   margin: 0;
-  padding: 6px;
+  padding: 7px;
   box-sizing: border-box;
-  background: var(--ink);
-  border: 1px solid var(--ember-dim);
-  border-radius: 6px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  background: var(--hd-plate);
+  border-radius: 7px;
+  box-shadow: var(--hd-raised);
   pointer-events: auto;
 }
 .ask-form input {
   width: 100%;
   box-sizing: border-box;
   padding: 6px 8px;
-  border: 1px solid #4a3d2c;
-  border-radius: 4px;
-  background: var(--ink-2);
-  color: var(--bone);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: var(--hd-well);
+  box-shadow: var(--hd-sunk);
+  color: var(--hd-read);
   font: inherit;
   outline: none;
 }
-.ask-form input:focus { border-color: var(--ember); }
-.ask-form input::placeholder { color: var(--bone-dim); }
+.ask-form input:focus { border-color: var(--hd-accent-dim); }
+.ask-form input::placeholder { color: var(--hd-dim); }
 .ask-hint {
   display: block;
-  margin-top: 4px;
-  color: var(--bone-dim);
+  margin-top: 5px;
+  color: var(--hd-legend);
   font-size: 11px;
 }
 
-/* Pin runes: a small stone with its number and one bright stroke running
-   round its edge. */
+/* Pin runes: a small stone standing off the page with its number cut in,
+   and one stroke of the project's colour running round its edge. */
 .pin-box, .rune {
   position: absolute;
   left: 0;
@@ -127,7 +137,7 @@
 
 .pin-box {
   box-sizing: border-box;
-  border: 1px dashed var(--ember-dim);
+  border: 1px dashed var(--hd-accent-dim);
   border-radius: 2px;
 }
 
@@ -146,15 +156,16 @@
   width: 26px;
   height: 26px;
   overflow: visible;
+  filter: drop-shadow(0 2px 1.5px var(--hd-cast));
 }
 .rune .stone {
-  fill: var(--ink);
-  stroke: var(--ember-dim);
+  fill: var(--hd-surface);
+  stroke: var(--hd-engrave-dark);
   stroke-width: 1.4;
 }
 .rune .trace {
   fill: none;
-  stroke: var(--ember);
+  stroke: var(--hd-accent);
   stroke-width: 1.8;
   stroke-linecap: round;
   stroke-dasharray: 16 84;
@@ -167,8 +178,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--ember);
-  font: 600 11px/1 "Segoe UI", system-ui, sans-serif;
+  color: var(--hd-text);
+  font: 600 11px/1 var(--hd-ui);
+  text-shadow: 0 -1px 0 var(--hd-engrave-dark);
 }
 
 /* goto: shows where it landed for a moment. */
@@ -177,7 +189,7 @@
   left: 0;
   top: 0;
   box-sizing: border-box;
-  border: 1.5px solid var(--ember);
+  border: 1.5px solid var(--hd-accent);
   border-radius: 2px;
   animation: flash-out 1.6s ease forwards;
 }
@@ -186,7 +198,8 @@
   100% { opacity: 0; }
 }
 
-/* Errors: small cards in a corner, out of the content's way. */
+/* Errors: small plates in a corner, out of the content's way, each with a
+   lamp lit in the error's colour as a tile's would be. */
 .errors {
   inset: auto 12px 12px auto;
   display: flex;
@@ -199,25 +212,38 @@
   pointer-events: auto;
   width: 100%;
   box-sizing: border-box;
-  padding: 8px 10px 10px;
-  background: var(--ink);
-  border: 1px solid #5a2a20;
-  border-left: 3px solid var(--blood);
-  border-radius: 5px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  padding: 9px 11px 11px;
+  background: var(--hd-plate);
+  border-radius: 7px;
+  box-shadow: var(--hd-raised);
 }
 .error-head {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  color: #e48a76;
+  gap: 8px;
+  color: var(--hd-error);
   font-weight: 600;
-  font-size: 12px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
+.error-head::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--hd-error);
+}
+.error-head > :last-child { margin-left: auto; }
 .error-text {
-  margin: 4px 0 8px;
-  color: var(--bone);
-  font: 12px/1.4 Consolas, "Cascadia Mono", monospace;
+  margin: 7px 0 9px;
+  padding: 7px 9px;
+  border-radius: 5px;
+  background: var(--hd-screen);
+  box-shadow: var(--hd-sunk);
+  color: var(--hd-read);
+  font: 12px/1.4 var(--hd-mono);
   word-break: break-word;
 }
 .error-card button {
@@ -228,21 +254,31 @@
   padding: 0 4px;
   border: 0;
   background: none;
-  color: var(--bone-dim);
+  color: var(--hd-dim);
   font-size: 16px !important;
   line-height: 1;
+  letter-spacing: 0;
 }
-.error-close:hover { color: var(--bone); }
-.error-send {
-  padding: 4px 10px;
-  border: 1px solid var(--ember-dim);
-  border-radius: 4px;
-  background: var(--ink-2);
-  color: var(--ember);
-  font-size: 12px !important;
+.error-close:hover { color: var(--hd-text); }
+.error-send, .crop-bar button, .crop-offer {
+  padding: 5px 11px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: linear-gradient(var(--hd-key-top), var(--hd-key-low));
+  box-shadow: var(--hd-key);
+  color: var(--hd-text);
+  cursor: pointer;
 }
-.error-send:hover:not(:disabled) { border-color: var(--ember); }
-.error-send:disabled { color: var(--bone-dim); border-color: #4a3d2c; cursor: default; }
+.error-send { font-size: 12px !important; }
+.error-send:hover:not(:disabled), .crop-bar button:hover, .crop-offer:hover {
+  color: var(--hd-accent);
+}
+.error-send:active:not(:disabled), .error-send:disabled,
+.crop-bar button:active, .crop-offer:active {
+  transform: translateY(1px);
+  box-shadow: var(--hd-key-down);
+}
+.error-send:disabled { color: var(--hd-dim); cursor: default; }
 
 /* A hand edit in place: a thin line round the block being typed in. */
 .editing {
@@ -251,7 +287,7 @@
   top: 0;
   display: none;
   box-sizing: border-box;
-  border: 1px dashed var(--ember);
+  border: 1px dashed var(--hd-accent);
   border-radius: 2px;
   pointer-events: none;
 }
@@ -270,17 +306,17 @@
 }
 .note {
   padding: 5px 10px;
-  border-radius: 4px;
-  background: var(--ink);
-  border: 1px solid #4a3d2c;
-  color: var(--bone);
+  border-radius: 6px;
+  background: var(--hd-plate);
+  box-shadow: var(--hd-raised);
+  color: var(--hd-text);
   font-size: 12px;
   transition: opacity 0.6s ease;
 }
-.note.bad { border-color: #5a2a20; border-left: 3px solid var(--blood); }
+.note.bad { color: var(--hd-error); }
 .note.fading { opacity: 0; }
 
-/* Crop: the part kept is clear, the rest dimmed; a small bar of buttons. */
+/* Crop: the part kept is clear, the rest dimmed; a small plate of keys. */
 .crop {
   position: absolute;
   inset: 0;
@@ -294,8 +330,8 @@
   left: 0;
   top: 0;
   box-sizing: border-box;
-  border: 1.5px solid var(--ember);
-  box-shadow: 0 0 0 100vmax rgba(10, 8, 6, 0.55);
+  border: 1.5px solid var(--hd-accent);
+  box-shadow: 0 0 0 100vmax var(--hd-cast);
 }
 .crop-bar {
   position: absolute;
@@ -305,30 +341,26 @@
   display: flex;
   gap: 6px;
   align-items: center;
-  padding: 6px;
-  background: var(--ink);
-  border: 1px solid #4a3d2c;
-  border-radius: 6px;
+  padding: 7px 7px 9px;
+  background: var(--hd-plate);
+  border-radius: 7px;
+  box-shadow: var(--hd-raised);
   cursor: default;
 }
-.crop-bar button, .crop-offer {
-  padding: 4px 10px;
-  border: 1px solid #4a3d2c;
-  border-radius: 4px;
-  background: var(--ink-2);
-  color: var(--bone);
-  font: inherit;
-  cursor: pointer;
+.crop-bar button { font: inherit; }
+.crop-bar .crop-save { color: var(--hd-accent); }
+.crop-angle {
+  min-width: 84px;
+  text-align: center;
+  color: var(--hd-dim);
+  font: 12px/1 var(--hd-mono);
 }
-.crop-bar button:hover, .crop-offer:hover { border-color: var(--ember-dim); }
-.crop-bar .crop-save { color: var(--ember); border-color: var(--ember-dim); }
-.crop-angle { min-width: 84px; text-align: center; color: var(--bone-dim); font-size: 12px; }
 .crop-offer {
   position: absolute;
   right: 12px;
   bottom: 12px;
   pointer-events: auto;
-  font: 13px/1.35 "Segoe UI", system-ui, sans-serif;
+  font: 13px/1.35 var(--hd-ui);
 }
 .crop.on ~ .crop-offer { display: none; }
 
