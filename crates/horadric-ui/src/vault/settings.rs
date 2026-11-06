@@ -1189,16 +1189,19 @@ fn delete_identity(id: &Identity) {
     if choose(Tone::Warning, TITLE, &text, buttons) != Some(0) {
         return;
     }
-    if kept > 0 {
-        let forgotten = store::change(|v| {
+    // The identity goes first: a delete that fails must leave its
+    // secrets where they were, not orphaned on an identity still there.
+    if let Err(e) = identity::delete(&id.slug) {
+        return fail(TITLE, &e);
+    }
+    let forgotten = match kept {
+        0 => Ok(()),
+        _ => store::change(|v| {
             v.secrets.retain(|s| s.owner != owner);
             v.logins.retain(|l| l.owner != owner);
-        });
-        if let Err(e) = forgotten {
-            return fail(TITLE, &e);
-        }
-    }
-    done(TITLE, identity::delete(&id.slug));
+        }),
+    };
+    done(TITLE, forgotten);
 }
 
 /// "2 secrets and a web login", for what an identity keeps.
