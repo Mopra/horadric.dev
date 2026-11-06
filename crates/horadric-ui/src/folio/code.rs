@@ -5,7 +5,10 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
-use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout, DWRITE_LINE_METRICS};
+use windows::Win32::Graphics::DirectWrite::{
+    IDWriteTextLayout, DWRITE_LINE_METRICS, DWRITE_TEXT_ALIGNMENT_TRAILING,
+    DWRITE_WORD_WRAPPING_NO_WRAP,
+};
 
 use super::rich::{colour_code, Ctx, Item, Scene, F};
 use super::transcript::Act;
@@ -29,6 +32,12 @@ const FOLD_OVER: usize = 30;
 const FOLD_TO: usize = 15;
 /// A snippet of fewer lines has nothing to count, so no numbers.
 const NUMBER_FROM: usize = 4;
+/// Columns a tab advances to, as editors show code; DirectWrite's own
+/// default is four ems, nearly twice as wide.
+const TAB: f32 = 4.0;
+/// The header's Copy and Fold buttons.
+const COPY_W: f32 = 72.0;
+const FOLD_W: f32 = 60.0;
 
 thread_local! {
     /// The blocks shown whole, by [`fold_key`]. The transcript sets it
@@ -282,6 +291,39 @@ pub(super) fn source_rows(lines: &[(f32, bool)]) -> Vec<(f32, f32)> {
     out
 }
 
+/// The gutter as one text, a line per laid out line of the code: each
+/// source line's mark on its first row, the rows it wraps onto blank.
+/// One layout for the gutter, not one per line, keeps a long block cheap.
+pub(super) fn gutter_lines(marks: &[Option<String>], lines: &[(f32, bool)]) -> String {
+    let mut out = String::new();
+    let mut row = 0;
+    let mut first = true;
+    for (k, &(_, ends)) in lines.iter().enumerate() {
+        if k > 0 {
+            out.push('\n');
+        }
+        if first {
+            if let Some(Some(m)) = marks.get(row) {
+                out.push_str(m);
+            }
+        }
+        first = ends;
+        if ends {
+            row += 1;
+        }
+    }
+    out
+}
+
+/// What the footer of a folded block says.
+pub(super) fn fold_say(total: usize, whole: bool) -> String {
+    match (whole, total.saturating_sub(FOLD_TO)) {
+        (true, _) => "Show less".to_string(),
+        (false, 1) => "Show 1 more line".to_string(),
+        (false, n) => format!("Show {n} more lines"),
+    }
+}
+
 fn line_metrics(l: &IDWriteTextLayout) -> Vec<(f32, bool)> {
     let mut n = 0u32;
     unsafe {
@@ -313,8 +355,21 @@ impl Ctx<'_> {
     /// the code coloured as the file viewer colours it, numbered when it
     /// is long and folded when it is very long. Diffs have their rows
     /// tinted, shell blocks a prompt before each command.
+    ///
+    /// Long lines wrap rather than clip: the Folio has no sideways
+    /// scroll, and a clipped line hides exactly the part that differs.
+    /// The gutter marks only a wrapped line's first row.
     pub(super) unsafe fn code(&self, info: &str, text: &str, w: f32) -> Scene {
         let mut s = Scene::default();
+        // A lone carriage return would start a laid out line of its own
+        // and push the gutter and tints off their lines.
+        let crlf;
+        let text = if text.contains('\r') {
+            crlf = text.replace("\r\n", "\n").replace('\r', "\n");
+            crlf.as_str()
+        } else {
+            text
+        };
         let fence = Fence::parse(info);
         let style = Style::of(&fence.lang, text);
         let shell = matches!(style, Style::Shell(_)).then(|| shell_view(text));
@@ -340,6 +395,7 @@ impl Ctx<'_> {
         let Some(l) = self.layout(&self.fonts.code, &shown, w - x0 - CODE_PAD) else {
             return s;
         };
+        let _ = l.SetIncrementalTabStop(TAB * cw);
         let at = spans(lines);
         match style {
             Style::Diff => self.colour_diff(&l, lines, &at),
@@ -352,7 +408,8 @@ impl Ctx<'_> {
                 }
             }
         }
-        let rows = source_rows(&line_metrics(&l));
+        let visual = line_metrics(&l);
+        let rows = source_rows(&visual);
         let (_, th) = render::text_size(&l);
         let top = CODE_HEAD + BODY_TOP;
         let foot = if foldable { FOOT } else { 0.0 };
@@ -370,7 +427,10 @@ impl Ctx<'_> {
             0.0,
             self.pal.fg.with_alpha(0.06),
         );
-        self.code_head(&mut s, &fence, style, text, shell.as_ref(), w);
+        // Folding again from the header, so a long block opened need not
+        // be scrolled to its end to close.
+        let fold = (foldable && whole).then_some(&key);
+        self.code_head(&mut s, &fence, style, text, shell.as_ref(), fold, w);
 
         if style == Style::Diff {
             for (line, &(y, rh)) in lines.iter().zip(&rows) {
@@ -382,33 +442,28 @@ impl Ctx<'_> {
                 s.fill(Rect::new(1.0, top + y, w - 2.0, rh), 0.0, tint);
             }
         }
-        match (&shell, style) {
+        let marks: Vec<Option<String>> = match (&shell, style) {
             (Some(v), Style::Shell(ps)) => {
                 let glyph = if ps { ">" } else { "$" };
-                for (row, &(y, _)) in v.rows.iter().zip(&rows) {
-                    if *row == Row::Command {
-                        self.gutter_text(&mut s, glyph, x0 - 10.0, top + y);
-                    }
-                }
+                (v.rows.iter().take(rows.len()))
+                    .map(|r| (*r == Row::Command).then(|| glyph.to_string()))
+                    .collect()
             }
             (_, Style::Plain) if gutter > 0.0 => {
-                for (k, &(y, _)) in rows.iter().enumerate() {
-                    let n = (k + 1).to_string();
-                    self.gutter_text(&mut s, &n, x0 - 10.0, top + y);
-                }
+                (1..=rows.len()).map(|k| Some(k.to_string())).collect()
             }
-            _ => {}
+            _ => Vec::new(),
+        };
+        if !marks.is_empty() {
+            self.gutter(&mut s, &marks, &visual, &rows, x0 - 10.0, top);
         }
         s.unit(&l, x0, top, self.pal.fg.with_alpha(0.9), &shown);
 
         if foldable {
             let fy = h - FOOT;
             s.fill(Rect::new(0.0, fy, w, 1.0), 0.0, self.pal.fg.with_alpha(0.06));
-            let (icon, say) = if whole {
-                ("\u{E70E}", "Show less".to_string())
-            } else {
-                ("\u{E70D}", format!("Show all {} lines", all.len()))
-            };
+            let icon = if whole { "\u{E70E}" } else { "\u{E70D}" };
+            let say = fold_say(all.len(), whole);
             let ink = self.link_ink();
             s.line(icon, F::Icon, Rect::new(CODE_PAD, fy, 16.0, FOOT), ink);
             s.line(say, F::Small, Rect::new(CODE_PAD + 22.0, fy, w / 2.0, FOOT), ink);
@@ -426,6 +481,7 @@ impl Ctx<'_> {
         style: Style,
         text: &str,
         shell: Option<&ShellView>,
+        fold: Option<&String>,
         w: f32,
     ) {
         let lang = match (fence.lang.as_str(), style) {
@@ -433,8 +489,8 @@ impl Ctx<'_> {
             ("", _) => "text",
             (l, _) => label(l),
         };
-        let copy_w = 72.0;
-        let room = (w - 2.0 * CODE_PAD - copy_w).max(0.0);
+        let buttons = COPY_W + if fold.is_some() { FOLD_W } else { 0.0 };
+        let room = (w - 2.0 * CODE_PAD - buttons).max(0.0);
         let mut x = CODE_PAD;
         // Too narrow a header for a readable name leaves it to the language.
         if let Some(file) = fence.file.as_ref().filter(|_| room >= 40.0) {
@@ -453,18 +509,52 @@ impl Ctx<'_> {
             Rect::new(x, 0.0, (CODE_PAD + room - x).max(0.0), CODE_HEAD),
             self.pal.faint,
         );
-        let copy = Rect::new(w - copy_w - 4.0, 4.0, copy_w, CODE_HEAD - 8.0);
+        let copy = Rect::new(w - COPY_W - 4.0, 4.0, COPY_W, CODE_HEAD - 8.0);
         let what = shell.map_or(text, |v| v.copy.as_str());
         s.items.extend(self.copy_face(copy, what, self.pal.dim));
         s.hit(copy, Hit::Tr(Act::Copy(what.to_string())));
+        if let Some(key) = fold {
+            let r = Rect::new(copy.x - FOLD_W, 4.0, FOLD_W, CODE_HEAD - 8.0);
+            let ink = self.pal.dim;
+            let icon = Rect::new(r.x + 6.0, r.y, 16.0, r.h);
+            s.line("\u{E70E}", F::Icon, icon, ink);
+            s.line("Fold", F::Small, Rect::new(r.x + 26.0, r.y, r.w - 28.0, r.h), ink);
+            s.hit(r, Hit::Tr(Act::All(key.clone())));
+        }
     }
 
-    /// A line number or prompt, right aligned to `right` on its line's
-    /// first row, drawn but never selected or copied.
-    unsafe fn gutter_text(&self, s: &mut Scene, t: &str, right: f32, y: f32) {
-        if let Some(l) = self.one_line(&self.fonts.code, t) {
-            let (tw, _) = render::text_size(&l);
-            s.text(&l, right - tw, y, self.pal.faint.with_alpha(0.75));
+    /// Line numbers or prompts, right aligned to `right` on each line's
+    /// first row, drawn but never selected or copied. One layout for the
+    /// lot when its rows match the code's, which they do unless a font
+    /// fallback made some line of the code taller; then one per mark.
+    unsafe fn gutter(
+        &self,
+        s: &mut Scene,
+        marks: &[Option<String>],
+        visual: &[(f32, bool)],
+        rows: &[(f32, f32)],
+        right: f32,
+        top: f32,
+    ) {
+        let ink = self.pal.faint.with_alpha(0.75);
+        let all = gutter_lines(marks, visual);
+        if let Some(g) = self.layout(&self.fonts.code, &all, right) {
+            let _ = g.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            let _ = g.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+            let theirs = line_metrics(&g);
+            let fits = theirs.len() == visual.len()
+                && (theirs.iter().zip(visual)).all(|(a, b)| (a.0 - b.0).abs() < 0.5);
+            if fits {
+                s.text(&g, 0.0, top, ink);
+                return;
+            }
+        }
+        for (m, &(y, _)) in marks.iter().zip(rows) {
+            let Some(m) = m else { continue };
+            if let Some(l) = self.one_line(&self.fonts.code, m) {
+                let (tw, _) = render::text_size(&l);
+                s.text(&l, right - tw, top + y, ink);
+            }
         }
     }
 
@@ -552,6 +642,22 @@ mod tests {
         let rows = source_rows(&[(10.0, false), (10.0, true), (10.0, true), (10.0, false)]);
         assert_eq!(rows, [(0.0, 20.0), (20.0, 10.0), (30.0, 10.0)]);
         assert!(source_rows(&[]).is_empty());
+    }
+
+    #[test]
+    fn gutter_marks_only_a_wrapped_lines_first_row() {
+        let marks = [Some("1".to_string()), None, Some("3".to_string())];
+        // Line one wraps onto a second row, line three onto a third.
+        let lines = [(10.0, false), (10.0, true), (10.0, true), (10.0, false), (10.0, false)];
+        assert_eq!(gutter_lines(&marks, &lines), "1\n\n\n3\n");
+        assert_eq!(gutter_lines(&marks, &[]), "");
+    }
+
+    #[test]
+    fn fold_footer_counts_what_is_hidden() {
+        assert_eq!(fold_say(FOLD_TO + 1, false), "Show 1 more line");
+        assert_eq!(fold_say(500, false), format!("Show {} more lines", 500 - FOLD_TO));
+        assert_eq!(fold_say(500, true), "Show less");
     }
 
     #[test]
