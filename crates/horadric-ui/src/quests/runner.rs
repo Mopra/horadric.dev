@@ -516,13 +516,13 @@ pub(crate) fn command_for(exe: &str) -> String {
     }
 }
 
+/// A blocked quest's look at whether its wait is over, run off the UI thread.
+type Look = Box<dyn FnOnce() -> bool + Send>;
+
 /// Whether `program` run in `dir` with no window exits 0 within
 /// `CHECK_LONGEST`. `cmd.exe` takes its one argument as the command to run,
 /// as typed, since its quoting is not a C program's; a Mac's `sh -c` takes
 /// it as one argument anyway.
-/// A blocked quest's look at whether its wait is over, run off the UI thread.
-type Look = Box<dyn FnOnce() -> bool + Send>;
-
 pub(crate) fn exits_zero(program: &str, args: &[String], dir: &Path) -> bool {
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(program);
