@@ -11,7 +11,6 @@
 //! Each session's agent keeps to a tab of its own, so the user showing
 //! another tab, or another session opening one, never moves it.
 
-use std::cell::RefCell;
 use std::collections::HashSet;
 
 use horadric_core::Phase;
@@ -190,25 +189,14 @@ impl App {
     }
 }
 
-thread_local! {
-    /// The sessions that have shown the app their key on a browser call.
-    static VOUCHED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-}
-
 /// Whether a browser call naming `session` is that session's own. The
 /// session id comes in a header any local program can set, so without
 /// the key an agent could drive another project's tab by naming one of
 /// its sessions. `horadric mcp` sends its session's key with every call.
-/// A session the app holds no key for (one begun before the app last
-/// started) still works for now. Until the Vault can say whether it holds
-/// a key, a session that has once shown the right key must show it from
-/// then on.
+/// A session the app holds no key for (one begun before keys were kept)
+/// still works for now.
 fn vouched(session: &str, key: &str) -> Result<(), &'static str> {
-    if run::key_ok(session, key) {
-        VOUCHED.with(|v| v.borrow_mut().insert(session.to_string()));
-        return Ok(());
-    }
-    if VOUCHED.with(|v| v.borrow().contains(session)) {
+    if run::has_key(session) && !run::key_ok(session, key) {
         return Err(
             "this call did not carry the session's key, so Horadric does not take it for the \
              session it names",

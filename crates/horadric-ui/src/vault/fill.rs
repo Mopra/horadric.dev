@@ -105,6 +105,16 @@ const HIDDEN: &str = r#"(() => {
   return here.length > 0 && here.every((f) => f.kind !== "password" || f.e.type === "password");
 })()"#;
 
+/// Whether the page's site has a service worker, controlling this page or
+/// only registered: a registered one still sees the next navigation, the
+/// sign in request among them.
+const WORKERS: &str = r#"(async () => {
+  const s = navigator.serviceWorker;
+  if (!s) return false;
+  if (s.controller) return true;
+  return (await s.getRegistrations()).length > 0;
+})()"#;
+
 #[derive(Default)]
 struct TabState {
     /// The documents (DevTools loader ids) a login was filled in.
@@ -116,6 +126,8 @@ struct TabState {
     tainted: bool,
     /// Runtime reports the tab's contexts to the app (`web::context_of`).
     tracked: bool,
+    /// The origins whose service workers the app cleared before a fill.
+    workers_cleared: Vec<String>,
     /// The TOTP seeds a code was filled from, by login name, so the codes
     /// near now are masked in what the tab answers.
     seeds: Vec<(String, String)>,
@@ -564,6 +576,38 @@ fn checked(
         req,
         login,
     };
+    if with_tab(tab, |s| s.workers_cleared.contains(&job.origin)) {
+        return ask_then_fill(job);
+    }
+    // A service worker the agent registered on this site from another tab
+    // would see the sign in request, password and all. The first fill on
+    // the site in this tab clears the site's workers when it has any; one
+    // the site registers again after the reload is its own, since agent
+    // code in this tab since would have tainted it.
+    let context = job.context();
+    eval(&job.key.clone(), tab, WORKERS.to_string(), context.as_deref(), move |r| match r {
+        Ok(Value::Bool(false)) => ask_then_fill(job),
+        Ok(Value::Bool(true)) => {
+            let params = json!({ "origin": job.origin, "storageTypes": "service_workers" });
+            let k = job.key.clone();
+            web::devtools(&k, tab, "Storage.clearDataForOrigin", &params.to_string(), move |r| {
+                if r.is_err() {
+                    return job.fail("this site's service workers could not be cleared");
+                }
+                with_tab(tab, |s| s.workers_cleared.push(job.origin.clone()));
+                log(&job.req, &job.origin, "fill stopped: service workers cleared");
+                job.reply.send(error(
+                    "Horadric cleared this site's service workers, which could have seen the \
+                     login sent: reload the page (browser_history reload) and fill again",
+                ));
+            });
+        }
+        _ => job.fail("the page could not be checked for service workers; try again"),
+    });
+}
+
+/// Asks the human, unless the login is allowed here for good, and fills.
+fn ask_then_fill(job: Job) {
     // A page on this machine can be one the agent serves itself, so it
     // is asked about every time, whatever was allowed before.
     let local = is_loopback(&job.origin);
