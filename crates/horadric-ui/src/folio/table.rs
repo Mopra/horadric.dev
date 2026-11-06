@@ -11,7 +11,7 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 
 use super::flow;
-use super::rich::{first_line, range, Ctx, Scene, F};
+use super::rich::{first_line, range, Ctx, Scene};
 use super::transcript::Act;
 use super::view::Hit;
 use crate::layout::Rect;
@@ -36,7 +36,7 @@ const PILL_SIZE: f32 = 12.5;
 const PILL_H: f32 = 20.0;
 const PILL_X: f32 = 8.0;
 /// The hover Copy button's size.
-const COPY_W: f32 = 64.0;
+const COPY_W: f32 = 76.0;
 const COPY_H: f32 = 22.0;
 
 impl Ctx<'_> {
@@ -329,25 +329,14 @@ impl Ctx<'_> {
             s.hover
                 .push(Item::Fill(copy, 5.0, self.pal.fg.with_alpha(0.06)));
         }
-        s.hover.push(Item::Line(
-            "\u{E8C8}".into(),
-            F::Icon,
-            Rect::new(copy.x + 6.0, copy.y, 16.0, copy.h),
-            self.pal.dim,
-        ));
-        s.hover.push(Item::Line(
-            "Copy".into(),
-            F::Small,
-            Rect::new(copy.x + 26.0, copy.y, COPY_W - 26.0, copy.h),
-            self.pal.dim,
-        ));
         let head: Vec<&str> = header.iter().map(|i| i.text.as_str()).collect();
         let body: Vec<Vec<&str>> = rows
             .iter()
             .map(|r| r.iter().map(|i| i.text.as_str()).collect())
             .collect();
-        s.hover_hits
-            .push((copy, Hit::Tr(Act::Copy(tsv(&head, &body)))));
+        let text = tsv(&head, &body);
+        s.hover.extend(self.copy_face(copy, &text, self.pal.dim));
+        s.hover_hits.push((copy, Hit::Tr(Act::Copy(text))));
     }
 }
 
