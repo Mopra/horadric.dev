@@ -21,7 +21,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::vault::secret::{
-    approval, approved, log_line, missing_line, once_only, valid_name, Mask, Owner,
+    approval, approved, changed_pins, fingerprint, log_line, missing_line, npm_shim, once_only,
+    pinned, runs_builds, valid_name, Mask, Owner, Pin,
 };
 use horadric_hooks::listener::{SecretNames, SecretRun, SecretSet, SecretStream};
 use serde_json::json;
@@ -665,12 +666,13 @@ fn pin(program: &Path) -> Result<Pinned, String> {
 }
 
 /// SHA-256 of everything in `file`, through CNG, a piece at a time.
-fn hash(file: &mut File) -> Option<String> {
+fn hash(file: &mut impl Read) -> Option<String> {
     let mut h = BCRYPT_HASH_HANDLE::default();
     unsafe { BCryptCreateHash(BCRYPT_SHA256_ALG_HANDLE, &mut h, None, None, 0) }
         .ok()
         .ok()?;
-    let mut buf = vec![0u8; 1 << 20];
+    // Small, as a package of thousands of files is hashed a file at a time.
+    let mut buf = vec![0u8; 1 << 16];
     let mut out = [0u8; 32];
     let done = loop {
         match file.read(&mut buf) {
@@ -773,19 +775,197 @@ fn inside(path: &Path, dir: &Path) -> bool {
     !d.is_empty() && (p == d || p.starts_with(&format!("{d}\\")))
 }
 
+/// What an npm shim runs, which Horadric runs itself: node, by its full
+/// path, with the package's script. The shim's own text is never run by
+/// cmd, so neither its parsing nor a `node` found in the project folder
+/// comes into it.
+struct ShimRun {
+    node: PathBuf,
+    script: PathBuf,
+    package: PathBuf,
+}
+
+/// The npm shim `program` is, None for anything else. Its node is the
+/// one beside it, as the shim would take, else the first on PATH.
+fn shim_of(program: &Path) -> Option<ShimRun> {
+    let ext = program.extension()?.to_string_lossy().to_ascii_lowercase();
+    if ext != "cmd" {
+        return None;
+    }
+    let shim = npm_shim(&std::fs::read_to_string(program).ok()?)?;
+    let dir = program.parent()?;
+    let package = dir.join(&shim.package);
+    let script = dir.join(&shim.script);
+    if !package.is_dir() || !script.is_file() {
+        return None;
+    }
+    let beside = dir.join("node.exe");
+    let node = if beside.is_file() {
+        beside
+    } else {
+        horadric_pty::find_program("node", &app_path(), &[".exe"], Path::is_file)?
+    };
+    Some(ShimRun { node, script, package })
+}
+
+/// The variable `name` as the child will have it: the identity's own
+/// first, then the app's unless the identity takes it away.
+fn child_var(env: &super::identity::SessionEnv, name: &str) -> Option<String> {
+    if let Some((_, v)) = env.set.iter().rev().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+        return Some(v.clone());
+    }
+    if env.remove.iter().any(|k| k.eq_ignore_ascii_case(name)) {
+        return None;
+    }
+    std::env::var(name).ok()
+}
+
+/// What runs when the program does, beyond its own file: what is pinned
+/// for it and the content of all of it.
+struct Runs {
+    shim: Option<ShimRun>,
+    /// The program is one [`pinned`] knows, or an npm shim.
+    pinned: bool,
+    pins: Vec<Pin>,
+    /// The program's SHA-256 and each pin's, as an Always keeps it; None
+    /// when a pin could not be read, which leaves only Once.
+    fingerprint: Option<String>,
+    /// The program's name as the human knows it: `vercel`, not `vercel.cmd`.
+    stem: String,
+}
+
+impl Runs {
+    fn of(program: &Pinned, env: &super::identity::SessionEnv) -> Runs {
+        let shim = shim_of(&program.path);
+        let path = program.path.to_string_lossy().into_owned();
+        let mut pins = pinned(&path, &|k| child_var(env, k));
+        if let Some(s) = &shim {
+            let name = s
+                .package
+                .strip_prefix(program.path.parent().unwrap_or(Path::new("")).join("node_modules"))
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default()
+                .replace([',', '=', '|'], "_");
+            let pins = pins.get_or_insert_with(Vec::new);
+            pins.push(Pin {
+                what: format!("the {name} package"),
+                path: s.package.to_string_lossy().into_owned(),
+                tree: true,
+            });
+            pins.push(Pin {
+                what: "node.exe".into(),
+                path: s.node.to_string_lossy().into_owned(),
+                tree: false,
+            });
+        }
+        let stem = program
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let is_pinned = pins.is_some();
+        let pins = pins.unwrap_or_default();
+        let fingerprint = pin_hashes(&pins).map(|h| fingerprint(&program.sha256, &h));
+        Runs {
+            shim,
+            pinned: is_pinned,
+            pins,
+            fingerprint,
+            stem,
+        }
+    }
+}
+
+/// Each pin's SHA-256, read fresh: no modified time is trusted, since one
+/// can be set back. None when one could not be read through.
+fn pin_hashes(pins: &[Pin]) -> Option<Vec<(String, String)>> {
+    pins.iter()
+        .map(|p| {
+            let path = Path::new(&p.path);
+            let h = match (std::fs::symlink_metadata(path), p.tree) {
+                (Err(e), _) if e.kind() == std::io::ErrorKind::NotFound => Some("absent".to_string()),
+                (Err(_), _) => None,
+                (Ok(_), true) => hash_tree(path),
+                (Ok(m), false) if m.is_file() && !reparse(&m) => hash(&mut File::open(path).ok()?),
+                (Ok(_), false) => None,
+            };
+            h.map(|h| (p.what.clone(), h))
+        })
+        .collect()
+}
+
+/// A link or junction, whose content is somewhere no pin covers.
+fn reparse(m: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// SHA-256 over every folder and file under `root`, by sorted relative
+/// path, each file by its own SHA-256. Nothing inside is skipped; a link
+/// anywhere fails it, since what it points at is not pinned.
+fn hash_tree(root: &Path) -> Option<String> {
+    let m = std::fs::symlink_metadata(root).ok()?;
+    if !m.is_dir() || reparse(&m) {
+        return None;
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut todo = vec![PathBuf::new()];
+    while let Some(rel) = todo.pop() {
+        for entry in std::fs::read_dir(root.join(&rel)).ok()? {
+            let entry = entry.ok()?;
+            let m = std::fs::symlink_metadata(entry.path()).ok()?;
+            if reparse(&m) {
+                return None;
+            }
+            let child = rel.join(entry.file_name());
+            let shown = child.to_string_lossy().replace('\\', "/");
+            if m.is_dir() {
+                lines.push(format!("d {shown}"));
+                todo.push(child);
+            } else {
+                let h = hash(&mut File::open(entry.path()).ok()?)?;
+                lines.push(format!("f {shown} {h}"));
+            }
+        }
+    }
+    lines.sort();
+    hash(&mut lines.join("\n").as_bytes())
+}
+
 /// Why Always is not offered, None when it is.
-fn once_why(pinned: &Pinned, place: &Place) -> Option<&'static str> {
+fn once_why(pinned: &Pinned, runs: &Runs, place: &Place) -> Option<&'static str> {
     let path = &pinned.path;
-    if once_only(&path.to_string_lossy()) {
+    // A shim is judged by the program it runs: `npm.cmd` is npm.
+    let listed = match &runs.shim {
+        Some(_) => once_only(&runs.stem),
+        None => once_only(&path.to_string_lossy()),
+    };
+    if listed {
         return Some("it can run code the agent writes");
+    }
+    if runs.pinned && runs.fingerprint.is_none() {
+        return Some("a file that decides what it runs could not be read through, or is a link");
     }
     if pinned.remote {
         return Some("it is on a network share");
     }
-    if inside(path, &place.dir) || inside(path, &place.cwd) || inside(path, &std::env::temp_dir()) {
+    let mut ran = vec![path.as_path()];
+    if let Some(s) = &runs.shim {
+        ran.extend([s.package.as_path(), s.node.as_path()]);
+    }
+    let agents = [place.dir.as_path(), place.cwd.as_path(), &std::env::temp_dir()];
+    if ran.iter().any(|p| agents.iter().any(|d| inside(p, d))) {
         return Some("it is inside the project or the temp folder, where the agent writes");
     }
-    if changeable(path) {
+    // A shim's package is pinned by content, so a global npm folder the
+    // user can write to may still have Always; the node it runs must not
+    // be, as a library planted beside it would load.
+    let own = match &runs.shim {
+        Some(s) => s.node.as_path(),
+        None => path.as_path(),
+    };
+    if changeable(own) {
         return Some("you can change it or its folder without elevation, so the agent could too");
     }
     None
@@ -882,9 +1062,13 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
             }
         }
     }
+    let env = super::identity::session_env(&place.dir);
+    let runs = Runs::of(&pinned, &env);
+    // A pin that could not be read matches no Always, and gets none.
+    let held_to = runs.fingerprint.clone().unwrap_or_else(|| "unreadable".into());
     let unasked: Vec<String> = secrets
         .iter()
-        .filter(|s| !approved(&s.allowed, &place.key, &program_lower, &pinned.sha256))
+        .filter(|s| !approved(&s.allowed, &place.key, &program_lower, &held_to))
         .map(|s| s.name.clone())
         .collect();
     let mut held = None;
@@ -896,12 +1080,8 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
             return;
         };
         held = Some(c);
-        let why_once = once_why(&pinned, &place);
-        let stem = pinned
-            .path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let why_once = once_why(&pinned, &runs, &place);
+        let stem = &runs.stem;
         let whose: Vec<String> = secrets
             .iter()
             .filter(|s| unasked.contains(&s.name))
@@ -914,6 +1094,25 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
             whose.join(", "),
             pinned.path.display(),
         );
+        let changed: Vec<String> = secrets
+            .iter()
+            .filter(|s| unasked.contains(&s.name))
+            .flat_map(|s| changed_pins(&s.allowed, &place.key, &program_lower, &held_to))
+            .fold(Vec::new(), |mut all, c| {
+                if !all.contains(&c) {
+                    all.push(c);
+                }
+                all
+            });
+        if !changed.is_empty() {
+            text.push_str(&format!(
+                "\n\nAsked again: {} changed since you allowed it.",
+                changed.join(", ")
+            ));
+        }
+        if runs_builds(stem) {
+            text.push_str("\n\nIt may run this project's build scripts.");
+        }
         if let Some(why) = why_once {
             text.push_str(&format!("\n\nOnly Once is offered: {why}."));
         }
@@ -926,7 +1125,9 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
         program_lower,
         args,
         cwd,
-        env: super::identity::session_env(&place.dir),
+        env,
+        runs,
+        held_to,
         secrets,
         stdin,
         unasked,
@@ -943,6 +1144,9 @@ struct Job {
     args: Vec<String>,
     cwd: PathBuf,
     env: super::identity::SessionEnv,
+    runs: Runs,
+    /// The fingerprint the question was asked about, which an Always keeps.
+    held_to: String,
     secrets: Vec<store::Secret>,
     stdin: Vec<String>,
     /// The secrets not yet allowed for this program, which were asked.
@@ -1015,7 +1219,23 @@ impl Job {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let granted = approval(&self.project, &self.program_lower, &self.pinned.sha256);
+        // What is pinned is not held open as the program is, so it is read
+        // again after a question: a change while the human looked is a
+        // change they did not see. It can still change between this and
+        // the program reading it; that window is the run's start, not the
+        // minute a question can wait.
+        let asked_about = !self.unasked.is_empty();
+        if asked_about && self.runs.pinned {
+            let now = pin_hashes(&self.runs.pins).map(|h| fingerprint(&self.pinned.sha256, &h));
+            if now.as_deref() != self.runs.fingerprint.as_deref() {
+                for n in &self.unasked {
+                    self.log(n, "changed while asked");
+                }
+                out.fail("A file that decides what the program runs changed while the human was asked. Run it again.");
+                return;
+            }
+        }
+        let granted = approval(&self.project, &self.program_lower, &self.held_to);
         // An Always for this program in this project from before it changed
         // is spent: the new one replaces it.
         let stale = format!("|{}|{}", self.project, self.program_lower);
@@ -1045,7 +1265,11 @@ impl Job {
 
     fn command(&self) -> Command {
         let program = &self.pinned.path;
-        let mut c = if horadric_pty::is_batch(program) {
+        let mut c = if let Some(shim) = &self.runs.shim {
+            let mut c = Command::new(&shim.node);
+            c.arg(&shim.script).args(&self.args);
+            c
+        } else if horadric_pty::is_batch(program) {
             // A batch file only runs through cmd, and its arguments are
             // read twice there, so they are quoted the way the pty's
             // launches quote them.
@@ -1512,6 +1736,33 @@ mod tests {
         assert!(remote_or_device(r"\\?\UNC\server\share"));
         assert!(remote_or_device(r"\\.\C:\work"));
         assert!(remote_or_device(r"\\?\GLOBALROOT\Device\x"));
+    }
+
+    #[test]
+    fn a_pinned_tree_changes_with_any_file_in_it() {
+        let root = std::env::temp_dir().join(format!("horadric-pin-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("ext/deep")).unwrap();
+        std::fs::write(root.join("ext/deep/a.js"), "one").unwrap();
+        std::fs::write(root.join("config.yml"), "aliases: {}").unwrap();
+        let pins = vec![
+            Pin { what: "c".into(), path: root.join("config.yml").to_string_lossy().into(), tree: false },
+            Pin { what: "e".into(), path: root.join("ext").to_string_lossy().into(), tree: true },
+            Pin { what: "m".into(), path: root.join("missing").to_string_lossy().into(), tree: true },
+        ];
+        let first = pin_hashes(&pins).unwrap();
+        assert_eq!(first[2].1, "absent");
+        assert_eq!(pin_hashes(&pins).unwrap(), first);
+        std::fs::write(root.join("ext/deep/a.js"), "two").unwrap();
+        let second = pin_hashes(&pins).unwrap();
+        assert_ne!(second[1], first[1]);
+        assert_eq!(second[0], first[0]);
+        std::fs::write(root.join("ext/new.js"), "").unwrap();
+        assert_ne!(pin_hashes(&pins).unwrap()[1], second[1], "a new empty file counts");
+        // A file pin that is a folder cannot be read as one.
+        let odd = [Pin { what: "x".into(), path: root.join("ext").to_string_lossy().into(), tree: false }];
+        assert!(pin_hashes(&odd).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

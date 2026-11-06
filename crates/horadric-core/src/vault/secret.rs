@@ -119,12 +119,11 @@ impl Mask {
 }
 
 /// Programs that run code the agent can write, and so could do anything
-/// with a value: they are only ever offered Once, never Always. That takes
-/// in tools the Vault is mostly for: `gh` runs aliases (`--shell`) and
-/// extensions, `wrangler`, `vercel` and `netlify` run the project's build,
-/// the cloud CLIs run plugins and hooks. The spec's tradeoff: a token for
-/// them is asked for each time, rather than handed for good to a program
-/// the agent can make run anything.
+/// with a value: they are only ever offered Once, never Always. The
+/// deploy and cloud CLIs the Vault is mostly for are not here but in
+/// [`pinned`]: what could make them run other code is in files of their
+/// own, and an Always holds only while those files stay as they were.
+/// Everything here runs the agent's code by design, so no pin helps.
 const ONCE_ONLY: &[&str] = &[
     // Shells and interpreters.
     "sh", "bash", "zsh", "fish", "dash", "cmd", "powershell", "pwsh", "python", "python3", "py",
@@ -134,14 +133,241 @@ const ONCE_ONLY: &[&str] = &[
     // Package managers and build runners, which run the project's scripts.
     "npm", "npx", "pnpm", "pnpx", "yarn", "uv", "uvx", "pip", "pipx", "poetry", "conda",
     "composer", "bundle", "rake", "make", "just", "cargo", "gradle", "mvn", "ant", "msbuild",
-    // Version control and deploy or cloud CLIs, through aliases, hooks,
-    // plugins or the project's own build.
-    "git", "gh", "ssh", "scp", "sftp", "kubectl", "helm", "aws", "az", "gcloud", "terraform",
-    "tofu", "pulumi", "wrangler", "vercel", "netlify", "docker", "podman",
+    // Version control, and the infrastructure tools that run the
+    // project's own code as their configuration.
+    "git", "ssh", "scp", "sftp", "terraform", "tofu", "pulumi", "podman",
     // Windows' own ways to run a script or a library.
     "cscript", "wscript", "mshta", "rundll32", "regsvr32", "certutil", "bitsadmin",
     "installutil", "msiexec",
 ];
+
+/// A file or folder whose content an Always is bound to, because changing
+/// it could make the program run other code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pin {
+    /// How the question names it: `gh's config.yml`. Never holds `,`, `=`
+    /// or `|`, which [`fingerprint`] uses.
+    pub what: String,
+    pub path: String,
+    /// A whole folder, every file in it, rather than one file.
+    pub tree: bool,
+}
+
+/// The deploy and cloud CLIs that may have Always once what could make
+/// them run other code is pinned: their aliases, extensions, plugins,
+/// credential helpers and exec hooks. Some for the program at this path,
+/// the files and folders to pin as `env` (the environment the child will
+/// get, an identity's own folders included) places them; None for any
+/// other program. A program that keeps no such file pins nothing extra,
+/// but is still here, since the caller pins the npm package it runs from.
+pub fn pinned(program_path: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<Vec<Pin>> {
+    let stem = stem_of(program_path);
+    let var = |k: &str| env(k).filter(|v| !v.trim().is_empty());
+    let home = || var("USERPROFILE");
+    let file = |what: &str, path: Option<String>| {
+        path.map(|path| Pin {
+            what: what.to_string(),
+            path,
+            tree: false,
+        })
+    };
+    let tree = |what: &str, path: Option<String>| {
+        path.map(|path| Pin {
+            what: what.to_string(),
+            path,
+            tree: true,
+        })
+    };
+    let kube = || -> Vec<Option<Pin>> {
+        match var("KUBECONFIG") {
+            Some(list) => list
+                .split(';')
+                .filter(|p| !p.trim().is_empty())
+                .map(|p| file("the kubeconfig", Some(p.trim().to_string())))
+                .collect(),
+            None => vec![file("the kubeconfig", home().map(|h| join(&h, r".kube\config")))],
+        }
+    };
+    let pins: Vec<Option<Pin>> = match stem.as_str() {
+        "gh" => {
+            let config = var("GH_CONFIG_DIR")
+                .or_else(|| var("XDG_CONFIG_HOME").map(|x| join(&x, "gh")))
+                .or_else(|| var("APPDATA").map(|a| join(&a, "GitHub CLI")));
+            let data = var("GH_DATA_DIR")
+                .or_else(|| var("XDG_DATA_HOME").map(|x| join(&x, "gh")))
+                .or_else(|| var("LOCALAPPDATA").map(|a| join(&a, "GitHub CLI")));
+            vec![
+                file("gh's config.yml", config.map(|c| join(&c, "config.yml"))),
+                tree("gh's extensions", data.map(|d| join(&d, "extensions"))),
+            ]
+        }
+        "aws" => vec![
+            file(
+                "the aws config",
+                var("AWS_CONFIG_FILE").or_else(|| home().map(|h| join(&h, r".aws\config"))),
+            ),
+            // `credential_process` runs a command from here too.
+            file(
+                "the aws credentials file",
+                var("AWS_SHARED_CREDENTIALS_FILE").or_else(|| home().map(|h| join(&h, r".aws\credentials"))),
+            ),
+        ],
+        "docker" => {
+            let dir = var("DOCKER_CONFIG").or_else(|| home().map(|h| join(&h, ".docker")));
+            vec![
+                // `credsStore` and `credHelpers` name programs it runs.
+                file("docker's config.json", dir.as_ref().map(|d| join(d, "config.json"))),
+                tree("docker's cli-plugins", dir.map(|d| join(&d, "cli-plugins"))),
+            ]
+        }
+        // A kubeconfig's `exec` runs a command for credentials.
+        "kubectl" => kube(),
+        "helm" => {
+            let mut pins = kube();
+            pins.push(tree(
+                "helm's plugins",
+                var("HELM_PLUGINS")
+                    .or_else(|| var("HELM_DATA_HOME").map(|d| join(&d, "plugins")))
+                    .or_else(|| var("APPDATA").map(|a| join(&a, r"helm\plugins"))),
+            ));
+            pins
+        }
+        "gcloud" => {
+            let dir = var("CLOUDSDK_CONFIG").or_else(|| var("APPDATA").map(|a| join(&a, "gcloud")));
+            vec![
+                file("gcloud's properties", dir.as_ref().map(|d| join(d, "properties"))),
+                file("gcloud's active_config", dir.as_ref().map(|d| join(d, "active_config"))),
+                tree("gcloud's configurations", dir.map(|d| join(&d, "configurations"))),
+            ]
+        }
+        "az" => {
+            let dir = var("AZURE_CONFIG_DIR").or_else(|| home().map(|h| join(&h, ".azure")));
+            vec![
+                file("az's config", dir.as_ref().map(|d| join(d, "config"))),
+                tree(
+                    "az's extensions",
+                    var("AZURE_EXTENSION_DIR").or_else(|| dir.map(|d| join(&d, "cliextensions"))),
+                ),
+            ]
+        }
+        // Their own config holds tokens that refresh, never a command, so
+        // pinning it would only ask again for nothing. What they can be made
+        // to run is the project's build; see [`runs_builds`].
+        "vercel" | "wrangler" | "netlify" => Vec::new(),
+        _ => return None,
+    };
+    Some(pins.into_iter().flatten().collect())
+}
+
+/// Whether the program deploys by running the project's own build
+/// (`wrangler.toml`'s `[build]`, `package.json` scripts), which lives in
+/// the project and changes with every commit, so no pin can hold it. The
+/// question says so, and the human answers knowing it.
+pub fn runs_builds(program_path: &str) -> bool {
+    matches!(stem_of(program_path).as_str(), "vercel" | "wrangler" | "netlify")
+}
+
+fn stem_of(program_path: &str) -> String {
+    let file = program_path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program_path)
+        .to_ascii_lowercase();
+    match file.rsplit_once('.') {
+        Some((s, _)) if !s.is_empty() => s.to_string(),
+        _ => file,
+    }
+}
+
+fn join(base: &str, rel: &str) -> String {
+    format!("{}\\{rel}", base.trim_end_matches(['\\', '/']))
+}
+
+/// What an npm `.cmd` shim runs: the package folder and the script in
+/// it, both relative to the shim's folder. Horadric runs that script with
+/// node itself rather than the shim through cmd, so the shim's text is
+/// only read, never trusted to run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shim {
+    /// `node_modules\vercel` or `node_modules\@scope\name`.
+    pub package: String,
+    /// `node_modules\vercel\dist\index.js`.
+    pub script: String,
+}
+
+/// Reads an npm cmd-shim, None for any other `.cmd`. Only the shape npm
+/// writes for a node script with no extra arguments counts; a shim for
+/// another interpreter, or with arguments of its own, stays Once only.
+pub fn npm_shim(text: &str) -> Option<Shim> {
+    if !text.contains(r#""%dp0%\node.exe""#) {
+        return None;
+    }
+    let line = text.lines().rev().find(|l| l.contains(r#""%_prog%""#))?;
+    let (_, after) = line.split_once(r#""%_prog%""#)?;
+    let after = after.trim_start();
+    let rest = after.strip_prefix(r#""%dp0%\"#)?;
+    let (script, tail) = rest.split_once('"')?;
+    if tail.trim() != "%*" {
+        return None;
+    }
+    let parts: Vec<&str> = script.split('\\').collect();
+    let clean = parts.iter().all(|p| {
+        !p.is_empty()
+            && *p != "."
+            && *p != ".."
+            && !p.contains(['%', '"', '/', ':', '^', '&', '|', '<', '>', '!'])
+    });
+    if !clean || parts.first() != Some(&"node_modules") {
+        return None;
+    }
+    let depth = if parts.get(1).is_some_and(|p| p.starts_with('@')) { 3 } else { 2 };
+    if parts.len() <= depth {
+        return None;
+    }
+    Some(Shim {
+        package: parts[..depth].join("\\"),
+        script: script.to_string(),
+    })
+}
+
+/// The content an Always holds to: the program's SHA-256, then each pin's
+/// as `what=hash`, so the question can say which one changed.
+pub fn fingerprint(program_sha256: &str, pins: &[(String, String)]) -> String {
+    let mut out = program_sha256.to_ascii_lowercase();
+    for (what, hash) in pins {
+        out.push_str(&format!(",{what}={hash}"));
+    }
+    out
+}
+
+/// What changed since an Always for this project and program, when the
+/// program is the same and only pinned things differ: their names, for
+/// the question. Empty when nothing was allowed or the program itself
+/// changed.
+pub fn changed_pins(allowed: &[String], project: &str, program: &str, fingerprint: &str) -> Vec<String> {
+    let tail = format!("|{}|{}", project, program.to_ascii_lowercase());
+    let now = fingerprint.to_ascii_lowercase();
+    let mut now = now.split(',');
+    let program_hash = now.next().unwrap_or_default();
+    let now: Vec<(&str, &str)> = now.filter_map(|p| p.split_once('=')).collect();
+    let Some(was) = allowed
+        .iter()
+        .filter_map(|a| a.strip_suffix(&tail)?.strip_prefix("sha256:"))
+        .find(|f| f.split(',').next() == Some(program_hash))
+    else {
+        return Vec::new();
+    };
+    let was: Vec<(&str, &str)> = was.split(',').skip(1).filter_map(|p| p.split_once('=')).collect();
+    now.iter()
+        .filter(|(what, hash)| !was.iter().any(|(w, h)| w == what && h == hash))
+        .map(|(what, _)| what.to_string())
+        .chain(
+            was.iter()
+                .filter(|(what, _)| !now.iter().any(|(w, _)| w == what))
+                .map(|(what, _)| what.to_string()),
+        )
+        .collect()
+}
 
 /// An Always as kept in a secret's `allowed` list: for one project, one
 /// program by its canonical path, and that program's content by SHA-256.
@@ -403,10 +629,6 @@ mod tests {
             assert!(once_only(p), "{p}");
         }
         for p in [
-            r"C:\Program Files\GitHub CLI\gh.exe",
-            r"C:\tools\vercel.exe",
-            "/usr/bin/wrangler",
-            r"C:\Program Files\Amazon\AWSCLIV2\aws.exe",
             r"C:\Windows\System32\rundll32.exe",
             r"C:\Windows\System32\certutil.exe",
             r"C:\Program Files\Java\bin\java.exe",
@@ -427,6 +649,153 @@ mod tests {
         ] {
             assert!(!once_only(p), "{p}");
         }
+    }
+
+    fn env_of<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+    }
+
+    fn pin_paths(program: &str, vars: &[(&str, &str)]) -> Option<Vec<(String, String, bool)>> {
+        let env = env_of(vars);
+        pinned(program, &env).map(|p| p.into_iter().map(|p| (p.what, p.path, p.tree)).collect())
+    }
+
+    #[test]
+    fn deploy_and_cloud_clis_are_pinned_not_once_only() {
+        for p in [
+            r"C:\Program Files\GitHub CLI\gh.exe",
+            r"C:\tools\vercel.exe",
+            r"C:\Users\a\AppData\Roaming\npm\wrangler.cmd",
+            "netlify",
+            r"C:\Program Files\Amazon\AWSCLIV2\aws.exe",
+            "az",
+            "gcloud",
+            r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",
+            "kubectl",
+            "helm",
+        ] {
+            assert!(pinned(p, &|_| None).is_some(), "{p}");
+            assert!(!ONCE_ONLY.contains(&stem_of(p).as_str()), "{p}");
+        }
+        for p in ["terraform", "tofu", "pulumi", "git", "npm", "curl", "stripe"] {
+            assert!(pinned(p, &|_| None).is_none(), "{p}");
+        }
+        assert!(runs_builds("vercel.cmd") && runs_builds("wrangler") && runs_builds("NETLIFY.exe"));
+        assert!(!runs_builds("gh.exe"));
+    }
+
+    #[test]
+    fn gh_pins_its_config_and_extensions_where_its_env_puts_them() {
+        let home = [
+            ("APPDATA", r"C:\Users\a\AppData\Roaming"),
+            ("LOCALAPPDATA", r"C:\Users\a\AppData\Local"),
+        ];
+        assert_eq!(
+            pin_paths("gh.exe", &home).unwrap(),
+            [
+                (
+                    "gh's config.yml".to_string(),
+                    r"C:\Users\a\AppData\Roaming\GitHub CLI\config.yml".to_string(),
+                    false
+                ),
+                (
+                    "gh's extensions".to_string(),
+                    r"C:\Users\a\AppData\Local\GitHub CLI\extensions".to_string(),
+                    true
+                ),
+            ]
+        );
+        let identity = [
+            ("APPDATA", r"C:\Users\a\AppData\Roaming"),
+            ("GH_CONFIG_DIR", r"C:\ids\work\gh\"),
+            ("XDG_DATA_HOME", r"C:\ids\work\data"),
+        ];
+        let p = pin_paths("gh", &identity).unwrap();
+        assert_eq!(p[0].1, r"C:\ids\work\gh\config.yml");
+        assert_eq!(p[1].1, r"C:\ids\work\data\gh\extensions");
+    }
+
+    #[test]
+    fn cloud_clis_pin_their_exec_hooks() {
+        let home = [("USERPROFILE", r"C:\Users\a"), ("APPDATA", r"C:\Users\a\AppData\Roaming")];
+        let paths = |p: &str, vars: &[(&str, &str)]| -> Vec<String> {
+            pin_paths(p, vars).unwrap().into_iter().map(|p| p.1).collect()
+        };
+        assert_eq!(paths("aws", &home), [r"C:\Users\a\.aws\config", r"C:\Users\a\.aws\credentials"]);
+        assert_eq!(
+            paths("aws", &[("USERPROFILE", r"C:\Users\a"), ("AWS_CONFIG_FILE", r"D:\aws.cfg")])[0],
+            r"D:\aws.cfg"
+        );
+        assert_eq!(
+            paths("docker", &home),
+            [r"C:\Users\a\.docker\config.json", r"C:\Users\a\.docker\cli-plugins"]
+        );
+        assert_eq!(paths("docker", &[("DOCKER_CONFIG", r"D:\dk")])[0], r"D:\dk\config.json");
+        assert_eq!(paths("kubectl", &home), [r"C:\Users\a\.kube\config"]);
+        assert_eq!(paths("kubectl", &[("KUBECONFIG", r"D:\a;;D:\b")]), [r"D:\a", r"D:\b"]);
+        assert_eq!(
+            paths("helm", &home),
+            [r"C:\Users\a\.kube\config", r"C:\Users\a\AppData\Roaming\helm\plugins"]
+        );
+        assert_eq!(
+            paths("gcloud", &[("CLOUDSDK_CONFIG", r"D:\g")]),
+            [r"D:\g\properties", r"D:\g\active_config", r"D:\g\configurations"]
+        );
+        assert_eq!(paths("az", &home), [r"C:\Users\a\.azure\config", r"C:\Users\a\.azure\cliextensions"]);
+        assert!(paths("vercel", &home).is_empty());
+        // No home to place them in pins nothing rather than a wrong path.
+        assert!(paths("aws", &[]).is_empty());
+        for pin in pinned("gcloud", &env_of(&home)).unwrap() {
+            assert!(!pin.what.contains([',', '=', '|']), "{}", pin.what);
+        }
+    }
+
+    const SHIM: &str = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\vercel\\dist\\index.js\" %*\r\n";
+
+    #[test]
+    fn an_npm_shim_names_its_package_and_script() {
+        assert_eq!(
+            npm_shim(SHIM),
+            Some(Shim {
+                package: r"node_modules\vercel".into(),
+                script: r"node_modules\vercel\dist\index.js".into(),
+            })
+        );
+        let scoped = SHIM.replace(r"node_modules\vercel\dist", r"node_modules\@netlify\cli\bin");
+        assert_eq!(npm_shim(&scoped).unwrap().package, r"node_modules\@netlify\cli");
+        for bad in [
+            SHIM.replace(r"node_modules\vercel", r"node_modules\..\..\x"),
+            SHIM.replace(r"node_modules\vercel", r"other\vercel"),
+            SHIM.replace("\" %*", "\" --flag %*"),
+            SHIM.replace("\"%_prog%\"  \"", "\"%_prog%\" --x \""),
+            SHIM.replace("node.exe", "sh.exe"),
+            SHIM.replace(r"vercel\dist\index.js", "vercel"),
+            SHIM.replace(r"dist\index.js", "dist\\%X%.js"),
+            "@echo off\r\nnode x.js %*\r\n".to_string(),
+        ] {
+            assert_eq!(npm_shim(&bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_changed_pin_is_named() {
+        let gh = r"C:\Program Files\GitHub CLI\gh.exe";
+        let pins = |c: &str, e: &str| {
+            vec![("gh's config.yml".to_string(), c.to_string()), ("gh's extensions".to_string(), e.to_string())]
+        };
+        let was = fingerprint("ABC", &pins("c1", "e1"));
+        let allowed = vec![approval("c:/a", gh, &was)];
+        assert!(approved(&allowed, "c:/a", gh, &fingerprint("abc", &pins("c1", "e1"))));
+        let now = fingerprint("abc", &pins("c2", "e1"));
+        assert!(!approved(&allowed, "c:/a", gh, &now));
+        assert_eq!(changed_pins(&allowed, "c:/a", gh, &now), ["gh's config.yml"]);
+        // Another program content, project or none allowed names nothing.
+        assert!(changed_pins(&allowed, "c:/a", gh, &fingerprint("abd", &pins("c2", "e1"))).is_empty());
+        assert!(changed_pins(&allowed, "c:/b", gh, &now).is_empty());
+        assert!(changed_pins(&[], "c:/a", gh, &now).is_empty());
+        // A pin that is new since, or gone, is named too.
+        let more = fingerprint("abc", &[("gh's config.yml".into(), "c1".into())]);
+        assert_eq!(changed_pins(&allowed, "c:/a", gh, &more), ["gh's extensions"]);
     }
 
     #[test]

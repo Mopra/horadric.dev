@@ -196,7 +196,17 @@ third half, below.
   `powershell`, `pwsh`, `python`, `node`, `deno`, `bun`), a script runner
   (`npm`, `npx`, `pnpm`, `yarn`, `uv`, `make`, `just`, `cargo`, whose
   build scripts run), and `git` (its aliases and hooks are shell). The
-  list is the pure part and grows with what turns up.
+  list is the pure part and grows with what turns up. The deploy and
+  cloud CLIs (`gh`, `vercel`, `wrangler`, `netlify`, `aws`, `az`,
+  `gcloud`, `docker`, `kubectl`, `helm`) can be made to run other code
+  too, but only through files of their own: `gh`'s aliases and
+  extensions, docker's credential helpers, a kubeconfig's `exec`. Their
+  Always pins those files by SHA-256, read fresh on every run, and any
+  change asks again, naming what changed. An npm shim is run as node with
+  its package's script, and its whole package folder and that node are
+  pinned. `vercel`, `wrangler` and `netlify` may also run the project's
+  build, which no pin can hold, and the question says so (decided
+  2026-11-06).
 - **Adding one.** In Settings, Projects, a Secrets row lists the picked
   project's names, its identity's and the Everywhere ones under them, and
   the names `config.json` asks for that are not kept yet. Add asks for the
