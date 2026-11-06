@@ -204,6 +204,17 @@ pub enum Call {
     Close,
     /// A DevTools protocol method and its parameters.
     DevTools(String, Value),
+    /// Type a kept web login into the page: its name, the session's key,
+    /// and the refs of the fields to fill, as `browser_fill_login` names
+    /// them. The values stay in the app.
+    #[cfg(windows)]
+    FillLogin {
+        name: String,
+        key: String,
+        user: Option<String>,
+        password: Option<String>,
+        code: Option<String>,
+    },
 }
 
 impl Call {
@@ -213,10 +224,10 @@ impl Call {
         let text = |k: &str| body.get(k).and_then(Value::as_str);
         Ok(match text("op") {
             Some("info") => Call::Info,
-            Some("open") => Call::Open(text("url").and_then(address)),
-            Some("navigate") => {
-                Call::Navigate(text("url").and_then(address).ok_or("say where: a url")?)
-            }
+            Some("open") => Call::Open(text("url").and_then(address).map(no_script).transpose()?),
+            Some("navigate") => Call::Navigate(no_script(
+                text("url").and_then(address).ok_or("say where: a url")?,
+            )?),
             Some("back") => Call::History(Step::Back),
             Some("forward") => Call::History(Step::Forward),
             Some("reload") => Call::History(Step::Reload),
@@ -225,11 +236,141 @@ impl Call {
                 let method = text("method").ok_or("say which DevTools method")?;
                 let params = body.get("params").cloned().unwrap_or_else(|| json!({}));
                 let params = devtools_allowed(method, params)?;
+                if method == "Page.navigate" {
+                    no_script(params["url"].as_str().unwrap_or_default().to_string())?;
+                }
                 Call::DevTools(method.to_string(), params)
+            }
+            #[cfg(windows)]
+            Some("fill_login") => {
+                let name = text("name").ok_or("say which login: name")?;
+                let field = |k: &str| text(k).filter(|r| !r.is_empty()).map(str::to_string);
+                let (user, password, code) = (field("user"), field("password"), field("code"));
+                if user.is_none() && password.is_none() && code.is_none() {
+                    return Err("say which fields to fill: the refs of user, password or code \
+                                from browser_snapshot"
+                        .into());
+                }
+                if user.is_some() && password.is_none() {
+                    return Err("a user name is filled with its password: give the password \
+                                field's ref too"
+                        .into());
+                }
+                Call::FillLogin {
+                    name: name.to_string(),
+                    key: text("key").unwrap_or_default().to_string(),
+                    user,
+                    password,
+                    code,
+                }
             }
             _ => return Err("unknown browser call".into()),
         })
     }
+}
+
+/// A `javascript:` address runs the agent's own script in the page it is
+/// on, which a page holding a filled login must never do; nothing else
+/// needs one.
+fn no_script(url: String) -> Result<String, String> {
+    if url.trim_start().to_ascii_lowercase().starts_with("javascript:") {
+        return Err("a javascript: address is not opened; use browser_evaluate".into());
+    }
+    Ok(url)
+}
+
+/// Where a tab stands with web logins, for what an agent may call on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Filled {
+    Never,
+    /// A login was filled in an earlier page of this tab.
+    Before,
+    /// The page it shows now holds a filled login.
+    Now,
+}
+
+/// The Page methods that read nothing of the page's own text or memory.
+const QUIET_PAGE: &[&str] = &[
+    "Page.enable",
+    "Page.disable",
+    "Page.navigate",
+    "Page.reload",
+    "Page.stopLoading",
+    "Page.getNavigationHistory",
+    "Page.getFrameTree",
+    "Page.getLayoutMetrics",
+    "Page.captureScreenshot",
+    "Page.bringToFront",
+    "Page.handleJavaScriptDialog",
+];
+
+/// Whether a DevTools call neither reads the page's fields nor puts the
+/// agent's own code into it: input, the quiet Page calls, emulation, and
+/// the mcp's own page scripts (with refs only, when `refs_only`). Such a
+/// call is allowed on a page holding a filled login, and does not keep
+/// one from being filled.
+pub fn quiet(method: &str, params: &Value, refs_only: bool) -> bool {
+    use horadric_core::vault::web::page;
+    if method.starts_with("Input.") || method.starts_with("Emulation.") {
+        return true;
+    }
+    if QUIET_PAGE.contains(&method) {
+        return true;
+    }
+    if method != "Runtime.evaluate" {
+        return false;
+    }
+    let Some(p) = params.as_object() else {
+        return false;
+    };
+    // includeCommandLineAPI, a context of another frame, or an object
+    // handle back would each reach past the script itself.
+    let plain = p.iter().all(|(k, v)| match k.as_str() {
+        "expression" => true,
+        "returnByValue" => v == true,
+        "awaitPromise" | "userGesture" => v.is_boolean(),
+        _ => false,
+    });
+    let Some(expression) = p.get("expression").and_then(Value::as_str) else {
+        return false;
+    };
+    plain
+        && if refs_only {
+            page::safe_after_fill(expression)
+        } else {
+            page::known(expression)
+        }
+}
+
+/// Whether an agent may make a DevTools call on a tab where a login was
+/// filled, or why not. While the page holding it shows, only quiet calls
+/// pass: a script, the DOM, the console, the accessibility tree or a DOM
+/// snapshot could each hand the agent the password. Reading a request's
+/// body or the page's heap is refused for the tab's whole life, since the
+/// sign in request and the old page's memory still hold it after the page
+/// is left.
+pub fn after_fill(method: &str, params: &Value, state: Filled) -> Result<(), String> {
+    if state == Filled::Never {
+        return Ok(());
+    }
+    let sticky = method == "Network.getRequestPostData"
+        || method == "Network.getResponseBody"
+        || method.starts_with("HeapProfiler.");
+    if sticky {
+        return Err(format!(
+            "{method} is refused in this tab: a login was filled in it, and the sign in \
+             request or the page's memory still holds the password"
+        ));
+    }
+    if state == Filled::Now && !quiet(method, params, true) {
+        return Err(format!(
+            "{method} is refused on this page: Horadric filled a login here, and until the \
+             page is left only browser_snapshot, browser_click, browser_type, browser_press, \
+             browser_scroll, browser_screenshot and browser_wait (by ref, no selectors) work. \
+             Sign in, or navigate away."
+        ));
+    }
+    Ok(())
 }
 
 /// Whole DevTools domains an agent may use: each acts on its own tab's
@@ -581,5 +722,73 @@ mod tests {
         let i = info(true, true, "p", Some((0, 1, true)), "", "");
         assert_eq!(i["shown"], true);
         assert_eq!(info(false, false, "p", None, "", "")["tab"], Value::Null);
+    }
+
+    #[test]
+    fn a_filled_page_allows_only_quiet_calls() {
+        use horadric_core::vault::web::page;
+        let eval = |e: &str| json!({ "expression": e, "returnByValue": true, "awaitPromise": true });
+        let snap = eval(&page::snapshot());
+        let click = eval(&page::call(page::POINT, &[json!("e2"), Value::Null]));
+        let by_selector = eval(&page::call(page::POINT, &[Value::Null, json!("#pw")]));
+        let own = eval("document.querySelector('[type=password]').value");
+        for state in [Filled::Never, Filled::Before, Filled::Now] {
+            assert!(after_fill("Runtime.evaluate", &snap, state).is_ok());
+            assert!(after_fill("Runtime.evaluate", &click, state).is_ok());
+            assert!(after_fill("Input.insertText", &json!({ "text": "x" }), state).is_ok());
+            assert!(after_fill("Page.captureScreenshot", &json!({}), state).is_ok());
+        }
+        assert!(after_fill("Runtime.evaluate", &own, Filled::Before).is_ok());
+        assert!(after_fill("Runtime.evaluate", &own, Filled::Now).is_err());
+        assert!(after_fill("Runtime.evaluate", &by_selector, Filled::Now).is_err());
+        for m in ["DOM.getOuterHTML", "DOMSnapshot.captureSnapshot", "Accessibility.getFullAXTree",
+            "Runtime.callFunctionOn", "Console.enable", "Log.enable", "Debugger.enable", "CSS.addRule"] {
+            assert!(after_fill(m, &json!({}), Filled::Now).is_err(), "{m}");
+            assert!(after_fill(m, &json!({}), Filled::Before).is_ok(), "{m}");
+        }
+        // The sign in request and the old page's heap hold it for good.
+        for m in ["Network.getRequestPostData", "Network.getResponseBody", "HeapProfiler.takeHeapSnapshot"] {
+            assert!(after_fill(m, &json!({}), Filled::Before).is_err(), "{m}");
+            assert!(after_fill(m, &json!({}), Filled::Never).is_ok(), "{m}");
+        }
+        // A known script with more than plain options is not quiet.
+        let mut wide = snap.clone();
+        wide["includeCommandLineAPI"] = json!(true);
+        assert!(after_fill("Runtime.evaluate", &wide, Filled::Now).is_err());
+        // Only the agent's own code marks a page against a fill.
+        assert!(quiet("Runtime.evaluate", &by_selector, false));
+        assert!(!quiet("Runtime.evaluate", &own, false));
+        assert!(!quiet("DOM.setAttributeValue", &json!({}), false));
+    }
+
+    #[test]
+    fn javascript_addresses_are_not_opened() {
+        let nav = |u: &str| Call::parse(&json!({ "op": "navigate", "url": u }));
+        assert!(nav("javascript://x%0afetch('//x.example')").is_err());
+        assert!(nav(" JavaScript://%0aalert(1)").is_err());
+        assert!(nav("https://example.com").is_ok());
+        let dev = json!({ "op": "devtools", "method": "Page.navigate", "params": { "url": "javascript:1" } });
+        assert!(Call::parse(&dev).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_fill_names_its_login_and_fields() {
+        let call = Call::parse(&json!({ "op": "fill_login", "name": "OPTI", "key": "k",
+            "user": "e1", "password": "e2", "code": null }))
+        .unwrap();
+        assert_eq!(
+            call,
+            Call::FillLogin {
+                name: "OPTI".into(),
+                key: "k".into(),
+                user: Some("e1".into()),
+                password: Some("e2".into()),
+                code: None
+            }
+        );
+        assert!(Call::parse(&json!({ "op": "fill_login", "name": "OPTI" })).is_err());
+        assert!(Call::parse(&json!({ "op": "fill_login", "name": "OPTI", "user": "e1" })).is_err());
+        assert!(Call::parse(&json!({ "op": "fill_login", "name": "OPTI", "code": "e4" })).is_ok());
     }
 }

@@ -1502,6 +1502,19 @@ pub fn forget_call(key: &str, id: u64) {
     });
 }
 
+/// Whether the tab `id` was opened by a page, or opened one still open:
+/// either page may reach into the other's document, so a login is not
+/// filled there.
+pub fn tied_to_popup(key: &str, id: u64) -> bool {
+    WEBS.with(|w| {
+        w.borrow().get(key).is_some_and(|web| {
+            web.tabs
+                .iter()
+                .any(|t| (t.id == id && t.from.is_some()) || t.from == Some(id))
+        })
+    })
+}
+
 /// The id of the tab the pane shows.
 pub fn shown_tab(key: &str) -> Option<u64> {
     read_tab(key, None, |t| t.id)

@@ -4,6 +4,8 @@
 //! so it is parsed here by hand, strictly, rather than trusted to anything
 //! that forgives a malformed URL.
 
+pub mod page;
+
 /// The origin of a URL, `https://host[:port]`, lower case, with the
 /// scheme's default port left out. None for anything but http and https,
 /// and for a URL with no host.

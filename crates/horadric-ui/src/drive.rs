@@ -15,11 +15,13 @@ use std::collections::HashSet;
 
 use horadric_core::Phase;
 use horadric_hooks::listener::{BrowserCall, Reply};
+use horadric_core::vault::identity::Resolved;
 use serde_json::{json, Value};
 
 use super::{App, WEB};
 use crate::browse::{self, closed, error, Call};
 use crate::console::Console;
+use crate::vault::{fill, identity};
 use crate::web;
 use crate::window::project_name;
 
@@ -44,6 +46,11 @@ impl App {
         // Its own tab, whichever tab the user shows: see `web::pick_tab`.
         let live = self.live_sessions();
         let tab = |make: bool| web::agent_tab(&key, session, |s| live.contains(s), make);
+        // A navigation while a login is typed in would carry the typing to
+        // another page.
+        if what != Call::Info && tab(false).is_some_and(fill::busy) {
+            return reply.send(error(fill::BUSY));
+        }
         match what {
             Call::Info => reply.send(info(&key, tab(false))),
             Call::Open(url) => {
@@ -99,15 +106,37 @@ impl App {
                     if !reply.wanted() {
                         return;
                     }
-                    web::devtools(&k, id, &method, &params.to_string(), move |r| {
-                        reply.send(match r {
-                            Ok(text) => json!({
-                                "result": serde_json::from_str::<Value>(&text)
-                                    .unwrap_or(Value::Null)
-                            }),
-                            Err(e) => error(&e),
-                        })
-                    });
+                    fill::devtools(&k, id, method, params, reply);
+                });
+            }
+            Call::FillLogin {
+                name,
+                key: secret_key,
+                user,
+                password,
+                code,
+            } => {
+                let Some(id) = tab(false) else {
+                    return reply.send(closed());
+                };
+                let identity = match self.project_dir(&key).map(|d| identity::of_project(&d)) {
+                    Some(Resolved::Identity(slug)) => Some(slug),
+                    _ => None,
+                };
+                let req = fill::Request {
+                    project: key.clone(),
+                    identity,
+                    session: session.to_string(),
+                    key: secret_key,
+                    name,
+                    user,
+                    password,
+                    code,
+                };
+                web::with_view(&key, id, move |_| {
+                    if reply.wanted() {
+                        fill::fill(req, id, reply);
+                    }
                 });
             }
         }
