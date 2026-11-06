@@ -66,7 +66,7 @@ pub fn with_mermaid(html: String) -> String {
         return html;
     }
     let scripts = format!(
-        "<script src=\"{}mermaid.js\"></script>\n<script>\
+        "<script src=\"{}mermaid.js\"></script>\n<script>{MERMAID_LOOK}\
          window.__forgeMermaid.render(document.body, function (e) {{\
          if (window.__forge && window.__forge.report) window.__forge.report(e);\
          }});</script>\n",
@@ -81,6 +81,32 @@ pub fn with_mermaid(html: String) -> String {
         None => html + &scripts,
     }
 }
+
+/// Mermaid drawn in the page's Horadric look rather than its own light
+/// default: keys' faces for nodes, the project's colour round them, the
+/// legends' ink for lines. Read from the page's `--hd-` properties, so a
+/// diagram follows the theme as the page does.
+const MERMAID_LOOK: &str = r##"(function () {
+  var s = getComputedStyle(document.documentElement);
+  var d = { screen: "#060709", plate: "#151619", surface: "#1b1d21", text: "#e8e9ed",
+    read: "#d4d5d9", dim: "#8f939e", legend: "#6e727c", accent: "#a78bfa" };
+  var v = function (n) { return s.getPropertyValue("--hd-" + n).trim() || d[n]; };
+  window.__forgeMermaid.mermaid.initialize({ startOnLoad: false, securityLevel: "strict",
+    layout: "dagre", theme: "base", themeVariables: { darkMode: true,
+    fontFamily: '"Segoe UI Variable Text", "Segoe UI", sans-serif', fontSize: "14px",
+    background: v("screen"), mainBkg: v("surface"), primaryColor: v("surface"),
+    primaryTextColor: v("text"), primaryBorderColor: v("accent"), nodeBorder: v("accent"),
+    secondaryColor: v("plate"), secondaryTextColor: v("read"), secondaryBorderColor: v("legend"),
+    tertiaryColor: v("plate"), tertiaryTextColor: v("read"), tertiaryBorderColor: v("legend"),
+    lineColor: v("dim"), textColor: v("read"), titleColor: v("text"),
+    clusterBkg: v("plate"), clusterBorder: v("legend"), edgeLabelBackground: v("screen"),
+    noteBkgColor: v("surface"), noteTextColor: v("read"), noteBorderColor: v("legend"),
+    actorBkg: v("surface"), actorBorder: v("accent"), actorTextColor: v("text"),
+    actorLineColor: v("legend"), signalColor: v("dim"), signalTextColor: v("read"),
+    labelBoxBkgColor: v("surface"), labelBoxBorderColor: v("legend"), labelTextColor: v("text"),
+    loopTextColor: v("read") } });
+})();
+"##;
 
 /// Text made safe for a double quoted attribute.
 pub fn attr(s: &str) -> String {

@@ -18,6 +18,7 @@ use std::path::Path;
 pub use csv::csv_html;
 pub use diff::{diff_lines, DiffLine};
 pub use edit::{replace_lines, replace_range, utf16_to_byte};
+pub use html::LOOK;
 pub use md::markdown_html;
 pub use pins::{pin_message, At, Pin, Rect};
 

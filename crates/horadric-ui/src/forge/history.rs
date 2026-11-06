@@ -34,7 +34,7 @@ use windows::core::{Interface, HSTRING, PWSTR};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::SHCreateMemStream;
 
-use super::serve::SUFFIX;
+use super::serve::{styled, SUFFIX};
 use crate::menu::{self, Item};
 use crate::web;
 
@@ -451,14 +451,18 @@ fn navigate_served(key: &str, tab: u64, url: String) {
         let Some(view) = view else { return };
         let first = SERVING.with(|s| s.borrow_mut().insert((owned.clone(), tab)));
         if first {
-            serve_versions(&view, &root, &version_host(&host));
+            // The version host's pages keep the look the tab had when it
+            // was first asked for one, as the chrome does.
+            let look = super::serve::look(crate::theme::accent(&owned));
+            serve_versions(&view, &root, &version_host(&host), look);
         }
         web::navigate(&owned, tab, &url);
     });
 }
 
-/// Answers every request to the version host of the page `view`.
-fn serve_versions(view: &ICoreWebView2, root: &Path, host: &str) {
+/// Answers every request to the version host of the page `view`, its
+/// pages in Horadric's `look`.
+fn serve_versions(view: &ICoreWebView2, root: &Path, host: &str, look: String) {
     unsafe {
         let _ = view.AddWebResourceRequestedFilter(
             &HSTRING::from(format!("https://{host}/*")),
@@ -468,7 +472,7 @@ fn serve_versions(view: &ICoreWebView2, root: &Path, host: &str) {
         let prefix = format!("https://{host}/");
         let handler = WebResourceRequestedEventHandler::create(Box::new(move |view, args| {
             if let (Some(view), Some(args)) = (view, args) {
-                answer(&view, &args, &root, &prefix);
+                answer(&view, &args, &root, &prefix, &look);
             }
             Ok(())
         }));
@@ -486,6 +490,7 @@ fn answer(
     args: &ICoreWebView2WebResourceRequestedEventArgs,
     root: &Path,
     prefix: &str,
+    look: &str,
 ) {
     let Ok(request) = (unsafe { args.Request() }) else {
         return;
@@ -505,9 +510,9 @@ fn answer(
     {
         return respond(&env, args, &(403, "text/plain", b"Not here".to_vec()));
     }
-    let root = root.to_path_buf();
+    let (root, look) = (root.to_path_buf(), look.to_string());
     let Ok(deferral) = (unsafe { args.GetDeferral() }) else {
-        return respond(&env, args, &reply_for(&root, segs));
+        return respond(&env, args, &reply_for(&root, segs, &look));
     };
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     WAITING.with(|w| {
@@ -523,7 +528,7 @@ fn answer(
     let started = thread::Builder::new()
         .name("horadric-forge-version".into())
         .spawn(move || {
-            let reply = reply_for(&root, segs);
+            let reply = reply_for(&root, segs, &look);
             if let Ok(mut done) = ANSWERED.lock() {
                 done.push((n, reply));
             }
@@ -570,18 +575,18 @@ pub(super) fn drain() {
     }
 }
 
-/// The answer to the path `segs` on the version host. Reads files, so it is
-/// for a worker thread.
-fn reply_for(root: &Path, mut segs: Vec<String>) -> Reply {
+/// The answer to the path `segs` on the version host, its pages in
+/// `look`. Reads files, so it is for a worker thread.
+fn reply_for(root: &Path, mut segs: Vec<String>, look: &str) -> Reply {
     if segs.first().is_some_and(|s| s == "compare") && segs.len() > 3 {
         let rel: PathBuf = segs[3..].iter().collect();
-        let page = compare_page(root, &rel, &segs[1], &segs[2]);
+        let page = compare_page(root, &rel, &segs[1], &segs[2], look);
         (200, "text/html; charset=utf-8", page.into_bytes())
     } else if segs.len() > 1 {
         let which = segs.remove(0);
         let rel: PathBuf = segs.iter().collect();
         match bytes_at(root, &rel, &which) {
-            Some(bytes) => rendered(&rel, bytes),
+            Some(bytes) => rendered(&rel, bytes, look),
             None => (404, "text/plain", b"Not kept".to_vec()),
         }
     } else {
@@ -604,7 +609,7 @@ fn bytes_at(root: &Path, rel: &Path, which: &str) -> Option<Vec<u8>> {
 
 /// A file's bytes as the page gets them: markdown and CSV rendered, the
 /// rest as they are.
-fn rendered(rel: &Path, bytes: Vec<u8>) -> (i32, &'static str, Vec<u8>) {
+fn rendered(rel: &Path, bytes: Vec<u8>, look: &str) -> (i32, &'static str, Vec<u8>) {
     let title = rel
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -612,12 +617,12 @@ fn rendered(rel: &Path, bytes: Vec<u8>) -> (i32, &'static str, Vec<u8>) {
     match horadric_core::forge::kind_of_bytes(rel, &bytes) {
         Some(Kind::Markdown) => {
             let src = String::from_utf8_lossy(&bytes);
-            let html = horadric_core::forge::markdown_html(&src, &title);
+            let html = styled(horadric_core::forge::markdown_html(&src, &title), look);
             (200, "text/html; charset=utf-8", html.into_bytes())
         }
         Some(Kind::Csv) => {
             let src = String::from_utf8_lossy(&bytes);
-            let html = horadric_core::forge::csv_html(&src, &title);
+            let html = styled(horadric_core::forge::csv_html(&src, &title), look);
             (200, "text/html; charset=utf-8", html.into_bytes())
         }
         _ => (200, mime_of(rel), bytes),
@@ -676,14 +681,9 @@ const CONTEXT: usize = 3;
 const COMPARE_LARGEST: usize = 4 << 20;
 
 /// The page comparing `rel` at `a` with it at `b`: the lines that changed
-/// for text, the two side by side for a picture or a PDF.
-fn compare_page(root: &Path, rel: &Path, a: &str, b: &str) -> String {
-    let title = format!(
-        "{}: {} and {}",
-        rel.display(),
-        side_name(a),
-        side_name(b)
-    );
+/// for text, the two side by side for a picture or a PDF. On Horadric's
+/// plate in `look`: the file and the two sides engraved over a screen.
+fn compare_page(root: &Path, rel: &Path, a: &str, b: &str, look: &str) -> String {
     let mut body = String::new();
     let kind = horadric_core::forge::kind_of_bytes(rel, &[]);
     if matches!(kind, Some(Kind::Image | Kind::Pdf)) {
@@ -693,8 +693,10 @@ fn compare_page(root: &Path, rel: &Path, a: &str, b: &str) -> String {
             _ => format!("<img src=\"/{w}/{path}\" alt=\"\">"),
         };
         body.push_str(&format!(
-            "<div class=\"sides\"><figure><figcaption>{}</figcaption>{}</figure>\
-             <figure><figcaption>{}</figcaption>{}</figure></div>",
+            "<div class=\"sides\"><figure><figcaption class=\"hd-legend was\"><i></i>{}</figcaption>\
+             <div class=\"hd-screen\">{}</div></figure>\
+             <figure><figcaption class=\"hd-legend now\"><i></i>{}</figcaption>\
+             <div class=\"hd-screen\">{}</div></figure></div>",
             escape(&side_name(a)),
             tag(a),
             escape(&side_name(b)),
@@ -705,7 +707,7 @@ fn compare_page(root: &Path, rel: &Path, a: &str, b: &str) -> String {
         let large = |t: &Option<Vec<u8>>| t.as_ref().is_some_and(|t| t.len() > COMPARE_LARGEST);
         if large(&ta) || large(&tb) {
             body.push_str(&format!(
-                "<p class=\"same\">Too large to compare line by line, over {} MB.</p>",
+                "<div class=\"hd-screen\"><p class=\"same\">Too large to compare line by line, over {} MB.</p></div>",
                 COMPARE_LARGEST >> 20
             ));
         } else {
@@ -713,14 +715,30 @@ fn compare_page(root: &Path, rel: &Path, a: &str, b: &str) -> String {
                 t.map(|b| String::from_utf8_lossy(&b).into_owned())
                     .unwrap_or_default()
             };
+            body.push_str("<div class=\"hd-screen diff\">");
             body.push_str(&diff_table(&horadric_core::forge::diff_lines(&text(ta), &text(tb))));
+            body.push_str("</div>");
         }
     }
-    format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{t}</title><style>{CSS}</style>\
-         </head><body><h1>{t}</h1>{body}</body></html>",
+    compare_frame(rel, a, b, &body, look)
+}
+
+/// The comparison's page round its `body`.
+fn compare_frame(rel: &Path, a: &str, b: &str, body: &str, look: &str) -> String {
+    let title = format!("{}: {} and {}", rel.display(), side_name(a), side_name(b));
+    let page = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <title>{t}</title><style>{}{CSS}</style></head><body><div class=\"compare\">\
+         <header><h1>{}</h1><div class=\"hd-legend\"><span class=\"was\"><i></i>{}</span>\
+         <span class=\"now\"><i></i>{}</span></div></header>{body}</div></body></html>",
+        horadric_core::forge::LOOK,
+        escape(&rel.to_string_lossy().replace('\\', "/")),
+        escape(&side_name(a)),
+        escape(&side_name(b)),
         t = escape(&title)
-    )
+    );
+    styled(page, look)
 }
 
 /// The diff as a table of numbered lines, long unchanged runs folded.
@@ -780,21 +798,51 @@ fn diff_table(lines: &[DiffLine]) -> String {
     out
 }
 
-const CSS: &str = "\
-:root{color-scheme:dark light;--bg:#1b1a19;--fg:#e8e4dc;--dim:#8d877c;--del:#4a2424;--add:#1f3b26}\
-@media (prefers-color-scheme:light){:root{--bg:#faf8f4;--fg:#22201c;--dim:#7a746a;--del:#f6dcdc;--add:#dcefdc}}\
-body{margin:0;padding:16px 20px;background:var(--bg);color:var(--fg);font:14px/1.45 'Segoe UI',sans-serif}\
-h1{font-size:15px;font-weight:600;margin:0 0 12px}\
-table{border-collapse:collapse;width:100%;font:12.5px/1.5 Consolas,'Cascadia Mono',monospace}\
-td{padding:0 8px;vertical-align:top;white-space:pre-wrap;word-break:break-word}\
-td.n{color:var(--dim);text-align:right;width:1%;white-space:nowrap;user-select:none}\
-td.m{color:var(--dim);width:1%;user-select:none}\
-tr.del{background:var(--del)}tr.add{background:var(--add)}\
-tr.fold td{color:var(--dim);text-align:center;padding:4px;font-family:'Segoe UI',sans-serif}\
-.same{color:var(--dim)}\
-.sides{display:flex;gap:16px;align-items:flex-start}\
-figure{flex:1;margin:0;min-width:0}figcaption{color:var(--dim);margin-bottom:6px}\
-figure img{max-width:100%;display:block}figure iframe{width:100%;height:85vh;border:0}";
+/// The comparison drawn as the Folio draws a diff: removed rows tinted
+/// in the error colour and added ones in the done colour, numbers and
+/// marks in the legends' ink, unchanged runs folded behind an engraved
+/// count.
+const CSS: &str = r#"
+body { padding: 30px 26px 40px; }
+.compare { max-width: 1120px; margin: 0 auto; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; margin: 0 4px 14px; }
+h1 { margin: 0; font: 600 16px/1.3 var(--hd-mono); color: var(--hd-text); overflow-wrap: anywhere; }
+header .hd-legend { display: flex; gap: 18px; }
+.hd-legend span, figcaption { display: inline-flex; align-items: center; gap: 8px; }
+/* Which side is which: a lamp lit in the colour its rows are tinted. */
+.hd-legend i { width: 6px; height: 6px; border-radius: 50%; }
+.was i { background: var(--hd-error); }
+.now i { background: var(--hd-done); }
+.diff { padding: 6px 0; overflow: auto; }
+table { border-collapse: collapse; width: 100%; font: 12.5px/1.65 var(--hd-mono); }
+td { padding: 0 10px; vertical-align: top; white-space: pre-wrap; word-break: break-word;
+  color: var(--hd-read); }
+td.n { color: var(--hd-legend); text-align: right; width: 1%; white-space: nowrap; user-select: none;
+  font-variant-numeric: tabular-nums; }
+td.m { width: 1%; color: var(--hd-legend); user-select: none; }
+tr.del td { background: color-mix(in srgb, var(--hd-error) 15%, transparent); }
+tr.add td { background: color-mix(in srgb, var(--hd-done) 13%, transparent); }
+tr.del td.m { color: var(--hd-error); }
+tr.add td.m { color: var(--hd-done); }
+tr.fold td { padding: 6px; text-align: center; font: 600 10.5px/1.2 var(--hd-ui);
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--hd-legend);
+  border-block: 1px solid color-mix(in srgb, var(--hd-read) 6%, transparent); }
+.same { margin: 0; padding: 30px 20px; text-align: center; color: var(--hd-dim); font-size: 14px; }
+.sides { display: flex; gap: 18px; align-items: flex-start; }
+figure { flex: 1; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+figcaption { padding: 0 4px; }
+figure .hd-screen { padding: 10px; }
+figure img { max-width: 100%; display: block; margin: 0 auto; }
+figure iframe { width: 100%; height: 80vh; border: 0; border-radius: 6px; display: block; }
+@media print {
+  body { padding: 0; }
+  .hd-screen { background: none; box-shadow: none; }
+  td { color: #1d1e21; }
+  tr.del td { background: #fbe3e4; }
+  tr.add td { background: #e0f5e9; }
+  h1 { color: #000; }
+}
+"#;
 
 fn respond(
     env: &ICoreWebView2Environment,
@@ -913,6 +961,23 @@ mod tests {
     fn civil_days_are_right() {
         assert_eq!(civil(0), (1970, 1, 1));
         assert_eq!(civil(20_397), (2025, 11, 5));
+    }
+
+    /// Writes a comparison to `FORGE_SAMPLES`, to look at in the browser
+    /// pane beside the other pages (serve.rs writes those).
+    #[test]
+    #[ignore]
+    fn write_a_sample_comparison() {
+        let Ok(dir) = std::env::var("FORGE_SAMPLES") else { return };
+        let a: String = (1..=30).map(|i| format!("Line {i} of the plan\n")).collect();
+        let b = a.replace("Line 12 of the plan\n", "Line 12, rewritten\nA line added\n");
+        let body = format!(
+            "<div class=\"hd-screen diff\">{}</div>",
+            diff_table(&horadric_core::forge::diff_lines(&a, &b))
+        );
+        let look = super::super::serve::look(crate::theme::ACCENTS[2].0);
+        let page = compare_frame(Path::new(r"docs\plan.md"), "1762380000000", "now", &body, &look);
+        std::fs::write(Path::new(&dir).join("compare.html"), page).unwrap();
     }
 
     #[test]

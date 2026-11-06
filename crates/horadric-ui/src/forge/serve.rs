@@ -431,16 +431,20 @@ fn plan(root: &Path, url: &str, document: bool, flat: bool, accent: Color) -> Op
         return Some(Plan::Now(Reply::file(file, raw_type(kind, raw))));
     }
     if matches!(kind, Kind::Pptx | Kind::Docx) {
-        return Some(Plan::Now(super::office::page(root, &file)));
+        return Some(Plan::Now(super::office::page(root, &file, &look(accent))));
     }
     if matches!(kind, Kind::Jsx | Kind::Mermaid) {
-        return Some(Plan::Now(Reply::html(super::runtime::artefact_page(path))));
+        let page = super::runtime::artefact_page(path);
+        return Some(Plan::Now(Reply::html(styled(page, &look(accent)))));
     }
     let title = file
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    Some(Plan::Later(Box::new(move || rendered(kind, &file, &title))))
+    // Read here, on the UI thread, where the theme and the project's
+    // colour live; the worker only renders.
+    let look = look(accent);
+    Some(Plan::Later(Box::new(move || rendered(kind, &file, &title, &look))))
 }
 
 /// The type a file of `kind` is served as when it is not rendered. The
@@ -457,11 +461,9 @@ fn raw_type(kind: Kind, raw: bool) -> &'static str {
     }
 }
 
-/// The page for a markdown or CSV `file`. Reads the file, so it is for a
-/// worker thread.
-fn rendered(kind: Kind, file: &Path, title: &str) -> Reply {
-    let t = super::runtime::attr(title);
-    let message = |text: String| format!("<!doctype html><title>{t}</title><p>{text}</p>");
+/// The page for a markdown or CSV `file`, in the theme and project
+/// colour `look` gives. Reads the file, so it is for a worker thread.
+fn rendered(kind: Kind, file: &Path, title: &str, look: &str) -> Reply {
     let read = std::fs::metadata(file).and_then(|meta| {
         if meta.len() > LARGEST {
             return Ok(None);
@@ -471,15 +473,19 @@ fn rendered(kind: Kind, file: &Path, title: &str) -> Reply {
     let bytes = match read {
         Ok(Some(b)) => b,
         Ok(None) => {
-            let text = format!("{t} is too large to show here, over {} MB.", LARGEST >> 20);
-            return Reply::html(message(text));
+            let text = format!("Too large to show here, over {} MB.", LARGEST >> 20);
+            return Reply::html(message(title, &text, Mood::Quiet, look));
         }
-        Err(e) => return Reply::html(message(format!("{t} cannot be read: {e}"))).status(404),
+        Err(e) => {
+            let text = format!("Cannot be read: {e}");
+            return Reply::html(message(title, &text, Mood::Trouble, look)).status(404);
+        }
     };
     let src = String::from_utf8_lossy(&bytes);
     match kind {
-        Kind::Markdown => Reply::html(super::runtime::with_mermaid(
-            horadric_core::forge::markdown_html(&src, title),
+        Kind::Markdown => Reply::html(styled(
+            super::runtime::with_mermaid(horadric_core::forge::markdown_html(&src, title)),
+            look,
         )),
         Kind::Csv => {
             let (src, cut) = first_rows(&src, MOST_ROWS);
@@ -490,11 +496,115 @@ fn rendered(kind: Kind, file: &Path, title: &str) -> Reply {
                 );
                 page = page.replacen("</body>", &note, 1);
             }
-            Reply::html(page)
+            Reply::html(styled(page, look))
         }
         _ => not_found(),
     }
 }
+
+/// Horadric's look as `--hd-` properties: the theme's colours and the
+/// project's, with the Folio's ink for code, which only the pages read.
+/// On the UI thread, where both live.
+pub(super) fn look(accent: Color) -> String {
+    let p = theme::palette();
+    let read = p.term_fg.mix(p.term_bg, 0.09);
+    let code = Color::rgb(0xE2C08D).mix(read, 0.25);
+    let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!(
+        "{} --hd-code: #{:02x}{:02x}{:02x};",
+        super::home::vars(accent),
+        b(code.r),
+        b(code.g),
+        b(code.b)
+    )
+}
+
+/// `page` with `look` set after its own stylesheet, so the theme in use
+/// wins over the default theme the page was made with.
+pub(super) fn styled(page: String, look: &str) -> String {
+    let style = format!("<style>:root {{ {look} }}</style>\n</head>");
+    page.replacen("</head>", &style, 1)
+}
+
+/// How a page with one thing to say says it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Mood {
+    /// Work going on: runes kindling in turn, in the project's colour.
+    Waiting,
+    /// Nothing wrong, only nothing to show: one unlit rune.
+    Quiet,
+    /// Something failed: one rune in the error colour.
+    Trouble,
+}
+
+/// A page saying one thing about the file `name`: its name engraved on
+/// the plate over a small screen with the words on it, as the Forge's home
+/// draws its listings. While `Waiting` it also asks again every few
+/// seconds, in case the reload that ends the wait is missed.
+pub(super) fn message(name: &str, text: &str, mood: Mood, look: &str) -> String {
+    let (runes, class): (&[usize], &str) = match mood {
+        Mood::Waiting => (&[3, 7, 10], "waiting"),
+        Mood::Quiet => (&[9], "quiet"),
+        Mood::Trouble => (&[2], "trouble"),
+    };
+    let refresh = if mood == Mood::Waiting {
+        "<meta http-equiv=\"refresh\" content=\"3\">"
+    } else {
+        ""
+    };
+    let marks: String = runes.iter().map(|&i| rune_svg(i)).collect();
+    let n = super::runtime::attr(name);
+    styled(
+        format!(
+            "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">{refresh}\
+             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+             <title>{n}</title>\n<style>{}{MESSAGE_STYLE}</style></head>\n\
+             <body><div class=\"say {class}\"><div class=\"hd-legend name\">{n}</div>\
+             <div class=\"hd-screen card\"><span class=\"runes\">{marks}</span><p>{}</p></div></div>\
+             </body></html>\n",
+            horadric_core::forge::LOOK,
+            super::runtime::attr(text)
+        ),
+        look,
+    )
+}
+
+/// One of the Folio's runes as a stroked mark, drawn in the text's colour.
+pub(super) fn rune_svg(i: usize) -> String {
+    let runes = &crate::sparks::RUNES;
+    let mut d = String::new();
+    for line in runes[i % runes.len()].iter() {
+        for (j, (x, y)) in line.iter().enumerate() {
+            d.push_str(&format!("{}{x} {y} ", if j == 0 { "M" } else { "L" }));
+        }
+    }
+    format!(
+        "<svg class=\"rune\" viewBox=\"-0.35 -0.08 0.7 1.16\" aria-hidden=\"true\">\
+         <path vector-effect=\"non-scaling-stroke\" d=\"{}\"/></svg>",
+        d.trim_end()
+    )
+}
+
+/// A message page: its card in the middle of the plate.
+const MESSAGE_STYLE: &str = r#"
+body { display: flex; align-items: center; justify-content: center; padding: 24px; }
+.say { width: min(460px, 100%); display: flex; flex-direction: column; gap: 10px; }
+.say .name { padding: 0 4px; overflow-wrap: anywhere; }
+.card { display: flex; flex-direction: column; align-items: center; gap: 14px;
+  padding: 30px 24px 26px; text-align: center; }
+.card p { margin: 0; font-size: 14px; line-height: 1.55; color: var(--hd-read); overflow-wrap: anywhere; }
+.runes { display: inline-flex; gap: 6px; }
+svg.rune { width: 13px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9px;
+  stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
+.quiet .runes { color: var(--hd-lamp-off); }
+.trouble .runes { color: var(--hd-error); }
+.waiting .runes { color: var(--hd-accent); }
+.waiting svg.rune { animation: kindle 1.2s ease-in-out infinite; opacity: 0.25; }
+.waiting svg.rune:nth-child(2) { animation-delay: 0.2s; }
+.waiting svg.rune:nth-child(3) { animation-delay: 0.4s; }
+@keyframes kindle { 40% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .waiting svg.rune { animation: none; opacity: 1; } }
+"#;
 
 /// The first `rows` lines of `src` (the header among them), and whether
 /// any were left out.
@@ -788,5 +898,52 @@ mod tests {
         assert!(file_in(root, "https://x.forge.horadric/a/%2E%2E/b").is_none());
         assert!(file_in(root, "https://x.forge.horadric/..%5Csecret").is_none());
         assert!(url_for("x", root, Path::new(r"C:\Work\other\a.md")).is_none());
+    }
+
+    /// Writes every page the Forge makes for a file to `FORGE_SAMPLES`,
+    /// with the home page beside them, to open in the browser pane and see
+    /// that they read as one family.
+    #[test]
+    #[ignore]
+    fn write_sample_pages() {
+        let Ok(out) = std::env::var("FORGE_SAMPLES") else { return };
+        let out = PathBuf::from(out);
+        let src = out.join("src");
+        std::fs::create_dir_all(src.join("notes")).unwrap();
+        let md = "# Release plan\n\nThe Forge shows **every page** in Horadric's look, with `inline code`, \
+a [link](https://horadric.dev) and ~~old words~~.\n\n## Steps\n\n1. Read the plan\n2. Write the code\n   - a nested bullet\n   - another\n3. Ship\n\n\
+- [x] Markdown restyled\n- [ ] CSV restyled\n\n> A quote from the human: the warm theme has to go.\n\n\
+### Code\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\n#### Small heading\n\n\
+| Name | Count | State |\n|:-----|------:|-------|\n| Tiles | 40 | done |\n| Windows | 1 | open |\n\n---\n\n\
+<details><summary>More</summary>\n\nHidden words.\n\n</details>\n\n```mermaid\ngraph LR\n  A[Hook] --> B(State)\n  B --> C{Tile}\n```\n";
+        std::fs::write(src.join("plan.md"), md).unwrap();
+        std::fs::write(
+            src.join("table.csv"),
+            "Project,Sessions,Tokens,Note\nhoradric,4,\"12 400\",the app\nsite,1,830,\"web, small\"\nlore,2,\"3,5\",memory\n",
+        )
+        .unwrap();
+        std::fs::write(src.join("notes").join("a.md"), "# a").unwrap();
+        let accent = crate::theme::ACCENTS[2].0;
+        let look = look(accent);
+        let mermaid = out.join("mermaid.js");
+        let _ = std::fs::write(&mermaid, include_bytes!("../../assets/forge/runtime/mermaid.js"));
+        let local = |page: String| {
+            page.replace(
+                &format!("{}mermaid.js", super::super::runtime::base()),
+                "mermaid.js",
+            )
+        };
+        let text = |r: Reply| String::from_utf8_lossy(bytes(&r)).into_owned();
+        let pages = [
+            ("md.html", local(text(rendered(Kind::Markdown, &src.join("plan.md"), "plan.md", &look)))),
+            ("csv.html", text(rendered(Kind::Csv, &src.join("table.csv"), "table.csv", &look))),
+            ("missing.html", text(rendered(Kind::Csv, &src.join("gone.csv"), "gone.csv", &look))),
+            ("waiting.html", message("Q3 review.pptx", "Converting with PowerPoint", Mood::Waiting, &look)),
+            ("large.html", message("huge.csv", "Too large to show here, over 20 MB.", Mood::Quiet, &look)),
+            ("home.html", text(super::super::home::page(&src, &src, false, &[], accent))),
+        ];
+        for (name, page) in pages {
+            std::fs::write(out.join(name), page).unwrap();
+        }
     }
 }

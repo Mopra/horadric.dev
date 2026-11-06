@@ -13,7 +13,8 @@ pub fn csv_html(src: &str, title: &str) -> String {
     if let Some(header) = rows.first() {
         body.push_str("<thead><tr data-row=\"0\">");
         for col in 0..width {
-            cell(&mut body, "th", 0, col, header.get(col).map_or("", String::as_str));
+            let name = header.get(col).map_or("", String::as_str);
+            cell(&mut body, "th", 0, col, name, figures(&rows[1..], col));
         }
         body.push_str("</tr></thead>\n");
     }
@@ -21,7 +22,8 @@ pub fn csv_html(src: &str, title: &str) -> String {
     for (r, row) in rows.iter().enumerate().skip(1) {
         body.push_str(&format!("<tr data-row=\"{r}\">"));
         for col in 0..width {
-            cell(&mut body, "td", r, col, row.get(col).map_or("", String::as_str));
+            let text = row.get(col).map_or("", String::as_str);
+            cell(&mut body, "td", r, col, text, is_number(text));
         }
         body.push_str("</tr>\n");
     }
@@ -29,8 +31,15 @@ pub fn csv_html(src: &str, title: &str) -> String {
     page(title, "forge-csv", &body, SORT)
 }
 
-fn cell(out: &mut String, tag: &str, row: usize, col: usize, text: &str) {
-    let num = tag == "td" && is_number(text);
+/// A column of figures: every filled cell under the header a number, so
+/// its header sits right, over them.
+fn figures(rows: &[Vec<String>], col: usize) -> bool {
+    let mut cells = rows.iter().filter_map(|r| r.get(col)).filter(|c| !c.trim().is_empty());
+    let first = cells.next();
+    first.is_some_and(|c| is_number(c)) && cells.all(|c| is_number(c))
+}
+
+fn cell(out: &mut String, tag: &str, row: usize, col: usize, text: &str, num: bool) {
     out.push_str(&format!("<{tag} data-row=\"{row}\" data-col=\"{col}\""));
     if num {
         out.push_str(" class=\"num\"");
@@ -168,7 +177,8 @@ mod tests {
     #[test]
     fn forge_csv_table() {
         let html = csv_html("name,n\n<b>,\"1,5\"\nx\n", "t");
-        assert!(html.contains("<th data-row=\"0\" data-col=\"1\">n</th>"));
+        assert!(html.contains("<th data-row=\"0\" data-col=\"0\">name</th>"));
+        assert!(html.contains("<th data-row=\"0\" data-col=\"1\" class=\"num\">n</th>"));
         assert!(html.contains("<td data-row=\"1\" data-col=\"0\">&lt;b&gt;</td>"));
         assert!(html.contains("<td data-row=\"1\" data-col=\"1\" class=\"num\">1,5</td>"));
         assert!(html.contains("<td data-row=\"2\" data-col=\"1\"></td>"));

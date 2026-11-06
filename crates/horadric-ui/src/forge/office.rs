@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use super::runtime::attr;
-use super::serve::Reply;
+use super::serve::{message, Mood, Reply};
 use crate::forge_office::{self, Converted, Converter};
 
 /// What a file's size and time were when it was converted. A save changes
@@ -34,8 +34,9 @@ pub fn cache_root() -> Option<PathBuf> {
 
 /// The page for the office file `file` in `root`: its conversion when it
 /// is done, else a page saying it is under way. A finished conversion
-/// reloads the tab through the watcher's queue, as a save would.
-pub fn page(root: &Path, file: &Path) -> Reply {
+/// reloads the tab through the watcher's queue, as a save would. `look`
+/// is Horadric's look as the Forge's pages take it.
+pub fn page(root: &Path, file: &Path, look: &str) -> Reply {
     let name = file
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -44,11 +45,11 @@ pub fn page(root: &Path, file: &Path) -> Reply {
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("pptx"));
     let Ok(meta) = std::fs::metadata(file) else {
-        return Reply::html(message_page(&name, &format!("{name} cannot be read."), false))
-            .status(404);
+        return Reply::html(message(&name, "Cannot be read.", Mood::Trouble, look)).status(404);
     };
     let Some(cache) = cache_root() else {
-        return Reply::html(message_page(&name, "There is no state folder to convert into.", false));
+        let text = "There is no state folder to convert into.";
+        return Reply::html(message(&name, text, Mood::Trouble, look));
     };
     let stamp: Stamp = (meta.len(), meta.modified().ok());
     let key = key_of(file);
@@ -59,12 +60,12 @@ pub fn page(root: &Path, file: &Path) -> Reply {
         if *s == stamp {
             match state {
                 State::Converting => {
-                    return Reply::html(message_page(&name, &converting(deck), true))
+                    return Reply::html(message(&name, &converting(deck), Mood::Waiting, look))
                 }
-                State::Failed(why) => return Reply::html(message_page(&name, why, false)),
+                State::Failed(why) => return Reply::html(message(&name, why, Mood::Trouble, look)),
                 State::Done(Converted::Slides(pngs)) => {
                     if pngs.iter().all(|p| p.is_file()) {
-                        return Reply::html(deck_page(&name, &cache, pngs));
+                        return Reply::html(deck_page(&name, &cache, pngs, look));
                     }
                 }
                 State::Done(Converted::Pdf(pdf)) => {
@@ -100,7 +101,7 @@ pub fn page(root: &Path, file: &Path) -> Reply {
         }
         super::watch::touched(&root, rel);
     });
-    Reply::html(message_page(&name, &converting(deck), true))
+    Reply::html(message(&name, &converting(deck), Mood::Waiting, look))
 }
 
 /// The answer to `/__forge/office/<rest>`: a slide picture or PDF in the
@@ -172,12 +173,13 @@ fn converting(deck: bool) -> String {
 }
 
 /// A deck of one picture per slide, laid out as the deck shell expects:
-/// a `<section class="slide">` each.
-pub fn deck_page(name: &str, cache: &Path, pngs: &[PathBuf]) -> String {
+/// a `<section class="slide">` each, on Horadric's plate.
+pub fn deck_page(name: &str, cache: &Path, pngs: &[PathBuf], look: &str) -> String {
     let mut out = format!(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
          <title>{}</title>\n<style>\n\
-         html, body {{ margin: 0; background: #121110; }}\n\
+         :root {{ {look} }}\n\
+         html, body {{ margin: 0; background: var(--hd-plate); }}\n\
          section.slide {{ position: relative; width: 1280px; height: 720px; margin: 0 auto 24px; background: #fff; }}\n\
          section.slide img {{ display: block; width: 100%; height: 100%; object-fit: contain; }}\n\
          </style>\n</head>\n<body>\n",
@@ -195,26 +197,6 @@ pub fn deck_page(name: &str, cache: &Path, pngs: &[PathBuf]) -> String {
     out
 }
 
-/// A small page with one line on it. While `waiting` it also asks again
-/// every few seconds, in case the reload that ends the wait is missed.
-fn message_page(name: &str, text: &str, waiting: bool) -> String {
-    let refresh = if waiting {
-        "<meta http-equiv=\"refresh\" content=\"3\">\n"
-    } else {
-        ""
-    };
-    format!(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n{refresh}\
-         <title>{}</title>\n<style>\n\
-         html, body {{ height: 100%; margin: 0; background: #121110; color: #c9c1b4; }}\n\
-         body {{ display: flex; align-items: center; justify-content: center; font: 14px/1.5 \"Segoe UI\", system-ui, sans-serif; }}\n\
-         p {{ max-width: 36em; text-align: center; }}\n\
-         </style>\n</head>\n<body>\n<p>{}</p>\n</body>\n</html>\n",
-        attr(name),
-        attr(text)
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,7 +205,7 @@ mod tests {
     fn a_converted_deck_is_a_slide_per_picture() {
         let cache = Path::new(r"C:\State\forge-office");
         let pngs = [cache.join("ab12").join("slide1.png"), cache.join("ab12").join("slide2.png")];
-        let html = deck_page("Q3 <draft>.pptx", cache, &pngs);
+        let html = deck_page("Q3 <draft>.pptx", cache, &pngs, "");
         assert_eq!(html.matches("<section class=\"slide\"").count(), 2);
         assert!(html.contains("src=\"/__forge/office/ab12/slide1.png\""));
         assert!(html.contains("data-slide=\"2\""));
@@ -241,8 +223,8 @@ mod tests {
 
     #[test]
     fn the_wait_page_asks_again_and_a_message_does_not() {
-        assert!(message_page("a.pptx", "Converting with PowerPoint", true).contains("refresh"));
-        let no = message_page("a.pptx", "To show slides, install PowerPoint", false);
+        assert!(message("a.pptx", "Converting with PowerPoint", Mood::Waiting, "").contains("refresh"));
+        let no = message("a.pptx", "To show slides, install PowerPoint", Mood::Trouble, "");
         assert!(!no.contains("refresh") && no.contains("install PowerPoint"));
     }
 }
