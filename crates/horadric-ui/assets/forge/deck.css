@@ -1,6 +1,6 @@
 /* The deck shell. Loaded twice by deck.js: into the page, where only the
    html.forge-deck rules match, and into the controls' shadow root, where
-   only the :host rules do. Slides are styled in place, never moved, so the
+   only the rules starting at :host do. Slides are styled in place, never moved, so the
    deck's own selectors keep matching them.
 
    The shell is drawn in Horadric's look: the `--hd-` properties serve.rs
@@ -24,9 +24,10 @@ html.forge-deck section.slide {
 html.forge-deck.forge-nobg section.slide { background-color: var(--forge-slide-bg); }
 
 /* Screen only, so printing lays every slide out the same whatever the
-   view was. */
+   view was. Below the toolbar and right of the strip is the stage, a
+   screen sunk into Horadric's plate. */
 @media screen {
-  /* One slide at a time, centred in what the strip leaves, letterboxed. */
+  /* One slide at a time, fitted to the stage with an even margin. */
   html.forge-deck.forge-single,
   html.forge-deck.forge-single body {
     overflow: hidden !important;
@@ -38,7 +39,7 @@ html.forge-deck.forge-nobg section.slide { background-color: var(--forge-slide-b
     position: fixed !important;
     inset: auto !important;
     left: var(--forge-cx) !important;
-    top: 50% !important;
+    top: var(--forge-cy) !important;
     margin: 0 !important;
     zoom: 1 !important;
     transform: translate(-50%, -50%) scale(var(--forge-scale)) !important;
@@ -46,16 +47,18 @@ html.forge-deck.forge-nobg section.slide { background-color: var(--forge-slide-b
     opacity: 1 !important;
     visibility: visible !important;
     z-index: 1 !important;
+    /* Standing on the screen: a hard edge and a shadow, no glow. */
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 6px 24px rgba(0, 0, 0, 0.55) !important;
   }
 
-  /* Every slide in a column, scaled to the pane's width. */
+  /* Every slide in a column, fitted to the stage's width. */
   html.forge-deck.forge-scroll,
   html.forge-deck.forge-scroll body {
     background: var(--hd-screen) !important;
   }
   html.forge-deck.forge-scroll body {
     margin: 0 !important;
-    padding: 24px 0 24px var(--forge-left) !important;
+    padding: calc(var(--forge-top) + 20px) 0 20px var(--forge-left) !important;
   }
   html.forge-deck.forge-scroll section.slide:not(.forge-clone) {
     display: var(--forge-slide-display, block) !important;
@@ -63,48 +66,62 @@ html.forge-deck.forge-nobg section.slide { background-color: var(--forge-slide-b
     inset: auto !important;
     transform: none !important;
     zoom: var(--forge-scale) !important;
-    margin: 0 auto 24px !important;
+    margin: 0 auto calc(20px / var(--forge-scale)) !important;
+    scroll-margin-top: calc((var(--forge-top) + 20px) / var(--forge-scale));
     opacity: 1 !important;
     visibility: visible !important;
   }
 
   html.forge-deck.forge-presenting,
   html.forge-deck.forge-presenting body { background: #000 !important; cursor: none; }
+  html.forge-deck.forge-presenting section.slide.forge-current:not(.forge-clone) { box-shadow: none !important; }
 }
 
-/* The slide strip: real clones of the slides, so they wear the deck's CSS. */
+/* The slide strip: real clones of the slides, so they wear the deck's CSS.
+   Plain light DOM for that. The strip and its thumbs set nothing that
+   inherits, or the clones would lose the type the deck gives its body;
+   the numbers and keys, which hold no clone, are reset whole. */
 html.forge-deck .forge-strip {
   position: fixed !important;
   left: 0;
-  top: 0;
+  top: var(--forge-top, 0);
   bottom: 0;
   z-index: 2147483640;
-  width: 196px;
+  display: block;
+  width: var(--forge-strip-w, 240px);
   box-sizing: border-box;
   margin: 0;
-  padding: 12px 10px 60px 22px;
+  padding: 14px 14px 16px 30px;
   overflow-x: hidden;
   overflow-y: auto;
   background: var(--hd-plate);
-  /* The seam between the strip's plate and the screen the slide is on. */
+  /* The seam between the strip's plate and the stage. */
   border-right: 1px solid var(--hd-engrave-dark);
   box-shadow: 1px 0 0 var(--hd-engrave-light);
   scrollbar-width: thin;
-  scrollbar-color: var(--hd-surface) transparent;
+  scrollbar-color: var(--hd-key-top) transparent;
 }
 html.forge-deck .forge-strip[hidden] { display: none !important; }
 html.forge-deck .forge-thumb {
   position: relative;
-  width: 164px;
-  margin: 0 0 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  display: block;
+  box-sizing: border-box;
+  width: var(--forge-thumb-w, 196px);
+  aspect-ratio: var(--forge-ratio, 16 / 9);
+  margin: 0 0 14px;
   cursor: pointer;
-  border-radius: 2px;
-  outline: 1px solid var(--hd-engrave-dark);
+  border-radius: 3px;
+  outline: 1px solid rgba(255, 255, 255, 0.08);
   outline-offset: 0;
-  box-shadow: 0 2px 5px var(--hd-cast);
+  box-shadow: 0 2px 6px var(--hd-cast);
 }
 html.forge-deck .forge-thumb:hover { outline-color: var(--hd-accent-dim); }
-html.forge-deck .forge-thumb.forge-on { outline: 2px solid var(--hd-accent); outline-offset: 2px; }
+/* The current slide: a ring in the project's colour round it and its
+   number lit, as Horadric marks the tile in front. */
+html.forge-deck .forge-thumb.forge-on { outline: 2px solid var(--hd-accent); outline-offset: 3px; }
 html.forge-deck .forge-strip section.slide.forge-clone {
   display: var(--forge-slide-display, block) !important;
   position: absolute !important;
@@ -120,107 +137,288 @@ html.forge-deck .forge-strip section.slide.forge-clone {
   pointer-events: none !important;
   animation: none !important;
   transition: none !important;
+  box-shadow: none !important;
 }
 html.forge-deck .forge-strip section.slide.forge-clone * {
   animation-play-state: paused !important;
   transition: none !important;
 }
+html.forge-deck .forge-thumb > section.slide.forge-clone { clip-path: inset(0 round 3px); }
 html.forge-deck .forge-thumb-n {
+  all: initial;
   position: absolute;
-  left: -18px;
-  top: 0;
-  width: 14px;
+  right: calc(100% + 7px);
+  top: 1px;
+  min-width: 18px;
   text-align: right;
-  color: var(--hd-legend);
-  font: 600 11px/1 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  color: var(--hd-dim);
+  font: 600 12px/1 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   font-variant-numeric: tabular-nums;
 }
-html.forge-deck .forge-thumb > section.slide.forge-clone { clip-path: inset(0); }
+html.forge-deck .forge-thumb.forge-on .forge-thumb-n { color: var(--hd-accent); }
 
-/* Slide edits in the strip: drag to move, small buttons to duplicate and
-   delete, shown on hover. */
+/* Slide edits in the strip: drag to move, keys to duplicate and delete,
+   shown on hover. */
 html.forge-deck .forge-thumb.forge-dragging { opacity: 0.4; }
-html.forge-deck .forge-thumb.forge-drop-before { box-shadow: 0 -6px 0 -3px var(--hd-accent); }
-html.forge-deck .forge-thumb.forge-drop-after { box-shadow: 0 6px 0 -3px var(--hd-accent); }
+html.forge-deck .forge-thumb.forge-drop-before { box-shadow: 0 -8px 0 -5px var(--hd-accent); }
+html.forge-deck .forge-thumb.forge-drop-after { box-shadow: 0 8px 0 -5px var(--hd-accent); }
 html.forge-deck .forge-strip.forge-saving .forge-thumb { cursor: progress; }
 html.forge-deck .forge-thumb-tools {
+  all: initial;
   position: absolute;
-  right: 3px;
-  top: 3px;
+  right: 5px;
+  top: 5px;
   z-index: 1;
   display: none;
-  gap: 3px;
+  gap: 4px;
 }
 html.forge-deck .forge-thumb:hover .forge-thumb-tools { display: flex; }
-html.forge-deck .forge-thumb-tools button {
+html.forge-deck .forge-thumb-tools button,
+html.forge-deck .forge-strip-add {
   all: unset;
   box-sizing: border-box;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 5px;
-  border-radius: 4px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 5px;
   background: linear-gradient(var(--hd-key-top), var(--hd-key-low));
-  box-shadow: inset 0 1px 0 var(--hd-bevel-light), 0 1px 0 var(--hd-key-side),
-    0 2px 4px var(--hd-cast);
+  box-shadow: inset 0 1px 0 var(--hd-bevel-light), inset 0 -1px 0 var(--hd-bevel-shade),
+    0 2px 0 var(--hd-key-side), 0 3px 6px var(--hd-cast);
   color: var(--hd-text);
-  font: 12px/20px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font: 500 13px/24px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   text-align: center;
   cursor: pointer;
 }
-html.forge-deck .forge-thumb-tools button:hover { color: var(--hd-accent); }
+html.forge-deck .forge-thumb-tools button:hover,
+html.forge-deck .forge-strip-add:hover { color: var(--hd-accent); }
+html.forge-deck .forge-thumb-tools button:active,
+html.forge-deck .forge-strip-add:active { transform: translateY(1px); }
 html.forge-deck .forge-thumb-tools button.forge-sure { color: var(--hd-error); }
+html.forge-deck .forge-thumb-tools button { display: inline-flex; align-items: center; justify-content: center; }
+html.forge-deck .forge-thumb-tools svg {
+  all: initial;
+  display: block;
+  width: 14px;
+  height: 14px;
+  color: inherit;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* Not `all`: a shape's geometry is CSS too, and would go with it. */
+html.forge-deck .forge-thumb-tools svg * { fill: none; stroke: currentColor; stroke-width: 1.4; }
+html.forge-deck .forge-strip-add {
+  display: block;
+  width: var(--forge-thumb-w, 196px);
+  height: 30px;
+  margin: 4px 0 6px;
+  line-height: 30px;
+  color: var(--hd-dim);
+}
 
 /* --------------------------------------------- the controls (shadow) */
 
+/* Every rule from here starts at :host, which only matches inside the
+   controls' shadow root: in the page these rules match nothing, so no
+   class name of the shell can restyle a deck's own elements. */
 :host([hidden]) { display: none !important; }
-/* The host's inline all:initial beats :host, so the type is set here. */
-.bar {
-  font: 12px/1 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+:host .forge-ui {
+  --key-h: 30px;
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  font: 13px/1 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   color: var(--hd-text);
+}
+:host .forge-ui > * { pointer-events: auto; }
+:host .forge-ui [hidden] { display: none !important; }
+:host .forge-ui.forge-resizing { cursor: col-resize; }
+
+/* The toolbar: a strip of plate along the top, its keys standing off it. */
+:host .forge-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 44px;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: 2px;
-  padding: 3px;
-  /* A small plate standing off the slide. */
+  gap: 14px;
+  padding: 0 12px 2px;
   background: var(--hd-plate);
-  border-radius: 7px;
-  box-shadow: inset 0 1px 0 var(--hd-bevel-light), inset 0 -1px 0 var(--hd-bevel-shade),
-    0 4px 12px var(--hd-cast);
-  opacity: 0.55;
-  transition: opacity 0.2s ease;
+  border-bottom: 1px solid var(--hd-engrave-dark);
+  box-shadow: 0 1px 0 var(--hd-engrave-light), 0 2px 8px var(--hd-cast);
 }
-.bar:hover { opacity: 1; }
-.btn {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 24px;
-  padding: 0;
+:host .forge-group { display: flex; align-items: center; gap: 6px; }
+:host .forge-fill { flex: 1; }
+:host .forge-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: var(--key-h);
+  height: var(--key-h);
+  box-sizing: border-box;
+  margin: 0 0 2px;
+  padding: 0 9px;
   border: 0;
-  border-radius: 4px;
-  background: none;
-  color: var(--hd-dim);
+  border-radius: 6px;
+  background: linear-gradient(var(--hd-key-top), var(--hd-key-low));
+  box-shadow: inset 0 1px 0 var(--hd-bevel-light), inset 0 -1px 0 var(--hd-bevel-shade),
+    0 2px 0 var(--hd-key-side), 0 3px 6px var(--hd-cast);
+  color: var(--hd-text);
+  font: 500 13px/1 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   cursor: pointer;
+  transition: transform 70ms ease, box-shadow 70ms ease;
 }
-.btn:hover { background: var(--hd-hover); color: var(--hd-text); }
-.btn:active { background: var(--hd-press); }
-.btn.on { color: var(--hd-accent); }
-.btn svg {
+:host .forge-key:hover {
+  background: linear-gradient(var(--hd-hover), var(--hd-hover)),
+    linear-gradient(var(--hd-key-top), var(--hd-key-low));
+}
+/* Pressed, or latched on: down at the plate, its legend in the project's
+   colour. */
+:host .forge-key:active:not(:disabled),
+:host .forge-key.forge-on {
+  transform: translateY(2px);
+  box-shadow: inset 0 1px 0 var(--hd-bevel-light), 0 0 0 var(--hd-key-side),
+    0 1px 2px var(--hd-cast);
+}
+:host .forge-key.forge-on { color: var(--hd-accent); }
+:host .forge-key:disabled { color: var(--hd-legend); cursor: default; }
+:host .forge-key:focus-visible { outline: 1px solid var(--hd-accent); outline-offset: 2px; }
+:host .forge-key svg {
+  flex: none;
   width: 16px;
   height: 16px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.3;
+  stroke-width: 1.4;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.count {
-  min-width: 44px;
-  padding: 0 6px 0 4px;
-  text-align: right;
-  color: var(--hd-dim);
+:host .forge-labelled { padding: 0 12px 0 10px; }
+:host .forge-narrow .forge-label { display: none; }
+:host .forge-narrow .forge-labelled { padding: 0 9px; }
+:host .forge-count {
+  min-width: 64px;
+  padding: 0 4px;
+  text-align: center;
+  color: var(--hd-text);
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
+
+/* Work going on: runes lighting in turn while the deck is written. */
+:host .forge-runes { display: none; gap: 5px; color: var(--hd-accent); }
+:host .forge-saving .forge-runes { display: inline-flex; }
+:host .forge-runes svg {
+  width: 10px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  overflow: visible;
+  opacity: 0.25;
+  animation: forge-kindle 1.2s ease-in-out infinite;
+}
+:host .forge-runes svg:nth-child(2) { animation-delay: 0.2s; }
+:host .forge-runes svg:nth-child(3) { animation-delay: 0.4s; }
+@keyframes forge-kindle { 40% { opacity: 1; } }
+
+/* The strip's edge, to drag. */
+:host .forge-grip {
+  position: absolute;
+  top: 44px;
+  bottom: 0;
+  left: calc(var(--strip-w) - 4px);
+  width: 8px;
+  cursor: col-resize;
+}
+:host .forge-grip::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+}
+:host .forge-grip:hover::after,
+:host .forge-resizing .forge-grip::after { background: var(--hd-accent-dim); }
+
+/* The speaker notes, under the slide when the pane has room for them. */
+:host .forge-notes {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--hd-plate);
+  box-shadow: inset 0 1px 0 var(--hd-bevel-light), inset 0 -1px 0 var(--hd-bevel-shade);
+}
+:host .forge-legend {
+  font: 600 11px/1.2 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--hd-legend);
+  text-shadow: 0 -1px 0 var(--hd-engrave-dark), 0 1px 0 var(--hd-engrave-light);
+}
+:host .forge-notes-text {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  font: 15px/1.55 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  color: var(--hd-read);
+  scrollbar-width: thin;
+  scrollbar-color: var(--hd-key-top) transparent;
+}
+:host .forge-notes-text.forge-none { color: var(--hd-legend); }
+
+/* The first time a deck is opened: how to work on it, until dismissed. */
+:host .forge-hint {
+  position: absolute;
+  right: 16px;
+  top: 56px;
+  width: 340px;
+  max-width: calc(100% - 32px);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px 14px;
+  border-radius: 8px;
+  background: var(--hd-plate);
+  box-shadow: inset 0 1px 0 var(--hd-bevel-light), inset 0 -1px 0 var(--hd-bevel-shade),
+    0 8px 24px var(--hd-cast);
+}
+:host .forge-hint ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 9px; }
+:host .forge-hint li {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  align-items: baseline;
+  gap: 10px;
+  font: 13px/1.4 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  color: var(--hd-read);
+}
+:host .forge-hint kbd {
+  justify-self: start;
+  padding: 2px 7px 3px;
+  border-radius: 4px;
+  background: var(--hd-key-top);
+  box-shadow: inset 0 1px 0 var(--hd-bevel-light), 0 1px 0 var(--hd-key-side);
+  color: var(--hd-text);
+  font: 600 12px/1.3 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  white-space: nowrap;
+}
+:host .forge-ok { align-self: flex-end; padding: 0 16px; }
 
 /* --------------------------------------------------------------- print */
 

@@ -8,7 +8,7 @@ dependencies, nothing fetched from the network. The plan is
 | File | Injected into | Does |
 |---|---|---|
 | `forge.js`, `forge.css` | every Forge page | scroll keeping, pins, pin runes, goto, errors, text edits in place, image crop |
-| `deck.js`, `deck.css` | HTML decks only (`<section class="slide">`), after `forge.js` | the deck shell: scaling, strip, keys, present, print, slides moved, duplicated and deleted |
+| `deck.js`, `deck.css` | HTML decks only (`<section class="slide">`), after `forge.js` | the deck shell: toolbar, scaling, resizable strip, speaker notes, keys, present, print, slides added, moved, duplicated and deleted |
 | `test/` | nothing | pages to try it all by hand, see the end |
 
 ## Injecting
@@ -26,7 +26,8 @@ or as `<script>` tags. The CSS is found one of two ways:
 Both scripts are idempotent: a second injection does nothing.
 `forge.css` goes into a closed shadow root and never touches the page.
 `deck.css` goes into the page (all rules under `html.forge-deck`) and into
-the deck controls' own shadow root.
+the deck controls' own shadow root (all rules starting at `:host`, so they
+match nothing in the page).
 
 Everything the page side adds: the globals `window.__forge` and
 `window.__forgeDeck`, the elements `<forge-overlay>` and `<forge-deck-ui>`
@@ -200,11 +201,15 @@ The slide strip changed the slides: dragged to a new place, or a thumb's
 duplicate or delete button (delete asks once more).
 ```json
 { "forge": "reorder", "id": "deck-1", "file": "/deck.html", "count": 5, "order": [2, 1, 3, 4, 5] }
+{ "forge": "reorder", "id": "deck-2", "file": "/deck.html", "count": 5, "order": [1, 2, 3, 3, 4, 5], "blank": true }
 ```
 `order` is the new list of the current slides by number. A permutation
 moves; one number left out deletes that slide; one number twice in a row
 duplicates it (the copy goes right after it). `count` is how many slides
-the page had, so a page older than the file is refused.
+the page had, so a page older than the file is refused. `blank` (Add
+slide) makes the copy a new empty slide of the same layout: each box of
+words says only "Title", "Point" or "Text", and its notes are emptied
+(`add_after` in `edit/html.rs`).
 
 ### `crop`
 On a PNG, JPEG or WebP shown alone: the Crop button or C, a drag draws the
@@ -295,10 +300,24 @@ shows the file as it is.
 
 ## The deck shell
 
-- **Views**: `single` (one slide, fitted and centred, letterboxed) and
-  `scroll` (every slide in a column, fitted to the width). The strip of
-  thumbnails sits on the left; it starts hidden when the pane is under 720
-  px wide.
+- **Toolbar** along the top: the strip on or off, previous and next with
+  the count, One or All (the view), a `?` that shows the first-run hint
+  again, Add slide (a new empty slide in the current one's layout, after
+  it) and Present. Labels go when the stage is under 640 px wide. Runes
+  kindle in it while a slide edit is being written.
+- **Views**: `single` (one slide fitted to the stage with a 20 px margin;
+  when the pane is taller than the slide needs, the slide goes to the top
+  and its speaker notes show under it) and `scroll` (every slide in a
+  column, fitted to the width).
+- **Strip** of thumbnails on the left, a fifth of the pane wide, starting
+  hidden when the pane is under 720 px. Drag its edge to resize (kept per
+  deck in `localStorage`, double click the edge to forget it). Drag a
+  thumbnail to move a slide; hover shows duplicate and delete.
+- **Kept across reloads** (the page reloads on every save) in
+  `sessionStorage`: the current slide and the view, and after a slide
+  edit the slide it should land on (the new one, the moved one). The
+  first-run hint (double click to edit, P to point, drag to reorder) is
+  remembered once dismissed.
 - **Keys**: Right, Down, PageDown, Space next; Left, Up, PageUp, Shift+Space
   back; Home, End; S strip; V view; F (or F5) present; Esc ends present. In
   the scroll view Up and Down scroll as usual. The shell takes these keys
@@ -314,8 +333,8 @@ shows the file as it is.
   `ShouldPrintBackgrounds` true, `ShouldPrintHeaderAndFooter` false.
 - `window.__forgeDeck`: `goto(n)`, `next()`, `prev()`, `present(on)`,
   `setMode("single" | "scroll")`, `setStrip(on)`, `rebuildStrip()`,
-  `moveSlide(n, before)`, `duplicateSlide(n)`, `deleteSlide(n)` (each
-  sends a `reorder`), and `current`, `count`, `mode`, `size`.
+  `moveSlide(n, before)`, `duplicateSlide(n)`, `deleteSlide(n)`,
+  `addSlide(after)` (each sends a `reorder`), and `current`, `count`, `mode`, `size`.
 - `window.__forge` also has `note(text, bad)`, `edit(el)` (starts an edit
   where a double click on `el` would) and `crop()`.
 
@@ -332,7 +351,9 @@ out, at most 20 s). A page can only change its own file.
 ## Trying it
 
 Open the pages in `test/` (`markdown.html`, `deck.html`, `image.html`) in
-the browser pane by `file://` URL. They load the scripts with relative
+the browser pane by `file://` URL. `deck.html` writes Horadric's `--hd-`
+colours itself, since nothing injects them there, and has a `.bar` of its
+own that must keep its look. They load the scripts with relative
 `<script>` tags. Press P to point. From the console, or `browser_evaluate`:
 
 ```js

@@ -92,7 +92,8 @@ enum Change {
     /// Text of an HTML element, by its content's byte range.
     Element { inner: (usize, usize), old: String, new: String },
     /// A deck's slides, as the current ones by number.
-    Slides { count: usize, order: Vec<usize> },
+    /// `blank`: the doubled one's copy is a new empty slide of its layout.
+    Slides { count: usize, order: Vec<usize>, blank: bool },
     /// An image's new bytes.
     Image(Vec<u8>),
 }
@@ -196,15 +197,15 @@ fn changed(src: &str, change: &Change) -> Result<Option<String>, Failed> {
             }
             text::edit_html(src, *inner, old, new).map_err(|()| Failed::NotExact)
         }
-        Change::Slides { count, order } => {
+        Change::Slides { count, order, blank } => {
             let now = html::slides(src).len();
             if now != *count {
                 return Err(Failed::Why(format!(
                     "the deck has {now} slides now, the page showed {count}; try again after it reloads"
                 )));
             }
-            html::reorder(src, order)
-                .map(Some)
+            let out = if *blank { html::add_after(src, order) } else { html::reorder(src, order) };
+            out.map(Some)
                 .ok_or_else(|| Failed::Why("that order of slides cannot be written".into()))
         }
         Change::Image(_) => Ok(None),
@@ -305,7 +306,10 @@ pub fn on_message(key: &str, tab: u64, msg: &Value) {
                         .collect()
                 });
             match order {
-                Some(order) if !order.is_empty() => Change::Slides { count, order },
+                Some(order) if !order.is_empty() => {
+                    let blank = msg.get("blank").and_then(Value::as_bool).unwrap_or(false);
+                    Change::Slides { count, order, blank }
+                }
                 _ => return refuse("the new order of slides is missing"),
             }
         }

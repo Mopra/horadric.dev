@@ -252,6 +252,51 @@ pub fn reorder(src: &str, order: &[usize]) -> Option<String> {
     None
 }
 
+/// One slide's source as a new empty slide of the same layout: each box
+/// of words says only what it is for ("Title" in a heading, "Point" in a
+/// list, "Text" elsewhere), so it can be filled in with a double click,
+/// and its speaker notes are empty. Pictures, styles and scripts stay.
+pub fn blank(slide: &str) -> String {
+    const BOXES: [&str; 12] = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "td", "th", "figcaption", "blockquote"];
+    let els = elements(slide);
+    let mut picked: Vec<&Element> = Vec::new();
+    for e in &els {
+        if RAW.contains(&e.name.as_str()) || picked.iter().any(|p| p.contains(e)) {
+            continue;
+        }
+        let inner = &slide[e.inner.0..e.inner.1];
+        let notes = e.name == "aside" && e.has_class("notes");
+        let words = !inner.contains('<') && !inner.trim().is_empty();
+        if notes || words || BOXES.contains(&e.name.as_str()) {
+            picked.push(e);
+        }
+    }
+    let mut out = String::with_capacity(slide.len());
+    let mut from = 0;
+    for e in picked {
+        let say = match e.name.as_str() {
+            "aside" => "",
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "Title",
+            "li" => "Point",
+            _ => "Text",
+        };
+        out.push_str(&slide[from..e.inner.0]);
+        out.push_str(say);
+        from = e.inner.1;
+    }
+    out.push_str(&slide[from..]);
+    out
+}
+
+/// `src` after `reorder` with the copy a duplicating `order` makes
+/// blanked: a new slide in the layout of the one it follows.
+pub fn add_after(src: &str, order: &[usize]) -> Option<String> {
+    let at = order.windows(2).position(|w| w[0] == w[1])? + 1;
+    let out = reorder(src, order)?;
+    let copy = slides(&out).into_iter().nth(at)?;
+    Some(format!("{}{}{}", &out[..copy.start], blank(&out[copy.start..copy.end]), &out[copy.end..]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +372,18 @@ mod tests {
         assert!(out.contains("B</section>\n  <section class=\"slide dark\">B</section>\n  <section class=\"slide\">C"));
         assert!(reorder(DECK, &[2, 1, 2, 3]).is_none());
         assert!(reorder(DECK, &[1, 2, 4]).is_none());
+    }
+
+    #[test]
+    fn a_slide_is_added_empty_in_the_layout_before_it() {
+        let src = "<body><section class=\"slide\"><h2 class=\"t\">Why <b>now</b></h2>            <div class=\"cols\"><div><p>Left</p></div><div>Right</div></div><ul><li>A</li><li>B</li></ul>            <img src=\"a.png\"><style>p{}</style><aside class=\"notes\">Say it</aside></section></body>";
+        let out = add_after(src, &[1, 1]).unwrap();
+        let copy = &out[slides(&out)[1].start..];
+        assert!(copy.starts_with("<section class=\"slide\"><h2 class=\"t\">Title</h2>"));
+        assert!(copy.contains("<div><p>Text</p></div><div>Text</div>"));
+        assert!(copy.contains("<li>Point</li><li>Point</li>"));
+        assert!(copy.contains("<img src=\"a.png\"><style>p{}</style><aside class=\"notes\"></aside>"));
+        assert!(out[..slides(&out)[1].start].contains("Why <b>now</b>"));
+        assert!(add_after(src, &[1]).is_none());
     }
 }

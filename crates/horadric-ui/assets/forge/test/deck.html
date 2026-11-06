@@ -6,6 +6,20 @@
 <script src="../forge.js"></script>
 <script src="../deck.js"></script>
 <style>
+  /* Horadric's look as the Forge sets it when it injects the shell; a
+     file:// page gets none, so it is written here (Skeuomorph, violet). */
+  html, forge-deck-ui {
+    --hd-plate: #151619; --hd-plate-low: #0e0f11; --hd-key-top: #2b2d31; --hd-key-low: #181a1e;
+    --hd-key-side: #0b0c0d; --hd-surface: #1b1d21; --hd-well: #090a0c; --hd-screen: #060709;
+    --hd-lamp-off: #25272c; --hd-text: #e8e9ed; --hd-dim: #8f939e; --hd-legend: #6e727c;
+    --hd-read: #d4d5d9; --hd-cast: rgba(0, 0, 0, 0.6); --hd-bevel-light: rgba(255, 255, 255, 0.11);
+    --hd-bevel-shade: rgba(0, 0, 0, 0.35); --hd-hollow-shade: rgba(0, 0, 0, 0.55);
+    --hd-hollow-light: rgba(255, 255, 255, 0.05); --hd-engrave-dark: rgba(0, 0, 0, 0.5);
+    --hd-engrave-light: rgba(255, 255, 255, 0.05); --hd-hover: rgba(255, 255, 255, 0.06);
+    --hd-press: rgba(255, 255, 255, 0.025); --hd-accent: #a78bfa;
+    --hd-accent-dim: rgba(167, 139, 250, 0.5); --hd-accent-faint: rgba(167, 139, 250, 0.12);
+    --hd-error: #ff5d66;
+  }
   body { margin: 0; font-family: "Segoe UI", sans-serif; background: #ddd; }
   section.slide {
     width: 1920px; height: 1080px; padding: 120px 160px;
@@ -18,12 +32,14 @@
   section.slide.dark { background: #1d2b36; color: #fbfaf7; }
   .cols { display: flex; gap: 80px; }
   .cols > div { flex: 1; background: #e6eef4; padding: 40px; border-radius: 16px; }
+  /* Named like a class the shell once used: it must keep this look. */
+  .bar { height: 40px; background: #3a7bd5; border-radius: 6px; margin: 16px 0; }
 </style>
 </head>
 <body>
 <section class="slide dark">
   <h1>The Forge</h1>
-  <p>A test deck, five slides, with notes.</p>
+  <p>A test deck, seven slides, with notes.</p>
   <aside class="notes">Welcome everyone. This is the first slide.</aside>
 </section>
 <section class="slide">
@@ -39,6 +55,17 @@
 <section class="slide">
   <h2>A picture</h2>
   <img src="sample.svg" alt="" style="height: 600px">
+</section>
+<section class="slide">
+  <h2>A chart</h2>
+  <div class="bar" style="width: 80%"></div>
+  <div class="bar" style="width: 55%"></div>
+  <div class="bar" style="width: 30%"></div>
+  <aside class="notes">The bars must stay blue and full height: the shell's own classes never reach the page.</aside>
+</section>
+<section class="slide">
+  <h2>Steps</h2>
+  <ol><li>Open the deck</li><li>Point at what is wrong</li><li>Let Claude fix it</li></ol>
 </section>
 <section class="slide dark">
   <h2>Thanks</h2>
