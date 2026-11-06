@@ -1,23 +1,37 @@
 //! A markdown table in a reply, set as a data table: no box and no
 //! stripes, hairlines between rows, a small label for a header, figures
 //! right aligned and in step, short statuses as pills.
+//!
+//! A table too wide to set at a readable width slides sideways inside its
+//! own frame rather than squeezing every column to a sliver. Where it has
+//! slid to is kept here by the table's text, as code folds are, and the
+//! transcript builds a reply again when it moves.
+
+use std::cell::{Cell, RefCell};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 use horadric_core::markdown::{Align, Inline};
 use windows::core::Interface;
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteTextLayout, IDWriteTextLayout1, DWRITE_FONT_FEATURE,
     DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, DWRITE_FONT_WEIGHT_MEDIUM,
-    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_WORD_WRAPPING_EMERGENCY_BREAK,
+    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_LINE_METRICS, DWRITE_TRIMMING,
+    DWRITE_TRIMMING_GRANULARITY_WORD, DWRITE_WORD_WRAPPING_EMERGENCY_BREAK,
 };
 
-use super::flow;
-use super::rich::{first_line, range, Ctx, Scene};
+use super::flow::{self, Kind, Para};
+use super::rich::{first_line, range, Ctx, Item, Scene};
 use super::transcript::Act;
 use super::view::Hit;
+use crate::folio_look as look;
 use crate::layout::Rect;
 use crate::render;
 use crate::theme;
 
+// Reached once the transcript and the view wire sliding in.
+#[allow(dead_code)]
 /// The room between two columns, half on each side. The outer edges get
 /// none, so the first column lines up with the prose around the table.
 const CELL_X: f32 = 12.0;
@@ -25,8 +39,28 @@ const CELL_X: f32 = 12.0;
 const CELL_Y: f32 = 7.0;
 /// The header label's room under it, above its rule.
 const HEAD_BELOW: f32 = 7.0;
-/// The narrowest a table column gets.
+/// The narrowest a table column gets when it cannot slide.
 const CELL_LEAST: f32 = 64.0;
+/// The narrowest a column is squeezed to before the table slides
+/// instead: about a dozen characters, so a word or a figure still reads.
+const READ_LEAST: f32 = 96.0;
+/// A sliding table has room to spare, so its wide columns wrap at a
+/// comfortable measure rather than running a line across many screens.
+const WIDE_MOST: f32 = 280.0;
+/// A cell taller than this many lines is cut to them, with an ellipsis:
+/// one long note must not make its row a page tall. Copy has it whole.
+const CELL_LINES: usize = 8;
+/// How far a notch of the wheel slides a table.
+const NOTCH_X: f32 = 72.0;
+/// The scroll indicator under a sliding table: its room above, its height.
+const BAR_GAP: f32 = 6.0;
+const BAR_H: f32 = 3.0;
+/// The shortest the indicator's thumb gets, so it stays easy to see.
+const THUMB_LEAST: f32 = 28.0;
+/// The fade at an edge the table runs on past, in strips of solid colour
+/// since a scene has no gradients.
+const FADE_W: f32 = 28.0;
+const FADE_STEPS: usize = 7;
 /// The header label: smaller than the body and a touch tracked, so it
 /// reads as a label over the data rather than a row of it.
 const HEAD_SIZE: f32 = 12.5;
@@ -38,6 +72,184 @@ const PILL_X: f32 = 8.0;
 /// The hover Copy button's size.
 const COPY_W: f32 = 76.0;
 const COPY_H: f32 = 22.0;
+
+/// Where a sliding table is: how far it has slid, how far it can, its
+/// frame in its own scene, and whether it moved since the transcript last
+/// built what shows.
+#[derive(Debug, Clone, Copy, Default)]
+struct Slide {
+    at: f32,
+    most: f32,
+    frame: Rect,
+    #[allow(dead_code)]
+    moved: bool,
+}
+
+thread_local! {
+    /// The tables wider than their view, by [`slide_key`].
+    static SLIDES: RefCell<HashMap<String, Slide>> = RefCell::new(HashMap::new());
+    /// Whether anything can slide a table yet. Until the transcript calls
+    /// [`settle`], a table squeezes to fit as it always did, since one
+    /// wider than the view with no wheel to reach it would hide columns.
+    static LIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The key a table slides by, from its text: the same table twice slides
+/// together, which reads as one thing anyway.
+pub(super) fn slide_key(header: &[Inline], rows: &[Vec<Inline>]) -> String {
+    let mut h = DefaultHasher::new();
+    for cell in header.iter().chain(rows.iter().flatten()) {
+        cell.text.hash(&mut h);
+    }
+    (header.len(), rows.len()).hash(&mut h);
+    format!("table:{:016x}", h.finish())
+}
+
+// Reached once the transcript and the view wire sliding in.
+#[allow(dead_code)]
+/// Slides table `key` by `by` pixels, right for more than nought. False
+/// when it did not move: it is not wider than its view, or already at
+/// that end, so the caller can leave the input to the page.
+pub(super) fn slide(key: &str, by: f32) -> bool {
+    SLIDES.with(|m| {
+        let mut m = m.borrow_mut();
+        let Some(s) = m.get_mut(key) else {
+            return false;
+        };
+        let at = (s.at + by).clamp(0.0, s.most);
+        if (at - s.at).abs() < 0.01 {
+            return false;
+        }
+        s.at = at;
+        s.moved = true;
+        true
+    })
+}
+
+// Reached once the transcript and the view wire sliding in.
+#[allow(dead_code)]
+/// The wheel over table `key`, in Windows' units of 120 a notch, more
+/// than nought sliding it right.
+pub(super) fn wheel(key: &str, delta: i32) -> bool {
+    slide(key, delta as f32 / 120.0 * NOTCH_X)
+}
+
+// Reached once the transcript and the view wire sliding in.
+#[allow(dead_code)]
+/// Where every table has slid, as one number: a reply is built again when
+/// it changes.
+pub(super) fn slide_print() -> u64 {
+    SLIDES.with(|m| {
+        // Xor, so the map's order does not matter.
+        (m.borrow().iter())
+            .filter(|(_, s)| s.at > 0.0)
+            .map(|(k, s)| {
+                let mut h = DefaultHasher::new();
+                (k, s.at.to_bits()).hash(&mut h);
+                h.finish()
+            })
+            .fold(0, |a, b| a ^ b)
+    })
+}
+
+// Reached once the transcript and the view wire sliding in.
+#[allow(dead_code)]
+/// Whether a paragraph kept from the last build is a table that has slid
+/// since, and so must be built again.
+pub(super) fn stale(p: &Para) -> bool {
+    let Kind::Table { header, rows, .. } = &p.kind else {
+        return false;
+    };
+    let key = slide_key(header, rows);
+    SLIDES.with(|m| m.borrow().get(&key).is_some_and(|s| s.moved))
+}
+
+// Reached once the transcript and the view wire sliding in.
+#[allow(dead_code)]
+/// Called once the transcript has built what shows: every table that
+/// moved is drawn where it now is. It is also what turns sliding on.
+pub(super) fn settle() {
+    LIVE.with(|l| l.set(true));
+    SLIDES.with(|m| m.borrow_mut().values_mut().for_each(|s| s.moved = false));
+}
+
+// Reached once the transcript and the view wire sliding in.
+#[allow(dead_code)]
+/// The key and frame of a table just built, in its own scene, when it is
+/// wider than its view: what the wheel over that frame slides.
+pub(super) fn slider(header: &[Inline], rows: &[Vec<Inline>]) -> Option<(String, Rect)> {
+    let key = slide_key(header, rows);
+    let frame = SLIDES.with(|m| m.borrow().get(&key).map(|s| s.frame))?;
+    Some((key, frame))
+}
+
+/// Notes a table being built at width `w` with its columns `total_w`
+/// wide: how far it can slide now, keeping where it was within that.
+/// Returns how far it has slid. A table that fits is forgotten.
+fn place(key: &str, total_w: f32, w: f32) -> f32 {
+    SLIDES.with(|m| {
+        let mut m = m.borrow_mut();
+        let most = (total_w - w).max(0.0);
+        if most <= 0.0 {
+            m.remove(key);
+            return 0.0;
+        }
+        let s = m.entry(key.to_string()).or_default();
+        s.most = most;
+        s.at = s.at.clamp(0.0, most);
+        s.at
+    })
+}
+
+/// The frame a sliding table was drawn in, once its height is known.
+fn set_frame(key: &str, frame: Rect) {
+    SLIDES.with(|m| {
+        if let Some(s) = m.borrow_mut().get_mut(key) {
+            s.frame = frame;
+        }
+    });
+}
+
+/// Column widths for a table whose columns want `natural` in a view `w`
+/// wide, and whether it slides: columns that fit keep their width; when
+/// they do not, the wide ones wrap, none below a readable width. Only
+/// when even that is too wide, and the table can slide, does it run past
+/// the view, each column at what it wants up to a comfortable measure.
+fn plan(natural: &[f32], w: f32, can_slide: bool) -> (Vec<f32>, bool) {
+    let cols = natural.len();
+    let total: f32 = natural.iter().sum();
+    if total <= w || cols == 0 {
+        return (natural.to_vec(), false);
+    }
+    let floor: f32 = natural.iter().map(|n| n.min(READ_LEAST)).sum();
+    if floor <= w {
+        return (fit(&flow::table_widths(natural, READ_LEAST, w), READ_LEAST, w), false);
+    }
+    // One column has nothing beside it to make room for, so wrapping it
+    // to the view beats sliding it.
+    if !can_slide || cols < 2 {
+        let least = CELL_LEAST.min(w / cols as f32);
+        return (fit(&flow::table_widths(natural, least, w), least, w), false);
+    }
+    (natural.iter().map(|n| n.min(WIDE_MOST)).collect(), true)
+}
+
+/// The scroll indicator's thumb under a table `content` wide seen through
+/// a view `view` wide, slid `at` of `most`: its left and width.
+fn thumb(at: f32, most: f32, view: f32, content: f32) -> (f32, f32) {
+    if content <= view || most <= 0.0 {
+        return (0.0, view.max(0.0));
+    }
+    let tw = (view * view / content).clamp(THUMB_LEAST.min(view), view);
+    let k = (at / most).clamp(0.0, 1.0);
+    (k * (view - tw), tw)
+}
+
+/// The height a cell whose lines are `lines` tall is cut to, or None when
+/// it is short enough to show whole.
+fn capped(lines: &[f32], most: usize) -> Option<f32> {
+    (lines.len() > most).then(|| lines[..most].iter().sum())
+}
 
 impl Ctx<'_> {
     /// A table: columns as wide as their widest cell, the wide ones
@@ -108,21 +320,33 @@ impl Ctx<'_> {
             let (l, r) = pad(c);
             *n += l + r + 2.0;
         }
-        let least = CELL_LEAST.min(w / cols as f32);
-        let widths = fit(&flow::table_widths(&natural, least, w), least, w);
+        let can_slide = LIVE.with(Cell::get);
+        let (widths, wide) = plan(&natural, w, can_slide);
         let total_w: f32 = widths.iter().sum();
+        let key = slide_key(header, rows);
+        // A table that fits is set from the left; one that slides is drawn
+        // moved by as far as it has slid, inside a frame the view wide.
+        let at = if can_slide { place(&key, total_w, w) } else { 0.0 };
         let lefts: Vec<f32> = widths
             .iter()
-            .scan(0.0, |x, cw| {
-                let at = *x;
+            .scan(-at, |x, cw| {
+                let left = *x;
                 *x += cw;
-                Some(at)
+                Some(left)
             })
             .collect();
+        let rule_w = if wide { w } else { total_w };
+        // Every status pill sits level with the first line of body text.
+        let line = self
+            .one_line(&self.fonts.body, "Ag")
+            .and_then(|l| first_line(&l))
+            .unwrap_or(PILL_H);
 
         // The hover Copy button covers nothing: beside the table when it
         // leaves the room, else in a slim margin kept above it.
         let top = copy_top(w, total_w);
+        let first_item = s.items.len();
+        let first_hit = s.hits.len();
 
         // The header: a dim label, then a rule a shade firmer than the
         // hairlines between rows, which is all that sets it apart.
@@ -154,7 +378,7 @@ impl Ctx<'_> {
         }
         y += hh + HEAD_BELOW;
         s.fill(
-            Rect::new(0.0, y - 1.0, total_w, 1.0),
+            Rect::new(0.0, y - 1.0, rule_w, 1.0),
             0.0,
             self.pal.fg.with_alpha(0.16),
         );
@@ -170,7 +394,8 @@ impl Ctx<'_> {
                 // shows its status as plain text.
                 let pill = status(t).filter(|_| cw >= 2.0 * PILL_X);
                 if let Some((tone, label)) = pill {
-                    rh = rh.max(self.pill(&mut s, tone, &label, x, y + CELL_Y, cw, aligns[c]));
+                    let at = (x, y + CELL_Y, cw, line);
+                    rh = rh.max(self.pill(&mut s, tone, &label, at, aligns[c]));
                     continue;
                 }
                 let ink = if blank(t) {
@@ -181,6 +406,7 @@ impl Ctx<'_> {
                     self.pal.fg.with_alpha(0.84)
                 };
                 let mark = s.units.len();
+                let drawn = s.items.len();
                 let (h, _) = self.inline(
                     &mut s,
                     inl,
@@ -201,7 +427,16 @@ impl Ctx<'_> {
                                 .layout
                                 .SetFontWeight(DWRITE_FONT_WEIGHT_MEDIUM, whole(&u.text));
                         }
-                        let (_, nh) = self.fit_cell(&u.layout);
+                        let (_, mut nh) = self.fit_cell(&u.layout);
+                        if let Some(cut) = capped(&line_heights(&u.layout), CELL_LINES) {
+                            self.cut(&u.layout, cut);
+                            nh = cut;
+                            // The lines past the cut are still in the
+                            // layout, so the cell is clipped to it too.
+                            let clip = Rect::new(x, y + CELL_Y, cw, cut);
+                            s.items.insert(drawn, Item::Clip(clip));
+                            s.items.push(Item::Unclip);
+                        }
                         u.h = nh;
                         nh
                     }
@@ -214,16 +449,85 @@ impl Ctx<'_> {
             // table ends where its text does.
             if k + 1 < rows.len() {
                 s.fill(
-                    Rect::new(0.0, y - 1.0, total_w, 1.0),
+                    Rect::new(0.0, y - 1.0, rule_w, 1.0),
                     0.0,
                     self.pal.fg.with_alpha(0.07),
                 );
             }
         }
 
+        if wide {
+            let frame = Rect::new(0.0, top, w, y - top);
+            self.frame(&mut s, frame, (first_item, first_hit), (at, total_w - w), total_w);
+            set_frame(&key, frame);
+            y += BAR_GAP + BAR_H + 2.0;
+        }
+
         self.copy_button(&mut s, header, rows, w, top, hh);
         s.h = y + 4.0;
         s
+    }
+
+    /// A sliding table's frame: what was drawn from `first` on clipped to
+    /// it, the links in it kept to what shows, a fade at each edge it runs
+    /// on past, and a thin indicator of where it is under it.
+    unsafe fn frame(
+        &self,
+        s: &mut Scene,
+        frame: Rect,
+        (first_item, first_hit): (usize, usize),
+        (at, most): (f32, f32),
+        content: f32,
+    ) {
+        s.items.insert(first_item, Item::Clip(frame));
+        let bg = self.pal.bg;
+        let strip = FADE_W / FADE_STEPS as f32;
+        for i in 0..FADE_STEPS {
+            // Strongest at the edge, gone by the fade's inner end.
+            let k = (i + 1) as f32 / FADE_STEPS as f32;
+            let a = 0.92 * k * k;
+            if at > 0.5 {
+                let x = frame.x + FADE_W - (i + 1) as f32 * strip;
+                s.fill(Rect::new(x, frame.y, strip, frame.h), 0.0, bg.with_alpha(a));
+            }
+            if at < most - 0.5 {
+                let x = frame.right() - FADE_W + i as f32 * strip;
+                s.fill(Rect::new(x, frame.y, strip, frame.h), 0.0, bg.with_alpha(a));
+            }
+        }
+        s.items.push(Item::Unclip);
+        // A link slid out of view must not take a click where it was.
+        let kept: Vec<(Rect, Hit)> = (s.hits.drain(first_hit..))
+            .filter_map(|(r, h)| Some((look::clip(&r, &frame)?, h)))
+            .collect();
+        s.hits.extend(kept);
+
+        let bar_y = frame.bottom() + BAR_GAP;
+        s.fill(
+            Rect::new(frame.x, bar_y, frame.w, BAR_H),
+            BAR_H / 2.0,
+            self.pal.fg.with_alpha(0.05),
+        );
+        let (tx, tw) = thumb(at, most, frame.w, content);
+        s.fill(
+            Rect::new(frame.x + tx, bar_y, tw, BAR_H),
+            BAR_H / 2.0,
+            self.pal.fg.with_alpha(0.26),
+        );
+    }
+
+    /// A cell cut to its first lines `h` tall, an ellipsis ending the last
+    /// one so it reads as cut rather than as all there is.
+    unsafe fn cut(&self, l: &IDWriteTextLayout, h: f32) {
+        let _ = l.SetMaxHeight(h + 0.5);
+        let trimming = DWRITE_TRIMMING {
+            granularity: DWRITE_TRIMMING_GRANULARITY_WORD,
+            delimiter: 0,
+            delimiterCount: 0,
+        };
+        if let Ok(sign) = self.gpu.dw.CreateEllipsisTrimmingSign(&self.fonts.body) {
+            let _ = l.SetTrimming(&trimming, &sign);
+        }
     }
 
     /// The header's label look on a layout already made from `text`.
@@ -268,23 +572,16 @@ impl Ctx<'_> {
     }
 
     /// A status as a small pill tinted by its tone, centred on the first
-    /// line of body text so it sits level with the cells beside it.
-    /// Returns the height it takes, which is that line's.
-    #[allow(clippy::too_many_arguments)]
+    /// line of body text, `line` tall, so it sits level with the cells
+    /// beside it. Returns the height it takes, which is that line's.
     unsafe fn pill(
         &self,
         s: &mut Scene,
         tone: Tone,
         label: &str,
-        x: f32,
-        y: f32,
-        cw: f32,
+        (x, y, cw, line): (f32, f32, f32, f32),
         align: Align,
     ) -> f32 {
-        let line = self
-            .one_line(&self.fonts.body, "Ag")
-            .and_then(|l| first_line(&l))
-            .unwrap_or(PILL_H);
         let Some(l) = self.pill_layout(label) else {
             return line;
         };
@@ -361,6 +658,19 @@ fn copy_rect(w: f32, top: f32, hh: f32) -> Rect {
 
 fn whole(text: &str) -> windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_RANGE {
     range(0..text.encode_utf16().count() as u32)
+}
+
+/// How tall each of a layout's lines is.
+fn line_heights(l: &IDWriteTextLayout) -> Vec<f32> {
+    let mut n = 0u32;
+    unsafe {
+        let _ = l.GetLineMetrics(None, &mut n);
+        let mut lines = vec![DWRITE_LINE_METRICS::default(); n as usize];
+        if n == 0 || l.GetLineMetrics(Some(&mut lines), &mut n).is_err() {
+            return Vec::new();
+        }
+        lines.iter().map(|m| m.height).collect()
+    }
 }
 
 /// Column widths that never add up to more than `w`. The flow's widths
@@ -666,5 +976,88 @@ mod tests {
         assert!(w.iter().sum::<f32>() <= 300.01);
         assert!(w.iter().all(|x| *x >= 64.0 - 0.01));
         assert_eq!(fit(&[100.0, 50.0], 64.0, 300.0), vec![100.0, 50.0]);
+    }
+
+    #[test]
+    fn table_plan_keeps_what_fits() {
+        assert_eq!(plan(&[100.0, 50.0], 300.0, true), (vec![100.0, 50.0], false));
+    }
+
+    #[test]
+    fn table_plan_wraps_wide_columns_to_a_readable_width() {
+        // A long column gives up room; the short one keeps its own.
+        let (w, wide) = plan(&[60.0, 900.0, 120.0], 500.0, true);
+        assert!(!wide);
+        assert!(w.iter().sum::<f32>() <= 500.01);
+        assert_eq!(w[0], 60.0);
+        assert!(w.iter().all(|x| *x >= 60.0 - 0.01));
+        assert!(w[1] >= READ_LEAST);
+    }
+
+    #[test]
+    fn table_plan_slides_when_columns_would_be_unreadable() {
+        let natural = vec![150.0; 20];
+        let (w, wide) = plan(&natural, 600.0, true);
+        assert!(wide);
+        assert!(w.iter().all(|x| *x >= READ_LEAST));
+        assert!(w.iter().sum::<f32>() > 600.0);
+        // A wide column wraps at a comfortable measure even then.
+        let (w, _) = plan(&[2000.0, 150.0, 150.0, 150.0, 150.0], 400.0, true);
+        assert_eq!(w[0], WIDE_MOST);
+        // Short columns keep their own width.
+        let (w, wide) = plan(&[40.0, 500.0, 500.0, 500.0], 200.0, true);
+        assert!(wide && w[0] == 40.0);
+    }
+
+    #[test]
+    fn table_plan_squeezes_when_it_cannot_slide() {
+        let natural = vec![150.0; 20];
+        let (w, wide) = plan(&natural, 600.0, false);
+        assert!(!wide);
+        assert!(w.iter().sum::<f32>() <= 600.01);
+        // One column wraps to the view rather than sliding.
+        let (w, wide) = plan(&[900.0], 60.0, true);
+        assert!(!wide && w[0] <= 60.01);
+    }
+
+    #[test]
+    fn table_thumb_tracks_the_slide() {
+        let (x, w) = thumb(0.0, 600.0, 400.0, 1000.0);
+        assert_eq!(x, 0.0);
+        assert!((w - 160.0).abs() < 0.01);
+        let (x, w) = thumb(600.0, 600.0, 400.0, 1000.0);
+        assert!((x + w - 400.0).abs() < 0.01);
+        // A very wide table still has a thumb worth seeing.
+        let (_, w) = thumb(0.0, 9600.0, 400.0, 10000.0);
+        assert_eq!(w, THUMB_LEAST);
+        assert_eq!(thumb(0.0, 0.0, 400.0, 300.0), (0.0, 400.0));
+    }
+
+    #[test]
+    fn table_tall_cells_are_cut() {
+        assert_eq!(capped(&[20.0; 5], 8), None);
+        assert_eq!(capped(&[20.0; 12], 8), Some(160.0));
+    }
+
+    #[test]
+    fn table_slide_stays_in_bounds() {
+        let key = "table:test";
+        assert!(!slide(key, 50.0), "an unknown table does not slide");
+        assert_eq!(place(key, 1000.0, 400.0), 0.0);
+        assert!(slide(key, 250.0));
+        assert!(slide(key, 9999.0));
+        assert!(!slide(key, 10.0), "already at the right end");
+        assert_eq!(place(key, 1000.0, 400.0), 600.0);
+        // Wider view: it keeps its place within the new reach.
+        assert_eq!(place(key, 1000.0, 700.0), 300.0);
+        assert!(wheel(key, -120));
+        assert!((place(key, 1000.0, 700.0) - (300.0 - NOTCH_X)).abs() < 0.01);
+        let before = slide_print();
+        assert_ne!(before, 0);
+        settle();
+        // Once it fits it is forgotten.
+        assert_eq!(place(key, 500.0, 700.0), 0.0);
+        assert!(!slide(key, 10.0));
+        assert_eq!(slide_print(), 0);
     }
 }
