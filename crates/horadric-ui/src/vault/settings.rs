@@ -44,6 +44,8 @@ pub enum Row {
     NoIdentity,
     /// Said in place of the rows for a project on a linked machine.
     Afar,
+    /// Said over the rows when the secrets file will not open.
+    Problem,
     /// An identity's name over its rows.
     Heading(u16),
     Name(u16),
@@ -64,6 +66,7 @@ pub fn help(row: Row) -> &'static str {
         Row::AddIdentity => "One of your worlds, with git and logins of its own",
         Row::NoIdentity | Row::Heading(_) => "",
         Row::Afar => "Its identity and secrets are that machine's",
+        Row::Problem => "Nothing kept shows or can be added until it opens",
         Row::Name(_) => "Rename it, or delete it and its logins",
         Row::Git(_) => "The name and email its commits carry, and its GitHub user",
         Row::Claims(_) => "Projects under these folders are its own unless they pick",
@@ -84,6 +87,7 @@ fn label(row: Row) -> &'static str {
         Row::AddIdentity => "Add an identity",
         Row::NoIdentity | Row::Heading(_) => "",
         Row::Afar => "Vault",
+        Row::Problem => "Secrets file",
         Row::Name(_) => "Name",
         Row::Git(_) => "Git",
         Row::Claims(_) => "Folders it claims",
@@ -138,6 +142,8 @@ struct View {
     secrets: Vec<Kept>,
     logins: Vec<Kept>,
     missing: Vec<String>,
+    /// Why the secrets file would not open, which leaves every row empty.
+    problem: Option<String>,
     ids: Vec<Identity>,
     /// Per identity, in `Tool::ALL`'s order: None when the tool is not
     /// its own, Some(None) when it is but nobody is logged in.
@@ -262,48 +268,34 @@ fn build(key: &str) -> View {
         Owner::Identity(s) => Some(s) == slug.as_ref(),
         Owner::Everywhere => true,
     };
-    let vault = store::read();
-    let mut secrets: Vec<Kept> = vault
-        .secrets
-        .iter()
-        .filter(|s| ours(&s.owner))
-        .map(|s| Kept {
-            name: s.name.clone(),
-            owner: Some(s.owner.clone()),
-            allowed: s.allowed.clone(),
-            last: s.last_used.clone(),
-            ..Default::default()
-        })
-        .collect();
-    let mut logins: Vec<Kept> = vault
-        .logins
-        .iter()
-        .filter(|l| ours(&l.owner))
-        .map(|l| Kept {
-            name: l.name.clone(),
-            owner: Some(l.owner.clone()),
-            allowed: l.allowed.clone(),
-            last: l.last_used.clone(),
-            origins: l.origins.clone(),
-            user: l.user.clone(),
-            totp: l.totp.as_deref().is_some_and(|t| !t.is_empty()),
-            ..Default::default()
-        })
-        .collect();
+    v.problem = store::problem();
+    // The listing, not the store itself: a view kept between paints holds
+    // no value, password or seed.
+    let (mut secrets, mut logins): (Vec<Kept>, Vec<Kept>) = (Vec::new(), Vec::new());
+    for l in store::listing(key, slug.as_deref()) {
+        if !ours(&l.owner) {
+            continue;
+        }
+        let kind = l.kind;
+        let k = Kept {
+            name: l.name,
+            owner: Some(l.owner),
+            beaten: l.beaten,
+            allowed: l.allowed,
+            last: l.last_used,
+            origins: l.origins,
+            user: l.user,
+            totp: l.has_totp,
+        };
+        match kind {
+            store::Kind::Secret => secrets.push(k),
+            store::Kind::WebLogin => logins.push(k),
+        }
+    }
     for list in [&mut secrets, &mut logins] {
         list.sort_by(|a, b| {
             (rank(&a.owner()), a.name.as_str()).cmp(&(rank(&b.owner()), b.name.as_str()))
         });
-        let beaten: Vec<bool> = list
-            .iter()
-            .map(|k| {
-                list.iter()
-                    .any(|o| o.name == k.name && rank(&o.owner()) < rank(&k.owner()))
-            })
-            .collect();
-        for (k, b) in list.iter_mut().zip(beaten) {
-            k.beaten = b;
-        }
     }
     v.missing = core::config_secrets(&config)
         .into_iter()
@@ -390,7 +382,11 @@ pub fn project_lines(key: &str) -> Vec<Line> {
         )];
     }
     with_view(Some(key), |v| {
-        let mut rows = vec![line(Row::Pick, pick_value(v), Control::Button)];
+        let mut rows = Vec::new();
+        if let Some(why) = &v.problem {
+            rows.push(line(Row::Problem, format!("Will not open: {why}"), Control::Note));
+        }
+        rows.push(line(Row::Pick, pick_value(v), Control::Button));
         for (i, s) in v.secrets.iter().enumerate() {
             let mut value = format!("{}, {}, {}", s.name, v.whose(&s.owner()), used(&s.last));
             if s.beaten {
@@ -685,7 +681,7 @@ fn act(row: Row) {
                 }
             }
         }
-        Row::NoIdentity | Row::Heading(_) | Row::Afar => {}
+        Row::NoIdentity | Row::Heading(_) | Row::Afar | Row::Problem => {}
         Row::Name(i) | Row::Git(i) | Row::Claims(i) | Row::Tool(i, _) => {
             let Some((id, who)) = with_view(None, |v| {
                 let id = v.ids.get(i as usize)?.clone();
@@ -914,14 +910,29 @@ fn forget(name: &str) -> bool {
 /// One of `allowed` to stop allowing Always, by its last part. The whole
 /// entry.
 fn pick_allowed(name: &str, allowed: &[String], what: &str) -> Option<String> {
-    let offers: Vec<(String, String)> = allowed
-        .iter()
-        .map(|a| (short(a).to_string(), a.clone()))
-        .collect();
+    let offers: Vec<(String, String)> = allowed.iter().map(|a| allowed_offer(a)).collect();
     let prompt = format!("Allowed Always for {name}. Pick {what} to ask about again from now on.");
     match pick_one(name, &prompt, "remove it", &offers, false)? {
         Picked::Offer(i) => allowed.get(i).cloned(),
         Picked::Typed(_) => None,
+    }
+}
+
+/// How an Always reads in the list: a secret's by its program's file name,
+/// with the project and the content it was given for, since the same
+/// program may be allowed for two projects or as it was before an update.
+/// A web login's is a project key.
+fn allowed_offer(entry: &str) -> (String, String) {
+    let parts = entry
+        .strip_prefix("sha256:")
+        .and_then(|rest| rest.split_once('|'))
+        .and_then(|(hash, rest)| rest.rsplit_once('|').map(|(project, program)| (hash, project, program)));
+    match parts {
+        Some((hash, project, program)) => (
+            short(program).to_string(),
+            format!("for {}, as it was at {}", short(project), hash.get(..8).unwrap_or(hash)),
+        ),
+        None => (short(entry).to_string(), entry.to_string()),
     }
 }
 
@@ -1158,10 +1169,9 @@ fn name_of(id: &Identity) {
 fn delete_identity(id: &Identity) {
     const TITLE: &str = "Delete identity";
     let owner = Owner::Identity(id.slug.clone());
-    let vault = store::read();
-    let secrets = vault.secrets.iter().filter(|s| s.owner == owner).count();
-    let logins = vault.logins.iter().filter(|l| l.owner == owner).count();
-    drop(vault);
+    let listed = store::listing("", Some(&id.slug));
+    let theirs = |kind| listed.iter().filter(|l| l.kind == kind && l.owner == owner).count();
+    let (secrets, logins) = (theirs(store::Kind::Secret), theirs(store::Kind::WebLogin));
     let mut text = format!(
         "Deletes {} and its folder of logins on this PC. Projects that were its get this PC's own logins in their next sessions; sessions already running keep it until restarted.",
         id.name
@@ -1418,6 +1428,13 @@ mod tests {
         );
         let same = [("x".to_string(), String::new()), ("X".to_string(), String::new())];
         assert_eq!(unique_labels(&same), ["x", "X #2"]);
+    }
+
+    #[test]
+    fn an_always_reads_by_program_project_and_content() {
+        let a = horadric_core::vault::secret::approval("c:/work/app", "c:/tools/gh.exe", "ABCDEF0123456789");
+        assert_eq!(allowed_offer(&a), ("gh.exe".to_string(), "for app, as it was at abcdef01".to_string()));
+        assert_eq!(allowed_offer("c:/work/site").0, "site");
     }
 
     #[test]

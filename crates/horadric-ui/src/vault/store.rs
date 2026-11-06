@@ -297,7 +297,12 @@ pub enum Kind {
 /// Every item kept, as a project's sessions see them: secrets first, then
 /// web logins.
 pub fn listing(project_key: &str, identity: Option<&str>) -> Vec<Listed> {
-    let v = read();
+    // Read in place under the lock, not through `read`, which would copy
+    // every value only to drop them.
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(v) = loaded(&mut cache) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for s in &v.secrets {
         let wins = winner(&v.secrets, |s| &s.owner, |s| &s.name, project_key, identity, &s.name);
