@@ -85,6 +85,21 @@ pub fn valid_origin(o: &str) -> bool {
     loopback(host)
 }
 
+/// Whether a page's origin is this machine. Any program here, the agent's
+/// own dev server among them, can serve a page on a loopback port, so a
+/// login is filled there only Once at a time.
+pub fn is_loopback(o: &str) -> bool {
+    let Some(o) = origin(o) else {
+        return false;
+    };
+    let rest = o.split_once("://").map_or("", |(_, r)| r);
+    let host = match rest.rfind(':') {
+        Some(c) if !rest[c..].contains(']') => &rest[..c],
+        _ => rest,
+    };
+    loopback(host)
+}
+
 /// Whether the page at `url` is on one of a login's origins, exactly.
 pub fn matches(url: &str, origins: &[String]) -> bool {
     let Some(here) = origin(url) else {
@@ -295,6 +310,15 @@ mod tests {
         assert!(!valid_origin("https://App.opticloud.dk"));
         assert!(!valid_origin("https://*.opticloud.dk"));
         assert!(!valid_origin("http://localhost.evil.example"));
+    }
+
+    #[test]
+    fn loopback_origins_are_this_machine() {
+        assert!(is_loopback("http://localhost:3000"));
+        assert!(is_loopback("https://127.0.0.1/x"));
+        assert!(is_loopback("http://[::1]:8080"));
+        assert!(!is_loopback("https://localhost.evil.example"));
+        assert!(!is_loopback("https://app.opticloud.dk"));
     }
 
     #[test]

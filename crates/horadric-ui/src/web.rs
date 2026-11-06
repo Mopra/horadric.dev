@@ -616,7 +616,53 @@ fn end(tab: Tab) {
     if let Some(c) = tab.controller {
         let _ = unsafe { c.Close() };
     }
+    CONTEXTS.with(|c| c.borrow_mut().remove(&tab.id));
     settle(tab.waiting, tab.loading);
+}
+
+thread_local! {
+    /// Each tab's main worlds, frame id to the unique id of the context its
+    /// document's own scripts run in, while Runtime reports to the app: a
+    /// script pinned to one runs in that document or not at all, never in
+    /// a page that came back from the back and forward cache meanwhile.
+    static CONTEXTS: RefCell<HashMap<u64, HashMap<String, String>>> = RefCell::new(HashMap::new());
+}
+
+/// Has Runtime tell the app of the tab's contexts from now on, for
+/// `context_of`. Only a tab a login was filled in asks: bot checks look
+/// for Runtime being on, and only such a tab needs scripts pinned.
+pub fn track_contexts(key: &str, id: u64, done: impl FnOnce() + 'static) {
+    devtools(key, id, "Runtime.enable", "{}", move |_| done());
+}
+
+/// The main world of frame `frame` of tab `id`, as last reported.
+pub fn context_of(id: u64, frame: &str) -> Option<String> {
+    CONTEXTS.with(|c| c.borrow().get(&id)?.get(frame).cloned())
+}
+
+/// Keeps `CONTEXTS` up to date from one Runtime event: a context made, one
+/// destroyed, or all cleared. An event it does not know clears the tab's,
+/// so a script finds no context rather than a stale one.
+fn context_event(id: u64, json: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return;
+    };
+    CONTEXTS.with(|c| {
+        let mut c = c.borrow_mut();
+        let frames = c.entry(id).or_default();
+        if let Some(ctx) = v.get("context") {
+            let aux = &ctx["auxData"];
+            if let (true, Some(f), Some(u)) =
+                (aux["isDefault"] == true, aux["frameId"].as_str(), ctx["uniqueId"].as_str())
+            {
+                frames.insert(f.to_string(), u.to_string());
+            }
+        } else if let Some(u) = v["executionContextUniqueId"].as_str() {
+            frames.retain(|_, x| x != u);
+        } else {
+            frames.clear();
+        }
+    });
 }
 
 /// Tells the agents still waiting on a page that went that it is gone.
@@ -2040,6 +2086,23 @@ fn listen(key: &str, id: u64, view: &ICoreWebView2) {
         let opening = HSTRING::from("Page.javascriptDialogOpening");
         if let Ok(r) = view.GetDevToolsProtocolEventReceiver(&opening) {
             let _ = r.add_DevToolsProtocolEventReceived(&dialog, &mut token);
+        }
+        for event in [
+            "Runtime.executionContextCreated",
+            "Runtime.executionContextDestroyed",
+            "Runtime.executionContextsCleared",
+        ] {
+            let context = DevToolsProtocolEventReceivedEventHandler::create(Box::new(
+                move |_, args| {
+                    if let Some(args) = args {
+                        context_event(id, &read(|p| args.ParameterObjectAsJson(p)));
+                    }
+                    Ok(())
+                },
+            ));
+            if let Ok(r) = view.GetDevToolsProtocolEventReceiver(&HSTRING::from(event)) {
+                let _ = r.add_DevToolsProtocolEventReceived(&context, &mut token);
+            }
         }
         let enabled = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
         let _ = view.CallDevToolsProtocolMethod(

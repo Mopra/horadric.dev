@@ -11,6 +11,7 @@
 //! Each session's agent keeps to a tab of its own, so the user showing
 //! another tab, or another session opening one, never moves it.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 
 use horadric_core::Phase;
@@ -21,7 +22,7 @@ use serde_json::{json, Value};
 use super::{App, WEB};
 use crate::browse::{self, closed, error, Call};
 use crate::console::Console;
-use crate::vault::{fill, identity};
+use crate::vault::{fill, identity, run};
 use crate::web;
 use crate::window::project_name;
 
@@ -35,6 +36,9 @@ impl App {
         let Some(key) = self.project_of(&call.session) else {
             return reply.send(error("this session has no project in Horadric"));
         };
+        if let Err(e) = vouched(&call.session, call.body["key"].as_str().unwrap_or("")) {
+            return reply.send(error(e));
+        }
         let Some(reply) = self.forge_call(&key, &call.body, reply) else {
             return;
         };
@@ -101,12 +105,15 @@ impl App {
                 };
                 // A tab still being made holds the call until it is, which
                 // may be after its agent gave up on it.
-                let k = key.clone();
+                let who = fill::Caller {
+                    project: key.clone(),
+                    identity: self.identity_of(&key),
+                };
                 web::with_view(&key, id, move |_| {
                     if !reply.wanted() {
                         return;
                     }
-                    fill::devtools(&k, id, method, params, reply);
+                    fill::devtools(who, id, method, params, reply);
                 });
             }
             Call::FillLogin {
@@ -119,13 +126,9 @@ impl App {
                 let Some(id) = tab(false) else {
                     return reply.send(closed());
                 };
-                let identity = match self.project_dir(&key).map(|d| identity::of_project(&d)) {
-                    Some(Resolved::Identity(slug)) => Some(slug),
-                    _ => None,
-                };
                 let req = fill::Request {
                     project: key.clone(),
-                    identity,
+                    identity: self.identity_of(&key),
                     session: session.to_string(),
                     key: secret_key,
                     name,
@@ -139,6 +142,14 @@ impl App {
                     }
                 });
             }
+        }
+    }
+
+    /// The identity the project's sessions work as, if it has one.
+    fn identity_of(&self, key: &str) -> Option<String> {
+        match self.project_dir(key).map(|d| identity::of_project(&d)) {
+            Some(Resolved::Identity(slug)) => Some(slug),
+            _ => None,
         }
     }
 
@@ -177,6 +188,33 @@ impl App {
         }
         id
     }
+}
+
+thread_local! {
+    /// The sessions that have shown the app their key on a browser call.
+    static VOUCHED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// Whether a browser call naming `session` is that session's own. The
+/// session id comes in a header any local program can set, so without
+/// the key an agent could drive another project's tab by naming one of
+/// its sessions. `horadric mcp` sends its session's key with every call.
+/// A session the app holds no key for (one begun before the app last
+/// started) still works for now. Until the Vault can say whether it holds
+/// a key, a session that has once shown the right key must show it from
+/// then on.
+fn vouched(session: &str, key: &str) -> Result<(), &'static str> {
+    if run::key_ok(session, key) {
+        VOUCHED.with(|v| v.borrow_mut().insert(session.to_string()));
+        return Ok(());
+    }
+    if VOUCHED.with(|v| v.borrow().contains(session)) {
+        return Err(
+            "this call did not carry the session's key, so Horadric does not take it for the \
+             session it names",
+        );
+    }
+    Ok(())
 }
 
 /// Answers once the tab's navigation ends, with where it ended up.

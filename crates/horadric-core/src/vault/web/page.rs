@@ -32,6 +32,16 @@ pub fn snapshot() -> String {
     format!("({SNAPSHOT})()")
 }
 
+/// The expression that reads what the page logged, as the app's console
+/// keeper holds it (`browse::KEEP_CONSOLE`), and clears it when `clear`.
+pub fn console(clear: bool) -> String {
+    format!(
+        "(() => {{ const detail = {{ clear: {clear}, out: [] }}; \
+         dispatchEvent(new CustomEvent('horadric-console', {{ detail }})); \
+         return detail.out; }})()"
+    )
+}
+
 /// Whether `expression` may run in a page holding a filled login: one of
 /// the page functions above exactly, called with plain JSON and no
 /// selector (a selector such as `input[value^="a"]` asks the page about
@@ -49,6 +59,12 @@ pub fn known(expression: &str) -> bool {
 
 fn matches(expression: &str, refs_only: bool) -> bool {
     if expression == snapshot() || expression == MIDDLE || expression == SCROLLED {
+        return true;
+    }
+    // The console may hold what the page logged of its own fields, so it
+    // is read only where nothing was filled; reading it is no code of the
+    // agent's.
+    if !refs_only && (expression == console(true) || expression == console(false)) {
         return true;
     }
     FUNCTIONS.iter().any(|fun| {
@@ -72,6 +88,7 @@ fn matches(expression: &str, refs_only: bool) -> bool {
 /// saying what it is.
 pub const HELPERS: &str = r#"
 const clean = (s, n) => { s = String(s || "").replace(/\s+/g, " ").trim(); return s.length > n ? s.slice(0, n - 3) + "..." : s; };
+const secret = (e) => e.type === "password" || e.hasAttribute("data-horadric-filled") || /password|one-time-code/.test(e.getAttribute("autocomplete") || "");
 const pick = (ref, selector) => {
   if (ref) {
     const refs = (window.__horadric || {}).refs || [];
@@ -85,7 +102,7 @@ const pick = (ref, selector) => {
 };
 const describe = (e) => {
   const tag = e.tagName.toLowerCase();
-  const label = clean(e.getAttribute("aria-label") || e.innerText || (e.type === "password" ? "" : e.value) || e.getAttribute("placeholder") || "", 60);
+  const label = clean(e.getAttribute("aria-label") || e.innerText || (secret(e) ? "" : e.value) || e.getAttribute("placeholder") || "", 60);
   return label ? `${tag} ${JSON.stringify(label)}` : tag;
 };
 const deepest = (x, y) => {
@@ -187,6 +204,7 @@ pub const SNAPSHOT: &str = r#"() => {
   let size = 0, cut = false;
   const clean = (s, n) => { s = String(s || "").replace(/\s+/g, " ").trim(); return s.length > n ? s.slice(0, n - 3) + "..." : s; };
   const q = (s) => JSON.stringify(s);
+  const secret = (e) => e.type === "password" || e.hasAttribute("data-horadric-filled") || /password|one-time-code/.test(e.getAttribute("autocomplete") || "");
   const say = (depth, line) => {
     if (cut) return;
     const l = "  ".repeat(depth) + "- " + line;
@@ -259,7 +277,7 @@ pub const SNAPSHOT: &str = r#"() => {
       s.push("options: " + Array.from(e.options).slice(0, 25).map((o) => q(clean(o.text, 40))).join(", ") + (e.options.length > 25 ? ", ..." : ""));
     } else if (FIELDS.has(r)) {
       const v = e.isContentEditable ? e.innerText : e.value;
-      if (v) s.push("value=" + q(e.type === "password" ? "(hidden)" : clean(v, 80)));
+      if (v) s.push("value=" + q(secret(e) ? "(hidden)" : clean(v, 80)));
     }
     if (r === "link") { const h = e.getAttribute("href"); if (h && !h.startsWith("javascript:")) s.push("to " + clean(h, 100)); }
     const root = e.getRootNode();
@@ -337,6 +355,15 @@ mod tests {
         assert!(!safe_after_fill(&call("(r) => r.value", &[json!("e3")])));
         assert!(known(&call(POINT, &[Value::Null, json!("#go")])));
         assert!(!known(&call("(r) => r.value", &[json!("e3")])));
+        assert!(known(&console(true)) && known(&console(false)));
+        assert!(!safe_after_fill(&console(false)));
+    }
+
+    #[test]
+    fn no_script_reports_a_secret_fields_value() {
+        assert!(HELPERS.contains("(secret(e) ? \"\" : e.value)"));
+        assert!(SNAPSHOT.contains("q(secret(e) ? \"(hidden)\" : clean(v, 80))"));
+        assert!(SNAPSHOT.contains("data-horadric-filled"));
     }
 
     #[test]

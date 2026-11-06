@@ -166,6 +166,12 @@ fn ask_app(port: u16, session: Option<&str>, body: &Value) -> Result<Value, Stri
     let session =
         session.ok_or("this session was not started by Horadric, so it has no browser")?;
     let headers = [(COMMAND_HEADER, "browser"), (SESSION_HEADER, session)];
+    // The session's key goes with every call, so the app knows the call is
+    // this session's and not another program's naming it.
+    let mut body = body.clone();
+    if let (Some(o), Ok(key)) = (body.as_object_mut(), std::env::var(SECRET_KEY_ENV)) {
+        o.entry("key").or_insert(json!(key));
+    }
     let (status, text) = client::ask(port, BROWSER_PATH, &headers, &body.to_string(), APP_WAIT)
         .map_err(|e| {
             if client::sent(&e) {
@@ -461,7 +467,9 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
             said.push_str(&format!(" (signing in as {user})"));
         }
         said.push_str(
-            ". Click the sign in button yourself. Until this page is left,              browser_evaluate, browser_console and browser_devtools are refused on it.",
+            ". Click the sign in button yourself. Until this page is left, browser_evaluate, \
+             browser_console, browser_devtools and browser_type are refused on it, and so are \
+             shortcuts and right clicks.",
         );
         Ok(vec![text(said)])
     }
@@ -577,11 +585,7 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
     fn console(&mut self, args: &Value) -> Result<Vec<Value>, String> {
         let clear = args.get("clear") == Some(&json!(true));
         let level = args.get("level").and_then(Value::as_str);
-        let kept = self.eval(&format!(
-            "(() => {{ const detail = {{ clear: {clear}, out: [] }}; \
-             dispatchEvent(new CustomEvent('horadric-console', {{ detail }})); \
-             return detail.out; }})()"
-        ))?;
+        let kept = self.eval(&page::console(clear))?;
         let lines: Vec<String> = kept
             .as_array()
             .map(Vec::as_slice)
@@ -860,7 +864,12 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "browser_fill_login",
-            "Sign in with a login the human kept in Horadric, without seeing its password:              Horadric types it into the fields you name by ref from browser_snapshot, only              on the login's own site. You get back what was filled, never the value; then              click the sign in button yourself. code fills a one time code where the login              keeps a seed.",
+            "Sign in with a login the human kept in Horadric, without seeing its password: \
+             Horadric types it into the fields you name by ref from browser_snapshot, only \
+             on the login's own site. You get back what was filled, never the value; then \
+             click the sign in button yourself. code fills a one time code where the login \
+             keeps a seed. Fill in a fresh tab where you ran none of your own scripts: a tab \
+             that ran your own code is never filled.",
             json!({
                 "name": { "type": "string", "description": "The login's name, like OPTICLOUD" },
                 "user": { "type": "string", "description": "Ref of the user name or email field" },

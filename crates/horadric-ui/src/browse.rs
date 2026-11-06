@@ -159,12 +159,13 @@ pub enum Step {
 /// scheme, a local server over http, a host over https, anything else a
 /// search.
 pub fn address(typed: &str) -> Option<String> {
-    let t = typed.trim();
+    let t = normalised(typed);
+    let t = t.trim();
     if t.is_empty() {
         return None;
     }
     if t.contains("://") || t.starts_with("about:") || t.starts_with("file:") {
-        return Some(t.to_string());
+        return opens(t).then(|| t.to_string());
     }
     let host = t.split(['/', '?', '#']).next().unwrap_or(t);
     let name = host.rsplit_once(':').map_or(host, |(h, _)| h);
@@ -235,9 +236,10 @@ impl Call {
             Some("devtools") => {
                 let method = text("method").ok_or("say which DevTools method")?;
                 let params = body.get("params").cloned().unwrap_or_else(|| json!({}));
-                let params = devtools_allowed(method, params)?;
+                let mut params = devtools_allowed(method, params)?;
                 if method == "Page.navigate" {
-                    no_script(params["url"].as_str().unwrap_or_default().to_string())?;
+                    let url = no_script(params["url"].as_str().unwrap_or_default().to_string())?;
+                    params["url"] = json!(url);
                 }
                 Call::DevTools(method.to_string(), params)
             }
@@ -269,14 +271,36 @@ impl Call {
     }
 }
 
-/// A `javascript:` address runs the agent's own script in the page it is
-/// on, which a page holding a filled login must never do; nothing else
-/// needs one.
+/// An address as a URL parser reads it: tabs and line breaks dropped
+/// wherever they are, and control characters and spaces cut from both
+/// ends. `java\tscript:` is `javascript:` to the browser, so it must be to
+/// the check too.
+fn normalised(url: &str) -> String {
+    let kept: String = url.chars().filter(|c| !matches!(c, '\t' | '\r' | '\n')).collect();
+    kept.trim_matches(|c: char| c <= ' ').to_string()
+}
+
+/// Whether an address is one a tab may be sent to: http, https, a file,
+/// or a blank page. A `javascript:` or `data:` address runs the agent's
+/// own script in the page, which a page holding a filled login must never
+/// do, and nothing else needs one.
+fn opens(url: &str) -> bool {
+    let u = normalised(url).to_ascii_lowercase();
+    u.starts_with("http://")
+        || u.starts_with("https://")
+        || u.starts_with("file:")
+        || u == "about:blank"
+}
+
 fn no_script(url: String) -> Result<String, String> {
-    if url.trim_start().to_ascii_lowercase().starts_with("javascript:") {
-        return Err("a javascript: address is not opened; use browser_evaluate".into());
+    if !opens(&url) {
+        return Err(
+            "only http, https, file and about:blank addresses are opened; to run a script, \
+             use browser_evaluate"
+                .into(),
+        );
     }
-    Ok(url)
+    Ok(normalised(&url))
 }
 
 /// Where a tab stands with web logins, for what an agent may call on it.
@@ -362,36 +386,146 @@ pub fn after_fill(method: &str, params: &Value, state: Filled) -> Result<(), Str
              request or the page's memory still holds the password"
         ));
     }
+    // The app pins its checks to the document they were made on through
+    // Runtime's reports, which this would stop.
+    if method == "Runtime.disable" {
+        return Err(format!("{method} is refused in this tab: a login was filled in it"));
+    }
     if state == Filled::Now && !quiet(method, params, true) {
         return Err(format!(
             "{method} is refused on this page: Horadric filled a login here, and until the \
-             page is left only browser_snapshot, browser_click, browser_type, browser_press, \
-             browser_scroll, browser_screenshot and browser_wait (by ref, no selectors) work. \
-             Sign in, or navigate away."
+             page is left only browser_snapshot, browser_click, browser_press, browser_scroll, \
+             browser_screenshot and browser_wait (by ref, no selectors) work. Sign in, or \
+             navigate away."
         ));
+    }
+    if state == Filled::Now {
+        input_after_fill(method, params)?;
     }
     Ok(())
 }
 
+/// The input a page holding a filled login refuses: a shortcut (Ctrl, Alt
+/// or the Windows key, an editing command, Shift with Delete or Insert)
+/// could copy a revealed password to the clipboard, a right click opens a
+/// menu with Copy in it, and typed or dropped text is not needed to sign
+/// in. Plain keys and left clicks pass.
+fn input_after_fill(method: &str, p: &Value) -> Result<(), String> {
+    let refuse = |what: &str| {
+        Err(format!(
+            "{what} is refused on this page: Horadric filled a login here, and it could copy \
+             the password out. Click the sign in button, or navigate away."
+        ))
+    };
+    match method {
+        "Input.insertText" | "Input.imeSetComposition" => refuse("typing text"),
+        "Input.dispatchDragEvent" => refuse("dragging"),
+        "Input.dispatchKeyEvent" => {
+            let modifiers = p["modifiers"].as_u64().unwrap_or(0);
+            let key = p["key"].as_str().unwrap_or("");
+            let code = p["code"].as_str().unwrap_or("");
+            let vk = p["windowsVirtualKeyCode"]
+                .as_u64()
+                .or_else(|| p["nativeVirtualKeyCode"].as_u64())
+                .unwrap_or(0);
+            let commands = p["commands"].as_array().is_some_and(|c| !c.is_empty())
+                || p["commands"].is_string();
+            let held = ["Control", "Meta", "Alt", "AltGraph", "OS", "ContextMenu"];
+            let shortcut = modifiers & 0b111 != 0
+                || commands
+                || held.contains(&key)
+                || held.iter().any(|h| code.starts_with(h))
+                || matches!(vk, 17 | 18 | 91 | 92 | 93 | 162..=165)
+                || (modifiers & 8 != 0
+                    && (matches!(key, "Delete" | "Insert") || matches!(vk, 45 | 46)));
+            if shortcut {
+                refuse("a key with Ctrl, Alt or the Windows key, or an editing command")
+            } else {
+                Ok(())
+            }
+        }
+        "Input.dispatchMouseEvent" | "Input.emulateTouchFromMouseEvent" => {
+            match p["button"].as_str() {
+                Some("right" | "middle") => refuse("a right or middle click"),
+                _ => Ok(()),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The calls that only move the tab on or look at where it is, allowed on
+/// a page holding a filled login even when its password shows: the way
+/// off the page.
+pub fn moves_only(method: &str) -> bool {
+    matches!(
+        method,
+        "Page.navigate"
+            | "Page.reload"
+            | "Page.stopLoading"
+            | "Page.getNavigationHistory"
+            | "Page.getFrameTree"
+            | "Page.enable"
+            | "Page.disable"
+            | "Page.bringToFront"
+            | "Page.handleJavaScriptDialog"
+    )
+}
+
+/// The Runtime calls that run nothing and read nothing of the page.
+const RUNTIME_QUIET: &[&str] = &[
+    "Runtime.enable",
+    "Runtime.getHeapUsage",
+    "Runtime.getIsolateId",
+    "Runtime.releaseObject",
+    "Runtime.releaseObjectGroup",
+    "Runtime.discardConsoleEntries",
+];
+
+/// Whether a DevTools call can run the agent's own code in the tab, or
+/// leave something there that outlasts the page: a script, a function
+/// called on a page object, a binding every later page gets, or an event
+/// handler written into the DOM. Code run in a page can register a
+/// service worker or poison what later pages of its site load, so such a
+/// call taints the whole tab, not only its page, and no login is filled
+/// in it again until it is closed. The mcp's own scripts are not the
+/// agent's code.
+pub fn taints(method: &str, params: &Value) -> bool {
+    if method == "Runtime.evaluate" {
+        return !quiet(method, params, false);
+    }
+    if method.starts_with("Runtime.") {
+        return !RUNTIME_QUIET.contains(&method);
+    }
+    if let Some(name) = method.strip_prefix("DOM.") {
+        return (name.starts_with("set")
+            && !matches!(name, "setInspectedNode" | "setNodeStackTracesEnabled"))
+            || matches!(name, "copyTo" | "moveTo" | "undo" | "redo");
+    }
+    false
+}
+
 /// Whole DevTools domains an agent may use: each acts on its own tab's
-/// page and nothing beyond it.
+/// page and nothing beyond it. Debugger, DOMDebugger and the profilers are
+/// out: a breakpoint's condition is a script that outlives the page and
+/// runs in every later one, a keylogger on a login page the app never saw
+/// the agent touch. Of what is here, only Runtime and the DOM's setters
+/// can put the agent's code in a page (`taints`); Emulation, Overlay,
+/// Animation and the Network calls below may last past a page but run no
+/// code.
 const PAGE_DOMAINS: &[&str] = &[
     "Accessibility",
     "Animation",
     "Console",
     "CSS",
-    "Debugger",
     "DOM",
-    "DOMDebugger",
     "DOMSnapshot",
     "Emulation",
-    "HeapProfiler",
     "Input",
     "LayerTree",
     "Log",
     "Overlay",
     "Performance",
-    "Profiler",
     "Runtime",
 ];
 
@@ -446,10 +580,19 @@ pub fn devtools_allowed(method: &str, params: Value) -> Result<Value, String> {
         return refuse("it would send the user's downloads elsewhere");
     }
     match domain {
-        "Storage" | "Browser" | "Target" | "Fetch" | "SystemInfo" => {
+        "Storage" | "Browser" | "Target" | "Fetch" | "SystemInfo" | "ServiceWorker" => {
             return refuse("it reaches past this tab into the whole browser")
         }
+        "Debugger" | "DOMDebugger" | "Profiler" | "HeapProfiler" => {
+            return refuse("what it sets lasts past the page and runs in later ones")
+        }
         _ => {}
+    }
+    if matches!(
+        method,
+        "Page.addScriptToEvaluateOnNewDocument" | "Network.setRequestInterception"
+    ) {
+        return refuse("it puts code or a hand into every page the tab opens later");
     }
     if FILE_METHODS.contains(&method) {
         return refuse("it hands the page files from the user's disk");
@@ -698,6 +841,12 @@ mod tests {
             "Network.loadNetworkResource",
             "Page.addScriptToEvaluateOnNewDocument",
             "Tracing.start",
+            "Debugger.setBreakpointByUrl",
+            "DOMDebugger.setEventListenerBreakpoint",
+            "Profiler.start",
+            "HeapProfiler.takeHeapSnapshot",
+            "ServiceWorker.enable",
+            "Network.setRequestInterception",
             "evaluate",
         ] {
             let e = ok(m).unwrap_err();
@@ -735,9 +884,10 @@ mod tests {
         for state in [Filled::Never, Filled::Before, Filled::Now] {
             assert!(after_fill("Runtime.evaluate", &snap, state).is_ok());
             assert!(after_fill("Runtime.evaluate", &click, state).is_ok());
-            assert!(after_fill("Input.insertText", &json!({ "text": "x" }), state).is_ok());
             assert!(after_fill("Page.captureScreenshot", &json!({}), state).is_ok());
         }
+        assert!(after_fill("Input.insertText", &json!({ "text": "x" }), Filled::Before).is_ok());
+        assert!(after_fill("Input.insertText", &json!({ "text": "x" }), Filled::Now).is_err());
         assert!(after_fill("Runtime.evaluate", &own, Filled::Before).is_ok());
         assert!(after_fill("Runtime.evaluate", &own, Filled::Now).is_err());
         assert!(after_fill("Runtime.evaluate", &by_selector, Filled::Now).is_err());
@@ -766,9 +916,63 @@ mod tests {
         let nav = |u: &str| Call::parse(&json!({ "op": "navigate", "url": u }));
         assert!(nav("javascript://x%0afetch('//x.example')").is_err());
         assert!(nav(" JavaScript://%0aalert(1)").is_err());
+        assert!(nav("java\tscript://%0aalert(1)").is_err());
+        assert!(nav("\u{1}javascript://%0aalert(1)").is_err());
+        assert!(nav("jav\r\nascript://x").is_err());
+        // A data: address typed is read as a host, never opened as data.
+        assert!(!matches!(nav("data:text/html,<script>1</script>"), Ok(Call::Navigate(u)) if u.starts_with("data:")));
         assert!(nav("https://example.com").is_ok());
-        let dev = json!({ "op": "devtools", "method": "Page.navigate", "params": { "url": "javascript:1" } });
-        assert!(Call::parse(&dev).is_err());
+        assert!(nav("about:blank").is_ok());
+        assert!(nav("file:///c:/x.html").is_ok());
+        assert_eq!(nav("ht\ttps://example.com"), Ok(Call::Navigate("https://example.com".into())));
+        let dev = |u: &str| {
+            Call::parse(&json!({ "op": "devtools", "method": "Page.navigate", "params": { "url": u } }))
+        };
+        assert!(dev("javascript:1").is_err());
+        assert!(dev("java\nscript:1").is_err());
+        assert!(dev("vbscript:1").is_err());
+        assert!(dev("data:text/html,<script>1</script>").is_err());
+        assert_eq!(
+            dev("\thttps://a.example"),
+            Ok(Call::DevTools("Page.navigate".into(), json!({ "url": "https://a.example" })))
+        );
+        assert_eq!(address("java\tscript://x%0aalert(1)"), None);
+    }
+
+    #[test]
+    fn a_filled_page_takes_no_shortcut() {
+        let key = |m: u64, k: &str| json!({ "type": "keyDown", "key": k, "modifiers": m });
+        let now = |m: &str, p: Value| after_fill(m, &p, Filled::Now);
+        assert!(now("Input.dispatchKeyEvent", key(0, "Enter")).is_ok());
+        assert!(now("Input.dispatchKeyEvent", key(8, "Tab")).is_ok());
+        assert!(now("Input.dispatchKeyEvent", key(2, "c")).is_err());
+        assert!(now("Input.dispatchKeyEvent", key(4, "c")).is_err());
+        assert!(now("Input.dispatchKeyEvent", key(1, "c")).is_err());
+        assert!(now("Input.dispatchKeyEvent", key(0, "Control")).is_err());
+        assert!(now("Input.dispatchKeyEvent", key(8, "Delete")).is_err());
+        assert!(now("Input.dispatchKeyEvent", json!({ "key": "a", "commands": ["copy"] })).is_err());
+        assert!(now("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "button": "left" })).is_ok());
+        assert!(now("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "button": "right" })).is_err());
+        assert!(now("Input.dispatchDragEvent", json!({})).is_err());
+        assert!(after_fill("Input.dispatchKeyEvent", &key(2, "c"), Filled::Before).is_ok());
+        assert!(after_fill("Runtime.disable", &json!({}), Filled::Before).is_err());
+    }
+
+    #[test]
+    fn code_the_agent_writes_taints_the_tab() {
+        use horadric_core::vault::web::page;
+        let eval = |e: &str| json!({ "expression": e, "returnByValue": true });
+        assert!(taints("Runtime.evaluate", &eval("1 + 1")));
+        assert!(!taints("Runtime.evaluate", &eval(&page::snapshot())));
+        assert!(!taints("Runtime.evaluate", &eval(&page::console(false))));
+        for m in ["Runtime.callFunctionOn", "Runtime.compileScript", "Runtime.runScript",
+            "Runtime.addBinding", "DOM.setAttributeValue", "DOM.setOuterHTML", "DOM.setAttributesAsText"] {
+            assert!(taints(m, &json!({})), "{m}");
+        }
+        for m in ["DOM.getDocument", "CSS.addRule", "Emulation.setScriptExecutionDisabled",
+            "Runtime.enable", "Page.navigate", "Input.insertText"] {
+            assert!(!taints(m, &json!({})), "{m}");
+        }
     }
 
     #[cfg(windows)]
