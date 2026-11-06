@@ -13,6 +13,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 use crate::backup::config::To;
 use horadric_core::saved::Discord;
@@ -35,7 +36,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos,
+    CallNextHookEx, CreateWindowExW, PostMessageW, WM_ACTIVATE, WM_APP, DefWindowProcW, DestroyWindow, GetCursorPos,
     GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsIconic, LoadCursorW, RegisterClassW,
     SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW,
     ShowWindow, UnhookWindowsHookEx, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HHOOK,
@@ -67,6 +68,8 @@ pub enum Section {
     Appearance,
     Sessions,
     Projects,
+    /// Whose git and logins a project's sessions get.
+    Identities,
     Keys,
     Dictation,
     Memory,
@@ -76,11 +79,12 @@ pub enum Section {
 
 impl Section {
     /// Most used first, About last, as Windows' own Settings has it.
-    pub const ALL: [Section; 9] = [
+    pub const ALL: [Section; 10] = [
         Section::General,
         Section::Appearance,
         Section::Sessions,
         Section::Projects,
+        Section::Identities,
         Section::Keys,
         Section::Dictation,
         Section::Memory,
@@ -94,6 +98,7 @@ impl Section {
             Section::Appearance => "Appearance",
             Section::Sessions => "Sessions",
             Section::Projects => "Projects",
+            Section::Identities => "Identities",
             Section::Keys => "Keys",
             Section::Dictation => "Dictation",
             Section::Memory => "Memory",
@@ -171,6 +176,9 @@ pub enum Field {
     /// What the Keys section has to say: how to set one, or why the last
     /// try did not take.
     KeysNote,
+    /// A row of the Vault's: a project's identity, its secrets and web
+    /// logins, and the identities. The window takes its clicks itself.
+    Vault(crate::vault::settings::Row),
 }
 
 impl Field {
@@ -222,6 +230,7 @@ impl Field {
             Field::Key(Action::Dictate) => "Talk into a session or chat, tap or hold",
             Field::Key(Action::DictateAnywhere) => "Talk into the program you are in, tap or hold",
             Field::Key(Action::Toggle) => "Puts the terminal and tiles away, or brings them back",
+            Field::Vault(row) => crate::vault::settings::help(row),
             _ => "",
         }
     }
@@ -374,6 +383,9 @@ fn thousands(n: i64) -> String {
 pub struct Project {
     /// Its place in [`Values::projects`].
     pub index: usize,
+    /// Its folder key, which the Vault's rows read its identity and
+    /// secrets by.
+    pub key: String,
     pub colour: String,
     /// Whether each session gets a worktree of its own, None outside a
     /// repository, where there is no choice.
@@ -670,7 +682,11 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                     line(Field::Forge, "Show files it writes", word, c)
                 },
             ]
+            .into_iter()
+            .chain(crate::vault::settings::project_lines(&p.key))
+            .collect()
         }
+        Section::Identities => crate::vault::settings::identity_lines(),
     }
 }
 
@@ -774,6 +790,22 @@ fn tallest(v: &Values) -> f32 {
         .iter()
         .map(|s| height(*s, v))
         .fold(project, f32::max)
+}
+
+/// The open window, 0 for none, for the Vault's rows to say they changed
+/// from any thread.
+static WINDOW: AtomicIsize = AtomicIsize::new(0);
+/// Sent to the window when the Vault's rows should be read again.
+const WM_VAULT_CHANGED: u32 = WM_APP + 0x56;
+
+/// Has the open window read the Vault's rows again, from any thread.
+pub(crate) fn vault_changed() {
+    let h = WINDOW.load(Ordering::Relaxed);
+    if h != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(h as *mut c_void)), WM_VAULT_CHANGED, WPARAM(0), LPARAM(0));
+        }
+    }
 }
 
 thread_local! {
@@ -947,6 +979,7 @@ impl SettingsWindow {
         section: Section,
         icon: HICON,
     ) -> Result<Box<Self>> {
+        crate::vault::settings::set_shared(Rc::clone(&shared));
         let natural = layout::settings_size(&shared.metrics, Section::ALL.len(), tallest(&values));
         let mut cursor = POINT::default();
         let mut info = MONITORINFO {
@@ -1016,6 +1049,7 @@ impl SettingsWindow {
                 Some(&*win as *const SettingsWindow as *const c_void),
             )?;
             win.hwnd = hwnd;
+            WINDOW.store(hwnd.0 as isize, Ordering::Relaxed);
             let pref: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
             let _ = DwmSetWindowAttribute(
                 hwnd,
@@ -1040,6 +1074,7 @@ impl SettingsWindow {
 
     pub fn destroy(&self) {
         LAST_SIZE.with(|c| c.set(Some(self.size.get())));
+        let _ = WINDOW.compare_exchange(self.hwnd.0 as isize, 0, Ordering::Relaxed, Ordering::Relaxed);
         hook(self.hwnd, false);
         unsafe {
             let _ = DestroyWindow(self.hwnd);
@@ -1060,6 +1095,7 @@ impl SettingsWindow {
         }
         hook(self.hwnd, values.listening.is_some());
         *self.values.borrow_mut() = values;
+        crate::vault::settings::stale();
         self.relayout();
     }
 
@@ -1318,6 +1354,10 @@ impl SettingsWindow {
                 if matches!(line.control, Control::Fixed | Control::Note) {
                     return;
                 }
+                if let Field::Vault(row) = line.field {
+                    crate::vault::settings::click(row);
+                    return;
+                }
                 if let Some(row) = self.row_on_screen(i) {
                     app::push(Input::SettingsClick(line.field, row));
                 }
@@ -1353,6 +1393,18 @@ impl SettingsWindow {
                 Some(LRESULT(0))
             }
             WM_ERASEBKGND => Some(LRESULT(1)),
+            WM_VAULT_CHANGED => {
+                crate::vault::settings::stale();
+                self.relayout();
+                Some(LRESULT(0))
+            }
+            // Back from a console a tool was logged in from, or anything
+            // else that may have changed the Vault: read it again.
+            WM_ACTIVATE if wparam.0 & 0xFFFF != 0 => {
+                crate::vault::settings::stale();
+                self.relayout();
+                None
+            }
             // The sizing frame stays, for its edges, but the client is the
             // whole window: the plate draws its own edge.
             WM_NCCALCSIZE if wparam.0 != 0 => Some(LRESULT(0)),
@@ -1595,6 +1647,7 @@ mod tests {
             projects: vec!["app".into(), "site".into()],
             project: Some(Project {
                 index: 1,
+                key: String::new(),
                 colour: "Violet".into(),
                 branches: Some(false),
                 hosts: vec!["pi".into()],
