@@ -28,7 +28,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -217,9 +216,6 @@ enum Env {
 
 thread_local! {
     static ENV: RefCell<Env> = const { RefCell::new(Env::None) };
-    /// Whether the browser was started with an older Horadric's DevTools
-    /// port, see [`legacy_port`].
-    static LEGACY: Cell<bool> = const { Cell::new(false) };
     static WEBS: RefCell<HashMap<String, Web>> = RefCell::new(HashMap::new());
     static NEXT_TAB: Cell<u64> = const { Cell::new(1) };
     /// Each project's page size in CSS pixels, where it has one. Kept
@@ -346,45 +342,55 @@ fn profile() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|a| PathBuf::from(a).join(r"Horadric\web"))
 }
 
-/// The DevTools port a Horadric from before 2026-11-04 opened on the
-/// shared browser, if one ever ran here. Never made anew: an open port let
-/// any local program read every login in the profile. It is read only to
-/// join such a Horadric's browser while it still runs, since WebView2
-/// refuses a second start with other arguments.
-fn legacy_port() -> Option<u16> {
-    fs::read_to_string(profile()?.join("devtools-port"))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
-}
-
 /// What WebView2 answers when the shared browser already runs with other
-/// arguments: HRESULT_FROM_WIN32(ERROR_INVALID_STATE).
+/// arguments: HRESULT_FROM_WIN32(ERROR_INVALID_STATE). Horadric starts it
+/// with none, so another program holds the profile with its own, perhaps
+/// a DevTools port that would let it drive every tab. The pane does not
+/// start on it; an older Horadric's port is never joined either.
 fn other_arguments(e: &windows::core::Error) -> bool {
     e.code().0 as u32 == 0x8007_139F
 }
 
-/// Starts the browser again with an older Horadric's arguments, after a
-/// start without them met its browser. Says whether it did; once only.
-fn join_legacy() -> bool {
-    if LEGACY.with(Cell::get) || legacy_port().is_none() {
-        return false;
-    }
-    LEGACY.with(|l| l.set(true));
-    eprintln!("horadric: an older Horadric's browser runs with a DevTools port; joining it");
-    true
-}
+const HELD: &str = "another program runs the browser profile with arguments of its own, \
+                    which may open it to remote control; close it and open the browser again";
 
-/// Once a tab opened on a browser started without the port, no older
-/// Horadric's browser runs any more, and the port is not to be opened
-/// again by the next start either.
-fn forget_legacy() {
-    if !LEGACY.with(Cell::get) {
-        if let Some(p) = profile() {
-            let _ = fs::remove_file(p.join("devtools-port"));
+/// Whether WebView2 is told, outside the app, to start its browser with
+/// more arguments: the variables it reads from the environment (which a
+/// Horadric started from an agent's terminal would inherit), and the
+/// policy for this program in the registry. Either could open a DevTools
+/// port on the profile, so the variables are dropped and a policy stops
+/// the browser from starting.
+fn outside_arguments() -> Option<String> {
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().to_ascii_uppercase().starts_with("WEBVIEW2_") {
+            std::env::remove_var(&name);
         }
     }
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_ANY,
+    };
+    let key = HSTRING::from(r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments");
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| Some(p.file_name()?.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        for value in ["*", exe.as_str()] {
+            let mut size = 0u32;
+            let found = unsafe {
+                RegGetValueW(hive, &key, &HSTRING::from(value), RRF_RT_ANY, None, None, Some(&mut size))
+            } == ERROR_SUCCESS;
+            if found && !value.is_empty() {
+                return Some(format!(
+                    "a WebView2 policy in the registry adds browser arguments for {value} \
+                     (Software\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments); \
+                     remove it and open the browser again"
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// Opens the project's browser, at `url` when given. A browser it has
@@ -593,7 +599,6 @@ pub fn shutdown() {
         end(tab);
     }
     ENV.with(|e| *e.borrow_mut() = Env::None);
-    LEGACY.with(|l| l.set(false));
 }
 
 /// Tells the town's cluster its tabs changed, since each is a tile there.
@@ -1561,6 +1566,21 @@ pub fn tied_to_popup(key: &str, id: u64) -> bool {
     })
 }
 
+/// Every made tab of every project, by project key and id.
+pub fn all_tabs() -> Vec<(String, u64)> {
+    WEBS.with(|w| {
+        w.borrow()
+            .iter()
+            .flat_map(|(k, web)| {
+                web.tabs
+                    .iter()
+                    .filter(|t| t.webview.is_some())
+                    .map(move |t| (k.clone(), t.id))
+            })
+            .collect()
+    })
+}
+
 /// The id of the tab the pane shows.
 pub fn shown_tab(key: &str) -> Option<u64> {
     read_tab(key, None, |t| t.id)
@@ -1696,9 +1716,6 @@ fn make(key: &str, id: u64) {
             Env::None => {
                 *e = Env::Starting(vec![(key.to_string(), id)]);
                 drop(e);
-                // A fresh environment tries without the port first; the
-                // older browser may be gone since the last one.
-                LEGACY.with(|l| l.set(false));
                 start_env();
                 None
             }
@@ -1717,17 +1734,17 @@ fn start_env() {
     let Some(folder) = profile() else {
         return fail("no LOCALAPPDATA".into());
     };
-    let options = CoreWebView2EnvironmentOptions::default();
-    if let Some(port) = LEGACY.with(Cell::get).then(legacy_port).flatten() {
-        unsafe { options.set_additional_browser_arguments(legacy_args(port)) };
+    if let Some(why) = outside_arguments() {
+        return fail(why);
     }
+    // No additional arguments, ever: a DevTools port would let any local
+    // program drive the tabs, a filled login's among them.
+    let options = CoreWebView2EnvironmentOptions::default();
     let options: ICoreWebView2EnvironmentOptions = options.into();
     let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(|result, env| {
         if let Err(e) = &result {
-            // The tabs keep waiting, on the browser started the old way.
-            if other_arguments(e) && join_legacy() {
-                start_env();
-                return Ok(());
+            if other_arguments(e) {
+                eprintln!("horadric: cannot start the browser: {HELD}");
             }
         }
         let waiting = ENV.with(|e| {
@@ -1761,17 +1778,10 @@ fn start_env() {
         )
     };
     match started {
-        Err(e) if other_arguments(&e) && join_legacy() => start_env(),
+        Err(e) if other_arguments(&e) => fail(HELD.into()),
         Err(e) => fail(e.to_string()),
         Ok(()) => {}
     }
-}
-
-/// What an older Horadric started the shared browser with. Every
-/// Horadric must start it alike to share it, so this is what joining one
-/// takes.
-fn legacy_args(port: u16) -> String {
-    format!("--remote-debugging-port={port} --remote-debugging-address=127.0.0.1")
 }
 
 fn make_controller(env: &ICoreWebView2Environment, key: &str, id: u64) {
@@ -1783,11 +1793,11 @@ fn make_controller(env: &ICoreWebView2Environment, key: &str, id: u64) {
     let handler = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
         move |result, controller| {
             match (result, controller) {
-                (Ok(()), Some(c)) => {
-                    forget_legacy();
-                    ready(&owned, id, c)
+                (Ok(()), Some(c)) => ready(&owned, id, c),
+                (Err(e), _) if other_arguments(&e) => {
+                    eprintln!("horadric: cannot open the browser pane: {HELD}");
+                    lost(&owned, id);
                 }
-                (Err(e), _) if other_arguments(&e) && restart_legacy(&owned, id) => {}
                 (r, _) => {
                     eprintln!("horadric: cannot open the browser pane: {r:?}");
                     lost(&owned, id);
@@ -1799,34 +1809,6 @@ fn make_controller(env: &ICoreWebView2Environment, key: &str, id: u64) {
     if let Err(e) = unsafe { env.CreateCoreWebView2Controller(parent, &handler) } {
         eprintln!("horadric: cannot open the browser pane: {e}");
         lost(key, id);
-    }
-}
-
-/// WebView2 may only find out when making a tab that the browser already
-/// runs with an older Horadric's arguments. The tab then waits on a
-/// browser started the old way. Says whether it does.
-fn restart_legacy(key: &str, id: u64) -> bool {
-    let waiting = ENV.with(|e| {
-        let mut e = e.borrow_mut();
-        match &mut *e {
-            Env::Starting(w) => {
-                w.push((key.to_string(), id));
-                Some(false)
-            }
-            Env::Ready(_) if join_legacy() => {
-                *e = Env::Starting(vec![(key.to_string(), id)]);
-                Some(true)
-            }
-            _ => None,
-        }
-    });
-    match waiting {
-        Some(true) => {
-            start_env();
-            true
-        }
-        Some(false) => true,
-        None => false,
     }
 }
 
@@ -2338,14 +2320,6 @@ mod tests {
         assert_eq!(percent(1.0000001), None);
         assert_eq!(percent(1.25), Some(125));
         assert_eq!(percent(0.6667), Some(67));
-    }
-
-    #[test]
-    fn an_older_horadric_is_joined_with_its_own_arguments() {
-        assert_eq!(
-            legacy_args(9333),
-            "--remote-debugging-port=9333 --remote-debugging-address=127.0.0.1"
-        );
     }
 
     #[test]

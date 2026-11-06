@@ -13,6 +13,7 @@
 //! a service worker it left there would hear the password typed.
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -142,6 +143,9 @@ thread_local! {
     static TABS: RefCell<HashMap<u64, TabState>> = RefCell::new(HashMap::new());
     /// The origins the agent's own code ran on, in any tab of any project.
     static TAINTED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// The documents (site, loader id) that showed a site when the app
+    /// cleared its storage, which a fill on that site waits out.
+    static STALE: RefCell<HashSet<(String, String)>> = RefCell::new(HashSet::new());
 }
 
 fn with_tab<T>(tab: u64, f: impl FnOnce(&mut TabState) -> T) -> T {
@@ -204,20 +208,69 @@ struct Page {
     loader: String,
     url: String,
     frame: String,
+    /// Every frame's address and document, the page's own first: code
+    /// the agent runs may run in any of them.
+    frames: Vec<(String, String)>,
 }
 
 fn page_of(key: &str, tab: u64, done: impl FnOnce(Option<Page>) + 'static) {
     web::devtools(key, tab, "Page.getFrameTree", "{}", move |r| {
         let v: Option<Value> = r.ok().and_then(|t| serde_json::from_str(&t).ok());
-        let frame = v.as_ref().and_then(|v| v.pointer("/frameTree/frame"));
-        done(frame.and_then(|f| {
-            Some(Page {
-                loader: f.get("loaderId")?.as_str()?.to_string(),
-                url: f.get("url")?.as_str()?.to_string(),
-                frame: f.get("id")?.as_str()?.to_string(),
-            })
-        }))
+        done(v.as_ref().and_then(|v| page_in(v.get("frameTree")?)))
     });
+}
+
+/// The page in a `Page.getFrameTree` answer's tree.
+fn page_in(tree: &Value) -> Option<Page> {
+    fn walk(node: &Value, out: &mut Vec<(String, String)>) {
+        let f = &node["frame"];
+        if let (Some(u), Some(l)) = (f["url"].as_str(), f["loaderId"].as_str()) {
+            out.push((u.to_string(), l.to_string()));
+        }
+        for child in node["childFrames"].as_array().into_iter().flatten() {
+            walk(child, out);
+        }
+    }
+    let f = tree.get("frame")?;
+    let mut frames = Vec::new();
+    walk(tree, &mut frames);
+    Some(Page {
+        loader: f.get("loaderId")?.as_str()?.to_string(),
+        url: f.get("url")?.as_str()?.to_string(),
+        frame: f.get("id")?.as_str()?.to_string(),
+        frames,
+    })
+}
+
+/// What every tab of every project shows now, frame by frame, for `done`.
+/// A tab that does not answer is left out.
+fn everywhere(done: impl FnOnce(Vec<(u64, Page)>) + 'static) {
+    let tabs = web::all_tabs();
+    let left = Rc::new(Cell::new(tabs.len()));
+    let got: Rc<RefCell<Vec<(u64, Page)>>> = Rc::new(RefCell::new(Vec::new()));
+    let done: Rc<RefCell<Option<Box<dyn FnOnce(Vec<(u64, Page)>)>>>> =
+        Rc::new(RefCell::new(Some(Box::new(done))));
+    if tabs.is_empty() {
+        if let Some(d) = done.borrow_mut().take() {
+            d(Vec::new());
+        }
+        return;
+    }
+    for (key, id) in tabs {
+        let (left, got, done) = (Rc::clone(&left), Rc::clone(&got), Rc::clone(&done));
+        page_of(&key, id, move |page| {
+            if let Some(p) = page {
+                got.borrow_mut().push((id, p));
+            }
+            left.set(left.get() - 1);
+            if left.get() == 0 {
+                let all = std::mem::take(&mut *got.borrow_mut());
+                if let Some(d) = done.borrow_mut().take() {
+                    d(all);
+                }
+            }
+        });
+    }
 }
 
 /// Runs one of the scripts above in the tab, in the context `context` when
@@ -390,14 +443,14 @@ pub fn devtools(who: Caller, tab: u64, method: String, params: Value, reply: Rep
         return page_of(&k.clone(), tab, move |page| {
             mark(tab, page.as_ref().map(|p| p.loader.as_str()));
             if taints {
-                page.iter().for_each(|p| taint_origin(&p.url));
+                page.iter().for_each(taint_page);
             }
             send(&who, tab, &method, &params, move |a| {
                 if !taints {
                     return reply.send(a);
                 }
                 page_of(&k, tab, move |after| {
-                    after.iter().for_each(|p| taint_origin(&p.url));
+                    after.iter().for_each(taint_page);
                     reply.send(a)
                 });
             });
@@ -410,7 +463,7 @@ pub fn devtools(who: Caller, tab: u64, method: String, params: Value, reply: Rep
             mark(tab, loader.as_deref());
         }
         if taints {
-            before.iter().for_each(|p| taint_origin(&p.url));
+            before.iter().for_each(taint_page);
         }
         let now = state(tab, loader.as_deref());
         if let Err(e) = browse::after_fill(&method, &params, now) {
@@ -430,7 +483,7 @@ pub fn devtools(who: Caller, tab: u64, method: String, params: Value, reply: Rep
             }
             page_of(&k, tab, move |after| {
                 if taints {
-                    after.iter().for_each(|p| taint_origin(&p.url));
+                    after.iter().for_each(taint_page);
                 }
                 let loader = after.map(|p| p.loader);
                 if marks {
@@ -570,7 +623,7 @@ fn checked(
     page: Option<Page>,
     reply: Reply,
 ) {
-    let Some(Page { loader, url, frame }) = page else {
+    let Some(Page { loader, url, frame, .. }) = page else {
         return reply.send(error("the page could not be read; try again once it loaded"));
     };
     let site = origin(&url).unwrap_or_else(|| url.clone());
@@ -643,21 +696,43 @@ fn checked(
         if !tainted && !workers {
             return hold_bypass(job);
         }
-        let params = json!({ "origin": job.origin, "storageTypes": CLEARED_TYPES }).to_string();
-        let k = job.key.clone();
-        web::devtools(&k, tab, "Storage.clearDataForOrigin", &params, move |r| {
-            if r.is_err() {
-                return job.fail("this site's storage could not be cleared");
-            }
-            let (o, l) = (job.origin.clone(), job.loader.clone());
-            with_tab(tab, |s| s.cleared.push((o, l)));
-            log(&job.req, &job.origin, "fill stopped: site storage cleared");
-            job.reply.send(error(
-                "Horadric cleared this site's storage and service workers (not its cookies), \
-                 since code ran on it or a worker could have seen the login sent: reload the \
-                 page (browser_history reload) and fill again",
-            ));
+        // A page of the site already open in any tab could write its storage
+        // back after the clear, so the documents showing it now are named
+        // stale, and a fill waits until none of them shows any more.
+        everywhere(move |pages| {
+            let site = job.origin.clone();
+            STALE.with(|s| {
+                let mut s = s.borrow_mut();
+                for (_, p) in &pages {
+                    for (url, loader) in &p.frames {
+                        if origin(url).as_deref() == Some(site.as_str()) {
+                            s.insert((site.clone(), loader.clone()));
+                        }
+                    }
+                }
+            });
+            clear_site(job);
         });
+    });
+}
+
+/// Clears the site's storage but cookies, and asks for a reload.
+fn clear_site(job: Job) {
+    let tab = job.tab;
+    let params = json!({ "origin": job.origin, "storageTypes": CLEARED_TYPES }).to_string();
+    let k = job.key.clone();
+    web::devtools(&k, tab, "Storage.clearDataForOrigin", &params, move |r| {
+        if r.is_err() {
+            return job.fail("this site's storage could not be cleared");
+        }
+        let (o, l) = (job.origin.clone(), job.loader.clone());
+        with_tab(tab, |s| s.cleared.push((o, l)));
+        log(&job.req, &job.origin, "fill stopped: site storage cleared");
+        job.reply.send(error(
+            "Horadric cleared this site's storage and service workers (not its cookies), \
+             since code ran on it or a worker could have seen the login sent: reload the \
+             page (browser_history reload) and fill again",
+        ));
     });
 }
 
@@ -671,6 +746,33 @@ const CLEARED_TYPES: &str =
 /// the tab's life, which is longer than the page needs but leaves no
 /// moment to get wrong; the agent can not turn it off (`browse`).
 fn hold_bypass(job: Job) {
+    // No tab may still show a document of the site from before its last
+    // clear, or one of a tab the agent ran code in: either could write the
+    // site's storage, or watch it, while the login goes in.
+    everywhere(move |pages| {
+        let site = job.origin.clone();
+        let held = pages.iter().find_map(|(id, p)| {
+            let tainted = TABS.with(|t| t.borrow().get(id).is_some_and(|s| s.tainted));
+            p.frames
+                .iter()
+                .filter(|(url, _)| origin(url).as_deref() == Some(site.as_str()))
+                .any(|(_, loader)| {
+                    tainted || STALE.with(|s| s.borrow().contains(&(site.clone(), loader.clone())))
+                })
+                .then(|| p.url.clone())
+        });
+        match held {
+            Some(url) => job.fail(&format!(
+                "another tab still shows a page of this site from before Horadric cleared its \
+                 storage, or one you ran your own code in ({url}); close or reload that tab \
+                 and fill again"
+            )),
+            None => bypass_then_ask(job),
+        }
+    });
+}
+
+fn bypass_then_ask(job: Job) {
     if with_tab(job.tab, |s| std::mem::replace(&mut s.bypass, true)) {
         return ask_then_fill(job);
     }
@@ -689,6 +791,14 @@ fn hold_bypass(job: Job) {
             ask_then_fill(job)
         });
     });
+}
+
+/// Taints the site of every frame of a page the agent's code ran in: code
+/// reaches a same site frame as easily as the page itself.
+fn taint_page(p: &Page) {
+    for (url, _) in &p.frames {
+        taint_origin(url);
+    }
 }
 
 /// Records that the agent's own code ran on `origin`: storage there may

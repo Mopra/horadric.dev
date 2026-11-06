@@ -44,9 +44,11 @@ impl App {
             self.consoles.contains_key(&call.session) || self.folios.contains_key(&call.session);
         if !ours || !run::key_ok(&call.session, call.body["key"].as_str().unwrap_or("")) {
             return reply.send(error(
-                "Horadric takes browser calls only from a session it started, with that \
-                 session's key. A session begun before Horadric kept keys has no browser until \
-                 it is restarted (close it and resume it).",
+                "Horadric takes browser pane and Forge calls only from a session it runs, with \
+                 that session's key. A session begun before Horadric kept keys gets them once \
+                 it is closed and resumed in Horadric; a session started outside Horadric \
+                 (horadric run, or a terminal of its own) gets them only when resumed inside \
+                 Horadric.",
             ));
         }
         let Some(reply) = self.forge_call(&key, &call.body, reply) else {

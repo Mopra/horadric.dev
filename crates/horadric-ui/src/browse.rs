@@ -444,7 +444,12 @@ fn input_after_fill(method: &str, p: &Value) -> Result<(), String> {
                 || held.iter().any(|h| code.starts_with(h))
                 || matches!(vk, 17 | 18 | 91 | 92 | 93 | 162..=165)
                 || (modifiers & 8 != 0
-                    && (matches!(key, "Delete" | "Insert") || matches!(vk, 45 | 46)));
+                    && (matches!(key, "Delete" | "Insert") || matches!(vk, 45 | 46)))
+                // F12 opens DevTools on the page, and Shift+F10 the
+                // context menu with Copy in it.
+                || key == "F12"
+                || vk == 123
+                || (modifiers & 8 != 0 && (key == "F10" || vk == 121));
             if shortcut {
                 refuse("a key with Ctrl, Alt or the Windows key, or an editing command")
             } else {
@@ -1020,6 +1025,11 @@ mod tests {
         assert!(now("Input.dispatchKeyEvent", key(1, "c")).is_err());
         assert!(now("Input.dispatchKeyEvent", key(0, "Control")).is_err());
         assert!(now("Input.dispatchKeyEvent", key(8, "Delete")).is_err());
+        assert!(now("Input.dispatchKeyEvent", key(0, "F12")).is_err());
+        assert!(now("Input.dispatchKeyEvent", json!({ "key": "", "windowsVirtualKeyCode": 123 })).is_err());
+        assert!(now("Input.dispatchKeyEvent", key(8, "F10")).is_err());
+        assert!(now("Input.dispatchKeyEvent", key(0, "F10")).is_ok());
+        assert!(now("Input.dispatchKeyEvent", key(2 | 8, "I")).is_err());
         assert!(now("Input.dispatchKeyEvent", json!({ "key": "a", "commands": ["copy"] })).is_err());
         assert!(now("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "button": "left" })).is_ok());
         assert!(now("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "button": "right" })).is_err());
