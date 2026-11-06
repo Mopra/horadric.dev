@@ -602,6 +602,7 @@ impl Ctx<'_> {
                 };
                 let f = self.fonts.of(*font);
                 let (mut tx, mut ty, mut tw) = (x, 0.0, w);
+                let mut term_h = 0.0;
                 if let Some(t) = term {
                     let left = x - p.term_w;
                     let look = Look {
@@ -611,7 +612,8 @@ impl Ctx<'_> {
                     let ink = self.pal.fg.with_alpha(if done { 0.55 } else { 1.0 });
                     if w >= TERM_ROOM {
                         let tw = p.term_w - flow::TERM_GAP + 8.0;
-                        self.inline_as(&mut s, t, f, (left, 0.0, tw), ink, Align::None, look);
+                        (term_h, _) =
+                            self.inline_as(&mut s, t, f, (left, 0.0, tw), ink, Align::None, look);
                     } else {
                         // Too narrow for two columns: the term goes above.
                         let (th, _) =
@@ -627,7 +629,9 @@ impl Ctx<'_> {
                 let (h, first) = self.inline_as(&mut s, inline, f, (tx, ty, tw), ink, Align::None, look);
                 mark_font = f;
                 mark_line = (0.0, if term.is_some() && ty > 0.0 { ty } else { first });
-                s.h = ty + h;
+                // A term that wraps beside a short text must not run into
+                // the next item.
+                s.h = flow::hang_height(ty, h, term_h);
                 if *font == Font::H1 {
                     s.fill(
                         Rect::new(x, s.h + 6.0, w, 1.0),
@@ -688,9 +692,12 @@ impl Ctx<'_> {
                 };
                 let f = &self.fonts.small_wrap;
                 let ink = self.pal.dim;
+                // The number, from the parser; a figure more than two
+                // gets the room of one more.
+                let col = NOTE_COL + label.chars().count().saturating_sub(2) as f32 * 7.0;
                 let (h, line) =
-                    self.inline(&mut s, text, f, x + NOTE_COL, top, w - NOTE_COL, ink, Align::None);
-                let n = Rect::new(x, top, NOTE_COL - 7.0, line);
+                    self.inline(&mut s, text, f, x + col, top, w - col, ink, Align::None);
+                let n = Rect::new(x, top, col - 7.0, line);
                 s.line(format!("{label}."), F::Right, n, self.pal.faint);
                 s.h = top + h;
             }

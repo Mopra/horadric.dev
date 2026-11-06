@@ -529,17 +529,45 @@ fn arriving(p: &Inline) -> bool {
 }
 
 /// About how wide a term is set in the body's semibold, without a window
-/// to measure it in: capitals and figures are wider than small letters.
+/// to measure it in: capitals and figures are wider than small letters,
+/// and a CJK character or an emoji takes about two.
 pub fn term_width(s: &str) -> f32 {
     s.chars()
         .map(|c| match c {
             ' ' => 4.5,
             'i' | 'l' | 'j' | '.' | ',' | ':' | '\'' | '|' => 4.5,
             'm' | 'w' | 'M' | 'W' => 13.5,
+            c if is_wide(c) => 17.2,
             c if c.is_uppercase() || c.is_ascii_digit() => 10.5,
             _ => 8.6,
         })
         .sum()
+}
+
+/// Whether `c` is set full width: East Asian wide and full width
+/// characters, and the emoji blocks.
+fn is_wide(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x115F
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F64F
+        | 0x1F900..=0x1F9FF
+        | 0x20000..=0x3FFFD)
+}
+
+/// How tall a list item with a hanging term is: its text, from where it
+/// starts, or the term beside it when that wraps to more lines.
+pub fn hang_height(text_top: f32, text_h: f32, term_h: f32) -> f32 {
+    (text_top + text_h).max(term_h)
 }
 
 /// The part of `inl` in byte range `r`, its spans cut to it.
@@ -572,6 +600,10 @@ pub fn list_indent(widest: &str) -> f32 {
 /// not, the wide ones give up room, none below `least` unless even that
 /// is too wide, when all shrink alike. The sum never passes `avail`.
 pub fn table_widths(natural: &[f32], least: f32, avail: f32) -> Vec<f32> {
+    // No room at all would divide by nothing below.
+    if avail <= 0.0 {
+        return vec![0.0; natural.len()];
+    }
     let total: f32 = natural.iter().sum();
     if total <= avail || natural.is_empty() {
         return natural.to_vec();
@@ -1326,6 +1358,28 @@ mod tests {
         assert!(matches!(&ps[0].kind, Kind::Code { info, .. } if info == "rust title=\"src/x.rs\""));
         assert!(matches!(&ps[1].kind, Kind::Code { info, text } if info == "math" && text == "x^2"));
         assert!(matches!(&ps[2].kind, Kind::Code { info, text } if info.is_empty() && text == "indented"));
+    }
+
+    #[test]
+    fn wide_characters_count_double_in_a_term() {
+        assert!(term_width("\u{6F22}\u{5B57}") >= 2.0 * term_width("ab"));
+        assert!(term_width("\u{D55C}") > term_width("a") * 1.5);
+    }
+
+    #[test]
+    fn a_wrapping_term_sets_the_item_height() {
+        assert_eq!(hang_height(0.0, 22.0, 66.0), 66.0);
+        assert_eq!(hang_height(20.0, 44.0, 22.0), 64.0);
+    }
+
+    #[test]
+    fn tables_with_no_room_get_zero_widths() {
+        for avail in [0.0, -10.0] {
+            let w = table_widths(&[50.0, 80.0], 40.0, avail);
+            assert_eq!(w, [0.0, 0.0]);
+        }
+        let w = table_widths(&[50.0, 80.0], 0.0, 0.0);
+        assert!(w.iter().all(|c| !c.is_nan()), "{w:?}");
     }
 
     #[test]

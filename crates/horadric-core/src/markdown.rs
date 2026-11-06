@@ -61,8 +61,8 @@ pub enum Block {
         body: Vec<Block>,
         open: bool,
     },
-    /// The reply's `[^label]: text` notes, gathered at its end in the
-    /// order they were written.
+    /// The reply's `[^label]: text` notes, gathered at its end, each with
+    /// the number its marks show, in that order.
     Footnotes(Vec<(String, Inline)>),
     /// A quote that says what it is: GitHub's `> [!NOTE]`, or a quote
     /// whose first words are `**Note:**`. `title` is any text after
@@ -156,7 +156,9 @@ pub enum Style {
     /// `<sup>` and `<sub>`.
     Sup,
     Sub,
-    /// A `[^label]` footnote mark: the label, shown small and raised.
+    /// A `[^label]` footnote mark, shown small and raised: its number in
+    /// the reply, by order of first mark, which its note in
+    /// [`Block::Footnotes`] carries too. Outside a whole reply, the label.
     Footnote(String),
     /// `![alt](src)` or `<img>` over its alt text. Unlike a link the src
     /// may be anything, a local file included: the UI decides what it
@@ -212,15 +214,37 @@ pub fn parse(src: &str) -> Vec<Block> {
         .collect();
     let defs = definitions(&lines);
     let was = REFS.with(|r| std::mem::replace(&mut *r.borrow_mut(), defs.links));
+    let was_notes = NOTES.with(|n| n.borrow_mut().replace(HashMap::new()));
     let mut out = blocks(&defs.lines, 0, true);
-    let notes: Vec<(String, Inline)> = (defs.notes.iter())
-        .map(|(label, text)| (label.clone(), parse_inline(text)))
+    let mut notes: Vec<(usize, Inline)> = (defs.notes.iter())
+        .map(|(label, text)| {
+            // After its text, whose marks come before it in reading order;
+            // a note never marked is numbered on from the rest.
+            let inline = parse_inline(text);
+            (note_number(label).unwrap_or(0), inline)
+        })
         .collect();
+    NOTES.with(|n| *n.borrow_mut() = was_notes);
     REFS.with(|r| *r.borrow_mut() = was);
     if !notes.is_empty() {
+        notes.sort_by_key(|(n, _)| *n);
+        let notes = (notes.into_iter())
+            .map(|(n, t)| (n.to_string(), t))
+            .collect();
         out.push(Block::Footnotes(notes));
     }
     out
+}
+
+/// The number a footnote label is shown as, given on its first mark;
+/// None outside [`parse`], where there is no reply to number in.
+fn note_number(label: &str) -> Option<usize> {
+    NOTES.with(|n| {
+        let mut n = n.borrow_mut();
+        let map = n.as_mut()?;
+        let next = map.len() + 1;
+        Some(*map.entry(label.to_string()).or_insert(next))
+    })
 }
 
 thread_local! {
@@ -229,6 +253,11 @@ thread_local! {
     /// call between carrying them.
     static REFS: std::cell::RefCell<HashMap<String, String>> =
         std::cell::RefCell::new(HashMap::new());
+    /// Each footnote label's number while a reply is parsed: its marks
+    /// are numbered in the order first met, which is reading order, so a
+    /// long label such as `[^note]` shows as a short figure.
+    static NOTES: std::cell::RefCell<Option<HashMap<String, usize>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// A reply's lines with its definitions taken out, and what they define.
@@ -311,11 +340,24 @@ fn definition(line: &str) -> Option<Def<'_>> {
         return (!note.is_empty() && !note.contains(char::is_whitespace))
             .then(|| Def::Note(note, after.trim()));
     }
+    let after = after.trim();
     let url = after.split_whitespace().next()?;
+    // Only a title may follow, as CommonMark has it, so "[Note]: this is
+    // important" is a sentence and not a definition.
+    let title = after[url.len()..].trim();
+    let quoted = |o: char, c: char| title.len() >= 2 && title.starts_with(o) && title.ends_with(c);
+    if !(title.is_empty() || quoted('"', '"') || quoted('\'', '\'') || quoted('(', ')')) {
+        return None;
+    }
     let url = url
         .strip_prefix('<')
         .and_then(|u| u.strip_suffix('>'))
         .unwrap_or(url);
+    // A link goes somewhere: a lone word such as "this" is the first word
+    // of a sentence still streaming in, which must not vanish meanwhile.
+    if !url.contains(['/', '.', ':', '#']) {
+        return None;
+    }
     Some(Def::Link(label, url))
 }
 
@@ -362,7 +404,7 @@ fn blocks(lines: &[&str], depth: usize, code: bool) -> Vec<Block> {
                 i = code_block(lines, i, fence, &mut out);
                 continue;
             }
-            if t.starts_with("$$") {
+            if math_starts(t) {
                 i = math(lines, i, &mut out);
                 continue;
             }
@@ -448,7 +490,7 @@ fn interrupts(lines: &[&str], i: usize) -> bool {
             || atx(t).is_some()
             || is_rule(t)
             || t.starts_with('>')
-            || t.starts_with("$$")
+            || math_starts(t)
             || details_starts(t)
         {
             return true;
@@ -468,7 +510,7 @@ fn paragraph(lines: &[&str], start: usize, out: &mut Vec<Block>) -> usize {
     let mut i = start + 1;
     let mut level = None;
     while i < lines.len() {
-        // Before the interrupt check, as `---` under text is a heading.
+        // Before the interrupt check, as `===` under text is a heading.
         if let Some(l) = setext(lines[i]) {
             level = Some(l);
             break;
@@ -503,21 +545,13 @@ fn paragraph(lines: &[&str], start: usize, out: &mut Vec<Block>) -> usize {
     }
 }
 
-/// A setext underline: `===` makes the text above a level one heading,
-/// `---` a level two. Dashes need three, so a "--" signature line or a
-/// lone "-" still streaming into a list item stays text.
+/// A setext underline: `===` makes the text above a level one heading.
+/// `---` under text stays a rule, not a level two heading: replies use it
+/// as a separator, and while one streams the text above would flip into
+/// a heading and back.
 fn setext(line: &str) -> Option<u8> {
-    if indent(line) >= 4 {
-        return None;
-    }
     let t = line.trim();
-    if !t.is_empty() && t.bytes().all(|b| b == b'=') {
-        Some(1)
-    } else if t.len() >= 3 && t.bytes().all(|b| b == b'-') {
-        Some(2)
-    } else {
-        None
-    }
+    (indent(line) < 4 && !t.is_empty() && t.bytes().all(|b| b == b'=')).then_some(1)
 }
 
 /// Lines four columns in, and the blank lines between them, as code.
@@ -538,6 +572,13 @@ fn indented_code(lines: &[&str], start: usize, out: &mut Vec<Block>) -> usize {
         closed: true,
     });
     i
+}
+
+/// A `$$` alone on its line, or `$$...$$` whole on one: a line that only
+/// starts with `$$`, as "$$10 more", is prose about money.
+fn math_starts(t: &str) -> bool {
+    let t = t.trim_end();
+    t == "$$" || (t.len() > 4 && t.starts_with("$$") && t.ends_with("$$"))
 }
 
 /// A `$$` display math block, shown as code labelled "math": the Folio
@@ -605,29 +646,25 @@ fn details(lines: &[&str], start: usize, depth: usize, code: bool, out: &mut Vec
     let mut rest = first.get(close_at + 1..).unwrap_or("").to_string();
     loop {
         // Inner details on this line count, so the right close ends it.
+        // One pass from `<` to `<`: looking for both tags afresh at every
+        // step read a line of many opens once per open.
         let mut cut = None;
         let mut from = 0;
-        loop {
-            let open_at = find_tag(&rest[from..], "<details").map(|k| k + from);
-            let shut_at = find_tag(&rest[from..], "</details>").map(|k| k + from);
-            match (open_at, shut_at) {
-                (Some(o), Some(c)) if o < c => {
-                    nested += 1;
-                    from = o + 8;
-                }
-                (Some(o), None) => {
-                    nested += 1;
-                    from = o + 8;
-                }
-                (_, Some(c)) if nested > 0 => {
-                    nested -= 1;
-                    from = c + 10;
-                }
-                (_, Some(c)) => {
-                    cut = Some(c);
+        while let Some(k) = rest[from..].find('<') {
+            let at = from + k;
+            let b = &rest.as_bytes()[at..];
+            if b.len() >= 8 && b[..8].eq_ignore_ascii_case(b"<details") {
+                nested += 1;
+                from = at + 8;
+            } else if b.len() >= 10 && b[..10].eq_ignore_ascii_case(b"</details>") {
+                if nested == 0 {
+                    cut = Some(at);
                     break;
                 }
-                (None, None) => break,
+                nested -= 1;
+                from = at + 10;
+            } else {
+                from = at + 1;
             }
         }
         i += 1;
@@ -1099,6 +1136,8 @@ fn tokenize(s: &str, depth: usize) -> Toks {
     let mut delims = Vec::new();
     let mut buf = String::new();
     let mut closes = HashMap::new();
+    let mut lasts = Lasts::default();
+    let mut no_path_before = 0;
     let mut i = 0;
     while i < b.len() {
         match b[i] {
@@ -1195,7 +1234,7 @@ fn tokenize(s: &str, depth: usize) -> Toks {
                     i = end;
                     continue;
                 }
-                if let Some(tag) = html_at(s, i) {
+                if let Some(tag) = html_at(s, i, &mut lasts) {
                     i = html(s, tag, depth, &mut buf, &mut toks);
                     continue;
                 }
@@ -1210,11 +1249,19 @@ fn tokenize(s: &str, depth: usize) -> Toks {
                 i = end;
                 continue;
             }
-            if let Some((end, path, line)) = path_at(s, i) {
-                flush(&mut buf, &mut toks);
-                toks.push(Tok::Path(s[i..end].to_string(), path, line));
-                i = end;
-                continue;
+            if i >= no_path_before {
+                match path_at(s, i) {
+                    Ok((end, path, line)) => {
+                        flush(&mut buf, &mut toks);
+                        toks.push(Tok::Path(s[i..end].to_string(), path, line));
+                        i = end;
+                        continue;
+                    }
+                    // No path starts inside a run that is none, and trying
+                    // each of its words would read a long snake_case run
+                    // once per word.
+                    Err(run_end) => no_path_before = run_end,
+                }
             }
         }
         let Some(c) = s[i..].chars().next() else {
@@ -1508,6 +1555,23 @@ const HTML_TAGS: &[&str] = &[
     "sup", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "tt", "u", "ul", "var", "wbr",
 ];
 
+/// Where each closing text a tag waits for is last seen in the text
+/// being read, looked up once, so a reply of many tags that never close
+/// is not read to its end once per tag.
+#[derive(Default)]
+struct Lasts(HashMap<String, Option<usize>>);
+
+impl Lasts {
+    /// Whether `close` comes anywhere at or after `from` in `s`.
+    fn after(&mut self, s: &str, close: &str, from: usize) -> bool {
+        let last = *self
+            .0
+            .entry(close.to_string())
+            .or_insert_with(|| s.rfind(close));
+        last.is_some_and(|l| l >= from)
+    }
+}
+
 struct Tag<'a> {
     /// Lower case; empty for a comment.
     name: String,
@@ -1517,11 +1581,15 @@ struct Tag<'a> {
 }
 
 /// An HTML tag or comment at `i`.
-fn html_at(s: &str, i: usize) -> Option<Tag<'_>> {
+fn html_at<'a>(s: &'a str, i: usize, lasts: &mut Lasts) -> Option<Tag<'a>> {
     let rest = s.get(i..)?;
     if let Some(body) = rest.strip_prefix("<!--") {
-        // A comment still streaming hides to the end, as it will once closed.
-        let end = body.find("-->").map_or(s.len(), |e| i + 4 + e + 3);
+        // Only a closed comment hides, so a stray "<!--" in prose does not
+        // take the rest of the paragraph with it.
+        if !lasts.after(s, "-->", i + 4) {
+            return None;
+        }
+        let end = i + 4 + body.find("-->")? + 3;
         return Some(Tag {
             name: String::new(),
             close: false,
@@ -1544,16 +1612,26 @@ fn html_at(s: &str, i: usize) -> Option<Tag<'_>> {
     if gt > 400 || after.as_bytes()[gt] != b'>' {
         return None;
     }
-    let name = after[..n].to_ascii_lowercase();
+    // Replies write HTML in lower case; `Foo<S>`, `Bar<I>` or `<T>` is a
+    // type in prose.
+    let name = &after[..n];
+    if name.bytes().any(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
     let attrs = after[n..gt].trim().trim_end_matches('/').trim();
     if n < gt && !matches!(after.as_bytes()[n], b' ' | b'\t' | b'/') {
         return None;
     }
-    let known = HTML_TAGS.contains(&name.as_str());
+    let known = HTML_TAGS.contains(&name);
     if !known && (close || !attrs.contains('=')) {
         return None;
     }
     let end = i + 1 + usize::from(close) + gt + 1;
+    // `Vec<p>` or `Box<a>` is a generic too, unless the tag closes later.
+    if n == 1 && !close && attrs.is_empty() && !lasts.after(s, &format!("</{name}>"), end) {
+        return None;
+    }
+    let name = name.to_string();
     Some(Tag {
         name,
         close,
@@ -1744,16 +1822,22 @@ fn url_at(s: &str, i: usize) -> Option<usize> {
     let mut end = rest
         .find(|c: char| c.is_whitespace() || c == '<' || c == '`')
         .unwrap_or(rest.len());
+    // Counted once and kept as the end moves, so a url followed by a long
+    // run of `)` is not recounted for each one.
+    let url = rest[..end].as_bytes();
+    let opens = url.iter().filter(|&&c| c == b'(').count();
+    let mut shuts = url.iter().filter(|&&c| c == b')').count();
     while end > scheme {
-        let url = &rest[..end];
-        let last = url.as_bytes()[end - 1];
+        let last = url[end - 1];
         let trailing = b"?!.,:;*_~'\"".contains(&last);
-        let unbalanced = last == b')' && url.matches(')').count() > url.matches('(').count();
-        if trailing || unbalanced {
-            end -= 1;
-        } else {
+        let unbalanced = last == b')' && shuts > opens;
+        if !(trailing || unbalanced) {
             break;
         }
+        if last == b')' {
+            shuts -= 1;
+        }
+        end -= 1;
     }
     (end > scheme).then_some(i + end)
 }
@@ -1762,21 +1846,24 @@ fn path_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'/' | b'\\')
 }
 
-/// A file path in running text at `i`: where it ends, the path and its line.
-fn path_at(s: &str, i: usize) -> Option<(usize, String, Option<u32>)> {
+/// A file path in running text at `i`: where it ends, the path and its
+/// line. When there is none, where the run of path characters it would
+/// have been read from ends.
+fn path_at(s: &str, i: usize) -> Result<(usize, String, Option<u32>), usize> {
     let b = s.as_bytes();
     if !(b[i].is_ascii_alphanumeric() || matches!(b[i], b'.' | b'/' | b'\\')) {
-        return None;
+        return Err(i);
     }
-    let mut end = i + b[i..]
+    let run = i + b[i..]
         .iter()
         .take_while(|&&c| path_char(c) || c == b':')
         .count();
+    let mut end = run;
     while end > i && !b[end - 1].is_ascii_alphanumeric() {
         end -= 1;
     }
-    let (path, line) = split_path(&s[i..end], true)?;
-    Some((end, path, line))
+    let (path, line) = split_path(&s[i..end], true).ok_or(run)?;
+    Ok((end, path, line))
 }
 
 /// Reads `dir/name.ext`, `name.ext:120` or `name.ext:120:5` (the column is
@@ -1953,8 +2040,9 @@ fn emit(mut t: Toks, out: &mut Inline) {
                 out.span(start, Style::Image(src));
             }
             Tok::Footnote(label) => {
-                out.text.push_str(&label);
-                out.span(start, Style::Footnote(label));
+                let shown = note_number(&label).map_or(label, |n| n.to_string());
+                out.text.push_str(&shown);
+                out.span(start, Style::Footnote(shown));
             }
             Tok::Open(style) => tags.push((style, start)),
             Tok::Close(style) => {
@@ -3112,7 +3200,7 @@ mod tests {
         for (src, text) in [
             ("<kbd>", None),
             ("<kbd></kbd>", None),
-            ("<kbd>a<b></kbd>", Some("a")),
+            ("<kbd>a<b></kbd>", Some("a<b>")),
             ("<kbd>Ctrl", Some("Ctrl")),
         ] {
             match (parse(src).as_slice(), text) {
@@ -3280,14 +3368,13 @@ mod tests {
         );
     }
 
+    /// Decided: replies use `---` as a separator, and a streaming one
+    /// would flip the text above into a heading and back.
     #[test]
-    fn dashes_under_a_paragraph_make_a_heading() {
+    fn dashes_under_a_paragraph_stay_a_rule() {
         assert_eq!(
             parse("text\n---"),
-            vec![Block::Heading {
-                level: 2,
-                text: plain("text")
-            }]
+            vec![Block::Paragraph(plain("text")), Block::Rule]
         );
     }
 
@@ -3300,10 +3387,8 @@ mod tests {
                     level: 1,
                     text: plain("Title")
                 },
-                Block::Heading {
-                    level: 2,
-                    text: para("Sub **bold**")
-                },
+                Block::Paragraph(para("Sub **bold**")),
+                Block::Rule,
                 Block::Paragraph(plain("Body")),
             ]
         );
@@ -3377,7 +3462,7 @@ mod tests {
 
     #[test]
     fn html_br_breaks_the_line() {
-        assert_eq!(para("a line<br>break<br/>and <BR />more").text, "a line\nbreak\nand\nmore");
+        assert_eq!(para("a line<br>break<br/>and <br />more").text, "a line\nbreak\nand\nmore");
     }
 
     #[test]
@@ -3407,10 +3492,39 @@ mod tests {
 
     #[test]
     fn an_unclosed_tag_styles_to_the_end() {
-        let p = para("so <b>far");
+        let p = para("so <strong>far");
         assert_eq!(p.text, "so far");
         assert_eq!(under(&p, &Style::Bold), ["far"]);
         assert_eq!(para("a </b> b").text, "a  b");
+        // A one letter tag waits for its close, as it may be a generic.
+        assert_eq!(para("so <b>far").text, "so <b>far");
+    }
+
+    #[test]
+    fn capitalised_and_one_letter_generics_stay_text() {
+        for src in [
+            "Foo<S> keeps the rest",
+            "a Bar<I> here",
+            "<B>not bold",
+            "<P>not a paragraph",
+            "<A>, <U> and <T>",
+            "a Vec<p> of points",
+            "Box<a> then more",
+        ] {
+            let p = para(src);
+            assert_eq!(p.text, src);
+            assert!(p.spans.is_empty(), "{src}: {:?}", p.spans);
+        }
+        // Closed later in the paragraph, it is HTML.
+        let p = para("a <b>bold</b> and <u>u</u>");
+        assert_eq!(p.text, "a bold and u");
+        assert_eq!(under(&p, &Style::Bold), ["bold"]);
+    }
+
+    #[test]
+    fn an_unclosed_comment_stays_text() {
+        assert_eq!(para("a <!-- not closed b").text, "a <!-- not closed b");
+        assert_eq!(para("x <!-- y --> z <!-- w").text, "x  z <!-- w");
     }
 
     #[test]
@@ -3573,17 +3687,48 @@ mod tests {
         let b = parse("A claim[^1] and[^note].\n\n[^1]: The **first**.\n[^note]: Second,\n  on two lines.\n\nMore.");
         match &b[..] {
             [Block::Paragraph(p), Block::Paragraph(more), Block::Footnotes(notes)] => {
-                assert_eq!(p.text, "A claim1 andnote.");
+                assert_eq!(p.text, "A claim1 and2.");
                 assert_eq!(under(p, &Style::Footnote("1".into())), ["1"]);
-                assert_eq!(under(p, &Style::Footnote("note".into())), ["note"]);
+                assert_eq!(under(p, &Style::Footnote("2".into())), ["2"]);
                 assert_eq!(more.text, "More.");
                 assert_eq!(notes.len(), 2);
-                assert_eq!(notes[0].0, "1");
+                assert_eq!((notes[0].0.as_str(), notes[1].0.as_str()), ("1", "2"));
                 assert_eq!(notes[0].1.text, "The first.");
                 assert_eq!(notes[1].1.text, "Second,\non two lines.");
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn footnotes_are_numbered_by_first_mark() {
+        let src = "B[^second] then A[^first], B[^second] again.\n\n[^first]: F.\n[^unused]: U.\n[^second]: S.";
+        match &parse(src)[..] {
+            [Block::Paragraph(p), Block::Footnotes(notes)] => {
+                assert_eq!(p.text, "B1 then A2, B1 again.");
+                let got: Vec<_> = notes.iter().map(|(n, t)| (n.as_str(), t.text.as_str())).collect();
+                assert_eq!(got, [("1", "S."), ("2", "F."), ("3", "U.")]);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Alone, as a heading's text is read, the label is all there is.
+        assert_eq!(parse_inline("x[^note]").text, "xnote");
+    }
+
+    #[test]
+    fn a_sentence_after_a_label_is_not_a_definition() {
+        for src in ["[Note]: this is important", "[Note]: this", "[a]: https://x.dev trailing words"] {
+            assert_eq!(para(src).text, src);
+        }
+        let p = para_of("[a][x] [b][y]\n\n[x]: https://x.dev \"Title\"\n[y]: <https://y.dev> (t)");
+        assert_eq!(links(&p), [("a", "https://x.dev"), ("b", "https://y.dev")]);
+    }
+
+    #[test]
+    fn dollars_in_prose_open_no_math() {
+        assert_eq!(para("cost $$5 vs\n$$10 more").text, "cost $$5 vs\n$$10 more");
+        assert_eq!(parse("$$10 more\nand on").len(), 1);
+        assert!(matches!(&parse("$$10 more")[..], [Block::Paragraph(_)]));
     }
 
     #[test]
@@ -3605,7 +3750,7 @@ mod tests {
         check(&b);
         let has = |f: &dyn Fn(&Block) -> bool| b.iter().any(f);
         assert!(has(&|b| matches!(b, Block::Heading { level: 1, text } if text.text == "Setext heading, level one")));
-        assert!(has(&|b| matches!(b, Block::Heading { level: 2, text } if text.text == "Setext heading, level two")));
+        assert!(has(&|b| matches!(b, Block::Paragraph(p) if p.text == "Setext heading, level two")));
         assert!(has(&|b| matches!(b, Block::Details { .. })));
         assert!(has(&|b| matches!(b, Block::Footnotes(n) if n.len() == 1)));
         assert!(has(&|b| matches!(b, Block::Code { lang, .. } if lang == "math")));
@@ -3786,6 +3931,11 @@ mod tests {
             "[[a]".repeat(n / 4),
             "[".repeat(n / 2) + &"]".repeat(n / 2),
             "[x](".repeat(n / 8) + &")".repeat(n / 8),
+            "<details>".repeat(11_111),
+            "a_".repeat(50_000),
+            "see https://x.dev/a".to_string() + &")".repeat(50_000),
+            "<b>".repeat(n / 3),
+            "<!--".repeat(n / 4),
         ];
         for src in &inputs {
             let t = std::time::Instant::now();
