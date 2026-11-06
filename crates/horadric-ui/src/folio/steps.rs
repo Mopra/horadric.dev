@@ -208,10 +208,10 @@ impl Ctx<'_> {
     /// lane turns while it runs, then its type, model and progress.
     fn lane_folded(&self, s: &mut Scene, step: &Step, lane: &Lane, r: Rect) {
         let ink = self.pal.accent.mix(self.pal.fg, 0.35);
-        // The rune turns over with each tool it uses, as in the open lane.
+        // Only shown while the agent works, so it turns on the frame clock too.
         let rune = lane.tool_uses.max(lane.steps.len() as u64) as usize;
         let h = 11.0;
-        (s.items).push(Item::Rune(rune, r.x + 5.0, r.y + (r.h - h) / 2.0, h, ink, 1.3));
+        (s.items).push(Item::Rune(LIVE | rune, r.x + 5.0, r.y + (r.h - h) / 2.0, h, ink, 1.3));
         let model = step.input["model"].as_str().unwrap_or_default();
         let line = look::with_model(flow::lane_line(lane, true), lane, model);
         let text = Rect::new(r.x + 16.0, r.y, (r.w - 16.0).max(0.0), r.h);

@@ -301,7 +301,7 @@ struct Built {
 
 /// Marks a rune for [`live_runes`] to take out of its scene: its number
 /// with the top bit set, a bit no rune's own number reaches.
-const LIVE: usize = 1 << (usize::BITS - 1);
+pub(super) const LIVE: usize = 1 << (usize::BITS - 1);
 
 /// Takes the runes marked [`LIVE`] out of `s`, their numbers unmarked.
 fn live_runes(s: &mut Scene) -> Vec<view::LiveRune> {
