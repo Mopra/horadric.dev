@@ -225,14 +225,31 @@ impl SessionSpec {
     }
 }
 
-/// The environment session `id` in `cwd` gets beside its tag, terminal or
-/// Folio: its worktree's ports, and which quest log `horadric quest` works
-/// on.
+/// The environment session `id` in `cwd` gets beside its tag, terminal,
+/// Folio or plain shell: its worktree's ports, which quest log `horadric
+/// quest` works on, and its project's identity. Returns what to set and
+/// what to remove from what it inherits, the machine's tokens when an
+/// identity speaks for it.
 pub(crate) fn session_env(
     id: &str,
     own_tree: Option<&Worktree>,
     cwd: &Path,
-) -> Vec<(String, String)> {
+) -> (Vec<(String, String)>, Vec<String>) {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut set = tree_env(id, own_tree, cwd);
+    // A worktree's identity is its main tree's; `of_project` maps it.
+    #[cfg(windows)]
+    let remove = {
+        let identity = crate::vault::identity::session_env(cwd);
+        set.extend(identity.set);
+        identity.remove
+    };
+    #[cfg(not(windows))]
+    let remove = Vec::new();
+    (set, remove)
+}
+
+fn tree_env(id: &str, own_tree: Option<&Worktree>, cwd: &Path) -> Vec<(String, String)> {
     own_tree
         .map(|w| {
             let mut env = w

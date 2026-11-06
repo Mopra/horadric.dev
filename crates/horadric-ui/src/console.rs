@@ -291,6 +291,9 @@ pub struct Launch {
     pub shell: bool,
     /// Added to the environment, the ports of a session's worktree.
     pub env: Vec<(String, String)>,
+    /// Removed from what it inherits: the machine's tokens, when the
+    /// project's identity speaks for it.
+    pub env_remove: Vec<String>,
     /// Run before the program, in its pane, by `horadric setup`: a new
     /// worktree's setup commands.
     pub setup: Vec<String>,
@@ -580,6 +583,7 @@ impl Console {
             }
             .into_iter()
             .map(String::from)
+            .chain(launch.env_remove)
             .collect(),
             cols: size.cols,
             rows: size.rows,

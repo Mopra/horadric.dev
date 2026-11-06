@@ -664,12 +664,10 @@ fn keep_transcript(t: &Tagged) {
 /// The app's window, for the memory's thread to wake when a recall fires.
 static EVENT_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
-/// A recall found `ids` in `project`: the mind lights them, and every
-/// sanctuary on the stage draws again.
 /// The secrets Horadric keeps, for the memory to cut from transcripts
-/// whatever they look like: the backup's passphrase and the kept logins'
-/// tokens. Google's and WorkOS's tokens are random enough for its
-/// patterns. The Vault (docs/plan/vault.md) belongs here once built.
+/// whatever they look like: the backup's passphrase, the kept logins'
+/// tokens and every value and password in the Vault. Google's and
+/// WorkOS's tokens are random enough for its patterns.
 fn kept_secrets() -> Vec<String> {
     let mut out: Vec<String> = accounts::load()
         .list
@@ -679,9 +677,22 @@ fn kept_secrets() -> Vec<String> {
     out.extend(crate::backup::credential::read(
         crate::backup::credential::PASSPHRASE,
     ));
+    out.extend(crate::vault::store::values());
     out
 }
 
+/// A new key for Claude session `id`, which `horadric secret` shows the
+/// app to prove it runs in that session. In memory only, so a session
+/// reattached after the app restarts holds a key the app no longer knows.
+fn secret_key(id: &str) -> (String, String) {
+    (
+        horadric_hooks::SECRET_KEY_ENV.to_string(),
+        crate::vault::run::mint_key(id),
+    )
+}
+
+/// A recall found `ids` in `project`: the mind lights them, and every
+/// sanctuary on the stage draws again.
 fn recalled(project: &str, ids: &[String]) {
     crate::mind::fire(project, ids);
     crate::glows::stir();
@@ -4243,15 +4254,15 @@ impl App {
                                 crate::memory::ask(call);
                             }
                         }
-                        // Until the vault's routes are wired in, the CLI
-                        // hears why at once rather than waiting.
-                        Command::SecretRun(r) => r.out.fail("the Vault is not built yet"),
-                        Command::SecretSet(s) => {
-                            s.reply.send(serde_json::json!({ "error": "the Vault is not built yet" }))
-                        }
-                        Command::SecretNames(n) => {
-                            n.reply.send(serde_json::json!({ "error": "the Vault is not built yet" }))
-                        }
+                        Command::SecretRun(r) => match self.secret_unkeyed(&r.session, &r.key) {
+                            Some(why) => r.out.fail(why),
+                            None => crate::vault::run::serve(self.secret_place(&r.session), r),
+                        },
+                        Command::SecretSet(s) => crate::vault::run::set(s),
+                        Command::SecretNames(n) => match self.secret_unkeyed(&n.session, &n.key) {
+                            Some(why) => n.reply.send(serde_json::json!({ "error": why })),
+                            None => crate::vault::run::names(self.secret_place(&n.session), n),
+                        },
                     }
                 }
             }
@@ -5426,9 +5437,10 @@ impl App {
         } else {
             self.extra_args(id, &program, &args, &cwd)
         };
-        let mut env = session_env(id, own_tree.as_ref(), &cwd);
+        let (mut env, env_remove) = session_env(id, own_tree.as_ref(), &cwd);
         if !attach && !shell && console::is_claude(&program) {
             env.extend(self.shared.defaults().env());
+            env.push(secret_key(id));
         }
         let serial = self.next_serial;
         self.next_serial += 1;
@@ -5442,6 +5454,7 @@ impl App {
                 cwd,
                 shell,
                 env,
+                env_remove,
                 setup: fresh.map(|(_, setup)| setup).unwrap_or_default(),
             },
             self.notify,
@@ -7264,6 +7277,7 @@ impl App {
         // Every way a session goes for good comes through here.
         self.keeping_ended(id);
         self.drop_turns(id);
+        crate::vault::run::drop_key(id);
         if let Some(c) = self.consoles.remove(id) {
             if c.exit_code().is_none() {
                 c.kill();
@@ -7433,6 +7447,38 @@ impl App {
 
     fn project_of(&self, id: &str) -> Option<String> {
         self.shared.registry.lock().ok()?.get(id).map(project_key)
+    }
+
+    /// Where live session `id` works, for the Vault: None for one that is
+    /// not running here, so a key that outlived its session buys nothing.
+    fn secret_place(&self, id: &str) -> Option<crate::vault::run::Place> {
+        let running = |c: Option<&Arc<Console>>| c.is_some_and(|c| c.exit_code().is_none());
+        if !running(self.consoles.get(id)) && !running(self.folios.get(id)) {
+            return None;
+        }
+        let cwd = self.dir_of(id).filter(|d| !d.as_os_str().is_empty())?;
+        // The project's key as `secret set` and the store spell it, its
+        // main tree's folder whichever worktree the session is in.
+        let key = crate::project::folder_key(&cwd.to_string_lossy());
+        if key.is_empty() {
+            return None;
+        }
+        Some(crate::vault::run::Place {
+            dir: PathBuf::from(&key),
+            key,
+            cwd,
+        })
+    }
+
+    /// Why a `horadric secret` call from `session` is refused before the
+    /// Vault sees it: a live session whose key the app does not know was
+    /// started before the app was, and only a new start gives it one.
+    fn secret_unkeyed(&self, session: &str, key: &str) -> Option<&'static str> {
+        let live = self.secret_place(session).is_some();
+        (live && !crate::vault::run::key_ok(session, key)).then_some(
+            "Refused: this session began before Horadric last started, so Horadric no longer \
+             knows its key. Restart the session (close it and resume it) to use secrets.",
+        )
     }
 
     /// The sessions of a project that have a console to show, in grid
@@ -8454,7 +8500,9 @@ impl App {
                 horadric_hooks::port().to_string(),
             ),
         ];
-        env_set.extend(session_env(id, own_tree.as_ref(), &dir));
+        let (own_set, own_remove) = session_env(id, own_tree.as_ref(), &dir);
+        env_set.extend(own_set);
+        env_set.push(secret_key(id));
         // The CLI keeps what each prompt's edits overwrote only when told
         // to off a terminal, and a rewind to an earlier prompt puts the
         // files back from that.
@@ -8469,6 +8517,7 @@ impl App {
             env_remove: console::inherited_env(console::under_claude())
                 .into_iter()
                 .map(String::from)
+                .chain(own_remove)
                 .collect(),
             ..Default::default()
         };

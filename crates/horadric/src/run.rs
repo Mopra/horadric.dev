@@ -155,9 +155,20 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // Not through the app, so the hosts are told here. The task list is
     // not: an item is only ever worked by a session the app started.
     let mut command = Command::new(program);
+    // The project's identity too, as an app session gets it. No secret
+    // key: the app did not start this one, so `horadric secret` refuses it.
     #[cfg(windows)]
-    if let Some(prompt) = horadric_ui::app::ssh_prompt(&cwd) {
-        command.arg("--append-system-prompt").arg(prompt);
+    {
+        let identity = horadric_ui::vault::identity::session_env(&cwd);
+        for name in &identity.remove {
+            command.env_remove(name);
+        }
+        command.envs(identity.set);
+        let mut system: Vec<String> = horadric_ui::app::ssh_prompt(&cwd).into_iter().collect();
+        system.extend(horadric_ui::vault::identity::prompt_lines(&cwd));
+        if !system.is_empty() {
+            command.arg("--append-system-prompt").arg(system.join("\n\n"));
+        }
     }
     // The tile's context bar and cost come from the status line, so this
     // `claude` gets the one the app's own get, unless it was handed

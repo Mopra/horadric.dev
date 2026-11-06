@@ -520,6 +520,9 @@ pub(crate) fn command_for(exe: &str) -> String {
 /// `CHECK_LONGEST`. `cmd.exe` takes its one argument as the command to run,
 /// as typed, since its quoting is not a C program's; a Mac's `sh -c` takes
 /// it as one argument anyway.
+/// A blocked quest's look at whether its wait is over, run off the UI thread.
+type Look = Box<dyn FnOnce() -> bool + Send>;
+
 pub(crate) fn exits_zero(program: &str, args: &[String], dir: &Path) -> bool {
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(program);
@@ -590,6 +593,45 @@ pub fn ssh_prompt(dir: &Path) -> Option<String> {
         fleet::system_prompt(&path.to_string_lossy().replace('\\', "/"), &devices)
     });
     ssh::system_prompt(&file::hosts(dir), &ssh, fleet)
+}
+
+/// What a Claude session in `cwd` is told about the Vault: whose project it
+/// is and its logins, the names of the secrets and web logins it may use,
+/// and those the project's config asks for that are not kept yet. Never a
+/// value.
+#[cfg(windows)]
+pub fn vault_prompt(cwd: &Path) -> Vec<String> {
+    use crate::vault::{identity, store};
+    let mut lines = identity::prompt_lines(cwd);
+    let key = folder_key(&cwd.to_string_lossy());
+    if key.is_empty() {
+        return lines;
+    }
+    let slug = identity::of_project(cwd).slug().map(str::to_string);
+    let (secrets, logins) = store::names(&key, slug.as_deref());
+    let secrets: Vec<String> = secrets.into_iter().map(|(n, _)| n).collect();
+    let logins: Vec<String> = logins.into_iter().map(|(n, _)| n).collect();
+    lines.extend(horadric_core::vault::secret::prompt_lines(&secrets, &logins));
+    // The config may be kept out of git, so a worktree reads its
+    // project's from the main tree.
+    let config = [Path::new(&key), cwd]
+        .into_iter()
+        .map(|p| std::fs::read_to_string(file::config_file(p)).unwrap_or_default())
+        .find(|t| !t.trim().is_empty())
+        .unwrap_or_default();
+    let missing: Vec<String> = horadric_core::vault::identity::config_secrets(&config)
+        .into_iter()
+        .filter(|n| !secrets.contains(n))
+        .collect();
+    if !missing.is_empty() {
+        lines.push(format!(
+            "This project needs secrets Horadric does not keep yet: {}. When you need one, ask \
+             the human to add it in Project settings, or block the quest with \
+             `horadric quest blocked --on-secret NAME`. Never ask for a value in the chat.",
+            missing.join(", ")
+        ));
+    }
+    lines
 }
 
 pub(crate) trait Runner: Host {
@@ -995,6 +1037,8 @@ pub(crate) trait Runner: Host {
         // The config may be kept out of git, so a worktree reads its
         // project's from the main tree.
         system.extend(ssh_prompt(Path::new(&folder_key(&cwd.to_string_lossy()))));
+        #[cfg(windows)]
+        system.extend(vault_prompt(cwd));
         // Its list of tools takes every word up to the next flag.
         let mut out = allowed;
         if !system.is_empty() {
@@ -1183,7 +1227,8 @@ pub(crate) trait Runner: Host {
 
     /// Whether what the blocked `t` of project `key` waits on is over. The
     /// list and the clock answer at once, a file by a look at the disk;
-    /// git and a command run on a thread at most every `CHECK_GAP`, and
+    /// git, a command and the Vault's look run on a thread at most every
+    /// `CHECK_GAP`, and
     /// until one has answered the wait is not over.
     fn wait_met(&self, key: &str, t: &Task, now: u64) -> bool {
         let Some(wait) = &t.wait else {
@@ -1195,12 +1240,16 @@ pub(crate) trait Runner: Host {
         let Some(dir) = self.project_dir(key) else {
             return false;
         };
-        let (program, args): (&str, Vec<String>) = match wait {
+        let run = |program: &'static str, args: Vec<String>| -> Look {
+            let dir = dir.clone();
+            Box::new(move || exits_zero(program, &args, &dir))
+        };
+        let look: Look = match wait {
             // The file name came with the quest log, which a clone brings,
             // and this runs on the UI thread every second.
             Wait::File(f) if !wait_file_safe(f) => return false,
             Wait::File(f) => return crate::links::disk(&dir.join(f)).is_some(),
-            Wait::Main(r) => (
+            Wait::Main(r) => run(
                 "git",
                 vec![
                     "merge-base".into(),
@@ -1212,11 +1261,28 @@ pub(crate) trait Runner: Host {
             // The command came with the quest log, which a clone brings.
             Wait::Cmd(c) if !file::approved(&dir, c) => return false,
             #[cfg(windows)]
-            Wait::Cmd(c) => ("cmd.exe", vec![c.clone()]),
+            Wait::Cmd(c) => run("cmd.exe", vec![c.clone()]),
             #[cfg(not(windows))]
-            Wait::Cmd(c) => ("sh", vec!["-c".into(), c.clone()]),
+            Wait::Cmd(c) => run("sh", vec!["-c".into(), c.clone()]),
             Wait::After | Wait::Quest(_) | Wait::Until(_) | Wait::Outside(_) => return false,
-            // Held until the Vault's look is wired in here.
+            // Kept is enough: whether it is allowed depends on the program
+            // a `secret run` names, and the human answers that when it
+            // runs. Both read identity files, so off the UI thread too.
+            #[cfg(windows)]
+            Wait::Secret(name) => {
+                let (key, dir, name) = (key.to_string(), dir.clone(), name.clone());
+                Box::new(move || {
+                    let identity = crate::vault::identity::of_project(&dir);
+                    let slug = identity.slug().map(str::to_string);
+                    crate::vault::store::kept(&key, slug.as_deref(), &name)
+                })
+            }
+            #[cfg(windows)]
+            Wait::Login(tool) => {
+                let (dir, tool) = (dir.clone(), tool.clone());
+                Box::new(move || crate::vault::identity::project_has_login(&dir, &tool))
+            }
+            #[cfg(not(windows))]
             Wait::Secret(_) | Wait::Login(_) => return false,
         };
         let id = (key.to_string(), wait.spell());
@@ -1239,7 +1305,7 @@ pub(crate) trait Runner: Host {
         // being told.
         let checks = Arc::clone(&self.tasks().checks);
         std::thread::spawn(move || {
-            let met = exits_zero(program, &args, &dir);
+            let met = look();
             if let Ok(mut c) = checks.lock() {
                 let at = Instant::now();
                 c.insert(

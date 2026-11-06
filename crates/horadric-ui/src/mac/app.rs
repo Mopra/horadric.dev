@@ -979,7 +979,7 @@ impl App {
             true => Vec::new(),
             false => self.claude_extra(id, &program, &args, &cwd),
         };
-        let env = crate::quests::session_env(id, own_tree.as_ref(), &cwd);
+        let (env, env_remove) = crate::quests::session_env(id, own_tree.as_ref(), &cwd);
         let serial = self.next_serial;
         self.next_serial += 1;
         let console = Console::spawn(
@@ -992,6 +992,7 @@ impl App {
                 cwd,
                 shell,
                 env,
+                env_remove,
                 setup: fresh.map(|(_, setup)| setup).unwrap_or_default(),
             },
             super::Notify,
