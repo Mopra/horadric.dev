@@ -353,7 +353,8 @@ fn why_and_wait(args: &[String], now: u64) -> Result<(String, Option<On>), Strin
                     let name = value.trim();
                     if !horadric_core::vault::secret::valid_name(name) {
                         return Err(format!(
-                            "--on-secret takes a secret's name, upper case letters, digits and _,                              a letter first, not {name}"
+                            "--on-secret takes a secret's name, upper case letters, digits and _, \
+                             a letter first, not {name}"
                         ));
                     }
                     On::Check(Wait::Secret(name.to_string()))
