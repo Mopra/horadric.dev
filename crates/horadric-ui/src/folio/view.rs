@@ -26,7 +26,8 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL,
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_LINE_SPACING_METHOD_UNIFORM,
     DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TRIMMING,
-    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_EMERGENCY_BREAK,
+    DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
@@ -109,6 +110,10 @@ const NOTCH: f32 = 54.0;
 /// glass's top and bottom.
 const BAR_W: f32 = 14.0;
 const BAR_INSET: f32 = 8.0;
+/// The widest a footnote shown on hover is set, to read as a note.
+const PEEK_NOTE_W: f32 = 380.0;
+/// The widest a link's address shown on hover is set.
+const PEEK_LINK_W: f32 = 560.0;
 
 pub fn register_class() -> Result<()> {
     unsafe {
@@ -412,6 +417,36 @@ pub(super) fn scroll_by(key: &str, by: f32) {
     });
 }
 
+/// Scrolls the reply holding the footnote mark clicked at height `y` to
+/// its note, a third down the view as a find's match is. The note is the
+/// reply's last piece of text that reads as it does, since the notes come
+/// at its end.
+fn to_note(key: &str, y: f32, note: &str) {
+    with(key, |c| {
+        let st = &c.tr.state;
+        let top = st.area.y - c.scroll;
+        let Some(block) = st.tops.partition_point(|t| top + t <= y).checked_sub(1) else {
+            return;
+        };
+        let Some(&block_top) = st.tops.get(block) else {
+            return;
+        };
+        let mut at = None;
+        let mut k = 0;
+        while let Some(u) = c.tr.cache.unit(block, k) {
+            if u.text == note {
+                at = Some(u.y);
+            }
+            k += 1;
+        }
+        if let Some(uy) = at {
+            let target = block_top + uy - c.view_h / 3.0;
+            c.scroll = look::clamp_scroll(target, c.content_h, c.view_h);
+            c.follow = false;
+        }
+    });
+}
+
 /// What a click on part of the conversation does.
 #[derive(Clone)]
 pub(super) enum Hit {
@@ -423,6 +458,9 @@ pub(super) enum Hit {
     Trust(bool),
     /// The transcript's own buttons and links.
     Tr(transcript::Act),
+    /// A footnote mark in a reply, with its note's text:
+    /// the note shows on hover, and a click goes down to it.
+    Note(String),
 }
 
 pub(super) struct Gfx {
@@ -448,6 +486,8 @@ pub(super) struct Gfx {
     pub(super) line: IDWriteTextFormat,
     pub(super) italic: IDWriteTextFormat,
     pub(super) small: IDWriteTextFormat,
+    /// Small and wrapping, for what a link or a footnote shows on hover.
+    pub(super) peek: IDWriteTextFormat,
     pub(super) title: IDWriteTextFormat,
     pub(super) mono: IDWriteTextFormat,
     pub(super) button: IDWriteTextFormat,
@@ -664,6 +704,7 @@ impl Gfx {
             line: text_format(gpu, FONT, 14.0, normal, false, true)?,
             italic: text_format(gpu, FONT, 14.0, normal, true, false)?,
             small: text_format(gpu, FONT, 12.5, normal, false, true)?,
+            peek: text_format(gpu, FONT, 12.5, normal, false, false)?,
             title: text_format(gpu, FONT, 14.5, semi, false, true)?,
             mono: text_format(gpu, PCWSTR(mono.as_ptr()), 13.0, normal, false, false)?,
             button,
@@ -1125,6 +1166,15 @@ impl View {
             self.composer_menu(gfx, chat, &pal, cx, cw, &mut composer_hits);
         }
 
+        // Last, so it sits over the composer when it has to go below.
+        if let Some((mx, my)) = chat.tr.state.mouse {
+            let on_composer = composer_hits.iter().any(|(r, _)| r.contains(mx, my));
+            let lit = (hits.iter().rev()).find(|(r, _)| r.contains(mx, my));
+            if let (false, Some((at, hit))) = (on_composer, lit) {
+                self.peek(gfx, &pal, hit, at, &Rect::new(0.0, 0.0, w, h));
+            }
+        }
+
         hits.extend(composer_hits);
         *self.hits.borrow_mut() = hits;
         rt.EndDraw(None, None).is_ok()
@@ -1381,6 +1431,43 @@ impl View {
         hits.push((cancel, Hit::Trust(false)));
     }
 
+    /// What the link or footnote mark under the pointer leads to, on a
+    /// small plate under it (over it when there is no room below): a
+    /// link's address, a file's path and line, a footnote's text. A link's
+    /// words may say anything, so where it goes is shown before a click.
+    unsafe fn peek(&self, gfx: &Gfx, pal: &Palette, hit: &Hit, at: &Rect, window: &Rect) {
+        let (text, ink) = match hit {
+            Hit::Tr(transcript::Act::Link(url)) => (url.clone(), pal.dim),
+            Hit::Tr(transcript::Act::Path(path, Some(n))) => (format!("{path}:{n}"), pal.dim),
+            Hit::Tr(transcript::Act::Path(path, None)) => (path.clone(), pal.dim),
+            Hit::Note(note) if !note.trim().is_empty() => (note.clone(), pal.fg.with_alpha(0.85)),
+            _ => return,
+        };
+        const PAD_X: f32 = 9.0;
+        const PAD_Y: f32 = 5.0;
+        const GAP: f32 = 4.0;
+        let most = if matches!(hit, Hit::Note(..)) { PEEK_NOTE_W } else { PEEK_LINK_W };
+        let room = (window.w - 16.0 - 2.0 * PAD_X).clamp(40.0, most);
+        let Ok(l) = render::wrapped(&self.shared.gpu, &gfx.peek, &text, room) else {
+            return;
+        };
+        // An address has few places to break, so it breaks anywhere.
+        let _ = l.SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
+        let (tw, th) = render::text_size(&l);
+        let (bw, bh) = (tw.min(room) + 2.0 * PAD_X, th + 2.0 * PAD_Y);
+        let x = at.x.min(window.right() - 8.0 - bw).max(window.x + 8.0);
+        let below = at.bottom() + GAP;
+        let y = if below + bh <= window.bottom() - 4.0 {
+            below
+        } else {
+            (at.y - GAP - bh).max(window.y + 4.0)
+        };
+        let plate = Rect::new(x, y, bw, bh);
+        gfx.fill_round(&plate, 6.0, pal.bg.mix(pal.fg, 0.09));
+        gfx.stroke_round(&plate, 6.0, pal.fg.with_alpha(0.14), 1.0);
+        gfx.layout_at(&l, x + PAD_X, y + PAD_Y, ink);
+    }
+
     /// Whether the keyboard is in the pane this conversation is laid in.
     pub(super) fn has_keyboard(&self) -> bool {
         unsafe {
@@ -1434,6 +1521,7 @@ impl View {
         match hit {
             Some(Hit::Answer(id, allow)) => answer(&key, &id, allow),
             Some(Hit::Tr(a)) => select::act(&key, a),
+            Some(Hit::Note(note)) => to_note(&key, y, &note),
             Some(Hit::Fold(i)) => {
                 with(&key, |c| {
                     if !c.open.remove(&i) {

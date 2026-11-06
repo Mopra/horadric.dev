@@ -102,6 +102,12 @@ pub struct Para {
     pub term_w: f32,
     /// Room kept at the right, inside the cards around it.
     pub right: f32,
+    /// A heading whose section a click folds: its fold key, and whether
+    /// the section is folded now.
+    pub fold: Option<(String, bool)>,
+    /// The footnotes its marks point at, by label, as plain text: a mark
+    /// shows its note on hover without the reader going to the end.
+    pub notes: Vec<(String, String)>,
 }
 
 impl Para {
@@ -161,11 +167,20 @@ pub enum Kind {
 /// A reply's markdown, parsed and laid flat, its sections open or folded
 /// as the transcript has them.
 pub fn paras(src: &str) -> Vec<Para> {
-    paras_with(src, super::code::is_open)
+    paras_with(src, super::code::is_open, false)
 }
 
-/// [`paras`] with `open` saying which fold keys are toggled.
-pub fn paras_with(src: &str, open: fn(&str) -> bool) -> Vec<Para> {
+/// [`paras`] with its headings folding their sections too. Only for what
+/// is built again when a fold key is toggled (a reply, a thought): on a
+/// card that is not, a click on a heading would seem to do nothing.
+#[allow(dead_code)] // Until the transcript's replies are laid with it.
+pub fn paras_folding(src: &str) -> Vec<Para> {
+    paras_with(src, super::code::is_open, true)
+}
+
+/// [`paras`] with `open` saying which fold keys are toggled, and whether
+/// `headings` fold.
+fn paras_with(src: &str, open: fn(&str) -> bool, headings: bool) -> Vec<Para> {
     let mut out = Vec::new();
     let at = At {
         indent: 0.0,
@@ -173,12 +188,65 @@ pub fn paras_with(src: &str, open: fn(&str) -> bool) -> Vec<Para> {
         right: 0.0,
         depth: 0,
         open,
+        headings,
     };
     flatten(&md::parse(src), &at, &mut out);
     if let Some(first) = out.first_mut() {
         first.gap = 0.0;
     }
+    attach_notes(&mut out);
     out
+}
+
+/// The fold key of a heading's section. It shares the code blocks'
+/// prefix, as [`details_key`] does, so a toggle builds the reply again.
+pub fn heading_key(level: u8, text: &str) -> String {
+    super::code::fold_key(&format!("heading\n{level}\n{text}"))
+}
+
+/// Whether a heading at `level` has anything under it before the next
+/// heading as big or bigger: an empty section has nothing to fold.
+fn has_section(rest: &[md::Block], level: u8) -> bool {
+    match rest.first() {
+        None | Some(md::Block::Footnotes(_)) => false,
+        Some(md::Block::Heading { level: l, .. }) => *l > level,
+        Some(_) => true,
+    }
+}
+
+/// Gives each paragraph the text of the footnotes its marks name. The
+/// notes come last, so this runs once all of them are laid.
+fn attach_notes(out: &mut [Para]) {
+    let notes: Vec<(String, String)> = (out.iter())
+        .filter_map(|p| match &p.kind {
+            Kind::Footnote { label, text, .. } => Some((label.clone(), text.text.clone())),
+            _ => None,
+        })
+        .collect();
+    if notes.is_empty() {
+        return;
+    }
+    for p in out.iter_mut() {
+        let Kind::Text { inline, term, .. } = &p.kind else {
+            continue;
+        };
+        let marks = (inline.spans.iter())
+            .chain(term.iter().flat_map(|t| t.spans.iter()))
+            .filter_map(|s| match &s.style {
+                Style::Footnote(label) => Some(label),
+                _ => None,
+            });
+        let mut mine: Vec<(String, String)> = Vec::new();
+        for label in marks {
+            if mine.iter().any(|(l, _)| l == label) {
+                continue;
+            }
+            if let Some(n) = notes.iter().find(|(l, _)| l == label) {
+                mine.push(n.clone());
+            }
+        }
+        p.notes = mine;
+    }
 }
 
 /// Where the blocks being laid flat sit.
@@ -191,6 +259,8 @@ struct At {
     depth: usize,
     /// Whether a fold key is toggled from how its section starts.
     open: fn(&str) -> bool,
+    /// The reply's own headings fold their sections.
+    headings: bool,
 }
 
 impl At {
@@ -204,6 +274,8 @@ impl At {
             marker_w: 0.0,
             term_w: 0.0,
             right: self.right,
+            fold: None,
+            notes: Vec::new(),
         }
     }
 
@@ -263,7 +335,16 @@ fn flatten(blocks: &[md::Block], at: &At, out: &mut Vec<Para>) {
     let normal = if at.depth > 0 { ITEM_GAP } else { PARA_GAP };
     let mut next_gap: Option<f32> = None;
     let mut prev: Option<&md::Block> = None;
-    for b in blocks {
+    // The level of a folded heading while its section is passed over.
+    let mut folded: Option<u8> = None;
+    for (i, b) in blocks.iter().enumerate() {
+        if let Some(level) = folded {
+            match b {
+                md::Block::Heading { level: l, .. } if *l <= level => folded = None,
+                md::Block::Footnotes(_) => {}
+                _ => continue,
+            }
+        }
         let after_heading = next_gap.is_some();
         let gap = next_gap.take().unwrap_or(normal);
         match b {
@@ -321,8 +402,23 @@ fn flatten(blocks: &[md::Block], at: &At, out: &mut Vec<Para>) {
                 };
                 // Two headings in a row read as one title and its subtitle.
                 let gap = if after_heading { gap } else { heading_gap(*level) };
-                out.push(at.para(text(font, t), gap));
-                next_gap = Some(UNDER_HEADING);
+                let mut p = at.para(text(font, t), gap);
+                // Only the reply's own headings fold, not one in a list,
+                // a quote or a details section.
+                let top = at.headings && at.depth == 0 && at.bars.is_empty() && at.indent == 0.0;
+                if top && has_section(&blocks[i + 1..], *level) {
+                    let key = heading_key(*level, &t.text);
+                    let shut = (at.open)(&key);
+                    if shut {
+                        folded = Some(*level);
+                    }
+                    p.fold = Some((key, shut));
+                }
+                let shut = folded.is_some();
+                out.push(p);
+                // A folded heading is a line of its own, not a title over
+                // the next one.
+                next_gap = (!shut).then_some(UNDER_HEADING);
             }
             md::Block::Code { info, text, .. } => out.push(at.para(
                 Kind::Code {
@@ -1300,7 +1396,7 @@ mod tests {
 
     #[test]
     fn details_fold_until_their_key_is_toggled() {
-        let ps = paras_with(DETAILS, none_open);
+        let ps = paras_with(DETAILS, none_open, false);
         assert_eq!(ps.len(), 3);
         match &ps[1].kind {
             Kind::Details { summary, key, open } => {
@@ -1311,7 +1407,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        let ps = paras_with(DETAILS, all_open);
+        let ps = paras_with(DETAILS, all_open, false);
         assert_eq!(ps.len(), 4);
         assert!(matches!(ps[1].kind, Kind::Details { open: true, .. }));
         assert_eq!(text_of(&ps[2]), "Hidden.");
@@ -1323,8 +1419,8 @@ mod tests {
     #[test]
     fn details_written_open_close_when_toggled() {
         let src = "<details open><summary>S</summary>body</details>";
-        assert_eq!(paras_with(src, none_open).len(), 2);
-        assert_eq!(paras_with(src, all_open).len(), 1);
+        assert_eq!(paras_with(src, none_open, false).len(), 2);
+        assert_eq!(paras_with(src, all_open, false).len(), 1);
     }
 
     #[test]
@@ -1343,6 +1439,52 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(ps[3].gap, NOTE_GAP);
+    }
+
+    #[test]
+    fn a_paragraph_carries_the_notes_its_marks_name() {
+        let ps = paras("Claim[^a] and[^b], again[^a].\n\nPlain.\n\n[^a]: One.\n[^b]: Two.");
+        let want = vec![("1".to_string(), "One.".to_string()), ("2".into(), "Two.".into())];
+        assert_eq!(ps[0].notes, want);
+        assert!(ps[1].notes.is_empty());
+    }
+
+    const SECTIONS: &str = "# Top\n\nIntro.\n\n## A\n\nIn A.\n\n### A1\n\nDeep.\n\n## B\n\nIn B.\n\n## Empty\n\n## C\n\n- item\n\n[^1]: Note.";
+
+    #[test]
+    fn a_heading_with_a_section_can_fold() {
+        let ps = paras_with(SECTIONS, none_open, true);
+        let folds: Vec<(String, bool)> = (ps.iter())
+            .filter_map(|p| p.fold.as_ref().map(|(_, shut)| (text_of(p).to_string(), *shut)))
+            .collect();
+        let names: Vec<&str> = folds.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(names, ["Top", "A", "A1", "B", "C"], "an empty section has nothing to fold");
+        assert!(folds.iter().all(|(_, shut)| !shut));
+    }
+
+    #[test]
+    fn a_folded_heading_hides_its_section_up_to_the_next_as_big() {
+        let a = heading_key(2, "A");
+        let ps: Vec<String> = paras_with(SECTIONS, |k| k == heading_key(2, "A"), true)
+            .iter()
+            .filter(|p| matches!(p.kind, Kind::Text { .. }))
+            .map(|p| text_of(p).to_string())
+            .collect();
+        assert_eq!(ps, ["Top", "Intro.", "A", "B", "In B.", "Empty", "C", "item"]);
+        let folded = paras_with(SECTIONS, |k| k == heading_key(2, "A"), true);
+        let head = folded.iter().find(|p| text_of(p) == "A").unwrap();
+        assert_eq!(head.fold, Some((a, true)));
+        // The footnotes stay, though the last section is folded.
+        let ps = paras_with(SECTIONS, |k| k == heading_key(2, "C"), true);
+        assert!(matches!(ps.last().unwrap().kind, Kind::Footnote { .. }));
+    }
+
+    #[test]
+    fn a_heading_inside_a_list_or_quote_does_not_fold() {
+        let ps = paras_with("> ## Quoted\n>\n> Body.\n\n- ## Listed\n\n  Body.", none_open, true);
+        assert!(ps.iter().all(|p| p.fold.is_none()));
+        // Nor on a card, which is not built again when one is toggled.
+        assert!(paras(SECTIONS).iter().all(|p| p.fold.is_none()));
     }
 
     #[test]

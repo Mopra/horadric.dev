@@ -389,7 +389,7 @@ impl Ctx<'_> {
         (x, y, width): (f32, f32, f32),
         ink: Color,
         align: Align,
-        look: Look,
+        look: Look<'_>,
     ) -> (f32, f32) {
         let caps;
         let shown = if look.caps {
@@ -452,11 +452,11 @@ impl Ctx<'_> {
                 Style::Link(url) => {
                     let _ = l.SetUnderline(true, dr);
                     self.paint(&l, r.clone(), self.link_ink());
-                    links.push((r, Act::Link(url.clone())));
+                    links.push((r, Hit::Tr(Act::Link(url.clone()))));
                 }
                 Style::Path { path, line } => {
                     self.paint(&l, r.clone(), self.link_ink());
-                    links.push((r, Act::Path(path.clone(), *line)));
+                    links.push((r, Hit::Tr(Act::Path(path.clone(), *line))));
                 }
                 Style::Sup | Style::Sub => {
                     let t = if *style == Style::Sup { &self.fonts.sups } else { &self.fonts.subs };
@@ -464,13 +464,17 @@ impl Ctx<'_> {
                         let _ = l.SetTypography(t, dr);
                     }
                 }
-                Style::Footnote(_) => {
+                Style::Footnote(label) => {
                     if let Some(t) = &self.fonts.sups {
                         let _ = l.SetTypography(t, dr);
                     }
                     let _ = l.SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, dr);
                     pad_sides(&l, &wide, r.clone(), 1.5, 0.0);
                     self.paint(&l, r.clone(), self.pal.accent.mix(self.pal.fg, 0.2));
+                    // A mark whose note has not streamed in yet is only text.
+                    if let Some((_, note)) = look.notes.iter().find(|(n, _)| n == label) {
+                        links.push((r, Hit::Note(note.clone())));
+                    }
                 }
                 Style::Image(src) => {
                     let _ = l.SetFontSize(size * 0.9, dr);
@@ -482,7 +486,7 @@ impl Ctx<'_> {
                         Act::Path(src.clone(), None)
                     };
                     images.push(r.clone());
-                    links.push((r, act));
+                    links.push((r, Hit::Tr(act)));
                 }
             }
         }
@@ -527,9 +531,9 @@ impl Ctx<'_> {
                 }
             }
         }
-        for (r, act) in links {
+        for (r, hit) in links {
             for b in render::range_rects(&l, r.start, r.end - r.start) {
-                s.hit(Rect::new(x + b.x, y + b.y, b.w, b.h), Hit::Tr(act.clone()));
+                s.hit(Rect::new(x + b.x, y + b.y, b.w, b.h), hit.clone());
             }
         }
         // Selection and find read the text as written, not as shown.
@@ -607,6 +611,7 @@ impl Ctx<'_> {
                     let left = x - p.term_w;
                     let look = Look {
                         weight: Some(DWRITE_FONT_WEIGHT_SEMI_BOLD),
+                        notes: &p.notes,
                         ..Look::default()
                     };
                     let ink = self.pal.fg.with_alpha(if done { 0.55 } else { 1.0 });
@@ -624,9 +629,13 @@ impl Ctx<'_> {
                 let look = Look {
                     caps: *font == Font::H4,
                     track: if *font == Font::H4 { 0.9 } else { 0.0 },
+                    notes: &p.notes,
                     ..Look::default()
                 };
                 let (h, first) = self.inline_as(&mut s, inline, f, (tx, ty, tw), ink, Align::None, look);
+                if let Some((key, shut)) = &p.fold {
+                    self.fold_mark(&mut s, key, *shut, (tx, ty, first));
+                }
                 mark_font = f;
                 mark_line = (0.0, if term.is_some() && ty > 0.0 { ty } else { first });
                 // A term that wraps beside a short text must not run into
@@ -746,6 +755,25 @@ impl Ctx<'_> {
         s
     }
 
+    /// A heading that folds its section: a click on its words toggles
+    /// it. The chevron in the margin shows on hover while it is open, so
+    /// a reply with many headings is not lined with them, and always once
+    /// it is folded, so a hidden section is never lost.
+    fn fold_mark(&self, s: &mut Scene, key: &str, shut: bool, (x, y, line): (f32, f32, f32)) {
+        let text_w = (s.units.last()).map_or(0.0, |u| render::text_size(&u.layout).0);
+        let hit = Hit::Tr(Act::All(key.to_string()));
+        s.hit(Rect::new(x, y, text_w.max(8.0), line), hit.clone());
+        let mark = Rect::new(x - FOLD_MARGIN, y, FOLD_MARGIN - 4.0, line);
+        if shut {
+            s.line("\u{E76C}", F::Icon, mark, self.pal.faint);
+            s.hit(mark, hit);
+        } else {
+            let ink = self.pal.faint.with_alpha(0.6);
+            (s.hover).push(Item::Line("\u{E70D}".into(), F::Icon, mark, ink));
+            s.hover_hits.push((mark, hit));
+        }
+    }
+
     /// A list item's bullet, number or box, in the column left of its
     /// text (and of its term, when it has one), on the line `band` gives
     /// as top and height.
@@ -828,13 +856,16 @@ impl Ctx<'_> {
 
 /// How a run of text is shown beyond its own styles.
 #[derive(Default, Clone, Copy)]
-struct Look {
+struct Look<'a> {
     /// In capitals, though selected and copied as written.
     caps: bool,
     /// Extra room after each character.
     track: f32,
     /// A weight for the whole run.
     weight: Option<DWRITE_FONT_WEIGHT>,
+    /// The footnotes the run's marks may name, by label, for a mark to
+    /// show its note on hover.
+    notes: &'a [(String, String)],
 }
 
 /// Room each side of inline code, inside its plate.
@@ -863,6 +894,9 @@ const NOTE_COL: f32 = 24.0;
 const NOTE_RULE: f32 = 140.0;
 /// An image's alt text under it, when it has one of its own.
 const CAPTION: f32 = 20.0;
+
+/// How far left of a heading its fold chevron sits, in the column's margin.
+const FOLD_MARGIN: f32 = 20.0;
 
 /// `s` in capitals, a character kept as it is where its capital would
 /// change how many UTF-16 units it takes, so the spans still fit.
