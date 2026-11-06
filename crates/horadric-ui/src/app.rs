@@ -453,6 +453,9 @@ pub(crate) enum Input {
     /// Ctrl+Shift+B in a pane: the browser pane of the project on the
     /// stage, opened or given the keyboard.
     Browse,
+    /// A cluster's browser button: the browser pane of the project with
+    /// this key, brought to the stage.
+    Web(String),
     /// The Forge: Ctrl+Shift+O, the Forge key in a browser pane's tab
     /// strip, or its row on the new tab page. The Forge's home for the
     /// project with this key (the one on the stage when None), or `file`
@@ -9895,6 +9898,7 @@ impl App {
                         self.open_web(&key, None);
                     }
                 }
+                Input::Web(key) => self.open_web(&key, None),
                 Input::Forge { key, file, replace } => {
                     let key = key.or_else(|| self.stage.as_ref().map(|s| s.project()));
                     if let Some(key) = key {

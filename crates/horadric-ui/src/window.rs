@@ -1105,7 +1105,10 @@ impl Cluster {
         let now = Instant::now();
         let looks = self.tiles.borrow_mut().step(now, &inputs);
         // Only the bays rise and sink; the other buttons are lit or not.
-        let bay = matches!(hot, Hit::Add | Hit::Shell | Hit::Folio) && pressed.is_none();
+        let bay = matches!(
+            hot,
+            Hit::Add | Hit::Shell | Hit::Folio | Hit::Web | Hit::Forge
+        ) && pressed.is_none();
         self.glow.borrow_mut().step(now, bay.then_some(hot));
         let glow = self.glow.borrow();
         let glowing = glow.moving();
@@ -1569,7 +1572,13 @@ impl Cluster {
                             app::push(Input::TileMenu(s.id.clone()));
                         }
                     }
-                    Hit::Header | Hit::Add | Hit::Shell | Hit::Folio | Hit::Page(_) => {
+                    Hit::Header
+                    | Hit::Add
+                    | Hit::Shell
+                    | Hit::Folio
+                    | Hit::Web
+                    | Hit::Forge
+                    | Hit::Page(_) => {
                         app::push(Input::ProjectMenu(self.key.clone()))
                     }
                     Hit::Task(i) | Hit::TaskApprove(i) => {
@@ -1838,6 +1847,12 @@ impl Cluster {
             Hit::Add => app::push(Input::Add(self.key.clone())),
             Hit::Shell => app::push(Input::Shell(Some(self.key.clone()))),
             Hit::Folio => app::push(Input::Folio(self.key.clone())),
+            Hit::Web => app::push(Input::Web(self.key.clone())),
+            Hit::Forge => app::push(Input::Forge {
+                key: Some(self.key.clone()),
+                file: None,
+                replace: None,
+            }),
             Hit::Header => app::push(Input::Toggle(self.hwnd.0 as isize)),
             Hit::FilesHeader => {
                 {

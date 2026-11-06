@@ -138,6 +138,10 @@ const FOLIO_ICON: char = '\u{E8F2}';
 /// The button that starts a Claude session as a terminal, code brackets,
 /// so it does not read as the shell's prompt beside it.
 const CLI_ICON: char = '\u{E943}';
+/// The globe on the bottom row's browser button.
+const WEB_ICON: char = '\u{E774}';
+/// A page on the bottom row's Forge button, for the files made there.
+const FORGE_ICON: char = '\u{E8A5}';
 
 /// Process wide Direct2D and DirectWrite objects.
 pub struct Gpu {
@@ -1384,6 +1388,12 @@ impl Painter<'_> {
         if let Some(folio) = &scene.layout.folio {
             let b = scene.bay(Hit::Folio);
             self.add_labelled(gpu, m, folio, b, FOLIO_ICON, "New chat");
+        }
+        if let Some(web) = &scene.layout.web {
+            self.add(gpu, m, web, scene.bay(Hit::Web), WEB_ICON);
+        }
+        if let Some(forge) = &scene.layout.forge {
+            self.add(gpu, m, forge, scene.bay(Hit::Forge), FORGE_ICON);
         }
         if let (Some(l), Some(t)) = (&scene.layout.tasks, &scene.tasks) {
             self.tasks(gpu, m, scene, l, t);

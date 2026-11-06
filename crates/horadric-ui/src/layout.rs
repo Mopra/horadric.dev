@@ -164,6 +164,12 @@ pub struct ClusterLayout {
     /// The wide button below the last tile that opens a new Folio, a chat,
     /// the way most sessions start. None when collapsed.
     pub folio: Option<Rect>,
+    /// The small button right of the Folio's that opens the project's
+    /// browser pane. None when collapsed and on macOS.
+    pub web: Option<Rect>,
+    /// The small button at the row's right end that opens the project's
+    /// Forge home. None where `web` is.
+    pub forge: Option<Rect>,
     /// The tasks tile, between the plus and the files. None when the
     /// cluster is collapsed or its project has no folder.
     pub tasks: Option<TasksLayout>,
@@ -275,6 +281,8 @@ pub fn cluster(
     let mut add = None;
     let mut shell = None;
     let mut folio = None;
+    let mut web = None;
+    let mut forge = None;
     let mut tasks_layout = None;
     let mut tome_layout = None;
     let mut files_layout = None;
@@ -294,9 +302,13 @@ pub fn cluster(
             folio = Some(Rect::new(m.pad + wide + m.gap, y, m.shell_w, m.add_h));
             shell = Some(Rect::new(m.pad + full - m.shell_w, y, m.shell_w, m.add_h));
         } else {
-            // The chat is the way in, so it is the one button. The CLI
-            // and a terminal are in the project menu.
-            folio = Some(Rect::new(m.pad, y, full, m.add_h));
+            // The chat is the way in, so it is the wide button. The CLI
+            // and a terminal are in the project menu; the browser and the
+            // Forge are a click away beside it, as they are per project too.
+            let wide = full - 2.0 * (m.shell_w + m.gap);
+            folio = Some(Rect::new(m.pad, y, wide, m.add_h));
+            web = Some(Rect::new(m.pad + wide + m.gap, y, m.shell_w, m.add_h));
+            forge = Some(Rect::new(m.pad + full - m.shell_w, y, m.shell_w, m.add_h));
         }
         y += m.add_h + m.gap;
         if let Some((approve, warriv)) = tasks {
@@ -351,6 +363,8 @@ pub fn cluster(
         add,
         shell,
         folio,
+        web,
+        forge,
         tasks: tasks_layout,
         tome: tome_layout,
         files: files_layout,
@@ -533,6 +547,10 @@ pub enum Hit {
     Shell,
     /// The Folio button between them.
     Folio,
+    /// The browser button right of the Folio's.
+    Web,
+    /// The Forge button at the row's right end.
+    Forge,
     /// A tile's second line while it counts the session's hirelings,
     /// which opens the war table. [`hit`] says `Tile`; the window, which
     /// knows what the line says, tells this one from it.
@@ -573,6 +591,8 @@ impl Hit {
                 | Hit::Add
                 | Hit::Shell
                 | Hit::Folio
+                | Hit::Web
+                | Hit::Forge
                 | Hit::Band(_)
                 | Hit::TasksMode
                 | Hit::TasksAdd
@@ -668,6 +688,12 @@ pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
     }
     if layout.folio.is_some_and(|a| a.contains(x, y)) {
         return Hit::Folio;
+    }
+    if layout.web.is_some_and(|a| a.contains(x, y)) {
+        return Hit::Web;
+    }
+    if layout.forge.is_some_and(|a| a.contains(x, y)) {
+        return Hit::Forge;
     }
     if let Some(t) = &layout.tasks {
         if t.mode.contains(x, y) {
@@ -2935,11 +2961,18 @@ mod tests {
             assert_eq!(hit(&l, add.x + 2.0, add.y + 1.0), Hit::Add);
             assert_eq!(hit(&l, shell.x + 2.0, shell.y + 1.0), Hit::Shell);
         } else {
-            // The one button, as wide as a tile.
+            // The wide chat, then the browser and the Forge, together as
+            // wide as a tile.
             assert!(l.add.is_none() && l.shell.is_none());
+            let (web, forge) = (l.web.unwrap(), l.forge.unwrap());
             assert_eq!(folio.x, l.tiles[2].x);
-            assert_eq!(folio.right(), l.tiles[2].right());
+            assert_eq!(web.x - folio.right(), m.gap);
+            assert_eq!(forge.x - web.right(), m.gap);
+            assert_eq!(forge.right(), l.tiles[2].right());
+            assert_eq!((web.y, forge.y), (folio.y, folio.y));
             assert_eq!(hit(&l, folio.right() - 2.0, folio.y + 1.0), Hit::Folio);
+            assert_eq!(hit(&l, web.x + 2.0, web.y + 1.0), Hit::Web);
+            assert_eq!(hit(&l, forge.right() - 2.0, forge.y + 1.0), Hit::Forge);
         }
         assert_eq!(folio.y - l.tiles[2].bottom(), m.gap);
         assert_eq!(l.size.1, folio.bottom() + m.pad);
