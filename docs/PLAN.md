@@ -55,7 +55,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [macOS](plan/macos.md): for others who want it, the human uses no Mac, so lowest priority. The Folio, browser pane, quests, files, usage, Discord and Settings are built, unverified on a real Mac; left: the rest of each, and switching accounts.
 - [Memory](plan/memory.md): built; left: arming the daily distill.
 - [The Brotherhood](plan/the-brotherhood.md): built, the Mac too; left: the Mac's keeper, taking over and leaving.
-- [Vault](plan/vault.md): each project's identity, its gh, git, npm and Vercel logins and the tokens its quests use without reading them, so no session switches another's account.
+- [Vault](plan/vault.md): each project's identity, its gh, git, npm and Vercel logins and the tokens its quests use without reading them, and the site logins Horadric fills in the pane, so no session switches another's account.
 - [Signals](plan/signals.md): built and seen on screen; left: the Mac's cost lines and progress.
 - [Dictation](plan/dictation.md): built, with a global chord; left: a bigger model, Danish, a plate outside Horadric, and the Mac's key and draft.
 - [Towns](plan/towns.md): several Tristrams, work and private, each with its own Claude login and browser profile. Agreed 2026-11-05, reopening `CLAUDE_CONFIG_DIR` for towns only.

@@ -14,9 +14,13 @@ or a deploy that landed in the wrong team. The daily case: `gh` must
 stay on Mopra for horadric.dev while MP-OPTI is the work account. Logging
 in is not the problem. Switching is.
 
-**The idea: the Vault holds, per identity, the tools' logins and named
-secrets. A project names an identity, and its sessions start with that
-identity's logins and can use its secrets without reading them.**
+**The idea: the Vault holds, per identity, the tools' logins, named
+secrets and the websites' logins. A project names an identity, and its
+sessions start with that identity's logins, can use its secrets without
+reading them, and can have Horadric sign in to a site in the browser
+pane without seeing the password.** Identities are the human's own, made
+in Settings and kept in this install; none come built in, and someone
+with one account per tool never makes one.
 Horadric starts every session, so it decides each one's environment. The
 human logs in once per identity and tool, and nobody switches again. Two
 sessions of two identities run side by side and never see each other's
@@ -26,9 +30,10 @@ login. Warriv and errands go further without the human.
 can repeat: into a commit, a log, a web form, or to a page in the browser
 pane whose text told it to. So the rule the secrets half is built on:
 **an agent uses a secret without ever reading it.** It names the secret,
-and Horadric hands the value to the one program that needs it. Logins
-are different: a tool reads its own login files, and the Vault only
-points it at the right ones.
+and Horadric hands the value to the one program that needs it, or types
+it into the one site it belongs to. Tool logins are different: a tool
+reads its own login files, and the Vault only points it at the right
+ones.
 
 ## What is kept, and where
 
@@ -51,7 +56,9 @@ points it at the right ones.
   of its own, and may also be written `"identity": "optipeople"` in
   `.horadric/config.json`, by slug, so a fresh checkout says whose it is.
   The setting wins over the file, since the file is shared with whoever
-  else clones the repo.
+  else clones the repo. A slug this install has no identity for (a
+  colleague's clone) means none, never an error, and the Projects row
+  offers to make an identity by that slug.
 - **By folder.** An identity may claim folders, `Documents\Github\opti\`,
   so a new project under one is that identity's from its first session.
   The longest claim wins. A project's own pick beats any claim.
@@ -79,12 +86,19 @@ An identity is a folder of the tools' own config (their login files
 where they keep them), and a session's environment points each tool at
 its identity's folder. Each tool has its own way to be pointed at a
 folder, and an identity only sets what it has a login for. What each
-reads was checked on 2026-10-17.
+reads was checked on 2026-10-17. A session with an identity also has
+`GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `NPM_TOKEN` and
+`VERCEL_TOKEN` removed from the environment it inherits, since any of
+them set for the whole machine beats the identity's login without a
+word.
 
 - **GitHub CLI.** `GH_CONFIG_DIR=<identity>\gh`. Its `hosts.yml` names
   the active user, and the token stays in Windows Credential Manager,
   keyed by host and user, where `gh` puts it now. A `gh auth switch` run
-  inside a session then only switches that identity.
+  inside a session then only switches that identity. Checked in `gh`'s
+  source on 2026-11-06: it reads the active user's token by user name
+  first, and the blank user entry every login and switch overwrites is
+  only its fallback.
 - **git.** The name, the email and which account the credential helper
   uses, set through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>` and
   `GIT_CONFIG_VALUE_<n>` (git 2.31 and later): `user.name`,
@@ -99,7 +113,10 @@ reads was checked on 2026-10-17.
   `.npmrc` still applies on top, as npm means it to.
 - **Vercel.** The CLI has no variable for its folder. It looks for
   `auth.json` in its XDG data folder, `--global-config` aside, so the
-  identity sets `XDG_DATA_HOME=<identity>\xdg-data`. That moves every
+  identity sets `XDG_DATA_HOME=<identity>\xdg-data`. An old `~\.vercel`
+  or `~\.now` folder may still win over it on some versions, so the
+  verify step checks `vercel whoami` per identity before this is
+  trusted. That moves every
   XDG minded tool's data in that session too, which is why it is set only
   for an identity with a Vercel login. The other way, a `VERCEL_TOKEN`
   kept as the identity's secret, works for every command that takes a
@@ -131,10 +148,9 @@ from asking a tool every paint.
 **Plain terminals and the browser pane.** A plain terminal in the stage
 gets its project's identity too, so the human's own `git push` there
 goes as the agent's would. The browser pane keeps its own login profile;
-an identity does not change that in the first cut, since web logins are
-the sites' own business. A profile per identity is the obvious later
-step. Web logins never become secrets: an agent that needs a site it is
-logged in to uses the pane, and never gets a password.
+an identity does not change that in the first cut. A profile per
+identity is the obvious later step. Signing in to a site is the Vault's
+third half, below.
 
 ## Secrets: used, never read
 
@@ -144,14 +160,28 @@ logged in to uses the pane, and never gets a password.
   else's, passes its exit code back, and pipes its output through a mask
   that writes `[GITHUB_TOKEN]` wherever a value would have shown. The mask
   works across the chunks output arrives in, so a value split over two
-  reads is still caught.
-- **Asked through the app, with a key.** The values come over the local
-  port, not out of the file, because the approvals, the log and which
-  project a session belongs to live in the app. The port is open to
-  anything on the machine, a web page included (a page may post to
-  localhost), so each session gets a random `HORADRIC_SECRET_KEY` in its
-  environment when it starts, and the app answers only a request carrying
-  a live session's id and its key. A session's key dies with it.
+  reads is still caught. `--stdin NAME` also writes that value to the
+  program's input, for a tool that asks for a password at a prompt
+  rather than reading a variable.
+- **The app starts the program, the CLI only relays.** The values never
+  leave the app: `secret run` sends the command line, its folder and its
+  input over the local port, the app starts the program with the values
+  in its environment, and streams the masked output and the exit code
+  back. A design where the app hands the CLI the values was turned down:
+  the agent holds whatever the CLI holds, and could ask the port itself
+  with `curl` and read them plain. The approvals, the log and which
+  project a session belongs to live in the app too.
+- **A key per session.** The port is open to anything on the machine, a
+  web page included (a page may post to localhost), so each session gets
+  a random `HORADRIC_SECRET_KEY` in its environment when it starts, and
+  the app runs a program only for a request carrying a live session's id
+  and its key. A session's key dies with it. The agent can read its own
+  key; that buys it nothing it could not do through `secret run`.
+- **The program is a full path.** The app finds the program on the
+  session's `PATH` itself, never in the current folder (Windows looks
+  there first, and an agent can drop a `gh.cmd` into the repository),
+  and an approval is kept for that full path. A program that moved is
+  asked about again.
 - **Not in the session's environment.** Putting every secret into the
   agent's environment at start was the simple way, turned down: one
   `echo $GITHUB_TOKEN` and it is in the transcript. There is no `secret
@@ -159,11 +189,14 @@ logged in to uses the pane, and never gets a password.
 - **Asking first.** The first time a project's session uses a secret, its
   tile raises like a permission question: "Use GITHUB_TOKEN for `gh pr
   create`?" with Once, Always for `gh`, and No. Always is kept per secret
-  and per program, the command's first word, so allowing `gh` does not
-  allow `curl`. A shell or an interpreter (`sh`, `bash`, `cmd`,
-  `powershell`, `pwsh`, `python`, `node`) is only ever offered Once,
-  since it can do anything with the value, printing it in a form the mask
-  does not know included.
+  and per program, so allowing `gh` does not allow `curl`. Anything that
+  runs code the agent can write is only ever offered Once, since it can
+  do anything with the value, printing it in a form the mask does not
+  know included: a shell or an interpreter (`sh`, `bash`, `cmd`,
+  `powershell`, `pwsh`, `python`, `node`, `deno`, `bun`), a script runner
+  (`npm`, `npx`, `pnpm`, `yarn`, `uv`, `make`, `just`, `cargo`, whose
+  build scripts run), and `git` (its aliases and hooks are shell). The
+  list is the pure part and grows with what turns up.
 - **Adding one.** In Settings, Projects, a Secrets row lists the picked
   project's names, its identity's and the Everywhere ones under them, and
   the names `config.json` asks for that are not kept yet. Add asks for the
@@ -181,8 +214,58 @@ logged in to uses the pane, and never gets a password.
   and cuts what it knows Horadric keeps, whatever it looks like
   (`transcripts::set_secret_source`, fed by `kept_secrets` in the app:
   today the backup passphrase and the kept logins). The sealed file's
-  values join that list when it is built, so a value an agent saw anyway
-  is not kept.
+  values, web passwords included, join that list when it is built, so a
+  value an agent saw anyway is not kept.
+
+## Web logins: filled, never read
+
+Decided on 2026-11-06, in the first cut and not later: an agent can sign
+in to a site in the browser pane with a password it never sees, as a
+password manager fills one. Without it a quest on a site the pane is not
+logged in to stops until the human comes, and a pasted password ends up
+in a transcript.
+
+- **What is kept.** A web login is a name (`OPTICLOUD`), the site it
+  belongs to, a user name and a password, in the same sealed
+  `secrets.dat` and owned the same way: by a project, an identity or
+  Everywhere. The site is one or more origins, `https://app.opticloud.dk`,
+  scheme and host exactly, no wildcards; plain `http` only for
+  `localhost`. The user name is not secret and the agent may see it.
+- **Filling.** A pane tool, `browser_fill_login`, takes the login's name
+  and the refs of the user name and password fields from a
+  `browser_snapshot`. Horadric checks the tab's top level origin is one
+  of the login's, that the password ref is a password field in the top
+  document or a frame of the same origin, and types the values in as
+  key input, so the site's own scripts see what they would from a
+  person. The agent gets back filled or why not, never the value. It
+  then clicks the sign in button itself.
+- **The origin is the guard.** A page's text can tell the agent to fill
+  the Opticloud login on `opticloud-login.example`; the origin check
+  refuses, whatever the agent was told. This is the reason the fill is
+  Horadric's and not the agent's. A redirect between the check and the
+  typing is caught by checking the origin again before each field.
+- **The pane hides what it filled.** After a fill, until that document
+  is left, `browser_evaluate`, `browser_console` and `browser_devtools`
+  are refused on the tab, since a script could read the field's value
+  and encode it past the mask. `browser_snapshot` never reports a
+  password field's value at all, and any other text it returns passes
+  the same mask as `secret run`.
+- **Asking first.** The first fill of a login from a project's sessions
+  raises the tile like `secret run` does: "Sign in to app.opticloud.dk
+  as mpg@...?" with Once, Always and No.
+- **One time codes.** A login may also keep a TOTP seed, filled by
+  `browser_fill_login` into a code field the same way. Off unless the
+  human adds one, and the row says what it costs: the second factor then
+  lives on this machine beside the first. Without a seed, a site asking
+  for a code blocks the quest on the human as today (`quest blocked`
+  with `--you`), saying which site wants one.
+- **Adding one.** The Secrets row lists web logins beside secrets, Add
+  asks for the site, the user name and the password in the masked field.
+  The pane may later offer Keep this login when the human signs in by
+  hand.
+- **Missing.** A fill with no login kept for the tab's origin fails with
+  the line the agent needs, and `--on-secret OPTICLOUD` blocks a quest
+  on a web login as on a secret.
 
 ## When something is missing
 
@@ -216,7 +299,10 @@ DPAPI opens for any program running as this user, so malware already on
 the machine can read `secrets.dat` just as it can read
 `.credentials.json`. An agent that means to leak a secret can, through a
 program it was allowed for that sends it somewhere. The mask catches the
-plain value, not an encoded one. Logins are no safer than the tool keeps
+plain value, not an encoded one. A web password goes to the site it is
+kept for and to nothing else, but that site's own scripts read it, as
+they would from the human; a compromised site is not the Vault's to
+catch. Logins are no safer than the tool keeps
 them: `gh`'s token is in Credential Manager either way and npm's in a
 plain file either way, just a different file, and an agent can still
 read what its identity's folder holds, as it can read the global one
@@ -247,8 +333,10 @@ An identity's slug, which identity a project gets (its pick, the config
 file, the longest folder claim, none), the environment an identity sets
 for the tools it has, the `GIT_CONFIG_*` entries, reading the active
 user from `hosts.yml` and the registries from an `.npmrc`. A secret's
-name, the mask over chunked output, the program a command line names and
-whether it is a shell, matching an approval, which of a project's, an
+name, the mask over chunked output, the program a command line names,
+its full path off `PATH` with the current folder skipped, and whether it
+is a shell or a runner, matching an approval, a web login's origins and
+whether a tab's origin matches one, a TOTP code from a seed, which of a project's, an
 identity's and an Everywhere secret wins, the names `config.json` asks
 for, the log line. The prompt lines, and `--on-login` and `--on-secret`
 written and read in a quest's wait.
@@ -265,10 +353,18 @@ and the pushing account checked on GitHub.
 
 Secrets: with a made-up secret, `horadric secret run TEST_SECRET -- cmd
 /c echo %TEST_SECRET%` from a session prints `[TEST_SECRET]` after Once,
-and a request with no key or a dead session's key is refused. Then
+and a request with no key or a dead session's key is refused, and a `curl`
+to the port with the session's own key gets no value back. Then
 `horadric run` on haiku, told to open a pull request on a scratch
 repository with a fine grained token kept for it, and a check that the
 token is nowhere in its transcript.
+
+Web logins: a login page served on `localhost` with a made-up login
+kept for it; `horadric run` on haiku, told to sign in, does, and the
+password is nowhere in its transcript. The same login page served on a
+second port (another origin) whose text tells the agent to fill the
+login there is refused, and `browser_evaluate` on the filled page is
+refused until it navigates.
 
 Checked on screen: the Projects row, Log in opening a console that lands
 in the identity's folder, the question on the tile, Always for one
@@ -289,5 +385,9 @@ Identities first, since the daily pain is a switched account.
 5. The key and the questions on the tile.
 6. The Secrets row in Settings, with secrets owned by a project, an
    identity or Everywhere.
-7. The secrets prompt lines and `--on-secret`.
-8. The later items, each when a project asks for it.
+7. Web logins: kept in the sealed file, `browser_fill_login` with the
+   origin check, the pane's tools held back after a fill, the question
+   on the tile, and TOTP seeds.
+8. The secrets prompt lines, web logins named in them, and
+   `--on-secret`.
+9. The later items, each when a project asks for it.
