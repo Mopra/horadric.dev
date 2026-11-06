@@ -39,6 +39,9 @@ pub enum Block {
         ordered: bool,
         start: u64,
         items: Vec<Vec<Block>>,
+        /// One per item: a task list's box, ticked or not, None for an
+        /// item without one.
+        tasks: Vec<Option<bool>>,
     },
     /// `closed` is false while a streaming reply has not sent the closing
     /// fence yet.
@@ -48,6 +51,14 @@ pub enum Block {
         closed: bool,
     },
     Quote(Vec<Block>),
+    /// A quote that says what it is: GitHub's `> [!NOTE]`, or a quote
+    /// whose first words are `**Note:**`. `title` is any text after
+    /// `[!NOTE]` on its line, empty for the kind's own name.
+    Callout {
+        kind: Callout,
+        title: Inline,
+        body: Vec<Block>,
+    },
     /// Every row has exactly as many cells as `header` and `align`.
     Table {
         header: Vec<Inline>,
@@ -55,6 +66,38 @@ pub enum Block {
         rows: Vec<Vec<Inline>>,
     },
     Rule,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Callout {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
+}
+
+impl Callout {
+    fn named(name: &str) -> Option<Callout> {
+        Some(match name.trim().to_ascii_lowercase().as_str() {
+            "note" => Callout::Note,
+            "tip" => Callout::Tip,
+            "important" => Callout::Important,
+            "warning" => Callout::Warning,
+            "caution" => Callout::Caution,
+            _ => return None,
+        })
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Callout::Note => "Note",
+            Callout::Tip => "Tip",
+            Callout::Important => "Important",
+            Callout::Warning => "Warning",
+            Callout::Caution => "Caution",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +137,9 @@ pub enum Style {
         path: String,
         line: Option<u32>,
     },
+    /// One key of a shortcut, from `<kbd>Esc</kbd>` or from inline code
+    /// that is nothing but a key combination, such as `Ctrl+Shift+P`.
+    Key,
 }
 
 impl Inline {
@@ -395,8 +441,41 @@ fn quote(lines: &[&str], start: usize, depth: usize, out: &mut Vec<Block>) -> us
         }
         i += 1;
     }
-    out.push(Block::Quote(blocks(&inner, depth + 1)));
+    match callout(&mut inner) {
+        Some((kind, title)) => out.push(Block::Callout {
+            kind,
+            title,
+            body: blocks(&inner, depth + 1),
+        }),
+        None => out.push(Block::Quote(blocks(&inner, depth + 1))),
+    }
     i
+}
+
+/// Whether a quote's lines open as a callout: `[!NOTE]` on the first line,
+/// or `**Note:**` (or `**Note**:`) starting it. The marker is taken off the
+/// lines, which then hold only the body.
+fn callout(inner: &mut Vec<&str>) -> Option<(Callout, Inline)> {
+    let first = (*inner.first()?).trim();
+    if let Some(rest) = first.strip_prefix("[!") {
+        let (name, after) = rest.split_once(']')?;
+        let kind = Callout::named(name)?;
+        let title = parse_inline(after);
+        inner.remove(0);
+        return Some((kind, title));
+    }
+    let rest = first.strip_prefix("**")?;
+    let (name, after) = rest.split_once("**")?;
+    let (name, after) = match name.strip_suffix(':') {
+        Some(n) => (n, after),
+        None => (name, after.strip_prefix(':')?),
+    };
+    if name.trim() != name || !(after.is_empty() || after.starts_with([' ', '\t'])) {
+        return None;
+    }
+    let kind = Callout::named(name)?;
+    inner[0] = after.trim_start();
+    Some((kind, Inline::default()))
 }
 
 struct Marker<'a> {
@@ -455,9 +534,15 @@ fn list<'a>(
     let (ordered, ch, number) = (first.ordered, first.ch, first.start);
     let mut marker = first;
     let mut items = Vec::new();
+    let mut tasks = Vec::new();
     let mut i = start;
     loop {
-        let mut body = vec![marker.body];
+        let (task, first) = match task_box(marker.body) {
+            Some((done, rest)) => (Some(done), rest),
+            None => (None, marker.body),
+        };
+        tasks.push(task);
+        let mut body = vec![first];
         i += 1;
         while i < lines.len() {
             let line = lines[i];
@@ -485,8 +570,26 @@ fn list<'a>(
         ordered,
         start: number,
         items,
+        tasks,
     });
     i
+}
+
+/// A task list item's `[ ]` or `[x]` and what follows it. The box needs
+/// words after it, so a bare "[ ]" in a reply still streaming stays text
+/// for the moment the words take to arrive.
+fn task_box(body: &str) -> Option<(bool, &str)> {
+    let b = body.as_bytes();
+    if b.len() < 4 || b[0] != b'[' || b[2] != b']' || !matches!(b[3], b' ' | b'\t') {
+        return None;
+    }
+    let done = match b[1] {
+        b' ' => false,
+        b'x' | b'X' => true,
+        _ => return None,
+    };
+    let rest = body[3..].trim_start_matches([' ', '\t']);
+    (!rest.trim().is_empty()).then_some((done, rest))
 }
 
 fn table_starts(lines: &[&str], i: usize) -> bool {
@@ -594,6 +697,7 @@ enum Tok {
     Link(Box<Toks>, String),
     Url(String),
     Path(String, String, Option<u32>),
+    Key(String),
 }
 
 struct Delim {
@@ -710,6 +814,12 @@ fn tokenize(s: &str, depth: usize) -> Toks {
                 }
             }
             b'<' => {
+                if let Some((key, end)) = kbd_at(s, i) {
+                    flush(&mut buf, &mut toks);
+                    toks.push(Tok::Key(key.to_string()));
+                    i = end;
+                    continue;
+                }
                 if let Some((url, end)) = angle_link(s, i) {
                     flush(&mut buf, &mut toks);
                     toks.push(Tok::Url(url.to_string()));
@@ -908,6 +1018,78 @@ fn skip_space(b: &[u8], mut k: usize) -> usize {
     k
 }
 
+/// `<kbd>Esc</kbd>` at `i`: the key's name and where it ends. Only a
+/// short name on one line, so a stray `<kbd>` stays as typed.
+fn kbd_at(s: &str, i: usize) -> Option<(&str, usize)> {
+    if !s.get(i..i + 5)?.eq_ignore_ascii_case("<kbd>") {
+        return None;
+    }
+    let rest = &s[i + 5..];
+    let end = rest.find('<')?;
+    let name = rest[..end].trim();
+    let ok = rest.get(end..end + 6)?.eq_ignore_ascii_case("</kbd>")
+        && !name.is_empty()
+        && name.chars().count() <= 24
+        && !name.contains('\n');
+    ok.then_some((name, i + 5 + end + 6))
+}
+
+/// Inline code that is a key combination and nothing else, such as
+/// `Ctrl+Shift+P` or `Alt+F4`: the byte range of each key. It takes a
+/// modifier and then a single key or a named one, so `a+b`, `C++` and
+/// `i+1` stay code.
+fn key_combo(s: &str) -> Option<Vec<Range<usize>>> {
+    if s.len() > 40 || s.contains(char::is_whitespace) {
+        return None;
+    }
+    // "Ctrl++" presses the plus key.
+    let (head, last) = match s.strip_suffix("++") {
+        Some(h) => (h, s.len() - 1..s.len()),
+        None => {
+            let (h, k) = s.rsplit_once('+')?;
+            (h, h.len() + 1..h.len() + 1 + k.len())
+        }
+    };
+    if !is_key(&s[last.clone()]) {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut at = 0;
+    for part in head.split('+') {
+        if !is_modifier(part) {
+            return None;
+        }
+        out.push(at..at + part.len());
+        at += part.len() + 1;
+    }
+    out.push(last);
+    Some(out)
+}
+
+fn is_modifier(k: &str) -> bool {
+    const MODS: &[&str] = &[
+        "ctrl", "control", "shift", "alt", "altgr", "option", "opt", "cmd", "command", "win",
+        "super", "meta", "fn", "\u{2318}", "\u{21e7}", "\u{2325}", "\u{2303}",
+    ];
+    MODS.iter().any(|m| m.eq_ignore_ascii_case(k))
+}
+
+fn is_key(k: &str) -> bool {
+    const NAMED: &[&str] = &[
+        "enter", "return", "esc", "escape", "tab", "space", "backspace", "delete", "del",
+        "insert", "ins", "home", "end", "pgup", "pgdn", "pageup", "pagedown", "up", "down",
+        "left", "right", "plus", "minus",
+    ];
+    let mut chars = k.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => {
+            c.is_ascii_graphic() || "\u{2190}\u{2191}\u{2192}\u{2193}".contains(c)
+        }
+        (Some('F' | 'f'), Some(_)) => k[1..].parse::<u8>().is_ok_and(|n| (1..=24).contains(&n)),
+        _ => NAMED.iter().any(|n| n.eq_ignore_ascii_case(k)),
+    }
+}
+
 /// `<https://...>` at `i`: the url and where it ends.
 fn angle_link(s: &str, i: usize) -> Option<(&str, usize)> {
     let rest = &s[i + 1..];
@@ -1100,6 +1282,15 @@ fn emit(mut t: Toks, out: &mut Inline) {
             }
             Tok::Code(s) => {
                 out.text.push_str(&s);
+                if let Some(keys) = key_combo(&s) {
+                    for k in keys {
+                        out.spans.push(Span {
+                            range: start + k.start..start + k.end,
+                            style: Style::Key,
+                        });
+                    }
+                    continue;
+                }
                 out.span(start, Style::Code);
                 if !s.contains(char::is_whitespace) {
                     if let Some((path, line)) = split_path(&s, false) {
@@ -1123,6 +1314,10 @@ fn emit(mut t: Toks, out: &mut Inline) {
             Tok::Path(text, path, line) => {
                 out.text.push_str(&text);
                 out.span(start, Style::Path { path, line });
+            }
+            Tok::Key(name) => {
+                out.text.push_str(&name);
+                out.span(start, Style::Key);
             }
         }
     }
@@ -1193,6 +1388,10 @@ mod tests {
                 Block::Paragraph(i) | Block::Heading { text: i, .. } => check_inline(i),
                 Block::List { items, .. } => items.iter().for_each(|it| check(it)),
                 Block::Quote(inner) => check(inner),
+                Block::Callout { title, body, .. } => {
+                    check_inline(title);
+                    check(body);
+                }
                 Block::Table {
                     header,
                     align,
@@ -1365,6 +1564,7 @@ mod tests {
                 ordered: true,
                 start: 3,
                 items,
+                ..
             } => assert_eq!(items.len(), 2),
             other => panic!("{other:?}"),
         }
@@ -1497,9 +1697,41 @@ mod tests {
         }
     }
 
+    fn tasks(b: &Block) -> &Vec<Option<bool>> {
+        match b {
+            Block::List { tasks, .. } => tasks,
+            other => panic!("not a list: {other:?}"),
+        }
+    }
+
     #[test]
-    fn task_box_stays_text() {
-        assert_eq!(item_text(&items(&parse("- [ ] todo")[0])[0]), "[ ] todo");
+    fn task_boxes_are_read_and_taken_off_the_text() {
+        let b = parse("- [ ] todo\n- [x] done\n- plain\n- [X] loud");
+        assert_eq!(tasks(&b[0]), &[Some(false), Some(true), None, Some(true)]);
+        let it = items(&b[0]);
+        assert_eq!(item_text(&it[0]), "todo");
+        assert_eq!(item_text(&it[1]), "done");
+        assert_eq!(item_text(&it[2]), "plain");
+        let star = parse("* [x] **bold** task");
+        assert_eq!(tasks(&star[0]), &[Some(true)]);
+        let ordered = parse("1. [ ] first");
+        assert_eq!(tasks(&ordered[0]), &[Some(false)]);
+    }
+
+    #[test]
+    fn a_box_without_words_or_a_link_stays_text() {
+        assert_eq!(tasks(&parse("- [ ]")[0]), &[None]);
+        assert_eq!(item_text(&items(&parse("- [ ]")[0])[0]), "[ ]");
+        assert_eq!(tasks(&parse("- [y] no")[0]), &[None]);
+        assert_eq!(tasks(&parse("- [x]no")[0]), &[None]);
+        assert_eq!(tasks(&parse("- [a](https://x.io) link")[0]), &[None]);
+    }
+
+    #[test]
+    fn every_item_has_its_task_slot() {
+        let b = parse("- a\n  - [ ] inner\n- b");
+        assert_eq!(tasks(&b[0]).len(), items(&b[0]).len());
+        assert_eq!(tasks(&items(&b[0])[0][1]), &[Some(false)]);
     }
 
     // Code blocks
@@ -2103,6 +2335,160 @@ mod tests {
     #[test]
     fn bare_gt_is_empty_quote() {
         assert_eq!(parse(">"), vec![Block::Quote(vec![])]);
+    }
+
+    // Callouts
+
+    #[test]
+    fn github_alerts_are_callouts() {
+        for (name, kind) in [
+            ("NOTE", Callout::Note),
+            ("TIP", Callout::Tip),
+            ("IMPORTANT", Callout::Important),
+            ("WARNING", Callout::Warning),
+            ("caution", Callout::Caution),
+        ] {
+            let b = parse(&format!("> [!{name}]\n> Mind the **gap**.\n>\n> More."));
+            check(&b);
+            match &b[..] {
+                [Block::Callout {
+                    kind: k,
+                    title,
+                    body,
+                }] => {
+                    assert_eq!(*k, kind);
+                    assert!(title.text.is_empty());
+                    assert_eq!(body.len(), 2);
+                    assert!(matches!(&body[0], Block::Paragraph(p) if p.text == "Mind the gap."));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_alert_may_carry_a_title() {
+        match &parse("> [!TIP] Faster builds\n> Use the cache.")[0] {
+            Block::Callout { kind, title, body } => {
+                assert_eq!(*kind, Callout::Tip);
+                assert_eq!(title.text, "Faster builds");
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_alert_still_streaming_is_a_callout_with_no_body() {
+        assert_eq!(
+            parse("> [!WARNING]"),
+            vec![Block::Callout {
+                kind: Callout::Warning,
+                title: Inline::default(),
+                body: vec![]
+            }]
+        );
+    }
+
+    #[test]
+    fn a_bold_lead_word_makes_a_callout() {
+        for src in ["> **Note:** keep it short", "> **Note**: keep it short"] {
+            match &parse(src)[0] {
+                Block::Callout { kind, body, .. } => {
+                    assert_eq!(*kind, Callout::Note);
+                    assert_eq!(body, &vec![Block::Paragraph(plain("keep it short"))]);
+                }
+                other => panic!("{src}: {other:?}"),
+            }
+        }
+        match &parse("> **Warning:**\n> on its own line")[0] {
+            Block::Callout { kind, body, .. } => {
+                assert_eq!(*kind, Callout::Warning);
+                assert_eq!(body, &vec![Block::Paragraph(plain("on its own line"))]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_quotes_stay_quotes() {
+        for src in [
+            "> [!FOO]\n> x",
+            "> **Notes:** x",
+            "> **Note** x",
+            "> **Note:**x",
+            "> a\n> [!NOTE]",
+            "> [!NOTE",
+            "**Note:** not quoted",
+        ] {
+            let b = parse(src);
+            assert!(
+                !b.iter().any(|x| matches!(x, Block::Callout { .. })),
+                "{src}: {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_callout_inside_a_list_item() {
+        let b = parse("- step\n  > [!NOTE]\n  > careful");
+        assert!(matches!(items(&b[0])[0][1], Block::Callout { .. }));
+    }
+
+    // Keys
+
+    #[test]
+    fn kbd_tags_are_keys() {
+        let p = para("Press <kbd>Ctrl</kbd>+<kbd>K</kbd> now");
+        assert_eq!(p.text, "Press Ctrl+K now");
+        assert_eq!(under(&p, &Style::Key), vec!["Ctrl", "K"]);
+        assert_eq!(under(&para("<KBD> Esc </KBD>"), &Style::Key), vec!["Esc"]);
+    }
+
+    #[test]
+    fn a_stray_kbd_stays_text() {
+        for src in ["<kbd>", "<kbd></kbd>", "<kbd>a<b></kbd>", "<kbd>Ctrl"] {
+            let p = para(src);
+            assert!(under(&p, &Style::Key).is_empty(), "{src}");
+            check_inline(&p);
+        }
+    }
+
+    #[test]
+    fn a_key_combo_in_code_is_keys() {
+        let p = para("Open it with `Ctrl+Shift+P` or `Alt+F4` or `cmd+k`.");
+        assert_eq!(
+            under(&p, &Style::Key),
+            vec!["Ctrl", "Shift", "P", "Alt", "F4", "cmd", "k"]
+        );
+        assert!(under(&p, &Style::Code).is_empty());
+        assert_eq!(p.text, "Open it with Ctrl+Shift+P or Alt+F4 or cmd+k.");
+        assert_eq!(under(&para("`Ctrl++`"), &Style::Key), vec!["Ctrl", "+"]);
+        assert_eq!(
+            under(&para("`Shift+Enter`"), &Style::Key),
+            vec!["Shift", "Enter"]
+        );
+        check_inline(&p);
+    }
+
+    #[test]
+    fn code_that_only_looks_like_keys_stays_code() {
+        for src in [
+            "`a+b`",
+            "`C++`",
+            "`i+1`",
+            "`Ctrl`",
+            "`Ctrl+`",
+            "`Ctrl+Foo`",
+            "`Ctrl + K`",
+            "`x+Ctrl+K`",
+            "`Ctrl+F99`",
+            "`+K`",
+        ] {
+            let p = para(src);
+            assert!(under(&p, &Style::Key).is_empty(), "{src}");
+            assert_eq!(under(&p, &Style::Code).len(), 1, "{src}");
+        }
     }
 
     // Tables

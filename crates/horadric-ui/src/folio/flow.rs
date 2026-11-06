@@ -8,38 +8,103 @@
 use std::ops::Range;
 
 use horadric_core::folio::{Ending, Lane, Notice, Todo, TodoStatus, TurnUsage};
-use horadric_core::markdown::{self as md, Align, Inline};
+use horadric_core::markdown::{self as md, Align, Inline, Span, Style};
 use serde_json::Value;
 
 /// How far each level of a list or quote moves its text in.
-pub const LIST_INDENT: f32 = 24.0;
-pub const QUOTE_INDENT: f32 = 16.0;
+pub const LIST_INDENT: f32 = 26.0;
+pub const QUOTE_INDENT: f32 = 18.0;
+/// A callout card: its text in from its left edge, the room kept at its
+/// right, and its padding above and below.
+pub const CARD_INDENT: f32 = 18.0;
+pub const CARD_RIGHT: f32 = 14.0;
+pub const CARD_PAD: f32 = 11.0;
+/// Between a callout's title and its body, which the title's own line
+/// already spaces.
+pub const TITLE_GAP: f32 = 2.0;
 /// Room between paragraphs, and inside a list.
 pub const PARA_GAP: f32 = 14.0;
 pub const ITEM_GAP: f32 = 6.0;
-/// Above a heading that is not the reply's first.
-pub const HEADING_GAP: f32 = 24.0;
+/// Under a heading: less than between paragraphs, so a heading binds to
+/// the section it opens rather than floating between two.
+pub const UNDER_HEADING: f32 = 8.0;
+/// Before a list that a line ending in a colon leads into.
+pub const LEAD_GAP: f32 = 8.0;
+/// Between a hanging term's column and the text right of it.
+pub const TERM_GAP: f32 = 18.0;
+/// A term wider than this, as guessed, keeps the list as it was written.
+const TERM_MAX: f32 = 220.0;
+const BULLETS: [char; 3] = ['\u{2022}', '\u{25e6}', '\u{25aa}'];
 
-/// The size a paragraph's text is set in.
+/// Above a heading that is not the reply's first: more for a bigger one,
+/// as the break it makes is bigger.
+pub fn heading_gap(level: u8) -> f32 {
+    match level {
+        1 => 32.0,
+        2 => 28.0,
+        3 => 22.0,
+        _ => 20.0,
+    }
+}
+
+/// The size a paragraph's text is set in. H4 stands for levels 4 to 6,
+/// set as a small tracked label rather than a smaller H3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Font {
     Body,
     H1,
     H2,
     H3,
+    H4,
 }
 
-/// One paragraph of a reply, placed: how far in, and in how many quotes.
+/// What sits in a list item's marker column.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Marker {
+    Bullet(char),
+    Number(String),
+    /// A task list's box, ticked or not.
+    Task(bool),
+}
+
+/// A quote or a callout a paragraph is inside, drawn at its left.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bar {
+    /// Where its left edge is.
+    pub x: f32,
+    /// The room kept at the right by the cards around it.
+    pub right: f32,
+    /// None for a plain quote.
+    pub callout: Option<md::Callout>,
+    /// This is the last paragraph inside it.
+    pub end: bool,
+}
+
+/// One paragraph of a reply, placed: how far in, and in what.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Para {
     pub kind: Kind,
     pub indent: f32,
-    /// Quotes it is inside, each a bar at its left.
-    pub quotes: u8,
+    /// The quotes and callouts it is inside, outermost first.
+    pub bars: Vec<Bar>,
     /// Room above it, none for the first.
     pub gap: f32,
+    /// A list item's bullet, number or box, drawn left of its first line.
+    pub marker: Option<Marker>,
     /// How wide the column left of it is that its list marker sits in.
     pub marker_w: f32,
+    /// How wide a hanging term's column is, between the marker's and the
+    /// text's.
+    pub term_w: f32,
+    /// Room kept at the right, inside the cards around it.
+    pub right: f32,
+}
+
+impl Para {
+    /// Inside a plain quote, as its nearest bar.
+    pub fn quoted(&self) -> bool {
+        self.bars.last().is_some_and(|b| b.callout.is_none())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,8 +112,13 @@ pub enum Kind {
     Text {
         font: Font,
         inline: Inline,
-        /// A list item's bullet or number, drawn left of the text.
-        marker: Option<String>,
+        /// A hanging term, drawn in its own column left of the text.
+        term: Option<Inline>,
+    },
+    /// A callout's title line: its icon and its name, or its own title.
+    Callout {
+        kind: md::Callout,
+        title: Inline,
     },
     Code {
         lang: String,
@@ -65,149 +135,378 @@ pub enum Kind {
 /// A reply's markdown, parsed and laid flat.
 pub fn paras(src: &str) -> Vec<Para> {
     let mut out = Vec::new();
-    flatten(&md::parse(src), 0.0, 0, 0, &mut out);
+    let at = At {
+        indent: 0.0,
+        bars: Vec::new(),
+        right: 0.0,
+        depth: 0,
+    };
+    flatten(&md::parse(src), &at, &mut out);
     if let Some(first) = out.first_mut() {
         first.gap = 0.0;
     }
     out
 }
 
-fn flatten(blocks: &[md::Block], indent: f32, quotes: u8, depth: usize, out: &mut Vec<Para>) {
-    let inside = depth > 0;
+/// Where the blocks being laid flat sit.
+#[derive(Clone)]
+struct At {
+    indent: f32,
+    bars: Vec<Bar>,
+    right: f32,
+    /// How many lists deep.
+    depth: usize,
+}
+
+impl At {
+    fn para(&self, kind: Kind, gap: f32) -> Para {
+        Para {
+            kind,
+            indent: self.indent,
+            bars: self.bars.clone(),
+            gap,
+            marker: None,
+            marker_w: 0.0,
+            term_w: 0.0,
+            right: self.right,
+        }
+    }
+
+    /// Inside one more quote or callout, its text `indent` further in.
+    fn within(&self, callout: Option<md::Callout>, indent: f32, right: f32) -> At {
+        let mut a = self.clone();
+        a.bars.push(Bar {
+            x: self.indent,
+            right: self.right,
+            callout,
+            end: false,
+        });
+        a.indent += indent;
+        a.right += right;
+        a
+    }
+}
+
+fn text(font: Font, inline: &Inline) -> Kind {
+    Kind::Text {
+        font,
+        inline: inline.clone(),
+        term: None,
+    }
+}
+
+/// Marks the last paragraph laid as the end of the bar at `level`.
+fn end_bar(out: &mut [Para], from: usize, level: usize) {
+    let n = out.len();
+    if let Some(p) = out[from.min(n)..].last_mut() {
+        if let Some(b) = p.bars.get_mut(level) {
+            b.end = true;
+        }
+    }
+}
+
+fn flatten(blocks: &[md::Block], at: &At, out: &mut Vec<Para>) {
+    let normal = if at.depth > 0 { ITEM_GAP } else { PARA_GAP };
+    let mut next_gap: Option<f32> = None;
+    let mut prev: Option<&md::Block> = None;
     for b in blocks {
-        let gap = if inside { ITEM_GAP } else { PARA_GAP };
-        let mut push = |kind: Kind, gap: f32| {
-            out.push(Para {
-                kind,
-                indent,
-                quotes,
-                gap,
-                marker_w: 0.0,
-            })
-        };
+        let after_heading = next_gap.is_some();
+        let gap = next_gap.take().unwrap_or(normal);
         match b {
-            md::Block::Paragraph(inline) => push(
-                Kind::Text {
-                    font: Font::Body,
-                    inline: inline.clone(),
-                    marker: None,
-                },
-                gap,
-            ),
-            md::Block::Heading { level, text } => {
+            md::Block::Paragraph(inline) => out.push(at.para(text(Font::Body, inline), gap)),
+            md::Block::Heading { level, text: t } => {
                 let font = match level {
                     1 => Font::H1,
                     2 => Font::H2,
-                    _ => Font::H3,
+                    3 => Font::H3,
+                    _ => Font::H4,
                 };
-                push(
-                    Kind::Text {
-                        font,
-                        inline: text.clone(),
-                        marker: None,
-                    },
-                    HEADING_GAP,
-                )
+                // Two headings in a row read as one title and its subtitle.
+                let gap = if after_heading { gap } else { heading_gap(*level) };
+                out.push(at.para(text(font, t), gap));
+                next_gap = Some(UNDER_HEADING);
             }
-            md::Block::Code { lang, text, .. } => push(
+            md::Block::Code { lang, text, .. } => out.push(at.para(
                 Kind::Code {
                     lang: lang.clone(),
                     text: text.clone(),
                 },
                 gap,
-            ),
+            )),
             md::Block::Table {
                 header,
                 align,
                 rows,
-            } => push(
+            } => out.push(at.para(
                 Kind::Table {
                     header: header.clone(),
                     align: align.clone(),
                     rows: rows.clone(),
                 },
                 gap,
-            ),
-            md::Block::Rule => push(Kind::Rule, gap),
+            )),
+            md::Block::Rule => out.push(at.para(Kind::Rule, gap)),
             md::Block::Quote(inner) => {
-                let at = out.len();
-                flatten(inner, indent + QUOTE_INDENT, quotes + 1, depth, out);
-                if let Some(p) = out.get_mut(at) {
+                let first = out.len();
+                flatten(inner, &at.within(None, QUOTE_INDENT, 0.0), out);
+                if let Some(p) = out.get_mut(first) {
                     p.gap = gap;
                 }
+                end_bar(out, first, at.bars.len());
+            }
+            md::Block::Callout { kind, title, body } => {
+                let inner = at.within(Some(*kind), CARD_INDENT, CARD_RIGHT);
+                let first = out.len();
+                out.push(inner.para(
+                    Kind::Callout {
+                        kind: *kind,
+                        title: title.clone(),
+                    },
+                    gap,
+                ));
+                flatten(body, &inner, out);
+                if let Some(p) = out.get_mut(first + 1) {
+                    p.gap = TITLE_GAP;
+                }
+                end_bar(out, first, at.bars.len());
             }
             md::Block::List {
                 ordered,
                 start,
                 items,
+                tasks,
             } => {
-                // As wide as its widest number, so "25." is not cut short.
-                let step = if *ordered {
-                    let last = start + items.len().saturating_sub(1) as u64;
-                    list_indent(&last.to_string())
+                let leads = matches!(prev, Some(md::Block::Paragraph(p)) if p.text.trim_end().ends_with(':'));
+                let gap = if leads && !after_heading {
+                    LEAD_GAP
                 } else {
-                    LIST_INDENT
+                    gap
                 };
-                for (k, item) in items.iter().enumerate() {
-                    let marker = if *ordered {
-                        format!("{}.", start + k as u64)
-                    } else {
-                        ["\u{2022}", "\u{25e6}", "\u{25aa}"][depth.min(2)].to_string()
-                    };
-                    let at = out.len();
-                    flatten(item, indent + step, quotes, depth + 1, out);
-                    if let Some(p) = out.get_mut(at) {
-                        p.gap = if k == 0 { gap } else { ITEM_GAP };
-                        p.marker_w = step;
-                        if let Kind::Text { marker: m, .. } = &mut p.kind {
-                            *m = Some(marker);
-                        }
-                    }
-                }
+                list(*ordered, *start, items, tasks, at, gap, out);
             }
+        }
+        prev = Some(b);
+    }
+}
+
+fn list(
+    ordered: bool,
+    start: u64,
+    items: &[Vec<md::Block>],
+    tasks: &[Option<bool>],
+    at: &At,
+    gap: f32,
+    out: &mut Vec<Para>,
+) {
+    let hang = hanging(items);
+    let boxes = tasks.iter().any(Option::is_some);
+    let step = if ordered {
+        // As wide as its widest number, so "25." is not cut short.
+        let last = start + items.len().saturating_sub(1) as u64;
+        list_indent(&last.to_string())
+    } else if hang.is_some() && !boxes {
+        // Terms in a column of their own need no bullets to set them apart.
+        0.0
+    } else {
+        LIST_INDENT
+    };
+    let term_w = hang.as_ref().map_or(0.0, |h| h.w);
+    for (k, item) in items.iter().enumerate() {
+        let marker = match tasks.get(k).copied().flatten() {
+            Some(done) => Some(Marker::Task(done)),
+            None if ordered => Some(Marker::Number(format!("{}.", start + k as u64))),
+            None if hang.is_some() => None,
+            None => Some(Marker::Bullet(BULLETS[at.depth.min(2)])),
+        };
+        let mut inner = at.clone();
+        inner.indent += step + term_w;
+        inner.depth += 1;
+        let first = out.len();
+        match hang.as_ref().and_then(|h| h.parts[k].as_ref()) {
+            Some((term, rest)) => {
+                out.push(inner.para(
+                    Kind::Text {
+                        font: Font::Body,
+                        inline: rest.clone(),
+                        term: Some(term.clone()),
+                    },
+                    0.0,
+                ));
+                flatten(&item[1..], &inner, out);
+            }
+            None => flatten(item, &inner, out),
+        }
+        if let Some(p) = out.get_mut(first) {
+            p.gap = if k == 0 { gap } else { ITEM_GAP };
+            p.marker = marker;
+            p.marker_w = step;
+            p.term_w = term_w;
         }
     }
 }
 
-/// How far an ordered list's items sit in, room for its widest number:
-/// one digit takes the usual indent, each more about a digit's width.
+/// A list laid out as terms and what they mean: the term column's width
+/// and each item's term and rest.
+struct Hang {
+    w: f32,
+    /// None for a last item still arriving.
+    parts: Vec<Option<(Inline, Inline)>>,
+}
+
+/// Whether every item of a list reads `**Term**: what it is` (or with a
+/// dash), so the terms can hang in a column of their own. One item that
+/// does not keeps the list as written. The last may be still streaming in,
+/// so a term half sent does not flip the whole list back and forth.
+fn hanging(items: &[Vec<md::Block>]) -> Option<Hang> {
+    if items.len() < 2 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut widest = 0.0f32;
+    for (k, item) in items.iter().enumerate() {
+        let Some(md::Block::Paragraph(p)) = item.first() else {
+            return None;
+        };
+        match term_of(p) {
+            Some((term, rest)) => {
+                widest = widest.max(term_width(&term.text));
+                parts.push(Some((term, rest)));
+            }
+            None if k + 1 == items.len() && arriving(p) => parts.push(None),
+            None => return None,
+        }
+    }
+    (widest <= TERM_MAX).then(|| Hang {
+        w: (widest + TERM_GAP).ceil(),
+        parts,
+    })
+}
+
+/// The bold run at a paragraph's start, if there is one: where it ends.
+fn lead_bold(p: &Inline) -> Option<usize> {
+    (p.spans.iter())
+        .filter(|s| s.style == Style::Bold && s.range.start == 0)
+        .map(|s| s.range.end)
+        .max()
+}
+
+/// `**Term**: rest`, `**Term:** rest` or `**Term** - rest` as the term
+/// and the rest.
+fn term_of(p: &Inline) -> Option<(Inline, Inline)> {
+    let bold = lead_bold(p)?;
+    let head = &p.text[..bold];
+    let after = &p.text[bold..];
+    let (term_end, rest_at, colon) = if let Some(t) = head.strip_suffix(':') {
+        (t.len(), bold, true)
+    } else if after.starts_with(':') {
+        (bold, bold + 1, true)
+    } else {
+        let dash = [" - ", " \u{2013} ", " \u{2014} "]
+            .iter()
+            .find(|d| after.starts_with(**d))?;
+        (bold, bold + dash.len(), false)
+    };
+    let rest = &p.text[rest_at..];
+    // A colon wants a space after it, so "**a**:b" stays as written.
+    let spaced = !colon || rest.is_empty() || rest.starts_with(char::is_whitespace);
+    if term_end == 0 || head.contains('\n') || !spaced {
+        return None;
+    }
+    let skip = rest.len() - rest.trim_start().len();
+    let mut term = slice(p, 0..term_end);
+    term.spans.retain(|s| s.style != Style::Bold);
+    Some((term, slice(p, rest_at + skip..p.text.len())))
+}
+
+/// The start of a term still being sent: an unclosed `**`, or a closed
+/// one with no more than its separator after it yet.
+fn arriving(p: &Inline) -> bool {
+    match lead_bold(p) {
+        Some(end) => matches!(
+            p.text[end..].trim(),
+            "" | "-" | "\u{2013}" | "\u{2014}"
+        ),
+        None => p.text.starts_with("**") && !p.text.contains('\n'),
+    }
+}
+
+/// About how wide a term is set in the body's semibold, without a window
+/// to measure it in: capitals and figures are wider than small letters.
+pub fn term_width(s: &str) -> f32 {
+    s.chars()
+        .map(|c| match c {
+            ' ' => 4.5,
+            'i' | 'l' | 'j' | '.' | ',' | ':' | '\'' | '|' => 4.5,
+            'm' | 'w' | 'M' | 'W' => 13.5,
+            c if c.is_uppercase() || c.is_ascii_digit() => 10.5,
+            _ => 8.6,
+        })
+        .sum()
+}
+
+/// The part of `inl` in byte range `r`, its spans cut to it.
+fn slice(inl: &Inline, r: Range<usize>) -> Inline {
+    Inline {
+        text: inl.text[r.clone()].to_string(),
+        spans: (inl.spans.iter())
+            .filter_map(|s| {
+                let a = s.range.start.max(r.start);
+                let b = s.range.end.min(r.end);
+                (a < b).then(|| Span {
+                    range: a - r.start..b - r.start,
+                    style: s.style.clone(),
+                })
+            })
+            .collect(),
+    }
+}
+
+/// How far an ordered list's items sit in, room for its widest number in
+/// the body's figures: one digit takes the usual indent, each more about
+/// a figure's width.
 pub fn list_indent(widest: &str) -> f32 {
     let digits = widest.chars().count().max(1) as f32;
-    LIST_INDENT + (digits - 1.0) * 7.5
+    LIST_INDENT + (digits - 1.0) * 9.5
 }
 
 /// Column widths for a table `avail` wide, from what each column's widest
 /// cell takes unwrapped. Columns that fit keep their width; when they do
-/// not, the wide ones give up room, none below `least`.
+/// not, the wide ones give up room, none below `least` unless even that
+/// is too wide, when all shrink alike. The sum never passes `avail`.
 pub fn table_widths(natural: &[f32], least: f32, avail: f32) -> Vec<f32> {
     let total: f32 = natural.iter().sum();
     if total <= avail || natural.is_empty() {
         return natural.to_vec();
     }
-    // The narrow columns keep their width; the rest share what is left
-    // in proportion to what they wanted.
+    // A column held back is held at what it wants or `least`, whichever
+    // is less; the rest share what is left in proportion to what they
+    // wanted.
+    let floor = |w: f32| w.min(least);
     let mut keep = vec![false; natural.len()];
     loop {
         let fixed: f32 = (natural.iter().zip(&keep))
             .filter(|(_, k)| **k)
-            .map(|(w, _)| *w)
+            .map(|(w, _)| floor(*w))
             .sum();
+        if fixed >= avail {
+            let k = avail / fixed;
+            return natural.iter().map(|w| floor(*w) * k).collect();
+        }
         let wide: f32 = (natural.iter().zip(&keep))
             .filter(|(_, k)| !**k)
             .map(|(w, _)| *w)
             .sum();
-        let room = (avail - fixed).max(0.0);
-        let scale = if wide > 0.0 { room / wide } else { 1.0 };
+        let scale = if wide > 0.0 { (avail - fixed) / wide } else { 1.0 };
         let mut changed = false;
         for (k, w) in keep.iter_mut().zip(natural) {
-            if !*k && w * scale <= least.min(*w) {
+            if !*k && w * scale <= floor(*w) {
                 *k = true;
                 changed = true;
             }
         }
         if !changed {
             return (natural.iter().zip(&keep))
-                .map(|(w, k)| if *k { *w } else { (w * scale).max(least) })
+                .map(|(w, k)| if *k { floor(*w) } else { w * scale })
                 .collect();
         }
     }
@@ -657,11 +956,12 @@ mod tests {
         }
     }
 
-    fn marker(p: &Para) -> Option<&str> {
-        match &p.kind {
-            Kind::Text { marker, .. } => marker.as_deref(),
-            _ => None,
-        }
+    fn marker(p: &Para) -> Option<String> {
+        p.marker.as_ref().map(|m| match m {
+            Marker::Bullet(c) => c.to_string(),
+            Marker::Number(n) => n.clone(),
+            Marker::Task(done) => format!("[{}]", if *done { "x" } else { " " }),
+        })
     }
 
     #[test]
@@ -685,13 +985,14 @@ mod tests {
         );
         assert_eq!(ps[0].gap, 0.0, "the first has no room above");
         assert!(matches!(ps[0].kind, Kind::Text { font: Font::H1, .. }));
-        assert_eq!(marker(&ps[2]), Some("\u{2022}"));
-        assert_eq!(marker(&ps[3]), Some("\u{25e6}"));
+        assert_eq!(marker(&ps[2]).as_deref(), Some("\u{2022}"));
+        assert_eq!(marker(&ps[3]).as_deref(), Some("\u{25e6}"));
         assert_eq!(ps[3].indent, 2.0 * LIST_INDENT);
         assert_eq!(ps[4].indent, LIST_INDENT);
-        assert_eq!(marker(&ps[5]), Some("1."));
-        assert_eq!(marker(&ps[6]), Some("2."));
-        assert_eq!(ps[7].quotes, 1);
+        assert_eq!(marker(&ps[5]).as_deref(), Some("1."));
+        assert_eq!(marker(&ps[6]).as_deref(), Some("2."));
+        assert_eq!(ps[7].bars.len(), 1);
+        assert!(ps[7].quoted());
         assert_eq!(ps[7].indent, QUOTE_INDENT);
         assert!(matches!(&ps[8].kind, Kind::Code { lang, .. } if lang == "rust"));
         assert!(matches!(ps[9].kind, Kind::Rule));
@@ -709,7 +1010,7 @@ mod tests {
             .collect();
         let ps = paras(&src);
         assert_eq!(ps.len(), 25);
-        assert_eq!(marker(&ps[24]), Some("25."));
+        assert_eq!(marker(&ps[24]).as_deref(), Some("25."));
         assert!(ps.iter().all(|p| p.indent == ps[0].indent), "one column");
         assert!(ps[0].marker_w > LIST_INDENT);
         assert_eq!(ps[0].marker_w, ps[0].indent);
@@ -718,14 +1019,153 @@ mod tests {
 2. b",
         );
         assert_eq!(short[0].marker_w, LIST_INDENT);
-        assert_eq!(list_indent("100"), LIST_INDENT + 15.0);
+        assert_eq!(list_indent("100"), LIST_INDENT + 19.0);
     }
 
     #[test]
     fn an_ordered_list_counts_from_its_start() {
         let ps = paras("3. c\n4. d");
-        assert_eq!(marker(&ps[0]), Some("3."));
-        assert_eq!(marker(&ps[1]), Some("4."));
+        assert_eq!(marker(&ps[0]).as_deref(), Some("3."));
+        assert_eq!(marker(&ps[1]).as_deref(), Some("4."));
+    }
+
+    #[test]
+    fn task_items_get_boxes_in_the_marker_column() {
+        let ps = paras("- [ ] todo\n- [x] done\n- plain");
+        assert_eq!(marker(&ps[0]).as_deref(), Some("[ ]"));
+        assert_eq!(marker(&ps[1]).as_deref(), Some("[x]"));
+        assert_eq!(marker(&ps[2]).as_deref(), Some("\u{2022}"));
+        assert_eq!(text_of(&ps[1]), "done");
+        assert_eq!(ps[0].marker_w, LIST_INDENT);
+    }
+
+    #[test]
+    fn an_item_that_opens_with_code_keeps_its_bullet() {
+        let ps = paras("- ```sh\n  ls\n  ```\n- | a |\n  |---|\n  | 1 |");
+        assert!(matches!(ps[0].kind, Kind::Code { .. }));
+        assert_eq!(marker(&ps[0]).as_deref(), Some("\u{2022}"));
+        assert!(matches!(ps[1].kind, Kind::Table { .. }));
+        assert_eq!(marker(&ps[1]).as_deref(), Some("\u{2022}"));
+    }
+
+    #[test]
+    fn a_callout_is_a_title_then_its_body_inside_one_bar() {
+        let ps = paras("Before.\n\n> [!WARNING]\n> Careful.\n>\n> - one\n\nAfter.");
+        assert!(matches!(
+            ps[1].kind,
+            Kind::Callout {
+                kind: md::Callout::Warning,
+                ..
+            }
+        ));
+        assert_eq!(ps[1].gap, PARA_GAP);
+        assert_eq!(ps[1].indent, CARD_INDENT);
+        assert_eq!(ps[1].right, CARD_RIGHT);
+        assert_eq!(text_of(&ps[2]), "Careful.");
+        assert_eq!(ps[2].gap, TITLE_GAP);
+        assert_eq!(text_of(&ps[3]), "one");
+        assert_eq!(ps[3].indent, CARD_INDENT + LIST_INDENT);
+        for p in &ps[1..4] {
+            assert_eq!(p.bars.len(), 1);
+            assert_eq!(p.bars[0].callout, Some(md::Callout::Warning));
+            assert_eq!(p.bars[0].x, 0.0);
+            assert!(!p.quoted());
+        }
+        assert!(!ps[1].bars[0].end && !ps[2].bars[0].end);
+        assert!(ps[3].bars[0].end, "the last inside ends the card");
+        assert!(ps[4].bars.is_empty());
+    }
+
+    #[test]
+    fn a_quote_in_a_list_has_its_bar_at_the_item() {
+        let ps = paras("- item\n\n  > said");
+        assert_eq!(ps[1].bars[0].x, LIST_INDENT);
+        assert_eq!(ps[1].indent, LIST_INDENT + QUOTE_INDENT);
+        assert!(ps[1].quoted() && ps[1].bars[0].end);
+    }
+
+    #[test]
+    fn headings_take_room_above_and_bind_below() {
+        let ps = paras("Intro.\n\n## Section\n\nBody.\n\n#### Small\n\nMore.\n\n# A\n## B");
+        assert_eq!(ps[1].gap, heading_gap(2));
+        assert_eq!(ps[2].gap, UNDER_HEADING);
+        assert!(matches!(ps[3].kind, Kind::Text { font: Font::H4, .. }));
+        assert_eq!(ps[4].gap, UNDER_HEADING);
+        assert_eq!(ps[6].gap, UNDER_HEADING, "a subtitle stays with its title");
+        assert!(heading_gap(1) > heading_gap(3));
+        for (src, font) in [("##### x", Font::H4), ("###### x", Font::H4), ("### x", Font::H3)] {
+            assert!(matches!(paras(src)[0].kind, Kind::Text { font: f, .. } if f == font));
+        }
+    }
+
+    #[test]
+    fn a_list_led_in_by_a_colon_sits_close() {
+        let ps = paras("Steps:\n\n- one");
+        assert_eq!(ps[1].gap, LEAD_GAP);
+        let ps = paras("Done.\n\n- one");
+        assert_eq!(ps[1].gap, PARA_GAP);
+    }
+
+    fn term(p: &Para) -> Option<&str> {
+        match &p.kind {
+            Kind::Text { term, .. } => term.as_ref().map(|t| t.text.as_str()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn terms_hang_when_every_item_has_one() {
+        let ps = paras("- **Fast**: it is quick\n- **Small:** it is light\n- **Safe** - no `unsafe`");
+        assert_eq!(term(&ps[0]), Some("Fast"));
+        assert_eq!(text_of(&ps[0]), "it is quick");
+        assert_eq!(term(&ps[1]), Some("Small"));
+        assert_eq!(text_of(&ps[1]), "it is light");
+        assert_eq!(term(&ps[2]), Some("Safe"));
+        assert_eq!(text_of(&ps[2]), "no unsafe");
+        match &ps[2].kind {
+            Kind::Text { inline, term, .. } => {
+                assert_eq!(inline.spans.len(), 1, "the code stays code");
+                assert!(term.as_ref().unwrap().spans.is_empty(), "no bold left");
+            }
+            _ => unreachable!(),
+        }
+        let w = ps[0].term_w;
+        assert!(w >= term_width("Small") + TERM_GAP);
+        assert!(ps.iter().all(|p| p.term_w == w && p.marker.is_none()));
+        assert!(ps.iter().all(|p| p.indent == w), "no bullet column");
+    }
+
+    #[test]
+    fn numbered_terms_keep_their_numbers() {
+        let ps = paras("1. **Build**: compile it\n2. **Ship**: send it");
+        assert_eq!(marker(&ps[1]).as_deref(), Some("2."));
+        assert_eq!(term(&ps[1]), Some("Ship"));
+        assert_eq!(ps[1].indent, ps[1].marker_w + ps[1].term_w);
+    }
+
+    #[test]
+    fn one_item_without_a_term_keeps_the_list_as_written() {
+        for src in [
+            "- **Fast**: quick\n- plain item\n- **Safe**: sound",
+            "- **Fast**: quick",
+            "- **Fast**:quick\n- **Safe**: sound",
+            "- **A very long term that would take half the line**: x\n- **B**: y",
+            "- **Fast** quick\n- **Safe** sound",
+        ] {
+            let ps = paras(src);
+            assert!(ps.iter().all(|p| term(p).is_none()), "{src}");
+            assert_eq!(marker(&ps[0]).as_deref(), Some("\u{2022}"), "{src}");
+        }
+    }
+
+    #[test]
+    fn a_term_still_arriving_keeps_the_list_hanging() {
+        for last in ["- **Th", "- **Third**", "- **Third** -"] {
+            let ps = paras(&format!("- **One**: a\n- **Two**: b\n{last}"));
+            assert_eq!(term(&ps[0]), Some("One"), "{last}");
+            assert_eq!(term(&ps[2]), None);
+            assert_eq!(ps[2].term_w, ps[0].term_w);
+        }
     }
 
     #[test]
@@ -751,6 +1191,19 @@ mod tests {
         );
         let w = table_widths(&[100.0, 1000.0], 80.0, 200.0);
         assert!(w[0] >= 80.0 && w[1] >= 80.0, "{w:?}");
+    }
+
+    #[test]
+    fn table_columns_never_pass_the_room_given() {
+        let sum = |w: &[f32]| w.iter().sum::<f32>();
+        let w = table_widths(&[500.0, 2000.0], 64.0, 300.0);
+        assert!(sum(&w) <= 300.01, "{w:?}");
+        assert!(w.iter().all(|c| *c >= 64.0), "{w:?}");
+        let w = table_widths(&[300.0; 8], 64.0, 300.0);
+        assert!(sum(&w) <= 300.01, "too many for least, all shrink: {w:?}");
+        let w = table_widths(&[30.0, 900.0, 40.0], 64.0, 200.0);
+        assert!(sum(&w) <= 200.01, "{w:?}");
+        assert_eq!((w[0], w[2]), (30.0, 40.0));
     }
 
     fn pos(block: usize, unit: u32, at: u32) -> Pos {

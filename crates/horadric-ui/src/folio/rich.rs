@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use horadric_core::markdown::{Align, Inline, Style};
+use horadric_core::markdown::{Align, Callout, Inline, Style};
 use windows::core::{Interface, Result, HSTRING, PCWSTR};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT, D2D_SIZE_U,
@@ -21,7 +21,9 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    IDWriteTextFormat, IDWriteTextLayout, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_WEIGHT_BOLD,
+    IDWriteTextFormat, IDWriteTextLayout, IDWriteTextLayout1, IDWriteTypography,
+    DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, DWRITE_FONT_STYLE_ITALIC,
+    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_MEDIUM,
     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_LINE_METRICS,
     DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_TEXT_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_RANGE,
@@ -35,7 +37,7 @@ use windows::Win32::Graphics::Imaging::{
 };
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 
-use super::flow::{self, Font, Kind, Para};
+use super::flow::{self, Font, Kind, Marker, Para};
 use super::transcript::Act;
 use super::view::{d2d, reading, text_format, Gfx, Hit, Palette, FONT, READ};
 use crate::layout::Rect;
@@ -191,6 +193,10 @@ pub(super) struct Fonts {
     pub(super) h1: IDWriteTextFormat,
     pub(super) h2: IDWriteTextFormat,
     pub(super) h3: IDWriteTextFormat,
+    /// Levels 4 to 6: a small label, set in capitals and spaced out.
+    pub(super) h4: IDWriteTextFormat,
+    /// Every figure the same width, for list numbers that line up.
+    pub(super) tnum: Option<IDWriteTypography>,
     /// A code block's text: it breaks long lines rather than hiding them.
     pub(super) code: IDWriteTextFormat,
     /// Diffs and shell output: one line a row, never wrapped.
@@ -205,7 +211,6 @@ pub(super) struct Fonts {
 impl Fonts {
     pub(super) unsafe fn new(gpu: &Gpu, family: &str) -> Result<Fonts> {
         let n = DWRITE_FONT_WEIGHT_NORMAL;
-        let semi = DWRITE_FONT_WEIGHT_SEMI_BOLD;
         let family = HSTRING::from(family);
         let mono = PCWSTR(family.as_ptr());
         let code = text_format(gpu, mono, 13.5, n, false, false)?;
@@ -221,11 +226,20 @@ impl Fonts {
         right.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)?;
         let centre = text_format(gpu, FONT, 12.5, n, false, true)?;
         centre.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+        let tnum = gpu.dw.CreateTypography().ok();
+        if let Some(t) = &tnum {
+            t.AddFontFeature(DWRITE_FONT_FEATURE {
+                nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+                parameter: 1,
+            })?;
+        }
         Ok(Fonts {
             body: reading(gpu, READ, n)?,
-            h1: reading(gpu, 23.0, semi)?,
-            h2: reading(gpu, 19.5, semi)?,
-            h3: reading(gpu, 17.0, semi)?,
+            h1: heading(gpu, 24.0, 1.3)?,
+            h2: heading(gpu, 20.0, 1.35)?,
+            h3: heading(gpu, 17.5, 1.45)?,
+            h4: heading(gpu, 13.0, 1.6)?,
+            tnum,
             code,
             rows,
             right,
@@ -241,8 +255,21 @@ impl Fonts {
             Font::H1 => &self.h1,
             Font::H2 => &self.h2,
             Font::H3 => &self.h3,
+            Font::H4 => &self.h4,
         }
     }
+}
+
+/// A heading's format: semibold, its lines closer than prose's so a title
+/// that wraps still reads as one, the baseline centred as in [`reading`].
+unsafe fn heading(gpu: &Gpu, size: f32, leading: f32) -> Result<IDWriteTextFormat> {
+    let f = text_format(gpu, FONT, size, DWRITE_FONT_WEIGHT_SEMI_BOLD, false, false)?;
+    // Segoe UI's ascent and descent, as fractions of its size.
+    let (ascent, descent) = (1.079, 0.251);
+    let line = (size * leading).round();
+    let baseline = (line - size * (ascent + descent)) / 2.0 + size * ascent;
+    f.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, line, baseline)?;
+    Ok(f)
 }
 
 /// What building a scene needs: the frame, its colours, the formats and
@@ -337,17 +364,50 @@ impl Ctx<'_> {
         ink: Color,
         align: Align,
     ) -> (f32, f32) {
-        let Some(l) = self.layout(f, &inl.text, width) else {
+        self.inline_as(s, inl, f, (x, y, width), ink, align, Look::default())
+    }
+
+    /// [`Ctx::inline`], with the text shown as `look` says.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn inline_as(
+        &self,
+        s: &mut Scene,
+        inl: &Inline,
+        f: &IDWriteTextFormat,
+        (x, y, width): (f32, f32, f32),
+        ink: Color,
+        align: Align,
+        look: Look,
+    ) -> (f32, f32) {
+        let caps;
+        let shown = if look.caps {
+            caps = capitals(&inl.text);
+            &caps
+        } else {
+            &inl.text
+        };
+        let Some(l) = self.layout(f, shown, width) else {
             return (0.0, 0.0);
         };
+        let wide: Vec<u16> = shown.encode_utf16().collect();
+        let all = range(0..wide.len() as u32);
         let a = match align {
             Align::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
             Align::Right => DWRITE_TEXT_ALIGNMENT_TRAILING,
             _ => DWRITE_TEXT_ALIGNMENT_LEADING,
         };
         let _ = l.SetTextAlignment(a);
+        if let Some(weight) = look.weight {
+            let _ = l.SetFontWeight(weight, all);
+        }
+        if look.track > 0.0 {
+            if let Ok(l1) = l.cast::<IDWriteTextLayout1>() {
+                let _ = l1.SetCharacterSpacing(0.0, look.track, 0.0, all);
+            }
+        }
         let size = f.GetFontSize();
         let mut code_runs = Vec::new();
+        let mut keys = Vec::new();
         let mut links = Vec::new();
         for (r, style) in inl.utf16_spans() {
             let dr = range(r.clone());
@@ -364,8 +424,17 @@ impl Ctx<'_> {
                 Style::Code => {
                     let _ = l.SetFontFamilyName(PCWSTR(self.fonts.family.as_ptr()), dr);
                     let _ = l.SetFontSize(size * 0.88, dr);
+                    pad(&l, &wide, r.clone(), CODE_PAD);
                     self.paint(&l, r.clone(), self.code_ink());
                     code_runs.push(r);
+                }
+                Style::Key => {
+                    let _ = l.SetFontFamilyName(FONT, dr);
+                    let _ = l.SetFontSize(size * 0.8, dr);
+                    let _ = l.SetFontWeight(DWRITE_FONT_WEIGHT_MEDIUM, dr);
+                    pad(&l, &wide, r.clone(), KEY_PAD);
+                    self.paint(&l, r.clone(), self.pal.fg.with_alpha(0.9));
+                    keys.push(r);
                 }
                 Style::Link(url) => {
                     let _ = l.SetUnderline(true, dr);
@@ -378,14 +447,31 @@ impl Ctx<'_> {
                 }
             }
         }
-        // Inline code sits on a faint plate, drawn before the text.
+        // The "+" between two keys of a shortcut is only a joint.
+        for pair in keys.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            if b.start == a.end + 1 && wide.get(a.end as usize) == Some(&(b'+' as u16)) {
+                self.paint(&l, a.end..b.start, self.pal.faint);
+            }
+        }
+        // Plates sit on the text's own band of the line, not its whole
+        // height, so code on two lines running does not merge into a bar.
+        let plate = |b: &Rect, inset: f32, h: f32| {
+            let cy = b.y + b.h / 2.0 + 0.12 * size;
+            Rect::new(x + b.x + inset, y + cy - h / 2.0, b.w - 2.0 * inset, h)
+        };
+        let code_h = (0.86 * size + 5.0).round();
         for r in code_runs {
             for b in render::range_rects(&l, r.start, r.end - r.start) {
-                s.fill(
-                    Rect::new(x + b.x - 2.0, y + b.y + 1.0, b.w + 4.0, b.h - 2.0),
-                    3.0,
-                    self.pal.fg.with_alpha(0.08),
-                );
+                s.fill(plate(&b, 0.5, code_h), 4.0, self.pal.fg.with_alpha(0.075));
+            }
+        }
+        let key_h = (0.8 * size + 7.0).round();
+        for r in keys {
+            for b in render::range_rects(&l, r.start, r.end - r.start) {
+                let k = plate(&b, KEY_PAD - KEY_INNER, key_h);
+                s.fill(k, 4.0, self.pal.fg.with_alpha(0.05));
+                s.stroke(k, 4.0, self.pal.fg.with_alpha(0.2), 1.0);
             }
         }
         for (r, act) in links {
@@ -393,50 +479,93 @@ impl Ctx<'_> {
                 s.hit(Rect::new(x + b.x, y + b.y, b.w, b.h), Hit::Tr(act.clone()));
             }
         }
+        // Selection and find read the text as written, not as shown.
         s.unit(&l, x, y, ink, &inl.text);
         let (_, h) = render::text_size(&l);
         (h, first_line(&l).unwrap_or(h))
+    }
+
+    /// The colour a callout of `kind` is drawn in: the theme's colours
+    /// for states where one fits, the project's own for what matters.
+    fn callout_ink(&self, kind: Callout) -> Color {
+        let t = crate::theme::palette();
+        let c = match kind {
+            Callout::Note => t.working,
+            Callout::Tip => t.done,
+            Callout::Important => self.pal.accent,
+            Callout::Warning => t.waiting,
+            Callout::Caution => t.error,
+        };
+        c.mix(self.pal.fg, 0.15)
     }
 
     /// One paragraph of a reply, `width` wide from its own indent.
     pub(super) unsafe fn para(&self, p: &Para, width: f32) -> Scene {
         let mut s = Scene::default();
         let x = p.indent;
-        let w = (width - x).max(40.0);
+        let w = (width - x - p.right).max(40.0);
+        // The marker's line: its format and the band it is centred in.
+        let mut mark_font = &self.fonts.body;
+        let mut mark_line = (0.0, 28.0);
         match &p.kind {
-            Kind::Text {
-                font,
-                inline,
-                marker,
-            } => {
+            Kind::Text { font, inline, term } => {
+                let done = p.marker == Some(Marker::Task(true));
                 let ink = match font {
+                    Font::Body if done => self.pal.fg.with_alpha(0.5),
+                    Font::Body if p.quoted() => self.pal.fg.with_alpha(0.74),
                     Font::Body => self.pal.fg.with_alpha(0.92),
+                    Font::H4 => self.pal.fg.with_alpha(0.62),
                     _ => self.pal.fg,
                 };
-                let (h, first) = self.inline(
-                    &mut s,
-                    inline,
-                    self.fonts.of(*font),
-                    x,
-                    0.0,
-                    w,
-                    ink,
-                    Align::None,
-                );
-                if let Some(m) = marker {
-                    let r = Rect::new(x - p.marker_w, 0.0, p.marker_w - 7.0, first);
-                    s.line(m.clone(), F::Right, r, self.pal.dim);
+                let f = self.fonts.of(*font);
+                let (mut tx, mut ty, mut tw) = (x, 0.0, w);
+                if let Some(t) = term {
+                    let left = x - p.term_w;
+                    let look = Look {
+                        weight: Some(DWRITE_FONT_WEIGHT_SEMI_BOLD),
+                        ..Look::default()
+                    };
+                    let ink = self.pal.fg.with_alpha(if done { 0.55 } else { 1.0 });
+                    if w >= TERM_ROOM {
+                        let tw = p.term_w - flow::TERM_GAP + 8.0;
+                        self.inline_as(&mut s, t, f, (left, 0.0, tw), ink, Align::None, look);
+                    } else {
+                        // Too narrow for two columns: the term goes above.
+                        let (th, _) =
+                            self.inline_as(&mut s, t, f, (left, 0.0, w + p.term_w), ink, Align::None, look);
+                        (tx, ty, tw) = (left, th, w + p.term_w);
+                    }
                 }
-                if *font == Font::H1 || *font == Font::H2 {
+                let look = Look {
+                    caps: *font == Font::H4,
+                    track: if *font == Font::H4 { 0.9 } else { 0.0 },
+                    ..Look::default()
+                };
+                let (h, first) = self.inline_as(&mut s, inline, f, (tx, ty, tw), ink, Align::None, look);
+                mark_font = f;
+                mark_line = (0.0, if term.is_some() && ty > 0.0 { ty } else { first });
+                s.h = ty + h;
+                if *font == Font::H1 {
                     s.fill(
-                        Rect::new(x, h + 5.0, w, 1.0),
+                        Rect::new(x, s.h + 6.0, w, 1.0),
                         0.0,
-                        self.pal.fg.with_alpha(0.08),
+                        self.pal.fg.with_alpha(0.07),
                     );
-                    s.h = h + 8.0;
-                } else {
-                    s.h = h;
+                    s.h += 7.0;
                 }
+            }
+            Kind::Callout { kind, title } => {
+                let c = self.callout_ink(*kind);
+                let y = flow::CARD_PAD;
+                let lh = 22.0;
+                s.line(callout_icon(*kind), F::Icon, Rect::new(x, y, 14.0, lh), c);
+                let label = if title.text.trim().is_empty() {
+                    kind.label()
+                } else {
+                    title.text.as_str()
+                };
+                s.line(label, F::Title, Rect::new(x + 21.0, y, w - 21.0, lh), c);
+                s.h = y + lh;
             }
             Kind::Code { lang, text } => {
                 s = self.code(lang, text, w);
@@ -451,18 +580,172 @@ impl Ctx<'_> {
                 s = moved(s, x);
             }
             Kind::Rule => {
-                s.fill(Rect::new(x, 8.0, w, 1.0), 0.0, self.pal.fg.with_alpha(0.14));
-                s.h = 17.0;
+                s.fill(Rect::new(x, 14.0, w, 1.0), 0.0, self.pal.fg.with_alpha(0.1));
+                s.h = 28.0;
             }
         }
-        // A quote's bars run the paragraph's height and the gap above it.
-        for q in 0..p.quotes {
-            let bx = x - flow::QUOTE_INDENT * (p.quotes - q) as f32 + 2.0;
-            let r = Rect::new(bx, -p.gap, 3.0, s.h + p.gap);
-            s.items
-                .insert(0, Item::Fill(r, 1.5, self.pal.accent.with_alpha(0.45)));
+        if let Some(m) = &p.marker {
+            self.marker(&mut s, m, p, mark_font, mark_line);
         }
+        let ends = (p.bars.iter())
+            .filter(|b| b.end && b.callout.is_some())
+            .count();
+        s.h += ends as f32 * flow::CARD_PAD;
+        let under = self.bars(p, width, s.h);
+        s.items.splice(0..0, under);
         s
+    }
+
+    /// A list item's bullet, number or box, in the column left of its
+    /// text (and of its term, when it has one), on the line `band` gives
+    /// as top and height.
+    unsafe fn marker(
+        &self,
+        s: &mut Scene,
+        m: &Marker,
+        p: &Para,
+        f: &IDWriteTextFormat,
+        (top, line): (f32, f32),
+    ) {
+        let right = p.indent - p.term_w - MARKER_GAP;
+        let left = p.indent - p.term_w - p.marker_w;
+        let size = f.GetFontSize();
+        let (glyph, ink) = match m {
+            Marker::Task(done) => {
+                let cy = top + line / 2.0 + 0.1 * size;
+                let r = Rect::new(right - BOX, cy - BOX / 2.0, BOX, BOX);
+                if *done {
+                    s.fill(r, 4.0, self.pal.accent.mix(self.pal.fg, 0.25).with_alpha(0.85));
+                    s.line("\u{E73E}", F::Icon, r, self.pal.bg);
+                } else {
+                    s.fill(r, 4.0, self.pal.fg.with_alpha(0.03));
+                    s.stroke(r, 4.0, self.pal.fg.with_alpha(0.35), 1.25);
+                }
+                return;
+            }
+            Marker::Bullet(c) => (c.to_string(), self.pal.accent.with_alpha(0.7)),
+            Marker::Number(n) => (n.clone(), self.pal.accent.mix(self.pal.fg, 0.35).with_alpha(0.85)),
+        };
+        let Some(l) = self.layout(f, &glyph, (right - left).max(1.0)) else {
+            return;
+        };
+        let _ = l.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        let _ = l.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+        if let (Marker::Number(_), Some(t)) = (m, &self.fonts.tnum) {
+            let _ = l.SetTypography(t, range(0..glyph.encode_utf16().count() as u32));
+        }
+        // In the text's own format its baseline is the first line's; a
+        // block that is not text centres it on its header instead.
+        let own = first_line(&l).unwrap_or(line);
+        let y = if matches!(p.kind, Kind::Text { .. }) {
+            top
+        } else {
+            top + (line - own) / 2.0
+        };
+        s.text(&l, left, y, ink);
+    }
+
+    /// What is drawn under a paragraph for the quotes and callouts it is
+    /// inside, `h` tall: a quote's bar, or its slice of a callout's card.
+    /// A card is one rounded plate across many paragraphs, so each draws
+    /// the whole card clipped to its own band, and the corners show only
+    /// where the card really starts and ends.
+    fn bars(&self, p: &Para, width: f32, h: f32) -> Vec<Item> {
+        let mut out = Vec::new();
+        for (q, bar) in p.bars.iter().enumerate() {
+            let Some(kind) = bar.callout else {
+                let r = Rect::new(bar.x + 2.0, -p.gap, 3.0, h + p.gap);
+                out.push(Item::Fill(r, 1.5, self.pal.accent.with_alpha(0.4)));
+                continue;
+            };
+            let first = q + 1 == p.bars.len() && matches!(p.kind, Kind::Callout { .. });
+            let top = if first { 0.0 } else { -p.gap };
+            let card_top = if first { 0.0 } else { top - 2.0 * CARD_R };
+            let card_bottom = if bar.end { h } else { h + 2.0 * CARD_R };
+            let cw = (width - bar.right - bar.x).max(1.0);
+            let card = Rect::new(bar.x, card_top, cw, card_bottom - card_top);
+            let c = self.callout_ink(kind);
+            out.push(Item::Clip(Rect::new(bar.x, top, cw, h - top)));
+            out.push(Item::Fill(card, CARD_R, c.with_alpha(0.07)));
+            out.push(Item::Clip(Rect::new(bar.x, top, 3.0, h - top)));
+            out.push(Item::Fill(card, CARD_R, c.with_alpha(0.8)));
+            out.push(Item::Unclip);
+            out.push(Item::Unclip);
+        }
+        out
+    }
+}
+
+/// How a run of text is shown beyond its own styles.
+#[derive(Default, Clone, Copy)]
+struct Look {
+    /// In capitals, though selected and copied as written.
+    caps: bool,
+    /// Extra room after each character.
+    track: f32,
+    /// A weight for the whole run.
+    weight: Option<DWRITE_FONT_WEIGHT>,
+}
+
+/// Room each side of inline code, inside its plate.
+const CODE_PAD: f32 = 3.5;
+/// Room each side of a key, and how much of it is inside the key's cap;
+/// the rest keeps two caps and the "+" between them apart.
+const KEY_PAD: f32 = 6.0;
+const KEY_INNER: f32 = 4.5;
+/// A task's box, and the room between a marker and its text.
+const BOX: f32 = 15.0;
+const MARKER_GAP: f32 = 9.0;
+/// A callout card's corner.
+const CARD_R: f32 = 6.0;
+/// Below this, a hanging term goes above its text rather than beside it.
+const TERM_ROOM: f32 = 220.0;
+
+/// `s` in capitals, a character kept as it is where its capital would
+/// change how many UTF-16 units it takes, so the spans still fit.
+fn capitals(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            let mut up = c.to_uppercase();
+            match (up.next(), up.next()) {
+                (Some(u), None) if u.len_utf16() == c.len_utf16() => u,
+                _ => c,
+            }
+        })
+        .collect()
+}
+
+/// Room before the first character of `r` and after its last, which
+/// DirectWrite counts in the run's own width, so a plate drawn to the
+/// run's box clears the text around it.
+fn pad(l: &IDWriteTextLayout, wide: &[u16], r: std::ops::Range<u32>, room: f32) {
+    if r.is_empty() {
+        return;
+    }
+    let Ok(l1) = l.cast::<IDWriteTextLayout1>() else {
+        return;
+    };
+    let surrogate = |u: u16| (0xD800..0xE000).contains(&u);
+    let first_end = if surrogate(wide[r.start as usize]) { r.start + 2 } else { r.start + 1 };
+    let last_start = if surrogate(wide[r.end as usize - 1]) { r.end - 2 } else { r.end - 1 };
+    unsafe {
+        if last_start <= r.start {
+            let _ = l1.SetCharacterSpacing(room, room, 0.0, range(r));
+        } else {
+            let _ = l1.SetCharacterSpacing(room, 0.0, 0.0, range(r.start..first_end.min(r.end)));
+            let _ = l1.SetCharacterSpacing(0.0, room, 0.0, range(last_start..r.end));
+        }
+    }
+}
+
+/// A callout's icon, from Segoe Fluent Icons.
+fn callout_icon(kind: Callout) -> &'static str {
+    match kind {
+        Callout::Note => "\u{E946}",
+        Callout::Tip => "\u{EA80}",
+        Callout::Important => "\u{E8C9}",
+        Callout::Warning => "\u{E7BA}",
+        Callout::Caution => "\u{E783}",
     }
 }
 
