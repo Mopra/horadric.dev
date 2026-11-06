@@ -7,7 +7,7 @@ use std::f32::consts::{PI, TAU};
 use std::path::Path;
 use std::time::Duration;
 
-use horadric_core::folio::{AskState, Ending, ResultKind, Step, StepState};
+use horadric_core::folio::{AskState, Ending, Lane, ResultKind, Step, StepState};
 
 use crate::layout::Rect;
 
@@ -367,6 +367,20 @@ pub fn step_line(step: &Step) -> StepLine {
         }
     }
     line
+}
+
+/// A subagent's folded line with its model after its type, as the open
+/// lane's header names it: "Explore · haiku · 4 tool uses".
+pub fn with_model(line: String, lane: &Lane, model: &str) -> String {
+    let model = model.trim();
+    if model.is_empty() {
+        return line;
+    }
+    let who = if lane.agent_type.is_empty() { "Agent" } else { &lane.agent_type };
+    match line.strip_prefix(who) {
+        Some(rest) => format!("{who} \u{b7} {model}{rest}"),
+        None => format!("{line} \u{b7} {model}"),
+    }
 }
 
 /// A Grep's count in words: "12 matches in 4 files", "3 files".
@@ -1006,6 +1020,19 @@ mod tests {
         assert_eq!(domain("https://www.docs.rs/serde/latest"), "docs.rs");
         assert_eq!(domain("http://user@example.com:8080?q=1"), "example.com:8080");
         assert_eq!(domain("not a url"), "not a url");
+    }
+
+    #[test]
+    fn a_folded_lane_names_its_model_after_its_type() {
+        let lane = Lane {
+            agent_type: "Explore".into(),
+            ..Lane::default()
+        };
+        let line = "Explore \u{b7} 4 tool uses".to_string();
+        let said = with_model(line.clone(), &lane, "haiku");
+        assert_eq!(said, "Explore \u{b7} haiku \u{b7} 4 tool uses");
+        assert_eq!(with_model(line.clone(), &lane, ""), line);
+        assert_eq!(with_model("Agent".into(), &Lane::default(), "opus"), "Agent \u{b7} opus");
     }
 
     #[test]

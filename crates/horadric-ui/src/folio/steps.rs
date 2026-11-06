@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use horadric_core::folio::{
-    GlobResult, GrepLine, GrepResult, ReadResult, ResultKind, ShellResult, Step, StepKind,
+    GlobResult, GrepLine, Lane, GrepResult, ReadResult, ResultKind, ShellResult, Step, StepKind,
     StepState, ToolResult, WebSearchResult,
 };
 use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout, DWRITE_TEXT_ALIGNMENT_TRAILING};
@@ -81,15 +81,14 @@ impl Ctx<'_> {
             for step in steps {
                 y = self.step(&mut s, step, 0.0, y, cw, st);
             }
-        } else if let Some((id, lane)) = (steps.iter())
-            .filter_map(|s| Some((&s.id, s.lane.as_ref().filter(|l| at_work(s, l))?)))
+        } else if let Some((step, lane)) = (steps.iter())
+            .filter_map(|s| Some((s, s.lane.as_ref().filter(|l| at_work(s, l))?)))
             .next()
         {
             // A subagent at work says what it is doing even folded.
-            let line = flow::lane_line(lane, true);
             let r = Rect::new(NEST, y, cw - NEST, 18.0);
-            s.line(line, F::Small, r, self.pal.faint);
-            s.hit(r, Hit::Tr(Act::Agent(i, id.clone())));
+            self.lane_folded(&mut s, step, lane, r);
+            s.hit(r, Hit::Tr(Act::Agent(i, step.id.clone())));
             y += 18.0;
         }
         s.h = y;
@@ -183,13 +182,7 @@ impl Ctx<'_> {
         let mut y = y + STEP_H;
         if !open {
             if let Some(lane) = step.lane.as_ref().filter(|l| at_work(step, l)) {
-                let line = flow::lane_line(lane, true);
-                s.line(
-                    line,
-                    F::Small,
-                    Rect::new(x + NEST, y - 3.0, w - NEST, 16.0),
-                    self.pal.faint,
-                );
+                self.lane_folded(s, step, lane, Rect::new(x + NEST, y - 3.0, w - NEST, 16.0));
                 y += 14.0;
             }
             return y;
@@ -209,6 +202,20 @@ impl Ctx<'_> {
             y = self.step_images(s, step, dx, y + 6.0, dw);
         }
         y + 6.0
+    }
+
+    /// A subagent at work folded to one line in `r`: the rune its open
+    /// lane turns while it runs, then its type, model and progress.
+    fn lane_folded(&self, s: &mut Scene, step: &Step, lane: &Lane, r: Rect) {
+        let ink = self.pal.accent.mix(self.pal.fg, 0.35);
+        // The rune turns over with each tool it uses, as in the open lane.
+        let rune = lane.tool_uses.max(lane.steps.len() as u64) as usize;
+        let h = 11.0;
+        (s.items).push(Item::Rune(rune, r.x + 5.0, r.y + (r.h - h) / 2.0, h, ink, 1.3));
+        let model = step.input["model"].as_str().unwrap_or_default();
+        let line = look::with_model(flow::lane_line(lane, true), lane, model);
+        let text = Rect::new(r.x + 16.0, r.y, (r.w - 16.0).max(0.0), r.h);
+        s.line(line, F::Small, text, self.pal.faint);
     }
 
     /// The images a step's result carried, as thumbnails in rows.
