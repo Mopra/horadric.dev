@@ -22,7 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::vault::secret::{
     always_refused, approval, approved, changed_pins, command_path, fingerprint, git_config_parameters,
-    git_refs, git_version, log_line,
+    git_key_refused, git_refs, git_version, gh_helper, log_line, GitRefs,
     missing_line, npm_shim, once_only, pinned, plainly, runs_builds, valid_name, Mask, Owner, Pin,
     PinKind,
 };
@@ -838,6 +838,78 @@ fn no_attributes() -> Result<PathBuf, String> {
     Ok(file)
 }
 
+/// What an Always run of a pinned CLI never inherits: ways for the
+/// environment to name a program for git or ssh to run, or to send its
+/// traffic and token somewhere else.
+const QUIET_REMOVED: &[&str] = &[
+    "GIT_SSH_COMMAND",
+    "GIT_SSH",
+    "GIT_SSH_VARIANT",
+    "GIT_PROXY_COMMAND",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_EXEC_PATH",
+    "GIT_TEMPLATE_DIR",
+    "GIT_SSL_NO_VERIFY",
+    "GIT_SSL_CAINFO",
+    "GIT_SSL_CAPATH",
+    "GIT_CURL_VERBOSE",
+    "GIT_REDACT_COOKIES",
+    "GIT_CONFIG_SYSTEM",
+];
+
+/// `GIT_CONFIG_COUNT` and its `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n`.
+fn numbered_git_config(name: &str) -> bool {
+    let up = name.to_ascii_uppercase();
+    up == "GIT_CONFIG_COUNT" || up.starts_with("GIT_CONFIG_KEY_") || up.starts_with("GIT_CONFIG_VALUE_")
+}
+
+/// Whether a variable the run would inherit is taken away from it: the
+/// fixed list, every `GIT_TRACE*`, and numbered settings.
+fn quiet_removed(name: &str) -> bool {
+    let up = name.to_ascii_uppercase();
+    QUIET_REMOVED.contains(&up.as_str()) || up.starts_with("GIT_TRACE") || numbered_git_config(&up)
+}
+
+/// The variables, as the child will have them, that change where its
+/// traffic goes or whom it trusts: every `GIT_*` it keeps, proxies and
+/// CA bundles. Each goes into the fingerprint by name and SHA-256, so one
+/// set with `setx` since the Always asks again and the question names it.
+fn watched_env(env: &super::identity::SessionEnv) -> Vec<(String, String)> {
+    const NAMED: &[&str] = &[
+        "CURL_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
+        "REQUESTS_CA_BUNDLE",
+        "AWS_CA_BUNDLE",
+    ];
+    let watched = |k: &str| {
+        let up = k.to_ascii_uppercase();
+        (up.starts_with("GIT_") && !quiet_removed(&up))
+            || up.ends_with("_PROXY")
+            || up.starts_with("SSL_CERT_")
+            || NAMED.contains(&up.as_str())
+    };
+    let mut names: Vec<String> = std::env::vars_os()
+        .filter_map(|(k, _)| k.into_string().ok())
+        .chain(env.set.iter().map(|(k, _)| k.clone()))
+        .filter(|k| watched(k))
+        .map(|k| k.to_ascii_uppercase())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .filter_map(|n| {
+            let v = child_var(env, &n)?;
+            let h = hash(&mut v.as_bytes())?;
+            let n = n.replace([',', '=', '|'], "_");
+            Some((format!("the variable {n}"), h))
+        })
+        .collect()
+}
+
 /// The tree git knows with no file in it, as the source of attributes:
 /// then no `.gitattributes` in the project, or in a submodule, can name a
 /// filter or a diff or merge driver for git to run.
@@ -1052,7 +1124,12 @@ impl Runs {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let refused = refused.or_else(|| always_refused(&stem, args));
-        let fingerprint = pin_hashes(&pins).map(|h| fingerprint(&program.sha256, &h));
+        let fingerprint = pin_hashes(&pins).map(|mut h| {
+            if is_pinned {
+                h.extend(watched_env(env));
+            }
+            fingerprint(&program.sha256, &h)
+        });
         Runs {
             shim,
             pinned: is_pinned,
@@ -1132,6 +1209,37 @@ fn git_path(p: &str, base: &Path, var: &dyn Fn(&str) -> Option<String>) -> Optio
 struct GitRepo {
     dir: PathBuf,
     top: PathBuf,
+}
+
+/// Err naming the first setting of `file` that is not known to be data,
+/// since git could run a program from it with the token in reach. gh's
+/// own credential helper passes when its gh is one the agent could not
+/// have put there.
+fn git_keys_ok(refs: &GitRefs, file: &Path) -> Result<(), String> {
+    for k in &refs.keys {
+        let helper = (k.section == "credential" && k.name == "helper")
+            .then(|| gh_helper(&k.value))
+            .flatten();
+        let fine = match helper {
+            Some(gh) => {
+                let path = if Path::new(&gh).is_absolute() {
+                    Some(PathBuf::from(&gh))
+                } else {
+                    horadric_pty::find_program(&gh, &app_path(), &["", ".exe"], Path::is_file)
+                };
+                path.is_some_and(|p| p.is_file() && !changeable(&p))
+            }
+            None => !git_key_refused(k),
+        };
+        if !fine {
+            return Err(format!(
+                "{} in {} can make git run a program",
+                plainly(&k.shown()),
+                file.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Where an Always run's git may look for a repository: the one pinned,
@@ -1229,6 +1337,13 @@ fn git_pins(cwd: &Path, var: &dyn Fn(&str) -> Option<String>) -> Result<(Vec<Pin
             dir: gitdir.clone(),
             top: top.to_path_buf(),
         });
+        // Which repository it is lives in these two: swapped, the same
+        // paths would name another's config.
+        let dot = top.join(".git");
+        if dot.is_file() {
+            extra.push(file("this worktree's .git file", &dot));
+        }
+        extra.push(file("this worktree's commondir", &gitdir.join("commondir")));
         configs.push(("this repository's git config".into(), common.join("config")));
         configs.push(("this worktree's git config".into(), gitdir.join("config.worktree")));
         // A submodule has a config, hooks and attributes of its own that
@@ -1259,6 +1374,7 @@ fn git_pins(cwd: &Path, var: &dyn Fn(&str) -> Option<String>) -> Result<(Vec<Pin
         if refs.odd {
             return Err(format!("{} holds a value git could read otherwise than Horadric does", c.display()));
         }
+        git_keys_ok(&refs, c)?;
         for inc in refs.includes {
             let Some(p) = git_path(&inc, base, var) else {
                 return Err("a git config includes a file that cannot be placed".into());
@@ -1271,6 +1387,7 @@ fn git_pins(cwd: &Path, var: &dyn Fn(&str) -> Option<String>) -> Result<(Vec<Pin
                 if refs.odd {
                     return Err(format!("{} holds a value git could read otherwise than Horadric does", p.display()));
                 }
+                git_keys_ok(&refs, &p)?;
             }
             n += 1;
             pins.push(file(&format!("a git config included ({n})"), &p));
@@ -1805,8 +1922,13 @@ impl Job {
         // minute a question can wait.
         let asked_about = !self.unasked.is_empty();
         if asked_about && self.runs.pinned {
-            let now = pin_hashes(&self.runs.pins).map(|h| fingerprint(&self.pinned.sha256, &h));
-            if now.as_deref() != self.runs.fingerprint.as_deref() {
+            // Found again from the start, not only hashed again: a swapped
+            // commondir or .git file names other paths with the same names.
+            let now = Runs::of(&self.pinned, &self.env, &self.args, &self.cwd);
+            if now.pins != self.runs.pins
+                || now.fingerprint.as_deref() != self.runs.fingerprint.as_deref()
+                || now.refused != self.runs.refused
+            {
                 for n in &self.unasked {
                     self.log(n, "changed while asked");
                 }
@@ -1848,7 +1970,15 @@ impl Job {
     /// no program named by the environment. What git's own config still
     /// runs (filters, drivers, aliases) is pinned instead.
     fn quiet_git(&self, c: &mut Command, hooks: &Path, attributes: &Path) {
-        let own = child_var(&self.env, "GIT_CONFIG_PARAMETERS");
+        // Only an identity's own settings are kept; the app's environment
+        // could have been given any with `setx`.
+        let own = self
+            .env
+            .set
+            .iter()
+            .rev()
+            .find(|(k, _)| k.eq_ignore_ascii_case("GIT_CONFIG_PARAMETERS"))
+            .map(|(_, v)| v.clone());
         let hooks = hooks.to_string_lossy().replace('\\', "/");
         let attributes = attributes.to_string_lossy().replace('\\', "/");
         c.env(
@@ -1878,18 +2008,24 @@ impl Job {
         for (k, v) in set {
             c.env(k, v);
         }
-        for name in [
-            "GIT_SSH_COMMAND",
-            "GIT_ASKPASS",
-            "SSH_ASKPASS",
-            "GIT_EDITOR",
-            "GIT_EXTERNAL_DIFF",
-            "GIT_EXEC_PATH",
-            "GIT_TEMPLATE_DIR",
-        ] {
+        for name in QUIET_REMOVED {
             c.env_remove(name);
         }
+        // Traces, and settings by number from the app's environment, a
+        // `setx` away; an identity's own numbered settings stay.
+        let names = std::env::vars_os()
+            .filter_map(|(k, _)| k.into_string().ok())
+            .chain(self.env.set.iter().map(|(k, _)| k.clone()));
+        for k in names {
+            let identity = self.env.set.iter().any(|(s, _)| s.eq_ignore_ascii_case(&k));
+            if quiet_removed(&k) && !(identity && numbered_git_config(&k)) {
+                c.env_remove(&k);
+            }
+        }
         for (name, value) in [
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_EDITOR", ":"),
+            ("GIT_SEQUENCE_EDITOR", ":"),
             ("GIT_TERMINAL_PROMPT", "0"),
             ("GIT_PAGER", ""),
             ("GH_PAGER", ""),
@@ -2655,6 +2791,50 @@ mod tests {
         let env = git_place(None, &inner);
         assert!(!run(&inner, &["rev-parse", "--show-toplevel"], &env).status.success());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_git_setting_that_runs_a_program_leaves_only_once() {
+        let root = scratch("git-keys");
+        let repo = root.join("repo");
+        let git = repo.join(".git");
+        for d in ["objects", "refs"] {
+            std::fs::create_dir_all(git.join(d)).unwrap();
+        }
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(git.join("config"), "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://x/y\n").unwrap();
+        let none = |_: &str| None;
+        let (pins, _) = git_pins(&repo, &none).unwrap();
+        assert!(pins.iter().any(|p| p.what == "this worktree's commondir"));
+        std::fs::write(git.join("config"), "[core]\n\tbare = false\n[filter \"x\"]\n\tclean = sh -c evil\n").unwrap();
+        let why = git_pins(&repo, &none).unwrap_err();
+        assert!(why.contains("filter.x.clean") && why.contains("config"), "{why}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn proxies_and_git_variables_go_into_the_fingerprint() {
+        let env = super::super::identity::SessionEnv {
+            set: vec![
+                ("HTTPS_PROXY".into(), "http://a".into()),
+                ("GIT_TRACE".into(), "1".into()),
+                ("GIT_SSL_CAINFO".into(), "x".into()),
+                ("NODE_EXTRA_CA_CERTS".into(), "c.pem".into()),
+            ],
+            remove: Vec::new(),
+        };
+        let watched: Vec<String> = watched_env(&env).into_iter().map(|(w, _)| w).collect();
+        assert!(watched.contains(&"the variable HTTPS_PROXY".to_string()), "{watched:?}");
+        assert!(watched.contains(&"the variable NODE_EXTRA_CA_CERTS".to_string()));
+        // What the run never gets is not watched.
+        assert!(!watched.iter().any(|w| w.contains("GIT_TRACE") || w.contains("GIT_SSL_CAINFO")));
+        let other = super::super::identity::SessionEnv {
+            set: vec![("HTTPS_PROXY".into(), "http://b".into())],
+            remove: Vec::new(),
+        };
+        let a = watched_env(&env).into_iter().find(|(w, _)| w.ends_with("HTTPS_PROXY"));
+        let b = watched_env(&other).into_iter().find(|(w, _)| w.ends_with("HTTPS_PROXY"));
+        assert_ne!(a, b);
     }
 
     #[test]

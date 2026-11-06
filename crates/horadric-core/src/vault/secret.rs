@@ -492,21 +492,45 @@ pub fn always_refused(stem: &str, args: &[String]) -> Option<String> {
     None
 }
 
-/// What a git config file points at that decides what git runs: the
-/// files it includes (`include.path`, `includeIf.*.path`) and the hooks
-/// folder (`core.hooksPath`), as written. `odd` is set by anything this
-/// reading and git's could take differently: a `;`, `#` or `\` in a
-/// value outside quotes, or a `\` anywhere in one.
+/// What a git config file says that decides what git runs: the files it
+/// includes (`include.path`, `includeIf.*.path`), the hooks folder
+/// (`core.hooksPath`), and every key in it, for [`git_key_refused`].
+/// `odd` is set by anything this reading and git's could take
+/// differently: a `;`, `#` or `\` in a value outside quotes, a `\`
+/// anywhere in one, a header that does not close.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitRefs {
     pub includes: Vec<String>,
     pub hooks_path: Option<String>,
     pub odd: bool,
+    pub keys: Vec<GitKey>,
+}
+
+/// One setting of a git config: `[remote "origin"] url = x` is section
+/// `remote`, sub `origin`, name `url`. Section and name in lower case, as
+/// git compares them; the sub as written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitKey {
+    pub section: String,
+    pub sub: Option<String>,
+    pub name: String,
+    pub value: String,
+}
+
+impl GitKey {
+    /// `remote.origin.url`, for the question.
+    pub fn shown(&self) -> String {
+        match &self.sub {
+            Some(s) => format!("{}.{s}.{}", self.section, self.name),
+            None => format!("{}.{}", self.section, self.name),
+        }
+    }
 }
 
 pub fn git_refs(config: &str) -> GitRefs {
     let mut out = GitRefs::default();
     let mut section = String::new();
+    let mut sub: Option<String> = None;
     let config = config.strip_prefix('\u{feff}').unwrap_or(config);
     for line in config.lines() {
         let line = line.trim();
@@ -526,37 +550,166 @@ pub fn git_refs(config: &str) -> GitRefs {
             }
             let name = head.split([' ', '"', '.']).next().unwrap_or_default();
             section = name.to_ascii_lowercase();
+            let rest = head[name.len()..].trim();
+            sub = if let Some(q) = rest.strip_prefix('"') {
+                Some(q.strip_suffix('"').unwrap_or(q).to_string())
+            } else {
+                rest.strip_prefix('.').map(str::to_string)
+            };
             // `[include] path = x` on one line.
             after.trim()
         } else {
             line
         };
-        let Some((key, value)) = line.split_once('=') else {
+        if line.is_empty() {
             continue;
-        };
+        }
+        // A key alone is a true boolean.
+        let (key, value) = line.split_once('=').unwrap_or((line, "true"));
         let key = key.trim().to_ascii_lowercase();
         let value = value.trim();
+        // As git reads a value: quotes dropped, `\\ \" \n \t \b` unescaped.
+        // Anything else (another escape, a line continued, a comment
+        // after the value) is read as odd rather than guessed at.
         let mut quoted = false;
-        for c in value.chars() {
+        let mut read = String::with_capacity(value.len());
+        let mut chars = value.chars();
+        while let Some(c) = chars.next() {
             match c {
                 '"' => quoted = !quoted,
-                '\\' => out.odd = true,
+                '\\' => match chars.next() {
+                    Some('\\') => read.push('\\'),
+                    Some('"') => read.push('"'),
+                    Some('n') => read.push('\n'),
+                    Some('t') => read.push('\t'),
+                    Some('b') => read.push('\u{8}'),
+                    _ => out.odd = true,
+                },
                 ';' | '#' if !quoted => out.odd = true,
-                _ => {}
+                c => read.push(c),
             }
         }
-        let value = value
-            .strip_prefix('"')
-            .and_then(|v| v.strip_suffix('"'))
-            .unwrap_or(value)
-            .to_string();
+        if quoted {
+            out.odd = true;
+        }
+        let value = read;
         match (section.as_str(), key.as_str()) {
-            ("include" | "includeif", "path") => out.includes.push(value),
-            ("core", "hookspath") => out.hooks_path = Some(value),
+            ("include" | "includeif", "path") => out.includes.push(value.clone()),
+            ("core", "hookspath") => out.hooks_path = Some(value.clone()),
             _ => {}
         }
+        out.keys.push(GitKey {
+            section: section.clone(),
+            sub: sub.clone(),
+            name: key,
+            value,
+        });
     }
     out
+}
+
+/// Credential helpers that are git's own or the system's, by name.
+const KNOWN_HELPERS: &[&str] = &["", "manager", "manager-core", "wincred"];
+
+/// gh's own helper, as `gh auth setup-git` writes it: the path to a gh,
+/// for the caller to check is one the agent could not have put there.
+/// None for any other value.
+pub fn gh_helper(value: &str) -> Option<String> {
+    let rest = value.trim().strip_prefix('!')?;
+    let rest = rest.trim();
+    let (program, tail) = match rest.strip_prefix('"').or_else(|| rest.strip_prefix('\'')) {
+        Some(q) => {
+            let end = q.find(['"', '\''])?;
+            (&q[..end], q[end + 1..].trim())
+        }
+        None => rest.split_once(' ').map(|(p, t)| (p, t.trim()))?,
+    };
+    let file = program.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
+    (tail == "auth git-credential" && (file == "gh" || file == "gh.exe")).then(|| program.to_string())
+}
+
+/// Why a git config setting leaves only Once: anything not known to be
+/// data. Git runs programs from config in many places (filters, drivers,
+/// `core.sshCommand`, `credential.helper`, `url.*.insteadOf` to a host of
+/// the agent's), so the list is of what is allowed, not what is not.
+/// Those Horadric overrides for the run (hooks, fsmonitor, attributes
+/// file, editor, pager) are allowed, as is gh's own credential helper,
+/// whose program the caller checks.
+pub fn git_key_refused(k: &GitKey) -> bool {
+    let sub = k.sub.is_some();
+    let v = k.value.to_ascii_lowercase();
+    let off = matches!(v.as_str(), "false" | "no" | "off" | "0" | "");
+    let name = k.name.as_str();
+    let allowed = match k.section.as_str() {
+        "include" | "includeif" => name == "path",
+        "user" => !sub && matches!(name, "name" | "email" | "signingkey" | "usetabs"),
+        "commit" | "tag" => !sub && name == "gpgsign" && off,
+        "init" => !sub && name == "defaultbranch",
+        "core" => {
+            !sub && matches!(
+                name,
+                "repositoryformatversion"
+                    | "filemode"
+                    | "bare"
+                    | "logallrefupdates"
+                    | "symlinks"
+                    | "ignorecase"
+                    | "autocrlf"
+                    | "eol"
+                    | "safecrlf"
+                    | "longpaths"
+                    | "quotepath"
+                    | "precomposeunicode"
+                    | "compression"
+                    | "packedgitlimit"
+                    | "fscache"
+                    | "preloadindex"
+                    | "untrackedcache"
+                    | "checkstat"
+                    | "trustctime"
+                    | "excludesfile"
+                    | "whitespace"
+                    // Overridden for every Always run.
+                    | "hookspath"
+                    | "fsmonitor"
+                    | "attributesfile"
+                    | "editor"
+                    | "pager"
+            )
+        }
+        "sequence" => !sub && name == "editor",
+        "remote" => {
+            sub && matches!(name, "url" | "pushurl" | "fetch" | "push" | "tagopt" | "prune" | "gh-resolved" | "mirror")
+                && !v.starts_with("ext::")
+        }
+        "branch" => {
+            sub && matches!(
+                name,
+                "remote" | "merge" | "rebase" | "pushremote" | "vscode-merge-base" | "gh-merge-base" | "description"
+            )
+        }
+        "pull" => !sub,
+        "push" => !sub && matches!(name, "default" | "autosetupremote" | "followtags"),
+        "fetch" => !sub && matches!(name, "prune" | "prunetags"),
+        "merge" => !sub && matches!(name, "ff" | "conflictstyle"),
+        "rebase" => !sub && matches!(name, "autostash" | "autosquash"),
+        "diff" => !sub && matches!(name, "renames" | "algorithm" | "colormoved" | "mnemonicprefix"),
+        "format" => !sub && name == "pretty",
+        "color" | "column" | "advice" | "status" | "log" | "gc" | "pack" | "index" | "feature"
+        | "maintenance" | "gui" => true,
+        "safe" => !sub && name == "directory",
+        "credential" => match name {
+            "helper" => KNOWN_HELPERS.contains(&v.as_str()) || gh_helper(&k.value).is_some(),
+            "provider" | "username" | "usehttppath" => true,
+            _ => false,
+        },
+        "http" => matches!(name, "sslbackend" | "schannelcheckrevoke" | "schannelusesslcainfo" | "postbuffer" | "version"),
+        // Aliases never replace one of git's own commands, and these CLIs
+        // run only git's own.
+        "alias" => true,
+        _ => false,
+    };
+    !allowed
 }
 
 /// Major and minor of `git --version`'s line: `git version 2.56.0.windows.4`.
@@ -1375,13 +1528,20 @@ mod tests {
     #[test]
     fn a_git_config_names_its_includes_and_hooks() {
         let text = "[core]\n\thooksPath = .githooks\n[include]\n\tpath = ~/extra.gitconfig\n[includeIf \"gitdir:C:/work/\"]\n  path = \"work.gitconfig\"\n# [include]\n; path = no\n[user]\n\tpath = not-an-include\n[Include] path = inline\n";
+        let refs = git_refs(text);
+        assert_eq!(refs.includes, ["~/extra.gitconfig", "work.gitconfig", "inline"]);
+        assert_eq!(refs.hooks_path.as_deref(), Some(".githooks"));
+        assert!(!refs.odd);
+        let shown: Vec<String> = refs.keys.iter().map(GitKey::shown).collect();
         assert_eq!(
-            git_refs(text),
-            GitRefs {
-                includes: vec!["~/extra.gitconfig".into(), "work.gitconfig".into(), "inline".into()],
-                hooks_path: Some(".githooks".into()),
-                odd: false,
-            }
+            shown,
+            [
+                "core.hookspath",
+                "include.path",
+                "includeif.gitdir:C:/work/.path",
+                "user.path",
+                "include.path"
+            ]
         );
         assert_eq!(git_refs(""), GitRefs::default());
         // Anything git could read otherwise than this does.
@@ -1389,15 +1549,59 @@ mod tests {
             "[core]\n\thooksPath = a ; b\n",
             "[core]\n\thooksPath = a # b\n",
             "[include]\n\tpath = C:\\x\n",
-            "[include]\n\tpath = \"a\\\"b\"\n",
+            "[include]\n\tpath = a\\\n",
+            "[include]\n\tpath = \"a\n",
             "[core\n",
             "[includeIf \"gitdir:x]\"]\n\tpath = y\n",
         ] {
             assert!(git_refs(odd).odd, "{odd}");
         }
         assert!(!git_refs("[alias]\n\tx = \"!echo a;b\"\n").odd, "quoted ; is a value");
+        // Escapes are read as git reads them.
+        let escaped = git_refs("[include]\n\tpath = \"C:\\\\a b\\\\c\"\n");
+        assert!(!escaped.odd);
+        assert_eq!(escaped.includes, [r"C:\a b\c"]);
         // A byte order mark does not hide the first section.
         assert_eq!(git_refs("\u{feff}[core]\n\thooksPath = h\n").hooks_path.as_deref(), Some("h"));
+    }
+
+    fn refused_keys(text: &str) -> Vec<String> {
+        git_refs(text).keys.iter().filter(|k| git_key_refused(k)).map(GitKey::shown).collect()
+    }
+
+    #[test]
+    fn only_git_settings_known_to_be_data_keep_always() {
+        let plain = "[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tbare = false\n\tlogallrefupdates = true\n\tsymlinks = false\n\tignorecase = true\n\thooksPath = .husky\n\teditor = code --wait\n[remote \"origin\"]\n\turl = https://github.com/o/r.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch \"main\"]\n\tremote = origin\n\tmerge = refs/heads/main\n[user]\n\tname = A\n\temail = a@b.c\n[init]\n\tdefaultBranch = main\n[pull]\n\trebase = true\n[credential]\n\thelper = manager\n[credential \"https://github.com\"]\n\thelper =\n\thelper = !'C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe' auth git-credential\n[alias]\n\tst = status\n[color]\n\tui = auto\n[commit]\n\tgpgsign = false\n[safe]\n\tdirectory = C:/x\n[http]\n\tsslbackend = schannel\n";
+        assert!(refused_keys(plain).is_empty(), "{:?}", refused_keys(plain));
+        for (text, key) in [
+            ("[filter \"x\"]\n\tclean = sh -c evil\n", "filter.x.clean"),
+            ("[filter \"x\"]\n\tprocess = evil\n", "filter.x.process"),
+            ("[core]\n\tsshCommand = evil\n", "core.sshcommand"),
+            ("[core]\n\tgitProxy = evil\n", "core.gitproxy"),
+            ("[diff \"x\"]\n\ttextconv = evil\n", "diff.x.textconv"),
+            ("[merge \"x\"]\n\tdriver = evil\n", "merge.x.driver"),
+            ("[credential]\n\thelper = !evil\n", "credential.helper"),
+            ("[credential]\n\thelper = store\n", "credential.helper"),
+            ("[credential]\n\thelper = !C:/x/evil.exe auth git-credential\n", "credential.helper"),
+            ("[url \"https://evil.example/\"]\n\tinsteadOf = https://github.com/\n", "url.https://evil.example/.insteadof"),
+            ("[http]\n\tproxy = http://evil\n", "http.proxy"),
+            ("[http]\n\tsslVerify = false\n", "http.sslverify"),
+            ("[http \"https://github.com\"]\n\textraHeader = x\n", "http.https://github.com.extraheader"),
+            ("[commit]\n\tgpgsign = true\n", "commit.gpgsign"),
+            ("[gpg]\n\tprogram = evil\n", "gpg.program"),
+            ("[submodule \"s\"]\n\tupdate = !evil\n", "submodule.s.update"),
+            ("[lfs]\n\turl = x\n", "lfs.url"),
+            ("[remote \"o\"]\n\turl = ext::sh -c evil\n", "remote.o.url"),
+            ("[remote \"o\"]\n\tuploadpack = evil\n", "remote.o.uploadpack"),
+            ("[protocol]\n\tallow = always\n", "protocol.allow"),
+            ("[core]\n\tfsmonitorHookVersion = 2\n", "core.fsmonitorhookversion"),
+        ] {
+            assert_eq!(refused_keys(text), [key], "{text}");
+        }
+        assert_eq!(gh_helper("!gh auth git-credential").as_deref(), Some("gh"));
+        assert_eq!(gh_helper("!/usr/bin/gh auth git-credential").as_deref(), Some("/usr/bin/gh"));
+        assert_eq!(gh_helper("!gh auth git-credential; evil"), None);
+        assert_eq!(gh_helper("!evil auth git-credential"), None);
     }
 
     const SHIM: &str = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\vercel\\dist\\index.js\" %*\r\n";
