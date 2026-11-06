@@ -129,7 +129,21 @@ const ONCE_ONLY: &[&str] = &[
     "sh", "bash", "zsh", "fish", "dash", "cmd", "powershell", "pwsh", "python", "python3", "py",
     "pythonw", "node", "deno", "bun", "bunx", "perl", "ruby", "php", "lua", "java", "dotnet",
     "go", "rustc", "r", "rscript", "julia", "busybox", "wsl", "env", "time", "start", "xargs",
-    "find", "forfiles",
+    "find", "forfiles", "git-bash", "git-cmd", "mintty", "conhost", "ubuntu", "debian", "kali",
+    "opensuse", "expect", "script",
+    // Wrappers that run whatever command line follows them.
+    "nohup", "nice", "timeout", "stdbuf", "chroot", "watch", "sudo", "gsudo", "runas",
+    "schtasks", "at", "wmic", "pcalua", "explorer",
+    // Tools whose own language runs commands: awk's system(), sed's e,
+    // an editor's :!, tar's --to-command, jq and yq through modules and env.
+    "awk", "gawk", "mawk", "nawk", "sed", "vim", "vi", "nvim", "gvim", "tar", "bsdtar", "jq",
+    "yq",
+    // Browsers and editors open anything they are pointed at, extensions
+    // and tasks included.
+    "msedge", "chrome", "firefox", "code", "code-insiders", "cursor",
+    // Node runners that execute the project's files.
+    "tsx", "ts-node", "zx", "nodemon", "vite-node", "esno", "jest", "vitest", "mocha", "turbo",
+    "nx", "lerna",
     // Package managers and build runners, which run the project's scripts.
     "npm", "npx", "pnpm", "pnpx", "yarn", "uv", "uvx", "pip", "pipx", "poetry", "conda",
     "composer", "bundle", "rake", "make", "just", "cargo", "gradle", "mvn", "ant", "msbuild",
@@ -138,7 +152,8 @@ const ONCE_ONLY: &[&str] = &[
     "git", "ssh", "scp", "sftp", "terraform", "tofu", "pulumi", "podman",
     // Windows' own ways to run a script or a library.
     "cscript", "wscript", "mshta", "rundll32", "regsvr32", "certutil", "bitsadmin",
-    "installutil", "msiexec",
+    "installutil", "msiexec", "cmstp", "odbcconf", "msxsl", "hh", "infdefaultinstall",
+    "ieexec", "dnscmd", "presentationhost",
 ];
 
 /// A file or folder whose content an Always is bound to, because changing
@@ -658,6 +673,96 @@ mod tests {
     fn pin_paths(program: &str, vars: &[(&str, &str)]) -> Option<Vec<(String, String, bool)>> {
         let env = env_of(vars);
         pinned(program, &env).map(|p| p.into_iter().map(|p| (p.what, p.path, p.tree)).collect())
+    }
+
+    #[test]
+    fn whatever_runs_a_command_line_is_once_only() {
+        let families: [(&str, &[&str]); 7] = [
+            (
+                "shells and consoles",
+                &[
+                    r"C:\Program Files\Git\git-bash.exe",
+                    r"C:\Program Files\Git\git-cmd.exe",
+                    r"C:\Program Files\Git\usr\bin\mintty.exe",
+                    r"C:\Windows\System32\conhost.exe",
+                    r"C:\Windows\System32\wsl.exe",
+                    r"C:\Windows\System32\bash.exe",
+                    r"C:\Users\a\AppData\Local\Microsoft\WindowsApps\ubuntu2204.exe",
+                    "expect",
+                    "script",
+                ],
+            ),
+            (
+                "wrappers",
+                &[
+                    r"C:\Program Files\Git\usr\bin\nohup.exe",
+                    "nice",
+                    r"C:\Windows\System32\timeout.exe",
+                    "stdbuf",
+                    "chroot",
+                    "watch",
+                    r"C:\Windows\System32\sudo.exe",
+                    "gsudo",
+                    r"C:\Windows\System32\runas.exe",
+                    r"C:\Windows\System32\schtasks.exe",
+                    r"C:\Windows\System32\at.exe",
+                    r"C:\Windows\System32\wbem\WMIC.exe",
+                    r"C:\Windows\System32\pcalua.exe",
+                    r"C:\Windows\explorer.exe",
+                    "xargs",
+                ],
+            ),
+            (
+                "languages with a system()",
+                &[
+                    r"C:\Program Files\Git\usr\bin\gawk.exe",
+                    "awk",
+                    "mawk",
+                    r"C:\Program Files\Git\usr\bin\sed.exe",
+                    "vim",
+                    "vi",
+                    "nvim",
+                    r"C:\Windows\System32\tar.exe",
+                    "bsdtar",
+                    "jq",
+                    "yq",
+                ],
+            ),
+            (
+                "browsers and editors",
+                &[
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                    "chrome",
+                    "firefox",
+                    r"C:\Users\a\AppData\Local\Programs\Microsoft VS Code\Code.exe",
+                ],
+            ),
+            ("node runners", &["tsx", "ts-node", "zx", "nodemon", "jest", "vitest", "turbo", "nx"]),
+            (
+                "Windows' own",
+                &[
+                    r"C:\Windows\System32\cmstp.exe",
+                    r"C:\Windows\System32\odbcconf.exe",
+                    "msxsl",
+                    r"C:\Windows\hh.exe",
+                    r"C:\Windows\System32\InfDefaultInstall.exe",
+                    "ieexec",
+                    "dnscmd",
+                    r"C:\Windows\System32\PresentationHost.exe",
+                    "mshta",
+                ],
+            ),
+            ("infrastructure", &["terraform", "tofu", "pulumi", "podman", "git"]),
+        ];
+        for (family, programs) in families {
+            for p in programs {
+                assert!(once_only(p), "{family}: {p}");
+            }
+        }
+        // Ordinary CLIs keep Always.
+        for p in ["curl", "stripe", "nano", "ssh-agent"] {
+            assert!(!once_only(p), "{p}");
+        }
     }
 
     #[test]
