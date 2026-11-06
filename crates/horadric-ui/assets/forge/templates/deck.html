@@ -3,121 +3,138 @@
 <head>
 <meta charset="utf-8">
 <title>Deck title</title>
-<!-- The house stylesheet, linked relatively so the deck works wherever it is served from. -->
+<!--
+  Restyle: change the variables at the top of deck.css (accent, colours,
+  fonts, type size, spacing). Dark: <html lang="en" class="dark">, or
+  class="slide dark" on one slide.
+  Add a slide: copy a <section> whose layout fits and change its words.
+  The second class names the layout: title, section, split, cards, stat,
+  chart, table, quote, image, end, or none for a heading and points.
+  Speaker notes go in <aside class="notes"> inside the slide.
+-->
 <link rel="stylesheet" href="deck.css">
 </head>
 <body>
 
 <section class="slide title">
-  <div class="runes"><i class="rune fehu"></i><i class="rune raidho"></i><i class="rune tiwaz"></i></div>
   <p class="kicker">Project or team</p>
-  <h1>The deck's title, one clear line</h1>
-  <p class="lead">A subtitle that says what the reader gets from it.</p>
-  <p class="meta">November 2026 · Presenter's name</p>
+  <h1>The deck's title in one clear line</h1>
+  <p class="lead">A subtitle that says what the audience gets from it.</p>
+  <p class="small">November 2026, presenter's name</p>
   <aside class="notes">Speaker notes go in an aside like this one, inside the slide. They show only when presenting.</aside>
 </section>
 
 <section class="slide">
   <p class="kicker">Context</p>
-  <h2>Where things stand</h2>
+  <h2>A heading that states the point</h2>
   <ul>
     <li>One point per line, short enough to read at a glance</li>
-    <li>Three to five points on a slide, never a wall of text</li>
-    <li>The detail belongs in the notes, not on the slide</li>
+    <li>Three to five points, never a wall of text</li>
+    <li>The detail belongs in the notes</li>
   </ul>
-  <div class="foot"><span>Deck title</span><span>02</span></div>
+  <aside class="notes">A slide with no layout class: a kicker, a heading and a few points.</aside>
 </section>
 
 <section class="slide section">
-  <div class="part">02</div>
-  <p class="kicker" style="--rune: var(--rune-raidho)">Part two</p>
+  <p class="kicker">Part two</p>
   <h1>A section break names what comes next</h1>
 </section>
 
-<section class="slide">
+<section class="slide split">
+  <div class="cols">
+    <div>
+      <p class="kicker">The problem</p>
+      <h2>A claim on the left</h2>
+      <p class="lead">One or two lines that frame it.</p>
+    </div>
+    <ul>
+      <li>The evidence on the right</li>
+      <li>Each point backs the claim</li>
+      <li>Swap the list for a paragraph or a card</li>
+    </ul>
+  </div>
+</section>
+
+<section class="slide cards">
   <p class="kicker">Options</p>
   <h2>Three ways to go</h2>
-  <div class="columns three">
+  <div class="cols">
     <div class="card">
-      <p class="legend">Option A</p>
+      <p class="kicker">Option A</p>
       <h3>The first</h3>
       <p>What it is, what it costs and what it gives.</p>
     </div>
     <div class="card">
-      <p class="legend">Option B</p>
+      <p class="kicker">Option B</p>
       <h3>The second</h3>
       <p>The same, so the options compare line for line.</p>
     </div>
     <div class="card">
-      <p class="legend">Option C</p>
+      <p class="kicker">Option C</p>
       <h3>The third</h3>
-      <p>Two columns: drop the class three and a card.</p>
+      <p>Two cards or four work too: the columns follow.</p>
     </div>
   </div>
-  <div class="foot"><span>Deck title</span><span>04</span></div>
 </section>
 
-<section class="slide figure">
-  <p class="kicker" style="--rune: var(--rune-kenaz)">The result</p>
-  <div class="number">42<span class="unit">%</span></div>
-  <p class="lead">One number, large, and a sentence on why it matters.</p>
-  <div class="foot"><span>Deck title</span><span>05</span></div>
+<section class="slide stat">
+  <p class="kicker">The result</p>
+  <h2>Numbers that make the case</h2>
+  <div class="cols">
+    <div><strong>42%</strong><p>What the first number means</p></div>
+    <div><strong>3.5x</strong><p>Why the second one matters</p></div>
+    <div><strong>12 wk</strong><p>Keep one to three of them</p></div>
+  </div>
+  <aside class="notes">One number alone is the strongest version: delete the other two columns.</aside>
 </section>
 
-<section class="slide">
+<section class="slide chart">
   <p class="kicker">Over time</p>
   <h2>A chart makes one point</h2>
-  <div class="screen chart">
-    <div class="chart-row"><span>Last year</span><div class="track"><div class="fill" style="--v: 38%"></div></div><span class="value">38</span></div>
-    <div class="chart-row"><span>First half</span><div class="track"><div class="fill" style="--v: 52%"></div></div><span class="value">52</span></div>
-    <div class="chart-row"><span>Second half</span><div class="track"><div class="fill" style="--v: 61%"></div></div><span class="value">61</span></div>
-    <div class="chart-row lit"><span>This year</span><div class="track"><div class="fill" style="--v: 84%"></div></div><span class="value">84</span></div>
+  <div class="bars">
+    <div style="--v: 38%"><span>Last year</span><i></i><b>38</b></div>
+    <div style="--v: 52%"><span>First half</span><i></i><b>52</b></div>
+    <div style="--v: 61%"><span>Second half</span><i></i><b>61</b></div>
+    <div class="hi" style="--v: 84%"><span>This year</span><i></i><b>84</b></div>
   </div>
   <p class="small">Source: where the numbers come from.</p>
-  <aside class="notes">Light the bar that makes the point with the class lit. Each bar's length is the percentage in its style.</aside>
-  <div class="foot"><span>Deck title</span><span>06</span></div>
+  <aside class="notes">Each bar's length is the --v on its row. The row with class hi is lit in the accent.</aside>
 </section>
 
-<section class="slide">
+<section class="slide table">
   <p class="kicker">The numbers</p>
   <h2>A table for what needs comparing</h2>
-  <div class="screen table">
-    <table>
-      <thead><tr><th>Option</th><th>What it gives</th><th class="num">Cost</th><th class="num">Weeks</th></tr></thead>
-      <tbody>
-        <tr><td>The first</td><td>The quick win</td><td class="num">12,000</td><td class="num">3</td></tr>
-        <tr class="lit"><td>The second</td><td>The one we recommend</td><td class="num">28,500</td><td class="num">6</td></tr>
-        <tr><td>The third</td><td>Everything, later</td><td class="num">64,000</td><td class="num">14</td></tr>
-      </tbody>
-    </table>
-  </div>
+  <table>
+    <thead><tr><th>Option</th><th>What it gives</th><th class="num">Cost</th><th class="num">Weeks</th></tr></thead>
+    <tbody>
+      <tr><td>The first</td><td>The quick win</td><td class="num">12,000</td><td class="num">3</td></tr>
+      <tr class="hi"><td>The second</td><td>The one we recommend</td><td class="num">28,500</td><td class="num">6</td></tr>
+      <tr><td>The third</td><td>Everything, later</td><td class="num">64,000</td><td class="num">14</td></tr>
+    </tbody>
+  </table>
   <p class="small">Prices in EUR, excluding VAT.</p>
-  <div class="foot"><span>Deck title</span><span>07</span></div>
 </section>
 
 <section class="slide quote">
-  <i class="rune ansuz"></i>
-  <blockquote>A customer's words say more than our summary of them.</blockquote>
-  <p class="legend who">Name, role, company</p>
+  <blockquote>“A customer's own words say more than our summary of them.”</blockquote>
+  <p class="small"><b>Name Surname</b>, role at company</p>
 </section>
 
 <section class="slide image">
-  <p class="kicker" style="--rune: var(--rune-sowilo)">In practice</p>
+  <p class="kicker">In practice</p>
   <h2>A picture and what to see in it</h2>
-  <p>Two or three lines that point at what the picture shows.</p>
-  <div class="picture">
-    <!-- Put the picture here: <img src="picture.png" alt="What it shows"> -->
-    <i class="rune sowilo"></i>
-    <span class="legend">Picture</span>
-  </div>
-  <div class="foot"><span>Deck title</span><span>09</span></div>
+  <p class="lead">Two lines that point at what the picture shows.</p>
+  <figure>
+    <!-- Replace this text with <img src="picture.png" alt="What it shows"> -->
+    Picture, filling the right half
+  </figure>
 </section>
 
 <section class="slide end">
-  <div class="runes"><i class="rune algiz"></i><i class="rune ansuz"></i><i class="rune dagaz"></i></div>
-  <h2>The ask, or the next step</h2>
+  <p class="kicker">Next step</p>
+  <h1>The ask, in one line</h1>
   <p class="lead">Who does what, by when.</p>
-  <p class="contact">name@company.com</p>
+  <p class="small"><a href="mailto:name@company.com">name@company.com</a></p>
 </section>
 
 </body>
