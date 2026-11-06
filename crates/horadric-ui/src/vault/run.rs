@@ -22,7 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::vault::secret::{
     always_refused, approval, approved, changed_pins, command_path, fingerprint, git_config_parameters,
-    git_refs, log_line,
+    git_refs, git_version, log_line,
     missing_line, npm_shim, once_only, pinned, plainly, runs_builds, valid_name, Mask, Owner, Pin,
     PinKind,
 };
@@ -818,6 +818,50 @@ fn no_hooks() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// The attributes file an Always run's git is pointed at, beside
+/// [`no_hooks`] and kept empty the same way, so the user's own global one
+/// names no filter or driver either.
+fn no_attributes() -> Result<PathBuf, String> {
+    let file = horadric_hooks::state_dir()
+        .ok_or("cannot find Horadric's own folder")?
+        .join("no-attributes");
+    if !file.exists() {
+        std::fs::write(&file, b"").map_err(|e| format!("cannot make {}: {e}", file.display()))?;
+    }
+    let empty = std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file() && m.len() == 0);
+    if !empty {
+        return Err(format!(
+            "Refused: {} should be an empty file and is not, so git could run what it names.",
+            file.display()
+        ));
+    }
+    Ok(file)
+}
+
+/// The tree git knows with no file in it, as the source of attributes:
+/// then no `.gitattributes` in the project, or in a submodule, can name a
+/// filter or a diff or merge driver for git to run.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// Whether the git a CLI would find reads `GIT_ATTR_SOURCE`, which came in
+/// git 2.40. Asked once; no git at all is fine, since nothing runs one.
+fn git_takes_attr_source() -> bool {
+    static KNOWN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *KNOWN.get_or_init(|| {
+        let Some(git) = horadric_pty::find_program("git", &app_path(), &[".exe"], Path::is_file) else {
+            return true;
+        };
+        horadric_hooks::no_window(&mut Command::new(git))
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .and_then(|o| git_version(&String::from_utf8_lossy(&o.stdout)))
+            .is_some_and(|v| v >= (2, 40))
+    })
+}
+
 /// Whether this user could put a file in `dir` without elevation.
 fn writable_dir(dir: &Path) -> bool {
     const WRITE_DAC: u32 = 0x4_0000;
@@ -1131,6 +1175,11 @@ fn git_pins(cwd: &Path, var: &dyn Fn(&str) -> Option<String>) -> Result<Vec<Pin>
         };
         configs.push(("this repository's git config".into(), common.join("config")));
         configs.push(("this worktree's git config".into(), gitdir.join("config.worktree")));
+        // A submodule has a config, hooks and attributes of its own that
+        // nothing here pins, and git can be led into one.
+        if top.join(".gitmodules").exists() || common.join("modules").exists() {
+            return Err("this repository has submodules, whose git config is not pinned".into());
+        }
         hooks = Some(common.join("hooks"));
         extra.push(file("this repository's info/attributes", &common.join("info").join("attributes")));
         extra.push(file("this repository's .gitattributes", &top.join(".gitattributes")));
@@ -1373,6 +1422,9 @@ fn once_why(pinned: &Pinned, runs: &Runs, place: &Place) -> Option<String> {
     }
     if let Some(why) = &runs.refused {
         return Some(why.clone());
+    }
+    if runs.pinned && !git_takes_attr_source() {
+        return Some("the git on PATH is older than 2.40, too old to be kept from the project's attributes".into());
     }
     if runs.pinned && runs.fingerprint.is_none() {
         return Some("a file that decides what it runs could not be read through, or is a link".into());
@@ -1739,9 +1791,10 @@ impl Job {
     /// agent: no hooks, no fsmonitor, no bare repository found by itself,
     /// no program named by the environment. What git's own config still
     /// runs (filters, drivers, aliases) is pinned instead.
-    fn quiet_git(&self, c: &mut Command, hooks: &Path) {
+    fn quiet_git(&self, c: &mut Command, hooks: &Path, attributes: &Path) {
         let own = child_var(&self.env, "GIT_CONFIG_PARAMETERS");
         let hooks = hooks.to_string_lossy().replace('\\', "/");
+        let attributes = attributes.to_string_lossy().replace('\\', "/");
         c.env(
             "GIT_CONFIG_PARAMETERS",
             git_config_parameters(
@@ -1750,9 +1803,18 @@ impl Job {
                     ("core.hooksPath", &hooks),
                     ("core.fsmonitor", "false"),
                     ("safe.bareRepository", "explicit"),
+                    ("core.attributesFile", &attributes),
+                    // A repository added inside the project is a submodule
+                    // to git, with a config and attributes of its own that
+                    // nothing here pins: git is kept out of them.
+                    ("diff.ignoreSubmodules", "all"),
+                    ("submodule.recurse", "false"),
+                    ("fetch.recurseSubmodules", "false"),
+                    ("status.submoduleSummary", "false"),
                 ],
             ),
         );
+        c.env("GIT_ATTR_SOURCE", EMPTY_TREE);
         for name in [
             "GIT_SSH_COMMAND",
             "GIT_ASKPASS",
@@ -1797,7 +1859,7 @@ impl Job {
     /// The command to start; `path` is the locked PATH of an Always run.
     /// `hooks` is the empty hooks folder an Always run of a pinned CLI
     /// gives the git it runs.
-    fn command(&self, path: Option<&OsString>, hooks: Option<&Path>) -> Command {
+    fn command(&self, path: Option<&OsString>, quiet: Option<&(PathBuf, PathBuf)>) -> Command {
         let program = &self.pinned.path;
         let mut c = if let Some(shim) = &self.runs.shim {
             let mut c = Command::new(&shim.node);
@@ -1842,8 +1904,8 @@ impl Job {
             c.env_remove("NODE_PATH");
             c.env_remove("NODE_OPTIONS");
         }
-        if let Some(hooks) = hooks {
-            self.quiet_git(&mut c, hooks);
+        if let Some((hooks, attributes)) = quiet {
+            self.quiet_git(&mut c, hooks, attributes);
         }
         for s in &self.secrets {
             c.env(&s.name, &s.value);
@@ -1867,7 +1929,9 @@ impl Job {
             let temp = std::env::temp_dir();
             locked_path(own, node, &[&self.dir, &self.cwd, &temp])
         });
-        let hooks = match (self.always && self.runs.pinned).then(no_hooks) {
+        let quiet = (self.always && self.runs.pinned)
+            .then(|| -> Result<(PathBuf, PathBuf), String> { Ok((no_hooks()?, no_attributes()?)) });
+        let hooks = match quiet {
             Some(Err(why)) => {
                 out.fail(&why);
                 return;
@@ -1875,7 +1939,7 @@ impl Job {
             Some(Ok(h)) => Some(h),
             None => None,
         };
-        let mut child = match self.command(locked.as_ref().map(|(p, _)| p), hooks.as_deref()).spawn() {
+        let mut child = match self.command(locked.as_ref().map(|(p, _)| p), hooks.as_ref()).spawn() {
             Ok(c) => c,
             Err(e) => {
                 out.fail(&format!("cannot start {}: {e}", self.pinned.path.display()));
@@ -2463,6 +2527,12 @@ mod tests {
         assert!(git_pins(&repo, &none).is_err());
         std::fs::write(repo.join(".git").join("config"), "[core]\n\tbare = false\n").unwrap();
         assert!(git_pins(&repo, &none).is_ok());
+        // Submodules, declared or already cloned, have configs of their own.
+        std::fs::write(repo.join(".gitmodules"), "").unwrap();
+        assert!(git_pins(&repo, &none).is_err());
+        std::fs::remove_file(repo.join(".gitmodules")).unwrap();
+        std::fs::create_dir_all(repo.join(".git").join("modules")).unwrap();
+        assert!(git_pins(&repo, &none).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 

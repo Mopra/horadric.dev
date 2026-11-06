@@ -209,7 +209,9 @@ third half, below.
   `-iq`, an extension, another host, a config file flag) leave only
   Once. The git such a run starts gets an empty hooks folder, no
   fsmonitor, no bare repository found by itself, and no pager, editor,
-  askpass or browser from the environment. An npm shim is run as node with its
+  askpass or browser from the environment. Its attributes come from the
+  empty tree (git 2.40 or later, else Once only), submodules are left
+  alone, and a repository with submodules is Once only. An npm shim is run as node with its
   package's script; the package folder, that node and the names in the
   global `node_modules` are pinned. An Always run gets a PATH without
   folders the user can write to. `vercel`, `wrangler` and `netlify` may
