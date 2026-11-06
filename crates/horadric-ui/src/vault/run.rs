@@ -21,8 +21,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::vault::secret::{
-    approval, approved, changed_pins, fingerprint, log_line, missing_line, npm_shim, once_only,
-    pinned, plainly, runs_builds, valid_name, Mask, Owner, Pin,
+    always_refused, approval, approved, changed_pins, command_path, fingerprint, git_refs, log_line,
+    missing_line, npm_shim, once_only, pinned, plainly, runs_builds, valid_name, Mask, Owner, Pin,
+    PinKind,
 };
 use horadric_hooks::listener::{SecretNames, SecretRun, SecretSet, SecretStream};
 use serde_json::json;
@@ -814,14 +815,28 @@ fn loose_dll(cwd: &Path) -> Option<String> {
 /// this user cannot write to and that are outside the project, so a
 /// helper or library looked up by name is one the agent could not have
 /// put there. A shim's node folder goes first, its node pinned already.
-fn locked_path(own: Option<String>, node: Option<&Path>, place: &[&Path]) -> OsString {
+fn locked_path(own: Option<String>, node: Option<&Path>, place: &[&Path]) -> (OsString, Vec<String>) {
     let own = own.map(OsString::from).unwrap_or_else(app_path);
-    let dirs = std::env::split_paths(&own)
-        .filter(|d| d.is_absolute() && d.is_dir())
-        .filter(|d| !place.iter().any(|p| inside(d, p)))
-        .filter(|d| !writable_dir(d));
-    let first = node.and_then(Path::parent).map(Path::to_path_buf);
-    std::env::join_paths(first.into_iter().chain(dirs)).unwrap_or_default()
+    let mut kept: Vec<PathBuf> = node.and_then(Path::parent).map(Path::to_path_buf).into_iter().collect();
+    let mut left = Vec::new();
+    for d in std::env::split_paths(&own).filter(|d| !d.as_os_str().is_empty()) {
+        let why = if !d.is_absolute() {
+            Some("a relative folder")
+        } else if !d.is_dir() {
+            None
+        } else if place.iter().any(|p| inside(&d, p)) {
+            Some("inside the project or temp")
+        } else if writable_dir(&d) {
+            Some("you can write to it")
+        } else {
+            kept.push(d.clone());
+            None
+        };
+        if let Some(why) = why {
+            left.push(format!("{} ({why})", d.display()));
+        }
+    }
+    (std::env::join_paths(kept).unwrap_or_default(), left)
 }
 
 /// A path as compared: lower case, one kind of slash, no trailing one.
@@ -844,6 +859,9 @@ struct ShimRun {
     node: PathBuf,
     script: PathBuf,
     package: PathBuf,
+    /// The global `node_modules` the package sits in, where node looks
+    /// for any module the package does not hold itself.
+    modules: PathBuf,
 }
 
 /// The npm shim `program` is, None for anything else. Its node is the
@@ -866,7 +884,12 @@ fn shim_of(program: &Path) -> Option<ShimRun> {
     } else {
         horadric_pty::find_program("node", &app_path(), &[".exe"], Path::is_file)?
     };
-    Some(ShimRun { node, script, package })
+    Some(ShimRun {
+        node,
+        script,
+        package,
+        modules: dir.join("node_modules"),
+    })
 }
 
 /// The variable `name` as the child will have it: the identity's own
@@ -882,7 +905,7 @@ fn child_var(env: &super::identity::SessionEnv, name: &str) -> Option<String> {
 }
 
 /// What runs when the program does, beyond its own file: what is pinned
-/// for it and the content of all of it.
+/// for it, the content of all of it, and what its arguments ask.
 struct Runs {
     shim: Option<ShimRun>,
     /// The program is one [`pinned`] knows, or an npm shim.
@@ -893,62 +916,221 @@ struct Runs {
     fingerprint: Option<String>,
     /// The program's name as the human knows it: `vercel`, not `vercel.cmd`.
     stem: String,
+    /// The subcommand an Always is for: `pr create`.
+    command: String,
+    /// Why Always is not offered for reasons of its own: its arguments,
+    /// a git include too deep to pin, a node folder outside the package.
+    refused: Option<String>,
 }
 
 impl Runs {
-    fn of(program: &Pinned, env: &super::identity::SessionEnv) -> Runs {
+    fn of(program: &Pinned, env: &super::identity::SessionEnv, args: &[String], cwd: &Path) -> Runs {
         let shim = shim_of(&program.path);
         let path = program.path.to_string_lossy().into_owned();
-        let mut pins = pinned(&path, &|k| child_var(env, k));
+        let var = |k: &str| child_var(env, k);
+        let mut pins = pinned(&path, &var);
+        let mut refused = None;
         if let Some(s) = &shim {
             let name = s
                 .package
-                .strip_prefix(program.path.parent().unwrap_or(Path::new("")).join("node_modules"))
+                .strip_prefix(&s.modules)
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default()
                 .replace([',', '=', '|'], "_");
-            let pins = pins.get_or_insert_with(Vec::new);
-            pins.push(Pin {
-                what: format!("the {name} package"),
-                path: s.package.to_string_lossy().into_owned(),
-                tree: true,
-            });
-            pins.push(Pin {
-                what: "node.exe".into(),
-                path: s.node.to_string_lossy().into_owned(),
-                tree: false,
-            });
+            pins.get_or_insert_with(Vec::new).extend([
+                Pin {
+                    what: format!("the {name} package"),
+                    path: s.package.to_string_lossy().into_owned(),
+                    kind: PinKind::Tree,
+                },
+                Pin {
+                    what: "node.exe".into(),
+                    path: s.node.to_string_lossy().into_owned(),
+                    kind: PinKind::File,
+                },
+                // A module the package lacks is looked for here next, so
+                // one planted here would load.
+                Pin {
+                    what: "the global npm packages".into(),
+                    path: s.modules.to_string_lossy().into_owned(),
+                    kind: PinKind::Names,
+                },
+            ]);
+            refused = node_escape(s, &var);
+        }
+        let is_pinned = pins.is_some();
+        let mut pins = pins.unwrap_or_default();
+        if is_pinned {
+            match git_pins(cwd, &var) {
+                Ok(more) => pins.extend(more),
+                Err(why) => refused = refused.or(Some(why)),
+            }
         }
         let stem = program
             .path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let is_pinned = pins.is_some();
-        let pins = pins.unwrap_or_default();
+        let refused = refused.or_else(|| always_refused(&stem, args));
         let fingerprint = pin_hashes(&pins).map(|h| fingerprint(&program.sha256, &h));
         Runs {
             shim,
             pinned: is_pinned,
             pins,
             fingerprint,
+            command: command_path(args),
             stem,
+            refused,
+        }
+    }
+
+    /// The program and subcommand an Always is kept for.
+    fn bound(&self, program_lower: &str) -> String {
+        match self.command.is_empty() {
+            true => program_lower.to_string(),
+            false => format!("{program_lower} {}", self.command),
         }
     }
 }
 
-/// Each pin's SHA-256, read fresh: no modified time is trusted, since one
-/// can be set back. None when one could not be read through.
+/// Why node could load a module from outside the pinned package: the
+/// folders it looks in above the global one, and the home ones. NODE_PATH
+/// is taken out of the run, so it is not one.
+fn node_escape(shim: &ShimRun, var: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let homes = ["USERPROFILE", "HOME"].into_iter().filter_map(var);
+    for home in homes {
+        for dir in [".node_modules", ".node_libraries"] {
+            let p = Path::new(&home).join(dir);
+            if p.exists() {
+                return Some(format!("{} exists, and node loads modules from it", p.display()));
+            }
+        }
+    }
+    let top = shim.modules.parent()?;
+    top.ancestors()
+        .skip(1)
+        .map(|a| a.join("node_modules"))
+        .find(|p| p.exists())
+        .map(|p| format!("{} exists, and node loads modules from it", p.display()))
+}
+
+/// Where `p`, as a git config writes it, points: `~/` from home, else
+/// from `base` when relative.
+fn git_path(p: &str, base: &Path, var: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    if let Some(rest) = p.strip_prefix("~/").or_else(|| p.strip_prefix("~\\")) {
+        return Some(Path::new(&var("USERPROFILE").or_else(|| var("HOME"))?).join(rest));
+    }
+    let path = Path::new(p);
+    Some(if path.is_absolute() { path.to_path_buf() } else { base.join(path) })
+}
+
+/// What git reads that decides what it runs, for a CLI that runs git in
+/// `cwd`: the repository's config, hooks and attributes (filters run
+/// commands), the user's own config and what each includes. An include
+/// that includes again is not followed: Err, and only Once.
+fn git_pins(cwd: &Path, var: &dyn Fn(&str) -> Option<String>) -> Result<Vec<Pin>, String> {
+    let file = |what: &str, path: &Path| Pin {
+        what: what.to_string(),
+        path: path.to_string_lossy().into_owned(),
+        kind: PinKind::File,
+    };
+    let home = var("USERPROFILE").or_else(|| var("HOME"));
+    let mut configs: Vec<(String, PathBuf)> = Vec::new();
+    match var("GIT_CONFIG_GLOBAL") {
+        Some(g) => configs.push(("your global git config".into(), PathBuf::from(g))),
+        None => {
+            if let Some(h) = &home {
+                configs.push(("your global git config".into(), Path::new(h).join(".gitconfig")));
+            }
+        }
+    }
+    let xdg = var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| Path::new(h).join(".config")));
+    if let Some(x) = xdg {
+        configs.push(("your git config in .config".into(), x.join("git").join("config")));
+    }
+    let top = cwd.ancestors().find(|d| d.join(".git").exists());
+    let mut hooks: Option<PathBuf> = None;
+    let mut extra: Vec<Pin> = Vec::new();
+    if let Some(top) = top {
+        let dot = top.join(".git");
+        let gitdir = if dot.is_file() {
+            let text = std::fs::read_to_string(&dot).map_err(|_| "its .git file cannot be read".to_string())?;
+            let to = text
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("gitdir:"))
+                .ok_or("its .git file names no repository")?
+                .trim()
+                .to_string();
+            git_path(&to, top, var).ok_or("its .git file names no repository")?
+        } else {
+            dot
+        };
+        let common = match std::fs::read_to_string(gitdir.join("commondir")) {
+            Ok(c) => git_path(c.trim(), &gitdir, var).unwrap_or_else(|| gitdir.clone()),
+            Err(_) => gitdir.clone(),
+        };
+        configs.push(("this repository's git config".into(), common.join("config")));
+        configs.push(("this worktree's git config".into(), gitdir.join("config.worktree")));
+        hooks = Some(common.join("hooks"));
+        extra.push(file("this repository's info/attributes", &common.join("info").join("attributes")));
+        extra.push(file("this repository's .gitattributes", &top.join(".gitattributes")));
+        extra.push(file("this repository's .lfsconfig", &top.join(".lfsconfig")));
+        // The repository's own wins over the user's.
+        for (_, c) in configs.iter().rev() {
+            if let Some(h) = std::fs::read_to_string(c).ok().and_then(|t| git_refs(&t).hooks_path) {
+                hooks = git_path(&h, top, var);
+                break;
+            }
+        }
+    }
+    let mut pins: Vec<Pin> = configs.iter().map(|(w, p)| file(w, p)).collect();
+    let mut n = 0;
+    for (_, c) in &configs {
+        let Ok(text) = std::fs::read_to_string(c) else {
+            continue;
+        };
+        let base = c.parent().unwrap_or(Path::new(""));
+        for inc in git_refs(&text).includes {
+            let Some(p) = git_path(&inc, base, var) else {
+                return Err("a git config includes a file that cannot be placed".into());
+            };
+            if let Ok(t) = std::fs::read_to_string(&p) {
+                if !git_refs(&t).includes.is_empty() {
+                    return Err(format!("{} includes yet another git config", p.display()));
+                }
+            }
+            n += 1;
+            pins.push(file(&format!("a git config included ({n})"), &p));
+        }
+    }
+    if let Some(h) = hooks {
+        pins.push(Pin {
+            what: "this repository's git hooks".into(),
+            path: h.to_string_lossy().into_owned(),
+            kind: PinKind::Tree,
+        });
+    }
+    pins.extend(extra);
+    Ok(pins)
+}
+
+/// Each pin's SHA-256, read fresh, never by modified time, which can be
+/// set back: a folder's from the cache only while a change watch on it
+/// has seen nothing. None when one could not be read through.
 fn pin_hashes(pins: &[Pin]) -> Option<Vec<(String, String)>> {
     pins.iter()
         .map(|p| {
             let path = Path::new(&p.path);
-            let h = match (std::fs::symlink_metadata(path), p.tree) {
+            let h = match (std::fs::symlink_metadata(path), p.kind) {
                 (Err(e), _) if e.kind() == std::io::ErrorKind::NotFound => Some("absent".to_string()),
                 (Err(_), _) => None,
-                (Ok(_), true) => hash_tree(path),
-                (Ok(m), false) if m.is_file() && !reparse(&m) => hash(&mut File::open(path).ok()?),
-                (Ok(_), false) => None,
+                (Ok(_), PinKind::Tree) => watched_tree(path, None),
+                (Ok(_), PinKind::TreeBut(skip)) => watched_tree(path, Some(skip)),
+                (Ok(_), PinKind::Names) => hash_names(path),
+                (Ok(m), PinKind::File) if m.is_file() && !reparse(&m) => hash(&mut File::open(path).ok()?),
+                (Ok(_), PinKind::File) => None,
             };
             h.map(|h| (p.what.clone(), h))
         })
@@ -962,10 +1144,84 @@ fn reparse(m: &std::fs::Metadata) -> bool {
     m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
+/// A tree's hash and the change notification armed before it was read.
+struct Cached {
+    hash: String,
+    watch: Watch,
+}
+
+/// A change notification on a folder and everything under it, signalled
+/// by the first change. Asked with a zero wait, so no thread waits on it
+/// and nothing can be missed between a change and its being seen.
+struct Watch(isize);
+
+// SAFETY: a change notification handle may be waited on and closed from
+// any thread.
+unsafe impl Send for Watch {}
+
+impl Watch {
+    fn on(dir: &Path) -> Option<Watch> {
+        use windows::Win32::Storage::FileSystem::{
+            FindFirstChangeNotificationW, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_DIR_NAME,
+            FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SECURITY,
+            FILE_NOTIFY_CHANGE_SIZE,
+        };
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+        let filter = FILE_NOTIFY_CHANGE_FILE_NAME
+            | FILE_NOTIFY_CHANGE_DIR_NAME
+            | FILE_NOTIFY_CHANGE_ATTRIBUTES
+            | FILE_NOTIFY_CHANGE_SIZE
+            | FILE_NOTIFY_CHANGE_LAST_WRITE
+            | FILE_NOTIFY_CHANGE_SECURITY;
+        let h = unsafe { FindFirstChangeNotificationW(PCWSTR(wide.as_ptr()), true, filter) }.ok()?;
+        (!h.is_invalid()).then(|| Watch(h.0 as isize))
+    }
+
+    /// Nothing changed since it was armed. A wait that fails counts as a
+    /// change, which only costs a read.
+    fn quiet(&self) -> bool {
+        use windows::Win32::Foundation::WAIT_TIMEOUT;
+        use windows::Win32::System::Threading::WaitForSingleObject;
+        unsafe { WaitForSingleObject(HANDLE(self.0 as *mut c_void), 0) == WAIT_TIMEOUT }
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        use windows::Win32::Storage::FileSystem::FindCloseChangeNotification;
+        let _ = unsafe { FindCloseChangeNotification(HANDLE(self.0 as *mut c_void)) };
+    }
+}
+
+/// Tree hashes for the app's life: a package of 250 MB is not read again
+/// each run, only after something in its folder changed.
+static TREES: Mutex<Option<HashMap<String, Cached>>> = Mutex::new(None);
+
+/// [`hash_tree`] through the cache. The watch is armed before the tree is
+/// read, so a change while it is read is a change the next run sees.
+fn watched_tree(root: &Path, skip: Option<&str>) -> Option<String> {
+    let key = format!("{}|{}", spelled(root), skip.unwrap_or_default());
+    let mut trees = TREES.lock().unwrap_or_else(|e| e.into_inner());
+    let trees = trees.get_or_insert_with(HashMap::new);
+    if let Some(c) = trees.get(&key) {
+        if c.watch.quiet() {
+            return Some(c.hash.clone());
+        }
+        trees.remove(&key);
+    }
+    let watch = Watch::on(root);
+    let hash = hash_tree(root, skip)?;
+    if let Some(watch) = watch {
+        trees.insert(key, Cached { hash: hash.clone(), watch });
+    }
+    Some(hash)
+}
+
 /// SHA-256 over every folder and file under `root`, by sorted relative
-/// path, each file by its own SHA-256. Nothing inside is skipped; a link
-/// anywhere fails it, since what it points at is not pinned.
-fn hash_tree(root: &Path) -> Option<String> {
+/// path, each file by its own SHA-256. Nothing inside is skipped but
+/// files named `skip`; a link anywhere fails it, since what it points at
+/// is not pinned.
+fn hash_tree(root: &Path, skip: Option<&str>) -> Option<String> {
     let m = std::fs::symlink_metadata(root).ok()?;
     if !m.is_dir() || reparse(&m) {
         return None;
@@ -984,6 +1240,8 @@ fn hash_tree(root: &Path) -> Option<String> {
             if m.is_dir() {
                 lines.push(format!("d {shown}"));
                 todo.push(child);
+            } else if skip.is_some_and(|s| entry.file_name().to_string_lossy().eq_ignore_ascii_case(s)) {
+                continue;
             } else {
                 let h = hash(&mut File::open(entry.path()).ok()?)?;
                 lines.push(format!("f {shown} {h}"));
@@ -994,8 +1252,22 @@ fn hash_tree(root: &Path) -> Option<String> {
     hash(&mut lines.join("\n").as_bytes())
 }
 
+/// SHA-256 of the names at the top of `dir`, each marked folder or file.
+fn hash_names(dir: &Path) -> Option<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .map(|e| {
+            let e = e.ok()?;
+            let kind = if e.file_type().ok()?.is_dir() { 'd' } else { 'f' };
+            Some(format!("{kind} {}", e.file_name().to_string_lossy().to_lowercase()))
+        })
+        .collect::<Option<_>>()?;
+    names.sort();
+    hash(&mut names.join("\n").as_bytes())
+}
+
 /// Why Always is not offered, None when it is.
-fn once_why(pinned: &Pinned, runs: &Runs, place: &Place) -> Option<&'static str> {
+fn once_why(pinned: &Pinned, runs: &Runs, place: &Place) -> Option<String> {
     let path = &pinned.path;
     // A shim is judged by the program it runs: `npm.cmd` is npm.
     let listed = match &runs.shim {
@@ -1003,13 +1275,16 @@ fn once_why(pinned: &Pinned, runs: &Runs, place: &Place) -> Option<&'static str>
         None => once_only(&path.to_string_lossy()),
     };
     if listed {
-        return Some("it can run code the agent writes");
+        return Some("it can run code the agent writes".into());
+    }
+    if let Some(why) = &runs.refused {
+        return Some(why.clone());
     }
     if runs.pinned && runs.fingerprint.is_none() {
-        return Some("a file that decides what it runs could not be read through, or is a link");
+        return Some("a file that decides what it runs could not be read through, or is a link".into());
     }
     if pinned.remote {
-        return Some("it is on a network share");
+        return Some("it is on a network share".into());
     }
     let mut ran = vec![path.as_path()];
     if let Some(s) = &runs.shim {
@@ -1017,7 +1292,7 @@ fn once_why(pinned: &Pinned, runs: &Runs, place: &Place) -> Option<&'static str>
     }
     let agents = [place.dir.as_path(), place.cwd.as_path(), &std::env::temp_dir()];
     if ran.iter().any(|p| agents.iter().any(|d| inside(p, d))) {
-        return Some("it is inside the project or the temp folder, where the agent writes");
+        return Some("it is inside the project or the temp folder, where the agent writes".into());
     }
     // A shim's package is pinned by content, so a global npm folder the
     // user can write to may still have Always; the node it runs must not
@@ -1027,7 +1302,7 @@ fn once_why(pinned: &Pinned, runs: &Runs, place: &Place) -> Option<&'static str>
         None => path.as_path(),
     };
     if changeable(own) {
-        return Some("you can change it or its folder without elevation, so the agent could too");
+        return Some("you can change it or its folder without elevation, so the agent could too".into());
     }
     None
 }
@@ -1124,7 +1399,8 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
         }
     }
     let env = super::identity::session_env(&place.dir);
-    let runs = Runs::of(&pinned, &env);
+    let runs = Runs::of(&pinned, &env, &args, &cwd);
+    let bound = runs.bound(&program_lower);
     // A pin that could not be read matches no Always, and gets none.
     let held_to = runs.fingerprint.clone().unwrap_or_else(|| "unreadable".into());
     // A library planted where the program runs voids every Always: each
@@ -1132,7 +1408,7 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
     let dll = loose_dll(&cwd);
     let unasked: Vec<String> = secrets
         .iter()
-        .filter(|s| dll.is_some() || !approved(&s.allowed, &place.key, &program_lower, &held_to))
+        .filter(|s| dll.is_some() || !approved(&s.allowed, &place.key, &bound, &held_to))
         .map(|s| s.name.clone())
         .collect();
     let mut held = None;
@@ -1145,7 +1421,7 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
         };
         held = Some(c);
         let why_once = match &dll {
-            Some(_) => Some("the folder it runs in holds a .dll, which it could load"),
+            Some(_) => Some("the folder it runs in holds a .dll, which it could load".to_string()),
             None => once_why(&pinned, &runs, &place),
         };
         let stem = &runs.stem;
@@ -1154,7 +1430,11 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
             .filter(|s| unasked.contains(&s.name))
             .map(|s| owned(&s.name, &s.owner))
             .collect();
-        let title = format!("Use {} for `{}`?", unasked.join(", "), plainly(stem));
+        let what = match runs.command.is_empty() {
+            true => stem.clone(),
+            false => format!("{stem} {}", runs.command),
+        };
+        let title = format!("Use {} for `{}`?", unasked.join(", "), plainly(&what));
         let mut text = format!(
             "{} asks to run this with {} in its environment:\n\n{shown}\n\nProgram: {}",
             asker(&session, Some(&crate::project::project_name(&place.key))),
@@ -1164,7 +1444,7 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
         let changed: Vec<String> = secrets
             .iter()
             .filter(|s| unasked.contains(&s.name))
-            .flat_map(|s| changed_pins(&s.allowed, &place.key, &program_lower, &held_to))
+            .flat_map(|s| changed_pins(&s.allowed, &place.key, &bound, &held_to))
             .fold(Vec::new(), |mut all, c| {
                 if !all.contains(&c) {
                     all.push(c);
@@ -1180,16 +1460,23 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
         if runs_builds(stem) {
             text.push_str("\n\nIt may run this project's build scripts.");
         }
+        if why_once.is_none() && (runs_builds(stem) || stem.eq_ignore_ascii_case("gh")) {
+            text.push_str(
+                "\n\nAlways runs it with a PATH of only the folders you cannot write to, so a tool it starts from one you can is not found.",
+            );
+        }
+        let always = why_once.is_none();
         if let Some(why) = why_once {
             text.push_str(&format!("\n\nOnly Once is offered: {why}."));
         }
-        Some(ask(&session, &title, &text, why_once.is_none()))
+        Some(ask(&session, &title, &text, always))
     };
     let job = Job {
         session,
         project: place.key,
         pinned,
         program_lower,
+        bound,
         args,
         cwd,
         env,
@@ -1210,6 +1497,8 @@ struct Job {
     project: String,
     pinned: Pinned,
     program_lower: String,
+    /// The program and subcommand an Always is kept for.
+    bound: String,
     args: Vec<String>,
     cwd: PathBuf,
     env: super::identity::SessionEnv,
@@ -1323,10 +1612,10 @@ impl Job {
                 return;
             }
         }
-        let granted = approval(&self.project, &self.program_lower, &self.held_to);
+        let granted = approval(&self.project, &self.bound, &self.held_to);
         // An Always for this program in this project from before it changed
         // is spent: the new one replaces it.
-        let stale = format!("|{}|{}", self.project, self.program_lower);
+        let stale = format!("|{}|{}", self.project, self.bound);
         let _ = store::change(|v| {
             for kept in &self.secrets {
                 let Some(s) = v
@@ -1351,7 +1640,8 @@ impl Job {
         self.start(out, left);
     }
 
-    fn command(&self) -> Command {
+    /// The command to start; `path` is the locked PATH of an Always run.
+    fn command(&self, path: Option<&OsString>) -> Command {
         let program = &self.pinned.path;
         let mut c = if let Some(shim) = &self.runs.shim {
             let mut c = Command::new(&shim.node);
@@ -1383,11 +1673,18 @@ impl Job {
         for (k, v) in &self.env.set {
             c.env(k, v);
         }
-        if self.always {
-            let node = self.runs.shim.as_ref().map(|s| s.node.as_path());
-            let own = child_var(&self.env, "PATH");
-            let temp = std::env::temp_dir();
-            c.env("PATH", locked_path(own, node, &[&self.dir, &self.cwd, &temp]));
+        if let Some(path) = path {
+            c.env("PATH", path);
+        }
+        // cmd, which CLIs start for helpers, would otherwise look in the
+        // project folder first for a program named without a path.
+        c.env("NoDefaultCurrentDirectoryInExePath", "1");
+        if self.runs.shim.is_some() {
+            // Each of these would have node load code from outside the
+            // pinned package: a compile cache, a module path, a --require.
+            c.env("NODE_DISABLE_COMPILE_CACHE", "1");
+            c.env_remove("NODE_PATH");
+            c.env_remove("NODE_OPTIONS");
         }
         for s in &self.secrets {
             c.env(&s.name, &s.value);
@@ -1405,7 +1702,13 @@ impl Job {
             out.fail("cannot start it: Windows would not make a job to keep it in.");
             return;
         };
-        let mut child = match self.command().spawn() {
+        let locked = self.always.then(|| {
+            let node = self.runs.shim.as_ref().map(|s| s.node.as_path());
+            let own = child_var(&self.env, "PATH");
+            let temp = std::env::temp_dir();
+            locked_path(own, node, &[&self.dir, &self.cwd, &temp])
+        });
+        let mut child = match self.command(locked.as_ref().map(|(p, _)| p)).spawn() {
             Ok(c) => c,
             Err(e) => {
                 out.fail(&format!("cannot start {}: {e}", self.pinned.path.display()));
@@ -1485,6 +1788,16 @@ impl Job {
             if done_rx.recv_timeout(rest).is_err() {
                 break;
             }
+        }
+        // A program that worked when allowed Once may fail on Always for a
+        // tool it could not find; this says where it was not looked for.
+        let mut out = out;
+        if let Some((_, left_out)) = locked.filter(|(_, l)| code != 0 && !l.is_empty()) {
+            let line = format!(
+                "horadric: this Always run's PATH left out {}\n",
+                left_out.join("; ")
+            );
+            let _ = out.err(line.as_bytes());
         }
         out.exit(code);
         drop(tree);
@@ -1864,6 +2177,94 @@ mod tests {
         assert!(remote_or_device(r"\\?\GLOBALROOT\Device\x"));
     }
 
+    fn scratch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("horadric-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn git_pins_follow_a_worktree_to_its_repository() {
+        let root = scratch("git-pins");
+        let home = root.join("home");
+        let main = root.join("main");
+        let wt = root.join("wt");
+        let common = main.join(".git");
+        let gitdir = common.join("worktrees").join("wt");
+        for d in [&home, &gitdir, &wt.join("sub")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        std::fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+        std::fs::write(common.join("config"), "[core]\n\thooksPath = .githooks\n").unwrap();
+        std::fs::write(home.join(".gitconfig"), "[include]\n\tpath = ~/more.gitconfig\n").unwrap();
+        std::fs::write(home.join("more.gitconfig"), "[alias]\n\tx = !sh\n").unwrap();
+        let h = home.to_string_lossy().into_owned();
+        let var = |k: &str| (k == "USERPROFILE").then(|| h.clone());
+        let pins = git_pins(&wt.join("sub"), &var).unwrap();
+        let path_of = |what: &str| pins.iter().find(|p| p.what == what).map(|p| PathBuf::from(&p.path));
+        assert_eq!(path_of("this repository's git config"), Some(gitdir.join("../..").join("config")));
+        assert_eq!(path_of("this worktree's git config"), Some(gitdir.join("config.worktree")));
+        assert_eq!(path_of("this repository's git hooks"), Some(wt.join(".githooks")));
+        assert_eq!(path_of("a git config included (1)"), Some(home.join("more.gitconfig")));
+        assert_eq!(path_of("this repository's .gitattributes"), Some(wt.join(".gitattributes")));
+        assert!(path_of("your global git config").is_some());
+        let mut whats: Vec<&str> = pins.iter().map(|p| p.what.as_str()).collect();
+        whats.sort();
+        whats.dedup();
+        assert_eq!(whats.len(), pins.len(), "each pin is named once");
+        // An include that includes again is not followed.
+        std::fs::write(home.join("more.gitconfig"), "[include]\n\tpath = deeper\n").unwrap();
+        assert!(git_pins(&wt, &var).is_err());
+        // Outside a repository only the user's own config counts.
+        std::fs::write(home.join("more.gitconfig"), "").unwrap();
+        let outside = git_pins(&home, &var).unwrap();
+        assert!(outside.iter().all(|p| !p.what.starts_with("this ")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gh_extensions_skip_state_and_names_see_only_names() {
+        let root = scratch("pin-kinds");
+        std::fs::create_dir_all(root.join("ext/gh-x")).unwrap();
+        std::fs::write(root.join("ext/gh-x/gh-x.exe"), "one").unwrap();
+        std::fs::write(root.join("ext/gh-x/state.yml"), "a").unwrap();
+        let ext = root.join("ext").to_string_lossy().into_owned();
+        let pins = [
+            Pin { what: "e".into(), path: ext.clone(), kind: PinKind::TreeBut("state.yml") },
+            Pin { what: "n".into(), path: ext, kind: PinKind::Names },
+        ];
+        let first = pin_hashes(&pins).unwrap();
+        std::fs::write(root.join("ext/gh-x/state.yml"), "b").unwrap();
+        std::fs::write(root.join("ext/gh-x/gh-x.exe"), "one").unwrap();
+        assert_eq!(pin_hashes(&pins).unwrap(), first, "state.yml and same content change nothing");
+        std::fs::write(root.join("ext/gh-x/gh-x.exe"), "two").unwrap();
+        let second = pin_hashes(&pins).unwrap();
+        assert_ne!(second[0], first[0], "the cached hash went with the change");
+        assert_eq!(second[1], first[1], "names alone did not change");
+        std::fs::create_dir_all(root.join("ext/encoding")).unwrap();
+        assert_ne!(pin_hashes(&pins).unwrap()[1], first[1], "a new entry is a new name");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_locked_path_says_what_it_left_out() {
+        let root = scratch("locked-path");
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join("bin")).unwrap();
+        let own = std::env::join_paths([project.join("bin"), PathBuf::from("rel"), PathBuf::from(r"C:\Windows")])
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let (path, left) = locked_path(Some(own), None, &[&project]);
+        let kept: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert!(!kept.iter().any(|k| k.starts_with(&project)));
+        assert!(left.iter().any(|l| l.contains("inside the project")), "{left:?}");
+        assert!(left.iter().any(|l| l.contains("relative")), "{left:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_pinned_tree_changes_with_any_file_in_it() {
         let root = std::env::temp_dir().join(format!("horadric-pin-test-{}", std::process::id()));
@@ -1872,9 +2273,9 @@ mod tests {
         std::fs::write(root.join("ext/deep/a.js"), "one").unwrap();
         std::fs::write(root.join("config.yml"), "aliases: {}").unwrap();
         let pins = vec![
-            Pin { what: "c".into(), path: root.join("config.yml").to_string_lossy().into(), tree: false },
-            Pin { what: "e".into(), path: root.join("ext").to_string_lossy().into(), tree: true },
-            Pin { what: "m".into(), path: root.join("missing").to_string_lossy().into(), tree: true },
+            Pin { what: "c".into(), path: root.join("config.yml").to_string_lossy().into(), kind: PinKind::File },
+            Pin { what: "e".into(), path: root.join("ext").to_string_lossy().into(), kind: PinKind::Tree },
+            Pin { what: "m".into(), path: root.join("missing").to_string_lossy().into(), kind: PinKind::Tree },
         ];
         let first = pin_hashes(&pins).unwrap();
         assert_eq!(first[2].1, "absent");
@@ -1886,7 +2287,7 @@ mod tests {
         std::fs::write(root.join("ext/new.js"), "").unwrap();
         assert_ne!(pin_hashes(&pins).unwrap()[1], second[1], "a new empty file counts");
         // A file pin that is a folder cannot be read as one.
-        let odd = [Pin { what: "x".into(), path: root.join("ext").to_string_lossy().into(), tree: false }];
+        let odd = [Pin { what: "x".into(), path: root.join("ext").to_string_lossy().into(), kind: PinKind::File }];
         assert!(pin_hashes(&odd).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }

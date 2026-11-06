@@ -149,12 +149,32 @@ const ONCE_ONLY: &[&str] = &[
     "composer", "bundle", "rake", "make", "just", "cargo", "gradle", "mvn", "ant", "msbuild",
     // Version control, and the infrastructure tools that run the
     // project's own code as their configuration.
-    "git", "ssh", "scp", "sftp", "terraform", "tofu", "pulumi", "podman",
+    "git", "ssh", "scp", "sftp", "terraform", "tofu", "pulumi", "podman", "git-lfs", "scalar",
+    "git-receive-pack", "git-upload-pack", "ftp", "tclsh", "wish", "wt", "control",
+    // Their exec paths are too many to pin: `docker run -e NAME`, a
+    // kubeconfig's exec plugin named by a flag, helm's --post-renderer.
+    "docker", "kubectl", "helm",
     // Windows' own ways to run a script or a library.
     "cscript", "wscript", "mshta", "rundll32", "regsvr32", "certutil", "bitsadmin",
     "installutil", "msiexec", "cmstp", "odbcconf", "msxsl", "hh", "infdefaultinstall",
     "ieexec", "dnscmd", "presentationhost",
 ];
+
+/// How a pin is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinKind {
+    /// One file's content.
+    File,
+    /// Every folder and file under it.
+    Tree,
+    /// Every folder and file under it but files of this name, which the
+    /// program rewrites by itself: gh's `state.yml` from its update check.
+    TreeBut(&'static str),
+    /// Only the names of what is at its top, for a folder whose new
+    /// entries matter but whose content another pin covers or churns:
+    /// the global `node_modules` a package can load a planted one from.
+    Names,
+}
 
 /// A file or folder whose content an Always is bound to, because changing
 /// it could make the program run other code.
@@ -164,44 +184,28 @@ pub struct Pin {
     /// or `|`, which [`fingerprint`] uses.
     pub what: String,
     pub path: String,
-    /// A whole folder, every file in it, rather than one file.
-    pub tree: bool,
+    pub kind: PinKind,
 }
 
 /// The deploy and cloud CLIs that may have Always once what could make
-/// them run other code is pinned: their aliases, extensions, plugins,
-/// credential helpers and exec hooks. Some for the program at this path,
-/// the files and folders to pin as `env` (the environment the child will
-/// get, an identity's own folders included) places them; None for any
-/// other program. A program that keeps no such file pins nothing extra,
-/// but is still here, since the caller pins the npm package it runs from.
+/// them run other code is pinned: their aliases, extensions, plugins and
+/// exec hook files. Some for the program at this path, the files and
+/// folders to pin as `env` (the environment the child will get, an
+/// identity's own folders included) places them; None for any other
+/// program. A program that keeps no such file pins nothing extra, but is
+/// still here, since the caller pins the npm package it runs from and the
+/// git repository it runs in. What its arguments can make it do is
+/// [`always_refused`]'s.
 pub fn pinned(program_path: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<Vec<Pin>> {
     let stem = stem_of(program_path);
     let var = |k: &str| env(k).filter(|v| !v.trim().is_empty());
     let home = || var("USERPROFILE");
-    let file = |what: &str, path: Option<String>| {
+    let pin = |what: &str, kind: PinKind, path: Option<String>| {
         path.map(|path| Pin {
             what: what.to_string(),
             path,
-            tree: false,
+            kind,
         })
-    };
-    let tree = |what: &str, path: Option<String>| {
-        path.map(|path| Pin {
-            what: what.to_string(),
-            path,
-            tree: true,
-        })
-    };
-    let kube = || -> Vec<Option<Pin>> {
-        match var("KUBECONFIG") {
-            Some(list) => list
-                .split(';')
-                .filter(|p| !p.trim().is_empty())
-                .map(|p| file("the kubeconfig", Some(p.trim().to_string())))
-                .collect(),
-            None => vec![file("the kubeconfig", home().map(|h| join(&h, r".kube\config")))],
-        }
     };
     let pins: Vec<Option<Pin>> = match stem.as_str() {
         "gh" => {
@@ -212,55 +216,46 @@ pub fn pinned(program_path: &str, env: &dyn Fn(&str) -> Option<String>) -> Optio
                 .or_else(|| var("XDG_DATA_HOME").map(|x| join(&x, "gh")))
                 .or_else(|| var("LOCALAPPDATA").map(|a| join(&a, "GitHub CLI")));
             vec![
-                file("gh's config.yml", config.map(|c| join(&c, "config.yml"))),
-                tree("gh's extensions", data.map(|d| join(&d, "extensions"))),
+                pin("gh's config.yml", PinKind::File, config.map(|c| join(&c, "config.yml"))),
+                pin(
+                    "gh's extensions",
+                    PinKind::TreeBut("state.yml"),
+                    data.map(|d| join(&d, "extensions")),
+                ),
             ]
         }
         "aws" => vec![
-            file(
+            pin(
                 "the aws config",
+                PinKind::File,
                 var("AWS_CONFIG_FILE").or_else(|| home().map(|h| join(&h, r".aws\config"))),
             ),
             // `credential_process` runs a command from here too.
-            file(
+            pin(
                 "the aws credentials file",
+                PinKind::File,
                 var("AWS_SHARED_CREDENTIALS_FILE").or_else(|| home().map(|h| join(&h, r".aws\credentials"))),
             ),
+            // Aliases run `!` shell commands. The folder's own content is
+            // the credential cache, which churns, so only its names count.
+            pin("the aws aliases", PinKind::File, home().map(|h| join(&h, r".aws\cli\alias"))),
+            pin("the aws cli folder", PinKind::Names, home().map(|h| join(&h, r".aws\cli"))),
         ],
-        "docker" => {
-            let dir = var("DOCKER_CONFIG").or_else(|| home().map(|h| join(&h, ".docker")));
-            vec![
-                // `credsStore` and `credHelpers` name programs it runs.
-                file("docker's config.json", dir.as_ref().map(|d| join(d, "config.json"))),
-                tree("docker's cli-plugins", dir.map(|d| join(&d, "cli-plugins"))),
-            ]
-        }
-        // A kubeconfig's `exec` runs a command for credentials.
-        "kubectl" => kube(),
-        "helm" => {
-            let mut pins = kube();
-            pins.push(tree(
-                "helm's plugins",
-                var("HELM_PLUGINS")
-                    .or_else(|| var("HELM_DATA_HOME").map(|d| join(&d, "plugins")))
-                    .or_else(|| var("APPDATA").map(|a| join(&a, r"helm\plugins"))),
-            ));
-            pins
-        }
         "gcloud" => {
             let dir = var("CLOUDSDK_CONFIG").or_else(|| var("APPDATA").map(|a| join(&a, "gcloud")));
             vec![
-                file("gcloud's properties", dir.as_ref().map(|d| join(d, "properties"))),
-                file("gcloud's active_config", dir.as_ref().map(|d| join(d, "active_config"))),
-                tree("gcloud's configurations", dir.map(|d| join(&d, "configurations"))),
+                pin("gcloud's properties", PinKind::File, dir.as_ref().map(|d| join(d, "properties"))),
+                pin("gcloud's active_config", PinKind::File, dir.as_ref().map(|d| join(d, "active_config"))),
+                pin("gcloud's configurations", PinKind::Tree, dir.map(|d| join(&d, "configurations"))),
             ]
         }
         "az" => {
             let dir = var("AZURE_CONFIG_DIR").or_else(|| home().map(|h| join(&h, ".azure")));
             vec![
-                file("az's config", dir.as_ref().map(|d| join(d, "config"))),
-                tree(
+                pin("az's config", PinKind::File, dir.as_ref().map(|d| join(d, "config"))),
+                pin(
                     "az's extensions",
+                    PinKind::Tree,
                     var("AZURE_EXTENSION_DIR").or_else(|| dir.map(|d| join(&d, "cliextensions"))),
                 ),
             ]
@@ -272,6 +267,171 @@ pub fn pinned(program_path: &str, env: &dyn Fn(&str) -> Option<String>) -> Optio
         _ => return None,
     };
     Some(pins.into_iter().flatten().collect())
+}
+
+/// What an Always is for beside the program: the leading words of the
+/// command line that read as subcommands, `pr create` of `gh pr create
+/// --fill`, so allowing one does not allow `gh api`. Words stop at the
+/// first flag or the first that is not a plain name (a number, a path, a
+/// URL), and at three.
+pub fn command_path(args: &[String]) -> String {
+    args.iter()
+        .take_while(|a| {
+            let mut c = a.chars();
+            c.next().is_some_and(|f| f.is_ascii_lowercase())
+                && c.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+        .take(3)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What a CLI's arguments can make it do that no pin covers, for the
+/// question's "Only Once is offered: ...".
+struct Refusals {
+    stems: &'static [&'static str],
+    /// Flags refused whatever their value.
+    flags: &'static [&'static str],
+    /// Flags refused when their value names a file to read.
+    file_flags: &'static [&'static str],
+    /// Command paths refused, and every path under them.
+    commands: &'static [&'static str],
+    /// The top-level commands it has; any other first word may name an
+    /// extension, which is code of anyone's.
+    known: Option<&'static [&'static str]>,
+}
+
+const GH_COMMANDS: &[&str] = &[
+    "accessibility", "agent-task", "alias", "api", "attestation", "auth", "browse", "cache", "co",
+    "codespace", "completion", "config", "copilot", "extension", "ext", "gist", "gpg-key", "help",
+    "issue", "label", "licenses", "org", "pr", "preview", "project", "release", "repo", "ruleset",
+    "run", "search", "secret", "ssh-key", "status", "variable", "version", "workflow",
+];
+
+const REFUSALS: &[Refusals] = &[
+    Refusals {
+        stems: &["gh"],
+        // `--jq` and `--template` read the environment: `$ENV.GITHUB_TOKEN`.
+        flags: &["--jq", "-q", "--template", "-t"],
+        file_flags: &[],
+        commands: &["alias", "extension", "ext", "config set"],
+        known: Some(GH_COMMANDS),
+    },
+    Refusals {
+        stems: &["aws"],
+        flags: &[],
+        file_flags: &["--cli-input-json", "--cli-input-yaml"],
+        commands: &["configure"],
+        known: None,
+    },
+    Refusals {
+        stems: &["gcloud"],
+        flags: &["--flags-file"],
+        file_flags: &[],
+        commands: &[],
+        known: None,
+    },
+    Refusals {
+        stems: &["vercel", "netlify", "wrangler"],
+        flags: &["--local-config", "--global-config", "-A", "--config", "-c"],
+        file_flags: &[],
+        commands: &[],
+        known: None,
+    },
+];
+
+/// Why the arguments leave only Once for the program `stem` names, None
+/// when they do not.
+pub fn always_refused(stem: &str, args: &[String]) -> Option<String> {
+    let stem = stem_of(stem);
+    let rules = REFUSALS.iter().find(|r| r.stems.contains(&stem.as_str()))?;
+    let given = |flag: &str, arg: &str| {
+        let short = !flag.starts_with("--");
+        arg == flag
+            || arg.starts_with(&format!("{flag}="))
+            || (short && arg.len() > flag.len() && arg.starts_with(flag))
+    };
+    for (i, arg) in args.iter().enumerate() {
+        if let Some(f) = rules.flags.iter().find(|f| given(f, arg)) {
+            return Some(format!("`{f}` can make {stem} read or run more than its command"));
+        }
+        if let Some(f) = rules.file_flags.iter().find(|f| given(f, arg)) {
+            let value = match arg.split_once('=') {
+                Some((_, v)) => Some(v),
+                None => args.get(i + 1).map(String::as_str),
+            };
+            if value.is_some_and(|v| {
+                let v = v.to_ascii_lowercase();
+                v.starts_with("file://") || v.starts_with("fileb://")
+            }) {
+                return Some(format!("`{f}` reads its input from a file the agent can write"));
+            }
+        }
+    }
+    let path = command_path(args);
+    if let Some(c) = rules
+        .commands
+        .iter()
+        .find(|c| path == **c || path.starts_with(&format!("{c} ")))
+    {
+        return Some(format!("`{stem} {c}` changes what {stem} runs"));
+    }
+    let first = path.split(' ').next().unwrap_or_default();
+    if let Some(known) = rules.known {
+        if !first.is_empty() && !known.contains(&first) {
+            return Some(format!("`{first}` may be an extension, someone else's code"));
+        }
+    }
+    None
+}
+
+/// What a git config file points at that decides what git runs: the
+/// files it includes (`include.path`, `includeIf.*.path`) and the hooks
+/// folder (`core.hooksPath`), as written.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GitRefs {
+    pub includes: Vec<String>,
+    pub hooks_path: Option<String>,
+}
+
+pub fn git_refs(config: &str) -> GitRefs {
+    let mut out = GitRefs::default();
+    let mut section = String::new();
+    for line in config.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(['#', ';']) {
+            continue;
+        }
+        let line = if let Some(rest) = line.strip_prefix('[') {
+            let Some((head, after)) = rest.split_once(']') else {
+                continue;
+            };
+            let head = head.trim();
+            let name = head.split([' ', '"', '.']).next().unwrap_or_default();
+            section = name.to_ascii_lowercase();
+            // `[include] path = x` on one line.
+            after.trim()
+        } else {
+            line
+        };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(value)
+            .to_string();
+        match (section.as_str(), key.as_str()) {
+            ("include" | "includeif", "path") => out.includes.push(value),
+            ("core", "hookspath") => out.hooks_path = Some(value),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Whether the program deploys by running the project's own build
@@ -428,7 +588,11 @@ pub fn once_only(program_path: &str) -> bool {
     }
     // python3.12, pip3, node18 and the like.
     let bare = stem.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-');
-    ONCE_ONLY.contains(&stem) || ONCE_ONLY.contains(&bare) || stem.starts_with("python")
+    // git-* helpers are git's own commands, hooks and config included.
+    ONCE_ONLY.contains(&stem)
+        || ONCE_ONLY.contains(&bare)
+        || stem.starts_with("python")
+        || stem.starts_with("git-")
 }
 
 /// One line of `secrets.log`: when, which project and session, which
@@ -711,9 +875,9 @@ mod tests {
         move |k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
     }
 
-    fn pin_paths(program: &str, vars: &[(&str, &str)]) -> Option<Vec<(String, String, bool)>> {
+    fn pin_paths(program: &str, vars: &[(&str, &str)]) -> Option<Vec<(String, String, PinKind)>> {
         let env = env_of(vars);
-        pinned(program, &env).map(|p| p.into_iter().map(|p| (p.what, p.path, p.tree)).collect())
+        pinned(program, &env).map(|p| p.into_iter().map(|p| (p.what, p.path, p.kind)).collect())
     }
 
     #[test]
@@ -829,15 +993,30 @@ mod tests {
             r"C:\Program Files\Amazon\AWSCLIV2\aws.exe",
             "az",
             "gcloud",
-            r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",
-            "kubectl",
-            "helm",
         ] {
             assert!(pinned(p, &|_| None).is_some(), "{p}");
             assert!(!ONCE_ONLY.contains(&stem_of(p).as_str()), "{p}");
         }
-        for p in ["terraform", "tofu", "pulumi", "git", "npm", "curl", "stripe"] {
+        for p in ["terraform", "tofu", "pulumi", "git", "npm", "curl", "stripe", "docker", "kubectl", "helm"] {
             assert!(pinned(p, &|_| None).is_none(), "{p}");
+        }
+        for p in [
+            r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",
+            "kubectl",
+            "helm",
+            "git-lfs",
+            "scalar",
+            "git-receive-pack",
+            "git-upload-pack",
+            r"C:\Program Files\Git\mingw64\libexec\git-core\git-remote-https.exe",
+            "git-credential-manager",
+            "wt",
+            "ftp",
+            "control",
+            "tclsh86",
+            "wish",
+        ] {
+            assert!(once_only(p), "{p}");
         }
         assert!(runs_builds("vercel.cmd") && runs_builds("wrangler") && runs_builds("NETLIFY.exe"));
         assert!(!runs_builds("gh.exe"));
@@ -855,12 +1034,12 @@ mod tests {
                 (
                     "gh's config.yml".to_string(),
                     r"C:\Users\a\AppData\Roaming\GitHub CLI\config.yml".to_string(),
-                    false
+                    PinKind::File
                 ),
                 (
                     "gh's extensions".to_string(),
                     r"C:\Users\a\AppData\Local\GitHub CLI\extensions".to_string(),
-                    true
+                    PinKind::TreeBut("state.yml")
                 ),
             ]
         );
@@ -880,21 +1059,19 @@ mod tests {
         let paths = |p: &str, vars: &[(&str, &str)]| -> Vec<String> {
             pin_paths(p, vars).unwrap().into_iter().map(|p| p.1).collect()
         };
-        assert_eq!(paths("aws", &home), [r"C:\Users\a\.aws\config", r"C:\Users\a\.aws\credentials"]);
+        assert_eq!(
+            paths("aws", &home),
+            [
+                r"C:\Users\a\.aws\config",
+                r"C:\Users\a\.aws\credentials",
+                r"C:\Users\a\.aws\cli\alias",
+                r"C:\Users\a\.aws\cli"
+            ]
+        );
+        assert_eq!(pin_paths("aws", &home).unwrap()[3].2, PinKind::Names);
         assert_eq!(
             paths("aws", &[("USERPROFILE", r"C:\Users\a"), ("AWS_CONFIG_FILE", r"D:\aws.cfg")])[0],
             r"D:\aws.cfg"
-        );
-        assert_eq!(
-            paths("docker", &home),
-            [r"C:\Users\a\.docker\config.json", r"C:\Users\a\.docker\cli-plugins"]
-        );
-        assert_eq!(paths("docker", &[("DOCKER_CONFIG", r"D:\dk")])[0], r"D:\dk\config.json");
-        assert_eq!(paths("kubectl", &home), [r"C:\Users\a\.kube\config"]);
-        assert_eq!(paths("kubectl", &[("KUBECONFIG", r"D:\a;;D:\b")]), [r"D:\a", r"D:\b"]);
-        assert_eq!(
-            paths("helm", &home),
-            [r"C:\Users\a\.kube\config", r"C:\Users\a\AppData\Roaming\helm\plugins"]
         );
         assert_eq!(
             paths("gcloud", &[("CLOUDSDK_CONFIG", r"D:\g")]),
@@ -907,6 +1084,75 @@ mod tests {
         for pin in pinned("gcloud", &env_of(&home)).unwrap() {
             assert!(!pin.what.contains([',', '=', '|']), "{}", pin.what);
         }
+    }
+
+    fn args(line: &str) -> Vec<String> {
+        line.split(' ').filter(|a| !a.is_empty()).map(str::to_string).collect()
+    }
+
+    #[test]
+    fn an_always_is_for_the_subcommand_too() {
+        assert_eq!(command_path(&args("pr create --fill")), "pr create");
+        assert_eq!(command_path(&args("api repos/a/b/issues")), "api");
+        assert_eq!(command_path(&args("pr view 123")), "pr view");
+        assert_eq!(command_path(&args("--version")), "");
+        assert_eq!(command_path(&args("a b c d")), "a b c");
+        assert_eq!(command_path(&args("deploy --prod")), "deploy");
+        assert_eq!(command_path(&args("https://x.example")), "");
+        assert_eq!(command_path(&[]), "");
+    }
+
+    #[test]
+    fn arguments_that_reach_past_the_command_leave_only_once() {
+        let refused = |stem: &str, line: &str| always_refused(stem, &args(line)).is_some();
+        // gh's output filters read the environment.
+        for line in [
+            "api user --jq $ENV.GITHUB_TOKEN",
+            "api user -q .login",
+            "api user -q.login",
+            "api user --jq=.x",
+            "pr list --template {{.}}",
+            "pr list -t x",
+            "alias set x !sh",
+            "extension install a/b",
+            "ext list",
+            "config set editor x",
+            "my-extension run",
+        ] {
+            assert!(refused("gh.exe", line), "gh {line}");
+        }
+        for line in ["pr create --fill", "api repos/a/b", "repo view", "config get editor", "--version", ""] {
+            assert!(!refused("gh", line), "gh {line}");
+        }
+        // aws reads its input from a file only with file://.
+        assert!(refused("aws", "ec2 run-instances --cli-input-json file://x.json"));
+        assert!(refused("aws", "ec2 run-instances --cli-input-yaml=fileb://x"));
+        assert!(refused("aws", "configure set x y"));
+        assert!(!refused("aws", "ec2 run-instances --cli-input-json {}"));
+        assert!(!refused("aws", "s3 ls --profile work"));
+        assert!(refused("gcloud", "run deploy --flags-file=f.yaml"));
+        assert!(!refused("gcloud", "run deploy --configuration work"));
+        for stem in ["vercel.cmd", "netlify", "wrangler"] {
+            for line in ["deploy --local-config x", "deploy -A x", "deploy --global-config d", "deploy --config x", "deploy -c x"] {
+                assert!(refused(stem, line), "{stem} {line}");
+            }
+            assert!(!refused(stem, "deploy --prod"), "{stem}");
+        }
+        assert!(!refused("az", "login --debug"));
+        assert!(!refused("curl", "-t x"));
+    }
+
+    #[test]
+    fn a_git_config_names_its_includes_and_hooks() {
+        let text = "[core]\n\thooksPath = .githooks\n[include]\n\tpath = ~/extra.gitconfig\n[includeIf \"gitdir:C:/work/\"]\n  path = \"work.gitconfig\"\n# [include]\n; path = no\n[user]\n\tpath = not-an-include\n[Include] path = inline\n";
+        assert_eq!(
+            git_refs(text),
+            GitRefs {
+                includes: vec!["~/extra.gitconfig".into(), "work.gitconfig".into(), "inline".into()],
+                hooks_path: Some(".githooks".into()),
+            }
+        );
+        assert_eq!(git_refs(""), GitRefs::default());
     }
 
     const SHIM: &str = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\vercel\\dist\\index.js\" %*\r\n";

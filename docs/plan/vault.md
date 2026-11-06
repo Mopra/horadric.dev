@@ -198,15 +198,20 @@ third half, below.
   build scripts run), and `git` (its aliases and hooks are shell). The
   list is the pure part and grows with what turns up. The deploy and
   cloud CLIs (`gh`, `vercel`, `wrangler`, `netlify`, `aws`, `az`,
-  `gcloud`, `docker`, `kubectl`, `helm`) can be made to run other code
-  too, but only through files of their own: `gh`'s aliases and
-  extensions, docker's credential helpers, a kubeconfig's `exec`. Their
-  Always pins those files by SHA-256, read fresh on every run, and any
-  change asks again, naming what changed. An npm shim is run as node with
-  its package's script, and its whole package folder and that node are
-  pinned. `vercel`, `wrangler` and `netlify` may also run the project's
-  build, which no pin can hold, and the question says so (decided
-  2026-11-06).
+  `gcloud`) can be made to run other code too, through files of their
+  own (`gh`'s aliases and extensions, aws aliases and
+  `credential_process`) and the git they run in the project. Their
+  Always pins those files by SHA-256, the repository's git config, hooks
+  and attributes and the user's git config included, and any change asks
+  again, naming what changed. An Always is for one subcommand (`gh pr
+  create`), and arguments that reach past it (`gh --jq`, an extension, a
+  config file flag) leave only Once. An npm shim is run as node with its
+  package's script; the package folder, that node and the names in the
+  global `node_modules` are pinned. An Always run gets a PATH without
+  folders the user can write to. `vercel`, `wrangler` and `netlify` may
+  also run the project's build, which no pin can hold, and the question
+  says so. `docker`, `kubectl` and `helm` have too many ways to run
+  other code from their flags and stay Once only (decided 2026-11-06).
 - **Adding one.** In Settings, Projects, a Secrets row lists the picked
   project's names, its identity's and the Everywhere ones under them, and
   the names `config.json` asks for that are not kept yet. Add asks for the
