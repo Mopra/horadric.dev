@@ -385,6 +385,26 @@ again with `base` = `current`). Any other `why` shows as "Not saved: why"
 and the next change tries again. The host does not reload a tab after a
 write the tab made itself.
 
+### `changed-on-disk`
+```json
+{ "forge": "changed-on-disk", "current": "<the file's whole text now>" }
+```
+Host to page, to a tab in edit mode, instead of reloading it, when
+someone else (usually Claude) wrote the file. With nothing unsaved the
+page takes `current` as its text and base without a word (through the
+editor's undo, the cursor kept at its offset): markdown fetches its page
+again (a plain `fetch` of the path) and swaps in the reading screen when
+that answers one, HTML reloads its preview frame, a CSV draws its grid
+again. With changes not yet written (a cell being typed in counts) it
+shows "Claude changed this file" with Load theirs and Keep mine, as a
+refused write does. With a write in flight it waits: that write is
+refused as `changed` and shows the same.
+
+The host takes writes only while the tab is in edit mode or within 5 s
+after it ends, and refuses a page turning edit mode on without recent
+human input. E and the Done key are that input; edit mode coming back
+after a reload posts `editing` on without it, so the host may refuse it.
+
 ### Reading the source
 
 - Markdown and CSV: `fetch(location.pathname + "?raw", { cache: "no-store" })`

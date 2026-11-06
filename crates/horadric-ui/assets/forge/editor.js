@@ -175,6 +175,46 @@
     return true;
   }
 
+  // Someone else wrote the file while it is open here; the host sends the
+  // new text instead of reloading the tab.
+  function changedOnDisk(m) {
+    if (!on || typeof m.current !== "string" || base === null) return true;
+    const theirs = m.current;
+    // A cell being typed in is a change too, and the grid is drawn again.
+    if (grid) grid.commit();
+    if (conflict !== null) {
+      conflict = theirs;
+      return true;
+    }
+    if (theirs === base) return true;
+    // A write on its way, or changes not yet sent, are the human's: they
+    // choose. A write in flight is refused as changed and lands here too.
+    if (inflight || timer || current() !== base) {
+      if (!inflight) showConflict(theirs);
+      return true;
+    }
+    base = theirs;
+    if (kind === "csv") grid.load(theirs, true);
+    else src.replaceAll(theirs);
+    if (kind === "html") reloadPreview();
+    if (kind === "md") refreshMarkdown();
+    status("saved");
+    keepSession();
+    return true;
+  }
+
+  // The rendered page is what a plain fetch of a markdown file answers;
+  // only its reading screen is taken.
+  async function refreshMarkdown() {
+    try {
+      const r = await fetch(FILE, { cache: "no-store" });
+      if (!r.ok) return;
+      const doc = new DOMParser().parseFromString(await r.text(), "text/html");
+      const main = doc.querySelector("main.forge-md");
+      if (main && main.childElementCount && on && kind === "md") swapPreview(main.innerHTML);
+    } catch (_) { /* the preview stays as it was until the next save */ }
+  }
+
   function showConflict(theirs) {
     conflict = theirs;
     clearTimeout(timer);
@@ -1482,6 +1522,7 @@
       return true;
     });
     f.on("write-result", writeResult);
+    f.on("changed-on-disk", changedOnDisk);
   }
 
   function boot() {
