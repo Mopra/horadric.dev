@@ -120,9 +120,13 @@ impl Ctx<'_> {
             })
             .collect();
 
+        // The hover Copy button covers nothing: beside the table when it
+        // leaves the room, else in a slim margin kept above it.
+        let top = copy_top(w, total_w);
+
         // The header: a dim label, then a rule a shade firmer than the
         // hairlines between rows, which is all that sets it apart.
-        let mut y = 0.0;
+        let mut y = top;
         let mut hh: f32 = 0.0;
         for (c, h) in header.iter().enumerate() {
             let (pl, pr) = pad(c);
@@ -133,7 +137,7 @@ impl Ctx<'_> {
                 &self.fonts.small_wrap,
                 lefts[c] + pl,
                 y,
-                widths[c] - pl - pr,
+                (widths[c] - pl - pr).max(0.0),
                 self.pal.dim,
                 aligns[c],
             );
@@ -160,9 +164,12 @@ impl Ctx<'_> {
             for (c, inl) in row.iter().enumerate().take(cols) {
                 let (pl, pr) = pad(c);
                 let x = lefts[c] + pl;
-                let cw = widths[c] - pl - pr;
+                let cw = (widths[c] - pl - pr).max(0.0);
                 let t = inl.text.as_str();
-                if let Some((tone, label)) = status(t) {
+                // A column squeezed narrower than a pill's own padding
+                // shows its status as plain text.
+                let pill = status(t).filter(|_| cw >= 2.0 * PILL_X);
+                if let Some((tone, label)) = pill {
                     rh = rh.max(self.pill(&mut s, tone, &label, x, y + CELL_Y, cw, aligns[c]));
                     continue;
                 }
@@ -214,7 +221,7 @@ impl Ctx<'_> {
             }
         }
 
-        self.copy_button(&mut s, header, rows, w, total_w, hh);
+        self.copy_button(&mut s, header, rows, w, top, hh);
         s.h = y + 4.0;
         s
     }
@@ -310,25 +317,19 @@ impl Ctx<'_> {
     }
 
     /// Copy on hover, the table as tab separated text so it pastes into a
-    /// spreadsheet as cells. It sits at the right of the header line;
-    /// over a table that reaches that far it gets a plate of the page's
-    /// own colour, so the header under it does not show through.
+    /// spreadsheet as cells. It sits at the right, level with the header
+    /// when the table leaves room beside it, else in the margin `top`
+    /// kept above the table, so it never covers a label.
     unsafe fn copy_button(
         &self,
         s: &mut Scene,
         header: &[Inline],
         rows: &[Vec<Inline>],
         w: f32,
-        total_w: f32,
+        top: f32,
         hh: f32,
     ) {
-        use super::rich::Item;
-        let copy = Rect::new(w - COPY_W, (hh - COPY_H) / 2.0, COPY_W, COPY_H);
-        if total_w > copy.x - 8.0 {
-            s.hover.push(Item::Fill(copy, 5.0, self.pal.bg));
-            s.hover
-                .push(Item::Fill(copy, 5.0, self.pal.fg.with_alpha(0.06)));
-        }
+        let copy = copy_rect(w, top, hh);
         let head: Vec<&str> = header.iter().map(|i| i.text.as_str()).collect();
         let body: Vec<Vec<&str>> = rows
             .iter()
@@ -338,6 +339,24 @@ impl Ctx<'_> {
         s.hover.extend(self.copy_face(copy, &text, self.pal.dim));
         s.hover_hits.push((copy, Hit::Tr(Act::Copy(text))));
     }
+}
+
+/// The margin kept above a table for its Copy button: none when the
+/// button fits beside the table, right of its last column.
+fn copy_top(w: f32, total_w: f32) -> f32 {
+    if w - total_w >= COPY_W + 8.0 {
+        0.0
+    } else {
+        COPY_H + 6.0
+    }
+}
+
+/// Where the Copy button goes: at the right, never left of the scene or
+/// above its top, level with the header when there is no margin for it.
+fn copy_rect(w: f32, top: f32, hh: f32) -> Rect {
+    let cw = COPY_W.min(w.max(0.0));
+    let y = if top > 0.0 { 0.0 } else { ((hh - COPY_H) / 2.0).max(0.0) };
+    Rect::new((w - cw).max(0.0), y, cw, COPY_H)
 }
 
 fn whole(text: &str) -> windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_RANGE {
@@ -623,6 +642,22 @@ mod tests {
     fn table_tsv_pastes_as_cells() {
         let t = tsv(&["a", "b"], &[vec!["1", "x\ty"], vec!["2"]]);
         assert_eq!(t, "a\tb\r\n1\tx y\r\n2\t");
+    }
+
+    #[test]
+    fn table_copy_button_covers_nothing() {
+        // Room beside the table: level with the header, right of it.
+        let top = copy_top(600.0, 300.0);
+        assert_eq!(top, 0.0);
+        let r = copy_rect(600.0, top, 17.0);
+        assert!(r.x >= 300.0 + 8.0 && r.y >= 0.0);
+        // A full width table: a margin above it holds the button.
+        let top = copy_top(600.0, 600.0);
+        let r = copy_rect(600.0, top, 17.0);
+        assert!(r.y >= 0.0 && r.y + r.h <= top);
+        // Narrower than the button: it stays inside the scene.
+        let r = copy_rect(40.0, copy_top(40.0, 40.0), 17.0);
+        assert!(r.x >= 0.0 && r.x + r.w <= 40.01);
     }
 
     #[test]

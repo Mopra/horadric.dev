@@ -360,21 +360,28 @@ fn answers_on_pick(questions: usize, previews: bool, again: bool) -> bool {
     questions == 1 && (!previews || again)
 }
 
+/// The waiting question card number keys and Enter go to, as its block:
+/// the newest, and only while nothing else would take the key, no card
+/// field holding the keyboard and nothing in the composer. The card
+/// shows its key caps by this too, so they only show where a key lands.
+pub(super) fn keyed_card(chat: &Chat) -> Option<&Block> {
+    if chat.watch.is_some() || chat.tr.state.focus.is_some() || !chat.input.bare() {
+        return None;
+    }
+    (chat.folio.blocks.iter().rev())
+        .find(|b| matches!(b, Block::Question { state, .. } if *state == AskState::Waiting))
+}
+
 /// A number key while the composer is empty and a question card waits:
 /// picks that option of the question the card is on. True when it did.
+/// It never answers, so a reply begun with a digit costs a pick to undo,
+/// not an answer sent; Enter or Submit answers.
 fn number_key(key: &str, c: char) -> bool {
     let Some(n) = c.to_digit(10).filter(|&n| n >= 1) else {
         return false;
     };
-    if super::is_watch(key) {
-        return false;
-    }
-    let target = with(key, |chat| {
-        if !chat.input.ed.is_empty() {
-            return None;
-        }
-        let b = (chat.folio.blocks.iter().rev())
-            .find(|b| matches!(b, Block::Question { state, .. } if *state == AskState::Waiting))?;
+    let picked = with(key, |chat| {
+        let b = keyed_card(chat)?;
         let Block::Question {
             request_id,
             questions,
@@ -385,13 +392,33 @@ fn number_key(key: &str, c: char) -> bool {
         };
         let q = keyed_question(b, &chat.tr.state)?;
         let o = n as usize - 1;
-        (o < questions.get(q)?.options.len()).then(|| (request_id.clone(), q, o))
+        let id = request_id.clone();
+        (o < questions.get(q)?.options.len()).then(|| pick(chat, &id, q, o))
     })
     .flatten();
-    let Some((id, q, o)) = target else {
+    if picked.is_none() {
+        return false;
+    }
+    redraw(key);
+    true
+}
+
+/// Enter with the composer empty: answers the card number keys go to,
+/// once every question on it has an answer. True when it did.
+fn enter_key(key: &str) -> bool {
+    let id = with(key, |chat| {
+        let b = keyed_card(chat)?;
+        let Block::Question { request_id, .. } = b else {
+            return None;
+        };
+        let picks = picks_of(b, &chat.tr.state);
+        picks.iter().all(|p| !p.is_empty()).then(|| request_id.clone())
+    })
+    .flatten();
+    let Some(id) = id else {
         return false;
     };
-    act(key, Act::Pick(id, q, o));
+    act(key, Act::Submit(id));
     true
 }
 
@@ -625,6 +652,9 @@ pub(super) fn char(key: &str, c: char, mods: Mods) -> bool {
             return copied.unwrap_or(false);
         }
         if !mods.ctrl && !mods.alt && number_key(key, c) {
+            return true;
+        }
+        if c == '\r' && !mods.ctrl && !mods.alt && !mods.shift && enter_key(key) {
             return true;
         }
         if c == '\u{1b}' {

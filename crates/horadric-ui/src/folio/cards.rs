@@ -656,7 +656,8 @@ pub(super) fn previewed(has: &[bool], rec: Option<usize>, picked: Option<usize>)
 /// and Submit. A single question with one pick answers on the click,
 /// unless its options have previews: then the click shows the picked
 /// one's, and Submit or a second click answers. Number keys pick in the
-/// question that waits first, each row showing its key.
+/// question that waits first, each row showing its key while a key would
+/// land there; they never answer, Enter does.
 /// Once settled each question shrinks to the line that answered it.
 pub(super) unsafe fn question(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
     let mut s = Scene::default();
@@ -707,7 +708,7 @@ pub(super) unsafe fn question(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene 
         let has: Vec<bool> = question.options.iter().map(|o| !o.preview.is_empty()).collect();
         let rec = (question.options.iter()).position(|o| look::recommended(&o.label).1);
         let shown = previewed(&has, rec, picks.and_then(|p| p.iter().next().copied()));
-        let keys = keyed_question(b, st) == Some(q);
+        let keys = st.keyed.as_ref() == Some(request_id) && keyed_question(b, st) == Some(q);
         for (o, opt) in question.options.iter().enumerate() {
             let on = picks.is_some_and(|p| p.contains(&o));
             let key = (keys && o < 9).then_some(o);

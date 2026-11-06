@@ -204,6 +204,9 @@ pub(super) struct State {
     pub(super) reviews: HashMap<String, super::comments::Review>,
     /// Per question card, per question, the options picked.
     pub(super) picks: HashMap<String, Vec<BTreeSet<usize>>>,
+    /// The question card number keys go to this frame, by request id, so
+    /// it alone shows its key caps.
+    pub(super) keyed: Option<String>,
     pub(super) todos_open: bool,
     /// Every block and step open, each step with when it ran.
     pub(super) verbose: bool,
@@ -448,7 +451,8 @@ fn stamp(i: usize, b: &Block, open: bool, live: bool, copy: bool, st: &State) ->
         // These only grow while they stream, and a reply settled after
         // an interrupt is a different length.
         Block::Prompt(t) | Block::Reply(t) | Block::Thinking(t) | Block::Raw(t) => {
-            if matches!(b, Block::Reply(_)) {
+            // Both lay out code blocks, whose fold is in their scene.
+            if matches!(b, Block::Reply(_) | Block::Thinking(_)) {
                 super::code::open_print(&st.all).hash(&mut h);
             }
             t.len().hash(&mut h);
@@ -486,6 +490,7 @@ fn stamp(i: usize, b: &Block, open: bool, live: bool, copy: bool, st: &State) ->
             (*state as u8).hash(&mut h);
             answers.hash(&mut h);
             st.picks.get(request_id).hash(&mut h);
+            (st.keyed.as_ref() == Some(request_id)).hash(&mut h);
             for q in 0..questions.len() {
                 hash_field(&mut h, st, &other_field(request_id, q));
             }
@@ -1509,6 +1514,11 @@ impl View {
         hits: &mut Vec<(Rect, Hit)>,
     ) {
         let rt = &gfx.rt;
+        let keyed = match super::select::keyed_card(chat) {
+            Some(Block::Question { request_id, .. }) if chat.tr.state.keys => Some(request_id.clone()),
+            _ => None,
+        };
+        chat.tr.state.keyed = keyed;
         let Ui { state: st, cache } = &mut chat.tr;
         super::select::refind_in(st, cache);
         let made_for = (

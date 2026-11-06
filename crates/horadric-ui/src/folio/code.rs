@@ -434,9 +434,10 @@ impl Ctx<'_> {
             (l, _) => label(l),
         };
         let copy_w = 72.0;
-        let room = w - 2.0 * CODE_PAD - copy_w;
+        let room = (w - 2.0 * CODE_PAD - copy_w).max(0.0);
         let mut x = CODE_PAD;
-        if let Some(file) = &fence.file {
+        // Too narrow a header for a readable name leaves it to the language.
+        if let Some(file) = fence.file.as_ref().filter(|_| room >= 40.0) {
             let fw = self
                 .one_line(&self.gfx.small, file)
                 .map_or(room / 2.0, |l| render::text_size(&l).0)

@@ -361,6 +361,11 @@ impl Input {
         self.dirty
     }
 
+    /// Whether nothing waits to be sent: no text, no images, no pins.
+    pub(super) fn bare(&self) -> bool {
+        self.ed.is_empty() && self.images.is_empty() && self.pins.is_empty()
+    }
+
     /// The session is gone for good: so is what was kept of it.
     pub(super) fn forget(&mut self) {
         self.dirty = false;
