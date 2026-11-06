@@ -293,6 +293,27 @@ struct Built {
     code_open: u64,
     /// Built while a Copy button in it said Copied.
     copy: bool,
+    /// Its runes that turn while what they stand for runs, taken out of
+    /// the scene: the view turns them on its clock, where the scene would
+    /// only move on when content arrived.
+    live: Vec<view::LiveRune>,
+}
+
+/// Marks a rune for [`live_runes`] to take out of its scene: its number
+/// with the top bit set, a bit no rune's own number reaches.
+const LIVE: usize = 1 << (usize::BITS - 1);
+
+/// Takes the runes marked [`LIVE`] out of `s`, their numbers unmarked.
+fn live_runes(s: &mut Scene) -> Vec<view::LiveRune> {
+    let mut live = Vec::new();
+    s.items.retain(|item| match *item {
+        Item::Rune(n, x, y, size, c, w) if n & LIVE != 0 => {
+            live.push((n & !LIVE, x, y, size, c, w));
+            false
+        }
+        _ => true,
+    });
+    live
 }
 
 /// Decoded thumbnails by block and image, None where one would not decode.
@@ -920,7 +941,7 @@ impl Ctx<'_> {
             // Each piece that streams in moves it on to another rune.
             let rune = t.len() / 48;
             let ink = self.pal.accent.mix(self.pal.fg, 0.35);
-            (s.items).push(Item::Rune(rune, r.x + 8.0, r.y + 7.0, 12.0, ink, 1.4));
+            (s.items).push(Item::Rune(LIVE | rune, r.x + 8.0, r.y + 7.0, 12.0, ink, 1.4));
         } else {
             s.line(
                 '\u{E82F}'.to_string(),
@@ -1119,7 +1140,7 @@ impl Ctx<'_> {
             // A rune that turns over with each tool it uses.
             let ink = self.pal.accent.mix(self.pal.fg, 0.35);
             let rune = lane.tool_uses.max(lane.steps.len() as u64) as usize;
-            (s.items).push(Item::Rune(rune, tx + 5.0, top + 5.0, 11.0, ink, 1.3));
+            (s.items).push(Item::Rune(LIVE | rune, tx + 5.0, top + 5.0, 11.0, ink, 1.3));
             tx += 16.0;
         }
         let model = step.input["model"].as_str().unwrap_or_default();
@@ -1597,7 +1618,7 @@ impl View {
                 .map(|b| b.paras)
                 .unwrap_or_default();
             let mut paras = Vec::new();
-            let scene = match b {
+            let mut scene = match b {
                 Block::Prompt(t) => ctx.prompt(i, t, lw),
                 Block::Images(v) => ctx.images(i, v, thumbs, lw),
                 Block::Reply(t) if t.trim().is_empty() => Scene::default(),
@@ -1624,12 +1645,14 @@ impl View {
                 Block::Notice(n) => ctx.notice(n, lw),
                 Block::Raw(t) => ctx.raw(i, t, open, lw),
             };
+            let live = live_runes(&mut scene);
             blocks[i] = Some(Built {
                 stamp,
                 scene,
                 paras,
                 code_open,
                 copy,
+                live,
             });
         }
 
@@ -1680,6 +1703,9 @@ impl View {
         let origin = area.y - chat.scroll;
         let mouse = st.mouse;
         st.shown.clear();
+        // The trust card covers the conversation, and a rune turning over
+        // it would show through.
+        let mut live = Vec::new();
         if earlier {
             let r = Rect::new(cx, origin + TOP, cw, EARLIER_H - 8.0);
             if r.bottom() >= area.y {
@@ -1704,6 +1730,10 @@ impl View {
             let whole = Rect::new(cx - 8.0, top, cw + 16.0, s.h + gap);
             let hovered = mouse.is_some_and(|(mx, my)| whole.contains(mx, my));
             rich::draw(gfx, fonts, s, cx, top, hovered);
+            if !waits {
+                let at = (built.live.iter()).map(|&(n, x, y, size, c, w)| (n, cx + x, top + y, size, c, w));
+                live.extend(at.filter(|r| r.2 + r.3 >= area.y && r.2 <= area.bottom()));
+            }
             let mine = s.hits.iter().chain(s.hover_hits.iter().filter(|_| hovered));
             // Drawing is clipped to the area; what is hidden must not take
             // clicks either.
@@ -1719,6 +1749,7 @@ impl View {
             }
         }
         self.marks(gfx, pal, st, cache_units(blocks), &area);
+        *self.live.borrow_mut() = (area, live);
         let mut y = origin + content - tail - 8.0;
         if chat.folio.busy {
             let at = Vector2 {
@@ -1762,7 +1793,11 @@ impl View {
             let lit = (hits.iter().rev()).find(|(r, _)| r.contains(mx, my));
             if let Some((r, h)) = lit {
                 let text_link = matches!(h, Hit::Tr(Act::Link(_) | Act::Path(..) | Act::Field(_)));
-                if !text_link {
+                if matches!(h, Hit::Tr(Act::Pick(..))) {
+                    // An option row is a rounded card of its own: lit to its
+                    // shape, in the accent it takes once picked.
+                    gfx.fill_round(r, 8.0, pal.accent.with_alpha(0.07));
+                } else if !text_link {
                     gfx.fill_round(r, 6.0, pal.fg.with_alpha(0.06));
                 }
             }

@@ -446,15 +446,22 @@ unsafe fn heading(
     y
 }
 
+/// The side of the key cap that names an option's number key.
+const CAP: f32 = 18.0;
+
 /// One option as a full-width row: a radio or a box to tick, the label
-/// with a badge when Claude recommends it, the description under it, and
-/// its preview when it has one. Returns the row.
+/// with a badge when Claude recommends it, the number key that picks it,
+/// the description under it, and its preview when `preview`. Returns the
+/// row.
+#[allow(clippy::too_many_arguments)]
 unsafe fn option(
     cx: &Ctx,
     s: &mut Scene,
     opt: &horadric_core::folio::QuestionOption,
     multi: bool,
     on: bool,
+    preview: bool,
+    key: Option<usize>,
     y: f32,
     inner: f32,
 ) -> Rect {
@@ -466,14 +473,15 @@ unsafe fn option(
             .map_or(90.0, |l| render::text_size(&l).0 + 16.0),
         false => 0.0,
     };
+    let cap_w = if key.is_some() { CAP + 8.0 } else { 0.0 };
     let x = PAD + 36.0;
     let text_w = inner - 48.0;
-    let label_w = if rec { text_w - badge_w - 8.0 } else { text_w };
+    let label_w = text_w - cap_w - if rec { badge_w + 8.0 } else { 0.0 };
     let label_l = cx.layout(&cx.gfx.text, label, label_w);
     let desc_l = (!opt.description.is_empty())
         .then(|| cx.layout(&cx.fonts.small_wrap, &opt.description, text_w))
         .flatten();
-    let preview_l = (!opt.preview.is_empty())
+    let preview_l = (preview && !opt.preview.is_empty())
         .then(|| cx.layout(&cx.fonts.rows, &opt.preview, text_w - 16.0))
         .flatten();
     let lh = label_l.as_ref().map_or(18.0, |l| render::text_size(l).1);
@@ -515,13 +523,20 @@ unsafe fn option(
     if let Some(l) = &label_l {
         s.unit(l, x, y + 10.0, cx.pal.fg, label);
     }
+    if let Some(k) = key {
+        // Dim, as a hint for the keyboard rather than a second button.
+        let top = y + 10.0 + (first - CAP) / 2.0;
+        let cap = Rect::new(r.right() - 12.0 - CAP, top, CAP, CAP);
+        s.stroke(cap, 4.0, cx.pal.fg.with_alpha(0.16), 1.0);
+        s.line((k + 1).to_string(), F::Centre, cap, cx.pal.faint.with_alpha(0.75));
+    }
     if rec {
         let top = y + 10.0 + (first - 20.0) / 2.0;
         let (ink, fill) = (
             theme::done().mix(cx.pal.fg, 0.35),
             theme::done().with_alpha(0.14),
         );
-        chip(cx, s, r.right() - 12.0 - badge_w, top, badge, ink, fill);
+        chip(cx, s, r.right() - 12.0 - cap_w - badge_w, top, badge, ink, fill);
     }
     let mut at = y + 10.0 + lh + 3.0;
     if let Some(l) = &desc_l {
@@ -606,9 +621,42 @@ pub(super) fn picks_of(b: &Block, st: &State) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// The question number keys pick in: the first not answered yet, or the
+/// last once all are, so a key can still change the last answer.
+pub(super) fn keyed(answered: &[bool]) -> usize {
+    (answered.iter().position(|a| !a)).unwrap_or(answered.len().saturating_sub(1))
+}
+
+/// The question of waiting card `b` that number keys pick in, if it
+/// waits.
+pub(super) fn keyed_question(b: &Block, st: &State) -> Option<usize> {
+    match b {
+        Block::Question { state, .. } if *state == AskState::Waiting => {
+            let answered: Vec<bool> = picks_of(b, st).iter().map(|p| !p.is_empty()).collect();
+            (!answered.is_empty()).then(|| keyed(&answered))
+        }
+        _ => None,
+    }
+}
+
+/// The one option of a question whose preview shows: the one picked,
+/// else the one Claude recommends, else the first that has one. Previews
+/// are long, and all of them inline buried the options they belong to.
+/// `has` says which options have a preview.
+pub(super) fn previewed(has: &[bool], rec: Option<usize>, picked: Option<usize>) -> Option<usize> {
+    if let Some(p) = picked {
+        return has.get(p).copied().unwrap_or(false).then_some(p);
+    }
+    rec.filter(|&r| has.get(r).copied().unwrap_or(false))
+        .or_else(|| has.iter().position(|&h| h))
+}
+
 /// A question card: each question with its options as buttons (boxes to
 /// tick when several may be picked), a field for an answer of one's own,
-/// and Submit. A single question with one pick answers on the click.
+/// and Submit. A single question with one pick answers on the click,
+/// unless its options have previews: then the click shows the picked
+/// one's, and Submit or a second click answers. Number keys pick in the
+/// question that waits first, each row showing its key.
 /// Once settled each question shrinks to the line that answered it.
 pub(super) unsafe fn question(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene {
     let mut s = Scene::default();
@@ -656,9 +704,15 @@ pub(super) unsafe fn question(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene 
             continue;
         }
         let picks = picked.and_then(|p| p.get(q));
+        let has: Vec<bool> = question.options.iter().map(|o| !o.preview.is_empty()).collect();
+        let rec = (question.options.iter()).position(|o| look::recommended(&o.label).1);
+        let shown = previewed(&has, rec, picks.and_then(|p| p.iter().next().copied()));
+        let keys = keyed_question(b, st) == Some(q);
         for (o, opt) in question.options.iter().enumerate() {
             let on = picks.is_some_and(|p| p.contains(&o));
-            let r = option(cx, &mut s, opt, question.multi_select, on, y, inner);
+            let key = (keys && o < 9).then_some(o);
+            let preview = shown == Some(o);
+            let r = option(cx, &mut s, opt, question.multi_select, on, preview, key, y, inner);
             s.hit(r, Hit::Tr(Act::Pick(request_id.clone(), q, o)));
             y = r.bottom() + 6.0;
         }
@@ -922,4 +976,29 @@ pub(super) unsafe fn sign_in(cx: &Ctx, i: usize, b: &Block, st: &State, w: f32) 
     plate(cx, &mut s, w, h, asking);
     s.h = h;
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keys_pick_in_the_first_question_not_answered() {
+        assert_eq!(keyed(&[true, false, false]), 1);
+        assert_eq!(keyed(&[false, true]), 0);
+        assert_eq!(keyed(&[true, true]), 1);
+        assert_eq!(keyed(&[]), 0);
+    }
+
+    #[test]
+    fn one_preview_shows_the_picked_then_the_recommended_then_the_first() {
+        let has = [false, true, true];
+        assert_eq!(previewed(&has, None, None), Some(1));
+        assert_eq!(previewed(&has, Some(2), None), Some(2));
+        assert_eq!(previewed(&has, Some(0), None), Some(1));
+        assert_eq!(previewed(&has, Some(2), Some(1)), Some(1));
+        // Picking one without a preview shows none, not another's.
+        assert_eq!(previewed(&has, Some(2), Some(0)), None);
+        assert_eq!(previewed(&[false, false], None, None), None);
+    }
 }

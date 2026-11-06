@@ -6,13 +6,13 @@
 
 use std::collections::BTreeSet;
 
-use horadric_core::folio::{Block, Reply};
+use horadric_core::folio::{AskState, Block, Reply};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
     VK_DELETE, VK_DOWN, VK_END, VK_F3, VK_HOME, VK_LEFT, VK_RIGHT, VK_SHIFT, VK_UP,
 };
 
-use super::cards::picks_of;
+use super::cards::{keyed_question, picks_of};
 use super::comments;
 use super::flow::{self, Pos};
 use super::transcript::{
@@ -311,17 +311,23 @@ fn toggle(set: &mut std::collections::HashSet<String>, id: String) {
 }
 
 /// Picks or unpicks an option. True when that answers the card: a single
-/// question with one answer and nothing typed of one's own.
+/// question with one answer and nothing typed of one's own. When its
+/// options have previews the first click only picks, so the preview it
+/// shows can be read; a second click on the same one answers.
 fn pick(c: &mut Chat, id: &str, q: usize, o: usize) -> bool {
-    let Some((count, multi)) = c.folio.blocks.iter().find_map(|b| match b {
+    let Some((count, multi, previews)) = c.folio.blocks.iter().find_map(|b| match b {
         Block::Question {
             request_id,
             questions,
             ..
-        } if request_id == id => Some((
-            questions.len(),
-            questions.get(q).is_some_and(|q| q.multi_select),
-        )),
+        } if request_id == id => {
+            let question = questions.get(q);
+            Some((
+                questions.len(),
+                question.is_some_and(|q| q.multi_select),
+                question.is_some_and(|q| q.options.iter().any(|o| !o.preview.is_empty())),
+            ))
+        }
         _ => None,
     }) else {
         return false;
@@ -340,10 +346,53 @@ fn pick(c: &mut Chat, id: &str, q: usize, o: usize) -> bool {
         }
         return false;
     }
+    let again = set.contains(&o);
     set.clear();
     set.insert(o);
     st.fields.remove(&other_field(id, q));
-    count == 1
+    answers_on_pick(count, previews, again)
+}
+
+/// Whether picking in a single-select question answers its card: only a
+/// card of one question, and when its options have previews only the
+/// second pick of the same option, the first having shown its preview.
+fn answers_on_pick(questions: usize, previews: bool, again: bool) -> bool {
+    questions == 1 && (!previews || again)
+}
+
+/// A number key while the composer is empty and a question card waits:
+/// picks that option of the question the card is on. True when it did.
+fn number_key(key: &str, c: char) -> bool {
+    let Some(n) = c.to_digit(10).filter(|&n| n >= 1) else {
+        return false;
+    };
+    if super::is_watch(key) {
+        return false;
+    }
+    let target = with(key, |chat| {
+        if !chat.input.ed.is_empty() {
+            return None;
+        }
+        let b = (chat.folio.blocks.iter().rev())
+            .find(|b| matches!(b, Block::Question { state, .. } if *state == AskState::Waiting))?;
+        let Block::Question {
+            request_id,
+            questions,
+            ..
+        } = b
+        else {
+            return None;
+        };
+        let q = keyed_question(b, &chat.tr.state)?;
+        let o = n as usize - 1;
+        (o < questions.get(q)?.options.len()).then(|| (request_id.clone(), q, o))
+    })
+    .flatten();
+    let Some((id, q, o)) = target else {
+        return false;
+    };
+    act(key, Act::Pick(id, q, o));
+    true
 }
 
 fn submit_question(key: &str, id: &str) {
@@ -574,6 +623,9 @@ pub(super) fn char(key: &str, c: char, mods: Mods) -> bool {
                 None => false,
             });
             return copied.unwrap_or(false);
+        }
+        if !mods.ctrl && !mods.alt && number_key(key, c) {
+            return true;
         }
         if c == '\u{1b}' {
             // Esc closes the find bar or clears the selection before it
@@ -897,4 +949,17 @@ fn to_prompt(key: &str, up: bool) {
         }
     });
     redraw(key);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::answers_on_pick;
+
+    #[test]
+    fn a_pick_answers_only_a_lone_question_and_waits_for_a_preview_to_be_seen() {
+        assert!(answers_on_pick(1, false, false));
+        assert!(!answers_on_pick(2, false, false));
+        assert!(!answers_on_pick(1, true, false));
+        assert!(answers_on_pick(1, true, true));
+    }
 }

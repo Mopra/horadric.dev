@@ -163,6 +163,7 @@ fn make(key: &str, shared: &Rc<Shared>, parent: HWND, bar: bool) -> Option<HWND>
         grab: Cell::new(None),
         bar_lit: Cell::new(false),
         dots: Cell::new(None),
+        live: RefCell::new((Rect::new(0.0, 0.0, 0.0, 0.0), Vec::new())),
     });
     let hwnd = unsafe {
         let Ok(instance) = GetModuleHandleW(None) else {
@@ -497,7 +498,19 @@ pub(super) struct View {
     /// are clipped to: they move on every frame, so they are not in the
     /// kept layer.
     pub(super) dots: Cell<Option<(Vector2, Rect)>>,
+    /// The runes in view that turn while what they stand for runs, and
+    /// the area they are clipped to. Like the dots they move on every
+    /// frame, so they are not in the kept layer either.
+    pub(super) live: RefCell<(Rect, Vec<LiveRune>)>,
 }
+
+/// A rune that turns on the frame clock: its first number, where it is
+/// (in the window's DIPs once in [`View::live`], else in its scene), its
+/// size, ink and stroke width, as `Gfx::rune` takes them.
+pub(super) type LiveRune = (usize, f32, f32, f32, Color, f32);
+
+/// How many times a second a live rune turns over to the next.
+const RUNE_TURNS: f32 = 3.0;
 
 pub(super) fn view_of(key: &str) -> Option<&'static View> {
     let hwnd = with(key, |c| c.view)??;
@@ -993,6 +1006,7 @@ impl View {
         let heat = chat.heat();
         let moving = chat.busy_was
             || heat > 0.0
+            || !self.live.borrow().1.is_empty()
             || self.burning()
             || self.summoning()
             || lightbox::moving(&self.key);
@@ -1050,7 +1064,14 @@ impl View {
             return false;
         };
         gfx.rt = layer;
-        self.still(gfx, chat) && self.frame(gfx, t, heat)
+        if !self.still(gfx, chat) {
+            return false;
+        }
+        // Runes that came into view start the clock that turns them.
+        if !self.live.borrow().1.is_empty() {
+            self.clock(true);
+        }
+        self.frame(gfx, t, heat)
     }
 
     /// The conversation and the composer, into the kept layer.
@@ -1062,6 +1083,7 @@ impl View {
         let (cx, cw) = look::column(w);
         let mut hits: Vec<(Rect, Hit)> = Vec::new();
         self.dots.set(None);
+        self.live.borrow_mut().1.clear();
 
         rt.BeginDraw();
         rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -1165,6 +1187,17 @@ impl View {
             }
             rt.PopAxisAlignedClip();
         }
+        let live = self.live.borrow();
+        // Over a page burning away or the opening they would float loose.
+        if gfx.ghost.is_none() && summoning.is_none() && !live.1.is_empty() {
+            rt.PushAxisAlignedClip(&d2d(&live.0), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            let turn = (t * RUNE_TURNS) as usize;
+            for &(n, x, y, size, c, w) in &live.1 {
+                gfx.rune(n.wrapping_add(turn), x, y, size, c, w);
+            }
+            rt.PopAxisAlignedClip();
+        }
+        drop(live);
         lightbox::draw(gfx, &pal, &self.key);
         rt.EndDraw(None, None).is_ok()
     }
