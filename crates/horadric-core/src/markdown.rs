@@ -607,6 +607,10 @@ fn math(lines: &[&str], start: usize, out: &mut Vec<Block>) -> usize {
         }
         body.push(t);
     }
+    // The first `$` of the closing `$$`, as with a fence.
+    if !closed && body.last() == Some(&"$") {
+        body.pop();
+    }
     out.push(math_block(body.join("\n"), closed));
     i
 }
@@ -793,6 +797,16 @@ fn code_block(lines: &[&str], start: usize, fence: Fence, out: &mut Vec<Block>) 
             break;
         }
         body.push(strip_cols(line, fence.indent));
+    }
+    // A last line of fewer fence characters is the close still arriving:
+    // shown, it would blink into the code and out again a delta later.
+    if !closed
+        && body.last().is_some_and(|l| {
+            let t = l.trim();
+            !t.is_empty() && t.len() < fence.len && t.bytes().all(|b| b == fence.ch)
+        })
+    {
+        body.pop();
     }
     out.push(Block::Code {
         lang: fence.lang,
@@ -1241,8 +1255,10 @@ fn tokenize(s: &str, depth: usize) -> Toks {
             }
             _ => {}
         }
-        // Inside a link's text the link is already the target.
-        if depth == 0 && at_word_start(s, i) {
+        // Inside a link's text the link is already the target. Right after
+        // a `](` that made no link, the destination is still streaming in,
+        // and linking its first half would flicker before the whole lands.
+        if depth == 0 && at_word_start(s, i) && !s[..i].ends_with("](") {
             if let Some(end) = url_at(s, i) {
                 flush(&mut buf, &mut toks);
                 toks.push(Tok::Url(s[i..end].to_string()));
@@ -3758,6 +3774,59 @@ mod tests {
         assert!(!src.is_empty() && !b.iter().any(|b| matches!(b, Block::Paragraph(p) if p.text.contains("&amp;") || p.text.contains("<b>"))));
     }
 
+    const STRESS: &str = include_str!("../tests/fixtures/folio_stress.md");
+
+    #[test]
+    fn stress_fixture_parses() {
+        let b = parse(STRESS);
+        check(&b);
+        let tables: Vec<usize> = (b.iter())
+            .filter_map(|b| match b {
+                Block::Table { header, .. } => Some(header.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tables, vec![20, 3]);
+        assert!(b.iter().any(|b| matches!(b, Block::Code { text, closed: true, .. } if text.lines().count() == 500)));
+        assert!(matches!(&b[b.len() - 2], Block::Code { lang, closed: false, .. } if lang == "python"));
+        assert!(matches!(b.last(), Some(Block::Footnotes(n)) if n.len() == 40));
+        // Code inside a list inside a quote, and again two levels further.
+        let Some(Block::Quote(q)) = b.iter().find(|b| matches!(b, Block::Quote(_))) else {
+            panic!("no quote")
+        };
+        let item = &items(&q[1])[0];
+        assert!(matches!(&item[1], Block::Code { lang, closed: true, .. } if lang == "rust"));
+        let Block::Quote(inner) = &items(&item[2])[0][1] else { panic!("{item:?}") };
+        assert!(matches!(&items(&inner[1])[0][1], Block::Code { lang, .. } if lang == "sh"));
+        let Block::Paragraph(refs) = &b[1] else { panic!("{:?}", b[1]) };
+        let lines: Vec<_> = paths(refs).into_iter().map(|(_, p, l)| (p, l)).collect();
+        assert_eq!(
+            lines,
+            vec![
+                ("crates/horadric-core/src/markdown.rs".to_string(), Some(812)),
+                ("src/main.rs".to_string(), Some(3)),
+                ("crates/horadric-ui/src/folio/rich.rs".to_string(), Some(457)),
+                ("C:\\Users\\me\\repo\\build.rs".to_string(), Some(7)),
+                ("main.rs".to_string(), Some(42)),
+            ]
+        );
+    }
+
+    #[test]
+    fn stress_fixture_streams_stably() {
+        // Every line end and the middle of every line: each char would
+        // reparse the fixture thirty thousand times.
+        let cuts = STRESS.match_indices('\n').flat_map(|(nl, _)| {
+            let start = STRESS[..nl].rfind('\n').map_or(0, |p| p + 1);
+            let mut mid = start + (nl - start) / 2;
+            while !STRESS.is_char_boundary(mid) {
+                mid += 1;
+            }
+            [mid, nl]
+        });
+        assert_streams_stably(STRESS, cuts);
+    }
+
     // Line endings and text
 
     #[test]
@@ -3876,6 +3945,160 @@ mod tests {
     fn streaming_list_item() {
         let b = parse("- item\n  - ne");
         assert_eq!(item_text(&items(&items(&b[0])[0][1])[0]), "ne");
+    }
+
+    /// The block that holds the code while a reply streams in.
+    fn code_of(b: &[Block]) -> (&str, bool) {
+        match b.last() {
+            Some(Block::Code { text, closed, .. }) => (text, *closed),
+            other => panic!("no code block last: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn streaming_fence_stays_code_on_every_prefix() {
+        let src = "Intro.\n\n```rust\nlet a = 1;\n\nlet b = \"**not bold**\";\n``";
+        let start = src.find("```").unwrap() + 3;
+        for (i, _) in src.char_indices().filter(|&(i, _)| i >= start) {
+            let b = parse(&src[..i]);
+            assert!(matches!(b[0], Block::Paragraph(_)), "{i}: {b:?}");
+            assert_eq!(b.len(), 2, "{i}: {b:?}");
+            assert!(!code_of(&b).1, "{i}");
+        }
+    }
+
+    #[test]
+    fn streaming_closing_fence_half_typed_is_not_shown_as_code() {
+        assert_eq!(code_of(&parse("```\nx\n`")), ("x", false));
+        assert_eq!(code_of(&parse("```\nx\n``")), ("x", false));
+        assert_eq!(code_of(&parse("```\nx\n```")), ("x", true));
+        // A longer fence closes only on as many, so a shorter run on its
+        // last line may still be the close arriving.
+        assert_eq!(code_of(&parse("````\nx\n```")), ("x", false));
+        // Not on the last line, the backticks are the code's own.
+        assert_eq!(code_of(&parse("````\n``\nx")), ("``\nx", false));
+    }
+
+    #[test]
+    fn streaming_fence_in_list_and_quote_runs_to_the_end() {
+        let b = parse("- item\n\n  ```sh\n  cargo ch");
+        let (text, closed) = code_of(&items(&b[0])[0]);
+        assert_eq!((text, closed), ("cargo ch", false));
+        let b = parse("> ```\n> let x\n> ``");
+        let Block::Quote(inner) = &b[0] else { panic!("{b:?}") };
+        assert_eq!(code_of(inner), ("let x", false));
+    }
+
+    #[test]
+    fn streaming_inline_openers_stay_plain() {
+        for src in [
+            "so **bo",
+            "so __bo",
+            "a *it",
+            "a ~~gone",
+            "run `cargo te",
+            "run ``a ` b",
+            "see [the plan",
+            "see [the plan]",
+            "see [the plan](",
+            "see [the plan](docs/PL",
+            "see [the plan](https://x.dev/a \"ti",
+            "see ![alt](https://x.dev/a.p",
+            "costs $5 and $",
+            "math $x^2",
+            "a note[^",
+            "a note[^lon",
+            "press <kb",
+            "a <b",
+            "a <details",
+        ] {
+            let p = para(src);
+            check_inline(&p);
+            assert_eq!(p.text, src, "{src}");
+            for s in &p.spans {
+                assert!(
+                    !matches!(s.style, Style::Bold | Style::Italic | Style::Strike | Style::Code),
+                    "{src}: {s:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_opener_does_not_swallow_what_came_before() {
+        let p = para("**done** then **open");
+        assert_eq!(under(&p, &Style::Bold), vec!["done"]);
+        assert_eq!(p.text, "done then **open");
+        let p = para("`a` then `b");
+        assert_eq!(under(&p, &Style::Code), vec!["a"]);
+        let p = para("[a](https://a.dev) and [b](https://b");
+        assert_eq!(links(&p), vec![("a", "https://a.dev")]);
+        assert!(paths(&para("see [the plan](docs/PLAN.md")).is_empty());
+        // Once closed it is a link again, and a bare one in parens still is.
+        assert!(links(&para("[b](https://b.dev)")).len() == 1);
+        assert_eq!(links(&para("(https://b.dev)")).len(), 1);
+    }
+
+    #[test]
+    fn file_references_in_prose_code_and_cells() {
+        let p = para("broke at src/a.rs:12:5, see `crates/b/c.rs:9` and main.rs:3.");
+        assert_eq!(
+            paths(&p),
+            vec![
+                ("src/a.rs:12:5", "src/a.rs".to_string(), Some(12)),
+                ("crates/b/c.rs:9", "crates/b/c.rs".to_string(), Some(9)),
+                ("main.rs:3", "main.rs".to_string(), Some(3)),
+            ]
+        );
+        // A reference streaming in is a path at each step, its line
+        // growing: never text that turns into one late.
+        assert_eq!(paths(&para("src/a.rs:1"))[0].2, Some(1));
+        assert_eq!(paths(&para("src/a.rs:12"))[0].2, Some(12));
+        assert_eq!(paths(&para("src/a.rs:"))[0].2, None);
+        assert_eq!(paths(&para("src/a.rs:12:"))[0].2, Some(12));
+    }
+
+    #[test]
+    fn streaming_task_quote_and_footnote() {
+        // A box without words yet is text, then a task once they arrive.
+        let b = parse("- [ ]");
+        assert_eq!(tasks(&b[0]), &vec![None]);
+        let b = parse("- [ ] wr");
+        assert_eq!(tasks(&b[0]), &vec![Some(false)]);
+        // A quote streaming a second line keeps the first.
+        let b = parse("> one\n> tw");
+        let Block::Quote(inner) = &b[0] else { panic!("{b:?}") };
+        assert!(matches!(&inner[..], [Block::Paragraph(p)] if p.text == "one\ntw"));
+        // A note's definition half typed never shows its marker as text.
+        let b = parse("Claim[^1].\n\n[^1]: The so");
+        assert!(matches!(&b[..], [Block::Paragraph(_), Block::Footnotes(n)] if n[0].1.text == "The so"));
+        // A math block streaming runs to the end, and a half close is hidden.
+        assert_eq!(code_of(&parse("$$\nx^2\n$")), ("x^2", false));
+        assert_eq!(code_of(&parse("$$\nx^2\n$$")), ("x^2", true));
+    }
+
+    /// Everything before the block still streaming in is final: the reply
+    /// cut short anywhere shows its earlier blocks as the whole reply does.
+    fn assert_streams_stably(src: &str, cuts: impl Iterator<Item = usize>) {
+        let whole: Vec<Block> = (parse(src).into_iter())
+            .filter(|b| !matches!(b, Block::Footnotes(_)))
+            .collect();
+        for cut in cuts {
+            let mut part: Vec<Block> = (parse(&src[..cut]).into_iter())
+                .filter(|b| !matches!(b, Block::Footnotes(_)))
+                .collect();
+            check(&part);
+            part.pop();
+            assert!(part.len() <= whole.len(), "cut at {cut}");
+            for (k, b) in part.iter().enumerate() {
+                assert_eq!(b, &whole[k], "block {k}, cut at {cut}");
+            }
+        }
+    }
+
+    #[test]
+    fn sample_streams_stably() {
+        assert_streams_stably(SAMPLE, SAMPLE.char_indices().map(|(i, _)| i));
     }
 
     // Robustness
