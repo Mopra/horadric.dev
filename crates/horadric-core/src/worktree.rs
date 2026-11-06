@@ -181,10 +181,14 @@ pub fn folder(main: &str, branch: &str) -> String {
 pub fn env(ports: Ports) -> Vec<(String, String)> {
     vec![
         ("PORT".into(), ports.first.to_string()),
-        ("HORADRIC_PORT_FIRST".into(), ports.first.to_string()),
-        ("HORADRIC_PORT_LAST".into(), ports.last().to_string()),
+        (PORT_FIRST_ENV.into(), ports.first.to_string()),
+        (PORT_LAST_ENV.into(), ports.last().to_string()),
     ]
 }
+
+/// The first and last port of a worktree session's range, set by [`env`].
+pub const PORT_FIRST_ENV: &str = "HORADRIC_PORT_FIRST";
+pub const PORT_LAST_ENV: &str = "HORADRIC_PORT_LAST";
 
 /// What the agent in a worktree is told about it.
 pub fn system_prompt(w: &Worktree) -> String {

@@ -385,6 +385,8 @@ pub fn user_env_for(command: &mut Command) {
         horadric_hooks::TASKS_ENV,
         horadric_hooks::SECRET_KEY_ENV,
         horadric_core::worktree::SETUP_ENV,
+        horadric_core::worktree::PORT_FIRST_ENV,
+        horadric_core::worktree::PORT_LAST_ENV,
     ];
     let knob = |k: &str| {
         k.to_ascii_uppercase().starts_with("HORADRIC_")
