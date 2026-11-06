@@ -67,8 +67,19 @@ pub(super) fn fold_key(text: &str) -> String {
     format!("code:{:016x}", h.finish())
 }
 
-fn is_open(key: &str) -> bool {
+/// Whether the block or section with fold key `key` has been toggled.
+pub(super) fn is_open(key: &str) -> bool {
     OPEN.with(|o| o.borrow().contains(key))
+}
+
+/// What a block's header calls its language. Formulas and diagrams are
+/// shown as their source, not drawn, so the header says what they are.
+pub(super) fn label(lang: &str) -> &str {
+    match lang {
+        "math" | "latex" | "tex" | "katex" => "math",
+        "mermaid" | "dot" | "graphviz" | "plantuml" => "diagram",
+        l => l,
+    }
 }
 
 /// A fence's info string: the language and a file name when it names
@@ -420,7 +431,7 @@ impl Ctx<'_> {
         let lang = match (fence.lang.as_str(), style) {
             ("", Style::Diff) => "diff",
             ("", _) => "text",
-            (l, _) => l,
+            (l, _) => label(l),
         };
         let copy_w = 72.0;
         let room = w - 2.0 * CODE_PAD - copy_w;
@@ -442,19 +453,8 @@ impl Ctx<'_> {
             self.pal.faint,
         );
         let copy = Rect::new(w - copy_w - 4.0, 4.0, copy_w, CODE_HEAD - 8.0);
-        s.line(
-            "\u{E8C8}",
-            F::Icon,
-            Rect::new(copy.x + 8.0, copy.y, 16.0, copy.h),
-            self.pal.dim,
-        );
-        s.line(
-            "Copy",
-            F::Small,
-            Rect::new(copy.x + 28.0, copy.y, copy_w - 28.0, copy.h),
-            self.pal.dim,
-        );
         let what = shell.map_or(text, |v| v.copy.as_str());
+        s.items.extend(self.copy_face(copy, what, self.pal.dim));
         s.hit(copy, Hit::Tr(Act::Copy(what.to_string())));
     }
 
@@ -497,6 +497,13 @@ mod tests {
         let f = Fence::parse("Python");
         assert_eq!(f, Fence { lang: "python".into(), file: None });
         assert_eq!(Fence::parse("").lang, "");
+    }
+
+    #[test]
+    fn formulas_and_diagrams_say_what_they_are() {
+        assert_eq!(label("math"), "math");
+        assert_eq!(label("mermaid"), "diagram");
+        assert_eq!(label("rust"), "rust");
     }
 
     #[test]

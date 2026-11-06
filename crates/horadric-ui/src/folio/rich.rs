@@ -22,7 +22,8 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteTextFormat, IDWriteTextLayout, IDWriteTextLayout1, IDWriteTypography,
-    DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, DWRITE_FONT_STYLE_ITALIC,
+    DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG, DWRITE_FONT_FEATURE_TAG_SUBSCRIPT,
+    DWRITE_FONT_FEATURE_TAG_SUPERSCRIPT, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, DWRITE_FONT_STYLE_ITALIC,
     DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_MEDIUM,
     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_LINE_METRICS,
     DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_TEXT_ALIGNMENT_CENTER,
@@ -197,6 +198,10 @@ pub(super) struct Fonts {
     pub(super) h4: IDWriteTextFormat,
     /// Every figure the same width, for list numbers that line up.
     pub(super) tnum: Option<IDWriteTypography>,
+    /// The font's own raised and lowered glyphs, for `<sup>`, `<sub>`
+    /// and footnote marks.
+    pub(super) sups: Option<IDWriteTypography>,
+    pub(super) subs: Option<IDWriteTypography>,
     /// A code block's text: it breaks long lines rather than hiding them.
     pub(super) code: IDWriteTextFormat,
     /// Diffs and shell output: one line a row, never wrapped.
@@ -226,13 +231,18 @@ impl Fonts {
         right.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)?;
         let centre = text_format(gpu, FONT, 12.5, n, false, true)?;
         centre.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-        let tnum = gpu.dw.CreateTypography().ok();
-        if let Some(t) = &tnum {
+        let typography = |tag: DWRITE_FONT_FEATURE_TAG| -> Option<IDWriteTypography> {
+            let t = gpu.dw.CreateTypography().ok()?;
             t.AddFontFeature(DWRITE_FONT_FEATURE {
-                nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+                nameTag: tag,
                 parameter: 1,
-            })?;
-        }
+            })
+            .ok()?;
+            Some(t)
+        };
+        let tnum = typography(DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES);
+        let sups = typography(DWRITE_FONT_FEATURE_TAG_SUPERSCRIPT);
+        let subs = typography(DWRITE_FONT_FEATURE_TAG_SUBSCRIPT);
         Ok(Fonts {
             body: reading(gpu, READ, n)?,
             h1: heading(gpu, 24.0, 1.3)?,
@@ -240,6 +250,8 @@ impl Fonts {
             h3: heading(gpu, 17.5, 1.45)?,
             h4: heading(gpu, 13.0, 1.6)?,
             tnum,
+            sups,
+            subs,
             code,
             rows,
             right,
@@ -409,6 +421,7 @@ impl Ctx<'_> {
         let mut code_runs = Vec::new();
         let mut keys = Vec::new();
         let mut links = Vec::new();
+        let mut images = Vec::new();
         for (r, style) in inl.utf16_spans() {
             let dr = range(r.clone());
             match style {
@@ -445,6 +458,32 @@ impl Ctx<'_> {
                     self.paint(&l, r.clone(), self.link_ink());
                     links.push((r, Act::Path(path.clone(), *line)));
                 }
+                Style::Sup | Style::Sub => {
+                    let t = if *style == Style::Sup { &self.fonts.sups } else { &self.fonts.subs };
+                    if let Some(t) = t {
+                        let _ = l.SetTypography(t, dr);
+                    }
+                }
+                Style::Footnote(_) => {
+                    if let Some(t) = &self.fonts.sups {
+                        let _ = l.SetTypography(t, dr);
+                    }
+                    let _ = l.SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, dr);
+                    pad_sides(&l, &wide, r.clone(), 1.5, 0.0);
+                    self.paint(&l, r.clone(), self.pal.accent.mix(self.pal.fg, 0.2));
+                }
+                Style::Image(src) => {
+                    let _ = l.SetFontSize(size * 0.9, dr);
+                    pad_sides(&l, &wide, r.clone(), IMAGE_ICON, CODE_PAD + 2.0);
+                    self.paint(&l, r.clone(), self.link_ink());
+                    let act = if horadric_core::markdown::is_web_link(src) {
+                        Act::Link(src.clone())
+                    } else {
+                        Act::Path(src.clone(), None)
+                    };
+                    images.push(r.clone());
+                    links.push((r, act));
+                }
             }
         }
         // The "+" between two keys of a shortcut is only a joint.
@@ -474,6 +513,20 @@ impl Ctx<'_> {
                 s.stroke(k, 4.0, self.pal.fg.with_alpha(0.2), 1.0);
             }
         }
+        // An image that cannot be shown here is a chip: a picture icon and
+        // its alt text on a plate, opening where it points.
+        let chip_h = (0.9 * size + 9.0).round();
+        for r in images {
+            for (k, b) in render::range_rects(&l, r.start, r.end - r.start).iter().enumerate() {
+                let p = plate(b, 0.5, chip_h);
+                s.fill(p, 5.0, self.pal.fg.with_alpha(0.06));
+                s.stroke(p, 5.0, self.pal.fg.with_alpha(0.12), 1.0);
+                if k == 0 {
+                    let icon = Rect::new(p.x + 5.0, p.y, IMAGE_ICON - 6.0, p.h);
+                    s.line("\u{EB9F}", F::Icon, icon, self.link_ink());
+                }
+            }
+        }
         for (r, act) in links {
             for b in render::range_rects(&l, r.start, r.end - r.start) {
                 s.hit(Rect::new(x + b.x, y + b.y, b.w, b.h), Hit::Tr(act.clone()));
@@ -483,6 +536,36 @@ impl Ctx<'_> {
         s.unit(&l, x, y, ink, &inl.text);
         let (_, h) = render::text_size(&l);
         (h, first_line(&l).unwrap_or(h))
+    }
+
+    /// A reply's image that is a file on this machine, decoded once. A
+    /// web address is never fetched, and a path to another machine
+    /// (`\\host\share`) never read, as reading it would reach out to it.
+    fn local_image(&self, src: &str) -> Option<(ID2D1Bitmap, u32, u32)> {
+        let src = src.strip_prefix("file:///").unwrap_or(src);
+        let b = src.as_bytes();
+        let remote = b.len() >= 2 && matches!(b[0], b'/' | b'\\') && matches!(b[1], b'/' | b'\\');
+        if remote || src.contains("://") || (src.contains(':') && !is_drive(src)) {
+            return None;
+        }
+        let ext = src.rsplit_once('.')?.1.to_ascii_lowercase();
+        if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp") {
+            return None;
+        }
+        let p = std::path::Path::new(src);
+        let p = if p.is_absolute() { p.to_path_buf() } else { self.dir.join(p) };
+        let key = format!("file:{}", p.display());
+        if let Some(got) = self.thumbs.borrow().get(&key) {
+            return got.clone();
+        }
+        let got = std::fs::metadata(&p)
+            .ok()
+            .filter(|m| m.is_file() && m.len() <= IMAGE_BYTES)
+            .and_then(|_| std::fs::read(&p).ok())
+            .and_then(|bytes| decode_bytes(&bytes, IMAGE_PX))
+            .and_then(|(px, w, h)| Some((bitmap(&self.gfx.rt, &px, w, h)?, w, h)));
+        self.thumbs.borrow_mut().insert(key, got.clone());
+        got
     }
 
     /// The colour a callout of `kind` is drawn in: the theme's colours
@@ -567,10 +650,70 @@ impl Ctx<'_> {
                 s.line(label, F::Title, Rect::new(x + 21.0, y, w - 21.0, lh), c);
                 s.h = y + lh;
             }
-            Kind::Code { lang, text } => {
-                s = self.code(lang, text, w);
+            Kind::Code { info, text } => {
+                s = self.code(info, text, w);
                 s = moved(s, x);
             }
+            Kind::Details { summary, key, open } => {
+                let plain;
+                let summary = if summary.text.trim().is_empty() {
+                    plain = Inline {
+                        text: "Details".into(),
+                        spans: Vec::new(),
+                    };
+                    &plain
+                } else {
+                    summary
+                };
+                let look = Look {
+                    weight: Some(DWRITE_FONT_WEIGHT_SEMI_BOLD),
+                    ..Look::default()
+                };
+                let ink = self.pal.fg.with_alpha(0.92);
+                let f = &self.fonts.body;
+                let (h, first) =
+                    self.inline_as(&mut s, summary, f, (x + 22.0, 0.0, w - 22.0), ink, Align::None, look);
+                let chevron = if *open { "\u{E70D}" } else { "\u{E76C}" };
+                s.line(chevron, F::Icon, Rect::new(x, 0.0, 14.0, first), self.pal.faint);
+                s.h = h;
+                s.hit(Rect::new(x, 0.0, w, h), Hit::Tr(Act::All(key.clone())));
+            }
+            Kind::Footnote { label, text, first } => {
+                let top = if *first {
+                    let rule = Rect::new(x, 0.0, NOTE_RULE.min(w), 1.0);
+                    s.fill(rule, 0.0, self.pal.fg.with_alpha(0.12));
+                    12.0
+                } else {
+                    0.0
+                };
+                let f = &self.fonts.small_wrap;
+                let ink = self.pal.dim;
+                let (h, line) =
+                    self.inline(&mut s, text, f, x + NOTE_COL, top, w - NOTE_COL, ink, Align::None);
+                let n = Rect::new(x, top, NOTE_COL - 7.0, line);
+                s.line(format!("{label}."), F::Right, n, self.pal.faint);
+                s.h = top + h;
+            }
+            Kind::Image { alt, src } => match self.local_image(src) {
+                Some((bmp, pw, ph)) => {
+                    let k = (0.5f32).min(w / pw as f32);
+                    let r = Rect::new(x, 2.0, pw as f32 * k, ph as f32 * k);
+                    s.items.push(Item::Image(bmp, r));
+                    s.stroke(r, 0.0, self.pal.fg.with_alpha(0.1), 1.0);
+                    s.hit(r, Hit::Tr(Act::Path(src.clone(), None)));
+                    s.h = r.h + 4.0;
+                    if alt.text != "image" && !alt.text.trim().is_empty() {
+                        let cap = Rect::new(x, s.h, w, CAPTION);
+                        s.line(alt.text.clone(), F::Small, cap, self.pal.dim);
+                        s.h += CAPTION;
+                    }
+                }
+                None => {
+                    let ink = self.pal.fg.with_alpha(0.92);
+                    let (h, _) = self.inline(&mut s, alt, &self.fonts.body, x, 0.0, w, ink, Align::None);
+                    s.h = h;
+                }
+            },
             Kind::Table {
                 header,
                 align,
@@ -700,6 +843,19 @@ const MARKER_GAP: f32 = 9.0;
 const CARD_R: f32 = 6.0;
 /// Below this, a hanging term goes above its text rather than beside it.
 const TERM_ROOM: f32 = 220.0;
+/// Room before an image chip's text for its icon.
+const IMAGE_ICON: f32 = 24.0;
+/// A reply's image: decoded to this many pixels on its longest side, and
+/// drawn at half that, so it stays sharp at 200%.
+const IMAGE_PX: u32 = 760;
+/// The largest image file a reply may show, so a stray path to a huge
+/// one does not stall the frame that reads it.
+const IMAGE_BYTES: u64 = 40 << 20;
+/// A footnote's number column, and its rule's width.
+const NOTE_COL: f32 = 24.0;
+const NOTE_RULE: f32 = 140.0;
+/// An image's alt text under it, when it has one of its own.
+const CAPTION: f32 = 20.0;
 
 /// `s` in capitals, a character kept as it is where its capital would
 /// change how many UTF-16 units it takes, so the spans still fit.
@@ -719,6 +875,11 @@ fn capitals(s: &str) -> String {
 /// DirectWrite counts in the run's own width, so a plate drawn to the
 /// run's box clears the text around it.
 fn pad(l: &IDWriteTextLayout, wide: &[u16], r: std::ops::Range<u32>, room: f32) {
+    pad_sides(l, wide, r, room, room);
+}
+
+/// [`pad`] with its own room before and after.
+fn pad_sides(l: &IDWriteTextLayout, wide: &[u16], r: std::ops::Range<u32>, before: f32, after: f32) {
     if r.is_empty() {
         return;
     }
@@ -730,10 +891,10 @@ fn pad(l: &IDWriteTextLayout, wide: &[u16], r: std::ops::Range<u32>, room: f32) 
     let last_start = if surrogate(wide[r.end as usize - 1]) { r.end - 2 } else { r.end - 1 };
     unsafe {
         if last_start <= r.start {
-            let _ = l1.SetCharacterSpacing(room, room, 0.0, range(r));
+            let _ = l1.SetCharacterSpacing(before, after, 0.0, range(r));
         } else {
-            let _ = l1.SetCharacterSpacing(room, 0.0, 0.0, range(r.start..first_end.min(r.end)));
-            let _ = l1.SetCharacterSpacing(0.0, room, 0.0, range(last_start..r.end));
+            let _ = l1.SetCharacterSpacing(before, 0.0, 0.0, range(r.start..first_end.min(r.end)));
+            let _ = l1.SetCharacterSpacing(0.0, after, 0.0, range(last_start..r.end));
         }
     }
 }
@@ -747,6 +908,13 @@ fn callout_icon(kind: Callout) -> &'static str {
         Callout::Warning => "\u{E7BA}",
         Callout::Caution => "\u{E783}",
     }
+}
+
+/// `C:\` or `C:/` at the start, the one colon a local path may have.
+fn is_drive(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\')
+        && !s[2..].contains(':')
 }
 
 fn moved(s: Scene, dx: f32) -> Scene {
@@ -859,12 +1027,16 @@ pub(super) fn thumbnail(gfx: &Gfx, base64: &str) -> Option<(ID2D1Bitmap, u32, u3
 /// An image's premultiplied BGRA pixels and size, scaled down so its
 /// longest side is at most `max` pixels.
 pub(super) fn decode(base64: &str, max: u32) -> Option<(Vec<u8>, u32, u32)> {
-    let bytes = horadric_core::release::base64_decode(base64)?;
+    decode_bytes(&horadric_core::release::base64_decode(base64)?, max)
+}
+
+/// [`decode`] from the image file's own bytes.
+pub(super) fn decode_bytes(bytes: &[u8], max: u32) -> Option<(Vec<u8>, u32, u32)> {
     unsafe {
         let factory: IWICImagingFactory =
             CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
         let stream = factory.CreateStream().ok()?;
-        stream.InitializeFromMemory(&bytes).ok()?;
+        stream.InitializeFromMemory(bytes).ok()?;
         let decoder = factory
             .CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
             .ok()?;

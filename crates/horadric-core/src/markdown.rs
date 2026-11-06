@@ -47,10 +47,23 @@ pub enum Block {
     /// fence yet.
     Code {
         lang: String,
+        /// The fence's whole info string, such as `rust title="x.rs"`,
+        /// for what else it names. `lang` is its first word.
+        info: String,
         text: String,
         closed: bool,
     },
     Quote(Vec<Block>),
+    /// An HTML `<details>` section: its `<summary>` line, and what folds
+    /// under it. `open` is the `open` attribute, how it starts.
+    Details {
+        summary: Inline,
+        body: Vec<Block>,
+        open: bool,
+    },
+    /// The reply's `[^label]: text` notes, gathered at its end in the
+    /// order they were written.
+    Footnotes(Vec<(String, Inline)>),
     /// A quote that says what it is: GitHub's `> [!NOTE]`, or a quote
     /// whose first words are `**Note:**`. `title` is any text after
     /// `[!NOTE]` on its line, empty for the kind's own name.
@@ -140,6 +153,15 @@ pub enum Style {
     /// One key of a shortcut, from `<kbd>Esc</kbd>` or from inline code
     /// that is nothing but a key combination, such as `Ctrl+Shift+P`.
     Key,
+    /// `<sup>` and `<sub>`.
+    Sup,
+    Sub,
+    /// A `[^label]` footnote mark: the label, shown small and raised.
+    Footnote(String),
+    /// `![alt](src)` or `<img>` over its alt text. Unlike a link the src
+    /// may be anything, a local file included: the UI decides what it
+    /// may show or open.
+    Image(String),
 }
 
 impl Inline {
@@ -188,7 +210,117 @@ pub fn parse(src: &str) -> Vec<Block> {
         .split('\n')
         .map(|l| l.strip_suffix('\r').unwrap_or(l))
         .collect();
-    blocks(&lines, 0)
+    let defs = definitions(&lines);
+    let was = REFS.with(|r| std::mem::replace(&mut *r.borrow_mut(), defs.links));
+    let mut out = blocks(&defs.lines, 0, true);
+    let notes: Vec<(String, Inline)> = (defs.notes.iter())
+        .map(|(label, text)| (label.clone(), parse_inline(text)))
+        .collect();
+    REFS.with(|r| *r.borrow_mut() = was);
+    if !notes.is_empty() {
+        out.push(Block::Footnotes(notes));
+    }
+    out
+}
+
+thread_local! {
+    /// The reply's `[id]: url` definitions while it is parsed, so the
+    /// inline reader deep inside can resolve `[text][id]` without every
+    /// call between carrying them.
+    static REFS: std::cell::RefCell<HashMap<String, String>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// A reply's lines with its definitions taken out, and what they define.
+struct Defs<'a> {
+    lines: Vec<&'a str>,
+    links: HashMap<String, String>,
+    /// `[^label]: text`, in the order written.
+    notes: Vec<(String, String)>,
+}
+
+/// How a reference label is matched: case and runs of space do not count.
+fn label_key(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Takes `[id]: url` and `[^label]: text` lines out of a reply, outside
+/// its fences, wherever they are written: replies put them at the end,
+/// and a stray one left in would show as raw text.
+fn definitions<'a>(lines: &[&'a str]) -> Defs<'a> {
+    let mut d = Defs {
+        lines: Vec::with_capacity(lines.len()),
+        links: HashMap::new(),
+        notes: Vec::new(),
+    };
+    let mut fence: Option<Fence> = None;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        i += 1;
+        if let Some(f) = &fence {
+            if f.closes(line) {
+                fence = None;
+            }
+            d.lines.push(line);
+            continue;
+        }
+        if let Some(f) = Fence::open(line) {
+            fence = Some(f);
+            d.lines.push(line);
+            continue;
+        }
+        match definition(line) {
+            Some(Def::Note(label, first)) => {
+                let mut text = first.to_string();
+                // Its own further lines are indented under it.
+                while i < lines.len() && !is_blank(lines[i]) && indent(lines[i]) >= 2 {
+                    text.push('\n');
+                    text.push_str(lines[i].trim());
+                    i += 1;
+                }
+                d.notes.push((label.to_string(), text));
+            }
+            Some(Def::Link(label, url)) => {
+                d.links.entry(label_key(label)).or_insert(url.to_string());
+            }
+            None => d.lines.push(line),
+        }
+    }
+    d
+}
+
+enum Def<'a> {
+    Link(&'a str, &'a str),
+    Note(&'a str, &'a str),
+}
+
+fn definition(line: &str) -> Option<Def<'_>> {
+    if indent(line) >= 4 {
+        return None;
+    }
+    let rest = line.trim_start().strip_prefix('[')?;
+    let (label, after) = rest.split_once("]:")?;
+    if label.trim().is_empty() || label.contains(['[', ']']) || label.len() > 100 {
+        return None;
+    }
+    if let Some(note) = label.strip_prefix('^') {
+        return (!note.is_empty() && !note.contains(char::is_whitespace))
+            .then(|| Def::Note(note, after.trim()));
+    }
+    let url = after.split_whitespace().next()?;
+    let url = url
+        .strip_prefix('<')
+        .and_then(|u| u.strip_suffix('>'))
+        .unwrap_or(url);
+    Some(Def::Link(label, url))
+}
+
+fn lookup(label: &str) -> Option<String> {
+    REFS.with(|r| r.borrow().get(&label_key(label)).cloned())
 }
 
 /// Parses one run of inline text: a heading, a cell, a title.
@@ -206,7 +338,11 @@ pub fn parse_inline(src: &str) -> Inline {
 
 // Blocks
 
-fn blocks(lines: &[&str], depth: usize) -> Vec<Block> {
+/// `code` is whether a line four columns in starts an indented code
+/// block. Inside a list it does not: there an item's text indented a
+/// little too far is far likelier than code, and an item's own nesting
+/// already reads as indent.
+fn blocks(lines: &[&str], depth: usize, code: bool) -> Vec<Block> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < lines.len() {
@@ -217,9 +353,21 @@ fn blocks(lines: &[&str], depth: usize) -> Vec<Block> {
         }
         let shallow = indent(line) < 4;
         let t = line.trim_start();
+        if !shallow && code {
+            i = indented_code(lines, i, &mut out);
+            continue;
+        }
         if shallow {
             if let Some(fence) = Fence::open(line) {
                 i = code_block(lines, i, fence, &mut out);
+                continue;
+            }
+            if t.starts_with("$$") {
+                i = math(lines, i, &mut out);
+                continue;
+            }
+            if depth < MAX_DEPTH && details_starts(t) {
+                i = details(lines, i, depth, code, &mut out);
                 continue;
             }
             if let Some((level, text)) = atx(t) {
@@ -236,7 +384,7 @@ fn blocks(lines: &[&str], depth: usize) -> Vec<Block> {
                 continue;
             }
             if t.starts_with('>') && depth < MAX_DEPTH {
-                i = quote(lines, i, depth, &mut out);
+                i = quote(lines, i, depth, code, &mut out);
                 continue;
             }
         }
@@ -296,7 +444,13 @@ fn interrupts(lines: &[&str], i: usize) -> bool {
     }
     if indent(line) < 4 {
         let t = line.trim_start();
-        if Fence::open(line).is_some() || atx(t).is_some() || is_rule(t) || t.starts_with('>') {
+        if Fence::open(line).is_some()
+            || atx(t).is_some()
+            || is_rule(t)
+            || t.starts_with('>')
+            || t.starts_with("$$")
+            || details_starts(t)
+        {
             return true;
         }
     }
@@ -312,7 +466,16 @@ fn interrupts(lines: &[&str], i: usize) -> bool {
 
 fn paragraph(lines: &[&str], start: usize, out: &mut Vec<Block>) -> usize {
     let mut i = start + 1;
-    while i < lines.len() && !interrupts(lines, i) {
+    let mut level = None;
+    while i < lines.len() {
+        // Before the interrupt check, as `---` under text is a heading.
+        if let Some(l) = setext(lines[i]) {
+            level = Some(l);
+            break;
+        }
+        if interrupts(lines, i) {
+            break;
+        }
         i += 1;
     }
     let text = lines[start..i]
@@ -320,7 +483,183 @@ fn paragraph(lines: &[&str], start: usize, out: &mut Vec<Block>) -> usize {
         .map(|l| l.trim_start())
         .collect::<Vec<_>>()
         .join("\n");
-    out.push(Block::Paragraph(parse_inline(&text)));
+    let inline = parse_inline(&text);
+    match level {
+        Some(level) => {
+            out.push(Block::Heading {
+                level,
+                text: inline,
+            });
+            i + 1
+        }
+        None => {
+            // A line of nothing but HTML tags, such as `<div align="center">`,
+            // has nothing left to show.
+            if !inline.text.trim().is_empty() {
+                out.push(Block::Paragraph(inline));
+            }
+            i
+        }
+    }
+}
+
+/// A setext underline: `===` makes the text above a level one heading,
+/// `---` a level two. Dashes need three, so a "--" signature line or a
+/// lone "-" still streaming into a list item stays text.
+fn setext(line: &str) -> Option<u8> {
+    if indent(line) >= 4 {
+        return None;
+    }
+    let t = line.trim();
+    if !t.is_empty() && t.bytes().all(|b| b == b'=') {
+        Some(1)
+    } else if t.len() >= 3 && t.bytes().all(|b| b == b'-') {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// Lines four columns in, and the blank lines between them, as code.
+fn indented_code(lines: &[&str], start: usize, out: &mut Vec<Block>) -> usize {
+    let mut i = start;
+    let mut body = Vec::new();
+    while i < lines.len() && (is_blank(lines[i]) || indent(lines[i]) >= 4) {
+        body.push(strip_cols(lines[i], 4));
+        i += 1;
+    }
+    while body.last().is_some_and(|l| is_blank(l)) {
+        body.pop();
+    }
+    out.push(Block::Code {
+        lang: String::new(),
+        info: String::new(),
+        text: body.join("\n"),
+        closed: true,
+    });
+    i
+}
+
+/// A `$$` display math block, shown as code labelled "math": the Folio
+/// draws no formulas, and the source reads well enough.
+fn math(lines: &[&str], start: usize, out: &mut Vec<Block>) -> usize {
+    let first = lines[start].trim()[2..].trim();
+    if let Some(one) = first.strip_suffix("$$") {
+        out.push(math_block(one.trim().to_string(), true));
+        return start + 1;
+    }
+    let mut body: Vec<&str> = Vec::new();
+    if !first.is_empty() {
+        body.push(first);
+    }
+    let mut i = start + 1;
+    let mut closed = false;
+    while i < lines.len() {
+        let t = lines[i].trim();
+        i += 1;
+        if let Some(last) = t.strip_suffix("$$") {
+            if !last.trim().is_empty() {
+                body.push(last.trim());
+            }
+            closed = true;
+            break;
+        }
+        body.push(t);
+    }
+    out.push(math_block(body.join("\n"), closed));
+    i
+}
+
+fn math_block(text: String, closed: bool) -> Block {
+    Block::Code {
+        lang: "math".into(),
+        info: "math".into(),
+        text,
+        closed,
+    }
+}
+
+fn details_starts(t: &str) -> bool {
+    let b = t.as_bytes();
+    b.len() >= 9
+        && b[..8].eq_ignore_ascii_case(b"<details")
+        && matches!(b[8], b'>' | b' ' | b'\t')
+}
+
+/// Where `tag` (as `<details` or `</details>`) is in `s`, ignoring case.
+fn find_tag(s: &str, tag: &str) -> Option<usize> {
+    let (b, t) = (s.as_bytes(), tag.as_bytes());
+    (0..b.len().saturating_sub(t.len() - 1)).find(|&k| b[k..k + t.len()].eq_ignore_ascii_case(t))
+}
+
+/// `<details>` to its `</details>`, or to the end while it streams in.
+/// The summary may share a line with the tags or have its own.
+fn details(lines: &[&str], start: usize, depth: usize, code: bool, out: &mut Vec<Block>) -> usize {
+    let first = lines[start].trim_start();
+    let close_at = first.find('>').unwrap_or(first.len());
+    let open = first[..close_at].to_ascii_lowercase().contains(" open")
+        || first[..close_at].to_ascii_lowercase().contains("\topen");
+    let mut inner: Vec<String> = Vec::new();
+    let mut nested = 0usize;
+    let mut i = start;
+    let mut rest = first.get(close_at + 1..).unwrap_or("").to_string();
+    loop {
+        // Inner details on this line count, so the right close ends it.
+        let mut cut = None;
+        let mut from = 0;
+        loop {
+            let open_at = find_tag(&rest[from..], "<details").map(|k| k + from);
+            let shut_at = find_tag(&rest[from..], "</details>").map(|k| k + from);
+            match (open_at, shut_at) {
+                (Some(o), Some(c)) if o < c => {
+                    nested += 1;
+                    from = o + 8;
+                }
+                (Some(o), None) => {
+                    nested += 1;
+                    from = o + 8;
+                }
+                (_, Some(c)) if nested > 0 => {
+                    nested -= 1;
+                    from = c + 10;
+                }
+                (_, Some(c)) => {
+                    cut = Some(c);
+                    break;
+                }
+                (None, None) => break,
+            }
+        }
+        i += 1;
+        if let Some(c) = cut {
+            inner.push(rest[..c].to_string());
+            break;
+        }
+        inner.push(rest);
+        match lines.get(i) {
+            Some(l) => rest = l.to_string(),
+            None => break,
+        }
+    }
+    let mut all = inner.join("\n");
+    let mut summary = Inline::default();
+    if let Some(s) = find_tag(&all, "<summary") {
+        if let Some(gt) = all[s..].find('>') {
+            let from = s + gt + 1;
+            let (text, end) = match find_tag(&all[from..], "</summary>") {
+                Some(e) => (&all[from..from + e], from + e + 10),
+                None => (&all[from..], all.len()),
+            };
+            summary = parse_inline(&text.replace('\n', " "));
+            all.replace_range(s..end, "");
+        }
+    }
+    let body_lines: Vec<&str> = all.split('\n').collect();
+    out.push(Block::Details {
+        summary,
+        body: blocks(&body_lines, depth + 1, code),
+        open,
+    });
     i
 }
 
@@ -369,6 +708,7 @@ struct Fence {
     len: usize,
     indent: usize,
     lang: String,
+    info: String,
 }
 
 impl Fence {
@@ -394,6 +734,7 @@ impl Fence {
             len,
             indent,
             lang,
+            info: info.to_string(),
         })
     }
 
@@ -418,13 +759,14 @@ fn code_block(lines: &[&str], start: usize, fence: Fence, out: &mut Vec<Block>) 
     }
     out.push(Block::Code {
         lang: fence.lang,
+        info: fence.info,
         text: body.join("\n"),
         closed,
     });
     i
 }
 
-fn quote(lines: &[&str], start: usize, depth: usize, out: &mut Vec<Block>) -> usize {
+fn quote(lines: &[&str], start: usize, depth: usize, code: bool, out: &mut Vec<Block>) -> usize {
     let mut inner: Vec<&str> = Vec::new();
     let mut i = start;
     while i < lines.len() {
@@ -445,9 +787,9 @@ fn quote(lines: &[&str], start: usize, depth: usize, out: &mut Vec<Block>) -> us
         Some((kind, title)) => out.push(Block::Callout {
             kind,
             title,
-            body: blocks(&inner, depth + 1),
+            body: blocks(&inner, depth + 1, code),
         }),
-        None => out.push(Block::Quote(blocks(&inner, depth + 1))),
+        None => out.push(Block::Quote(blocks(&inner, depth + 1, code))),
     }
     i
 }
@@ -560,7 +902,7 @@ fn list<'a>(
             }
             i += 1;
         }
-        items.push(blocks(&body, depth + 1));
+        items.push(blocks(&body, depth + 1, false));
         match lines.get(i).and_then(|l| Marker::read(l)) {
             Some(next) if next.ordered == ordered && next.ch == ch => marker = next,
             _ => break,
@@ -698,6 +1040,12 @@ enum Tok {
     Url(String),
     Path(String, String, Option<u32>),
     Key(String),
+    Image(Box<Toks>, String),
+    Footnote(String),
+    /// An HTML tag that styles what follows until its close, such as
+    /// `<b>`. A close matches the nearest open of the same kind.
+    Open(Style),
+    Close(Style),
 }
 
 struct Delim {
@@ -803,14 +1151,35 @@ fn tokenize(s: &str, depth: usize) -> Toks {
                 continue;
             }
             b'[' | b'!' if depth < MAX_DEPTH => {
-                let open = if b[i] == b'!' { i + 1 } else { i };
-                if b.get(open) == Some(&b'[') {
-                    if let Some((text, url, end)) = link_at(s, open, &mut closes) {
+                let image = b[i] == b'!';
+                let open = if image { i + 1 } else { i };
+                if !image {
+                    if let Some((label, end)) = footnote_at(s, i) {
                         flush(&mut buf, &mut toks);
-                        toks.push(Tok::Link(Box::new(tokenize(&s[text], depth + 1)), url));
+                        toks.push(Tok::Footnote(label.to_string()));
                         i = end;
                         continue;
                     }
+                }
+                if b.get(open) == Some(&b'[') {
+                    if let Some((text, url, end)) = link_at(s, open, &mut closes) {
+                        flush(&mut buf, &mut toks);
+                        let inner = Box::new(tokenize(&s[text], depth + 1));
+                        toks.push(if image {
+                            Tok::Image(inner, url)
+                        } else {
+                            Tok::Link(inner, url)
+                        });
+                        i = end;
+                        continue;
+                    }
+                }
+            }
+            b'&' => {
+                if let Some((c, end)) = entity_at(s, i) {
+                    buf.push(c);
+                    i = end;
+                    continue;
                 }
             }
             b'<' => {
@@ -824,6 +1193,10 @@ fn tokenize(s: &str, depth: usize) -> Toks {
                     flush(&mut buf, &mut toks);
                     toks.push(Tok::Url(url.to_string()));
                     i = end;
+                    continue;
+                }
+                if let Some(tag) = html_at(s, i) {
+                    i = html(s, tag, depth, &mut buf, &mut toks);
                     continue;
                 }
             }
@@ -972,7 +1345,7 @@ fn link_at(
     let b = s.as_bytes();
     let close = close_of(s, open, closes)?;
     if b.get(close + 1) != Some(&b'(') {
-        return None;
+        return reference(s, open, close);
     }
     let mut k = skip_space(b, close + 2);
     let url = if b.get(k) == Some(&b'<') {
@@ -1009,6 +1382,257 @@ fn link_at(
         return None;
     }
     Some((open + 1..close, url, k + 1))
+}
+
+/// `[text][id]`, `[text][]` or `[text]` for a defined `[id]: url`. An
+/// undefined label leaves the brackets as written.
+fn reference(s: &str, open: usize, close: usize) -> Option<(Range<usize>, String, usize)> {
+    // Labels are short, and a reply full of brackets must not have each
+    // one's whole text looked up, which would be read once per bracket.
+    const LABEL_MAX: usize = 200;
+    if REFS.with(|r| r.borrow().is_empty()) {
+        return None;
+    }
+    let text = &s[open + 1..close];
+    if s.as_bytes().get(close + 1) == Some(&b'[') {
+        let rest = &s[close + 2..];
+        let e = rest.bytes().take(LABEL_MAX).position(|c| c == b']')?;
+        let label = &rest[..e];
+        if label.contains('[') {
+            return None;
+        }
+        let label = if label.trim().is_empty() { text } else { label };
+        return lookup(label).map(|u| (open + 1..close, u, close + 2 + e + 1));
+    }
+    if text.len() > LABEL_MAX || text.trim().is_empty() || text.starts_with('^') {
+        return None;
+    }
+    lookup(text).map(|u| (open + 1..close, u, close + 1))
+}
+
+/// `[^label]` at `i`, a footnote mark: its label and where it ends. A
+/// label is a short word, so "[^ see above]" stays as typed.
+fn footnote_at(s: &str, i: usize) -> Option<(&str, usize)> {
+    let rest = s.get(i..)?.strip_prefix("[^")?;
+    let e = rest.bytes().take(31).position(|c| c == b']')?;
+    let label = &rest[..e];
+    let ok = !label.is_empty()
+        && label.len() <= 30
+        && label
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    ok.then_some((label, i + 2 + e + 1))
+}
+
+/// An HTML entity at `i`: what it stands for and where it ends. Only the
+/// names replies use; any other stays as typed.
+fn entity_at(s: &str, i: usize) -> Option<(char, usize)> {
+    let rest = s.get(i + 1..)?;
+    let semi = rest.bytes().take(12).position(|c| c == b';')?;
+    let name = &rest[..semi];
+    let end = i + 1 + semi + 1;
+    if let Some(num) = name.strip_prefix('#') {
+        let n = match num.strip_prefix(['x', 'X']) {
+            Some(hex) if !hex.is_empty() && hex.len() <= 6 => u32::from_str_radix(hex, 16).ok()?,
+            None if !num.is_empty() && num.len() <= 7 => num.parse().ok()?,
+            _ => return None,
+        };
+        let c = match char::from_u32(n) {
+            Some(c) if n != 0 => c,
+            _ => '\u{FFFD}',
+        };
+        return Some((c, end));
+    }
+    let c = match name {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "nbsp" => '\u{a0}',
+        "copy" => '\u{a9}',
+        "reg" => '\u{ae}',
+        "trade" => '\u{2122}',
+        "deg" => '\u{b0}',
+        "plusmn" => '\u{b1}',
+        "times" => '\u{d7}',
+        "divide" => '\u{f7}',
+        "middot" => '\u{b7}',
+        "bull" => '\u{2022}',
+        "hellip" => '\u{2026}',
+        "ndash" => '\u{2013}',
+        "mdash" => '\u{2014}',
+        "lsquo" => '\u{2018}',
+        "rsquo" => '\u{2019}',
+        "ldquo" => '\u{201c}',
+        "rdquo" => '\u{201d}',
+        "laquo" => '\u{ab}',
+        "raquo" => '\u{bb}',
+        "larr" => '\u{2190}',
+        "uarr" => '\u{2191}',
+        "rarr" => '\u{2192}',
+        "darr" => '\u{2193}',
+        "check" => '\u{2713}',
+        _ => return None,
+    };
+    Some((c, end))
+}
+
+/// Text with its entities decoded, for HTML `<code>`'s text.
+fn decode_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s.as_bytes()[i] == b'&' {
+            if let Some((c, end)) = entity_at(s, i) {
+                out.push(c);
+                i = end;
+                continue;
+            }
+        }
+        let c = s[i..].chars().next().expect("i is on a char boundary");
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// HTML elements a reply might write. A tag of another name is taken
+/// as HTML only when it has attributes, so `Option<T>` or `Vec<u8>` in
+/// prose stays as written.
+const HTML_TAGS: &[&str] = &[
+    "a", "abbr", "b", "big", "blockquote", "br", "center", "cite", "code", "dd", "del",
+    "details", "dfn", "div", "dl", "dt", "em", "figcaption", "figure", "font", "h1", "h2",
+    "h3", "h4", "h5", "h6", "hr", "i", "img", "ins", "kbd", "li", "mark", "ol", "p", "picture",
+    "pre", "q", "s", "samp", "small", "source", "span", "strike", "strong", "sub", "summary",
+    "sup", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "tt", "u", "ul", "var", "wbr",
+];
+
+struct Tag<'a> {
+    /// Lower case; empty for a comment.
+    name: String,
+    close: bool,
+    attrs: &'a str,
+    end: usize,
+}
+
+/// An HTML tag or comment at `i`.
+fn html_at(s: &str, i: usize) -> Option<Tag<'_>> {
+    let rest = s.get(i..)?;
+    if let Some(body) = rest.strip_prefix("<!--") {
+        // A comment still streaming hides to the end, as it will once closed.
+        let end = body.find("-->").map_or(s.len(), |e| i + 4 + e + 3);
+        return Some(Tag {
+            name: String::new(),
+            close: false,
+            attrs: "",
+            end,
+        });
+    }
+    let (close, after) = match rest[1..].strip_prefix('/') {
+        Some(a) => (true, a),
+        None => (false, &rest[1..]),
+    };
+    let n = after
+        .bytes()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == b'-')
+        .count();
+    if n == 0 || !after.as_bytes()[0].is_ascii_alphabetic() {
+        return None;
+    }
+    let gt = after.find(['>', '<', '\n'])?;
+    if gt > 400 || after.as_bytes()[gt] != b'>' {
+        return None;
+    }
+    let name = after[..n].to_ascii_lowercase();
+    let attrs = after[n..gt].trim().trim_end_matches('/').trim();
+    if n < gt && !matches!(after.as_bytes()[n], b' ' | b'\t' | b'/') {
+        return None;
+    }
+    let known = HTML_TAGS.contains(&name.as_str());
+    if !known && (close || !attrs.contains('=')) {
+        return None;
+    }
+    let end = i + 1 + usize::from(close) + gt + 1;
+    Some(Tag {
+        name,
+        close,
+        attrs,
+        end,
+    })
+}
+
+/// An attribute's value in a tag, quoted or not.
+fn attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
+    let lower = attrs.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(k) = lower[from..].find(name) {
+        let at = from + k;
+        from = at + name.len();
+        let before_ok = at == 0 || lower.as_bytes()[at - 1].is_ascii_whitespace();
+        let after = attrs[from..].trim_start();
+        if !before_ok || !after.starts_with('=') {
+            continue;
+        }
+        let v = after[1..].trim_start();
+        return Some(match v.chars().next() {
+            Some(q @ ('"' | '\'')) => v[1..].split(q).next().unwrap_or(""),
+            _ => v.split_whitespace().next().unwrap_or(""),
+        });
+    }
+    None
+}
+
+/// What an HTML tag does to the text: a break, a style, an image, or
+/// nothing, its text kept and the tag never shown. Returns where it ends.
+fn html(s: &str, tag: Tag, depth: usize, buf: &mut String, toks: &mut Vec<Tok>) -> usize {
+    let style = match tag.name.as_str() {
+        "b" | "strong" => Some(Style::Bold),
+        "i" | "em" | "cite" | "var" | "dfn" => Some(Style::Italic),
+        "s" | "del" | "strike" => Some(Style::Strike),
+        "sup" => Some(Style::Sup),
+        "sub" => Some(Style::Sub),
+        "a" if tag.close => Some(Style::Link(String::new())),
+        "a" => attr(tag.attrs, "href")
+            .filter(|u| is_web_link(u))
+            .map(|u| Style::Link(u.to_string())),
+        _ => None,
+    };
+    if let Some(style) = style {
+        flush(buf, toks);
+        toks.push(if tag.close {
+            Tok::Close(style)
+        } else {
+            Tok::Open(style)
+        });
+        return tag.end;
+    }
+    match tag.name.as_str() {
+        "br" => line_break(buf),
+        "code" | "tt" | "samp" if !tag.close => {
+            // Looked for only so far, so a reply of many unclosed tags is
+            // not read to its end once per tag.
+            let mut stop = (tag.end + 2000).min(s.len());
+            while !s.is_char_boundary(stop) {
+                stop -= 1;
+            }
+            if let Some(e) = find_tag(&s[tag.end..stop], &format!("</{}>", tag.name)) {
+                flush(buf, toks);
+                let text = decode_entities(&s[tag.end..tag.end + e]);
+                toks.push(Tok::Code(text));
+                return tag.end + e + tag.name.len() + 3;
+            }
+        }
+        "img" if !tag.close && depth < MAX_DEPTH => {
+            if let Some(src) = attr(tag.attrs, "src").filter(|v| !v.is_empty()) {
+                flush(buf, toks);
+                let alt = attr(tag.attrs, "alt").unwrap_or("");
+                toks.push(Tok::Image(Box::new(tokenize(alt, depth + 1)), src.to_string()));
+            }
+        }
+        _ => {}
+    }
+    tag.end
 }
 
 fn skip_space(b: &[u8], mut k: usize) -> usize {
@@ -1265,6 +1889,8 @@ fn emit(mut t: Toks, out: &mut Inline) {
         closes[*c].push(p);
     }
     let mut starts = vec![0; pairs.len()];
+    // HTML styles open and where, innermost last.
+    let mut tags: Vec<(Style, usize)> = Vec::new();
     for tok in t.toks {
         let start = out.text.len();
         match tok {
@@ -1319,7 +1945,33 @@ fn emit(mut t: Toks, out: &mut Inline) {
                 out.text.push_str(&name);
                 out.span(start, Style::Key);
             }
+            Tok::Image(inner, src) => {
+                emit(*inner, out);
+                if out.text.len() == start {
+                    out.text.push_str("image");
+                }
+                out.span(start, Style::Image(src));
+            }
+            Tok::Footnote(label) => {
+                out.text.push_str(&label);
+                out.span(start, Style::Footnote(label));
+            }
+            Tok::Open(style) => tags.push((style, start)),
+            Tok::Close(style) => {
+                let kind = std::mem::discriminant(&style);
+                if let Some(k) = tags
+                    .iter()
+                    .rposition(|(s, _)| std::mem::discriminant(s) == kind)
+                {
+                    let (style, from) = tags.remove(k);
+                    out.span(from, style);
+                }
+            }
         }
+    }
+    // A tag not closed yet, as while a reply streams, styles to the end.
+    for (style, from) in tags {
+        out.span(from, style);
     }
 }
 
@@ -1404,6 +2056,11 @@ mod tests {
                         r.iter().for_each(check_inline);
                     }
                 }
+                Block::Details { summary, body, .. } => {
+                    check_inline(summary);
+                    check(body);
+                }
+                Block::Footnotes(notes) => notes.iter().for_each(|(_, t)| check_inline(t)),
                 Block::Code { .. } | Block::Rule => {}
             }
         }
@@ -1678,6 +2335,7 @@ mod tests {
             it[0][1],
             Block::Code {
                 lang: "sh".into(),
+                info: "sh".into(),
                 text: "cargo test".into(),
                 closed: true
             }
@@ -1742,6 +2400,7 @@ mod tests {
             parse("```rust\nfn main() {}\n```"),
             vec![Block::Code {
                 lang: "rust".into(),
+                info: "rust".into(),
                 text: "fn main() {}".into(),
                 closed: true
             }]
@@ -1770,6 +2429,7 @@ mod tests {
             parse("```py\nprint(1)\n\nprint(2)"),
             vec![Block::Code {
                 lang: "py".into(),
+                info: "py".into(),
                 text: "print(1)\n\nprint(2)".into(),
                 closed: false
             }]
@@ -2038,11 +2698,12 @@ mod tests {
     }
 
     #[test]
-    fn image_shows_as_link() {
-        assert_eq!(
-            links(&para("![logo](https://x.dev/a.png)")),
-            vec![("logo", "https://x.dev/a.png")]
-        );
+    fn image_is_its_alt_text_marked_with_its_source() {
+        let p = para("see ![logo](https://x.dev/a.png) and ![](c:/x.png)");
+        assert_eq!(p.text, "see logo and image");
+        assert_eq!(under(&p, &Style::Image("https://x.dev/a.png".into())), ["logo"]);
+        assert_eq!(under(&p, &Style::Image("c:/x.png".into())), ["image"]);
+        assert!(links(&p).is_empty());
     }
 
     #[test]
@@ -2447,10 +3108,22 @@ mod tests {
 
     #[test]
     fn a_stray_kbd_stays_text() {
-        for src in ["<kbd>", "<kbd></kbd>", "<kbd>a<b></kbd>", "<kbd>Ctrl"] {
-            let p = para(src);
-            assert!(under(&p, &Style::Key).is_empty(), "{src}");
-            check_inline(&p);
+        // Not a key, and as HTML its tags are taken off, never shown.
+        for (src, text) in [
+            ("<kbd>", None),
+            ("<kbd></kbd>", None),
+            ("<kbd>a<b></kbd>", Some("a")),
+            ("<kbd>Ctrl", Some("Ctrl")),
+        ] {
+            match (parse(src).as_slice(), text) {
+                ([], None) => {}
+                ([Block::Paragraph(p)], Some(t)) => {
+                    assert_eq!(p.text, t, "{src}");
+                    assert!(under(p, &Style::Key).is_empty(), "{src}");
+                    check_inline(p);
+                }
+                (other, _) => panic!("{src}: {other:?}"),
+            }
         }
     }
 
@@ -2600,11 +3273,53 @@ mod tests {
     }
 
     #[test]
-    fn rule_after_paragraph() {
+    fn rule_after_blank_line() {
         assert_eq!(
-            parse("text\n---"),
+            parse("text\n\n---"),
             vec![Block::Paragraph(plain("text")), Block::Rule]
         );
+    }
+
+    #[test]
+    fn dashes_under_a_paragraph_make_a_heading() {
+        assert_eq!(
+            parse("text\n---"),
+            vec![Block::Heading {
+                level: 2,
+                text: plain("text")
+            }]
+        );
+    }
+
+    #[test]
+    fn setext_headings() {
+        assert_eq!(
+            parse("Title\n=====\n\nSub **bold**\n---\nBody"),
+            vec![
+                Block::Heading {
+                    level: 1,
+                    text: plain("Title")
+                },
+                Block::Heading {
+                    level: 2,
+                    text: para("Sub **bold**")
+                },
+                Block::Paragraph(plain("Body")),
+            ]
+        );
+        // Two lines of text under one underline are one heading.
+        assert!(matches!(&parse("a\nb\n===")[..], [Block::Heading { level: 1, text }] if text.text == "a\nb"));
+    }
+
+    #[test]
+    fn short_or_spaced_dashes_are_not_setext() {
+        assert_eq!(para("text\n--").text, "text\n--");
+        assert_eq!(
+            parse("text\n- - -"),
+            vec![Block::Paragraph(plain("text")), Block::Rule]
+        );
+        // A list item's rule is not its heading.
+        assert!(matches!(parse("- item\n---")[1], Block::Rule));
     }
 
     #[test]
@@ -2632,13 +3347,270 @@ mod tests {
     }
 
     #[test]
-    fn entities_stay_as_text() {
-        assert_eq!(para("&amp; &lt;b&gt; &#42;").text, "&amp; &lt;b&gt; &#42;");
+    fn entities_are_decoded() {
+        let p = para("&amp; &lt;b&gt; &#42;x&#42; &#x1F600; &quot;&#39;&nbsp;.");
+        assert_eq!(p.text, "& <b> *x* \u{1F600} \"'\u{a0}.");
+        // What an entity stands for is never markup.
+        assert!(p.spans.is_empty());
     }
 
     #[test]
-    fn html_stays_as_text() {
-        assert_eq!(para("<b>hi</b>").text, "<b>hi</b>");
+    fn entities_stay_in_code_and_unknown_ones_stay() {
+        assert_eq!(para("`&amp;`").text, "&amp;");
+        assert_eq!(para("&nosuch; & a &amp").text, "&nosuch; & a &amp");
+        assert_eq!(para("&#0; &#xZZ;").text, "\u{FFFD} &#xZZ;");
+        assert_eq!(para("\\&amp;").text, "&amp;");
+    }
+
+    #[test]
+    fn html_styles() {
+        let p = para("<b>bold</b> <strong>s</strong> <i>it</i> <em>e</em> <s>x</s>");
+        assert_eq!(p.text, "bold s it e x");
+        assert_eq!(under(&p, &Style::Bold), ["bold", "s"]);
+        assert_eq!(under(&p, &Style::Italic), ["it", "e"]);
+        assert_eq!(under(&p, &Style::Strike), ["x"]);
+        let p = para("H<sub>2</sub>O and x<sup>2</sup>");
+        assert_eq!(p.text, "H2O and x2");
+        assert_eq!(under(&p, &Style::Sub), ["2"]);
+        assert_eq!(under(&p, &Style::Sup), ["2"]);
+    }
+
+    #[test]
+    fn html_br_breaks_the_line() {
+        assert_eq!(para("a line<br>break<br/>and <BR />more").text, "a line\nbreak\nand\nmore");
+    }
+
+    #[test]
+    fn html_code_is_code_and_raw() {
+        let p = para("run <code>a *b* &lt;c&gt;</code> now");
+        assert_eq!(p.text, "run a *b* <c> now");
+        assert_eq!(under(&p, &Style::Code), ["a *b* <c>"]);
+    }
+
+    #[test]
+    fn html_link_and_image() {
+        let p = para("<a href=\"https://x.dev\">site</a> and <a href=\"file:///c\">no</a>");
+        assert_eq!(p.text, "site and no");
+        assert_eq!(links(&p), [("site", "https://x.dev")]);
+        let p = para("<img src=\"a.png\" alt=\"the logo\">");
+        assert_eq!(p.text, "the logo");
+        assert_eq!(under(&p, &Style::Image("a.png".into())), ["the logo"]);
+    }
+
+    #[test]
+    fn unknown_html_is_stripped_but_generics_stay() {
+        assert_eq!(para("<span class=\"x\">kept</span> <div>d</div>").text, "kept d");
+        assert_eq!(para("<custom-el data=\"1\">t</custom-el>").text, "t</custom-el>");
+        assert_eq!(para("Option<T> and Vec<u8> and a < b > c").text, "Option<T> and Vec<u8> and a < b > c");
+        assert_eq!(para("a <!-- hidden --> b").text, "a  b");
+    }
+
+    #[test]
+    fn an_unclosed_tag_styles_to_the_end() {
+        let p = para("so <b>far");
+        assert_eq!(p.text, "so far");
+        assert_eq!(under(&p, &Style::Bold), ["far"]);
+        assert_eq!(para("a </b> b").text, "a  b");
+    }
+
+    #[test]
+    fn a_line_of_only_tags_leaves_no_paragraph() {
+        assert_eq!(
+            parse("<div align=\"center\">\n\ntext\n\n</div>"),
+            vec![Block::Paragraph(plain("text"))]
+        );
+    }
+
+    // Details
+
+    #[test]
+    fn details_fold_their_body_under_the_summary() {
+        let src = "<details>\n<summary>A **folded** section</summary>\n\nInside it.\n\n- one\n\n</details>\n\nAfter.";
+        let b = parse(src);
+        match &b[..] {
+            [Block::Details { summary, body, open }, Block::Paragraph(after)] => {
+                assert_eq!(summary.text, "A folded section");
+                assert_eq!(under(summary, &Style::Bold), ["folded"]);
+                assert!(!open);
+                assert_eq!(body.len(), 2);
+                assert!(matches!(&body[0], Block::Paragraph(p) if p.text == "Inside it."));
+                assert!(matches!(&body[1], Block::List { .. }));
+                assert_eq!(after.text, "After.");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn details_on_one_line_and_open() {
+        match &parse("<details open><summary>S</summary>body text</details>")[..] {
+            [Block::Details { summary, body, open: true }] => {
+                assert_eq!(summary.text, "S");
+                assert!(matches!(&body[..], [Block::Paragraph(p)] if p.text == "body text"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_details_close_in_order() {
+        let src = "<details>\n<summary>Out</summary>\n<details>\n<summary>In</summary>\ninner\n</details>\nouter\n</details>\nafter";
+        match &parse(src)[..] {
+            [Block::Details { body, .. }, Block::Paragraph(p)] => {
+                assert!(matches!(&body[0], Block::Details { summary, .. } if summary.text == "In"));
+                assert!(matches!(&body[1], Block::Paragraph(p) if p.text == "outer"));
+                assert_eq!(p.text, "after");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn details_still_streaming_run_to_the_end() {
+        match &parse("<details>\n<summary>Wait")[..] {
+            [Block::Details { summary, body, .. }] => {
+                assert_eq!(summary.text, "Wait");
+                assert!(body.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // Indented code and math
+
+    #[test]
+    fn indented_code_block() {
+        assert_eq!(
+            parse("Text.\n\n    let a = 1;\n\n    \tb\n\nAfter."),
+            vec![
+                Block::Paragraph(plain("Text.")),
+                Block::Code {
+                    lang: String::new(),
+                    info: String::new(),
+                    text: "let a = 1;\n\n\tb".into(),
+                    closed: true
+                },
+                Block::Paragraph(plain("After.")),
+            ]
+        );
+    }
+
+    #[test]
+    fn indented_lines_carry_on_a_paragraph() {
+        assert_eq!(para("one\n    two").text, "one\ntwo");
+    }
+
+    #[test]
+    fn indented_lines_in_a_list_are_not_code() {
+        let b = parse("- item\n\n      - deep");
+        assert!(matches!(&b[..], [Block::List { .. }]));
+        let items = items(&b[0]);
+        assert!(!items[0].iter().any(|b| matches!(b, Block::Code { .. })));
+    }
+
+    #[test]
+    fn display_math_is_a_math_code_block() {
+        let want = |text: &str, closed| Block::Code {
+            lang: "math".into(),
+            info: "math".into(),
+            text: text.into(),
+            closed,
+        };
+        assert_eq!(parse("$$\n\\sum_i i\n$$"), vec![want("\\sum_i i", true)]);
+        assert_eq!(parse("$$ x^2 $$"), vec![want("x^2", true)]);
+        assert_eq!(parse("$$\na"), vec![want("a", false)]);
+        assert_eq!(parse("so:\n$$\na\n$$")[1], want("a", true));
+        // Inline dollars are money as often as maths.
+        assert_eq!(para("costs $5 or $E = mc^2$").text, "costs $5 or $E = mc^2$");
+    }
+
+    #[test]
+    fn fence_keeps_its_whole_info() {
+        match &parse("```rust title=\"src/x.rs\"\nx\n```")[0] {
+            Block::Code { lang, info, .. } => {
+                assert_eq!(lang, "rust");
+                assert_eq!(info, "rust title=\"src/x.rs\"");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // References and footnotes
+
+    #[test]
+    fn reference_links() {
+        let p = para_of("See [the docs][docs], [Docs][] and [docs].\n\n[docs]: https://x.dev/d \"Title\"");
+        assert_eq!(p.text, "See the docs, Docs and docs.");
+        assert_eq!(
+            links(&p),
+            [
+                ("the docs", "https://x.dev/d"),
+                ("Docs", "https://x.dev/d"),
+                ("docs", "https://x.dev/d")
+            ]
+        );
+    }
+
+    #[test]
+    fn undefined_references_stay_as_written() {
+        assert_eq!(para("[a][nope] and [b] and [x]").text, "[a][nope] and [b] and [x]");
+    }
+
+    #[test]
+    fn definitions_in_code_stay() {
+        let b = parse("```\n[a]: https://x.dev\n```");
+        assert!(matches!(&b[..], [Block::Code { text, .. }] if text == "[a]: https://x.dev"));
+    }
+
+    #[test]
+    fn reference_images() {
+        let p = para_of("![logo][l]\n\n[l]: assets/logo.png");
+        assert_eq!(under(&p, &Style::Image("assets/logo.png".into())), ["logo"]);
+    }
+
+    #[test]
+    fn footnotes_are_marked_and_gathered_at_the_end() {
+        let b = parse("A claim[^1] and[^note].\n\n[^1]: The **first**.\n[^note]: Second,\n  on two lines.\n\nMore.");
+        match &b[..] {
+            [Block::Paragraph(p), Block::Paragraph(more), Block::Footnotes(notes)] => {
+                assert_eq!(p.text, "A claim1 andnote.");
+                assert_eq!(under(p, &Style::Footnote("1".into())), ["1"]);
+                assert_eq!(under(p, &Style::Footnote("note".into())), ["note"]);
+                assert_eq!(more.text, "More.");
+                assert_eq!(notes.len(), 2);
+                assert_eq!(notes[0].0, "1");
+                assert_eq!(notes[0].1.text, "The first.");
+                assert_eq!(notes[1].1.text, "Second,\non two lines.");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn spaced_carets_are_not_footnotes() {
+        assert_eq!(para("[^ x] and [^]").text, "[^ x] and [^]");
+    }
+
+    fn para_of(src: &str) -> Inline {
+        match parse(src).as_slice() {
+            [Block::Paragraph(p), ..] => p.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn showcase_edges_parse() {
+        let src = include_str!("../tests/fixtures/folio_showcase.md");
+        let b = parse(src);
+        check(&b);
+        let has = |f: &dyn Fn(&Block) -> bool| b.iter().any(f);
+        assert!(has(&|b| matches!(b, Block::Heading { level: 1, text } if text.text == "Setext heading, level one")));
+        assert!(has(&|b| matches!(b, Block::Heading { level: 2, text } if text.text == "Setext heading, level two")));
+        assert!(has(&|b| matches!(b, Block::Details { .. })));
+        assert!(has(&|b| matches!(b, Block::Footnotes(n) if n.len() == 1)));
+        assert!(has(&|b| matches!(b, Block::Code { lang, .. } if lang == "math")));
+        assert!(has(&|b| matches!(b, Block::Code { text, .. } if text.starts_with("An indented code block"))));
+        assert!(!src.is_empty() && !b.iter().any(|b| matches!(b, Block::Paragraph(p) if p.text.contains("&amp;") || p.text.contains("<b>"))));
     }
 
     // Line endings and text
@@ -2732,6 +3704,7 @@ mod tests {
                 Block::Paragraph(plain("text")),
                 Block::Code {
                     lang: "rust".into(),
+                    info: "rust".into(),
                     text: "fn".into(),
                     closed: false
                 }

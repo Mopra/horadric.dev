@@ -2,12 +2,12 @@
 //! markdown as a flat run of paragraphs to lay out, a table's columns,
 //! where a selection starts and ends in each piece of text, what a find
 //! matches, the diff of an edit as rows, and the one line texts of
-//! footers, notices, lanes and todos. The drawing is in [`super::rich`]
+//! footers, notices and lanes. The drawing is in [`super::rich`]
 //! and [`super::transcript`]; everything here is tested.
 
 use std::ops::Range;
 
-use horadric_core::folio::{Ending, Lane, Notice, Todo, TodoStatus, TurnUsage};
+use horadric_core::folio::{Ending, Lane, Notice, TurnUsage};
 use horadric_core::markdown::{self as md, Align, Inline, Span, Style};
 use serde_json::Value;
 
@@ -32,6 +32,10 @@ pub const UNDER_HEADING: f32 = 8.0;
 pub const LEAD_GAP: f32 = 8.0;
 /// Between a hanging term's column and the text right of it.
 pub const TERM_GAP: f32 = 18.0;
+/// How far an open `<details>` section's body sits in under its title.
+pub const DETAILS_INDENT: f32 = 22.0;
+/// Between two footnotes, which read as one small list.
+pub const NOTE_GAP: f32 = 3.0;
 /// A term wider than this, as guessed, keeps the list as it was written.
 const TERM_MAX: f32 = 220.0;
 const BULLETS: [char; 3] = ['\u{2022}', '\u{25e6}', '\u{25aa}'];
@@ -121,7 +125,9 @@ pub enum Kind {
         title: Inline,
     },
     Code {
-        lang: String,
+        /// The fence's whole info string: the language, and a file name
+        /// when it names one.
+        info: String,
         text: String,
     },
     Table {
@@ -130,16 +136,43 @@ pub enum Kind {
         rows: Vec<Vec<Inline>>,
     },
     Rule,
+    /// A `<details>` section's title row; its body follows only when it
+    /// is open. `key` is what a click toggles in the open set.
+    Details {
+        summary: Inline,
+        key: String,
+        open: bool,
+    },
+    /// One of the reply's footnotes at its end; the `first` has the rule
+    /// above that sets them apart.
+    Footnote {
+        label: String,
+        text: Inline,
+        first: bool,
+    },
+    /// An image alone in its paragraph: a thumbnail when it is a file
+    /// here, else a chip naming it.
+    Image {
+        alt: Inline,
+        src: String,
+    },
 }
 
-/// A reply's markdown, parsed and laid flat.
+/// A reply's markdown, parsed and laid flat, its sections open or folded
+/// as the transcript has them.
 pub fn paras(src: &str) -> Vec<Para> {
+    paras_with(src, super::code::is_open)
+}
+
+/// [`paras`] with `open` saying which fold keys are toggled.
+pub fn paras_with(src: &str, open: fn(&str) -> bool) -> Vec<Para> {
     let mut out = Vec::new();
     let at = At {
         indent: 0.0,
         bars: Vec::new(),
         right: 0.0,
         depth: 0,
+        open,
     };
     flatten(&md::parse(src), &at, &mut out);
     if let Some(first) = out.first_mut() {
@@ -156,6 +189,8 @@ struct At {
     right: f32,
     /// How many lists deep.
     depth: usize,
+    /// Whether a fold key is toggled from how its section starts.
+    open: fn(&str) -> bool,
 }
 
 impl At {
@@ -187,6 +222,25 @@ impl At {
     }
 }
 
+/// The fold key of a `<details>` section, from its summary: two with the
+/// same title open together, as code blocks with the same text do. It
+/// shares the code blocks' prefix, so the transcript keeps it with them
+/// and builds a reply again when it is toggled.
+pub fn details_key(summary: &str) -> String {
+    super::code::fold_key(&format!("details\n{summary}"))
+}
+
+/// The source of a paragraph that is one image and nothing else.
+fn lone_image(p: &Inline) -> Option<String> {
+    match p.spans.as_slice() {
+        [Span {
+            range,
+            style: Style::Image(src),
+        }] if range.start == 0 && range.end == p.text.len() => Some(src.clone()),
+        _ => None,
+    }
+}
+
 fn text(font: Font, inline: &Inline) -> Kind {
     Kind::Text {
         font,
@@ -213,7 +267,51 @@ fn flatten(blocks: &[md::Block], at: &At, out: &mut Vec<Para>) {
         let after_heading = next_gap.is_some();
         let gap = next_gap.take().unwrap_or(normal);
         match b {
-            md::Block::Paragraph(inline) => out.push(at.para(text(Font::Body, inline), gap)),
+            md::Block::Paragraph(inline) => {
+                let kind = match lone_image(inline) {
+                    Some(src) => Kind::Image {
+                        alt: inline.clone(),
+                        src,
+                    },
+                    None => text(Font::Body, inline),
+                };
+                out.push(at.para(kind, gap));
+            }
+            md::Block::Details {
+                summary,
+                body,
+                open,
+            } => {
+                let key = details_key(&summary.text);
+                let open = *open != (at.open)(&key);
+                out.push(at.para(
+                    Kind::Details {
+                        summary: summary.clone(),
+                        key,
+                        open,
+                    },
+                    gap,
+                ));
+                if open {
+                    let mut inner = at.clone();
+                    inner.indent += DETAILS_INDENT;
+                    let first = out.len();
+                    flatten(body, &inner, out);
+                    if let Some(p) = out.get_mut(first) {
+                        p.gap = ITEM_GAP;
+                    }
+                }
+            }
+            md::Block::Footnotes(notes) => {
+                for (k, (label, t)) in notes.iter().enumerate() {
+                    let kind = Kind::Footnote {
+                        label: label.clone(),
+                        text: t.clone(),
+                        first: k == 0,
+                    };
+                    out.push(at.para(kind, if k == 0 { PARA_GAP } else { NOTE_GAP }));
+                }
+            }
             md::Block::Heading { level, text: t } => {
                 let font = match level {
                     1 => Font::H1,
@@ -226,9 +324,9 @@ fn flatten(blocks: &[md::Block], at: &At, out: &mut Vec<Para>) {
                 out.push(at.para(text(font, t), gap));
                 next_gap = Some(UNDER_HEADING);
             }
-            md::Block::Code { lang, text, .. } => out.push(at.para(
+            md::Block::Code { info, text, .. } => out.push(at.para(
                 Kind::Code {
-                    lang: lang.clone(),
+                    info: info.clone(),
                     text: text.clone(),
                 },
                 gap,
@@ -867,24 +965,6 @@ pub fn lane_line(lane: &Lane, running: bool) -> String {
     s
 }
 
-/// The todo list folded to a line: how many are done, and what is being
-/// done now.
-pub fn todo_line(todos: &[Todo]) -> String {
-    let done = (todos.iter())
-        .filter(|t| t.status == TodoStatus::Completed)
-        .count();
-    let mut s = format!("Todos {done} of {}", todos.len());
-    if let Some(now) = todos.iter().find(|t| t.status == TodoStatus::InProgress) {
-        let what = if now.active_form.is_empty() {
-            &now.content
-        } else {
-            &now.active_form
-        };
-        s.push_str(&format!(" \u{b7} {what}"));
-    }
-    s
-}
-
 /// The file a link names, relative to the project (with forward slashes),
 /// or None when it is not a file inside it. The name comes from the model,
 /// so it is taken apart rather than trusted: `..` may not climb out, a
@@ -994,7 +1074,7 @@ mod tests {
         assert_eq!(ps[7].bars.len(), 1);
         assert!(ps[7].quoted());
         assert_eq!(ps[7].indent, QUOTE_INDENT);
-        assert!(matches!(&ps[8].kind, Kind::Code { lang, .. } if lang == "rust"));
+        assert!(matches!(&ps[8].kind, Kind::Code { info, .. } if info == "rust"));
         assert!(matches!(ps[9].kind, Kind::Rule));
     }
 
@@ -1174,6 +1254,78 @@ mod tests {
         let b = paras("First para.\n\nSecond is growing");
         assert_eq!(a[0], b[0], "an unchanged paragraph compares equal");
         assert_ne!(a[1], b[1]);
+    }
+
+    fn none_open(_: &str) -> bool {
+        false
+    }
+
+    fn all_open(k: &str) -> bool {
+        k.starts_with("code:")
+    }
+
+    const DETAILS: &str = "Before.\n\n<details>\n<summary>More</summary>\n\nHidden.\n\n</details>\n\nAfter.";
+
+    #[test]
+    fn details_fold_until_their_key_is_toggled() {
+        let ps = paras_with(DETAILS, none_open);
+        assert_eq!(ps.len(), 3);
+        match &ps[1].kind {
+            Kind::Details { summary, key, open } => {
+                assert_eq!(summary.text, "More");
+                assert_eq!(key, &details_key("More"));
+                assert!(key.starts_with("code:"), "kept with the code blocks' keys");
+                assert!(!open);
+            }
+            other => panic!("{other:?}"),
+        }
+        let ps = paras_with(DETAILS, all_open);
+        assert_eq!(ps.len(), 4);
+        assert!(matches!(ps[1].kind, Kind::Details { open: true, .. }));
+        assert_eq!(text_of(&ps[2]), "Hidden.");
+        assert_eq!(ps[2].indent, DETAILS_INDENT);
+        assert_eq!(ps[2].gap, ITEM_GAP);
+        assert_eq!(text_of(&ps[3]), "After.");
+    }
+
+    #[test]
+    fn details_written_open_close_when_toggled() {
+        let src = "<details open><summary>S</summary>body</details>";
+        assert_eq!(paras_with(src, none_open).len(), 2);
+        assert_eq!(paras_with(src, all_open).len(), 1);
+    }
+
+    #[test]
+    fn footnotes_come_last_under_one_rule() {
+        let ps = paras("Claim[^1] and[^2].\n\n[^1]: One.\n[^2]: Two.\n\nMore.");
+        assert_eq!(ps.len(), 4);
+        assert_eq!(text_of(&ps[1]), "More.");
+        match (&ps[2].kind, &ps[3].kind) {
+            (
+                Kind::Footnote { label: a, text: ta, first: true },
+                Kind::Footnote { label: b, first: false, .. },
+            ) => {
+                assert_eq!((a.as_str(), b.as_str()), ("1", "2"));
+                assert_eq!(ta.text, "One.");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(ps[3].gap, NOTE_GAP);
+    }
+
+    #[test]
+    fn an_image_alone_is_an_image_and_in_text_stays_text() {
+        let ps = paras("![logo](assets/rune.png)\n\nSee ![x](https://x.dev/a.png) here.");
+        assert!(matches!(&ps[0].kind, Kind::Image { alt, src } if alt.text == "logo" && src == "assets/rune.png"));
+        assert!(matches!(ps[1].kind, Kind::Text { .. }));
+    }
+
+    #[test]
+    fn code_keeps_the_fence_info_and_math_is_labelled() {
+        let ps = paras("```rust title=\"src/x.rs\"\nfn a() {}\n```\n\n$$\nx^2\n$$\n\n    indented");
+        assert!(matches!(&ps[0].kind, Kind::Code { info, .. } if info == "rust title=\"src/x.rs\""));
+        assert!(matches!(&ps[1].kind, Kind::Code { info, text } if info == "math" && text == "x^2"));
+        assert!(matches!(&ps[2].kind, Kind::Code { info, text } if info.is_empty() && text == "indented"));
     }
 
     #[test]
@@ -1445,21 +1597,6 @@ mod tests {
             "Explore \u{b7} 3 tool uses \u{b7} Reading files"
         );
         assert_eq!(lane_line(&lane, false), "Explore \u{b7} 3 tool uses");
-    }
-
-    #[test]
-    fn the_todo_line_counts_and_names_the_current() {
-        let t = |s, status| Todo {
-            content: s,
-            active_form: String::new(),
-            status,
-        };
-        let todos = [
-            t("a".into(), TodoStatus::Completed),
-            t("b".into(), TodoStatus::InProgress),
-            t("c".into(), TodoStatus::Pending),
-        ];
-        assert_eq!(todo_line(&todos), "Todos 1 of 3 \u{b7} b");
     }
 
     #[test]
