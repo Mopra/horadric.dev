@@ -773,12 +773,44 @@ fn changeable(program: &Path) -> bool {
     const DELETE: u32 = 0x1_0000;
     const WRITE_DAC: u32 = 0x4_0000;
     const WRITE_OWNER: u32 = 0x8_0000;
+    let file = FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE | WRITE_DAC | WRITE_OWNER;
+    may(program, file) || program.parent().is_none_or(writable_dir)
+}
+
+/// Whether this user could put a file in `dir` without elevation.
+fn writable_dir(dir: &Path) -> bool {
+    const WRITE_DAC: u32 = 0x4_0000;
+    const WRITE_OWNER: u32 = 0x8_0000;
     const FILE_ADD_FILE: u32 = 0x2;
     const FILE_ADD_SUBDIRECTORY: u32 = 0x4;
     const FILE_DELETE_CHILD: u32 = 0x40;
-    let file = FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE | WRITE_DAC | WRITE_OWNER;
-    let folder = FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER;
-    may(program, file) || program.parent().is_none_or(|dir| may(dir, folder))
+    may(dir, FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER)
+}
+
+/// A `.dll` at the top of the folder the program runs in, where Windows
+/// looks for a library loaded by bare name once its own and the system
+/// folders have none: the agent could plant one there for a program that
+/// has Always.
+fn loose_dll(cwd: &Path) -> Option<String> {
+    std::fs::read_dir(cwd).ok()?.flatten().find_map(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let dll = name.to_ascii_lowercase().ends_with(".dll") && e.path().is_file();
+        dll.then_some(name)
+    })
+}
+
+/// The PATH an Always run gets: of the child's own, only absolute folders
+/// this user cannot write to and that are outside the project, so a
+/// helper or library looked up by name is one the agent could not have
+/// put there. A shim's node folder goes first, its node pinned already.
+fn locked_path(own: Option<String>, node: Option<&Path>, place: &[&Path]) -> OsString {
+    let own = own.map(OsString::from).unwrap_or_else(app_path);
+    let dirs = std::env::split_paths(&own)
+        .filter(|d| d.is_absolute() && d.is_dir())
+        .filter(|d| !place.iter().any(|p| inside(d, p)))
+        .filter(|d| !writable_dir(d));
+    let first = node.and_then(Path::parent).map(Path::to_path_buf);
+    std::env::join_paths(first.into_iter().chain(dirs)).unwrap_or_default()
 }
 
 /// A path as compared: lower case, one kind of slash, no trailing one.
@@ -1084,9 +1116,12 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
     let runs = Runs::of(&pinned, &env);
     // A pin that could not be read matches no Always, and gets none.
     let held_to = runs.fingerprint.clone().unwrap_or_else(|| "unreadable".into());
+    // A library planted where the program runs voids every Always: each
+    // secret is asked, Once only.
+    let dll = loose_dll(&cwd);
     let unasked: Vec<String> = secrets
         .iter()
-        .filter(|s| !approved(&s.allowed, &place.key, &program_lower, &held_to))
+        .filter(|s| dll.is_some() || !approved(&s.allowed, &place.key, &program_lower, &held_to))
         .map(|s| s.name.clone())
         .collect();
     let mut held = None;
@@ -1098,7 +1133,10 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
             return;
         };
         held = Some(c);
-        let why_once = once_why(&pinned, &runs, &place);
+        let why_once = match &dll {
+            Some(_) => Some("the folder it runs in holds a .dll, which it could load"),
+            None => once_why(&pinned, &runs, &place),
+        };
         let stem = &runs.stem;
         let whose: Vec<String> = secrets
             .iter()
@@ -1146,6 +1184,8 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
         env,
         runs,
         held_to,
+        dir: place.dir,
+        always: false,
         secrets,
         stdin,
         unasked,
@@ -1165,6 +1205,10 @@ struct Job {
     runs: Runs,
     /// The fingerprint the question was asked about, which an Always keeps.
     held_to: String,
+    /// The project's main folder, kept off an Always run's PATH.
+    dir: PathBuf,
+    /// Runs on an Always, given now or before: a locked PATH.
+    always: bool,
     secrets: Vec<store::Secret>,
     stdin: Vec<String>,
     /// The secrets not yet allowed for this program, which were asked.
@@ -1184,7 +1228,7 @@ impl Job {
         ));
     }
 
-    fn run(self, asked: Option<Asked>, held: Option<Claim>, out: SecretStream, left: Arc<AtomicBool>) {
+    fn run(mut self, asked: Option<Asked>, held: Option<Claim>, out: SecretStream, left: Arc<AtomicBool>) {
         let answer = match asked {
             None => Answer::Once,
             Some(a) => {
@@ -1213,6 +1257,21 @@ impl Job {
             }
         };
         drop(held);
+        self.always = self.unasked.is_empty() || answer == Answer::Always;
+        // Checked again just before the start, as a question can wait a
+        // minute. A library planted between this and the program loading
+        // it still gets in; the window is the start itself.
+        if self.always {
+            if let Some(dll) = loose_dll(&self.cwd) {
+                for s in &self.secrets {
+                    self.log(&s.name, "refused: a .dll beside it");
+                }
+                out.fail(&format!(
+                    "Refused: {dll} is in the folder it would run in, which it could load. Run it from a folder without one."
+                ));
+                return;
+            }
+        }
         for s in &self.secrets {
             let outcome = match (self.unasked.contains(&s.name), answer) {
                 (false, _) => "allowed",
@@ -1312,6 +1371,12 @@ impl Job {
         }
         for (k, v) in &self.env.set {
             c.env(k, v);
+        }
+        if self.always {
+            let node = self.runs.shim.as_ref().map(|s| s.node.as_path());
+            let own = child_var(&self.env, "PATH");
+            let temp = std::env::temp_dir();
+            c.env("PATH", locked_path(own, node, &[&self.dir, &self.cwd, &temp]));
         }
         for s in &self.secrets {
             c.env(&s.name, &s.value);
