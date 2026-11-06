@@ -215,7 +215,7 @@ unsafe fn taken(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
     bytes
 }
 
-fn seal(bytes: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn seal(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut out = CRYPT_INTEGER_BLOB::default();
     unsafe {
         CryptProtectData(
@@ -232,7 +232,7 @@ fn seal(bytes: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-fn unseal(bytes: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn unseal(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut out = CRYPT_INTEGER_BLOB::default();
     unsafe {
         CryptUnprotectData(
