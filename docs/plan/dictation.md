@@ -14,18 +14,38 @@ into any program. How it works, what was measured and why are in the
 lore (ask about `dictate.rs`, `anywhere.rs` and `speech.rs`). What
 follows is what is left.
 
+Since 2026-11-08: four models to pick from in Settings, Dictation, with
+the language (English or Danish) told to a multilingual one, and a plate
+by the caret when Ctrl+Alt+D dictates into another program.
+
+## Measured 2026-11-08
+
+Release build, i7-11700K, the example (`examples/dictate.rs`) on Windows
+TTS recordings, the second run timed. A 15 second sentence:
+
+| Model | Fetch | Time | Heard |
+|---|---|---|---|
+| distil-small.en (default) | 332 MB | 1.9 s | "pain", "Maine", "Warwick" for pane, main, Warriv |
+| distil-large-v3 | 1.5 GB | 6.5 s | "main", "folio's quest log"; still "pain" |
+| whisper-small | 970 MB | 2.6 s | "main", "warriv", "anywhere.rs": best on names |
+| whisper-large-v3-turbo | 1.6 GB | 7.0 s | about as distil-large-v3 |
+
+On 25 s of Danish read aloud, whisper-small took 5.1 s with a slip in
+most lines, turbo 12.6 s and nearly every word right.
+
+distil-large-v3 is not the default: three and a half times the wait for
+no clear gain on these. The encoder in eight bits was tried and is far
+slower on candle's CPU path (nine times, and f16 a fifth slower), so the
+encoder stays in full floats; the large ones hold about 3 GB while
+loaded.
+
 ## Next
 
-- **A bigger model.** The decoder is no longer the slow half; the
-  encoder is (1.3 s of 2.3 s on 16.7 s of speech). distil-large-v3
-  hears better and may take a longer prompt without looping, but its
-  encoder is about three times the work: try it once quantized, or with
-  the encoder in eight bits.
-- **Danish.** A multilingual model, about twice the size, picked in the
-  Dictation section.
-- **Seen outside Horadric.** Dictating into another program shows
-  nothing but the ticks: a small plate near the caret with the level and
-  the draft, as Wispr has.
+- **Hear it from a real microphone.** Every number above is from TTS.
+  Try whisper-small for English as well: it was the best on project
+  names, at 1.4 times the wait.
+- **Quicker large models.** The encoder is the time. Ways left: a
+  shorter window still (it is the speech plus two seconds), or the GPU.
 - **macOS.** The microphone is written (`mac/microphone.rs`, not yet
   built on a Mac); the stage still needs the key, the draft and the
   ticks, and the tidy needs `claude` found the Mac's way.
