@@ -4,11 +4,6 @@ The Mac's core loop shipped in 0.17.0 (tiles, stage, hosts, resume,
 menu bar, install, updater). What is still not built on the Mac, each
 its own step:
 
-- **The rest of the Folio.** New Claude sessions open as a Folio on the
-  Mac too, in AppKit text views (lore has how). Still Windows only:
-  slash commands, images, `!` commands, review, the sign in card, MCP
-  forms, undo, handing over to a terminal, and a smoke step with a fake
-  headless claude so CI sees one.
 - **The browser pane's rest.** It is on the Mac as a `WKWebView` per
   tab (`mac/web.rs`, lore has how): tabs per project, an address bar,
   and the `browser_*` tools, whose DevTools calls WebKit stands in for
