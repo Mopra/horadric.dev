@@ -883,7 +883,7 @@ fn figure(s: &str) -> Option<(&str, bool)> {
         .map_or(0, |(i, c)| i + c.len_utf8());
     if unit_len == 0 {
         // Nothing but space can follow a bare number.
-        return Some((after, false)).filter(|_| trimmed.is_empty() || after.len() != trimmed.len());
+        return (trimmed.is_empty() || after.len() != trimmed.len()).then_some((after, false));
     }
     let unit = &trimmed[..unit_len];
     if unit.chars().count() > 8 {

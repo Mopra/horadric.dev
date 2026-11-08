@@ -589,7 +589,7 @@ fn gave_up(key: &str, gift: &Gift) {
     };
     let why = format!("No session of {key} took it. {why}");
     let why = why.trim_end();
-    if !crate::app::forge_note(what, &why) {
+    if !crate::app::forge_note(what, why) {
         eprintln!("horadric: forge: {what}: {why}");
     }
 }

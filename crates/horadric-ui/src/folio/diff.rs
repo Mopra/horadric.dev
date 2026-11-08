@@ -88,7 +88,7 @@ impl Ctx<'_> {
             let _ = l.SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
             self.colour_rows(l, view, &starts, &e.path);
         }
-        let heights = l.as_ref().map_or_else(Vec::new, |l| row_heights(l));
+        let heights = l.as_ref().map_or_else(Vec::new, row_heights);
         let spans: Vec<(f32, f32)> = if heights.len() == view.len() {
             heights
         } else {
@@ -581,11 +581,13 @@ fn tokens(s: &str) -> Vec<Range<usize>> {
 /// since the table grows as the product of the two.
 const MAX_TOKENS: usize = 400;
 
+type Spans = Vec<Range<usize>>;
+
 /// What changed between a removed line and the added line that replaces
 /// it, as byte ranges in each: the tokens off their longest common run.
 /// None when the lines share too little for the spans to help, as GitHub
 /// leaves a rewritten line plain.
-fn word_spans(old: &str, new: &str) -> Option<(Vec<Range<usize>>, Vec<Range<usize>>)> {
+fn word_spans(old: &str, new: &str) -> Option<(Spans, Spans)> {
     let (a, b) = (tokens(old), tokens(new));
     if a.len() > MAX_TOKENS || b.len() > MAX_TOKENS || old == new {
         return None;

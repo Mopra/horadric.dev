@@ -244,7 +244,7 @@ fn under(raw: Vec<Raw>, prefix: &str, flat: bool) -> Vec<Change> {
         })
         .take(MOST)
         .collect();
-    out.sort_by(|a, b| a.rel.to_lowercase().cmp(&b.rel.to_lowercase()));
+    out.sort_by_key(|a| a.rel.to_lowercase());
     out
 }
 

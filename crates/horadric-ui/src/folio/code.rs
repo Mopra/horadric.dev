@@ -491,6 +491,7 @@ impl Ctx<'_> {
     }
 
     /// The header: the file when the fence names one, the language, Copy.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn code_head(
         &self,
         s: &mut Scene,

@@ -268,12 +268,10 @@ pub fn prepare(key: &str, id: u64, view: &ICoreWebView2, root: &Path, host: &str
         // itself and never raises WebResourceRequested for them, so
         // markdown came through as plain text. Every request on the host
         // is answered by `render` instead, from the folder.
-        for pattern in [format!("https://{host}/*")] {
-            let _ = view.AddWebResourceRequestedFilter(
-                &HSTRING::from(pattern),
-                COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
-            );
-        }
+        let _ = view.AddWebResourceRequestedFilter(
+            &HSTRING::from(format!("https://{host}/*")),
+            COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+        );
         // Before ours: handlers run in the order they were added, so a
         // refusal set by ours is the one that stands.
         super::edit::serve(view, host, root);

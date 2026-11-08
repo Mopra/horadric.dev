@@ -177,9 +177,9 @@ fn keeper(rx: Receiver<Job>) {
         match job {
             Job::Seen(file) => {
                 let key = fold(&file);
-                if !seen.contains_key(&key) {
+                if let std::collections::hash_map::Entry::Vacant(slot) = seen.entry(key) {
                     if let Some(bytes) = read_small(&file) {
-                        seen.insert(key, bytes);
+                        slot.insert(bytes);
                     }
                 }
             }

@@ -389,6 +389,7 @@ impl Shading {
 
     /// `r`'s shadow on `rt`, moved by `by`, `blur` soft, in `c`. `rt` must
     /// be drawing.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn cast(
         &self,
         gpu: &Gpu,

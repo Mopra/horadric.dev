@@ -363,12 +363,12 @@ pub fn log(line: &str) {
     }
 }
 
+/// A kept name and the owner that wins it.
+pub type Named = (String, Owner);
+
 /// The names kept for a project's sessions, each with the owner that wins
 /// it: secrets first, then web logins.
-pub fn names(
-    project_key: &str,
-    identity: Option<&str>,
-) -> (Vec<(String, Owner)>, Vec<(String, Owner)>) {
+pub fn names(project_key: &str, identity: Option<&str>) -> (Vec<Named>, Vec<Named>) {
     let v = read();
     let mut secrets: Vec<(String, Owner)> = Vec::new();
     for s in &v.secrets {

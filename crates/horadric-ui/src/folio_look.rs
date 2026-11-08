@@ -412,7 +412,7 @@ pub fn duration(ms: u64) -> String {
     let secs = (ms + 500) / 1000;
     if secs < 60 {
         format!("{secs} s")
-    } else if secs % 60 == 0 {
+    } else if secs.is_multiple_of(60) {
         format!("{} min", secs / 60)
     } else {
         format!("{} min {} s", secs / 60, secs % 60)

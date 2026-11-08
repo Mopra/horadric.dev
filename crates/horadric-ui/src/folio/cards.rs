@@ -512,7 +512,7 @@ unsafe fn option(
     };
     let first = label_l
         .as_ref()
-        .and_then(|l| super::rich::first_line(l))
+        .and_then(super::rich::first_line)
         .unwrap_or(20.0);
     s.line(
         icon,

@@ -242,14 +242,15 @@ fn page_in(tree: &Value) -> Option<Page> {
     })
 }
 
+type Pages = Box<dyn FnOnce(Vec<(u64, Page)>)>;
+
 /// What every tab of every project shows now, frame by frame, for `done`.
 /// A tab that does not answer is left out.
 fn everywhere(done: impl FnOnce(Vec<(u64, Page)>) + 'static) {
     let tabs = web::all_tabs();
     let left = Rc::new(Cell::new(tabs.len()));
     let got: Rc<RefCell<Vec<(u64, Page)>>> = Rc::new(RefCell::new(Vec::new()));
-    let done: Rc<RefCell<Option<Box<dyn FnOnce(Vec<(u64, Page)>)>>>> =
-        Rc::new(RefCell::new(Some(Box::new(done))));
+    let done: Rc<RefCell<Option<Pages>>> = Rc::new(RefCell::new(Some(Box::new(done))));
     if tabs.is_empty() {
         if let Some(d) = done.borrow_mut().take() {
             d(Vec::new());
@@ -1136,10 +1137,11 @@ fn finish(job: Job) {
 }
 
 type Then = Box<dyn FnOnce(Option<Answer>)>;
+type Answered = (u64, Option<Answer>);
 
 thread_local! {
     static WAITING: RefCell<Vec<(u64, Then)>> = const { RefCell::new(Vec::new()) };
-    static INBOX: RefCell<Option<(Sender<(u64, Option<Answer>)>, Receiver<(u64, Option<Answer>)>)>> =
+    static INBOX: RefCell<Option<(Sender<Answered>, Receiver<Answered>)>> =
         const { RefCell::new(None) };
     static NEXT_WAIT: Cell<u64> = const { Cell::new(1) };
 }

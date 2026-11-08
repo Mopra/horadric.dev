@@ -2256,6 +2256,9 @@ fn stage_agents(key: Option<&str>) -> Vec<(String, String)> {
     .unwrap_or_default()
 }
 
+/// An agent the Forge can hand a pin to: (id, name, its Folio's key when it is one).
+pub(crate) type ForgeAgent = (String, String, Option<String>);
+
 /// The project `key`'s agents, as (id, name, its Folio's key when it is
 /// one); and whether the first is the one that last had the keyboard
 /// rather than just first. From the stage while it shows the project, so
@@ -2263,7 +2266,7 @@ fn stage_agents(key: Option<&str>) -> Vec<(String, String)> {
 /// project, since a pin can come from a browser popped out or while the
 /// stage shows another project. None while the app is busy (a menu it
 /// opened is up), for the caller to try again.
-pub(crate) fn forge_agents(key: &str) -> Option<(Vec<(String, String, Option<String>)>, bool)> {
+pub(crate) fn forge_agents(key: &str) -> Option<(Vec<ForgeAgent>, bool)> {
     with_app(|app| {
         if let Some(stage) = app.stage.as_ref().filter(|s| s.project() == key) {
             let agents = (stage.agents().into_iter())
