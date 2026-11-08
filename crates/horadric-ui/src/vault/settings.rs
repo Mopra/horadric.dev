@@ -195,10 +195,8 @@ pub fn stale() {
 
 /// The folder of the project `key`, the town's own for the town.
 fn project_dir(key: &str) -> PathBuf {
-    if crate::town::is(key) {
-        if let Some(d) = crate::town::dir() {
-            return d;
-        }
+    if let Some(d) = crate::town::dir_of(key) {
+        return d;
     }
     PathBuf::from(key)
 }

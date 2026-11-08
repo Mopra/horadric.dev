@@ -236,8 +236,9 @@ pub(crate) fn session_env(
     own_tree: Option<&Worktree>,
     cwd: &Path,
 ) -> (Vec<(String, String)>, Vec<String>) {
-    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut set = tree_env(id, own_tree, cwd);
+    // A town with a login of its own runs every session there on it.
+    set.extend(crate::town::session_env(cwd));
     // A worktree's identity is its main tree's; `of_project` maps it.
     #[cfg(windows)]
     let remove = {

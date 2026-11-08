@@ -1517,7 +1517,8 @@ impl Painter<'_> {
         self.plate(m, l.size);
 
         self.screen(gpu, &l.limits_box, m.tile_radius);
-        let limits = scene.usage.map(|u| u.limits.named()).unwrap_or_default();
+        // A town with a login of its own adds its rows after the machine's.
+        let limits = crate::town::limit_rows(scene.usage);
         let first = l.limits.first().copied();
         match (limits.first(), first) {
             (None, Some(r)) => {
@@ -1544,7 +1545,7 @@ impl Painter<'_> {
         // does: a chevron beside the first word, always there when folded.
         let folding = !scene.locked && scene.button(UsageHit::Limits) != Button::Idle;
         if let (Some(r), true) = (first, scene.collapsed || folding) {
-            let name = limits.first().map_or("", |(n, _)| *n);
+            let name = limits.first().map_or("", |(n, _)| n.as_str());
             let x = r.x + INNER_PAD + self.measure(gpu, &gpu.body, name);
             let chevron = if scene.collapsed {
                 '\u{E76C}'

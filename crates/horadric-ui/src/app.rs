@@ -577,6 +577,8 @@ pub(crate) enum Input {
     SettingsPicked(Field, Option<usize>),
     /// The Settings window's cross, Esc or Alt+F4.
     SettingsClosed,
+    /// The towns were changed from Settings.
+    TownsChanged,
     /// A key pressed in the Settings window while it listens for a
     /// shortcut's new chord.
     SettingsPress(Press),
@@ -846,7 +848,11 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 continue;
             }
             keep_transcript(&t);
-            if let Some(limits) = t.limits.filter(|l| !l.is_empty()) {
+            if let Some(limits) = t
+                .limits
+                .filter(|l| !l.is_empty())
+                .filter(|l| !town::hear_limits(&t.event.cwd, l, unix_now()))
+            {
                 let now = unix_now();
                 let heard = |held: Option<&Usage>| Usage {
                     limits: held.map_or(limits.clone(), |h| h.limits.merge(&limits, now)),
@@ -991,7 +997,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     // running the status line from wherever it pointed.
     let status_settings = store::write_status_settings(&console::host_program());
     let mcp_config = store::write_mcp_config(&console::host_program());
+    town::set(saved.towns());
     town::make();
+    town::start(&saved.home_usage);
     crate::backdrop::set_still(saved.still);
     crate::dictate::use_microphone(saved.microphone.clone());
     crate::dictate::use_tidy(saved.dictation_tidy);
@@ -1099,14 +1107,12 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             far_hidden: saved.far_hidden.clone(),
             columns: Columns::from_keys(&saved.columns),
             recent: saved.recent.clone(),
-            town_listed: None,
             autostart_offered,
             explorer_offered,
             quiet: saved.quiet,
             tiles_away: false,
             sounds: saved.sounds,
             microphone: saved.microphone.clone(),
-            town_hidden: saved.town_hidden,
             still: saved.still,
             switch_accounts: saved.switch_accounts,
             chat_sessions: !saved.terminal_sessions,
@@ -2928,11 +2934,12 @@ fn project_menu(key: &str) {
     if !town::is(key) {
         items.push(Item::action(CLOSE, "Close project"));
     } else if with_app(|app| app.sessions_in(key)) == Some(0) {
-        items.push(Item::action(HIDE_TOWN, "Hide Tristram"));
+        items.push(Item::action(HIDE_TOWN, format!("Hide {}", project_name(key))));
     } else {
-        items.push(Item::Disabled(
-            "Hide Tristram (end its sessions first)".into(),
-        ));
+        items.push(Item::Disabled(format!(
+            "Hide {} (end its sessions first)",
+            project_name(key)
+        )));
     }
     let picked = menu::popup(&items);
     match (picked, &dir) {
@@ -2977,7 +2984,7 @@ fn project_menu(key: &str) {
         Some(START_OVER) => app.start_over(key, BATCH),
         Some(END_ALL) => app.end_all(Some(key)),
         Some(CLOSE) => app.close_project(key),
-        Some(HIDE_TOWN) => app.hide_town(true),
+        Some(HIDE_TOWN) => app.hide_town(key, true),
         Some(SHELL) => app.open_shell(key),
         Some(i) if (REOPEN..REOPEN_END).contains(&i) => {
             let conversation = reopen.get(i - REOPEN).map(|(c, _)| c.as_str());
@@ -3978,8 +3985,6 @@ struct App {
     columns: Columns,
     /// Projects sessions were started in, newest first, for the tray menu.
     recent: Vec<String>,
-    /// The projects the town's `CLAUDE.md` was last written for.
-    town_listed: Option<Vec<town::Project>>,
     autostart_offered: bool,
     explorer_offered: bool,
     last_saved: Option<SavedState>,
@@ -4031,8 +4036,6 @@ struct App {
     sounds: bool,
     /// The microphone dictation listens to, None for Windows' default.
     microphone: Option<String>,
-    /// Tristram's tile is hidden while no session runs in the town.
-    town_hidden: bool,
     /// Horadric's own animations are off, from the Settings window.
     still: bool,
     /// A usage limit switches Claude Code to the account with the most
@@ -6216,7 +6219,7 @@ impl App {
             sounds: self.sounds,
             microphone: self.microphone_name(),
             tidy: crate::dictate::tidies(),
-            town: !self.town_hidden,
+            towns: crate::town_settings::views(),
             animations: !self.still,
             switch_accounts: self.switch_accounts,
             terminal_sessions: !self.chat_sessions,
@@ -6867,7 +6870,6 @@ impl App {
                 self.quiet = !self.quiet;
                 self.save();
             }
-            Field::Town => self.hide_town(!self.town_hidden),
             Field::Animations => {
                 self.still = !self.still;
                 crate::backdrop::set_still(self.still);
@@ -6922,6 +6924,7 @@ impl App {
             Field::Updates => self.check_update(true),
             // The Settings window answers a Vault row itself, off the app's borrow.
             Field::Version | Field::KeysNote | Field::Lexicon | Field::Vault(_) => {}
+            Field::Town(_) => {}
             Field::Ask => {
                 self.tome.ask = !self.tome.ask;
                 self.save();
@@ -7202,12 +7205,27 @@ impl App {
             .map_or(0, |r| r.all().filter(|s| project_key(s) == key).count())
     }
 
-    /// Hides Tristram's tile, or shows it again. A session running in the
+    /// Hides a town's tile, or shows it again. A session running in the
     /// town keeps it on screen until it ends.
-    fn hide_town(&mut self, hidden: bool) {
-        self.town_hidden = hidden;
+    fn hide_town(&mut self, key: &str, hidden: bool) {
+        let Some(slug) = town::of(key).map(|t| t.saved.slug) else {
+            return;
+        };
+        town::change(|all| {
+            for t in all.iter_mut().filter(|t| t.slug == slug) {
+                t.hidden = hidden;
+            }
+        });
+        self.towns_changed();
+    }
+
+    /// The towns changed in Settings or a tile menu: kept, and their
+    /// clusters made to match.
+    fn towns_changed(&mut self) {
         self.save();
         self.reconcile(false);
+        self.arrange();
+        self.refresh_settings();
     }
 
     /// Ends the project's sessions and takes its cluster down, unfinished
@@ -9316,7 +9334,8 @@ impl App {
             sounds: self.sounds,
             microphone: self.microphone.clone(),
             dictation_tidy: crate::dictate::tidies(),
-            town_hidden: self.town_hidden,
+            town_list: town::saved(),
+            home_usage: town::usage_saved(),
             still: self.still,
             switch_accounts: self.switch_accounts,
             terminal_sessions: !self.chat_sessions,
@@ -9458,21 +9477,10 @@ impl App {
             .collect()
     }
 
-    /// Rewrites the town's `CLAUDE.md` when the set of projects changed.
-    /// Only the folders count: how long ago a session ran would rewrite it
-    /// on every pass.
+    /// Rewrites each town's `CLAUDE.md` when the projects or the towns
+    /// changed, see [`town::write_all`].
     fn refresh_town(&mut self) {
-        let Some(dir) = town::dir().filter(|d| d.is_dir()) else {
-            return;
-        };
-        let projects = self.town_projects();
-        let same = self.town_listed.as_ref().is_some_and(|old| {
-            old.len() == projects.len() && old.iter().zip(&projects).all(|(a, b)| a.dir == b.dir)
-        });
-        if !same {
-            town::write(&dir, &projects);
-            self.town_listed = Some(projects);
-        }
+        town::write_all(&self.town_projects());
     }
 
     /// Makes the windows match the projects in the registry.
@@ -9493,15 +9501,11 @@ impl App {
         self.open
             .retain(|k| horadric_core::afar::split_key(k).is_none() || projects.contains(k));
         // A hidden town shows only while a session runs there.
-        if self.town_hidden {
-            self.open.retain(|k| !town::is(k));
-        }
+        self.open.retain(|k| !town::hidden(k));
         projects.extend(self.open.iter().cloned());
         projects.extend(self.listed());
-        // The town stays when it has no sessions, unless it is hidden.
-        if !self.town_hidden {
-            projects.extend(town::key().map(String::from));
-        }
+        // A town stays when it has no sessions, unless it is hidden.
+        projects.extend(town::all().into_iter().filter(|t| !t.saved.hidden).map(|t| t.key));
 
         // Remove clusters whose project is gone.
         let mut i = 0;
@@ -10096,6 +10100,7 @@ impl App {
                 Input::SettingsClick(field, row) => self.settings_click(field, row),
                 Input::SettingsPicked(field, pick) => self.settings_picked(field, pick),
                 Input::SettingsClosed => self.close_settings(),
+                Input::TownsChanged => self.towns_changed(),
                 Input::SettingsPress(press) => self.settings_press(press),
                 Input::Answered {
                     dir,
@@ -10204,8 +10209,8 @@ impl App {
     /// session, as the recent list spells it, for a project up for its
     /// task list alone.
     fn project_dir(&self, key: &str) -> Option<PathBuf> {
-        if town::is(key) {
-            return town::dir();
+        if let Some(dir) = town::dir_of(key) {
+            return Some(dir);
         }
         let from_session = self.shared.registry.lock().ok().and_then(|r| {
             let mut dirs = r
@@ -10344,8 +10349,11 @@ impl App {
         if self.usage_window.is_some() && !self.columns.contains(columns::USAGE) {
             self.columns.add_first(columns::USAGE);
         }
-        if let Some(k) = town::key().filter(|k| is_present(k) && !self.columns.contains(k)) {
-            self.columns.add_first(k);
+        // Last added is on top, so Tristram stands above the other towns.
+        for k in town::keys().iter().rev() {
+            if is_present(k) && !self.columns.contains(k) {
+                self.columns.add_first(k);
+            }
         }
         let mut fresh: Vec<(String, String, i32)> = self
             .clusters

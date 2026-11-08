@@ -221,7 +221,7 @@ pub fn open(key: &str, dir: &Path) {
             .or_insert_with(|| Sky {
                 dir: dir.to_path_buf(),
                 key: key.to_string(),
-                town: crate::town::key() == Some(key),
+                town: crate::town::is(key),
                 mind: false,
                 stash: None,
                 mind_key: None,

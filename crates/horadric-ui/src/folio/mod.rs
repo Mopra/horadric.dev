@@ -1058,8 +1058,12 @@ fn drain() {
                 tell.push(Input::FolioFilesRewound(id.clone(), how));
             }
             // A replay's limits are old news, and the bars already had them.
+            // A town's own login keeps its limits apart from the machine's.
             if let Some(limits) = chat.folio.limits.take().filter(|_| chat.live) {
-                tell.push(Input::Limits(limits));
+                let now = crate::app::unix_now();
+                if !crate::town::hear_limits(&chat.dir.to_string_lossy(), &limits, now) {
+                    tell.push(Input::Limits(limits));
+                }
             }
             if chat.folio.cleared != cleared {
                 chat.open.clear();

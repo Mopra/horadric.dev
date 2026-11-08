@@ -21,6 +21,7 @@ pub mod otel;
 pub mod pace;
 pub mod tasks;
 pub mod tend;
+pub mod towns;
 pub mod transcript;
 
 /// Environment variable Horadric sets on every `claude` it spawns.
