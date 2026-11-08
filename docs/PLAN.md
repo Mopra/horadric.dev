@@ -51,16 +51,16 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 
 ## Next
 
-- [One portal](plan/one-portal.md): a phone paired once sees every brother and every session. Built; left: the test with three machines, and pairing a phone by signing in (being built).
+- [One portal](plan/one-portal.md): a phone paired once, by QR code or by signing in, sees every brother and every session. Built and live; left: the test with three machines and a real phone signing in.
 - [macOS](plan/macos.md): for others who want it, the human uses no Mac, so lowest priority. The Folio, browser pane, quests, files, usage, Discord and Settings are built, unverified on a real Mac; left: the rest of each, and switching accounts.
 - [Memory](plan/memory.md): built; left: arming the daily distill.
 - [The Brotherhood](plan/the-brotherhood.md): built, the Mac too; left: the Mac's keeper, taking over and leaving.
-- [Vault](plan/vault.md): each project's identity, its gh, git, npm and Vercel logins and the tokens its quests use without reading them, and the site logins Horadric fills in the pane, so no session switches another's account.
+- [Vault](plan/vault.md): built, with Restart them for sessions on an old identity; left: the human's checks, and deciding the git credential helper, `secret run --file` and Keep this login, which as planned would let an agent read a secret.
 - [Signals](plan/signals.md): built and seen on screen; left: the Mac's cost lines and progress.
-- [Dictation](plan/dictation.md): built, with a global chord; left: a bigger model, Danish, a plate outside Horadric, and the Mac's key and draft.
-- [Towns](plan/towns.md): several Tristrams, work and private, each with its own Claude login and browser profile. Agreed 2026-11-05, reopening `CLAUDE_CONFIG_DIR` for towns only.
-- [The Forge](plan/the-forge.md): files worked on with Claude beside the session (decks, artefacts, markdown, images), pinned, edited by hand, versioned and exported. Proposed.
-- [GPU light](plan/gpu-light.md): every glow, shadow and spark drawn with real bloom, the shadow effect and particles instead of stacked shapes, window by window, then the Mac. Steps 1 and 2 are built; the human approved the look on 2026-11-06, so step 3 is next. The bloom costs about 4 points of the UI thread in a tile's first minute of work (limit: 1).
+- [Dictation](plan/dictation.md): built, with four models, Danish and a plate by the caret; left: trying it with a real voice, and the Mac's key and draft.
+- [Towns](plan/towns.md): built (2026-11-08), several Tristrams each with its own Claude home, browser profile and usage rows; left: the two-town check on screen.
+- [The Forge](plan/the-forge.md): built, pins on web pages too; left: pins on PDF and Word files, keeping web pins, the Forge in `horadric run` sessions, and the Mac.
+- [GPU light](plan/gpu-light.md): steps 1 to 7 built, steps 1 and 2 approved; left: the human's look at steps 3 to 7, measuring the UI thread cost again, a remote desktop run, and the Mac (step 8).
 
 ## Reference
 
