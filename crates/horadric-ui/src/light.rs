@@ -77,7 +77,6 @@ impl Bloom {
 
     /// The stage's panes: softer than a tile, since it sits beside text
     /// being read.
-    #[allow(dead_code)] // until the stage's panes take their light
     pub fn pane() -> Bloom {
         let tile = Bloom::tile();
         Bloom {
