@@ -13,9 +13,9 @@
 
 use std::collections::HashSet;
 
+use horadric_core::vault::identity::Resolved;
 use horadric_core::Phase;
 use horadric_hooks::listener::{BrowserCall, Reply};
-use horadric_core::vault::identity::Resolved;
 use serde_json::{json, Value};
 
 use super::{App, WEB};

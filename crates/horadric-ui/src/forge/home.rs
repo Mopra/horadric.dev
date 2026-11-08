@@ -232,7 +232,9 @@ pub fn recent(root: &Path, written: &[PathBuf]) -> Vec<Recent> {
         if label(name).is_none() || under_tucked(&segs) || out.iter().any(|r| r.segs == segs) {
             continue;
         }
-        let Ok(meta) = std::fs::metadata(file) else { continue };
+        let Ok(meta) = std::fs::metadata(file) else {
+            continue;
+        };
         if meta.is_file() {
             out.push(Recent {
                 segs,
@@ -254,7 +256,9 @@ fn newest(root: &Path) -> Vec<Recent> {
     let mut stack = vec![(root.to_path_buf(), Vec::<String>::new())];
     let mut looked = 0;
     'walk: while let Some((dir, segs)) = stack.pop() {
-        let Ok(names) = std::fs::read_dir(&dir) else { continue };
+        let Ok(names) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in names.flatten() {
             looked += 1;
             if looked > WALK_MOST {
@@ -317,7 +321,11 @@ fn read(root: &Path, dir: &Path, flat: bool, written: &[PathBuf]) -> Option<Show
         .unwrap_or_else(|| root.display().to_string());
     let (entries, cut, trouble) = match list(dir, flat) {
         Ok((entries, cut)) => (entries, cut, String::new()),
-        Err(e) => (Vec::new(), false, format!("This folder cannot be read: {e}")),
+        Err(e) => (
+            Vec::new(),
+            false,
+            format!("This folder cannot be read: {e}"),
+        ),
     };
     let recent = if segs.is_empty() && trouble.is_empty() {
         recent(root, written)
@@ -474,7 +482,10 @@ fn href(segs: &[String]) -> String {
 
 /// How long ago `at` was, in a few words.
 fn ago(at: Option<SystemTime>, now: SystemTime) -> String {
-    let Some(secs) = at.and_then(|a| now.duration_since(a).ok()).map(|d| d.as_secs()) else {
+    let Some(secs) = at
+        .and_then(|a| now.duration_since(a).ok())
+        .map(|d| d.as_secs())
+    else {
         return String::new();
     };
     match secs {
@@ -555,8 +566,14 @@ fn html(look: &str, s: &Shown) -> String {
     b.push_str("</nav>\n");
 
     b.push_str("<section class=\"new\"><span class=\"legend\">New</span>");
-    for (what, name) in [("md", "Markdown note"), ("deck", "HTML deck"), ("csv", "CSV table")] {
-        b.push_str(&format!("<button type=\"button\" data-new=\"{what}\">{name}</button>"));
+    for (what, name) in [
+        ("md", "Markdown note"),
+        ("deck", "HTML deck"),
+        ("csv", "CSV table"),
+    ] {
+        b.push_str(&format!(
+            "<button type=\"button\" data-new=\"{what}\">{name}</button>"
+        ));
     }
     if !s.flat {
         b.push_str("<button type=\"button\" data-op=\"mkdir\">Folder</button>");
@@ -647,7 +664,9 @@ fn listing(s: &Shown) -> String {
 
     if !s.recent.is_empty() {
         let now = SystemTime::now();
-        b.push_str("<section><div class=\"bar\"><h2>Recent</h2><span class=\"groove\"></span></div>");
+        b.push_str(
+            "<section><div class=\"bar\"><h2>Recent</h2><span class=\"groove\"></span></div>",
+        );
         b.push_str("<div class=\"screen\"><ul class=\"list\">\n");
         for r in &s.recent {
             let name = r.segs.last().map(String::as_str).unwrap_or_default();
@@ -713,7 +732,11 @@ fn listing(s: &Shown) -> String {
         let mark = marks.get(&e.name.to_lowercase()).copied();
         b.push_str(&format!(
             "<li class=\"{class}{}\" data-name=\"{}\" data-kind=\"{}\" draggable=\"true\">",
-            if e.label.is_none() && !e.dir { " other" } else { "" },
+            if e.label.is_none() && !e.dir {
+                " other"
+            } else {
+                ""
+            },
             esc(&e.name),
             if e.dir { "dir" } else { "file" }
         ));
@@ -761,7 +784,9 @@ fn listing(s: &Shown) -> String {
     }
     b.push_str("</ul>\n");
     if s.cut {
-        b.push_str(&format!("<p class=\"note\">Only the first {MOST} names are listed.</p>\n"));
+        b.push_str(&format!(
+            "<p class=\"note\">Only the first {MOST} names are listed.</p>\n"
+        ));
     }
     b.push_str("</div></section>\n");
     b
@@ -1431,7 +1456,9 @@ fn create(dir: &Path, what: New) -> io::Result<PathBuf> {
             Err(e) => return Err(e),
         }
     }
-    Err(io::Error::other("there are too many untitled files here already"))
+    Err(io::Error::other(
+        "there are too many untitled files here already",
+    ))
 }
 
 /// The folder tab `tab` shows: its served root, host and folder, checked
@@ -1498,13 +1525,20 @@ fn off(key: &str, tab: u64, seq: u64, work: impl FnOnce() -> Value + Send + 'sta
         });
     if started.is_err() {
         let text = "Horadric could not start on that, try again.";
-        super::post(key, tab, &json!({"forge": "home-did", "seq": seq, "ok": false, "text": text}));
+        super::post(
+            key,
+            tab,
+            &json!({"forge": "home-did", "seq": seq, "ok": false, "text": text}),
+        );
     }
 }
 
 /// On the UI thread: sends the pages what their operations came to.
 pub(super) fn drain() {
-    let done = DONE.lock().map(|mut d| std::mem::take(&mut *d)).unwrap_or_default();
+    let done = DONE
+        .lock()
+        .map(|mut d| std::mem::take(&mut *d))
+        .unwrap_or_default();
     for (key, tab, reply) in done {
         super::post(&key, tab, &reply);
     }
@@ -1526,7 +1560,9 @@ fn reply(seq: u64, root: &Path, dir: &Path, flat: bool, done: Outcome) -> Value 
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
             json!({"forge": "home-did", "seq": seq, "ok": true, "text": text, "name": name, "listing": listing})
         }
-        Err(e) => json!({"forge": "home-did", "seq": seq, "ok": false, "text": e.to_string(), "listing": listing}),
+        Err(e) => {
+            json!({"forge": "home-did", "seq": seq, "ok": false, "text": e.to_string(), "listing": listing})
+        }
     }
 }
 
@@ -1535,11 +1571,20 @@ fn reply(seq: u64, root: &Path, dir: &Path, flat: bool, done: Outcome) -> Value 
 /// tab shows, never one the page names, but for where a move goes.
 fn act(key: &str, tab: u64, msg: &Value) {
     let seq = msg.get("seq").and_then(Value::as_u64).unwrap_or(0);
-    let text = |k: &str| msg.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+    let text = |k: &str| {
+        msg.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
     let op = text("op");
     let Some((root, host, dir)) = folder_tab(key, tab) else {
         let text = "This folder is not the project's.";
-        return super::post(key, tab, &json!({"forge": "home-did", "seq": seq, "ok": false, "text": text}));
+        return super::post(
+            key,
+            tab,
+            &json!({"forge": "home-did", "seq": seq, "ok": false, "text": text}),
+        );
     };
     let flat = super::serve::is_flat(&host);
     if op == "upload" {
@@ -1549,13 +1594,22 @@ fn act(key: &str, tab: u64, msg: &Value) {
     let names: Vec<String> = msg
         .get("names")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
     off(key, tab, seq, move || {
         let done: Outcome = match op.as_str() {
             "list" => Ok((None, String::new())),
             "folders" => {
-                let folders = if flat { Vec::new() } else { files::folders(&root) };
+                let folders = if flat {
+                    Vec::new()
+                } else {
+                    files::folders(&root)
+                };
                 return json!({"forge": "home-did", "seq": seq, "ok": true, "folders": folders});
             }
             "rename" => files::rename(&root, &dir, &name, &to).map(|p| (Some(p), String::new())),
@@ -1564,8 +1618,15 @@ fn act(key: &str, tab: u64, msg: &Value) {
             "move" if !flat => files::folder_at(&root, &to)
                 .and_then(|target| files::move_into(&root, &dir, &name, &target))
                 .map(|p| {
-                    let into = if to.is_empty() { "the top folder" } else { to.as_str() };
-                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let into = if to.is_empty() {
+                        "the top folder"
+                    } else {
+                        to.as_str()
+                    };
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
                     (None, format!("Moved {name} to {into}."))
                 }),
             "delete" => files::recycle(&root, &dir, &names).map(|()| {
@@ -1573,10 +1634,15 @@ fn act(key: &str, tab: u64, msg: &Value) {
                     [one] => one.clone(),
                     many => format!("{} things", many.len()),
                 };
-                (None, format!("{what} went to the Recycle Bin, to be had back from there."))
+                (
+                    None,
+                    format!("{what} went to the Recycle Bin, to be had back from there."),
+                )
             }),
             "mkdir" if !flat => files::new_folder(&root, &dir).map(|p| (Some(p), String::new())),
-            _ => Err(io::Error::other("That is not something this page can do here.")),
+            _ => Err(io::Error::other(
+                "That is not something this page can do here.",
+            )),
         };
         reply(seq, &root, &dir, flat, done)
     });
@@ -1606,9 +1672,18 @@ thread_local! {
 fn upload(key: &str, tab: u64, seq: u64, (root, dir, flat): (PathBuf, PathBuf, bool), msg: &Value) {
     let field = |k: &str| msg.get(k).and_then(Value::as_str).unwrap_or_default();
     let number = |k: &str| msg.get(k).and_then(Value::as_u64).unwrap_or(u64::MAX);
-    let (id, name, part, parts) = (field("id").to_string(), field("name").to_string(), number("part"), number("parts"));
+    let (id, name, part, parts) = (
+        field("id").to_string(),
+        field("name").to_string(),
+        number("part"),
+        number("parts"),
+    );
     let fail = |text: String| {
-        super::post(key, tab, &json!({"forge": "home-did", "seq": seq, "ok": false, "text": text}));
+        super::post(
+            key,
+            tab,
+            &json!({"forge": "home-did", "seq": seq, "ok": false, "text": text}),
+        );
     };
     if id.is_empty() || id.len() > 64 || !files::name_ok(&name) {
         return fail(format!("\"{name}\" is not a name a file can have."));
@@ -1664,7 +1739,6 @@ fn upload(key: &str, tab: u64, seq: u64, (root, dir, flat): (PathBuf, PathBuf, b
     });
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1690,13 +1764,30 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(
             names,
-            [".cache", ".git", "Alpha", "node_modules", "zeta", ".env", "b.csv", "notes.txt", "Slide 2.md", "slide 10.md"]
+            [
+                ".cache",
+                ".git",
+                "Alpha",
+                "node_modules",
+                "zeta",
+                ".env",
+                "b.csv",
+                "notes.txt",
+                "Slide 2.md",
+                "slide 10.md"
+            ]
         );
         let quiet = |n: &str| entries.iter().find(|e| e.name == n).unwrap().quiet;
         assert!(quiet(".git") && quiet("node_modules") && quiet(".cache") && quiet(".env"));
-        assert!(quiet("notes.txt"), "a file the Forge does not show waits behind the toggle");
+        assert!(
+            quiet("notes.txt"),
+            "a file the Forge does not show waits behind the toggle"
+        );
         assert!(!quiet("Alpha") && !quiet("b.csv") && !quiet("Slide 2.md"));
-        assert_eq!(entries.iter().find(|e| e.name == "b.csv").unwrap().label, Some("Table"));
+        assert_eq!(
+            entries.iter().find(|e| e.name == "b.csv").unwrap().label,
+            Some("Table")
+        );
         // A flat host serves no subfolder, so its page lists none.
         let (flat, _) = list(&dir, true).unwrap();
         assert!(flat.iter().all(|e| !e.dir));
@@ -1723,9 +1814,18 @@ mod tests {
         let page = page(&root, &dir, false, &[], theme::ACCENTS[0].0);
         assert_eq!(page.status, 404);
         // A flat host has only its top folder's page.
-        assert_eq!(super::page(&root, &root.join("docs"), true, &[], theme::ACCENTS[0].0).status, 404);
-        assert_eq!(super::page(&root, &root, true, &[], theme::ACCENTS[0].0).status, 200);
-        assert_eq!(segments(&root, &root.join("docs").join("a.md")).unwrap(), ["docs", "a.md"]);
+        assert_eq!(
+            super::page(&root, &root.join("docs"), true, &[], theme::ACCENTS[0].0).status,
+            404
+        );
+        assert_eq!(
+            super::page(&root, &root, true, &[], theme::ACCENTS[0].0).status,
+            200
+        );
+        assert_eq!(
+            segments(&root, &root.join("docs").join("a.md")).unwrap(),
+            ["docs", "a.md"]
+        );
         assert!(segments(&root, &dir.join("secret.md")).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1733,9 +1833,24 @@ mod tests {
     #[test]
     fn the_page_links_relative_and_escapes_names() {
         let entries = vec![
-            Entry { name: "a <b>".into(), dir: true, label: None, quiet: false },
-            Entry { name: "my deck #1.html".into(), dir: false, label: Some("HTML"), quiet: false },
-            Entry { name: "build.rs".into(), dir: false, label: None, quiet: true },
+            Entry {
+                name: "a <b>".into(),
+                dir: true,
+                label: None,
+                quiet: false,
+            },
+            Entry {
+                name: "my deck #1.html".into(),
+                dir: false,
+                label: Some("HTML"),
+                quiet: false,
+            },
+            Entry {
+                name: "build.rs".into(),
+                dir: false,
+                label: None,
+                quiet: true,
+            },
         ];
         let shown = Shown {
             top: "site".into(),
@@ -1779,7 +1894,10 @@ mod tests {
         assert!(page.contains("href=\"my%20deck%20%231.html\""));
         assert!(page.contains("<a href=\"/docs/\" data-rel=\"docs\">docs</a>"));
         assert!(page.contains("Show 1 more"));
-        assert!(!page.contains("href=\"build.rs\""), "a file the Forge does not show is no link");
+        assert!(
+            !page.contains("href=\"build.rs\""),
+            "a file the Forge does not show is no link"
+        );
         for bad in ['\u{2014}', '\u{2013}'] {
             assert!(!page.contains(bad));
         }
@@ -1818,8 +1936,13 @@ mod tests {
         assert_eq!(b.file_name().unwrap(), "Untitled note 2.md");
         std::fs::write(dir.join("deck.css"), "mine").unwrap();
         let deck = create(&dir, New::Deck).unwrap();
-        assert!(std::fs::read_to_string(&deck).unwrap().contains("class=\"slide"));
-        assert_eq!(std::fs::read_to_string(dir.join("deck.css")).unwrap(), "mine");
+        assert!(std::fs::read_to_string(&deck)
+            .unwrap()
+            .contains("class=\"slide"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("deck.css")).unwrap(),
+            "mine"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1828,7 +1951,14 @@ mod tests {
         let root = scratch(name);
         let git = |args: &[&str]| {
             std::process::Command::new("git")
-                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
                 .args(args)
                 .current_dir(&root)
                 .output()
@@ -1838,7 +1968,9 @@ mod tests {
             return None;
         }
         std::fs::create_dir_all(root.join("docs")).unwrap();
-        let plan: String = (1..=40).map(|i| format!("Line {i} of the plan.\n")).collect();
+        let plan: String = (1..=40)
+            .map(|i| format!("Line {i} of the plan.\n"))
+            .collect();
         std::fs::write(root.join("docs").join("plan.md"), &plan).unwrap();
         std::fs::write(root.join("old name.md"), "kept\n").unwrap();
         std::fs::write(root.join("gone.md"), "soon gone\n").unwrap();
@@ -1851,7 +1983,11 @@ mod tests {
         .unwrap();
         std::fs::remove_file(root.join("gone.md")).unwrap();
         assert!(git(&["mv", "old name.md", "new name's.md"]));
-        std::fs::write(root.join("docs").join("fresh note.md"), "# Fresh\n\nNew here.\n").unwrap();
+        std::fs::write(
+            root.join("docs").join("fresh note.md"),
+            "# Fresh\n\nNew here.\n",
+        )
+        .unwrap();
         Some(root)
     }
 
@@ -1859,7 +1995,8 @@ mod tests {
     fn git_names_every_change_under_the_folder() {
         let Some(root) = repo("git") else { return };
         let (_, changes) = git::changes(&root, false).unwrap();
-        let got: Vec<(git::State, &str)> = changes.iter().map(|c| (c.state, c.rel.as_str())).collect();
+        let got: Vec<(git::State, &str)> =
+            changes.iter().map(|c| (c.state, c.rel.as_str())).collect();
         assert_eq!(
             got,
             [
@@ -1884,7 +2021,10 @@ mod tests {
         assert!(text.contains("Line twelve, rewritten."));
         assert!(text.contains("lines the same"));
         assert!(text.contains("href=\"/docs/plan.md\">Open file"));
-        assert_eq!(page_asked(&root, &root, false, &[], accent, "diff=../x.md").status, 404);
+        assert_eq!(
+            page_asked(&root, &root, false, &[], accent, "diff=../x.md").status,
+            404
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1897,7 +2037,11 @@ mod tests {
         let out = PathBuf::from(std::env::var("FORGE_SAMPLES").expect("FORGE_SAMPLES"));
         std::fs::create_dir_all(&out).unwrap();
         let root = repo("samples").expect("git");
-        std::fs::write(root.join("deck.html"), "<section class=\"slide\"></section>").unwrap();
+        std::fs::write(
+            root.join("deck.html"),
+            "<section class=\"slide\"></section>",
+        )
+        .unwrap();
         std::fs::write(root.join("table.csv"), "a,b\n").unwrap();
         std::fs::write(root.join("build.rs"), "fn main() {}").unwrap();
         let accent = theme::ACCENTS[0].0;
@@ -1905,12 +2049,27 @@ mod tests {
             super::super::serve::Body::Bytes(b) => b.into_owned(),
             _ => Vec::new(),
         };
-        for (name, query) in [("home.html", ""), ("diff.html", "diff=docs/plan.md"), ("all.html", "changes")] {
-            std::fs::write(out.join(name), body(page_asked(&root, &root, false, &[], accent, query))).unwrap();
+        for (name, query) in [
+            ("home.html", ""),
+            ("diff.html", "diff=docs/plan.md"),
+            ("all.html", "changes"),
+        ] {
+            std::fs::write(
+                out.join(name),
+                body(page_asked(&root, &root, false, &[], accent, query)),
+            )
+            .unwrap();
         }
         std::fs::write(
             out.join("docs.html"),
-            body(page_asked(&root, &root.join("docs"), false, &[], accent, "")),
+            body(page_asked(
+                &root,
+                &root.join("docs"),
+                false,
+                &[],
+                accent,
+                "",
+            )),
         )
         .unwrap();
         let _ = std::fs::remove_dir_all(&root);

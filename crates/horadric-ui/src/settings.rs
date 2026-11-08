@@ -36,16 +36,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, PostMessageW, WM_ACTIVATE, WM_APP, DefWindowProcW, DestroyWindow, GetCursorPos,
-    GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsIconic, LoadCursorW, RegisterClassW,
-    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW,
-    ShowWindow, UnhookWindowsHookEx, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HHOOK,
-    HICON, HTCAPTION, HTCLIENT, ICON_BIG, ICON_SMALL, IDC_ARROW, KBDLLHOOKSTRUCT, MINMAXINFO,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE, SW_SHOW, WH_KEYBOARD_LL, WM_CAPTURECHANGED, WM_CHAR,
-    WM_CLOSE, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE,
-    WM_NCDESTROY, WM_NCHITTEST, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WNDCLASSW, WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos,
+    GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsIconic, LoadCursorW, PostMessageW,
+    RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+    GWLP_USERDATA, HHOOK, HICON, HTCAPTION, HTCLIENT, ICON_BIG, ICON_SMALL, IDC_ARROW,
+    KBDLLHOOKSTRUCT, MINMAXINFO, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE, SW_SHOW, WH_KEYBOARD_LL,
+    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_PAINT, WM_SETICON,
+    WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_EX_APPWINDOW, WS_MINIMIZEBOX,
+    WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
 
 use crate::app::{self, Input};
@@ -828,7 +829,12 @@ pub(crate) fn vault_changed() {
     let h = WINDOW.load(Ordering::Relaxed);
     if h != 0 {
         unsafe {
-            let _ = PostMessageW(Some(HWND(h as *mut c_void)), WM_VAULT_CHANGED, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(
+                Some(HWND(h as *mut c_void)),
+                WM_VAULT_CHANGED,
+                WPARAM(0),
+                LPARAM(0),
+            );
         }
     }
 }
@@ -1100,7 +1106,12 @@ impl SettingsWindow {
 
     pub fn destroy(&self) {
         LAST_SIZE.with(|c| c.set(Some(self.size.get())));
-        let _ = WINDOW.compare_exchange(self.hwnd.0 as isize, 0, Ordering::Relaxed, Ordering::Relaxed);
+        let _ = WINDOW.compare_exchange(
+            self.hwnd.0 as isize,
+            0,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
         hook(self.hwnd, false);
         unsafe {
             let _ = DestroyWindow(self.hwnd);
@@ -1738,12 +1749,7 @@ mod tests {
         let v = values();
         assert_eq!(
             fields(Section::Appearance, &v),
-            [
-                Field::Theme,
-                Field::Font,
-                Field::Screen,
-                Field::Animations
-            ]
+            [Field::Theme, Field::Font, Field::Screen, Field::Animations]
         );
         assert_eq!(
             fields(Section::General, &v),

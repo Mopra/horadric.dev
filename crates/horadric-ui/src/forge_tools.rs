@@ -109,7 +109,9 @@ fn showable(root: Option<&Path>, file: &Path) -> Result<(), String> {
     if forge::kind(file).is_none() {
         return Err(format!(
             "the Forge does not show .{} files",
-            file.extension().map(|e| e.to_string_lossy()).unwrap_or_default()
+            file.extension()
+                .map(|e| e.to_string_lossy())
+                .unwrap_or_default()
         ));
     }
     Ok(())

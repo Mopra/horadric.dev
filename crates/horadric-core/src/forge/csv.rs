@@ -34,7 +34,10 @@ pub fn csv_html(src: &str, title: &str) -> String {
 /// A column of figures: every filled cell under the header a number, so
 /// its header sits right, over them.
 fn figures(rows: &[Vec<String>], col: usize) -> bool {
-    let mut cells = rows.iter().filter_map(|r| r.get(col)).filter(|c| !c.trim().is_empty());
+    let mut cells = rows
+        .iter()
+        .filter_map(|r| r.get(col))
+        .filter(|c| !c.trim().is_empty());
     let first = cells.next();
     first.is_some_and(|c| is_number(c)) && cells.all(|c| is_number(c))
 }
@@ -53,7 +56,10 @@ fn cell(out: &mut String, tag: &str, row: usize, col: usize, text: &str, num: bo
 /// human's spreadsheets are Danish as often as not.
 fn is_number(s: &str) -> bool {
     let t: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    !t.is_empty() && t.replacen(',', ".", 1).parse::<f64>().is_ok_and(f64::is_finite)
+    !t.is_empty()
+        && t.replacen(',', ".", 1)
+            .parse::<f64>()
+            .is_ok_and(f64::is_finite)
 }
 
 /// The records, quoted fields per RFC 4180: a quote inside one doubled, and
@@ -121,7 +127,10 @@ fn delimiter(src: &str) -> char {
     }
     counts
         .iter()
-        .fold((',', 0), |best, &(d, n)| if n > best.1 { (d, n) } else { best })
+        .fold(
+            (',', 0),
+            |best, &(d, n)| if n > best.1 { (d, n) } else { best },
+        )
         .0
 }
 
@@ -160,7 +169,10 @@ mod tests {
     fn forge_csv_quoting() {
         assert_eq!(
             rows("a,\"b,c\",\"say \"\"hi\"\"\"\r\n1,\"two\r\nlines\",3\r\n"),
-            vec![vec!["a", "b,c", "say \"hi\""], vec!["1", "two\r\nlines", "3"]]
+            vec![
+                vec!["a", "b,c", "say \"hi\""],
+                vec!["1", "two\r\nlines", "3"]
+            ]
         );
     }
 
@@ -169,7 +181,10 @@ mod tests {
         assert_eq!(rows("a,b\n,\n"), vec![vec!["a", "b"], vec!["", ""]]);
         assert_eq!(rows("x"), vec![vec!["x"]]);
         assert!(rows("").is_empty());
-        assert_eq!(rows("\u{feff}a;b;c\n1,5;2;3"), vec![vec!["a", "b", "c"], vec!["1,5", "2", "3"]]);
+        assert_eq!(
+            rows("\u{feff}a;b;c\n1,5;2;3"),
+            vec![vec!["a", "b", "c"], vec!["1,5", "2", "3"]]
+        );
         assert_eq!(rows("a\tb\n1\t2"), vec![vec!["a", "b"], vec!["1", "2"]]);
         assert_eq!(rows("\"a;b\",c\n"), vec![vec!["a;b", "c"]]);
     }

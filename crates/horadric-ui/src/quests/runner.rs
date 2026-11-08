@@ -611,7 +611,9 @@ pub fn vault_prompt(cwd: &Path) -> Vec<String> {
     let (secrets, logins) = store::names(&key, slug.as_deref());
     let secrets: Vec<String> = secrets.into_iter().map(|(n, _)| n).collect();
     let logins: Vec<String> = logins.into_iter().map(|(n, _)| n).collect();
-    lines.extend(horadric_core::vault::secret::prompt_lines(&secrets, &logins));
+    lines.extend(horadric_core::vault::secret::prompt_lines(
+        &secrets, &logins,
+    ));
     // The config may be kept out of git, so a worktree reads its
     // project's from the main tree.
     let config = [Path::new(&key), cwd]

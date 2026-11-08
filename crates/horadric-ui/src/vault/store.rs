@@ -68,7 +68,8 @@ pub struct Used {
 static CACHE: Mutex<Option<Result<Vault, String>>> = Mutex::new(None);
 
 /// What the human is told when the file is there but will not open.
-pub const UNREADABLE: &str = "The secrets file could not be read, so Horadric changes nothing in it \
+pub const UNREADABLE: &str =
+    "The secrets file could not be read, so Horadric changes nothing in it \
      until it can. Nothing in it was lost.";
 
 fn path() -> Option<PathBuf> {
@@ -172,7 +173,9 @@ fn load() -> Result<Vault, String> {
     };
     match read_sealed(&path) {
         Ok(None) => Ok(Vault::default()),
-        Ok(Some(bytes)) => serde_json::from_slice(&bytes).map_err(|e| format!("{UNREADABLE} ({e})")),
+        Ok(Some(bytes)) => {
+            serde_json::from_slice(&bytes).map_err(|e| format!("{UNREADABLE} ({e})"))
+        }
         Err(e) => Err(format!("{UNREADABLE} ({e})")),
     }
 }
@@ -305,7 +308,14 @@ pub fn listing(project_key: &str, identity: Option<&str>) -> Vec<Listed> {
     };
     let mut out = Vec::new();
     for s in &v.secrets {
-        let wins = winner(&v.secrets, |s| &s.owner, |s| &s.name, project_key, identity, &s.name);
+        let wins = winner(
+            &v.secrets,
+            |s| &s.owner,
+            |s| &s.name,
+            project_key,
+            identity,
+            &s.name,
+        );
         out.push(Listed {
             name: s.name.clone(),
             owner: s.owner.clone(),
@@ -319,7 +329,14 @@ pub fn listing(project_key: &str, identity: Option<&str>) -> Vec<Listed> {
         });
     }
     for l in &v.logins {
-        let wins = winner(&v.logins, |l| &l.owner, |l| &l.name, project_key, identity, &l.name);
+        let wins = winner(
+            &v.logins,
+            |l| &l.owner,
+            |l| &l.name,
+            project_key,
+            identity,
+            &l.name,
+        );
         out.push(Listed {
             name: l.name.clone(),
             owner: l.owner.clone(),
@@ -341,25 +358,31 @@ pub fn log(line: &str) {
     let Some(path) = horadric_hooks::state_dir().map(|d| d.join("secrets.log")) else {
         return;
     };
-    if let Ok(mut f) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(f, "{line}");
     }
 }
 
 /// The names kept for a project's sessions, each with the owner that wins
 /// it: secrets first, then web logins.
-pub fn names(project_key: &str, identity: Option<&str>) -> (Vec<(String, Owner)>, Vec<(String, Owner)>) {
+pub fn names(
+    project_key: &str,
+    identity: Option<&str>,
+) -> (Vec<(String, Owner)>, Vec<(String, Owner)>) {
     let v = read();
     let mut secrets: Vec<(String, Owner)> = Vec::new();
     for s in &v.secrets {
         if secrets.iter().any(|(n, _)| *n == s.name) {
             continue;
         }
-        if let Some(w) = winner(&v.secrets, |s| &s.owner, |s| &s.name, project_key, identity, &s.name) {
+        if let Some(w) = winner(
+            &v.secrets,
+            |s| &s.owner,
+            |s| &s.name,
+            project_key,
+            identity,
+            &s.name,
+        ) {
             secrets.push((w.name.clone(), w.owner.clone()));
         }
     }
@@ -368,7 +391,14 @@ pub fn names(project_key: &str, identity: Option<&str>) -> (Vec<(String, Owner)>
         if logins.iter().any(|(n, _)| *n == l.name) {
             continue;
         }
-        if let Some(w) = winner(&v.logins, |l| &l.owner, |l| &l.name, project_key, identity, &l.name) {
+        if let Some(w) = winner(
+            &v.logins,
+            |l| &l.owner,
+            |l| &l.name,
+            project_key,
+            identity,
+            &l.name,
+        ) {
             logins.push((w.name.clone(), w.owner.clone()));
         }
     }

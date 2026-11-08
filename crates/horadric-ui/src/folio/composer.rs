@@ -13,10 +13,10 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use horadric_core::forge::{pin_message, Pin};
 use horadric_core::folio::{
     effort_line, prompt_line, shell_command, typed, Block, ImageData, Priority, Typed,
 };
+use horadric_core::forge::{pin_message, Pin};
 use horadric_hooks::transcript::Past;
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
@@ -716,7 +716,9 @@ fn with_pins(pins: &[Pin], dir: &Path, text: String, images: &mut Vec<ImageData>
         return text;
     }
     for crop in pins.iter().filter_map(|p| p.crop.as_deref()) {
-        let read = small_enough(crop).then(|| std::fs::read(crop).ok()).flatten();
+        let read = small_enough(crop)
+            .then(|| std::fs::read(crop).ok())
+            .flatten();
         if let Some(data) = read.as_deref().and_then(ImageData::from_bytes) {
             images.push(data);
         }
@@ -2116,7 +2118,12 @@ impl View {
             gfx.fill_round(&chip, CHIP_H / 2.0, pal.fg.with_alpha(0.08));
             let words = Rect::new(chip.x + 10.0, chip.y, tw + 2.0, CHIP_H);
             gfx.text_in(&label, &gfx.small, &words, pal.fg.fade(0.85));
-            let close = Rect::new(chip.right() - 20.0, chip.y + (CHIP_H - 16.0) / 2.0, 16.0, 16.0);
+            let close = Rect::new(
+                chip.right() - 20.0,
+                chip.y + (CHIP_H - 16.0) / 2.0,
+                16.0,
+                16.0,
+            );
             let hot = chat.input.hover == Some(Act::Unpin(i));
             if hot {
                 gfx.fill_round(&close, 8.0, pal.bg.with_alpha(0.95));
@@ -2249,8 +2256,7 @@ impl View {
         let b = Rect::new(r.right() - WELL_INSET - margin - KEY, y, KEY, KEY);
         let busy = chat.folio.busy;
         let act = if busy { Act::Stop } else { Act::Send };
-        let ready =
-            busy || !empty || !chat.input.images.is_empty() || !chat.input.pins.is_empty();
+        let ready = busy || !empty || !chat.input.images.is_empty() || !chat.input.pins.is_empty();
         let lit = ready && chat.input.hover == Some(act);
         round_key(gfx, &self.shared.gpu, &b, lit);
         let ink = match (ready, lit) {

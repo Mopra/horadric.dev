@@ -26,14 +26,21 @@ pub fn diff_lines(a: &str, b: &str) -> Vec<DiffLine> {
         .take_while(|(x, y)| x == y)
         .count();
     let (am, bm) = (&a[head..a.len() - tail], &b[head..b.len() - tail]);
-    let mut out: Vec<DiffLine> = a[..head].iter().map(|l| DiffLine::Same(l.to_string())).collect();
+    let mut out: Vec<DiffLine> = a[..head]
+        .iter()
+        .map(|l| DiffLine::Same(l.to_string()))
+        .collect();
     if am.len().saturating_mul(bm.len()) > MAX_CELLS {
         out.extend(am.iter().map(|l| DiffLine::Removed(l.to_string())));
         out.extend(bm.iter().map(|l| DiffLine::Added(l.to_string())));
     } else {
         middle(am, bm, &mut out);
     }
-    out.extend(a[a.len() - tail..].iter().map(|l| DiffLine::Same(l.to_string())));
+    out.extend(
+        a[a.len() - tail..]
+            .iter()
+            .map(|l| DiffLine::Same(l.to_string())),
+    );
     out
 }
 
@@ -42,7 +49,9 @@ fn split(s: &str) -> Vec<&str> {
         return Vec::new();
     }
     let s = s.strip_suffix('\n').unwrap_or(s);
-    s.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect()
+    s.split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .collect()
 }
 
 fn middle(a: &[&str], b: &[&str], out: &mut Vec<DiffLine>) {
@@ -91,14 +100,31 @@ mod tests {
     fn forge_diff_lines() {
         assert_eq!(
             diff_lines("a\nb\nc\nd\n", "a\nx\nc\nd\ne\n"),
-            vec![Same(s("a")), Removed(s("b")), Added(s("x")), Same(s("c")), Same(s("d")), Added(s("e"))]
+            vec![
+                Same(s("a")),
+                Removed(s("b")),
+                Added(s("x")),
+                Same(s("c")),
+                Same(s("d")),
+                Added(s("e"))
+            ]
         );
-        assert_eq!(diff_lines("a\r\nb\r\n", "a\nb"), vec![Same(s("a")), Same(s("b"))]);
+        assert_eq!(
+            diff_lines("a\r\nb\r\n", "a\nb"),
+            vec![Same(s("a")), Same(s("b"))]
+        );
         assert_eq!(diff_lines("", "x"), vec![Added(s("x"))]);
         assert_eq!(diff_lines("x\n", ""), vec![Removed(s("x"))]);
         assert_eq!(
             diff_lines("1\n2\n3\n4", "1\n9\n8\n4"),
-            vec![Same(s("1")), Removed(s("2")), Removed(s("3")), Added(s("9")), Added(s("8")), Same(s("4"))]
+            vec![
+                Same(s("1")),
+                Removed(s("2")),
+                Removed(s("3")),
+                Added(s("9")),
+                Added(s("8")),
+                Same(s("4"))
+            ]
         );
     }
 

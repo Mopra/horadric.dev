@@ -3,17 +3,19 @@
 
 use windows::core::Result;
 use windows::Win32::Foundation::RECT;
-use windows::Win32::Graphics::Direct2D::{ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE};
+use windows::Win32::Graphics::Direct2D::{
+    ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE,
+};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
 use super::view::{d2d, Gfx, Palette, View};
-use crate::render::color;
 use crate::folio_look as look;
 use crate::layout::Rect;
 use crate::light::Bloom;
+use crate::render::color;
 use crate::sparks::RUNES;
 use windows_numerics::Vector2;
 
@@ -98,13 +100,15 @@ impl View {
         let to: &ID2D1RenderTarget = &layer;
         for (e, c) in &embers {
             gfx.rune_on(to, e.rune, (e.x, e.y), e.size, *c, e.stroke);
-            gfx.light.lit(Rect::new(e.x - e.size / 2.0, e.y, e.size * 2.0, e.size));
+            gfx.light
+                .lit(Rect::new(e.x - e.size / 2.0, e.y, e.size * 2.0, e.size));
         }
         if let Some((at, area)) = dots {
             to.PushAxisAlignedClip(&d2d(&area), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             let hot = pal.accent.mix(pal.fg, 0.3);
             for k in 0..3 {
-                gfx.brush.SetColor(&color(hot.with_alpha(0.5 * pulse(clocks.0, k))));
+                gfx.brush
+                    .SetColor(&color(hot.with_alpha(0.5 * pulse(clocks.0, k))));
                 let dot = D2D1_ELLIPSE {
                     point: Vector2 {
                         X: at.X + k as f32 * 12.0,

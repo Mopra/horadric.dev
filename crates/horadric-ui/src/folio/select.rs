@@ -17,8 +17,7 @@ use super::comments;
 use super::flow::{self, Pos};
 use super::transcript::{
     change_field, deny_field, keep_field, note_field, other_field, Act, Copied, Find, State,
-    FIND_FIELD,
-    SHOWN,
+    FIND_FIELD, SHOWN,
 };
 use super::view::View;
 use super::{answer_with, redraw, with, Chat};
@@ -416,7 +415,10 @@ fn enter_key(key: &str) -> bool {
             return None;
         };
         let picks = picks_of(b, &chat.tr.state);
-        picks.iter().all(|p| !p.is_empty()).then(|| request_id.clone())
+        picks
+            .iter()
+            .all(|p| !p.is_empty())
+            .then(|| request_id.clone())
     })
     .flatten();
     let Some(id) = id else {

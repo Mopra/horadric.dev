@@ -157,7 +157,10 @@ mod tests {
 
     #[test]
     fn forge_kind_by_extension() {
-        assert_eq!(kind_of_bytes(Path::new("a/B.MD"), b""), Some(Kind::Markdown));
+        assert_eq!(
+            kind_of_bytes(Path::new("a/B.MD"), b""),
+            Some(Kind::Markdown)
+        );
         assert_eq!(kind_of_bytes(Path::new("x.htm"), b"<p>"), Some(Kind::Html));
         assert_eq!(kind_of_bytes(Path::new("x.tsx"), b""), Some(Kind::Jsx));
         assert_eq!(kind_of_bytes(Path::new("x.jpeg"), b""), Some(Kind::Image));
@@ -172,7 +175,10 @@ mod tests {
     fn forge_deck_detection() {
         let deck = |s: &str| kind_of_bytes(Path::new("d.html"), s.as_bytes());
         assert_eq!(deck(r#"<section class="slide">"#), Some(Kind::Deck));
-        assert_eq!(deck(r#"<SECTION id=a CLASS='title slide'>"#), Some(Kind::Deck));
+        assert_eq!(
+            deck(r#"<SECTION id=a CLASS='title slide'>"#),
+            Some(Kind::Deck)
+        );
         assert_eq!(deck("<section class=slide>"), Some(Kind::Deck));
         assert_eq!(deck(r#"<section class="slides">"#), Some(Kind::Html));
         assert_eq!(deck(r#"<section data-class="slide">"#), Some(Kind::Html));

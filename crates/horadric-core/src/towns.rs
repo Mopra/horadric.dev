@@ -219,7 +219,10 @@ mod tests {
 
     #[test]
     fn tristram_comes_first_and_doubles_go() {
-        let towns = migrate(vec![town("acme"), town("tristram"), town("acme"), town("")], false);
+        let towns = migrate(
+            vec![town("acme"), town("tristram"), town("acme"), town("")],
+            false,
+        );
         let slugs: Vec<&str> = towns.iter().map(|t| t.slug.as_str()).collect();
         assert_eq!(slugs, ["tristram", "acme"]);
         assert!(!towns[0].hidden);

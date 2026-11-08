@@ -169,7 +169,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let mut system: Vec<String> = horadric_ui::app::ssh_prompt(&cwd).into_iter().collect();
         system.extend(horadric_ui::vault::identity::prompt_lines(&cwd));
         if !system.is_empty() {
-            command.arg("--append-system-prompt").arg(system.join("\n\n"));
+            command
+                .arg("--append-system-prompt")
+                .arg(system.join("\n\n"));
         }
     }
     // The tile's context bar and cost come from the status line, so this

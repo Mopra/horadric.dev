@@ -40,8 +40,8 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
 };
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2Environment10, ICoreWebView2Environment15, ICoreWebView2_19, ICoreWebView2_28, ICoreWebView2_3,
-    ICoreWebView2_9, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+    ICoreWebView2Environment10, ICoreWebView2Environment15, ICoreWebView2_19, ICoreWebView2_28,
+    ICoreWebView2_3, ICoreWebView2_9, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
     COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
 };
 use webview2_com::{
@@ -362,7 +362,11 @@ const HELD: &str = "another program runs the browser profile with arguments of i
 /// the browser from starting.
 fn outside_arguments() -> Option<String> {
     for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().to_ascii_uppercase().starts_with("WEBVIEW2_") {
+        if name
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("WEBVIEW2_")
+        {
             std::env::remove_var(&name);
         }
     }
@@ -370,7 +374,8 @@ fn outside_arguments() -> Option<String> {
     use windows::Win32::System::Registry::{
         RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_ANY,
     };
-    let key = HSTRING::from(r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments");
+    let key =
+        HSTRING::from(r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments");
     let exe = std::env::current_exe()
         .ok()
         .and_then(|p| Some(p.file_name()?.to_string_lossy().into_owned()))
@@ -379,7 +384,15 @@ fn outside_arguments() -> Option<String> {
         for value in ["*", exe.as_str()] {
             let mut size = 0u32;
             let found = unsafe {
-                RegGetValueW(hive, &key, &HSTRING::from(value), RRF_RT_ANY, None, None, Some(&mut size))
+                RegGetValueW(
+                    hive,
+                    &key,
+                    &HSTRING::from(value),
+                    RRF_RT_ANY,
+                    None,
+                    None,
+                    Some(&mut size),
+                )
             } == ERROR_SUCCESS;
             if found && !value.is_empty() {
                 return Some(format!(
@@ -657,9 +670,11 @@ fn context_event(id: u64, json: &str) {
         let frames = c.entry(id).or_default();
         if let Some(ctx) = v.get("context") {
             let aux = &ctx["auxData"];
-            if let (true, Some(f), Some(u)) =
-                (aux["isDefault"] == true, aux["frameId"].as_str(), ctx["uniqueId"].as_str())
-            {
+            if let (true, Some(f), Some(u)) = (
+                aux["isDefault"] == true,
+                aux["frameId"].as_str(),
+                ctx["uniqueId"].as_str(),
+            ) {
                 frames.insert(f.to_string(), u.to_string());
             }
         } else if let Some(u) = v["executionContextUniqueId"].as_str() {
@@ -1505,7 +1520,9 @@ pub fn give_back(key: &str) {
     let Some((pane, bounds, zoom)) = LENT.with(|l| l.borrow_mut().remove(key)) else {
         return;
     };
-    let pane = pane.filter(|p| unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(*p)) }.as_bool());
+    let pane = pane.filter(|p| {
+        unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(*p)) }.as_bool()
+    });
     WEBS.with(|w| {
         if let Some(web) = w.borrow_mut().get_mut(key) {
             web.pane = pane;
@@ -2102,14 +2119,13 @@ fn listen(key: &str, id: u64, view: &ICoreWebView2) {
             "Runtime.executionContextDestroyed",
             "Runtime.executionContextsCleared",
         ] {
-            let context = DevToolsProtocolEventReceivedEventHandler::create(Box::new(
-                move |_, args| {
+            let context =
+                DevToolsProtocolEventReceivedEventHandler::create(Box::new(move |_, args| {
                     if let Some(args) = args {
                         context_event(id, &read(|p| args.ParameterObjectAsJson(p)));
                     }
                     Ok(())
-                },
-            ));
+                }));
             if let Ok(r) = view.GetDevToolsProtocolEventReceiver(&HSTRING::from(event)) {
                 let _ = r.add_DevToolsProtocolEventReceived(&context, &mut token);
             }

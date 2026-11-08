@@ -51,7 +51,12 @@ pub fn name_ok(name: &str) -> bool {
     if name.ends_with('.') || name.ends_with(' ') || name.starts_with(' ') {
         return false;
     }
-    let stem = name.split('.').next().unwrap_or_default().trim_end().to_ascii_uppercase();
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
     let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || ((stem.starts_with("COM") || stem.starts_with("LPT"))
             && stem.len() == 4
@@ -82,7 +87,9 @@ pub fn item(root: &Path, dir: &Path, name: &str) -> io::Result<PathBuf> {
     }
     let path = dir.join(name);
     match std::fs::symlink_metadata(&path) {
-        Ok(m) if m.file_type().is_symlink() => Err(refuse(format!("{name} is a link, left alone."))),
+        Ok(m) if m.file_type().is_symlink() => {
+            Err(refuse(format!("{name} is a link, left alone.")))
+        }
         Ok(_) => Ok(path),
         Err(_) => Err(refuse(format!("{name} is not here any more."))),
     }
@@ -98,7 +105,8 @@ pub fn folder_at(root: &Path, rel: &str) -> io::Result<PathBuf> {
         }
         dir.push(seg);
     }
-    let plain = std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
+    let plain =
+        std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
     if !plain || !within(root, &dir) {
         return Err(refuse("That folder is not here any more."));
     }
@@ -155,15 +163,21 @@ fn move_new(from: &Path, to: &Path) -> io::Result<()> {
     }
     // Without MOVEFILE_REPLACE_EXISTING Windows itself refuses a name in
     // use, closing the gap between the look above and the move.
-    unsafe { MoveFileExW(&HSTRING::from(from.as_os_str()), &HSTRING::from(to.as_os_str()), MOVE_FILE_FLAGS(0)) }
-        .map_err(|e| {
-            // ERROR_FILE_EXISTS and ERROR_ALREADY_EXISTS.
-            if matches!(e.code().0 as u32 & 0xFFFF, 80 | 183) {
-                io::ErrorKind::AlreadyExists.into()
-            } else {
-                io::Error::from_raw_os_error((e.code().0 as u32 & 0xFFFF) as i32)
-            }
-        })
+    unsafe {
+        MoveFileExW(
+            &HSTRING::from(from.as_os_str()),
+            &HSTRING::from(to.as_os_str()),
+            MOVE_FILE_FLAGS(0),
+        )
+    }
+    .map_err(|e| {
+        // ERROR_FILE_EXISTS and ERROR_ALREADY_EXISTS.
+        if matches!(e.code().0 as u32 & 0xFFFF, 80 | 183) {
+            io::ErrorKind::AlreadyExists.into()
+        } else {
+            io::Error::from_raw_os_error((e.code().0 as u32 & 0xFFFF) as i32)
+        }
+    })
 }
 
 /// Whether two paths name one thing, as a rename that only changes case
@@ -326,7 +340,9 @@ pub fn recycle(root: &Path, dir: &Path, names: &[String]) -> io::Result<()> {
         return Err(refuse("Left as it was."));
     }
     if r != 0 {
-        return Err(refuse(format!("Windows would not move it to the Recycle Bin (code {r:#x}).")));
+        return Err(refuse(format!(
+            "Windows would not move it to the Recycle Bin (code {r:#x})."
+        )));
     }
     Ok(())
 }
@@ -338,7 +354,9 @@ pub fn folders(root: &Path) -> Vec<String> {
     let mut out = vec![String::new()];
     let mut stack = vec![(root.to_path_buf(), String::new(), 0usize)];
     while let Some((dir, rel, depth)) = stack.pop() {
-        let Ok(names) = std::fs::read_dir(&dir) else { continue };
+        let Ok(names) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         let mut here: Vec<(PathBuf, String)> = Vec::new();
         for e in names.flatten() {
             let Ok(ft) = e.file_type() else { continue };
@@ -349,7 +367,11 @@ pub fn folders(root: &Path) -> Vec<String> {
             if super::tucked(&name) {
                 continue;
             }
-            let r = if rel.is_empty() { name } else { format!("{rel}/{name}") };
+            let r = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
             here.push((e.path(), r));
         }
         for (path, r) in here {
@@ -398,8 +420,28 @@ mod tests {
             assert!(name_ok(ok), "{ok}");
         }
         for bad in [
-            "", ".", "..", "a/b", "a\\b", "..\\x", "../x", "c:x", "a?", "a*", "a|b", "a\"b", "<a>",
-            "trailing.", "trailing ", " leading", "CON", "con.txt", "nul", "COM1", "lpt9.md", "a\u{1}",
+            "",
+            ".",
+            "..",
+            "a/b",
+            "a\\b",
+            "..\\x",
+            "../x",
+            "c:x",
+            "a?",
+            "a*",
+            "a|b",
+            "a\"b",
+            "<a>",
+            "trailing.",
+            "trailing ",
+            " leading",
+            "CON",
+            "con.txt",
+            "nul",
+            "COM1",
+            "lpt9.md",
+            "a\u{1}",
         ] {
             assert!(!name_ok(bad), "{bad:?}");
         }
@@ -437,7 +479,10 @@ mod tests {
         assert!(folder_at(&root, "nope").is_err());
         assert_eq!(folder_at(&root, "docs").unwrap(), docs);
         assert_eq!(folder_at(&root, "").unwrap(), root);
-        assert_eq!(std::fs::read_to_string(outer.join("secret.md")).unwrap(), "secret");
+        assert_eq!(
+            std::fs::read_to_string(outer.join("secret.md")).unwrap(),
+            "secret"
+        );
         assert!(!outer.join("escaped.md").exists() && !outer.join("x.md").exists());
         let _ = std::fs::remove_dir_all(&outer);
     }
@@ -493,7 +538,10 @@ mod tests {
         std::fs::write(root.join("docs").join("a.md"), "theirs").unwrap();
         let moved = move_into(&root, &root, "a.md", &root.join("docs")).unwrap();
         assert_eq!(moved.file_name().unwrap(), "a 2.md");
-        assert_eq!(std::fs::read_to_string(root.join("docs").join("a.md")).unwrap(), "theirs");
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs").join("a.md")).unwrap(),
+            "theirs"
+        );
         assert!(!root.join("a.md").exists());
 
         let k1 = keep(&root, &root, "b.md", b"dropped").unwrap();
@@ -514,10 +562,16 @@ mod tests {
         std::fs::write(root.join("docs").join("deep").join("x.md"), "x").unwrap();
         let copy = duplicate(&root, &root, "docs").unwrap();
         assert_eq!(copy.file_name().unwrap(), "docs copy");
-        assert_eq!(std::fs::read_to_string(copy.join("deep").join("x.md")).unwrap(), "x");
+        assert_eq!(
+            std::fs::read_to_string(copy.join("deep").join("x.md")).unwrap(),
+            "x"
+        );
         assert!(move_into(&root, &root, "docs", &root.join("docs").join("deep")).is_err());
         assert!(move_into(&root, &root, "docs", &root.join("docs")).is_err());
-        assert!(move_into(&root, &root, "a.md", &root).is_err(), "already there");
+        assert!(
+            move_into(&root, &root, "a.md", &root).is_err(),
+            "already there"
+        );
         assert!(rename(&root, &root, ".git", "x").is_err());
         let listed = folders(&root);
         assert_eq!(listed[0], "");

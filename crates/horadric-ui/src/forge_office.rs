@@ -43,10 +43,15 @@ pub enum OfficeError {
     /// The file is not a deck or a document this module knows.
     NotOffice(PathBuf),
     /// Nothing installed can convert this kind of file.
-    NoConverter { deck: bool },
+    NoConverter {
+        deck: bool,
+    },
     Io(std::io::Error),
     /// A converter ran and failed, with what it said.
-    Failed { by: Converter, why: String },
+    Failed {
+        by: Converter,
+        why: String,
+    },
     /// A converter took longer than [`TIMEOUT`] and was given up on.
     TimedOut(Converter),
 }
@@ -227,7 +232,7 @@ mod win {
     use windows::Win32::System::Ole::DISPID_PROPERTYPUT;
     use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
     use windows::Win32::System::Variant::{
-        VariantChangeType, VariantClear, VAR_CHANGE_FLAGS, VARENUM, VARIANT, VT_BOOL, VT_BSTR,
+        VariantChangeType, VariantClear, VARENUM, VARIANT, VAR_CHANGE_FLAGS, VT_BOOL, VT_BSTR,
         VT_DISPATCH, VT_ERROR, VT_I4, VT_R8,
     };
 
@@ -424,10 +429,14 @@ mod win {
         by: Converter,
     ) -> Result<(Disp, bool), OfficeError> {
         let fail = |why: String| OfficeError::Failed { by, why };
-        let clsid = unsafe { CLSIDFromProgID(&HSTRING::from(prog_id)) }.map_err(|e| fail(e.message()))?;
+        let clsid =
+            unsafe { CLSIDFromProgID(&HSTRING::from(prog_id)) }.map_err(|e| fail(e.message()))?;
         let app: IDispatch = unsafe { CoCreateInstance(&clsid, None, CLSCTX_LOCAL_SERVER) }
             .map_err(|e| fail(e.message()))?;
-        let new: Vec<u32> = pids(exe).into_iter().filter(|p| !before.contains(p)).collect();
+        let new: Vec<u32> = pids(exe)
+            .into_iter()
+            .filter(|p| !before.contains(p))
+            .collect();
         // Office runs one instance, so exactly one new process is the one
         // COM started for us. More than one cannot be told apart, and a
         // wrong guess would kill the user's work, so none is recorded.
@@ -517,7 +526,10 @@ mod win {
             files.push(file);
         }
         if files.is_empty() {
-            return Err(OfficeError::Failed { by, why: "the deck has no slides".into() });
+            return Err(OfficeError::Failed {
+                by,
+                why: "the deck has no slides".into(),
+            });
         }
         Ok(Converted::Slides(files))
     }
@@ -559,7 +571,10 @@ mod win {
             const WD_EXPORT_FORMAT_PDF: i32 = 17;
             let exported = doc.call(
                 "ExportAsFixedFormat",
-                vec![Var::str(&pdf.to_string_lossy()), Var::int(WD_EXPORT_FORMAT_PDF)],
+                vec![
+                    Var::str(&pdf.to_string_lossy()),
+                    Var::int(WD_EXPORT_FORMAT_PDF),
+                ],
             );
             const WD_DO_NOT_SAVE_CHANGES: i32 = 0;
             let _ = doc.call("Close", vec![Var::int(WD_DO_NOT_SAVE_CHANGES)]);
@@ -598,7 +613,10 @@ mod win {
             flags: DISPATCH_FLAGS,
             mut args: Vec<Var>,
         ) -> Result<Var, OfficeError> {
-            let fail = |why: String| OfficeError::Failed { by: self.by, why: format!("{name}: {why}") };
+            let fail = |why: String| OfficeError::Failed {
+                by: self.by,
+                why: format!("{name}: {why}"),
+            };
             let wide = HSTRING::from(name);
             let mut id = 0i32;
             unsafe {
@@ -612,7 +630,11 @@ mod win {
             let named = flags == DISPATCH_PROPERTYPUT;
             let params = DISPPARAMS {
                 rgvarg: args.as_mut_ptr() as *mut VARIANT,
-                rgdispidNamedArgs: if named { &mut put_id } else { std::ptr::null_mut() },
+                rgdispidNamedArgs: if named {
+                    &mut put_id
+                } else {
+                    std::ptr::null_mut()
+                },
                 cArgs: args.len() as u32,
                 cNamedArgs: named as u32,
             };
@@ -656,7 +678,10 @@ mod win {
     }
 
     impl Var {
-        fn with(vt: VARENUM, fill: impl FnOnce(&mut windows::Win32::System::Variant::VARIANT_0_0_0)) -> Var {
+        fn with(
+            vt: VARENUM,
+            fill: impl FnOnce(&mut windows::Win32::System::Variant::VARIANT_0_0_0),
+        ) -> Var {
             let mut v = VARIANT::default();
             unsafe {
                 let inner = &mut *v.Anonymous.Anonymous;
@@ -671,7 +696,9 @@ mod win {
         }
 
         fn bool(b: bool) -> Var {
-            Var::with(VT_BOOL, |u| u.boolVal = VARIANT_BOOL(if b { -1 } else { 0 }))
+            Var::with(VT_BOOL, |u| {
+                u.boolVal = VARIANT_BOOL(if b { -1 } else { 0 })
+            })
         }
 
         fn str(s: &str) -> Var {
@@ -693,16 +720,21 @@ mod win {
             } else {
                 None
             };
-            obj.map(|obj| Disp { obj, by }).ok_or_else(|| OfficeError::Failed {
-                by,
-                why: format!("expected an object, got variant type {}", self.vt().0),
-            })
+            obj.map(|obj| Disp { obj, by })
+                .ok_or_else(|| OfficeError::Failed {
+                    by,
+                    why: format!("expected an object, got variant type {}", self.vt().0),
+                })
         }
 
         fn changed(&self, to: VARENUM, by: Converter) -> Result<Var, OfficeError> {
             let mut out = Var(VARIANT::default());
-            unsafe { VariantChangeType(&mut out.0, &self.0, VAR_CHANGE_FLAGS(0), to) }
-                .map_err(|e| OfficeError::Failed { by, why: e.message() })?;
+            unsafe { VariantChangeType(&mut out.0, &self.0, VAR_CHANGE_FLAGS(0), to) }.map_err(
+                |e| OfficeError::Failed {
+                    by,
+                    why: e.message(),
+                },
+            )?;
             Ok(out)
         }
 
@@ -729,7 +761,11 @@ mod win {
         };
         let mut more = unsafe { Process32FirstW(snap, &mut entry) }.is_ok();
         while more {
-            let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szExeFile.len());
             if String::from_utf16_lossy(&entry.szExeFile[..len]).eq_ignore_ascii_case(exe) {
                 found.push(entry.th32ProcessID);
             }
@@ -788,7 +824,14 @@ mod win {
         let before = pids("soffice.bin");
         let mut child = Command::new(soffice)
             .arg(format!("-env:UserInstallation={}", file_url(&profile)))
-            .args(["--headless", "--norestore", "--nologo", "--convert-to", "pdf", "--outdir"])
+            .args([
+                "--headless",
+                "--norestore",
+                "--nologo",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+            ])
             .arg(out)
             .arg(src)
             .creation_flags(CREATE_NO_WINDOW)
@@ -801,7 +844,10 @@ mod win {
             if started.elapsed() > TIMEOUT {
                 let _ = child.kill();
                 // soffice.exe is a launcher; the work happens in soffice.bin.
-                for pid in pids("soffice.bin").into_iter().filter(|p| !before.contains(p)) {
+                for pid in pids("soffice.bin")
+                    .into_iter()
+                    .filter(|p| !before.contains(p))
+                {
                     kill(pid);
                 }
                 return Err(OfficeError::TimedOut(by));
@@ -839,7 +885,8 @@ mod win {
         #[test]
         #[ignore]
         fn converts_real_files() {
-            let dir = PathBuf::from(std::env::var("FORGE_OFFICE_SAMPLES").expect("FORGE_OFFICE_SAMPLES"));
+            let dir =
+                PathBuf::from(std::env::var("FORGE_OFFICE_SAMPLES").expect("FORGE_OFFICE_SAMPLES"));
             let cache = dir.join("cache");
             eprintln!("available: {:?}", available());
             for name in ["test.pptx", "test.docx"] {

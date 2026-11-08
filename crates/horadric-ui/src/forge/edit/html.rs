@@ -43,11 +43,14 @@ pub const RAW: [&str; 4] = ["script", "style", "textarea", "title"];
 fn find_ci(src: &str, from: usize, needle: &str) -> Option<usize> {
     let hay = src.as_bytes();
     let n = needle.as_bytes();
-    (from..=hay.len().saturating_sub(n.len())).find(|&i| hay[i..i + n.len()].eq_ignore_ascii_case(n))
+    (from..=hay.len().saturating_sub(n.len()))
+        .find(|&i| hay[i..i + n.len()].eq_ignore_ascii_case(n))
 }
 
 fn name_at(b: &[u8], mut i: usize) -> usize {
-    while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'-' || b[i] == b':' || b[i] == b'_') {
+    while i < b.len()
+        && (b[i].is_ascii_alphanumeric() || b[i] == b'-' || b[i] == b':' || b[i] == b'_')
+    {
         i += 1;
     }
     i
@@ -79,7 +82,10 @@ fn attributes(src: &str, mut i: usize) -> (usize, bool, String) {
                     let (v0, v1) = if i < b.len() && (b[i] == b'"' || b[i] == b'\'') {
                         let q = b[i];
                         let s = i + 1;
-                        let e = b[s..].iter().position(|&c| c == q).map_or(b.len(), |p| s + p);
+                        let e = b[s..]
+                            .iter()
+                            .position(|&c| c == q)
+                            .map_or(b.len(), |p| s + p);
                         i = (e + 1).min(b.len());
                         (s, e)
                     } else {
@@ -118,18 +124,31 @@ pub fn elements(src: &str) -> Vec<Element> {
         }
         let next = b.get(i + 1).copied().unwrap_or(0);
         if next == b'!' || next == b'?' {
-            i = b[i..].iter().position(|&c| c == b'>').map_or(b.len(), |p| i + p + 1);
+            i = b[i..]
+                .iter()
+                .position(|&c| c == b'>')
+                .map_or(b.len(), |p| i + p + 1);
             continue;
         }
         if next == b'/' {
             let n_end = name_at(b, i + 2);
             let name = src[i + 2..n_end].to_ascii_lowercase();
-            let gt = b[n_end..].iter().position(|&c| c == b'>').map_or(b.len(), |p| n_end + p + 1);
+            let gt = b[n_end..]
+                .iter()
+                .position(|&c| c == b'>')
+                .map_or(b.len(), |p| n_end + p + 1);
             if let Some(at) = open.iter().rposition(|o| o.0 == name) {
                 // Anything still open above it was closed by the browser.
                 open.truncate(at + 1);
                 let (name, start, name_end, inner, class) = open.pop().unwrap_or_default();
-                out.push(Element { name, start, name_end, inner: (inner, i), end: gt, class });
+                out.push(Element {
+                    name,
+                    start,
+                    name_end,
+                    inner: (inner, i),
+                    end: gt,
+                    class,
+                });
             }
             i = gt;
             continue;
@@ -143,8 +162,18 @@ pub fn elements(src: &str) -> Vec<Element> {
         let (after, self_closed, class) = attributes(src, name_end);
         if RAW.contains(&name.as_str()) {
             let close = find_ci(src, after, &format!("</{name}")).unwrap_or(b.len());
-            let gt = b[close..].iter().position(|&c| c == b'>').map_or(b.len(), |p| close + p + 1);
-            out.push(Element { name, start: i, name_end, inner: (after, close), end: gt, class });
+            let gt = b[close..]
+                .iter()
+                .position(|&c| c == b'>')
+                .map_or(b.len(), |p| close + p + 1);
+            out.push(Element {
+                name,
+                start: i,
+                name_end,
+                inner: (after, close),
+                end: gt,
+                class,
+            });
             i = gt;
             continue;
         }
@@ -247,7 +276,12 @@ pub fn reorder(src: &str, order: &[usize]) -> Option<String> {
         if sep.is_empty() {
             sep = "\n";
         }
-        return Some(format!("{}{sep}{}{}", &src[..e.end], text(k), &src[e.end..]));
+        return Some(format!(
+            "{}{sep}{}{}",
+            &src[..e.end],
+            text(k),
+            &src[e.end..]
+        ));
     }
     None
 }
@@ -257,7 +291,20 @@ pub fn reorder(src: &str, order: &[usize]) -> Option<String> {
 /// list, "Text" elsewhere), so it can be filled in with a double click,
 /// and its speaker notes are empty. Pictures, styles and scripts stay.
 pub fn blank(slide: &str) -> String {
-    const BOXES: [&str; 12] = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "td", "th", "figcaption", "blockquote"];
+    const BOXES: [&str; 12] = [
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "p",
+        "li",
+        "td",
+        "th",
+        "figcaption",
+        "blockquote",
+    ];
     let els = elements(slide);
     let mut picked: Vec<&Element> = Vec::new();
     for e in &els {
@@ -294,7 +341,12 @@ pub fn add_after(src: &str, order: &[usize]) -> Option<String> {
     let at = order.windows(2).position(|w| w[0] == w[1])? + 1;
     let out = reorder(src, order)?;
     let copy = slides(&out).into_iter().nth(at)?;
-    Some(format!("{}{}{}", &out[..copy.start], blank(&out[copy.start..copy.end]), &out[copy.end..]))
+    Some(format!(
+        "{}{}{}",
+        &out[..copy.start],
+        blank(&out[copy.start..copy.end]),
+        &out[copy.end..]
+    ))
 }
 
 #[cfg(test)]
@@ -334,7 +386,10 @@ mod tests {
     fn annotate_marks_only_the_served_copy() {
         let src = "<body><h1 id=x>Café</h1></body>";
         let out = annotate(src);
-        assert_eq!(out, "<body><h1 data-forge-at=\"15-20\" id=x>Café</h1></body>");
+        assert_eq!(
+            out,
+            "<body><h1 data-forge-at=\"15-20\" id=x>Café</h1></body>"
+        );
         assert_eq!(&src[15..20], "Café");
     }
 
@@ -382,7 +437,9 @@ mod tests {
         assert!(copy.starts_with("<section class=\"slide\"><h2 class=\"t\">Title</h2>"));
         assert!(copy.contains("<div><p>Text</p></div><div>Text</div>"));
         assert!(copy.contains("<li>Point</li><li>Point</li>"));
-        assert!(copy.contains("<img src=\"a.png\"><style>p{}</style><aside class=\"notes\"></aside>"));
+        assert!(
+            copy.contains("<img src=\"a.png\"><style>p{}</style><aside class=\"notes\"></aside>")
+        );
         assert!(out[..slides(&out)[1].start].contains("Why <b>now</b>"));
         assert!(add_after(src, &[1]).is_none());
     }

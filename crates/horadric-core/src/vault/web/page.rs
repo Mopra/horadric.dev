@@ -346,11 +346,25 @@ mod tests {
         assert!(safe_after_fill(MIDDLE));
         assert!(safe_after_fill(SCROLLED));
         assert!(safe_after_fill(&call(POINT, &[json!("e3"), Value::Null])));
-        assert!(safe_after_fill(&call(FOCUS, &[json!("e3"), Value::Null, json!(true)])));
-        assert!(safe_after_fill(&call(FIND, &[json!("Welcome"), Value::Null])));
-        assert!(safe_after_fill(&call(SELECT, &[json!("e1"), Value::Null, json!(["a"])])));
-        assert!(!safe_after_fill("document.querySelector('input[type=password]').value"));
-        assert!(!safe_after_fill(&call(POINT, &[Value::Null, json!("input[value^=a]")])));
+        assert!(safe_after_fill(&call(
+            FOCUS,
+            &[json!("e3"), Value::Null, json!(true)]
+        )));
+        assert!(safe_after_fill(&call(
+            FIND,
+            &[json!("Welcome"), Value::Null]
+        )));
+        assert!(safe_after_fill(&call(
+            SELECT,
+            &[json!("e1"), Value::Null, json!(["a"])]
+        )));
+        assert!(!safe_after_fill(
+            "document.querySelector('input[type=password]').value"
+        ));
+        assert!(!safe_after_fill(&call(
+            POINT,
+            &[Value::Null, json!("input[value^=a]")]
+        )));
         assert!(!safe_after_fill(&call(FIND, &[Value::Null, json!("#pw")])));
         assert!(!safe_after_fill(&call("(r) => r.value", &[json!("e3")])));
         assert!(known(&call(POINT, &[Value::Null, json!("#go")])));

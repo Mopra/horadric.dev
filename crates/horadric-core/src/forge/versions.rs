@@ -39,12 +39,16 @@ pub fn keep_at(root: &Path, rel_path: &Path, bytes: &[u8], now: SystemTime) -> i
     let dir = root.join(folder(rel_path));
     if let Some(newest) = list_in(&dir).into_iter().next() {
         // Pruned away between the listing and the read: keep it anew.
-        if newest.len == bytes.len() as u64 && fs::read(&newest.file).ok().as_deref() == Some(bytes) {
+        if newest.len == bytes.len() as u64 && fs::read(&newest.file).ok().as_deref() == Some(bytes)
+        {
             return Ok(newest);
         }
     }
     fs::create_dir_all(&dir)?;
-    let mut ms = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let mut ms = now
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     // Two writes in one millisecond, or a clock stepped back: the later
     // write still sorts after.
     if let Some(newest) = list_in(&dir).first() {
@@ -58,7 +62,11 @@ pub fn keep_at(root: &Path, rel_path: &Path, bytes: &[u8], now: SystemTime) -> i
     let (file, tmp) = loop {
         let file = dir.join(format!("{ms:013}.{EXT}"));
         let tmp = file.with_extension("tmp");
-        match fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
             Ok(mut f) if !file.exists() => {
                 if let Err(e) = io::Write::write_all(&mut f, bytes) {
                     drop(f);
@@ -137,7 +145,9 @@ pub fn prune(root: &Path, max_bytes: u64) -> io::Result<u64> {
 }
 
 fn millis(at: SystemTime) -> u64 {
-    at.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    at.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn list_in(dir: &Path) -> Vec<Version> {
@@ -183,7 +193,10 @@ pub(super) fn folder(rel_path: &Path) -> String {
     let mut name = String::from("f-");
     let bytes = joined.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
-        let keep = b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || (b == b'.' && i + 1 < bytes.len());
+        let keep = b.is_ascii_alphanumeric()
+            || b == b'-'
+            || b == b'_'
+            || (b == b'.' && i + 1 < bytes.len());
         if keep {
             name.push(b as char);
         } else {
@@ -214,7 +227,8 @@ mod tests {
     use super::*;
 
     fn tmp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("horadric-forge-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("horadric-forge-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -288,7 +302,9 @@ mod tests {
         let threads: Vec<_> = (0..8u8)
             .map(|i| {
                 let root = root.clone();
-                std::thread::spawn(move || keep_at(&root, Path::new("a.md"), &[b'x', i], at(5_000)).unwrap())
+                std::thread::spawn(move || {
+                    keep_at(&root, Path::new("a.md"), &[b'x', i], at(5_000)).unwrap()
+                })
             })
             .collect();
         for t in threads {

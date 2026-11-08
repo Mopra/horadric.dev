@@ -962,7 +962,10 @@ fn secret_paste(s: &str, room: usize) -> std::result::Result<String, String> {
         return Err("It has line breaks inside. A value of more than one line goes in with horadric secret set NAME in a terminal".into());
     }
     if s.chars().any(char::is_control) {
-        return Err("It has a tab or another control character inside, which a secret here cannot hold".into());
+        return Err(
+            "It has a tab or another control character inside, which a secret here cannot hold"
+                .into(),
+        );
     }
     if s.chars().count() > room {
         return Err(too_long(room));

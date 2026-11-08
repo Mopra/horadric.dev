@@ -233,7 +233,10 @@ fn plan(natural: &[f32], w: f32, can_slide: bool) -> (Vec<f32>, bool) {
     }
     let floor: f32 = natural.iter().map(|n| n.min(READ_LEAST)).sum();
     if floor <= w {
-        return (fit(&flow::table_widths(natural, READ_LEAST, w), READ_LEAST, w), false);
+        return (
+            fit(&flow::table_widths(natural, READ_LEAST, w), READ_LEAST, w),
+            false,
+        );
     }
     // One column has nothing beside it to make room for, so wrapping it
     // to the view beats sliding it.
@@ -348,7 +351,11 @@ impl Ctx<'_> {
         let key = slide_key(header, rows);
         // A table that fits is set from the left; one that slides is drawn
         // moved by as far as it has slid, inside a frame the view wide.
-        let at = if can_slide { place(&key, total_w, w) } else { 0.0 };
+        let at = if can_slide {
+            place(&key, total_w, w)
+        } else {
+            0.0
+        };
         let lefts: Vec<f32> = widths
             .iter()
             .scan(-at, |x, cw| {
@@ -480,7 +487,14 @@ impl Ctx<'_> {
 
         if wide {
             let frame = Rect::new(0.0, top, w, y - top);
-            self.frame(&mut s, &key, frame, (first_item, first_hit), (at, total_w - w), total_w);
+            self.frame(
+                &mut s,
+                &key,
+                frame,
+                (first_item, first_hit),
+                (at, total_w - w),
+                total_w,
+            );
             set_frame(&key, frame);
             y += BAR_GAP + BAR_H + 2.0;
         }
@@ -678,7 +692,11 @@ fn copy_top(w: f32, total_w: f32) -> f32 {
 /// above its top, level with the header when there is no margin for it.
 fn copy_rect(w: f32, top: f32, hh: f32) -> Rect {
     let cw = COPY_W.min(w.max(0.0));
-    let y = if top > 0.0 { 0.0 } else { ((hh - COPY_H) / 2.0).max(0.0) };
+    let y = if top > 0.0 {
+        0.0
+    } else {
+        ((hh - COPY_H) / 2.0).max(0.0)
+    };
     Rect::new((w - cw).max(0.0), y, cw, COPY_H)
 }
 
@@ -1006,7 +1024,10 @@ mod tests {
 
     #[test]
     fn table_plan_keeps_what_fits() {
-        assert_eq!(plan(&[100.0, 50.0], 300.0, true), (vec![100.0, 50.0], false));
+        assert_eq!(
+            plan(&[100.0, 50.0], 300.0, true),
+            (vec![100.0, 50.0], false)
+        );
     }
 
     #[test]

@@ -463,7 +463,12 @@ impl Painter<'_> {
             if w.end.is_none() {
                 // Awake: the dot is light, and the bloom gives it its glow.
                 let hot = gold.mix(Color::rgb(0xFFFFFF), 0.3).fade(0.7);
-                self.emit(Emitter::Dot { x, y, radius: WAKE_R, c: hot });
+                self.emit(Emitter::Dot {
+                    x,
+                    y,
+                    radius: WAKE_R,
+                    c: hot,
+                });
             }
             if w.errand {
                 let square = |r: f32| Rect::new(x - r, y - r, 2.0 * r, 2.0 * r);
@@ -535,7 +540,12 @@ impl Painter<'_> {
         if outcome == Outcome::Working {
             // In progress: the dot is light, and the bloom gives it its glow.
             let hot = c.mix(Color::rgb(0xFFFFFF), 0.3).fade(0.7);
-            self.emit(Emitter::Dot { x, y, radius: DOT_R, c: hot });
+            self.emit(Emitter::Dot {
+                x,
+                y,
+                radius: DOT_R,
+                c: hot,
+            });
         }
         // The screen's glass under it, so a line through it stops at its
         // rim.

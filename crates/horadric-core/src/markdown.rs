@@ -626,9 +626,7 @@ fn math_block(text: String, closed: bool) -> Block {
 
 fn details_starts(t: &str) -> bool {
     let b = t.as_bytes();
-    b.len() >= 9
-        && b[..8].eq_ignore_ascii_case(b"<details")
-        && matches!(b[8], b'>' | b' ' | b'\t')
+    b.len() >= 9 && b[..8].eq_ignore_ascii_case(b"<details") && matches!(b[8], b'>' | b' ' | b'\t')
 }
 
 /// Where `tag` (as `<details` or `</details>`) is in `s`, ignoring case.
@@ -1564,11 +1562,66 @@ fn decode_entities(s: &str) -> String {
 /// as HTML only when it has attributes, so `Option<T>` or `Vec<u8>` in
 /// prose stays as written.
 const HTML_TAGS: &[&str] = &[
-    "a", "abbr", "b", "big", "blockquote", "br", "center", "cite", "code", "dd", "del",
-    "details", "dfn", "div", "dl", "dt", "em", "figcaption", "figure", "font", "h1", "h2",
-    "h3", "h4", "h5", "h6", "hr", "i", "img", "ins", "kbd", "li", "mark", "ol", "p", "picture",
-    "pre", "q", "s", "samp", "small", "source", "span", "strike", "strong", "sub", "summary",
-    "sup", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "tt", "u", "ul", "var", "wbr",
+    "a",
+    "abbr",
+    "b",
+    "big",
+    "blockquote",
+    "br",
+    "center",
+    "cite",
+    "code",
+    "dd",
+    "del",
+    "details",
+    "dfn",
+    "div",
+    "dl",
+    "dt",
+    "em",
+    "figcaption",
+    "figure",
+    "font",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "hr",
+    "i",
+    "img",
+    "ins",
+    "kbd",
+    "li",
+    "mark",
+    "ol",
+    "p",
+    "picture",
+    "pre",
+    "q",
+    "s",
+    "samp",
+    "small",
+    "source",
+    "span",
+    "strike",
+    "strong",
+    "sub",
+    "summary",
+    "sup",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "tr",
+    "tt",
+    "u",
+    "ul",
+    "var",
+    "wbr",
 ];
 
 /// Where each closing text a tag waits for is last seen in the text
@@ -1721,7 +1774,10 @@ fn html(s: &str, tag: Tag, depth: usize, buf: &mut String, toks: &mut Vec<Tok>) 
             if let Some(src) = attr(tag.attrs, "src").filter(|v| !v.is_empty()) {
                 flush(buf, toks);
                 let alt = attr(tag.attrs, "alt").unwrap_or("");
-                toks.push(Tok::Image(Box::new(tokenize(alt, depth + 1)), src.to_string()));
+                toks.push(Tok::Image(
+                    Box::new(tokenize(alt, depth + 1)),
+                    src.to_string(),
+                ));
             }
         }
         _ => {}
@@ -1794,15 +1850,33 @@ fn is_modifier(k: &str) -> bool {
 
 fn is_key(k: &str) -> bool {
     const NAMED: &[&str] = &[
-        "enter", "return", "esc", "escape", "tab", "space", "backspace", "delete", "del",
-        "insert", "ins", "home", "end", "pgup", "pgdn", "pageup", "pagedown", "up", "down",
-        "left", "right", "plus", "minus",
+        "enter",
+        "return",
+        "esc",
+        "escape",
+        "tab",
+        "space",
+        "backspace",
+        "delete",
+        "del",
+        "insert",
+        "ins",
+        "home",
+        "end",
+        "pgup",
+        "pgdn",
+        "pageup",
+        "pagedown",
+        "up",
+        "down",
+        "left",
+        "right",
+        "plus",
+        "minus",
     ];
     let mut chars = k.chars();
     match (chars.next(), chars.next()) {
-        (Some(c), None) => {
-            c.is_ascii_graphic() || "\u{2190}\u{2191}\u{2192}\u{2193}".contains(c)
-        }
+        (Some(c), None) => c.is_ascii_graphic() || "\u{2190}\u{2191}\u{2192}\u{2193}".contains(c),
         (Some('F' | 'f'), Some(_)) => k[1..].parse::<u8>().is_ok_and(|n| (1..=24).contains(&n)),
         _ => NAMED.iter().any(|n| n.eq_ignore_ascii_case(k)),
     }
@@ -2805,7 +2879,10 @@ mod tests {
     fn image_is_its_alt_text_marked_with_its_source() {
         let p = para("see ![logo](https://x.dev/a.png) and ![](c:/x.png)");
         assert_eq!(p.text, "see logo and image");
-        assert_eq!(under(&p, &Style::Image("https://x.dev/a.png".into())), ["logo"]);
+        assert_eq!(
+            under(&p, &Style::Image("https://x.dev/a.png".into())),
+            ["logo"]
+        );
         assert_eq!(under(&p, &Style::Image("c:/x.png".into())), ["image"]);
         assert!(links(&p).is_empty());
     }
@@ -3409,7 +3486,9 @@ mod tests {
             ]
         );
         // Two lines of text under one underline are one heading.
-        assert!(matches!(&parse("a\nb\n===")[..], [Block::Heading { level: 1, text }] if text.text == "a\nb"));
+        assert!(
+            matches!(&parse("a\nb\n===")[..], [Block::Heading { level: 1, text }] if text.text == "a\nb")
+        );
     }
 
     #[test]
@@ -3478,7 +3557,10 @@ mod tests {
 
     #[test]
     fn html_br_breaks_the_line() {
-        assert_eq!(para("a line<br>break<br/>and <br />more").text, "a line\nbreak\nand\nmore");
+        assert_eq!(
+            para("a line<br>break<br/>and <br />more").text,
+            "a line\nbreak\nand\nmore"
+        );
     }
 
     #[test]
@@ -3500,9 +3582,18 @@ mod tests {
 
     #[test]
     fn unknown_html_is_stripped_but_generics_stay() {
-        assert_eq!(para("<span class=\"x\">kept</span> <div>d</div>").text, "kept d");
-        assert_eq!(para("<custom-el data=\"1\">t</custom-el>").text, "t</custom-el>");
-        assert_eq!(para("Option<T> and Vec<u8> and a < b > c").text, "Option<T> and Vec<u8> and a < b > c");
+        assert_eq!(
+            para("<span class=\"x\">kept</span> <div>d</div>").text,
+            "kept d"
+        );
+        assert_eq!(
+            para("<custom-el data=\"1\">t</custom-el>").text,
+            "t</custom-el>"
+        );
+        assert_eq!(
+            para("Option<T> and Vec<u8> and a < b > c").text,
+            "Option<T> and Vec<u8> and a < b > c"
+        );
         assert_eq!(para("a <!-- hidden --> b").text, "a  b");
     }
 
@@ -3558,7 +3649,11 @@ mod tests {
         let src = "<details>\n<summary>A **folded** section</summary>\n\nInside it.\n\n- one\n\n</details>\n\nAfter.";
         let b = parse(src);
         match &b[..] {
-            [Block::Details { summary, body, open }, Block::Paragraph(after)] => {
+            [Block::Details {
+                summary,
+                body,
+                open,
+            }, Block::Paragraph(after)] => {
                 assert_eq!(summary.text, "A folded section");
                 assert_eq!(under(summary, &Style::Bold), ["folded"]);
                 assert!(!open);
@@ -3574,7 +3669,11 @@ mod tests {
     #[test]
     fn details_on_one_line_and_open() {
         match &parse("<details open><summary>S</summary>body text</details>")[..] {
-            [Block::Details { summary, body, open: true }] => {
+            [Block::Details {
+                summary,
+                body,
+                open: true,
+            }] => {
                 assert_eq!(summary.text, "S");
                 assert!(matches!(&body[..], [Block::Paragraph(p)] if p.text == "body text"));
             }
@@ -3651,7 +3750,10 @@ mod tests {
         assert_eq!(parse("$$\na"), vec![want("a", false)]);
         assert_eq!(parse("so:\n$$\na\n$$")[1], want("a", true));
         // Inline dollars are money as often as maths.
-        assert_eq!(para("costs $5 or $E = mc^2$").text, "costs $5 or $E = mc^2$");
+        assert_eq!(
+            para("costs $5 or $E = mc^2$").text,
+            "costs $5 or $E = mc^2$"
+        );
     }
 
     #[test]
@@ -3669,7 +3771,9 @@ mod tests {
 
     #[test]
     fn reference_links() {
-        let p = para_of("See [the docs][docs], [Docs][] and [docs].\n\n[docs]: https://x.dev/d \"Title\"");
+        let p = para_of(
+            "See [the docs][docs], [Docs][] and [docs].\n\n[docs]: https://x.dev/d \"Title\"",
+        );
         assert_eq!(p.text, "See the docs, Docs and docs.");
         assert_eq!(
             links(&p),
@@ -3683,7 +3787,10 @@ mod tests {
 
     #[test]
     fn undefined_references_stay_as_written() {
-        assert_eq!(para("[a][nope] and [b] and [x]").text, "[a][nope] and [b] and [x]");
+        assert_eq!(
+            para("[a][nope] and [b] and [x]").text,
+            "[a][nope] and [b] and [x]"
+        );
     }
 
     #[test]
@@ -3722,7 +3829,10 @@ mod tests {
         match &parse(src)[..] {
             [Block::Paragraph(p), Block::Footnotes(notes)] => {
                 assert_eq!(p.text, "B1 then A2, B1 again.");
-                let got: Vec<_> = notes.iter().map(|(n, t)| (n.as_str(), t.text.as_str())).collect();
+                let got: Vec<_> = notes
+                    .iter()
+                    .map(|(n, t)| (n.as_str(), t.text.as_str()))
+                    .collect();
                 assert_eq!(got, [("1", "S."), ("2", "F."), ("3", "U.")]);
             }
             other => panic!("{other:?}"),
@@ -3733,7 +3843,11 @@ mod tests {
 
     #[test]
     fn a_sentence_after_a_label_is_not_a_definition() {
-        for src in ["[Note]: this is important", "[Note]: this", "[a]: https://x.dev trailing words"] {
+        for src in [
+            "[Note]: this is important",
+            "[Note]: this",
+            "[a]: https://x.dev trailing words",
+        ] {
             assert_eq!(para(src).text, src);
         }
         let p = para_of("[a][x] [b][y]\n\n[x]: https://x.dev \"Title\"\n[y]: <https://y.dev> (t)");
@@ -3742,7 +3856,10 @@ mod tests {
 
     #[test]
     fn dollars_in_prose_open_no_math() {
-        assert_eq!(para("cost $$5 vs\n$$10 more").text, "cost $$5 vs\n$$10 more");
+        assert_eq!(
+            para("cost $$5 vs\n$$10 more").text,
+            "cost $$5 vs\n$$10 more"
+        );
         assert_eq!(parse("$$10 more\nand on").len(), 1);
         assert!(matches!(&parse("$$10 more")[..], [Block::Paragraph(_)]));
     }
@@ -3765,12 +3882,20 @@ mod tests {
         let b = parse(src);
         check(&b);
         let has = |f: &dyn Fn(&Block) -> bool| b.iter().any(f);
-        assert!(has(&|b| matches!(b, Block::Heading { level: 1, text } if text.text == "Setext heading, level one")));
-        assert!(has(&|b| matches!(b, Block::Paragraph(p) if p.text == "Setext heading, level two")));
+        assert!(has(
+            &|b| matches!(b, Block::Heading { level: 1, text } if text.text == "Setext heading, level one")
+        ));
+        assert!(has(
+            &|b| matches!(b, Block::Paragraph(p) if p.text == "Setext heading, level two")
+        ));
         assert!(has(&|b| matches!(b, Block::Details { .. })));
         assert!(has(&|b| matches!(b, Block::Footnotes(n) if n.len() == 1)));
-        assert!(has(&|b| matches!(b, Block::Code { lang, .. } if lang == "math")));
-        assert!(has(&|b| matches!(b, Block::Code { text, .. } if text.starts_with("An indented code block"))));
+        assert!(has(
+            &|b| matches!(b, Block::Code { lang, .. } if lang == "math")
+        ));
+        assert!(has(
+            &|b| matches!(b, Block::Code { text, .. } if text.starts_with("An indented code block"))
+        ));
         assert!(!src.is_empty() && !b.iter().any(|b| matches!(b, Block::Paragraph(p) if p.text.contains("&amp;") || p.text.contains("<b>"))));
     }
 
@@ -3787,8 +3912,12 @@ mod tests {
             })
             .collect();
         assert_eq!(tables, vec![20, 3]);
-        assert!(b.iter().any(|b| matches!(b, Block::Code { text, closed: true, .. } if text.lines().count() == 500)));
-        assert!(matches!(&b[b.len() - 2], Block::Code { lang, closed: false, .. } if lang == "python"));
+        assert!(b.iter().any(
+            |b| matches!(b, Block::Code { text, closed: true, .. } if text.lines().count() == 500)
+        ));
+        assert!(
+            matches!(&b[b.len() - 2], Block::Code { lang, closed: false, .. } if lang == "python")
+        );
         assert!(matches!(b.last(), Some(Block::Footnotes(n)) if n.len() == 40));
         // Code inside a list inside a quote, and again two levels further.
         let Some(Block::Quote(q)) = b.iter().find(|b| matches!(b, Block::Quote(_))) else {
@@ -3796,16 +3925,26 @@ mod tests {
         };
         let item = &items(&q[1])[0];
         assert!(matches!(&item[1], Block::Code { lang, closed: true, .. } if lang == "rust"));
-        let Block::Quote(inner) = &items(&item[2])[0][1] else { panic!("{item:?}") };
+        let Block::Quote(inner) = &items(&item[2])[0][1] else {
+            panic!("{item:?}")
+        };
         assert!(matches!(&items(&inner[1])[0][1], Block::Code { lang, .. } if lang == "sh"));
-        let Block::Paragraph(refs) = &b[1] else { panic!("{:?}", b[1]) };
+        let Block::Paragraph(refs) = &b[1] else {
+            panic!("{:?}", b[1])
+        };
         let lines: Vec<_> = paths(refs).into_iter().map(|(_, p, l)| (p, l)).collect();
         assert_eq!(
             lines,
             vec![
-                ("crates/horadric-core/src/markdown.rs".to_string(), Some(812)),
+                (
+                    "crates/horadric-core/src/markdown.rs".to_string(),
+                    Some(812)
+                ),
                 ("src/main.rs".to_string(), Some(3)),
-                ("crates/horadric-ui/src/folio/rich.rs".to_string(), Some(457)),
+                (
+                    "crates/horadric-ui/src/folio/rich.rs".to_string(),
+                    Some(457)
+                ),
                 ("C:\\Users\\me\\repo\\build.rs".to_string(), Some(7)),
                 ("main.rs".to_string(), Some(42)),
             ]
@@ -3985,7 +4124,9 @@ mod tests {
         let (text, closed) = code_of(&items(&b[0])[0]);
         assert_eq!((text, closed), ("cargo ch", false));
         let b = parse("> ```\n> let x\n> ``");
-        let Block::Quote(inner) = &b[0] else { panic!("{b:?}") };
+        let Block::Quote(inner) = &b[0] else {
+            panic!("{b:?}")
+        };
         assert_eq!(code_of(inner), ("let x", false));
     }
 
@@ -4017,7 +4158,10 @@ mod tests {
             assert_eq!(p.text, src, "{src}");
             for s in &p.spans {
                 assert!(
-                    !matches!(s.style, Style::Bold | Style::Italic | Style::Strike | Style::Code),
+                    !matches!(
+                        s.style,
+                        Style::Bold | Style::Italic | Style::Strike | Style::Code
+                    ),
                     "{src}: {s:?}"
                 );
             }
@@ -4067,11 +4211,15 @@ mod tests {
         assert_eq!(tasks(&b[0]), &vec![Some(false)]);
         // A quote streaming a second line keeps the first.
         let b = parse("> one\n> tw");
-        let Block::Quote(inner) = &b[0] else { panic!("{b:?}") };
+        let Block::Quote(inner) = &b[0] else {
+            panic!("{b:?}")
+        };
         assert!(matches!(&inner[..], [Block::Paragraph(p)] if p.text == "one\ntw"));
         // A note's definition half typed never shows its marker as text.
         let b = parse("Claim[^1].\n\n[^1]: The so");
-        assert!(matches!(&b[..], [Block::Paragraph(_), Block::Footnotes(n)] if n[0].1.text == "The so"));
+        assert!(
+            matches!(&b[..], [Block::Paragraph(_), Block::Footnotes(n)] if n[0].1.text == "The so")
+        );
         // A math block streaming runs to the end, and a half close is hidden.
         assert_eq!(code_of(&parse("$$\nx^2\n$")), ("x^2", false));
         assert_eq!(code_of(&parse("$$\nx^2\n$$")), ("x^2", true));

@@ -63,7 +63,11 @@ pub fn menu(key: &str, tab: u64, file: &Path) {
         items.push(Item::action(VISIBLE, "Picture of what is shown"));
         items.push(Item::action(
             COPY,
-            if deck { "Copy the slide as a picture" } else { "Copy what is shown as a picture" },
+            if deck {
+                "Copy the slide as a picture"
+            } else {
+                "Copy what is shown as a picture"
+            },
         ));
     }
     if deck {
@@ -83,7 +87,10 @@ pub fn menu(key: &str, tab: u64, file: &Path) {
         items.push(Item::action(CHANGES, "Changes since the last commit"));
     }
     items.push(Item::action(EDITOR, "Open in editor"));
-    items.push(Item::action(OPEN_WITH, "Open with the program Windows has for it"));
+    items.push(Item::action(
+        OPEN_WITH,
+        "Open with the program Windows has for it",
+    ));
     items.push(Item::action(EXPLORER, "Show in Explorer"));
     let file = file.to_path_buf();
     match menu::popup(&items) {
@@ -221,13 +228,19 @@ impl Clip {
 /// awaited.
 fn evaluate(key: &str, tab: u64, expr: &str, done: impl FnOnce(Option<Value>) + 'static) {
     let params = json!({"expression": expr, "returnByValue": true, "awaitPromise": true});
-    web::devtools(key, tab, "Runtime.evaluate", &params.to_string(), move |r| {
-        let value = r
-            .ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .and_then(|v| v.get("result")?.get("value").cloned());
-        done(value);
-    });
+    web::devtools(
+        key,
+        tab,
+        "Runtime.evaluate",
+        &params.to_string(),
+        move |r| {
+            let value = r
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| v.get("result")?.get("value").cloned());
+            done(value);
+        },
+    );
 }
 
 /// A PNG of `clip`.
@@ -237,13 +250,19 @@ fn capture(key: &str, tab: u64, clip: Clip, done: impl FnOnce(Option<Vec<u8>>) +
         "fromSurface": true,
         "clip": {"x": clip.x, "y": clip.y, "width": clip.w, "height": clip.h, "scale": clip.scale},
     });
-    web::devtools(key, tab, "Page.captureScreenshot", &params.to_string(), move |r| {
-        let png = r
-            .ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .and_then(|v| horadric_core::release::base64_decode(v.get("data")?.as_str()?));
-        done(png);
-    });
+    web::devtools(
+        key,
+        tab,
+        "Page.captureScreenshot",
+        &params.to_string(),
+        move |r| {
+            let png = r
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| horadric_core::release::base64_decode(v.get("data")?.as_str()?));
+            done(png);
+        },
+    );
 }
 
 /// What of the page is in view, at twice its pixels.
@@ -342,7 +361,10 @@ struct Slides {
 impl Slides {
     fn shoot(self: Rc<Self>, n: usize) {
         if n > self.count {
-            let back = format!("window.__forgeDeck && window.__forgeDeck.goto({})", self.was);
+            let back = format!(
+                "window.__forgeDeck && window.__forgeDeck.goto({})",
+                self.was
+            );
             evaluate(&self.key, self.tab, &back, |_| {});
             super::bar::show_in_explorer(&self.out(1));
             return;
@@ -370,7 +392,11 @@ impl Slides {
 /// on the clipboard as a picture.
 fn copy(key: &str, tab: u64, deck: bool) {
     let owned = key.to_string();
-    let js = if deck { slide_js(0) } else { VISIBLE_JS.to_string() };
+    let js = if deck {
+        slide_js(0)
+    } else {
+        VISIBLE_JS.to_string()
+    };
     evaluate(key, tab, &js, move |v| {
         let Some(clip) = v.as_ref().and_then(Clip::from_json) else {
             return;
@@ -443,7 +469,8 @@ fn dib_of(png: &[u8]) -> Option<Vec<u8>> {
         bgra.GetSize(&mut w, &mut h).ok()?;
         let stride = w as usize * 4;
         let mut pixels = vec![0u8; stride * h as usize];
-        bgra.CopyPixels(std::ptr::null(), stride as u32, &mut pixels).ok()?;
+        bgra.CopyPixels(std::ptr::null(), stride as u32, &mut pixels)
+            .ok()?;
         let mut out = Vec::with_capacity(40 + pixels.len());
         out.extend_from_slice(&40u32.to_le_bytes());
         out.extend_from_slice(&(w as i32).to_le_bytes());

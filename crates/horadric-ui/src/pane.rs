@@ -1257,7 +1257,12 @@ impl Pane {
         });
         let start_rows: Vec<new_tab::Row> = start_key
             .as_deref()
-            .map(|k| new_tab::entries(k).iter().map(new_tab::Entry::row).collect())
+            .map(|k| {
+                new_tab::entries(k)
+                    .iter()
+                    .map(new_tab::Entry::row)
+                    .collect()
+            })
             .unwrap_or_default();
         let start = start_key.as_ref().map(|_| new_tab::Start {
             layout: new_tab::layout(self.page_glass(), start_rows.len()),
@@ -3544,12 +3549,9 @@ impl Pane {
                 }
                 let at = LPARAM(((p.y as u16 as isize) << 16) | p.x as u16 as isize);
                 if self.in_header(at) || self.in_tabs(at) {
-                    let typed = self.bar_at(at) == Some(BarHit::Field) && self.forge_at(at).is_none();
-                    let cursor = if typed {
-                        IDC_IBEAM
-                    } else {
-                        IDC_ARROW
-                    };
+                    let typed =
+                        self.bar_at(at) == Some(BarHit::Field) && self.forge_at(at).is_none();
+                    let cursor = if typed { IDC_IBEAM } else { IDC_ARROW };
                     unsafe {
                         SetCursor(LoadCursorW(None, cursor).ok());
                     }
@@ -3897,8 +3899,9 @@ impl Pane {
             // A Folio's wide table slides first; anything else sideways is
             // the file viewer's.
             WM_MOUSEHWHEEL
-                if (self.console.folio.as_deref())
-                    .is_some_and(|k| folio::hwheel(k, ((wparam.0 >> 16) & 0xffff) as i16 as i32)) =>
+                if (self.console.folio.as_deref()).is_some_and(|k| {
+                    folio::hwheel(k, ((wparam.0 >> 16) & 0xffff) as i16 as i32)
+                }) =>
             {
                 Some(LRESULT(0))
             }

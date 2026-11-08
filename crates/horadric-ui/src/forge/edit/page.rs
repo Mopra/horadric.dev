@@ -24,11 +24,23 @@ const ASSETS: &str = "assets";
 /// renderer, answered as `rendered` with the same `id`.
 pub fn on_render(key: &str, tab: u64, msg: &Value) {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
-    let markdown = super::super::file_of(key, tab).is_some_and(|f| super::super::kind(&f) == Some(Kind::Markdown));
-    let text = msg.get("text").and_then(Value::as_str).filter(|t| t.len() <= super::WRITE_MAX);
+    let markdown = super::super::file_of(key, tab)
+        .is_some_and(|f| super::super::kind(&f) == Some(Kind::Markdown));
+    let text = msg
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|t| t.len() <= super::WRITE_MAX);
     let (true, Some(text)) = (markdown, text) else {
-        let why = if markdown { "the text is missing or too large" } else { "only markdown is drawn here" };
-        super::super::post(key, tab, &json!({"forge": "rendered", "id": id, "ok": false, "why": why}));
+        let why = if markdown {
+            "the text is missing or too large"
+        } else {
+            "only markdown is drawn here"
+        };
+        super::super::post(
+            key,
+            tab,
+            &json!({"forge": "rendered", "id": id, "ok": false, "why": why}),
+        );
         return;
     };
     if text.len() <= RENDER_INLINE {
@@ -36,13 +48,15 @@ pub fn on_render(key: &str, tab: u64, msg: &Value) {
         return;
     }
     let (key, text) = (key.to_string(), text.to_string());
-    let _ = std::thread::Builder::new().name("forge-render".into()).spawn(move || {
-        let msg = rendered(&id, &text);
-        if let Ok(mut d) = super::DONE.lock() {
-            d.push((key, tab, msg));
-        }
-        super::super::wake();
-    });
+    let _ = std::thread::Builder::new()
+        .name("forge-render".into())
+        .spawn(move || {
+            let msg = rendered(&id, &text);
+            if let Ok(mut d) = super::DONE.lock() {
+                d.push((key, tab, msg));
+            }
+            super::super::wake();
+        });
 }
 
 /// The answer to a render. A diagram in it needs Mermaid, which the page
@@ -67,7 +81,11 @@ fn rendered(id: &Value, text: &str) -> Value {
 pub fn on_save_image(key: &str, tab: u64, msg: &Value) {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let refuse = |why: &str| {
-        super::super::post(key, tab, &json!({"forge": "image-saved", "id": id, "ok": false, "why": why}));
+        super::super::post(
+            key,
+            tab,
+            &json!({"forge": "image-saved", "id": id, "ok": false, "why": why}),
+        );
     };
     if !super::may_write(key, tab) {
         return refuse("the page may not write now");
@@ -80,7 +98,10 @@ pub fn on_save_image(key: &str, tab: u64, msg: &Value) {
         return refuse("pictures are saved beside markdown only");
     }
     let Some(root) = super::super::TABS.with(|t| {
-        t.borrow().iter().find(|f| f.key == key && f.id == tab).map(|f| f.root.clone())
+        t.borrow()
+            .iter()
+            .find(|f| f.key == key && f.id == tab)
+            .map(|f| f.root.clone())
     }) else {
         return refuse("the tab is gone");
     };
@@ -90,30 +111,36 @@ pub fn on_save_image(key: &str, tab: u64, msg: &Value) {
     if data.is_empty() || data.len() > IMAGE_MAX / 3 * 4 + 4 {
         return refuse("the picture is missing or larger than 20 MB");
     }
-    let name = msg.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
+    let name = msg
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let data = data.to_string();
     let key = key.to_string();
     // Decoding and the disk are off the UI thread.
-    let _ = std::thread::Builder::new().name("forge-image".into()).spawn(move || {
-        let mut out = json!({"forge": "image-saved", "id": id});
-        match horadric_core::release::base64_decode(&data)
-            .ok_or_else(|| "the picture is not base64".to_string())
-            .and_then(|bytes| save_beside(&file, &root, &name, &bytes))
-        {
-            Ok(path) => {
-                out["ok"] = json!(true);
-                out["path"] = json!(path);
+    let _ = std::thread::Builder::new()
+        .name("forge-image".into())
+        .spawn(move || {
+            let mut out = json!({"forge": "image-saved", "id": id});
+            match horadric_core::release::base64_decode(&data)
+                .ok_or_else(|| "the picture is not base64".to_string())
+                .and_then(|bytes| save_beside(&file, &root, &name, &bytes))
+            {
+                Ok(path) => {
+                    out["ok"] = json!(true);
+                    out["path"] = json!(path);
+                }
+                Err(why) => {
+                    out["ok"] = json!(false);
+                    out["why"] = json!(why);
+                }
             }
-            Err(why) => {
-                out["ok"] = json!(false);
-                out["why"] = json!(why);
+            if let Ok(mut d) = super::DONE.lock() {
+                d.push((key, tab, out));
             }
-        }
-        if let Ok(mut d) = super::DONE.lock() {
-            d.push((key, tab, out));
-        }
-        super::super::wake();
-    });
+            super::super::wake();
+        });
 }
 
 /// The extension for a picture, by its first bytes, never by what the
@@ -177,10 +204,18 @@ fn save_beside(file: &Path, root: &Path, name: &str, bytes: &[u8]) -> Result<Str
     }
     let stem = image_stem(name);
     for n in 1..10_000 {
-        let fname = if n == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{n}.{ext}") };
+        let fname = if n == 1 {
+            format!("{stem}.{ext}")
+        } else {
+            format!("{stem}-{n}.{ext}")
+        };
         let path: PathBuf = dir.join(&fname);
         // Made new or not at all, so two saves never take the same name.
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
             Ok(mut f) => {
                 if let Err(e) = f.write_all(bytes) {
                     drop(f);
@@ -221,11 +256,17 @@ mod tests {
     fn forge_render_draws_a_block_as_the_page_does() {
         let msg = rendered(&json!(4), "# Title\n\n- [ ] todo\n");
         assert_eq!(msg["id"], 4);
-        assert_eq!(msg["html"], horadric_core::forge::markdown_body("# Title\n\n- [ ] todo\n"));
+        assert_eq!(
+            msg["html"],
+            horadric_core::forge::markdown_body("# Title\n\n- [ ] todo\n")
+        );
         assert!(msg["html"].as_str().unwrap().contains("data-lines=\"1-1\""));
         assert!(msg.get("mermaid").is_none());
         let diagram = rendered(&json!(5), "```mermaid\ngraph TD\n  A-->B\n```\n");
-        assert!(diagram["mermaid"]["src"].as_str().unwrap().ends_with("mermaid.js"));
+        assert!(diagram["mermaid"]["src"]
+            .as_str()
+            .unwrap()
+            .ends_with("mermaid.js"));
         assert!(!diagram["mermaid"]["look"].as_str().unwrap().is_empty());
     }
 
@@ -247,11 +288,23 @@ mod tests {
         let file = root.join("notes").join("a.md");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, "# a\n").unwrap();
-        assert_eq!(save_beside(&file, &root, "shot.png", PNG).unwrap(), "assets/shot.png");
-        assert_eq!(save_beside(&file, &root, "shot.png", PNG).unwrap(), "assets/shot-2.png");
-        assert_eq!(std::fs::read(root.join("notes/assets/shot.png")).unwrap(), PNG);
+        assert_eq!(
+            save_beside(&file, &root, "shot.png", PNG).unwrap(),
+            "assets/shot.png"
+        );
+        assert_eq!(
+            save_beside(&file, &root, "shot.png", PNG).unwrap(),
+            "assets/shot-2.png"
+        );
+        assert_eq!(
+            std::fs::read(root.join("notes/assets/shot.png")).unwrap(),
+            PNG
+        );
         // The name is the page's, the extension the bytes'.
-        assert_eq!(save_beside(&file, &root, "x.exe", PNG).unwrap(), "assets/x.png");
+        assert_eq!(
+            save_beside(&file, &root, "x.exe", PNG).unwrap(),
+            "assets/x.png"
+        );
         assert!(save_beside(&file, &root, "x.png", b"MZ not a picture").is_err());
         let _ = std::fs::remove_dir_all(&root);
     }

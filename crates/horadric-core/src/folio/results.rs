@@ -52,11 +52,13 @@ impl ToolResult {
     /// output only in its streams, those streams joined.
     pub fn whole_text(&self) -> Cow<'_, str> {
         match &self.kind {
-            ResultKind::Shell(sh) if self.text.is_empty() => match (sh.stdout.is_empty(), sh.stderr.is_empty()) {
-                (_, true) => Cow::Borrowed(&sh.stdout),
-                (true, false) => Cow::Borrowed(&sh.stderr),
-                (false, false) => Cow::Owned(format!("{}\n{}", sh.stdout, sh.stderr)),
-            },
+            ResultKind::Shell(sh) if self.text.is_empty() => {
+                match (sh.stdout.is_empty(), sh.stderr.is_empty()) {
+                    (_, true) => Cow::Borrowed(&sh.stdout),
+                    (true, false) => Cow::Borrowed(&sh.stderr),
+                    (false, false) => Cow::Owned(format!("{}\n{}", sh.stdout, sh.stderr)),
+                }
+            }
             _ => Cow::Borrowed(&self.text),
         }
     }
@@ -472,7 +474,11 @@ fn grep(text: &str, detail: &Value) -> GrepResult {
     match mode.as_str() {
         "files_with_matches" => {
             let files: Vec<String> = match detail["filenames"].as_array() {
-                Some(a) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+                Some(a) => a
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect(),
                 None => text
                     .lines()
                     .skip_while(|l| l.starts_with("Found "))
@@ -599,7 +605,11 @@ fn split_numbered(l: &str, skip: usize, sep: char) -> Option<(&str, usize, &str)
 
 fn glob(text: &str, detail: &Value) -> GlobResult {
     let files: Vec<String> = match detail["filenames"].as_array() {
-        Some(a) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+        Some(a) => a
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
         None => text
             .lines()
             .filter(|l| !l.trim().is_empty() && *l != "No files found" && !l.starts_with('('))
@@ -742,7 +752,13 @@ mod tests {
         let (s, err) = clean_text("<tool_use_error>Blocked: sleep 240</tool_use_error>");
         assert_eq!(s, "Blocked: sleep 240");
         assert!(err);
-        let r = read_result("Read", &json!({}), "<tool_use_error>File does not exist.</tool_use_error>", false, &Value::Null);
+        let r = read_result(
+            "Read",
+            &json!({}),
+            "<tool_use_error>File does not exist.</tool_use_error>",
+            false,
+            &Value::Null,
+        );
         assert!(r.error);
         assert_eq!(r.kind, ResultKind::Plain);
     }
@@ -777,8 +793,15 @@ mod tests {
         assert!(r.text.is_empty());
         assert_eq!(r.whole_text(), "boom");
         // With nothing in the streams the text is all there is.
-        let detail = json!({"stdout": "", "stderr": "", "interrupted": false, "backgroundTaskId": "b1"});
-        let r = read_result("Bash", &json!({}), "Running in the background", false, &detail);
+        let detail =
+            json!({"stdout": "", "stderr": "", "interrupted": false, "backgroundTaskId": "b1"});
+        let r = read_result(
+            "Bash",
+            &json!({}),
+            "Running in the background",
+            false,
+            &detail,
+        );
         assert_eq!(&*r.text, "Running in the background");
         assert_eq!(r.whole_text(), "Running in the background");
     }
@@ -788,7 +811,9 @@ mod tests {
         let big = "x\n".repeat(RESULT_CAP);
         let detail = json!({"stdout": big, "stderr": big, "interrupted": false});
         let r = read_result("Bash", &json!({}), &format!("{big}\n{big}"), false, &detail);
-        let ResultKind::Shell(s) = &r.kind else { panic!() };
+        let ResultKind::Shell(s) = &r.kind else {
+            panic!()
+        };
         assert!(s.stdout.len() + s.stderr.len() <= RESULT_CAP);
         assert!(s.stderr.len() <= RESULT_CAP / 4);
         assert_eq!(r.cut, Cut::Start);
@@ -806,8 +831,16 @@ mod tests {
     #[test]
     fn a_read_from_its_account() {
         let detail = json!({"type": "text", "file": {"filePath": "C:\\a\\b.rs", "content": "fn a() {}\n\nfn b() {}", "numLines": 3, "startLine": 163, "totalLines": 688}});
-        let r = read_result("Read", &json!({"file_path": "x"}), "163\tfn a() {}", false, &detail);
-        let ResultKind::Read(read) = r.kind else { panic!("{:?}", r.kind) };
+        let r = read_result(
+            "Read",
+            &json!({"file_path": "x"}),
+            "163\tfn a() {}",
+            false,
+            &detail,
+        );
+        let ResultKind::Read(read) = r.kind else {
+            panic!("{:?}", r.kind)
+        };
         assert_eq!(read.path, "C:\\a\\b.rs");
         assert_eq!(read.start, 163);
         assert_eq!(read.lines, vec!["fn a() {}", "", "fn b() {}"]);
@@ -818,8 +851,16 @@ mod tests {
     #[test]
     fn a_read_from_its_text() {
         let text = "     5\u{2192}first\n     6\u{2192}\n     7\u{2192}  third\n\n<system-reminder>\nmalware note\n</system-reminder>\n";
-        let r = read_result("Read", &json!({"file_path": "C:/x/y.rs"}), text, false, &Value::Null);
-        let ResultKind::Read(read) = r.kind else { panic!("{:?}", r.kind) };
+        let r = read_result(
+            "Read",
+            &json!({"file_path": "C:/x/y.rs"}),
+            text,
+            false,
+            &Value::Null,
+        );
+        let ResultKind::Read(read) = r.kind else {
+            panic!("{:?}", r.kind)
+        };
         assert_eq!(read.path, "C:/x/y.rs");
         assert_eq!(read.start, 5);
         assert_eq!(read.lines, vec!["first", "", "  third"]);
@@ -845,10 +886,17 @@ mod tests {
 
     #[test]
     fn grep_files() {
-        let detail = json!({"mode": "files_with_matches", "filenames": ["a.rs", "b.rs"], "numFiles": 2});
+        let detail =
+            json!({"mode": "files_with_matches", "filenames": ["a.rs", "b.rs"], "numFiles": 2});
         let r = grep("Found 2 files\na.rs\nb.rs", &detail);
         assert_eq!(r.files.len(), 2);
-        assert_eq!(r.files[1], FileHits { path: "b.rs".into(), count: None });
+        assert_eq!(
+            r.files[1],
+            FileHits {
+                path: "b.rs".into(),
+                count: None
+            }
+        );
         let r = grep("Found 2 files\na.rs\nb.rs", &Value::Null);
         assert_eq!(r.mode, "files_with_matches");
         assert_eq!(r.files.len(), 2);
@@ -859,8 +907,20 @@ mod tests {
         let detail = json!({"mode": "count", "numFiles": 2, "filenames": [], "content": "crates\\a.rs:63\nC:\\b.rs:2", "numMatches": 65});
         let r = grep("", &detail);
         assert_eq!(r.matches, Some(65));
-        assert_eq!(r.files[0], FileHits { path: "crates\\a.rs".into(), count: Some(63) });
-        assert_eq!(r.files[1], FileHits { path: "C:\\b.rs".into(), count: Some(2) });
+        assert_eq!(
+            r.files[0],
+            FileHits {
+                path: "crates\\a.rs".into(),
+                count: Some(63)
+            }
+        );
+        assert_eq!(
+            r.files[1],
+            FileHits {
+                path: "C:\\b.rs".into(),
+                count: Some(2)
+            }
+        );
     }
 
     #[test]
@@ -870,7 +930,16 @@ mod tests {
         let r = grep("", &detail);
         assert!(r.limited);
         assert_eq!(r.matches, Some(3));
-        assert_eq!(r.lines[0], GrepLine { file: "crates\\a.rs".into(), line: Some(409), text: "  \"x\" => 1,".into(), context: false, gap: false });
+        assert_eq!(
+            r.lines[0],
+            GrepLine {
+                file: "crates\\a.rs".into(),
+                line: Some(409),
+                text: "  \"x\" => 1,".into(),
+                context: false,
+                gap: false
+            }
+        );
         assert!(r.lines[1].context && r.lines[1].line == Some(410) && r.lines[1].text == "  ctx");
         assert!(r.lines[2].gap);
         assert_eq!(r.lines[3].file, "C:\\horadric-core\\b.rs");
@@ -879,7 +948,10 @@ mod tests {
         assert_eq!(r.files.len(), 3);
         assert_eq!(r.files[0].count, Some(1));
         let one = grep_line("12:only one file");
-        assert_eq!((one.file.as_str(), one.line, one.text.as_str()), ("", Some(12), "only one file"));
+        assert_eq!(
+            (one.file.as_str(), one.line, one.text.as_str()),
+            ("", Some(12), "only one file")
+        );
         let bare = grep_line("no numbers here");
         assert_eq!((bare.line, bare.text.as_str()), (None, "no numbers here"));
     }
@@ -887,7 +959,14 @@ mod tests {
     #[test]
     fn glob_files() {
         let detail = json!({"filenames": ["a.md", "b.md"], "numFiles": 2, "truncated": false, "totalMatches": 2});
-        assert_eq!(glob("", &detail), GlobResult { files: vec!["a.md".into(), "b.md".into()], total: 2, truncated: false });
+        assert_eq!(
+            glob("", &detail),
+            GlobResult {
+                files: vec!["a.md".into(), "b.md".into()],
+                total: 2,
+                truncated: false
+            }
+        );
         assert_eq!(glob("No files found", &Value::Null).files.len(), 0);
         assert_eq!(glob("x.rs\ny.rs", &Value::Null).total, 2);
     }
@@ -896,9 +975,20 @@ mod tests {
     fn shell_streams_and_codes() {
         let input = json!({"command": "git log", "description": "Show history"});
         let detail = json!({"stdout": "\u{1b}[33mabc\u{1b}[0m one", "stderr": "\nShell cwd was reset", "interrupted": false, "isImage": false});
-        let r = read_result("Bash", &input, "abc one\nShell cwd was reset", false, &detail);
-        let ResultKind::Shell(s) = r.kind else { panic!() };
-        assert_eq!((s.command.as_str(), s.description.as_str()), ("git log", "Show history"));
+        let r = read_result(
+            "Bash",
+            &input,
+            "abc one\nShell cwd was reset",
+            false,
+            &detail,
+        );
+        let ResultKind::Shell(s) = r.kind else {
+            panic!()
+        };
+        assert_eq!(
+            (s.command.as_str(), s.description.as_str()),
+            ("git log", "Show history")
+        );
         assert_eq!(&*s.stdout, "abc one");
         assert_eq!(&*s.stderr, "Shell cwd was reset");
         assert_eq!(s.exit_code, Some(0));
@@ -906,17 +996,30 @@ mod tests {
         let text = "Exit code 128\nfatal: pathspec 'x' did not match any files";
         let r = read_result("Bash", &input, text, true, &json!(format!("Error: {text}")));
         assert!(r.error);
-        let ResultKind::Shell(s) = r.kind else { panic!() };
+        let ResultKind::Shell(s) = r.kind else {
+            panic!()
+        };
         assert_eq!(s.exit_code, Some(128));
         assert_eq!(&*s.stdout, "fatal: pathspec 'x' did not match any files");
 
         let detail = json!({"stdout": "", "stderr": "", "interrupted": false, "returnCodeInterpretation": "No matches found"});
-        let ResultKind::Shell(s) = read_result("Bash", &input, "", false, &detail).kind else { panic!() };
-        assert_eq!((s.exit_code, s.interpretation.as_str()), (None, "No matches found"));
+        let ResultKind::Shell(s) = read_result("Bash", &input, "", false, &detail).kind else {
+            panic!()
+        };
+        assert_eq!(
+            (s.exit_code, s.interpretation.as_str()),
+            (None, "No matches found")
+        );
 
         let detail = json!({"stdout": "", "stderr": "", "interrupted": false, "backgroundTaskId": "b8b", "timedOutAfterMs": 600000});
-        let ResultKind::Shell(s) = read_result("PowerShell", &input, "moved", false, &detail).kind else { panic!() };
-        assert_eq!((s.exit_code, s.background.as_deref(), s.timed_out_ms), (None, Some("b8b"), Some(600000)));
+        let ResultKind::Shell(s) = read_result("PowerShell", &input, "moved", false, &detail).kind
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (s.exit_code, s.background.as_deref(), s.timed_out_ms),
+            (None, Some("b8b"), Some(600000))
+        );
     }
 
     #[test]
@@ -927,7 +1030,13 @@ mod tests {
         ]});
         let r = web_search(&json!({}), "", &detail);
         assert_eq!(r.query, "aocr.org");
-        assert_eq!(r.links, vec![Link { title: "AOCR".into(), url: "https://aocr.org".into() }]);
+        assert_eq!(
+            r.links,
+            vec![Link {
+                title: "AOCR".into(),
+                url: "https://aocr.org".into()
+            }]
+        );
         assert_eq!(r.summary, "It is a college of radiology.");
 
         let text = "Web search results for query: \"q\"\n\nLinks: [{\"title\":\"T\",\"url\":\"https://t\"}]\n\nWords here.";
@@ -938,9 +1047,18 @@ mod tests {
 
     #[test]
     fn mcp_names_and_json() {
-        let r = mcp("mcp__claude_ai_Slack__slack_send_message", "{\"a\":1,\"b\":[2]}");
-        assert_eq!((r.server.as_str(), r.tool.as_str()), ("claude_ai_Slack", "slack_send_message"));
-        assert_eq!(r.json.as_deref(), Some("{\n  \"a\": 1,\n  \"b\": [\n    2\n  ]\n}"));
+        let r = mcp(
+            "mcp__claude_ai_Slack__slack_send_message",
+            "{\"a\":1,\"b\":[2]}",
+        );
+        assert_eq!(
+            (r.server.as_str(), r.tool.as_str()),
+            ("claude_ai_Slack", "slack_send_message")
+        );
+        assert_eq!(
+            r.json.as_deref(),
+            Some("{\n  \"a\": 1,\n  \"b\": [\n    2\n  ]\n}")
+        );
         assert_eq!(mcp("mcp__x__y", "plain words").json, None);
         assert_eq!(mcp("mcp__x__y", "{broken").json, None);
     }

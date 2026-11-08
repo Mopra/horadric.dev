@@ -207,7 +207,15 @@ mod tests {
         assert_eq!(at.slide, Some(3));
         assert_eq!(at.lines, Some((4, 9)));
         assert_eq!(at.page, None);
-        assert_eq!(at.rect, Some(Rect { x: 1.5, y: 2.0, w: 30.0, h: 40.0 }));
+        assert_eq!(
+            at.rect,
+            Some(Rect {
+                x: 1.5,
+                y: 2.0,
+                w: 30.0,
+                h: 40.0
+            })
+        );
         assert_eq!(At::from_json("{}").unwrap(), At::default());
     }
 
@@ -222,7 +230,12 @@ mod tests {
                 selector: Some("section.slide:nth-of-type(3) > h2".into()),
                 text: Some("Quarterly\n   results".into()),
                 html: Some("<h2>Quarterly results</h2>".into()),
-                rect: Some(Rect { x: 120.4, y: 40.0, w: 300.0, h: 80.0 }),
+                rect: Some(Rect {
+                    x: 120.4,
+                    y: 40.0,
+                    w: 300.0,
+                    h: 80.0,
+                }),
                 ..At::default()
             },
             crop: Some(PathBuf::from("C:/tmp/pin1.png")),
@@ -247,14 +260,22 @@ mod tests {
                 file: PathBuf::from("/p/notes.md"),
                 url: None,
                 words: "shorter".into(),
-                at: At { lines: Some((5, 7)), ..At::default() },
+                at: At {
+                    lines: Some((5, 7)),
+                    ..At::default()
+                },
                 crop: None,
             },
             Pin {
                 file: PathBuf::from("/elsewhere/data.csv"),
                 url: None,
                 words: "fix the total".into(),
-                at: At { row: Some(4), col: Some(2), text: Some("x".repeat(400)), ..At::default() },
+                at: At {
+                    row: Some(4),
+                    col: Some(2),
+                    text: Some("x".repeat(400)),
+                    ..At::default()
+                },
                 crop: None,
             },
         ];
@@ -272,15 +293,24 @@ mod tests {
             file: PathBuf::new(),
             url: Some("https://example.com/pricing".into()),
             words: "this plan is wrong".into(),
-            at: At { selector: Some("#plans > div:nth-of-type(2)".into()), ..At::default() },
+            at: At {
+                selector: Some("#plans > div:nth-of-type(2)".into()),
+                ..At::default()
+            },
             crop: None,
         };
         let msg = pin_message(std::slice::from_ref(&page), Path::new("/p"));
         assert!(msg.starts_with("The human pinned a spot on a web page in the browser"));
-        assert!(msg.contains("
+        assert!(msg.contains(
+            "
 https://example.com/pricing, `#plans > div:nth-of-type(2)`
-"));
-        let file = Pin { file: PathBuf::from("/p/a.md"), url: None, ..page.clone() };
+"
+        ));
+        let file = Pin {
+            file: PathBuf::from("/p/a.md"),
+            url: None,
+            ..page.clone()
+        };
         let both = pin_message(&[file, page], Path::new("/p"));
         assert!(both.starts_with("The human pinned 2 spots in files in the Forge and on web pages"));
         assert!(both.contains("1. a.md, "));

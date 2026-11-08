@@ -520,7 +520,12 @@ pub fn started_otherwise(started: Option<&str>, now: Option<&str>) -> bool {
 /// The sessions noted with the identity each started with, newest last:
 /// `id` noted again moves to the end, and only the newest `keep` stay, so
 /// the list never grows past what a machine runs.
-pub fn noted(mut list: Vec<(String, String)>, id: &str, slug: &str, keep: usize) -> Vec<(String, String)> {
+pub fn noted(
+    mut list: Vec<(String, String)>,
+    id: &str,
+    slug: &str,
+    keep: usize,
+) -> Vec<(String, String)> {
     list.retain(|(i, _)| i != id);
     list.push((id.to_string(), slug.to_string()));
     let over = list.len().saturating_sub(keep);
@@ -548,9 +553,15 @@ mod tests {
         let list = noted(Vec::new(), "a", "acme", 2);
         let list = noted(list, "b", "", 2);
         let list = noted(list, "a", "globex", 2);
-        assert_eq!(list, [("b".into(), "".into()), ("a".into(), "globex".into())]);
+        assert_eq!(
+            list,
+            [("b".into(), "".into()), ("a".into(), "globex".into())]
+        );
         let list = noted(list, "c", "acme", 2);
-        assert_eq!(list, [("a".into(), "globex".into()), ("c".into(), "acme".into())]);
+        assert_eq!(
+            list,
+            [("a".into(), "globex".into()), ("c".into(), "acme".into())]
+        );
     }
 
     #[test]

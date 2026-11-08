@@ -226,9 +226,13 @@ impl Call {
         Ok(match text("op") {
             Some("info") => Call::Info,
             Some("open") => Call::Open(text("url").map(agent_address).transpose()?.flatten()),
-            Some("navigate") => {
-                Call::Navigate(text("url").map(agent_address).transpose()?.flatten().ok_or("say where: a url")?)
-            }
+            Some("navigate") => Call::Navigate(
+                text("url")
+                    .map(agent_address)
+                    .transpose()?
+                    .flatten()
+                    .ok_or("say where: a url")?,
+            ),
             Some("back") => Call::History(Step::Back),
             Some("forward") => Call::History(Step::Forward),
             Some("reload") => Call::History(Step::Reload),
@@ -249,14 +253,18 @@ impl Call {
                 let field = |k: &str| text(k).filter(|r| !r.is_empty()).map(str::to_string);
                 let (user, password, code) = (field("user"), field("password"), field("code"));
                 if user.is_none() && password.is_none() && code.is_none() {
-                    return Err("say which fields to fill: the refs of user, password or code \
+                    return Err(
+                        "say which fields to fill: the refs of user, password or code \
                                 from browser_snapshot"
-                        .into());
+                            .into(),
+                    );
                 }
                 if user.is_some() && password.is_none() {
-                    return Err("a user name is filled with its password: give the password \
+                    return Err(
+                        "a user name is filled with its password: give the password \
                                 field's ref too"
-                        .into());
+                            .into(),
+                    );
                 }
                 Call::FillLogin {
                     name: name.to_string(),
@@ -276,7 +284,10 @@ impl Call {
 /// ends. `java\tscript:` is `javascript:` to the browser, so it must be to
 /// the check too.
 fn normalised(url: &str) -> String {
-    let kept: String = url.chars().filter(|c| !matches!(c, '\t' | '\r' | '\n')).collect();
+    let kept: String = url
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\r' | '\n'))
+        .collect();
     kept.trim_matches(|c: char| c <= ' ').to_string()
 }
 
@@ -396,7 +407,9 @@ pub fn after_fill(method: &str, params: &Value, state: Filled) -> Result<(), Str
     // Runtime's reports, and keeps service workers out of the tab's
     // requests through Network, which these would stop.
     if method == "Runtime.disable" || method == "Network.disable" {
-        return Err(format!("{method} is refused in this tab: a login was filled in it"));
+        return Err(format!(
+            "{method} is refused in this tab: a login was filled in it"
+        ));
     }
     if state == Filled::Now && !quiet(method, params, true) {
         return Err(format!(
@@ -557,7 +570,14 @@ const PAGE_METHODS: &[(&str, &[&str])] = &[
     ("Page.stopLoading", &[]),
     (
         "Page.captureScreenshot",
-        &["format", "quality", "clip", "fromSurface", "captureBeyondViewport", "optimizeForSpeed"],
+        &[
+            "format",
+            "quality",
+            "clip",
+            "fromSurface",
+            "captureBeyondViewport",
+            "optimizeForSpeed",
+        ],
     ),
     ("Page.getLayoutMetrics", &[]),
     ("Page.getFrameTree", &[]),
@@ -567,24 +587,55 @@ const PAGE_METHODS: &[(&str, &[&str])] = &[
     (
         "Page.printToPDF",
         &[
-            "landscape", "printBackground", "scale", "paperWidth", "paperHeight", "marginTop",
-            "marginBottom", "marginLeft", "marginRight", "pageRanges", "preferCSSPageSize",
-            "generateTaggedPDF", "generateDocumentOutline",
+            "landscape",
+            "printBackground",
+            "scale",
+            "paperWidth",
+            "paperHeight",
+            "marginTop",
+            "marginBottom",
+            "marginLeft",
+            "marginRight",
+            "pageRanges",
+            "preferCSSPageSize",
+            "generateTaggedPDF",
+            "generateDocumentOutline",
         ],
     ),
     ("Page.bringToFront", &[]),
     ("Page.handleJavaScriptDialog", &["accept", "promptText"]),
-    ("Network.enable", &["maxTotalBufferSize", "maxResourceBufferSize", "maxPostDataSize"]),
+    (
+        "Network.enable",
+        &[
+            "maxTotalBufferSize",
+            "maxResourceBufferSize",
+            "maxPostDataSize",
+        ],
+    ),
     ("Network.disable", &[]),
     ("Network.getResponseBody", &["requestId"]),
     ("Network.getRequestPostData", &["requestId"]),
     ("Network.setCacheDisabled", &["cacheDisabled"]),
     (
         "Network.emulateNetworkConditions",
-        &["offline", "latency", "downloadThroughput", "uploadThroughput", "connectionType"],
+        &[
+            "offline",
+            "latency",
+            "downloadThroughput",
+            "uploadThroughput",
+            "connectionType",
+        ],
     ),
     ("Network.setExtraHTTPHeaders", &["headers"]),
-    ("Network.setUserAgentOverride", &["userAgent", "acceptLanguage", "platform", "userAgentMetadata"]),
+    (
+        "Network.setUserAgentOverride",
+        &[
+            "userAgent",
+            "acceptLanguage",
+            "platform",
+            "userAgentMetadata",
+        ],
+    ),
 ];
 
 /// Methods of the allowed domains that reach the user's files: each puts a
@@ -636,7 +687,11 @@ pub fn devtools_allowed(method: &str, params: Value) -> Result<Value, String> {
         if let Some(k) = extra {
             return refuse(&format!(
                 "it takes only {} here, not {k}",
-                if takes.is_empty() { "no params".to_string() } else { takes.join(", ") }
+                if takes.is_empty() {
+                    "no params".to_string()
+                } else {
+                    takes.join(", ")
+                }
             ));
         }
         return Ok(params);
@@ -861,8 +916,13 @@ mod tests {
         ] {
             assert_eq!(ok(m), Ok(json!({ "x": 1 })), "{m}");
         }
-        for m in ["Page.captureScreenshot", "Page.getLayoutMetrics", "Page.navigate",
-            "Network.getResponseBody", "Page.printToPDF"] {
+        for m in [
+            "Page.captureScreenshot",
+            "Page.getLayoutMetrics",
+            "Page.navigate",
+            "Network.getResponseBody",
+            "Page.printToPDF",
+        ] {
             assert_eq!(devtools_allowed(m, json!({})), Ok(json!({})), "{m}");
             assert!(ok(m).is_err(), "{m} takes no x");
         }
@@ -924,7 +984,8 @@ mod tests {
     #[test]
     fn a_filled_page_allows_only_quiet_calls() {
         use horadric_core::vault::web::page;
-        let eval = |e: &str| json!({ "expression": e, "returnByValue": true, "awaitPromise": true });
+        let eval =
+            |e: &str| json!({ "expression": e, "returnByValue": true, "awaitPromise": true });
         let snap = eval(&page::snapshot());
         let click = eval(&page::call(page::POINT, &[json!("e2"), Value::Null]));
         let by_selector = eval(&page::call(page::POINT, &[Value::Null, json!("#pw")]));
@@ -939,13 +1000,25 @@ mod tests {
         assert!(after_fill("Runtime.evaluate", &own, Filled::Before).is_ok());
         assert!(after_fill("Runtime.evaluate", &own, Filled::Now).is_err());
         assert!(after_fill("Runtime.evaluate", &by_selector, Filled::Now).is_err());
-        for m in ["DOM.getOuterHTML", "DOMSnapshot.captureSnapshot", "Accessibility.getFullAXTree",
-            "Runtime.callFunctionOn", "Console.enable", "Log.enable", "Debugger.enable", "CSS.addRule"] {
+        for m in [
+            "DOM.getOuterHTML",
+            "DOMSnapshot.captureSnapshot",
+            "Accessibility.getFullAXTree",
+            "Runtime.callFunctionOn",
+            "Console.enable",
+            "Log.enable",
+            "Debugger.enable",
+            "CSS.addRule",
+        ] {
             assert!(after_fill(m, &json!({}), Filled::Now).is_err(), "{m}");
             assert!(after_fill(m, &json!({}), Filled::Before).is_ok(), "{m}");
         }
         // The sign in request and the old page's heap hold it for good.
-        for m in ["Network.getRequestPostData", "Network.getResponseBody", "HeapProfiler.takeHeapSnapshot"] {
+        for m in [
+            "Network.getRequestPostData",
+            "Network.getResponseBody",
+            "HeapProfiler.takeHeapSnapshot",
+        ] {
             assert!(after_fill(m, &json!({}), Filled::Before).is_err(), "{m}");
             assert!(after_fill(m, &json!({}), Filled::Never).is_ok(), "{m}");
         }
@@ -968,13 +1041,20 @@ mod tests {
         assert!(nav("\u{1}javascript://%0aalert(1)").is_err());
         assert!(nav("jav\r\nascript://x").is_err());
         // A data: address typed is read as a host, never opened as data.
-        assert!(!matches!(nav("data:text/html,<script>1</script>"), Ok(Call::Navigate(u)) if u.starts_with("data:")));
+        assert!(
+            !matches!(nav("data:text/html,<script>1</script>"), Ok(Call::Navigate(u)) if u.starts_with("data:"))
+        );
         assert!(nav("https://example.com").is_ok());
         assert!(nav("about:blank").is_ok());
         assert!(nav("file:///c:/x.html").is_ok());
-        assert_eq!(nav("ht\ttps://example.com"), Ok(Call::Navigate("https://example.com".into())));
+        assert_eq!(
+            nav("ht\ttps://example.com"),
+            Ok(Call::Navigate("https://example.com".into()))
+        );
         let dev = |u: &str| {
-            Call::parse(&json!({ "op": "devtools", "method": "Page.navigate", "params": { "url": u } }))
+            Call::parse(
+                &json!({ "op": "devtools", "method": "Page.navigate", "params": { "url": u } }),
+            )
         };
         assert!(dev("javascript:1").is_err());
         assert!(dev("java\nscript:1").is_err());
@@ -982,10 +1062,16 @@ mod tests {
         assert!(dev("data:text/html,<script>1</script>").is_err());
         assert_eq!(
             dev("\thttps://a.example"),
-            Ok(Call::DevTools("Page.navigate".into(), json!({ "url": "https://a.example" })))
+            Ok(Call::DevTools(
+                "Page.navigate".into(),
+                json!({ "url": "https://a.example" })
+            ))
         );
         // The human's address bar goes anywhere; an agent hears why not.
-        assert_eq!(address("edge://settings").as_deref(), Some("edge://settings"));
+        assert_eq!(
+            address("edge://settings").as_deref(),
+            Some("edge://settings")
+        );
         assert_eq!(address("about:version").as_deref(), Some("about:version"));
         let open = |u: &str| Call::parse(&json!({ "op": "open", "url": u }));
         let e = open("edge://settings").unwrap_err();
@@ -999,13 +1085,41 @@ mod tests {
     fn page_and_network_calls_take_only_their_own_params() {
         let a = |m: &str, p: Value| devtools_allowed(m, p);
         assert!(a("Page.reload", json!({ "ignoreCache": true })).is_ok());
-        assert!(a("Page.reload", json!({ "scriptToEvaluateOnLoad": "alert(1)" })).is_err());
-        assert!(a("Page.navigate", json!({ "url": "https://a.example", "referrer": "https://b.example" })).is_ok());
-        assert!(a("Page.navigate", json!({ "url": "https://a.example", "frameId": "F" })).is_err());
-        assert!(a("Page.navigate", json!({ "url": "https://a.example", "transitionType": "link" })).is_err());
-        assert!(a("Page.handleJavaScriptDialog", json!({ "accept": true, "promptText": "x" })).is_ok());
-        assert!(a("Page.captureScreenshot", json!({ "format": "png", "clip": {}, "captureBeyondViewport": true })).is_ok());
-        assert!(a("Page.printToPDF", json!({ "headerTemplate": "<img src=x>" })).is_err());
+        assert!(a(
+            "Page.reload",
+            json!({ "scriptToEvaluateOnLoad": "alert(1)" })
+        )
+        .is_err());
+        assert!(a(
+            "Page.navigate",
+            json!({ "url": "https://a.example", "referrer": "https://b.example" })
+        )
+        .is_ok());
+        assert!(a(
+            "Page.navigate",
+            json!({ "url": "https://a.example", "frameId": "F" })
+        )
+        .is_err());
+        assert!(a(
+            "Page.navigate",
+            json!({ "url": "https://a.example", "transitionType": "link" })
+        )
+        .is_err());
+        assert!(a(
+            "Page.handleJavaScriptDialog",
+            json!({ "accept": true, "promptText": "x" })
+        )
+        .is_ok());
+        assert!(a(
+            "Page.captureScreenshot",
+            json!({ "format": "png", "clip": {}, "captureBeyondViewport": true })
+        )
+        .is_ok());
+        assert!(a(
+            "Page.printToPDF",
+            json!({ "headerTemplate": "<img src=x>" })
+        )
+        .is_err());
         assert!(a("Page.reload", json!(["x"])).is_err());
         assert!(a("Page.reload", Value::Null).is_ok());
         assert!(a("Network.setBypassServiceWorker", json!({ "bypass": false })).is_err());
@@ -1026,13 +1140,29 @@ mod tests {
         assert!(now("Input.dispatchKeyEvent", key(0, "Control")).is_err());
         assert!(now("Input.dispatchKeyEvent", key(8, "Delete")).is_err());
         assert!(now("Input.dispatchKeyEvent", key(0, "F12")).is_err());
-        assert!(now("Input.dispatchKeyEvent", json!({ "key": "", "windowsVirtualKeyCode": 123 })).is_err());
+        assert!(now(
+            "Input.dispatchKeyEvent",
+            json!({ "key": "", "windowsVirtualKeyCode": 123 })
+        )
+        .is_err());
         assert!(now("Input.dispatchKeyEvent", key(8, "F10")).is_err());
         assert!(now("Input.dispatchKeyEvent", key(0, "F10")).is_ok());
         assert!(now("Input.dispatchKeyEvent", key(2 | 8, "I")).is_err());
-        assert!(now("Input.dispatchKeyEvent", json!({ "key": "a", "commands": ["copy"] })).is_err());
-        assert!(now("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "button": "left" })).is_ok());
-        assert!(now("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "button": "right" })).is_err());
+        assert!(now(
+            "Input.dispatchKeyEvent",
+            json!({ "key": "a", "commands": ["copy"] })
+        )
+        .is_err());
+        assert!(now(
+            "Input.dispatchMouseEvent",
+            json!({ "type": "mousePressed", "button": "left" })
+        )
+        .is_ok());
+        assert!(now(
+            "Input.dispatchMouseEvent",
+            json!({ "type": "mousePressed", "button": "right" })
+        )
+        .is_err());
         assert!(now("Input.dispatchDragEvent", json!({})).is_err());
         assert!(after_fill("Input.dispatchKeyEvent", &key(2, "c"), Filled::Before).is_ok());
         assert!(after_fill("Runtime.disable", &json!({}), Filled::Before).is_err());
@@ -1045,12 +1175,25 @@ mod tests {
         assert!(taints("Runtime.evaluate", &eval("1 + 1")));
         assert!(!taints("Runtime.evaluate", &eval(&page::snapshot())));
         assert!(!taints("Runtime.evaluate", &eval(&page::console(false))));
-        for m in ["Runtime.callFunctionOn", "Runtime.compileScript", "Runtime.runScript",
-            "Runtime.addBinding", "DOM.setAttributeValue", "DOM.setOuterHTML", "DOM.setAttributesAsText"] {
+        for m in [
+            "Runtime.callFunctionOn",
+            "Runtime.compileScript",
+            "Runtime.runScript",
+            "Runtime.addBinding",
+            "DOM.setAttributeValue",
+            "DOM.setOuterHTML",
+            "DOM.setAttributesAsText",
+        ] {
             assert!(taints(m, &json!({})), "{m}");
         }
-        for m in ["DOM.getDocument", "CSS.addRule", "Emulation.setScriptExecutionDisabled",
-            "Runtime.enable", "Page.navigate", "Input.insertText"] {
+        for m in [
+            "DOM.getDocument",
+            "CSS.addRule",
+            "Emulation.setScriptExecutionDisabled",
+            "Runtime.enable",
+            "Page.navigate",
+            "Input.insertText",
+        ] {
             assert!(!taints(m, &json!({})), "{m}");
         }
     }

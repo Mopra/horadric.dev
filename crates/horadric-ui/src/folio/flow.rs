@@ -400,7 +400,11 @@ fn flatten(blocks: &[md::Block], at: &At, out: &mut Vec<Para>) {
                     _ => Font::H4,
                 };
                 // Two headings in a row read as one title and its subtitle.
-                let gap = if after_heading { gap } else { heading_gap(*level) };
+                let gap = if after_heading {
+                    gap
+                } else {
+                    heading_gap(*level)
+                };
                 let mut p = at.para(text(font, t), gap);
                 // Only the reply's own headings fold, not one in a list,
                 // a quote or a details section.
@@ -615,10 +619,7 @@ fn term_of(p: &Inline) -> Option<(Inline, Inline)> {
 /// one with no more than its separator after it yet.
 fn arriving(p: &Inline) -> bool {
     match lead_bold(p) {
-        Some(end) => matches!(
-            p.text[end..].trim(),
-            "" | "-" | "\u{2013}" | "\u{2014}"
-        ),
+        Some(end) => matches!(p.text[end..].trim(), "" | "-" | "\u{2013}" | "\u{2014}"),
         None => p.text.starts_with("**") && !p.text.contains('\n'),
     }
 }
@@ -721,7 +722,11 @@ pub fn table_widths(natural: &[f32], least: f32, avail: f32) -> Vec<f32> {
             .filter(|(_, k)| !**k)
             .map(|(w, _)| *w)
             .sum();
-        let scale = if wide > 0.0 { (avail - fixed) / wide } else { 1.0 };
+        let scale = if wide > 0.0 {
+            (avail - fixed) / wide
+        } else {
+            1.0
+        };
         let mut changed = false;
         for (k, w) in keep.iter_mut().zip(natural) {
             if !*k && w * scale <= floor(*w) {
@@ -1300,7 +1305,11 @@ mod tests {
         assert_eq!(ps[4].gap, UNDER_HEADING);
         assert_eq!(ps[6].gap, UNDER_HEADING, "a subtitle stays with its title");
         assert!(heading_gap(1) > heading_gap(3));
-        for (src, font) in [("##### x", Font::H4), ("###### x", Font::H4), ("### x", Font::H3)] {
+        for (src, font) in [
+            ("##### x", Font::H4),
+            ("###### x", Font::H4),
+            ("### x", Font::H3),
+        ] {
             assert!(matches!(paras(src)[0].kind, Kind::Text { font: f, .. } if f == font));
         }
     }
@@ -1322,7 +1331,8 @@ mod tests {
 
     #[test]
     fn terms_hang_when_every_item_has_one() {
-        let ps = paras("- **Fast**: it is quick\n- **Small:** it is light\n- **Safe** - no `unsafe`");
+        let ps =
+            paras("- **Fast**: it is quick\n- **Small:** it is light\n- **Safe** - no `unsafe`");
         assert_eq!(term(&ps[0]), Some("Fast"));
         assert_eq!(text_of(&ps[0]), "it is quick");
         assert_eq!(term(&ps[1]), Some("Small"));
@@ -1391,7 +1401,8 @@ mod tests {
         k.starts_with("code:")
     }
 
-    const DETAILS: &str = "Before.\n\n<details>\n<summary>More</summary>\n\nHidden.\n\n</details>\n\nAfter.";
+    const DETAILS: &str =
+        "Before.\n\n<details>\n<summary>More</summary>\n\nHidden.\n\n</details>\n\nAfter.";
 
     #[test]
     fn details_fold_until_their_key_is_toggled() {
@@ -1429,8 +1440,16 @@ mod tests {
         assert_eq!(text_of(&ps[1]), "More.");
         match (&ps[2].kind, &ps[3].kind) {
             (
-                Kind::Footnote { label: a, text: ta, first: true },
-                Kind::Footnote { label: b, first: false, .. },
+                Kind::Footnote {
+                    label: a,
+                    text: ta,
+                    first: true,
+                },
+                Kind::Footnote {
+                    label: b,
+                    first: false,
+                    ..
+                },
             ) => {
                 assert_eq!((a.as_str(), b.as_str()), ("1", "2"));
                 assert_eq!(ta.text, "One.");
@@ -1443,7 +1462,10 @@ mod tests {
     #[test]
     fn a_paragraph_carries_the_notes_its_marks_name() {
         let ps = paras("Claim[^a] and[^b], again[^a].\n\nPlain.\n\n[^a]: One.\n[^b]: Two.");
-        let want = vec![("1".to_string(), "One.".to_string()), ("2".into(), "Two.".into())];
+        let want = vec![
+            ("1".to_string(), "One.".to_string()),
+            ("2".into(), "Two.".into()),
+        ];
         assert_eq!(ps[0].notes, want);
         assert!(ps[1].notes.is_empty());
     }
@@ -1454,10 +1476,18 @@ mod tests {
     fn a_heading_with_a_section_can_fold() {
         let ps = paras_with(SECTIONS, none_open, true);
         let folds: Vec<(String, bool)> = (ps.iter())
-            .filter_map(|p| p.fold.as_ref().map(|(_, shut)| (text_of(p).to_string(), *shut)))
+            .filter_map(|p| {
+                p.fold
+                    .as_ref()
+                    .map(|(_, shut)| (text_of(p).to_string(), *shut))
+            })
             .collect();
         let names: Vec<&str> = folds.iter().map(|(t, _)| t.as_str()).collect();
-        assert_eq!(names, ["Top", "A", "A1", "B", "C"], "an empty section has nothing to fold");
+        assert_eq!(
+            names,
+            ["Top", "A", "A1", "B", "C"],
+            "an empty section has nothing to fold"
+        );
         assert!(folds.iter().all(|(_, shut)| !shut));
     }
 
@@ -1469,7 +1499,10 @@ mod tests {
             .filter(|p| matches!(p.kind, Kind::Text { .. }))
             .map(|p| text_of(p).to_string())
             .collect();
-        assert_eq!(ps, ["Top", "Intro.", "A", "B", "In B.", "Empty", "C", "item"]);
+        assert_eq!(
+            ps,
+            ["Top", "Intro.", "A", "B", "In B.", "Empty", "C", "item"]
+        );
         let folded = paras_with(SECTIONS, |k| k == heading_key(2, "A"), true);
         let head = folded.iter().find(|p| text_of(p) == "A").unwrap();
         assert_eq!(head.fold, Some((a, true)));
@@ -1480,7 +1513,11 @@ mod tests {
 
     #[test]
     fn a_heading_inside_a_list_or_quote_does_not_fold() {
-        let ps = paras_with("> ## Quoted\n>\n> Body.\n\n- ## Listed\n\n  Body.", none_open, true);
+        let ps = paras_with(
+            "> ## Quoted\n>\n> Body.\n\n- ## Listed\n\n  Body.",
+            none_open,
+            true,
+        );
         assert!(ps.iter().all(|p| p.fold.is_none()));
         // Nor on a card, which is not built again when one is toggled.
         assert!(paras(SECTIONS).iter().all(|p| p.fold.is_none()));
@@ -1489,16 +1526,24 @@ mod tests {
     #[test]
     fn an_image_alone_is_an_image_and_in_text_stays_text() {
         let ps = paras("![logo](assets/rune.png)\n\nSee ![x](https://x.dev/a.png) here.");
-        assert!(matches!(&ps[0].kind, Kind::Image { alt, src } if alt.text == "logo" && src == "assets/rune.png"));
+        assert!(
+            matches!(&ps[0].kind, Kind::Image { alt, src } if alt.text == "logo" && src == "assets/rune.png")
+        );
         assert!(matches!(ps[1].kind, Kind::Text { .. }));
     }
 
     #[test]
     fn code_keeps_the_fence_info_and_math_is_labelled() {
         let ps = paras("```rust title=\"src/x.rs\"\nfn a() {}\n```\n\n$$\nx^2\n$$\n\n    indented");
-        assert!(matches!(&ps[0].kind, Kind::Code { info, .. } if info == "rust title=\"src/x.rs\""));
-        assert!(matches!(&ps[1].kind, Kind::Code { info, text } if info == "math" && text == "x^2"));
-        assert!(matches!(&ps[2].kind, Kind::Code { info, text } if info.is_empty() && text == "indented"));
+        assert!(
+            matches!(&ps[0].kind, Kind::Code { info, .. } if info == "rust title=\"src/x.rs\"")
+        );
+        assert!(
+            matches!(&ps[1].kind, Kind::Code { info, text } if info == "math" && text == "x^2")
+        );
+        assert!(
+            matches!(&ps[2].kind, Kind::Code { info, text } if info.is_empty() && text == "indented")
+        );
     }
 
     #[test]

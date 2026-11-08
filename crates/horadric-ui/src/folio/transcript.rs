@@ -14,7 +14,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
-use horadric_core::folio::{ timeline, turn_map, Block, Ending, Lane, ShellRun, Step, StepState, TodoStatus};
+use horadric_core::folio::{
+    timeline, turn_map, Block, Ending, Lane, ShellRun, Step, StepState, TodoStatus,
+};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct2D::{
     ID2D1Bitmap, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
@@ -28,7 +30,7 @@ use super::rich::{self, Ctx, Fonts, Item, Scene, F};
 use super::view::{self, d2d, text_format, Gfx, Hit, Palette, View, CARET_W, FONT};
 use super::Chat;
 use crate::field::Field;
-use crate::folio_look::self as look;
+use crate::folio_look as look;
 use crate::layout::Rect;
 use crate::render;
 use crate::theme::{self, Color};
@@ -963,7 +965,14 @@ impl Ctx<'_> {
             // Each piece that streams in moves it on to another rune.
             let rune = t.len() / 48;
             let ink = self.pal.accent.mix(self.pal.fg, 0.35);
-            (s.items).push(Item::Rune(LIVE | rune, r.x + 8.0, r.y + 7.0, 12.0, ink, 1.4));
+            (s.items).push(Item::Rune(
+                LIVE | rune,
+                r.x + 8.0,
+                r.y + 7.0,
+                12.0,
+                ink,
+                1.4,
+            ));
         } else {
             s.line(
                 '\u{E82F}'.to_string(),
@@ -978,7 +987,12 @@ impl Ctx<'_> {
         let lw = (self.one_line(&self.gfx.line, &label))
             .map_or(room, |l| render::text_size(&l).0)
             .min(room);
-        s.line(label, F::Line, Rect::new(x, r.y, lw + 2.0, r.h), self.pal.dim);
+        s.line(
+            label,
+            F::Line,
+            Rect::new(x, r.y, lw + 2.0, r.h),
+            self.pal.dim,
+        );
         x += lw + 12.0;
         let glimpse = thought_glimpse(t, live);
         if !open && !glimpse.is_empty() && x + 40.0 < r.x + 22.0 + room {
@@ -1149,7 +1163,12 @@ impl Ctx<'_> {
         let dot_x = x - NEST + 8.0;
         let elbow = top + HEAD_H / 2.0;
         s.fill(
-            Rect::new(dot_x, top - STEP_H / 2.0 + 5.0, 1.0, elbow - top + STEP_H / 2.0 - 5.0),
+            Rect::new(
+                dot_x,
+                top - STEP_H / 2.0 + 5.0,
+                1.0,
+                elbow - top + STEP_H / 2.0 - 5.0,
+            ),
             0.0,
             tie,
         );
@@ -1187,8 +1206,16 @@ impl Ctx<'_> {
         let who_w = (self.one_line(&self.gfx.small, who))
             .map_or(room, |l| render::text_size(&l).0 + 2.0)
             .min(room);
-        s.line(who, F::Small, Rect::new(tx, top, who_w, HEAD_H), self.pal.dim);
-        let about = step.input["description"].as_str().unwrap_or_default().trim();
+        s.line(
+            who,
+            F::Small,
+            Rect::new(tx, top, who_w, HEAD_H),
+            self.pal.dim,
+        );
+        let about = step.input["description"]
+            .as_str()
+            .unwrap_or_default()
+            .trim();
         if !about.is_empty() && room - who_w > 40.0 {
             let r = Rect::new(tx + who_w + 8.0, top, room - who_w - 8.0, HEAD_H);
             s.line(about, F::Small, r, self.pal.faint);
@@ -1532,7 +1559,9 @@ impl View {
     ) {
         let rt = &gfx.rt;
         let keyed = match super::select::keyed_card(chat) {
-            Some(Block::Question { request_id, .. }) if chat.tr.state.keys => Some(request_id.clone()),
+            Some(Block::Question { request_id, .. }) if chat.tr.state.keys => {
+                Some(request_id.clone())
+            }
             _ => None,
         };
         chat.tr.state.keyed = keyed;
@@ -1767,7 +1796,8 @@ impl View {
             let hovered = mouse.is_some_and(|(mx, my)| whole.contains(mx, my));
             rich::draw(gfx, fonts, s, cx, top, hovered);
             if !waits {
-                let at = (built.live.iter()).map(|&(n, x, y, size, c, w)| (n, cx + x, top + y, size, c, w));
+                let at = (built.live.iter())
+                    .map(|&(n, x, y, size, c, w)| (n, cx + x, top + y, size, c, w));
                 live.extend(at.filter(|r| r.2 + r.3 >= area.y && r.2 <= area.bottom()));
             }
             let mine = s.hits.iter().chain(s.hover_hits.iter().filter(|_| hovered));
@@ -1927,13 +1957,22 @@ impl View {
         let count = format!("{done} of {total}");
         let mut x = head.x + 24.0;
         let cw = width_of(&gfx.line, &count) + 2.0;
-        gfx.text_in(&count, &gfx.line, &Rect::new(x, head.y, cw, head.h), pal.fg.with_alpha(0.85));
+        gfx.text_in(
+            &count,
+            &gfx.line,
+            &Rect::new(x, head.y, cw, head.h),
+            pal.fg.with_alpha(0.85),
+        );
         x += cw + 10.0;
         let bar_w = TODO_BAR_W.min((head.right() - 24.0 - x).max(0.0));
         if bar_w > 12.0 {
             let track = Rect::new(x, head.y + head.h / 2.0 - 1.5, bar_w, 3.0);
             gfx.fill_round(&track, 1.5, pal.fg.with_alpha(0.08));
-            let k = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+            let k = if total == 0 {
+                0.0
+            } else {
+                done as f32 / total as f32
+            };
             if k > 0.0 {
                 let fill = Rect::new(track.x, track.y, (track.w * k).max(3.0), track.h);
                 gfx.fill_round(&fill, 1.5, mark.with_alpha(0.85));
@@ -2127,7 +2166,10 @@ mod tests {
         assert_eq!(thought_line("", false), "Thought");
         assert_eq!(thought_line("hmm", false), "Thought \u{b7} 1 word");
         assert_eq!(thought_line("a b\nc", false), "Thought \u{b7} 3 words");
-        assert_eq!(thought_line(&"w ".repeat(1500), false), "Thought \u{b7} 1.5k words");
+        assert_eq!(
+            thought_line(&"w ".repeat(1500), false),
+            "Thought \u{b7} 1.5k words"
+        );
         assert_eq!(thought_line("a b", true), "Thinking\u{2026}");
     }
 
@@ -2146,7 +2188,10 @@ mod tests {
             lane_meta("sonnet", 1, 950, Some(2_000)),
             "Sonnet \u{b7} 1 tool use \u{b7} 950 tokens \u{b7} 2.0 s"
         );
-        assert_eq!(lane_meta(" ", 3, 12_300, None), "3 tool uses \u{b7} 12.3k tokens");
+        assert_eq!(
+            lane_meta(" ", 3, 12_300, None),
+            "3 tool uses \u{b7} 12.3k tokens"
+        );
     }
 
     #[test]

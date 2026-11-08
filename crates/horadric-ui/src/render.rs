@@ -41,9 +41,9 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND,
     D2D1_OPACITY_MASK_CONTENT_GRAPHICS, D2D1_PRESENT_OPTIONS_IMMEDIATELY,
-    D2D1_PRESENT_OPTIONS_RETAIN_CONTENTS,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
+    D2D1_PRESENT_OPTIONS_RETAIN_CONTENTS, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
+    D2D1_STROKE_STYLE_PROPERTIES,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteRenderingParams,
@@ -1397,7 +1397,10 @@ impl Painter<'_> {
             let at = Rect::new(r.x, look.y, r.w, r.h);
             // Its lamp's light would shine through the tiles sliding over
             // it; it is going out anyway.
-            let dark = Painter { emit: None, ..*self };
+            let dark = Painter {
+                emit: None,
+                ..*self
+            };
             dark.tile(gpu, m, scene, usize::MAX, &at, s, &look);
         }
         for (i, (r, s, look)) in tiles(scene).enumerate() {

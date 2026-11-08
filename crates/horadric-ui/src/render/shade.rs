@@ -18,10 +18,11 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     CLSID_D2D1Shadow, ID2D1Bitmap, ID2D1BitmapRenderTarget, ID2D1DeviceContext, ID2D1Geometry,
-    ID2D1Image, ID2D1RenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_LINEAR,
-    D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS, D2D1_PROPERTY_TYPE_FLOAT,
-    D2D1_PROPERTY_TYPE_VECTOR4, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
+    ID2D1Image, ID2D1RenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
+    D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_VECTOR4, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION,
+    D2D1_SHADOW_PROP_COLOR,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows_numerics::{Matrix3x2, Vector2};
@@ -56,7 +57,9 @@ pub(super) fn stepped(blur: f32) -> f32 {
 
 /// The key of the shade in `kept` drawn longest ago.
 fn oldest<K: Clone, V>(kept: &HashMap<K, (V, u64)>) -> Option<K> {
-    kept.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| k.clone())
+    kept.iter()
+        .min_by_key(|(_, (_, at))| *at)
+        .map(|(k, _)| k.clone())
 }
 
 /// The Gaussian that softens an edge as much as the old stack of shapes
@@ -329,7 +332,9 @@ impl Painter<'_> {
                 draw();
                 return Ok(());
             }
-            let mask = gpu.d2d.CreateRoundedRectangleGeometry(&rounded(&shape, s.radius))?;
+            let mask = gpu
+                .d2d
+                .CreateRoundedRectangleGeometry(&rounded(&shape, s.radius))?;
             let mask = mask.cast::<ID2D1Geometry>()?;
             let layer = out.CreateLayer(None)?;
             let params = D2D1_LAYER_PARAMETERS {
@@ -410,7 +415,8 @@ impl Shading {
         far: Color,
         opacity: f32,
     ) {
-        self.painter(rt).inner(gpu, r, radius, depth, near, far, opacity);
+        self.painter(rt)
+            .inner(gpu, r, radius, depth, near, far, opacity);
     }
 }
 

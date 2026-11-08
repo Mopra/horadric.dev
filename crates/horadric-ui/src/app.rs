@@ -2955,7 +2955,10 @@ fn project_menu(key: &str) {
     if !town::is(key) {
         items.push(Item::action(CLOSE, "Close project"));
     } else if with_app(|app| app.sessions_in(key)) == Some(0) {
-        items.push(Item::action(HIDE_TOWN, format!("Hide {}", project_name(key))));
+        items.push(Item::action(
+            HIDE_TOWN,
+            format!("Hide {}", project_name(key)),
+        ));
     } else {
         items.push(Item::Disabled(format!(
             "Hide {} (end its sessions first)",
@@ -4313,12 +4316,10 @@ impl App {
                 Some(Action::Listen) => self.listen_on_demand(),
                 Some(Action::Stop) => self.stop_warriv(),
                 Some(Action::Account) => post(self.notify.0 as isize, WM_HORADRIC_ACCOUNT_MENU, 0),
-                Some(Action::DictateAnywhere) => {
-                    crate::dictate::anywhere::press(
-                        &self.shared,
-                        self.keys[Action::DictateAnywhere.index()].key,
-                    )
-                }
+                Some(Action::DictateAnywhere) => crate::dictate::anywhere::press(
+                    &self.shared,
+                    self.keys[Action::DictateAnywhere.index()].key,
+                ),
                 Some(Action::Toggle) => {
                     self.toggle();
                 }
@@ -6896,7 +6897,10 @@ impl App {
                 let now = crate::dictate::voice().model;
                 list(
                     "Fetched the first time it listens",
-                    models.iter().map(|m| crate::dictate::model_label(*m)).collect(),
+                    models
+                        .iter()
+                        .map(|m| crate::dictate::model_label(*m))
+                        .collect(),
                     at(models.iter().position(|m| *m == now)),
                 )
             }
@@ -6909,7 +6913,10 @@ impl App {
                     } else {
                         "Another than English picks a model for any language"
                     },
-                    Language::ALL.iter().map(|l| l.label().to_string()).collect(),
+                    Language::ALL
+                        .iter()
+                        .map(|l| l.label().to_string())
+                        .collect(),
                     at(Language::ALL
                         .iter()
                         .position(|l| now.model.is_multilingual() && *l == now.language)),
@@ -9684,7 +9691,12 @@ impl App {
         projects.extend(self.open.iter().cloned());
         projects.extend(self.listed());
         // A town stays when it has no sessions, unless it is hidden.
-        projects.extend(town::all().into_iter().filter(|t| !t.saved.hidden).map(|t| t.key));
+        projects.extend(
+            town::all()
+                .into_iter()
+                .filter(|t| !t.saved.hidden)
+                .map(|t| t.key),
+        );
 
         // Remove clusters whose project is gone.
         let mut i = 0;

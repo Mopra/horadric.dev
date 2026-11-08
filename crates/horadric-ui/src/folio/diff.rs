@@ -7,8 +7,8 @@
 use std::ops::Range;
 
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FONT_WEIGHT_BOLD, DWRITE_LINE_METRICS, DWRITE_TEXT_ALIGNMENT_LEADING,
-    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_WORD_WRAPPING_EMERGENCY_BREAK, IDWriteTextLayout,
+    IDWriteTextLayout, DWRITE_FONT_WEIGHT_BOLD, DWRITE_LINE_METRICS, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_WORD_WRAPPING_EMERGENCY_BREAK,
 };
 
 use super::flow::{self, DiffRow};
@@ -112,12 +112,8 @@ impl Ctx<'_> {
         self.diff_head(s, e, plate, add, del);
 
         if !view.is_empty() {
-            s.items.push(rich::Item::Clip(Rect::new(
-                x,
-                body_top,
-                w,
-                plate_h - HEAD,
-            )));
+            s.items
+                .push(rich::Item::Clip(Rect::new(x, body_top, w, plate_h - HEAD)));
             let row_rect = |k: usize| {
                 let (t, h) = spans[k];
                 Rect::new(x, rows_y + t, w, h)
@@ -221,7 +217,11 @@ impl Ctx<'_> {
                         '-' => del,
                         _ => self.pal.faint,
                     };
-                    let n = if matches!(r.mark, '+' | '-' | '~') { 1 } else { 0 };
+                    let n = if matches!(r.mark, '+' | '-' | '~') {
+                        1
+                    } else {
+                        0
+                    };
                     self.paint(&ml, at..at + n, ink);
                     at += n + lines(k) as u32;
                 }
@@ -379,7 +379,9 @@ impl Ctx<'_> {
             let (mut byte, mut pos) = (0usize, starts[k]);
             for sp in spans {
                 let end = (byte + sp.len).min(r.text.len());
-                let Some(piece) = r.text.get(byte..end) else { break };
+                let Some(piece) = r.text.get(byte..end) else {
+                    break;
+                };
                 let n = piece.encode_utf16().count() as u32;
                 let [cr, cg, cb] = sp.style.fg;
                 let c = Color::rgb((cr as u32) << 16 | (cg as u32) << 8 | cb as u32);
@@ -693,7 +695,10 @@ mod tests {
             row('~', None, None, ""),
             row(' ', Some(20), Some(21), "b"),
         ];
-        assert_eq!(gap_label(&rows, 1, true), "9 unchanged lines \u{b7} @@ line 21");
+        assert_eq!(
+            gap_label(&rows, 1, true),
+            "9 unchanged lines \u{b7} @@ line 21"
+        );
         assert_eq!(gap_label(&rows, 1, false), "Edit 2 of 2");
     }
 
@@ -715,7 +720,10 @@ mod tests {
         let (old, new, at) = sides(&rows);
         assert_eq!(old, ["k", "old"]);
         assert_eq!(new, ["k", "new"]);
-        assert_eq!(at, [Some((false, 0)), Some((true, 1)), Some((false, 1)), None]);
+        assert_eq!(
+            at,
+            [Some((false, 0)), Some((true, 1)), Some((false, 1)), None]
+        );
     }
 
     #[test]

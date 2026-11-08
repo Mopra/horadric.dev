@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use horadric_core::folio::{
-    GlobResult, GrepLine, Lane, GrepResult, ReadResult, ResultKind, ShellResult, Step, StepKind,
+    GlobResult, GrepLine, GrepResult, Lane, ReadResult, ResultKind, ShellResult, Step, StepKind,
     StepState, ToolResult, WebSearchResult,
 };
 use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout, DWRITE_TEXT_ALIGNMENT_TRAILING};
@@ -52,7 +52,14 @@ struct Mono {
 }
 
 impl Ctx<'_> {
-    pub(super) unsafe fn tools(&self, i: usize, steps: &[Step], open: bool, st: &State, cw: f32) -> Scene {
+    pub(super) unsafe fn tools(
+        &self,
+        i: usize,
+        steps: &[Step],
+        open: bool,
+        st: &State,
+        cw: f32,
+    ) -> Scene {
         let mut s = Scene::default();
         let r = Rect::new(0.0, 0.0, cw, LINE_H);
         let state = look::run_state(steps);
@@ -97,7 +104,15 @@ impl Ctx<'_> {
 
     /// One step's line at `x`, `y`, and its detail when open. Returns
     /// where the next goes.
-    pub(super) unsafe fn step(&self, s: &mut Scene, step: &Step, x: f32, y: f32, cw: f32, st: &State) -> f32 {
+    pub(super) unsafe fn step(
+        &self,
+        s: &mut Scene,
+        step: &Step,
+        x: f32,
+        y: f32,
+        cw: f32,
+        st: &State,
+    ) -> f32 {
         let w = cw - x;
         let row = Rect::new(x, y, w, STEP_H);
         let dot = match step.state {
@@ -211,7 +226,14 @@ impl Ctx<'_> {
         // Only shown while the agent works, so it turns on the frame clock too.
         let rune = lane.tool_uses.max(lane.steps.len() as u64) as usize;
         let h = 11.0;
-        (s.items).push(Item::Rune(LIVE | rune, r.x + 5.0, r.y + (r.h - h) / 2.0, h, ink, 1.3));
+        (s.items).push(Item::Rune(
+            LIVE | rune,
+            r.x + 5.0,
+            r.y + (r.h - h) / 2.0,
+            h,
+            ink,
+            1.3,
+        ));
         let model = step.input["model"].as_str().unwrap_or_default();
         let line = look::with_model(flow::lane_line(lane, true), lane, model);
         let text = Rect::new(r.x + 16.0, r.y, (r.w - 16.0).max(0.0), r.h);
@@ -219,7 +241,14 @@ impl Ctx<'_> {
     }
 
     /// The images a step's result carried, as thumbnails in rows.
-    pub(super) unsafe fn step_images(&self, s: &mut Scene, step: &Step, x: f32, y: f32, w: f32) -> f32 {
+    pub(super) unsafe fn step_images(
+        &self,
+        s: &mut Scene,
+        step: &Step,
+        x: f32,
+        y: f32,
+        w: f32,
+    ) -> f32 {
         let (mut cx, mut cy, mut row_h) = (x, y, 0.0f32);
         for (k, img) in step.images.iter().enumerate() {
             let got = (self.thumbs.borrow_mut())
@@ -277,7 +306,16 @@ impl Ctx<'_> {
 
     /// A step's result drawn for what it is. Returns where the next goes.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn result(&self, s: &mut Scene, step: &Step, r: &ToolResult, x: f32, y: f32, w: f32, st: &State) -> f32 {
+    unsafe fn result(
+        &self,
+        s: &mut Scene,
+        step: &Step,
+        r: &ToolResult,
+        x: f32,
+        y: f32,
+        w: f32,
+        st: &State,
+    ) -> f32 {
         let all = st.all.contains(&step.id);
         let id = step.id.as_str();
         // A shell's error is its output, which it shows as such.
@@ -297,7 +335,9 @@ impl Ctx<'_> {
                 Some(json) => self.mono_plate(s, id, json, "json", x, y, w, all, JSON_LINES),
                 None => self.prose(s, id, &r.text, x, y, w, all),
             },
-            ResultKind::Plain if step.tool == "WebFetch" => self.prose(s, id, &r.text, x, y, w, all),
+            ResultKind::Plain if step.tool == "WebFetch" => {
+                self.prose(s, id, &r.text, x, y, w, all)
+            }
             ResultKind::Plain => self.mono_plate(s, id, &r.text, "", x, y, w, all, OUTPUT_LINES),
         }
     }
@@ -305,7 +345,16 @@ impl Ctx<'_> {
     /// A Read: the file and range in the header, the lines it gave
     /// numbered from where they start and coloured for the file's kind.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn read_lines(&self, s: &mut Scene, id: &str, r: &ReadResult, x: f32, y: f32, w: f32, all: bool) -> f32 {
+    unsafe fn read_lines(
+        &self,
+        s: &mut Scene,
+        id: &str,
+        r: &ReadResult,
+        x: f32,
+        y: f32,
+        w: f32,
+        all: bool,
+    ) -> f32 {
         let n = r.lines.len();
         let shown = if all { n } else { n.min(READ_LINES) };
         let at = s.items.len();
@@ -315,10 +364,23 @@ impl Ctx<'_> {
             range.push_str(&format!(" of {total}"));
         }
         let rw = self.width(&self.fonts.right, &range) + 2.0;
-        s.line(range, F::Right, Rect::new(x + w - PAD - rw, y, rw, HEAD), self.pal.faint);
+        s.line(
+            range,
+            F::Right,
+            Rect::new(x + w - PAD - rw, y, rw, HEAD),
+            self.pal.faint,
+        );
         let file = Rect::new(x + PAD, y, (w - 3.0 * PAD - rw).max(0.0), HEAD);
-        s.line(self.short(&r.path), F::Small, file, self.pal.fg.with_alpha(0.78));
-        s.hit(file, Hit::Tr(Act::Path(r.path.clone(), Some(r.start as u32))));
+        s.line(
+            self.short(&r.path),
+            F::Small,
+            file,
+            self.pal.fg.with_alpha(0.78),
+        );
+        s.hit(
+            file,
+            Hit::Tr(Act::Path(r.path.clone(), Some(r.start as u32))),
+        );
         let mut cy = y + HEAD;
         if shown > 0 {
             let nums: Vec<String> = (r.start..r.start + shown).map(|k| k.to_string()).collect();
@@ -327,7 +389,14 @@ impl Ctx<'_> {
                 .map(|e| e.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let text = r.lines[..shown].join("\n");
-            if let Some(m) = self.mono(text, &ext, Some(&nums), &[], w, self.pal.fg.with_alpha(0.88)) {
+            if let Some(m) = self.mono(
+                text,
+                &ext,
+                Some(&nums),
+                &[],
+                w,
+                self.pal.fg.with_alpha(0.88),
+            ) {
                 self.draw_mono(s, &m, x, cy + 8.0, w);
                 cy += m.h + 18.0;
             }
@@ -372,7 +441,11 @@ impl Ctx<'_> {
             if left == 0 {
                 break;
             }
-            let file = if l.file.is_empty() { searched } else { l.file.as_str() };
+            let file = if l.file.is_empty() {
+                searched
+            } else {
+                l.file.as_str()
+            };
             match groups.last_mut() {
                 Some((f, list)) if *f == file => list.push(l),
                 _ => groups.push((file, vec![l])),
@@ -393,9 +466,16 @@ impl Ctx<'_> {
                 self.path_row(s, file, count, first, x + PAD, cy, w - 2.0 * PAD);
                 cy += ROW;
             }
-            let body: Vec<&str> = lines.iter().map(|l| if l.gap { "" } else { l.text.as_str() }).collect();
+            let body: Vec<&str> = lines
+                .iter()
+                .map(|l| if l.gap { "" } else { l.text.as_str() })
+                .collect();
             let nums: Vec<String> = (lines.iter())
-                .map(|l| l.line.filter(|_| !l.gap).map_or(String::new(), |n| n.to_string()))
+                .map(|l| {
+                    l.line
+                        .filter(|_| !l.gap)
+                        .map_or(String::new(), |n| n.to_string())
+                })
                 .collect();
             let dim = self.pal.fg.with_alpha(0.4);
             let tints: Vec<(usize, Color)> = (lines.iter().enumerate())
@@ -440,12 +520,35 @@ impl Ctx<'_> {
 
     /// A Glob: the files it found, short where they are in the project.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn glob_files(&self, s: &mut Scene, id: &str, g: &GlobResult, x: f32, y: f32, w: f32, all: bool) -> f32 {
+    unsafe fn glob_files(
+        &self,
+        s: &mut Scene,
+        id: &str,
+        g: &GlobResult,
+        x: f32,
+        y: f32,
+        w: f32,
+        all: bool,
+    ) -> f32 {
         let files = g.files.iter().map(|f| (f.as_str(), None, None));
         let note = (g.truncated && g.total > g.files.len())
             .then(|| format!("The first {} of {}", g.files.len(), g.total));
-        let note = note.or_else(|| g.truncated.then(|| "Only the first files were listed".to_string()));
-        self.path_list(s, id, files, g.files.len(), note.as_deref(), "No files", x, y, w, all)
+        let note = note.or_else(|| {
+            g.truncated
+                .then(|| "Only the first files were listed".to_string())
+        });
+        self.path_list(
+            s,
+            id,
+            files,
+            g.files.len(),
+            note.as_deref(),
+            "No files",
+            x,
+            y,
+            w,
+            all,
+        )
     }
 
     /// Paths as rows on a plate, each opening its file, with a count
@@ -465,8 +568,17 @@ impl Ctx<'_> {
         all: bool,
     ) -> f32 {
         if n == 0 {
-            let say = if empty.trim().is_empty() { "Nothing found" } else { empty.trim() };
-            s.line(say.to_string(), F::Small, Rect::new(x, y, w, ROW), self.pal.faint);
+            let say = if empty.trim().is_empty() {
+                "Nothing found"
+            } else {
+                empty.trim()
+            };
+            s.line(
+                say.to_string(),
+                F::Small,
+                Rect::new(x, y, w, ROW),
+                self.pal.faint,
+            );
             return y + ROW;
         }
         let at = s.items.len();
@@ -510,7 +622,10 @@ impl Ctx<'_> {
         let at = s.items.len();
         let ps = step.tool == "PowerShell";
         let command = match r.command.trim_end() {
-            "" => step.input["command"].as_str().unwrap_or_default().trim_end(),
+            "" => step.input["command"]
+                .as_str()
+                .unwrap_or_default()
+                .trim_end(),
             c => c,
         };
         let mut cy = y;
@@ -533,7 +648,11 @@ impl Ctx<'_> {
         // What it printed: its output, then its errors.
         let (out, err) = (r.stdout.trim_end(), r.stderr.trim_end());
         let mut text = out.trim_start_matches('\n').to_string();
-        let err_row = if text.is_empty() { 0 } else { text.split('\n').count() };
+        let err_row = if text.is_empty() {
+            0
+        } else {
+            text.split('\n').count()
+        };
         if !err.is_empty() {
             if !text.is_empty() {
                 text.push('\n');
@@ -543,8 +662,16 @@ impl Ctx<'_> {
         if text.is_empty() && r.interpretation.is_empty() {
             text = tr.text.trim_end().to_string();
         }
-        let lines: Vec<&str> = if text.is_empty() { Vec::new() } else { text.split('\n').collect() };
-        let cut = if all { 0 } else { lines.len().saturating_sub(OUTPUT_LINES) };
+        let lines: Vec<&str> = if text.is_empty() {
+            Vec::new()
+        } else {
+            text.split('\n').collect()
+        };
+        let cut = if all {
+            0
+        } else {
+            lines.len().saturating_sub(OUTPUT_LINES)
+        };
         let failed = step.state == StepState::Failed || tr.error;
         let ink = if failed && err.is_empty() {
             theme::error().mix(self.pal.fg, 0.35)
@@ -555,7 +682,9 @@ impl Ctx<'_> {
         let tints: Vec<(usize, Color)> = if err.is_empty() {
             Vec::new()
         } else {
-            (err_row.max(cut)..lines.len()).map(|k| (k - cut, err_ink)).collect()
+            (err_row.max(cut)..lines.len())
+                .map(|k| (k - cut, err_ink))
+                .collect()
         };
         if !lines.is_empty() {
             if lines.len() > OUTPUT_LINES {
@@ -566,7 +695,12 @@ impl Ctx<'_> {
                     format!("Show all, {cut} more lines above")
                 };
                 let r = Rect::new(x, cy, w, 24.0);
-                s.line(say, F::Small, Rect::new(x + PAD, cy + 2.0, w - 2.0 * PAD, 22.0), self.link_ink());
+                s.line(
+                    say,
+                    F::Small,
+                    Rect::new(x + PAD, cy + 2.0, w - 2.0 * PAD, 22.0),
+                    self.link_ink(),
+                );
                 s.hit(r, Hit::Tr(Act::All(step.id.clone())));
                 cy += 22.0;
             }
@@ -579,7 +713,12 @@ impl Ctx<'_> {
         if !r.interpretation.is_empty() {
             // What the CLI made of a nonzero code: an answer, not a failure.
             let row = Rect::new(x + PAD, cy + 1.0, w - 2.0 * PAD, ROW);
-            s.line(r.interpretation.trim().to_string(), F::Small, row, self.pal.dim);
+            s.line(
+                r.interpretation.trim().to_string(),
+                F::Small,
+                row,
+                self.pal.dim,
+            );
             cy += ROW + 2.0;
         }
         if cy == y {
@@ -600,22 +739,45 @@ impl Ctx<'_> {
     /// A WebSearch: the pages it found, each opening in the browser, and
     /// what it said of them when asked.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn web_links(&self, s: &mut Scene, id: &str, ws: &WebSearchResult, x: f32, y: f32, w: f32, all: bool) -> f32 {
+    unsafe fn web_links(
+        &self,
+        s: &mut Scene,
+        id: &str,
+        ws: &WebSearchResult,
+        x: f32,
+        y: f32,
+        w: f32,
+        all: bool,
+    ) -> f32 {
         let mut cy = y;
         if !ws.links.is_empty() {
             let at = s.items.len();
             cy += 5.0;
             for link in ws.links.iter().take(if all { usize::MAX } else { LINKS }) {
                 let row = Rect::new(x, cy, w, ROW);
-                s.line("\u{E774}", F::Icon, Rect::new(x + PAD, cy, 14.0, ROW), self.pal.faint.with_alpha(0.7));
+                s.line(
+                    "\u{E774}",
+                    F::Icon,
+                    Rect::new(x + PAD, cy, 14.0, ROW),
+                    self.pal.faint.with_alpha(0.7),
+                );
                 let host = look::domain(&link.url);
-                let title = if link.title.trim().is_empty() { host.clone() } else { link.title.trim().to_string() };
+                let title = if link.title.trim().is_empty() {
+                    host.clone()
+                } else {
+                    link.title.trim().to_string()
+                };
                 let room = w - 2.0 * PAD - 24.0;
                 let hw = self.width(&self.gfx.small, &host).min(room * 0.4) + 2.0;
                 let tw = self.width(&self.gfx.small, &title).min(room - hw - 10.0) + 2.0;
                 let tx = x + PAD + 24.0;
                 s.line(title, F::Small, Rect::new(tx, cy, tw, ROW), self.link_ink());
-                s.line(host, F::Small, Rect::new(tx + tw + 8.0, cy, hw, ROW), self.pal.faint);
+                s.line(
+                    host,
+                    F::Small,
+                    Rect::new(tx + tw + 8.0, cy, hw, ROW),
+                    self.pal.faint,
+                );
                 s.hit(row, Hit::Tr(Act::Link(link.url.clone())));
                 cy += ROW;
             }
@@ -643,7 +805,16 @@ impl Ctx<'_> {
     /// Words a tool fetched or a server sent: as a reply is set when they
     /// are markdown, else as plain text, folded when long.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn prose(&self, s: &mut Scene, id: &str, text: &str, x: f32, y: f32, w: f32, all: bool) -> f32 {
+    unsafe fn prose(
+        &self,
+        s: &mut Scene,
+        id: &str,
+        text: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        all: bool,
+    ) -> f32 {
         let text = text.trim();
         if text.is_empty() {
             return y;
@@ -651,7 +822,11 @@ impl Ctx<'_> {
         let (mut cy, more) = if look::looks_like_markdown(text) {
             self.markdown(s, text, x, y + 2.0, w, all)
         } else {
-            let cut = if all { text } else { head_chars(text, PROSE_CHARS) };
+            let cut = if all {
+                text
+            } else {
+                head_chars(text, PROSE_CHARS)
+            };
             let Some(l) = self.layout(&self.fonts.small_wrap, cut, w - 14.0) else {
                 return y;
             };
@@ -660,13 +835,22 @@ impl Ctx<'_> {
             s.items.push(Item::Clip(Rect::new(x, y, w, shown)));
             s.unit(&l, x + 14.0, y + 2.0, self.pal.fg.with_alpha(0.7), cut);
             s.items.push(Item::Unclip);
-            s.fill(Rect::new(x + 2.0, y + 2.0, 2.0, shown - 2.0), 1.0, self.pal.fg.with_alpha(0.1));
+            s.fill(
+                Rect::new(x + 2.0, y + 2.0, 2.0, shown - 2.0),
+                1.0,
+                self.pal.fg.with_alpha(0.1),
+            );
             (y + shown + 4.0, th > PROSE_H || cut.len() < text.len())
         };
         if more || all && text.len() > PROSE_CHARS {
             let say = if all { "Show less" } else { "Show all" };
             let r = Rect::new(x, cy, w, 24.0);
-            s.line(say, F::Small, Rect::new(x + 14.0, cy, w - 14.0, 24.0), self.link_ink());
+            s.line(
+                say,
+                F::Small,
+                Rect::new(x + 14.0, cy, w - 14.0, 24.0),
+                self.link_ink(),
+            );
             s.hit(r, Hit::Tr(Act::All(id.to_string())));
             cy += 24.0;
         }
@@ -676,8 +860,20 @@ impl Ctx<'_> {
     /// Markdown set as a reply's paragraphs, a rule at its left so it
     /// reads as quoted. Stops past [`PROSE_H`] unless `all`. Returns
     /// where it ends and whether it stopped short.
-    unsafe fn markdown(&self, s: &mut Scene, text: &str, x: f32, y: f32, w: f32, all: bool) -> (f32, bool) {
-        let src = if all { text } else { head_chars(text, PROSE_CHARS) };
+    unsafe fn markdown(
+        &self,
+        s: &mut Scene,
+        text: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        all: bool,
+    ) -> (f32, bool) {
+        let src = if all {
+            text
+        } else {
+            head_chars(text, PROSE_CHARS)
+        };
         let mut cy = y;
         let mut short = src.len() < text.len();
         for (k, p) in flow::paras(src).into_iter().enumerate() {
@@ -692,14 +888,29 @@ impl Ctx<'_> {
             s.append(&ps, x + 14.0, cy);
             cy += ps.h;
         }
-        s.fill(Rect::new(x + 2.0, y, 2.0, cy - y), 1.0, self.pal.fg.with_alpha(0.1));
+        s.fill(
+            Rect::new(x + 2.0, y, 2.0, cy - y),
+            1.0,
+            self.pal.fg.with_alpha(0.1),
+        );
         (cy + 6.0, short)
     }
 
     /// Text in mono on a plate, its head shown and the rest folded past
     /// `max` lines.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn mono_plate(&self, s: &mut Scene, id: &str, text: &str, lang: &str, x: f32, y: f32, w: f32, all: bool, max: usize) -> f32 {
+    unsafe fn mono_plate(
+        &self,
+        s: &mut Scene,
+        id: &str,
+        text: &str,
+        lang: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        all: bool,
+        max: usize,
+    ) -> f32 {
         let text = text.trim_end().trim_start_matches('\n');
         if text.is_empty() {
             return y;
@@ -709,7 +920,14 @@ impl Ctx<'_> {
         let shown = if all { n } else { n.min(max) };
         let at = s.items.len();
         let mut cy = y;
-        if let Some(m) = self.mono(lines[..shown].join("\n"), lang, None, &[], w, self.pal.fg.with_alpha(0.78)) {
+        if let Some(m) = self.mono(
+            lines[..shown].join("\n"),
+            lang,
+            None,
+            &[],
+            w,
+            self.pal.fg.with_alpha(0.78),
+        ) {
             self.draw_mono(s, &m, x, cy + 8.0, w);
             cy += m.h + 16.0;
         }
@@ -728,12 +946,29 @@ impl Ctx<'_> {
     /// A tool's error: its message in the error ink on a plate tinted to
     /// match, nothing of the tags it came in.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn error_box(&self, s: &mut Scene, id: &str, text: &str, x: f32, y: f32, w: f32, all: bool) -> f32 {
+    unsafe fn error_box(
+        &self,
+        s: &mut Scene,
+        id: &str,
+        text: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        all: bool,
+    ) -> f32 {
         let text = text.trim();
-        let text = if text.is_empty() { "It failed without saying why" } else { text };
+        let text = if text.is_empty() {
+            "It failed without saying why"
+        } else {
+            text
+        };
         let lines: Vec<&str> = text.split('\n').collect();
         let n = lines.len();
-        let shown = if all { text.to_string() } else { lines[..n.min(ERROR_LINES)].join("\n") };
+        let shown = if all {
+            text.to_string()
+        } else {
+            lines[..n.min(ERROR_LINES)].join("\n")
+        };
         let Some(l) = self.layout(&self.fonts.small_wrap, &shown, w - 2.0 * PAD - 24.0) else {
             return y;
         };
@@ -747,8 +982,19 @@ impl Ctx<'_> {
         let red = theme::error();
         s.fill(r, RADIUS, red.with_alpha(0.07));
         s.stroke(r, RADIUS, red.with_alpha(0.22), 1.0);
-        s.line("\u{E783}", F::Icon, Rect::new(x + PAD, y + 9.0, 16.0, 20.0), red.with_alpha(0.85));
-        s.unit(&l, x + PAD + 24.0, y + 9.0, red.mix(self.pal.fg, 0.45), &shown);
+        s.line(
+            "\u{E783}",
+            F::Icon,
+            Rect::new(x + PAD, y + 9.0, 16.0, 20.0),
+            red.with_alpha(0.85),
+        );
+        s.unit(
+            &l,
+            x + PAD + 24.0,
+            y + 9.0,
+            red.mix(self.pal.fg, 0.45),
+            &shown,
+        );
         if fold {
             let say = if all {
                 "Show less".to_string()
@@ -756,7 +1002,12 @@ impl Ctx<'_> {
                 format!("Show all {n} lines")
             };
             let row = Rect::new(x, y + th + 14.0, w, 22.0);
-            s.line(say, F::Small, Rect::new(x + PAD + 24.0, row.y, w / 2.0, 22.0), self.link_ink());
+            s.line(
+                say,
+                F::Small,
+                Rect::new(x + PAD + 24.0, row.y, w / 2.0, 22.0),
+                self.link_ink(),
+            );
             s.hit(row, Hit::Tr(Act::All(id.to_string())));
         }
         y + h + 2.0
@@ -765,7 +1016,15 @@ impl Ctx<'_> {
     /// A shell step's command and the end of its output, or any step's
     /// output, in mono on a dark plate: what a step without a read result
     /// shows.
-    pub(super) unsafe fn output(&self, s: &mut Scene, step: &Step, x: f32, y: f32, w: f32, st: &State) -> f32 {
+    pub(super) unsafe fn output(
+        &self,
+        s: &mut Scene,
+        step: &Step,
+        x: f32,
+        y: f32,
+        w: f32,
+        st: &State,
+    ) -> f32 {
         let all = st.all.contains(&step.id);
         let command = step.input["command"]
             .as_str()
@@ -842,7 +1101,12 @@ impl Ctx<'_> {
     ) -> Option<Mono> {
         let gw = match gutter {
             Some(g) => {
-                let chars = g.iter().map(|n| n.chars().count()).max().unwrap_or(1).max(2);
+                let chars = g
+                    .iter()
+                    .map(|n| n.chars().count())
+                    .max()
+                    .unwrap_or(1)
+                    .max(2);
                 chars as f32 * self.width(&self.fonts.rows, "0") + PAD + 10.0
             }
             None => PAD,
@@ -878,7 +1142,8 @@ impl Ctx<'_> {
     /// Mono rows at (`x`, `y`) on a plate `w` wide, clipped to it since
     /// a row never wraps.
     unsafe fn draw_mono(&self, s: &mut Scene, m: &Mono, x: f32, y: f32, w: f32) {
-        s.items.push(Item::Clip(Rect::new(x + 1.0, y, w - 2.0, m.h)));
+        s.items
+            .push(Item::Clip(Rect::new(x + 1.0, y, w - 2.0, m.h)));
         if let Some(g) = &m.gutter {
             s.text(g, x, y, self.pal.faint.with_alpha(0.7));
         }
@@ -904,12 +1169,26 @@ impl Ctx<'_> {
 
     /// The row along a plate's foot that shows all of it or less.
     #[allow(clippy::too_many_arguments)]
-    fn foot(&self, s: &mut Scene, id: &str, say: String, open: bool, x: f32, y: f32, w: f32) -> f32 {
+    fn foot(
+        &self,
+        s: &mut Scene,
+        id: &str,
+        say: String,
+        open: bool,
+        x: f32,
+        y: f32,
+        w: f32,
+    ) -> f32 {
         s.fill(Rect::new(x, y, w, 1.0), 0.0, self.pal.fg.with_alpha(0.06));
         let ink = self.link_ink();
         let icon = if open { "\u{E70E}" } else { "\u{E70D}" };
         s.line(icon, F::Icon, Rect::new(x + PAD, y, 16.0, FOOT), ink);
-        s.line(say, F::Small, Rect::new(x + PAD + 22.0, y, w - 2.0 * PAD - 22.0, FOOT), ink);
+        s.line(
+            say,
+            F::Small,
+            Rect::new(x + PAD + 22.0, y, w - 2.0 * PAD - 22.0, FOOT),
+            ink,
+        );
         s.hit(Rect::new(x, y, w, FOOT), Hit::Tr(Act::All(id.to_string())));
         y + FOOT
     }
@@ -917,7 +1196,16 @@ impl Ctx<'_> {
     /// A file as a row: its folder faint, its name in the link ink, its
     /// count at the right. A click opens it, at `line` when given.
     #[allow(clippy::too_many_arguments)]
-    fn path_row(&self, s: &mut Scene, path: &str, count: Option<usize>, line: Option<u32>, x: f32, y: f32, w: f32) {
+    fn path_row(
+        &self,
+        s: &mut Scene,
+        path: &str,
+        count: Option<usize>,
+        line: Option<u32>,
+        x: f32,
+        y: f32,
+        w: f32,
+    ) {
         let shown = self.short(path);
         let (dir, name) = match shown.rfind('/') {
             Some(i) => (&shown[..=i], &shown[i + 1..]),
@@ -936,11 +1224,19 @@ impl Ctx<'_> {
             (self.width(&self.gfx.small, dir) + 1.0).min(room * 0.6)
         };
         if dw > 0.0 {
-            s.line(dir.to_string(), F::Small, Rect::new(x, y, dw, ROW), self.pal.faint);
+            s.line(
+                dir.to_string(),
+                F::Small,
+                Rect::new(x, y, dw, ROW),
+                self.pal.faint,
+            );
         }
         let r = Rect::new(x + dw, y, (room - dw).max(0.0), ROW);
         s.line(name.to_string(), F::Small, r, self.link_ink());
-        s.hit(Rect::new(x, y, room, ROW), Hit::Tr(Act::Path(path.to_string(), line)));
+        s.hit(
+            Rect::new(x, y, room, ROW),
+            Hit::Tr(Act::Path(path.to_string(), line)),
+        );
     }
 
     /// A state on a step's line as a small rounded mark ending at
@@ -949,7 +1245,10 @@ impl Ctx<'_> {
         let tw = self.width(&self.fonts.centre, say);
         let r = Rect::new(right - tw - 14.0, mid - 9.0, tw + 14.0, 18.0);
         let (fill, ink) = match tone {
-            Tone::Error => (theme::error().with_alpha(0.14), theme::error().mix(self.pal.fg, 0.35)),
+            Tone::Error => (
+                theme::error().with_alpha(0.14),
+                theme::error().mix(self.pal.fg, 0.35),
+            ),
             Tone::Quiet => (self.pal.fg.with_alpha(0.06), self.pal.dim),
         };
         s.fill(r, 4.0, fill);
@@ -963,13 +1262,19 @@ impl Ctx<'_> {
         let tw = self.width(&self.fonts.centre, say).min(160.0);
         let r = Rect::new(x, mid - 9.0, tw + 14.0, 18.0);
         s.fill(r, 4.0, self.pal.accent.with_alpha(0.12));
-        s.line(say.to_string(), F::Centre, r, self.pal.accent.mix(self.pal.fg, 0.5));
+        s.line(
+            say.to_string(),
+            F::Centre,
+            r,
+            self.pal.accent.mix(self.pal.fg, 0.5),
+        );
         r.right()
     }
 
     /// How wide `t` is set in `f` on one line.
     fn width(&self, f: &windows::Win32::Graphics::DirectWrite::IDWriteTextFormat, t: &str) -> f32 {
-        self.one_line(f, t).map_or(t.chars().count() as f32 * 7.0, |l| render::text_size(&l).0)
+        self.one_line(f, t)
+            .map_or(t.chars().count() as f32 * 7.0, |l| render::text_size(&l).0)
     }
 
     /// A path as the human knows it: inside the project, from its folder.

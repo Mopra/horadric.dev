@@ -528,7 +528,12 @@ unsafe fn option(
         let top = y + 10.0 + (first - CAP) / 2.0;
         let cap = Rect::new(r.right() - 12.0 - CAP, top, CAP, CAP);
         s.stroke(cap, 4.0, cx.pal.fg.with_alpha(0.16), 1.0);
-        s.line((k + 1).to_string(), F::Centre, cap, cx.pal.faint.with_alpha(0.75));
+        s.line(
+            (k + 1).to_string(),
+            F::Centre,
+            cap,
+            cx.pal.faint.with_alpha(0.75),
+        );
     }
     if rec {
         let top = y + 10.0 + (first - 20.0) / 2.0;
@@ -536,7 +541,15 @@ unsafe fn option(
             theme::done().mix(cx.pal.fg, 0.35),
             theme::done().with_alpha(0.14),
         );
-        chip(cx, s, r.right() - 12.0 - cap_w - badge_w, top, badge, ink, fill);
+        chip(
+            cx,
+            s,
+            r.right() - 12.0 - cap_w - badge_w,
+            top,
+            badge,
+            ink,
+            fill,
+        );
     }
     let mut at = y + 10.0 + lh + 3.0;
     if let Some(l) = &desc_l {
@@ -705,7 +718,11 @@ pub(super) unsafe fn question(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene 
             continue;
         }
         let picks = picked.and_then(|p| p.get(q));
-        let has: Vec<bool> = question.options.iter().map(|o| !o.preview.is_empty()).collect();
+        let has: Vec<bool> = question
+            .options
+            .iter()
+            .map(|o| !o.preview.is_empty())
+            .collect();
         let rec = (question.options.iter()).position(|o| look::recommended(&o.label).1);
         let shown = previewed(&has, rec, picks.and_then(|p| p.iter().next().copied()));
         let keys = st.keyed.as_ref() == Some(request_id) && keyed_question(b, st) == Some(q);
@@ -713,7 +730,17 @@ pub(super) unsafe fn question(cx: &Ctx, b: &Block, st: &State, w: f32) -> Scene 
             let on = picks.is_some_and(|p| p.contains(&o));
             let key = (keys && o < 9).then_some(o);
             let preview = shown == Some(o);
-            let r = option(cx, &mut s, opt, question.multi_select, on, preview, key, y, inner);
+            let r = option(
+                cx,
+                &mut s,
+                opt,
+                question.multi_select,
+                on,
+                preview,
+                key,
+                y,
+                inner,
+            );
             s.hit(r, Hit::Tr(Act::Pick(request_id.clone(), q, o)));
             y = r.bottom() + 6.0;
         }

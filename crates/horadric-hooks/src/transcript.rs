@@ -268,7 +268,9 @@ fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
 /// own transcripts, in folders named after their parent, are not among
 /// them.
 pub fn files() -> Vec<PathBuf> {
-    let towns = crate::towns::homes().into_iter().map(|h| h.join("projects"));
+    let towns = crate::towns::homes()
+        .into_iter()
+        .map(|h| h.join("projects"));
     let roots: Vec<PathBuf> = projects().into_iter().chain(towns).collect();
     let mut found: Vec<(SystemTime, PathBuf)> = roots
         .iter()

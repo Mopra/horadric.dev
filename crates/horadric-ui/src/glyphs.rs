@@ -1399,7 +1399,12 @@ impl GridTarget {
                 None => b,
                 Some(a) => {
                     let (l, t) = (a.x.min(b.x), a.y.min(b.y));
-                    Rect::new(l, t, a.right().max(b.right()) - l, a.bottom().max(b.bottom()) - t)
+                    Rect::new(
+                        l,
+                        t,
+                        a.right().max(b.right()) - l,
+                        a.bottom().max(b.bottom()) - t,
+                    )
                 }
             });
         };
@@ -2096,7 +2101,8 @@ impl GridTarget {
             && fx.ashes.is_empty()
             && fx.summon.is_none()
             && g.rain.is_none()
-            && g.sky.is_none_or(|s| s.sparks.is_empty() && s.dots.iter().all(|d| d.glow.is_none()));
+            && g.sky
+                .is_none_or(|s| s.sparks.is_empty() && s.dots.iter().all(|d| d.glow.is_none()));
         if quiet {
             return Ok(());
         }
@@ -2148,7 +2154,8 @@ impl GridTarget {
             } else {
                 self.letter(to, g.font, g.cell, &b.ink, x, y, hot);
             }
-            self.light.lit(Rect::new(x - cw, y - ch, 3.0 * cw, 3.0 * ch));
+            self.light
+                .lit(Rect::new(x - cw, y - ch, 3.0 * cw, 3.0 * ch));
         }
         for a in &fx.ashes {
             // A deleted letter's embers lifting off as it crumbles.
@@ -2224,7 +2231,8 @@ impl GridTarget {
                 bidiLevel: 0,
             };
             let ink = if light {
-                ink.mix(Color::rgb(0xFFFFFF), 0.3).with_alpha(0.5 * strength)
+                ink.mix(Color::rgb(0xFFFFFF), 0.3)
+                    .with_alpha(0.5 * strength)
             } else {
                 ink.with_alpha((0.15 + 0.85 * level) * strength)
             };

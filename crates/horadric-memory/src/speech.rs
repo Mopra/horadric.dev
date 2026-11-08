@@ -179,9 +179,7 @@ impl Model {
         self.pinned()
             .files
             .iter()
-            .filter(|f| {
-                std::fs::metadata(dir.join(f.name)).is_ok_and(|m| m.len() == f.size as u64)
-            })
+            .filter(|f| std::fs::metadata(dir.join(f.name)).is_ok_and(|m| m.len() == f.size as u64))
             .map(|f| f.size)
             .sum()
     }

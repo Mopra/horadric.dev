@@ -409,9 +409,15 @@ mod tests {
         let mut all = Accounts::default();
         all.remember(login("new", 200));
         assert!(!all.remember(login("old", 100)));
-        assert_eq!(all.get("u-one:org-one").unwrap().oauth["refreshToken"], "r-new");
+        assert_eq!(
+            all.get("u-one:org-one").unwrap().oauth["refreshToken"],
+            "r-new"
+        );
         all.remember(login("newer", 300));
-        assert_eq!(all.get("u-one:org-one").unwrap().oauth["refreshToken"], "r-newer");
+        assert_eq!(
+            all.get("u-one:org-one").unwrap().oauth["refreshToken"],
+            "r-newer"
+        );
     }
 
     #[test]

@@ -35,11 +35,11 @@ use std::sync::Mutex;
 use horadric_core::forge::Kind;
 use horadric_core::{HookEvent, Registry};
 use serde_json::Value;
-use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2;
 use webview2_com::ContentLoadingEventHandler;
+use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2;
 use windows::core::{HSTRING, PWSTR};
-use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::web;
@@ -293,7 +293,12 @@ fn broad(dir: &Path) -> bool {
     if dir.parent().is_none() {
         return true;
     }
-    let norm = |p: &Path| p.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    let norm = |p: &Path| {
+        p.to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    };
     let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
     home.is_some_and(|h| norm(&h) == norm(dir) || inside(dir, &h))
 }
@@ -433,7 +438,8 @@ fn moved(key: &str, id: u64, url: &str) {
         let mut t = t.borrow_mut();
         let f = t.iter_mut().find(|f| f.key == key && f.id == id)?;
         let (root, host) = (f.root.clone(), f.host.clone());
-        let (_, file) = serve::parse_url(url, |h| h.eq_ignore_ascii_case(&host).then(|| root.clone()))?;
+        let (_, file) =
+            serve::parse_url(url, |h| h.eq_ignore_ascii_case(&host).then(|| root.clone()))?;
         if same(&file, &f.file) {
             return None;
         }
@@ -514,7 +520,9 @@ fn scroll_of(key: &str, id: u64) -> Option<(f64, f64)> {
 fn changed(root: &Path, rel: &[String], all: bool) {
     prune();
     let own_file = |f: &FileTab| {
-        all || rel.iter().any(|r| same(&f.root.join(r.replace('/', "\\")), &f.file))
+        all || rel
+            .iter()
+            .any(|r| same(&f.root.join(r.replace('/', "\\")), &f.file))
     };
     let mine: Vec<PathBuf> = TABS.with(|t| {
         t.borrow()
@@ -540,8 +548,17 @@ fn changed(root: &Path, rel: &[String], all: bool) {
             .filter(|f| same(&f.root, root))
             .filter(|f| all || rel.iter().any(|r| touches(f, r)))
             .map(|f| {
-                let others = all || rel.iter().any(|r| touches(f, r) && !same(&f.root.join(r.replace('/', "\\")), &f.file));
-                (f.key.clone(), f.id, f.file.clone(), !f.folder && own_file(f), others)
+                let others = all
+                    || rel.iter().any(|r| {
+                        touches(f, r) && !same(&f.root.join(r.replace('/', "\\")), &f.file)
+                    });
+                (
+                    f.key.clone(),
+                    f.id,
+                    f.file.clone(),
+                    !f.folder && own_file(f),
+                    others,
+                )
             })
             .collect()
     });
@@ -555,7 +572,11 @@ fn changed(root: &Path, rel: &[String], all: bool) {
             // when it next loads; the page itself stays.
             if mine && !by_itself {
                 match edit::text_of(&file) {
-                    Some(current) => post(&key, id, &serde_json::json!({"forge": "changed-on-disk", "current": current})),
+                    Some(current) => post(
+                        &key,
+                        id,
+                        &serde_json::json!({"forge": "changed-on-disk", "current": current}),
+                    ),
                     None => web::reload_fresh(&key, id),
                 }
             }
@@ -641,9 +662,7 @@ pub fn heard(registry: &Mutex<Registry>, id: &str, event: &HookEvent) {
     // A brother's session writes on its own machine, not here.
     let key = registry.lock().ok().and_then(|r| {
         let s = r.get(id)?;
-        s.brother
-            .is_none()
-            .then(|| crate::project::project_key(s))
+        s.brother.is_none().then(|| crate::project::project_key(s))
     });
     let Some(key) = key else { return };
     pins::wrote(&key, &file, id);

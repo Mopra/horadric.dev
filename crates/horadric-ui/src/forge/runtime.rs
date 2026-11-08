@@ -140,9 +140,14 @@ mod tests {
     fn the_runtime_files_are_served_with_their_types() {
         let js = asset("0000/runtime.js").unwrap();
         assert!(js.content_type.starts_with("text/javascript"));
-        assert!(matches!(&js.body, super::super::serve::Body::Bytes(b) if b.len() == RUNTIME_JS.len()));
+        assert!(
+            matches!(&js.body, super::super::serve::Body::Bytes(b) if b.len() == RUNTIME_JS.len())
+        );
         assert!(asset("0000/mermaid.js").is_some());
-        assert!(asset("0000/runtime.css").unwrap().content_type.starts_with("text/css"));
+        assert!(asset("0000/runtime.css")
+            .unwrap()
+            .content_type
+            .starts_with("text/css"));
         assert!(asset("0000/secret.txt").is_none());
     }
 
@@ -150,7 +155,8 @@ mod tests {
     fn mermaid_is_loaded_only_for_a_diagram() {
         let plain = "<html><body><p>hi</p></body></html>".to_string();
         assert_eq!(with_mermaid(plain.clone()), plain);
-        let md = horadric_core::forge::markdown_html("```mermaid\ngraph TD\n  A-->B\n```\n", "d.md");
+        let md =
+            horadric_core::forge::markdown_html("```mermaid\ngraph TD\n  A-->B\n```\n", "d.md");
         let out = with_mermaid(md);
         let script = out.find("mermaid.js\"></script>").unwrap();
         assert!(script < out.rfind("</body>").unwrap());

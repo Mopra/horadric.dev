@@ -95,7 +95,9 @@ pub(super) fn written_by(file: &Path) -> Vec<(String, u64)> {
     if lately.is_empty() {
         return Vec::new();
     }
-    let Ok(bytes) = std::fs::read(file) else { return Vec::new() };
+    let Ok(bytes) = std::fs::read(file) else {
+        return Vec::new();
+    };
     let now = hash(&bytes);
     let mut tabs: Vec<(String, u64)> = Vec::new();
     for (h, key, tab) in lately {
@@ -127,11 +129,15 @@ pub fn hooked(event: &HookEvent) {
         "PostToolUse" | "PostToolUseFailure" => false,
         _ => return,
     };
-    let Some(tool) = event.tool_name.as_deref() else { return };
+    let Some(tool) = event.tool_name.as_deref() else {
+        return;
+    };
     if !horadric_core::rarity::WRITERS.contains(&tool) {
         return;
     }
-    let Some(input) = event.tool_input.as_ref() else { return };
+    let Some(input) = event.tool_input.as_ref() else {
+        return;
+    };
     let path = input
         .get("file_path")
         .or_else(|| input.get("notebook_path"))
@@ -143,10 +149,9 @@ pub fn hooked(event: &HookEvent) {
     w.retain(|e| e.2.elapsed() < WAIT_MAX);
     if begins {
         w.push((file, call, Instant::now()));
-    } else if let Some(at) = w
-        .iter()
-        .position(|e| (call.is_some() && e.1 == call) || (call.is_none() && super::same(&e.0, &file)))
-    {
+    } else if let Some(at) = w.iter().position(|e| {
+        (call.is_some() && e.1 == call) || (call.is_none() && super::same(&e.0, &file))
+    }) {
         w.remove(at);
     }
 }
@@ -158,18 +163,32 @@ pub(super) fn being_written(file: &Path) -> bool {
 }
 
 fn busy(w: &[(PathBuf, Option<String>, Instant)], file: &Path) -> bool {
-    w.iter().any(|e| e.2.elapsed() < WAIT_MAX && super::same(&e.0, file))
+    w.iter()
+        .any(|e| e.2.elapsed() < WAIT_MAX && super::same(&e.0, file))
 }
 
 /// What the writer thread does to a file.
 enum Change {
     /// Text of a markdown block, by its lines.
-    Lines { a: usize, b: usize, old: String, new: String },
+    Lines {
+        a: usize,
+        b: usize,
+        old: String,
+        new: String,
+    },
     /// Text of an HTML element, by its content's byte range.
-    Element { inner: (usize, usize), old: String, new: String },
+    Element {
+        inner: (usize, usize),
+        old: String,
+        new: String,
+    },
     /// A deck's slides, as the current ones by number.
     /// `blank`: the doubled one's copy is a new empty slide of its layout.
-    Slides { count: usize, order: Vec<usize>, blank: bool },
+    Slides {
+        count: usize,
+        order: Vec<usize>,
+        blank: bool,
+    },
     /// An image's new bytes.
     Image(Vec<u8>),
     /// The whole file from the page's editor, if it still holds `base`.
@@ -255,7 +274,8 @@ fn run(job: &Job) -> Result<Option<String>, Failed> {
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
-        let bytes = std::fs::read(&job.file).map_err(|e| Failed::Why(format!("cannot read it: {e}")))?;
+        let bytes =
+            std::fs::read(&job.file).map_err(|e| Failed::Why(format!("cannot read it: {e}")))?;
         if let Change::Whole { base, text } = &job.change {
             return run_whole(job, &bytes, base, text);
         }
@@ -275,7 +295,8 @@ fn run(job: &Job) -> Result<Option<String>, Failed> {
         }
         // One write of the whole file, so a session reading it sees the
         // old or the new, and its next `Edit` sees the change.
-        std::fs::write(&job.file, &out).map_err(|e| Failed::Why(format!("cannot write it: {e}")))?;
+        std::fs::write(&job.file, &out)
+            .map_err(|e| Failed::Why(format!("cannot write it: {e}")))?;
         return Ok(None);
     }
 }
@@ -283,7 +304,8 @@ fn run(job: &Job) -> Result<Option<String>, Failed> {
 /// The editor's whole file over `bytes`, the file as it is, when that is
 /// still the text the edit began from.
 fn run_whole(job: &Job, bytes: &[u8], base: &str, text: &str) -> Result<Option<String>, Failed> {
-    let disk = std::str::from_utf8(bytes).map_err(|_| Failed::Why("it is not UTF-8 text".into()))?;
+    let disk =
+        std::str::from_utf8(bytes).map_err(|_| Failed::Why("it is not UTF-8 text".into()))?;
     if !write::unchanged(disk, base) {
         return Err(Failed::Changed(write::normalise(disk).into_owned()));
     }
@@ -315,7 +337,10 @@ fn remember(job: &Job, out: &[u8]) {
 /// move is refused (another program holds the file open without letting it
 /// be replaced), it is written in place instead.
 fn replace(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let beside = file.with_file_name(format!(".{name}.forge-write"));
     std::fs::write(&beside, bytes)?;
     if std::fs::rename(&beside, file).is_ok() {
@@ -339,14 +364,22 @@ fn changed(src: &str, change: &Change) -> Result<Option<String>, Failed> {
             }
             text::edit_html(src, *inner, old, new).map_err(|()| Failed::NotExact)
         }
-        Change::Slides { count, order, blank } => {
+        Change::Slides {
+            count,
+            order,
+            blank,
+        } => {
             let now = html::slides(src).len();
             if now != *count {
                 return Err(Failed::Why(format!(
                     "the deck has {now} slides now, the page showed {count}; try again after it reloads"
                 )));
             }
-            let out = if *blank { html::add_after(src, order) } else { html::reorder(src, order) };
+            let out = if *blank {
+                html::add_after(src, order)
+            } else {
+                html::reorder(src, order)
+            };
             out.map(Some)
                 .ok_or_else(|| Failed::Why("that order of slides cannot be written".into()))
         }
@@ -356,7 +389,10 @@ fn changed(src: &str, change: &Change) -> Result<Option<String>, Failed> {
 
 /// On the UI thread, woken by the writer: its answers go to their pages.
 pub fn drain() {
-    let done = DONE.lock().map(|mut d| std::mem::take(&mut *d)).unwrap_or_default();
+    let done = DONE
+        .lock()
+        .map(|mut d| std::mem::take(&mut *d))
+        .unwrap_or_default();
     for (key, tab, msg) in done {
         answer(&key, tab, &msg);
     }
@@ -403,7 +439,10 @@ fn pair(msg: &Value, k: &str) -> Option<(usize, usize)> {
 
 /// The kinds of file the page's editor writes whole.
 pub(super) fn editable(file: &Path) -> bool {
-    matches!(super::kind(file), Some(Kind::Markdown | Kind::Html | Kind::Deck | Kind::Csv))
+    matches!(
+        super::kind(file),
+        Some(Kind::Markdown | Kind::Html | Kind::Deck | Kind::Csv)
+    )
 }
 
 /// The kinds of file whose page is always the editor: no edit mode, the
@@ -433,14 +472,19 @@ thread_local! {
 /// Whether the tab's page is in edit mode.
 pub(super) fn editing(key: &str, tab: u64) -> bool {
     always_editing(key, tab)
-        || EDITING.with(|e| e.borrow().iter().any(|(k, t, off)| k == key && *t == tab && off.is_none()))
+        || EDITING.with(|e| {
+            e.borrow()
+                .iter()
+                .any(|(k, t, off)| k == key && *t == tab && off.is_none())
+        })
 }
 
 /// Whether the tab's page may write its file: in edit mode, or only just
 /// out of it.
 fn may_write(key: &str, tab: u64) -> bool {
     if always_editing(key, tab) {
-        return crate::web::shown_tab(key) == Some(tab) && super::pins::human_within(key, HUMAN_FOR);
+        return crate::web::shown_tab(key) == Some(tab)
+            && super::pins::human_within(key, HUMAN_FOR);
     }
     EDITING.with(|e| {
         e.borrow().iter().any(|(k, t, off)| {
@@ -452,8 +496,12 @@ fn may_write(key: &str, tab: u64) -> bool {
 fn set_editing(key: &str, tab: u64, on: bool) {
     EDITING.with(|e| {
         let mut e = e.borrow_mut();
-        let was = e.iter().any(|(k, t, off)| k == key && *t == tab && off.is_none());
-        e.retain(|(k, t, off)| !(k == key && *t == tab) && off.is_none_or(|at| at.elapsed() < WRITE_AFTER));
+        let was = e
+            .iter()
+            .any(|(k, t, off)| k == key && *t == tab && off.is_none());
+        e.retain(|(k, t, off)| {
+            !(k == key && *t == tab) && off.is_none_or(|at| at.elapsed() < WRITE_AFTER)
+        });
         if on {
             e.push((key.to_string(), tab, None));
         } else if was {
@@ -474,8 +522,12 @@ pub(super) fn page_gone(key: &str, tab: u64) {
 
 /// The bar's Edit button: edit mode on or off in the project's shown tab.
 pub fn toggle_editing(key: &str) {
-    let Some(tab) = crate::web::shown_tab(key) else { return };
-    let Some(file) = super::file_of(key, tab) else { return };
+    let Some(tab) = crate::web::shown_tab(key) else {
+        return;
+    };
+    let Some(file) = super::file_of(key, tab) else {
+        return;
+    };
     if !editable(&file) || always_editable(&file) {
         return;
     }
@@ -506,7 +558,11 @@ pub(super) fn page_editing(key: &str, tab: u64, on: bool) {
 pub fn on_write(key: &str, tab: u64, msg: &Value) {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let refuse = |why: &str| {
-        super::post(key, tab, &json!({"forge": "write-result", "id": id, "ok": false, "why": why}));
+        super::post(
+            key,
+            tab,
+            &json!({"forge": "write-result", "id": id, "ok": false, "why": why}),
+        );
     };
     if !may_write(key, tab) {
         if always_editing(key, tab) {
@@ -531,7 +587,14 @@ pub fn on_write(key: &str, tab: u64, msg: &Value) {
         return refuse("the write is missing its text, or it is too large");
     };
     let change = Change::Whole { base, text };
-    let job = Job { key: key.to_string(), tab, id: id.clone(), what: "write", file, change };
+    let job = Job {
+        key: key.to_string(),
+        tab,
+        id: id.clone(),
+        what: "write",
+        file,
+        change,
+    };
     if writer().is_none_or(|tx| tx.send(job).is_err()) {
         refuse("the Forge's writer is not running");
     }
@@ -548,7 +611,11 @@ pub fn on_message(key: &str, tab: u64, msg: &Value) {
     };
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let refuse = |why: &str| {
-        super::post(key, tab, &json!({"forge": "edit-result", "what": what, "id": id, "ok": false, "why": why}));
+        super::post(
+            key,
+            tab,
+            &json!({"forge": "edit-result", "what": what, "id": id, "ok": false, "why": why}),
+        );
     };
     let page_file = msg.get("file").and_then(Value::as_str).unwrap_or_default();
     let Some(file) = own_file(key, tab, page_file) else {
@@ -557,15 +624,23 @@ pub fn on_message(key: &str, tab: u64, msg: &Value) {
     let kind = super::kind(&file);
     let change = match (what, kind) {
         ("edit", Some(Kind::Markdown)) => {
-            let (Some((a, b)), Some(old), Some(new)) = (pair(msg, "lines"), string(msg, "old"), string(msg, "new")) else {
+            let (Some((a, b)), Some(old), Some(new)) =
+                (pair(msg, "lines"), string(msg, "old"), string(msg, "new"))
+            else {
                 return refuse("the edit is missing its lines or text");
             };
             Change::Lines { a, b, old, new }
         }
         ("edit", Some(Kind::Html | Kind::Deck)) => {
-            let (Some(inner), Some(old), Some(new)) = (pair(msg, "offsets"), string(msg, "old"), string(msg, "new")) else {
+            let (Some(inner), Some(old), Some(new)) =
+                (pair(msg, "offsets"), string(msg, "old"), string(msg, "new"))
+            else {
                 // No offsets: the element is not in the file as written.
-                return answer(key, tab, &json!({"forge": "edit-result", "what": what, "id": id, "ok": false, "pin": true}));
+                return answer(
+                    key,
+                    tab,
+                    &json!({"forge": "edit-result", "what": what, "id": id, "ok": false, "pin": true}),
+                );
             };
             Change::Element { inner, old, new }
         }
@@ -586,7 +661,11 @@ pub fn on_message(key: &str, tab: u64, msg: &Value) {
             match order {
                 Some(order) if !order.is_empty() => {
                     let blank = msg.get("blank").and_then(Value::as_bool).unwrap_or(false);
-                    Change::Slides { count, order, blank }
+                    Change::Slides {
+                        count,
+                        order,
+                        blank,
+                    }
                 }
                 _ => return refuse("the new order of slides is missing"),
             }
@@ -597,7 +676,14 @@ pub fn on_message(key: &str, tab: u64, msg: &Value) {
         },
         _ => return refuse("this kind of file cannot be changed that way"),
     };
-    let job = Job { key: key.to_string(), tab, id: id.clone(), what, file, change };
+    let job = Job {
+        key: key.to_string(),
+        tab,
+        id: id.clone(),
+        what,
+        file,
+        change,
+    };
     if writer().is_none_or(|tx| tx.send(job).is_err()) {
         refuse("the Forge's writer is not running");
     }
@@ -605,15 +691,21 @@ pub fn on_message(key: &str, tab: u64, msg: &Value) {
 
 /// The new image a crop sent, checked to be the file's own format.
 fn image_bytes(file: &Path, msg: &Value) -> Result<Vec<u8>, String> {
-    let data = msg.get("data").and_then(Value::as_str).ok_or("the crop has no image")?;
-    let (head, body) = data.split_once(',').ok_or("the crop's image is not a data address")?;
+    let data = msg
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or("the crop has no image")?;
+    let (head, body) = data
+        .split_once(',')
+        .ok_or("the crop's image is not a data address")?;
     if !head.ends_with(";base64") {
         return Err("the crop's image is not base64".into());
     }
     if body.len() > 80 << 20 {
         return Err("the cropped image is too big".into());
     }
-    let bytes = horadric_core::release::base64_decode(body).ok_or("the crop's image is not base64")?;
+    let bytes =
+        horadric_core::release::base64_decode(body).ok_or("the crop's image is not base64")?;
     let ext = file
         .extension()
         .and_then(|e| e.to_str())
@@ -634,17 +726,23 @@ fn image_bytes(file: &Path, msg: &Value) -> Result<Vec<u8>, String> {
 /// Opens the file the project's shown tab shows as text to edit, in the
 /// editor Ctrl+click on a file opens. False when the tab shows no file.
 pub fn source_view(key: &str) -> bool {
-    let Some(id) = crate::web::shown_tab(key) else { return false };
+    let Some(id) = crate::web::shown_tab(key) else {
+        return false;
+    };
     let found = super::TABS.with(|t| {
         t.borrow()
             .iter()
             .find(|f| f.key == key && f.id == id)
             .map(|f| (f.root.clone(), f.file.clone()))
     });
-    let Some((root, file)) = found else { return false };
+    let Some((root, file)) = found else {
+        return false;
+    };
     let r = root.to_string_lossy().replace('/', "\\");
     let f = file.to_string_lossy().replace('/', "\\");
-    let Some(rel) = f.get(r.trim_end_matches('\\').len()..) else { return false };
+    let Some(rel) = f.get(r.trim_end_matches('\\').len()..) else {
+        return false;
+    };
     crate::watch::open(&root, &rel.trim_start_matches('\\').replace('\\', "/"));
     true
 }
@@ -656,7 +754,10 @@ pub fn source_view(key: &str) -> bool {
 pub fn serve(view: &ICoreWebView2, host: &str, root: &Path) {
     unsafe {
         for ext in ["html", "htm"] {
-            for pattern in [format!("https://{host}/*.{ext}"), format!("https://{host}/*.{ext}?*")] {
+            for pattern in [
+                format!("https://{host}/*.{ext}"),
+                format!("https://{host}/*.{ext}?*"),
+            ] {
                 let _ = view.AddWebResourceRequestedFilter(
                     &HSTRING::from(pattern),
                     COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
@@ -680,9 +781,15 @@ pub fn serve(view: &ICoreWebView2, host: &str, root: &Path) {
 pub(super) const MARK_MAX: usize = 8 << 20;
 
 fn marked(view: &ICoreWebView2, args: &ICoreWebView2WebResourceRequestedEventArgs, root: &Path) {
-    let Ok(request) = (unsafe { args.Request() }) else { return };
+    let Ok(request) = (unsafe { args.Request() }) else {
+        return;
+    };
     let url = read(|p| unsafe { request.Uri(p) });
-    let path = url.split(['?', '#']).next().unwrap_or_default().to_ascii_lowercase();
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     // The Forge's own pages (the artefact runtime) are not files.
     if path.contains("/__forge/") || !(path.ends_with(".html") || path.ends_with(".htm")) {
         return;
@@ -696,21 +803,32 @@ fn marked(view: &ICoreWebView2, args: &ICoreWebView2WebResourceRequestedEventArg
     if !small {
         return;
     }
-    let Ok(bytes) = std::fs::read(&file) else { return };
+    let Ok(bytes) = std::fs::read(&file) else {
+        return;
+    };
     if bytes.len() > MARK_MAX {
         return;
     }
     // A page in another encoding is served as is: offsets into a
     // re-encoded copy would not be the file's.
-    let Ok(src) = String::from_utf8(bytes) else { return };
+    let Ok(src) = String::from_utf8(bytes) else {
+        return;
+    };
     let body = html::annotate(&src);
     unsafe {
-        let Ok(env) = view.cast::<ICoreWebView2_2>().and_then(|v| v.Environment()) else { return };
-        let Some(stream) = SHCreateMemStream(Some(body.as_bytes())) else { return };
+        let Ok(env) = view.cast::<ICoreWebView2_2>().and_then(|v| v.Environment()) else {
+            return;
+        };
+        let Some(stream) = SHCreateMemStream(Some(body.as_bytes())) else {
+            return;
+        };
         let headers = "Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store";
-        if let Ok(response) =
-            env.CreateWebResourceResponse(&stream, 200, &HSTRING::from("OK"), &HSTRING::from(headers))
-        {
+        if let Ok(response) = env.CreateWebResourceResponse(
+            &stream,
+            200,
+            &HSTRING::from("OK"),
+            &HSTRING::from(headers),
+        ) {
             let _ = args.SetResponse(&response);
         }
     }

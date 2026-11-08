@@ -163,9 +163,17 @@ fn url_of(cache: &Path, file: &Path) -> Option<String> {
 /// What the page says while it converts, naming the program that will.
 fn converting(deck: bool) -> String {
     let found = forge_office::available();
-    let office = if deck { Converter::PowerPoint } else { Converter::Word };
+    let office = if deck {
+        Converter::PowerPoint
+    } else {
+        Converter::Word
+    };
     let by = if found.contains(&office) || !found.contains(&Converter::LibreOffice) {
-        if deck { "PowerPoint" } else { "Word" }
+        if deck {
+            "PowerPoint"
+        } else {
+            "Word"
+        }
     } else {
         "LibreOffice"
     };
@@ -186,7 +194,9 @@ pub fn deck_page(name: &str, cache: &Path, pngs: &[PathBuf], look: &str) -> Stri
         attr(name)
     );
     for (i, png) in pngs.iter().enumerate() {
-        let Some(src) = url_of(cache, png) else { continue };
+        let Some(src) = url_of(cache, png) else {
+            continue;
+        };
         let n = i + 1;
         out.push_str(&format!(
             "<section class=\"slide\" data-slide=\"{n}\"><img src=\"{}\" alt=\"Slide {n}\" draggable=\"false\"></section>\n",
@@ -204,7 +214,10 @@ mod tests {
     #[test]
     fn a_converted_deck_is_a_slide_per_picture() {
         let cache = Path::new(r"C:\State\forge-office");
-        let pngs = [cache.join("ab12").join("slide1.png"), cache.join("ab12").join("slide2.png")];
+        let pngs = [
+            cache.join("ab12").join("slide1.png"),
+            cache.join("ab12").join("slide2.png"),
+        ];
         let html = deck_page("Q3 <draft>.pptx", cache, &pngs, "");
         assert_eq!(html.matches("<section class=\"slide\"").count(), 2);
         assert!(html.contains("src=\"/__forge/office/ab12/slide1.png\""));
@@ -223,8 +236,15 @@ mod tests {
 
     #[test]
     fn the_wait_page_asks_again_and_a_message_does_not() {
-        assert!(message("a.pptx", "Converting with PowerPoint", Mood::Waiting, "").contains("refresh"));
-        let no = message("a.pptx", "To show slides, install PowerPoint", Mood::Trouble, "");
+        assert!(
+            message("a.pptx", "Converting with PowerPoint", Mood::Waiting, "").contains("refresh")
+        );
+        let no = message(
+            "a.pptx",
+            "To show slides, install PowerPoint",
+            Mood::Trouble,
+            "",
+        );
         assert!(!no.contains("refresh") && no.contains("install PowerPoint"));
     }
 }

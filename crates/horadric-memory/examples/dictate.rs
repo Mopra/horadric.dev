@@ -19,7 +19,9 @@ fn main() {
     };
     let (model, language) = model.split_once(':').unwrap_or((model, "en"));
     let model = Model::from_folder(model).expect("a model's folder");
-    let dir = model.ensure(models.as_ref(), curl).expect("fetch the model");
+    let dir = model
+        .ensure(models.as_ref(), curl)
+        .expect("fetch the model");
     let at = Instant::now();
     let mut listener = Listener::load(&dir).expect("load");
     listener.set_language(language).expect("language");

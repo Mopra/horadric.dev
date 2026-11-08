@@ -24,8 +24,8 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget, D2D1_DRAW_TEXT_OPTIONS_NONE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -36,8 +36,8 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, EnumDisplayMonitors, GetMonitorInfoW, GetStockObject, InvalidateRect,
-    MonitorFromRect, BLACK_BRUSH, HBRUSH, HDC, HMONITOR, MONITORINFO,
-    MONITOR_DEFAULTTOPRIMARY, PAINTSTRUCT,
+    MonitorFromRect, BLACK_BRUSH, HBRUSH, HDC, HMONITOR, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+    PAINTSTRUCT,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -47,9 +47,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, KillTimer, LoadCursorW,
-    RegisterClassW, SetForegroundWindow, SetTimer, ShowWindow, IDC_ARROW, MONITORINFOF_PRIMARY, SW_SHOWMAXIMIZED, SW_SHOWNORMAL,
-    WINDOW_EX_STYLE, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSW,
-    WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    RegisterClassW, SetForegroundWindow, SetTimer, ShowWindow, IDC_ARROW, MONITORINFOF_PRIMARY,
+    SW_SHOWMAXIMIZED, SW_SHOWNORMAL, WINDOW_EX_STYLE, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
+    WS_POPUP,
 };
 
 use crate::menu::{self, Item};
@@ -157,7 +158,10 @@ fn register() {
         };
         let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
         for (class, proc) in [
-            (STAGE_CLASS, stage_proc as unsafe extern "system" fn(_, _, _, _) -> _),
+            (
+                STAGE_CLASS,
+                stage_proc as unsafe extern "system" fn(_, _, _, _) -> _,
+            ),
             (NOTES_CLASS, notes_proc),
         ] {
             let wc = WNDCLASSW {
@@ -217,7 +221,9 @@ fn stage_screen(key: &str, all: &[Screen]) -> Option<usize> {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
-    unsafe { GetMonitorInfoW(m, &mut info) }.as_bool().then_some(())?;
+    unsafe { GetMonitorInfoW(m, &mut info) }
+        .as_bool()
+        .then_some(())?;
     let b = info.rcMonitor;
     all.iter()
         .position(|s| s.bounds == [b.left, b.top, b.right, b.bottom])
@@ -448,7 +454,10 @@ impl Notes {
     fn paint(&mut self, slide: &(u64, u64, String), since: Instant) -> windows::core::Result<()> {
         let mut r = RECT::default();
         unsafe { GetClientRect(self.hwnd, &mut r)? };
-        let (wpx, hpx) = ((r.right - r.left).max(1) as u32, (r.bottom - r.top).max(1) as u32);
+        let (wpx, hpx) = (
+            (r.right - r.left).max(1) as u32,
+            (r.bottom - r.top).max(1) as u32,
+        );
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32;
         if self.rt.is_none() {
             let props = D2D1_RENDER_TARGET_PROPERTIES {
@@ -506,7 +515,12 @@ impl Notes {
             draw(&head, &self.big, rect(pad, pad, w - pad, pad + 56.0), &text);
             let secs = since.elapsed().as_secs();
             let clock = format!("{}:{:02}:{:02}", secs / 3600, secs % 3600 / 60, secs % 60);
-            draw(&clock, &self.small_right, rect(pad, pad + 8.0, w - pad, pad + 32.0), &dim);
+            draw(
+                &clock,
+                &self.small_right,
+                rect(pad, pad + 8.0, w - pad, pad + 32.0),
+                &dim,
+            );
             let next = if *n > 0 && n < of {
                 format!("Next: slide {}", n + 1)
             } else if *of > 0 {
@@ -514,10 +528,24 @@ impl Notes {
             } else {
                 String::new()
             };
-            draw(&next, &self.small, rect(pad, pad + 60.0, w - pad, pad + 84.0), &dim);
-            let body = if notes.trim().is_empty() { "No notes for this slide." } else { notes };
+            draw(
+                &next,
+                &self.small,
+                rect(pad, pad + 60.0, w - pad, pad + 84.0),
+                &dim,
+            );
+            let body = if notes.trim().is_empty() {
+                "No notes for this slide."
+            } else {
+                notes
+            };
             let brush = if notes.trim().is_empty() { &dim } else { &text };
-            draw(body, &self.body, rect(pad, pad + 110.0, w - pad, h - pad - 30.0), brush);
+            draw(
+                body,
+                &self.body,
+                rect(pad, pad + 110.0, w - pad, h - pad - 30.0),
+                brush,
+            );
             draw(
                 "Right, Space or Page Down for the next slide, Left for the one before, Esc to end",
                 &self.small,

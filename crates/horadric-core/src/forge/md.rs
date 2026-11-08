@@ -134,10 +134,7 @@ fn rule(line: &str) -> bool {
         return false;
     }
     let t: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-    t.len() >= 3
-        && ['-', '*', '_']
-            .iter()
-            .any(|&c| t.chars().all(|x| x == c))
+    t.len() >= 3 && ['-', '*', '_'].iter().any(|&c| t.chars().all(|x| x == c))
 }
 
 struct Marker {
@@ -174,7 +171,11 @@ fn marker(line: &str) -> Option<Marker> {
         return None;
     }
     let spaces = indent(rest);
-    let gap = if rest.trim().is_empty() || spaces > 4 { 1 } else { spaces };
+    let gap = if rest.trim().is_empty() || spaces > 4 {
+        1
+    } else {
+        spaces
+    };
     Some(Marker {
         indent: ind,
         ordered,
@@ -332,7 +333,14 @@ impl Cx {
     /// Renders `lines` as blocks. `top` is the file line index of
     /// `lines[0]` when these are the page's top-level blocks, which are the
     /// ones tagged; nested blocks are not, so a pin lands on the outer one.
-    fn blocks(&self, lines: &[String], top: Option<usize>, tight: bool, depth: usize, out: &mut String) {
+    fn blocks(
+        &self,
+        lines: &[String],
+        top: Option<usize>,
+        tight: bool,
+        depth: usize,
+        out: &mut String,
+    ) {
         if depth > MAX_DEPTH {
             out.push_str("<p>");
             esc_into(&lines.join("\n"), out);
@@ -388,7 +396,11 @@ impl Cx {
                 if !id.is_empty() {
                     out.push_str(&format!(" id=\"{}\"", esc(&id)));
                 }
-                out.push_str(&format!("{}>{}</h{level}>\n", tag(i, i + 1), self.inline(text)));
+                out.push_str(&format!(
+                    "{}>{}</h{level}>\n",
+                    tag(i, i + 1),
+                    self.inline(text)
+                ));
                 i += 1;
                 continue;
             }
@@ -461,7 +473,10 @@ impl Cx {
                     }
                     j += 1;
                 }
-                let code: Vec<&str> = lines[i..=last].iter().map(|l| l.get(4..).unwrap_or("")).collect();
+                let code: Vec<&str> = lines[i..=last]
+                    .iter()
+                    .map(|l| l.get(4..).unwrap_or(""))
+                    .collect();
                 out.push_str(&format!("<pre{}><code>", tag(i, last + 1)));
                 esc_into(&code.join("\n"), out);
                 out.push_str("\n</code></pre>\n");
@@ -619,7 +634,9 @@ impl Cx {
                 Some(done) => {
                     item[0] = head.get(4..).unwrap_or("").to_string();
                     let checked = if done { " checked" } else { "" };
-                    out.push_str(&format!("<li class=\"task\"><input type=\"checkbox\" disabled{checked}>"));
+                    out.push_str(&format!(
+                        "<li class=\"task\"><input type=\"checkbox\" disabled{checked}>"
+                    ));
                 }
                 None => out.push_str("<li>"),
             }
@@ -660,7 +677,11 @@ impl Cx {
                     let n = run(b, i, b'`');
                     if let Some(close) = find_run(s, i + n, b'`', n) {
                         let code = s[i + n..close].replace('\n', " ");
-                        let code = if code.len() > 1 && code.starts_with(' ') && code.ends_with(' ') && code.trim() != "" {
+                        let code = if code.len() > 1
+                            && code.starts_with(' ')
+                            && code.ends_with(' ')
+                            && code.trim() != ""
+                        {
                             &code[1..code.len() - 1]
                         } else {
                             &code[..]
@@ -677,7 +698,11 @@ impl Cx {
                 }
                 b'!' if b.get(i + 1) == Some(&b'[') => {
                     if let Some((text, url, title, end)) = self.link(s, i + 1) {
-                        out.push_str(&format!("<img src=\"{}\" alt=\"{}\"", safe_url(&url), esc(&plain(&text))));
+                        out.push_str(&format!(
+                            "<img src=\"{}\" alt=\"{}\"",
+                            safe_url(&url),
+                            esc(&plain(&text))
+                        ));
                         if let Some(t) = title {
                             out.push_str(&format!(" title=\"{}\"", esc(&t)));
                         }
@@ -725,7 +750,11 @@ impl Cx {
                     let entity = s[i + 1..]
                         .find(';')
                         .filter(|&e| (1..=32).contains(&e))
-                        .filter(|&e| s[i + 1..i + 1 + e].bytes().all(|x| x.is_ascii_alphanumeric() || x == b'#'));
+                        .filter(|&e| {
+                            s[i + 1..i + 1 + e]
+                                .bytes()
+                                .all(|x| x.is_ascii_alphanumeric() || x == b'#')
+                        });
                     if let Some(e) = entity {
                         out.push_str(&s[i..i + e + 2]);
                         i += e + 2;
@@ -866,7 +895,11 @@ impl Cx {
         let (label, end) = match after.strip_prefix('[') {
             Some(rest) => {
                 let e = rest.find(']')?;
-                let label = if e == 0 { text.clone() } else { rest[..e].to_string() };
+                let label = if e == 0 {
+                    text.clone()
+                } else {
+                    rest[..e].to_string()
+                };
                 (label, close + 2 + e + 1)
             }
             None => (text.clone(), close + 1),
@@ -901,7 +934,11 @@ fn destination(rest: &str) -> Option<(String, Option<String>, usize)> {
     };
     at += rest[at..].len() - rest[at..].trim_start().len();
     let mut title = None;
-    if let Some(q) = rest[at..].chars().next().filter(|c| matches!(c, '"' | '\'')) {
+    if let Some(q) = rest[at..]
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '"' | '\''))
+    {
         let e = rest[at + 1..].find(q)?;
         title = Some(rest[at + 1..at + 1 + e].to_string());
         at += e + 2;
@@ -937,7 +974,12 @@ fn is_autolink(inner: &str) -> bool {
         return false;
     }
     match inner.find(':') {
-        Some(k) => k >= 2 && inner[..k].bytes().all(|x| x.is_ascii_alphanumeric() || b"+.-".contains(&x)),
+        Some(k) => {
+            k >= 2
+                && inner[..k]
+                    .bytes()
+                    .all(|x| x.is_ascii_alphanumeric() || b"+.-".contains(&x))
+        }
         None => inner.contains('@') && !inner.starts_with('@') && !inner.ends_with('@'),
     }
 }
@@ -961,7 +1003,9 @@ fn is_inline_tag(inner: &str) -> bool {
 /// How long a bare `http(s)://` address is: to whitespace or `<`, less
 /// trailing punctuation and an unbalanced closing paren.
 fn bare_url(s: &str) -> usize {
-    let mut end = s.find(|c: char| c.is_whitespace() || c == '<').unwrap_or(s.len());
+    let mut end = s
+        .find(|c: char| c.is_whitespace() || c == '<')
+        .unwrap_or(s.len());
     loop {
         let t = &s[..end];
         match t.chars().next_back() {
@@ -974,7 +1018,9 @@ fn bare_url(s: &str) -> usize {
 
 /// The text of inline markdown with its markup dropped, for an image's alt.
 fn plain(s: &str) -> String {
-    s.chars().filter(|c| !matches!(c, '*' | '_' | '`' | '[' | ']')).collect()
+    s.chars()
+        .filter(|c| !matches!(c, '*' | '_' | '`' | '[' | ']'))
+        .collect()
 }
 
 fn starts_block(line: &str) -> bool {
@@ -997,13 +1043,22 @@ fn nested_list_gap(item: &[String]) -> bool {
 fn with_attr(raw: &str, attr: &str) -> String {
     let t = raw.trim_start();
     let lead = raw.len() - t.len();
-    if attr.is_empty() || !t.starts_with('<') || !t[1..].starts_with(|c: char| c.is_ascii_alphabetic()) {
+    if attr.is_empty()
+        || !t.starts_with('<')
+        || !t[1..].starts_with(|c: char| c.is_ascii_alphabetic())
+    {
         return raw.to_string();
     }
     let name_end = t[1..]
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
         .map_or(t.len(), |e| e + 1);
-    format!("{}{}{}{}", &raw[..lead], &t[..name_end], attr, &t[name_end..])
+    format!(
+        "{}{}{}{}",
+        &raw[..lead],
+        &t[..name_end],
+        attr,
+        &t[name_end..]
+    )
 }
 
 #[cfg(test)]
@@ -1012,7 +1067,8 @@ mod tests {
 
     fn body(src: &str) -> String {
         let html = markdown_html(src, "t");
-        let start = html.find("<main class=\"forge-md\">\n").unwrap() + "<main class=\"forge-md\">\n".len();
+        let start =
+            html.find("<main class=\"forge-md\">\n").unwrap() + "<main class=\"forge-md\">\n".len();
         let end = html.rfind("</main>").unwrap();
         html[start..end].to_string()
     }
@@ -1039,7 +1095,9 @@ mod tests {
     #[test]
     fn forge_md_mermaid() {
         let html = body("Text\n\n```mermaid\ngraph TD\n  A-->B\n```\n");
-        assert!(html.contains("<pre class=\"mermaid\" data-lines=\"3-6\">graph TD\n  A--&gt;B\n</pre>"));
+        assert!(
+            html.contains("<pre class=\"mermaid\" data-lines=\"3-6\">graph TD\n  A--&gt;B\n</pre>")
+        );
     }
 
     #[test]
@@ -1054,7 +1112,8 @@ mod tests {
 
     #[test]
     fn forge_md_tasks_tables_images() {
-        let html = body("- [ ] todo\n- [x] done\n\n| a | b |\n|:--|--:|\n| `x|y` | ![p](img/a.png) |\n");
+        let html =
+            body("- [ ] todo\n- [x] done\n\n| a | b |\n|:--|--:|\n| `x|y` | ![p](img/a.png) |\n");
         assert!(html.contains("<li class=\"task\"><input type=\"checkbox\" disabled>todo"));
         assert!(html.contains("<input type=\"checkbox\" disabled checked>done"));
         assert!(html.contains("<table data-lines=\"4-6\">"));
@@ -1065,14 +1124,28 @@ mod tests {
 
     #[test]
     fn forge_md_inline() {
-        let cx = Cx { refs: HashMap::new() };
-        assert_eq!(cx.inline("**bold** and *it* and ~~s~~"), "<strong>bold</strong> and <em>it</em> and <del>s</del>");
+        let cx = Cx {
+            refs: HashMap::new(),
+        };
+        assert_eq!(
+            cx.inline("**bold** and *it* and ~~s~~"),
+            "<strong>bold</strong> and <em>it</em> and <del>s</del>"
+        );
         assert_eq!(cx.inline("snake_case_name"), "snake_case_name");
         assert_eq!(cx.inline("2 * 3 * 4"), "2 * 3 * 4");
-        assert_eq!(cx.inline("[a](../b.md \"T\")"), "<a href=\"../b.md\" title=\"T\">a</a>");
+        assert_eq!(
+            cx.inline("[a](../b.md \"T\")"),
+            "<a href=\"../b.md\" title=\"T\">a</a>"
+        );
         assert_eq!(cx.inline("[x](javascript:alert(1))"), "<a href=\"#\">x</a>");
-        assert_eq!(cx.inline("see https://a.dk/x."), "see <a href=\"https://a.dk/x\">https://a.dk/x</a>.");
-        assert_eq!(cx.inline("a <kbd>K</kbd> & b < c &amp;"), "a <kbd>K</kbd> &amp; b &lt; c &amp;");
+        assert_eq!(
+            cx.inline("see https://a.dk/x."),
+            "see <a href=\"https://a.dk/x\">https://a.dk/x</a>."
+        );
+        assert_eq!(
+            cx.inline("a <kbd>K</kbd> & b < c &amp;"),
+            "a <kbd>K</kbd> &amp; b &lt; c &amp;"
+        );
         assert_eq!(cx.inline("æ **ø** å"), "æ <strong>ø</strong> å");
         assert_eq!(cx.inline("`a ``b`` c`"), "<code>a ``b`` c</code>");
     }
@@ -1088,7 +1161,10 @@ mod tests {
     #[test]
     fn forge_md_html_block_keeps_its_element() {
         let html = body("<details>\n<summary>S</summary>\n</details>\n");
-        assert_eq!(html, "<details data-lines=\"1-3\">\n<summary>S</summary>\n</details>\n");
+        assert_eq!(
+            html,
+            "<details data-lines=\"1-3\">\n<summary>S</summary>\n</details>\n"
+        );
     }
 
     #[test]

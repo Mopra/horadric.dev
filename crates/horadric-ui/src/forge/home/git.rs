@@ -124,9 +124,15 @@ pub fn parse(bytes: &[u8]) -> Vec<Raw> {
         // and must be taken even for an entry skipped, or it would be read
         // as an entry of its own.
         let from = (matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C'))
-            .then(|| parts.next().map(|p| String::from_utf8_lossy(p).into_owned()))
+            .then(|| {
+                parts
+                    .next()
+                    .map(|p| String::from_utf8_lossy(p).into_owned())
+            })
             .flatten();
-        let Some(state) = state_of(x, y) else { continue };
+        let Some(state) = state_of(x, y) else {
+            continue;
+        };
         out.push(Raw {
             state,
             path,
@@ -195,14 +201,25 @@ fn git(dir: &Path, args: &[&str], wait: Duration) -> Option<Vec<u8>> {
 /// repository or git could not say in time. A `flat` folder is only its
 /// own files, none in its subfolders.
 pub fn changes(root: &Path, flat: bool) -> Option<(Repo, Vec<Change>)> {
-    let found = git(root, &["rev-parse", "--show-toplevel", "--show-prefix"], STATUS_WAIT)?;
+    let found = git(
+        root,
+        &["rev-parse", "--show-toplevel", "--show-prefix"],
+        STATUS_WAIT,
+    )?;
     let found = String::from_utf8_lossy(&found);
     let mut lines = found.lines();
     let top = PathBuf::from(lines.next()?.trim());
     let prefix = lines.next().unwrap_or_default().trim().to_string();
     let status = git(
         root,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."],
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            ".",
+        ],
         STATUS_WAIT,
     )?;
     Some((Repo { top }, under(parse(&status), &prefix, flat)))
@@ -284,7 +301,11 @@ fn unescape(s: &str) -> String {
 /// The text of `path` (from the repository's top) at the last commit,
 /// None when it was not in it.
 fn committed(repo: &Repo, path: &str) -> Option<Vec<u8>> {
-    git(&repo.top, &["cat-file", "blob", &format!("HEAD:{path}")], SHOW_WAIT)
+    git(
+        &repo.top,
+        &["cat-file", "blob", &format!("HEAD:{path}")],
+        SHOW_WAIT,
+    )
 }
 
 /// The two sides of a change: as committed and as it is now.
@@ -328,7 +349,9 @@ pub fn page(root: &Path, flat: bool, asked: &Asked, look: &str) -> Reply {
     let mut head = String::new();
     head.push_str("<nav class=\"top\"><a class=\"key\" href=\"/\">Home</a>");
     if one_file && found.as_ref().is_some_and(|(_, all)| all.len() > 1) {
-        head.push_str(&format!("<a class=\"key\" href=\"{ALL_HREF}\">All changes</a>"));
+        head.push_str(&format!(
+            "<a class=\"key\" href=\"{ALL_HREF}\">All changes</a>"
+        ));
     }
     head.push_str("</nav>");
     let page = format!(
@@ -343,7 +366,10 @@ pub fn page(root: &Path, flat: bool, asked: &Asked, look: &str) -> Reply {
 }
 
 fn quiet(text: &str) -> String {
-    format!("<div class=\"hd-screen\"><p class=\"same\">{}</p></div>", esc(text))
+    format!(
+        "<div class=\"hd-screen\"><p class=\"same\">{}</p></div>",
+        esc(text)
+    )
 }
 
 /// Every change, one after another, until [`ALL_LARGEST`] is read.
@@ -376,7 +402,11 @@ fn every(repo: &Repo, root: &Path, all: &[Change]) -> String {
 /// to its own page on the page of every change, and a key to open it.
 fn header(c: &Change, linked: bool) -> String {
     let name = if linked {
-        format!("<a href=\"{}\">{}</a>", esc(&diff_href(&c.rel)), esc(&c.rel))
+        format!(
+            "<a href=\"{}\">{}</a>",
+            esc(&diff_href(&c.rel)),
+            esc(&c.rel)
+        )
     } else {
         esc(&c.rel)
     };
@@ -385,9 +415,14 @@ fn header(c: &Change, linked: bool) -> String {
         .as_deref()
         .map(|f| format!("<span class=\"from\">from {}</span>", esc(f)))
         .unwrap_or_default();
-    let open = if c.state != State::Deleted && super::label(c.rel.rsplit('/').next().unwrap_or_default()).is_some() {
+    let open = if c.state != State::Deleted
+        && super::label(c.rel.rsplit('/').next().unwrap_or_default()).is_some()
+    {
         let path: Vec<String> = c.rel.split('/').map(encode).collect();
-        format!("<a class=\"key small\" href=\"/{}\">Open file</a>", esc(&path.join("/")))
+        format!(
+            "<a class=\"key small\" href=\"/{}\">Open file</a>",
+            esc(&path.join("/"))
+        )
     } else {
         String::new()
     };
@@ -414,7 +449,10 @@ fn one(repo: &Repo, root: &Path, c: &Change, read: &mut usize) -> String {
     } else if binary(&before) || binary(&now) {
         "<p class=\"same\">Not text, so not shown line by line.</p>".to_string()
     } else {
-        let text = |s: Option<Vec<u8>>| s.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        let text = |s: Option<Vec<u8>>| {
+            s.map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default()
+        };
         let lines = diff_lines(&text(before), &text(now));
         if c.state == State::Renamed && lines.iter().all(|l| matches!(l, DiffLine::Same(_))) {
             "<p class=\"same\">Only its name changed.</p>".to_string()
@@ -430,7 +468,8 @@ fn one(repo: &Repo, root: &Path, c: &Change, read: &mut usize) -> String {
 
 /// Whether bytes are not text: git's own test, a NUL near the start.
 fn binary(b: &Option<Vec<u8>>) -> bool {
-    b.as_ref().is_some_and(|b| b[..b.len().min(8000)].contains(&0))
+    b.as_ref()
+        .is_some_and(|b| b[..b.len().min(8000)].contains(&0))
 }
 
 /// The lines as a table numbered on both sides. Unchanged runs longer
@@ -438,12 +477,15 @@ fn binary(b: &Option<Vec<u8>>) -> bool {
 /// them where they are.
 pub fn table(lines: &[DiffLine]) -> String {
     if !lines.iter().any(|l| !matches!(l, DiffLine::Same(_))) {
-        return "<p class=\"same\">The text is the same, only how it is stored changed.</p>".to_string();
+        return "<p class=\"same\">The text is the same, only how it is stored changed.</p>"
+            .to_string();
     }
     let near = |i: usize| {
         let lo = i.saturating_sub(CONTEXT);
         let hi = (i + CONTEXT + 1).min(lines.len());
-        lines[lo..hi].iter().any(|l| !matches!(l, DiffLine::Same(_)))
+        lines[lo..hi]
+            .iter()
+            .any(|l| !matches!(l, DiffLine::Same(_)))
     };
     let mut out = String::from("<table>");
     let mut folded = String::new();
@@ -607,7 +649,10 @@ mod tests {
         assert_eq!(got[0].state, State::Renamed);
         assert_eq!(got[0].path, "docs/new name.md");
         assert_eq!(got[0].from.as_deref(), Some("docs/old name.md"));
-        assert_eq!(got[1].path, "after.md", "the source is never read as an entry");
+        assert_eq!(
+            got[1].path, "after.md",
+            "the source is never read as an entry"
+        );
         assert_eq!(got[2].from.as_deref(), Some("b.md"));
         // A copy is a new file; its source is still taken.
         let copy = parse(b"C  c2.md\0c.md\0?? x.md\0");
@@ -640,11 +685,17 @@ mod tests {
 
     #[test]
     fn the_query_names_a_change() {
-        assert_eq!(asked("diff=docs/my%20plan.md"), Some(Asked::One("docs/my plan.md".into())));
+        assert_eq!(
+            asked("diff=docs/my%20plan.md"),
+            Some(Asked::One("docs/my plan.md".into()))
+        );
         assert_eq!(asked("changes"), Some(Asked::All));
         assert_eq!(asked(""), None);
         assert_eq!(diff_href("docs/my plan.md"), "/?diff=docs/my%20plan.md");
-        assert_eq!(asked(&diff_href("a b/c#d.md")[2..]), Some(Asked::One("a b/c#d.md".into())));
+        assert_eq!(
+            asked(&diff_href("a b/c#d.md")[2..]),
+            Some(Asked::One("a b/c#d.md".into()))
+        );
     }
 
     #[test]

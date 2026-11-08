@@ -22,7 +22,11 @@ pub fn on_message(key: &str, tab: u64, msg: &Value) {
         "ready" => {
             super::edit::page_gone(key, tab);
             if let Some((x, y)) = super::scroll_of(key, tab) {
-                super::post(key, tab, &json!({"forge": "restore-scroll", "x": x, "y": y}));
+                super::post(
+                    key,
+                    tab,
+                    &json!({"forge": "restore-scroll", "x": x, "y": y}),
+                );
             }
             super::pins::page_ready(key, tab);
         }
@@ -41,7 +45,10 @@ pub fn on_message(key: &str, tab: u64, msg: &Value) {
         "send-error" => super::pins::page_send_error(key, tab, msg),
         // Step 4 of the plan: shown in the tab with a button to send it.
         "error" => {
-            let text = msg.get("message").and_then(Value::as_str).unwrap_or_default();
+            let text = msg
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             eprintln!(
                 "horadric: forge page error in tab {tab} of {key}: {}",
                 text.chars().take(300).collect::<String>()

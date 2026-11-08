@@ -15,11 +15,10 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1BitmapRenderTarget, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1RenderTarget,
     ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_CAP_STYLE_ROUND,
-    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_SOLID,
-    D2D1_DRAW_TEXT_OPTIONS, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
-    D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
-    D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
-    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS,
+    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT,
+    D2D1_STROKE_STYLE_PROPERTIES, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteTextFormat, IDWriteTextLayout, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
@@ -44,10 +43,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetAncestor, GetClientRect, GetCursorPos, GetParent,
     GetWindowLongPtrW, IsIconic, IsWindowVisible, KillTimer, LoadCursorW, RegisterClassW,
     SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, CREATESTRUCTW, CS_DBLCLKS, GA_ROOT,
-    GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, IDC_SIZEWE, SWP_NOACTIVATE, SWP_NOZORDER,
-    WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_DESTROY, WM_DROPFILES, WM_ERASEBKGND, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR,
-    WM_SIZE, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+    GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, IDC_SIZEWE, SWP_NOACTIVATE,
+    SWP_NOZORDER, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_DESTROY, WM_DROPFILES, WM_ERASEBKGND,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY,
+    WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 use windows_numerics::Vector2;
 
@@ -438,7 +437,8 @@ fn slide_table(key: &str, delta: i32) -> bool {
         return false;
     };
     let mut p = POINT::default();
-    let inside = unsafe { GetCursorPos(&mut p).is_ok() && ScreenToClient(view.hwnd(), &mut p).as_bool() };
+    let inside =
+        unsafe { GetCursorPos(&mut p).is_ok() && ScreenToClient(view.hwnd(), &mut p).as_bool() };
     if !inside {
         return false;
     }
@@ -855,12 +855,8 @@ impl Gfx {
 
     pub(super) unsafe fn layout_at(&self, l: &IDWriteTextLayout, x: f32, y: f32, c: Color) {
         self.brush.SetColor(&color(c));
-        self.rt.DrawTextLayout(
-            Vector2 { X: x, Y: y },
-            l,
-            &self.brush,
-            TEXT_OPTIONS,
-        );
+        self.rt
+            .DrawTextLayout(Vector2 { X: x, Y: y }, l, &self.brush, TEXT_OPTIONS);
     }
 
     /// A rune of the rim's, `size` tall with its top at `y`, centred on `x`.
@@ -1434,7 +1430,11 @@ impl View {
             return;
         };
         let into = x - band.x - tx;
-        let into = if (0.0..=tw).contains(&into) { into } else { tw / 2.0 };
+        let into = if (0.0..=tw).contains(&into) {
+            into
+        } else {
+            tw / 2.0
+        };
         *self.table_grab.borrow_mut() = Some((key, band, into));
         unsafe { SetCapture(self.hwnd()) };
         self.drag_table(x);
@@ -1464,9 +1464,8 @@ impl View {
     ) {
         let held = self.table_grab.borrow().clone();
         let lit = match held {
-            Some((key, ..)) => (hits.iter()).find(|(_, h)| {
-                matches!(h, Hit::Tr(transcript::Act::TableBar(k)) if *k == key)
-            }),
+            Some((key, ..)) => (hits.iter())
+                .find(|(_, h)| matches!(h, Hit::Tr(transcript::Act::TableBar(k)) if *k == key)),
             None => {
                 let Some((mx, my)) = mouse else {
                     return;
@@ -1609,7 +1608,11 @@ impl View {
         const PAD_X: f32 = 9.0;
         const PAD_Y: f32 = 5.0;
         const GAP: f32 = 4.0;
-        let most = if matches!(hit, Hit::Note(..)) { PEEK_NOTE_W } else { PEEK_LINK_W };
+        let most = if matches!(hit, Hit::Note(..)) {
+            PEEK_NOTE_W
+        } else {
+            PEEK_LINK_W
+        };
         let room = (window.w - 16.0 - 2.0 * PAD_X).clamp(40.0, most);
         let Ok(l) = render::wrapped(&self.shared.gpu, &gfx.peek, &text, room) else {
             return;

@@ -338,7 +338,10 @@ mod tests {
     #[test]
     fn the_buttons_end_the_field_and_the_name_has_the_rest() {
         let l = layout((100.0, 400.0), 30.0, &[Button::History, Button::Export]);
-        assert_eq!(l.buttons, vec![(Button::History, 340.0), (Button::Export, 370.0)]);
+        assert_eq!(
+            l.buttons,
+            vec![(Button::History, 340.0), (Button::Export, 370.0)]
+        );
         assert_eq!(l.name, (100.0, 336.0));
         assert_eq!(hit(&l, 345.0), Some(Button::History));
         assert_eq!(hit(&l, 399.0), Some(Button::Export));

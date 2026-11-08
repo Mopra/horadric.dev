@@ -100,7 +100,12 @@ fn line(row: Row, value: String, control: Control) -> Line {
 
 /// The section's rows for `towns`.
 pub fn lines(towns: &[View]) -> Vec<Line> {
-    let switch = |on: bool| (if on { "On" } else { "Off" }.to_string(), Control::Switch(on));
+    let switch = |on: bool| {
+        (
+            if on { "On" } else { "Off" }.to_string(),
+            Control::Switch(on),
+        )
+    };
     let mut rows = vec![line(Row::Add, "Add\u{2026}".into(), Control::Button)];
     for (i, v) in towns.iter().enumerate() {
         let n = i as u16;
@@ -146,7 +151,10 @@ pub fn lines(towns: &[View]) -> Vec<Line> {
 
 /// The last two parts of a folder, which is what tells two towns apart.
 fn short(folder: &str) -> String {
-    let parts: Vec<&str> = folder.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
+    let parts: Vec<&str> = folder
+        .split(['\\', '/'])
+        .filter(|p| !p.is_empty())
+        .collect();
     parts[parts.len().saturating_sub(2)..].join("\\")
 }
 
@@ -209,7 +217,13 @@ fn fail(what: &str, why: &str) {
     choose(Tone::Error, what, why, &["OK"]);
 }
 
-fn type_in(title: &str, prompt: &str, initial: &str, placeholder: &str, verb: &str) -> Option<String> {
+fn type_in(
+    title: &str,
+    prompt: &str,
+    initial: &str,
+    placeholder: &str,
+    verb: &str,
+) -> Option<String> {
     let shared = shared()?;
     let question = ask::Ask {
         title,
@@ -256,7 +270,13 @@ fn act(row: Row) {
                 "What {} is for, in a sentence or two. Its sessions read it in the town's CLAUDE.md.",
                 t.saved.name
             );
-            if let Some(about) = type_in("What the town is for", &prompt, &t.saved.about, "Work mail, chat and tickets", "save") {
+            if let Some(about) = type_in(
+                "What the town is for",
+                &prompt,
+                &t.saved.about,
+                "Work mail, chat and tickets",
+                "save",
+            ) {
                 edit(i, |t| t.about = about.trim().to_string());
             }
         }
@@ -267,7 +287,13 @@ fn act(row: Row) {
                 t.saved.name
             );
             let now = t.saved.connectors.join(", ");
-            if let Some(list) = type_in("Connectors", &prompt, &now, "Microsoft 365, Slack, Atlassian", "save") {
+            if let Some(list) = type_in(
+                "Connectors",
+                &prompt,
+                &now,
+                "Microsoft 365, Slack, Atlassian",
+                "save",
+            ) {
                 edit(i, |t| t.connectors = core::split_list(&list));
             }
         }
@@ -317,7 +343,13 @@ fn name(i: u16, t: &SavedTown) {
     );
     match choose(Tone::Question, &t.name, &text, buttons) {
         Some(0) => {
-            if let Some(n) = type_in("Rename the town", "Its folder keeps its name.", &t.name, "Name", "rename") {
+            if let Some(n) = type_in(
+                "Rename the town",
+                "Its folder keeps its name.",
+                &t.name,
+                "Name",
+                "rename",
+            ) {
                 let n = n.trim().to_string();
                 if !n.is_empty() {
                     edit(i, |t| t.name = n);
@@ -344,7 +376,13 @@ fn login(t: &town::Town) {
         let text = format!(
             "{name}'s sessions would run on a Claude account of their own, beside the one the projects use, and see that account's connectors only. A console opens to log in. Accounts never switches it."
         );
-        if choose(Tone::Question, "A login of its own", &text, &["Log in", "Cancel"]) != Some(0) {
+        if choose(
+            Tone::Question,
+            "A login of its own",
+            &text,
+            &["Log in", "Cancel"],
+        ) != Some(0)
+        {
             return;
         }
         let made = match off.is_dir() {
@@ -361,7 +399,12 @@ fn login(t: &town::Town) {
     let text = format!(
         "Log {name} in again, or go back to the projects' login. Its own stays on disk for next time. Sessions running there keep the login they started with."
     );
-    match choose(Tone::Question, "Its Claude login", &text, &["Log in", "Use the projects' login", "Cancel"]) {
+    match choose(
+        Tone::Question,
+        "Its Claude login",
+        &text,
+        &["Log in", "Use the projects' login", "Cancel"],
+    ) {
         Some(0) => log_in(&home),
         Some(1) => {
             if let Err(e) = std::fs::rename(&home, &off) {
@@ -380,7 +423,10 @@ fn login(t: &town::Town) {
 fn hooks_into(home: &Path) {
     let settings = home.join("settings.json");
     if let Err(e) = horadric_hooks::install::install(&settings, horadric_hooks::port()) {
-        fail("No hooks for the town", &format!("{}: {e}", settings.display()));
+        fail(
+            "No hooks for the town",
+            &format!("{}: {e}", settings.display()),
+        );
     }
 }
 

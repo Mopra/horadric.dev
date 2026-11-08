@@ -44,7 +44,12 @@ pub(super) enum Emitter {
         strength: f32,
     },
     /// A small round light.
-    Dot { x: f32, y: f32, radius: f32, c: Color },
+    Dot {
+        x: f32,
+        y: f32,
+        radius: f32,
+        c: Color,
+    },
     /// A line of light from `a` to `b`, `width` wide: a lit rune's cut, a
     /// stone's rim.
     Line {
@@ -144,7 +149,10 @@ impl Target {
         emitters: &[Emitter],
         look: &Bloom,
     ) -> Result<()> {
-        for (n, group) in emitters.split(|e| matches!(e, Emitter::Cover { .. })).enumerate() {
+        for (n, group) in emitters
+            .split(|e| matches!(e, Emitter::Cover { .. }))
+            .enumerate()
+        {
             if n > 0 {
                 // The cover that ended the group before this one.
                 let at = emitters
@@ -154,7 +162,8 @@ impl Target {
                 if let Some(&Emitter::Cover { r, radius }) = at {
                     let dc = target.cast::<ID2D1DeviceContext>()?;
                     dc.SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
-                    self.painter(target).fill_rounded(&r, radius, Color::rgb(0).with_alpha(0.0));
+                    self.painter(target)
+                        .fill_rounded(&r, radius, Color::rgb(0).with_alpha(0.0));
                     dc.SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
                 }
             }
@@ -624,8 +633,14 @@ mod tests {
     #[test]
     fn still_light_that_moves_dims_or_changes_is_bloomed_again() {
         let a = [lamp(14.0, 1.0)];
-        assert_ne!(signature(&a, &look()), signature(&[lamp(15.0, 1.0)], &look()));
-        assert_ne!(signature(&a, &look()), signature(&[lamp(14.0, 0.5)], &look()));
+        assert_ne!(
+            signature(&a, &look()),
+            signature(&[lamp(15.0, 1.0)], &look())
+        );
+        assert_ne!(
+            signature(&a, &look()),
+            signature(&[lamp(14.0, 0.5)], &look())
+        );
         assert_ne!(signature(&a, &look()), signature(&[], &look()));
         let wider = Bloom { far: 9.0, ..look() };
         assert_ne!(signature(&a, &look()), signature(&a, &wider));

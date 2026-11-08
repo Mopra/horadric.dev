@@ -47,11 +47,11 @@ mod release;
 #[cfg(not(target_os = "linux"))]
 mod reload;
 mod run;
-mod secret;
 #[cfg(windows)]
 mod runestep;
 #[cfg(windows)]
 mod runeword;
+mod secret;
 #[cfg(windows)]
 mod setup;
 mod status;

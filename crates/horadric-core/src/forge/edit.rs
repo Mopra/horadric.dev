@@ -101,8 +101,14 @@ mod tests {
     #[test]
     fn forge_replace_lines_crlf_and_no_final_newline() {
         let src = "# T\r\n\r\nold\r\ntext\r\n\r\nafter";
-        assert_eq!(replace_lines(src, 3, 4, "new\ntext"), "# T\r\n\r\nnew\r\ntext\r\n\r\nafter");
-        assert_eq!(replace_lines(src, 6, 6, "last"), "# T\r\n\r\nold\r\ntext\r\n\r\nlast");
+        assert_eq!(
+            replace_lines(src, 3, 4, "new\ntext"),
+            "# T\r\n\r\nnew\r\ntext\r\n\r\nafter"
+        );
+        assert_eq!(
+            replace_lines(src, 6, 6, "last"),
+            "# T\r\n\r\nold\r\ntext\r\n\r\nlast"
+        );
         assert_eq!(replace_lines("a", 2, 1, "b"), "a\nb");
         assert_eq!(replace_lines("", 1, 1, "x"), "x");
     }
@@ -111,8 +117,14 @@ mod tests {
     fn forge_replace_range_unicode() {
         let src = "<p>Grüße</p>\r\n<p>ø</p>";
         let s = src.find("Grüße").unwrap();
-        assert_eq!(replace_range(src, s, s + "Grüße".len(), "Hej"), "<p>Hej</p>\r\n<p>ø</p>");
-        assert_eq!(replace_range(src, 0, 0, "a\nb"), "a\r\nb<p>Grüße</p>\r\n<p>ø</p>");
+        assert_eq!(
+            replace_range(src, s, s + "Grüße".len(), "Hej"),
+            "<p>Hej</p>\r\n<p>ø</p>"
+        );
+        assert_eq!(
+            replace_range(src, 0, 0, "a\nb"),
+            "a\r\nb<p>Grüße</p>\r\n<p>ø</p>"
+        );
         // Inside the two byte ü: moves back to its start, never panics.
         assert_eq!(replace_range("ü", 1, 1, "x"), "xü");
         assert_eq!(replace_range("ab", 5, 9, "c"), "abc");

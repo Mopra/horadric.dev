@@ -96,8 +96,8 @@ fn write_json(path: &Path, value: &Value) -> io::Result<()> {
 /// is taken in and the key set again, so nothing of claude.exe's is lost
 /// and the window stays the few microseconds of a rename.
 pub fn trust(dir: &Path) -> io::Result<()> {
-    let path =
-        config_path_for(dir).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no home folder"))?;
+    let path = config_path_for(dir)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no home folder"))?;
     let key = trust::project_key(&dir.to_string_lossy());
     for _ in 0..5 {
         let before = match fs::read(&path) {

@@ -23,10 +23,10 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteTextFormat, IDWriteTextLayout, IDWriteTextLayout1, IDWriteTypography,
     DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG, DWRITE_FONT_FEATURE_TAG_SUBSCRIPT,
-    DWRITE_FONT_FEATURE_TAG_SUPERSCRIPT, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, DWRITE_FONT_STYLE_ITALIC,
-    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_MEDIUM,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_LINE_METRICS,
-    DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_FONT_FEATURE_TAG_SUPERSCRIPT, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+    DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD,
+    DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+    DWRITE_LINE_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_TEXT_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_RANGE,
     DWRITE_WORD_WRAPPING_EMERGENCY_BREAK, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
@@ -459,7 +459,11 @@ impl Ctx<'_> {
                     links.push((r, Hit::Tr(Act::Path(path.clone(), *line))));
                 }
                 Style::Sup | Style::Sub => {
-                    let t = if *style == Style::Sup { &self.fonts.sups } else { &self.fonts.subs };
+                    let t = if *style == Style::Sup {
+                        &self.fonts.sups
+                    } else {
+                        &self.fonts.subs
+                    };
                     if let Some(t) = t {
                         let _ = l.SetTypography(t, dr);
                     }
@@ -521,7 +525,10 @@ impl Ctx<'_> {
         // its alt text on a plate, opening where it points.
         let chip_h = (0.9 * size + 9.0).round();
         for r in images {
-            for (k, b) in render::range_rects(&l, r.start, r.end - r.start).iter().enumerate() {
+            for (k, b) in render::range_rects(&l, r.start, r.end - r.start)
+                .iter()
+                .enumerate()
+            {
                 let p = plate(b, 0.5, chip_h);
                 s.fill(p, 5.0, self.pal.fg.with_alpha(0.06));
                 s.stroke(p, 5.0, self.pal.fg.with_alpha(0.12), 1.0);
@@ -557,7 +564,11 @@ impl Ctx<'_> {
             return None;
         }
         let p = std::path::Path::new(src);
-        let p = if p.is_absolute() { p.to_path_buf() } else { self.dir.join(p) };
+        let p = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            self.dir.join(p)
+        };
         let key = format!("file:{}", p.display());
         if let Some(got) = self.thumbs.borrow().get(&key) {
             return got.clone();
@@ -621,8 +632,15 @@ impl Ctx<'_> {
                             self.inline_as(&mut s, t, f, (left, 0.0, tw), ink, Align::None, look);
                     } else {
                         // Too narrow for two columns: the term goes above.
-                        let (th, _) =
-                            self.inline_as(&mut s, t, f, (left, 0.0, w + p.term_w), ink, Align::None, look);
+                        let (th, _) = self.inline_as(
+                            &mut s,
+                            t,
+                            f,
+                            (left, 0.0, w + p.term_w),
+                            ink,
+                            Align::None,
+                            look,
+                        );
                         (tx, ty, tw) = (left, th, w + p.term_w);
                     }
                 }
@@ -632,12 +650,20 @@ impl Ctx<'_> {
                     notes: &p.notes,
                     ..Look::default()
                 };
-                let (h, first) = self.inline_as(&mut s, inline, f, (tx, ty, tw), ink, Align::None, look);
+                let (h, first) =
+                    self.inline_as(&mut s, inline, f, (tx, ty, tw), ink, Align::None, look);
                 if let Some((key, shut)) = &p.fold {
                     self.fold_mark(&mut s, key, *shut, (tx, ty, first));
                 }
                 mark_font = f;
-                mark_line = (0.0, if term.is_some() && ty > 0.0 { ty } else { first });
+                mark_line = (
+                    0.0,
+                    if term.is_some() && ty > 0.0 {
+                        ty
+                    } else {
+                        first
+                    },
+                );
                 // A term that wraps beside a short text must not run into
                 // the next item.
                 s.h = flow::hang_height(ty, h, term_h);
@@ -684,10 +710,22 @@ impl Ctx<'_> {
                 };
                 let ink = self.pal.fg.with_alpha(0.92);
                 let f = &self.fonts.body;
-                let (h, first) =
-                    self.inline_as(&mut s, summary, f, (x + 22.0, 0.0, w - 22.0), ink, Align::None, look);
+                let (h, first) = self.inline_as(
+                    &mut s,
+                    summary,
+                    f,
+                    (x + 22.0, 0.0, w - 22.0),
+                    ink,
+                    Align::None,
+                    look,
+                );
                 let chevron = if *open { "\u{E70D}" } else { "\u{E76C}" };
-                s.line(chevron, F::Icon, Rect::new(x, 0.0, 14.0, first), self.pal.faint);
+                s.line(
+                    chevron,
+                    F::Icon,
+                    Rect::new(x, 0.0, 14.0, first),
+                    self.pal.faint,
+                );
                 s.h = h;
                 s.hit(Rect::new(x, 0.0, w, h), Hit::Tr(Act::All(key.clone())));
             }
@@ -726,7 +764,8 @@ impl Ctx<'_> {
                 }
                 None => {
                     let ink = self.pal.fg.with_alpha(0.92);
-                    let (h, _) = self.inline(&mut s, alt, &self.fonts.body, x, 0.0, w, ink, Align::None);
+                    let (h, _) =
+                        self.inline(&mut s, alt, &self.fonts.body, x, 0.0, w, ink, Align::None);
                     s.h = h;
                 }
             },
@@ -797,7 +836,11 @@ impl Ctx<'_> {
                 let cy = top + line / 2.0 + 0.1 * size;
                 let r = Rect::new(right - BOX, cy - BOX / 2.0, BOX, BOX);
                 if *done {
-                    s.fill(r, 4.0, self.pal.accent.mix(self.pal.fg, 0.25).with_alpha(0.85));
+                    s.fill(
+                        r,
+                        4.0,
+                        self.pal.accent.mix(self.pal.fg, 0.25).with_alpha(0.85),
+                    );
                     s.line("\u{E73E}", F::Icon, r, self.pal.bg);
                 } else {
                     s.fill(r, 4.0, self.pal.fg.with_alpha(0.03));
@@ -806,7 +849,10 @@ impl Ctx<'_> {
                 return;
             }
             Marker::Bullet(c) => (c.to_string(), self.pal.accent.with_alpha(0.7)),
-            Marker::Number(n) => (n.clone(), self.pal.accent.mix(self.pal.fg, 0.35).with_alpha(0.85)),
+            Marker::Number(n) => (
+                n.clone(),
+                self.pal.accent.mix(self.pal.fg, 0.35).with_alpha(0.85),
+            ),
         };
         let Some(l) = self.layout(f, &glyph, (right - left).max(1.0)) else {
             return;
@@ -924,7 +970,13 @@ fn pad(l: &IDWriteTextLayout, wide: &[u16], r: std::ops::Range<u32>, room: f32) 
 }
 
 /// [`pad`] with its own room before and after.
-fn pad_sides(l: &IDWriteTextLayout, wide: &[u16], r: std::ops::Range<u32>, before: f32, after: f32) {
+fn pad_sides(
+    l: &IDWriteTextLayout,
+    wide: &[u16],
+    r: std::ops::Range<u32>,
+    before: f32,
+    after: f32,
+) {
     if r.is_empty() {
         return;
     }
@@ -932,8 +984,16 @@ fn pad_sides(l: &IDWriteTextLayout, wide: &[u16], r: std::ops::Range<u32>, befor
         return;
     };
     let surrogate = |u: u16| (0xD800..0xE000).contains(&u);
-    let first_end = if surrogate(wide[r.start as usize]) { r.start + 2 } else { r.start + 1 };
-    let last_start = if surrogate(wide[r.end as usize - 1]) { r.end - 2 } else { r.end - 1 };
+    let first_end = if surrogate(wide[r.start as usize]) {
+        r.start + 2
+    } else {
+        r.start + 1
+    };
+    let last_start = if surrogate(wide[r.end as usize - 1]) {
+        r.end - 2
+    } else {
+        r.end - 1
+    };
     unsafe {
         if last_start <= r.start {
             let _ = l1.SetCharacterSpacing(before, after, 0.0, range(r));
@@ -958,7 +1018,10 @@ fn callout_icon(kind: Callout) -> &'static str {
 /// `C:\` or `C:/` at the start, the one colon a local path may have.
 fn is_drive(s: &str) -> bool {
     let b = s.as_bytes();
-    b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\')
+    b.len() > 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && matches!(b[2], b'/' | b'\\')
         && !s[2..].contains(':')
 }
 

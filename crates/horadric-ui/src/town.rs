@@ -6,8 +6,8 @@
 //! knows the key is a town, keeps its cluster when it is empty and pins it
 //! first.
 
-use std::path::{Path, PathBuf};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 
 use horadric_core::tasks::{self, Task, Waits};
@@ -109,7 +109,11 @@ pub fn of(key: &str) -> Option<Town> {
 
 /// What a town's cluster is called, in place of its folder's name.
 pub fn name_of(key: &str) -> Option<String> {
-    with(|t| t.iter().find(|t| t.key == key).map(|t| t.saved.name.clone()))
+    with(|t| {
+        t.iter()
+            .find(|t| t.key == key)
+            .map(|t| t.saved.name.clone())
+    })
 }
 
 /// Whether the project with this key is a town.

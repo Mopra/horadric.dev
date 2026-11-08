@@ -75,7 +75,10 @@ pub fn open(
     let code = status(&head).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            Sent(io::Error::new(io::ErrorKind::InvalidData, "not an HTTP reply")),
+            Sent(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "not an HTTP reply",
+            )),
         )
     })?;
     loop {

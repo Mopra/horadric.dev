@@ -62,7 +62,12 @@ fn parse_run(args: &[String]) -> Result<RunArgs, String> {
         } else if a.starts_with("--") {
             return Err(format!("unknown flag `{a}`\n\n{USAGE}"));
         } else {
-            names.extend(a.split(',').map(str::trim).filter(|n| !n.is_empty()).map(String::from));
+            names.extend(
+                a.split(',')
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                    .map(String::from),
+            );
         }
     }
     for n in &stdin {
@@ -101,7 +106,10 @@ fn session() -> Option<String> {
 }
 
 fn key() -> Result<String, String> {
-    match (session(), std::env::var(SECRET_KEY_ENV).ok().filter(|k| !k.is_empty())) {
+    match (
+        session(),
+        std::env::var(SECRET_KEY_ENV).ok().filter(|k| !k.is_empty()),
+    ) {
         (None, _) => Err("this terminal was not started by Horadric, so it has no secrets".into()),
         (Some(_), None) => Err(format!(
             "this session has no {SECRET_KEY_ENV}: it was started before Horadric kept secrets. \
@@ -156,9 +164,13 @@ fn secret_run(args: &[String]) -> Result<(), String> {
         "cwd": cwd,
     });
     let (port, headers) = app("secret-run");
-    let (status, mut reader) =
-        client::open(port, SECRET_RUN_PATH, &borrowed(&headers), &body.to_string())
-            .map_err(not_listening)?;
+    let (status, mut reader) = client::open(
+        port,
+        SECRET_RUN_PATH,
+        &borrowed(&headers),
+        &body.to_string(),
+    )
+    .map_err(not_listening)?;
     if status != 200 {
         let mut rest = String::new();
         let _ = std::io::Read::read_to_string(&mut reader, &mut rest);
@@ -281,7 +293,11 @@ fn list() -> Result<(), String> {
     if let Some(e) = answer.get("error").and_then(Value::as_str) {
         return Err(e.to_string());
     }
-    let names = answer.get("names").and_then(Value::as_array).cloned().unwrap_or_default();
+    let names = answer
+        .get("names")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     if names.is_empty() {
         eprintln!("No secrets kept for this project.");
     }
@@ -336,7 +352,9 @@ impl Echo {
             if GetConsoleMode(h, &mut mode).is_err() {
                 return Echo { was: None };
             }
-            SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT).ok().map(|_| mode)
+            SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT)
+                .ok()
+                .map(|_| mode)
         };
         Echo { was }
     }

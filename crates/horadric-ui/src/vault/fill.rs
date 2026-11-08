@@ -13,8 +13,8 @@
 //! a service worker it left there would hear the password typed.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -282,25 +282,32 @@ fn eval(
     context: Option<&str>,
     done: impl FnOnce(Result<Value, String>) + 'static,
 ) {
-    let mut params = json!({ "expression": expression, "returnByValue": true, "awaitPromise": true });
+    let mut params =
+        json!({ "expression": expression, "returnByValue": true, "awaitPromise": true });
     if let Some(c) = context {
         params["uniqueContextId"] = json!(c);
     }
-    web::devtools(key, tab, "Runtime.evaluate", &params.to_string(), move |r| {
-        let v: Value = match r.map(|t| serde_json::from_str(&t)) {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => return done(Err(e.to_string())),
-            Err(e) => return done(Err(e)),
-        };
-        if v.get("exceptionDetails").is_some() {
-            return done(Err("the page's script failed".into()));
-        }
-        let value = v.pointer("/result/value").cloned().unwrap_or(Value::Null);
-        match value.get("error").and_then(Value::as_str) {
-            Some(e) => done(Err(e.to_string())),
-            None => done(Ok(value)),
-        }
-    });
+    web::devtools(
+        key,
+        tab,
+        "Runtime.evaluate",
+        &params.to_string(),
+        move |r| {
+            let v: Value = match r.map(|t| serde_json::from_str(&t)) {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => return done(Err(e.to_string())),
+                Err(e) => return done(Err(e)),
+            };
+            if v.get("exceptionDetails").is_some() {
+                return done(Err("the page's script failed".into()));
+            }
+            let value = v.pointer("/result/value").cloned().unwrap_or(Value::Null);
+            match value.get("error").and_then(Value::as_str) {
+                Some(e) => done(Err(e.to_string())),
+                None => done(Ok(value)),
+            }
+        },
+    );
 }
 
 fn script(fun: &str, args: &[Value]) -> String {
@@ -503,7 +510,14 @@ pub fn devtools(who: Caller, tab: u64, method: String, params: Value, reply: Rep
 
 /// A call on the page holding a filled login: the tab held from the first
 /// check to the last, so nothing else moves it in between.
-fn on_filled(who: Caller, tab: u64, page: Option<Page>, method: String, params: Value, reply: Reply) {
+fn on_filled(
+    who: Caller,
+    tab: u64,
+    page: Option<Page>,
+    method: String,
+    params: Value,
+    reply: Reply,
+) {
     let Some(held) = Busy::take(tab) else {
         return reply.send(error(BUSY));
     };
@@ -537,7 +551,6 @@ fn on_filled(who: Caller, tab: u64, page: Option<Page>, method: String, params: 
     });
 }
 
-
 /// What an agent asked to fill, as `browser_fill_login` names it.
 pub struct Request {
     pub project: String,
@@ -557,7 +570,14 @@ fn unix() -> u64 {
 }
 
 fn log(req: &Request, site: &str, outcome: &str) {
-    store::log(&log_line(unix(), &req.project, &req.session, &req.name, site, outcome));
+    store::log(&log_line(
+        unix(),
+        &req.project,
+        &req.session,
+        &req.name,
+        site,
+        outcome,
+    ));
 }
 
 /// Fills a kept login into the session's own tab `tab`, answering `reply`
@@ -605,7 +625,11 @@ pub fn fill(req: Request, tab: u64, reply: Reply) {
     // the agent's scripts can be pinned to the page they were checked on.
     let tracked = with_tab(tab, |s| std::mem::replace(&mut s.tracked, true));
     let pane = key.clone();
-    let start = move || page_of(&k, tab, move |page| checked(req, login, key, tab, busy, page, reply));
+    let start = move || {
+        page_of(&k, tab, move |page| {
+            checked(req, login, key, tab, busy, page, reply)
+        })
+    };
     if tracked {
         start();
     } else {
@@ -623,8 +647,13 @@ fn checked(
     page: Option<Page>,
     reply: Reply,
 ) {
-    let Some(Page { loader, url, frame, .. }) = page else {
-        return reply.send(error("the page could not be read; try again once it loaded"));
+    let Some(Page {
+        loader, url, frame, ..
+    }) = page
+    else {
+        return reply.send(error(
+            "the page could not be read; try again once it loaded",
+        ));
     };
     let site = origin(&url).unwrap_or_else(|| url.clone());
     if !matches(&url, &login.origins) {
@@ -665,7 +694,10 @@ fn checked(
     // site is tainted again. Workers are found from the browser's own
     // count, never by asking the page, which a worker could answer for.
     let cleared = with_tab(tab, |s| {
-        s.cleared.iter().find(|(o, _)| *o == job.origin).map(|(_, l)| l.clone())
+        s.cleared
+            .iter()
+            .find(|(o, _)| *o == job.origin)
+            .map(|(_, l)| l.clone())
     });
     match cleared {
         Some(l) if l != job.loader => return hold_bypass(job),
@@ -689,7 +721,8 @@ fn checked(
             .and_then(|v| {
                 let list = v["usageBreakdown"].as_array()?.clone();
                 Some(list.iter().any(|u| {
-                    u["storageType"] == "service_workers" && u["usage"].as_f64().unwrap_or(0.0) > 0.0
+                    u["storageType"] == "service_workers"
+                        && u["usage"].as_f64().unwrap_or(0.0) > 0.0
                 }))
             })
             .unwrap_or(true);
@@ -783,13 +816,19 @@ fn bypass_then_ask(job: Job) {
             return job.fail("the browser would not keep service workers out of this tab");
         }
         let k = job.key.clone();
-        web::devtools(&k, tab, "Network.setBypassServiceWorker", r#"{"bypass":true}"#, move |r| {
-            if r.is_err() {
-                with_tab(tab, |s| s.bypass = false);
-                return job.fail("the browser would not keep service workers out of this tab");
-            }
-            ask_then_fill(job)
-        });
+        web::devtools(
+            &k,
+            tab,
+            "Network.setBypassServiceWorker",
+            r#"{"bypass":true}"#,
+            move |r| {
+                if r.is_err() {
+                    with_tab(tab, |s| s.bypass = false);
+                    return job.fail("the browser would not keep service workers out of this tab");
+                }
+                ask_then_fill(job)
+            },
+        );
     });
 }
 
@@ -823,7 +862,12 @@ fn ask_then_fill(job: Job) {
     if !local && job.login.allowed.contains(&job.req.project) {
         return next(job);
     }
-    let host = job.origin.split("://").nth(1).unwrap_or(&job.origin).to_string();
+    let host = job
+        .origin
+        .split("://")
+        .nth(1)
+        .unwrap_or(&job.origin)
+        .to_string();
     let mut text = format!(
         "An agent of {} asks Horadric to fill the web login {} in its browser tab. It never \
          sees the password.",
@@ -869,7 +913,10 @@ fn ask_then_fill(job: Job) {
 }
 
 fn allow(logins: &mut [WebLogin], name: &str, owner: &Owner, project: &str) {
-    for l in logins.iter_mut().filter(|l| l.name == name && &l.owner == owner) {
+    for l in logins
+        .iter_mut()
+        .filter(|l| l.name == name && &l.owner == owner)
+    {
         if !l.allowed.iter().any(|p| p == project) {
             l.allowed.push(project.to_string());
         }
@@ -946,7 +993,10 @@ impl Job {
         let mut why = why.to_string();
         if !self.done.is_empty() {
             let said: Vec<&str> = self.done.iter().map(|k| k.said()).collect();
-            why.push_str(&format!(" (the {} went in before it stopped)", said.join(" and ")));
+            why.push_str(&format!(
+                " (the {} went in before it stopped)",
+                said.join(" and ")
+            ));
         }
         self.reply.send(error(&why));
     }
@@ -997,38 +1047,50 @@ fn next(mut job: Job) {
     still_there(job, move |job| {
         let args = [json!(r), json!(kind.name()), json!(job.origin)];
         let context = job.context();
-        eval(&key, tab, script(FIELD, &args), context.as_deref(), move |res| {
-            if let Err(e) = res {
-                return job.fail(&e);
-            }
-            still_there(job, move |mut job| {
-                let Some(text) = job.value(kind) else {
-                    return job.fail("the one time code could not be made from the kept seed");
-                };
-                let want = text.encode_utf16().count() as u64;
-                let params = json!({ "text": text }).to_string();
-                let (k, tab) = (job.key.clone(), job.tab);
-                web::devtools(&k, tab, "Input.insertText", &params, move |res| {
-                    if res.is_err() {
-                        return job.fail("the browser did not take the typing");
-                    }
-                    let args = [json!(kind.name()), json!(job.origin)];
-                    let context = job.context();
-                    let k = job.key.clone();
-                    eval(&k, tab, script(TYPED, &args), context.as_deref(), move |res| match res {
-                        Ok(v) if v["length"].as_u64() == Some(want) => {
-                            job.done.push(kind);
-                            next(job)
+        eval(
+            &key,
+            tab,
+            script(FIELD, &args),
+            context.as_deref(),
+            move |res| {
+                if let Err(e) = res {
+                    return job.fail(&e);
+                }
+                still_there(job, move |mut job| {
+                    let Some(text) = job.value(kind) else {
+                        return job.fail("the one time code could not be made from the kept seed");
+                    };
+                    let want = text.encode_utf16().count() as u64;
+                    let params = json!({ "text": text }).to_string();
+                    let (k, tab) = (job.key.clone(), job.tab);
+                    web::devtools(&k, tab, "Input.insertText", &params, move |res| {
+                        if res.is_err() {
+                            return job.fail("the browser did not take the typing");
                         }
-                        Ok(_) => job.fail(&format!(
+                        let args = [json!(kind.name()), json!(job.origin)];
+                        let context = job.context();
+                        let k = job.key.clone();
+                        eval(
+                            &k,
+                            tab,
+                            script(TYPED, &args),
+                            context.as_deref(),
+                            move |res| match res {
+                                Ok(v) if v["length"].as_u64() == Some(want) => {
+                                    job.done.push(kind);
+                                    next(job)
+                                }
+                                Ok(_) => job.fail(&format!(
                             "the {} field did not take all of it; the page may limit its length",
                             kind.said()
                         )),
-                        Err(e) => job.fail(&e),
+                                Err(e) => job.fail(&e),
+                            },
+                        );
                     });
                 });
-            });
-        });
+            },
+        );
     });
 }
 
@@ -1052,7 +1114,11 @@ fn finish(job: Job) {
     };
     let (always, project) = (job.always, job.req.project.clone());
     let _ = store::change(|v| {
-        for l in v.logins.iter_mut().filter(|l| l.name == name && l.owner == owner) {
+        for l in v
+            .logins
+            .iter_mut()
+            .filter(|l| l.name == name && l.owner == owner)
+        {
             l.last_used = Some(used.clone());
         }
         if always {
@@ -1062,7 +1128,10 @@ fn finish(job: Job) {
     crate::settings::vault_changed();
     log(&job.req, &job.origin, "filled");
     let filled: Vec<&str> = job.done.iter().map(|k| k.said()).collect();
-    let user = job.done.contains(&Kind::User).then(|| job.login.user.clone());
+    let user = job
+        .done
+        .contains(&Kind::User)
+        .then(|| job.login.user.clone());
     job.reply.send(json!({ "filled": filled, "as": user }));
 }
 
@@ -1079,12 +1148,7 @@ thread_local! {
 /// is on a thread of its own, and a thread timer here picks the answer up.
 fn when_answered(asked: Asked, then: impl FnOnce(Option<Answer>) + 'static) {
     let id = NEXT_WAIT.with(|n| n.replace(n.get() + 1));
-    let tx = INBOX.with(|i| {
-        i.borrow_mut()
-            .get_or_insert_with(mpsc::channel)
-            .0
-            .clone()
-    });
+    let tx = INBOX.with(|i| i.borrow_mut().get_or_insert_with(mpsc::channel).0.clone());
     WAITING.with(|w| w.borrow_mut().push((id, Box::new(then))));
     thread::spawn(move || {
         let answer = asked.wait(ASK_WAIT);

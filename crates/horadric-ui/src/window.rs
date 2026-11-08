@@ -1578,9 +1578,7 @@ impl Cluster {
                     | Hit::Folio
                     | Hit::Web
                     | Hit::Forge
-                    | Hit::Page(_) => {
-                        app::push(Input::ProjectMenu(self.key.clone()))
-                    }
+                    | Hit::Page(_) => app::push(Input::ProjectMenu(self.key.clone())),
                     Hit::Task(i) | Hit::TaskApprove(i) => {
                         if let Some(item) = self.item_at(i) {
                             app::push(Input::TaskMenu(self.key.clone(), item.line, item.title));

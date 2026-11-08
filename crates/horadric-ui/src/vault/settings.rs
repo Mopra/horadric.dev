@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use horadric_core::session::Phase;
 use horadric_core::vault::identity as core;
 use horadric_core::vault::secret::{valid_name, Owner};
-use horadric_core::session::Phase;
 use horadric_core::vault::web;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
@@ -208,7 +208,9 @@ fn project_dir(key: &str) -> PathBuf {
 
 fn read_text(path: &Path) -> String {
     let text = std::fs::read_to_string(path).unwrap_or_default();
-    text.strip_prefix('\u{feff}').map(String::from).unwrap_or(text)
+    text.strip_prefix('\u{feff}')
+        .map(String::from)
+        .unwrap_or(text)
 }
 
 fn rank(owner: &Owner) -> u8 {
@@ -239,13 +241,7 @@ fn build(key: &str) -> View {
     let ids = identities();
     let who = ids
         .iter()
-        .map(|i| {
-            Tool::ALL.map(|t| {
-                i.tools
-                    .contains(&t)
-                    .then(|| identity::who(&i.slug, t))
-            })
-        })
+        .map(|i| Tool::ALL.map(|t| i.tools.contains(&t).then(|| identity::who(&i.slug, t))))
         .collect();
     let mut v = View {
         built: true,
@@ -387,7 +383,11 @@ pub fn project_lines(key: &str) -> Vec<Line> {
     with_view(Some(key), |v| {
         let mut rows = Vec::new();
         if let Some(why) = &v.problem {
-            rows.push(line(Row::Problem, format!("Will not open: {why}"), Control::Note));
+            rows.push(line(
+                Row::Problem,
+                format!("Will not open: {why}"),
+                Control::Note,
+            ));
         }
         rows.push(line(Row::Pick, pick_value(v), Control::Button));
         if let Some(value) = left_behind_value(v, key) {
@@ -473,7 +473,11 @@ fn left_behind_value(v: &View, key: &str) -> Option<String> {
         false => "an old identity".to_string(),
     };
     let n = old.len();
-    let sessions = if n == 1 { "1 session" } else { &format!("{n} sessions") };
+    let sessions = if n == 1 {
+        "1 session"
+    } else {
+        &format!("{n} sessions")
+    };
     Some(format!("{sessions} still on {whose}, restart them"))
 }
 
@@ -490,13 +494,19 @@ fn pick_value(v: &View) -> String {
             let name = v.identity_name(slug);
             if v.pick.as_deref() == Some(slug.as_str()) {
                 name
-            } else if v.file.as_deref().is_some_and(|f| f.eq_ignore_ascii_case(slug)) {
+            } else if v
+                .file
+                .as_deref()
+                .is_some_and(|f| f.eq_ignore_ascii_case(slug))
+            {
                 format!("{name}, as config.json says")
             } else {
                 format!("{name}, by its folder")
             }
         }
-        Some(Resolved::Unknown(slug)) if makeable(slug) => format!("{slug} in config.json, not on this PC, make it"),
+        Some(Resolved::Unknown(slug)) if makeable(slug) => {
+            format!("{slug} in config.json, not on this PC, make it")
+        }
         Some(Resolved::Unknown(slug)) => format!(
             "{slug} in config.json is not a slug: fix its identity to one like {}",
             core::slug(slug)
@@ -509,7 +519,11 @@ fn pick_value(v: &View) -> String {
 /// The Identities section's rows.
 pub fn identity_lines() -> Vec<Line> {
     with_view(None, |v| {
-        let mut rows = vec![line(Row::AddIdentity, "Add\u{2026}".into(), Control::Button)];
+        let mut rows = vec![line(
+            Row::AddIdentity,
+            "Add\u{2026}".into(),
+            Control::Button,
+        )];
         if v.ids.is_empty() {
             rows.push(line(
                 Row::NoIdentity,
@@ -610,7 +624,14 @@ fn done(what: &str, result: Result<(), String>) {
 }
 
 /// A line typed, None when cancelled.
-fn type_in(title: &str, prompt: &str, initial: &str, placeholder: &str, verb: &str, secret: bool) -> Option<String> {
+fn type_in(
+    title: &str,
+    prompt: &str,
+    initial: &str,
+    placeholder: &str,
+    verb: &str,
+    secret: bool,
+) -> Option<String> {
     let shared = shared()?;
     let question = ask::Ask {
         title,
@@ -655,7 +676,13 @@ fn unique_labels(offers: &[(String, String)]) -> Vec<String> {
 
 /// One of `offers` (label, detail) picked as it is typed, or with `free`
 /// anything typed.
-fn pick_one(title: &str, prompt: &str, verb: &str, offers: &[(String, String)], free: bool) -> Option<Picked> {
+fn pick_one(
+    title: &str,
+    prompt: &str,
+    verb: &str,
+    offers: &[(String, String)],
+    free: bool,
+) -> Option<Picked> {
     let shared = shared()?;
     let labels = unique_labels(offers);
     let offers: Vec<(String, String)> = labels
@@ -774,7 +801,13 @@ fn restart_left_behind(key: &str) {
     let text = format!(
         "{n} of this project's sessions started before its identity changed and still use the old logins. Each stops once its turn is done and carries on in the same conversation with the new ones."
     );
-    if choose(Tone::Question, "Restart them", &text, &["Restart them", "Cancel"]) == Some(0) {
+    if choose(
+        Tone::Question,
+        "Restart them",
+        &text,
+        &["Restart them", "Cancel"],
+    ) == Some(0)
+    {
         crate::app::push(crate::app::Input::RestartLeftBehind(key.to_string()));
         BEHIND.with(|b| *b.borrow_mut() = None);
     }
@@ -814,14 +847,19 @@ fn pick_identity(key: &str) {
         auto,
         Choice::Auto,
     ));
-    if let Some(slug) = file.filter(|f| makeable(f) && !ids.iter().any(|i| i.slug.eq_ignore_ascii_case(f))) {
+    if let Some(slug) =
+        file.filter(|f| makeable(f) && !ids.iter().any(|i| i.slug.eq_ignore_ascii_case(f)))
+    {
         offers.push((
             format!("Make identity {slug}"),
             "as config.json names it".into(),
             Choice::Make(slug),
         ));
     }
-    let shown: Vec<(String, String)> = offers.iter().map(|(l, d, _)| (l.clone(), d.clone())).collect();
+    let shown: Vec<(String, String)> = offers
+        .iter()
+        .map(|(l, d, _)| (l.clone(), d.clone()))
+        .collect();
     let Some(Picked::Offer(i)) = pick_one(
         "Identity",
         "Whose logins its sessions get. Sessions running now keep the one they started with; new ones get this.",
@@ -838,8 +876,9 @@ fn pick_identity(key: &str) {
         Choice::Auto => identity::set_pick(key, None),
         Choice::Nobody => identity::set_pick(key, Some("")),
         Choice::Id(slug) => identity::set_pick(key, Some(&slug)),
-        Choice::Make(slug) => identity::create_with_slug(&slug, &slug)
-            .and_then(|_| identity::set_pick(key, None)),
+        Choice::Make(slug) => {
+            identity::create_with_slug(&slug, &slug).and_then(|_| identity::set_pick(key, None))
+        }
     };
     done("Identity", result);
 }
@@ -922,7 +961,11 @@ fn kept_secret(key: &str, k: Kept) {
     let whose = with_view(Some(key), |v| v.whose(&owner));
     let mut text = format!("Kept {whose}, {}.", used(&k.last));
     if let Some(u) = &k.last {
-        text.push_str(&format!(" Last by session {} for {}.", short_id(&u.session), short(&u.what)));
+        text.push_str(&format!(
+            " Last by session {} for {}.",
+            short_id(&u.session),
+            short(&u.what)
+        ));
     }
     if k.beaten {
         text.push_str(" Another of the same name wins for this project.");
@@ -951,7 +994,11 @@ fn kept_secret(key: &str, k: Kept) {
                             // A new value is a new secret, as with secret
                             // set: what was allowed for the old one is asked
                             // again.
-                            for s in v.secrets.iter_mut().filter(|s| s.name == k.name && s.owner == owner) {
+                            for s in v
+                                .secrets
+                                .iter_mut()
+                                .filter(|s| s.name == k.name && s.owner == owner)
+                            {
                                 s.value = value.clone();
                                 s.allowed.clear();
                             }
@@ -964,7 +1011,10 @@ fn kept_secret(key: &str, k: Kept) {
             if forget(&k.name) {
                 done(
                     &k.name,
-                    store::change(|v| v.secrets.retain(|s| !(s.name == k.name && s.owner == owner))),
+                    store::change(|v| {
+                        v.secrets
+                            .retain(|s| !(s.name == k.name && s.owner == owner))
+                    }),
                 );
             }
         }
@@ -973,7 +1023,11 @@ fn kept_secret(key: &str, k: Kept) {
                 done(
                     &k.name,
                     store::change(|v| {
-                        for s in v.secrets.iter_mut().filter(|s| s.name == k.name && s.owner == owner) {
+                        for s in v
+                            .secrets
+                            .iter_mut()
+                            .filter(|s| s.name == k.name && s.owner == owner)
+                        {
                             s.allowed.retain(|a| *a != gone);
                         }
                     }),
@@ -989,7 +1043,8 @@ fn short_id(session: &str) -> &str {
 }
 
 fn forget(name: &str) -> bool {
-    let text = format!("Forgets {name} on this PC. Sessions asking for it after are told it is missing.");
+    let text =
+        format!("Forgets {name} on this PC. Sessions asking for it after are told it is missing.");
     choose(Tone::Warning, name, &text, &["Forget it", "Keep it"]) == Some(0)
 }
 
@@ -1012,7 +1067,10 @@ fn allowed_offer(entry: &str) -> (String, String) {
     let parts = entry
         .strip_prefix("sha256:")
         .and_then(|rest| rest.split_once('|'))
-        .and_then(|(hash, rest)| rest.rsplit_once('|').map(|(project, program)| (hash, project, program)));
+        .and_then(|(hash, rest)| {
+            rest.rsplit_once('|')
+                .map(|(project, program)| (hash, project, program))
+        });
     match parts {
         // Kept rather than dropped, so the human sees what was allowed;
         // a program no longer on the list is never run on it.
@@ -1020,9 +1078,15 @@ fn allowed_offer(entry: &str) -> (String, String) {
             let used = horadric_core::vault::secret::always_allowed(
                 horadric_core::vault::secret::allowed_program(program),
             );
-            let mut detail = format!("for {}, as it was at {}", short(project), hash.get(..8).unwrap_or(hash));
+            let mut detail = format!(
+                "for {}, as it was at {}",
+                short(project),
+                hash.get(..8).unwrap_or(hash)
+            );
             if !used {
-                detail.push_str(", no longer used: only programs Horadric knows can be allowed always");
+                detail.push_str(
+                    ", no longer used: only programs Horadric knows can be allowed always",
+                );
             }
             (short(program).to_string(), detail)
         }
@@ -1057,14 +1121,22 @@ fn kept_login(key: &str, k: Kept) {
     let pressed = choose(Tone::Question, &k.name, &text, &buttons);
     let change = |f: &dyn Fn(&mut store::WebLogin)| {
         store::change(|v| {
-            for l in v.logins.iter_mut().filter(|l| l.name == k.name && l.owner == owner) {
+            for l in v
+                .logins
+                .iter_mut()
+                .filter(|l| l.name == k.name && l.owner == owner)
+            {
                 f(l);
             }
         })
     };
     match pressed.map(|i| buttons[i]) {
         Some("Replace") => {
-            let prompt = format!("A new password for {} on {}. Leave it empty to keep the one kept.", k.user, sites.join(", "));
+            let prompt = format!(
+                "A new password for {} on {}. Leave it empty to keep the one kept.",
+                k.user,
+                sites.join(", ")
+            );
             let Some(password) = type_in(&k.name, &prompt, "", "", "go on", true) else {
                 return;
             };
@@ -1143,7 +1215,11 @@ fn seed_ok(seed: &str) -> bool {
 /// not do.
 pub fn parse_sites(text: &str) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
-    for part in text.split([' ', ',', ';', '\n', '\t']).map(str::trim).filter(|p| !p.is_empty()) {
+    for part in text
+        .split([' ', ',', ';', '\n', '\t'])
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
         let url = if part.contains("://") {
             part.to_string()
         } else {
@@ -1155,7 +1231,11 @@ pub fn parse_sites(text: &str) -> Result<Vec<String>, String> {
                     out.push(o);
                 }
             }
-            Some(o) => return Err(format!("{o} will not do: https, or plain http only on this PC")),
+            Some(o) => {
+                return Err(format!(
+                    "{o} will not do: https, or plain http only on this PC"
+                ))
+            }
             None => return Err(format!("{part} is not a site's address")),
         }
     }
@@ -1169,7 +1249,10 @@ pub fn parse_sites(text: &str) -> Result<Vec<String>, String> {
 /// level domain, upper case. `https://app.example.com` is EXAMPLE.
 pub fn name_for(origin: &str) -> String {
     let host = host(origin);
-    let host = host.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h);
+    let host = host
+        .rsplit_once(':')
+        .filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit()))
+        .map_or(host, |(h, _)| h);
     let parts: Vec<&str> = host.split('.').filter(|p| !p.is_empty()).collect();
     let main = match parts.as_slice() {
         [] => "",
@@ -1178,7 +1261,13 @@ pub fn name_for(origin: &str) -> String {
     };
     let mut name: String = main
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
     if !name.starts_with(|c: char| c.is_ascii_uppercase()) {
         name.insert_str(0, "SITE_");
@@ -1191,7 +1280,14 @@ fn add_login(key: &str) {
     const TITLE: &str = "Add a web login";
     let mut prompt = "The address of the page you sign in on, pasted whole is fine. More than one site: put spaces between them.".to_string();
     let origins = loop {
-        let text = match type_in(TITLE, &prompt, "", "https://app.example.com", "go on", false) {
+        let text = match type_in(
+            TITLE,
+            &prompt,
+            "",
+            "https://app.example.com",
+            "go on",
+            false,
+        ) {
             Some(t) => t,
             None => return,
         };
@@ -1203,10 +1299,21 @@ fn add_login(key: &str) {
     let Some(name) = ask_name(TITLE, &name_for(&origins[0])) else {
         return;
     };
-    let Some(user) = type_in(TITLE, "The user name or email you sign in with. Agents may see it.", "", "", "go on", false) else {
+    let Some(user) = type_in(
+        TITLE,
+        "The user name or email you sign in with. Agents may see it.",
+        "",
+        "",
+        "go on",
+        false,
+    ) else {
         return;
     };
-    let prompt = format!("The password for {} on {}. Sealed for this Windows user and never shown again.", user.trim(), host(&origins[0]));
+    let prompt = format!(
+        "The password for {} on {}. Sealed for this Windows user and never shown again.",
+        user.trim(),
+        host(&origins[0])
+    );
     let Some(password) = type_in(TITLE, &prompt, "", "", "go on", true) else {
         return;
     };
@@ -1241,12 +1348,22 @@ fn name_of(id: &Identity) {
     let pressed = choose(
         Tone::Question,
         &id.name,
-        &format!("Its slug is {}, which config.json files name it by and which stays.", id.slug),
+        &format!(
+            "Its slug is {}, which config.json files name it by and which stays.",
+            id.slug
+        ),
         &["Rename", "Delete", "Keep"],
     );
     match pressed {
         Some(0) => {
-            if let Some(name) = type_in("Rename identity", "Its new name. The slug stays.", &id.name, "", "rename", false) {
+            if let Some(name) = type_in(
+                "Rename identity",
+                "Its new name. The slug stays.",
+                &id.name,
+                "",
+                "rename",
+                false,
+            ) {
                 if !name.trim().is_empty() {
                     done("Rename identity", identity::rename(&id.slug, &name));
                 }
@@ -1264,7 +1381,12 @@ fn delete_identity(id: &Identity) {
     const TITLE: &str = "Delete identity";
     let owner = Owner::Identity(id.slug.clone());
     let listed = store::listing("", Some(&id.slug));
-    let theirs = |kind| listed.iter().filter(|l| l.kind == kind && l.owner == owner).count();
+    let theirs = |kind| {
+        listed
+            .iter()
+            .filter(|l| l.kind == kind && l.owner == owner)
+            .count()
+    };
     let (secrets, logins) = (theirs(store::Kind::Secret), theirs(store::Kind::WebLogin));
     let mut text = format!(
         "Deletes {} and its folder of logins on this PC. Projects that were its get this PC's own logins in their next sessions; sessions already running keep it until restarted.",
@@ -1318,7 +1440,10 @@ fn git_of(id: &Identity) {
     std::thread::spawn(move || {
         let _ = send.send(identity::github_accounts());
     });
-    let prompt = format!("The name {}'s commits carry. Empty to use this PC's git as it is.", id.name);
+    let prompt = format!(
+        "The name {}'s commits carry. Empty to use this PC's git as it is.",
+        id.name
+    );
     let Some(name) = type_in(TITLE, &prompt, &old.name, "Full name", "go on", false) else {
         return;
     };
@@ -1327,7 +1452,14 @@ fn git_of(id: &Identity) {
         done(TITLE, identity::set_git(&id.slug, None));
         return;
     }
-    let Some(email) = type_in(TITLE, "The email its commits carry.", &old.email, "name@example.com", "go on", false) else {
+    let Some(email) = type_in(
+        TITLE,
+        "The email its commits carry.",
+        &old.email,
+        "name@example.com",
+        "go on",
+        false,
+    ) else {
         return;
     };
     // Asked of Git Credential Manager while the name and email were typed:
@@ -1336,9 +1468,19 @@ fn git_of(id: &Identity) {
     let accounts = accounts.try_recv().unwrap_or_default();
     let prompt = "The GitHub user its pushes go as, from the ones Git Credential Manager keeps. Empty for whichever it picks.";
     let user = if accounts.is_empty() {
-        type_in(TITLE, prompt, old.github_user.as_deref().unwrap_or(""), "GitHub user", "keep it", false)
+        type_in(
+            TITLE,
+            prompt,
+            old.github_user.as_deref().unwrap_or(""),
+            "GitHub user",
+            "keep it",
+            false,
+        )
     } else {
-        let offers: Vec<(String, String)> = accounts.iter().map(|a| (a.clone(), String::new())).collect();
+        let offers: Vec<(String, String)> = accounts
+            .iter()
+            .map(|a| (a.clone(), String::new()))
+            .collect();
         pick_one(TITLE, prompt, "keep it", &offers, true).map(|p| match p {
             Picked::Offer(i) => accounts[i].clone(),
             Picked::Typed(t) => t,
@@ -1380,7 +1522,11 @@ fn claims_of(id: &Identity) {
     let text = if id.claims.is_empty() {
         format!("{} claims no folder. A project under one it claims is its own from its first session, unless the project picks.", id.name)
     } else {
-        format!("{} claims {}. The longest claim wins, and a project's own pick beats any.", id.name, id.claims.join(", "))
+        format!(
+            "{} claims {}. The longest claim wins, and a project's own pick beats any.",
+            id.name,
+            id.claims.join(", ")
+        )
     };
     let mut buttons = vec!["Add a folder"];
     if !id.claims.is_empty() {
@@ -1436,8 +1582,18 @@ fn claims_of(id: &Identity) {
             }
         }
         Some("Remove one") => {
-            let offers: Vec<(String, String)> = id.claims.iter().map(|c| (c.clone(), String::new())).collect();
-            if let Some(Picked::Offer(i)) = pick_one(TITLE, "Which folder it claims no more.", "remove it", &offers, false) {
+            let offers: Vec<(String, String)> = id
+                .claims
+                .iter()
+                .map(|c| (c.clone(), String::new()))
+                .collect();
+            if let Some(Picked::Offer(i)) = pick_one(
+                TITLE,
+                "Which folder it claims no more.",
+                "remove it",
+                &offers,
+                false,
+            ) {
                 done(TITLE, identity::remove_claim(&id.slug, &id.claims[i]));
             }
         }
@@ -1521,18 +1677,39 @@ mod tests {
         ];
         assert_eq!(
             unique_labels(&offers),
-            ["main.exe (C:\\a\\main.exe)", "main.exe (C:\\b\\main.exe)", "git.exe"]
+            [
+                "main.exe (C:\\a\\main.exe)",
+                "main.exe (C:\\b\\main.exe)",
+                "git.exe"
+            ]
         );
-        let same = [("x".to_string(), String::new()), ("X".to_string(), String::new())];
+        let same = [
+            ("x".to_string(), String::new()),
+            ("X".to_string(), String::new()),
+        ];
         assert_eq!(unique_labels(&same), ["x", "X #2"]);
     }
 
     #[test]
     fn an_always_reads_by_program_project_and_content() {
-        let a = horadric_core::vault::secret::approval("c:/work/app", "c:/tools/aws.exe s3 ls", "ABCDEF0123456789");
-        assert_eq!(allowed_offer(&a), ("aws.exe s3 ls".to_string(), "for app, as it was at abcdef01".to_string()));
+        let a = horadric_core::vault::secret::approval(
+            "c:/work/app",
+            "c:/tools/aws.exe s3 ls",
+            "ABCDEF0123456789",
+        );
+        assert_eq!(
+            allowed_offer(&a),
+            (
+                "aws.exe s3 ls".to_string(),
+                "for app, as it was at abcdef01".to_string()
+            )
+        );
         // One for a program no longer allowed Always says so.
-        let gh = horadric_core::vault::secret::approval("c:/work/app", "c:/tools/gh.exe pr create", "ab");
+        let gh = horadric_core::vault::secret::approval(
+            "c:/work/app",
+            "c:/tools/gh.exe pr create",
+            "ab",
+        );
         assert!(allowed_offer(&gh).1.contains("no longer used"));
         assert_eq!(allowed_offer("c:/work/site").0, "site");
     }

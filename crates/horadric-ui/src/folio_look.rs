@@ -316,7 +316,10 @@ pub fn step_line(step: &Step) -> StepLine {
             }
         }
         "Bash" | "PowerShell" => {
-            let said = step.input["description"].as_str().unwrap_or_default().trim();
+            let said = step.input["description"]
+                .as_str()
+                .unwrap_or_default()
+                .trim();
             if !said.is_empty() {
                 line.label = said.to_string();
             }
@@ -376,7 +379,11 @@ pub fn with_model(line: String, lane: &Lane, model: &str) -> String {
     if model.is_empty() {
         return line;
     }
-    let who = if lane.agent_type.is_empty() { "Agent" } else { &lane.agent_type };
+    let who = if lane.agent_type.is_empty() {
+        "Agent"
+    } else {
+        &lane.agent_type
+    };
     match line.strip_prefix(who) {
         Some(rest) => format!("{who} \u{b7} {model}{rest}"),
         None => format!("{line} \u{b7} {model}"),
@@ -1018,7 +1025,10 @@ mod tests {
         assert_eq!(duration(125_000), "2 min 5 s");
         assert_eq!(duration(120_000), "2 min");
         assert_eq!(domain("https://www.docs.rs/serde/latest"), "docs.rs");
-        assert_eq!(domain("http://user@example.com:8080?q=1"), "example.com:8080");
+        assert_eq!(
+            domain("http://user@example.com:8080?q=1"),
+            "example.com:8080"
+        );
         assert_eq!(domain("not a url"), "not a url");
     }
 
@@ -1032,20 +1042,31 @@ mod tests {
         let said = with_model(line.clone(), &lane, "haiku");
         assert_eq!(said, "Explore \u{b7} haiku \u{b7} 4 tool uses");
         assert_eq!(with_model(line.clone(), &lane, ""), line);
-        assert_eq!(with_model("Agent".into(), &Lane::default(), "opus"), "Agent \u{b7} opus");
+        assert_eq!(
+            with_model("Agent".into(), &Lane::default(), "opus"),
+            "Agent \u{b7} opus"
+        );
     }
 
     #[test]
     fn markdown_is_told_from_plain_words() {
         assert!(looks_like_markdown("# Title\n\nSome text.\n\n- one\n- two"));
-        assert!(looks_like_markdown("See [docs](https://x.y).\n\nAnd **this**."));
+        assert!(looks_like_markdown(
+            "See [docs](https://x.y).\n\nAnd **this**."
+        ));
         assert!(!looks_like_markdown("Just a plain answer.\nOn two lines."));
         assert!(!looks_like_markdown("#hashtag\n2024. A year."));
     }
 
     #[test]
     fn a_web_search_counts_on_its_own() {
-        let steps = [step("WebSearch", "rust", Some(true)), step("WebFetch", "u", Some(true))];
-        assert_eq!(run_summary(&steps), "Searched the web \u{b7} Fetched 1 page");
+        let steps = [
+            step("WebSearch", "rust", Some(true)),
+            step("WebFetch", "u", Some(true)),
+        ];
+        assert_eq!(
+            run_summary(&steps),
+            "Searched the web \u{b7} Fetched 1 page"
+        );
     }
 }

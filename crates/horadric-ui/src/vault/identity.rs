@@ -219,7 +219,10 @@ pub fn note_started(id: &str, project_dir: &Path) {
 
 /// The slug session `id` started with, "" for none, None when not noted.
 pub fn started_as(id: &str) -> Option<String> {
-    started_list().into_iter().find(|(i, _)| i == id).map(|(_, s)| s)
+    started_list()
+        .into_iter()
+        .find(|(i, _)| i == id)
+        .map(|(_, s)| s)
 }
 
 /// Whether session `id` in `cwd` runs on another identity than its

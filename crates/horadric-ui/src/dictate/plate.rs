@@ -36,8 +36,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, ShowWindow, CREATESTRUCTW,
     GUITHREADINFO, GWLP_USERDATA, HTTRANSPARENT, LWA_ALPHA, MA_NOACTIVATE, SW_SHOWNOACTIVATE,
     WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_PAINT, WM_TIMER,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    WS_POPUP,
 };
 
 use super::Shown;
@@ -354,7 +354,9 @@ impl Plate {
         if kept.0 != text || kept.1.is_none() {
             *kept = (text.clone(), self.layout(&text, heard));
         }
-        let Some(layout) = kept.1.as_ref() else { return };
+        let Some(layout) = kept.1.as_ref() else {
+            return;
+        };
         let mut slot = self.target.borrow_mut();
         if slot.is_none() {
             let s = self.scale;
@@ -481,7 +483,10 @@ mod tests {
         let work = [0, 0, 1920, 1040];
         assert_eq!(place(caret(100, 200, 220), (380, 34), work, 6), (100, 226));
         // No room under: over the caret's top, not over its line.
-        assert_eq!(place(caret(100, 1000, 1020), (380, 34), work, 6), (100, 960));
+        assert_eq!(
+            place(caret(100, 1000, 1020), (380, 34), work, 6),
+            (100, 960)
+        );
         // Kept on the screen at the right edge.
         assert_eq!(place(caret(1800, 200, 220), (380, 34), work, 6).0, 1540);
     }

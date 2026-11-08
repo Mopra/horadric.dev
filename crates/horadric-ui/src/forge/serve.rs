@@ -22,8 +22,7 @@ use horadric_core::forge::Kind;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2Deferral, ICoreWebView2Environment,
     ICoreWebView2WebResourceRequestedEventArgs, ICoreWebView2_2,
-    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
-    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
 };
 use webview2_com::{
     AddScriptToExecuteOnDocumentCreatedCompletedHandler, WebMessageReceivedEventHandler,
@@ -167,7 +166,10 @@ fn file_in(root: &Path, url: &str) -> Option<PathBuf> {
 
 /// The folder and file a file tab's address names, the folder found by
 /// its host through `root_of`. None for any other address.
-pub fn parse_url(url: &str, root_of: impl Fn(&str) -> Option<PathBuf>) -> Option<(PathBuf, PathBuf)> {
+pub fn parse_url(
+    url: &str,
+    root_of: impl Fn(&str) -> Option<PathBuf>,
+) -> Option<(PathBuf, PathBuf)> {
     if !url.starts_with("https://") {
         return None;
     }
@@ -190,8 +192,24 @@ pub fn is_subresource(file: &Path) -> bool {
         .to_ascii_lowercase();
     matches!(
         ext.as_str(),
-        "css" | "js" | "mjs" | "json" | "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "avif"
-            | "ico" | "woff" | "woff2" | "ttf" | "otf" | "mp4" | "webm"
+        "css"
+            | "js"
+            | "mjs"
+            | "json"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "svg"
+            | "avif"
+            | "ico"
+            | "woff"
+            | "woff2"
+            | "ttf"
+            | "otf"
+            | "mp4"
+            | "webm"
     )
 }
 
@@ -216,9 +234,9 @@ fn script(accent: Color) -> String {
     let assets = serde_json::json!({
         "forgeCss": forge_css(accent),
         "deckCss": format!(":host, html.forge-deck {{ {look} }}
-{DECK_CSS}"),
+    {DECK_CSS}"),
         "editorCss": format!(":host, html.forge-editing {{ {look} }}
-{EDITOR_CSS}"),
+    {EDITOR_CSS}"),
     });
     format!(
         "(function(){{\nif(!location.hostname.toLowerCase().endsWith({suffix:?}))return;\n\
@@ -234,8 +252,10 @@ fn script(accent: Color) -> String {
 /// colour, as the page side and the pins on web pages draw with it.
 pub(super) fn forge_css(accent: Color) -> String {
     let look = super::home::vars(accent);
-    format!(":host {{ {look} }}
-{FORGE_CSS}")
+    format!(
+        ":host {{ {look} }}
+{FORGE_CSS}"
+    )
 }
 
 /// Readies the new page of a file tab: `root` mapped to `host` read only,
@@ -284,7 +304,10 @@ pub fn prepare(key: &str, id: u64, view: &ICoreWebView2, root: &Path, host: &str
 
         let added =
             AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|_, _| Ok(())));
-        let _ = view.AddScriptToExecuteOnDocumentCreated(&HSTRING::from(script(theme::accent(key))), &added);
+        let _ = view.AddScriptToExecuteOnDocumentCreated(
+            &HSTRING::from(script(theme::accent(key))),
+            &added,
+        );
     }
 }
 
@@ -360,7 +383,10 @@ impl Reply {
         } else {
             "no-store"
         };
-        format!("Content-Type: {}\r\nCache-Control: {cache}", self.content_type)
+        format!(
+            "Content-Type: {}\r\nCache-Control: {cache}",
+            self.content_type
+        )
     }
 }
 
@@ -379,7 +405,10 @@ fn path_query(url: &str) -> (&str, &str) {
 /// Whether `url` is the editor's preview of an HTML file, the file in a
 /// frame of its own page: served as the page is, but not the tab's page.
 pub fn is_preview(url: &str) -> bool {
-    path_query(url).1.split('&').any(|q| q == "preview" || q.starts_with("preview="))
+    path_query(url)
+        .1
+        .split('&')
+        .any(|q| q == "preview" || q.starts_with("preview="))
 }
 
 /// How a request is to be answered.
@@ -422,7 +451,11 @@ fn plan(root: &Path, url: &str, document: bool, flat: bool, accent: Color) -> Op
                 super::runtime::attr(&to)
             ))));
         }
-        let (root, written, query) = (root.to_path_buf(), super::recent_written(), query.to_string());
+        let (root, written, query) = (
+            root.to_path_buf(),
+            super::recent_written(),
+            query.to_string(),
+        );
         return Some(Plan::Later(Box::new(move || {
             super::home::page_asked(&root, &file, flat, &written, accent, &query)
         })));
@@ -433,7 +466,8 @@ fn plan(root: &Path, url: &str, document: bool, flat: bool, accent: Color) -> Op
         // with where each element's text sits; it runs first and passes
         // on pages too large to mark.
         let page = matches!(ext.as_deref(), Some("html" | "htm"));
-        let markable = std::fs::metadata(&file).is_ok_and(|m| m.len() <= super::edit::MARK_MAX as u64);
+        let markable =
+            std::fs::metadata(&file).is_ok_and(|m| m.len() <= super::edit::MARK_MAX as u64);
         if document && page && markable {
             return None;
         }
@@ -466,7 +500,9 @@ fn plan(root: &Path, url: &str, document: bool, flat: bool, accent: Color) -> Op
     // Read here, on the UI thread, where the theme and the project's
     // colour live; the worker only renders.
     let look = look(accent);
-    Some(Plan::Later(Box::new(move || rendered(kind, &file, &title, &look))))
+    Some(Plan::Later(Box::new(move || {
+        rendered(kind, &file, &title, &look)
+    })))
 }
 
 /// The type a file of `kind` is served as when it is not rendered. The
@@ -641,10 +677,12 @@ fn first_rows(src: &str, rows: usize) -> (&str, bool) {
 /// answer as it would. Reads the file on the calling thread.
 #[cfg(test)]
 fn answer(root: &Path, url: &str, document: bool, flat: bool) -> Option<Reply> {
-    Some(match plan(root, url, document, flat, crate::theme::ACCENTS[0].0)? {
-        Plan::Now(reply) => reply,
-        Plan::Later(make) => make(),
-    })
+    Some(
+        match plan(root, url, document, flat, crate::theme::ACCENTS[0].0)? {
+            Plan::Now(reply) => reply,
+            Plan::Later(make) => make(),
+        },
+    )
 }
 
 /// A request waiting on a worker thread, with what is needed to answer it
@@ -736,7 +774,11 @@ pub fn drain() {
     }
 }
 
-fn respond(env: &ICoreWebView2Environment, args: &ICoreWebView2WebResourceRequestedEventArgs, reply: &Reply) {
+fn respond(
+    env: &ICoreWebView2Environment,
+    args: &ICoreWebView2WebResourceRequestedEventArgs,
+    reply: &Reply,
+) {
     let stream = match &reply.body {
         Body::Bytes(b) => unsafe { SHCreateMemStream(Some(b)) },
         Body::File(file) => unsafe {
@@ -754,7 +796,9 @@ fn respond(env: &ICoreWebView2Environment, args: &ICoreWebView2WebResourceReques
         Some(s) => (s, reply.status, reply.headers()),
         None => {
             let missing = not_found();
-            let Body::Bytes(b) = &missing.body else { return };
+            let Body::Bytes(b) = &missing.body else {
+                return;
+            };
             let Some(s) = (unsafe { SHCreateMemStream(Some(b)) }) else {
                 return;
             };
@@ -831,7 +875,12 @@ mod tests {
         assert!(matches!(&raw.body, Body::File(f) if f == &dir.join("chart.jsx")));
         assert!(raw.content_type.starts_with("text/plain") && !raw.cache);
         let base = super::super::runtime::base();
-        let js = answer(&dir, &format!("https://{host}{base}runtime.js"), false, false);
+        let js = answer(
+            &dir,
+            &format!("https://{host}{base}runtime.js"),
+            false,
+            false,
+        );
         assert!(js.is_some_and(|r| r.cache && r.status == 200));
         let nope = answer(&dir, &format!("https://{host}/__forge/nope"), true, false);
         assert_eq!(nope.unwrap().status, 404);
@@ -851,9 +900,13 @@ mod tests {
     fn only_a_page_gets_the_rendered_csv() {
         let dir = std::env::temp_dir().join(format!("forge-serve-csv-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("data.csv"), "a,b
+        std::fs::write(
+            dir.join("data.csv"),
+            "a,b
 1,2
-").unwrap();
+",
+        )
+        .unwrap();
         let url = "https://x.forge.horadric/data.csv";
         let page = answer(&dir, url, true, false).unwrap();
         assert!(page.content_type.starts_with("text/html"));
@@ -874,9 +927,17 @@ mod tests {
         assert!(fetched.content_type.starts_with("text/html"));
         // The preview frame is a document: left to edit.rs to mark, as the
         // tab's page is.
-        assert!(answer(&dir, "https://x.forge.horadric/page.html?preview", true, false).is_none());
+        assert!(answer(
+            &dir,
+            "https://x.forge.horadric/page.html?preview",
+            true,
+            false
+        )
+        .is_none());
         assert!(is_preview("https://x.forge.horadric/page.html?preview"));
-        assert!(is_preview("https://x.forge.horadric/page.html?a=1&preview=2#s"));
+        assert!(is_preview(
+            "https://x.forge.horadric/page.html?a=1&preview=2#s"
+        ));
         assert!(!is_preview("https://x.forge.horadric/page.html"));
         assert!(!is_preview("https://x.forge.horadric/preview.html"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -887,12 +948,30 @@ mod tests {
         let root = Path::new(r"C:/Users/me/Desktop");
         let host = host_for_flat(root);
         assert!(is_flat(&host) && !is_flat(&host_for(root)));
-        let deep = plan(root, &format!("https://{host}/.ssh/id_rsa"), false, true, crate::theme::ACCENTS[0].0);
+        let deep = plan(
+            root,
+            &format!("https://{host}/.ssh/id_rsa"),
+            false,
+            true,
+            crate::theme::ACCENTS[0].0,
+        );
         assert!(matches!(deep, Some(Plan::Now(r)) if r.status == 404));
-        let hidden = plan(root, &format!("https://{host}/a%2Fb.png"), false, true, crate::theme::ACCENTS[0].0);
+        let hidden = plan(
+            root,
+            &format!("https://{host}/a%2Fb.png"),
+            false,
+            true,
+            crate::theme::ACCENTS[0].0,
+        );
         assert!(matches!(hidden, Some(Plan::Now(r)) if r.status == 404));
         // A file at the top passes the subfolder check; this one is missing.
-        let top = plan(root, &format!("https://{host}/notes.png"), false, true, crate::theme::ACCENTS[0].0);
+        let top = plan(
+            root,
+            &format!("https://{host}/notes.png"),
+            false,
+            true,
+            crate::theme::ACCENTS[0].0,
+        );
         assert!(matches!(top, Some(Plan::Now(r)) if r.status == 404));
     }
 
@@ -917,20 +996,41 @@ mod tests {
 
     #[test]
     fn a_long_csv_is_cut_to_its_first_rows() {
-        assert_eq!(first_rows("h
+        assert_eq!(
+            first_rows(
+                "h
 1
 2
-", 2), ("h
+", 2
+            ),
+            (
+                "h
 1
-", true));
-        assert_eq!(first_rows("h
+", true
+            )
+        );
+        assert_eq!(
+            first_rows(
+                "h
 1
-", 2), ("h
+", 2
+            ),
+            (
+                "h
 1
-", false));
-        assert_eq!(first_rows("h
-1", 5), ("h
-1", false));
+", false
+            )
+        );
+        assert_eq!(
+            first_rows(
+                "h
+1", 5
+            ),
+            (
+                "h
+1", false
+            )
+        );
     }
 
     #[test]
@@ -947,7 +1047,9 @@ mod tests {
     #[test]
     #[ignore]
     fn write_sample_pages() {
-        let Ok(out) = std::env::var("FORGE_SAMPLES") else { return };
+        let Ok(out) = std::env::var("FORGE_SAMPLES") else {
+            return;
+        };
         let out = PathBuf::from(out);
         let src = out.join("src");
         std::fs::create_dir_all(src.join("notes")).unwrap();
@@ -967,7 +1069,10 @@ a [link](https://horadric.dev) and ~~old words~~.\n\n## Steps\n\n1. Read the pla
         let accent = crate::theme::ACCENTS[2].0;
         let look = look(accent);
         let mermaid = out.join("mermaid.js");
-        let _ = std::fs::write(&mermaid, include_bytes!("../../assets/forge/runtime/mermaid.js"));
+        let _ = std::fs::write(
+            &mermaid,
+            include_bytes!("../../assets/forge/runtime/mermaid.js"),
+        );
         let local = |page: String| {
             page.replace(
                 &format!("{}mermaid.js", super::super::runtime::base()),
@@ -976,12 +1081,55 @@ a [link](https://horadric.dev) and ~~old words~~.\n\n## Steps\n\n1. Read the pla
         };
         let text = |r: Reply| String::from_utf8_lossy(bytes(&r)).into_owned();
         let pages = [
-            ("md.html", local(text(rendered(Kind::Markdown, &src.join("plan.md"), "plan.md", &look)))),
-            ("csv.html", text(rendered(Kind::Csv, &src.join("table.csv"), "table.csv", &look))),
-            ("missing.html", text(rendered(Kind::Csv, &src.join("gone.csv"), "gone.csv", &look))),
-            ("waiting.html", message("Q3 review.pptx", "Converting with PowerPoint", Mood::Waiting, &look)),
-            ("large.html", message("huge.csv", "Too large to show here, over 20 MB.", Mood::Quiet, &look)),
-            ("home.html", text(super::super::home::page(&src, &src, false, &[], accent))),
+            (
+                "md.html",
+                local(text(rendered(
+                    Kind::Markdown,
+                    &src.join("plan.md"),
+                    "plan.md",
+                    &look,
+                ))),
+            ),
+            (
+                "csv.html",
+                text(rendered(
+                    Kind::Csv,
+                    &src.join("table.csv"),
+                    "table.csv",
+                    &look,
+                )),
+            ),
+            (
+                "missing.html",
+                text(rendered(
+                    Kind::Csv,
+                    &src.join("gone.csv"),
+                    "gone.csv",
+                    &look,
+                )),
+            ),
+            (
+                "waiting.html",
+                message(
+                    "Q3 review.pptx",
+                    "Converting with PowerPoint",
+                    Mood::Waiting,
+                    &look,
+                ),
+            ),
+            (
+                "large.html",
+                message(
+                    "huge.csv",
+                    "Too large to show here, over 20 MB.",
+                    Mood::Quiet,
+                    &look,
+                ),
+            ),
+            (
+                "home.html",
+                text(super::super::home::page(&src, &src, false, &[], accent)),
+            ),
         ];
         for (name, page) in pages {
             std::fs::write(out.join(name), page).unwrap();

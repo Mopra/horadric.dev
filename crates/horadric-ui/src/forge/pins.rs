@@ -128,7 +128,9 @@ pub fn written(key: &str, file: &Path) {
                 && super::same(&p.pin.file, file)
                 && p.handed.as_ref().is_some_and(|(id, folio)| {
                     *id == writer
-                        && folio.as_deref().is_none_or(|f| !crate::folio::holds_pin(f, &p.pin))
+                        && folio
+                            .as_deref()
+                            .is_none_or(|f| !crate::folio::holds_pin(f, &p.pin))
                 });
             !done
         });
@@ -320,7 +322,11 @@ pub(super) fn page_pin(key: &str, tab: u64, msg: &Value) {
         eprintln!("horadric: forge pin from tab {tab} of {key} outside pin mode, refused");
         return;
     }
-    let words = msg.get("words").and_then(Value::as_str).unwrap_or_default().trim();
+    let words = msg
+        .get("words")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
     if words.is_empty() {
         return;
     }
@@ -340,7 +346,11 @@ pub(super) fn page_pin(key: &str, tab: u64, msg: &Value) {
     // crop takes; the viewport box moves with the scroll.
     let in_doc = rect_of(anchor.get("rect")).or_else(|| {
         let (x, y) = super::scroll_of(key, tab).unwrap_or_default();
-        shown.map(|r| Rect { x: r.x + x, y: r.y + y, ..r })
+        shown.map(|r| Rect {
+            x: r.x + x,
+            y: r.y + y,
+            ..r
+        })
     });
     // An image's own pixels say more than where it sat on the screen.
     at.rect = msg
@@ -420,7 +430,12 @@ pub(super) fn page_send_error(key: &str, tab: u64, msg: &Value) {
     if too_soon {
         return;
     }
-    let field = |k: &str| msg.get(k).and_then(Value::as_str).unwrap_or_default().trim();
+    let field = |k: &str| {
+        msg.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+    };
     let message = clip(field("message"), WORDS_MAX);
     if message.is_empty() {
         return;
@@ -604,9 +619,8 @@ fn session_for(key: &str, writer: Option<String>) -> Found {
     } else {
         const FIRST: usize = 1;
         let mut items = vec![Item::Disabled("Send the pin to".into())];
-        items.extend(
-            (agents.iter().enumerate()).map(|(i, a)| Item::action(FIRST + i, a.1.clone())),
-        );
+        items
+            .extend((agents.iter().enumerate()).map(|(i, a)| Item::action(FIRST + i, a.1.clone())));
         let picked = menu::popup(&items).and_then(|p| agents.get(p.checked_sub(FIRST)?));
         match picked {
             Some(a) => a,
@@ -654,6 +668,9 @@ fn hand_page(id: &str, folio: Option<&str>, pin: Pin) {
             crate::folio::pinned(f, pin);
             push(Input::Hand(id.to_string(), String::new()));
         }
-        None => push(Input::Hand(id.to_string(), pin_message(&[pin], Path::new("")))),
+        None => push(Input::Hand(
+            id.to_string(),
+            pin_message(&[pin], Path::new("")),
+        )),
     }
 }

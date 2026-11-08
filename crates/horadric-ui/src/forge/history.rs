@@ -83,7 +83,9 @@ fn fold(p: &Path) -> String {
 }
 
 fn ms(at: SystemTime) -> u64 {
-    at.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    at.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// Where the versions of the files in `root` are kept: one folder for each
@@ -246,7 +248,10 @@ pub(super) fn forget_closed() {
     send(Job::Only(open_files()));
     let open: HashSet<(String, u64)> =
         super::TABS.with(|t| t.borrow().iter().map(|f| (f.key.clone(), f.id)).collect());
-    VIEWING.with(|v| v.borrow_mut().retain(|v| open.contains(&(v.key.clone(), v.tab))));
+    VIEWING.with(|v| {
+        v.borrow_mut()
+            .retain(|v| open.contains(&(v.key.clone(), v.tab)))
+    });
     SERVING.with(|s| s.borrow_mut().retain(|k| open.contains(k)));
     bump();
 }
@@ -525,13 +530,19 @@ fn answer(
         return;
     };
     let url = read(|p| unsafe { request.Uri(p) });
-    if !url.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase()) {
+    if !url
+        .to_ascii_lowercase()
+        .starts_with(&prefix.to_ascii_lowercase())
+    {
         return;
     }
     let Ok(env) = (unsafe { view.cast::<ICoreWebView2_2>().and_then(|v| v.Environment()) }) else {
         return;
     };
-    let path = url[prefix.len()..].split(['?', '#']).next().unwrap_or_default();
+    let path = url[prefix.len()..]
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default();
     let segs: Vec<String> = path.split('/').map(decode).collect();
     if segs
         .iter()
@@ -745,7 +756,10 @@ fn compare_page(root: &Path, rel: &Path, a: &str, b: &str, look: &str) -> String
                     .unwrap_or_default()
             };
             body.push_str("<div class=\"hd-screen diff\">");
-            body.push_str(&diff_table(&horadric_core::forge::diff_lines(&text(ta), &text(tb))));
+            body.push_str(&diff_table(&horadric_core::forge::diff_lines(
+                &text(ta),
+                &text(tb),
+            )));
             body.push_str("</div>");
         }
     }
@@ -888,8 +902,10 @@ fn respond(
         let Some(stream) = SHCreateMemStream(Some(body)) else {
             return;
         };
-        let headers = format!("Content-Type: {mime}
-Cache-Control: no-store");
+        let headers = format!(
+            "Content-Type: {mime}
+Cache-Control: no-store"
+        );
         if let Ok(response) = env.CreateWebResourceResponse(
             &stream,
             *status,
@@ -983,7 +999,10 @@ mod tests {
             Some(PathBuf::from(r"docs\a.md"))
         );
         assert_eq!(rel_of(root, Path::new(r"C:\Work\Sitemap\a.md")), None);
-        assert_eq!(url_path(Path::new(r"docs\my deck.html")), "docs/my%20deck.html");
+        assert_eq!(
+            url_path(Path::new(r"docs\my deck.html")),
+            "docs/my%20deck.html"
+        );
     }
 
     #[test]
@@ -1013,15 +1032,28 @@ mod tests {
     #[test]
     #[ignore]
     fn write_a_sample_comparison() {
-        let Ok(dir) = std::env::var("FORGE_SAMPLES") else { return };
-        let a: String = (1..=30).map(|i| format!("Line {i} of the plan\n")).collect();
-        let b = a.replace("Line 12 of the plan\n", "Line 12, rewritten\nA line added\n");
+        let Ok(dir) = std::env::var("FORGE_SAMPLES") else {
+            return;
+        };
+        let a: String = (1..=30)
+            .map(|i| format!("Line {i} of the plan\n"))
+            .collect();
+        let b = a.replace(
+            "Line 12 of the plan\n",
+            "Line 12, rewritten\nA line added\n",
+        );
         let body = format!(
             "<div class=\"hd-screen diff\">{}</div>",
             diff_table(&horadric_core::forge::diff_lines(&a, &b))
         );
         let look = super::super::serve::look(crate::theme::ACCENTS[2].0);
-        let page = compare_frame(Path::new(r"docs\plan.md"), "1762380000000", "now", &body, &look);
+        let page = compare_frame(
+            Path::new(r"docs\plan.md"),
+            "1762380000000",
+            "now",
+            &body,
+            &look,
+        );
         std::fs::write(Path::new(&dir).join("compare.html"), page).unwrap();
     }
 

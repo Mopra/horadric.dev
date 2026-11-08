@@ -232,9 +232,7 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
                 },
             })),
             "ping" => Ok(json!({})),
-            "tools/list" if self.browser => {
-                Ok(json!({ "tools": tool_list() }))
-            }
+            "tools/list" if self.browser => Ok(json!({ "tools": tool_list() })),
             "tools/list" => Ok(json!({ "tools": lore_tools() })),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
@@ -1250,7 +1248,10 @@ B.";
         assert_eq!(body["password"], "e2");
         assert_eq!(body["code"], Value::Null);
         let said = a["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(said.starts_with("Filled the user name and password of OPTI (signing in as mpg@x.dk)."), "{said}");
+        assert!(
+            said.starts_with("Filled the user name and password of OPTI (signing in as mpg@x.dk)."),
+            "{said}"
+        );
     }
 
     #[test]

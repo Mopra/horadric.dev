@@ -163,7 +163,9 @@ pub(super) fn looks_like_diff(text: &str) -> bool {
     let marked = (lines.iter())
         .filter(|l| l.starts_with('+') || l.starts_with('-') || l.starts_with("@@"))
         .count();
-    let telling = lines.iter().any(|l| l.starts_with('+') || l.starts_with("@@"));
+    let telling = lines
+        .iter()
+        .any(|l| l.starts_with('+') || l.starts_with("@@"));
     marked >= 2 && telling && 2 * marked >= lines.len()
 }
 
@@ -221,7 +223,10 @@ fn after_prompt(line: &str) -> Option<&str> {
 /// Whether the line after this one carries on its command.
 fn continues(line: &str) -> bool {
     let t = line.trim_end();
-    t.ends_with('\\') || t.ends_with('`') || t.ends_with('|') || t.ends_with("&&")
+    t.ends_with('\\')
+        || t.ends_with('`')
+        || t.ends_with('|')
+        || t.ends_with("&&")
         || t.ends_with("||")
 }
 
@@ -332,7 +337,10 @@ fn line_metrics(l: &IDWriteTextLayout) -> Vec<(f32, bool)> {
         if l.GetLineMetrics(Some(&mut lines), &mut n).is_err() {
             return Vec::new();
         }
-        lines.iter().map(|m| (m.height, m.newlineLength > 0)).collect()
+        lines
+            .iter()
+            .map(|m| (m.height, m.newlineLength > 0))
+            .collect()
     }
 }
 
@@ -461,12 +469,21 @@ impl Ctx<'_> {
 
         if foldable {
             let fy = h - FOOT;
-            s.fill(Rect::new(0.0, fy, w, 1.0), 0.0, self.pal.fg.with_alpha(0.06));
+            s.fill(
+                Rect::new(0.0, fy, w, 1.0),
+                0.0,
+                self.pal.fg.with_alpha(0.06),
+            );
             let icon = if whole { "\u{E70E}" } else { "\u{E70D}" };
             let say = fold_say(all.len(), whole);
             let ink = self.link_ink();
             s.line(icon, F::Icon, Rect::new(CODE_PAD, fy, 16.0, FOOT), ink);
-            s.line(say, F::Small, Rect::new(CODE_PAD + 22.0, fy, w / 2.0, FOOT), ink);
+            s.line(
+                say,
+                F::Small,
+                Rect::new(CODE_PAD + 22.0, fy, w / 2.0, FOOT),
+                ink,
+            );
             s.hit(Rect::new(0.0, fy, w, FOOT), Hit::Tr(Act::All(key)));
         }
         s.h = h + 6.0;
@@ -518,7 +535,12 @@ impl Ctx<'_> {
             let ink = self.pal.dim;
             let icon = Rect::new(r.x + 6.0, r.y, 16.0, r.h);
             s.line("\u{E70E}", F::Icon, icon, ink);
-            s.line("Fold", F::Small, Rect::new(r.x + 26.0, r.y, r.w - 28.0, r.h), ink);
+            s.line(
+                "Fold",
+                F::Small,
+                Rect::new(r.x + 26.0, r.y, r.w - 28.0, r.h),
+                ink,
+            );
             s.hit(r, Hit::Tr(Act::All(key.clone())));
         }
     }
@@ -586,7 +608,13 @@ mod tests {
         assert_eq!(f.lang, "rust");
         assert_eq!(f.file.as_deref(), Some("src/x.rs"));
         let f = Fence::parse("Python");
-        assert_eq!(f, Fence { lang: "python".into(), file: None });
+        assert_eq!(
+            f,
+            Fence {
+                lang: "python".into(),
+                file: None
+            }
+        );
         assert_eq!(Fence::parse("").lang, "");
     }
 
@@ -610,10 +638,19 @@ mod tests {
     #[test]
     fn typed_session_copies_only_commands() {
         let v = shell_view("$ cargo build \\\n  --release\n   Compiling x\n$ ls\nREADME.md");
-        assert_eq!(v.shown, "cargo build \\\n  --release\n   Compiling x\nls\nREADME.md");
+        assert_eq!(
+            v.shown,
+            "cargo build \\\n  --release\n   Compiling x\nls\nREADME.md"
+        );
         assert_eq!(
             v.rows,
-            [Row::Command, Row::More, Row::Output, Row::Command, Row::Output]
+            [
+                Row::Command,
+                Row::More,
+                Row::Output,
+                Row::Command,
+                Row::Output
+            ]
         );
         assert_eq!(v.copy, "cargo build \\\n  --release\nls");
     }
@@ -648,7 +685,13 @@ mod tests {
     fn gutter_marks_only_a_wrapped_lines_first_row() {
         let marks = [Some("1".to_string()), None, Some("3".to_string())];
         // Line one wraps onto a second row, line three onto a third.
-        let lines = [(10.0, false), (10.0, true), (10.0, true), (10.0, false), (10.0, false)];
+        let lines = [
+            (10.0, false),
+            (10.0, true),
+            (10.0, true),
+            (10.0, false),
+            (10.0, false),
+        ];
         assert_eq!(gutter_lines(&marks, &lines), "1\n\n\n3\n");
         assert_eq!(gutter_lines(&marks, &[]), "");
     }
@@ -656,7 +699,10 @@ mod tests {
     #[test]
     fn fold_footer_counts_what_is_hidden() {
         assert_eq!(fold_say(FOLD_TO + 1, false), "Show 1 more line");
-        assert_eq!(fold_say(500, false), format!("Show {} more lines", 500 - FOLD_TO));
+        assert_eq!(
+            fold_say(500, false),
+            format!("Show {} more lines", 500 - FOLD_TO)
+        );
         assert_eq!(fold_say(500, true), "Show less");
     }
 

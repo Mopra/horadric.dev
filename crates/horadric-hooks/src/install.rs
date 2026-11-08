@@ -206,7 +206,11 @@ pub fn town_settings() -> Vec<PathBuf> {
 pub fn install_towns(port: u16) -> Vec<String> {
     town_settings()
         .into_iter()
-        .filter_map(|p| install(&p, port).err().map(|e| format!("{}: {e}", p.display())))
+        .filter_map(|p| {
+            install(&p, port)
+                .err()
+                .map(|e| format!("{}: {e}", p.display()))
+        })
         .collect()
 }
 

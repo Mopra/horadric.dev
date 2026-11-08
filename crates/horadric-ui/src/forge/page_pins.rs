@@ -65,7 +65,9 @@ pub fn toggle(key: &str) {
     let Some(tab) = web::shown_tab(key) else {
         return;
     };
-    let url = web::label_of(key, Some(tab)).map(|(_, u)| u).unwrap_or_default();
+    let url = web::label_of(key, Some(tab))
+        .map(|(_, u)| u)
+        .unwrap_or_default();
     if serve::host_of(&url).is_some_and(|h| h.to_ascii_lowercase().ends_with(serve::SUFFIX)) {
         return pins::toggle_pinning(key);
     }
@@ -83,7 +85,10 @@ pub fn toggle(key: &str) {
 
 /// Forgets tabs that closed: the browser does not say.
 fn prune() {
-    ON.with(|o| o.borrow_mut().retain(|p| web::place_of(&p.key, p.tab).is_some()));
+    ON.with(|o| {
+        o.borrow_mut()
+            .retain(|p| web::place_of(&p.key, p.tab).is_some())
+    });
 }
 
 /// Takes the tab out of pin mode here, giving its world if it had one.
@@ -125,7 +130,11 @@ fn start(key: &str, tab: u64) {
     });
     let owned = key.to_string();
     call(key, tab, "Page.getFrameTree", "{}", move |tree| {
-        let frame = tree.and_then(|v| v.pointer("/frameTree/frame/id")?.as_str().map(str::to_string));
+        let frame = tree.and_then(|v| {
+            v.pointer("/frameTree/frame/id")?
+                .as_str()
+                .map(str::to_string)
+        });
         let Some(frame) = frame else {
             take(&owned, tab);
             return;
@@ -134,22 +143,30 @@ fn start(key: &str, tab: u64) {
         // no more reach than the page itself has.
         let params = json!({"frameId": frame, "worldName": WORLD, "grantUniveralAccess": false});
         let key = owned.clone();
-        call(&owned, tab, "Page.createIsolatedWorld", &params.to_string(), move |made| {
-            let world = made.and_then(|v| v.get("executionContextId")?.as_i64());
-            let still = ON.with(|o| {
-                let mut o = o.borrow_mut();
-                let p = o.iter_mut().find(|p| p.key == key && p.tab == tab && p.token == token)?;
-                p.world = world;
-                world
-            });
-            match still {
-                Some(world) => next(&key, tab, world, false, Some(&token)),
-                // Toggled off meanwhile, or no world could be made.
-                None => {
-                    take(&key, tab);
+        call(
+            &owned,
+            tab,
+            "Page.createIsolatedWorld",
+            &params.to_string(),
+            move |made| {
+                let world = made.and_then(|v| v.get("executionContextId")?.as_i64());
+                let still = ON.with(|o| {
+                    let mut o = o.borrow_mut();
+                    let p = o
+                        .iter_mut()
+                        .find(|p| p.key == key && p.tab == tab && p.token == token)?;
+                    p.world = world;
+                    world
+                });
+                match still {
+                    Some(world) => next(&key, tab, world, false, Some(&token)),
+                    // Toggled off meanwhile, or no world could be made.
+                    None => {
+                        take(&key, tab);
+                    }
                 }
-            }
-        });
+            },
+        );
     });
 }
 
@@ -172,37 +189,51 @@ fn next(key: &str, tab: u64, world: i64, took: bool, token: Option<&str>) {
         "returnByValue": true,
     });
     let owned = key.to_string();
-    call(key, tab, "Runtime.evaluate", &params.to_string(), move |answer| {
-        let Some(token) = current(&owned, tab, world) else {
-            return;
-        };
-        let said = answer
-            .and_then(|v| v.pointer("/result/value")?.as_str().map(str::to_string))
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok());
-        // Esc, the page hidden or gone: pin mode is over.
-        let Some(said) = said else {
-            take(&owned, tab);
-            return;
-        };
-        let ours = said.get("t").and_then(Value::as_str) == Some(token.as_str());
-        let theirs = web::shown_tab(&owned) == Some(tab) && pins::human_within(&owned, SENT_WITHIN);
-        let pin = said.get("pin").and_then(Value::as_str).and_then(|p| serde_json::from_str(p).ok());
-        match pin.filter(|_| ours && theirs) {
-            Some(pin) => pinned(&owned, tab, world, &pin),
-            None => {
-                eprintln!("horadric: page pin from tab {tab} of {owned} refused");
+    call(
+        key,
+        tab,
+        "Runtime.evaluate",
+        &params.to_string(),
+        move |answer| {
+            let Some(token) = current(&owned, tab, world) else {
+                return;
+            };
+            let said = answer
+                .and_then(|v| v.pointer("/result/value")?.as_str().map(str::to_string))
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+            // Esc, the page hidden or gone: pin mode is over.
+            let Some(said) = said else {
                 take(&owned, tab);
-                stop(&owned, tab, Some(world));
+                return;
+            };
+            let ours = said.get("t").and_then(Value::as_str) == Some(token.as_str());
+            let theirs =
+                web::shown_tab(&owned) == Some(tab) && pins::human_within(&owned, SENT_WITHIN);
+            let pin = said
+                .get("pin")
+                .and_then(Value::as_str)
+                .and_then(|p| serde_json::from_str(p).ok());
+            match pin.filter(|_| ours && theirs) {
+                Some(pin) => pinned(&owned, tab, world, &pin),
+                None => {
+                    eprintln!("horadric: page pin from tab {tab} of {owned} refused");
+                    take(&owned, tab);
+                    stop(&owned, tab, Some(world));
+                }
             }
-        }
-    });
+        },
+    );
 }
 
 /// The human's pin, as the world answered it: cropped, handed to its
 /// session, and the next one waited for.
 fn pinned(key: &str, tab: u64, world: i64, said: &Value) {
     let text = |k: &str, max: usize| {
-        let s = said.get(k).and_then(Value::as_str).unwrap_or_default().trim();
+        let s = said
+            .get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
         (!s.is_empty()).then(|| clip(s, max))
     };
     let Some(words) = text("words", WORDS_MAX) else {
@@ -214,7 +245,12 @@ fn pinned(key: &str, tab: u64, world: i64, said: &Value) {
     };
     let rect = said.get("rect").and_then(|r| {
         let n = |k: &str| r.get(k).and_then(Value::as_f64).filter(|n| n.is_finite());
-        Some(Rect { x: n("x")?, y: n("y")?, w: n("w")?.max(0.0), h: n("h")?.max(0.0) })
+        Some(Rect {
+            x: n("x")?,
+            y: n("y")?,
+            w: n("w")?.max(0.0),
+            h: n("h")?.max(0.0),
+        })
     });
     let pin = Pin {
         file: PathBuf::new(),
@@ -229,7 +265,8 @@ fn pinned(key: &str, tab: u64, world: i64, said: &Value) {
         },
         crop: None,
     };
-    let driver = web::place_of(key, tab).and_then(|(at, _, _)| web::drivers(key).get(at).cloned().flatten());
+    let driver =
+        web::place_of(key, tab).and_then(|(at, _, _)| web::drivers(key).get(at).cloned().flatten());
     let Some(r) = rect.filter(|r| r.w >= 1.0 && r.h >= 1.0) else {
         pins::give_page(key, pin, driver);
         return next(key, tab, world, true, None);
@@ -260,7 +297,13 @@ fn stop(key: &str, tab: u64, world: Option<i64>) {
 
 /// A DevTools call of the host's own, its answer read as JSON. It is not an
 /// agent's, so it never counts as one having just driven the tab.
-fn call(key: &str, tab: u64, method: &str, params: &str, done: impl FnOnce(Option<Value>) + 'static) {
+fn call(
+    key: &str,
+    tab: u64,
+    method: &str,
+    params: &str,
+    done: impl FnOnce(Option<Value>) + 'static,
+) {
     let owned = key.to_string();
     web::devtools(key, tab, method, params, move |answer| {
         web::forget_call(&owned, tab);

@@ -136,7 +136,7 @@ pub fn always_allowed(program_path: &str) -> bool {
         .next()
         .unwrap_or(program_path)
         .to_ascii_lowercase();
-    let ext =file.rsplit_once('.').map(|(_, e)| e).unwrap_or_default();
+    let ext = file.rsplit_once('.').map(|(_, e)| e).unwrap_or_default();
     matches!(ext, "" | "exe") && ALWAYS.contains(&stem_of(program_path).as_str())
 }
 
@@ -198,28 +198,57 @@ pub fn pinned(program_path: &str, env: &dyn Fn(&str) -> Option<String>) -> Optio
             pin(
                 "the aws credentials file",
                 PinKind::Text,
-                var("AWS_SHARED_CREDENTIALS_FILE").or_else(|| home().map(|h| join(&h, r".aws\credentials"))),
+                var("AWS_SHARED_CREDENTIALS_FILE")
+                    .or_else(|| home().map(|h| join(&h, r".aws\credentials"))),
             ),
             // Aliases run `!` shell commands. The folder's own content is
             // the credential cache, which churns, so only its names count.
-            pin("the aws aliases", PinKind::Text, home().map(|h| join(&h, r".aws\cli\alias"))),
-            pin("the aws cli folder", PinKind::Names, home().map(|h| join(&h, r".aws\cli"))),
+            pin(
+                "the aws aliases",
+                PinKind::Text,
+                home().map(|h| join(&h, r".aws\cli\alias")),
+            ),
+            pin(
+                "the aws cli folder",
+                PinKind::Names,
+                home().map(|h| join(&h, r".aws\cli")),
+            ),
             // botocore loads service models, endpoint rules included, from
             // here before its own.
-            pin("the aws models folder", PinKind::Empty, home().map(|h| join(&h, r".aws\models"))),
+            pin(
+                "the aws models folder",
+                PinKind::Empty,
+                home().map(|h| join(&h, r".aws\models")),
+            ),
         ],
         "gcloud" => {
             let dir = var("CLOUDSDK_CONFIG").or_else(|| var("APPDATA").map(|a| join(&a, "gcloud")));
             vec![
-                pin("gcloud's properties", PinKind::Text, dir.as_ref().map(|d| join(d, "properties"))),
-                pin("gcloud's active_config", PinKind::Text, dir.as_ref().map(|d| join(d, "active_config"))),
-                pin("gcloud's configurations", PinKind::Tree, dir.map(|d| join(&d, "configurations"))),
+                pin(
+                    "gcloud's properties",
+                    PinKind::Text,
+                    dir.as_ref().map(|d| join(d, "properties")),
+                ),
+                pin(
+                    "gcloud's active_config",
+                    PinKind::Text,
+                    dir.as_ref().map(|d| join(d, "active_config")),
+                ),
+                pin(
+                    "gcloud's configurations",
+                    PinKind::Tree,
+                    dir.map(|d| join(&d, "configurations")),
+                ),
             ]
         }
         "az" => {
             let dir = var("AZURE_CONFIG_DIR").or_else(|| home().map(|h| join(&h, ".azure")));
             vec![
-                pin("az's config", PinKind::Text, dir.as_ref().map(|d| join(d, "config"))),
+                pin(
+                    "az's config",
+                    PinKind::Text,
+                    dir.as_ref().map(|d| join(d, "config")),
+                ),
                 pin(
                     "az's extensions",
                     PinKind::Tree,
@@ -232,9 +261,17 @@ pub fn pinned(program_path: &str, env: &dyn Fn(&str) -> Option<String>) -> Optio
                 .map(|x| join(&x, "stripe"))
                 .or_else(|| home().map(|h| join(&h, r".config\stripe")));
             vec![
-                pin("stripe's config.toml", PinKind::Text, dir.as_ref().map(|d| join(d, "config.toml"))),
+                pin(
+                    "stripe's config.toml",
+                    PinKind::Text,
+                    dir.as_ref().map(|d| join(d, "config.toml")),
+                ),
                 // A plugin runs as `stripe <name>`, code of anyone's.
-                pin("stripe's plugins", PinKind::Empty, dir.map(|d| join(&d, "plugins"))),
+                pin(
+                    "stripe's plugins",
+                    PinKind::Empty,
+                    dir.map(|d| join(&d, "plugins")),
+                ),
             ]
         }
         _ => return None,
@@ -302,7 +339,14 @@ const RULES: &[Rules] = &[
         file_flags: &[],
         // Each installs or fetches code that runs as az, or starts git or
         // docker: `repos` checks out with git, `acr login` runs docker.
-        commands: &["extension", "bicep", "upgrade", "repos", "devops", "acr login"],
+        commands: &[
+            "extension",
+            "bicep",
+            "upgrade",
+            "repos",
+            "devops",
+            "acr login",
+        ],
         response_files: true,
     },
     Rules {
@@ -310,12 +354,22 @@ const RULES: &[Rules] = &[
         // The `-base` flags send the key to another host; `--config`
         // reads another config; `--raw` and `--edit` give a fixture,
         // which names its own API host.
-        flags: &["--api-base", "--connect-base", "--dashboard-base", "--files-base", "--config", "--raw", "--edit"],
+        flags: &[
+            "--api-base",
+            "--connect-base",
+            "--dashboard-base",
+            "--files-base",
+            "--config",
+            "--raw",
+            "--edit",
+        ],
         file_flags: &[],
         // `plugin` installs code, `samples` runs git, `login`, `logout`
         // and `config` change what the pins hold; `fixtures` and
         // `trigger` run fixtures, whose `api_base` is not checked.
-        commands: &["plugin", "samples", "login", "logout", "config", "fixtures", "trigger"],
+        commands: &[
+            "plugin", "samples", "login", "logout", "config", "fixtures", "trigger",
+        ],
         response_files: false,
     },
 ];
@@ -337,11 +391,15 @@ pub fn always_refused(stem: &str, args: &[String]) -> Option<String> {
     }
     let path = command_path(args);
     if path.is_empty() {
-        return Some(format!("it names no {stem} subcommand, and Always would cover all of them"));
+        return Some(format!(
+            "it names no {stem} subcommand, and Always would cover all of them"
+        ));
     }
     let under = |c: &str| path == c || path.starts_with(&format!("{c} "));
     if let Some(c) = rules.commands.iter().find(|c| under(c)) {
-        return Some(format!("`{stem} {c}` installs code or changes what {stem} runs"));
+        return Some(format!(
+            "`{stem} {c}` installs code or changes what {stem} runs"
+        ));
     }
     let mut i = 0;
     while i < args.len() {
@@ -353,7 +411,9 @@ pub fn always_refused(stem: &str, args: &[String]) -> Option<String> {
             break;
         }
         if rules.response_files && a.starts_with('@') {
-            return Some(format!("`{a}` reads more arguments from a file the agent can write"));
+            return Some(format!(
+                "`{a}` reads more arguments from a file the agent can write"
+            ));
         }
         let Some(long) = a.strip_prefix("--") else {
             continue;
@@ -364,7 +424,9 @@ pub fn always_refused(stem: &str, args: &[String]) -> Option<String> {
         };
         let flag = format!("--{name}");
         if rules.flags.contains(&flag.as_str()) {
-            return Some(format!("`{flag}` can make {stem} read or run more than its command"));
+            return Some(format!(
+                "`{flag}` can make {stem} read or run more than its command"
+            ));
         }
         let value = inline.or(next);
         if rules.file_flags.contains(&flag.as_str())
@@ -373,7 +435,9 @@ pub fn always_refused(stem: &str, args: &[String]) -> Option<String> {
                 v.starts_with("file://") || v.starts_with("fileb://")
             })
         {
-            return Some(format!("`{flag}` reads its input from a file the agent can write"));
+            return Some(format!(
+                "`{flag}` reads its input from a file the agent can write"
+            ));
         }
     }
     None
@@ -393,12 +457,17 @@ pub fn once_reason(name: &str, npm: bool) -> Option<String> {
     let stem = stem_of(name);
     if RUN_GIT.contains(&stem.as_str()) {
         let then = match login_tool(name) {
-            Some(tool) => format!("; for unattended use, log {tool} in for this project's identity in Settings"),
+            Some(tool) => format!(
+                "; for unattended use, log {tool} in for this project's identity in Settings"
+            ),
             None => String::new(),
         };
-        return Some(format!("{stem} runs git, which can run other programs with the secret{then}"));
+        return Some(format!(
+            "{stem} runs git, which can run other programs with the secret{then}"
+        ));
     }
-    (npm || !always_allowed(name)).then(|| "only programs Horadric knows can be allowed always".to_string())
+    (npm || !always_allowed(name))
+        .then(|| "only programs Horadric knows can be allowed always".to_string())
 }
 
 /// The identity login that stands in for a secret for this program, as
@@ -434,7 +503,10 @@ pub fn allowed_program(bound: &str) -> &str {
 /// the project and changes with every commit, so no pin can hold it. The
 /// question says so, and the human answers knowing it.
 pub fn runs_builds(program_path: &str) -> bool {
-    matches!(stem_of(program_path).as_str(), "vercel" | "wrangler" | "netlify")
+    matches!(
+        stem_of(program_path).as_str(),
+        "vercel" | "wrangler" | "netlify"
+    )
 }
 
 fn stem_of(program_path: &str) -> String {
@@ -490,7 +562,11 @@ pub fn npm_shim(text: &str) -> Option<Shim> {
     if !clean || parts.first() != Some(&"node_modules") {
         return None;
     }
-    let depth = if parts.get(1).is_some_and(|p| p.starts_with('@')) { 3 } else { 2 };
+    let depth = if parts.get(1).is_some_and(|p| p.starts_with('@')) {
+        3
+    } else {
+        2
+    };
     if parts.len() <= depth {
         return None;
     }
@@ -514,7 +590,12 @@ pub fn fingerprint(program_sha256: &str, pins: &[(String, String)]) -> String {
 /// program is the same and only pinned things differ: their names, for
 /// the question. Empty when nothing was allowed or the program itself
 /// changed.
-pub fn changed_pins(allowed: &[String], project: &str, program: &str, fingerprint: &str) -> Vec<String> {
+pub fn changed_pins(
+    allowed: &[String],
+    project: &str,
+    program: &str,
+    fingerprint: &str,
+) -> Vec<String> {
     let tail = format!("|{}|{}", project, program.to_ascii_lowercase());
     let now = fingerprint.to_ascii_lowercase();
     let mut now = now.split(',');
@@ -527,7 +608,11 @@ pub fn changed_pins(allowed: &[String], project: &str, program: &str, fingerprin
     else {
         return Vec::new();
     };
-    let was: Vec<(&str, &str)> = was.split(',').skip(1).filter_map(|p| p.split_once('=')).collect();
+    let was: Vec<(&str, &str)> = was
+        .split(',')
+        .skip(1)
+        .filter_map(|p| p.split_once('='))
+        .collect();
     now.iter()
         .filter(|(what, hash)| !was.iter().any(|(w, h)| w == what && h == hash))
         .map(|(what, _)| what.to_string())
@@ -780,10 +865,7 @@ mod tests {
             mask(&[("SHORT", "abc"), ("LONG", "abcdef")], &["xabcdefx abcx"]),
             "x[LONG]x [SHORT]x"
         );
-        assert_eq!(
-            mask(&[("A", "abcd"), ("B", "cdef")], &["abcdef"]),
-            "[A]ef"
-        );
+        assert_eq!(mask(&[("A", "abcd"), ("B", "cdef")], &["abcdef"]), "[A]ef");
         // A longer value's start held back must not hide a shorter one
         // that turns out to be all there was.
         assert_eq!(
@@ -802,7 +884,10 @@ mod tests {
         assert_eq!(plainly("gh pr list"), "gh pr list");
         assert_eq!(plainly("a\nb\r\tc"), r"a\nb\r\tc");
         assert_eq!(plainly("gh \u{202e}tsil rp"), r"gh \u{202e}tsil rp");
-        assert_eq!(plainly("x\u{200b}y\u{feff}z\u{2066}"), r"x\u{200b}y\u{feff}z\u{2066}");
+        assert_eq!(
+            plainly("x\u{200b}y\u{feff}z\u{2066}"),
+            r"x\u{200b}y\u{feff}z\u{2066}"
+        );
         assert_eq!(plainly("\u{1b}[2J\u{7f}"), r"\u{1b}[2J\u{7f}");
         assert_eq!(plainly("tag\u{e0041}"), r"tag\u{e0041}");
         assert_eq!(plainly("line\u{2028}two"), r"line\u{2028}two");
@@ -811,7 +896,11 @@ mod tests {
     }
 
     fn env_of<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
-        move |k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+        move |k: &str| {
+            vars.iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        }
     }
 
     fn pin_paths(program: &str, vars: &[(&str, &str)]) -> Option<Vec<(String, String, PinKind)>> {
@@ -821,7 +910,12 @@ mod tests {
 
     #[test]
     fn only_known_programs_may_have_always() {
-        for p in [r"C:\Program Files\Amazon\AWSCLIV2\aws.exe", "az", "gcloud", r"C:\Program Files\Stripe\stripe.exe"] {
+        for p in [
+            r"C:\Program Files\Amazon\AWSCLIV2\aws.exe",
+            "az",
+            "gcloud",
+            r"C:\Program Files\Stripe\stripe.exe",
+        ] {
             assert!(always_allowed(p), "{p}");
             assert!(pinned(p, &|_| None).is_some(), "{p}");
             assert_eq!(once_reason(p, false), None, "{p}");
@@ -863,13 +957,21 @@ mod tests {
             gh,
             "gh runs git, which can run other programs with the secret; for unattended use, log gh in for this project's identity in Settings"
         );
-        assert!(once_reason("vercel", true).unwrap().contains("log vercel in"));
+        assert!(once_reason("vercel", true)
+            .unwrap()
+            .contains("log vercel in"));
         let netlify = once_reason("netlify-cli", true).unwrap();
-        assert!(netlify.contains("runs git") && !netlify.contains("log"), "{netlify}");
+        assert!(
+            netlify.contains("runs git") && !netlify.contains("log"),
+            "{netlify}"
+        );
         assert_eq!(login_tool("gh.exe"), Some("gh"));
         assert_eq!(login_tool("wrangler"), None);
         for t in ["gh", "vercel"] {
-            assert!(crate::vault::identity::Tool::from_name(t).is_some(), "{t} is a login --on-login takes");
+            assert!(
+                crate::vault::identity::Tool::from_name(t).is_some(),
+                "{t} is a login --on-login takes"
+            );
         }
     }
 
@@ -879,16 +981,29 @@ mod tests {
             allowed_program(r"c:\program files\github cli\gh.exe pr create"),
             r"c:\program files\github cli\gh.exe"
         );
-        assert_eq!(allowed_program(r"c:\a.exe.d\stripe.exe"), r"c:\a.exe.d\stripe.exe");
-        assert_eq!(allowed_program(r"c:\x\aws.exe s3 ls <stdin K>"), r"c:\x\aws.exe");
+        assert_eq!(
+            allowed_program(r"c:\a.exe.d\stripe.exe"),
+            r"c:\a.exe.d\stripe.exe"
+        );
+        assert_eq!(
+            allowed_program(r"c:\x\aws.exe s3 ls <stdin K>"),
+            r"c:\x\aws.exe"
+        );
         assert_eq!(allowed_program("aws"), "aws");
     }
 
     #[test]
     fn cloud_clis_pin_their_exec_hooks() {
-        let home = [("USERPROFILE", r"C:\Users\a"), ("APPDATA", r"C:\Users\a\AppData\Roaming")];
+        let home = [
+            ("USERPROFILE", r"C:\Users\a"),
+            ("APPDATA", r"C:\Users\a\AppData\Roaming"),
+        ];
         let paths = |p: &str, vars: &[(&str, &str)]| -> Vec<String> {
-            pin_paths(p, vars).unwrap().into_iter().map(|p| p.1).collect()
+            pin_paths(p, vars)
+                .unwrap()
+                .into_iter()
+                .map(|p| p.1)
+                .collect()
         };
         assert_eq!(
             paths("aws", &home),
@@ -903,14 +1018,30 @@ mod tests {
         assert_eq!(pin_paths("aws", &home).unwrap()[0].2, PinKind::Text);
         assert_eq!(pin_paths("aws", &home).unwrap()[3].2, PinKind::Names);
         assert_eq!(
-            paths("aws", &[("USERPROFILE", r"C:\Users\a"), ("AWS_CONFIG_FILE", r"D:\aws.cfg")])[0],
+            paths(
+                "aws",
+                &[
+                    ("USERPROFILE", r"C:\Users\a"),
+                    ("AWS_CONFIG_FILE", r"D:\aws.cfg")
+                ]
+            )[0],
             r"D:\aws.cfg"
         );
         assert_eq!(
             paths("gcloud", &[("CLOUDSDK_CONFIG", r"D:\g")]),
-            [r"D:\g\properties", r"D:\g\active_config", r"D:\g\configurations"]
+            [
+                r"D:\g\properties",
+                r"D:\g\active_config",
+                r"D:\g\configurations"
+            ]
         );
-        assert_eq!(paths("az", &home), [r"C:\Users\a\.azure\config", r"C:\Users\a\.azure\cliextensions"]);
+        assert_eq!(
+            paths("az", &home),
+            [
+                r"C:\Users\a\.azure\config",
+                r"C:\Users\a\.azure\cliextensions"
+            ]
+        );
         // No home to place them in pins nothing rather than a wrong path.
         assert!(paths("aws", &[]).is_empty());
         for pin in pinned("gcloud", &env_of(&home)).unwrap() {
@@ -919,13 +1050,19 @@ mod tests {
     }
 
     fn args(line: &str) -> Vec<String> {
-        line.split(' ').filter(|a| !a.is_empty()).map(str::to_string).collect()
+        line.split(' ')
+            .filter(|a| !a.is_empty())
+            .map(str::to_string)
+            .collect()
     }
 
     #[test]
     fn an_always_is_for_the_subcommand_too() {
         assert_eq!(command_path(&args("s3 ls s3://b")), "s3 ls");
-        assert_eq!(command_path(&args("ec2 describe-instances --region x")), "ec2 describe-instances");
+        assert_eq!(
+            command_path(&args("ec2 describe-instances --region x")),
+            "ec2 describe-instances"
+        );
         assert_eq!(command_path(&args("--version")), "");
         assert_eq!(command_path(&args("a b c d")), "a b c");
         assert_eq!(command_path(&args("https://x.example")), "");
@@ -936,8 +1073,14 @@ mod tests {
     fn arguments_that_reach_past_the_command_leave_only_once() {
         let refused = |stem: &str, line: &str| always_refused(stem, &args(line)).is_some();
         // aws reads its input from a file only with file://.
-        assert!(refused("aws", "ec2 run-instances --cli-input-json file://x.json"));
-        assert!(refused("aws", "ec2 run-instances --cli-input-yaml=fileb://x"));
+        assert!(refused(
+            "aws",
+            "ec2 run-instances --cli-input-json file://x.json"
+        ));
+        assert!(refused(
+            "aws",
+            "ec2 run-instances --cli-input-yaml=fileb://x"
+        ));
         assert!(refused("aws", "configure set x y"));
         assert!(!refused("aws", "ec2 run-instances --cli-input-json {}"));
         assert!(!refused("aws", "s3 ls --profile work"));
@@ -1009,8 +1152,14 @@ mod tests {
                 script: r"node_modules\vercel\dist\index.js".into(),
             })
         );
-        let scoped = SHIM.replace(r"node_modules\vercel\dist", r"node_modules\@netlify\cli\bin");
-        assert_eq!(npm_shim(&scoped).unwrap().package, r"node_modules\@netlify\cli");
+        let scoped = SHIM.replace(
+            r"node_modules\vercel\dist",
+            r"node_modules\@netlify\cli\bin",
+        );
+        assert_eq!(
+            npm_shim(&scoped).unwrap().package,
+            r"node_modules\@netlify\cli"
+        );
         for bad in [
             SHIM.replace(r"node_modules\vercel", r"node_modules\..\..\x"),
             SHIM.replace(r"node_modules\vercel", r"other\vercel"),
@@ -1029,21 +1178,37 @@ mod tests {
     fn a_changed_pin_is_named() {
         let gh = r"C:\Program Files\GitHub CLI\gh.exe";
         let pins = |c: &str, e: &str| {
-            vec![("gh's config.yml".to_string(), c.to_string()), ("gh's extensions".to_string(), e.to_string())]
+            vec![
+                ("gh's config.yml".to_string(), c.to_string()),
+                ("gh's extensions".to_string(), e.to_string()),
+            ]
         };
         let was = fingerprint("ABC", &pins("c1", "e1"));
         let allowed = vec![approval("c:/a", gh, &was)];
-        assert!(approved(&allowed, "c:/a", gh, &fingerprint("abc", &pins("c1", "e1"))));
+        assert!(approved(
+            &allowed,
+            "c:/a",
+            gh,
+            &fingerprint("abc", &pins("c1", "e1"))
+        ));
         let now = fingerprint("abc", &pins("c2", "e1"));
         assert!(!approved(&allowed, "c:/a", gh, &now));
-        assert_eq!(changed_pins(&allowed, "c:/a", gh, &now), ["gh's config.yml"]);
+        assert_eq!(
+            changed_pins(&allowed, "c:/a", gh, &now),
+            ["gh's config.yml"]
+        );
         // Another program content, project or none allowed names nothing.
-        assert!(changed_pins(&allowed, "c:/a", gh, &fingerprint("abd", &pins("c2", "e1"))).is_empty());
+        assert!(
+            changed_pins(&allowed, "c:/a", gh, &fingerprint("abd", &pins("c2", "e1"))).is_empty()
+        );
         assert!(changed_pins(&allowed, "c:/b", gh, &now).is_empty());
         assert!(changed_pins(&[], "c:/a", gh, &now).is_empty());
         // A pin that is new since, or gone, is named too.
         let more = fingerprint("abc", &[("gh's config.yml".into(), "c1".into())]);
-        assert_eq!(changed_pins(&allowed, "c:/a", gh, &more), ["gh's extensions"]);
+        assert_eq!(
+            changed_pins(&allowed, "c:/a", gh, &more),
+            ["gh's extensions"]
+        );
     }
 
     #[test]
@@ -1054,7 +1219,10 @@ mod tests {
         assert!(approved(&allowed, "c:/a", &gh.to_uppercase(), "abc"));
         assert!(!approved(&allowed, "c:/b", gh, "abc"), "another project");
         assert!(!approved(&allowed, "c:/a", gh, "abd"), "a changed program");
-        assert!(!approved(&allowed, "c:/a", r"C:\x\gh.exe", "abc"), "another program");
+        assert!(
+            !approved(&allowed, "c:/a", r"C:\x\gh.exe", "abc"),
+            "another program"
+        );
         // A list from before Always was bound, a bare path, matches nothing.
         assert!(!approved(&[gh.to_ascii_lowercase()], "c:/a", gh, "abc"));
         assert!(approval("c:/a", gh, "abc").ends_with(r"\gh.exe"));
@@ -1063,7 +1231,10 @@ mod tests {
     #[test]
     fn a_log_line_never_holds_more_than_it_is_given() {
         let line = log_line(0, "c:/a", "s1", "TOKEN", r"C:\gh.exe", "allowed");
-        assert_eq!(line, "1970-01-01 00:00:00Z\tc:/a\ts1\tTOKEN\tC:\\gh.exe\tallowed");
+        assert_eq!(
+            line,
+            "1970-01-01 00:00:00Z\tc:/a\ts1\tTOKEN\tC:\\gh.exe\tallowed"
+        );
         let line = log_line(1_762_432_496, "p\nq", "s", "N", "x", "asked");
         assert!(line.starts_with("2025-11-06 12:34:56Z\t"), "{line}");
         assert!(!line.contains('\n'));

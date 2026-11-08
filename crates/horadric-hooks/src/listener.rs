@@ -28,8 +28,8 @@ use serde_json::{json, Value};
 use crate::{
     checkpoint, client, otel, pace, transcript, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH,
     HEAVY_PATH, HOOK_PATH, KNOW_PATH, NEW_PATH, OWNER_HEADER, RECALL_PATH, RELOAD_PATH,
-    SECRET_NAMES_PATH, SECRET_RUN_PATH, SECRET_SET_PATH, SESSION_HEADER, STATE_HEADER,
-    STATUS_PATH, TASKS_PATH,
+    SECRET_NAMES_PATH, SECRET_RUN_PATH, SECRET_SET_PATH, SESSION_HEADER, STATE_HEADER, STATUS_PATH,
+    TASKS_PATH,
 };
 
 /// A hook event together with the Horadric session id from the header.
@@ -250,7 +250,14 @@ impl SecretRun {
     #[allow(clippy::type_complexity)]
     fn fields(
         body: &[u8],
-    ) -> Option<(String, Vec<String>, Vec<String>, String, Vec<String>, String)> {
+    ) -> Option<(
+        String,
+        Vec<String>,
+        Vec<String>,
+        String,
+        Vec<String>,
+        String,
+    )> {
         let v: Value = serde_json::from_slice(body).ok()?;
         let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
         let list = |k: &str| -> Option<Vec<String>> {
@@ -340,7 +347,10 @@ impl SecretStream {
     /// Writes the program's stdout, masked by the caller.
     pub fn out(&mut self, b: &[u8]) -> io::Result<()> {
         for piece in b.chunks(FRAME_BYTES) {
-            self.line(&format!("o {}\n", horadric_core::release::base64_encode(piece)))?;
+            self.line(&format!(
+                "o {}\n",
+                horadric_core::release::base64_encode(piece)
+            ))?;
         }
         Ok(())
     }
@@ -348,7 +358,10 @@ impl SecretStream {
     /// Writes the program's stderr, masked by the caller.
     pub fn err(&mut self, b: &[u8]) -> io::Result<()> {
         for piece in b.chunks(FRAME_BYTES) {
-            self.line(&format!("e {}\n", horadric_core::release::base64_encode(piece)))?;
+            self.line(&format!(
+                "e {}\n",
+                horadric_core::release::base64_encode(piece)
+            ))?;
         }
         Ok(())
     }
@@ -405,7 +418,12 @@ impl SecretStream {
                 match peer.read(&mut buf) {
                     Ok(0) => break,
                     Ok(_) => {}
-                    Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
                         let open = run
                             .upgrade()
                             .is_some_and(|r| r.lock().is_ok_and(|s| s.is_some()));
@@ -1145,7 +1163,14 @@ fn secret_set(
         owner: text("owner").unwrap_or_else(|| "project".into()),
         reply: reply.clone(),
     };
-    wait_reply(stream, Command::SecretSet(call), reply, rx, SECRET_SET_WAIT, commands)
+    wait_reply(
+        stream,
+        Command::SecretSet(call),
+        reply,
+        rx,
+        SECRET_SET_WAIT,
+        commands,
+    )
 }
 
 /// Hands a `secret list` to the app and answers with what it answers.
@@ -1161,10 +1186,21 @@ fn secret_names(
     let (reply, rx) = Reply::new();
     let call = SecretNames {
         session,
-        key: v.get("key").and_then(Value::as_str).unwrap_or_default().to_string(),
+        key: v
+            .get("key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
         reply: reply.clone(),
     };
-    wait_reply(stream, Command::SecretNames(call), reply, rx, KNOW_WAIT * 5, commands)
+    wait_reply(
+        stream,
+        Command::SecretNames(call),
+        reply,
+        rx,
+        KNOW_WAIT * 5,
+        commands,
+    )
 }
 
 /// Sends a command carrying `reply` and answers the caller with what comes
@@ -1753,7 +1789,8 @@ mod tests {
             }
             other => panic!("{other:?}"),
         });
-        let body = json!({ "key": "k", "names": ["A"], "program": "gh", "args": [], "cwd": "C:/x" });
+        let body =
+            json!({ "key": "k", "names": ["A"], "program": "gh", "args": [], "cwd": "C:/x" });
         let headers = [(COMMAND_HEADER, "secret-run"), (SESSION_HEADER, "tile-s")];
         let (status, reader) =
             client::open(port, SECRET_RUN_PATH, &headers, &body.to_string()).unwrap();
@@ -1789,7 +1826,12 @@ mod tests {
     fn a_secret_run_needs_a_session_and_its_command_header() {
         let (port, rx) = start_with_new();
         let body = r#"{"program":"gh","cwd":"C:/x"}"#;
-        let no_session = post_to(port, SECRET_RUN_PATH, "X-Horadric-Command: secret-run\r\n", body);
+        let no_session = post_to(
+            port,
+            SECRET_RUN_PATH,
+            "X-Horadric-Command: secret-run\r\n",
+            body,
+        );
         assert!(no_session.starts_with("HTTP/1.1 400"), "{no_session}");
         let no_command = post_to(port, SECRET_RUN_PATH, "X-Horadric-Session: s\r\n", body);
         assert!(no_command.starts_with("HTTP/1.1 403"), "{no_command}");
@@ -1809,7 +1851,12 @@ mod tests {
             other => panic!("{other:?}"),
         });
         let body = r#"{"cwd":"C:/x","name":"A","value":"v","owner":"everywhere"}"#;
-        let reply = post_to(port, SECRET_SET_PATH, "X-Horadric-Command: secret-set\r\n", body);
+        let reply = post_to(
+            port,
+            SECRET_SET_PATH,
+            "X-Horadric-Command: secret-set\r\n",
+            body,
+        );
         app.join().unwrap();
         assert!(reply.ends_with(r#"{"text":"kept"}"#), "{reply}");
     }

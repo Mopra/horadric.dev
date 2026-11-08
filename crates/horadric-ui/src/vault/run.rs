@@ -21,9 +21,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::vault::secret::{
-    always_refused, approval, approved, changed_pins, command_path, fingerprint, log_line, login_tool,
-    missing_line, npm_shim, once_reason, pinned, plainly, runs_builds, valid_name, Mask, Owner, Pin,
-    PinKind,
+    always_refused, approval, approved, changed_pins, command_path, fingerprint, log_line,
+    login_tool, missing_line, npm_shim, once_reason, pinned, plainly, runs_builds, valid_name,
+    Mask, Owner, Pin, PinKind,
 };
 use horadric_hooks::listener::{SecretNames, SecretRun, SecretSet, SecretStream};
 use serde_json::json;
@@ -126,7 +126,10 @@ fn save_keys(keys: &HashMap<String, String>) {
         return;
     };
     if let Err(e) = store::write_sealed(&path, &bytes) {
-        eprintln!("horadric: cannot write {}: {e}, trying again", path.display());
+        eprintln!(
+            "horadric: cannot write {}: {e}, trying again",
+            path.display()
+        );
         thread::sleep(Duration::from_millis(100));
         if let Err(e) = store::write_sealed(&path, &bytes) {
             eprintln!(
@@ -227,7 +230,10 @@ impl Asked {
             if now >= end {
                 break;
             }
-            match self.rx.recv_timeout((end - now).min(Duration::from_millis(250))) {
+            match self
+                .rx
+                .recv_timeout((end - now).min(Duration::from_millis(250)))
+            {
                 Ok(p) => return Waited::Pressed(p),
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -349,7 +355,12 @@ fn waker() {
     }
 }
 
-unsafe extern "system" fn waker_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn waker_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     if msg == WM_QUESTION {
         soon(0);
         return LRESULT(0);
@@ -371,16 +382,19 @@ fn put_with(
     let (tx, rx) = mpsc::channel();
     let gone = Arc::new(AtomicBool::new(false));
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    QUEUE.lock().unwrap_or_else(|e| e.into_inner()).push_back(Question {
-        id,
-        title: title.to_string(),
-        text: text.to_string(),
-        buttons,
-        tx,
-        gone: Arc::clone(&gone),
-        tries: 0,
-        masked,
-    });
+    QUEUE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push_back(Question {
+            id,
+            title: title.to_string(),
+            text: text.to_string(),
+            buttons,
+            tx,
+            gone: Arc::clone(&gone),
+            tries: 0,
+            masked,
+        });
     let hwnd = WAKER.load(Ordering::Acquire);
     if hwnd == 0 {
         // Only ever the UI thread, before any worker asked.
@@ -388,7 +402,12 @@ fn put_with(
         soon(0);
     } else {
         unsafe {
-            let _ = PostMessageW(Some(HWND(hwnd as *mut c_void)), WM_QUESTION, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(
+                Some(HWND(hwnd as *mut c_void)),
+                WM_QUESTION,
+                WPARAM(0),
+                LPARAM(0),
+            );
         }
     }
     Asked {
@@ -445,7 +464,10 @@ unsafe extern "system" fn show_queued(_: HWND, _: u32, id: usize, _: u32) {
             && q.tries < 100
         {
             q.tries += 1;
-            QUEUE.lock().unwrap_or_else(|e| e.into_inner()).push_front(q);
+            QUEUE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push_front(q);
             soon(500);
             break;
         }
@@ -482,7 +504,9 @@ struct Claim(String);
 
 impl Drop for Claim {
     fn drop(&mut self) {
-        OPEN.lock().unwrap_or_else(|e| e.into_inner()).retain(|s| *s != self.0);
+        OPEN.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|s| *s != self.0);
     }
 }
 
@@ -540,9 +564,10 @@ fn asker(session: &str, project: Option<&str>) -> String {
         return "A terminal that is not a Horadric session".to_string();
     }
     let seen = session_seen(session);
-    let label = seen
-        .as_ref()
-        .map_or_else(|| session.get(..8).unwrap_or(session).to_string(), |(l, _)| l.clone());
+    let label = seen.as_ref().map_or_else(
+        || session.get(..8).unwrap_or(session).to_string(),
+        |(l, _)| l.clone(),
+    );
     let project = project.map(str::to_string).or_else(|| {
         seen.map(|(_, cwd)| crate::project::project_name(&crate::project::folder_key(&cwd)))
     });
@@ -564,7 +589,9 @@ fn app_path() -> OsString {
 /// ones a process can be started from.
 fn exts() -> Vec<String> {
     const RUNNABLE: [&str; 4] = [".exe", ".com", ".cmd", ".bat"];
-    let ext = std::env::var("PATHEXT").unwrap_or_default().to_ascii_lowercase();
+    let ext = std::env::var("PATHEXT")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let mut out: Vec<String> = ext
         .split(';')
         .map(str::trim)
@@ -673,18 +700,26 @@ fn pin(program: &Path) -> Result<Pinned, String> {
             GetFinalPathNameByHandleW(HANDLE(file.as_raw_handle()), &mut buf, FILE_NAME_NORMALIZED)
         } as usize;
         if len == 0 {
-            return Err(format!("cannot tell where {} really is.", program.display()));
+            return Err(format!(
+                "cannot tell where {} really is.",
+                program.display()
+            ));
         }
         if len < buf.len() {
             break;
         }
         buf.resize(len + 1, 0);
     }
-    let full = OsString::from_wide(&buf[..len]).to_string_lossy().into_owned();
+    let full = OsString::from_wide(&buf[..len])
+        .to_string_lossy()
+        .into_owned();
     let (path, remote) = if let Some(unc) = full.strip_prefix("\\\\?\\UNC\\") {
         (format!("\\\\{unc}"), true)
     } else {
-        (full.strip_prefix("\\\\?\\").unwrap_or(&full).to_string(), false)
+        (
+            full.strip_prefix("\\\\?\\").unwrap_or(&full).to_string(),
+            false,
+        )
     };
     let sha256 = hash(&mut file).ok_or_else(|| format!("cannot read {path}."))?;
     Ok(Pinned {
@@ -739,12 +774,24 @@ fn may(path: &Path, rights: u32) -> bool {
             return true;
         }
         let mut token = HANDLE::default();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &mut token).is_err() {
+        if OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &mut token,
+        )
+        .is_err()
+        {
             return true;
         }
         let token = OwnedHandle::from_raw_handle(token.0);
         let mut imp = HANDLE::default();
-        if DuplicateToken(HANDLE(token.as_raw_handle()), SecurityImpersonation, &mut imp).is_err() {
+        if DuplicateToken(
+            HANDLE(token.as_raw_handle()),
+            SecurityImpersonation,
+            &mut imp,
+        )
+        .is_err()
+        {
             return true;
         }
         let imp = OwnedHandle::from_raw_handle(imp.0);
@@ -815,7 +862,9 @@ const QUIET_REMOVED: &[&str] = &[
 /// `GIT_CONFIG_COUNT` and its `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n`.
 fn numbered_git_config(name: &str) -> bool {
     let up = name.to_ascii_uppercase();
-    up == "GIT_CONFIG_COUNT" || up.starts_with("GIT_CONFIG_KEY_") || up.starts_with("GIT_CONFIG_VALUE_")
+    up == "GIT_CONFIG_COUNT"
+        || up.starts_with("GIT_CONFIG_KEY_")
+        || up.starts_with("GIT_CONFIG_VALUE_")
 }
 
 /// Whether a variable the run would inherit is taken away from it: the
@@ -877,7 +926,10 @@ fn writable_dir(dir: &Path) -> bool {
     const FILE_ADD_FILE: u32 = 0x2;
     const FILE_ADD_SUBDIRECTORY: u32 = 0x4;
     const FILE_DELETE_CHILD: u32 = 0x40;
-    may(dir, FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER)
+    may(
+        dir,
+        FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER,
+    )
 }
 
 /// A `.dll` at the top of the folder the program runs in, where Windows
@@ -896,9 +948,17 @@ fn loose_dll(cwd: &Path) -> Option<String> {
 /// this user cannot write to and that are outside the project, so a
 /// helper or library looked up by name is one the agent could not have
 /// put there. A shim's node folder goes first, its node pinned already.
-fn locked_path(own: Option<String>, node: Option<&Path>, place: &[&Path]) -> (OsString, Vec<String>) {
+fn locked_path(
+    own: Option<String>,
+    node: Option<&Path>,
+    place: &[&Path],
+) -> (OsString, Vec<String>) {
     let own = own.map(OsString::from).unwrap_or_else(app_path);
-    let mut kept: Vec<PathBuf> = node.and_then(Path::parent).map(Path::to_path_buf).into_iter().collect();
+    let mut kept: Vec<PathBuf> = node
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .into_iter()
+        .collect();
     let mut left = Vec::new();
     for d in std::env::split_paths(&own).filter(|d| !d.as_os_str().is_empty()) {
         let why = if !d.is_absolute() {
@@ -924,7 +984,9 @@ fn locked_path(own: Option<String>, node: Option<&Path>, place: &[&Path]) -> (Os
 fn spelled(p: &Path) -> String {
     let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let s = p.to_string_lossy().to_ascii_lowercase().replace('/', "\\");
-    s.trim_start_matches(r"\\?\").trim_end_matches('\\').to_string()
+    s.trim_start_matches(r"\\?\")
+        .trim_end_matches('\\')
+        .to_string()
 }
 
 fn inside(path: &Path, dir: &Path) -> bool {
@@ -991,7 +1053,12 @@ fn shim_of(program: &Path) -> Option<ShimRun> {
 /// The variable `name` as the child will have it: the identity's own
 /// first, then the app's unless the identity takes it away.
 fn child_var(env: &super::identity::SessionEnv, name: &str) -> Option<String> {
-    if let Some((_, v)) = env.set.iter().rev().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+    if let Some((_, v)) = env
+        .set
+        .iter()
+        .rev()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+    {
         return Some(v.clone());
     }
     if env.remove.iter().any(|k| k.eq_ignore_ascii_case(name)) {
@@ -1059,10 +1126,14 @@ impl Runs {
         // A folder that must be empty and is not holds code the program
         // would run, put there before any question could show it.
         let full = pins.iter().find(|p| {
-            p.kind == PinKind::Empty && std::fs::read_dir(&p.path).is_ok_and(|mut d| d.next().is_some())
+            p.kind == PinKind::Empty
+                && std::fs::read_dir(&p.path).is_ok_and(|mut d| d.next().is_some())
         });
         if let Some(p) = full {
-            refused = refused.or(Some(format!("{} holds something, which it would run", p.path)));
+            refused = refused.or(Some(format!(
+                "{} holds something, which it would run",
+                p.path
+            )));
         }
         let refused = refused.or_else(|| always_refused(&stem, args));
         let fingerprint = pin_hashes(&pins).map(|mut h| {
@@ -1109,7 +1180,10 @@ fn node_escape(shim: &ShimRun, var: &dyn Fn(&str) -> Option<String>) -> Option<S
         for dir in [".node_modules", ".node_libraries"] {
             let p = Path::new(&home).join(dir);
             if p.exists() {
-                return Some(format!("{} exists, and node loads modules from it", p.display()));
+                return Some(format!(
+                    "{} exists, and node loads modules from it",
+                    p.display()
+                ));
             }
         }
     }
@@ -1118,7 +1192,10 @@ fn node_escape(shim: &ShimRun, var: &dyn Fn(&str) -> Option<String>) -> Option<S
     if let Some(scope) = shim.package.parent().filter(|p| *p != shim.modules) {
         let p = scope.join("node_modules");
         if p.exists() {
-            return Some(format!("{} exists, and node loads modules from it", p.display()));
+            return Some(format!(
+                "{} exists, and node loads modules from it",
+                p.display()
+            ));
         }
     }
     let top = shim.modules.parent()?;
@@ -1137,7 +1214,9 @@ fn pin_hashes(pins: &[Pin]) -> Option<Vec<(String, String)>> {
         .map(|p| {
             let path = Path::new(&p.path);
             let h = match (std::fs::symlink_metadata(path), p.kind) {
-                (Err(e), _) if e.kind() == std::io::ErrorKind::NotFound => Some("absent".to_string()),
+                (Err(e), _) if e.kind() == std::io::ErrorKind::NotFound => {
+                    Some("absent".to_string())
+                }
                 (Err(_), _) => None,
                 (Ok(_), PinKind::Tree) => watched_tree(path),
                 (Ok(_), PinKind::Names) => hash_names(path),
@@ -1153,7 +1232,9 @@ fn pin_hashes(pins: &[Pin]) -> Option<Vec<(String, String)>> {
                     hash(&mut bytes.as_slice())
                 }
                 (Ok(_), PinKind::Text) => None,
-                (Ok(m), PinKind::File) if m.is_file() && !reparse(&m) => hash(&mut File::open(path).ok()?),
+                (Ok(m), PinKind::File) if m.is_file() && !reparse(&m) => {
+                    hash(&mut File::open(path).ok()?)
+                }
                 (Ok(_), PinKind::File) => None,
             };
             h.map(|h| (p.what.clone(), h))
@@ -1181,7 +1262,9 @@ struct Cached {
 /// The volume and file id of what `path` names itself, a link not
 /// followed: the same id is the same folder, whatever it is called now.
 fn file_id(path: &Path) -> Option<(u32, u64)> {
-    use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
     const FILE_READ_ATTRIBUTES: u32 = 0x80;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
@@ -1209,9 +1292,9 @@ unsafe impl Send for Watch {}
 impl Watch {
     fn on(dir: &Path) -> Option<Watch> {
         use windows::Win32::Storage::FileSystem::{
-            FindFirstChangeNotificationW, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_DIR_NAME,
-            FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SECURITY,
-            FILE_NOTIFY_CHANGE_SIZE,
+            FindFirstChangeNotificationW, FILE_NOTIFY_CHANGE_ATTRIBUTES,
+            FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME,
+            FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SECURITY, FILE_NOTIFY_CHANGE_SIZE,
         };
         let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
         let filter = FILE_NOTIFY_CHANGE_FILE_NAME
@@ -1220,7 +1303,8 @@ impl Watch {
             | FILE_NOTIFY_CHANGE_SIZE
             | FILE_NOTIFY_CHANGE_LAST_WRITE
             | FILE_NOTIFY_CHANGE_SECURITY;
-        let h = unsafe { FindFirstChangeNotificationW(PCWSTR(wide.as_ptr()), true, filter) }.ok()?;
+        let h =
+            unsafe { FindFirstChangeNotificationW(PCWSTR(wide.as_ptr()), true, filter) }.ok()?;
         (!h.is_invalid()).then(|| Watch(h.0 as isize))
     }
 
@@ -1263,7 +1347,14 @@ fn watched_tree(root: &Path) -> Option<String> {
     let hash = hash_tree(root)?;
     if let (Some(watch), Some(id)) = (watch, id) {
         if file_id(root) == Some(id) {
-            trees.insert(key, Cached { hash: hash.clone(), watch, id });
+            trees.insert(
+                key,
+                Cached {
+                    hash: hash.clone(),
+                    watch,
+                    id,
+                },
+            );
         }
     }
     Some(hash)
@@ -1307,8 +1398,15 @@ fn hash_names(dir: &Path) -> Option<String> {
         .ok()?
         .map(|e| {
             let e = e.ok()?;
-            let kind = if e.file_type().ok()?.is_dir() { 'd' } else { 'f' };
-            Some(format!("{kind} {}", e.file_name().to_string_lossy().to_lowercase()))
+            let kind = if e.file_type().ok()?.is_dir() {
+                'd'
+            } else {
+                'f'
+            };
+            Some(format!(
+                "{kind} {}",
+                e.file_name().to_string_lossy().to_lowercase()
+            ))
         })
         .collect::<Option<_>>()?;
     names.sort();
@@ -1376,10 +1474,15 @@ fn once_why(pinned: &Pinned, runs: &Runs, place: &Place) -> Option<String> {
         return Some(why.clone());
     }
     if runs.pinned && hold_pins(&runs.pins).is_err() {
-        return Some("a file it reads is open for writing elsewhere, so it cannot be held while it runs".into());
+        return Some(
+            "a file it reads is open for writing elsewhere, so it cannot be held while it runs"
+                .into(),
+        );
     }
     if runs.pinned && runs.fingerprint.is_none() {
-        return Some("a file that decides what it runs could not be read through, or is a link".into());
+        return Some(
+            "a file that decides what it runs could not be read through, or is a link".into(),
+        );
     }
     if pinned.remote {
         return Some("it is on a network share".into());
@@ -1388,7 +1491,11 @@ fn once_why(pinned: &Pinned, runs: &Runs, place: &Place) -> Option<String> {
     if let Some(s) = &runs.shim {
         ran.extend([s.package.as_path(), s.node.as_path()]);
     }
-    let agents = [place.dir.as_path(), place.cwd.as_path(), &std::env::temp_dir()];
+    let agents = [
+        place.dir.as_path(),
+        place.cwd.as_path(),
+        &std::env::temp_dir(),
+    ];
     if ran.iter().any(|p| agents.iter().any(|d| inside(p, d))) {
         return Some("it is inside the project or the temp folder, where the agent writes".into());
     }
@@ -1400,7 +1507,9 @@ fn once_why(pinned: &Pinned, runs: &Runs, place: &Place) -> Option<String> {
         None => path.as_path(),
     };
     if changeable(own) {
-        return Some("you can change it or its folder without elevation, so the agent could too".into());
+        return Some(
+            "you can change it or its folder without elevation, so the agent could too".into(),
+        );
     }
     None
 }
@@ -1440,7 +1549,9 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
     let mut wanted: Vec<String> = Vec::new();
     for n in names.iter().chain(&stdin) {
         if !valid_name(n) {
-            out.fail(&format!("{n} is not a secret's name: upper case letters, digits and _."));
+            out.fail(&format!(
+                "{n} is not a secret's name: upper case letters, digits and _."
+            ));
             return;
         }
         if !wanted.contains(n) {
@@ -1483,7 +1594,14 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
     let identity = identity_slug(&place.dir);
     let at = now();
     let log = |name: &str, outcome: &str| {
-        store::log(&log_line(at, &place.key, &session, name, &program_lower, outcome));
+        store::log(&log_line(
+            at,
+            &place.key,
+            &session,
+            name,
+            &program_lower,
+            outcome,
+        ));
     };
     let mut secrets = Vec::new();
     for n in &wanted {
@@ -1500,7 +1618,10 @@ fn prepare(place: Place, req: SecretRun, left: Arc<AtomicBool>) {
     let runs = Runs::of(&pinned, &env, &args);
     let bound = runs.bound(&program_lower, &stdin);
     // A pin that could not be read matches no Always, and gets none.
-    let held_to = runs.fingerprint.clone().unwrap_or_else(|| "unreadable".into());
+    let held_to = runs
+        .fingerprint
+        .clone()
+        .unwrap_or_else(|| "unreadable".into());
     // A library planted where the program runs voids every Always: each
     // secret is asked, Once only.
     // A stored Always covers this run only while the run is one that
@@ -1623,7 +1744,13 @@ impl Job {
         ));
     }
 
-    fn run(mut self, asked: Option<Asked>, held: Option<Claim>, out: SecretStream, left: Arc<AtomicBool>) {
+    fn run(
+        mut self,
+        asked: Option<Asked>,
+        held: Option<Claim>,
+        out: SecretStream,
+        left: Arc<AtomicBool>,
+    ) {
         let answer = match asked {
             None => Answer::Once,
             Some(a) => {
@@ -1825,11 +1952,13 @@ impl Job {
         for s in &self.secrets {
             c.env(&s.name, &s.value);
         }
-        c.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(if self.stdin.is_empty() {
-            Stdio::null()
-        } else {
-            Stdio::piped()
-        });
+        c.stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(if self.stdin.is_empty() {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            });
         c
     }
 
@@ -1852,7 +1981,9 @@ impl Job {
             held = match hold_pins(&self.runs.pins) {
                 Ok(h) => h,
                 Err(why) => {
-                    out.fail(&format!("Refused: {why}. Run it again; it is offered Once while that lasts."));
+                    out.fail(&format!(
+                        "Refused: {why}. Run it again; it is offered Once while that lasts."
+                    ));
                     return;
                 }
             };
@@ -1906,8 +2037,14 @@ impl Job {
         let (done_tx, done_rx) = mpsc::channel::<()>();
         let mut readers = 0;
         for (i, pipe) in [
-            child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>),
-            child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>),
+            child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn Read + Send>),
+            child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn Read + Send>),
         ]
         .into_iter()
         .enumerate()
@@ -2052,8 +2189,11 @@ impl Tree {
 
     fn adopt(&self, child: &Child) -> bool {
         unsafe {
-            AssignProcessToJobObject(HANDLE(self.0.as_raw_handle()), HANDLE(child.as_raw_handle()))
-                .is_ok()
+            AssignProcessToJobObject(
+                HANDLE(self.0.as_raw_handle()),
+                HANDLE(child.as_raw_handle()),
+            )
+            .is_ok()
         }
     }
 
@@ -2138,12 +2278,16 @@ fn set_off_ui(place: Option<Place>, known: HashSet<String>, req: SecretSet) {
     let error = |why: String| reply.send(json!({ "error": why }));
     if let Some(s) = &session {
         if !key_ok(s, &key) {
-            error("Refused: this terminal names a Horadric session but does not hold its key.".into());
+            error(
+                "Refused: this terminal names a Horadric session but does not hold its key.".into(),
+            );
             return;
         }
     }
     if !valid_name(&name) {
-        error(format!("{name} is not a secret's name: upper case letters, digits and _, a letter first."));
+        error(format!(
+            "{name} is not a secret's name: upper case letters, digits and _, a letter first."
+        ));
         return;
     }
     if value.is_empty() && session.is_some() {
@@ -2177,7 +2321,9 @@ fn set_off_ui(place: Option<Place>, known: HashSet<String>, req: SecretSet) {
                 }
             },
             None => {
-                error(format!("{o} is not an owner: project, everywhere or identity:SLUG."));
+                error(format!(
+                    "{o} is not an owner: project, everywhere or identity:SLUG."
+                ));
                 return;
             }
         },
@@ -2210,8 +2356,13 @@ fn set_off_ui(place: Option<Place>, known: HashSet<String>, req: SecretSet) {
             "{} asks to keep {name} for {whose}{replacing}. It may be an agent rather than you, so the value it sent is not used: if you want {name} kept, type the value yourself in the next step.",
             asker(&session, None),
         );
-        let prompt = format!("The value of {name} for {whose}, one line. Type or paste it yourself.");
-        (text, vec!["Type it in".to_string(), "No".to_string()], Some((prompt, tx, rx)))
+        let prompt =
+            format!("The value of {name} for {whose}, one line. Type or paste it yourself.");
+        (
+            text,
+            vec!["Type it in".to_string(), "No".to_string()],
+            Some((prompt, tx, rx)),
+        )
     } else {
         let text = format!(
             "{} asks to keep {name} for {whose}{replacing}. Keep it only if you typed it yourself.",
@@ -2229,7 +2380,11 @@ fn set_off_ui(place: Option<Place>, known: HashSet<String>, req: SecretSet) {
         o => o.label(),
     };
     // Typing the value in comes before the answer, so it gets longer.
-    let wait = if typed.is_some() { SET_WAIT * 3 } else { SET_WAIT };
+    let wait = if typed.is_some() {
+        SET_WAIT * 3
+    } else {
+        SET_WAIT
+    };
     let pressed = match asked.until(wait, None) {
         Waited::Pressed(p) => p,
         _ => None,
@@ -2256,7 +2411,11 @@ fn set_off_ui(place: Option<Place>, known: HashSet<String>, req: SecretSet) {
         return;
     }
     let kept = store::change(|v| {
-        match v.secrets.iter_mut().find(|s| s.name == name && s.owner == owner) {
+        match v
+            .secrets
+            .iter_mut()
+            .find(|s| s.name == name && s.owner == owner)
+        {
             Some(s) => {
                 // A new value is a new secret: what was allowed for the
                 // old one is asked again.
@@ -2285,11 +2444,14 @@ fn set_off_ui(place: Option<Place>, known: HashSet<String>, req: SecretSet) {
 /// `horadric secret list`: the names a session may use, never a value.
 pub fn names(place: Option<Place>, req: SecretNames) {
     if req.session.is_empty() || !key_ok(&req.session, &req.key) {
-        req.reply.send(json!({ "error": "Refused: this is not a live Horadric session with its own key." }));
+        req.reply.send(
+            json!({ "error": "Refused: this is not a live Horadric session with its own key." }),
+        );
         return;
     }
     let Some(place) = place else {
-        req.reply.send(json!({ "error": "Horadric does not know this session's project." }));
+        req.reply
+            .send(json!({ "error": "Horadric does not know this session's project." }));
         return;
     };
     if let Some(why) = store::problem() {
@@ -2387,19 +2549,43 @@ mod tests {
         std::fs::write(&config, "[default]\n").unwrap();
         std::fs::create_dir_all(&models).unwrap();
         let pins = vec![
-            Pin { what: "c".into(), path: config.to_string_lossy().into(), kind: PinKind::Text },
-            Pin { what: "m".into(), path: models.to_string_lossy().into(), kind: PinKind::Empty },
-            Pin { what: "x".into(), path: root.join("missing").to_string_lossy().into(), kind: PinKind::File },
+            Pin {
+                what: "c".into(),
+                path: config.to_string_lossy().into(),
+                kind: PinKind::Text,
+            },
+            Pin {
+                what: "m".into(),
+                path: models.to_string_lossy().into(),
+                kind: PinKind::Empty,
+            },
+            Pin {
+                what: "x".into(),
+                path: root.join("missing").to_string_lossy().into(),
+                kind: PinKind::File,
+            },
         ];
         let held = hold_pins(&pins).unwrap();
         assert_eq!(held.len(), 2);
         assert!(pin_hashes(&pins).is_some(), "still readable");
-        assert!(std::fs::write(&config, "[evil]\n").is_err(), "not writable while held");
-        assert!(std::fs::remove_file(&config).is_err(), "not deletable while held");
-        assert!(std::fs::rename(&models, root.join("moved")).is_err(), "the folder stays put");
+        assert!(
+            std::fs::write(&config, "[evil]\n").is_err(),
+            "not writable while held"
+        );
+        assert!(
+            std::fs::remove_file(&config).is_err(),
+            "not deletable while held"
+        );
+        assert!(
+            std::fs::rename(&models, root.join("moved")).is_err(),
+            "the folder stays put"
+        );
         drop(held);
         // Open for writing elsewhere: it cannot be held.
-        let writer = std::fs::OpenOptions::new().write(true).open(&config).unwrap();
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&config)
+            .unwrap();
         assert!(hold_pins(&pins).is_err());
         drop(writer);
         std::fs::write(models.join("endpoints.json"), "{}").unwrap();
@@ -2418,9 +2604,17 @@ mod tests {
         }];
         let first = pin_hashes(&pins).unwrap();
         std::fs::write(root.join("m/a/x.js"), "changed").unwrap();
-        assert_eq!(pin_hashes(&pins).unwrap(), first, "content is another pin's");
+        assert_eq!(
+            pin_hashes(&pins).unwrap(),
+            first,
+            "content is another pin's"
+        );
         std::fs::create_dir_all(root.join("m/encoding")).unwrap();
-        assert_ne!(pin_hashes(&pins).unwrap(), first, "a new entry is a new name");
+        assert_ne!(
+            pin_hashes(&pins).unwrap(),
+            first,
+            "a new entry is a new name"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2429,14 +2623,21 @@ mod tests {
         let root = scratch("locked-path");
         let project = root.join("project");
         std::fs::create_dir_all(project.join("bin")).unwrap();
-        let own = std::env::join_paths([project.join("bin"), PathBuf::from("rel"), PathBuf::from(r"C:\Windows")])
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        let own = std::env::join_paths([
+            project.join("bin"),
+            PathBuf::from("rel"),
+            PathBuf::from(r"C:\Windows"),
+        ])
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
         let (path, left) = locked_path(Some(own), None, &[&project]);
         let kept: Vec<PathBuf> = std::env::split_paths(&path).collect();
         assert!(!kept.iter().any(|k| k.starts_with(&project)));
-        assert!(left.iter().any(|l| l.contains("inside the project")), "{left:?}");
+        assert!(
+            left.iter().any(|l| l.contains("inside the project")),
+            "{left:?}"
+        );
         assert!(left.iter().any(|l| l.contains("relative")), "{left:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2461,7 +2662,10 @@ mod tests {
         let env = super::super::identity::SessionEnv {
             set: vec![
                 ("XDG_CONFIG_HOME".into(), "C:/x".into()),
-                ("AWS_ENDPOINT_URL_BEDROCK_RUNTIME".into(), "https://e".into()),
+                (
+                    "AWS_ENDPOINT_URL_BEDROCK_RUNTIME".into(),
+                    "https://e".into(),
+                ),
                 ("AWS_DATA_PATH".into(), "C:/models".into()),
                 ("HTTPS_PROXY".into(), "http://a".into()),
                 ("GIT_TRACE".into(), "1".into()),
@@ -2471,19 +2675,31 @@ mod tests {
             remove: Vec::new(),
         };
         let watched: Vec<String> = watched_env(&env).into_iter().map(|(w, _)| w).collect();
-        assert!(watched.contains(&"the variable HTTPS_PROXY".to_string()), "{watched:?}");
+        assert!(
+            watched.contains(&"the variable HTTPS_PROXY".to_string()),
+            "{watched:?}"
+        );
         assert!(watched.contains(&"the variable NODE_EXTRA_CA_CERTS".to_string()));
         assert!(watched.contains(&"the variable XDG_CONFIG_HOME".to_string()));
         assert!(watched.contains(&"the variable AWS_ENDPOINT_URL_BEDROCK_RUNTIME".to_string()));
-        assert!(!watched.iter().any(|w| w.contains("AWS_DATA_PATH")), "taken away, not watched");
+        assert!(
+            !watched.iter().any(|w| w.contains("AWS_DATA_PATH")),
+            "taken away, not watched"
+        );
         // What the run never gets is not watched.
-        assert!(!watched.iter().any(|w| w.contains("GIT_TRACE") || w.contains("GIT_SSL_CAINFO")));
+        assert!(!watched
+            .iter()
+            .any(|w| w.contains("GIT_TRACE") || w.contains("GIT_SSL_CAINFO")));
         let other = super::super::identity::SessionEnv {
             set: vec![("HTTPS_PROXY".into(), "http://b".into())],
             remove: Vec::new(),
         };
-        let a = watched_env(&env).into_iter().find(|(w, _)| w.ends_with("HTTPS_PROXY"));
-        let b = watched_env(&other).into_iter().find(|(w, _)| w.ends_with("HTTPS_PROXY"));
+        let a = watched_env(&env)
+            .into_iter()
+            .find(|(w, _)| w.ends_with("HTTPS_PROXY"));
+        let b = watched_env(&other)
+            .into_iter()
+            .find(|(w, _)| w.ends_with("HTTPS_PROXY"));
         assert_ne!(a, b);
     }
 
@@ -2515,9 +2731,21 @@ mod tests {
         std::fs::write(root.join("ext/deep/a.js"), "one").unwrap();
         std::fs::write(root.join("config.yml"), "aliases: {}").unwrap();
         let pins = vec![
-            Pin { what: "c".into(), path: root.join("config.yml").to_string_lossy().into(), kind: PinKind::File },
-            Pin { what: "e".into(), path: root.join("ext").to_string_lossy().into(), kind: PinKind::Tree },
-            Pin { what: "m".into(), path: root.join("missing").to_string_lossy().into(), kind: PinKind::Tree },
+            Pin {
+                what: "c".into(),
+                path: root.join("config.yml").to_string_lossy().into(),
+                kind: PinKind::File,
+            },
+            Pin {
+                what: "e".into(),
+                path: root.join("ext").to_string_lossy().into(),
+                kind: PinKind::Tree,
+            },
+            Pin {
+                what: "m".into(),
+                path: root.join("missing").to_string_lossy().into(),
+                kind: PinKind::Tree,
+            },
         ];
         let first = pin_hashes(&pins).unwrap();
         assert_eq!(first[2].1, "absent");
@@ -2527,9 +2755,17 @@ mod tests {
         assert_ne!(second[1], first[1]);
         assert_eq!(second[0], first[0]);
         std::fs::write(root.join("ext/new.js"), "").unwrap();
-        assert_ne!(pin_hashes(&pins).unwrap()[1], second[1], "a new empty file counts");
+        assert_ne!(
+            pin_hashes(&pins).unwrap()[1],
+            second[1],
+            "a new empty file counts"
+        );
         // A file pin that is a folder cannot be read as one.
-        let odd = [Pin { what: "x".into(), path: root.join("ext").to_string_lossy().into(), kind: PinKind::File }];
+        let odd = [Pin {
+            what: "x".into(),
+            path: root.join("ext").to_string_lossy().into(),
+            kind: PinKind::File,
+        }];
         assert!(pin_hashes(&odd).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2547,6 +2783,9 @@ mod tests {
     #[test]
     fn owners_are_named_in_the_question() {
         assert_eq!(owned("T", &Owner::Everywhere), "T (kept for every project)");
-        assert_eq!(owned("T", &Owner::Project("c:/work/acme".into())), "acme's T");
+        assert_eq!(
+            owned("T", &Owner::Project("c:/work/acme".into())),
+            "acme's T"
+        );
     }
 }
