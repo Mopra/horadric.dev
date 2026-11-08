@@ -83,9 +83,10 @@ at on a dev instance.
   `hooks install` and each app start. A dev instance writes them into its
   own town homes (under `Horadric-dev`, at its own port) and still never
   touches `~/.claude`.
-- Browser profiles: a project whose identity resolves gets
-  `identity-<slug>`; a town gets one only from an identity picked for it,
-  else `town-<slug>` when Own browser is on. New towns start with it on;
+- Browser profiles: projects always share one, identity or not, so the
+  human's logins stay in reach (the human, 2026-11-08). A town gets
+  `identity-<slug>` only from an identity picked for it, else
+  `town-<slug>` when Own browser is on. New towns start with it on;
   Tristram keeps the shared profile it had, so its logins stay.
 - Usage: a town home's limits are kept apart (`home_usage` in the state)
   and shown as extra rows named by the town. Warriv drives only projects,

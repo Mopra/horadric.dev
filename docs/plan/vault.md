@@ -149,8 +149,8 @@ from asking a tool every paint.
 **Plain terminals and the browser pane.** A plain terminal in the stage
 gets its project's identity too, so the human's own `git push` there
 goes as the agent's would. The browser pane keeps its own login profile;
-an identity does not change that in the first cut. A profile per
-identity is the obvious later step. Signing in to a site is the Vault's
+an identity does not change that for a project (the human, 2026-11-08);
+only a town with an identity picked opens that identity's profile. Signing in to a site is the Vault's
 third half, below.
 
 ## Secrets: used, never read
