@@ -995,6 +995,10 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     crate::backdrop::set_still(saved.still);
     crate::dictate::use_microphone(saved.microphone.clone());
     crate::dictate::use_tidy(saved.dictation_tidy);
+    crate::dictate::use_voice(crate::dictate::saved_voice(
+        saved.dictation_model.as_deref(),
+        saved.dictation_language.as_deref(),
+    ));
     let usage_window = match UsageWindow::create(
         Rc::clone(&shared),
         saved.usage_window.as_ref().is_some_and(|p| p.collapsed),
@@ -6215,6 +6219,15 @@ impl App {
             notify: !self.quiet,
             sounds: self.sounds,
             microphone: self.microphone_name(),
+            dictation_model: crate::dictate::model_label(crate::dictate::voice().model),
+            dictation_language: {
+                let v = crate::dictate::voice();
+                if v.model.is_multilingual() {
+                    v.language.label().to_string()
+                } else {
+                    "English, as the model hears no other".to_string()
+                }
+            },
             tidy: crate::dictate::tidies(),
             town: !self.town_hidden,
             animations: !self.still,
@@ -6766,6 +6779,30 @@ impl App {
                     current,
                 )
             }
+            Field::DictationModel => {
+                let models = horadric_memory::speech::Model::ALL;
+                let now = crate::dictate::voice().model;
+                list(
+                    "Fetched the first time it listens",
+                    models.iter().map(|m| crate::dictate::model_label(*m)).collect(),
+                    at(models.iter().position(|m| *m == now)),
+                )
+            }
+            Field::DictationLanguage => {
+                use crate::dictate::Language;
+                let now = crate::dictate::voice();
+                list(
+                    if now.model.is_multilingual() {
+                        "What you speak"
+                    } else {
+                        "Another than English picks a model for any language"
+                    },
+                    Language::ALL.iter().map(|l| l.label().to_string()).collect(),
+                    at(Language::ALL
+                        .iter()
+                        .position(|l| now.model.is_multilingual() && *l == now.language)),
+                )
+            }
             Field::Discord => list(
                 "What your Discord profile may show",
                 Discord::ALL.iter().map(|d| d.label().to_string()).collect(),
@@ -6829,6 +6866,8 @@ impl App {
             | Field::Font
             | Field::Screen
             | Field::Microphone
+            | Field::DictationModel
+            | Field::DictationLanguage
             | Field::Discord
             | Field::Default(_)
             | Field::Project
@@ -6979,6 +7018,30 @@ impl App {
             Field::Discord => {
                 if let Some(d) = Discord::ALL.get(i) {
                     self.set_discord(*d);
+                }
+            }
+            Field::DictationModel => {
+                if let Some(m) = horadric_memory::speech::Model::ALL.get(i) {
+                    let v = crate::dictate::voice();
+                    crate::dictate::use_voice(crate::dictate::Voice { model: *m, ..v });
+                    self.save();
+                }
+            }
+            Field::DictationLanguage => {
+                use horadric_memory::speech::Model;
+                if let Some(l) = crate::dictate::Language::ALL.get(i) {
+                    let v = crate::dictate::voice();
+                    // Danish asked of an English model means a model for
+                    // any language, the small one so it stays quick.
+                    let model = match (*l, v.model.is_multilingual()) {
+                        (crate::dictate::Language::English, _) | (_, true) => v.model,
+                        (_, false) => Model::Small,
+                    };
+                    crate::dictate::use_voice(crate::dictate::Voice {
+                        model,
+                        language: *l,
+                    });
+                    self.save();
                 }
             }
             Field::Microphone => {
@@ -9316,6 +9379,12 @@ impl App {
             sounds: self.sounds,
             microphone: self.microphone.clone(),
             dictation_tidy: crate::dictate::tidies(),
+            dictation_model: Some(crate::dictate::voice().model)
+                .filter(|m| *m != horadric_memory::speech::Model::SmallEn)
+                .map(|m| m.folder().to_string()),
+            dictation_language: Some(crate::dictate::voice().language)
+                .filter(|l| *l != crate::dictate::Language::English)
+                .map(|l| l.code().to_string()),
             town_hidden: self.town_hidden,
             still: self.still,
             switch_accounts: self.switch_accounts,

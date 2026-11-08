@@ -123,6 +123,10 @@ pub enum Field {
     Sounds,
     /// What Ctrl+Space dictation listens to.
     Microphone,
+    /// The Whisper model dictation listens with.
+    DictationModel,
+    /// The language a multilingual model hears.
+    DictationLanguage,
     /// Opens the words dictation should know.
     DictationWords,
     /// Whether Haiku tidies what was dictated.
@@ -194,6 +198,8 @@ impl Field {
             Field::Notify => "A Windows notification when a session needs you",
             Field::Sounds => "A soft sound when a turn finishes or work lands",
             Field::Microphone => "What dictation listens to",
+            Field::DictationModel => "Larger ones hear better and take longer",
+            Field::DictationLanguage => "What you speak, for a model that hears any language",
             Field::DictationWords => "Names it mishears, and what you meant",
             Field::TidyDictation => "Haiku drops the ums and carries out \"scratch that\"",
             Field::Default(Setting::Model) => "The model new sessions start on",
@@ -294,6 +300,10 @@ pub struct Values {
     pub sounds: bool,
     /// The microphone dictation listens to, by name.
     pub microphone: String,
+    /// The model dictation listens with, by its label.
+    pub dictation_model: String,
+    /// The language it hears, by name.
+    pub dictation_language: String,
     /// Haiku tidies what was dictated before it is typed.
     pub tidy: bool,
     /// Tristram's tile shows.
@@ -497,6 +507,18 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                     Field::Microphone,
                     "Microphone",
                     &v.microphone,
+                    Control::List,
+                ),
+                line(
+                    Field::DictationModel,
+                    "Model",
+                    &v.dictation_model,
+                    Control::List,
+                ),
+                line(
+                    Field::DictationLanguage,
+                    "Language",
+                    &v.dictation_language,
                     Control::List,
                 ),
                 line(
@@ -1618,6 +1640,8 @@ mod tests {
             notify: true,
             sounds: false,
             microphone: "Windows default".into(),
+            dictation_model: "Small, English".into(),
+            dictation_language: "English".into(),
             tidy: false,
             town: true,
             animations: true,
@@ -1728,6 +1752,8 @@ mod tests {
             fields(Section::Dictation, &v),
             [
                 Field::Microphone,
+                Field::DictationModel,
+                Field::DictationLanguage,
                 Field::DictationWords,
                 Field::TidyDictation
             ]

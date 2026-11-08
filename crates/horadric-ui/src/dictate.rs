@@ -17,7 +17,8 @@
 //! write, which is why the words come quickly however long the dictation.
 //!
 //! The first press on a machine without the model fetches it instead,
-//! 332 MB with a bar counting up, and says when it is ready: speech
+//! 332 MB for the small English one, with a bar counting up, and says
+//! when it is ready: speech
 //! recorded then would wait minutes to be written down, or be lost if the
 //! fetch failed.
 //!
@@ -42,7 +43,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use horadric_memory::speech::{self, words::Words, Listener};
+use horadric_memory::speech::{self, words::Words, Listener, Model};
 
 use crate::hotkey::{Action, Chord};
 use windows::core::{GUID, HSTRING, PCWSTR};
@@ -188,6 +189,95 @@ const TIDY_LONGEST: Duration = Duration::from_secs(12);
 /// The microphone picked in Settings, by its endpoint id. None, or one
 /// unplugged since, is the one Windows records from by default.
 static MIC: Mutex<Option<String>> = Mutex::new(None);
+
+/// The model and the language picked in Settings.
+static PICKED: Mutex<Voice> = Mutex::new(Voice {
+    model: Model::SmallEn,
+    language: Language::English,
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Voice {
+    pub model: Model,
+    pub language: Language,
+}
+
+/// The languages Settings offers. Whisper hears some ninety; these are
+/// the ones asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    English,
+    Danish,
+}
+
+impl Language {
+    pub const ALL: [Language; 2] = [Language::English, Language::Danish];
+
+    /// Whisper's code for it, as saved.
+    pub fn code(self) -> &'static str {
+        match self {
+            Language::English => "en",
+            Language::Danish => "da",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Language> {
+        Language::ALL.into_iter().find(|l| l.code() == code)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Language::English => "English",
+            Language::Danish => "Danish",
+        }
+    }
+}
+
+/// A model's row in Settings, with what the human weighs it by. The
+/// times are a 15 second sentence on an eight core desktop, measured
+/// 2026-11-08.
+pub fn model_label(model: Model) -> String {
+    let (name, speed) = match model {
+        Model::SmallEn => ("Small, English", "quickest"),
+        Model::LargeEn => ("Large, English", "about 3.5 times as slow"),
+        Model::Small => ("Small, any language", "about 1.4 times as slow"),
+        Model::Turbo => ("Large, any language", "about 3.7 times as slow"),
+    };
+    let mb = model.download_size() / 1_000_000;
+    let size = if mb >= 1000 {
+        format!("{:.1} GB", mb as f32 / 1000.0)
+    } else {
+        format!("{mb} MB")
+    };
+    format!("{name}, {speed}, {size}")
+}
+
+/// The model and language dictation listens with.
+pub fn voice() -> Voice {
+    PICKED.lock().map(|v| *v).unwrap_or(Voice {
+        model: Model::SmallEn,
+        language: Language::English,
+    })
+}
+
+/// Dictation listens with `voice` from the next one on; the model is
+/// loaded, or fetched, when it next starts.
+pub fn use_voice(voice: Voice) {
+    if let Ok(mut v) = PICKED.lock() {
+        *v = voice;
+    }
+}
+
+/// The voice saved settings name, the small English model and English
+/// for what they do not.
+pub fn saved_voice(model: Option<&str>, language: Option<&str>) -> Voice {
+    Voice {
+        model: model.and_then(Model::from_folder).unwrap_or(Model::SmallEn),
+        language: language
+            .and_then(Language::from_code)
+            .unwrap_or(Language::English),
+    }
+}
 
 thread_local! {
     static NOW: RefCell<Option<Now>> = const { RefCell::new(None) };
@@ -425,7 +515,7 @@ pub fn press(pane: HWND, dir: Option<&Path>, before: &str) {
             Some(_) => true,
             None => {
                 AFTER.with(|f| f.borrow_mut().take());
-                let here = models().is_some_and(|m| speech::is_fetched(&m));
+                let here = models().is_some_and(|m| voice().model.is_fetched(&m));
                 *n = Some(if here {
                     let project = dir
                         .and_then(|d| d.file_name())
@@ -518,7 +608,7 @@ pub fn notice(pane: HWND) -> Option<String> {
     Some(match shown {
         Shown::Listening(_) => to_stop(),
         Shown::Fetching(f) if f < 1.0 => {
-            let mb = speech::download_size() / 1_000_000;
+            let mb = voice().model.download_size() / 1_000_000;
             format!(
                 "Dictation needs its speech model first, downloaded once: {} of {mb} MB.",
                 (f * mb as f32) as usize
@@ -559,7 +649,7 @@ pub fn shown(pane: HWND) -> Option<Shown> {
     Some(match phase {
         Phase::Listening => Shown::Listening(f32::from_bits(LEVEL.load(Ordering::Relaxed))),
         Phase::Fetching => {
-            let total = speech::download_size().max(1);
+            let total = voice().model.download_size().max(1);
             Shown::Fetching((FETCHED.load(Ordering::Relaxed) as f32 / total as f32).min(1.0))
         }
         Phase::Writing => Shown::Writing,
@@ -977,7 +1067,7 @@ fn writer() -> &'static Sender<Job> {
     WRITER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<Job>();
         thread::spawn(move || {
-            let mut listener: Option<Listener> = None;
+            let mut listener: Option<(Model, Listener)> = None;
             let mut takes: HashMap<u64, Take> = HashMap::new();
             for job in rx {
                 let pane = match &job {
@@ -1006,9 +1096,18 @@ fn writer() -> &'static Sender<Job> {
                         },
                     );
                 }
+                // The model is changed only between dictations, and the
+                // old one goes before the new loads: a large one is
+                // gigabytes.
+                let wanted = voice();
+                if matches!(job, Job::Prepare(_) | Job::Begin { .. })
+                    && listener.as_ref().is_some_and(|(m, _)| *m != wanted.model)
+                {
+                    listener = None;
+                }
                 if listener.is_none() {
-                    match load(pane) {
-                        Ok(l) => listener = Some(l),
+                    match load(pane, wanted.model) {
+                        Ok(l) => listener = Some((wanted.model, l)),
                         Err(e) => {
                             if let Job::Begin { id, .. } | Job::Phrase { id, .. } = &job {
                                 takes.remove(id);
@@ -1019,7 +1118,12 @@ fn writer() -> &'static Sender<Job> {
                         }
                     }
                 }
-                let Some(l) = listener.as_mut() else { continue };
+                let Some((_, l)) = listener.as_mut() else { continue };
+                if matches!(job, Job::Prepare(_) | Job::Begin { .. }) {
+                    // Only the codes Settings offers are given, and every
+                    // multilingual model knows them.
+                    let _ = l.set_language(wanted.language.code());
+                }
                 match job {
                     Job::Prepare(_) => note(pane, Note::Ready),
                     Job::Begin { .. } => {}
@@ -1089,15 +1193,15 @@ fn writer() -> &'static Sender<Job> {
 
 /// The model, fetched first if it is not here, the bar moved on at each
 /// whole percent.
-fn load(pane: isize) -> Result<Listener, String> {
+fn load(pane: isize, model: Model) -> Result<Listener, String> {
     let models = models().ok_or("no state folder")?;
-    if !speech::is_fetched(&models) {
+    if !model.is_fetched(&models) {
         note(pane, Note::Phase(Phase::Fetching));
     }
-    let total = speech::download_size().max(1);
-    let done = Cell::new(speech::fetched_bytes(&models));
+    let total = model.download_size().max(1);
+    let done = Cell::new(model.fetched_bytes(&models));
     FETCHED.store(done.get(), Ordering::Relaxed);
-    let dir = speech::ensure(&models, |url, limit| {
+    let dir = model.ensure(&models, |url, limit| {
         let base = done.get();
         let percent = Cell::new(base * 100 / total);
         let body = crate::net::get_counting(url, limit, &|n| {

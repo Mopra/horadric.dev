@@ -134,6 +134,14 @@ pub struct SavedState {
     /// Dictation is tidied by Haiku before it is typed, from Settings.
     #[serde(default)]
     pub dictation_tidy: bool,
+    /// The Whisper model dictation listens with, by its folder under
+    /// `models`. None is the small English one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dictation_model: Option<String>,
+    /// The language a multilingual model hears, Whisper's two letters.
+    /// None is English.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dictation_language: Option<String>,
     /// Tristram's tile is hidden, from its header menu or the Settings
     /// window. It shows again while a session runs in the town.
     #[serde(default)]
