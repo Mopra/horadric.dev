@@ -1,34 +1,40 @@
-//! Transcribes a WAV file with the dictation model, to try it without the
-//! app: `cargo run --release -p horadric-memory --example dictate -- <models dir> <file.wav> [prompt]`.
-//! The file is 16 bit mono at 16 kHz, as Windows' Sound Recorder or
-//! `System.Speech` can write it.
+//! Transcribes WAV files with a dictation model, to try it without the
+//! app: `cargo run --release -p horadric-memory --example dictate --
+//! <models dir> <model folder>[:<language>] <file.wav>...`, the model
+//! one of `speech::Model`'s folders (distil-small.en, distil-large-v3,
+//! whisper-small, whisper-large-v3-turbo). Each file is heard twice and
+//! the second time is the one told, so the first run's warming up is not
+//! counted. The files are 16 bit mono at 16 kHz, as Windows' Sound
+//! Recorder or `System.Speech` can write them.
 
 use std::time::Instant;
 
-use horadric_memory::speech::{self, Listener};
+use horadric_memory::speech::{Listener, Model};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (models, wav, prompt) = match args.as_slice() {
-        [m, w] => (m, w, ""),
-        [m, w, p] => (m, w, p.as_str()),
-        _ => {
-            eprintln!("usage: dictate <models dir> <file.wav> [prompt]");
-            std::process::exit(2);
-        }
+    let [models, model, wavs @ ..] = args.as_slice() else {
+        eprintln!("usage: dictate <models dir> <model>[:<language>] <file.wav>...");
+        std::process::exit(2);
     };
-    let pcm = read_wav(&std::fs::read(wav).expect("read the wav"));
-    let dir = speech::ensure(models.as_ref(), curl).expect("fetch the model");
+    let (model, language) = model.split_once(':').unwrap_or((model, "en"));
+    let model = Model::from_folder(model).expect("a model's folder");
+    let dir = model.ensure(models.as_ref(), curl).expect("fetch the model");
     let at = Instant::now();
     let mut listener = Listener::load(&dir).expect("load");
-    println!("loaded in {:?}", at.elapsed());
-    let at = Instant::now();
-    let text = listener.transcribe(&pcm, prompt).expect("transcribe");
-    println!(
-        "{:.1} s of sound in {:?}: {text}",
-        pcm.len() as f32 / 16000.0,
-        at.elapsed()
-    );
+    listener.set_language(language).expect("language");
+    println!("{} loaded in {:?}", model.folder(), at.elapsed());
+    for wav in wavs {
+        let pcm = read_wav(&std::fs::read(wav).expect("read the wav"));
+        listener.transcribe(&pcm, "").expect("transcribe");
+        let at = Instant::now();
+        let text = listener.transcribe(&pcm, "").expect("transcribe");
+        println!(
+            "{wav}: {:.1} s of sound in {:.2} s: {text}",
+            pcm.len() as f32 / 16000.0,
+            at.elapsed().as_secs_f32()
+        );
+    }
 }
 
 /// The samples of a 16 bit PCM WAV, found by its `data` chunk.
