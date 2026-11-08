@@ -1135,9 +1135,11 @@ impl View {
     fn advance(&self, chat: &mut Chat, now: Instant) -> (f32, f32) {
         chat.note_busy();
         let heat = chat.heat();
-        let moving = chat.busy_was
-            || heat > 0.0
-            || !self.live.borrow().1.is_empty()
+        // The embers and the turning runes are light that moves, which
+        // "show animations" off stills; a page burning away or opening
+        // still runs its course.
+        let drifting = chat.busy_was || heat > 0.0 || !self.live.borrow().1.is_empty();
+        let moving = drifting && crate::backdrop::animations_on()
             || self.burning()
             || self.summoning()
             || lightbox::moving(&self.key);
@@ -1199,7 +1201,7 @@ impl View {
             return false;
         }
         // Runes that came into view start the clock that turns them.
-        if !self.live.borrow().1.is_empty() {
+        if !self.live.borrow().1.is_empty() && crate::backdrop::animations_on() {
             self.clock(true);
         }
         self.frame(gfx, t, heat)
