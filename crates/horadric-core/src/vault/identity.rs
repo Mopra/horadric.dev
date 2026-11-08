@@ -506,10 +506,52 @@ pub fn without_claim(claims: &[String], folder: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether a session that started with the identity `started` ("" for
+/// none) is on another than the project's `now`. A session whose start was
+/// not noted, from before Horadric noted them, is not counted: a restart
+/// it may not need is worse than one left out.
+pub fn started_otherwise(started: Option<&str>, now: Option<&str>) -> bool {
+    match started {
+        None => false,
+        Some(s) => s != now.unwrap_or(""),
+    }
+}
+
+/// The sessions noted with the identity each started with, newest last:
+/// `id` noted again moves to the end, and only the newest `keep` stay, so
+/// the list never grows past what a machine runs.
+pub fn noted(mut list: Vec<(String, String)>, id: &str, slug: &str, keep: usize) -> Vec<(String, String)> {
+    list.retain(|(i, _)| i != id);
+    list.push((id.to_string(), slug.to_string()));
+    let over = list.len().saturating_sub(keep);
+    list.drain(..over);
+    list
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn a_session_is_otherwise_only_when_noted_and_different() {
+        assert!(!started_otherwise(None, Some("acme")));
+        assert!(!started_otherwise(Some(""), None));
+        assert!(!started_otherwise(Some("acme"), Some("acme")));
+        assert!(started_otherwise(Some("acme"), None));
+        assert!(started_otherwise(Some(""), Some("acme")));
+        assert!(started_otherwise(Some("acme"), Some("globex")));
+    }
+
+    #[test]
+    fn a_noted_session_moves_to_the_end_and_the_oldest_go() {
+        let list = noted(Vec::new(), "a", "acme", 2);
+        let list = noted(list, "b", "", 2);
+        let list = noted(list, "a", "globex", 2);
+        assert_eq!(list, [("b".into(), "".into()), ("a".into(), "globex".into())]);
+        let list = noted(list, "c", "acme", 2);
+        assert_eq!(list, [("a".into(), "globex".into()), ("c".into(), "acme".into())]);
+    }
 
     #[test]
     fn identity_vars_are_the_ones_env_sets() {

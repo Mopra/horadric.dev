@@ -17,6 +17,7 @@ mod history;
 mod home;
 pub mod message;
 mod office;
+pub mod page_pins;
 pub mod pins;
 mod present;
 mod runtime;

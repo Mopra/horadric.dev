@@ -1,5 +1,5 @@
-//! Pins: a place in a file plus the human's words, and the text a session
-//! gets for them.
+//! Pins: a place in a file, or on a web page, plus the human's words, and
+//! the text a session gets for them.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -8,7 +8,12 @@ use serde::{Deserialize, Serialize};
 /// The human pointing at a spot in a file and saying what to change there.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pin {
+    /// Empty for a pin on a web page, which has `url` instead.
     pub file: PathBuf,
+    /// The web page pinned, as the browser knows its address rather than
+    /// as the page says it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     pub words: String,
     pub at: At,
     /// An image of the spot, for a session that can look at it.
@@ -74,18 +79,30 @@ const HTML_MAX: usize = 600;
 /// human's words last, so the place is read before the request.
 pub fn pin_message(pins: &[Pin], project_root: &Path) -> String {
     let mut out = String::new();
+    let pages = pins.iter().filter(|p| p.url.is_some()).count();
+    let spots = match (pages, pins.len() - pages) {
+        (0, _) => "in files in the Forge",
+        (_, 0) => "on web pages in the browser",
+        _ => "in files in the Forge and on web pages",
+    };
     match pins.len() {
         0 => return out,
+        1 if pages == 1 => out.push_str(
+            "The human pinned a spot on a web page in the browser and said what to change there.\n\n",
+        ),
         1 => out.push_str(
             "The human pinned a spot in a file in the Forge and said what to change there.\n\n",
         ),
         n => out.push_str(&format!(
-            "The human pinned {n} spots in files in the Forge and said what to change at each.\n\n"
+            "The human pinned {n} spots {spots} and said what to change at each.\n\n"
         )),
     }
     for (n, pin) in pins.iter().enumerate() {
         let at = &pin.at;
-        let mut place = vec![relative(&pin.file, project_root)];
+        let mut place = vec![match &pin.url {
+            Some(url) => url.clone(),
+            None => relative(&pin.file, project_root),
+        }];
         if let Some(s) = at.slide {
             place.push(format!("slide {s}"));
         }
@@ -198,6 +215,7 @@ mod tests {
     fn forge_pin_message_one() {
         let pin = Pin {
             file: PathBuf::from("C:/Work/Proj/decks/q3.html"),
+            url: None,
             words: " make it bolder ".into(),
             at: At {
                 slide: Some(3),
@@ -227,12 +245,14 @@ mod tests {
         let pins = [
             Pin {
                 file: PathBuf::from("/p/notes.md"),
+                url: None,
                 words: "shorter".into(),
                 at: At { lines: Some((5, 7)), ..At::default() },
                 crop: None,
             },
             Pin {
                 file: PathBuf::from("/elsewhere/data.csv"),
+                url: None,
                 words: "fix the total".into(),
                 at: At { row: Some(4), col: Some(2), text: Some("x".repeat(400)), ..At::default() },
                 crop: None,
@@ -244,5 +264,25 @@ mod tests {
         assert!(msg.contains("data.csv, row 4, column 3\n"));
         assert!(msg.contains(&format!("   Text there: \"{}...\"\n", "x".repeat(300))));
         assert_eq!(pin_message(&[], Path::new("/p")), "");
+    }
+
+    #[test]
+    fn forge_pin_message_on_a_web_page() {
+        let page = Pin {
+            file: PathBuf::new(),
+            url: Some("https://example.com/pricing".into()),
+            words: "this plan is wrong".into(),
+            at: At { selector: Some("#plans > div:nth-of-type(2)".into()), ..At::default() },
+            crop: None,
+        };
+        let msg = pin_message(std::slice::from_ref(&page), Path::new("/p"));
+        assert!(msg.starts_with("The human pinned a spot on a web page in the browser"));
+        assert!(msg.contains("
+https://example.com/pricing, `#plans > div:nth-of-type(2)`
+"));
+        let file = Pin { file: PathBuf::from("/p/a.md"), url: None, ..page.clone() };
+        let both = pin_message(&[file, page], Path::new("/p"));
+        assert!(both.starts_with("The human pinned 2 spots in files in the Forge and on web pages"));
+        assert!(both.contains("1. a.md, "));
     }
 }

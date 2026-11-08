@@ -191,6 +191,33 @@ pub fn uninstall(path: &Path) -> io::Result<()> {
     }
 }
 
+/// The settings file of each town's own Claude home: a session there reads
+/// its user settings from that home and never from `~/.claude`, so the
+/// hooks and the mod are written into each as well.
+pub fn town_settings() -> Vec<PathBuf> {
+    crate::towns::homes()
+        .into_iter()
+        .map(|h| h.join("settings.json"))
+        .collect()
+}
+
+/// [`install`] into every town home. Each failure is said, none stops the
+/// rest: a town without hooks only has tiles that do not move.
+pub fn install_towns(port: u16) -> Vec<String> {
+    town_settings()
+        .into_iter()
+        .filter_map(|p| install(&p, port).err().map(|e| format!("{}: {e}", p.display())))
+        .collect()
+}
+
+/// [`uninstall`] from every town home.
+pub fn uninstall_towns() -> Vec<String> {
+    town_settings()
+        .into_iter()
+        .filter_map(|p| uninstall(&p).err().map(|e| format!("{}: {e}", p.display())))
+        .collect()
+}
+
 /// The folder the mod is written to, beside the settings file.
 pub const MOD_DIR: &str = "horadric-mod";
 

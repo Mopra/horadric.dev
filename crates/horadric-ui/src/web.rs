@@ -40,7 +40,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
 };
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2Environment15, ICoreWebView2_19, ICoreWebView2_28, ICoreWebView2_3,
+    ICoreWebView2Environment10, ICoreWebView2Environment15, ICoreWebView2_19, ICoreWebView2_28, ICoreWebView2_3,
     ICoreWebView2_9, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
     COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
 };
@@ -1806,9 +1806,37 @@ fn make_controller(env: &ICoreWebView2Environment, key: &str, id: u64) {
             Ok(())
         },
     ));
-    if let Err(e) = unsafe { env.CreateCoreWebView2Controller(parent, &handler) } {
+    // A town or identity with a browser of its own gets a profile in the
+    // one user data folder, so one environment serves them all and no
+    // login of one is seen by another. Named profiles need a newer
+    // runtime; without one it opens in the shared profile rather than not
+    // at all, and says so.
+    let made = match crate::town::profile_for(key) {
+        Some(name) => unsafe { with_profile(env, &name, parent, &handler) }.or_else(|e| {
+            eprintln!("horadric: no browser profile {name}, the shared one is used: {e}");
+            unsafe { env.CreateCoreWebView2Controller(parent, &handler) }
+        }),
+        None => unsafe { env.CreateCoreWebView2Controller(parent, &handler) },
+    };
+    if let Err(e) = made {
         eprintln!("horadric: cannot open the browser pane: {e}");
         lost(key, id);
+    }
+}
+
+/// Makes a controller in the WebView2 profile called `name`, which
+/// WebView2 makes inside the user data folder the first time.
+unsafe fn with_profile(
+    env: &ICoreWebView2Environment,
+    name: &str,
+    parent: HWND,
+    handler: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2CreateCoreWebView2ControllerCompletedHandler,
+) -> windows::core::Result<()> {
+    let env10: ICoreWebView2Environment10 = env.cast()?;
+    let options = unsafe { env10.CreateCoreWebView2ControllerOptions() }?;
+    unsafe {
+        options.SetProfileName(&HSTRING::from(name))?;
+        env10.CreateCoreWebView2ControllerWithOptions(parent, &options, handler)
     }
 }
 
@@ -2237,6 +2265,7 @@ fn keys(key: &str, controller: &ICoreWebView2Controller) {
             (b'L', true, false, false) => Input::WebAsk(owned.clone(), WebAsk::Address),
             (b'T', true, true, false) => Input::Shell(None),
             (b'J', true, false, false) => Input::WebAsk(owned.clone(), WebAsk::Downloads),
+            (b'P', true, true, false) => Input::WebAsk(owned.clone(), WebAsk::Pin),
             (b'O', true, true, false) => Input::Forge {
                 key: Some(owned.clone()),
                 file: None,

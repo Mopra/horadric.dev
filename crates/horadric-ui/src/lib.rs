@@ -239,6 +239,8 @@ mod sound;
 mod start;
 #[cfg(any(windows, target_os = "macos"))]
 pub mod town;
+#[cfg(windows)]
+mod town_settings;
 // The journal, the chronicle and the MCP config wait for the Mac's quest log
 // and browser pane.
 #[cfg(windows)]

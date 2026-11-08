@@ -17,6 +17,7 @@ use crate::rarity::Loot;
 use crate::runeword::{Armed, OnProject, Runeword};
 use crate::session::{Phase, Session};
 use crate::title::Title;
+use crate::towns::SavedTown;
 use crate::usage::{Defaults, Usage};
 use crate::warriv::{Drive, Heard};
 use crate::worktree::Worktree;
@@ -134,10 +135,18 @@ pub struct SavedState {
     /// Dictation is tidied by Haiku before it is typed, from Settings.
     #[serde(default)]
     pub dictation_tidy: bool,
-    /// Tristram's tile is hidden, from its header menu or the Settings
-    /// window. It shows again while a session runs in the town.
-    #[serde(default)]
+    /// Tristram's tile was hidden, from before there were several towns.
+    /// Read once into [`SavedState::towns`] and never written again.
+    #[serde(default, skip_serializing)]
     pub town_hidden: bool,
+    /// The towns, Tristram first. Empty in a file from before towns; read
+    /// it through [`SavedState::towns`].
+    #[serde(default, rename = "towns", skip_serializing_if = "Vec::is_empty")]
+    pub town_list: Vec<SavedTown>,
+    /// The usage limits as last heard of each town's own Claude login, by
+    /// the folder of its home. The machine's login is [`SavedState::usage`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub home_usage: BTreeMap<String, Usage>,
     /// Nothing moves inside Horadric: no ring round a working pane, no
     /// letters burning in, no gliding. Windows turning animations off does
     /// the same without this.
@@ -352,6 +361,12 @@ impl SavedState {
             }
         }
         ids
+    }
+
+    /// The towns, Tristram first, a file from before towns read as
+    /// Tristram alone with its old hidden flag.
+    pub fn towns(&self) -> Vec<SavedTown> {
+        crate::towns::migrate(self.town_list.clone(), self.town_hidden)
     }
 
     pub fn to_json(&self) -> String {
@@ -848,7 +863,7 @@ mod tests {
             theme: Some("glass".into()),
             quiet: true,
             sounds: true,
-            town_hidden: true,
+            town_list: crate::towns::migrate(Vec::new(), true),
             still: true,
             switch_accounts: true,
             discord: Discord::Named,
@@ -887,7 +902,8 @@ mod tests {
         assert_eq!(back.theme, state.theme);
         assert!(back.quiet);
         assert!(back.sounds);
-        assert!(back.town_hidden);
+        assert!(back.towns()[0].hidden);
+        assert_eq!(back.town_list, state.town_list);
         assert!(back.still);
         assert!(back.switch_accounts);
         assert_eq!(back.discord, Discord::Named);
@@ -941,6 +957,20 @@ mod tests {
             ["Off", "Without project names", "With project names"]
         );
         assert_eq!(Discord::ALL.map(Discord::names), [false, false, true]);
+    }
+
+    #[test]
+    fn an_old_hidden_town_comes_back_as_a_hidden_tristram_and_is_not_written_again() {
+        let s = SavedState::from_json(br#"{"version":1,"town_hidden":true}"#);
+        let towns = s.towns();
+        assert_eq!(towns.len(), 1);
+        assert!(towns[0].hidden);
+        let mut s = s;
+        s.town_list = towns;
+        let text = s.to_json();
+        assert!(!text.contains("town_hidden"));
+        let back = SavedState::from_json(text.as_bytes());
+        assert!(back.towns()[0].hidden);
     }
 
     #[test]

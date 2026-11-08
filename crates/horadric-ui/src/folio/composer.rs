@@ -1710,9 +1710,12 @@ pub fn holds_pin(key: &str, pin: &Pin) -> bool {
 /// What a pin's chip says: the file and the human's words, short.
 fn chip_label(pin: &Pin) -> String {
     const WORDS: usize = 40;
-    let name = (pin.file.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let name = match &pin.url {
+        Some(url) => crate::pick::site(url),
+        None => (pin.file.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
     let words = pin.words.split_whitespace().collect::<Vec<_>>().join(" ");
     let words = match words.char_indices().nth(WORDS) {
         Some((i, _)) => format!("{}...", &words[..i]),

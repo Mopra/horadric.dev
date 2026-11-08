@@ -1,54 +1,292 @@
-//! Tristram, the town above the projects: a folder Horadric owns, for work
-//! that belongs to no project. Sessions there are ordinary sessions keyed by
-//! that folder; the only new thing is that Horadric knows the key is the
-//! town, keeps its cluster when it is empty and pins it first.
+//! The towns above the projects: folders Horadric owns, for work that
+//! belongs to no project. Tristram is the first; the human adds others, a
+//! work town and a private one, each with its own Claude login and browser
+//! profile if they want (docs/plan/towns.md). Sessions there are ordinary
+//! sessions keyed by the town's folder; the only new thing is that Horadric
+//! knows the key is a town, keeps its cluster when it is empty and pins it
+//! first.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::collections::BTreeMap;
+use std::sync::{Mutex, RwLock};
 
 use horadric_core::tasks::{self, Task, Waits};
+use horadric_core::towns::{self as core, SavedTown};
+use horadric_core::usage::{Limit, Limits, Usage};
 
-/// What the town's cluster is called, in place of its folder's name.
-pub const NAME: &str = "Tristram";
+/// A town as the app knows it: what the state keeps, and where it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Town {
+    pub saved: SavedTown,
+    pub dir: PathBuf,
+    /// Its project key, asked for once since keys are asked for on every
+    /// paint.
+    pub key: String,
+}
+
+impl Town {
+    /// Its own Claude home, when it has one: the folder being there is
+    /// what says so (see `horadric_core::towns::HOME_DIR`).
+    pub fn home(&self) -> Option<PathBuf> {
+        Some(core::home_in(&self.dir)).filter(|h| h.is_dir())
+    }
+}
+
+/// The towns, Tristram first. None until set or first asked for, when they
+/// are read from the saved state: a command line process asks too.
+static TOWNS: RwLock<Option<Vec<Town>>> = RwLock::new(None);
 
 /// The town's folder under the user's home: `Horadric\tristram`, or
 /// `Horadric-dev\tristram` for a dev instance, which keeps its own town.
 pub fn folder_in(home: &Path, state_name: &str) -> PathBuf {
-    home.join(state_name).join("tristram")
+    core::folder(&home.join(state_name), core::TRISTRAM)
 }
 
-/// The town's folder, none when there is no home to put it in.
-pub fn dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    let home = std::env::var_os("USERPROFILE");
-    #[cfg(not(windows))]
-    let home = std::env::var_os("HOME");
-    home.map(|h| folder_in(Path::new(&h), horadric_hooks::state_name()))
+fn build(list: Vec<SavedTown>) -> Vec<Town> {
+    let Some(base) = horadric_hooks::towns::base() else {
+        return Vec::new();
+    };
+    list.into_iter()
+        .map(|saved| {
+            let dir = core::folder(&base, &saved.slug);
+            let key = crate::project::folder_key(&dir.to_string_lossy());
+            Town { saved, dir, key }
+        })
+        .collect()
 }
 
-/// Makes the town's folder if it is not there yet.
-pub fn make() -> Option<PathBuf> {
-    let dir = dir()?;
-    match std::fs::create_dir_all(&dir) {
-        Ok(()) => Some(dir),
-        Err(e) => {
-            eprintln!("horadric: cannot make the town at {}: {e}", dir.display());
-            None
-        }
+/// Takes the towns the state holds, or the ones Settings changed.
+pub fn set(list: Vec<SavedTown>) {
+    let towns = build(core::migrate(list, false));
+    if let Ok(mut t) = TOWNS.write() {
+        *t = Some(towns);
     }
 }
 
-/// The town's project key, asked for once since keys are asked for on
-/// every paint.
-pub fn key() -> Option<&'static str> {
-    static KEY: OnceLock<Option<String>> = OnceLock::new();
-    KEY.get_or_init(|| dir().map(|d| crate::project::folder_key(&d.to_string_lossy())))
-        .as_deref()
+fn with<R>(f: impl FnOnce(&[Town]) -> R) -> R {
+    if let Ok(t) = TOWNS.read() {
+        if let Some(towns) = t.as_deref() {
+            return f(towns);
+        }
+    }
+    let towns = build(crate::store::load().towns());
+    if let Ok(mut t) = TOWNS.write() {
+        t.get_or_insert(towns);
+    }
+    match TOWNS.read() {
+        Ok(t) => f(t.as_deref().unwrap_or_default()),
+        Err(_) => f(&[]),
+    }
 }
 
-/// Whether the project with this key is the town.
+/// Every town, Tristram first.
+pub fn all() -> Vec<Town> {
+    with(<[Town]>::to_vec)
+}
+
+/// The towns as the state keeps them.
+pub fn saved() -> Vec<SavedTown> {
+    with(|t| t.iter().map(|t| t.saved.clone()).collect())
+}
+
+/// Changes the towns, the folders of any new one made.
+pub fn change(f: impl FnOnce(&mut Vec<SavedTown>)) {
+    let mut list = saved();
+    f(&mut list);
+    set(list);
+    make();
+}
+
+/// Every town's project key.
+pub fn keys() -> Vec<String> {
+    with(|t| t.iter().map(|t| t.key.clone()).collect())
+}
+
+/// The town whose project key is `key`.
+pub fn of(key: &str) -> Option<Town> {
+    with(|t| t.iter().find(|t| t.key == key).cloned())
+}
+
+/// What a town's cluster is called, in place of its folder's name.
+pub fn name_of(key: &str) -> Option<String> {
+    with(|t| t.iter().find(|t| t.key == key).map(|t| t.saved.name.clone()))
+}
+
+/// Whether the project with this key is a town.
 pub fn is(project: &str) -> bool {
-    key() == Some(project)
+    with(|t| t.iter().any(|t| t.key == project))
+}
+
+/// Whether the town with this key is hidden.
+pub fn hidden(key: &str) -> bool {
+    with(|t| t.iter().any(|t| t.key == key && t.saved.hidden))
+}
+
+/// Tristram's folder, none when there is no home to put it in. Where a
+/// project is founded from and the first town, which a command with no
+/// town named means.
+pub fn dir() -> Option<PathBuf> {
+    with(|t| t.first().map(|t| t.dir.clone()))
+}
+
+/// The folder of the town with this key.
+pub fn dir_of(key: &str) -> Option<PathBuf> {
+    with(|t| t.iter().find(|t| t.key == key).map(|t| t.dir.clone()))
+}
+
+/// Makes every town's folder that is not there yet.
+pub fn make() -> Option<PathBuf> {
+    for t in all() {
+        if let Err(e) = std::fs::create_dir_all(&t.dir) {
+            eprintln!("horadric: cannot make the town at {}: {e}", t.dir.display());
+        }
+    }
+    dir().filter(|d| d.is_dir())
+}
+
+/// What a session in `cwd` gets when it runs in a town with its own Claude
+/// home: `CLAUDE_CONFIG_DIR` pointing at it. Nothing anywhere else, so a
+/// project keeps the machine's login and Accounts.
+pub fn session_env(cwd: &Path) -> Vec<(String, String)> {
+    let home = horadric_hooks::towns::home_for(&cwd.to_string_lossy());
+    core::env(home.as_deref())
+}
+
+/// The WebView2 profile the browser pane of the project `key` opens in,
+/// None for the one shared by every project. A project's identity that
+/// names itself picks one of its own, so its logins never meet another
+/// identity's; a town without an identity picked has its own when it asks
+/// for one. A town goes only by a pick made for it, never by a folder an
+/// identity claims, since a claim on the home folder would take them all.
+pub fn profile_for(key: &str) -> Option<String> {
+    let town = of(key);
+    #[cfg(windows)]
+    {
+        let identity = match &town {
+            Some(_) => crate::vault::identity::pick(key).filter(|s| !s.is_empty()),
+            None => crate::vault::identity::of_project(Path::new(key))
+                .slug()
+                .map(String::from),
+        };
+        if let Some(slug) = identity {
+            return Some(identity_profile(&slug));
+        }
+    }
+    town?.saved.profile()
+}
+
+/// The profile name of an identity's browser.
+pub fn identity_profile(slug: &str) -> String {
+    format!("identity-{slug}")
+}
+
+/// Writes every town's `CLAUDE.md` when the projects or the towns changed
+/// since the last time. Only the folders count of the projects: how long
+/// ago a session ran would rewrite it on every pass.
+pub fn write_all(projects: &[Project]) {
+    type Written = (Vec<String>, Vec<(SavedTown, bool)>);
+    static LAST: Mutex<Option<Written>> = Mutex::new(None);
+    let towns = all();
+    let now: Written = (
+        projects.iter().map(|p| p.dir.clone()).collect(),
+        towns
+            .iter()
+            .map(|t| (t.saved.clone(), t.home().is_some()))
+            .collect(),
+    );
+    let Ok(mut last) = LAST.lock() else {
+        return;
+    };
+    if last.as_ref() == Some(&now) {
+        return;
+    }
+    for t in towns.iter().filter(|t| t.dir.is_dir()) {
+        write(t, projects);
+    }
+    *last = Some(now);
+}
+
+/// The usage limits of each town's own Claude login, by its home's folder.
+/// The machine's login keeps its own in the app, as before towns.
+static HOME_USAGE: Mutex<BTreeMap<String, Usage>> = Mutex::new(BTreeMap::new());
+
+fn home_key(home: &Path) -> String {
+    home.to_string_lossy().into_owned()
+}
+
+/// At the app's start: the limits as last heard of each town login, and
+/// the hooks and the mod written into each town home, since `install` may
+/// have run before the home was made. A dev instance writes them too: its
+/// town homes are its own, under `Horadric-dev`, and never the machine's
+/// `~/.claude`, which it still leaves alone.
+pub fn start(saved: &BTreeMap<String, Usage>) {
+    if let Ok(mut u) = HOME_USAGE.lock() {
+        *u = saved.clone();
+    }
+    for e in horadric_hooks::install::install_towns(horadric_hooks::port()) {
+        eprintln!("horadric: town hooks not written: {e}");
+    }
+}
+
+/// The town logins' limits, for the state file.
+pub fn usage_saved() -> BTreeMap<String, Usage> {
+    HOME_USAGE.lock().map(|u| u.clone()).unwrap_or_default()
+}
+
+/// Takes in limits a session in `cwd` heard. True when they were a town
+/// login's, kept here, so the machine's limits do not take them: the work
+/// town's limit must never read as the private one's.
+pub fn hear_limits(cwd: &str, limits: &Limits, now: u64) -> bool {
+    let Some(home) = horadric_hooks::towns::home_for(cwd) else {
+        return false;
+    };
+    if let Ok(mut all) = HOME_USAGE.lock() {
+        let held = all.get(&home_key(&home));
+        let merged = Usage {
+            limits: held.map_or(limits.clone(), |h| h.limits.merge(limits, now)),
+            at: now,
+        };
+        all.insert(home_key(&home), merged);
+    }
+    true
+}
+
+/// The limits of the login a session in project `key` runs on, when that
+/// is a town's own; None for the machine's.
+pub fn usage_for(key: &str) -> Option<Option<Usage>> {
+    let home = of(key)?.home()?;
+    Some(HOME_USAGE.lock().ok()?.get(&home_key(&home)).cloned())
+}
+
+/// The usage window's rows: the machine login's limits as before, then
+/// one set for each town login heard from, named by its town.
+pub fn limit_rows(machine: Option<&Usage>) -> Vec<(String, Limit)> {
+    let mut rows: Vec<(String, Limit)> = machine
+        .map(|u| u.limits.named())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(n, l)| (n.to_string(), l))
+        .collect();
+    let Ok(heard) = HOME_USAGE.lock() else {
+        return rows;
+    };
+    for t in all() {
+        let Some(u) = t.home().and_then(|h| heard.get(&home_key(&h))) else {
+            continue;
+        };
+        rows.extend(
+            u.limits
+                .named()
+                .into_iter()
+                .map(|(n, l)| (town_limit_name(&t.saved.name, n), l)),
+        );
+    }
+    rows
+}
+
+/// A town login's limit as its row says it: "Acme week".
+pub fn town_limit_name(town: &str, limit: &str) -> String {
+    format!("{town} {}", limit.to_lowercase())
 }
 
 /// One project the town agent is told about.
@@ -83,19 +321,22 @@ fn ago(secs: u64) -> String {
     }
 }
 
-/// The `CLAUDE.md` of the town folder, a pure function of the projects.
-pub fn brief(projects: &[Project]) -> String {
-    let mut out = String::from(
-        "# Tristram\n\n\
+/// The `CLAUDE.md` of a town's folder, a pure function of the town, whether
+/// it has a login of its own, and the projects.
+pub fn brief(town: &SavedTown, own_login: bool, projects: &[Project]) -> String {
+    let name = &town.name;
+    let mut out = format!(
+        "# {name}\n\n\
          Generated by Horadric. A hand edit is lost: put your own notes in `NOTES.md` \
          beside this file, and read it first.\n\n\
-         You are in Tristram, the town above the projects. It belongs to no project. \
+         You are in {name}, a town above the projects. It belongs to no project. \
          You answer broad questions and run errands across projects. You do not edit \
          code in a project: projects run in trunk mode with other sessions in them, so \
          you would be one more writer nobody planned for. Read them, answer, and file a \
-         quest with `horadric quest add` for the project's own sessions to do.\n\n\
-         ## Projects\n\n",
+         quest with `horadric quest add` for the project's own sessions to do.\n\n"
     );
+    out.push_str(&core::about_lines(town, own_login));
+    out.push_str("## Projects\n\n");
     if projects.is_empty() {
         out.push_str("None yet.\n");
     }
@@ -113,17 +354,20 @@ pub fn brief(projects: &[Project]) -> String {
     out
 }
 
-/// Writes `CLAUDE.md` and makes `NOTES.md` if it is not there, so the file
-/// the brief points at exists. Leaves `CLAUDE.md` alone when it is current.
-pub fn write(dir: &Path, projects: &[Project]) {
+/// Writes a town's `CLAUDE.md` and makes `NOTES.md` if it is not there, so
+/// the file the brief points at exists. Leaves `CLAUDE.md` alone when it is
+/// current.
+pub fn write(town: &Town, projects: &[Project]) {
+    let dir = &town.dir;
     let notes = dir.join("NOTES.md");
     if !notes.exists() {
-        let _ = std::fs::write(
-            &notes,
-            "# Notes for Tristram\n\nYour own notes. Horadric never edits this file.\n",
+        let text = format!(
+            "# Notes for {}\n\nYour own notes. Horadric never edits this file.\n",
+            town.saved.name
         );
+        let _ = std::fs::write(&notes, text);
     }
-    let text = brief(projects);
+    let text = brief(&town.saved, town.home().is_some(), projects);
     let file = dir.join("CLAUDE.md");
     if std::fs::read_to_string(&file).is_ok_and(|old| old == text) {
         return;
@@ -494,7 +738,11 @@ mod tests {
 
     #[test]
     fn the_brief_lists_every_project() {
-        let b = brief(&[proj("app", Some(7200), "A thing"), proj("lib", None, "")]);
+        let b = brief(
+            &tristram(),
+            false,
+            &[proj("app", Some(7200), "A thing"), proj("lib", None, "")],
+        );
         assert!(b.contains("### app"));
         assert!(b.contains("`C:/code/app`"));
         assert!(b.contains("2 h ago"));
@@ -505,7 +753,29 @@ mod tests {
 
     #[test]
     fn an_empty_town_says_so() {
-        assert!(brief(&[]).contains("None yet."));
+        assert!(brief(&tristram(), false, &[]).contains("None yet."));
+    }
+
+    fn tristram() -> SavedTown {
+        core::migrate(Vec::new(), false).remove(0)
+    }
+
+    #[test]
+    fn each_town_names_itself_and_lists_its_connectors() {
+        let acme = SavedTown {
+            name: "Acme".into(),
+            slug: "acme".into(),
+            about: "Mail, chat and tickets for work at Acme.".into(),
+            connectors: vec!["Microsoft 365".into(), "Slack".into()],
+            ..Default::default()
+        };
+        let b = brief(&acme, true, &[]);
+        assert!(b.starts_with("# Acme\n"));
+        assert!(b.contains("You are in Acme, a town"));
+        assert!(b.contains("for work at Acme."));
+        assert!(b.contains("- Microsoft 365\n"));
+        assert!(b.contains("account of its own"));
+        assert!(!b.contains("Tristram"));
     }
 
     #[test]
