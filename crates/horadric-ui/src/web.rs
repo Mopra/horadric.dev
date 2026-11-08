@@ -2265,6 +2265,7 @@ fn keys(key: &str, controller: &ICoreWebView2Controller) {
             (b'L', true, false, false) => Input::WebAsk(owned.clone(), WebAsk::Address),
             (b'T', true, true, false) => Input::Shell(None),
             (b'J', true, false, false) => Input::WebAsk(owned.clone(), WebAsk::Downloads),
+            (b'P', true, true, false) => Input::WebAsk(owned.clone(), WebAsk::Pin),
             (b'O', true, true, false) => Input::Forge {
                 key: Some(owned.clone()),
                 file: None,

@@ -347,6 +347,8 @@ pub enum WebAsk {
     Size,
     /// The list of downloads.
     Downloads,
+    /// Pin mode on or off in the shown tab.
+    Pin,
 }
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
@@ -511,6 +513,8 @@ pub(crate) enum Input {
     /// A Folio's claude.exe ended to read a new login: it starts again on
     /// its conversation, shown on the stage when true.
     FolioRestart(String, bool),
+    /// Settings' Restart them for the project with this key.
+    RestartLeftBehind(String),
     /// A Folio's `/add-dir`: it starts again on its conversation with this
     /// folder added to the ones Claude may work in.
     FolioAddDir(String, PathBuf),
@@ -1044,6 +1048,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             settings_before: None,
             accounts: accounts::load(),
             login: Login::default(),
+            restart: None,
             clusters: Vec::new(),
             consoles: HashMap::new(),
             portal: None,
@@ -1456,6 +1461,7 @@ unsafe extern "system" fn app_proc(
                     WebAsk::Menu => web_menu(&key),
                     WebAsk::Size => size_menu(&key),
                     WebAsk::Downloads => web::downloads(&key),
+                    WebAsk::Pin => crate::forge::page_pins::toggle(&key),
                 }
             }
             return LRESULT(0);
@@ -2712,6 +2718,7 @@ fn web_menu(key: &str) {
     const FIND: usize = 9;
     const DOWNLOADS: usize = 10;
     const POP: usize = 11;
+    const PIN: usize = 12;
     const SIZE: usize = 100;
     const PICK: usize = 200;
     let agents = stage_agents(Some(key));
@@ -2739,6 +2746,15 @@ fn web_menu(key: &str) {
         Item::Separator,
     ];
     let mut items = items;
+    let pinning = crate::forge::page_pins::pinning(key) || crate::forge::pins::pinning(key);
+    items.push(Item::action(
+        PIN,
+        if pinning {
+            "Stop pinning\tCtrl+Shift+P"
+        } else {
+            "Pin what to change\tCtrl+Shift+P"
+        },
+    ));
     items.extend(hand_items(&agents, "Pick an element for", PICK));
     items.extend([Item::Separator, Item::action(CLOSE, "Close")]);
     match menu::popup(&items) {
@@ -2750,6 +2766,7 @@ fn web_menu(key: &str) {
         Some(RELOAD) => web::go(key, web::Step::Reload),
         Some(FIND) => ask_find(key),
         Some(DOWNLOADS) => web::downloads(key),
+        Some(PIN) => crate::forge::page_pins::toggle(key),
         Some(POP) => push(Input::PopWeb(key.to_string(), !web::is_popped(key))),
         Some(OUTSIDE) => {
             if let Some((_, url)) = web::label(key).filter(|(_, u)| u.starts_with("http")) {
@@ -3847,6 +3864,7 @@ struct App {
     accounts: Accounts,
     /// Claude Code's login as the app follows it.
     login: Login,
+    restart: Option<IdentityRestart>,
     // Boxed on purpose: the window procedures hold a raw pointer to each
     // window struct, so it must not move when the Vec grows.
     #[allow(clippy::vec_box)]
@@ -4161,6 +4179,14 @@ struct AccountSwitch {
     now: bool,
 }
 
+/// Settings' Restart them, see [`App::restart_left_behind`].
+#[derive(Default)]
+struct IdentityRestart {
+    running: Vec<String>,
+    stopped: Vec<String>,
+    limited: Vec<String>,
+}
+
 /// How long an account a limit stopped is passed over when the limits
 /// heard show none full, so no reset is known.
 const OUT_FOR: u64 = 60 * 60;
@@ -4193,6 +4219,7 @@ impl App {
                 self.switch_free();
                 self.switch_when_out();
                 self.switch_step();
+                self.restart_step();
                 self.run_tasks();
                 self.recount();
                 self.mark_sweeps();
@@ -4324,6 +4351,7 @@ impl App {
                 self.watch_login();
                 self.switch_when_out();
                 self.switch_step();
+                self.restart_step();
                 self.tick_tasks();
                 self.reload_when_ready();
                 self.portal_check();
@@ -5449,6 +5477,10 @@ impl App {
             self.extra_args(id, &program, &args, &cwd)
         };
         let (mut env, env_remove) = session_env(id, own_tree.as_ref(), &cwd);
+        // An attached pane runs in the daemon's session, born elsewhere.
+        if !attach {
+            crate::vault::identity::note_started(id, &cwd);
+        }
         if !attach && !shell && console::is_claude(&program) {
             env.extend(self.shared.defaults().env());
             env.push(secret_key(id));
@@ -6044,12 +6076,37 @@ impl App {
         let Some(mut s) = self.login.switch.take() else {
             return;
         };
+        self.stop_free(&mut s.running, &mut s.stopped, &mut s.limited, s.now);
+        if !s.running.is_empty() || self.stopping(&s.stopped) {
+            self.login.switch = Some(s);
+            return;
+        }
+        let email = self.accounts.get(&s.to).map(|a| a.email.clone());
+        match self.put_login(&s.to) {
+            Ok(()) => self.toasts.show(
+                Kind::Done,
+                &format!("Switched to {}", email.unwrap_or_default()),
+                "The sessions carry on with this account.",
+            ),
+            Err(e) => self.toasts.show(Kind::Failed, "Cannot switch accounts", &e),
+        }
+        // Once each, whatever happened: on the old login if the switch failed.
+        self.resume_stopped(&s.stopped, &s.limited);
+    }
+
+    /// Stops each of `running` that is free to stop, `now` mid turn or
+    /// not, moving it to `stopped`, and to `limited` too when a usage
+    /// limit had stopped it. One gone on its own leaves `running`.
+    fn stop_free(
+        &self,
+        running: &mut Vec<String>,
+        stopped: &mut Vec<String>,
+        limited: &mut Vec<String>,
+        now: bool,
+    ) {
         if let Ok(r) = self.shared.registry.lock() {
             let (consoles, folios) = (&self.consoles, &self.folios);
-            let stopped = &mut s.stopped;
-            let limited = &mut s.limited;
-            let now = s.now;
-            s.running.retain(|id| {
+            running.retain(|id| {
                 if folios.contains_key(id) {
                     if !crate::folio::running(id) {
                         return false;
@@ -6084,33 +6141,29 @@ impl App {
                 !free
             });
         }
-        let stopping = s.stopped.iter().any(|id| {
+    }
+
+    /// Whether any of `stopped` has not ended yet.
+    fn stopping(&self, stopped: &[String]) -> bool {
+        stopped.iter().any(|id| {
             let terminal = (self.consoles.get(id)).is_some_and(|c| c.exit_code().is_none());
             terminal || (self.folios.contains_key(id) && crate::folio::running(id))
-        });
-        if !s.running.is_empty() || stopping {
-            self.login.switch = Some(s);
-            return;
-        }
-        let email = self.accounts.get(&s.to).map(|a| a.email.clone());
-        match self.put_login(&s.to) {
-            Ok(()) => self.toasts.show(
-                Kind::Done,
-                &format!("Switched to {}", email.unwrap_or_default()),
-                "The sessions carry on with this account.",
-            ),
-            Err(e) => self.toasts.show(Kind::Failed, "Cannot switch accounts", &e),
-        }
-        // Once each, whatever happened: on the old login if the switch failed.
+        })
+    }
+
+    /// Starts each of `stopped` again on its conversation, those of
+    /// `limited` told to go on, and shows again the one that was on the
+    /// stage.
+    fn resume_stopped(&mut self, stopped: &[String], limited: &[String]) {
         let on_stage = self.shared.active.borrow().clone();
-        for id in &s.stopped {
+        for id in stopped {
             let chat = self.folios.contains_key(id);
             if !chat && !self.paused.contains_key(id) {
                 continue;
             }
             // Its refused prompt is the last in the conversation, and
             // this takes it up again on the new login.
-            if s.limited.contains(id) {
+            if limited.contains(id) {
                 self.tasks
                     .prompts
                     .insert(id.clone(), horadric_core::accounts::GO_ON.to_string());
@@ -6126,11 +6179,64 @@ impl App {
                 self.tasks.prompts.remove(id);
             }
         }
-        if let Some(id) = on_stage.filter(|id| s.stopped.contains(id)) {
+        if let Some(id) = on_stage.filter(|id| stopped.contains(id)) {
             if self.consoles.contains_key(&id) || self.folios.contains_key(&id) {
                 self.reveal(&id, false);
             }
         }
+    }
+
+    /// Settings' Restart them: the project `key`'s sessions still on the
+    /// identity they started with stop once their turn is done and start
+    /// again on its identity now, as an account switch does but with no
+    /// login to put in. A plain terminal is left: what the human has in
+    /// it would be lost.
+    fn restart_left_behind(&mut self, key: &str) {
+        let behind: Vec<String> = match self.shared.registry.lock() {
+            Ok(r) => r
+                .all()
+                .filter(|s| project_key(s) == key)
+                .filter(|s| crate::vault::identity::left_behind(&s.id, Path::new(&s.cwd)))
+                .map(|s| s.id.clone())
+                .collect(),
+            Err(_) => return,
+        };
+        let running: Vec<String> = behind.into_iter().filter(|id| self.runs(id)).collect();
+        if running.is_empty() {
+            return;
+        }
+        let r = self.restart.get_or_insert_with(Default::default);
+        for id in running {
+            if !r.running.contains(&id) && !r.stopped.contains(&id) {
+                r.running.push(id);
+            }
+        }
+        self.toasts.show(
+            Kind::Info,
+            "Restarting on the new identity",
+            "Each session stops once its turn is done and carries on with its project's logins.",
+        );
+        self.restart_step();
+    }
+
+    fn restart_step(&mut self) {
+        let Some(mut r) = self.restart.take() else {
+            return;
+        };
+        // A switch stops and resumes them itself, on the identity now, so
+        // those it holds are left to it rather than restarted twice.
+        if let Some(sw) = &self.login.switch {
+            r.running
+                .retain(|id| !sw.running.contains(id) && !sw.stopped.contains(id));
+            self.restart = Some(r);
+            return;
+        }
+        self.stop_free(&mut r.running, &mut r.stopped, &mut r.limited, false);
+        if !r.running.is_empty() || self.stopping(&r.stopped) {
+            self.restart = Some(r);
+            return;
+        }
+        self.resume_stopped(&r.stopped, &r.limited);
     }
 
     /// Logs in as account `to`, keeping the leaving login as it is now
@@ -8549,6 +8655,7 @@ impl App {
             ),
         ];
         let (own_set, own_remove) = session_env(id, own_tree.as_ref(), &dir);
+        crate::vault::identity::note_started(id, &dir);
         env_set.extend(own_set);
         env_set.push(secret_key(id));
         // The CLI keeps what each prompt's edits overwrote only when told
@@ -10055,6 +10162,7 @@ impl App {
                 } => self.folio_fork(&id, back, &text, resend),
                 Input::FolioFilesRewound(id, how) => self.folio_files_rewound(&id, how),
                 Input::FolioRestart(id, show) => self.folio_restart(&id, show),
+                Input::RestartLeftBehind(key) => self.restart_left_behind(&key),
                 Input::FolioAddDir(id, dir) => {
                     let own = self.folio_args.entry(id.clone()).or_default();
                     own.extend(["--add-dir".to_string(), dir.to_string_lossy().into_owned()]);

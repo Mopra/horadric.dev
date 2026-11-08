@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use horadric_core::vault::identity as core;
 use horadric_core::vault::secret::{valid_name, Owner};
+use horadric_core::session::Phase;
 use horadric_core::vault::web;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
@@ -32,6 +33,8 @@ use crate::window::Shared;
 pub enum Row {
     /// Which identity the project's sessions get.
     Pick,
+    /// Running sessions still on the identity they started with.
+    LeftBehind,
     /// A secret kept for the project, its identity or Everywhere.
     Secret(u16),
     Login(u16),
@@ -58,6 +61,7 @@ pub enum Row {
 pub fn help(row: Row) -> &'static str {
     match row {
         Row::Pick => "Whose git, gh, npm and Vercel logins its new sessions get",
+        Row::LeftBehind => "A session keeps the logins it started with until it restarts",
         Row::Secret(_) => "Its sessions use it through secret run, never read it",
         Row::Login(_) => "Its sessions sign in with it in the browser pane, never read it",
         Row::Missing(_) => "Its config.json asks for it and none is kept",
@@ -79,6 +83,7 @@ pub fn help(row: Row) -> &'static str {
 fn label(row: Row) -> &'static str {
     match row {
         Row::Pick => "Identity",
+        Row::LeftBehind => "Running sessions",
         Row::Secret(_) => "Secret",
         Row::Login(_) => "Web login",
         Row::Missing(_) => "Wanted by config.json",
@@ -385,6 +390,9 @@ pub fn project_lines(key: &str) -> Vec<Line> {
             rows.push(line(Row::Problem, format!("Will not open: {why}"), Control::Note));
         }
         rows.push(line(Row::Pick, pick_value(v), Control::Button));
+        if let Some(value) = left_behind_value(v, key) {
+            rows.push(line(Row::LeftBehind, value, Control::Button));
+        }
         for (i, s) in v.secrets.iter().enumerate() {
             let mut value = format!("{}, {}, {}", s.name, v.whose(&s.owner()), used(&s.last));
             if s.beaten {
@@ -411,6 +419,62 @@ pub fn project_lines(key: &str) -> Vec<Line> {
         rows.push(line(Row::AddLogin, "Add\u{2026}".into(), Control::Button));
         rows
     })
+}
+
+thread_local! {
+    /// The last count, with when and for which project: the rows are asked
+    /// for at every paint, and each session's identity is a file read.
+    static BEHIND: RefCell<Option<(String, std::time::Instant, Vec<String>)>> = const { RefCell::new(None) };
+}
+
+/// The slug each running agent session of the project `key` started with
+/// where it is not the one the project gets now, "" for none. A plain
+/// terminal is not counted, since Restart them leaves it be.
+fn left_behind(key: &str) -> Vec<String> {
+    let fresh = BEHIND.with(|b| {
+        b.borrow()
+            .as_ref()
+            .filter(|(k, at, _)| k == key && at.elapsed() < std::time::Duration::from_secs(3))
+            .map(|(_, _, list)| list.clone())
+    });
+    if let Some(list) = fresh {
+        return list;
+    }
+    let sessions: Vec<(String, String)> = shared()
+        .and_then(|sh| {
+            let r = sh.registry.lock().ok()?;
+            Some(
+                r.all()
+                    .filter(|s| crate::project::project_key(s) == key)
+                    .filter(|s| !s.shell && s.background.is_none() && s.brother.is_none())
+                    .filter(|s| !matches!(s.phase, Phase::Paused | Phase::Ended))
+                    .map(|s| (s.id.clone(), s.cwd.clone()))
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+    let list: Vec<String> = sessions
+        .iter()
+        .filter(|(id, cwd)| identity::left_behind(id, Path::new(cwd)))
+        .filter_map(|(id, _)| identity::started_as(id))
+        .collect();
+    BEHIND.with(|b| {
+        *b.borrow_mut() = Some((key.to_string(), std::time::Instant::now(), list.clone()));
+    });
+    list
+}
+
+fn left_behind_value(v: &View, key: &str) -> Option<String> {
+    let old = left_behind(key);
+    let first = old.first()?;
+    let whose = match old.iter().all(|s| s == first) {
+        true if first.is_empty() => "the machine's logins".to_string(),
+        true => v.identity_name(first),
+        false => "an old identity".to_string(),
+    };
+    let n = old.len();
+    let sessions = if n == 1 { "1 session" } else { &format!("{n} sessions") };
+    Some(format!("{sessions} still on {whose}, restart them"))
 }
 
 /// Whether an identity can be made by the name config.json gives: only
@@ -648,6 +712,7 @@ fn act(row: Row) {
     let key = VIEW.with(|v| v.borrow().key.clone());
     match row {
         Row::Pick => pick_identity(&key),
+        Row::LeftBehind => restart_left_behind(&key),
         Row::Secret(i) => {
             if let Some(k) = with_view(None, |v| v.secrets.get(i as usize).cloned()) {
                 kept_secret(&key, k);
@@ -698,6 +763,20 @@ fn act(row: Row) {
                 _ => {}
             }
         }
+    }
+}
+
+fn restart_left_behind(key: &str) {
+    let n = left_behind(key).len();
+    if n == 0 {
+        return;
+    }
+    let text = format!(
+        "{n} of this project's sessions started before its identity changed and still use the old logins. Each stops once its turn is done and carries on in the same conversation with the new ones."
+    );
+    if choose(Tone::Question, "Restart them", &text, &["Restart them", "Cancel"]) == Some(0) {
+        crate::app::push(crate::app::Input::RestartLeftBehind(key.to_string()));
+        BEHIND.with(|b| *b.borrow_mut() = None);
     }
 }
 
