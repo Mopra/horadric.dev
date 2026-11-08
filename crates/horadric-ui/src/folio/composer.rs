@@ -1966,16 +1966,14 @@ unsafe fn edge(
 /// A small round key raised out of the field, cut from the same stuff as
 /// the plate: a soft cast below, a lit top rim and a shaded bottom one.
 /// Pressed while the mouse is on it, so it sinks a little.
-unsafe fn round_key(gfx: &Gfx, b: &Rect, lit: bool) {
+unsafe fn round_key(gfx: &Gfx, gpu: &Gpu, b: &Rect, lit: bool) {
     let p = crate::theme::palette();
     let white = crate::theme::Color::rgb(0xFFFFFF);
     let rad = b.h / 2.0;
     let drop = if lit { 0.5 } else { 1.5 };
-    for i in 1..=2 {
-        let s = i as f32;
-        let fall = Rect::new(b.x - s * 0.5, b.y + drop + s * 0.5, b.w + s, b.h);
-        gfx.fill_round(&fall, rad + s * 0.5, p.cast.fade(0.18));
-    }
+    let shadow = p.cast.fade(0.35);
+    gfx.shading
+        .cast(gpu, &gfx.rt, b, rad, (0.0, drop + 1.0), 3.0, shadow);
     let face = p.surface.mix(white, if lit { 0.09 } else { 0.05 });
     gfx.fill_round(b, rad, face);
     let half = b.h / 2.0;
@@ -2251,7 +2249,7 @@ impl View {
         let ready =
             busy || !empty || !chat.input.images.is_empty() || !chat.input.pins.is_empty();
         let lit = ready && chat.input.hover == Some(act);
-        round_key(gfx, &b, lit);
+        round_key(gfx, &self.shared.gpu, &b, lit);
         let ink = match (ready, lit) {
             (false, _) => pal.faint.fade(0.45),
             (true, true) => pal.fg,
@@ -2301,11 +2299,11 @@ impl View {
                 pal.accent
             }
             Some(_) => {
-                round_key(gfx, b, false);
+                round_key(gfx, &self.shared.gpu, b, false);
                 pal.faint
             }
             None => {
-                round_key(gfx, b, hot);
+                round_key(gfx, &self.shared.gpu, b, hot);
                 if hot {
                     pal.fg
                 } else {

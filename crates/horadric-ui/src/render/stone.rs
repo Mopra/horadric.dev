@@ -79,11 +79,14 @@ impl Painter<'_> {
         }
         let thick = size * 0.05;
 
-        // Its shadow falls down and to the right, away from the light.
-        for (k, a) in [(1.0, 0.18), (0.6, 0.22), (0.3, 0.3)] {
-            let d = thick + size * 0.06 * k;
-            self.fill_at(&slab, (d * 0.6, d), theme::cast().fade(a));
-        }
+        // Its shadow falls down and to the right, away from the light: a
+        // real blur of a rounded box the slab's size, which the slab hides
+        // all but the soft edge of.
+        let d = thick + size * 0.04;
+        let base = Rect::new(cx - half.0, cy - half.1, 2.0 * half.0, 2.0 * half.1);
+        let round = half.0.min(half.1) * 0.6;
+        let shadow = theme::cast().fade(0.55);
+        self.cast(gpu, &base, round, (d * 0.6, d), size * 0.12, shadow);
         // Its side, showing below the face where the slab is thick.
         self.fill_at(&slab, (thick * 0.35, thick), rock.mix(black, 0.55));
         // The face, brightest at the top left.
