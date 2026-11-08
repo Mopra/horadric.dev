@@ -26,10 +26,6 @@ and a tab for each was too much.
   and its rune is drawn by the page, but the host does not hold it:
   `forge_pins` does not list it, and the runes go when the page does.
   Keep them by address if sessions turn out to want them again.
-- **Sessions started with `horadric run`** in a plain terminal get no
-  `--mcp-config`, so they have neither the browser tools nor the Forge's,
-  and are told of neither. Giving them the Horadric MCP server would
-  bring both prompt lines with it.
 - **macOS.** WKWebView has the pieces (a custom scheme handler for the
   virtual host, `createPDF`, snapshots). Goes in [macos.md](macos.md).
 

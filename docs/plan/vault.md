@@ -280,8 +280,9 @@ in a transcript.
   with `--you`), saying which site wants one.
 - **Adding one.** The Secrets row lists web logins beside secrets, Add
   asks for the site, the user name and the password in the masked field.
-  The pane may later offer Keep this login when the human signs in by
-  hand.
+  That is the only way in: the pane never offers to keep a login typed
+  into a page, since that means reading a password out of a web form
+  (decided 2026-11-08).
 - **Missing.** A fill with no login kept for the tab's origin fails with
   the line the agent needs, and `--on-secret EXAMPLE` blocks a quest
   on a web login as on a secret.
@@ -336,15 +337,14 @@ tokens over passwords (a fine grained GitHub token for one repository,
 an API key with one scope), so a leak costs little and a revoke is a
 click on the provider's site.
 
-## Later, not in the first cut
+## Turned down (2026-11-08)
 
-- **Git over HTTPS.** `horadric secret git` as a credential helper, so a
-  push needs no `secret run` around it. It would go in the project's
-  `.git/config`, never the global one.
-- **Secrets as files.** `secret run --file KUBECONFIG ...` writes the
-  value to a file only this user can read, puts its path in the variable,
-  and deletes it when the program exits, for tools that want a path.
-- **A browser profile per identity**, above.
+- **Git over HTTPS through `horadric secret git`.** A credential helper
+  prints the token to whoever runs it, and the agent can run it too.
+  `secret run ... -- git push` already pushes without the agent seeing
+  the token.
+- **Secrets as files (`secret run --file`).** The agent runs as the same
+  Windows user, so it could read the file while the program runs.
 
 ## Pure and tested
 
