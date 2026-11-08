@@ -1,6 +1,6 @@
 # The Forge: working on files together with Claude
 
-Proposed 2026-10-30. The human's work at Optipeople is mostly
+Proposed 2026-10-30. The human's work at Acme is mostly
 presentations, slides, designs, documents and Claude artefacts. In
 Claude desktop a thing Claude makes opens beside the chat and both work
 on it there. The Forge is that, in Horadric, and better: the work is a
@@ -102,7 +102,7 @@ file) scales slides to the pane, gives arrow keys, a slide strip, and
 presenting full screen. A project can hold its house style in
 `.horadric/forge/` (a stylesheet and a starting deck) and the Forge
 tells the session about it when it opens a deck, so every deck Claude
-makes looks like Optipeople's.
+makes looks like Acme's.
 
 **PowerPoint files.** Shown by converting each slide to PNG: through
 PowerPoint itself over COM when it is installed (exact), else

@@ -20,7 +20,7 @@ pub fn origin(url: &str) -> Option<String> {
     let end = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
     let authority = &rest[..end];
     // A user name before the host is never part of the origin, and
-    // `https://app.opticloud.dk@evil.example` must read as evil.example.
+    // `https://app.example.com@evil.example` must read as evil.example.
     let host_port = match authority.rfind('@') {
         Some(at) => &authority[at + 1..],
         None => authority,
@@ -277,8 +277,8 @@ mod tests {
     #[test]
     fn origin_is_scheme_and_host_exactly() {
         assert_eq!(
-            origin("https://App.Opticloud.dk/login?x=1").as_deref(),
-            Some("https://app.opticloud.dk")
+            origin("https://App.Example.com/login?x=1").as_deref(),
+            Some("https://app.example.com")
         );
         assert_eq!(origin("https://a.dk:443/").as_deref(), Some("https://a.dk"));
         assert_eq!(origin("https://a.dk:8443").as_deref(), Some("https://a.dk:8443"));
@@ -288,7 +288,7 @@ mod tests {
         );
         assert_eq!(origin("http://[::1]:8080/").as_deref(), Some("http://[::1]:8080"));
         assert_eq!(
-            origin("https://app.opticloud.dk@evil.example/").as_deref(),
+            origin("https://app.example.com@evil.example/").as_deref(),
             Some("https://evil.example")
         );
         assert_eq!(origin("https://a.dk#@b.dk").as_deref(), Some("https://a.dk"));
@@ -301,14 +301,14 @@ mod tests {
 
     #[test]
     fn valid_origins() {
-        assert!(valid_origin("https://app.opticloud.dk"));
+        assert!(valid_origin("https://app.example.com"));
         assert!(valid_origin("http://localhost:3000"));
         assert!(valid_origin("http://127.0.0.1"));
         assert!(valid_origin("http://[::1]:8080"));
-        assert!(!valid_origin("http://app.opticloud.dk"));
-        assert!(!valid_origin("https://app.opticloud.dk/"));
-        assert!(!valid_origin("https://App.opticloud.dk"));
-        assert!(!valid_origin("https://*.opticloud.dk"));
+        assert!(!valid_origin("http://app.example.com"));
+        assert!(!valid_origin("https://app.example.com/"));
+        assert!(!valid_origin("https://App.example.com"));
+        assert!(!valid_origin("https://*.example.com"));
         assert!(!valid_origin("http://localhost.evil.example"));
     }
 
@@ -318,19 +318,19 @@ mod tests {
         assert!(is_loopback("https://127.0.0.1/x"));
         assert!(is_loopback("http://[::1]:8080"));
         assert!(!is_loopback("https://localhost.evil.example"));
-        assert!(!is_loopback("https://app.opticloud.dk"));
+        assert!(!is_loopback("https://app.example.com"));
     }
 
     #[test]
     fn matches_only_the_kept_origins() {
-        let kept = vec!["https://app.opticloud.dk".to_string(), "http://localhost:3000".to_string()];
-        assert!(matches("https://app.opticloud.dk/login", &kept));
+        let kept = vec!["https://app.example.com".to_string(), "http://localhost:3000".to_string()];
+        assert!(matches("https://app.example.com/login", &kept));
         assert!(matches("http://localhost:3000/", &kept));
-        assert!(!matches("http://app.opticloud.dk/login", &kept));
-        assert!(!matches("https://opticloud-login.example/", &kept));
-        assert!(!matches("https://evil.app.opticloud.dk/", &kept));
+        assert!(!matches("http://app.example.com/login", &kept));
+        assert!(!matches("https://example-login.test/", &kept));
+        assert!(!matches("https://evil.app.example.com/", &kept));
         assert!(!matches("http://localhost:3001/", &kept));
-        assert!(!matches("https://app.opticloud.dk@evil.example/", &kept));
+        assert!(!matches("https://app.example.com@evil.example/", &kept));
         assert!(!matches("http://plain.example/", &["http://plain.example".to_string()]));
     }
 }

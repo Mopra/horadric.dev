@@ -1089,7 +1089,7 @@ pub fn parse_sites(text: &str) -> Result<Vec<String>, String> {
 }
 
 /// A name for a login on `origin`: the part of its host before the top
-/// level domain, upper case. `https://app.opticloud.dk` is OPTICLOUD.
+/// level domain, upper case. `https://app.example.com` is EXAMPLE.
 pub fn name_for(origin: &str) -> String {
     let host = host(origin);
     let host = host.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h);
@@ -1415,8 +1415,8 @@ mod tests {
     #[test]
     fn sites_are_reduced_to_origins() {
         assert_eq!(
-            parse_sites("https://app.opticloud.dk/login?next=/ app.opticloud.dk").unwrap(),
-            ["https://app.opticloud.dk"]
+            parse_sites("https://app.example.com/login?next=/ app.example.com").unwrap(),
+            ["https://app.example.com"]
         );
         assert_eq!(
             parse_sites("http://localhost:3000, https://a.example").unwrap(),
@@ -1429,7 +1429,7 @@ mod tests {
 
     #[test]
     fn a_login_is_named_by_its_site() {
-        assert_eq!(name_for("https://app.opticloud.dk"), "OPTICLOUD");
+        assert_eq!(name_for("https://app.example.com"), "EXAMPLE");
         assert_eq!(name_for("https://my-site.example.com"), "EXAMPLE");
         assert_eq!(name_for("http://localhost:3000"), "LOCALHOST");
         assert_eq!(name_for("https://1password.com"), "SITE_1PASSWORD");

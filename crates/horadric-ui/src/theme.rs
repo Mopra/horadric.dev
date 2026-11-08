@@ -845,7 +845,7 @@ mod tests {
     #[test]
     fn a_project_keeps_its_accent_and_projects_spread_over_them() {
         assert_eq!(accent("c:/code/horadric"), accent("c:/code/horadric"));
-        let keys = ["a", "b", "c", "horadric", "purrch", "opticore", "x/y", "zz"];
+        let keys = ["a", "b", "c", "horadric", "purrch", "ledger", "x/y", "zz"];
         let distinct: std::collections::HashSet<usize> = keys.iter().map(|k| hashed(k)).collect();
         assert!(
             distinct.len() >= 4,

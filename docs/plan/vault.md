@@ -5,13 +5,14 @@ projects that run on their own stop at authentication. A quest that has
 to push to GitHub, call an API or deploy needs a token, and today it
 either sits in a plain `.env` file, gets pasted into the conversation, or
 the quest blocks until the human comes. On 2026-10-17: the human's
-projects belong to three worlds, Optipeople, personal and Pradsgaard
-Labs, each with its own GitHub, Vercel and npm accounts. The command line
+projects belong to three worlds, a day job, personal and a company of
+their own, each with its own GitHub, Vercel and npm accounts. The command line
 tools keep one "current account" each, for the whole machine, so a
 session that runs `gh auth switch` for its project switches every other
 session too, and a quest stops on a push that went to the wrong account
 or a deploy that landed in the wrong team. The daily case: `gh` must
-stay on Mopra for horadric.dev while MP-OPTI is the work account. Logging
+stay on the personal account for one repository while the work account
+serves the others. Logging
 in is not the problem. Switching is.
 
 **The idea: the Vault holds, per identity, the tools' logins, named
@@ -37,7 +38,7 @@ ones.
 
 ## What is kept, and where
 
-- **An identity.** A name ("Optipeople"), a short slug for its folder,
+- **An identity.** A name ("Acme"), a short slug for its folder,
   and the tools it has set up. Kept in `identities.json` beside
   `state.json`, the tools' config under `identities\<slug>\` in the app
   data.
@@ -53,7 +54,7 @@ ones.
 - **A project names one identity, or none.** None is today's behaviour:
   the session gets the machine's global logins, so nothing changes for a
   project until the human picks. The pick is in Settings, Projects, a row
-  of its own, and may also be written `"identity": "optipeople"` in
+  of its own, and may also be written `"identity": "acme"` in
   `.horadric/config.json`, by slug, so a fresh checkout says whose it is.
   The setting wins over the file, since the file is shared with whoever
   else clones the repo. A slug this install has no identity for (a
@@ -68,7 +69,7 @@ ones.
   or **to Everywhere** (for a token several share). Its name is an
   environment variable's name, `GITHUB_TOKEN`, upper case, digits and `_`.
   A project's own wins over its identity's, which wins over Everywhere. So
-  Pradsgaard Labs' `CLOUDFLARE_API_TOKEN` serves every Pradsgaard project
+  Globex Labs' `CLOUDFLARE_API_TOKEN` serves every Globex project
   without being added to each.
 - **Names may be in the repository, values never.** `"secrets":
   ["GITHUB_TOKEN", "CLOUDFLARE_API_TOKEN"]` in `.horadric/config.json`
@@ -107,7 +108,7 @@ word.
   with. Nothing is written into any `.gitconfig`, global or the
   repository's, so the human's own terminals outside Horadric are as
   they were. The commit author is the part that matters most: a commit
-  on an Optipeople repository should never carry the personal email.
+  on an Acme repository should never carry the personal email.
 - **npm.** `NPM_CONFIG_USERCONFIG=<identity>\npm\.npmrc`, its registry
   tokens inside, plain text as npm keeps them anywhere. A project's own
   `.npmrc` still applies on top, as npm means it to.
@@ -243,10 +244,10 @@ password manager fills one. Without it a quest on a site the pane is not
 logged in to stops until the human comes, and a pasted password ends up
 in a transcript.
 
-- **What is kept.** A web login is a name (`OPTICLOUD`), the site it
+- **What is kept.** A web login is a name (`EXAMPLE`), the site it
   belongs to, a user name and a password, in the same sealed
   `secrets.dat` and owned the same way: by a project, an identity or
-  Everywhere. The site is one or more origins, `https://app.opticloud.dk`,
+  Everywhere. The site is one or more origins, `https://app.example.com`,
   scheme and host exactly, no wildcards; plain `http` only for
   `localhost`. The user name is not secret and the agent may see it.
 - **Filling.** A pane tool, `browser_fill_login`, takes the login's name
@@ -258,7 +259,7 @@ in a transcript.
   person. The agent gets back filled or why not, never the value. It
   then clicks the sign in button itself.
 - **The origin is the guard.** A page's text can tell the agent to fill
-  the Opticloud login on `opticloud-login.example`; the origin check
+  the Example login on `example-login.test`; the origin check
   refuses, whatever the agent was told. This is the reason the fill is
   Horadric's and not the agent's. A redirect between the check and the
   typing is caught by checking the origin again before each field.
@@ -269,7 +270,7 @@ in a transcript.
   password field's value at all, and any other text it returns passes
   the same mask as `secret run`.
 - **Asking first.** The first fill of a login from a project's sessions
-  raises the tile like `secret run` does: "Sign in to app.opticloud.dk
+  raises the tile like `secret run` does: "Sign in to app.example.com
   as mpg@...?" with Once, Always and No.
 - **One time codes.** A login may also keep a TOTP seed, filled by
   `browser_fill_login` into a code field the same way. Off unless the
@@ -282,7 +283,7 @@ in a transcript.
   The pane may later offer Keep this login when the human signs in by
   hand.
 - **Missing.** A fill with no login kept for the tab's origin fails with
-  the line the agent needs, and `--on-secret OPTICLOUD` blocks a quest
+  the line the agent needs, and `--on-secret EXAMPLE` blocks a quest
   on a web login as on a secret.
 
 ## When something is missing
@@ -301,7 +302,7 @@ move on and the quest goes on by itself once the human fixes it.
   click opens Project settings with the name filled in.
 - **`horadric quest blocked --on-login gh`**, for a tool that says it is
   not logged in, holds until that identity has a `gh` login. The row reads
-  "needs gh login for Optipeople" and a click opens the identity's row in
+  "needs gh login for Acme" and a click opens the identity's row in
   Settings.
 
 **Telling the agent.** A session gets a few lines joined into its

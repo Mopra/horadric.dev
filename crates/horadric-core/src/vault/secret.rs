@@ -1075,7 +1075,7 @@ mod tests {
         let lines = prompt_lines(&["GITHUB_TOKEN".into()], &[]);
         assert!(lines[0].contains("GITHUB_TOKEN"));
         assert!(lines.iter().any(|l| l.contains("--on-secret")));
-        let lines = prompt_lines(&[], &["OPTICLOUD".into()]);
+        let lines = prompt_lines(&[], &["EXAMPLE".into()]);
         assert!(lines[0].contains("browser_fill_login"));
     }
 }

@@ -549,8 +549,8 @@ mod tests {
 
     #[test]
     fn slugs_are_folder_names() {
-        assert_eq!(slug("Optipeople"), "optipeople");
-        assert_eq!(slug("Pradsgaard Labs"), "pradsgaard-labs");
+        assert_eq!(slug("Acme"), "acme");
+        assert_eq!(slug("Globex Labs"), "globex-labs");
         assert_eq!(slug("  Hello,  World! "), "hello-world");
         assert_eq!(slug("Søren's Æble"), "soren-s-aeble");
         assert_eq!(slug("!!!"), "identity");
@@ -684,8 +684,8 @@ mod tests {
 
     #[test]
     fn config_names_an_identity_and_secrets() {
-        let c = "\u{feff}{\"identity\": \" Optipeople \", \"secrets\": [\"GITHUB_TOKEN\", \"bad\", \"GITHUB_TOKEN\", \"CF_2\", 3]}";
-        assert_eq!(config_identity(c), Some("optipeople".into()));
+        let c = "\u{feff}{\"identity\": \" Acme \", \"secrets\": [\"GITHUB_TOKEN\", \"bad\", \"GITHUB_TOKEN\", \"CF_2\", 3]}";
+        assert_eq!(config_identity(c), Some("acme".into()));
         assert_eq!(config_secrets(c), ["GITHUB_TOKEN", "CF_2"]);
         assert_eq!(config_identity("{}"), None);
         assert_eq!(config_identity("{\"identity\": \"\"}"), None);
@@ -695,8 +695,8 @@ mod tests {
 
     #[test]
     fn the_active_gh_user_is_the_hosts_own() {
-        let hosts = "github.com:\n    git_protocol: https\n    users:\n        MP-OPTI:\n        Mopra:\n            user: nested\n    user: MP-OPTI\n";
-        assert_eq!(gh_user(hosts), Some("MP-OPTI".into()));
+        let hosts = "github.com:\n    git_protocol: https\n    users:\n        acme-mo:\n        Mopra:\n            user: nested\n    user: acme-mo\n";
+        assert_eq!(gh_user(hosts), Some("acme-mo".into()));
         let other = "ghe.example.com:\n    user: corp\ngithub.com:\n    user: \"Mopra\"\n";
         assert_eq!(gh_user(other), Some("Mopra".into()));
         assert_eq!(gh_user("ghe.example.com:\n    user: corp\n"), None);
@@ -728,25 +728,25 @@ mod tests {
     #[test]
     fn prompt_lines_say_whose_and_who() {
         let mut i = id("opti", &[]);
-        i.name = "Optipeople".into();
+        i.name = "Acme".into();
         i.git = Some(Git {
             name: "Mo".into(),
-            email: "mo@opti.dk".into(),
-            github_user: Some("MP-OPTI".into()),
+            email: "mo@acme.test".into(),
+            github_user: Some("acme-mo".into()),
         });
         let who = [
-            (Tool::Gh, Some("MP-OPTI".to_string())),
+            (Tool::Gh, Some("acme-mo".to_string())),
             (Tool::Npm, None),
             (Tool::Vercel, Some(String::new())),
         ];
         let lines = prompt_lines(&i, &who);
         let all = lines.join("\n");
-        assert!(lines[0].contains("\"Optipeople\""));
+        assert!(lines[0].contains("\"Acme\""));
         assert!(all.contains(
-            "Git commits as Mo <mo@opti.dk> and pushes to GitHub over HTTPS as MP-OPTI."
+            "Git commits as Mo <mo@acme.test> and pushes to GitHub over HTTPS as acme-mo."
         ));
-        assert!(all.contains("gh: logged in as MP-OPTI."));
-        assert!(all.contains("npm: not logged in for Optipeople."));
+        assert!(all.contains("gh: logged in as acme-mo."));
+        assert!(all.contains("npm: not logged in for Acme."));
         assert!(all.contains("vercel: logged in."));
         assert!(all.contains("gh auth switch"));
         assert!(all.contains("horadric quest blocked --on-login <tool>"));

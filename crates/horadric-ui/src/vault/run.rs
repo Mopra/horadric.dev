@@ -509,7 +509,7 @@ fn identity_slug(dir: &Path) -> Option<String> {
     super::identity::of_project(dir).slug().map(str::to_string)
 }
 
-/// A secret as the human reads it, with whose it is: "Optipeople's
+/// A secret as the human reads it, with whose it is: "Acme's
 /// GITHUB_TOKEN".
 fn owned(name: &str, owner: &Owner) -> String {
     match owner {
@@ -2547,6 +2547,6 @@ mod tests {
     #[test]
     fn owners_are_named_in_the_question() {
         assert_eq!(owned("T", &Owner::Everywhere), "T (kept for every project)");
-        assert_eq!(owned("T", &Owner::Project("c:/work/optipeople".into())), "optipeople's T");
+        assert_eq!(owned("T", &Owner::Project("c:/work/acme".into())), "acme's T");
     }
 }

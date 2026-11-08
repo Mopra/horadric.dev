@@ -458,9 +458,9 @@ mod tests {
     #[test]
     fn a_named_organization_shows_in_the_label() {
         let mut conf = config("one", "a@x.dk");
-        conf["oauthAccount"]["organizationName"] = json!("Optipeople");
+        conf["oauthAccount"]["organizationName"] = json!("Acme");
         let a = Account::capture(&credentials("one"), &conf).unwrap();
-        assert_eq!(a.label(), "a@x.dk\tMax 5x, Optipeople");
+        assert_eq!(a.label(), "a@x.dk\tMax 5x, Acme");
     }
 
     fn with_usage(token: &str, session: f32, week: f32) -> Account {

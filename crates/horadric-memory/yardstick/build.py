@@ -57,17 +57,30 @@ PHONE = re.compile(r"\+\d{1,3}[ -]?\d{2}[ -]?\d{2}[ -]?\d{2}[ -]?\d{2}|\b\d{2} \
 # Matters that are not about building Horadric: the human's day job, family,
 # health, money. A chunk that touches one is left out whole.
 PERSONAL = re.compile(
-    r"\b(optipeople|opticore|opticloud|wife|husband|girlfriend|boyfriend|my (son|daughter|kids?|family|mom|dad|mother|father)|"
+    r"\b(wife|husband|girlfriend|boyfriend|my (son|daughter|kids?|family|mom|dad|mother|father)|"
     r"doctor|hospital|sick leave|salary|bank account|credit card|cpr|ssn|social security|"
-    r"vacation|holiday|birthday|morten|prads\w*|mp-opti|danish|denmark)\b|"
+    r"vacation|holiday|birthday|danish|denmark)\b|"
     # a social profile or post names a person
     r"\b(x|twitter|linkedin|facebook|instagram)\.com/\w+",
     re.I,
 )
 
 
+# The human's own names, employer and accounts stay out of the repository:
+# one word or pattern a line in private.txt beside this file, which git ignores.
+try:
+    with open(os.path.join(HERE, "private.txt"), encoding="utf-8") as f:
+        _OWN = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+except FileNotFoundError:
+    _OWN = []
+OWN = re.compile(r"\b(" + "|".join(_OWN) + r")\b", re.I) if _OWN else None
+
+
 def private(text):
-    return bool(SECRET.search(text) or EMAIL.search(text) or PHONE.search(text) or PERSONAL.search(text))
+    return bool(
+        SECRET.search(text) or EMAIL.search(text) or PHONE.search(text)
+        or PERSONAL.search(text) or (OWN and OWN.search(text))
+    )
 
 
 def split_long(text, limit=MAX):

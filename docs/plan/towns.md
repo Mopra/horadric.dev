@@ -7,7 +7,7 @@ a calendar. Claude sessions already reach most of these through
 connectors, and the browser pane shows the rest. What is missing is a
 place for that work that keeps work and private apart.
 
-Some of it is work (Optipeople: Outlook, Slack, Jira, monday), some is
+Some of it is work (Acme: Outlook, Slack, Jira, monday), some is
 private or the human's own company (Gmail, Discord). Tristram, the town
 above the projects, is where non project work goes today, and there is
 one of it. This part answers the open question "one town or several":
