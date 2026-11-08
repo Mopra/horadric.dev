@@ -45,6 +45,14 @@ pub(super) enum Emitter {
     },
     /// A small round light.
     Dot { x: f32, y: f32, radius: f32, c: Color },
+    /// A line of light from `a` to `b`, `width` wide: a lit rune's cut, a
+    /// stone's rim.
+    Line {
+        a: (f32, f32),
+        b: (f32, f32),
+        width: f32,
+        c: Color,
+    },
     /// Not light: a key drawn over what came before it, which hides
     /// their light where it lies. What follows is over it.
     Cover { r: Rect, radius: f32 },
@@ -57,6 +65,12 @@ impl Emitter {
             Emitter::Rim { r, .. } => r.inset(-2.0),
             Emitter::Dot { x, y, radius, .. } => {
                 Rect::new(x - radius, y - radius, 2.0 * radius, 2.0 * radius)
+            }
+            Emitter::Line { a, b, width, .. } => {
+                let (x, y) = (a.0.min(b.0), a.1.min(b.1));
+                let w = (a.0 - b.0).abs();
+                let h = (a.1 - b.1).abs();
+                Rect::new(x, y, w, h).inset(-width)
             }
             Emitter::Cover { r, .. } => r,
         }
@@ -108,6 +122,9 @@ fn signature(emitters: &[Emitter], look: &Bloom) -> Vec<u32> {
                 level(strength),
             ]),
             Emitter::Dot { x, y, radius, c } => sig.extend([2, q(x), q(y), q(radius), ink(c)]),
+            Emitter::Line { a, b, width, c } => {
+                sig.extend([4, q(a.0), q(a.1), q(b.0), q(b.1), q(width), ink(c)])
+            }
             Emitter::Cover { r, radius } => {
                 sig.extend([3, q(r.x), q(r.y), q(r.w), q(r.h), q(radius)])
             }
@@ -216,6 +233,25 @@ impl Target {
             D2D1_COMPOSITE_MODE_PLUS,
         );
         Ok(())
+    }
+
+    /// Adds `emitters`, bloomed, over a window drawn whole each time, as the
+    /// small ones are. `rt` must be drawing. Nothing when nothing is lit.
+    pub(super) unsafe fn bloom_over(&self, emitters: &[Emitter]) -> Result<()> {
+        let lit: Vec<&Emitter> = emitters
+            .iter()
+            .filter(|e| !matches!(e, Emitter::Cover { .. }))
+            .collect();
+        if lit.is_empty() {
+            return Ok(());
+        }
+        let layer = self.light.begin(&self.rt)?;
+        let p = self.painter(&layer);
+        for e in lit {
+            p.emitter(e);
+            self.light.lit(e.bounds());
+        }
+        self.light.present(&self.rt, &Bloom::tile())
     }
 
     /// Lays the frame's light over what is drawn. Nothing when nothing
@@ -327,6 +363,11 @@ impl Painter<'_> {
                 strength,
             } => self.rim(&r, radius, c, strength),
             Emitter::Dot { x, y, radius, c } => self.dot(x, y, radius, c),
+            Emitter::Line { a, b, width, c } => {
+                let at = |(x, y): (f32, f32)| Vector2 { X: x, Y: y };
+                self.brush.SetColor(&color(c));
+                self.rt.DrawLine(at(a), at(b), self.brush, width, None);
+            }
             Emitter::Cover { .. } => {}
         }
     }

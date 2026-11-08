@@ -40,7 +40,7 @@ impl Target {
     pub fn draw_context(&self, gpu: &Gpu, m: &Metrics, scene: &ContextScene) -> Result<()> {
         unsafe {
             self.rt.BeginDraw();
-            self.painter(&self.rt).context(gpu, m, scene);
+            self.lit(|p| p.context(gpu, m, scene));
             self.rt.EndDraw(None, None)
         }
     }

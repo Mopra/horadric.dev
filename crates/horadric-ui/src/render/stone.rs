@@ -19,6 +19,7 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows_numerics::{Matrix3x2, Vector2};
 
+use super::shine::Emitter;
 use super::{color, rect, Gpu, Painter};
 use crate::layout::Rect;
 use crate::theme::{self, Color};
@@ -78,9 +79,6 @@ impl Painter<'_> {
         }
         let thick = size * 0.05;
 
-        if let StoneState::Running(breath) = look.state {
-            self.glow_dot(cx, cy, size * 0.75, gold, 0.35 + 0.3 * breath);
-        }
         // Its shadow falls down and to the right, away from the light.
         for (k, a) in [(1.0, 0.18), (0.6, 0.22), (0.3, 0.3)] {
             let d = thick + size * 0.06 * k;
@@ -111,6 +109,23 @@ impl Painter<'_> {
                 .DrawGeometry(&slab, &brush, (size * 0.025).max(1.0), None);
         }
 
+        if let StoneState::Running(breath) = look.state {
+            // Its edge lit in the cube's gold, as light: the bloom spills
+            // it onto the plate round the slab, where a gradient behind it
+            // only ever read as a sticker.
+            let gold = gold.fade(0.35 + 0.3 * breath);
+            let mid = |a: Vector2, b: Vector2| ((a.X + b.X) / 2.0, (a.Y + b.Y) / 2.0);
+            let n = outline.len();
+            for i in 0..n {
+                let (p, q, r) = (outline[i], outline[(i + 1) % n], outline[(i + 2) % n]);
+                self.emit(Emitter::Line {
+                    a: mid(p, q),
+                    b: mid(q, r),
+                    width: (size * 0.02).max(1.0),
+                    c: gold,
+                });
+            }
+        }
         let round = round_caps(gpu);
         let cut = (size * 0.075).max(1.5);
         let inner = Rect::new(cx - size * 0.24, cy - size * 0.27, size * 0.48, size * 0.54);
@@ -136,7 +151,7 @@ impl Painter<'_> {
                 StoneState::Running(breath) => Some(gold.mix(white, 0.25 * breath)),
                 _ => None,
             };
-            self.cut_lines(&lines, cut, round.as_ref(), ink, size);
+            self.cut_lines(&lines, cut, round.as_ref(), ink);
             if look.state == StoneState::Cracked {
                 self.crack(look.carving, &inner, size, round.as_ref());
             }
@@ -238,7 +253,6 @@ impl Painter<'_> {
         width: f32,
         style: Option<&ID2D1StrokeStyle>,
         ink: Option<Color>,
-        size: f32,
     ) {
         let off = (width * 0.3).max(0.6);
         let shifted = |p: Vector2| Vector2 {
@@ -265,8 +279,14 @@ impl Painter<'_> {
         };
         for &(a, b) in lines {
             line(a, b, ink, width * 0.6);
-            let (mx, my) = ((a.X + b.X) / 2.0, (a.Y + b.Y) / 2.0);
-            self.glow_dot(mx, my, size * 0.16, ink, 0.35);
+            // The cut again as light, thinner, so its core runs hot and the
+            // bloom lights the face round it.
+            self.emit(Emitter::Line {
+                a: (a.X, a.Y),
+                b: (b.X, b.Y),
+                width: width * 0.4,
+                c: ink.mix(Color::rgb(0xFFFFFF), 0.3).fade(0.8),
+            });
         }
     }
 
@@ -292,7 +312,7 @@ impl Painter<'_> {
             });
         }
         let lines: Vec<(Vector2, Vector2)> = points.windows(2).map(|w| (w[0], w[1])).collect();
-        self.cut_lines(&lines, (size * 0.03).max(1.0), style, None, size);
+        self.cut_lines(&lines, (size * 0.03).max(1.0), style, None);
     }
 }
 
