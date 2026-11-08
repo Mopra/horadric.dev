@@ -21,7 +21,7 @@ use windows::core::{w, Result, BOOL, HSTRING};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1SolidColorBrush,
+    ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1RenderTarget, ID2D1SolidColorBrush,
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
     D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
@@ -38,6 +38,9 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::favicon::{self, Favicon};
 use crate::frame::{Decoration, Frame, BOLD, ITALIC};
+use crate::layout::Rect;
+use crate::light::{Bloom, Light};
+use crate::particles::{self, Burst};
 use crate::render::{self, hwnd_target, Gpu};
 use crate::sky::SkyFrame;
 use crate::sparks::{self, Ash, Burn, Fx, Ink, Lit, Orbit, Ring};
@@ -878,17 +881,34 @@ fn glyph_index(face: &IDWriteFontFace, c: char) -> u16 {
 }
 
 /// One terminal window's render target.
+/// Where a pane's glass is this frame, for the light drawn in it.
+struct Glass<'a> {
+    font: &'a Font,
+    cell: &'a CellSize,
+    screen: &'a D2D_RECT_F,
+    /// The glass inside the grid's margin.
+    inner: &'a D2D_RECT_F,
+    rain: Option<(u64, f32)>,
+    /// The grid's top left.
+    origin: (f32, f32),
+}
+
 pub struct GridTarget {
     rt: ID2D1HwndRenderTarget,
     brush: ID2D1SolidColorBrush,
     /// The faceplate's light, top to bottom of the whole stage.
     plate: ID2D1LinearGradientBrush,
-    /// The shade the bezel casts down onto the top of the glass.
-    shade: ID2D1LinearGradientBrush,
     /// A key's face, lit from above.
     face: ID2D1LinearGradientBrush,
     /// The theme the gradients were made in.
     theme: theme::Theme,
+    /// The light in the glass and on the plate, bloomed over the pane.
+    light: Light,
+    /// Key shadows and the shade in a latched key, through the GPU's
+    /// shadow effect.
+    shading: render::Shading,
+    /// The tab lamps lit this frame, for the light.
+    lamps: RefCell<Vec<(f32, f32, Color)>>,
 }
 
 impl GridTarget {
@@ -903,7 +923,6 @@ impl GridTarget {
             let brush = rt.CreateSolidColorBrush(&color(Rgb { r: 0, g: 0, b: 0 }), None)?;
             let black = Color::rgb(0);
             let plate = gradient(&rt, &[theme::plate_top(), theme::plate_bottom()])?;
-            let shade = gradient(&rt, &[black.with_alpha(0.55), black.with_alpha(0.0)])?;
             let white = Color::rgb(0xFFFFFF);
             let face = gradient(
                 &rt,
@@ -912,13 +931,16 @@ impl GridTarget {
                     theme::surface().mix(black, 0.1),
                 ],
             )?;
+            let shading = render::Shading::new(&rt)?;
             Ok(GridTarget {
                 rt,
                 brush,
                 plate,
-                shade,
                 face,
                 theme: theme::current(),
+                light: Light::default(),
+                shading,
+                lamps: RefCell::default(),
             })
         }
     }
@@ -990,6 +1012,7 @@ impl GridTarget {
                 bottom: size.height - BEZEL,
             };
             self.rt.BeginDraw();
+            self.lamps.borrow_mut().clear();
             self.bezel(&screen, frame.background, plate, size);
             self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
             // Nothing a program draws spills out of the glass, nor into the
@@ -1005,10 +1028,10 @@ impl GridTarget {
                 .PushAxisAlignedClip(&inner, D2D1_ANTIALIAS_MODE_ALIASED);
 
             if let Some((seed, t)) = rain {
-                self.rain(font, cell, &inner, seed, t);
+                self.rain(&self.rt, font, cell, &inner, seed, t, false);
             }
             if let Some((t, strength)) = fx.summon {
-                self.summon(font, cell, &inner, t, strength);
+                self.summon(&self.rt, font, cell, &inner, t, strength, false);
             }
 
             for f in &frame.fills {
@@ -1144,16 +1167,16 @@ impl GridTarget {
             for b in &fx.burns {
                 let hot = sparks::heat_color(b.heat);
                 if b.gather < 1.0 {
-                    self.gathering(font, cell, b, x(b.col), y(b.row), hot);
+                    self.gathering(&self.rt, font, cell, b, x(b.col), y(b.row), hot);
                 } else {
-                    self.letter(font, cell, &b.ink, x(b.col), y(b.row), hot);
+                    self.letter(&self.rt, font, cell, &b.ink, x(b.col), y(b.row), hot);
                 }
             }
             for a in &fx.ashes {
                 self.ash(font, cell, a, x(a.col), y(a.row));
             }
             if let Some((at, light)) = fx.sweep {
-                self.sweep(&inner, at, light);
+                self.sweep(&self.rt, &inner, at, light);
             }
             self.rt.PopAxisAlignedClip();
             self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -1173,10 +1196,10 @@ impl GridTarget {
             }
             self.glass(&screen, header);
             if let Some(o) = &fx.orbit {
-                self.orbit(&screen, o);
+                self.orbit(&self.rt, &screen, o, false);
             }
             if let Some((ink, breath)) = fx.rim {
-                self.rim(&screen, ink, breath);
+                self.rim(&self.rt, &screen, ink, breath);
             }
             if let Some(bar) = &header.bar {
                 self.tab_strip(gpu, bar, size.width, header.accent);
@@ -1188,6 +1211,18 @@ impl GridTarget {
             if let Some(f) = find {
                 self.find_bar(gpu, f, &screen);
             }
+            // Under the veil, so a pane that stepped back dims its light
+            // with its glass. A failed bloom leaves the pane without its
+            // glow, never without the pane.
+            let glass = Glass {
+                font,
+                cell,
+                screen: &screen,
+                inner: &inner,
+                rain,
+                origin: (ox, oy),
+            };
+            let _ = self.shine(&glass, fx);
             if veil > 0.0 {
                 // Over the glass only: the plate and the name printed on it
                 // stay, and the dimmer name already says the pane is not in
@@ -1416,9 +1451,9 @@ impl GridTarget {
                 bottom,
             };
             if shown {
-                self.latched_key(&key, TAB_RADIUS);
+                self.latched_key(gpu, &key, TAB_RADIUS);
             } else {
-                self.raised_key(&key, TAB_RADIUS);
+                self.raised_key(gpu, &key, TAB_RADIUS);
             }
             let wide = right - left >= 2.0 * TAB_CROSS;
             if wide {
@@ -1479,7 +1514,7 @@ impl GridTarget {
             right: cx + d / 2.0,
             bottom: top + d,
         };
-        self.raised_key(&new, d / 2.0);
+        self.raised_key(gpu, &new, d / 2.0);
         glyph("\u{E710}", new.left, new.right, theme::text_dim());
         let cx = l.forge + TAB_NEW / 2.0;
         let forge = D2D_RECT_F {
@@ -1487,7 +1522,7 @@ impl GridTarget {
             right: cx + d / 2.0,
             ..new
         };
-        self.raised_key(&forge, d / 2.0);
+        self.raised_key(gpu, &forge, d / 2.0);
         let files = crate::forge::bar::glyph(crate::forge::bar::Button::Files);
         glyph(files, forge.left, forge.right, theme::text_dim());
     }
@@ -1495,20 +1530,12 @@ impl GridTarget {
     /// A key standing off the plate: its shadow on the plate, its side
     /// showing under its face, the face lit from above and the light
     /// catching its top edge.
-    unsafe fn raised_key(&self, r: &D2D_RECT_F, radius: f32) {
+    unsafe fn raised_key(&self, gpu: &Gpu, r: &D2D_RECT_F, radius: f32) {
         let side = 2.5;
-        for (grow, alpha) in [(3.0, 0.06), (2.0, 0.1), (1.0, 0.16), (0.0, 0.22)] {
-            self.brush
-                .SetColor(&render::color(Color::rgb(0).with_alpha(alpha)));
-            let s = D2D_RECT_F {
-                left: r.left - grow,
-                top: r.top + side + 1.0 - grow,
-                right: r.right + grow,
-                bottom: r.bottom + side + 1.0 + grow,
-            };
-            self.rt
-                .FillRoundedRectangle(&rounded(&s, radius + grow), &self.brush);
-        }
+        let key = Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top);
+        let shadow = Color::rgb(0).with_alpha(0.45);
+        self.shading
+            .cast(gpu, &self.rt, &key, radius, (0.0, side + 1.0), 6.0, shadow);
         self.brush
             .SetColor(&render::color(theme::surface().mix(Color::rgb(0), 0.6)));
         let below = D2D_RECT_F {
@@ -1541,7 +1568,7 @@ impl GridTarget {
     /// A key latched in, level with the plate: the plate's shade falling
     /// in over its top edge and the plate's lit lip along its bottom, as
     /// round a bay.
-    unsafe fn latched_key(&self, r: &D2D_RECT_F, radius: f32) {
+    unsafe fn latched_key(&self, gpu: &Gpu, r: &D2D_RECT_F, radius: f32) {
         let lip = D2D_RECT_F {
             left: r.left - 0.5,
             top: r.top + 0.5,
@@ -1556,7 +1583,10 @@ impl GridTarget {
             .SetColor(&render::color(theme::well().mix(theme::surface(), 0.15)));
         self.rt
             .FillRoundedRectangle(&rounded(r, radius), &self.brush);
-        self.sink(r, radius, 6.0);
+        let key = Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top);
+        let (near, far) = (theme::hollow_shade(), theme::hollow_light());
+        self.shading
+            .inner(gpu, &self.rt, &key, radius, (2.0, 6.0), near, far, 1.0);
         let edge = D2D_RECT_F {
             left: r.left + 0.5,
             top: r.top + 0.5,
@@ -1584,9 +1614,10 @@ impl GridTarget {
         };
         match lit {
             Some(c) => {
-                dot(6.0, c.with_alpha(0.12));
-                dot(4.0, c.with_alpha(0.25));
-                dot(2.5, c.mix(Color::rgb(0xFFFFFF), 0.3));
+                // Its glow is the bloom's: the lamp is light.
+                let hot = c.mix(Color::rgb(0xFFFFFF), 0.3);
+                dot(2.5, hot);
+                self.lamps.borrow_mut().push((x, y, hot));
             }
             None => {
                 dot(3.5, Color::rgb(0).with_alpha(0.55));
@@ -1760,7 +1791,17 @@ impl GridTarget {
     }
 
     /// One letter of the grid's font, its cell's top left at `(x, y)`.
-    unsafe fn letter(&self, font: &Font, cell: &CellSize, ink: &Ink, x: f32, y: f32, c: Color) {
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn letter(
+        &self,
+        to: &ID2D1RenderTarget,
+        font: &Font,
+        cell: &CellSize,
+        ink: &Ink,
+        x: f32,
+        y: f32,
+        c: Color,
+    ) {
         if c.a <= 0.0 {
             return;
         }
@@ -1777,7 +1818,7 @@ impl GridTarget {
             bidiLevel: 0,
         };
         self.brush.SetColor(&render::color(c));
-        self.rt.DrawGlyphRun(
+        to.DrawGlyphRun(
             Vector2 {
                 X: x,
                 Y: y + cell.baseline,
@@ -1792,13 +1833,23 @@ impl GridTarget {
 
     /// A typed letter coming together: the slices a deleted one breaks
     /// into, settling back into its cell.
-    unsafe fn gathering(&self, font: &Font, cell: &CellSize, b: &Burn, x: f32, y: f32, c: Color) {
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn gathering(
+        &self,
+        to: &ID2D1RenderTarget,
+        font: &Font,
+        cell: &CellSize,
+        b: &Burn,
+        x: f32,
+        y: f32,
+        c: Color,
+    ) {
         let band = cell.h / sparks::SHARDS as f32;
         for s in 0..sparks::SHARDS {
             let (dx, dy, solid) = sparks::gather(b.seed, s, b.gather);
             let (sx, sy) = (x + dx * cell.w, y + dy * cell.h);
             let top = sy + s as f32 * band;
-            self.rt.PushAxisAlignedClip(
+            to.PushAxisAlignedClip(
                 &D2D_RECT_F {
                     left: sx - 1.0,
                     top,
@@ -1807,8 +1858,8 @@ impl GridTarget {
                 },
                 D2D1_ANTIALIAS_MODE_ALIASED,
             );
-            self.letter(font, cell, &b.ink, sx, sy, c.with_alpha(c.a * solid));
-            self.rt.PopAxisAlignedClip();
+            self.letter(to, font, cell, &b.ink, sx, sy, c.with_alpha(c.a * solid));
+            to.PopAxisAlignedClip();
         }
     }
 
@@ -1833,14 +1884,15 @@ impl GridTarget {
                 },
                 D2D1_ANTIALIAS_MODE_ALIASED,
             );
-            self.letter(font, cell, &a.ink, sx, sy, ink.with_alpha(left));
+            self.letter(&self.rt, font, cell, &a.ink, sx, sy, ink.with_alpha(left));
             self.rt.PopAxisAlignedClip();
         }
     }
 
     /// The ring of a working pane: runes cut just inside the glass's rim,
-    /// lighting one after another as the work goes round.
-    unsafe fn orbit(&self, screen: &D2D_RECT_F, o: &Orbit) {
+    /// lighting one after another as the work goes round. As `light`, the
+    /// hot runes again and each tool's flare, into the light layer `to`.
+    unsafe fn orbit(&self, to: &ID2D1RenderTarget, screen: &D2D_RECT_F, o: &Orbit, light: bool) {
         const CUT: f32 = PAD / 2.0;
         const RUNE_H: f32 = 11.0;
         let inset = |by: f32| {
@@ -1854,19 +1906,19 @@ impl GridTarget {
         };
         let cut = inset(CUT);
         let cuts = cut.runes(o.seed);
-        let light = o.light(&cut, &cuts);
+        let ring = o.light(&cut, &cuts);
         let p = theme::palette();
         let tint = |lit: Lit| match lit {
             Lit::Work => p.working,
             Lit::Cast => p.unique,
             Lit::Seal => p.done,
         };
-        // Faint and without a halo, so the runes read as carved into the
-        // glass rather than lit on top of it.
+        // Faint, so the runes read as carved into the glass rather than
+        // lit on top of it; only the hot ones give off light.
         const STRENGTH: f32 = 0.45;
         let line = |a: (f32, f32), b: (f32, f32), c: Color, w: f32| {
             self.brush.SetColor(&render::color(c));
-            self.rt.DrawLine(
+            to.DrawLine(
                 Vector2 { X: a.0, Y: a.1 },
                 Vector2 { X: b.0, Y: b.1 },
                 &self.brush,
@@ -1875,8 +1927,9 @@ impl GridTarget {
             );
         };
 
-        for &(c, heat, lit) in &light.runes {
-            if heat <= 0.01 {
+        let least = if light { 0.15 } else { 0.01 };
+        for &(c, heat, lit) in &ring.runes {
+            if heat <= least {
                 continue;
             }
             let ((cx, cy), (nx, ny)) = cut.at(c.d);
@@ -1888,39 +1941,69 @@ impl GridTarget {
                 let across = u * RUNE_H;
                 (cx + nx * up + tx * across, cy + ny * up + ty * across)
             };
-            let ink = tint(lit).with_alpha(STRENGTH * heat);
+            let (ink, w) = if light {
+                let hot = particles::heat_color(tint(lit), heat);
+                (hot.with_alpha(0.55 * heat * heat), 0.9)
+            } else {
+                (tint(lit).with_alpha(STRENGTH * heat), 1.2)
+            };
             for stroke in sparks::RUNES[c.rune] {
                 for seg in stroke.windows(2) {
-                    line(place(seg[0]), place(seg[1]), ink, 1.2);
+                    line(place(seg[0]), place(seg[1]), ink, w);
+                }
+            }
+        }
+        if !light {
+            return;
+        }
+        // A tool cast is a flare: sparks thrown off the rim where the head
+        // was, and a hot front racing round as it dies.
+        let gold = p.unique;
+        for (n, f) in o.flares(&cut).iter().enumerate() {
+            let k = f.age / sparks::CAST.as_secs_f32();
+            if k >= 1.0 {
+                continue;
+            }
+            let ((x, y), _) = cut.at(f.front);
+            let front = particles::heat_color(gold, 1.3).fade(o.strength * (1.0 - k));
+            self.point(to, x, y, 1.4, front);
+            let burst = Burst::new(o.seed ^ ((n as u64 + 1) << 8), 8, particles::Kind::Spark);
+            let ((bx, by), _) = cut.at(f.from);
+            for i in 0..burst.count {
+                if let Some(s) = burst.particle(i, f.age) {
+                    let ink = particles::heat_color(gold, s.heat).fade(s.alpha * o.strength);
+                    self.point(to, bx + s.x, by + s.y, s.size, ink);
                 }
             }
         }
     }
 
-    /// The line of light running down the glass as a turn ends, with a
-    /// glow trailing above it, in the colour of a finished turn.
-    unsafe fn sweep(&self, inner: &D2D_RECT_F, at: f32, light: f32) {
-        const TAIL: usize = 14;
-        const STEP: f32 = 3.0;
+    /// A sharp round point of `c` on `to`; in the light layer the bloom
+    /// gives it its glow.
+    unsafe fn point(&self, to: &ID2D1RenderTarget, x: f32, y: f32, radius: f32, c: Color) {
+        if c.a <= 0.0 {
+            return;
+        }
+        self.brush.SetColor(&render::color(c));
+        to.FillEllipse(
+            &D2D1_ELLIPSE {
+                point: Vector2 { X: x, Y: y },
+                radiusX: radius,
+                radiusY: radius,
+            },
+            &self.brush,
+        );
+    }
+
+    /// The line of light running down the glass as a turn ends, in the
+    /// colour of a finished turn. Drawn again into the light layer, its
+    /// bloom is the glow round it.
+    unsafe fn sweep(&self, to: &ID2D1RenderTarget, inner: &D2D_RECT_F, at: f32, light: f32) {
         let ink = theme::palette().done;
         let y = inner.top + (inner.bottom - inner.top) * at;
         // Aliased, a line this thin would flip between one pixel and two
         // as it moves.
-        self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        for i in 0..TAIL {
-            let fade = 1.0 - i as f32 / TAIL as f32;
-            self.brush
-                .SetColor(&render::color(ink.with_alpha(0.10 * light * fade * fade)));
-            self.rt.FillRectangle(
-                &D2D_RECT_F {
-                    left: inner.left,
-                    top: y - (i + 1) as f32 * STEP,
-                    right: inner.right,
-                    bottom: y - i as f32 * STEP,
-                },
-                &self.brush,
-            );
-        }
+        to.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         // The line burns hottest in the middle and thins out to the
         // edges, as light off a blade.
         const PIECES: usize = 32;
@@ -1930,7 +2013,7 @@ impl GridTarget {
             let heat = (std::f32::consts::PI * across).sin().powf(1.5);
             self.brush
                 .SetColor(&render::color(ink.with_alpha(0.9 * light * heat)));
-            self.rt.FillRectangle(
+            to.FillRectangle(
                 &D2D_RECT_F {
                     left: inner.left + i as f32 * w,
                     top: y - 1.0,
@@ -1940,42 +2023,125 @@ impl GridTarget {
                 &self.brush,
             );
         }
-        self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+        to.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
     }
 
-    /// The glass glowing from its edge inward, `breath` from rest to full.
-    unsafe fn rim(&self, screen: &D2D_RECT_F, ink: Color, breath: f32) {
-        const RINGS: usize = 8;
-        for i in 0..RINGS {
-            let inset = 1.0 + i as f32 * 2.0;
-            let fade = 1.0 - i as f32 / RINGS as f32;
-            let edge = D2D_RECT_F {
-                left: screen.left + inset,
-                top: screen.top + inset,
-                right: screen.right - inset,
-                bottom: screen.bottom - inset,
-            };
-            self.brush.SetColor(&render::color(
-                ink.with_alpha((0.10 + 0.35 * breath) * fade * fade),
-            ));
-            self.rt.DrawRoundedRectangle(
-                &rounded(&edge, (SCREEN_RADIUS - inset).max(1.0)),
-                &self.brush,
-                2.0,
-                None,
-            );
+    /// The glass lit round its edge, `breath` from rest to full: one line,
+    /// which drawn again into the light layer spills inward as a glow.
+    unsafe fn rim(&self, to: &ID2D1RenderTarget, screen: &D2D_RECT_F, ink: Color, breath: f32) {
+        let inset = 1.5;
+        let edge = D2D_RECT_F {
+            left: screen.left + inset,
+            top: screen.top + inset,
+            right: screen.right - inset,
+            bottom: screen.bottom - inset,
+        };
+        self.brush
+            .SetColor(&render::color(ink.with_alpha(0.25 + 0.45 * breath)));
+        to.DrawRoundedRectangle(
+            &rounded(&edge, (SCREEN_RADIUS - inset).max(1.0)),
+            &self.brush,
+            2.0,
+            None,
+        );
+    }
+
+    /// What gives off light this frame, sharp into the pane's light layer,
+    /// bloomed over the pane. Nothing when nothing shines, so a quiet pane
+    /// costs no blur.
+    unsafe fn shine(&self, g: &Glass, fx: &Fx) -> Result<()> {
+        let lamps = std::mem::take(&mut *self.lamps.borrow_mut());
+        let quiet = lamps.is_empty()
+            && fx.orbit.is_none()
+            && fx.rim.is_none()
+            && fx.sweep.is_none()
+            && fx.burns.is_empty()
+            && fx.ashes.is_empty()
+            && fx.summon.is_none()
+            && g.rain.is_none();
+        if quiet {
+            return Ok(());
         }
+        let layer = self.light.begin(&self.rt)?;
+        let to: &ID2D1RenderTarget = &layer;
+        let box_of = |r: &D2D_RECT_F| Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top);
+        for &(x, y, c) in &lamps {
+            self.point(to, x, y, 2.5, c.fade(0.6));
+            self.light.lit(Rect::new(x - 3.0, y - 3.0, 6.0, 6.0));
+        }
+        if let Some(o) = &fx.orbit {
+            self.orbit(to, g.screen, o, true);
+            self.light.lit(box_of(g.screen));
+        }
+        if let Some((ink, breath)) = fx.rim {
+            self.rim(to, g.screen, ink.fade(0.8), breath);
+            self.light.lit(box_of(g.screen));
+        }
+
+        // What lights the text stays inside the grid's margin, as the
+        // text does.
+        to.PushAxisAlignedClip(g.inner, D2D1_ANTIALIAS_MODE_ALIASED);
+        let (ox, oy) = g.origin;
+        let (cw, ch) = (g.cell.w, g.cell.h);
+        let at = |row: usize, col: usize| (ox + col as f32 * cw, oy + row as f32 * ch);
+        if let Some((seed, t)) = g.rain {
+            self.rain(to, g.font, g.cell, g.inner, seed, t, true);
+            self.light.lit(box_of(g.inner));
+        }
+        if let Some((t, strength)) = fx.summon {
+            self.summon(to, g.font, g.cell, g.inner, t, strength, true);
+            self.light.lit(box_of(g.inner));
+        }
+        for b in &fx.burns {
+            // A typed letter settling, white hot as it lands: its heat as
+            // light, so the bloom makes it burn.
+            let hot = sparks::heat_color(b.heat);
+            let hot = hot.with_alpha(hot.a * b.heat);
+            let (x, y) = at(b.row, b.col);
+            if b.gather < 1.0 {
+                self.gathering(to, g.font, g.cell, b, x, y, hot);
+            } else {
+                self.letter(to, g.font, g.cell, &b.ink, x, y, hot);
+            }
+            self.light.lit(Rect::new(x - cw, y - ch, 3.0 * cw, 3.0 * ch));
+        }
+        for a in &fx.ashes {
+            // A deleted letter's embers lifting off as it crumbles.
+            let (x, y) = at(a.row, a.col);
+            let (cx, cy) = (x + cw / 2.0, y + ch / 2.0);
+            let embers = Burst::new(a.seed, 5, particles::Kind::Ember);
+            let age = a.t * embers.span();
+            let ember = sparks::heat_color(0.0).with_alpha(1.0);
+            for i in 0..embers.count {
+                if let Some(p) = embers.particle(i, age) {
+                    let ink = particles::heat_color(ember, p.heat).fade(0.8 * p.alpha);
+                    self.point(to, cx + p.x, cy + p.y, p.size * 0.8, ink);
+                }
+            }
+            self.light.lit(Rect::new(cx - 16.0, cy - 24.0, 32.0, 32.0));
+        }
+        if let Some((at, light)) = fx.sweep {
+            self.sweep(to, g.inner, at, light);
+            self.light.lit(box_of(g.inner));
+        }
+        to.PopAxisAlignedClip();
+        self.light.present(&self.rt, &Bloom::pane())
     }
 
     /// The Horadric cube turning in the middle of the glass, drawn in the
     /// grid's own font, in the gold of a unique item.
+    /// As `light`, only its brightest cells, into the light layer `to`, so
+    /// the cube glows where it is lit most.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn summon(
         &self,
+        to: &ID2D1RenderTarget,
         font: &Font,
         cell: &CellSize,
         inner: &D2D_RECT_F,
         t: f32,
         strength: f32,
+        light: bool,
     ) {
         const STEPS: usize = 5;
         let (ox, oy) = grid_origin();
@@ -1997,7 +2163,7 @@ impl GridTarget {
         let ink = theme::palette().unique;
         let face = font.faces.borrow().faces[0].clone();
         for (i, (indices, offsets)) in steps.iter().enumerate() {
-            if indices.is_empty() {
+            if indices.is_empty() || light && i + 1 < STEPS {
                 continue;
             }
             let level = (i + 1) as f32 / STEPS as f32;
@@ -2012,10 +2178,13 @@ impl GridTarget {
                 isSideways: false.into(),
                 bidiLevel: 0,
             };
-            self.brush.SetColor(&render::color(
-                ink.with_alpha((0.15 + 0.85 * level) * strength),
-            ));
-            self.rt.DrawGlyphRun(
+            let ink = if light {
+                ink.mix(Color::rgb(0xFFFFFF), 0.3).with_alpha(0.5 * strength)
+            } else {
+                ink.with_alpha((0.15 + 0.85 * level) * strength)
+            };
+            self.brush.SetColor(&render::color(ink));
+            to.DrawGlyphRun(
                 Vector2 {
                     X: ox,
                     Y: oy + cell.baseline,
@@ -2034,7 +2203,19 @@ impl GridTarget {
     /// The code falling down the glass at `t` seconds in the pattern of `seed`, dim enough that the
     /// text over it reads as if it were not there. Mirrored, as in the film,
     /// and drawn as one glyph run for each step of brightness.
-    unsafe fn rain(&self, font: &Font, cell: &CellSize, inner: &D2D_RECT_F, seed: u64, t: f32) {
+    /// As `light`, only the falling heads, into the light layer `to`, so
+    /// they glow as phosphor does.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn rain(
+        &self,
+        to: &ID2D1RenderTarget,
+        font: &Font,
+        cell: &CellSize,
+        inner: &D2D_RECT_F,
+        seed: u64,
+        t: f32,
+        light: bool,
+    ) {
         const STEPS: usize = 6;
         // Dimmed again on top of the steps, so the text over it always reads
         // first.
@@ -2056,7 +2237,7 @@ impl GridTarget {
             });
         }
         let mut kept = Matrix3x2::default();
-        self.rt.GetTransform(&mut kept);
+        to.GetTransform(&mut kept);
         let mid = (inner.left + inner.right) / 2.0;
         let mirror = Matrix3x2 {
             M11: -1.0,
@@ -2066,14 +2247,16 @@ impl GridTarget {
             M31: 2.0 * mid,
             M32: 0.0,
         };
-        self.rt.SetTransform(&(mirror * kept));
+        to.SetTransform(&(mirror * kept));
         let p = theme::palette();
         for (i, (indices, offsets)) in steps.iter().enumerate() {
-            if indices.is_empty() {
+            if indices.is_empty() || light && i + 1 < STEPS {
                 continue;
             }
             let level = (i + 1) as f32 / STEPS as f32;
-            let ink = if i + 1 == STEPS {
+            let ink = if light {
+                p.term_cursor.with_alpha(0.35 * STRENGTH)
+            } else if i + 1 == STEPS {
                 p.term_cursor.with_alpha(0.3 * STRENGTH)
             } else {
                 p.term_fg
@@ -2091,7 +2274,7 @@ impl GridTarget {
                 bidiLevel: 0,
             };
             self.brush.SetColor(&render::color(ink));
-            self.rt.DrawGlyphRun(
+            to.DrawGlyphRun(
                 Vector2 {
                     X: ox,
                     Y: oy + cell.baseline,
@@ -2103,7 +2286,7 @@ impl GridTarget {
             let mut run = run;
             ManuallyDrop::drop(&mut run.fontFace);
         }
-        self.rt.SetTransform(&kept);
+        to.SetTransform(&kept);
     }
 
     unsafe fn bezel(
@@ -2148,31 +2331,6 @@ impl GridTarget {
         self.brush.SetColor(&render::color(rim));
         self.rt
             .DrawRoundedRectangle(&rounded(&edge, SCREEN_RADIUS - 0.5), &self.brush, 1.0, None);
-    }
-
-    /// Shade falling `depth` from the top edge of the rounded `r`, as into
-    /// a well. The gradient clamps to clear below `depth`, so filling the
-    /// rounded shape clipped to the band shades it with the corners cut,
-    /// without a layer and a geometry made for every paint.
-    unsafe fn sink(&self, r: &D2D_RECT_F, radius: f32, depth: f32) {
-        self.shade.SetStartPoint(Vector2 { X: 0.0, Y: r.top });
-        self.shade.SetEndPoint(Vector2 {
-            X: 0.0,
-            Y: r.top + depth,
-        });
-        // A pixel wider each side, so the clip never shaves the shape's own
-        // antialiased edge.
-        let band = D2D_RECT_F {
-            left: r.left - 1.0,
-            top: r.top - 1.0,
-            right: r.right + 1.0,
-            bottom: r.top + depth,
-        };
-        self.rt
-            .PushAxisAlignedClip(&band, D2D1_ANTIALIAS_MODE_ALIASED);
-        self.rt
-            .FillRoundedRectangle(&rounded(r, radius), &self.shade);
-        self.rt.PopAxisAlignedClip();
     }
 
     /// The session's name printed on the plate above the glass.

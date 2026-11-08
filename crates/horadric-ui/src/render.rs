@@ -75,6 +75,7 @@ use crate::theme::{self, Color};
 
 mod keycube;
 mod shade;
+pub(crate) use shade::Shading;
 mod shine;
 mod stone;
 pub(crate) use stone::{StoneLook, StoneState};

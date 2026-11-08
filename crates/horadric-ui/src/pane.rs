@@ -921,7 +921,8 @@ impl Pane {
     /// terminal, with its timer kept running, and the pane's own pattern.
     fn rain(&self) -> Option<(u64, f32)> {
         static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-        if !theme::rains() || !self.is_session() {
+        // Rain is light that moves, which "show animations" off stills.
+        if !theme::rains() || !self.is_session() || !crate::backdrop::animations_on() {
             return None;
         }
         if !self.raining.replace(true) {
@@ -3478,7 +3479,7 @@ impl Pane {
                 Some(LRESULT(0))
             }
             WM_TIMER if wparam.0 == RAIN_TIMER => {
-                if theme::rains() {
+                if theme::rains() && crate::backdrop::animations_on() {
                     if unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
                         self.invalidate();
                     }
