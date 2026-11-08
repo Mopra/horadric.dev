@@ -5667,6 +5667,14 @@ impl App {
                 login.settling = None;
             } else if accounts::live_id().as_ref() != Some(&to) {
                 eprintln!("horadric: the login was written over, putting it back");
+                // The writer may have just refreshed its account's token,
+                // which retires the kept one. Lost, that account is logged
+                // out the next time it is picked.
+                if let Some(writer) = accounts::live() {
+                    if self.accounts.remember(writer) {
+                        self.save_accounts();
+                    }
+                }
                 if let Some(a) = self.accounts.get(&to).cloned() {
                     if let Err(e) = self.put_file(&a) {
                         eprintln!("horadric: cannot put the login back: {e}");

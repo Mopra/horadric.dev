@@ -226,8 +226,10 @@ impl Accounts {
 
     /// Keeps `account`'s login as it is now, over what was kept for it,
     /// and its limits unless it brings some. A token Claude Code refreshed
-    /// replaces the old one this way, which may no longer work. True when
-    /// anything changed.
+    /// replaces the old one this way, which may no longer work. A token
+    /// older than the kept one does not: each refresh retires the token
+    /// before it, so going back to an older one logs the account out.
+    /// True when anything changed.
     pub fn remember(&mut self, mut account: Account) -> bool {
         match self.list.iter_mut().find(|a| a.id == account.id) {
             Some(kept) => {
@@ -236,6 +238,9 @@ impl Accounts {
                 }
                 if account.out_until.is_none() {
                     account.out_until = kept.out_until;
+                }
+                if expires(&account.oauth) < expires(&kept.oauth) {
+                    account.oauth = kept.oauth.clone();
                 }
                 let changed = *kept != account;
                 *kept = account;
@@ -285,6 +290,12 @@ impl Accounts {
             }
         }
     }
+}
+
+/// When a Claude login's access token runs out, which grows with each
+/// refresh. 0 when it does not say.
+fn expires(oauth: &Value) -> u64 {
+    oauth.get("expiresAt").and_then(Value::as_u64).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -385,6 +396,22 @@ mod tests {
         let kept = all.get("u-one:org-one").unwrap();
         assert_eq!(kept.oauth["refreshToken"], "r-three");
         assert!(kept.usage.is_some());
+    }
+
+    #[test]
+    fn an_older_token_does_not_replace_a_newer_one() {
+        let login = |token: &str, at: u64| {
+            let mut c = credentials(token);
+            c["organizationUuid"] = json!("org-one");
+            c["claudeAiOauth"]["expiresAt"] = json!(at);
+            Account::capture(&c, &config("one", "a@x.dk")).unwrap()
+        };
+        let mut all = Accounts::default();
+        all.remember(login("new", 200));
+        assert!(!all.remember(login("old", 100)));
+        assert_eq!(all.get("u-one:org-one").unwrap().oauth["refreshToken"], "r-new");
+        all.remember(login("newer", 300));
+        assert_eq!(all.get("u-one:org-one").unwrap().oauth["refreshToken"], "r-newer");
     }
 
     #[test]
