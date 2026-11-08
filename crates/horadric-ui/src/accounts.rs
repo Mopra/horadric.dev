@@ -48,6 +48,23 @@ fn config_path() -> Option<PathBuf> {
     Some(config_dir().or_else(home)?.join(".claude.json"))
 }
 
+/// The `.claude.json` a session in `dir` reads: its town's own home's, or
+/// the machine's.
+fn config_path_for(dir: &Path) -> Option<PathBuf> {
+    match horadric_hooks::towns::home_for(&dir.to_string_lossy()) {
+        Some(h) => Some(h.join(".claude.json")),
+        None => config_path(),
+    }
+}
+
+/// Who a town's own Claude home is logged in as, by email, from its
+/// `.claude.json`. None when nobody is.
+pub fn email_in(home: &Path) -> Option<String> {
+    let config = read_json(&home.join(".claude.json")).ok()?;
+    let email = config.get("oauthAccount")?.get("emailAddress")?.as_str()?;
+    Some(email.to_string())
+}
+
 /// Why this instance may not switch accounts, if it may not. A dev
 /// instance must not log the real Claude Code into another account, so it
 /// switches only one with a home of its own, its variable set.
@@ -80,7 +97,7 @@ fn write_json(path: &Path, value: &Value) -> io::Result<()> {
 /// and the window stays the few microseconds of a rename.
 pub fn trust(dir: &Path) -> io::Result<()> {
     let path =
-        config_path().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no home folder"))?;
+        config_path_for(dir).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no home folder"))?;
     let key = trust::project_key(&dir.to_string_lossy());
     for _ in 0..5 {
         let before = match fs::read(&path) {
@@ -114,7 +131,7 @@ pub fn trust(dir: &Path) -> io::Result<()> {
 /// trust it.
 pub fn trusted(dir: &Path) -> bool {
     let key = trust::project_key(&dir.to_string_lossy());
-    config_path()
+    config_path_for(dir)
         .and_then(|p| read_json(&p).ok())
         .is_some_and(|c| trust::accepted(&c, &key))
 }
@@ -157,6 +174,11 @@ pub fn put(account: &Account) -> io::Result<()> {
 /// not a session, so it gets no pane. The app sees the new login in the
 /// files.
 pub fn log_in() -> io::Result<()> {
+    log_in_at(None)
+}
+
+/// [`log_in`] into a town's own Claude home, `None` for the machine's.
+pub fn log_in_at(home: Option<&Path>) -> io::Result<()> {
     let program = console::claude_program()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "claude not found on PATH"))?;
     // `start` gives it a console with working handles, which a program
@@ -175,6 +197,10 @@ pub fn log_in() -> io::Result<()> {
     {
         command.env_remove(name);
     }
+    match home {
+        Some(h) => command.env(horadric_core::towns::CONFIG_ENV, h),
+        None => &mut command,
+    };
     command.spawn().map(drop)
 }
 

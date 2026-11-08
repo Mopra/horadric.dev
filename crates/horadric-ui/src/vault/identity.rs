@@ -186,6 +186,49 @@ pub fn remove_tool(slug: &str, tool: Tool) -> Result<(), String> {
     change_one(slug, |i| i.tools.retain(|t| *t != tool))
 }
 
+/// Kept beside `identities.json` and not in `state.json`: a session host
+/// outlives a reload, and only the app that started it knew what it got.
+fn started_file() -> Option<PathBuf> {
+    Some(horadric_hooks::state_dir()?.join("session-identities.json"))
+}
+
+fn started_list() -> Vec<(String, String)> {
+    started_file()
+        .map(|p| read_text(&p))
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Notes the identity session `id` in `project_dir` starts with, so the
+/// Projects row can count those a change of pick left behind.
+pub fn note_started(id: &str, project_dir: &Path) {
+    let slug = of_project(project_dir).slug().unwrap_or("").to_string();
+    let list = core::noted(started_list(), id, &slug, 512);
+    let Some(path) = started_file() else {
+        return;
+    };
+    let tmp = path.with_extension("horadric-tmp");
+    let written = serde_json::to_string(&list)
+        .map_err(|e| e.to_string())
+        .and_then(|t| fs::write(&tmp, t).map_err(|e| e.to_string()))
+        .and_then(|()| fs::rename(&tmp, &path).map_err(|e| e.to_string()));
+    if let Err(e) = written {
+        eprintln!("horadric: cannot note {id}'s identity: {e}");
+    }
+}
+
+/// The slug session `id` started with, "" for none, None when not noted.
+pub fn started_as(id: &str) -> Option<String> {
+    started_list().into_iter().find(|(i, _)| i == id).map(|(_, s)| s)
+}
+
+/// Whether session `id` in `cwd` runs on another identity than its
+/// project gets now.
+pub fn left_behind(id: &str, cwd: &Path) -> bool {
+    let now = of_project(cwd);
+    core::started_otherwise(started_as(id).as_deref(), now.slug())
+}
+
 /// The identity's folder of the tools' config.
 pub fn dir(slug: &str) -> PathBuf {
     horadric_hooks::state_dir()

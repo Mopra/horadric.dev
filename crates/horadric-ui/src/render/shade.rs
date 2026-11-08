@@ -18,7 +18,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     CLSID_D2D1Shadow, ID2D1Bitmap, ID2D1BitmapRenderTarget, ID2D1DeviceContext, ID2D1Geometry,
-    ID2D1Image, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    ID2D1Image, ID2D1RenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
     D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_LINEAR,
     D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS, D2D1_PROPERTY_TYPE_FLOAT,
     D2D1_PROPERTY_TYPE_VECTOR4, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
@@ -350,6 +350,67 @@ impl Painter<'_> {
         out.EndDraw(None, None)?;
         drawn?;
         out.GetBitmap()
+    }
+}
+
+/// Shadow and shade for a window that draws itself, not through a
+/// [`super::Target`]: the stage's panes, the Folio. Kept with its target,
+/// since what it bakes is the target's.
+pub struct Shading {
+    brush: ID2D1SolidColorBrush,
+    gradients: super::Gradients,
+    shades: Shades,
+}
+
+impl Shading {
+    pub fn new(rt: &ID2D1RenderTarget) -> Result<Shading> {
+        let brush = unsafe { rt.CreateSolidColorBrush(&color(Color::rgb(0)), None)? };
+        Ok(Shading {
+            brush,
+            gradients: super::Gradients::default(),
+            shades: Shades::default(),
+        })
+    }
+
+    fn painter<'a>(&'a self, rt: &'a ID2D1RenderTarget) -> Painter<'a> {
+        Painter {
+            rt,
+            brush: &self.brush,
+            gradients: &self.gradients,
+            shades: &self.shades,
+            emit: None,
+        }
+    }
+
+    /// `r`'s shadow on `rt`, moved by `by`, `blur` soft, in `c`. `rt` must
+    /// be drawing.
+    pub unsafe fn cast(
+        &self,
+        gpu: &Gpu,
+        rt: &ID2D1RenderTarget,
+        r: &Rect,
+        radius: f32,
+        by: (f32, f32),
+        blur: f32,
+        c: Color,
+    ) {
+        self.painter(rt).cast(gpu, r, radius, by, blur, c);
+    }
+
+    /// Light and shade inside `r` on `rt`, as [`Painter::inner`].
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn inner(
+        &self,
+        gpu: &Gpu,
+        rt: &ID2D1RenderTarget,
+        r: &Rect,
+        radius: f32,
+        depth: (f32, f32),
+        near: Color,
+        far: Color,
+        opacity: f32,
+    ) {
+        self.painter(rt).inner(gpu, r, radius, depth, near, far, opacity);
     }
 }
 

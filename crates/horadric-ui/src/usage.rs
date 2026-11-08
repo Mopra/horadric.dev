@@ -281,9 +281,7 @@ impl UsageWindow {
     }
 
     fn limits(&self) -> usize {
-        self.shared
-            .usage_now()
-            .map_or(0, |u| u.limits.named().len())
+        crate::town::limit_rows(self.shared.usage_now().as_ref()).len()
     }
 
     /// Lays out again for the limits known now and resizes to fit. True

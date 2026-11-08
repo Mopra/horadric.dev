@@ -559,6 +559,10 @@ pub(super) struct Gfx {
     pub(super) button: IDWriteTextFormat,
     pub(super) icon: IDWriteTextFormat,
     pub(super) big: IDWriteTextFormat,
+    /// The embers' and the working dots' light, bloomed over each frame.
+    pub(super) light: crate::light::Light,
+    /// The composer's shadow, through the GPU's shadow effect.
+    pub(super) shading: render::Shading,
 }
 
 pub(super) struct View {
@@ -759,7 +763,10 @@ impl Gfx {
         icon.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         let big = text_format(gpu, FONT, 20.0, semi, false, true)?;
         big.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+        let shading = render::Shading::new(&rt)?;
         Ok(Gfx {
+            light: crate::light::Light::default(),
+            shading,
             win,
             rt,
             layer: None,
@@ -866,11 +873,24 @@ impl Gfx {
         c: Color,
         width: f32,
     ) {
+        self.rune_on(&self.rt, which, (x, y), size, c, width);
+    }
+
+    /// [`Gfx::rune`] on `to`, the light layer as well as the window.
+    pub(super) unsafe fn rune_on(
+        &self,
+        to: &ID2D1RenderTarget,
+        which: usize,
+        (x, y): (f32, f32),
+        size: f32,
+        c: Color,
+        width: f32,
+    ) {
         self.brush.SetColor(&color(c));
         for stroke in RUNES[which % RUNES.len()] {
             for pair in stroke.windows(2) {
                 let (a, b) = (pair[0], pair[1]);
-                self.rt.DrawLine(
+                to.DrawLine(
                     Vector2 {
                         X: x + a.0 * size,
                         Y: y + a.1 * size,
@@ -1115,9 +1135,11 @@ impl View {
     fn advance(&self, chat: &mut Chat, now: Instant) -> (f32, f32) {
         chat.note_busy();
         let heat = chat.heat();
-        let moving = chat.busy_was
-            || heat > 0.0
-            || !self.live.borrow().1.is_empty()
+        // The embers and the turning runes are light that moves, which
+        // "show animations" off stills; a page burning away or opening
+        // still runs its course.
+        let drifting = chat.busy_was || heat > 0.0 || !self.live.borrow().1.is_empty();
+        let moving = drifting && crate::backdrop::animations_on()
             || self.burning()
             || self.summoning()
             || lightbox::moving(&self.key);
@@ -1179,7 +1201,7 @@ impl View {
             return false;
         }
         // Runes that came into view start the clock that turns them.
-        if !self.live.borrow().1.is_empty() {
+        if !self.live.borrow().1.is_empty() && crate::backdrop::animations_on() {
             self.clock(true);
         }
         self.frame(gfx, t, heat)
@@ -1291,7 +1313,7 @@ impl View {
         if let Some((at, area)) = self.dots.get() {
             rt.PushAxisAlignedClip(&d2d(&area), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             for k in 0..3 {
-                let pulse = ((t * 4.0 - k as f32 * 0.7).sin() * 0.5 + 0.5).powf(1.5);
+                let pulse = super::backdrop::pulse(t, k);
                 gfx.brush.SetColor(&color(
                     pal.accent.mix(pal.fg, 0.3).with_alpha(0.25 + 0.75 * pulse),
                 ));
@@ -1319,6 +1341,10 @@ impl View {
             rt.PopAxisAlignedClip();
         }
         drop(live);
+        // Light adds over the frame; a failed bloom leaves it without its
+        // glow, never without the frame.
+        let calm = gfx.ghost.is_none() && summoning.is_none();
+        let _ = self.shine(gfx, &pal, view, (t, self.warp.get()), heat, calm);
         lightbox::draw(gfx, &pal, &self.key);
         rt.EndDraw(None, None).is_ok()
     }

@@ -4,8 +4,10 @@ Proposed 2026-10-31. Built so far: the working lamp's surge (the human
 called it much better), the light module every window can keep
 (`crate::light`), particles (`particles.rs`), the cluster's moving
 light (`render/shine.rs`) and its still light and shadow
-(`render/shade.rs`). The lore has how. This part takes the rest of
-Horadric the same way.
+(`render/shade.rs`), and on 2026-11-08 steps 4 to 7: the rest of the
+cluster, the stage, the Folio, the Sanctuary and the small windows. The
+lore has how. What is left on Windows is the human's look and the
+measure; then the Mac (step 8).
 
 ## Why
 
@@ -111,6 +113,25 @@ Built 2026-11-06: still light bloomed into the kept layer and bloomed
 again only when it changes, shadow and shade through the shadow effect
 baked once per shape; the lore has how.
 
+### Steps 4 to 7: built 2026-11-08, waiting on the human's look
+
+Built in one go; nothing was looked at on screen yet. What to look at:
+a running Runetome stone (gold rim and lit runes), the quest log's
+working and awake dots, the Settings portal's specks, a toast's lamp; a
+working pane's ring (hot runes, a spark burst at each tool), typing and
+deleting in a pane, a turn ending (the sweep, now a line without its
+stepped tail), a waiting pane's rim (one line, the bloom its glow), a
+browser tab's lamp, the Matrix rain's heads, the cube; the Folio's
+margins while Claude works and its composer's shadow; the Sanctuary's
+lit nodes and a recall's sparks. Bloom near text was not masked: the
+pane's bloom is the softer `Bloom::pane()` and only what is meant to
+sit on a letter (a typed one) lights the grid. If the ring's or the
+rim's glow blurs the edge columns, mask then.
+
+Cost to watch: a Matrix pane blooms its rain heads on every rain frame,
+and a working Folio blooms its margins 25 times a second. Both blur
+only what is lit, but the lit area is most of the window.
+
 ### Step 4: the other parts of the cluster window
 
 - Runetome stones (`render/stone.rs`): the gold glow behind a stone and
@@ -118,7 +139,7 @@ baked once per shape; the lore has how.
 - The quest log's glow dots (`render/questlog.rs`): emitters.
 - Delete `glow_dot`, the ring loops, `BLUR_STEPS` and the theme tokens
   nothing uses any more. A grep for `glow_dot` and `BLUR_STEPS` finds
-  nothing.
+  nothing outside `mac/`, which keeps its own until step 8.
 
 ### Step 5: the stage
 
@@ -182,7 +203,8 @@ Each theme gets its own `Bloom` look:
 
 - The system's "show animations" off (`backdrop`, already read) turns
   off the moving light, not the still light: a lamp still glows, nothing
-  flies.
+  flies. Checked 2026-11-08 window by window; the rain, the Folio's
+  embers and the Sanctuary's sparks did not stop and now do.
 - No setting of its own unless the human asks for one.
 
 ## Open questions

@@ -214,8 +214,7 @@ pub fn is_subresource(file: &Path) -> bool {
 fn script(accent: Color) -> String {
     let look = super::home::vars(accent);
     let assets = serde_json::json!({
-        "forgeCss": format!(":host {{ {look} }}
-{FORGE_CSS}"),
+        "forgeCss": forge_css(accent),
         "deckCss": format!(":host, html.forge-deck {{ {look} }}
 {DECK_CSS}"),
         "editorCss": format!(":host, html.forge-editing {{ {look} }}
@@ -229,6 +228,14 @@ fn script(accent: Color) -> String {
          if(window.top===window)(function(){{\n{EDITOR_JS}\n}})();\n}})();",
         suffix = SUFFIX,
     )
+}
+
+/// The Forge's overlay stylesheet in Horadric's look with the project's
+/// colour, as the page side and the pins on web pages draw with it.
+pub(super) fn forge_css(accent: Color) -> String {
+    let look = super::home::vars(accent);
+    format!(":host {{ {look} }}
+{FORGE_CSS}")
 }
 
 /// Readies the new page of a file tab: `root` mapped to `host` read only,

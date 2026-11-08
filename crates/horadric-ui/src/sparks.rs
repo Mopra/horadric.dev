@@ -313,22 +313,50 @@ pub struct Orbit {
     pub seal: Option<f32>,
 }
 
+/// A cast's flare racing round the ring: where it left from and where its
+/// front is, along the ring, and seconds since the cast.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Flare {
+    pub from: f32,
+    pub front: f32,
+    pub age: f32,
+}
+
 impl Orbit {
-    /// Lights the `cuts` round `ring` as the head passes each one.
-    pub fn light(&self, ring: &Ring, cuts: &[Cut]) -> RingLight {
+    fn head(&self, ring: &Ring) -> f32 {
+        let len = ring.length();
+        self.t * len / LAP.as_secs_f32() + unit(&[self.seed, 9]) * len
+    }
+
+    /// Each cast's flare: it leaves from wherever the head was when the
+    /// tool was cast, and races half the way round as it dies.
+    pub fn flares(&self, ring: &Ring) -> Vec<Flare> {
         let len = ring.length();
         let speed = len / LAP.as_secs_f32();
-        let head = self.t * speed + unit(&[self.seed, 9]) * len;
-        // A flare leaves from wherever the head was when the tool was
-        // cast, and races half the way round as it dies.
-        let flares: Vec<(f32, f32, f32)> = self
-            .casts
+        let head = self.head(ring);
+        self.casts
             .iter()
             .map(|&e| {
                 let from = head - e * speed;
                 let k = e / CAST.as_secs_f32();
-                (from, from + len * 0.5 * motion::ease_out(k), e)
+                Flare {
+                    from,
+                    front: from + len * 0.5 * motion::ease_out(k),
+                    age: e,
+                }
             })
+            .collect()
+    }
+
+    /// Lights the `cuts` round `ring` as the head passes each one.
+    pub fn light(&self, ring: &Ring, cuts: &[Cut]) -> RingLight {
+        let len = ring.length();
+        let speed = len / LAP.as_secs_f32();
+        let head = self.head(ring);
+        let flares: Vec<(f32, f32, f32)> = self
+            .flares(ring)
+            .iter()
+            .map(|f| (f.from, f.front, f.age))
             .collect();
         let runes = cuts
             .iter()
@@ -882,6 +910,27 @@ mod tests {
             casts: Vec::new(),
             seal: None,
         }
+    }
+
+    #[test]
+    fn a_flare_leaves_from_the_head_and_races_half_way_round() {
+        let r = ring();
+        let len = r.length();
+        let o = Orbit {
+            casts: vec![0.0, CAST.as_secs_f32()],
+            ..orbit(10.0)
+        };
+        let head = o.light(&r, &[]).head;
+        let f = o.flares(&r);
+        assert_eq!(f.len(), 2);
+        // Just cast: it is where the head is, and has gone nowhere.
+        assert!((f[0].from - head).abs() < 1e-3);
+        assert!((f[0].front - f[0].from).abs() < 1e-3);
+        // A cast's length ago: it left from where the head was then and
+        // its front is half the ring on.
+        let speed = len / LAP.as_secs_f32();
+        assert!((f[1].from - (head - CAST.as_secs_f32() * speed)).abs() < 1e-3);
+        assert!((f[1].front - f[1].from - len * 0.5).abs() < 1e-2);
     }
 
     #[test]

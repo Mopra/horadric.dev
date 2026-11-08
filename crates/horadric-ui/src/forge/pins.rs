@@ -34,9 +34,11 @@ struct Open {
     handed: Option<(String, Option<String>)>,
 }
 
-/// What goes to a session from a file's tab.
+/// What goes to a session from a file's tab, or from a web page.
 enum Gift {
     Pin(Pin),
+    /// A pin on a web page, with the session whose agent drives its tab.
+    PagePin(Pin, Option<String>),
     Text(String),
 }
 
@@ -347,6 +349,7 @@ pub(super) fn page_pin(key: &str, tab: u64, msg: &Value) {
         .or(in_doc);
     let pin = Pin {
         file: file.clone(),
+        url: None,
         words,
         at,
         crop: None,
@@ -475,7 +478,7 @@ fn crops_dir() -> Option<PathBuf> {
 
 /// Writes the picture in a `Page.captureScreenshot` answer, and forgets
 /// crops older than a week.
-fn save_crop(answer: &str) -> Option<PathBuf> {
+pub(super) fn save_crop(answer: &str) -> Option<PathBuf> {
     let v: Value = serde_json::from_str(answer).ok()?;
     let png = horadric_core::release::base64_decode(v.get("data")?.as_str()?)?;
     let dir = crops_dir()?;
@@ -509,6 +512,13 @@ pub fn ask(key: &str, file: &Path, text: &str) {
     give(key, file, Gift::Text(text.to_string()));
 }
 
+/// Hands a pin made on a web page to its session: the one whose agent
+/// drives the tab, else as a file's pin goes. Never kept here: the page
+/// draws its own runes, and they go with it.
+pub(super) fn give_page(key: &str, pin: Pin, driver: Option<String>) {
+    give(key, &PathBuf::new(), Gift::PagePin(pin, driver));
+}
+
 fn give(key: &str, file: &Path, gift: Gift) {
     WAITING.with(|w| {
         w.borrow_mut()
@@ -524,7 +534,11 @@ unsafe extern "system" fn hand_out(_: HWND, _: u32, id: usize, _: u32) {
     let all = WAITING.with(|w| std::mem::take(&mut *w.borrow_mut()));
     let mut again = Vec::new();
     for (key, file, gift, since) in all {
-        match session_for(&key, &file) {
+        let writer = match &gift {
+            Gift::PagePin(_, driver) => driver.clone(),
+            _ => writer_of(&key, &file),
+        };
+        match session_for(&key, writer) {
             Found::To(id, folio) => hand(&key, &id, folio.as_deref(), gift),
             // The human closed the picker: not sent, and not lost either,
             // as a pin stays open, drawn and listed for `forge_pins`.
@@ -550,11 +564,16 @@ unsafe extern "system" fn hand_out(_: HWND, _: u32, id: usize, _: u32) {
 /// A gift that found no session for long enough is dropped, said where
 /// the human sees it. A pin stays on the page for `forge_pins`.
 fn gave_up(key: &str, gift: &Gift) {
+    let why = match gift {
+        Gift::Pin(_) => "A pin stays on the page, and forge_pins lists it.",
+        _ => "",
+    };
     let what = match gift {
-        Gift::Pin(_) => "Pin not sent",
+        Gift::Pin(_) | Gift::PagePin(..) => "Pin not sent",
         Gift::Text(_) => "Not sent to a session",
     };
-    let why = format!("No session of {key} took it. A pin stays on the page, and forge_pins lists it.");
+    let why = format!("No session of {key} took it. {why}");
+    let why = why.trim_end();
     if !crate::app::forge_note(what, &why) {
         eprintln!("horadric: forge: {what}: {why}");
     }
@@ -569,14 +588,13 @@ enum Found {
     Declined,
 }
 
-/// Which session a pin on `file` goes to: the one that last wrote it, else
-/// the one that last had the keyboard, else the only one; with several
-/// and no clue, the human picks.
-fn session_for(key: &str, file: &Path) -> Found {
+/// Which session a pin goes to: `writer`, the one that last wrote its file
+/// or drives its web page, else the one that last had the keyboard, else
+/// the only one; with several and no clue, the human picks.
+fn session_for(key: &str, writer: Option<String>) -> Found {
     let Some((agents, known)) = crate::app::forge_agents(key) else {
         return Found::Busy;
     };
-    let writer = writer_of(key, file);
     let chosen = if let Some(a) = writer.and_then(|w| agents.iter().find(|a| a.0 == w)) {
         a
     } else if agents.len() == 1 || (known && !agents.is_empty()) {
@@ -607,6 +625,10 @@ fn hand(key: &str, id: &str, folio: Option<&str>, gift: Gift) {
             }
         });
     }
+    let gift = match gift {
+        Gift::PagePin(pin, _) => return hand_page(id, folio, pin),
+        gift => gift,
+    };
     match (gift, folio) {
         // A Folio gathers pins as chips, to go with the next message.
         (Gift::Pin(pin), Some(f)) => {
@@ -620,5 +642,18 @@ fn hand(key: &str, id: &str, folio: Option<&str>, gift: Gift) {
             push(Input::Hand(id.to_string(), pin_message(&[pin], &root)));
         }
         (Gift::Text(text), _) => push(Input::Hand(id.to_string(), text)),
+        (Gift::PagePin(..), _) => {}
+    }
+}
+
+/// A web page's pin goes as a file's does, but names its address, so no
+/// project folder is needed to say where.
+fn hand_page(id: &str, folio: Option<&str>, pin: Pin) {
+    match folio {
+        Some(f) => {
+            crate::folio::pinned(f, pin);
+            push(Input::Hand(id.to_string(), String::new()));
+        }
+        None => push(Input::Hand(id.to_string(), pin_message(&[pin], Path::new("")))),
     }
 }

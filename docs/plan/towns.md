@@ -65,6 +65,33 @@ login only and leaves every town with a home of its own alone.
 - One town: a single `OnceLock` key and a single `town_hidden` flag
   (`crates/horadric-ui/src/town.rs`, `app.rs`).
 
+## What was built (2026-11-08)
+
+Steps 1 to 4 are built, step 5's CLAUDE.md listing too, not yet looked
+at on a dev instance.
+
+- The towns are `towns` in the state (`horadric-core/src/towns.rs`),
+  Tristram first; an old `town_hidden` is read into Tristram once. The
+  app keeps them in `horadric-ui/src/town.rs`, the Settings rows are in
+  `town_settings.rs`.
+- **A town has its own Claude home when its folder holds `claude`.** No
+  flag in the state: the installer, the transcript lookups, trust and the
+  sessions all go by the folder, so a command line process agrees without
+  reading the app's state. Going back to the projects' login renames it to
+  `claude.off`, kept for next time.
+- The hooks and the mod go into every town home on `install`, `reload`,
+  `hooks install` and each app start. A dev instance writes them into its
+  own town homes (under `Horadric-dev`, at its own port) and still never
+  touches `~/.claude`.
+- Browser profiles: a project whose identity resolves gets
+  `identity-<slug>`; a town gets one only from an identity picked for it,
+  else `town-<slug>` when Own browser is on. New towns start with it on;
+  Tristram keeps the shared profile it had, so its logins stay.
+- Usage: a town home's limits are kept apart (`home_usage` in the state)
+  and shown as extra rows named by the town. Warriv drives only projects,
+  which all run on the machine's login, so it already paces on that
+  login's limits alone.
+
 ## Steps
 
 1. **Several towns.** Towns kept in the state as a list (name, slug,

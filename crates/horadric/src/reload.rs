@@ -169,6 +169,9 @@ fn hooks(log: &mut Log) {
     if let Err(e) = horadric_hooks::install::install(&settings, horadric_hooks::port()) {
         log.line(&format!("hooks not updated: {e}"));
     }
+    for e in horadric_hooks::install::install_towns(horadric_hooks::port()) {
+        log.line(&format!("town hooks not updated: {e}"));
+    }
 }
 
 /// Starts `dir\horadric.exe app --reload` and reports whether it came up and

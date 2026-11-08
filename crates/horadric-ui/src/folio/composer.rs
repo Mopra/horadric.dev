@@ -1710,9 +1710,12 @@ pub fn holds_pin(key: &str, pin: &Pin) -> bool {
 /// What a pin's chip says: the file and the human's words, short.
 fn chip_label(pin: &Pin) -> String {
     const WORDS: usize = 40;
-    let name = (pin.file.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let name = match &pin.url {
+        Some(url) => crate::pick::site(url),
+        None => (pin.file.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
     let words = pin.words.split_whitespace().collect::<Vec<_>>().join(" ");
     let words = match words.char_indices().nth(WORDS) {
         Some((i, _)) => format!("{}...", &words[..i]),
@@ -1907,15 +1910,15 @@ unsafe fn decode_thumb(bytes: &[u8]) -> Option<Thumb> {
 /// glass, lit along its top and casting its shadow down, with the field
 /// the text is written in sunk into it like the pane's own glass. Nothing
 /// lights up when it has the keys: a real field shows that by its caret.
-unsafe fn faceplate(gfx: &Gfx, r: &Rect, pal: &Palette) {
+unsafe fn faceplate(gfx: &Gfx, gpu: &Gpu, r: &Rect, pal: &Palette) {
     let p = crate::theme::palette();
     let black = crate::theme::Color::rgb(0);
     let white = crate::theme::Color::rgb(0xFFFFFF);
-    for i in 1..=4 {
-        let s = i as f32 * 1.5;
-        let fall = Rect::new(r.x - s, r.y + 2.0 + s, r.w + 2.0 * s, r.h);
-        gfx.fill_round(&fall, PLATE_R + s, p.cast.fade(0.12));
-    }
+    // Its shadow falling down off the plate, a real blur of its shape.
+    let fall = r.inset(-3.0);
+    let shadow = p.cast.fade(0.4);
+    gfx.shading
+        .cast(gpu, &gfx.rt, &fall, PLATE_R + 3.0, (0.0, 5.0), 8.0, shadow);
     let side = Rect::new(r.x, r.y + 2.0, r.w, r.h);
     gfx.fill_round(&side, PLATE_R, p.surface.mix(black, 0.6));
     gfx.fill_round(r, PLATE_R, p.surface.mix(white, 0.02));
@@ -1966,16 +1969,14 @@ unsafe fn edge(
 /// A small round key raised out of the field, cut from the same stuff as
 /// the plate: a soft cast below, a lit top rim and a shaded bottom one.
 /// Pressed while the mouse is on it, so it sinks a little.
-unsafe fn round_key(gfx: &Gfx, b: &Rect, lit: bool) {
+unsafe fn round_key(gfx: &Gfx, gpu: &Gpu, b: &Rect, lit: bool) {
     let p = crate::theme::palette();
     let white = crate::theme::Color::rgb(0xFFFFFF);
     let rad = b.h / 2.0;
     let drop = if lit { 0.5 } else { 1.5 };
-    for i in 1..=2 {
-        let s = i as f32;
-        let fall = Rect::new(b.x - s * 0.5, b.y + drop + s * 0.5, b.w + s, b.h);
-        gfx.fill_round(&fall, rad + s * 0.5, p.cast.fade(0.18));
-    }
+    let shadow = p.cast.fade(0.35);
+    gfx.shading
+        .cast(gpu, &gfx.rt, b, rad, (0.0, drop + 1.0), 3.0, shadow);
     let face = p.surface.mix(white, if lit { 0.09 } else { 0.05 });
     gfx.fill_round(b, rad, face);
     let half = b.h / 2.0;
@@ -2063,7 +2064,7 @@ impl View {
         // A card's field or the find bar may have the keys instead: one
         // caret on the glass, never two.
         let focused = self.has_keyboard() && chat.tr.state.focus.is_none();
-        faceplate(gfx, &r, pal);
+        faceplate(gfx, gpu, &r, pal);
         hits.push((r, Hit::Input(Act::Text)));
 
         // Images waiting to go, each with a cross to take it back.
@@ -2251,7 +2252,7 @@ impl View {
         let ready =
             busy || !empty || !chat.input.images.is_empty() || !chat.input.pins.is_empty();
         let lit = ready && chat.input.hover == Some(act);
-        round_key(gfx, &b, lit);
+        round_key(gfx, &self.shared.gpu, &b, lit);
         let ink = match (ready, lit) {
             (false, _) => pal.faint.fade(0.45),
             (true, true) => pal.fg,
@@ -2301,11 +2302,11 @@ impl View {
                 pal.accent
             }
             Some(_) => {
-                round_key(gfx, b, false);
+                round_key(gfx, &self.shared.gpu, b, false);
                 pal.faint
             }
             None => {
-                round_key(gfx, b, hot);
+                round_key(gfx, &self.shared.gpu, b, hot);
                 if hot {
                     pal.fg
                 } else {

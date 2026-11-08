@@ -68,6 +68,8 @@ pub enum Section {
     Appearance,
     Sessions,
     Projects,
+    /// The towns, each with its own login and browser if it asks.
+    Towns,
     /// Whose git and logins a project's sessions get.
     Identities,
     Keys,
@@ -79,11 +81,12 @@ pub enum Section {
 
 impl Section {
     /// Most used first, About last, as Windows' own Settings has it.
-    pub const ALL: [Section; 10] = [
+    pub const ALL: [Section; 11] = [
         Section::General,
         Section::Appearance,
         Section::Sessions,
         Section::Projects,
+        Section::Towns,
         Section::Identities,
         Section::Keys,
         Section::Dictation,
@@ -98,6 +101,7 @@ impl Section {
             Section::Appearance => "Appearance",
             Section::Sessions => "Sessions",
             Section::Projects => "Projects",
+            Section::Towns => "Towns",
             Section::Identities => "Identities",
             Section::Keys => "Keys",
             Section::Dictation => "Dictation",
@@ -115,8 +119,8 @@ pub enum Field {
     Theme,
     Font,
     Screen,
-    /// Whether Tristram's tile shows.
-    Town,
+    /// A row of the Towns section, which takes its clicks itself.
+    Town(crate::town_settings::Row),
     /// Whether anything moves.
     Animations,
     Notify,
@@ -193,7 +197,7 @@ impl Field {
             Field::Theme => "The colours of the tiles, the terminal and every window",
             Field::Font => "The typeface terminals and a Folio's code are drawn in",
             Field::Screen => "The monitor the tiles stand on",
-            Field::Town => "The tile for work that belongs to no project",
+            Field::Town(row) => crate::town_settings::help(row),
             Field::Animations => "Runes, breathing lights and moving tiles",
             Field::Notify => "A Windows notification when a session needs you",
             Field::Sounds => "A soft sound when a turn finishes or work lands",
@@ -306,8 +310,8 @@ pub struct Values {
     pub dictation_language: String,
     /// Haiku tidies what was dictated before it is typed.
     pub tidy: bool,
-    /// Tristram's tile shows.
-    pub town: bool,
+    /// The towns, as their rows show them.
+    pub towns: Vec<crate::town_settings::View>,
     pub animations: bool,
     /// What the sessions Horadric starts get.
     pub defaults: Defaults,
@@ -467,13 +471,11 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                 (Some(s), _) => (s.as_str(), Control::Fixed),
                 (None, _) => ("Primary", Control::Fixed),
             };
-            let (town, t) = switch(v.town);
             let (moves, m) = switch(v.animations);
             vec![
                 line(Field::Theme, "Theme", v.theme.label(), Control::List),
                 line(Field::Font, "Code font", &v.font, Control::List),
                 line(Field::Screen, "Tiles on screen", name, control),
-                line(Field::Town, "Show Tristram", town, t),
                 line(Field::Animations, "Animations", moves, m),
             ]
         }
@@ -709,6 +711,7 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
             .collect()
         }
         Section::Identities => crate::vault::settings::identity_lines(),
+        Section::Towns => crate::town_settings::lines(&v.towns),
     }
 }
 
@@ -1002,6 +1005,7 @@ impl SettingsWindow {
         icon: HICON,
     ) -> Result<Box<Self>> {
         crate::vault::settings::set_shared(Rc::clone(&shared));
+        crate::town_settings::set_shared(Rc::clone(&shared));
         let natural = layout::settings_size(&shared.metrics, Section::ALL.len(), tallest(&values));
         let mut cursor = POINT::default();
         let mut info = MONITORINFO {
@@ -1380,6 +1384,10 @@ impl SettingsWindow {
                     crate::vault::settings::click(row);
                     return;
                 }
+                if let Field::Town(row) = line.field {
+                    crate::town_settings::click(row);
+                    return;
+                }
                 if let Some(row) = self.row_on_screen(i) {
                     app::push(Input::SettingsClick(line.field, row));
                 }
@@ -1643,7 +1651,7 @@ mod tests {
             dictation_model: "Small, English".into(),
             dictation_language: "English".into(),
             tidy: false,
-            town: true,
+            towns: Vec::new(),
             animations: true,
             defaults: Defaults {
                 effort: Some("xhigh".into()),
@@ -1734,7 +1742,6 @@ mod tests {
                 Field::Theme,
                 Field::Font,
                 Field::Screen,
-                Field::Town,
                 Field::Animations
             ]
         );
@@ -2017,8 +2024,8 @@ mod tests {
         let found = |q: &str| search(q, &v).iter().map(|l| l.field).collect::<Vec<_>>();
         // By name, whatever the case.
         assert_eq!(found("THEME"), [Field::Theme]);
-        // By what the help says: Tristram's row is about work in no project.
-        assert!(found("no project").contains(&Field::Town));
+        // By what the help says: adding a town is about work in no project.
+        assert!(found("no project").contains(&Field::Town(crate::town_settings::Row::Add)));
         // By section: every Backup row.
         assert_eq!(found("backup"), fields(Section::Backup, &v));
         // A note is no setting to find.

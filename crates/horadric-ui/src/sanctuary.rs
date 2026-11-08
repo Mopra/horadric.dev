@@ -221,7 +221,7 @@ pub fn open(key: &str, dir: &Path) {
             .or_insert_with(|| Sky {
                 dir: dir.to_path_buf(),
                 key: key.to_string(),
-                town: crate::town::key() == Some(key),
+                town: crate::town::is(key),
                 mind: false,
                 stash: None,
                 mind_key: None,
@@ -342,6 +342,11 @@ fn light(sky: &Sky) -> Light {
         if let Some(key) = &sky.mind_key {
             light = crate::mind::shine(key, &sky.index, &sky.next, &sky.pairs, now);
         }
+        // Sparks are light that moves, which "show animations" off stills;
+        // what they lit still glows.
+        if !crate::backdrop::animations_on() {
+            light.sparks.clear();
+        }
         return light;
     }
     match &sky.state {
@@ -359,6 +364,9 @@ fn light(sky: &Sky) -> Light {
             });
         }
     }
+    if !crate::backdrop::animations_on() {
+        light.sparks.clear();
+    }
     light
 }
 
@@ -367,9 +375,11 @@ fn glowing(sky: &Sky) -> bool {
     let now = crate::glows::now();
     let moving = |key: &str| crate::glows::with(key, |glow| glow.moving(now)).unwrap_or(false);
     if sky.mind {
-        // Its wandering sparks never rest while it has synapses.
+        // Its wandering sparks never rest while it has synapses, unless
+        // nothing may move.
+        let wanders = !sky.pairs.is_empty() && crate::backdrop::animations_on();
         return matches!(sky.state, State::Ready { .. })
-            && (!sky.pairs.is_empty()
+            && (wanders
                 || sky
                     .mind_key
                     .as_deref()

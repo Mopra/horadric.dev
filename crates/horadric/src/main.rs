@@ -446,6 +446,9 @@ fn install_command() -> Result<(), String> {
         horadric_hooks::install::settings_path().ok_or("cannot find your home directory")?;
     horadric_hooks::install::install(&settings, horadric_hooks::port())
         .map_err(|e| format!("{}: {e}", settings.display()))?;
+    for e in horadric_hooks::install::install_towns(horadric_hooks::port()) {
+        eprintln!("horadric: town hooks not written: {e}");
+    }
     horadric_hooks::install::forget_grok()?;
     println!("installed Horadric in {}", dir.display());
     println!("  Start menu: search for Horadric");
@@ -463,6 +466,9 @@ fn uninstall_command() -> Result<(), String> {
         horadric_hooks::install::settings_path().ok_or("cannot find your home directory")?;
     horadric_hooks::install::uninstall(&settings)
         .map_err(|e| format!("{}: {e}", settings.display()))?;
+    for e in horadric_hooks::install::uninstall_towns() {
+        eprintln!("horadric: town hooks not removed: {e}");
+    }
     horadric_hooks::install::forget_grok()?;
     println!("uninstalled Horadric: PATH, Start menu, Explorer, start with Windows and hooks");
     if let Some(dir) = install::dir().filter(|d| d.exists()) {
@@ -482,6 +488,9 @@ fn install_command() -> Result<(), String> {
         horadric_hooks::install::settings_path().ok_or("cannot find your home directory")?;
     horadric_hooks::install::install(&settings, horadric_hooks::port())
         .map_err(|e| format!("{}: {e}", settings.display()))?;
+    for e in horadric_hooks::install::install_towns(horadric_hooks::port()) {
+        eprintln!("horadric: town hooks not written: {e}");
+    }
     let exe = install::dir()
         .ok_or("cannot find your home directory")?
         .join("horadric");
@@ -508,6 +517,9 @@ fn uninstall_command() -> Result<(), String> {
         horadric_hooks::install::settings_path().ok_or("cannot find your home directory")?;
     horadric_hooks::install::uninstall(&settings)
         .map_err(|e| format!("{}: {e}", settings.display()))?;
+    for e in horadric_hooks::install::uninstall_towns() {
+        eprintln!("horadric: town hooks not removed: {e}");
+    }
     horadric_hooks::install::forget_grok()?;
     println!("uninstalled Horadric: the app, the command, opening at login and the hooks");
     if let Some(dir) = horadric_hooks::state_dir() {
@@ -568,6 +580,12 @@ fn hooks(sub: Option<&str>) -> Result<(), String> {
         Some("install") => {
             install::install(&path, port).map_err(|e| format!("{}: {e}", path.display()))?;
             println!("installed Horadric hooks in {}", path.display());
+            for p in install::town_settings() {
+                match install::install(&p, port) {
+                    Ok(()) => println!("installed Horadric hooks in {}", p.display()),
+                    Err(e) => eprintln!("horadric: {}: {e}", p.display()),
+                }
+            }
             println!("posting to {}", horadric_hooks::hook_url(port));
             install::forget_grok()?;
             Ok(())
@@ -575,6 +593,9 @@ fn hooks(sub: Option<&str>) -> Result<(), String> {
         Some("uninstall") => {
             install::uninstall(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             println!("removed Horadric hooks from {}", path.display());
+            for e in install::uninstall_towns() {
+                eprintln!("horadric: town hooks not removed: {e}");
+            }
             install::forget_grok()?;
             Ok(())
         }

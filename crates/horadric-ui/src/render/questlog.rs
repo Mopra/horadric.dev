@@ -14,6 +14,7 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows_numerics::Vector2;
 
+use super::shine::Emitter;
 use super::{color, rect, text_size, wrapped, Gpu, Painter, Target};
 use crate::layout::{self, Button, Metrics, Rect};
 use crate::questlog::{QuestHit, QuestLogLayout, ROW_H};
@@ -120,7 +121,7 @@ impl Target {
     pub fn draw_questlog(&self, gpu: &Gpu, m: &Metrics, scene: &QuestLogScene) -> Result<f32> {
         unsafe {
             self.rt.BeginDraw();
-            let h = self.painter(&self.rt).questlog(gpu, m, scene);
+            let h = self.lit(|p| p.questlog(gpu, m, scene));
             self.rt.EndDraw(None, None)?;
             Ok(h)
         }
@@ -460,7 +461,9 @@ impl Painter<'_> {
                 self.rt.DrawEllipse(&e(WAKE_R + 3.0), self.brush, 1.0, None);
             }
             if w.end.is_none() {
-                self.glow_dot(x, y, 9.0, gold, 0.55);
+                // Awake: the dot is light, and the bloom gives it its glow.
+                let hot = gold.mix(Color::rgb(0xFFFFFF), 0.3).fade(0.7);
+                self.emit(Emitter::Dot { x, y, radius: WAKE_R, c: hot });
             }
             if w.errand {
                 let square = |r: f32| Rect::new(x - r, y - r, 2.0 * r, 2.0 * r);
@@ -530,7 +533,9 @@ impl Painter<'_> {
             self.rt.DrawEllipse(&e(DOT_R + 3.5), self.brush, 1.2, None);
         }
         if outcome == Outcome::Working {
-            self.glow_dot(x, y, 10.0, c, 0.55);
+            // In progress: the dot is light, and the bloom gives it its glow.
+            let hot = c.mix(Color::rgb(0xFFFFFF), 0.3).fade(0.7);
+            self.emit(Emitter::Dot { x, y, radius: DOT_R, c: hot });
         }
         // The screen's glass under it, so a line through it stops at its
         // rim.

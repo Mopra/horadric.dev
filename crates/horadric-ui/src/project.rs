@@ -115,11 +115,11 @@ impl Known {
     }
 }
 
-/// A readable name for a project key. The town goes by its own name, not
+/// A readable name for a project key. A town goes by its own name, not
 /// its folder's.
 pub fn project_name(key: &str) -> String {
-    if crate::town::is(key) {
-        return crate::town::NAME.to_string();
+    if let Some(name) = crate::town::name_of(key) {
+        return name;
     }
     if let Some((brother, project)) = afar::split_key(key) {
         return afar::title(&brother_name(brother), project);

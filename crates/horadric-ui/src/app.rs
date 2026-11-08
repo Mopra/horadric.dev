@@ -347,6 +347,8 @@ pub enum WebAsk {
     Size,
     /// The list of downloads.
     Downloads,
+    /// Pin mode on or off in the shown tab.
+    Pin,
 }
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
@@ -511,6 +513,8 @@ pub(crate) enum Input {
     /// A Folio's claude.exe ended to read a new login: it starts again on
     /// its conversation, shown on the stage when true.
     FolioRestart(String, bool),
+    /// Settings' Restart them for the project with this key.
+    RestartLeftBehind(String),
     /// A Folio's `/add-dir`: it starts again on its conversation with this
     /// folder added to the ones Claude may work in.
     FolioAddDir(String, PathBuf),
@@ -577,6 +581,8 @@ pub(crate) enum Input {
     SettingsPicked(Field, Option<usize>),
     /// The Settings window's cross, Esc or Alt+F4.
     SettingsClosed,
+    /// The towns were changed from Settings.
+    TownsChanged,
     /// A key pressed in the Settings window while it listens for a
     /// shortcut's new chord.
     SettingsPress(Press),
@@ -846,7 +852,11 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 continue;
             }
             keep_transcript(&t);
-            if let Some(limits) = t.limits.filter(|l| !l.is_empty()) {
+            if let Some(limits) = t
+                .limits
+                .filter(|l| !l.is_empty())
+                .filter(|l| !town::hear_limits(&t.event.cwd, l, unix_now()))
+            {
                 let now = unix_now();
                 let heard = |held: Option<&Usage>| Usage {
                     limits: held.map_or(limits.clone(), |h| h.limits.merge(&limits, now)),
@@ -991,7 +1001,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     // running the status line from wherever it pointed.
     let status_settings = store::write_status_settings(&console::host_program());
     let mcp_config = store::write_mcp_config(&console::host_program());
+    town::set(saved.towns());
     town::make();
+    town::start(&saved.home_usage);
     crate::backdrop::set_still(saved.still);
     crate::dictate::use_microphone(saved.microphone.clone());
     crate::dictate::use_tidy(saved.dictation_tidy);
@@ -1040,6 +1052,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             settings_before: None,
             accounts: accounts::load(),
             login: Login::default(),
+            restart: None,
             clusters: Vec::new(),
             consoles: HashMap::new(),
             portal: None,
@@ -1103,14 +1116,12 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             far_hidden: saved.far_hidden.clone(),
             columns: Columns::from_keys(&saved.columns),
             recent: saved.recent.clone(),
-            town_listed: None,
             autostart_offered,
             explorer_offered,
             quiet: saved.quiet,
             tiles_away: false,
             sounds: saved.sounds,
             microphone: saved.microphone.clone(),
-            town_hidden: saved.town_hidden,
             still: saved.still,
             switch_accounts: saved.switch_accounts,
             chat_sessions: !saved.terminal_sessions,
@@ -1454,6 +1465,7 @@ unsafe extern "system" fn app_proc(
                     WebAsk::Menu => web_menu(&key),
                     WebAsk::Size => size_menu(&key),
                     WebAsk::Downloads => web::downloads(&key),
+                    WebAsk::Pin => crate::forge::page_pins::toggle(&key),
                 }
             }
             return LRESULT(0);
@@ -2710,6 +2722,7 @@ fn web_menu(key: &str) {
     const FIND: usize = 9;
     const DOWNLOADS: usize = 10;
     const POP: usize = 11;
+    const PIN: usize = 12;
     const SIZE: usize = 100;
     const PICK: usize = 200;
     let agents = stage_agents(Some(key));
@@ -2737,6 +2750,15 @@ fn web_menu(key: &str) {
         Item::Separator,
     ];
     let mut items = items;
+    let pinning = crate::forge::page_pins::pinning(key) || crate::forge::pins::pinning(key);
+    items.push(Item::action(
+        PIN,
+        if pinning {
+            "Stop pinning\tCtrl+Shift+P"
+        } else {
+            "Pin what to change\tCtrl+Shift+P"
+        },
+    ));
     items.extend(hand_items(&agents, "Pick an element for", PICK));
     items.extend([Item::Separator, Item::action(CLOSE, "Close")]);
     match menu::popup(&items) {
@@ -2748,6 +2770,7 @@ fn web_menu(key: &str) {
         Some(RELOAD) => web::go(key, web::Step::Reload),
         Some(FIND) => ask_find(key),
         Some(DOWNLOADS) => web::downloads(key),
+        Some(PIN) => crate::forge::page_pins::toggle(key),
         Some(POP) => push(Input::PopWeb(key.to_string(), !web::is_popped(key))),
         Some(OUTSIDE) => {
             if let Some((_, url)) = web::label(key).filter(|(_, u)| u.starts_with("http")) {
@@ -2932,11 +2955,12 @@ fn project_menu(key: &str) {
     if !town::is(key) {
         items.push(Item::action(CLOSE, "Close project"));
     } else if with_app(|app| app.sessions_in(key)) == Some(0) {
-        items.push(Item::action(HIDE_TOWN, "Hide Tristram"));
+        items.push(Item::action(HIDE_TOWN, format!("Hide {}", project_name(key))));
     } else {
-        items.push(Item::Disabled(
-            "Hide Tristram (end its sessions first)".into(),
-        ));
+        items.push(Item::Disabled(format!(
+            "Hide {} (end its sessions first)",
+            project_name(key)
+        )));
     }
     let picked = menu::popup(&items);
     match (picked, &dir) {
@@ -2981,7 +3005,7 @@ fn project_menu(key: &str) {
         Some(START_OVER) => app.start_over(key, BATCH),
         Some(END_ALL) => app.end_all(Some(key)),
         Some(CLOSE) => app.close_project(key),
-        Some(HIDE_TOWN) => app.hide_town(true),
+        Some(HIDE_TOWN) => app.hide_town(key, true),
         Some(SHELL) => app.open_shell(key),
         Some(i) if (REOPEN..REOPEN_END).contains(&i) => {
             let conversation = reopen.get(i - REOPEN).map(|(c, _)| c.as_str());
@@ -3844,6 +3868,7 @@ struct App {
     accounts: Accounts,
     /// Claude Code's login as the app follows it.
     login: Login,
+    restart: Option<IdentityRestart>,
     // Boxed on purpose: the window procedures hold a raw pointer to each
     // window struct, so it must not move when the Vec grows.
     #[allow(clippy::vec_box)]
@@ -3982,8 +4007,6 @@ struct App {
     columns: Columns,
     /// Projects sessions were started in, newest first, for the tray menu.
     recent: Vec<String>,
-    /// The projects the town's `CLAUDE.md` was last written for.
-    town_listed: Option<Vec<town::Project>>,
     autostart_offered: bool,
     explorer_offered: bool,
     last_saved: Option<SavedState>,
@@ -4035,8 +4058,6 @@ struct App {
     sounds: bool,
     /// The microphone dictation listens to, None for Windows' default.
     microphone: Option<String>,
-    /// Tristram's tile is hidden while no session runs in the town.
-    town_hidden: bool,
     /// Horadric's own animations are off, from the Settings window.
     still: bool,
     /// A usage limit switches Claude Code to the account with the most
@@ -4162,6 +4183,14 @@ struct AccountSwitch {
     now: bool,
 }
 
+/// Settings' Restart them, see [`App::restart_left_behind`].
+#[derive(Default)]
+struct IdentityRestart {
+    running: Vec<String>,
+    stopped: Vec<String>,
+    limited: Vec<String>,
+}
+
 /// How long an account a limit stopped is passed over when the limits
 /// heard show none full, so no reset is known.
 const OUT_FOR: u64 = 60 * 60;
@@ -4194,6 +4223,7 @@ impl App {
                 self.switch_free();
                 self.switch_when_out();
                 self.switch_step();
+                self.restart_step();
                 self.run_tasks();
                 self.recount();
                 self.mark_sweeps();
@@ -4328,6 +4358,7 @@ impl App {
                 self.watch_login();
                 self.switch_when_out();
                 self.switch_step();
+                self.restart_step();
                 self.tick_tasks();
                 self.reload_when_ready();
                 self.portal_check();
@@ -5453,6 +5484,10 @@ impl App {
             self.extra_args(id, &program, &args, &cwd)
         };
         let (mut env, env_remove) = session_env(id, own_tree.as_ref(), &cwd);
+        // An attached pane runs in the daemon's session, born elsewhere.
+        if !attach {
+            crate::vault::identity::note_started(id, &cwd);
+        }
         if !attach && !shell && console::is_claude(&program) {
             env.extend(self.shared.defaults().env());
             env.push(secret_key(id));
@@ -6048,12 +6083,37 @@ impl App {
         let Some(mut s) = self.login.switch.take() else {
             return;
         };
+        self.stop_free(&mut s.running, &mut s.stopped, &mut s.limited, s.now);
+        if !s.running.is_empty() || self.stopping(&s.stopped) {
+            self.login.switch = Some(s);
+            return;
+        }
+        let email = self.accounts.get(&s.to).map(|a| a.email.clone());
+        match self.put_login(&s.to) {
+            Ok(()) => self.toasts.show(
+                Kind::Done,
+                &format!("Switched to {}", email.unwrap_or_default()),
+                "The sessions carry on with this account.",
+            ),
+            Err(e) => self.toasts.show(Kind::Failed, "Cannot switch accounts", &e),
+        }
+        // Once each, whatever happened: on the old login if the switch failed.
+        self.resume_stopped(&s.stopped, &s.limited);
+    }
+
+    /// Stops each of `running` that is free to stop, `now` mid turn or
+    /// not, moving it to `stopped`, and to `limited` too when a usage
+    /// limit had stopped it. One gone on its own leaves `running`.
+    fn stop_free(
+        &self,
+        running: &mut Vec<String>,
+        stopped: &mut Vec<String>,
+        limited: &mut Vec<String>,
+        now: bool,
+    ) {
         if let Ok(r) = self.shared.registry.lock() {
             let (consoles, folios) = (&self.consoles, &self.folios);
-            let stopped = &mut s.stopped;
-            let limited = &mut s.limited;
-            let now = s.now;
-            s.running.retain(|id| {
+            running.retain(|id| {
                 if folios.contains_key(id) {
                     if !crate::folio::running(id) {
                         return false;
@@ -6088,33 +6148,29 @@ impl App {
                 !free
             });
         }
-        let stopping = s.stopped.iter().any(|id| {
+    }
+
+    /// Whether any of `stopped` has not ended yet.
+    fn stopping(&self, stopped: &[String]) -> bool {
+        stopped.iter().any(|id| {
             let terminal = (self.consoles.get(id)).is_some_and(|c| c.exit_code().is_none());
             terminal || (self.folios.contains_key(id) && crate::folio::running(id))
-        });
-        if !s.running.is_empty() || stopping {
-            self.login.switch = Some(s);
-            return;
-        }
-        let email = self.accounts.get(&s.to).map(|a| a.email.clone());
-        match self.put_login(&s.to) {
-            Ok(()) => self.toasts.show(
-                Kind::Done,
-                &format!("Switched to {}", email.unwrap_or_default()),
-                "The sessions carry on with this account.",
-            ),
-            Err(e) => self.toasts.show(Kind::Failed, "Cannot switch accounts", &e),
-        }
-        // Once each, whatever happened: on the old login if the switch failed.
+        })
+    }
+
+    /// Starts each of `stopped` again on its conversation, those of
+    /// `limited` told to go on, and shows again the one that was on the
+    /// stage.
+    fn resume_stopped(&mut self, stopped: &[String], limited: &[String]) {
         let on_stage = self.shared.active.borrow().clone();
-        for id in &s.stopped {
+        for id in stopped {
             let chat = self.folios.contains_key(id);
             if !chat && !self.paused.contains_key(id) {
                 continue;
             }
             // Its refused prompt is the last in the conversation, and
             // this takes it up again on the new login.
-            if s.limited.contains(id) {
+            if limited.contains(id) {
                 self.tasks
                     .prompts
                     .insert(id.clone(), horadric_core::accounts::GO_ON.to_string());
@@ -6130,11 +6186,64 @@ impl App {
                 self.tasks.prompts.remove(id);
             }
         }
-        if let Some(id) = on_stage.filter(|id| s.stopped.contains(id)) {
+        if let Some(id) = on_stage.filter(|id| stopped.contains(id)) {
             if self.consoles.contains_key(&id) || self.folios.contains_key(&id) {
                 self.reveal(&id, false);
             }
         }
+    }
+
+    /// Settings' Restart them: the project `key`'s sessions still on the
+    /// identity they started with stop once their turn is done and start
+    /// again on its identity now, as an account switch does but with no
+    /// login to put in. A plain terminal is left: what the human has in
+    /// it would be lost.
+    fn restart_left_behind(&mut self, key: &str) {
+        let behind: Vec<String> = match self.shared.registry.lock() {
+            Ok(r) => r
+                .all()
+                .filter(|s| project_key(s) == key)
+                .filter(|s| crate::vault::identity::left_behind(&s.id, Path::new(&s.cwd)))
+                .map(|s| s.id.clone())
+                .collect(),
+            Err(_) => return,
+        };
+        let running: Vec<String> = behind.into_iter().filter(|id| self.runs(id)).collect();
+        if running.is_empty() {
+            return;
+        }
+        let r = self.restart.get_or_insert_with(Default::default);
+        for id in running {
+            if !r.running.contains(&id) && !r.stopped.contains(&id) {
+                r.running.push(id);
+            }
+        }
+        self.toasts.show(
+            Kind::Info,
+            "Restarting on the new identity",
+            "Each session stops once its turn is done and carries on with its project's logins.",
+        );
+        self.restart_step();
+    }
+
+    fn restart_step(&mut self) {
+        let Some(mut r) = self.restart.take() else {
+            return;
+        };
+        // A switch stops and resumes them itself, on the identity now, so
+        // those it holds are left to it rather than restarted twice.
+        if let Some(sw) = &self.login.switch {
+            r.running
+                .retain(|id| !sw.running.contains(id) && !sw.stopped.contains(id));
+            self.restart = Some(r);
+            return;
+        }
+        self.stop_free(&mut r.running, &mut r.stopped, &mut r.limited, false);
+        if !r.running.is_empty() || self.stopping(&r.stopped) {
+            self.restart = Some(r);
+            return;
+        }
+        self.resume_stopped(&r.stopped, &r.limited);
     }
 
     /// Logs in as account `to`, keeping the leaving login as it is now
@@ -6232,7 +6341,7 @@ impl App {
                 }
             },
             tidy: crate::dictate::tidies(),
-            town: !self.town_hidden,
+            towns: crate::town_settings::views(),
             animations: !self.still,
             switch_accounts: self.switch_accounts,
             terminal_sessions: !self.chat_sessions,
@@ -6909,7 +7018,6 @@ impl App {
                 self.quiet = !self.quiet;
                 self.save();
             }
-            Field::Town => self.hide_town(!self.town_hidden),
             Field::Animations => {
                 self.still = !self.still;
                 crate::backdrop::set_still(self.still);
@@ -6964,6 +7072,7 @@ impl App {
             Field::Updates => self.check_update(true),
             // The Settings window answers a Vault row itself, off the app's borrow.
             Field::Version | Field::KeysNote | Field::Lexicon | Field::Vault(_) => {}
+            Field::Town(_) => {}
             Field::Ask => {
                 self.tome.ask = !self.tome.ask;
                 self.save();
@@ -7268,12 +7377,27 @@ impl App {
             .map_or(0, |r| r.all().filter(|s| project_key(s) == key).count())
     }
 
-    /// Hides Tristram's tile, or shows it again. A session running in the
+    /// Hides a town's tile, or shows it again. A session running in the
     /// town keeps it on screen until it ends.
-    fn hide_town(&mut self, hidden: bool) {
-        self.town_hidden = hidden;
+    fn hide_town(&mut self, key: &str, hidden: bool) {
+        let Some(slug) = town::of(key).map(|t| t.saved.slug) else {
+            return;
+        };
+        town::change(|all| {
+            for t in all.iter_mut().filter(|t| t.slug == slug) {
+                t.hidden = hidden;
+            }
+        });
+        self.towns_changed();
+    }
+
+    /// The towns changed in Settings or a tile menu: kept, and their
+    /// clusters made to match.
+    fn towns_changed(&mut self) {
         self.save();
         self.reconcile(false);
+        self.arrange();
+        self.refresh_settings();
     }
 
     /// Ends the project's sessions and takes its cluster down, unfinished
@@ -8597,6 +8721,7 @@ impl App {
             ),
         ];
         let (own_set, own_remove) = session_env(id, own_tree.as_ref(), &dir);
+        crate::vault::identity::note_started(id, &dir);
         env_set.extend(own_set);
         env_set.push(secret_key(id));
         // The CLI keeps what each prompt's edits overwrote only when told
@@ -9388,7 +9513,8 @@ impl App {
             dictation_language: Some(crate::dictate::voice().language)
                 .filter(|l| *l != crate::dictate::Language::English)
                 .map(|l| l.code().to_string()),
-            town_hidden: self.town_hidden,
+            town_list: town::saved(),
+            home_usage: town::usage_saved(),
             still: self.still,
             switch_accounts: self.switch_accounts,
             terminal_sessions: !self.chat_sessions,
@@ -9530,21 +9656,10 @@ impl App {
             .collect()
     }
 
-    /// Rewrites the town's `CLAUDE.md` when the set of projects changed.
-    /// Only the folders count: how long ago a session ran would rewrite it
-    /// on every pass.
+    /// Rewrites each town's `CLAUDE.md` when the projects or the towns
+    /// changed, see [`town::write_all`].
     fn refresh_town(&mut self) {
-        let Some(dir) = town::dir().filter(|d| d.is_dir()) else {
-            return;
-        };
-        let projects = self.town_projects();
-        let same = self.town_listed.as_ref().is_some_and(|old| {
-            old.len() == projects.len() && old.iter().zip(&projects).all(|(a, b)| a.dir == b.dir)
-        });
-        if !same {
-            town::write(&dir, &projects);
-            self.town_listed = Some(projects);
-        }
+        town::write_all(&self.town_projects());
     }
 
     /// Makes the windows match the projects in the registry.
@@ -9565,15 +9680,11 @@ impl App {
         self.open
             .retain(|k| horadric_core::afar::split_key(k).is_none() || projects.contains(k));
         // A hidden town shows only while a session runs there.
-        if self.town_hidden {
-            self.open.retain(|k| !town::is(k));
-        }
+        self.open.retain(|k| !town::hidden(k));
         projects.extend(self.open.iter().cloned());
         projects.extend(self.listed());
-        // The town stays when it has no sessions, unless it is hidden.
-        if !self.town_hidden {
-            projects.extend(town::key().map(String::from));
-        }
+        // A town stays when it has no sessions, unless it is hidden.
+        projects.extend(town::all().into_iter().filter(|t| !t.saved.hidden).map(|t| t.key));
 
         // Remove clusters whose project is gone.
         let mut i = 0;
@@ -10123,6 +10234,7 @@ impl App {
                 } => self.folio_fork(&id, back, &text, resend),
                 Input::FolioFilesRewound(id, how) => self.folio_files_rewound(&id, how),
                 Input::FolioRestart(id, show) => self.folio_restart(&id, show),
+                Input::RestartLeftBehind(key) => self.restart_left_behind(&key),
                 Input::FolioAddDir(id, dir) => {
                     let own = self.folio_args.entry(id.clone()).or_default();
                     own.extend(["--add-dir".to_string(), dir.to_string_lossy().into_owned()]);
@@ -10168,6 +10280,7 @@ impl App {
                 Input::SettingsClick(field, row) => self.settings_click(field, row),
                 Input::SettingsPicked(field, pick) => self.settings_picked(field, pick),
                 Input::SettingsClosed => self.close_settings(),
+                Input::TownsChanged => self.towns_changed(),
                 Input::SettingsPress(press) => self.settings_press(press),
                 Input::Answered {
                     dir,
@@ -10276,8 +10389,8 @@ impl App {
     /// session, as the recent list spells it, for a project up for its
     /// task list alone.
     fn project_dir(&self, key: &str) -> Option<PathBuf> {
-        if town::is(key) {
-            return town::dir();
+        if let Some(dir) = town::dir_of(key) {
+            return Some(dir);
         }
         let from_session = self.shared.registry.lock().ok().and_then(|r| {
             let mut dirs = r
@@ -10416,8 +10529,11 @@ impl App {
         if self.usage_window.is_some() && !self.columns.contains(columns::USAGE) {
             self.columns.add_first(columns::USAGE);
         }
-        if let Some(k) = town::key().filter(|k| is_present(k) && !self.columns.contains(k)) {
-            self.columns.add_first(k);
+        // Last added is on top, so Tristram stands above the other towns.
+        for k in town::keys().iter().rev() {
+            if is_present(k) && !self.columns.contains(k) {
+                self.columns.add_first(k);
+            }
         }
         let mut fresh: Vec<(String, String, i32)> = self
             .clusters

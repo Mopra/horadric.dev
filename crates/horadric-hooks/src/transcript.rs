@@ -56,10 +56,7 @@ fn read_head(file: &mut File, most: u64) -> Option<Vec<u8>> {
 /// Whether the conversation `id`, held in `cwd`, is in the middle of a
 /// turn, see [`title::mid_turn`]. None when its transcript can not be read.
 pub fn mid_turn(cwd: &str, id: &str) -> Option<bool> {
-    let root = projects_root(
-        std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
-        crate::home().as_deref(),
-    )?;
+    let root = root_for(cwd)?;
     folders(&root, cwd).iter().find_map(|dir| {
         let mut file = File::open(dir.join(format!("{id}.jsonl"))).ok()?;
         let len = file.metadata().ok()?.len();
@@ -164,10 +161,7 @@ fn remote_drive(_path: &str) -> bool {
 /// disk. A quest's worktree may be long gone, and with it the spelling of
 /// its folder, so failing that every folder is looked in.
 pub fn path(cwd: &str, id: &str) -> Option<PathBuf> {
-    let root = projects_root(
-        std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
-        crate::home().as_deref(),
-    )?;
+    let root = root_for(cwd)?;
     path_in(&root, cwd, id)
 }
 
@@ -217,10 +211,7 @@ const LOOKED_AT: usize = 300;
 /// one held over its SDK, is named by its first prompt; one with neither
 /// never got going.
 pub fn history(cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
-    let Some(root) = projects_root(
-        std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
-        crate::home().as_deref(),
-    ) else {
+    let Some(root) = root_for(cwd) else {
         return Vec::new();
     };
     list_in(&root, cwd, skip, limit)
@@ -277,14 +268,11 @@ fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
 /// own transcripts, in folders named after their parent, are not among
 /// them.
 pub fn files() -> Vec<PathBuf> {
-    let Some(root) = projects_root(
-        std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
-        crate::home().as_deref(),
-    ) else {
-        return Vec::new();
-    };
-    let mut found: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(root)
-        .into_iter()
+    let towns = crate::towns::homes().into_iter().map(|h| h.join("projects"));
+    let roots: Vec<PathBuf> = projects().into_iter().chain(towns).collect();
+    let mut found: Vec<(SystemTime, PathBuf)> = roots
+        .iter()
+        .filter_map(|r| std::fs::read_dir(r).ok())
         .flatten()
         .flatten()
         .filter_map(|d| std::fs::read_dir(d.path()).ok())
@@ -295,6 +283,15 @@ pub fn files() -> Vec<PathBuf> {
         .collect();
     found.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
     found.into_iter().map(|(_, p)| p).collect()
+}
+
+/// The transcripts folder of the Claude home a session in `cwd` runs on:
+/// its town's own, or the machine's.
+fn root_for(cwd: &str) -> Option<PathBuf> {
+    match crate::towns::home_for(cwd) {
+        Some(home) => Some(home.join("projects")),
+        None => projects(),
+    }
 }
 
 /// Where Claude Code keeps its transcripts, one folder per working

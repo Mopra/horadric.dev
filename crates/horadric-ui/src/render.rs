@@ -32,7 +32,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap, ID2D1BitmapRenderTarget, ID2D1Factory, ID2D1Geometry,
     ID2D1GradientStopCollection, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush,
-    ID2D1RadialGradientBrush, ID2D1RenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED,
+    ID2D1RenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED,
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
     D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND,
     D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_CUSTOM,
@@ -41,7 +41,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND,
     D2D1_OPACITY_MASK_CONTENT_GRAPHICS, D2D1_PRESENT_OPTIONS_IMMEDIATELY,
-    D2D1_PRESENT_OPTIONS_RETAIN_CONTENTS, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES,
+    D2D1_PRESENT_OPTIONS_RETAIN_CONTENTS,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
 };
@@ -75,6 +75,7 @@ use crate::theme::{self, Color};
 
 mod keycube;
 mod shade;
+pub(crate) use shade::Shading;
 mod shine;
 mod stone;
 pub(crate) use stone::{StoneLook, StoneState};
@@ -827,7 +828,6 @@ pub struct Target {
 #[derive(Default)]
 struct Gradients {
     linear: RefCell<HashMap<Vec<u32>, ID2D1LinearGradientBrush>>,
-    radial: RefCell<HashMap<Vec<u32>, ID2D1RadialGradientBrush>>,
 }
 
 /// Enough for every colour a cluster uses, with room for the passing ones
@@ -990,7 +990,7 @@ impl Target {
     pub fn draw_usage(&self, gpu: &Gpu, m: &Metrics, scene: &UsageScene) -> Result<()> {
         unsafe {
             self.rt.BeginDraw();
-            self.painter(&self.rt).usage(gpu, m, scene);
+            self.lit(|p| p.usage(gpu, m, scene));
             self.fade_cut();
             self.rt.EndDraw(None, None)
         }
@@ -1000,7 +1000,7 @@ impl Target {
     pub fn draw_settings(&self, gpu: &Gpu, m: &Metrics, scene: &SettingsScene) -> Result<()> {
         unsafe {
             self.rt.BeginDraw();
-            self.painter(&self.rt).settings(gpu, m, scene);
+            self.lit(|p| p.settings(gpu, m, scene));
             self.rt.EndDraw(None, None)
         }
     }
@@ -1009,7 +1009,7 @@ impl Target {
     pub fn draw_dropdown(&self, gpu: &Gpu, m: &Metrics, scene: &DropdownScene) -> Result<()> {
         unsafe {
             self.rt.BeginDraw();
-            self.painter(&self.rt).dropdown(gpu, m, scene);
+            self.lit(|p| p.dropdown(gpu, m, scene));
             self.rt.EndDraw(None, None)
         }
     }
@@ -1019,7 +1019,7 @@ impl Target {
     pub fn draw_suggest(&self, gpu: &Gpu, m: &Metrics, scene: &SuggestScene) -> Result<()> {
         unsafe {
             self.rt.BeginDraw();
-            self.painter(&self.rt).suggest(gpu, m, scene);
+            self.lit(|p| p.suggest(gpu, m, scene));
             self.rt.EndDraw(None, None)
         }
     }
@@ -1028,7 +1028,7 @@ impl Target {
     pub fn draw_menu(&self, gpu: &Gpu, m: &Metrics, scene: &MenuScene) -> Result<()> {
         unsafe {
             self.rt.BeginDraw();
-            self.painter(&self.rt).menu(gpu, m, scene);
+            self.lit(|p| p.menu(gpu, m, scene));
             self.rt.EndDraw(None, None)
         }
     }
@@ -1037,7 +1037,7 @@ impl Target {
     pub fn draw_caption(&self, gpu: &Gpu, scene: &CaptionScene) -> Result<()> {
         unsafe {
             self.rt.BeginDraw();
-            self.painter(&self.rt).caption(gpu, scene);
+            self.lit(|p| p.caption(gpu, scene));
             self.rt.EndDraw(None, None)
         }
     }
@@ -1046,7 +1046,7 @@ impl Target {
     pub fn draw_toast(&self, gpu: &Gpu, m: &Metrics, scene: &ToastScene) -> Result<()> {
         unsafe {
             self.rt.BeginDraw();
-            self.painter(&self.rt).toast(gpu, m, scene);
+            self.lit(|p| p.toast(gpu, m, scene));
             self.rt.EndDraw(None, None)
         }
     }
@@ -1066,7 +1066,7 @@ impl Target {
     pub fn draw_catchup(&self, gpu: &Gpu, m: &Metrics, scene: &CatchupScene) -> Result<()> {
         unsafe {
             self.rt.BeginDraw();
-            self.painter(&self.rt).catchup(gpu, m, scene);
+            self.lit(|p| p.catchup(gpu, m, scene));
             self.rt.EndDraw(None, None)
         }
     }
@@ -1075,7 +1075,7 @@ impl Target {
     pub fn draw_dialog(&self, gpu: &Gpu, m: &Metrics, scene: &DialogScene) -> Result<()> {
         unsafe {
             self.rt.BeginDraw();
-            self.painter(&self.rt).dialog(gpu, m, scene);
+            self.lit(|p| p.dialog(gpu, m, scene));
             self.rt.EndDraw(None, None)
         }
     }
@@ -1084,7 +1084,7 @@ impl Target {
     pub fn draw_ask(&self, gpu: &Gpu, m: &Metrics, scene: &AskScene) -> Result<()> {
         unsafe {
             self.rt.BeginDraw();
-            self.painter(&self.rt).ask(gpu, m, scene);
+            self.lit(|p| p.ask(gpu, m, scene));
             self.rt.EndDraw(None, None)
         }
     }
@@ -1093,7 +1093,7 @@ impl Target {
     pub fn draw_start(&self, gpu: &Gpu, m: &Metrics, scene: &StartScene) -> Result<()> {
         unsafe {
             self.rt.BeginDraw();
-            self.painter(&self.rt).start(gpu, m, scene);
+            self.lit(|p| p.start(gpu, m, scene));
             self.fade_cut();
             self.rt.EndDraw(None, None)
         }
@@ -1198,6 +1198,19 @@ fn bitmap_on(rt: &ID2D1RenderTarget, size: u32, bgra: &[u8]) -> Result<ID2D1Bitm
 }
 
 impl Target {
+    /// Draws with `draw` on the window, which is drawing, and blooms what
+    /// it lit over it. A failed bloom leaves the window without its glow,
+    /// never without the window.
+    unsafe fn lit<T>(&self, draw: impl FnOnce(&Painter) -> T) -> T {
+        let emitters = RefCell::new(Vec::new());
+        let out = draw(&Painter {
+            emit: Some(&emitters),
+            ..self.painter(&self.rt)
+        });
+        let _ = self.bloom_over(&emitters.into_inner());
+        out
+    }
+
     fn painter<'a>(&'a self, rt: &'a ID2D1RenderTarget) -> Painter<'a> {
         Painter {
             rt,
@@ -1545,7 +1558,8 @@ impl Painter<'_> {
         self.plate(m, l.size);
 
         self.screen(gpu, &l.limits_box, m.tile_radius);
-        let limits = scene.usage.map(|u| u.limits.named()).unwrap_or_default();
+        // A town with a login of its own adds its rows after the machine's.
+        let limits = crate::town::limit_rows(scene.usage);
         let first = l.limits.first().copied();
         match (limits.first(), first) {
             (None, Some(r)) => {
@@ -1572,7 +1586,7 @@ impl Painter<'_> {
         // does: a chevron beside the first word, always there when folded.
         let folding = !scene.locked && scene.button(UsageHit::Limits) != Button::Idle;
         if let (Some(r), true) = (first, scene.collapsed || folding) {
-            let name = limits.first().map_or("", |(n, _)| *n);
+            let name = limits.first().map_or("", |(n, _)| n.as_str());
             let x = r.x + INNER_PAD + self.measure(gpu, &gpu.body, name);
             let chevron = if scene.collapsed {
                 '\u{E76C}'
@@ -1612,7 +1626,13 @@ impl Painter<'_> {
         if rx <= 0.5 {
             return;
         }
-        self.glow_dot(cx, cy, ry * 1.6, c, 0.8 * bright);
+        // The portal's own light, faint, under the specks turning in it.
+        self.emit(shine::Emitter::Dot {
+            x: cx,
+            y: cy,
+            radius: rx * 0.8,
+            c: c.fade(0.25 * bright),
+        });
         let oval = |k: f32, c: Color| {
             self.brush.SetColor(&color(c));
             self.rt.FillEllipse(
@@ -1636,7 +1656,20 @@ impl Painter<'_> {
             for i in 0..6 {
                 let a = i as f32 * std::f32::consts::TAU / 6.0 + turn + ring as f32;
                 let (x, y) = (cx + rx * k * a.cos(), cy + ry * k * a.sin());
-                self.glow_dot(x, y, speck, c.mix(Color::rgb(0xFFFFFF), 0.4), bright);
+                let hot = c.mix(Color::rgb(0xFFFFFF), 0.4);
+                let e = D2D1_ELLIPSE {
+                    point: Vector2 { X: x, Y: y },
+                    radiusX: speck * 0.5,
+                    radiusY: speck * 0.5,
+                };
+                self.brush.SetColor(&color(hot.fade(bright)));
+                self.rt.FillEllipse(&e, self.brush);
+                self.emit(shine::Emitter::Dot {
+                    x,
+                    y,
+                    radius: speck * 0.5,
+                    c: hot.fade(0.8 * bright),
+                });
             }
         }
     }
@@ -2883,10 +2916,9 @@ impl Painter<'_> {
     unsafe fn notch(&self, gpu: &Gpu, h: f32, bite: &Rect, screen: &Rect, radius: f32) {
         let corner = radius - 4.0;
         self.masked(gpu, screen, radius, || {
-            for (s, a) in [(3.0, 0.2), (2.0, 0.35), (1.0, 0.5)] {
-                let shade = Rect::new(bite.x - 0.5, bite.y + 1.5, bite.w, bite.h).inset(-s);
-                self.fill_rounded(&shade, corner + s, theme::hollow_shade().fade(a));
-            }
+            let shade = theme::hollow_shade().fade(0.6);
+            let grown = bite.inset(-1.5);
+            self.cast(gpu, &grown, corner + 1.5, (-0.5, 1.5), 4.0, shade);
         });
         self.masked(gpu, bite, corner, || {
             let stops = [(0.0, theme::plate_top()), (1.0, theme::plate_bottom())];
@@ -3234,17 +3266,16 @@ impl Painter<'_> {
         }
     }
 
-    /// A small round indicator, lit in `c`. In the kept layer its glow is
-    /// the bloom's; elsewhere, until those windows take light, a soft dot.
+    /// A small round indicator, lit in `c`. Its glow is the bloom's.
     unsafe fn led(&self, x: f32, y: f32, c: Color) {
         let hot = c.mix(Color::rgb(0xFFFFFF), 0.3);
-        if self.emit.is_some() {
-            // The dot again as light: lit, it reads brighter than its glass.
-            let c = hot.fade(0.6);
-            self.emit(shine::Emitter::Dot { x, y, radius: 2.5, c });
-        } else {
-            self.glow_dot(x, y, 6.0, c, 0.45);
-        }
+        // The dot again as light: lit, it reads brighter than its glass.
+        self.emit(shine::Emitter::Dot {
+            x,
+            y,
+            radius: 2.5,
+            c: hot.fade(0.6),
+        });
         let dot = D2D1_ELLIPSE {
             point: Vector2 { X: x, Y: y },
             radiusX: 2.5,
@@ -3378,65 +3409,6 @@ impl Painter<'_> {
         brush.SetEndPoint(Vector2 { X: x1, Y: y1 });
         brush.SetOpacity(1.0);
         Some(brush)
-    }
-
-    unsafe fn radial(
-        &self,
-        x: f32,
-        y: f32,
-        radius: f32,
-        stops: &[(f32, Color)],
-    ) -> Option<ID2D1RadialGradientBrush> {
-        let key = stops_key(stops);
-        let mut kept = self.gradients.radial.borrow_mut();
-        if kept.len() > GRADIENTS_KEPT {
-            kept.clear();
-        }
-        let brush = match kept.get(&key) {
-            Some(b) => b.clone(),
-            None => {
-                let collection = self.gradient_stops(stops)?;
-                let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES::default();
-                let b = self
-                    .rt
-                    .CreateRadialGradientBrush(&props, None, &collection)
-                    .ok()?;
-                kept.insert(key, b.clone());
-                b
-            }
-        };
-        brush.SetCenter(Vector2 { X: x, Y: y });
-        brush.SetRadiusX(radius);
-        brush.SetRadiusY(radius);
-        brush.SetOpacity(1.0);
-        Some(brush)
-    }
-
-    /// A soft round glow, strongest at its centre.
-    unsafe fn glow_dot(&self, x: f32, y: f32, radius: f32, c: Color, strength: f32) {
-        if strength <= 0.0 {
-            return;
-        }
-        let c = c.with_alpha(1.0);
-        let Some(brush) = self.radial(
-            x,
-            y,
-            radius,
-            &[
-                (0.0, c),
-                (0.45, c.with_alpha(0.4)),
-                (1.0, c.with_alpha(0.0)),
-            ],
-        ) else {
-            return;
-        };
-        brush.SetOpacity(strength.min(1.0));
-        let e = D2D1_ELLIPSE {
-            point: Vector2 { X: x, Y: y },
-            radiusX: radius,
-            radiusY: radius,
-        };
-        self.rt.FillEllipse(&e, &brush);
     }
 
     /// The stage shows a whole project, so the project is what gets marked,
@@ -4359,7 +4331,13 @@ impl Painter<'_> {
             let badge = Rect::new(r.right() - pad - badge_w, r.y, badge_w, r.h);
             if node.dir {
                 let (dx, dy) = (badge.right() - 4.0, badge.y + badge.h / 2.0);
-                self.glow_dot(dx, dy, 6.0, theme::change_color(change), 0.35);
+                let hot = theme::change_color(change).mix(Color::rgb(0xFFFFFF), 0.3);
+                self.emit(shine::Emitter::Dot {
+                    x: dx,
+                    y: dy,
+                    radius: 2.5,
+                    c: hot.fade(0.4),
+                });
                 let dot = D2D1_ELLIPSE {
                     point: Vector2 { X: dx, Y: dy },
                     radiusX: 2.5,

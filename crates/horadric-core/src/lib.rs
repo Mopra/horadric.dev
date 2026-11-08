@@ -84,6 +84,7 @@ pub mod sworn;
 pub mod tasks;
 pub mod team;
 pub mod title;
+pub mod towns;
 pub mod trust;
 pub mod usage;
 pub mod vault;
