@@ -76,7 +76,7 @@ impl Mask {
             .filter(|(_, v)| !v.is_empty())
             .map(|(n, v)| (v.into_bytes(), format!("[{n}]").into_bytes()))
             .collect();
-        values.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        values.sort_by_key(|v| std::cmp::Reverse(v.0.len()));
         Mask {
             values,
             held: Vec::new(),
@@ -642,7 +642,7 @@ pub fn approval(project: &str, program: &str, sha256: &str) -> String {
 /// changed, is not one: the human is asked again.
 pub fn approved(allowed: &[String], project: &str, program: &str, sha256: &str) -> bool {
     let want = approval(project, program, sha256);
-    allowed.iter().any(|a| *a == want)
+    allowed.contains(&want)
 }
 
 /// One line of `secrets.log`: when, which project and session, which
@@ -792,7 +792,7 @@ mod tests {
 
     struct Item(Owner, &'static str, u8);
 
-    fn pick<'a>(items: &'a [Item], project: &str, id: Option<&str>, name: &str) -> Option<u8> {
+    fn pick(items: &[Item], project: &str, id: Option<&str>, name: &str) -> Option<u8> {
         winner(items, |i| &i.0, |i| i.1, project, id, name).map(|i| i.2)
     }
 

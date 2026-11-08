@@ -497,7 +497,7 @@ impl Cx {
                         setext = 1;
                         break;
                     }
-                    if t.len() >= 1 && t.chars().all(|c| c == '-') {
+                    if !t.is_empty() && t.chars().all(|c| c == '-') {
                         setext = 2;
                         break;
                     }

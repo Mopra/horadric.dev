@@ -1914,7 +1914,7 @@ fn url_at(s: &str, i: usize) -> Option<usize> {
         .unwrap_or(rest.len());
     // Counted once and kept as the end moves, so a url followed by a long
     // run of `)` is not recounted for each one.
-    let url = rest[..end].as_bytes();
+    let url = &rest.as_bytes()[..end];
     let opens = url.iter().filter(|&&c| c == b'(').count();
     let mut shuts = url.iter().filter(|&&c| c == b')').count();
     while end > scheme {

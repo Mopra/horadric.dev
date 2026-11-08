@@ -169,7 +169,7 @@ fn list_in(dir: &Path) -> Vec<Version> {
             })
         })
         .collect();
-    out.sort_by(|a, b| b.at.cmp(&a.at));
+    out.sort_by_key(|v| std::cmp::Reverse(v.at));
     out
 }
 
