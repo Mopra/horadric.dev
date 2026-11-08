@@ -871,7 +871,7 @@ fn tools() -> Vec<Value> {
              keeps a seed. Fill in a fresh tab where you ran none of your own scripts: a tab \
              that ran your own code is never filled.",
             json!({
-                "name": { "type": "string", "description": "The login's name, like OPTICLOUD" },
+                "name": { "type": "string", "description": "The login's name, like EXAMPLE" },
                 "user": { "type": "string", "description": "Ref of the user name or email field" },
                 "password": { "type": "string", "description": "Ref of the password field" },
                 "code": { "type": "string", "description": "Ref of a one time code field" },

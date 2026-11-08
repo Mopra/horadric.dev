@@ -670,7 +670,7 @@ fn act(row: Row) {
         Row::AddIdentity => {
             if let Some(name) = type_in(
                 "Add an identity",
-                "A name for one of your worlds: OptiPeople, Pradsgaard Labs, Personal. Its git and logins are set in its rows after.",
+                "A name for one of your worlds: Work, Personal, a client. Its git and logins are set in its rows after.",
                 "",
                 "Name",
                 "add it",
