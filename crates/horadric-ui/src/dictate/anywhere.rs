@@ -12,10 +12,11 @@
 //! The words go in as typed characters (`SendInput` with
 //! `KEYEVENTF_UNICODE`), not through the clipboard, which stays the
 //! human's. A new line is Shift+Enter, which is a new line in a chat box
-//! where Enter would send. The ticks are what the human hears of it; it
-//! shows nothing on screen.
+//! where Enter would send. Beside the ticks, a plate by the caret shows
+//! the voice and the words so far ([`super::plate`]).
 
 use std::cell::Cell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use windows::core::w;
@@ -32,6 +33,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::WM_DICTATE;
+use crate::window::Shared;
 
 /// The timer that looks at the chord's key while the microphone is open.
 const POLL: usize = 1;
@@ -47,11 +49,12 @@ thread_local! {
 
 /// The global chord went down, its key `key`: starts listening, or stops
 /// a tapped dictation already listening.
-pub fn press(key: u16) {
+pub fn press(shared: &Rc<Shared>, key: u16) {
     let Some(hwnd) = window() else { return };
     KEY.with(|k| k.set(key));
     super::press(hwnd, None, "");
     if super::shown(hwnd).is_some() {
+        super::plate::open(shared, hwnd);
         unsafe {
             let _ = RegisterHotKey(Some(hwnd), ESC, MOD_NOREPEAT, u32::from(VK_ESCAPE.0));
             SetTimer(Some(hwnd), POLL, 30, None);

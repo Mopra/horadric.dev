@@ -4284,7 +4284,10 @@ impl App {
                 Some(Action::Stop) => self.stop_warriv(),
                 Some(Action::Account) => post(self.notify.0 as isize, WM_HORADRIC_ACCOUNT_MENU, 0),
                 Some(Action::DictateAnywhere) => {
-                    crate::dictate::anywhere::press(self.keys[Action::DictateAnywhere.index()].key)
+                    crate::dictate::anywhere::press(
+                        &self.shared,
+                        self.keys[Action::DictateAnywhere.index()].key,
+                    )
                 }
                 Some(Action::Toggle) => {
                     self.toggle();

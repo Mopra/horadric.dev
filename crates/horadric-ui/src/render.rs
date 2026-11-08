@@ -633,6 +633,23 @@ pub struct ToastScene<'a> {
     pub close_hot: bool,
 }
 
+/// Everything one frame of the plate dictation shows by another
+/// program's caret needs ([`crate::dictate::plate`]).
+pub struct DictationScene<'a> {
+    /// In DIPs.
+    pub size: (f32, f32),
+    /// The end of the words heard so far, or what to do when none are.
+    pub text: &'a IDWriteTextLayout,
+    /// Whether `text` is words heard, drawn brighter than a hint.
+    pub heard: bool,
+    /// How loud the microphone is, 0 to 1.
+    pub level: f32,
+    /// The microphone is shut and the last words are being written.
+    pub writing: bool,
+    /// Seconds since the plate showed, for the runes' clock.
+    pub t: f32,
+}
+
 /// Everything one frame of the catch-up needs.
 pub struct CatchupScene<'a> {
     pub layout: &'a CatchupLayout,
@@ -1030,6 +1047,17 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).toast(gpu, m, scene);
+            self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// Draws the dictation plate. `Err` means the target must be recreated.
+    pub fn draw_dictation(&self, m: &Metrics, scene: &DictationScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            let p = self.painter(&self.rt);
+            p.plate(m, scene.size);
+            p.dictation(scene);
             self.rt.EndDraw(None, None)
         }
     }
@@ -2191,6 +2219,42 @@ impl Painter<'_> {
 
     /// A notification: a lamp in its tone by the title, the text under it,
     /// and a cross that shows while the mouse is on it.
+    /// Three runes and the words. Listening, the runes light with the
+    /// voice, the one under the loudest lit last, and a slow wave runs
+    /// through them so a quiet room still shows it is listening. Writing,
+    /// they are cut again one after another, round and round.
+    unsafe fn dictation(&self, scene: &DictationScene) {
+        const RUNES: [usize; 3] = [2, 7, 10];
+        let (_, h) = scene.size;
+        let mid = h / 2.0;
+        for (i, &rune) in RUNES.iter().enumerate() {
+            let at = (18.0 + i as f32 * 15.0, mid);
+            let k = i as f32 / RUNES.len() as f32;
+            if scene.writing {
+                let drawn = (scene.t * 0.9 - k).rem_euclid(1.0) * 1.4;
+                self.rune(rune, at, 13.0, theme::working(), drawn.min(1.0));
+            } else {
+                let wave = 0.5 + 0.5 * (scene.t * 2.4 - k * 2.0).sin();
+                let voice = ((scene.level * 1.25 - k * 0.6) / 0.4).clamp(0.0, 1.0);
+                let lit = (0.15 + 0.2 * wave).max(voice);
+                let ink = theme::text_dim().mix(theme::working(), lit);
+                self.rune(rune, at, 13.0, ink.fade(0.45 + 0.55 * lit), 1.0);
+            }
+        }
+        let x = 18.0 + RUNES.len() as f32 * 15.0 + 4.0;
+        let (_, th) = text_size(scene.text);
+        let ink = if scene.heard {
+            theme::text()
+        } else {
+            theme::text_dim()
+        };
+        self.draw_layout(
+            scene.text,
+            ink,
+            Rect::new(x, mid - th / 2.0, scene.size.0 - x - 12.0, th),
+        );
+    }
+
     unsafe fn toast(&self, gpu: &Gpu, m: &Metrics, scene: &ToastScene) {
         let l = scene.layout;
         self.plate(m, l.size);

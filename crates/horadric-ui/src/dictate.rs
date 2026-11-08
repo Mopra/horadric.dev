@@ -31,6 +31,7 @@
 //! dictates into any program ([`anywhere`]).
 
 pub mod anywhere;
+mod plate;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
