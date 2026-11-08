@@ -347,6 +347,8 @@ pub enum WebAsk {
     Size,
     /// The list of downloads.
     Downloads,
+    /// Pin mode on or off in the shown tab.
+    Pin,
 }
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
@@ -1450,6 +1452,7 @@ unsafe extern "system" fn app_proc(
                     WebAsk::Menu => web_menu(&key),
                     WebAsk::Size => size_menu(&key),
                     WebAsk::Downloads => web::downloads(&key),
+                    WebAsk::Pin => crate::forge::page_pins::toggle(&key),
                 }
             }
             return LRESULT(0);
@@ -2706,6 +2709,7 @@ fn web_menu(key: &str) {
     const FIND: usize = 9;
     const DOWNLOADS: usize = 10;
     const POP: usize = 11;
+    const PIN: usize = 12;
     const SIZE: usize = 100;
     const PICK: usize = 200;
     let agents = stage_agents(Some(key));
@@ -2733,6 +2737,15 @@ fn web_menu(key: &str) {
         Item::Separator,
     ];
     let mut items = items;
+    let pinning = crate::forge::page_pins::pinning(key) || crate::forge::pins::pinning(key);
+    items.push(Item::action(
+        PIN,
+        if pinning {
+            "Stop pinning\tCtrl+Shift+P"
+        } else {
+            "Pin what to change\tCtrl+Shift+P"
+        },
+    ));
     items.extend(hand_items(&agents, "Pick an element for", PICK));
     items.extend([Item::Separator, Item::action(CLOSE, "Close")]);
     match menu::popup(&items) {
@@ -2744,6 +2757,7 @@ fn web_menu(key: &str) {
         Some(RELOAD) => web::go(key, web::Step::Reload),
         Some(FIND) => ask_find(key),
         Some(DOWNLOADS) => web::downloads(key),
+        Some(PIN) => crate::forge::page_pins::toggle(key),
         Some(POP) => push(Input::PopWeb(key.to_string(), !web::is_popped(key))),
         Some(OUTSIDE) => {
             if let Some((_, url)) = web::label(key).filter(|(_, u)| u.starts_with("http")) {
