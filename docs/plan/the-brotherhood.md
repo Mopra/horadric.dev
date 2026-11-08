@@ -26,15 +26,15 @@ What is left is below.
 
 Each of these is its own decision when it comes.
 
+## Decided
+
+- A quest does not follow a takeover (the human, 2026-11-08). It moves
+  only with a handed off session; after a takeover the silent owner's
+  copy waits blocked, naming the brother, for the human.
+- A plain terminal is never handed off (the human, 2026-11-08). A shell
+  has no transcript to resume.
+
 ## Open questions
 
-- Should a quest follow a takeover too? It moves with a handed off
-  session, but the silent owner's quest log keeps a taken over one held
-  by a session that now runs elsewhere. Nor does it follow a session
-  that lands outside a worktree of its own, or on a Linux node, which
-  has no quest log; the sender's copy then waits blocked, naming the
-  brother, for the human.
-- Handing off a plain terminal: a shell has no transcript to resume, so
-  probably never, only its folder.
 - Who pays when teams use SSO? AuthKit is free, enterprise SSO is priced
   per connection. Fine to defer until a team asks for it.
