@@ -891,6 +891,7 @@ struct Glass<'a> {
     rain: Option<(u64, f32)>,
     /// The grid's top left.
     origin: (f32, f32),
+    sky: Option<&'a SkyFrame>,
 }
 
 pub struct GridTarget {
@@ -1221,6 +1222,7 @@ impl GridTarget {
                 inner: &inner,
                 rain,
                 origin: (ox, oy),
+                sky,
             };
             let _ = self.shine(&glass, fx);
             if veil > 0.0 {
@@ -1307,22 +1309,6 @@ impl GridTarget {
                 &self.brush,
             );
         };
-        // What an agent touched glows under every dot, a few rings of its
-        // session's colour thinning outward, so a lit cluster reads as one
-        // light rather than as single dots.
-        for d in &sky.dots {
-            if let Some((rgb, strength)) = d.glow {
-                let c = Color::rgb(rgb);
-                let reach = 4.0 + 10.0 * strength;
-                for (grow, alpha) in [(1.0, 0.10), (0.6, 0.16), (0.3, 0.26)] {
-                    disc(
-                        d.at,
-                        d.r + reach * grow,
-                        c.with_alpha(alpha * strength * d.fade),
-                    );
-                }
-            }
-        }
         for d in &sky.dots {
             let mut c = match (d.hovered, d.lit) {
                 (true, _) => accent,
@@ -1358,7 +1344,6 @@ impl GridTarget {
                 1.6,
                 None,
             );
-            disc(s.at, 5.0, c.with_alpha(0.25));
             disc(s.at, 2.2, c.mix(ink, 0.4));
         }
         // A name is drawn over a halo of the background, so it reads over
@@ -1400,6 +1385,58 @@ impl GridTarget {
             let y = (room.top + room.bottom) / 2.0 - 10.0;
             label(m, mid, y, bg.mix(ink, 0.55));
         }
+    }
+
+    /// The Arcane Sanctuary's light, into the light layer `to`: what an
+    /// agent touched lately, as its dot burning in its session's colour,
+    /// so a lit cluster blooms into one light, and each recall's spark as
+    /// a streak with a hot head. Where it lit.
+    unsafe fn sky_light(&self, to: &ID2D1RenderTarget, sky: &SkyFrame) -> Option<Rect> {
+        let mut lit: Option<Rect> = None;
+        let mut grow = |x: f32, y: f32, r: f32| {
+            let b = Rect::new(x - r, y - r, 2.0 * r, 2.0 * r);
+            lit = Some(match lit {
+                None => b,
+                Some(a) => {
+                    let (l, t) = (a.x.min(b.x), a.y.min(b.y));
+                    Rect::new(l, t, a.right().max(b.right()) - l, a.bottom().max(b.bottom()) - t)
+                }
+            });
+        };
+        let white = Color::rgb(0xFFFFFF);
+        for d in &sky.dots {
+            let Some((rgb, strength)) = d.glow else {
+                continue;
+            };
+            let strength = strength.min(1.0) * d.fade.max(0.0);
+            if strength <= 0.02 {
+                continue;
+            }
+            let hot = particles::heat_color(Color::rgb(rgb), strength);
+            self.point(to, d.at.0, d.at.1, d.r, hot.with_alpha(0.7 * strength));
+            grow(d.at.0, d.at.1, d.r + 1.0);
+        }
+        for s in &sky.sparks {
+            let c = Color::rgb(s.rgb);
+            self.brush.SetColor(&render::color(c.with_alpha(0.6)));
+            to.DrawLine(
+                Vector2 {
+                    X: s.tail.0,
+                    Y: s.tail.1,
+                },
+                Vector2 {
+                    X: s.at.0,
+                    Y: s.at.1,
+                },
+                &self.brush,
+                1.2,
+                None,
+            );
+            self.point(to, s.at.0, s.at.1, 1.8, c.mix(white, 0.5));
+            grow(s.at.0, s.at.1, 2.0);
+            grow(s.tail.0, s.tail.1, 1.0);
+        }
+        lit
     }
 
     /// A browser pane's tabs, a row of keys on the plate above its glass
@@ -2058,7 +2095,8 @@ impl GridTarget {
             && fx.burns.is_empty()
             && fx.ashes.is_empty()
             && fx.summon.is_none()
-            && g.rain.is_none();
+            && g.rain.is_none()
+            && g.sky.is_none_or(|s| s.sparks.is_empty() && s.dots.iter().all(|d| d.glow.is_none()));
         if quiet {
             return Ok(());
         }
@@ -2076,6 +2114,13 @@ impl GridTarget {
         if let Some((ink, breath)) = fx.rim {
             self.rim(to, g.screen, ink.fade(0.8), breath);
             self.light.lit(box_of(g.screen));
+        }
+        if let Some(sky) = g.sky {
+            to.PushAxisAlignedClip(g.screen, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            if let Some(r) = self.sky_light(to, sky) {
+                self.light.lit(r);
+            }
+            to.PopAxisAlignedClip();
         }
 
         // What lights the text stays inside the grid's margin, as the

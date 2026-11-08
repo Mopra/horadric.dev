@@ -1907,15 +1907,15 @@ unsafe fn decode_thumb(bytes: &[u8]) -> Option<Thumb> {
 /// glass, lit along its top and casting its shadow down, with the field
 /// the text is written in sunk into it like the pane's own glass. Nothing
 /// lights up when it has the keys: a real field shows that by its caret.
-unsafe fn faceplate(gfx: &Gfx, r: &Rect, pal: &Palette) {
+unsafe fn faceplate(gfx: &Gfx, gpu: &Gpu, r: &Rect, pal: &Palette) {
     let p = crate::theme::palette();
     let black = crate::theme::Color::rgb(0);
     let white = crate::theme::Color::rgb(0xFFFFFF);
-    for i in 1..=4 {
-        let s = i as f32 * 1.5;
-        let fall = Rect::new(r.x - s, r.y + 2.0 + s, r.w + 2.0 * s, r.h);
-        gfx.fill_round(&fall, PLATE_R + s, p.cast.fade(0.12));
-    }
+    // Its shadow falling down off the plate, a real blur of its shape.
+    let fall = r.inset(-3.0);
+    let shadow = p.cast.fade(0.4);
+    gfx.shading
+        .cast(gpu, &gfx.rt, &fall, PLATE_R + 3.0, (0.0, 5.0), 8.0, shadow);
     let side = Rect::new(r.x, r.y + 2.0, r.w, r.h);
     gfx.fill_round(&side, PLATE_R, p.surface.mix(black, 0.6));
     gfx.fill_round(r, PLATE_R, p.surface.mix(white, 0.02));
@@ -2063,7 +2063,7 @@ impl View {
         // A card's field or the find bar may have the keys instead: one
         // caret on the glass, never two.
         let focused = self.has_keyboard() && chat.tr.state.focus.is_none();
-        faceplate(gfx, &r, pal);
+        faceplate(gfx, gpu, &r, pal);
         hits.push((r, Hit::Input(Act::Text)));
 
         // Images waiting to go, each with a cross to take it back.
