@@ -1111,6 +1111,72 @@ fn desktop_tools() -> Vec<Value> {
             }),
             &["window", "key"],
         ),
+        tool(
+            "desktop_changes",
+            "What changed in the desktop programs this session works with since your last \
+             desktop_changes: windows and dialogs shown and closed, a window coming to the \
+             front, menus, and fields, labels, boxes and items whose value, name or state \
+             changed, one short line each, newest last. Horadric watches a program from the \
+             first time this session looks at it or operates it. Far cheaper than a snapshot \
+             or a picture: ask this first to learn what happened after you or the user acted, \
+             or while a program works, and take a desktop_snapshot only when you need refs to \
+             act.",
+            json!({
+                "window": {
+                    "anyOf": [{ "type": "string" }, { "type": "number" }],
+                    "description": "Only this program's changes: its window's id from \
+                        desktop_windows, or part of its title. Without it, every program \
+                        watched",
+                },
+                "since": {
+                    "type": "integer",
+                    "description": "The changes after this number (each answer says where it \
+                        ended), instead of after your last desktop_changes",
+                },
+                "reason": reason(),
+            }),
+            &[],
+        ),
+        tool(
+            "desktop_wait",
+            "Wait until something happens in a desktop program, instead of taking snapshots or \
+             screenshots in a loop, then say what held and every change seen meanwhile. Give \
+             one or more of appears, gone, text and quiet_ms: it returns as soon as any of them \
+             holds, or after timeout_ms. quiet_ms waits until a program has finished loading, \
+             building or transferring: nothing in it changed for that long.",
+            json!({
+                "window": {
+                    "anyOf": [{ "type": "string" }, { "type": "number" }],
+                    "description": "The window to watch: its id from desktop_windows, or part \
+                        of its title. Without it, every program this session watches already",
+                },
+                "appears": {
+                    "type": "string",
+                    "description": "A window whose title contains this is open (a dialog, \
+                        a program starting)",
+                },
+                "gone": {
+                    "type": "string",
+                    "description": "No window whose title contains this is open any more",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "A field, label or item came to have a name or value \
+                        containing this, or a window such a title",
+                },
+                "quiet_ms": {
+                    "type": "integer",
+                    "description": "Nothing changed in the window for this many milliseconds",
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "How long to wait at most: 15000 when not given, 60000 at \
+                        most",
+                },
+                "reason": reason(),
+            }),
+            &[],
+        ),
     ]
 }
 
@@ -1199,7 +1265,11 @@ do the same for programs on the user's Windows desktop (an engineering tool like
 its watch window, its dialogs): list them with desktop_windows, read one with desktop_snapshot, \
 look with desktop_screenshot, act with desktop_click, desktop_type and desktop_press, and know \
 that the user approves each program once per session and confirms each risky action. Refs from \
-desktop_snapshot are surer than points on the screen, so act by ref or name. The user watches \
+desktop_snapshot are surer than points on the screen, so act by ref or name. Horadric watches \
+each program you have looked at or operated: ask desktop_changes what changed since you last \
+looked, and wait for a dialog, a text, a window to close or the program to go quiet with \
+desktop_wait, rather than taking snapshots or screenshots again and again; take a new \
+desktop_snapshot only when you need refs. The user watches \
 the control happen, so give every desktop call but desktop_windows a reason: one short sentence, \
 in the user's language, saying what you are about to do and why.";
 
@@ -1395,9 +1465,33 @@ B.";
             "desktop_click",
             "desktop_type",
             "desktop_press",
+            "desktop_changes",
+            "desktop_wait",
         ] {
             named(n);
         }
+        assert_eq!(
+            named("desktop_changes")["inputSchema"]["required"],
+            json!([])
+        );
+        assert_eq!(named("desktop_wait")["inputSchema"]["required"], json!([]));
+        for k in [
+            "appears",
+            "gone",
+            "text",
+            "quiet_ms",
+            "timeout_ms",
+            "window",
+        ] {
+            assert!(
+                !named("desktop_wait")["inputSchema"]["properties"][k].is_null(),
+                "{k}"
+            );
+        }
+        assert!(named("desktop_changes")["description"]
+            .as_str()
+            .unwrap()
+            .contains("only when you need refs"));
         assert_eq!(
             named("desktop_type")["inputSchema"]["required"],
             json!(["window", "text"])
@@ -1416,6 +1510,8 @@ B.";
             "desktop_click",
             "desktop_type",
             "desktop_press",
+            "desktop_changes",
+            "desktop_wait",
         ] {
             let reason = &named(n)["inputSchema"]["properties"]["reason"];
             assert_eq!(reason["type"], "string", "{n}");
@@ -1432,6 +1528,24 @@ B.";
         let said = s.handle(&init).unwrap()["result"]["instructions"].clone();
         assert!(said.as_str().unwrap().contains("desktop_snapshot"));
         assert!(said.as_str().unwrap().contains("give every desktop call"));
+        assert!(said
+            .as_str()
+            .unwrap()
+            .contains("desktop_changes what changed"));
+        assert!(said.as_str().unwrap().contains("desktop_wait"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_desktop_wait_for_nothing_asks_nothing() {
+        let (mut s, calls) = server(|_| Ok(json!({ "allowed": true })));
+        let a = s.handle(&call("desktop_wait", json!({}))).unwrap();
+        assert_eq!(a["result"]["isError"], true);
+        assert!(a["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("say what to wait for"));
+        assert!(calls.borrow().is_empty());
     }
 
     #[cfg(windows)]
