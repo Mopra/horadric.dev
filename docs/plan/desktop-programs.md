@@ -33,6 +33,23 @@ window and operate it, within what the human allowed. Windows only.
   call over a named pipe that takes one local client, each end checking
   the other's process id. The program is named as running as
   administrator, so a grant for the normal program does not cover it.
+- **Watched between looks.** From the first time a session looks at a
+  program or operates it, `horadric mcp` watches it (`watch.rs`): a
+  thread of its own holds out of context WinEvent hooks on that process
+  and keeps the last 500 changes, each numbered: windows and dialogs
+  shown and closed, the front, menus, titles, and elements whose name,
+  value or state changed, read through MSAA after a burst is folded (one
+  element changing fast is one change from first to last, at most 60
+  are kept a second, caret, location and reorder events are not hooked).
+  `desktop_changes` tells what changed since the session last asked, one
+  line each, and `desktop_wait` blocks until a window appears or is
+  gone, a text appears or the program goes quiet, so an agent asks
+  cheaply instead of taking snapshot after snapshot. Click, type and
+  press end with what changed because of them. WinEvents from a program
+  run as administrator do reach a hook that is not (tried on
+  2026-11-09), but its elements then mostly will not say what they hold,
+  so for such a window the helper watches, and its changes come over
+  the same pipe.
 - **Seen on the stage.** Every operate action shows a notification naming
   the session and the program, so the human always knows an agent has
   their program in hand.

@@ -8,9 +8,10 @@
 //! only asked whether the human allows it: once per program per session,
 //! and again for anything that looks risky.
 
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use windows::core::{Interface, BSTR, HRESULT};
@@ -59,6 +60,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::desktop_helper::{as_administrator, Helper, HelperStart};
 use crate::mcp::text;
+use crate::watch::{self, changes_text, digest, verdict, Until};
 
 /// The most elements one snapshot holds, so a vast window can not take
 /// minutes or fill the context.
@@ -67,6 +69,21 @@ const MOST_ELEMENTS: usize = 2000;
 /// A dialog with fewer elements than this is read whole to judge whether
 /// what is about to happen in it is risky.
 const SMALL_DIALOG: usize = 40;
+
+/// How long `desktop_wait` waits when not told, and at most.
+const WAIT_DEFAULT_MS: u64 = 15_000;
+const WAIT_MOST_MS: u64 = 60_000;
+
+/// Said when a change is asked for before any program is watched.
+const NOTHING_WATCHED: &str = "Nothing is watched yet: Horadric watches a program from the first \
+time this session looks at it or operates it (desktop_snapshot, desktop_screenshot, or naming its \
+window to desktop_changes or desktop_wait).";
+
+/// Said of a window that runs as administrator when the helper that
+/// reaches it is not to be had.
+const UNWATCHED: &str = "Changes in this window are only partly watched because it runs as \
+administrator: its windows opening, closing and coming to the front, and that something in it \
+changed, mostly without what the change was.";
 
 /// The widest picture, in pixels.
 const WIDEST: u32 = 1600;
@@ -663,6 +680,9 @@ pub struct Desktop {
     /// Why the helper can not be had: the user declined it, or it died.
     /// Kept so Windows does not ask the user again on every call.
     no_helper: Option<String>,
+    /// The last change `desktop_changes` told, per program (none for
+    /// all), so the next call starts after it.
+    seen: HashMap<Option<u32>, u64>,
 }
 
 /// What is known about the element an action aims at.
@@ -839,7 +859,7 @@ fn is_dialog(w: &Window) -> bool {
     w.owner.is_some() || w.class == "#32770"
 }
 
-fn info(id: isize) -> Window {
+pub(crate) fn info(id: isize) -> Window {
     unsafe {
         let h = hwnd(id);
         let mut buf = [0u16; 512];
@@ -1198,6 +1218,14 @@ impl Desktop {
         if name == "desktop_windows" {
             return Ok(vec![text(windows_text(&list_windows()))]);
         }
+        // Without a window these read what is watched already, every
+        // program in it approved earlier, so there is nothing to ask.
+        let unnamed = args.get("window").is_none_or(Value::is_null);
+        match name {
+            "desktop_changes" if unnamed => return Ok(vec![text(self.changes(args, None, app))]),
+            "desktop_wait" if unnamed => return Ok(vec![text(self.wait(args, None)?)]),
+            _ => {}
+        }
         let (w, root) = find(args.get("window"))?;
         let mut walled = out_of_reach(&w);
         if let Some(why) = &walled {
@@ -1215,6 +1243,7 @@ impl Desktop {
             "desktop_snapshot" => {
                 let what = format!("read the controls of {:?}", w.title);
                 allow(app, &root, "see", &what, false, None, &reason)?;
+                watch::follow(w.pid);
                 let result = self.snapshot(&w).map(|mut tree| {
                     if let Some(why) = walled {
                         tree.push_str(&format!("\n(Note: {why}.)"));
@@ -1230,6 +1259,7 @@ impl Desktop {
                 };
                 let what = format!("take a picture of {:?}", w.title);
                 allow(app, &root, "see", &what, false, None, &reason)?;
+                watch::follow(w.pid);
                 let result =
                     self.picture(&w, crop.as_ref().map(|a| a.rect))
                         .map(|(png, copied)| {
@@ -1270,10 +1300,11 @@ impl Desktop {
                 let risky = flag("risky") || self.looks_risky(&w, &[&aim.name]);
                 let point = aim_point(&w, &aim);
                 allow(app, &root, "operate", &what, risky, point, &reason)?;
-                let before = list_windows();
+                watch::follow(w.pid);
+                let (before, mark) = (list_windows(), watch::newest());
                 let result = self.click(&w, &aim, button, double).map(|mut said| {
                     thread::sleep(settle);
-                    said.push_str(&opened(&before, &w));
+                    said.push_str(&came_of(&before, &w, mark));
                     (vec![text(said.clone())], said)
                 });
                 report(app, &root, &what, result)
@@ -1292,10 +1323,11 @@ impl Desktop {
                     || self.looks_risky(&w, &[&aim.name]);
                 let point = aim_point(&w, &aim);
                 allow(app, &root, "operate", &what, risky, point, &reason)?;
-                let before = list_windows();
+                watch::follow(w.pid);
+                let (before, mark) = (list_windows(), watch::newest());
                 let result = self.type_in(&w, &aim, typed, submit).map(|mut said| {
                     thread::sleep(settle);
-                    said.push_str(&opened(&before, &w));
+                    said.push_str(&came_of(&before, &w, mark));
                     (vec![text(said.clone())], said)
                 });
                 report(app, &root, &what, result)
@@ -1313,18 +1345,159 @@ impl Desktop {
                     || self.looks_risky(&w, &[&focused, key]);
                 let point = at.or_else(|| window_point(&w));
                 allow(app, &root, "operate", &what, risky, point, &reason)?;
-                let before = list_windows();
+                watch::follow(w.pid);
+                let (before, mark) = (list_windows(), watch::newest());
                 let pressed = bring_forward(&w).and_then(|()| send_strokes(&chord_input(&chord)));
                 let result = pressed.map(|()| {
                     thread::sleep(settle);
                     let mut said = format!("Pressed {key} in {:?}.", w.title);
-                    said.push_str(&opened(&before, &w));
+                    said.push_str(&came_of(&before, &w, mark));
                     (vec![text(said.clone())], said)
+                });
+                report(app, &root, &what, result)
+            }
+            "desktop_changes" | "desktop_wait" => {
+                let what = if name == "desktop_wait" {
+                    format!("wait for a change in {:?}", w.title)
+                } else {
+                    format!("read what changed in {:?}", w.title)
+                };
+                allow(app, &root, "see", &what, false, None, &reason)?;
+                watch::follow(w.pid);
+                let answer = if name == "desktop_wait" {
+                    self.wait(args, Some(&w))
+                } else {
+                    Ok(self.changes(args, Some(&w), app))
+                };
+                let result = answer.map(|mut said| {
+                    if let Some(why) = walled {
+                        said.push_str(&format!("\n(Note: {why}. {UNWATCHED})"));
+                    }
+                    let outcome = if name == "desktop_wait" {
+                        "Waited for a change."
+                    } else {
+                        "Read what changed."
+                    };
+                    (vec![text(said)], outcome.to_string())
                 });
                 report(app, &root, &what, result)
             }
             _ => Err(format!("there is no tool {name}")),
         }
+    }
+
+    /// What changed since the last call, in `w`'s program or in every
+    /// program watched, the helper's too.
+    fn changes<A: FnMut(Value) -> Result<Value, String>>(
+        &mut self,
+        args: &Value,
+        w: Option<&Window>,
+        app: &mut A,
+    ) -> String {
+        let pid = w.map(|w| w.pid);
+        let mut out = if pid.is_none() && !watch::any_followed() {
+            NOTHING_WATCHED.to_string()
+        } else {
+            watch::flush();
+            let since = args
+                .get("since")
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| self.seen.get(&pid).copied().unwrap_or(0));
+            let (list, lost, newest) = watch::since(since, pid);
+            self.seen.insert(pid, newest);
+            let scope = match w {
+                Some(w) => format!(" in {:?}", w.title),
+                None => " in the watched programs".to_string(),
+            };
+            changes_text(&list, since, newest, lost, &scope)
+        };
+        if pid.is_none() {
+            if let Some(helper) = self.helper.as_mut() {
+                let mut marked = |body: Value| app(as_administrator(body));
+                let theirs = helper.call("desktop_changes", args, &mut marked, Duration::ZERO);
+                if let Ok(Ok(content)) = theirs {
+                    let said = content
+                        .first()
+                        .and_then(|c| c["text"].as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    out.push_str(&format!("\nIn programs that run as administrator: {said}"));
+                }
+            }
+        }
+        out
+    }
+
+    /// Waits until what `args` asks for holds, in `w`'s program or in any
+    /// watched, and says which held and what changed meanwhile.
+    fn wait(&mut self, args: &Value, w: Option<&Window>) -> Result<String, String> {
+        let s = |k: &str| {
+            args.get(k)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+        };
+        let until = Until {
+            appears: s("appears"),
+            text: s("text"),
+            gone: s("gone"),
+            quiet_ms: args.get("quiet_ms").and_then(Value::as_u64),
+        };
+        if until.is_empty() {
+            return Err("say what to wait for: appears, gone, text or quiet_ms".into());
+        }
+        let pid = w.map(|w| w.pid);
+        let needs_watch = until.text.is_some() || until.quiet_ms.is_some();
+        if needs_watch && pid.is_none() && !watch::any_followed() {
+            return Err(format!("{NOTHING_WATCHED} Name the window to wait in."));
+        }
+        let most = Duration::from_millis(
+            args.get("timeout_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(WAIT_DEFAULT_MS)
+                .clamp(100, WAIT_MOST_MS),
+        );
+        let titled = until.appears.is_some() || until.gone.is_some();
+        watch::flush();
+        let (mark, started, begun) = (watch::newest(), watch::now_ms(), Instant::now());
+        let met = loop {
+            let titles: Vec<String> = if titled {
+                list_windows().into_iter().map(|w| w.title).collect()
+            } else {
+                Vec::new()
+            };
+            let (seen, _, newest) = watch::since(mark, pid);
+            if let Some(v) = verdict(&until, &titles, &seen, started, watch::now_ms()) {
+                break Some(v);
+            }
+            let left = most.saturating_sub(begun.elapsed());
+            if left.is_zero() {
+                break None;
+            }
+            watch::wait_for_change(newest, left.min(Duration::from_millis(150)));
+        };
+        let (seen, _, newest) = watch::since(mark, pid);
+        self.seen.insert(pid, newest);
+        let took = begun.elapsed().as_secs_f32();
+        let mut out = match met {
+            Some(v) => format!("Done after {took:.1} s: {v}."),
+            None => format!(
+                "Timed out after {took:.1} s: nothing asked for held. desktop_snapshot or \
+                 desktop_screenshot shows where the window is."
+            ),
+        };
+        if seen.is_empty() {
+            out.push_str(" Nothing changed meanwhile.");
+        } else {
+            out.push_str(" Meanwhile:");
+            let skip = seen.len().saturating_sub(watch::MOST_LINES);
+            for c in &seen[skip..] {
+                out.push('\n');
+                out.push_str(&watch::line(c));
+            }
+        }
+        Ok(out)
     }
 
     fn snapshot(&mut self, w: &Window) -> Result<String, String> {
@@ -1708,6 +1881,20 @@ impl Desktop {
         let png = unsafe { encode(&pixels, width as u32, height as u32, part) }.map_err(win_err)?;
         Ok((png, copied))
     }
+}
+
+/// What came of an action on `w`, told by the watcher from change `mark`
+/// on, or by the windows that are new since `before` when it has nothing.
+fn came_of(before: &[Window], w: &Window, mark: u64) -> String {
+    if watch::following(w.pid) {
+        watch::flush();
+        let (list, _, _) = watch::since(mark, Some(w.pid));
+        let said = digest(&list, 2);
+        if !said.is_empty() {
+            return said;
+        }
+    }
+    opened(before, w)
 }
 
 /// What a new window of the same program, a dialog most likely, says it
@@ -2554,6 +2741,172 @@ mod tests {
             }
             Err(e) => println!("ERROR: {e}"),
         }
+    }
+
+    /// A window of our own to operate: a button opens a modal dialog with
+    /// a field, Escape closes it.
+    const DIALOG_FORM: &str = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$f = New-Object Windows.Forms.Form
+$f.Text = 'Horadric operate test'
+$b = New-Object Windows.Forms.Button; $b.Text = 'Settings'; $b.Top = 10
+$b.Add_Click({
+  $d = New-Object Windows.Forms.Form; $d.Text = 'Settings dialog'
+  $t = New-Object Windows.Forms.TextBox; $t.AccessibleName = 'IP address'; $t.Text = '10.0.0.3'; $t.Top = 10
+  $x = New-Object Windows.Forms.Button; $x.Text = 'Cancel'; $x.Top = 40
+  $x.DialogResult = [Windows.Forms.DialogResult]::Cancel
+  $d.Controls.AddRange(@($t, $x)); $d.CancelButton = $x
+  [void]$d.ShowDialog($f)
+})
+$f.Controls.Add($b)
+[Windows.Forms.Application]::Run($f)
+"#;
+
+    /// Not a check but a run to read: starts the form above, opens its
+    /// dialog, types into its field, asks what changed, closes the dialog,
+    /// waits for it to be gone and for quiet, and closes the form.
+    /// `cargo test -p horadric watch_a_dialog_by_hand -- --ignored
+    /// --nocapture`
+    #[test]
+    #[ignore]
+    fn watch_a_dialog_by_hand() {
+        let script = std::env::temp_dir().join("horadric-operate-form.ps1");
+        std::fs::write(&script, DIALOG_FORM).unwrap();
+        let mut form = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .spawn()
+            .unwrap();
+        let mut w = None;
+        for _ in 0..40 {
+            thread::sleep(Duration::from_millis(250));
+            w = list_windows()
+                .into_iter()
+                .find(|w| w.title == "Horadric operate test");
+            if w.is_some() {
+                break;
+            }
+        }
+        let w = w.expect("the form came up");
+        let mut d = Desktop::default();
+        let mut app = |_: Value| Ok(json!({ "allowed": true }));
+        let id = json!(w.hwnd);
+        let mut run = |name: &str, args: Value| {
+            let r = d.tool(name, &args, &mut app, Duration::from_millis(400));
+            match &r {
+                Ok(c) => println!("{name}: {}", c[0]["text"].as_str().unwrap_or("(an image)")),
+                Err(e) => println!("{name} ERROR: {e}"),
+            }
+            r.map(|c| c[0]["text"].as_str().unwrap_or_default().to_string())
+                .unwrap_or_else(|e| format!("ERROR: {e}"))
+        };
+        let first = run("desktop_changes", json!({ "window": id }));
+        // A real key, not UI Automation's invoke: a WinForms button holds
+        // that until its modal dialog closes, and UI Automation then waits
+        // on the program for anything else.
+        let clicked = run("desktop_press", json!({ "window": id, "key": "Enter" }));
+        let waited_for = run(
+            "desktop_wait",
+            json!({ "appears": "Settings dialog", "timeout_ms": 5000 }),
+        );
+        let typed = run(
+            "desktop_type",
+            json!({ "window": "Settings dialog", "name": "IP address", "text": "10.0.0.5" }),
+        );
+        let changes = run("desktop_changes", json!({ "window": id }));
+        let again = run("desktop_changes", json!({ "window": id }));
+        let escaped = run(
+            "desktop_press",
+            json!({ "window": "Settings dialog", "key": "Escape" }),
+        );
+        let gone = run(
+            "desktop_wait",
+            json!({ "window": id, "gone": "Settings dialog", "timeout_ms": 5000 }),
+        );
+        let quiet = run(
+            "desktop_wait",
+            json!({ "quiet_ms": 800, "timeout_ms": 5000 }),
+        );
+        let _ = form.kill();
+        let _ = form.wait();
+        let _ = std::fs::remove_file(&script);
+        assert!(first.starts_with("Nothing changed"), "{first}");
+        assert!(clicked.contains("dialog shown"), "{clicked}");
+        assert!(waited_for.starts_with("Done after"), "{waited_for}");
+        assert!(typed.contains("10.0.0.3\" -> \"10.0.0.5"), "{typed}");
+        assert!(
+            changes.contains("dialog shown \"Settings dialog\""),
+            "{changes}"
+        );
+        assert!(changes.contains("10.0.0.5"), "{changes}");
+        assert!(again.starts_with("Nothing changed"), "{again}");
+        assert!(escaped.contains("dialog closed"), "{escaped}");
+        assert!(gone.starts_with("Done after"), "{gone}");
+        assert!(quiet.contains("nothing changed for 800 ms"), "{quiet}");
+    }
+
+    /// The same for a window that runs as administrator, reached through
+    /// the helper, on a machine that elevates without asking: starts a
+    /// small form as administrator that changes by itself, reads it once,
+    /// and asks what changed. `cargo build -p horadric` first, for the
+    /// helper, then `cargo test -p horadric watch_elevated_by_hand --
+    /// --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn watch_elevated_by_hand() {
+        let script = std::env::temp_dir().join("horadric-watch-elevated.ps1");
+        std::fs::write(&script, crate::watch::tests::FORM).unwrap();
+        let start = format!(
+            "(Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-STA',\
+             '-ExecutionPolicy','Bypass','-File','{}').Id",
+            script.display()
+        );
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &start])
+            .output()
+            .unwrap();
+        let pid: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+        let mut w = None;
+        for _ in 0..40 {
+            thread::sleep(Duration::from_millis(100));
+            w = list_windows().into_iter().find(|w| w.pid == pid);
+            if w.is_some() {
+                break;
+            }
+        }
+        let w = w.expect("the form came up");
+        let mut d = Desktop::default();
+        let mut app = |_: Value| Ok(json!({ "allowed": true }));
+        let id = json!(w.hwnd);
+        let mut run = |name: &str, args: Value| {
+            let r = d.tool(name, &args, &mut app, Duration::from_millis(400));
+            match &r {
+                Ok(c) => println!("{name}: {}", c[0]["text"].as_str().unwrap_or("(an image)")),
+                Err(e) => println!("{name} ERROR: {e}"),
+            }
+            r
+        };
+        let _ = run("desktop_snapshot", json!({ "window": id }));
+        let waited = run(
+            "desktop_wait",
+            json!({ "window": id, "text": "Watch dialog", "timeout_ms": 8000 }),
+        );
+        thread::sleep(Duration::from_millis(2500));
+        let changes = run("desktop_changes", json!({ "window": id }));
+        let all = run("desktop_changes", json!({}));
+        thread::sleep(Duration::from_secs(3));
+        let _ = std::fs::remove_file(&script);
+        let text =
+            |r: Result<Vec<Value>, String>| r.unwrap()[0]["text"].as_str().unwrap().to_string();
+        let waited = text(waited);
+        assert!(waited.starts_with("Done after"), "{waited}");
+        assert!(
+            waited.contains("CheckBox \"Online\" now checked"),
+            "{waited}"
+        );
+        let changes = text(changes);
+        assert!(changes.contains("dialog closed"), "{changes}");
+        assert!(text(all).contains("run as administrator"));
     }
 
     #[test]

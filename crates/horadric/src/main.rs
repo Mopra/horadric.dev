@@ -61,6 +61,8 @@ mod setup;
 mod status;
 #[cfg(not(target_os = "linux"))]
 mod task;
+#[cfg(windows)]
+mod watch;
 
 use std::io::Read;
 #[cfg(not(target_os = "linux"))]
