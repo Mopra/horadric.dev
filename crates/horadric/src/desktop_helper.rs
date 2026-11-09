@@ -7,8 +7,11 @@
 //! window like that `horadric mcp` starts `horadric desktop-helper` as
 //! administrator (Windows asks the user, unless its settings elevate
 //! without asking) and hands it the whole desktop call over a named pipe.
-//! The helper asks for the human's leave through the MCP process, so the
-//! grants work the same as for any other program.
+//! The helper asks for the human's leave, and tells the app how each
+//! action went, through the MCP process, so the grants and what the human
+//! watches work the same as for any other program. It works out where an
+//! action lands itself, so that point reaches the app in the same `allow`
+//! body, before the action, as it does for a program run normally.
 //!
 //! The pipe takes one client, never a remote one, and each end checks the
 //! other is the process it expects, so nothing else on the machine can
@@ -44,8 +47,9 @@ const START_WAIT: Duration = Duration::from_secs(60);
 /// One line from the helper to the MCP process.
 #[derive(Debug, PartialEq)]
 pub enum FromHelper {
-    /// Ask the app for the human's leave with this body.
-    Allow(Value),
+    /// Send the app this body, an `allow` or a `done`, and hand its
+    /// answer back.
+    App(Value),
     /// The call is answered with this content.
     Done(Vec<Value>),
     /// The call failed, saying why.
@@ -55,8 +59,8 @@ pub enum FromHelper {
 /// Reads one line the helper wrote.
 pub fn from_helper(line: &str) -> Result<FromHelper, String> {
     let v: Value = serde_json::from_str(line).map_err(|e| format!("the helper said {e}"))?;
-    if let Some(body) = v.get("allow") {
-        return Ok(FromHelper::Allow(body.clone()));
+    if let Some(body) = v.get("app") {
+        return Ok(FromHelper::App(body.clone()));
     }
     if let Some(content) = v.get("done").and_then(Value::as_array) {
         return Ok(FromHelper::Done(content.clone()));
@@ -67,7 +71,7 @@ pub fn from_helper(line: &str) -> Result<FromHelper, String> {
     Err(format!("the helper said something unknown: {line}"))
 }
 
-/// The app's answer to an `allow`, as the line sent back to the helper.
+/// The app's answer, as the line sent back to the helper.
 pub fn answer_line(answer: &Result<Value, String>) -> String {
     match answer {
         Ok(v) => json!({ "ok": v }).to_string(),
@@ -85,9 +89,9 @@ pub fn answer_of(line: &str) -> Result<Value, String> {
     }
 }
 
-/// An `allow` body for a window reached through the helper. The program
-/// is named as running as administrator, which also keeps its grant apart
-/// from the grant for the same program run normally.
+/// An `allow` or `done` body for a window reached through the helper. The
+/// program is named as running as administrator, which also keeps its
+/// grant apart from the grant for the same program run normally.
 pub fn as_administrator(mut body: Value) -> Value {
     if let Some(exe) = body
         .pointer("/window/exe")
@@ -268,7 +272,7 @@ impl Helper {
                 return Err("the helper ended".into());
             }
             match from_helper(line.trim_end())? {
-                FromHelper::Allow(body) => {
+                FromHelper::App(body) => {
                     let answer = app(body);
                     writeln!(self.writer, "{}", answer_line(&answer)).map_err(lost)?;
                 }
@@ -315,7 +319,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             Duration::from_millis(req.get("settle_ms").and_then(Value::as_u64).unwrap_or(0));
         let mut broken = None;
         let mut app = |body: Value| -> Result<Value, String> {
-            writeln!(writer, "{}", json!({ "allow": body })).map_err(|e| e.to_string())?;
+            writeln!(writer, "{}", json!({ "app": body })).map_err(|e| e.to_string())?;
             let mut answer = String::new();
             match reader.read_line(&mut answer) {
                 Ok(n) if n > 0 => answer_of(answer.trim_end()),
@@ -348,8 +352,8 @@ mod tests {
     #[test]
     fn helper_lines_are_read_by_their_key() {
         assert_eq!(
-            from_helper(r#"{"allow":{"exe":"a.exe"}}"#),
-            Ok(FromHelper::Allow(json!({"exe": "a.exe"})))
+            from_helper(r#"{"app":{"exe":"a.exe"}}"#),
+            Ok(FromHelper::App(json!({"exe": "a.exe"})))
         );
         assert_eq!(
             from_helper(r#"{"done":[{"type":"text","text":"hi"}]}"#),

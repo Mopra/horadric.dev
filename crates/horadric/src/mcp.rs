@@ -1013,9 +1013,17 @@ fn desktop_tools() -> Vec<Value> {
                 deleting, saving over a file. The user is then asked to confirm.",
         })
     };
+    let reason = || {
+        json!({
+            "type": "string",
+            "description": "One short sentence, in the user's language, saying what you are \
+                about to do and why; it is shown to the human in Horadric's thinking box.",
+        })
+    };
     let element = |verb: &str| {
         json!({
             "window": window(),
+            "reason": reason(),
             "ref": { "type": "string", "description": "A ref from desktop_snapshot of this window, like e12" },
             "name": { "type": "string", "description": format!("Where there is no ref: the first element whose name or automation id contains this, to {verb}") },
             "risky": risky(),
@@ -1044,7 +1052,7 @@ fn desktop_tools() -> Vec<Value> {
              value), and a ref like e12 for desktop_click, desktop_type and \
              desktop_screenshot. Take a new one after the window changes; refs from an old \
              one go stale.",
-            json!({ "window": window() }),
+            json!({ "window": window(), "reason": reason() }),
             &["window"],
         ),
         tool(
@@ -1055,6 +1063,7 @@ fn desktop_tools() -> Vec<Value> {
             json!({
                 "window": window(),
                 "ref": { "type": "string", "description": "Only this element, a ref from desktop_snapshot" },
+                "reason": reason(),
             }),
             &["window"],
         ),
@@ -1098,6 +1107,7 @@ fn desktop_tools() -> Vec<Value> {
                 "window": window(),
                 "key": { "type": "string" },
                 "risky": risky(),
+                "reason": reason(),
             }),
             &["window", "key"],
         ),
@@ -1189,7 +1199,9 @@ do the same for programs on the user's Windows desktop (an engineering tool like
 its watch window, its dialogs): list them with desktop_windows, read one with desktop_snapshot, \
 look with desktop_screenshot, act with desktop_click, desktop_type and desktop_press, and know \
 that the user approves each program once per session and confirms each risky action. Refs from \
-desktop_snapshot are surer than points on the screen, so act by ref or name.";
+desktop_snapshot are surer than points on the screen, so act by ref or name. The user watches \
+the control happen, so give every desktop call but desktop_windows a reason: one short sentence, \
+in the user's language, saying what you are about to do and why.";
 
 #[cfg(test)]
 mod tests {
@@ -1398,9 +1410,28 @@ B.";
                 "{n}"
             );
         }
+        for n in [
+            "desktop_snapshot",
+            "desktop_screenshot",
+            "desktop_click",
+            "desktop_type",
+            "desktop_press",
+        ] {
+            let reason = &named(n)["inputSchema"]["properties"]["reason"];
+            assert_eq!(reason["type"], "string", "{n}");
+            assert!(
+                reason["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("thinking box"),
+                "{n}"
+            );
+        }
+        assert!(named("desktop_windows")["inputSchema"]["properties"]["reason"].is_null());
         let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
         let said = s.handle(&init).unwrap()["result"]["instructions"].clone();
         assert!(said.as_str().unwrap().contains("desktop_snapshot"));
+        assert!(said.as_str().unwrap().contains("give every desktop call"));
     }
 
     #[cfg(windows)]

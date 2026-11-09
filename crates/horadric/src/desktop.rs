@@ -120,19 +120,36 @@ pub fn looks_risky(texts: &[&str]) -> bool {
     })
 }
 
+/// The window as the app's bodies name it.
+fn window_json(window: &Window) -> Value {
+    json!({
+        "hwnd": window.hwnd,
+        "title": window.title,
+        "exe": window.exe,
+        "pid": window.pid,
+    })
+}
+
 /// What the app is asked before the agent may see or operate `window`.
-pub fn allow_body(window: &Window, action: &str, what: &str, risky: bool) -> Value {
+/// `point` is where on the screen the action lands, so the app can glide
+/// its ghost cursor there while the human reads `reason`, the agent's own
+/// words for why.
+pub fn allow_body(
+    window: &Window,
+    action: &str,
+    what: &str,
+    risky: bool,
+    point: Option<(i32, i32)>,
+    reason: &str,
+) -> Value {
     json!({
         "op": "desktop.allow",
-        "window": {
-            "hwnd": window.hwnd,
-            "title": window.title,
-            "exe": window.exe,
-            "pid": window.pid,
-        },
+        "window": window_json(window),
         "action": action,
         "what": what,
         "risky": risky,
+        "point": point.map(|(x, y)| json!({ "x": x, "y": y })),
+        "reason": reason,
     })
 }
 
@@ -143,13 +160,49 @@ pub fn allow<A: FnMut(Value) -> Result<Value, String>>(
     action: &str,
     what: &str,
     risky: bool,
+    point: Option<(i32, i32)>,
+    reason: &str,
 ) -> Result<(), String> {
-    let answer = app(allow_body(window, action, what, risky))?;
+    let answer = app(allow_body(window, action, what, risky, point, reason))?;
     if answer["allowed"] == true {
         Ok(())
     } else {
         Err(format!("Horadric did not allow you to {what}"))
     }
+}
+
+/// What the app is told after an allowed action, for the history the
+/// human watches: whether it worked and, in one line, what came of it.
+pub fn done_body(window: &Window, what: &str, ok: bool, outcome: &str) -> Value {
+    json!({
+        "op": "desktop.done",
+        "window": window_json(window),
+        "what": what,
+        "ok": ok,
+        "outcome": short(outcome, 160),
+    })
+}
+
+/// Tells the app how an allowed action went and hands back its content.
+/// `result` holds the content and the outcome line, or the error. The
+/// app's answer does not matter: the action has happened either way.
+pub fn report<A: FnMut(Value) -> Result<Value, String>>(
+    app: &mut A,
+    window: &Window,
+    what: &str,
+    result: Result<(Vec<Value>, String), String>,
+) -> Result<Vec<Value>, String> {
+    let body = match &result {
+        Ok((_, outcome)) => done_body(window, what, true, outcome),
+        Err(why) => done_body(window, what, false, why),
+    };
+    let _ = app(body);
+    result.map(|(content, _)| content)
+}
+
+/// The middle of a rectangle given by its edges, none when it is empty.
+pub fn centre(left: i32, top: i32, right: i32, bottom: i32) -> Option<(i32, i32)> {
+    (right > left && bottom > top).then_some(((left + right) / 2, (top + bottom) / 2))
 }
 
 /// The window list as the agent reads it.
@@ -1156,15 +1209,19 @@ impl Desktop {
         if let (Some(why), "desktop_click" | "desktop_type" | "desktop_press") = (&walled, name) {
             return Err(why.clone());
         }
+        // The agent's words for the human, kept to one line.
+        let reason = short(s("reason").unwrap_or_default(), 300);
         match name {
             "desktop_snapshot" => {
                 let what = format!("read the controls of {:?}", w.title);
-                allow(app, &root, "see", &what, false)?;
-                let mut tree = self.snapshot(&w)?;
-                if let Some(why) = walled {
-                    tree.push_str(&format!("\n(Note: {why}.)"));
-                }
-                Ok(vec![text(tree)])
+                allow(app, &root, "see", &what, false, None, &reason)?;
+                let result = self.snapshot(&w).map(|mut tree| {
+                    if let Some(why) = walled {
+                        tree.push_str(&format!("\n(Note: {why}.)"));
+                    }
+                    (vec![text(tree)], "Read the window's controls.".to_string())
+                });
+                report(app, &root, &what, result)
             }
             "desktop_screenshot" => {
                 let crop = match s("ref") {
@@ -1172,20 +1229,29 @@ impl Desktop {
                     None => None,
                 };
                 let what = format!("take a picture of {:?}", w.title);
-                allow(app, &root, "see", &what, false)?;
-                let (png, copied) = self.picture(&w, crop.as_ref().map(|a| a.rect))?;
-                let mut content = vec![json!({
-                    "type": "image",
-                    "data": horadric_core::release::base64_encode(&png),
-                    "mimeType": "image/png",
-                })];
-                if copied {
-                    content.push(text(
-                        "Windows would not draw this window for the agent, so this is copied off \
-                         the screen: whatever covers the window shows too.",
-                    ));
-                }
-                Ok(content)
+                allow(app, &root, "see", &what, false, None, &reason)?;
+                let result =
+                    self.picture(&w, crop.as_ref().map(|a| a.rect))
+                        .map(|(png, copied)| {
+                            let mut content = vec![json!({
+                                "type": "image",
+                                "data": horadric_core::release::base64_encode(&png),
+                                "mimeType": "image/png",
+                            })];
+                            if copied {
+                                content.push(text(
+                                    "Windows would not draw this window for the agent, so this is \
+                                 copied off the screen: whatever covers the window shows too.",
+                                ));
+                            }
+                            let outcome = if copied {
+                                "Took a picture, copied off the screen."
+                            } else {
+                                "Took a picture."
+                            };
+                            (content, outcome.to_string())
+                        });
+                report(app, &root, &what, result)
             }
             "desktop_click" => {
                 let button = s("button").unwrap_or("left");
@@ -1202,12 +1268,15 @@ impl Desktop {
                 };
                 let what = format!("{how} {}", aim.what());
                 let risky = flag("risky") || self.looks_risky(&w, &[&aim.name]);
-                allow(app, &root, "operate", &what, risky)?;
+                let point = aim_point(&w, &aim);
+                allow(app, &root, "operate", &what, risky, point, &reason)?;
                 let before = list_windows();
-                let mut said = self.click(&w, &aim, button, double)?;
-                thread::sleep(settle);
-                said.push_str(&opened(&before, &w));
-                Ok(vec![text(said)])
+                let result = self.click(&w, &aim, button, double).map(|mut said| {
+                    thread::sleep(settle);
+                    said.push_str(&opened(&before, &w));
+                    (vec![text(said.clone())], said)
+                });
+                report(app, &root, &what, result)
             }
             "desktop_type" => {
                 let typed = s("text").ok_or("say what to type: text")?;
@@ -1221,12 +1290,15 @@ impl Desktop {
                 let risky = flag("risky")
                     || (submit && is_dialog(&w))
                     || self.looks_risky(&w, &[&aim.name]);
-                allow(app, &root, "operate", &what, risky)?;
+                let point = aim_point(&w, &aim);
+                allow(app, &root, "operate", &what, risky, point, &reason)?;
                 let before = list_windows();
-                let mut said = self.type_in(&w, &aim, typed, submit)?;
-                thread::sleep(settle);
-                said.push_str(&opened(&before, &w));
-                Ok(vec![text(said)])
+                let result = self.type_in(&w, &aim, typed, submit).map(|mut said| {
+                    thread::sleep(settle);
+                    said.push_str(&opened(&before, &w));
+                    (vec![text(said.clone())], said)
+                });
+                report(app, &root, &what, result)
             }
             "desktop_press" => {
                 let key = s("key").ok_or("say which key")?;
@@ -1235,18 +1307,21 @@ impl Desktop {
                     return Err(why);
                 }
                 let what = format!("press {key} in {:?}", w.title);
-                let focused = self.focused_name(&w);
+                let (focused, at) = self.focused(&w);
                 let risky = flag("risky")
                     || risky_key(&chord, is_dialog(&w))
                     || self.looks_risky(&w, &[&focused, key]);
-                allow(app, &root, "operate", &what, risky)?;
+                let point = at.or_else(|| window_point(&w));
+                allow(app, &root, "operate", &what, risky, point, &reason)?;
                 let before = list_windows();
-                bring_forward(&w)?;
-                send_strokes(&chord_input(&chord))?;
-                thread::sleep(settle);
-                let mut said = format!("Pressed {key} in {:?}.", w.title);
-                said.push_str(&opened(&before, &w));
-                Ok(vec![text(said)])
+                let pressed = bring_forward(&w).and_then(|()| send_strokes(&chord_input(&chord)));
+                let result = pressed.map(|()| {
+                    thread::sleep(settle);
+                    let mut said = format!("Pressed {key} in {:?}.", w.title);
+                    said.push_str(&opened(&before, &w));
+                    (vec![text(said.clone())], said)
+                });
+                report(app, &root, &what, result)
             }
             _ => Err(format!("there is no tool {name}")),
         }
@@ -1367,19 +1442,27 @@ impl Desktop {
         looks_risky(&refs)
     }
 
-    /// The name of what has the keyboard, when it is in `w`.
-    fn focused_name(&mut self, w: &Window) -> String {
+    /// The name of what has the keyboard, when it is in `w`, and its
+    /// middle on the screen, where a key pressed now lands.
+    fn focused(&mut self, w: &Window) -> (String, Option<(i32, i32)>) {
         let Ok(com) = self.com() else {
-            return String::new();
+            return (String::new(), None);
+        };
+        let el = unsafe { com.uia.GetFocusedElementBuildCache(&com.one) }
+            .ok()
+            // The process id is not among the cached properties, so it is
+            // read live; a cached read of it always fails.
+            .filter(|el| unsafe { el.CurrentProcessId() }.ok() == Some(w.pid as i32));
+        let Some(el) = el else {
+            return (String::new(), None);
         };
         unsafe {
-            com.uia
-                .GetFocusedElementBuildCache(&com.one)
+            let name = el.CachedName().map(|b| b.to_string()).unwrap_or_default();
+            let at = el
+                .CachedBoundingRectangle()
                 .ok()
-                .filter(|el| cached_i32(el, UIA_ProcessIdPropertyId) == Some(w.pid as i32))
-                .and_then(|el| el.CachedName().ok())
-                .map(|b| b.to_string())
-                .unwrap_or_default()
+                .and_then(|r| centre(r.left, r.top, r.right, r.bottom));
+            (name, at)
         }
     }
 
@@ -1640,6 +1723,23 @@ fn opened(before: &[Window], w: &Window) -> String {
     } else {
         format!(" A window opened: {}.", new.join(", "))
     }
+}
+
+/// The middle of `w` on the screen, none when it is minimized and so
+/// parked far off it.
+fn window_point(w: &Window) -> Option<(i32, i32)> {
+    if unsafe { IsIconic(hwnd(w.hwnd)) }.as_bool() {
+        return None;
+    }
+    let r = window_rect(w.hwnd);
+    centre(r.left, r.top, r.right, r.bottom)
+}
+
+/// Where an action on `aim` lands: its middle, or the window's when it
+/// has no place on screen.
+fn aim_point(w: &Window, aim: &Aim) -> Option<(i32, i32)> {
+    let r = aim.rect;
+    centre(r.left, r.top, r.right, r.bottom).or_else(|| window_point(w))
 }
 
 fn aim_of(el: IUIAutomationElement) -> Aim {
@@ -1914,32 +2014,105 @@ mod tests {
     }
 
     #[test]
-    fn the_allow_body_names_the_program_and_the_action() {
+    fn the_allow_body_names_the_program_the_action_and_where_it_lands() {
         let w = win(66, "Proj - Sysmac Studio", "SysmacStudio.exe");
         assert_eq!(
-            allow_body(&w, "operate", "click Button \"Transfer\"", true),
+            allow_body(
+                &w,
+                "operate",
+                "click Button \"Transfer\"",
+                true,
+                Some((-1200, 340)),
+                "Send the fix to the PLC"
+            ),
             json!({
                 "op": "desktop.allow",
                 "window": { "hwnd": 66, "title": "Proj - Sysmac Studio", "exe": "SysmacStudio.exe", "pid": 7 },
                 "action": "operate",
                 "what": "click Button \"Transfer\"",
                 "risky": true,
+                "point": { "x": -1200, "y": 340 },
+                "reason": "Send the fix to the PLC",
             })
         );
+        let seeing = allow_body(&w, "see", "look", false, None, "");
+        assert_eq!(seeing["point"], Value::Null);
+        assert_eq!(seeing["reason"], "");
     }
 
     #[test]
     fn allow_needs_the_app_to_say_allowed() {
         let w = win(1, "A", "a.exe");
         let mut yes = |_: Value| Ok(json!({ "allowed": true }));
-        assert!(allow(&mut yes, &w, "see", "look", false).is_ok());
+        assert!(allow(&mut yes, &w, "see", "look", false, None, "").is_ok());
         let mut silent = |_: Value| Ok(json!({}));
-        assert!(allow(&mut silent, &w, "see", "look", false).is_err());
+        assert!(allow(&mut silent, &w, "see", "look", false, None, "").is_err());
         let mut no = |_: Value| Err("the user said no".to_string());
         assert_eq!(
-            allow(&mut no, &w, "see", "look", false),
+            allow(&mut no, &w, "see", "look", false, None, ""),
             Err("the user said no".to_string())
         );
+    }
+
+    #[test]
+    fn the_done_body_says_how_it_went_in_one_line() {
+        let w = win(66, "Proj", "SysmacStudio.exe");
+        assert_eq!(
+            done_body(
+                &w,
+                "press Enter in \"Proj\"",
+                false,
+                "the window\nwould not come forward"
+            ),
+            json!({
+                "op": "desktop.done",
+                "window": { "hwnd": 66, "title": "Proj", "exe": "SysmacStudio.exe", "pid": 7 },
+                "what": "press Enter in \"Proj\"",
+                "ok": false,
+                "outcome": "the window would not come forward",
+            })
+        );
+        let long = "x".repeat(500);
+        let cut = done_body(&w, "look", true, &long);
+        assert_eq!(cut["outcome"].as_str().unwrap().chars().count(), 160);
+    }
+
+    #[test]
+    fn a_report_tells_the_app_and_keeps_the_result() {
+        let w = win(1, "A", "a.exe");
+        let mut told = Vec::new();
+        let mut app = |body: Value| {
+            told.push(body);
+            Err("an old Horadric knows no desktop.done".to_string())
+        };
+        let content = vec![json!({ "type": "text", "text": "hi" })];
+        assert_eq!(
+            report(
+                &mut app,
+                &w,
+                "click",
+                Ok((content.clone(), "Clicked.".into()))
+            ),
+            Ok(content)
+        );
+        assert_eq!(
+            report(&mut app, &w, "click", Err("covered".into())),
+            Err("covered".to_string())
+        );
+        assert_eq!(told.len(), 2);
+        assert_eq!(told[0]["op"], "desktop.done");
+        assert_eq!(told[0]["ok"], true);
+        assert_eq!(told[0]["outcome"], "Clicked.");
+        assert_eq!(told[1]["ok"], false);
+        assert_eq!(told[1]["outcome"], "covered");
+    }
+
+    #[test]
+    fn a_rectangle_has_a_middle_unless_it_is_empty() {
+        assert_eq!(centre(0, 0, 100, 50), Some((50, 25)));
+        assert_eq!(centre(-1920, -200, -1820, -100), Some((-1870, -150)));
+        assert_eq!(centre(10, 10, 10, 40), None);
+        assert_eq!(centre(10, 40, 30, 20), None);
     }
 
     #[test]

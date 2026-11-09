@@ -10,6 +10,10 @@
 //!
 //! Asking runs the dialog's modal loop, which must not hold the app, so a
 //! question waits on [`Desktop`] and is asked from the window procedure.
+//!
+//! What is allowed is shown while it happens, see [`super::ghost`]: a
+//! click waits for the ghost cursor to reach it, and the human can stop it
+//! on the way.
 
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
@@ -18,6 +22,7 @@ use horadric_hooks::listener::{BrowserCall, Reply};
 use serde_json::{json, Value};
 use windows::Win32::Foundation::HWND;
 
+use super::ghost::{self, Allowed};
 use super::{ask, post, with_app, App, WM_HORADRIC_DESKTOP};
 use crate::dialog::{Dialog, Tone};
 use crate::toast::Kind;
@@ -147,14 +152,58 @@ pub(super) fn operating_line(program: &str, what: &str) -> String {
     }
 }
 
+/// The short word a refusal leaves in the history.
+pub(super) fn refusal_word(why: Refusal) -> &'static str {
+    match why {
+        Refusal::Refused => "refused by the human",
+        Refusal::OnlyLook => "only looking was allowed",
+    }
+}
+
 /// A call as `horadric mcp` sent it.
 #[derive(Debug, PartialEq)]
 pub(super) struct Request {
     pub title: String,
     pub exe: String,
+    /// The program's window, for the screen the Thinking plate goes on.
+    pub hwnd: isize,
     pub action: Action,
     pub what: String,
     pub risky: bool,
+    /// Where the click goes, in physical screen pixels, for the ghost.
+    pub point: Option<(i32, i32)>,
+    /// The agent's own sentence on why.
+    pub reason: String,
+}
+
+/// A finished action, as `desktop.done` tells it.
+#[derive(Debug, PartialEq)]
+pub(super) struct Done {
+    pub what: String,
+    pub ok: bool,
+    pub outcome: String,
+}
+
+/// Reads a `desktop.done` body. Nothing waits on it, so a part missing
+/// is left empty rather than refused.
+pub(super) fn parse_done(body: &Value) -> Done {
+    let text = |k: &str| {
+        body.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Done {
+        what: text("what"),
+        ok: body.get("ok").and_then(Value::as_bool).unwrap_or(true),
+        outcome: text("outcome"),
+    }
+}
+
+fn point_of(v: Option<&Value>) -> Option<(i32, i32)> {
+    let v = v?;
+    let at = |k: &str| v.get(k)?.as_i64().and_then(|n| i32::try_from(n).ok());
+    Some((at("x")?, at("y")?))
 }
 
 /// Reads a `desktop.allow` body, or says what is wrong with it.
@@ -178,9 +227,16 @@ pub(super) fn parse(body: &Value) -> Result<Request, String> {
     Ok(Request {
         title: text(window.get("title")),
         exe: exe.to_string(),
+        hwnd: window
+            .get("hwnd")
+            .and_then(Value::as_i64)
+            .and_then(|h| isize::try_from(h).ok())
+            .unwrap_or(0),
         action,
         what: text(body.get("what")),
         risky: body.get("risky").and_then(Value::as_bool).unwrap_or(false),
+        point: point_of(body.get("point")),
+        reason: text(body.get("reason")),
     })
 }
 
@@ -242,6 +298,11 @@ impl App {
                 .reply
                 .send(json!({ "error": "this session is not one of Horadric's" }));
         }
+        if call.body.get("op").and_then(Value::as_str) == Some("desktop.done") {
+            let d = parse_done(&call.body);
+            ghost::done(&self.shared, &d.what, d.ok, &d.outcome);
+            return call.reply.send(json!({}));
+        }
         let request = match parse(&call.body) {
             Ok(r) => r,
             Err(e) => return call.reply.send(json!({ "error": e })),
@@ -270,22 +331,41 @@ impl App {
     /// Lets a call go ahead. Operating is shown, so the human always knows
     /// a program is being driven; looking is not, since screenshots come
     /// many to a turn.
+    ///
+    /// The Thinking plate and the frame round the screens say the rest, so
+    /// the toast comes once, as control begins.
     fn allow(&mut self, p: Pending) {
-        let r = &p.request;
+        let r = p.request;
+        let name = self.name_of(&p.session);
+        let program = program_name(&r.exe).to_string();
         if r.action == Action::Operate {
-            let name = self.name_of(&p.session);
-            let program = program_name(&r.exe);
-            self.toasts
-                .show(Kind::Info, &format!("{name} in {program}"), &r.what);
             // The tile says it until the agent's next tool event replaces
             // it. The tiles redraw on the next tick.
             if let Ok(mut reg) = self.shared.registry.lock() {
                 if let Some(s) = reg.get_mut(&p.session) {
-                    s.last_line = operating_line(program, &r.what);
+                    s.last_line = operating_line(&program, &r.what);
                 }
             }
         }
-        p.reply.send(json!({ "allowed": true }));
+        let call = Allowed {
+            name: name.clone(),
+            program: program.clone(),
+            reason: r.reason,
+            what: r.what.clone(),
+            point: r.point,
+            hwnd: r.hwnd,
+        };
+        let started = ghost::allowed(&self.shared, call, p.reply);
+        if started && r.action == Action::Operate {
+            self.toasts
+                .show(Kind::Info, &format!("{name} in {program}"), &r.what);
+        }
+    }
+
+    /// Refuses a call, and keeps it in the history.
+    fn refuse(&mut self, p: Pending, why: Refusal) {
+        ghost::refused(&self.shared, &p.request.what, refusal_word(why));
+        p.refuse(why);
     }
 
     /// The next waiting call that needs the human, answering on the way
@@ -295,7 +375,7 @@ impl App {
             let grant = self.grant_of(&p);
             match decide(grant, p.request.action, p.request.risky) {
                 Decision::Allow => self.allow(p),
-                Decision::Refuse(why) => p.refuse(why),
+                Decision::Refuse(why) => self.refuse(p, why),
                 ask => {
                     return Some(Question {
                         name: self.name_of(&p.session),
@@ -322,12 +402,12 @@ impl App {
         };
         match decision {
             Decision::Allow => self.allow(q.pending),
-            Decision::Refuse(why) => q.pending.refuse(why),
+            Decision::Refuse(why) => self.refuse(q.pending, why),
             Decision::AskRisky => {
                 q.risky = true;
                 return Some(q);
             }
-            Decision::AskApprove => q.pending.refuse(Refusal::Refused),
+            Decision::AskApprove => self.refuse(q.pending, Refusal::Refused),
         }
         None
     }
@@ -584,16 +664,67 @@ mod tests {
             "action": "operate",
             "what": "click Button \"OK\"",
             "risky": true,
+            "point": {"x": -1200, "y": 340},
+            "reason": "Confirm the transfer the human asked for.",
         });
         assert_eq!(
             parse(&body),
             Ok(Request {
                 title: "Watch".into(),
                 exe: "Sysmac Studio.exe".into(),
+                hwnd: 1,
                 action: Action::Operate,
                 what: "click Button \"OK\"".into(),
                 risky: true,
+                point: Some((-1200, 340)),
+                reason: "Confirm the transfer the human asked for.".into(),
             })
+        );
+    }
+
+    #[test]
+    fn a_request_without_a_point_or_reason_has_none() {
+        let mut body = json!({
+            "op": "desktop.allow",
+            "window": {"exe": "a.exe"},
+            "action": "see",
+            "point": null,
+        });
+        let r = parse(&body).unwrap();
+        assert_eq!((r.point, r.reason.as_str(), r.hwnd), (None, "", 0));
+        body["point"] = json!({"x": 5});
+        assert_eq!(parse(&body).unwrap().point, None);
+        body["point"] = json!({"x": 5, "y": 1e12});
+        assert_eq!(parse(&body).unwrap().point, None);
+    }
+
+    #[test]
+    fn a_done_is_read_from_its_body() {
+        let body = json!({
+            "op": "desktop.done",
+            "window": {"exe": "a.exe"},
+            "what": "click OK",
+            "ok": false,
+            "outcome": "the button was gone",
+        });
+        assert_eq!(
+            parse_done(&body),
+            Done {
+                what: "click OK".into(),
+                ok: false,
+                outcome: "the button was gone".into(),
+            }
+        );
+        let bare = parse_done(&json!({"op": "desktop.done"}));
+        assert!(bare.ok && bare.what.is_empty() && bare.outcome.is_empty());
+    }
+
+    #[test]
+    fn a_refusal_leaves_a_short_word_in_the_history() {
+        assert_eq!(refusal_word(Refusal::Refused), "refused by the human");
+        assert_ne!(
+            refusal_word(Refusal::OnlyLook),
+            refusal_word(Refusal::Refused)
         );
     }
 

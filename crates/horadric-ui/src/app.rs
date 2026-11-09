@@ -153,6 +153,9 @@ mod forge_tools;
 #[path = "desktop.rs"]
 mod desktop;
 
+#[path = "ghost.rs"]
+mod ghost;
+
 #[path = "chronicler.rs"]
 mod chronicler;
 
