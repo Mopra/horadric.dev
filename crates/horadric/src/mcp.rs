@@ -14,6 +14,10 @@
 //! leave each other, to every session, Horadric's or not. What a lore tool
 //! showed a session of Horadric's is passed on to the app, which lights it
 //! in the project's Arcane Sanctuary.
+//!
+//! The desktop tools, for programs on the user's Windows desktop, are in
+//! `desktop`: they work here in this process and ask the app only whether
+//! the human allows them.
 
 use std::cell::OnceCell;
 use std::io::{BufRead, Write};
@@ -32,6 +36,9 @@ use serde_json::{json, Value};
 #[path = "mcp_forge.rs"]
 mod forge;
 
+#[cfg(windows)]
+use crate::desktop::Desktop;
+
 /// What this server speaks when the client does not say.
 const PROTOCOL: &str = "2025-06-18";
 
@@ -48,7 +55,7 @@ const MAY_HAVE_RUN: &str = "It may still have run in the page: look (browser_sna
 const HAS_LORE: bool = cfg!(not(target_os = "macos"));
 
 /// The most text a tool answers with, so one call can not fill the context.
-const MOST_TEXT: usize = 60_000;
+pub(crate) const MOST_TEXT: usize = 60_000;
 
 /// The tallest full page screenshot, in CSS pixels.
 const TALLEST: f64 = 12_000.0;
@@ -72,6 +79,8 @@ pub fn run() -> Result<(), String> {
         lore: crate::lore::tool,
         #[cfg(target_os = "macos")]
         lore: |_, _| None,
+        #[cfg(windows)]
+        desktop: Desktop::default(),
     };
     let mut out = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
@@ -161,10 +170,23 @@ fn shown(msg: &Value, answer: &Value, is_file: impl Fn(&str) -> bool) -> Vec<Str
     out
 }
 
+/// What a session Horadric started is told of its browser, and on Windows
+/// of its desktop.
+fn browser_said() -> String {
+    if cfg!(windows) {
+        format!("{INSTRUCTIONS} {DESKTOP}")
+    } else {
+        INSTRUCTIONS.to_string()
+    }
+}
+
+/// Why a session Horadric did not start can not use these tools.
+const NOT_STARTED: &str =
+    "this session was not started by Horadric, so it has no browser and no desktop tools";
+
 /// One call to the app, and what it answered, or why not.
 fn ask_app(port: u16, session: Option<&str>, body: &Value) -> Result<Value, String> {
-    let session =
-        session.ok_or("this session was not started by Horadric, so it has no browser")?;
+    let session = session.ok_or(NOT_STARTED)?;
     let headers = [(COMMAND_HEADER, "browser"), (SESSION_HEADER, session)];
     // The session's key goes with every call, so the app knows the call is
     // this session's and not another program's naming it.
@@ -206,6 +228,10 @@ struct Server<A> {
     settle: Duration,
     /// Answers a lore tool, None for any other.
     lore: fn(&str, &Value) -> Option<Result<String, String>>,
+    /// The desktop programs the agent reads and operates, its UI
+    /// Automation set up on first use.
+    #[cfg(windows)]
+    desktop: Desktop,
 }
 
 impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
@@ -223,10 +249,10 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "horadric", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": match (self.browser, HAS_LORE) {
-                    (true, true) => format!("{INSTRUCTIONS}
+                    (true, true) => format!("{}
 
-{LORE}"),
-                    (true, false) => INSTRUCTIONS.to_string(),
+{LORE}", browser_said()),
+                    (true, false) => browser_said(),
                     (false, true) => LORE.to_string(),
                     (false, false) => NOTHING.to_string(),
                 },
@@ -319,6 +345,13 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
                 let method = s("method").ok_or("say which method")?;
                 let params = args.get("params").cloned().unwrap_or(json!({}));
                 Ok(vec![text(cap(pretty(&self.devtools(method, params)?)))])
+            }
+            // The lore is served to any session, but the desktop only to
+            // one Horadric started, which has an app to ask the human.
+            n if n.starts_with("desktop_") && !self.browser => Err(NOT_STARTED.into()),
+            #[cfg(windows)]
+            n if n.starts_with("desktop_") => {
+                self.desktop.tool(n, args, &mut self.app, self.settle)
             }
             _ => Err(format!("there is no tool {name}")),
         }
@@ -621,7 +654,7 @@ fn what(v: &Value) -> String {
         .to_string()
 }
 
-fn text(s: impl Into<String>) -> Value {
+pub(crate) fn text(s: impl Into<String>) -> Value {
     json!({ "type": "text", "text": s.into() })
 }
 
@@ -783,7 +816,7 @@ fn tools() -> Vec<Value> {
         }
         base
     };
-    vec![
+    let mut list = vec![
         tool(
             "browser_open",
             "Open this project's browser pane in Horadric, and a tab of your own in it, at url when given. It is a real browser (Edge WebView2 on Windows, WebKit on the Mac) beside the user's terminals, logged in wherever the user logged in. Open it when a task needs a web page; it stays open until closed. Use it in place of Playwright, Puppeteer, a Chrome DevTools MCP or a Chrome or headless browser of your own.",
@@ -957,6 +990,117 @@ fn tools() -> Vec<Value> {
             }),
             &["method"],
         ),
+    ];
+    #[cfg(windows)]
+    list.extend(desktop_tools());
+    list
+}
+
+/// The tools for programs on the user's Windows desktop.
+#[cfg(windows)]
+fn desktop_tools() -> Vec<Value> {
+    let window = || {
+        json!({
+            "anyOf": [{ "type": "string" }, { "type": "number" }],
+            "description": "The window: its id from desktop_windows, or part of its title",
+        })
+    };
+    let risky = || {
+        json!({
+            "type": "boolean",
+            "description": "Set it for anything that changes the controlled machine or the \
+                project: writing a value to a running PLC, changing its mode, transferring, \
+                deleting, saving over a file. The user is then asked to confirm.",
+        })
+    };
+    let element = |verb: &str| {
+        json!({
+            "window": window(),
+            "ref": { "type": "string", "description": "A ref from desktop_snapshot of this window, like e12" },
+            "name": { "type": "string", "description": format!("Where there is no ref: the first element whose name or automation id contains this, to {verb}") },
+            "risky": risky(),
+        })
+    };
+    let with = |mut base: Value, more: Value| {
+        if let (Some(b), Value::Object(m)) = (base.as_object_mut(), more) {
+            b.extend(m);
+        }
+        base
+    };
+    vec![
+        tool(
+            "desktop_windows",
+            "The programs' windows open on the user's Windows desktop, frontmost first: an id \
+             for the other desktop tools, the title, the program's file and process id. Dialogs \
+             say whose they are.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "desktop_snapshot",
+            "A window's controls as text, through UI Automation: each button, field, list, tree \
+             item and label with its type, name, value, automation id, whether it is enabled, \
+             where it is in the window and what it can do (invoke, toggle, select, expand, \
+             value), and a ref like e12 for desktop_click, desktop_type and \
+             desktop_screenshot. Take a new one after the window changes; refs from an old \
+             one go stale.",
+            json!({ "window": window() }),
+            &["window"],
+        ),
+        tool(
+            "desktop_screenshot",
+            "A picture of a window as it is drawn, even when other windows cover it, or of one \
+             element of it by ref. Use it to check what a snapshot can not tell, like a chart, \
+             a ladder diagram or colours.",
+            json!({
+                "window": window(),
+                "ref": { "type": "string", "description": "Only this element, a ref from desktop_snapshot" },
+            }),
+            &["window"],
+        ),
+        tool(
+            "desktop_click",
+            "Click an element of a window, by ref or by name. A plain left click uses the \
+             element's own action through UI Automation (press a button, tick a box, pick an \
+             item, open a tree node), so it works whatever covers the window; a double or \
+             right click, or an element with no action, brings the window to the front for a \
+             real click at its middle, and the user's mouse pointer is put back after.",
+            with(
+                element("click"),
+                json!({
+                    "button": { "type": "string", "enum": ["left", "right", "middle"] },
+                    "double": { "type": "boolean", "description": "A double click" },
+                }),
+            ),
+            &["window"],
+        ),
+        tool(
+            "desktop_type",
+            "Type text into a field of a window, by ref or by name. A field that takes a value \
+             has it set, replacing what was there; otherwise the window comes to the front, the \
+             field gets the keyboard and the text is typed at its caret. submit presses Enter \
+             after.",
+            with(
+                element("type into"),
+                json!({
+                    "text": { "type": "string" },
+                    "submit": { "type": "boolean", "description": "Press Enter after" },
+                }),
+            ),
+            &["window", "text"],
+        ),
+        tool(
+            "desktop_press",
+            "Bring a window to the front and press a key there, with modifiers joined by +: \
+             Enter, Escape, Tab, F5, Down, Control+S, Shift+Tab, Alt+F4, a. The key goes to \
+             whatever in the window has the keyboard.",
+            json!({
+                "window": window(),
+                "key": { "type": "string" },
+                "risky": risky(),
+            }),
+            &["window", "key"],
+        ),
     ]
 }
 
@@ -1039,6 +1183,14 @@ with browser_screenshot. Refs from browser_snapshot are surer than guessed selec
 browser_close when you are done, unless the user is using it. It keeps one login profile with \
 the user's own use of it, so take care on sites where they are logged in.";
 
+/// What a Windows session is told of the desktop tools, after the browser.
+pub(crate) const DESKTOP: &str = "The desktop_ tools \
+do the same for programs on the user's Windows desktop (an engineering tool like Sysmac Studio, \
+its watch window, its dialogs): list them with desktop_windows, read one with desktop_snapshot, \
+look with desktop_screenshot, act with desktop_click, desktop_type and desktop_press, and know \
+that the user approves each program once per session and confirms each risky action. Refs from \
+desktop_snapshot are surer than points on the screen, so act by ref or name.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1064,6 +1216,8 @@ mod tests {
             app,
             settle: Duration::ZERO,
             lore: |name, _| (name == "lore_recall").then(|| Ok("#1 a note".into())),
+            #[cfg(windows)]
+            desktop: Desktop::default(),
         };
         (s, calls)
     }
@@ -1162,6 +1316,10 @@ B.";
         assert_eq!(names, want);
         let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
         assert_eq!(s.handle(&init).unwrap()["result"]["instructions"], said);
+        // The lore needs no Horadric, the desktop does.
+        let a = s.handle(&call("desktop_windows", json!({}))).unwrap();
+        assert_eq!(a["result"]["isError"], true);
+        assert_eq!(a["result"]["content"][0]["text"], NOT_STARTED);
     }
 
     #[test]
@@ -1185,7 +1343,7 @@ B.";
         for t in &[tools(), forge::tools(), lore_tools()].concat() {
             let name = t["name"].as_str().unwrap();
             assert!(
-                ["browser_", "forge_", "lore_"]
+                ["browser_", "desktop_", "forge_", "lore_"]
                     .iter()
                     .any(|p| name.starts_with(p)),
                 "{t}"
@@ -1201,6 +1359,61 @@ B.";
                 );
             }
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_desktop_tools_are_offered_with_the_browser() {
+        let (mut s, _) = server(|_| Ok(json!({})));
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        let tools = s.handle(&list).unwrap()["result"]["tools"].clone();
+        let named = |n: &str| {
+            tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == n)
+                .cloned()
+                .unwrap_or_else(|| panic!("no {n}"))
+        };
+        for n in [
+            "desktop_windows",
+            "desktop_snapshot",
+            "desktop_screenshot",
+            "desktop_click",
+            "desktop_type",
+            "desktop_press",
+        ] {
+            named(n);
+        }
+        assert_eq!(
+            named("desktop_type")["inputSchema"]["required"],
+            json!(["window", "text"])
+        );
+        for n in ["desktop_click", "desktop_type", "desktop_press"] {
+            let risky = &named(n)["inputSchema"]["properties"]["risky"];
+            assert_eq!(risky["type"], "boolean", "{n}");
+            assert!(
+                risky["description"].as_str().unwrap().contains("PLC"),
+                "{n}"
+            );
+        }
+        let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
+        let said = s.handle(&init).unwrap()["result"]["instructions"].clone();
+        assert!(said.as_str().unwrap().contains("desktop_snapshot"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_desktop_call_without_a_window_asks_nothing() {
+        let (mut s, calls) = server(|_| Ok(json!({ "allowed": true })));
+        let a = s.handle(&call("desktop_snapshot", json!({}))).unwrap();
+        assert_eq!(a["result"]["isError"], true);
+        assert!(a["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("say which window"));
+        assert!(calls.borrow().is_empty());
     }
 
     #[test]

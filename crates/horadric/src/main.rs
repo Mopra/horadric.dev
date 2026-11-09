@@ -21,6 +21,8 @@ mod console;
 #[cfg(not(target_os = "linux"))]
 mod context;
 #[cfg(windows)]
+mod desktop;
+#[cfg(windows)]
 mod google;
 #[cfg(windows)]
 mod headless_debug;

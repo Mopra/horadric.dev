@@ -1051,8 +1051,10 @@ fn start(cwd: &Path) -> Result<(), String> {
             chars(horadric_ui::AGENT_PROMPT),
         ),
         (
-            "Horadric's MCP server instructions (browser, lore)".into(),
-            chars(crate::mcp::INSTRUCTIONS) + chars(crate::mcp::LORE),
+            "Horadric's MCP server instructions (browser, desktop, lore)".into(),
+            chars(crate::mcp::INSTRUCTIONS)
+                + if cfg!(windows) { chars(crate::mcp::DESKTOP) } else { 0 }
+                + chars(crate::mcp::LORE),
         ),
         (
             "Horadric's MCP tool list, when not deferred".into(),

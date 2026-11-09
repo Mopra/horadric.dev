@@ -27,6 +27,15 @@ use crate::window::project_name;
 
 impl App {
     pub(super) fn browser_call(&mut self, call: BrowserCall) {
+        // A desktop program is no project's, so these ask nothing of it.
+        if call
+            .body
+            .get("op")
+            .and_then(Value::as_str)
+            .is_some_and(|op| op.starts_with("desktop."))
+        {
+            return self.desktop_call(call);
+        }
         let reply = call.reply;
         // Its agent heard it fail while it waited behind something slow.
         if !reply.wanted() {

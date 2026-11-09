@@ -61,6 +61,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Towns](plan/towns.md): built (2026-11-08), several Tristrams each with its own Claude home, browser profile and usage rows; left: the two-town check on screen.
 - [The Forge](plan/the-forge.md): built, pins on web pages too; left: pins on PDF and Word files, keeping web pins, and the Mac.
 - [GPU light](plan/gpu-light.md): steps 1 to 7 built, steps 1 and 2 approved; left: the human's look at steps 3 to 7, measuring the UI thread cost again, a remote desktop run, and the Mac (step 8).
+- [Desktop programs](plan/desktop-programs.md): built (2026-11-09), Windows only, sessions look at and operate the programs the human allows; left: a frame around the element acted on, and whether grants outlive Horadric.
 
 ## Reference
 
