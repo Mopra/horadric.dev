@@ -1053,7 +1053,11 @@ fn start(cwd: &Path) -> Result<(), String> {
         (
             "Horadric's MCP server instructions (browser, desktop, lore)".into(),
             chars(crate::mcp::INSTRUCTIONS)
-                + if cfg!(windows) { chars(crate::mcp::DESKTOP) } else { 0 }
+                + if cfg!(windows) {
+                    chars(crate::mcp::DESKTOP)
+                } else {
+                    0
+                }
                 + chars(crate::mcp::LORE),
         ),
         (
