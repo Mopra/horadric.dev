@@ -214,6 +214,10 @@ pub struct SavedState {
     /// casts without asking first.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cast_without_asking: bool,
+    /// How long the ghost takes to reach a desktop click, in milliseconds,
+    /// once the Thinking plate's slider moved it from the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_glide_ms: Option<u32>,
     /// The built in stones the human put away, by label, which the tome
     /// leaves out until they are shown again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -156,6 +156,9 @@ mod desktop;
 #[path = "ghost.rs"]
 mod ghost;
 
+#[path = "guard.rs"]
+mod guard;
+
 #[path = "chronicler.rs"]
 mod chronicler;
 
@@ -792,6 +795,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     let keys_live = Action::ALL.map(|a| register_key(notify, a, keys[a.index()]));
     crate::dictate::use_chord(keys[Action::Dictate.index()]);
     web::set_sizes(&saved.page_sizes);
+    ghost::set_speed_saved(saved.desktop_glide_ms);
     theme::set_accents(&saved.accents);
     web::set_docks(&saved.page_docks);
     sanctuary::set_docks(&saved.sky_docks);
@@ -9568,6 +9572,7 @@ impl App {
             runewords: self.tome.projects.clone(),
             stones_cast: self.tome.cast.clone(),
             cast_without_asking: !self.tome.ask,
+            desktop_glide_ms: ghost::speed_saved(),
             stones_hidden: self.tome.hidden.clone(),
             stones_order: self.tome.order.clone(),
             errands: self.tome.errands.clone(),

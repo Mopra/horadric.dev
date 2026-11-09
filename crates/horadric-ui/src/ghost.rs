@@ -14,8 +14,21 @@
 //!
 //! Its state lives here, off the app, since the frames come to its own
 //! window and must not wait on the app's borrow.
+//!
+//! The plate is the one window here the mouse can reach, and only over its
+//! controls: a slider for how long the ghost takes, kept across restarts,
+//! and Bypass. Clicking them never activates it, so the program being
+//! driven keeps the focus. Bypass lets what would be asked go unasked, for
+//! a human who trusts the work and watches it: the frame turns to the
+//! warning colour, each call it lets through is held for Esc as a click
+//! is, and Esc then stops the call and turns bypass off. It starts off at
+//! every start of the app and is never kept.
+//!
+//! While the ghost is on its way, [`super::guard`] watches for a window
+//! opening or another program taking the front, and stops the click as
+//! Esc would: the point was chosen on a screen that is no longer there.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::rc::Rc;
@@ -49,18 +62,20 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, VK_ESCAPE,
+    RegisterHotKey, ReleaseCapture, SetCapture, UnregisterHotKey, MOD_NOREPEAT, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, RegisterClassW,
-    SetWindowDisplayAffinity, ShowWindow, UpdateLayeredWindow, HTTRANSPARENT, MA_NOACTIVATE,
-    SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WDA_EXCLUDEFROMCAPTURE, WM_HOTKEY, WM_MOUSEACTIVATE,
-    WM_NCHITTEST, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW,
+    RegisterClassW, SetWindowDisplayAffinity, SetWindowLongPtrW, ShowWindow, UpdateLayeredWindow,
+    GWL_EXSTYLE, HTCLIENT, HTTRANSPARENT, MA_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA,
+    WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_CAPTURECHANGED, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use windows_numerics::Vector2;
 
+use super::guard;
 use crate::motion;
 use crate::render::{self, color};
 use crate::theme::{self, Color};
@@ -72,11 +87,18 @@ const FRAME: usize = 1;
 /// hotkey of the app's can share it.
 const STOP_KEY: i32 = 0x6057;
 
+/// What the guard posts to the clock window when it saw something.
+const GUARD_MSG: u32 = WM_APP + 1;
+
 /// Control counts as running this long after the last desktop call.
 pub(super) const ACTIVE_FOR: Duration = Duration::from_secs(20);
-/// How long the ghost takes to reach a click. Slow, so the human can see
-/// where it goes and stop it before it acts.
+/// How long the ghost takes to reach a click until the plate's slider says
+/// otherwise. Slow, so the human can see where it goes and stop it before
+/// it acts.
 pub(super) const GLIDE: Duration = Duration::from_secs(2);
+/// The slider's two ends.
+pub(super) const GLIDE_FAST: Duration = Duration::from_millis(300);
+pub(super) const GLIDE_SLOW: Duration = Duration::from_secs(4);
 /// The ring the ghost gives when it arrives.
 const RING: Duration = Duration::from_millis(450);
 /// The ghost stays this long after its last action, then fades.
@@ -97,6 +119,22 @@ const BOX_W: f32 = 380.0;
 const PAD: f32 = 14.0;
 const BOX_MARGIN: f32 = 18.0;
 const ROW: f32 = 18.0;
+/// The control row under the title: the speed slider on the left, Bypass
+/// on the right, in DIPs from the plate's corner.
+const CONTROLS_Y: f32 = 40.0;
+const CONTROLS_H: f32 = 24.0;
+const CONTROLS_STEP: f32 = 30.0;
+const SLIDER_X: f32 = PAD + 48.0;
+const SLIDER_W: f32 = 140.0;
+/// Room beside the slider's ends that still takes the knob.
+const SLIDER_SLACK: f32 = 8.0;
+const BYPASS_W: f32 = 100.0;
+const BYPASS_X: f32 = BOX_W - PAD - BYPASS_W;
+/// The warning band under the controls while bypass is on.
+const BANNER: f32 = 26.0;
+/// What a call bypass let through is told when bypass ends before it went.
+const BYPASS_ENDED: &str =
+    "the human stopped bypass, so this action was not made; ask again and they will be asked";
 /// The reason gets at most this many lines.
 const REASON_LINES: f32 = 3.0;
 const REASON_LINE: f32 = 17.0;
@@ -149,15 +187,43 @@ pub(super) struct Entry {
     pub mark: Mark,
     pub what: String,
     pub outcome: String,
+    /// Bypass let it through without asking.
+    pub unasked: bool,
 }
 
-/// The plate's line for an entry, after its time and mark.
+/// The plate's line for an entry, after its time and mark. What bypass let
+/// through says so first, where a long line is not cut, so the human sees
+/// afterwards what went unasked.
 pub(super) fn entry_line(e: &Entry) -> String {
-    match (e.what.trim(), e.outcome.trim()) {
+    let line = match (e.what.trim(), e.outcome.trim()) {
         ("", "") => String::new(),
         (what, "") => what.to_string(),
         ("", outcome) => outcome.to_string(),
         (what, outcome) => format!("{what}: {outcome}"),
+    };
+    match (e.unasked, line.is_empty()) {
+        (false, _) => line,
+        (true, true) => "unasked".into(),
+        (true, false) => format!("unasked: {line}"),
+    }
+}
+
+/// Notes an action bypass let through, until its `desktop.done` comes.
+pub(super) fn note_unasked(unasked: &mut VecDeque<String>, what: &str) {
+    unasked.push_back(what.to_string());
+    while unasked.len() > HISTORY {
+        unasked.pop_front();
+    }
+}
+
+/// Whether a finished action was one bypass let through, forgetting it.
+pub(super) fn take_unasked(unasked: &mut VecDeque<String>, what: &str) -> bool {
+    match unasked.iter().position(|w| w == what) {
+        Some(i) => {
+            unasked.remove(i);
+            true
+        }
+        None => false,
     }
 }
 
@@ -182,16 +248,116 @@ pub(super) fn extend(until: Option<Instant>, now: Instant, allowed: bool) -> Opt
     }
 }
 
-/// Where the ghost is `elapsed` into a glide from `from` to `to`, soft at
-/// both ends.
-pub(super) fn glide_at(from: (f32, f32), to: (f32, f32), elapsed: Duration) -> (f32, f32) {
-    let t = motion::ease_in_out(motion::progress(elapsed, GLIDE));
+/// Where the ghost is `elapsed` into a glide from `from` to `to` that
+/// `takes` that long, soft at both ends.
+pub(super) fn glide_at(
+    from: (f32, f32),
+    to: (f32, f32),
+    elapsed: Duration,
+    takes: Duration,
+) -> (f32, f32) {
+    let t = motion::ease_in_out(motion::progress(elapsed, takes));
     (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
 }
 
 /// How much of a glide is left, 1 to 0, for the bar that counts it down.
-pub(super) fn left_of_glide(elapsed: Duration) -> f32 {
-    1.0 - motion::progress(elapsed, GLIDE)
+pub(super) fn left_of_glide(elapsed: Duration, takes: Duration) -> f32 {
+    1.0 - motion::progress(elapsed, takes)
+}
+
+/// A glide kept between the slider's ends.
+pub(super) fn clamp_glide(d: Duration) -> Duration {
+    d.clamp(GLIDE_FAST, GLIDE_SLOW)
+}
+
+/// The glide a place on the slider sets, 0 its left end and 1 its right.
+/// Right is fast, as a speed reads, and it moves in whole tenths of a
+/// second, as its label shows them.
+pub(super) fn glide_of_slider(f: f32) -> Duration {
+    let f = if f.is_nan() { 0.0 } else { f.clamp(0.0, 1.0) };
+    let (fast, slow) = (GLIDE_FAST.as_secs_f32(), GLIDE_SLOW.as_secs_f32());
+    let tenths = ((slow - f * (slow - fast)) * 10.0).round() as u64;
+    clamp_glide(Duration::from_millis(tenths * 100))
+}
+
+/// Where on the slider a glide sits, 0 to 1.
+pub(super) fn slider_of_glide(d: Duration) -> f32 {
+    let (fast, slow) = (GLIDE_FAST.as_secs_f32(), GLIDE_SLOW.as_secs_f32());
+    (slow - clamp_glide(d).as_secs_f32()) / (slow - fast)
+}
+
+/// Where along the slider a point `x` DIPs across the plate falls.
+pub(super) fn slider_at(x: f32) -> f32 {
+    ((x - SLIDER_X) / SLIDER_W).clamp(0.0, 1.0)
+}
+
+/// The glide's seconds beside the slider.
+pub(super) fn speed_label(d: Duration) -> String {
+    format!("{:.1} s", d.as_secs_f32())
+}
+
+/// The glide as kept in the state file, none for the default.
+pub(super) fn glide_from_saved(ms: Option<u32>) -> Duration {
+    ms.map_or(GLIDE, |ms| clamp_glide(Duration::from_millis(ms.into())))
+}
+
+pub(super) fn glide_to_saved(d: Duration) -> Option<u32> {
+    (d != GLIDE).then(|| u32::try_from(d.as_millis()).unwrap_or(u32::MAX))
+}
+
+/// A control on the plate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Control {
+    Speed,
+    Bypass,
+}
+
+/// The control under a point `x`, `y` DIPs from the plate's corner.
+pub(super) fn control_at(x: f32, y: f32) -> Option<Control> {
+    if !(CONTROLS_Y..CONTROLS_Y + CONTROLS_H).contains(&y) {
+        return None;
+    }
+    if (SLIDER_X - SLIDER_SLACK..SLIDER_X + SLIDER_W + SLIDER_SLACK).contains(&x) {
+        Some(Control::Speed)
+    } else if (BYPASS_X..BYPASS_X + BYPASS_W).contains(&x) {
+        Some(Control::Bypass)
+    } else {
+        None
+    }
+}
+
+fn window_named(title: &str) -> String {
+    match title.trim() {
+        "" => "a window with no title".into(),
+        t => format!("the window \"{t}\""),
+    }
+}
+
+fn guard_did(kind: guard::Kind) -> &'static str {
+    match kind {
+        guard::Kind::Front => "came to the front",
+        guard::Kind::Shown | guard::Kind::Dialog => "opened",
+    }
+}
+
+/// What the agent is told when the guard stopped its action: what changed,
+/// and that its point was chosen on a screen that is gone.
+pub(super) fn guard_error(title: &str, kind: guard::Kind, held: bool) -> String {
+    let (wait, act) = if held {
+        ("while Horadric held the action", "acting")
+    } else {
+        ("while the ghost was on its way", "clicking")
+    };
+    format!(
+        "stopped: {} {} {wait}; look again before {act}",
+        window_named(title),
+        guard_did(kind)
+    )
+}
+
+/// The history's word for the same.
+pub(super) fn guard_outcome(title: &str, kind: guard::Kind) -> String {
+    format!("stopped: {} {}", window_named(title), guard_did(kind))
 }
 
 /// The frame's alpha `t` into control, breathing between faint and full.
@@ -231,10 +397,11 @@ pub(super) fn box_place(work: [i32; 4], size: (i32, i32), margin: i32) -> (i32, 
 }
 
 /// The plate's height in DIPs for a reason `reason_h` tall and `rows`
-/// lines of history.
-pub(super) fn box_height(reason_h: f32, rows: usize) -> f32 {
+/// lines of history, with the bypass band when it is on.
+pub(super) fn box_height(reason_h: f32, rows: usize, bypass: bool) -> f32 {
     let reason = reason_h.min(REASON_LINES * REASON_LINE);
-    let now = 40.0 + 22.0 + if reason > 0.0 { reason + 4.0 } else { 0.0 } + ROW;
+    let controls = CONTROLS_STEP + if bypass { BANNER } else { 0.0 };
+    let now = CONTROLS_Y + controls + 22.0 + if reason > 0.0 { reason + 4.0 } else { 0.0 } + ROW;
     let history = if rows == 0 {
         0.0
     } else {
@@ -262,23 +429,56 @@ pub(super) struct Allowed {
     pub point: Option<(i32, i32)>,
     /// The program's window, for the screen the plate goes on.
     pub hwnd: isize,
+    /// Only bypass let it through: held for Esc even without a point.
+    pub unasked: bool,
 }
 
-/// A click on its way, its answer held until the ghost arrives.
+/// A click on its way, its answer held until the ghost arrives. A hold is
+/// one without a point, the ghost waiting where it is.
 struct Glide {
     from: (f32, f32),
     to: (f32, f32),
     began: Instant,
+    takes: Duration,
+    held: bool,
+    unasked: bool,
+    /// Its number, so what the guard saw is matched to it.
+    serial: u64,
     reply: Reply,
     what: String,
 }
 
 /// A click waiting for the one before it to land.
 struct Queued {
-    to: (i32, i32),
+    to: Option<(i32, i32)>,
+    hwnd: isize,
+    unasked: bool,
     reply: Reply,
     name: String,
     what: String,
+}
+
+thread_local! {
+    /// How long a glide takes, from the plate's slider.
+    static SPEED: Cell<Duration> = const { Cell::new(GLIDE) };
+    /// Bypass is on. Here and not on the overlay, since deciding a call
+    /// reads it too, and never saved.
+    static BYPASS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether bypass is on.
+pub(super) fn bypass() -> bool {
+    BYPASS.get()
+}
+
+/// The glide speed from the state file, at the app's start.
+pub(super) fn set_speed_saved(ms: Option<u32>) {
+    SPEED.set(glide_from_saved(ms));
+}
+
+/// The glide speed for the state file.
+pub(super) fn speed_saved() -> Option<u32> {
+    glide_to_saved(SPEED.get())
 }
 
 /// A window drawn with its own alpha through a DIB, the way layered windows
@@ -445,6 +645,20 @@ impl Layer {
         }
     }
 
+    /// Lets the mouse reach the window, or go through it. Toggled as the
+    /// cursor comes over a control, since a click on another process's
+    /// window behind does not come through `HTTRANSPARENT`.
+    fn set_clickable(&self, on: bool) {
+        unsafe {
+            let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
+            let through = WS_EX_TRANSPARENT.0 as isize;
+            let want = if on { ex & !through } else { ex | through };
+            if want != ex {
+                SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, want);
+            }
+        }
+    }
+
     fn hide(&mut self) {
         if self.shown {
             self.shown = false;
@@ -592,8 +806,18 @@ struct Overlay {
     ghost_stopped: bool,
     ring: Option<(Instant, Color)>,
     glide: Option<Glide>,
+    glides: u64,
     queue: VecDeque<Queued>,
     stop_key: bool,
+    /// Watching for windows while a glide runs.
+    watch: Option<guard::Watch>,
+    /// The slider's knob is held.
+    dragging: bool,
+    hover: Option<Control>,
+    /// The frame was painted for bypass.
+    edges_bypass: bool,
+    /// What bypass let through and has not been told done yet.
+    unasked: VecDeque<String>,
     until: Option<Instant>,
     /// When control began, for the pulse, and how far it has faded in.
     began: Instant,
@@ -673,8 +897,14 @@ fn with(shared: &Rc<Shared>, f: impl FnOnce(&mut Overlay)) {
                         ghost_stopped: false,
                         ring: None,
                         glide: None,
+                        glides: 0,
                         queue: VecDeque::new(),
                         stop_key: false,
+                        watch: None,
+                        dragging: false,
+                        hover: None,
+                        edges_bypass: false,
+                        unasked: VecDeque::new(),
                         until: None,
                         began: now,
                         shown: 0.0,
@@ -695,12 +925,14 @@ fn with(shared: &Rc<Shared>, f: impl FnOnce(&mut Overlay)) {
 
 /// An allowed call. With a point the ghost glides there and the call is
 /// answered when it arrives, or refused if the human presses Esc; without
-/// one it is answered at once. True when this call started control, so
+/// one it is answered at once, unless only bypass let it through, when it
+/// is held as long as a glide. True when this call started control, so
 /// the app can say so once.
 pub(super) fn allowed(shared: &Rc<Shared>, call: Allowed, reply: Reply) -> bool {
     // Without an overlay the app's own word is all the human gets.
     let mut started = true;
     let mut reply = Some(reply);
+    let unasked = call.unasked;
     with(shared, |o| {
         let now = Instant::now();
         started = !o.active(now);
@@ -716,10 +948,13 @@ pub(super) fn allowed(shared: &Rc<Shared>, call: Allowed, reply: Reply) -> bool 
             what: call.what.clone(),
         };
         o.stale = true;
-        // Taken only with a point: a call without one is answered below.
-        if let Some((to, r)) = call.point.and_then(|to| Some((to, reply.take()?))) {
+        // Taken only when held: any other is answered below.
+        let held = call.point.is_some() || call.unasked;
+        if let Some(r) = reply.take_if(|_| held) {
             o.queue.push_back(Queued {
-                to,
+                to: call.point,
+                hwnd: call.hwnd,
+                unasked: call.unasked,
                 reply: r,
                 name: call.name,
                 what: call.what,
@@ -730,24 +965,33 @@ pub(super) fn allowed(shared: &Rc<Shared>, call: Allowed, reply: Reply) -> bool 
         }
         o.run();
     });
-    // Without a point, or without an overlay to show the way.
+    // Without a point, or without an overlay to show the way. What only
+    // bypass allowed goes nowhere the human could not stop it.
     if let Some(r) = reply {
-        r.send(json!({ "allowed": true }));
+        if unasked {
+            r.send(
+                json!({ "error": "Horadric could not show this action to the human, so \
+                bypass did not let it through; ask again" }),
+            );
+        } else {
+            r.send(json!({ "allowed": true }));
+        }
     }
     started
 }
 
 /// A finished action, from `desktop.done`.
 pub(super) fn done(shared: &Rc<Shared>, what: &str, ok: bool, outcome: &str) {
-    record(
-        shared,
-        Entry {
+    with(shared, |o| {
+        let unasked = take_unasked(&mut o.unasked, what);
+        o.note(Entry {
             at: now_clock(),
             mark: if ok { Mark::Ok } else { Mark::Failed },
             what: what.to_string(),
             outcome: outcome.to_string(),
-        },
-    );
+            unasked,
+        });
+    });
 }
 
 /// A call the human refused.
@@ -759,18 +1003,13 @@ pub(super) fn refused(shared: &Rc<Shared>, what: &str, why: &str) {
             mark: Mark::Refused,
             what: what.to_string(),
             outcome: why.to_string(),
+            unasked: false,
         },
     );
 }
 
 fn record(shared: &Rc<Shared>, e: Entry) {
-    with(shared, |o| {
-        let now = Instant::now();
-        o.until = extend(o.until, now, false);
-        remember(&mut o.history, e);
-        o.stale = true;
-        o.run();
-    });
+    with(shared, |o| o.note(e));
 }
 
 fn now_clock() -> String {
@@ -826,8 +1065,17 @@ fn monitors() -> Vec<HMONITOR> {
 }
 
 impl Overlay {
+    /// Bypass keeps it all up, so it is never on unseen.
     fn active(&self, now: Instant) -> bool {
-        self.until.is_some_and(|u| u > now)
+        self.until.is_some_and(|u| u > now) || bypass()
+    }
+
+    fn note(&mut self, e: Entry) {
+        let now = Instant::now();
+        self.until = extend(self.until, now, false);
+        remember(&mut self.history, e);
+        self.stale = true;
+        self.run();
     }
 
     /// Starts the frames, if they are not running.
@@ -886,7 +1134,11 @@ impl Overlay {
                     2 => ((0.0, 0.0), (dw, 0.0)),
                     _ => ((dw, 0.0), (0.0, 0.0)),
                 };
-                let glow = theme::working();
+                let glow = if bypass() {
+                    theme::waiting()
+                } else {
+                    theme::working()
+                };
                 let painted = layer.paint(|p| unsafe {
                     p.fill_gradient(
                         d2rect(0.0, 0.0, dw, dh),
@@ -905,6 +1157,7 @@ impl Overlay {
                 }
             }
         }
+        self.edges_bypass = bypass();
     }
 
     fn next_glide(&mut self, now: Instant) {
@@ -922,10 +1175,19 @@ impl Overlay {
             self.ghost_name = q.name;
             self.ghost_stopped = false;
             self.ghost_acted = now;
+            self.glides += 1;
+            if self.watch.is_none() {
+                self.watch = Some(guard::watch(self.clock, GUARD_MSG));
+            }
+            guard::aim(self.glides, q.hwnd, q.to);
             self.glide = Some(Glide {
                 from,
-                to: (q.to.0 as f32, q.to.1 as f32),
+                to: q.to.map_or(from, |(x, y)| (x as f32, y as f32)),
                 began: now,
+                takes: SPEED.get(),
+                held: q.to.is_none(),
+                unasked: q.unasked,
+                serial: self.glides,
                 reply: q.reply,
                 what: q.what,
             });
@@ -934,6 +1196,7 @@ impl Overlay {
             return;
         }
         self.listen_for_stop(false);
+        self.watch = None;
     }
 
     /// Esc is the human's only while a glide runs, and theirs again after.
@@ -953,14 +1216,14 @@ impl Overlay {
         }
     }
 
-    /// Esc while gliding: the click is not made.
-    fn stop(&mut self) {
+    /// The glide on its way is not made: `error` to its agent, `outcome`
+    /// in the history.
+    fn halt(&mut self, error: &str, outcome: String) {
         let now = Instant::now();
         let Some(g) = self.glide.take() else {
             return;
         };
-        g.reply
-            .send(json!({ "error": "the human stopped this action" }));
+        g.reply.send(json!({ "error": error }));
         self.ghost_stopped = true;
         self.ghost_acted = now;
         self.ring = Some((now, theme::error()));
@@ -971,14 +1234,144 @@ impl Overlay {
                 at: now_clock(),
                 mark: Mark::Stopped,
                 what: g.what,
-                outcome: "stopped by the human".into(),
+                outcome,
+                unasked: g.unasked,
             },
         );
         self.stale = true;
+    }
+
+    /// Esc while gliding: the click is not made. With bypass on it ends
+    /// bypass too, the human's word that the trust is over.
+    fn stop(&mut self) {
+        if self.glide.is_none() {
+            return;
+        }
+        self.halt(
+            "the human stopped this action",
+            "stopped by the human".into(),
+        );
+        if bypass() {
+            self.bypass_off();
+        }
         // The rest waiting were asked before the stop and still go, each
         // with its own glide to stop.
-        self.next_glide(now);
+        self.next_glide(Instant::now());
         self.run();
+    }
+
+    /// The guard saw a window open or the front move while the glide it
+    /// tripped on was on its way. Bypass stays: nobody said no.
+    fn tripped(&mut self) {
+        let Some(t) = guard::take() else {
+            return;
+        };
+        let Some(g) = &self.glide else {
+            return;
+        };
+        if g.serial != t.glide {
+            return;
+        }
+        let error = guard_error(&t.title, t.kind, g.held);
+        self.halt(&error, guard_outcome(&t.title, t.kind));
+        self.next_glide(Instant::now());
+        self.run();
+    }
+
+    fn bypass_on(&mut self) {
+        BYPASS.set(true);
+        self.stale = true;
+        self.run();
+    }
+
+    /// Ends bypass, and with it every call it let through that has not
+    /// gone yet.
+    fn bypass_off(&mut self) {
+        BYPASS.set(false);
+        if self.glide.as_ref().is_some_and(|g| g.unasked) {
+            self.halt(BYPASS_ENDED, "stopped: bypass turned off".into());
+        }
+        let (gone, kept): (VecDeque<Queued>, VecDeque<Queued>) =
+            self.queue.drain(..).partition(|q| q.unasked);
+        self.queue = kept;
+        for q in gone {
+            q.reply.send(json!({ "error": BYPASS_ENDED }));
+            remember(
+                &mut self.history,
+                Entry {
+                    at: now_clock(),
+                    mark: Mark::Stopped,
+                    what: q.what,
+                    outcome: "not made: bypass turned off".into(),
+                    unasked: true,
+                },
+            );
+        }
+        // Control runs on a while, so the plate does not vanish the
+        // moment bypass ends.
+        self.until = extend(self.until, Instant::now(), true);
+        self.stale = true;
+        if self.glide.is_none() {
+            self.next_glide(Instant::now());
+        }
+        self.run();
+    }
+
+    fn set_speed(&mut self, f: f32) {
+        let d = glide_of_slider(f);
+        if d != SPEED.get() {
+            SPEED.set(d);
+            self.stale = true;
+        }
+    }
+
+    /// Whether a point on screen, in physical pixels, is over one of the
+    /// plate's controls, or the knob is held.
+    fn over_control(&self, hwnd: HWND, at: (i32, i32)) -> bool {
+        let Some(p) = self.plate.as_ref().filter(|p| p.hwnd == hwnd && p.shown) else {
+            return false;
+        };
+        let x = (at.0 - p.pos.0) as f32 / p.scale;
+        let y = (at.1 - p.pos.1) as f32 / p.scale;
+        self.dragging || control_at(x, y).is_some()
+    }
+
+    /// The mouse on the plate. True when it turned bypass on, for the app
+    /// to answer the calls waiting for a question.
+    fn mouse(&mut self, hwnd: HWND, msg: u32, lparam: LPARAM) -> bool {
+        let Some(p) = self.plate.as_ref().filter(|p| p.hwnd == hwnd) else {
+            return false;
+        };
+        let scale = p.scale;
+        let x = (lparam.0 & 0xFFFF) as i16 as f32 / scale;
+        let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32 / scale;
+        match msg {
+            WM_LBUTTONDOWN => match control_at(x, y) {
+                Some(Control::Speed) => {
+                    self.dragging = true;
+                    unsafe {
+                        SetCapture(hwnd);
+                    }
+                    self.set_speed(slider_at(x));
+                }
+                Some(Control::Bypass) if bypass() => self.bypass_off(),
+                Some(Control::Bypass) => {
+                    self.bypass_on();
+                    return true;
+                }
+                None => {}
+            },
+            WM_MOUSEMOVE if self.dragging => self.set_speed(slider_at(x)),
+            WM_LBUTTONUP if self.dragging => {
+                self.dragging = false;
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+            }
+            WM_CAPTURECHANGED => self.dragging = false,
+            _ => {}
+        }
+        false
     }
 
     fn tick(&mut self) {
@@ -988,6 +1381,9 @@ impl Overlay {
             .min(Duration::from_millis(50));
         self.ticked = now;
         let active = self.active(now) || self.glide.is_some();
+        if self.edges_bypass != bypass() {
+            self.edges.clear();
+        }
         if active {
             self.frame_screens();
             self.shown = (self.shown + dt.as_secs_f32() / FADE_IN.as_secs_f32()).min(1.0);
@@ -997,11 +1393,14 @@ impl Overlay {
 
         if let Some(g) = &self.glide {
             let elapsed = now.duration_since(g.began);
-            self.ghost_at = Some(glide_at(g.from, g.to, elapsed));
+            self.ghost_at = Some(glide_at(g.from, g.to, elapsed, g.takes));
             self.stale = true;
-            if elapsed >= GLIDE {
+            if elapsed >= g.takes {
                 if let Some(g) = self.glide.take() {
                     g.reply.send(json!({ "allowed": true }));
+                    if g.unasked {
+                        note_unasked(&mut self.unasked, &g.what);
+                    }
                 }
                 self.ghost_acted = now;
                 self.ring = Some((now, theme::working()));
@@ -1085,6 +1484,8 @@ impl Overlay {
             .map(|(t, c)| (motion::progress(now.duration_since(t), RING), c));
         let tint = if self.ghost_stopped {
             theme::error()
+        } else if self.glide.as_ref().is_some_and(|g| g.unasked) {
+            theme::waiting()
         } else {
             theme::working()
         };
@@ -1119,7 +1520,8 @@ impl Overlay {
         let gliding = self
             .glide
             .as_ref()
-            .map(|g| left_of_glide(now.duration_since(g.began)));
+            .map(|g| left_of_glide(now.duration_since(g.began), g.takes));
+        let bypass = bypass();
         let gpu = &self.shared.gpu;
         let content_w = BOX_W - 2.0 * PAD;
         let reason = (!self.now.reason.trim().is_empty())
@@ -1128,7 +1530,7 @@ impl Overlay {
         let reason_h = reason
             .as_ref()
             .map_or(0.0, |l| render::text_size(l).1.ceil());
-        let h = box_height(reason_h, self.history.len());
+        let h = box_height(reason_h, self.history.len(), bypass);
         let s = self.scale;
         let size = ((BOX_W * s).round() as i32, (h * s).round() as i32);
         let margin = (BOX_MARGIN * s).round() as i32;
@@ -1151,6 +1553,7 @@ impl Overlay {
             let now_line = &self.now;
             let history = &self.history;
             let metrics_radius = self.shared.metrics.window_radius;
+            let (speed, hover, dragging) = (SPEED.get(), self.hover, self.dragging);
             let _ = plate.paint(|p| unsafe {
                 draw_plate(
                     gpu,
@@ -1163,11 +1566,28 @@ impl Overlay {
                         reason_h,
                         gliding,
                         history,
+                        speed,
+                        bypass,
+                        hover,
+                        dragging,
                     },
                 );
             });
         }
         plate.present(pos, self.shown);
+        // The mouse reaches the plate only over a control, so the rest of
+        // it does not stand between the human and their screen.
+        let mut cursor = POINT::default();
+        let hover = unsafe { GetCursorPos(&mut cursor) }.ok().and_then(|_| {
+            let x = (cursor.x - pos.0) as f32 / s;
+            let y = (cursor.y - pos.1) as f32 / s;
+            control_at(x, y)
+        });
+        plate.set_clickable(hover.is_some() || self.dragging);
+        if hover != self.hover {
+            self.hover = hover;
+            self.stale = true;
+        }
     }
 }
 
@@ -1236,6 +1656,10 @@ struct PlateScene<'a> {
     /// How much of the glide is left, while one runs.
     gliding: Option<f32>,
     history: &'a VecDeque<Entry>,
+    speed: Duration,
+    bypass: bool,
+    hover: Option<Control>,
+    dragging: bool,
 }
 
 /// The Thinking plate, drawn like the app's other plates: dark metal lit
@@ -1244,6 +1668,12 @@ unsafe fn draw_plate(gpu: &render::Gpu, p: &Pen, s: PlateScene) {
     let (w, h) = (BOX_W, s.h);
     let radius = s.radius.max(6.0);
     let all = d2rect(0.0, 0.0, w, h);
+    // Bypass tints the plate as it tints the frame.
+    let lamp = if s.bypass {
+        theme::waiting()
+    } else {
+        theme::working()
+    };
     p.fill_rounded(all, radius, theme::plate_bottom());
     p.rt.PushAxisAlignedClip(&d2rect(0.0, 0.0, w, h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     p.fill_gradient(
@@ -1259,8 +1689,8 @@ unsafe fn draw_plate(gpu: &render::Gpu, p: &Pen, s: PlateScene) {
     p.stroke_rounded(
         d2rect(0.5, 0.5, w - 1.0, h - 1.0),
         radius,
-        theme::working().with_alpha(0.55),
-        1.0,
+        lamp.with_alpha(if s.bypass { 0.9 } else { 0.55 }),
+        if s.bypass { 2.0 } else { 1.0 },
     );
     let seam = d2rect(5.5, 5.5, w - 11.0, h - 11.0);
     let seam_r = (radius - 3.0).max(2.0);
@@ -1275,13 +1705,8 @@ unsafe fn draw_plate(gpu: &render::Gpu, p: &Pen, s: PlateScene) {
     let x = PAD;
     let cw = w - 2.0 * PAD;
     // Title: the lamp, the name of the plate, and who is at work where.
-    p.circle((x + 4.0, 24.0), 4.0, theme::working(), None);
-    p.circle(
-        (x + 4.0, 24.0),
-        7.0,
-        theme::working().with_alpha(0.25),
-        None,
-    );
+    p.circle((x + 4.0, 24.0), 4.0, lamp, None);
+    p.circle((x + 4.0, 24.0), 7.0, lamp.with_alpha(0.25), None);
     p.text(
         &gpu.title,
         theme::text(),
@@ -1300,7 +1725,22 @@ unsafe fn draw_plate(gpu: &render::Gpu, p: &Pen, s: PlateScene) {
         d2rect(x + 100.0, 14.0, cw - 100.0, 20.0),
     );
 
-    let mut y = 40.0;
+    draw_controls(gpu, p, &s);
+    let mut y = CONTROLS_Y + CONTROLS_STEP;
+    if s.bypass {
+        p.fill_rounded(
+            d2rect(x, y - 2.0, cw, BANNER - 6.0),
+            4.0,
+            theme::waiting().with_alpha(0.18),
+        );
+        p.text(
+            &gpu.small_bold,
+            theme::waiting(),
+            "BYPASS ON, Esc stops and turns it off",
+            d2rect(x + 8.0, y, cw - 16.0, ROW),
+        );
+        y += BANNER;
+    }
     p.text(&gpu.chip, theme::legend(), "NOW", d2rect(x, y, 60.0, 16.0));
     if let Some(left) = s.gliding {
         p.text(
@@ -1356,9 +1796,14 @@ unsafe fn draw_plate(gpu: &render::Gpu, p: &Pen, s: PlateScene) {
         };
         p.text(&gpu.small, theme::legend(), &e.at, d2rect(x, y, 60.0, ROW));
         let mut buf = [0u8; 4];
+        let mark = if e.unasked {
+            theme::waiting()
+        } else {
+            e.mark.colour()
+        };
         p.text(
             &gpu.icon_small,
-            e.mark.colour(),
+            mark,
             e.mark.glyph().encode_utf8(&mut buf),
             d2rect(x + 58.0, y, 16.0, ROW),
         );
@@ -1372,9 +1817,115 @@ unsafe fn draw_plate(gpu: &render::Gpu, p: &Pen, s: PlateScene) {
     }
 }
 
+/// The control row: the glide's speed on a slider drawn like the glide's
+/// own bar, and the Bypass switch.
+unsafe fn draw_controls(gpu: &render::Gpu, p: &Pen, s: &PlateScene) {
+    let y = CONTROLS_Y;
+    let mid = y + CONTROLS_H / 2.0;
+    p.text(
+        &gpu.chip,
+        theme::legend(),
+        "SPEED",
+        d2rect(PAD, mid - 8.0, 48.0, 16.0),
+    );
+    let at = slider_of_glide(s.speed);
+    let live = s.dragging || s.hover == Some(Control::Speed);
+    p.fill_rounded(
+        d2rect(SLIDER_X, mid - 1.5, SLIDER_W, 3.0),
+        1.5,
+        theme::well(),
+    );
+    p.fill_rounded(
+        d2rect(SLIDER_X, mid - 1.5, SLIDER_W * at, 3.0),
+        1.5,
+        theme::working(),
+    );
+    let knob = (SLIDER_X + SLIDER_W * at, mid);
+    if live {
+        p.circle(knob, 9.0, theme::working().with_alpha(0.25), None);
+    }
+    p.circle(knob, 5.5, theme::text(), None);
+    p.circle(knob, 5.5, theme::working(), Some(1.5));
+    p.text(
+        &gpu.small,
+        if live {
+            theme::text()
+        } else {
+            theme::text_dim()
+        },
+        &speed_label(s.speed),
+        d2rect(SLIDER_X + SLIDER_W + 12.0, mid - 9.0, 50.0, ROW),
+    );
+
+    let button = d2rect(BYPASS_X, y, BYPASS_W, CONTROLS_H);
+    let hover = s.hover == Some(Control::Bypass);
+    if s.bypass {
+        p.fill_rounded(button, 5.0, theme::waiting());
+        p.text(&gpu.small_centre, Color::rgb(0x0B0C0E), "Bypass on", button);
+    } else {
+        p.fill_rounded(button, 5.0, theme::well());
+        let edge = if hover {
+            theme::waiting()
+        } else {
+            theme::engrave_light()
+        };
+        p.stroke_rounded(
+            d2rect(BYPASS_X + 0.5, y + 0.5, BYPASS_W - 1.0, CONTROLS_H - 1.0),
+            5.0,
+            edge,
+            1.0,
+        );
+        let ink = if hover {
+            theme::text()
+        } else {
+            theme::text_dim()
+        };
+        p.text(&gpu.small_centre, ink, "Bypass", button);
+    }
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
-        WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+        WM_NCHITTEST => {
+            let at = (
+                (lparam.0 & 0xFFFF) as i16 as i32,
+                ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+            );
+            let over = OVERLAY.with(|o| {
+                o.try_borrow()
+                    .ok()
+                    .and_then(|o| o.as_ref().map(|o| o.over_control(hwnd, at)))
+                    .unwrap_or(false)
+            });
+            if over {
+                LRESULT(HTCLIENT as isize)
+            } else {
+                LRESULT(HTTRANSPARENT as isize)
+            }
+        }
+        WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE | WM_CAPTURECHANGED => {
+            let turned_on = OVERLAY.with(|o| {
+                o.try_borrow_mut()
+                    .ok()
+                    .and_then(|mut o| o.as_mut().map(|o| o.mouse(hwnd, msg, lparam)))
+                    .unwrap_or(false)
+            });
+            // Outside the overlay's borrow: the app may hand it calls.
+            if turned_on {
+                super::with_app(|app| app.desktop_bypass_on());
+            }
+            LRESULT(0)
+        }
+        GUARD_MSG => {
+            OVERLAY.with(|o| {
+                if let Ok(mut o) = o.try_borrow_mut() {
+                    if let Some(o) = o.as_mut() {
+                        o.tripped();
+                    }
+                }
+            });
+            LRESULT(0)
+        }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_TIMER if wparam.0 == FRAME => {
             crate::vsync::took(hwnd, FRAME);
@@ -1411,6 +1962,7 @@ mod tests {
             mark: Mark::Ok,
             what: format!("click {n}"),
             outcome: String::new(),
+            unasked: false,
         }
     }
 
@@ -1431,21 +1983,119 @@ mod tests {
     #[test]
     fn the_ghost_glides_softly_from_start_to_point() {
         let (a, b) = ((0.0, 100.0), (200.0, -100.0));
-        assert_eq!(glide_at(a, b, Duration::ZERO), a);
-        assert_eq!(glide_at(a, b, GLIDE), b);
-        assert_eq!(glide_at(a, b, GLIDE * 3), b);
-        let half = glide_at(a, b, GLIDE / 2);
-        assert!((half.0 - 100.0).abs() < 0.01 && half.1.abs() < 0.01);
-        // Slow at the start: a tenth of the time is far less than a tenth
-        // of the way.
-        assert!(glide_at(a, b, GLIDE / 10).0 < 10.0);
+        for takes in [GLIDE, GLIDE_FAST, GLIDE_SLOW] {
+            assert_eq!(glide_at(a, b, Duration::ZERO, takes), a);
+            assert_eq!(glide_at(a, b, takes, takes), b);
+            assert_eq!(glide_at(a, b, takes * 3, takes), b);
+            let half = glide_at(a, b, takes / 2, takes);
+            assert!((half.0 - 100.0).abs() < 0.01 && half.1.abs() < 0.01);
+            // Slow at the start: a tenth of the time is far less than a
+            // tenth of the way.
+            assert!(glide_at(a, b, takes / 10, takes).0 < 10.0);
+        }
+        // A hold goes nowhere.
+        assert_eq!(glide_at(a, a, GLIDE / 2, GLIDE), a);
     }
 
     #[test]
     fn the_glide_counts_down_its_bar() {
-        assert_eq!(left_of_glide(Duration::ZERO), 1.0);
-        assert!((left_of_glide(GLIDE / 4) - 0.75).abs() < 1e-4);
-        assert_eq!(left_of_glide(GLIDE * 2), 0.0);
+        for takes in [GLIDE, GLIDE_FAST] {
+            assert_eq!(left_of_glide(Duration::ZERO, takes), 1.0);
+            assert!((left_of_glide(takes / 4, takes) - 0.75).abs() < 1e-4);
+            assert_eq!(left_of_glide(takes * 2, takes), 0.0);
+        }
+    }
+
+    #[test]
+    fn the_slider_runs_from_slow_on_the_left_to_fast_on_the_right() {
+        assert_eq!(glide_of_slider(0.0), GLIDE_SLOW);
+        assert_eq!(glide_of_slider(1.0), GLIDE_FAST);
+        assert_eq!(glide_of_slider(-3.0), GLIDE_SLOW);
+        assert_eq!(glide_of_slider(7.0), GLIDE_FAST);
+        assert_eq!(glide_of_slider(f32::NAN), GLIDE_SLOW);
+        // Whole tenths only, as the label shows.
+        for i in 0..=100 {
+            let d = glide_of_slider(i as f32 / 100.0);
+            assert_eq!(d.as_millis() % 100, 0, "{d:?}");
+            assert!((GLIDE_FAST..=GLIDE_SLOW).contains(&d));
+        }
+        // And back: a glide's place gives the same glide.
+        for ms in [300, 1000, 2000, 3700, 4000] {
+            let d = Duration::from_millis(ms);
+            assert_eq!(glide_of_slider(slider_of_glide(d)), d);
+        }
+        assert_eq!(slider_of_glide(Duration::from_secs(60)), 0.0);
+        assert_eq!(slider_of_glide(Duration::ZERO), 1.0);
+    }
+
+    #[test]
+    fn the_slider_takes_its_place_from_the_mouse() {
+        assert_eq!(slider_at(SLIDER_X), 0.0);
+        assert_eq!(slider_at(SLIDER_X + SLIDER_W), 1.0);
+        assert_eq!(slider_at(SLIDER_X + SLIDER_W / 2.0), 0.5);
+        assert_eq!(slider_at(0.0), 0.0);
+        assert_eq!(slider_at(BOX_W), 1.0);
+        assert_eq!(speed_label(GLIDE), "2.0 s");
+        assert_eq!(speed_label(GLIDE_FAST), "0.3 s");
+    }
+
+    #[test]
+    fn the_speed_is_kept_only_when_moved_from_the_default() {
+        assert_eq!(glide_to_saved(GLIDE), None);
+        assert_eq!(glide_from_saved(None), GLIDE);
+        let d = Duration::from_millis(700);
+        assert_eq!(glide_from_saved(glide_to_saved(d)), d);
+        // A file edited by hand stays between the ends.
+        assert_eq!(glide_from_saved(Some(10)), GLIDE_FAST);
+        assert_eq!(glide_from_saved(Some(60_000)), GLIDE_SLOW);
+    }
+
+    #[test]
+    fn the_mouse_finds_the_controls_and_nothing_else() {
+        let mid = CONTROLS_Y + CONTROLS_H / 2.0;
+        assert_eq!(control_at(SLIDER_X + 10.0, mid), Some(Control::Speed));
+        assert_eq!(control_at(SLIDER_X - 4.0, mid), Some(Control::Speed));
+        assert_eq!(control_at(BYPASS_X + 5.0, mid), Some(Control::Bypass));
+        assert_eq!(control_at(BOX_W - PAD - 1.0, mid), Some(Control::Bypass));
+        // The title, the label, the gap and the history are not controls.
+        assert_eq!(control_at(SLIDER_X + 10.0, 20.0), None);
+        assert_eq!(control_at(PAD + 2.0, mid), None);
+        assert_eq!(control_at(BYPASS_X - 4.0, mid), None);
+        assert_eq!(control_at(BYPASS_X + 5.0, CONTROLS_Y + CONTROLS_H), None);
+        assert_eq!(control_at(BOX_W - 2.0, mid), None);
+    }
+
+    #[test]
+    fn the_guard_tells_the_agent_what_opened() {
+        assert_eq!(
+            guard_error("Synchronization", guard::Kind::Dialog, false),
+            "stopped: the window \"Synchronization\" opened while the ghost was on its way; \
+             look again before clicking"
+        );
+        assert_eq!(
+            guard_error(" ", guard::Kind::Front, true),
+            "stopped: a window with no title came to the front while Horadric held the \
+             action; look again before acting"
+        );
+        assert_eq!(
+            guard_outcome("Save As", guard::Kind::Shown),
+            "stopped: the window \"Save As\" opened"
+        );
+    }
+
+    #[test]
+    fn what_bypass_let_through_is_marked_once() {
+        let mut list = VecDeque::new();
+        note_unasked(&mut list, "type \"x\"");
+        note_unasked(&mut list, "click OK");
+        assert!(take_unasked(&mut list, "click OK"));
+        assert!(!take_unasked(&mut list, "click OK"));
+        assert!(take_unasked(&mut list, "type \"x\""));
+        for n in 0..HISTORY + 4 {
+            note_unasked(&mut list, &format!("click {n}"));
+        }
+        assert_eq!(list.len(), HISTORY);
+        assert!(!take_unasked(&mut list, "click 0"));
     }
 
     #[test]
@@ -1494,15 +2144,19 @@ mod tests {
 
     #[test]
     fn the_plate_grows_with_its_reason_and_history() {
-        let bare = box_height(0.0, 0);
-        assert!(box_height(17.0, 0) > bare);
+        let bare = box_height(0.0, 0, false);
+        // Room for the controls under the title.
+        assert!(bare >= CONTROLS_Y + CONTROLS_STEP + 22.0 + ROW);
+        assert!(box_height(17.0, 0, false) > bare);
         assert_eq!(
-            box_height(500.0, 0),
-            box_height(REASON_LINES * REASON_LINE, 0)
+            box_height(500.0, 0, false),
+            box_height(REASON_LINES * REASON_LINE, 0, false)
         );
-        let one = box_height(0.0, 1);
+        let one = box_height(0.0, 1, false);
         assert!(one > bare);
-        assert_eq!(box_height(0.0, 3) - one, 2.0 * ROW);
+        assert_eq!(box_height(0.0, 3, false) - one, 2.0 * ROW);
+        // And for the bypass band while it is on.
+        assert_eq!(box_height(0.0, 1, true) - one, BANNER);
     }
 
     #[test]
@@ -1524,6 +2178,10 @@ mod tests {
         assert_eq!(entry_line(&e), "click 1: dialog opened");
         e.what = " ".into();
         assert_eq!(entry_line(&e), "dialog opened");
+        e.unasked = true;
+        assert_eq!(entry_line(&e), "unasked: dialog opened");
+        e.outcome.clear();
+        assert_eq!(entry_line(&e), "unasked");
         assert_eq!(clock(7, 3, 9), "07:03:09");
     }
 

@@ -14,6 +14,10 @@
 //! What is allowed is shown while it happens, see [`super::ghost`]: a
 //! click waits for the ghost cursor to reach it, and the human can stop it
 //! on the way.
+//!
+//! The plate's Bypass lets a human who trusts the work and watches it skip
+//! the questions. It is never kept, and what it lets through unasked is
+//! still held for Esc, which stops it and turns bypass off.
 
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
@@ -77,6 +81,16 @@ pub(super) fn decide(grant: Grant, action: Action, risky: bool) -> Decision {
         Action::Operate if grant == Grant::Operate && risky => Decision::AskRisky,
         Action::Operate if grant == Grant::Operate => Decision::Allow,
         _ => Decision::AskApprove,
+    }
+}
+
+/// What bypass makes of a decision: a question it would ask becomes an
+/// allowed call, true when held for the human's Esc. Nothing else moves:
+/// what is allowed goes as ever, and a refusal stays one.
+pub(super) fn bypassed(decision: Decision, bypass: bool) -> (Decision, bool) {
+    match decision {
+        Decision::AskApprove | Decision::AskRisky if bypass => (Decision::Allow, true),
+        d => (d, false),
     }
 }
 
@@ -313,8 +327,9 @@ impl App {
             reply: call.reply,
         };
         let grant = self.grant_of(&pending);
-        if decide(grant, pending.request.action, pending.request.risky) == Decision::Allow {
-            return self.allow(pending);
+        let asked = decide(grant, pending.request.action, pending.request.risky);
+        if let (Decision::Allow, held) = bypassed(asked, ghost::bypass()) {
+            return self.allow(pending, held);
         }
         self.desktop.waiting.push_back(pending);
         post(self.notify.0 as isize, WM_HORADRIC_DESKTOP, 0);
@@ -333,8 +348,9 @@ impl App {
     /// many to a turn.
     ///
     /// The Thinking plate and the frame round the screens say the rest, so
-    /// the toast comes once, as control begins.
-    fn allow(&mut self, p: Pending) {
+    /// the toast comes once, as control begins. `unasked` is a call only
+    /// bypass let through, held for Esc before it is answered.
+    fn allow(&mut self, p: Pending, unasked: bool) {
         let r = p.request;
         let name = self.name_of(&p.session);
         let program = program_name(&r.exe).to_string();
@@ -354,6 +370,7 @@ impl App {
             what: r.what.clone(),
             point: r.point,
             hwnd: r.hwnd,
+            unasked,
         };
         let started = ghost::allowed(&self.shared, call, p.reply);
         if started && r.action == Action::Operate {
@@ -373,10 +390,11 @@ impl App {
     fn next_question(&mut self) -> Option<Question> {
         while let Some(p) = self.desktop.waiting.pop_front() {
             let grant = self.grant_of(&p);
-            match decide(grant, p.request.action, p.request.risky) {
-                Decision::Allow => self.allow(p),
-                Decision::Refuse(why) => self.refuse(p, why),
-                ask => {
+            let asked = decide(grant, p.request.action, p.request.risky);
+            match bypassed(asked, ghost::bypass()) {
+                (Decision::Allow, held) => self.allow(p, held),
+                (Decision::Refuse(why), _) => self.refuse(p, why),
+                (ask, _) => {
                     return Some(Question {
                         name: self.name_of(&p.session),
                         risky: ask == Decision::AskRisky,
@@ -386,6 +404,14 @@ impl App {
             }
         }
         None
+    }
+
+    /// Bypass was turned on: the calls waiting for a question go through
+    /// it now, rather than after the human answers each.
+    pub(super) fn desktop_bypass_on(&self) {
+        if !self.desktop.waiting.is_empty() {
+            post(self.notify.0 as isize, WM_HORADRIC_DESKTOP, 0);
+        }
     }
 
     /// Acts on the human's answer. A question back when there is another
@@ -401,7 +427,7 @@ impl App {
             decision
         };
         match decision {
-            Decision::Allow => self.allow(q.pending),
+            Decision::Allow => self.allow(q.pending, false),
             Decision::Refuse(why) => self.refuse(q.pending, why),
             Decision::AskRisky => {
                 q.risky = true;
@@ -540,6 +566,24 @@ mod tests {
             decide(Grant::Operate, Action::Operate, true),
             Decision::AskRisky
         );
+    }
+
+    #[test]
+    fn bypass_lets_a_question_through_held_and_leaves_the_rest() {
+        for ask in [Decision::AskApprove, Decision::AskRisky] {
+            assert_eq!(bypassed(ask, true), (Decision::Allow, true));
+            assert_eq!(bypassed(ask, false), (ask, false));
+        }
+        for bypass in [true, false] {
+            assert_eq!(bypassed(Decision::Allow, bypass), (Decision::Allow, false));
+            for why in [Refusal::Refused, Refusal::OnlyLook] {
+                let no = Decision::Refuse(why);
+                assert_eq!(bypassed(no, bypass), (no, false));
+            }
+        }
+        // A risky click in a program never approved goes through bypass.
+        let asked = decide(Grant::None, Action::Operate, true);
+        assert_eq!(bypassed(asked, true), (Decision::Allow, true));
     }
 
     #[test]
