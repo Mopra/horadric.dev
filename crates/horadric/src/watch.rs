@@ -16,13 +16,15 @@ use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::System::SystemInformation::GetLocalTime;
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::System::Threading::{
+    GetCurrentThreadId, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
-    AccessibleObjectFromEvent, IAccessible, SetWinEventHook, HWINEVENTHOOK,
+    AccessibleObjectFromEvent, IAccessible, SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetMessageW,
@@ -173,6 +175,10 @@ pub struct Ring {
     most: usize,
     /// Every change up to this one has been pushed out.
     lost_upto: u64,
+    /// Every change up to this one may have been read by an agent, so it
+    /// stays as it was told: folding it away would leave the reader with a
+    /// change that was undone.
+    handed: u64,
 }
 
 impl Ring {
@@ -182,7 +188,13 @@ impl Ring {
             next: 1,
             most,
             lost_upto: 0,
+            handed: 0,
         }
+    }
+
+    /// Notes that every change up to `upto` has gone to a reader.
+    pub fn hand_out(&mut self, upto: u64) {
+        self.handed = self.handed.max(upto);
     }
 
     /// The last change recorded, 0 before any.
@@ -191,7 +203,8 @@ impl Ring {
     }
 
     /// Records `c`, folded into an earlier change of the same element when
-    /// they come close together. Whether anything new is there to read.
+    /// they come close together and no reader has had that one yet.
+    /// Whether anything new is there to read.
     pub fn push(&mut self, mut c: Change) -> bool {
         // The front moves through several windows in a moment (a dialog
         // closing hands it back); only where it came to rest matters.
@@ -208,10 +221,20 @@ impl Ring {
             .find(|&i| near(&self.items[i]))
         {
             let same = &self.items[i];
-            if same.window == c.window && same.to == c.to && same.states == c.states {
+            // A window closed in between makes a second showing news.
+            let since_touched = !c.folds()
+                && self
+                    .items
+                    .range(i + 1..)
+                    .any(|later| later.window == c.window);
+            if same.window == c.window
+                && same.to == c.to
+                && same.states == c.states
+                && !since_touched
+            {
                 return false;
             }
-            if c.folds() {
+            if c.folds() && same.seq > self.handed {
                 let old = self.items.remove(i).expect("found just above");
                 c.from = old.from;
                 if let (Some((first, _)), Some((_, now))) = (old.states, c.states) {
@@ -465,14 +488,7 @@ pub fn changes_text(list: &[Change], since: u64, newest: u64, lost: bool, scope:
     if list.is_empty() {
         out.push_str(&format!("Nothing changed{scope} since #{since}."));
     } else {
-        let skip = list.len().saturating_sub(MOST_LINES);
-        if skip > 0 {
-            out.push_str(&format!("({skip} earlier changes left out.)\n"));
-        }
-        for c in &list[skip..] {
-            out.push_str(&line(c));
-            out.push('\n');
-        }
+        push_lines(&mut out, list);
         out.push_str(&format!(
             "{} change{}{scope}, up to #{newest}.",
             list.len(),
@@ -483,6 +499,41 @@ pub fn changes_text(list: &[Change], since: u64, newest: u64, lost: bool, scope:
         " The next desktop_changes starts after #{newest} by itself."
     ));
     out
+}
+
+/// The changes the helper read in programs that run as administrator, as
+/// part of another answer. Its ring counts on its own, so no numbers: the
+/// agent's `since` names the other ring's.
+pub fn changes_part(list: &[Change], lost: bool, scope: &str) -> String {
+    let mut out = String::new();
+    if lost {
+        out.push_str(&format!(
+            "(Some changes were pushed out: only the last {KEPT} are kept.)\n"
+        ));
+    }
+    if list.is_empty() {
+        out.push_str(&format!("Nothing changed{scope} since the last look."));
+    } else {
+        push_lines(&mut out, list);
+        out.push_str(&format!(
+            "{} change{}{scope}.",
+            list.len(),
+            if list.len() == 1 { "" } else { "s" }
+        ));
+    }
+    out
+}
+
+/// The last lines of `list`, one a line, saying how many were left out.
+fn push_lines(out: &mut String, list: &[Change]) {
+    let skip = list.len().saturating_sub(MOST_LINES);
+    if skip > 0 {
+        out.push_str(&format!("({skip} earlier changes left out.)\n"));
+    }
+    for c in &list[skip..] {
+        out.push_str(&line(c));
+        out.push('\n');
+    }
 }
 
 /// What came of an action, in a sentence: windows first, as a dialog that
@@ -635,6 +686,11 @@ fn poke(thread: u32) {
 /// Starts watching program `pid`, and returns once it is.
 pub fn follow(pid: u32) {
     let w = watch();
+    // The thread never started: nothing would ever hook it, and waiting
+    // each call would only slow every action down.
+    if w.thread == 0 {
+        return;
+    }
     let (lock, changed) = &*w.shared;
     let Ok(mut s) = lock.lock() else { return };
     if s.followed.contains(&pid) {
@@ -671,6 +727,13 @@ pub fn newest() -> u64 {
         .unwrap_or(0)
 }
 
+/// The last change, once what came before now has been read, so changes
+/// after it are what an action about to be made did.
+pub fn mark() -> u64 {
+    flush();
+    newest()
+}
+
 /// Waits until the thread has read what the programs said so far.
 pub fn flush() {
     let Some(w) = WATCH.get() else { return };
@@ -683,17 +746,31 @@ pub fn flush() {
 }
 
 /// The changes after `seq` in program `pid`, or all, whether some were
-/// pushed out, and the newest change.
+/// pushed out, and the newest change, for an agent to read: they are
+/// not folded away after.
 pub fn since(seq: u64, pid: Option<u32>) -> (Vec<Change>, bool, u64) {
+    read_ring(seq, pid, true)
+}
+
+/// As [`since`], for a look no agent sees, which leaves them free to fold.
+pub fn peek(seq: u64, pid: Option<u32>) -> (Vec<Change>, bool, u64) {
+    read_ring(seq, pid, false)
+}
+
+fn read_ring(seq: u64, pid: Option<u32>, handed: bool) -> (Vec<Change>, bool, u64) {
     let Some(w) = WATCH.get() else {
         return (Vec::new(), false, 0);
     };
-    let Ok(s) = w.shared.0.lock() else {
+    let Ok(mut s) = w.shared.0.lock() else {
         return (Vec::new(), false, 0);
     };
     let (list, lost) = s.ring.since(seq);
+    let newest = s.ring.newest();
+    if handed {
+        s.ring.hand_out(newest);
+    }
     let list = list.into_iter().filter(|c| in_scope(c, pid)).collect();
-    (list, lost, s.ring.newest())
+    (list, lost, newest)
 }
 
 /// Waits up to `most` for a change to be recorded.
@@ -708,7 +785,7 @@ pub fn wait_for_change(after: u64, most: Duration) {
 }
 
 /// An event as the hook hands it over, to be read later.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Raw {
     event: u32,
     hwnd: isize,
@@ -769,7 +846,17 @@ struct Local {
     states: HashMap<(isize, i32, i32), u32>,
     intake: Intake,
     start: Instant,
+    /// Each followed program's hooks, removed when it ends or the thread
+    /// does.
+    hooks: HashMap<u32, Vec<HWINEVENTHOOK>>,
+    /// Rounds since the followed programs were last checked for having
+    /// ended.
+    unchecked: u32,
 }
+
+/// How many rounds, of a tenth of a second at least, between looks for
+/// programs that ended.
+const CHECK_ENDED: u32 = 50;
 
 /// Classes of windows that come and go with no meaning to the agent.
 const NOISE_CLASSES: &[&str] = &[
@@ -798,9 +885,55 @@ fn run(shared: Arc<(Mutex<Shared>, Condvar)>, start: Instant, ready: mpsc::Sende
             states: HashMap::new(),
             intake: Intake::default(),
             start,
+            hooks: HashMap::new(),
+            unchecked: 0,
         };
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             round(&shared, &mut local);
+        }
+        for h in local.hooks.into_values().flatten() {
+            let _ = UnhookWinEvent(h);
+        }
+    }
+}
+
+/// Whether program `pid` has ended. One that can not be opened for some
+/// other reason than being gone is taken as running.
+fn ended(pid: u32) -> bool {
+    const STILL_ACTIVE: u32 = 259;
+    unsafe {
+        match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(p) => {
+                let mut code = 0u32;
+                let read = GetExitCodeProcess(p, &mut code).is_ok();
+                let _ = CloseHandle(p);
+                read && code != STILL_ACTIVE
+            }
+            Err(e) => e.code() == ERROR_INVALID_PARAMETER.to_hresult(),
+        }
+    }
+}
+
+/// Unhooks the programs that ended, so their numbers, once Windows hands
+/// them to another program, are hooked afresh.
+fn drop_ended(shared: &Arc<(Mutex<Shared>, Condvar)>, local: &mut Local) {
+    local.unchecked += 1;
+    if local.unchecked < CHECK_ENDED {
+        return;
+    }
+    local.unchecked = 0;
+    let gone: Vec<u32> = local.hooks.keys().copied().filter(|&p| ended(p)).collect();
+    if gone.is_empty() {
+        return;
+    }
+    for pid in &gone {
+        for h in local.hooks.remove(pid).unwrap_or_default() {
+            let _ = unsafe { UnhookWinEvent(h) };
+        }
+    }
+    if let Ok(mut s) = shared.0.lock() {
+        for pid in &gone {
+            s.followed.remove(pid);
         }
     }
 }
@@ -812,9 +945,15 @@ fn round(shared: &Arc<(Mutex<Shared>, Condvar)>, local: &mut Local) {
         .lock()
         .map(|mut s| std::mem::take(&mut s.asked))
         .unwrap_or_default();
+    drop_ended(shared, local);
     for pid in &asked {
+        let hooks = local.hooks.entry(*pid).or_default();
+        // Asked twice before the first round answered: hooked once.
+        if !hooks.is_empty() {
+            continue;
+        }
         for (min, max) in HOOKED {
-            unsafe {
+            let h = unsafe {
                 SetWinEventHook(
                     min,
                     max,
@@ -823,7 +962,10 @@ fn round(shared: &Arc<(Mutex<Shared>, Condvar)>, local: &mut Local) {
                     *pid,
                     0,
                     WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-                );
+                )
+            };
+            if !h.is_invalid() {
+                hooks.push(h);
             }
         }
         for w in windows_of(*pid) {
@@ -842,12 +984,13 @@ fn round(shared: &Arc<(Mutex<Shared>, Condvar)>, local: &mut Local) {
     // Of a burst on one element only the last is read: it has the value
     // the others led to.
     let mut kept = Vec::with_capacity(raw.len());
+    let mut had = HashSet::new();
     while let Some(r) = raw.pop() {
         let element = matches!(
             r.event,
             EVENT_NAMECHANGE | EVENT_VALUECHANGE | EVENT_STATECHANGE
         );
-        if !(element && kept.contains(&r)) {
+        if !element || had.insert(r) {
             kept.push(r);
         }
     }
@@ -1204,6 +1347,58 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_value_read_before_it_went_back_keeps_both_lines() {
+        let mut r = Ring::new(10);
+        r.push(value(0, Some("a"), "b"));
+        r.hand_out(r.newest());
+        r.push(value(200, Some("b"), "a"));
+        let all = r.since(0).0;
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            (all[1].from.as_deref(), all[1].to.as_str()),
+            (Some("b"), "a")
+        );
+        // What no reader had yet still folds: there and back is nothing.
+        r.push(value(400, Some("a"), "b"));
+        let all = r.since(0).0;
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].to, "b");
+    }
+
+    #[test]
+    fn a_state_read_before_it_went_back_keeps_both_lines() {
+        let mut r = Ring::new(10);
+        let mut a = Change::of(What::State, &win("w"));
+        a.key = Some((1, -4, 0));
+        a.states = Some((Some(0), STATE_CHECKED));
+        r.push(a.clone());
+        r.hand_out(1);
+        a.at_ms = 100;
+        a.states = Some((Some(STATE_CHECKED), 0));
+        r.push(a);
+        assert_eq!(r.since(0).0.len(), 2);
+        assert_eq!(r.since(1).0[0].states, Some((Some(STATE_CHECKED), 0)));
+    }
+
+    #[test]
+    fn a_window_shown_closed_and_shown_again_ends_shown() {
+        let mut r = Ring::new(10);
+        let mut a = Change::of(What::Shown, &win("Save As"));
+        a.at_ms = 10;
+        r.push(a.clone());
+        let mut closed = Change::of(What::Closed, &win("Save As"));
+        closed.at_ms = 200;
+        assert!(r.push(closed));
+        a.at_ms = 400;
+        assert!(r.push(a));
+        let all = r.since(0).0;
+        assert_eq!(
+            all.iter().map(|c| c.what).collect::<Vec<_>>(),
+            [What::Shown, What::Closed, What::Shown]
+        );
+    }
+
+    #[test]
     fn the_same_event_twice_is_kept_once() {
         let mut r = Ring::new(10);
         let mut a = Change::of(What::Shown, &win("Save As"));
@@ -1385,6 +1580,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_administrator_part_says_no_numbers() {
+        assert_eq!(
+            changes_part(&[], false, " in the watched programs"),
+            "Nothing changed in the watched programs since the last look."
+        );
+        let mut a = value(0, None, "1");
+        a.seq = 9;
+        let text = changes_part(&[a], true, "");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].contains("pushed out"));
+        assert!(lines[1].contains("value now \"1\""));
+        assert_eq!(lines[2], "1 change.");
+        assert!(!text.contains('#'));
+    }
+
+    #[test]
     fn a_digest_puts_windows_first_and_counts_the_rest() {
         assert_eq!(digest(&[], 2), "");
         let mut shown = Change::of(What::Shown, &win("Save As"));
@@ -1475,8 +1686,8 @@ $timer.Start()
     /// Not a check but a run to read: starts the form above, as
     /// administrator when `ELEVATED=1` (on a machine that elevates without
     /// asking), watches it from this process, and prints what was seen.
-    /// `ELEVATED=1 cargo test -p horadric watch_a_form_by_hand -- --ignored
-    /// --nocapture`
+    /// `ELEVATED=1 cargo test -p horadric watch_a_form_by_hand`, with the
+    /// ignored and nocapture flags handed on to the test binary.
     #[test]
     #[ignore]
     fn watch_a_form_by_hand() {

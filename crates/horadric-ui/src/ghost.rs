@@ -135,6 +135,10 @@ const BANNER: f32 = 26.0;
 /// What a call bypass let through is told when bypass ends before it went.
 const BYPASS_ENDED: &str =
     "the human stopped bypass, so this action was not made; ask again and they will be asked";
+/// What a call bypass let through is told when Esc cannot be taken, since
+/// then nothing would let the human stop it.
+const NO_ESC: &str = "Horadric could not take the Esc key, so the human could not stop this \
+    action and bypass did not let it through; bypass can not be used now, ask again";
 /// The reason gets at most this many lines.
 const REASON_LINES: f32 = 3.0;
 const REASON_LINE: f32 = 17.0;
@@ -225,6 +229,30 @@ pub(super) fn take_unasked(unasked: &mut VecDeque<String>, what: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// Whether Esc is held for the human: while a glide runs, so it can be
+/// stopped, and the whole time bypass is on, as its banner promises.
+pub(super) fn wants_esc(gliding: bool, bypass: bool) -> bool {
+    gliding || bypass
+}
+
+/// What Esc does: whether it halts the glide on its way, and whether it
+/// ends bypass. With nothing on its way it still ends bypass.
+pub(super) fn esc_does(gliding: bool, bypass: bool) -> (bool, bool) {
+    (gliding, bypass)
+}
+
+/// Whether a queued call may start its glide. One only bypass let through
+/// goes only where Esc can stop it; one the human allowed goes anyway.
+pub(super) fn may_glide(unasked: bool, have_esc: bool) -> bool {
+    !unasked || have_esc
+}
+
+/// Whether a trip the guard noted stops the glide now on its way. One
+/// noted for an earlier glide came too late and stops nothing.
+pub(super) fn trip_stops(tripped: u64, gliding: Option<u64>) -> bool {
+    gliding == Some(tripped)
 }
 
 /// A wall clock time as the history shows it.
@@ -1160,10 +1188,33 @@ impl Overlay {
         self.edges_bypass = bypass();
     }
 
+    /// Starts the next queued call's glide, unless one is on its way:
+    /// starting another would drop that one's answer and its guard.
     fn next_glide(&mut self, now: Instant) {
+        if self.glide.is_some() {
+            return;
+        }
         while let Some(q) = self.queue.pop_front() {
             // Its agent gave up waiting: acting now would act twice.
             if !q.reply.wanted() {
+                continue;
+            }
+            // Taken before the glide starts, so the human can stop it from
+            // its first frame.
+            self.listen_for_stop(true);
+            if !may_glide(q.unasked, self.stop_key) {
+                q.reply.send(json!({ "error": NO_ESC }));
+                remember(
+                    &mut self.history,
+                    Entry {
+                        at: now_clock(),
+                        mark: Mark::Stopped,
+                        what: q.what,
+                        outcome: "not made: Esc could not be taken".into(),
+                        unasked: true,
+                    },
+                );
+                self.stale = true;
                 continue;
             }
             let from = self.ghost_at.unwrap_or_else(|| {
@@ -1191,15 +1242,21 @@ impl Overlay {
                 reply: q.reply,
                 what: q.what,
             });
-            self.listen_for_stop(true);
             self.paint_ghost(now);
             return;
         }
-        self.listen_for_stop(false);
         self.watch = None;
+        self.keep_esc();
     }
 
-    /// Esc is the human's only while a glide runs, and theirs again after.
+    /// Holds Esc while it has something to stop, and gives it back to the
+    /// human's programs the moment it has not.
+    fn keep_esc(&mut self) {
+        self.listen_for_stop(wants_esc(self.glide.is_some(), bypass()));
+    }
+
+    /// Takes or gives back Esc. A failed take leaves it given back, and the
+    /// next take tries again.
     fn listen_for_stop(&mut self, on: bool) {
         if on == self.stop_key {
             return;
@@ -1241,22 +1298,25 @@ impl Overlay {
         self.stale = true;
     }
 
-    /// Esc while gliding: the click is not made. With bypass on it ends
-    /// bypass too, the human's word that the trust is over.
+    /// Esc: the click on its way is not made. With bypass on it ends
+    /// bypass too, the human's word that the trust is over, even with
+    /// nothing on its way.
     fn stop(&mut self) {
-        if self.glide.is_none() {
-            return;
+        let (halts, ends) = esc_does(self.glide.is_some(), bypass());
+        if halts {
+            self.halt(
+                "the human stopped this action",
+                "stopped by the human".into(),
+            );
         }
-        self.halt(
-            "the human stopped this action",
-            "stopped by the human".into(),
-        );
-        if bypass() {
+        if ends {
+            // It starts the next glide itself.
             self.bypass_off();
+        } else {
+            // The rest waiting were asked before the stop and still go,
+            // each with its own glide to stop.
+            self.next_glide(Instant::now());
         }
-        // The rest waiting were asked before the stop and still go, each
-        // with its own glide to stop.
-        self.next_glide(Instant::now());
         self.run();
     }
 
@@ -1269,7 +1329,7 @@ impl Overlay {
         let Some(g) = &self.glide else {
             return;
         };
-        if g.serial != t.glide {
+        if !trip_stops(t.glide, Some(g.serial)) {
             return;
         }
         let error = guard_error(&t.title, t.kind, g.held);
@@ -1280,6 +1340,8 @@ impl Overlay {
 
     fn bypass_on(&mut self) {
         BYPASS.set(true);
+        // Its banner says Esc ends it, so Esc is held from now.
+        self.keep_esc();
         self.stale = true;
         self.run();
     }
@@ -1311,9 +1373,9 @@ impl Overlay {
         // moment bypass ends.
         self.until = extend(self.until, Instant::now(), true);
         self.stale = true;
-        if self.glide.is_none() {
-            self.next_glide(Instant::now());
-        }
+        // Starts what the human asked for, or gives Esc back when nothing
+        // is left to stop.
+        self.next_glide(Instant::now());
         self.run();
     }
 
@@ -1391,6 +1453,10 @@ impl Overlay {
             self.shown = (self.shown - dt.as_secs_f32() / FADE_OUT.as_secs_f32()).max(0.0);
         }
 
+        // A trip whose message came while the overlay was busy, or after
+        // this frame, is taken before the glide is answered: the window
+        // it saw opened before the click.
+        self.tripped();
         if let Some(g) = &self.glide {
             let elapsed = now.duration_since(g.began);
             self.ghost_at = Some(glide_at(g.from, g.to, elapsed, g.takes));
@@ -2081,6 +2147,37 @@ mod tests {
             guard_outcome("Save As", guard::Kind::Shown),
             "stopped: the window \"Save As\" opened"
         );
+    }
+
+    #[test]
+    fn esc_is_held_while_a_glide_runs_or_bypass_is_on() {
+        assert!(!wants_esc(false, false));
+        assert!(wants_esc(true, false));
+        assert!(wants_esc(false, true));
+        assert!(wants_esc(true, true));
+    }
+
+    #[test]
+    fn esc_halts_what_glides_and_ends_bypass_even_with_nothing_on_its_way() {
+        assert_eq!(esc_does(true, false), (true, false));
+        assert_eq!(esc_does(true, true), (true, true));
+        assert_eq!(esc_does(false, true), (false, true));
+        assert_eq!(esc_does(false, false), (false, false));
+    }
+
+    #[test]
+    fn only_what_the_human_allowed_goes_without_esc() {
+        assert!(may_glide(false, false));
+        assert!(may_glide(false, true));
+        assert!(may_glide(true, true));
+        assert!(!may_glide(true, false));
+    }
+
+    #[test]
+    fn a_trip_stops_only_the_glide_it_came_for() {
+        assert!(trip_stops(4, Some(4)));
+        assert!(!trip_stops(3, Some(4)));
+        assert!(!trip_stops(4, None));
     }
 
     #[test]

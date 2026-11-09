@@ -60,7 +60,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::desktop_helper::{as_administrator, Helper, HelperStart};
 use crate::mcp::text;
-use crate::watch::{self, changes_text, digest, verdict, Until};
+use crate::watch::{self, changes_part, changes_text, digest, verdict, Until};
 
 /// The most elements one snapshot holds, so a vast window can not take
 /// minutes or fill the context.
@@ -683,6 +683,10 @@ pub struct Desktop {
     /// The last change `desktop_changes` told, per program (none for
     /// all), so the next call starts after it.
     seen: HashMap<Option<u32>, u64>,
+    /// This is the helper, whose changes are a part of the session's
+    /// answer: its ring numbers apart from the session's, so it keeps its
+    /// own place and says no numbers.
+    part: bool,
 }
 
 /// What is known about the element an action aims at.
@@ -1142,6 +1146,14 @@ fn on_the_side(
 }
 
 impl Desktop {
+    /// The desktop as the helper serves it.
+    pub fn for_helper() -> Desktop {
+        Desktop {
+            part: true,
+            ..Desktop::default()
+        }
+    }
+
     fn com(&mut self) -> Result<&Com, String> {
         if self.com.is_none() {
             let com = unsafe {
@@ -1301,7 +1313,7 @@ impl Desktop {
                 let point = aim_point(&w, &aim);
                 allow(app, &root, "operate", &what, risky, point, &reason)?;
                 watch::follow(w.pid);
-                let (before, mark) = (list_windows(), watch::newest());
+                let (before, mark) = (list_windows(), watch::mark());
                 let result = self.click(&w, &aim, button, double).map(|mut said| {
                     thread::sleep(settle);
                     said.push_str(&came_of(&before, &w, mark));
@@ -1324,7 +1336,7 @@ impl Desktop {
                 let point = aim_point(&w, &aim);
                 allow(app, &root, "operate", &what, risky, point, &reason)?;
                 watch::follow(w.pid);
-                let (before, mark) = (list_windows(), watch::newest());
+                let (before, mark) = (list_windows(), watch::mark());
                 let result = self.type_in(&w, &aim, typed, submit).map(|mut said| {
                     thread::sleep(settle);
                     said.push_str(&came_of(&before, &w, mark));
@@ -1346,7 +1358,7 @@ impl Desktop {
                 let point = at.or_else(|| window_point(&w));
                 allow(app, &root, "operate", &what, risky, point, &reason)?;
                 watch::follow(w.pid);
-                let (before, mark) = (list_windows(), watch::newest());
+                let (before, mark) = (list_windows(), watch::mark());
                 let pressed = bring_forward(&w).and_then(|()| send_strokes(&chord_input(&chord)));
                 let result = pressed.map(|()| {
                     thread::sleep(settle);
@@ -1399,29 +1411,43 @@ impl Desktop {
             NOTHING_WATCHED.to_string()
         } else {
             watch::flush();
-            let since = args
+            let asked = args
                 .get("since")
                 .and_then(Value::as_u64)
-                .unwrap_or_else(|| self.seen.get(&pid).copied().unwrap_or(0));
+                .filter(|_| !self.part);
+            let since = asked.unwrap_or_else(|| self.seen.get(&pid).copied().unwrap_or(0));
             let (list, lost, newest) = watch::since(since, pid);
             self.seen.insert(pid, newest);
             let scope = match w {
                 Some(w) => format!(" in {:?}", w.title),
                 None => " in the watched programs".to_string(),
             };
-            changes_text(&list, since, newest, lost, &scope)
+            if self.part {
+                changes_part(&list, lost, &scope)
+            } else {
+                changes_text(&list, since, newest, lost, &scope)
+            }
         };
         if pid.is_none() {
             if let Some(helper) = self.helper.as_mut() {
+                // The agent's `since` counts in this ring; the helper keeps
+                // its own place in its own.
+                let mut theirs_args = args.clone();
+                if let Some(o) = theirs_args.as_object_mut() {
+                    o.remove("since");
+                }
                 let mut marked = |body: Value| app(as_administrator(body));
-                let theirs = helper.call("desktop_changes", args, &mut marked, Duration::ZERO);
+                let theirs =
+                    helper.call("desktop_changes", &theirs_args, &mut marked, Duration::ZERO);
                 if let Ok(Ok(content)) = theirs {
                     let said = content
                         .first()
                         .and_then(|c| c["text"].as_str())
                         .unwrap_or_default()
                         .to_string();
-                    out.push_str(&format!("\nIn programs that run as administrator: {said}"));
+                    out.push_str(&format!(
+                        "\nIn programs that run as administrator, counted apart: {said}"
+                    ));
                 }
             }
         }
@@ -1467,7 +1493,8 @@ impl Desktop {
             } else {
                 Vec::new()
             };
-            let (seen, _, newest) = watch::since(mark, pid);
+            // A look only: what the agent is told comes after the loop.
+            let (seen, _, newest) = watch::peek(mark, pid);
             if let Some(v) = verdict(&until, &titles, &seen, started, watch::now_ms()) {
                 break Some(v);
             }
@@ -2599,8 +2626,9 @@ mod tests {
 
     /// Not a check but a run to watch: opens a file in Notepad, reads it,
     /// types, selects all, takes pictures, closes the tab without saving.
-    /// `HORADRIC_DESKTOP_OUT=<folder> cargo test -p horadric notepad_by_hand
-    /// -- --ignored --nocapture`, then look at the pictures in the folder.
+    /// `HORADRIC_DESKTOP_OUT=<folder> cargo test -p horadric notepad_by_hand`,
+    /// with the ignored and nocapture flags handed on to the test binary,
+    /// then look at the pictures in the folder.
     #[test]
     #[ignore]
     fn notepad_by_hand() {
@@ -2709,7 +2737,8 @@ mod tests {
 
     /// One tool call by hand, for checking a program on screen:
     /// `TOOL=desktop_snapshot ARGS='{"window":"Notepad"}' cargo test -p
-    /// horadric one_tool -- --ignored --nocapture`. A picture is written to
+    /// horadric one_tool`, with the ignored and nocapture flags handed on to
+    /// the test binary. A picture is written to
     /// `HORADRIC_DESKTOP_OUT`, or the temp folder.
     #[test]
     #[ignore]
@@ -2765,8 +2794,8 @@ $f.Controls.Add($b)
     /// Not a check but a run to read: starts the form above, opens its
     /// dialog, types into its field, asks what changed, closes the dialog,
     /// waits for it to be gone and for quiet, and closes the form.
-    /// `cargo test -p horadric watch_a_dialog_by_hand -- --ignored
-    /// --nocapture`
+    /// `cargo test -p horadric watch_a_dialog_by_hand`, with the ignored and
+    /// nocapture flags handed on to the test binary.
     #[test]
     #[ignore]
     fn watch_a_dialog_by_hand() {
@@ -2849,8 +2878,8 @@ $f.Controls.Add($b)
     /// the helper, on a machine that elevates without asking: starts a
     /// small form as administrator that changes by itself, reads it once,
     /// and asks what changed. `cargo build -p horadric` first, for the
-    /// helper, then `cargo test -p horadric watch_elevated_by_hand --
-    /// --ignored --nocapture`
+    /// helper, then `cargo test -p horadric watch_elevated_by_hand`, with
+    /// the ignored and nocapture flags handed on to the test binary.
     #[test]
     #[ignore]
     fn watch_elevated_by_hand() {

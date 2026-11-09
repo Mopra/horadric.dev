@@ -1131,7 +1131,9 @@ fn desktop_tools() -> Vec<Value> {
                 "since": {
                     "type": "integer",
                     "description": "The changes after this number (each answer says where it \
-                        ended), instead of after your last desktop_changes",
+                        ended), instead of after your last desktop_changes. Programs that run \
+                        as administrator are counted apart and always go on from your last \
+                        desktop_changes",
                 },
                 "reason": reason(),
             }),

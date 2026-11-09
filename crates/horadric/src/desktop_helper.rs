@@ -306,7 +306,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     let mut writer = pipe.try_clone().map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(pipe);
-    let mut desktop = Desktop::default();
+    let mut desktop = Desktop::for_helper();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
