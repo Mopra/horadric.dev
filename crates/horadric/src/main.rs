@@ -23,6 +23,8 @@ mod context;
 #[cfg(windows)]
 mod desktop;
 #[cfg(windows)]
+mod desktop_helper;
+#[cfg(windows)]
 mod google;
 #[cfg(windows)]
 mod headless_debug;
@@ -285,6 +287,8 @@ fn main() -> ExitCode {
         Some("sky") => lore::sky(),
         #[cfg(windows)]
         Some("backup") => backup::run(&args[1..]),
+        #[cfg(windows)]
+        Some("desktop-helper") => desktop_helper::run(&args[1..]),
         #[cfg(not(target_os = "linux"))]
         Some("swap") => reload::swap(&args[1..]),
         Some("install") => install_command(),

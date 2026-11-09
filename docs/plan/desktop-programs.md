@@ -26,6 +26,13 @@ window and operate it, within what the human allowed. Windows only.
   says so with `risky`, and the MCP process also finds the words itself
   in the element's name, the window title and a small dialog's text. Each
   is confirmed by the human and never remembered.
+- **Programs that run as administrator.** Windows hides an elevated
+  window from a session that is not, and Sysmac Studio always restarts
+  itself elevated. For such a window `horadric mcp` starts `horadric
+  desktop-helper` as administrator (`desktop_helper.rs`) and hands it the
+  call over a named pipe that takes one local client, each end checking
+  the other's process id. The program is named as running as
+  administrator, so a grant for the normal program does not cover it.
 - **Seen on the stage.** Every operate action shows a notification naming
   the session and the program, so the human always knows an agent has
   their program in hand.

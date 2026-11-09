@@ -57,6 +57,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE, WS_EX_TOOLWINDOW,
 };
 
+use crate::desktop_helper::{as_administrator, Helper, HelperStart};
 use crate::mcp::text;
 
 /// The most elements one snapshot holds, so a vast window can not take
@@ -603,6 +604,12 @@ struct Snap {
 pub struct Desktop {
     com: Option<Com>,
     snap: Option<Snap>,
+    /// The helper that reaches programs running as administrator, once
+    /// one has been needed.
+    helper: Option<Helper>,
+    /// Why the helper can not be had: the user declined it, or it died.
+    /// Kept so Windows does not ask the user again on every call.
+    no_helper: Option<String>,
 }
 
 /// What is known about the element an action aims at.
@@ -752,8 +759,8 @@ fn out_of_reach(w: &Window) -> Option<String> {
         format!(
             "{} runs as administrator and this session does not, so Windows shows the agent \
              only its title bar and lets it neither click nor type there (pictures come off the screen). \
-             To operate it, the user can start {} without administrator rights",
-            w.exe, w.exe
+             It can only be reached through a helper that runs as administrator",
+            w.exe
         )
     })
 }
@@ -1089,6 +1096,42 @@ impl Desktop {
         Ok(self.com.as_ref().expect("set just above"))
     }
 
+    /// Hands a call for an elevated window to the helper, starting it the
+    /// first time. The outer error says the helper is out of reach.
+    fn through_helper<A: FnMut(Value) -> Result<Value, String>>(
+        &mut self,
+        name: &str,
+        args: &Value,
+        app: &mut A,
+        settle: Duration,
+    ) -> Result<Result<Vec<Value>, String>, String> {
+        if let Some(no) = &self.no_helper {
+            return Err(no.clone());
+        }
+        if self.helper.is_none() {
+            match Helper::start() {
+                Ok(h) => self.helper = Some(h),
+                Err(HelperStart::Declined(no)) => {
+                    self.no_helper = Some(no.clone());
+                    return Err(no);
+                }
+                Err(HelperStart::Failed(no)) => return Err(no),
+            }
+        }
+        let helper = self.helper.as_mut().expect("started just above");
+        // A grant for a program does not cover the same program running as
+        // administrator: the human is asked about that one by itself.
+        let mut marked = |body: Value| app(as_administrator(body));
+        let answer = helper.call(name, args, &mut marked, settle);
+        if let Err(why) = &answer {
+            self.helper = None;
+            self.no_helper = Some(format!(
+                "{why} (it may already have acted; it is not started again this session)"
+            ));
+        }
+        answer
+    }
+
     /// Answers a `desktop_` tool, asking `app` for the human's leave first.
     pub fn tool<A: FnMut(Value) -> Result<Value, String>>(
         &mut self,
@@ -1103,7 +1146,13 @@ impl Desktop {
             return Ok(vec![text(windows_text(&list_windows()))]);
         }
         let (w, root) = find(args.get("window"))?;
-        let walled = out_of_reach(&w);
+        let mut walled = out_of_reach(&w);
+        if let Some(why) = &walled {
+            match self.through_helper(name, args, app, settle) {
+                Ok(answer) => return answer,
+                Err(no) => walled = Some(format!("{why}, and {no}")),
+            }
+        }
         if let (Some(why), "desktop_click" | "desktop_type" | "desktop_press") = (&walled, name) {
             return Err(why.clone());
         }
