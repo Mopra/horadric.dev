@@ -10434,7 +10434,7 @@ impl App {
             })
             // A project kept open after it left the recent list: the key is
             // its folder, spelled in lower case.
-            .or_else(|| Some(PathBuf::from(key)).filter(|d| !key.is_empty() && d.is_dir()))
+            .or_else(|| on_disk(key))
     }
 
     /// Brings every tile window above the other windows.
@@ -11152,9 +11152,74 @@ fn known(
     out.into()
 }
 
+/// How long a folder's spelling on disk is trusted before it is looked at
+/// again: a folder can be deleted or come back.
+const ON_DISK_FOR: Duration = Duration::from_secs(30);
+
+/// The folder of the project keyed `key`, spelled as on disk, None when
+/// there is none. The key is lower cased, and Google Drive caches a look
+/// only for a path's own case: every look at a lower cased path there took
+/// a quarter second, and the quest runner looks every second from the
+/// thread that draws. So the spelling is asked once and kept, and later
+/// looks go to the path in its own case, which Drive answers at once.
+fn on_disk(key: &str) -> Option<PathBuf> {
+    if key.is_empty() {
+        return None;
+    }
+    static KNOWN: std::sync::OnceLock<Mutex<HashMap<String, (Option<PathBuf>, Instant)>>> =
+        std::sync::OnceLock::new();
+    let known = KNOWN.get_or_init(Default::default);
+    let now = Instant::now();
+    let kept = known.lock().ok().and_then(|k| k.get(key).cloned());
+    let found = match kept {
+        Some((dir, at)) if now.saturating_duration_since(at) < ON_DISK_FOR => return dir,
+        // Looked at in its own case, so cheap, unlike asking the spelling.
+        Some((Some(dir), _)) if dir.is_dir() => Some(dir),
+        _ => std::fs::canonicalize(key).ok().map(|p| {
+            spelled_as(key, &p.to_string_lossy()).unwrap_or_else(|| PathBuf::from(key))
+        }),
+    };
+    if let Ok(mut k) = known.lock() {
+        k.insert(key.to_string(), (found.clone(), now));
+    }
+    found
+}
+
+/// The folder `canonical` names, a path as `canonicalize` gives it, when it
+/// is the folder `key` names. A junction or a substituted drive resolves
+/// to another folder, whose path would not give this key.
+fn spelled_as(key: &str, canonical: &str) -> Option<PathBuf> {
+    let plain = match canonical.strip_prefix(r"\\?\UNC\") {
+        Some(share) => format!(r"\\{share}"),
+        None => canonical
+            .strip_prefix(r"\\?\")
+            .unwrap_or(canonical)
+            .to_string(),
+    };
+    (crate::project::normalise(&plain) == key).then(|| PathBuf::from(plain))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_on_disk_keeps_its_case_and_only_for_its_own_key() {
+        assert_eq!(
+            spelled_as("g:/my drive/acme", r"\\?\G:\My Drive\Acme"),
+            Some(PathBuf::from(r"G:\My Drive\Acme"))
+        );
+        assert_eq!(
+            spelled_as("//server/share/acme", r"\\?\UNC\Server\Share\Acme"),
+            Some(PathBuf::from(r"\\Server\Share\Acme"))
+        );
+        assert_eq!(
+            spelled_as("c:/work/acme", r"C:\Work\Acme"),
+            Some(PathBuf::from(r"C:\Work\Acme"))
+        );
+        // A junction to another folder, which `on_disk` leaves to the key.
+        assert_eq!(spelled_as("c:/link/acme", r"\\?\D:\Real\Acme"), None);
+    }
 
     #[test]
     fn a_cast_out_names_the_line_that_goes_with_it() {
