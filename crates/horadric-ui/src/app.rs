@@ -11166,8 +11166,8 @@ fn on_disk(key: &str) -> Option<PathBuf> {
     if key.is_empty() {
         return None;
     }
-    static KNOWN: std::sync::OnceLock<Mutex<HashMap<String, (Option<PathBuf>, Instant)>>> =
-        std::sync::OnceLock::new();
+    type Spellings = HashMap<String, (Option<PathBuf>, Instant)>;
+    static KNOWN: std::sync::OnceLock<Mutex<Spellings>> = std::sync::OnceLock::new();
     let known = KNOWN.get_or_init(Default::default);
     let now = Instant::now();
     let kept = known.lock().ok().and_then(|k| k.get(key).cloned());
