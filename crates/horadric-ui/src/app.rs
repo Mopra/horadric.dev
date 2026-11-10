@@ -11175,9 +11175,9 @@ fn on_disk(key: &str) -> Option<PathBuf> {
         Some((dir, at)) if now.saturating_duration_since(at) < ON_DISK_FOR => return dir,
         // Looked at in its own case, so cheap, unlike asking the spelling.
         Some((Some(dir), _)) if dir.is_dir() => Some(dir),
-        _ => std::fs::canonicalize(key).ok().map(|p| {
-            spelled_as(key, &p.to_string_lossy()).unwrap_or_else(|| PathBuf::from(key))
-        }),
+        _ => std::fs::canonicalize(key)
+            .ok()
+            .map(|p| spelled_as(key, &p.to_string_lossy()).unwrap_or_else(|| PathBuf::from(key))),
     };
     if let Ok(mut k) = known.lock() {
         k.insert(key.to_string(), (found.clone(), now));

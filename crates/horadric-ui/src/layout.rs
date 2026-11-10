@@ -3589,7 +3589,10 @@ mod tests {
         };
         let (cells, cuts) = super::docked_grid(3, area, 8, &[wide, sky], 200, 0);
         assert_eq!(cuts.len(), 1);
-        assert_eq!([cells[0], cells[2]][..], grid(2, (10, 40, 402, 840), 8, 0)[..]);
+        assert_eq!(
+            [cells[0], cells[2]][..],
+            grid(2, (10, 40, 402, 840), 8, 0)[..]
+        );
     }
 
     #[test]

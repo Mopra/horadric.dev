@@ -299,7 +299,11 @@ mod tests {
         let t0 = SystemTime::now();
         r.add(Session::new("g1", "x", "C:/p"));
         assert!(r.close("g1", t0).is_some());
-        r.apply("g1", &event("SessionEnd", "c1"), t0 + Duration::from_secs(2));
+        r.apply(
+            "g1",
+            &event("SessionEnd", "c1"),
+            t0 + Duration::from_secs(2),
+        );
         assert!(r.get("g1").is_none());
         // Long after, the same tag is a session worth showing again.
         r.apply("g1", &event("UserPromptSubmit", "c1"), t0 + CLOSED_FOR);

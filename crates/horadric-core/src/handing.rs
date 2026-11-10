@@ -257,9 +257,7 @@ impl Outgoing {
     /// run it, and two must not run, so it stays paused for the human to
     /// decide. One that was paused before the handoff stays paused too.
     pub fn revives(&self) -> bool {
-        self.halted
-            && self.stopped()
-            && matches!(self.stage, Stage::Bases(_) | Stage::Placing(..))
+        self.halted && self.stopped() && matches!(self.stage, Stage::Bases(_) | Stage::Placing(..))
     }
 }
 

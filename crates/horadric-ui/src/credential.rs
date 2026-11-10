@@ -56,8 +56,7 @@ pub fn write(target: &str, user: &str, secret: &[u8]) -> Result<(), String> {
         TargetAlias: PWSTR::null(),
         UserName: PWSTR(user_w.as_mut_ptr()),
     };
-    unsafe { CredWriteW(&credential, 0) }
-        .map_err(|e| write_failure(e.code(), &e.message()))
+    unsafe { CredWriteW(&credential, 0) }.map_err(|e| write_failure(e.code(), &e.message()))
 }
 
 fn too_large(len: usize) -> String {
