@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::handing::{
     self, bases_answer, bases_ask_placing, bases_placing, bases_refused, Arriving, Do, Landed,
-    Outgoing, PlaceAsk,
+    Outgoing, PlaceAsk, Reviving,
 };
 use crate::handoff::{self, moved_line, moved_plain_line, split, Package, Record, RepoId};
 use crate::placing::{self, Placement};
@@ -38,6 +38,8 @@ pub struct Handoffs {
     /// again and again while the receiver's human decides, and the ask
     /// reads the disk.
     asks: HashMap<String, Value>,
+    /// The sessions a failed handoff stopped, to start again.
+    reviving: Reviving,
 }
 
 /// What came of packing a session for its receiver.
@@ -60,6 +62,7 @@ impl Handoffs {
         }
         self.out.insert(id.to_string(), Outgoing::new(id, to, now));
         self.hands.insert(id.to_string(), new_hand());
+        self.reviving.forget(id);
     }
 
     /// Which try at handing session `id` this is, while it goes: the
@@ -138,6 +141,29 @@ impl Handoffs {
         self.out.remove(id);
         self.asks.remove(id);
         self.hands.remove(id);
+    }
+
+    /// Session `id`'s handoff stopped its running agent.
+    pub fn halted(&mut self, id: &str) {
+        if let Some(o) = self.out.get_mut(id) {
+            o.halted = true;
+        }
+    }
+
+    /// Session `id`'s handoff `o` failed at `at`: it is no longer going,
+    /// and is started again if it failed before any part went (see
+    /// [`Outgoing::revives`]).
+    pub fn failed(&mut self, id: &str, o: &Outgoing, at: u64) {
+        self.drop(id);
+        if o.revives() {
+            self.reviving.mark(id, at);
+        }
+    }
+
+    /// The sessions a failed handoff stopped that `paused` says are paused
+    /// now, at `at`, to start again, each once.
+    pub fn revive(&mut self, at: u64, paused: impl Fn(&str) -> bool) -> Vec<String> {
+        self.reviving.take(at, paused)
     }
 
     /// Session `id`'s receiver runs it: it goes from here, and nothing

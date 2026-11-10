@@ -13,8 +13,9 @@
 //! answers with `took` instead.
 //!
 //! The sender keeps the session until the receiver says it runs. A
-//! handoff that fails on the way leaves it paused where it was, its work
-//! still in its folder, for a click to resume.
+//! handoff that fails before any part went starts it again where it was
+//! (see [`Outgoing::revives`]); one that fails later leaves it paused, its
+//! work still in its folder, for a click to resume.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -109,6 +110,9 @@ pub struct Outgoing {
     /// The link dropped after the parts went, so the receiver's `took`
     /// may have been lost with it and is asked for again once it is back.
     pub lost: bool,
+    /// Its agent was running and the handoff stopped it, rather than
+    /// finding it paused already: only then does a failure start it again.
+    pub halted: bool,
 }
 
 impl Outgoing {
@@ -120,6 +124,7 @@ impl Outgoing {
             clean: true,
             stage: Stage::Turn,
             lost: false,
+            halted: false,
         }
     }
 
@@ -240,9 +245,58 @@ impl Outgoing {
     }
 
     /// Whether the session's agent was stopped for the move, so a failure
-    /// leaves it paused rather than running.
+    /// finds it paused rather than running.
     pub fn stopped(&self) -> bool {
         !matches!(self.stage, Stage::Turn | Stage::Stopping(_))
+    }
+
+    /// Whether a failure now should start the session again here: the
+    /// handoff stopped its running agent, and the receiver is still asked
+    /// for its commits, so no part has gone and it cannot run there. Once
+    /// packing starts the parts may be out and the receiver may already
+    /// run it, and two must not run, so it stays paused for the human to
+    /// decide. One that was paused before the handoff stays paused too.
+    pub fn revives(&self) -> bool {
+        self.halted
+            && self.stopped()
+            && matches!(self.stage, Stage::Bases(_) | Stage::Placing(..))
+    }
+}
+
+/// How long a failed handoff waits for the agent it stopped to show as
+/// paused, in seconds. A kill's exit comes in well under it; a pause
+/// later than that is not the handoff's.
+pub const REVIVE_SECS: u64 = 10;
+
+/// The sessions a failed handoff stopped and is to start again once they
+/// show as paused, each until a time limit, so no later pause of the same
+/// session starts it by surprise.
+#[derive(Debug, Default)]
+pub struct Reviving {
+    due: HashMap<String, u64>,
+}
+
+impl Reviving {
+    /// Session `id`'s handoff failed at `at` after stopping it.
+    pub fn mark(&mut self, id: &str, at: u64) {
+        self.due.insert(id.to_string(), at + REVIVE_SECS);
+    }
+
+    /// It is going again, or gone: nothing to start.
+    pub fn forget(&mut self, id: &str) {
+        self.due.remove(id);
+    }
+
+    /// The sessions to start again now, at `at`: those `paused` says are,
+    /// each given once and forgotten, so a start that is refused is not
+    /// tried again. Those past their time are forgotten too.
+    pub fn take(&mut self, at: u64, paused: impl Fn(&str) -> bool) -> Vec<String> {
+        let ready: Vec<String> = self.due.keys().filter(|id| paused(id)).cloned().collect();
+        for id in &ready {
+            self.due.remove(id);
+        }
+        self.due.retain(|_, until| at <= *until);
+        ready
     }
 }
 
@@ -677,6 +731,48 @@ mod tests {
         o.sent(10);
         assert_eq!(o.tick(true, true, 10 + TOOK_SECS - 1), Do::Wait);
         assert!(matches!(o.tick(true, true, 10 + TOOK_SECS), Do::Fail(_)));
+    }
+
+    #[test]
+    fn only_a_failure_before_any_part_went_starts_the_session_again() {
+        let mut o = Outgoing::new("s1", "Desktop", false);
+        o.tick(true, true, 0);
+        assert!(!o.revives(), "paused before the handoff");
+        let mut o = Outgoing::new("s1", "Desktop", false);
+        assert!(!o.revives(), "never stopped");
+        o.hurry();
+        o.tick(false, true, 0);
+        assert!(!o.revives(), "only interrupted, still running");
+        o.tick(true, true, 1);
+        o.halted = true;
+        assert!(o.revives(), "asked for commits");
+        o.heard_placing(2);
+        assert!(o.revives(), "its human is placing it");
+        o.heard_bases(vec![]);
+        assert!(!o.revives(), "packing, the parts may go");
+        o.sent(3);
+        assert!(!o.revives(), "the receiver may run it");
+        o.tick(true, false, 4);
+        o.tick(true, true, 5);
+        assert!(!o.revives(), "asked again after a drop");
+    }
+
+    #[test]
+    fn a_failed_handoff_starts_its_session_once_and_only_soon() {
+        let mut r = Reviving::default();
+        r.mark("s1", 0);
+        assert!(r.take(1, |_| false).is_empty(), "not paused yet");
+        assert_eq!(r.take(2, |_| true), vec!["s1".to_string()]);
+        assert!(r.take(3, |_| true).is_empty(), "once, even if refused");
+        r.mark("s2", 0);
+        assert!(r.take(REVIVE_SECS + 1, |_| false).is_empty());
+        assert!(
+            r.take(REVIVE_SECS + 2, |_| true).is_empty(),
+            "a later pause is not the handoff's"
+        );
+        r.mark("s3", 0);
+        r.forget("s3");
+        assert!(r.take(1, |_| true).is_empty(), "handed off again");
     }
 
     #[test]

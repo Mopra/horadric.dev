@@ -452,6 +452,7 @@ impl App {
     /// every link event.
     pub(super) fn handing_tick(&mut self) {
         self.handing_back();
+        self.handing_revive();
         // A place nobody comes for any more: the sender gave up.
         PLACING.expire(unix_now());
         let takers = self.far_takers();
@@ -541,7 +542,9 @@ impl App {
             Do::AskBases => {
                 // The agent stops first, so nothing changes the tree or
                 // the transcript while they travel. Halted, it pauses.
-                self.halt(id);
+                if self.halt(id) {
+                    with(|s| s.hand.halted(id));
+                }
                 let ask = with(|s| s.hand.ask(id, || self.bases_ask_for(id)));
                 self.far_tell(&o.to, ask);
             }
@@ -549,12 +552,27 @@ impl App {
             Do::LetGo(n) => self.let_go(id, &o.to, n),
             Do::Fail(why) => {
                 with(|s| {
-                    s.hand.drop(id);
+                    s.hand.failed(id, o, unix_now());
                     s.stuck.insert(id.to_string());
                 });
                 self.keeping_recall(id);
                 self.handing_line(id, &format!("not handed off: {why}"));
                 self.toasts.show(Kind::Failed, "Handoff failed", &why);
+                self.handing_revive();
+            }
+        }
+    }
+
+    /// Starts again each session a failed handoff stopped, once its stop
+    /// has paused it: a Folio at once, a terminal when its kill's exit
+    /// comes. Each is tried once, so a refusal (a fence, say) says why
+    /// and never retries.
+    fn handing_revive(&mut self) {
+        let paused = &self.paused;
+        let ids = with(|s| s.hand.revive(unix_now(), |id| paused.contains_key(id)));
+        for id in ids {
+            if let Err(why) = self.resume(&id, false) {
+                self.handing_line(&id, &format!("not handed off or started again: {why}"));
             }
         }
     }
