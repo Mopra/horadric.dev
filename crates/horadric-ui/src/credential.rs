@@ -62,7 +62,8 @@ pub fn write(target: &str, user: &str, secret: &[u8]) -> Result<(), String> {
 
 fn too_large(len: usize) -> String {
     format!(
-        "the secret is {len} bytes, more than the {CRED_MAX_CREDENTIAL_BLOB_SIZE}          Windows Credential Manager holds"
+        "the secret is {len} bytes, more than the {CRED_MAX_CREDENTIAL_BLOB_SIZE} \
+         Windows Credential Manager holds"
     )
 }
 
@@ -71,7 +72,10 @@ fn too_large(len: usize) -> String {
 /// It can still be a real shortage, hence "most likely".
 fn write_failure(code: HRESULT, windows_says: &str) -> String {
     if code == ERROR_NOT_ENOUGH_MEMORY.to_hresult() {
-        return "Windows Credential Manager is most likely full, so it refuses new entries.                 This Windows account has too many saved sign ins, often Xbox tokens whose                 names start with XblGrts. Remove old ones in Control Panel, Credential                 Manager, Windows Credentials, then try again."
+        return "Windows Credential Manager is most likely full, so it refuses new entries. \
+                This Windows account has too many saved sign ins, often Xbox tokens whose \
+                names start with XblGrts. Remove old ones in Control Panel, Credential \
+                Manager, Windows Credentials, then try again."
             .into();
     }
     format!(
