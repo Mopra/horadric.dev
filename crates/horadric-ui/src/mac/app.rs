@@ -1170,7 +1170,7 @@ impl App {
         }
         self.paused.remove(id);
         let own_tree = (self.registry.lock().ok())
-            .and_then(|mut r| r.remove(id))
+            .and_then(|mut r| r.close(id, SystemTime::now()))
             .and_then(|s| Some((project_key(&s), s.worktree?)));
         if let Some((key, w)) = own_tree {
             self.remove_tree(key, w);

@@ -7520,7 +7520,7 @@ impl App {
         }
         let own_tree = match self.shared.registry.lock() {
             Ok(mut r) => r
-                .remove(id)
+                .close(id, SystemTime::now())
                 .and_then(|s| Some((project_key(&s), s.worktree?))),
             Err(_) => None,
         };

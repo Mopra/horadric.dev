@@ -1,7 +1,7 @@
 //! All known sessions, keyed by Horadric id.
 
 use std::collections::BTreeMap;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::event::HookEvent;
 use crate::session::{Phase, Session};
@@ -20,7 +20,13 @@ pub enum Route {
 #[derive(Debug, Default)]
 pub struct Registry {
     sessions: BTreeMap<String, Session>,
+    /// Sessions closed here, and when. A program dying after its tile went
+    /// still sends its last hooks, and those must not bring the tile back.
+    closed: BTreeMap<String, SystemTime>,
 }
+
+/// How long a closed session's late hooks are turned away.
+const CLOSED_FOR: Duration = Duration::from_secs(60);
 
 impl Registry {
     pub fn new() -> Self {
@@ -30,6 +36,7 @@ impl Registry {
     /// Registers a session Horadric spawned. Called before the CLI starts so the
     /// first hook finds a home.
     pub fn add(&mut self, session: Session) {
+        self.closed.remove(&session.id);
         self.sessions.insert(session.id.clone(), session);
     }
 
@@ -45,6 +52,22 @@ impl Registry {
         self.sessions.remove(id)
     }
 
+    /// Takes a session off the tiles for good, as the human or Horadric
+    /// ends it: its late hooks are turned away for a while.
+    pub fn close(&mut self, id: &str, now: SystemTime) -> Option<Session> {
+        self.closed
+            .retain(|_, at| now.duration_since(*at).unwrap_or_default() < CLOSED_FOR);
+        self.closed.insert(id.to_string(), now);
+        self.sessions.remove(id)
+    }
+
+    /// Whether session `id` was closed here a moment ago.
+    pub fn just_closed(&self, id: &str, now: SystemTime) -> bool {
+        self.closed
+            .get(id)
+            .is_some_and(|at| now.duration_since(*at).unwrap_or_default() < CLOSED_FOR)
+    }
+
     /// Applies an event to the session with the given Horadric id.
     ///
     /// Unknown ids are adopted: a `claude` started by hand inside a Horadric
@@ -58,6 +81,9 @@ impl Registry {
         let news = [HookEvent::STATUS, HookEvent::HEAVY, HookEvent::SPENT]
             .contains(&event.hook_event_name.as_str());
         if news && !self.sessions.contains_key(horadric_id) {
+            return false;
+        }
+        if self.just_closed(horadric_id, now) {
             return false;
         }
         let session = self
@@ -265,5 +291,28 @@ mod tests {
         r.apply("older", &perm, t0);
         let ids: Vec<&str> = r.waiting().iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, vec!["older", "newer"]);
+    }
+
+    #[test]
+    fn a_closed_session_stays_gone_when_its_last_hooks_arrive() {
+        let mut r = Registry::new();
+        let t0 = SystemTime::now();
+        r.add(Session::new("g1", "x", "C:/p"));
+        assert!(r.close("g1", t0).is_some());
+        r.apply("g1", &event("SessionEnd", "c1"), t0 + Duration::from_secs(2));
+        assert!(r.get("g1").is_none());
+        // Long after, the same tag is a session worth showing again.
+        r.apply("g1", &event("UserPromptSubmit", "c1"), t0 + CLOSED_FOR);
+        assert!(r.get("g1").is_some());
+    }
+
+    #[test]
+    fn a_closed_session_added_back_takes_its_hooks_again() {
+        let mut r = Registry::new();
+        let t0 = SystemTime::now();
+        r.add(Session::new("g1", "x", "C:/p"));
+        r.close("g1", t0);
+        r.add(Session::new("g1", "x", "C:/p"));
+        assert!(r.apply("g1", &event("UserPromptSubmit", "c1"), t0));
     }
 }
