@@ -1991,16 +1991,24 @@ impl Lines {
     }
 }
 
+/// The least width a grid column keeps before the grid stacks its panes
+/// instead, in DIPs: about sixty columns of terminal text, below which an
+/// agent's screen wraps into something unreadable.
+pub const COLUMN_MIN_DIP: f32 = 480.0;
+
 /// Tiles `n` windows over `area` (left, top, right, bottom) with `gap`
 /// between them: as many columns as the square root rounded up, filled row
 /// by row, the last row stretched across when it has fewer windows. Four
-/// windows are two by two, three are two above one wide.
-pub fn grid(n: usize, area: (i32, i32, i32, i32), gap: i32) -> Vec<[i32; 4]> {
+/// windows are two by two, three are two above one wide. Fewer columns
+/// where that many would each be narrower than `min_w`, down to one, so a
+/// narrow area stacks its windows rather than squeezing them.
+pub fn grid(n: usize, area: (i32, i32, i32, i32), gap: i32, min_w: i32) -> Vec<[i32; 4]> {
     if n == 0 {
         return Vec::new();
     }
     let (left, top, right, bottom) = area;
-    let cols = (1..=n).find(|c| c * c >= n).unwrap_or(1);
+    let fit = ((right - left + gap) / (min_w + gap).max(1)).max(1) as usize;
+    let cols = (1..=n).find(|c| c * c >= n).unwrap_or(1).min(fit);
     let rows = n.div_ceil(cols);
     let span = |from: i32, to: i32, count: usize, i: usize| {
         let count = count as i32;
@@ -2047,13 +2055,15 @@ pub struct Cut {
 /// across the whole of its side of what the ones before it left, and the
 /// rest in a grid in what is left over. A dock's size is kept to leave
 /// each side at least `min`. A dock the area is too small for, or that
-/// would leave the grid empty, takes its place in the grid instead.
+/// would leave the grid empty, takes its place in the grid instead. The
+/// grid keeps its columns at least `col_min` wide, as [`grid`] does.
 pub fn docked_grid(
     n: usize,
     area: (i32, i32, i32, i32),
     gap: i32,
     docks: &[Docked],
     min: i32,
+    col_min: i32,
 ) -> (Vec<[i32; 4]>, Vec<Cut>) {
     let mut cells = vec![[0; 4]; n];
     let mut cuts: Vec<Cut> = Vec::new();
@@ -2097,7 +2107,7 @@ pub fn docked_grid(
     let in_grid: Vec<usize> = (0..n)
         .filter(|i| !cuts.iter().any(|c| c.index == *i))
         .collect();
-    for (&i, cell) in in_grid.iter().zip(grid(in_grid.len(), rest, gap)) {
+    for (&i, cell) in in_grid.iter().zip(grid(in_grid.len(), rest, gap, col_min)) {
         cells[i] = cell;
     }
     (cells, cuts)
@@ -3439,31 +3449,53 @@ mod tests {
 
     #[test]
     fn grid_of_one_fills_the_area() {
-        assert_eq!(grid(1, (0, 0, 1000, 800), 10), vec![[0, 0, 1000, 800]]);
-        assert!(grid(0, (0, 0, 1000, 800), 10).is_empty());
+        assert_eq!(grid(1, (0, 0, 1000, 800), 10, 0), vec![[0, 0, 1000, 800]]);
+        assert!(grid(0, (0, 0, 1000, 800), 10, 0).is_empty());
     }
 
     #[test]
     fn grid_puts_two_side_by_side_and_four_two_by_two() {
         assert_eq!(
-            grid(2, (0, 0, 1010, 800), 10),
+            grid(2, (0, 0, 1010, 800), 10, 0),
             vec![[0, 0, 500, 800], [510, 0, 1010, 800]]
         );
-        let four = grid(4, (0, 0, 1010, 810), 10);
+        let four = grid(4, (0, 0, 1010, 810), 10, 0);
         assert_eq!(four[0], [0, 0, 500, 400]);
         assert_eq!(four[3], [510, 410, 1010, 810]);
     }
 
     #[test]
     fn grid_stretches_a_short_last_row() {
-        let three = grid(3, (0, 0, 1010, 810), 10);
+        let three = grid(3, (0, 0, 1010, 810), 10, 0);
         assert_eq!(three[0], [0, 0, 500, 400]);
         assert_eq!(three[1], [510, 0, 1010, 400]);
         assert_eq!(three[2], [0, 410, 1010, 810]);
         // Five: three columns, then two wider ones below.
-        let five = grid(5, (0, 0, 920, 410), 10);
+        let five = grid(5, (0, 0, 920, 410), 10, 0);
         assert_eq!(five[2], [620, 0, 920, 200]);
         assert_eq!(five[4], [465, 210, 920, 410]);
+    }
+
+    #[test]
+    fn a_narrow_grid_stacks_rather_than_squeezes() {
+        // Two that would each be under 480 wide go one above the other.
+        assert_eq!(
+            grid(2, (0, 0, 900, 810), 10, 480),
+            vec![[0, 0, 900, 400], [0, 410, 900, 810]]
+        );
+        // Four in room for two columns stay two by two.
+        let four = grid(4, (0, 0, 1010, 810), 10, 480);
+        assert_eq!(four[3], [510, 410, 1010, 810]);
+        // Four in room for one column stack in a single column.
+        let stacked = grid(4, (0, 0, 700, 830), 10, 480);
+        assert!(stacked.iter().all(|r| r[0] == 0 && r[2] == 700));
+        assert_eq!(stacked[3], [0, 630, 700, 830]);
+        // Nine in room for two go two wide, the last row stretched.
+        let nine = grid(9, (0, 0, 1010, 900), 10, 480);
+        assert_eq!(nine[1][2], 1010);
+        assert_eq!(nine[8], [0, 728, 1010, 900]);
+        // Narrower than one column, one column all the same.
+        assert_eq!(grid(2, (0, 0, 300, 410), 10, 480).len(), 2);
     }
 
     #[test]
@@ -3492,7 +3524,7 @@ mod tests {
     ) -> Option<Vec<[i32; 4]>> {
         let index = n - 1;
         let dock = Docked { index, side, size };
-        let (cells, cuts) = super::docked_grid(n, area, gap, &[dock], min);
+        let (cells, cuts) = super::docked_grid(n, area, gap, &[dock], min, 0);
         (!cuts.is_empty()).then_some(cells)
     }
 
@@ -3509,7 +3541,7 @@ mod tests {
             side: Side::Right,
             size: Some(250),
         };
-        let (cells, cuts) = super::docked_grid(3, area, 8, &[browser, sky], 200);
+        let (cells, cuts) = super::docked_grid(3, area, 8, &[browser, sky], 200, 0);
         assert_eq!(cells[1], [710, 40, 1010, 840], "the browser outermost");
         assert_eq!(cells[2], [452, 40, 702, 840], "the sanctuary inside it");
         assert_eq!(cells[0], [10, 40, 444, 840]);
@@ -3522,16 +3554,16 @@ mod tests {
             side: Side::Left,
             ..sky
         };
-        let (cells, _) = super::docked_grid(3, area, 8, &[browser, left], 200);
+        let (cells, _) = super::docked_grid(3, area, 8, &[browser, left], 200, 0);
         assert_eq!(cells[2], [10, 40, 260, 840]);
         assert_eq!(cells[0], [268, 40, 702, 840]);
         // Docked between sessions, it still leaves the grid in order.
         let middle = Docked { index: 1, ..left };
-        let (cells, _) = super::docked_grid(3, area, 8, &[middle], 200);
+        let (cells, _) = super::docked_grid(3, area, 8, &[middle], 200, 0);
         assert_eq!(cells[1], [10, 40, 260, 840]);
         assert_eq!(
             [cells[0], cells[2]][..],
-            grid(2, (268, 40, 1010, 840), 8)[..]
+            grid(2, (268, 40, 1010, 840), 8, 0)[..]
         );
         // With nothing else to show the last one fills what is left.
         let (cells, cuts) = super::docked_grid(
@@ -3546,6 +3578,7 @@ mod tests {
                 Docked { index: 1, ..sky },
             ],
             200,
+            0,
         );
         assert_eq!(cuts.len(), 1);
         assert_eq!(cells[1], [10, 40, 702, 840]);
@@ -3554,9 +3587,9 @@ mod tests {
             size: Some(600),
             ..browser
         };
-        let (cells, cuts) = super::docked_grid(3, area, 8, &[wide, sky], 200);
+        let (cells, cuts) = super::docked_grid(3, area, 8, &[wide, sky], 200, 0);
         assert_eq!(cuts.len(), 1);
-        assert_eq!([cells[0], cells[2]][..], grid(2, (10, 40, 402, 840), 8)[..]);
+        assert_eq!([cells[0], cells[2]][..], grid(2, (10, 40, 402, 840), 8, 0)[..]);
     }
 
     #[test]
@@ -3564,13 +3597,13 @@ mod tests {
         let area = (10, 40, 1010, 840);
         let right = docked_grid(3, area, 8, Side::Right, Some(400), 200).unwrap();
         assert_eq!(right[2], [610, 40, 1010, 840]);
-        assert_eq!(right[..2], grid(2, (10, 40, 602, 840), 8)[..]);
+        assert_eq!(right[..2], grid(2, (10, 40, 602, 840), 8, 0)[..]);
         let left = docked_grid(3, area, 8, Side::Left, Some(400), 200).unwrap();
         assert_eq!(left[2], [10, 40, 410, 840]);
-        assert_eq!(left[..2], grid(2, (418, 40, 1010, 840), 8)[..]);
+        assert_eq!(left[..2], grid(2, (418, 40, 1010, 840), 8, 0)[..]);
         let top = docked_grid(3, area, 8, Side::Top, Some(300), 200).unwrap();
         assert_eq!(top[2], [10, 40, 1010, 340]);
-        assert_eq!(top[..2], grid(2, (10, 348, 1010, 840), 8)[..]);
+        assert_eq!(top[..2], grid(2, (10, 348, 1010, 840), 8, 0)[..]);
         // Kept to leave the sessions their minimum, and itself its own.
         let wide = docked_grid(2, area, 8, Side::Right, Some(5000), 200).unwrap();
         assert_eq!(wide[1][0], 218);
@@ -3669,7 +3702,7 @@ mod tests {
 
     #[test]
     fn slot_at_finds_the_rect_under_the_point() {
-        let rects = grid(2, (0, 0, 1010, 800), 10);
+        let rects = grid(2, (0, 0, 1010, 800), 10, 0);
         assert_eq!(slot_at(&rects, 10, 10), Some(0));
         assert_eq!(slot_at(&rects, 700, 799), Some(1));
         // In the gap between them, or outside.
@@ -3680,7 +3713,7 @@ mod tests {
     #[test]
     fn neighbour_follows_the_grid() {
         // Two above one wide.
-        let rects = grid(3, (0, 0, 1010, 810), 10);
+        let rects = grid(3, (0, 0, 1010, 810), 10, 0);
         assert_eq!(neighbour(&rects, 0, Dir::Right), Some(1));
         assert_eq!(neighbour(&rects, 1, Dir::Left), Some(0));
         assert_eq!(neighbour(&rects, 0, Dir::Down), Some(2));
@@ -3690,7 +3723,7 @@ mod tests {
         assert_eq!(neighbour(&rects, 0, Dir::Left), None);
         assert_eq!(neighbour(&rects, 2, Dir::Down), None);
         // Two by two: straight across, not diagonal.
-        let rects = grid(4, (0, 0, 1010, 810), 10);
+        let rects = grid(4, (0, 0, 1010, 810), 10, 0);
         assert_eq!(neighbour(&rects, 3, Dir::Up), Some(1));
         assert_eq!(neighbour(&rects, 3, Dir::Left), Some(2));
         assert_eq!(neighbour(&[], 0, Dir::Up), None);

@@ -453,7 +453,14 @@ impl TerminalWindow {
                 })
             })
             .collect();
-        let (grid, cuts) = layout::docked_grid(panes.len(), area, gap, &docks, px(DOCK_MIN_DIP));
+        let (grid, cuts) = layout::docked_grid(
+            panes.len(),
+            area,
+            gap,
+            &docks,
+            px(DOCK_MIN_DIP),
+            px(layout::COLUMN_MIN_DIP),
+        );
         *self.seams.borrow_mut() = cuts;
         let many = panes.len() > 1;
         let zoomed = many && self.zoomed.get();

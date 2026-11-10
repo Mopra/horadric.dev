@@ -694,7 +694,7 @@ impl StageView {
                 };
             }
         } else {
-            let rects = layout::grid(panes.len(), area, GAP);
+            let rects = layout::grid(panes.len(), area, GAP, layout::COLUMN_MIN_DIP as i32);
             for (p, [l, t, r, bt]) in panes.iter_mut().zip(rects) {
                 p.rect = Rect::new(l as f32, t as f32, (r - l) as f32, (bt - t) as f32);
             }
