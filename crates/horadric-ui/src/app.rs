@@ -969,6 +969,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         .collect();
 
     theme::set(Theme::from_key(saved.theme.as_deref()));
+    horadric_core::usage::learn_models(&saved.defaults.models);
     let gpu = Gpu::new()?;
     let font = Font::new(
         &gpu.dw,
@@ -9506,7 +9507,10 @@ impl App {
                 .filter(|(_, order)| !order.is_empty())
                 .collect(),
             sessions,
-            defaults: self.shared.defaults(),
+            defaults: horadric_core::Defaults {
+                models: horadric_core::usage::known_models(),
+                ..self.shared.defaults()
+            },
             usage: self.shared.usage.lock().ok().and_then(|u| u.clone()),
             usage_window: self.usage_window.as_ref().map(|u| SavedPanel {
                 collapsed: u.collapsed.get(),

@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::RwLock;
 
 use crate::agent::Agent;
 
@@ -447,6 +448,93 @@ pub enum Setting {
 /// What Claude Code reads the workflow agents' model from.
 pub const WORKFLOW_MODEL_ENV: &str = "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL";
 
+/// The models offered until a session has told us Claude Code's own list.
+const BUILT_IN_MODELS: &[(&str, &str)] = &[
+    ("claude-fable-5-1", "Fable 5.1"),
+    ("claude-opus-5-5", "Opus 5.5"),
+    ("claude-opus-5-5[1m]", "Opus 5.5 1M"),
+    ("claude-sonnet-5-5", "Sonnet 5.5"),
+    ("claude-haiku-5-5", "Haiku 5.5"),
+];
+
+/// The models Claude Code offered last, so Settings lists a new model the
+/// day it ships and not the day Horadric is updated. Each new list is
+/// leaked to give [`Setting::choices`] its static lifetime; it changes a
+/// handful of times a year.
+static LEARNED: RwLock<Option<&'static [(&'static str, &'static str)]>> = RwLock::new(None);
+
+/// Takes the models Claude Code offers, full id and name, from a session's
+/// `initialize` or from what was saved. An empty list changes nothing.
+pub fn learn_models(models: &[(String, String)]) {
+    if models.is_empty() || known_models() == models {
+        return;
+    }
+    let list: Vec<(&'static str, &'static str)> = models
+        .iter()
+        .map(|(id, name)| -> (&'static str, &'static str) {
+            (id.clone().leak(), name.clone().leak())
+        })
+        .collect();
+    if let Ok(mut l) = LEARNED.write() {
+        *l = Some(list.leak());
+    }
+}
+
+/// The models learned with [`learn_models`], empty before any, to save.
+pub fn known_models() -> Vec<(String, String)> {
+    LEARNED
+        .read()
+        .ok()
+        .and_then(|l| *l)
+        .unwrap_or_default()
+        .iter()
+        .map(|(id, name)| (id.to_string(), name.to_string()))
+        .collect()
+}
+
+/// `claude-opus-5-5` is "Opus 5.5", `claude-sonnet-4-5-20250929` is
+/// "Sonnet 4.5".
+pub fn pretty_id(id: &str) -> String {
+    let rest = id.strip_prefix("claude-").unwrap_or(id);
+    let rest = rest.split('[').next().unwrap_or(rest);
+    let mut parts = rest.split('-');
+    let Some(family) = parts.next() else {
+        return id.to_string();
+    };
+    let version: Vec<&str> = parts
+        .take_while(|p| p.len() <= 2 && p.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    let mut name: String = family
+        .chars()
+        .take(1)
+        .flat_map(char::to_uppercase)
+        .chain(family.chars().skip(1))
+        .collect();
+    if !version.is_empty() {
+        name.push(' ');
+        name.push_str(&version.join("."));
+    }
+    name
+}
+
+/// The models `/model` offers as Settings lists them: by full id, each
+/// once, without the `default` alias, which Settings has a line of its own
+/// for.
+pub fn offered_models(models: &[crate::folio::ModelInfo]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for m in models {
+        if m.value == "default" || m.resolved.is_empty() || out.iter().any(|(id, _)| *id == m.resolved) {
+            continue;
+        }
+        let mut name = pretty_id(&m.resolved);
+        if m.resolved.ends_with("[1m]") {
+            name.push_str(" 1M");
+        }
+        out.push((m.resolved.clone(), name));
+    }
+    out
+}
+
 impl Setting {
     pub const ALL: [Setting; 3] = [Setting::Model, Setting::Effort, Setting::Permissions];
 
@@ -466,13 +554,11 @@ impl Setting {
     /// picked by a slip.
     pub fn choices(self) -> &'static [(&'static str, &'static str)] {
         match self {
-            Setting::Model | Setting::Workflow => &[
-                ("claude-fable-5-1", "Fable 5.1"),
-                ("claude-opus-5-5", "Opus 5.5"),
-                ("claude-opus-5-5[1m]", "Opus 5.5 1M"),
-                ("claude-sonnet-5-5", "Sonnet 5.5"),
-                ("claude-haiku-5-5", "Haiku 5.5"),
-            ],
+            Setting::Model | Setting::Workflow => LEARNED
+                .read()
+                .ok()
+                .and_then(|l| *l)
+                .unwrap_or(BUILT_IN_MODELS),
             Setting::Effort => &[
                 ("low", "Low"),
                 ("medium", "Medium"),
@@ -540,6 +626,10 @@ pub struct Defaults {
     pub permission_mode: Option<String>,
     #[serde(default)]
     pub workflow_model: Option<String>,
+    /// The models Claude Code offered last, kept so Settings lists them
+    /// after a restart before any session has started. See [`learn_models`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<(String, String)>,
 }
 
 impl Defaults {
@@ -894,6 +984,7 @@ mod tests {
             permission_mode: Some("plan".into()),
             // An environment variable, never a flag.
             workflow_model: Some("claude-sonnet-5".into()),
+            models: Vec::new(),
         };
         assert_eq!(
             d.flags(&[]),
@@ -935,6 +1026,7 @@ mod tests {
             effort: None,
             permission_mode: Some("plan".into()),
             workflow_model: None,
+            models: Vec::new(),
         };
         assert_eq!(
             d.flags_for(&[], true),
@@ -953,6 +1045,36 @@ mod tests {
         assert!(has_flag(&args("--model=haiku"), "--model"));
         assert!(!has_flag(&args("--models haiku"), "--model"));
         assert!(!has_flag(&args("--fallback-model haiku"), "--model"));
+    }
+
+    #[test]
+    fn settings_list_the_models_claude_code_offers() {
+        let info = |value: &str, resolved: &str| crate::folio::ModelInfo {
+            value: value.into(),
+            resolved: resolved.into(),
+            ..Default::default()
+        };
+        let offered = offered_models(&[
+            info("default", "claude-opus-5-5"),
+            info("fable", "claude-fable-5-2"),
+            info("opus", "claude-opus-5-5"),
+            info("opus[1m]", "claude-opus-5-5[1m]"),
+            info("opus-again", "claude-opus-5-5"),
+        ]);
+        assert_eq!(
+            offered,
+            [
+                ("claude-fable-5-2".to_string(), "Fable 5.2".to_string()),
+                ("claude-opus-5-5".into(), "Opus 5.5".into()),
+                ("claude-opus-5-5[1m]".into(), "Opus 5.5 1M".into()),
+            ]
+        );
+        learn_models(&offered);
+        assert_eq!(known_models(), offered);
+        assert_eq!(Setting::Model.name_of(Some("claude-fable-5-2")), "Fable 5.2");
+        assert_eq!(Setting::Workflow.choices().len(), 3);
+        learn_models(&[]);
+        assert_eq!(known_models(), offered);
     }
 
     #[test]

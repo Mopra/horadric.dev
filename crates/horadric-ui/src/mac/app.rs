@@ -313,7 +313,10 @@ pub fn run(port: u16, reload: bool) -> Result<(), String> {
                 .map(|c| c.key.clone())
                 .collect(),
         ),
-        defaults: saved.defaults.clone(),
+        defaults: {
+            horadric_core::usage::learn_models(&saved.defaults.models);
+            saved.defaults.clone()
+        },
         usage,
     };
     app.attach_hosts();
@@ -2229,7 +2232,10 @@ impl App {
             live: !self.quit,
             update_told: self.update.told(),
             discord: self.discord,
-            defaults: self.defaults.clone(),
+            defaults: horadric_core::Defaults {
+                models: horadric_core::usage::known_models(),
+                ..self.defaults.clone()
+            },
             usage: self.usage.lock().ok().and_then(|u| u.clone()),
             ..Default::default()
         };
