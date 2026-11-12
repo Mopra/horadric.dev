@@ -24,15 +24,30 @@
 //! is, and Esc then stops the call and turns bypass off. It starts off at
 //! every start of the app and is never kept.
 //!
+//! Bypass is trust in the work at hand, so it ends with that work: once
+//! every session it was on for has ended its turn (its `Stop`,
+//! `StopFailure` or `SessionEnd`, or seen working and then resting) and no
+//! action is on its way, it turns itself off and the plate says so.
+//!
+//! NOW says what the session last did in the program. When the session
+//! goes on with other tools (a shell, files, the browser) or ends its turn,
+//! the plate says that instead, so an old NOW is never taken for the
+//! present. It names the session by its id and start too, since two
+//! sessions can have the same name.
+//!
 //! While the ghost is on its way, [`super::guard`] watches for a window
 //! opening or another program taking the front, and stops the click as
 //! Esc would: the point was chosen on a screen that is no longer there.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::f32::consts::PI;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use horadric_core::session::{Phase, WaitReason};
 
 use horadric_hooks::listener::Reply;
 use serde_json::json;
@@ -132,6 +147,12 @@ const BYPASS_W: f32 = 100.0;
 const BYPASS_X: f32 = BOX_W - PAD - BYPASS_W;
 /// The warning band under the controls while bypass is on.
 const BANNER: f32 = 26.0;
+/// How long bypass waits for a session that was resting when it was turned
+/// on to start working, before it counts that session's work as done.
+pub(super) const BYPASS_IDLE: Duration = Duration::from_secs(60);
+/// How often, while bypass is on, the sessions it is on for are looked at,
+/// and how often the plate looks at what its session does now.
+const TURNS_EVERY: Duration = Duration::from_millis(250);
 /// What a call bypass let through is told when bypass ends before it went.
 const BYPASS_ENDED: &str =
     "the human stopped bypass, so this action was not made; ask again and they will be asked";
@@ -253,6 +274,134 @@ pub(super) fn may_glide(unasked: bool, have_esc: bool) -> bool {
 /// noted for an earlier glide came too late and stops nothing.
 pub(super) fn trip_stops(tripped: u64, gliding: Option<u64>) -> bool {
     gliding == Some(tripped)
+}
+
+/// Where a session's turn stands, for when bypass ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Turn {
+    /// At work: a tool, a prompt it is on, a permission or dialog mid turn.
+    Working,
+    /// Its turn is over: done, idle, failed, waiting for the human's words.
+    Resting,
+    /// Its process ended, or Horadric no longer has it.
+    Gone,
+}
+
+/// A session's phase as a [`Turn`]. None is a session Horadric no longer has.
+pub(super) fn turn_of(phase: Option<&Phase>) -> Turn {
+    match phase {
+        None | Some(Phase::Ended | Phase::Paused) => Turn::Gone,
+        Some(Phase::Working | Phase::Waiting(WaitReason::Permission | WaitReason::Dialog)) => {
+            Turn::Working
+        }
+        Some(_) => Turn::Resting,
+    }
+}
+
+/// A session bypass is on for: the one driving when it was turned on, and
+/// each whose call came while it was on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Holder {
+    /// Seen at work since bypass was on for it.
+    pub worked: bool,
+    /// Its turn has ended since.
+    pub ended: bool,
+}
+
+impl Holder {
+    /// A call of its came while bypass was on: it is at work again.
+    pub(super) fn called(&mut self) {
+        *self = Holder {
+            worked: true,
+            ended: false,
+        };
+    }
+
+    /// What its tile says now. Resting ends it once it has worked, or once
+    /// it rested the whole of [`BYPASS_IDLE`] after bypass was turned on.
+    pub(super) fn saw(&mut self, turn: Turn, waited: bool) {
+        match turn {
+            Turn::Working => self.worked = true,
+            Turn::Gone => self.ended = true,
+            Turn::Resting if self.worked || waited => self.ended = true,
+            Turn::Resting => {}
+        }
+    }
+}
+
+/// Whether a tool is one of the desktop tools, under any MCP prefix.
+pub(super) fn is_desktop_tool(tool: &str) -> bool {
+    tool.rsplit("__")
+        .next()
+        .unwrap_or(tool)
+        .starts_with("desktop_")
+}
+
+/// Where a tool works, in a few words for the plate.
+pub(super) fn tool_place(tool: &str) -> String {
+    let bare = tool.rsplit("__").next().unwrap_or(tool);
+    match bare {
+        "Bash" | "PowerShell" | "BashOutput" | "KillShell" => "in the shell".into(),
+        "Read" | "Edit" | "Write" | "MultiEdit" | "Grep" | "Glob" | "NotebookEdit" => {
+            "on files".into()
+        }
+        "WebFetch" | "WebSearch" => "on the web".into(),
+        "Agent" | "Task" => "with a subagent".into(),
+        b if b.starts_with("browser_") => "in the browser".into(),
+        b => format!("with {b}"),
+    }
+}
+
+/// What NOW says instead of the last desktop action, when the session no
+/// longer works in the program: None while that action is still its latest
+/// doing.
+pub(super) fn away_of(tool: Option<&str>, turn: Turn, program: &str) -> Option<String> {
+    let program = match program.trim() {
+        "" => "the program".to_string(),
+        p => p.to_string(),
+    };
+    match (turn, tool) {
+        (Turn::Gone, _) => Some("The session has ended.".into()),
+        (Turn::Resting, _) => Some(format!("Finished its turn, not working in {program}.")),
+        (Turn::Working, Some(t)) if !is_desktop_tool(t) => Some(format!(
+            "Working {} ({}), not in {program}.",
+            tool_place(t),
+            t.rsplit("__").next().unwrap_or(t)
+        )),
+        _ => None,
+    }
+}
+
+/// Whether bypass has outlived the work it was turned on for: every
+/// session it is on for has ended its turn and no action is on its way.
+pub(super) fn bypass_over(holders: &HashMap<String, Holder>, in_flight: bool) -> bool {
+    !in_flight && !holders.is_empty() && holders.values().all(|h| h.ended)
+}
+
+/// Bypass is on, for the hook thread, which notes turns only then.
+static BYPASS_LIVE: AtomicBool = AtomicBool::new(false);
+/// Sessions whose turn ended while bypass was on, from the hook thread,
+/// until the overlay's next look.
+static TURNS_ENDED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// A session's turn ended, its `Stop`, `StopFailure` or `SessionEnd`. Called
+/// from the thread that reads hooks, so the overlay takes it on its frame.
+pub(super) fn turn_ended(session: &str) {
+    if !BYPASS_LIVE.load(Ordering::Acquire) {
+        return;
+    }
+    if let Ok(mut ended) = TURNS_ENDED.lock() {
+        if !ended.iter().any(|s| s == session) {
+            ended.push(session.to_string());
+        }
+    }
+}
+
+fn take_turns_ended() -> Vec<String> {
+    TURNS_ENDED
+        .lock()
+        .map(|mut e| std::mem::take(&mut *e))
+        .unwrap_or_default()
 }
 
 /// A wall clock time as the history shows it.
@@ -441,6 +590,12 @@ pub(super) fn box_height(reason_h: f32, rows: usize, bypass: bool) -> f32 {
 /// What is shown under NOW.
 #[derive(Clone, Default)]
 struct Now {
+    /// The session's id, which bypass is then on for.
+    session: String,
+    /// Its id and when it started, as the human reads them.
+    ident: String,
+    /// What it does instead, when it no longer works in the program.
+    away: Option<String>,
     name: String,
     program: String,
     reason: String,
@@ -449,6 +604,9 @@ struct Now {
 
 /// An allowed call, as the plate and the ghost show it.
 pub(super) struct Allowed {
+    pub session: String,
+    /// The session's id and start, for the plate.
+    pub ident: String,
     pub name: String,
     pub program: String,
     pub reason: String,
@@ -846,6 +1004,13 @@ struct Overlay {
     edges_bypass: bool,
     /// What bypass let through and has not been told done yet.
     unasked: VecDeque<String>,
+    /// The sessions bypass is on for, when it was turned on, and when they
+    /// were last looked at.
+    holders: HashMap<String, Holder>,
+    bypass_at: Instant,
+    turns_checked: Instant,
+    /// When the plate last looked at what its session does now.
+    now_checked: Instant,
     until: Option<Instant>,
     /// When control began, for the pulse, and how far it has faded in.
     began: Instant,
@@ -933,6 +1098,10 @@ fn with(shared: &Rc<Shared>, f: impl FnOnce(&mut Overlay)) {
                         hover: None,
                         edges_bypass: false,
                         unasked: VecDeque::new(),
+                        holders: HashMap::new(),
+                        bypass_at: now,
+                        turns_checked: now,
+                        now_checked: now,
                         until: None,
                         began: now,
                         shown: 0.0,
@@ -969,7 +1138,13 @@ pub(super) fn allowed(shared: &Rc<Shared>, call: Allowed, reply: Reply) -> bool 
         }
         o.until = extend(o.until, now, true);
         o.place_plate(call.hwnd, call.point);
+        if bypass() {
+            o.holders.entry(call.session.clone()).or_default().called();
+        }
         o.now = Now {
+            session: call.session,
+            ident: call.ident,
+            away: None,
             name: call.name.clone(),
             program: call.program,
             reason: call.reason,
@@ -1340,6 +1515,18 @@ impl Overlay {
 
     fn bypass_on(&mut self) {
         BYPASS.set(true);
+        BYPASS_LIVE.store(true, Ordering::Release);
+        take_turns_ended();
+        let now = Instant::now();
+        self.bypass_at = now;
+        self.turns_checked = now;
+        self.holders.clear();
+        // It is on for the session the plate shows. One that only rests
+        // has BYPASS_IDLE to start working.
+        if !self.now.session.is_empty() {
+            self.holders
+                .insert(self.now.session.clone(), Holder::default());
+        }
         // Its banner says Esc ends it, so Esc is held from now.
         self.keep_esc();
         self.stale = true;
@@ -1350,6 +1537,9 @@ impl Overlay {
     /// gone yet.
     fn bypass_off(&mut self) {
         BYPASS.set(false);
+        BYPASS_LIVE.store(false, Ordering::Release);
+        take_turns_ended();
+        self.holders.clear();
         if self.glide.as_ref().is_some_and(|g| g.unasked) {
             self.halt(BYPASS_ENDED, "stopped: bypass turned off".into());
         }
@@ -1377,6 +1567,68 @@ impl Overlay {
         // is left to stop.
         self.next_glide(Instant::now());
         self.run();
+    }
+
+    /// Bypass on: looks at the sessions it is on for, and turns it off once
+    /// their work is done and nothing is on its way.
+    fn watch_turns(&mut self, now: Instant) {
+        if !bypass() || now.duration_since(self.turns_checked) < TURNS_EVERY {
+            return;
+        }
+        self.turns_checked = now;
+        for session in take_turns_ended() {
+            if let Some(h) = self.holders.get_mut(&session) {
+                h.ended = true;
+            }
+        }
+        let waited = now.duration_since(self.bypass_at) >= BYPASS_IDLE;
+        if let Ok(reg) = self.shared.registry.lock() {
+            for (id, h) in &mut self.holders {
+                h.saw(turn_of(reg.get(id).map(|s| &s.phase)), waited);
+            }
+        }
+        let in_flight = self.glide.is_some() || !self.queue.is_empty();
+        if !bypass_over(&self.holders, in_flight) {
+            return;
+        }
+        self.bypass_off();
+        remember(
+            &mut self.history,
+            Entry {
+                at: now_clock(),
+                mark: Mark::Ok,
+                what: "Bypass off".into(),
+                outcome: "the work it was on for is done".into(),
+                unasked: false,
+            },
+        );
+        self.stale = true;
+    }
+
+    /// Looks at what the plate's session does now, so NOW does not stand
+    /// on an action long done while it works elsewhere.
+    fn watch_now(&mut self, now: Instant) {
+        if self.now.session.is_empty()
+            || self.glide.is_some()
+            || now.duration_since(self.now_checked) < TURNS_EVERY
+        {
+            return;
+        }
+        self.now_checked = now;
+        let Ok(reg) = self.shared.registry.lock() else {
+            return;
+        };
+        let s = reg.get(&self.now.session);
+        let away = away_of(
+            s.and_then(|s| s.tool.as_deref()),
+            turn_of(s.map(|s| &s.phase)),
+            &self.now.program,
+        );
+        drop(reg);
+        if away != self.now.away {
+            self.now.away = away;
+            self.stale = true;
+        }
     }
 
     fn set_speed(&mut self, f: f32) {
@@ -1457,6 +1709,8 @@ impl Overlay {
         // this frame, is taken before the glide is answered: the window
         // it saw opened before the click.
         self.tripped();
+        self.watch_turns(now);
+        self.watch_now(now);
         if let Some(g) = &self.glide {
             let elapsed = now.duration_since(g.began);
             self.ghost_at = Some(glide_at(g.from, g.to, elapsed, g.takes));
@@ -1590,8 +1844,10 @@ impl Overlay {
         let bypass = bypass();
         let gpu = &self.shared.gpu;
         let content_w = BOX_W - 2.0 * PAD;
-        let reason = (!self.now.reason.trim().is_empty())
-            .then(|| render::wrapped(gpu, &gpu.small, self.now.reason.trim(), content_w).ok())
+        // Away, what it does now takes the place of why it acted then.
+        let said = self.now.away.as_deref().unwrap_or(&self.now.reason).trim();
+        let reason = (!said.is_empty())
+            .then(|| render::wrapped(gpu, &gpu.small, said, content_w).ok())
             .flatten();
         let reason_h = reason
             .as_ref()
@@ -1808,6 +2064,18 @@ unsafe fn draw_plate(gpu: &render::Gpu, p: &Pen, s: PlateScene) {
         y += BANNER;
     }
     p.text(&gpu.chip, theme::legend(), "NOW", d2rect(x, y, 60.0, 16.0));
+    // The session's id and start, since two sessions can share a name.
+    let ident_w = if s.gliding.is_some() {
+        cw - 140.0
+    } else {
+        cw - 40.0
+    };
+    p.text(
+        &gpu.small,
+        theme::legend(),
+        s.now.ident.trim(),
+        d2rect(x + 40.0, y - 1.0, ident_w, 16.0),
+    );
     if let Some(left) = s.gliding {
         p.text(
             &gpu.small_right,
@@ -1822,7 +2090,11 @@ unsafe fn draw_plate(gpu: &render::Gpu, p: &Pen, s: PlateScene) {
     if let Some(reason) = s.reason {
         let shown = s.reason_h.min(REASON_LINES * REASON_LINE);
         p.rt.PushAxisAlignedClip(&d2rect(x, y, cw, shown), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        p.brush.SetColor(&color(theme::text()));
+        p.brush.SetColor(&color(if s.now.away.is_some() {
+            theme::waiting()
+        } else {
+            theme::text()
+        }));
         p.rt.DrawTextLayout(
             Vector2 { X: x, Y: y },
             reason,
@@ -1832,11 +2104,18 @@ unsafe fn draw_plate(gpu: &render::Gpu, p: &Pen, s: PlateScene) {
         p.rt.PopAxisAlignedClip();
         y += shown + 4.0;
     }
-    let what = match s.now.what.trim() {
-        "" => "looking",
-        what => what,
+    let what = match (s.now.what.trim(), s.now.away.is_some()) {
+        ("", false) => "looking".to_string(),
+        (what, false) => what.to_string(),
+        ("", true) => "Last in the program: looking".to_string(),
+        (what, true) => format!("Last in the program: {what}"),
     };
-    p.text(&gpu.small, theme::text_dim(), what, d2rect(x, y, cw, ROW));
+    let ink = if s.now.away.is_some() {
+        theme::legend()
+    } else {
+        theme::text_dim()
+    };
+    p.text(&gpu.small, ink, &what, d2rect(x, y, cw, ROW));
     y += ROW;
 
     if s.history.is_empty() {
@@ -2178,6 +2457,108 @@ mod tests {
         assert!(trip_stops(4, Some(4)));
         assert!(!trip_stops(3, Some(4)));
         assert!(!trip_stops(4, None));
+    }
+
+    #[test]
+    fn now_says_when_the_session_works_elsewhere() {
+        let sysmac = "Sysmac Studio";
+        let click = Some("mcp__horadric__desktop_click");
+        assert_eq!(away_of(click, Turn::Working, sysmac), None);
+        assert_eq!(away_of(None, Turn::Working, sysmac), None);
+        assert_eq!(
+            away_of(Some("Bash"), Turn::Working, sysmac),
+            Some("Working in the shell (Bash), not in Sysmac Studio.".into())
+        );
+        assert_eq!(
+            away_of(Some("mcp__horadric__browser_open"), Turn::Working, ""),
+            Some("Working in the browser (browser_open), not in the program.".into())
+        );
+        assert!(away_of(click, Turn::Resting, sysmac)
+            .unwrap()
+            .starts_with("Finished its turn"));
+        assert_eq!(
+            away_of(None, Turn::Gone, sysmac),
+            Some("The session has ended.".into())
+        );
+    }
+
+    #[test]
+    fn tools_are_placed_in_words() {
+        assert!(is_desktop_tool("desktop_type"));
+        assert!(is_desktop_tool("mcp__horadric__desktop_text"));
+        assert!(!is_desktop_tool("mcp__horadric__browser_click"));
+        assert!(!is_desktop_tool("Bash"));
+        assert_eq!(tool_place("PowerShell"), "in the shell");
+        assert_eq!(tool_place("Edit"), "on files");
+        assert_eq!(
+            tool_place("mcp__omron__sysmac_project_build"),
+            "with sysmac_project_build"
+        );
+    }
+
+    #[test]
+    fn a_session_works_until_its_turn_is_over() {
+        let at = |p: Phase| turn_of(Some(&p));
+        assert_eq!(at(Phase::Working), Turn::Working);
+        assert_eq!(at(Phase::Waiting(WaitReason::Permission)), Turn::Working);
+        assert_eq!(at(Phase::Waiting(WaitReason::Dialog)), Turn::Working);
+        assert_eq!(at(Phase::Done), Turn::Resting);
+        assert_eq!(at(Phase::Idle), Turn::Resting);
+        assert_eq!(at(Phase::Waiting(WaitReason::Input)), Turn::Resting);
+        assert_eq!(
+            at(Phase::Waiting(WaitReason::Error("x".into()))),
+            Turn::Resting
+        );
+        assert_eq!(at(Phase::Ended), Turn::Gone);
+        assert_eq!(at(Phase::Paused), Turn::Gone);
+        assert_eq!(turn_of(None), Turn::Gone);
+    }
+
+    #[test]
+    fn bypass_ends_when_the_work_it_was_on_for_is_done() {
+        let mut held = HashMap::new();
+        // Nobody to wait for: bypass is left to the human.
+        assert!(!bypass_over(&held, false));
+        held.insert("a".to_string(), Holder::default());
+        held.get_mut("a").unwrap().saw(Turn::Working, false);
+        assert!(!bypass_over(&held, false));
+        // Done, the Stop hook's phase, after working.
+        held.get_mut("a").unwrap().saw(Turn::Resting, false);
+        assert!(bypass_over(&held, false));
+        // Not while the last action is still on its way.
+        assert!(!bypass_over(&held, true));
+        // A second session still at work keeps it on.
+        held.insert("b".to_string(), Holder::default());
+        held.get_mut("b").unwrap().called();
+        assert!(!bypass_over(&held, false));
+        // Its Stop, StopFailure or SessionEnd ends its share.
+        held.get_mut("b").unwrap().ended = true;
+        assert!(bypass_over(&held, false));
+    }
+
+    #[test]
+    fn a_resting_session_gets_time_to_start_working() {
+        let mut h = Holder::default();
+        h.saw(Turn::Resting, false);
+        assert!(!h.ended, "turned on before its next prompt");
+        h.saw(Turn::Resting, true);
+        assert!(h.ended, "rested the whole wait");
+        let mut gone = Holder::default();
+        gone.saw(Turn::Gone, false);
+        assert!(gone.ended);
+        // A new call while bypass is on starts its share over.
+        gone.called();
+        assert_eq!(
+            gone,
+            Holder {
+                worked: true,
+                ended: false
+            }
+        );
+        // Working after its turn ended does not undo the end the hook told.
+        gone.ended = true;
+        gone.saw(Turn::Working, false);
+        assert!(gone.ended);
     }
 
     #[test]

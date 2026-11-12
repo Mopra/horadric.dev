@@ -918,6 +918,15 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             // Woken by the post below whether or not it lit anything.
             crate::glows::hear(&feed_registry, &target, &t.event);
             crate::forge::heard(&feed_registry, &target, &t.event);
+            // Bypass on the Thinking plate ends with the turn it was on for.
+            if t.event.agent_id.is_none()
+                && matches!(
+                    t.event.hook_event_name.as_str(),
+                    "Stop" | "StopFailure" | "SessionEnd"
+                )
+            {
+                ghost::turn_ended(&target);
+            }
             // A turn's end is when its keeper is sent the snapshot.
             if t.event.hook_event_name == "Stop" && t.event.agent_id.is_none() {
                 keeping::turn_ended(&target, &t.event.transcript_path);

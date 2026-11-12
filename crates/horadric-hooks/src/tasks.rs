@@ -288,6 +288,17 @@ pub fn runewords_file() -> Option<PathBuf> {
     crate::state_dir().map(|d| d.join("runewords.json"))
 }
 
+/// The desktop programs the human allows ahead of time, beside the app's
+/// state like [`runewords_file`].
+pub fn desktop_programs_file() -> Option<PathBuf> {
+    crate::state_dir().map(|d| d.join(horadric_core::desktop_programs::FILE))
+}
+
+/// The log of desktop grants, beside [`desktop_programs_file`].
+pub fn desktop_log_file() -> Option<PathBuf> {
+    crate::state_dir().map(|d| d.join(horadric_core::desktop_programs::LOG_FILE))
+}
+
 fn global_runewords() -> String {
     runewords_file().map(|f| read_text(&f)).unwrap_or_default()
 }

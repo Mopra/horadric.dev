@@ -1088,7 +1088,8 @@ fn desktop_tools() -> Vec<Value> {
             "Type text into a field of a window, by ref or by name. A field that takes a value \
              has it set, replacing what was there; otherwise the window comes to the front, the \
              field gets the keyboard and the text is typed at its caret. submit presses Enter \
-             after.",
+             after. The answer says what the field holds afterwards, read back before Enter; \
+             when that is not what was typed, Enter is not pressed.",
             with(
                 element("type into"),
                 json!({
@@ -1097,6 +1098,17 @@ fn desktop_tools() -> Vec<Value> {
                 }),
             ),
             &["window", "text"],
+        ),
+        tool(
+            "desktop_text",
+            "Read the text of a list, grid, output pane or editor that desktop_snapshot can not \
+             read, by ref or by name, or of what has the keyboard in the window when neither is \
+             given. It reads UI Automation's text first; where there is none it selects all \
+             (Control+A) and copies (Control+C), which counts as operating, and puts the \
+             clipboard's text back after (anything else on the clipboard is lost). Use it for \
+             build output, logs and tables instead of reading screenshots.",
+            element("read the text of"),
+            &["window"],
         ),
         tool(
             "desktop_press",
@@ -1155,11 +1167,13 @@ fn desktop_tools() -> Vec<Value> {
                 "appears": {
                     "type": "string",
                     "description": "A window whose title contains this is open (a dialog, \
-                        a program starting)",
+                        a program starting), in the named window's program, or anywhere \
+                        without one",
                 },
                 "gone": {
                     "type": "string",
-                    "description": "No window whose title contains this is open any more",
+                    "description": "No window whose title contains this is open any more, \
+                        in the named window's program, or anywhere without one",
                 },
                 "text": {
                     "type": "string",
@@ -1172,8 +1186,9 @@ fn desktop_tools() -> Vec<Value> {
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "How long to wait at most: 15000 when not given, 60000 at \
-                        most",
+                    "description": "How long to wait at most: 10000 when not given (or what \
+                        HORADRIC_DESKTOP_WAIT_MS says), 60000 at most. A wait that times out \
+                        is an error: look at the window before waiting again",
                 },
                 "reason": reason(),
             }),
@@ -1265,7 +1280,8 @@ the user's own use of it, so take care on sites where they are logged in.";
 pub(crate) const DESKTOP: &str = "The desktop_ tools \
 do the same for programs on the user's Windows desktop (an engineering tool like Sysmac Studio, \
 its watch window, its dialogs): list them with desktop_windows, read one with desktop_snapshot, \
-look with desktop_screenshot, act with desktop_click, desktop_type and desktop_press, and know \
+look with desktop_screenshot, read lists and output panes with desktop_text, act with \
+desktop_click, desktop_type and desktop_press, and know \
 that the user approves each program once per session and confirms each risky action. Refs from \
 desktop_snapshot are surer than points on the screen, so act by ref or name. Horadric watches \
 each program you have looked at or operated: ask desktop_changes what changed since you last \
@@ -1467,6 +1483,7 @@ B.";
             "desktop_click",
             "desktop_type",
             "desktop_press",
+            "desktop_text",
             "desktop_changes",
             "desktop_wait",
         ] {

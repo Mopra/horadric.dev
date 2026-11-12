@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use windows::core::{Interface, BSTR, HRESULT};
-use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED, HANDLE, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{
+    CloseHandle, GlobalFree, E_ACCESSDENIED, HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT,
+};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
@@ -32,6 +34,11 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, STREAM_SEEK_END,
     STREAM_SEEK_SET,
 };
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
+    IsClipboardFormatAvailable, OpenClipboard, SetClipboardData,
+};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken,
     QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -71,7 +78,16 @@ const MOST_ELEMENTS: usize = 2000;
 const SMALL_DIALOG: usize = 40;
 
 /// How long `desktop_wait` waits when not told, and at most.
-const WAIT_DEFAULT_MS: u64 = 15_000;
+const WAIT_DEFAULT_MS: u64 = 10_000;
+/// Sets another default for a wait, in milliseconds, for a machine whose
+/// programs are slow.
+pub const WAIT_ENV: &str = "HORADRIC_DESKTOP_WAIT_MS";
+
+/// The most characters `desktop_text` gives back.
+const TEXT_MOST: usize = 20_000;
+/// How long a copy is given to reach the clipboard.
+const COPY_WAIT: Duration = Duration::from_millis(1500);
+const CF_UNICODETEXT: u32 = 13;
 const WAIT_MOST_MS: u64 = 60_000;
 
 /// Said when a change is asked for before any program is watched.
@@ -122,6 +138,9 @@ pub struct Window {
     pub title: String,
     /// The program's file name, like `notepad.exe`.
     pub exe: String,
+    /// The program's full path, which the app's list of allowed programs
+    /// may name. Empty when Windows will not tell.
+    pub path: String,
     pub pid: u32,
     /// The window that owns it, for a dialog.
     pub owner: Option<isize>,
@@ -137,12 +156,112 @@ pub fn looks_risky(texts: &[&str]) -> bool {
     })
 }
 
+/// The titles a wait's `appears` and `gone` look at: the named program's
+/// windows, or every window when none was named. A window of the same name
+/// in another program, a dialog the human has open elsewhere, must not
+/// answer for the one the agent waits on.
+pub fn wait_titles(windows: Vec<Window>, pid: Option<u32>) -> Vec<String> {
+    windows
+        .into_iter()
+        .filter(|w| pid.is_none_or(|p| w.pid == p))
+        .map(|w| w.title)
+        .collect()
+}
+
+/// How long a wait may last: what the call asks, else what [`WAIT_ENV`]
+/// says, else ten seconds, and never past a minute. Short by default, so an
+/// agent waiting on something that will not come looks again soon instead
+/// of waiting blind.
+pub fn wait_limit(asked: Option<u64>, env: Option<&str>) -> Duration {
+    let ms = asked
+        .or_else(|| env.and_then(|e| e.trim().parse().ok()))
+        .unwrap_or(WAIT_DEFAULT_MS);
+    Duration::from_millis(ms.clamp(100, WAIT_MOST_MS))
+}
+
+/// What a wait waited for, in words.
+pub fn waited_for(u: &Until) -> String {
+    let mut said = Vec::new();
+    if let Some(a) = &u.appears {
+        said.push(format!("a window titled like {a:?}"));
+    }
+    if let Some(g) = &u.gone {
+        said.push(format!("no window titled like {g:?}"));
+    }
+    if let Some(t) = &u.text {
+        said.push(format!("the text {t:?}"));
+    }
+    if let Some(q) = u.quiet_ms {
+        said.push(format!("{q} ms of quiet"));
+    }
+    said.join(" or ")
+}
+
+/// What a field holds after text was typed into it.
+#[derive(Debug, PartialEq)]
+pub enum Landed {
+    /// It holds what was typed, maybe among more.
+    Holds(String),
+    /// It holds something else: the text went elsewhere, or not at all.
+    Elsewhere(String),
+    /// Its value can not be read.
+    Unknown,
+}
+
+/// Whether `now`, the field's value read back, holds `typed`. Line breaks
+/// and case are not held against it, since fields change both.
+pub fn landed(typed: &str, now: Option<String>) -> Landed {
+    let Some(now) = now else {
+        return Landed::Unknown;
+    };
+    let flat = |s: &str| s.replace("\r\n", "\n").trim().to_lowercase();
+    let want = flat(typed);
+    if want.is_empty() || flat(&now).contains(&want) {
+        Landed::Holds(now)
+    } else {
+        Landed::Elsewhere(now)
+    }
+}
+
+/// What the agent is told of a field's value after typing.
+pub fn landed_text(l: &Landed, entered: bool) -> String {
+    let when = if entered {
+        " when Enter was pressed"
+    } else {
+        ""
+    };
+    match l {
+        Landed::Holds(v) => format!(" The field held {:?}{when}.", short(v, 300)),
+        Landed::Elsewhere(v) => format!(
+            " But the field held {:?}, not what was typed: the text may have gone to another \
+             element, or the field changed it.",
+            short(v, 300)
+        ),
+        Landed::Unknown => " Its value can not be read back through UI Automation; \
+            desktop_snapshot or desktop_screenshot shows whether the text is there."
+            .to_string(),
+    }
+}
+
+/// What `desktop_text` answers with the text read `how`, cut to
+/// [`TEXT_MOST`] characters.
+pub fn text_answer(text: &str, how: &str) -> String {
+    let text = text.replace("\r\n", "\n");
+    let n = text.chars().count();
+    if n <= TEXT_MOST {
+        return format!("Read {how}, {n} characters:\n{text}");
+    }
+    let kept: String = text.chars().take(TEXT_MOST).collect();
+    format!("Read {how}, {n} characters, the first {TEXT_MOST} here:\n{kept}")
+}
+
 /// The window as the app's bodies name it.
 fn window_json(window: &Window) -> Value {
     json!({
         "hwnd": window.hwnd,
         "title": window.title,
         "exe": window.exe,
+        "path": window.path,
         "pid": window.pid,
     })
 }
@@ -777,10 +896,13 @@ fn window_rect(id: isize) -> RECT {
 /// What [`exe_of`] says when Windows will not tell.
 const UNKNOWN_EXE: &str = "?";
 
-fn exe_of(pid: u32) -> String {
+/// The program's file name and its full path, which is empty when Windows
+/// will not tell.
+fn exe_of(pid: u32) -> (String, String) {
+    let unknown = || (UNKNOWN_EXE.to_string(), String::new());
     unsafe {
         let Ok(p) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-            return UNKNOWN_EXE.into();
+            return unknown();
         };
         let mut buf = [0u16; 1024];
         let mut len = buf.len() as u32;
@@ -792,10 +914,11 @@ fn exe_of(pid: u32) -> String {
         );
         let _ = CloseHandle(p);
         if ok.is_err() {
-            return UNKNOWN_EXE.into();
+            return unknown();
         }
         let path = String::from_utf16_lossy(&buf[..len as usize]);
-        path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string()
+        let exe = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
+        (exe, path)
     }
 }
 
@@ -877,10 +1000,12 @@ pub(crate) fn info(id: isize) -> Window {
             .ok()
             .filter(|o| !o.is_invalid())
             .map(|o| o.0 as isize);
+        let (exe, path) = exe_of(pid);
         Window {
             hwnd: id,
             title,
-            exe: exe_of(pid),
+            exe,
+            path,
             pid,
             owner,
             class,
@@ -1145,6 +1270,91 @@ fn on_the_side(
     }
 }
 
+/// Reads something through UI Automation on its own thread, as
+/// [`on_the_side`] acts, so a program that holds the call does not hold
+/// this server. None when it fails or takes too long.
+fn read_on_the_side<T: Send + 'static>(
+    el: &IUIAutomationElement,
+    read: impl FnOnce(&IUIAutomationElement) -> windows::core::Result<T> + Send + 'static,
+) -> Option<T> {
+    let el = Sent(el.clone());
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        let _ = tx.send(read(el.get()).ok());
+    });
+    rx.recv_timeout(PATTERN_WAIT).ok().flatten()
+}
+
+/// What a field holds now, read live.
+fn value_now(el: &IUIAutomationElement) -> Option<String> {
+    read_on_the_side(el, |el| unsafe {
+        let p = el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)?;
+        Ok(p.CurrentValue()?.to_string())
+    })
+}
+
+/// Another program can hold the clipboard open for a moment.
+fn open_clipboard() -> bool {
+    for _ in 0..10 {
+        if unsafe { OpenClipboard(None) }.is_ok() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+/// The clipboard's text, if it holds any.
+fn clip_text() -> Option<String> {
+    if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT) }.is_err() || !open_clipboard() {
+        return None;
+    }
+    let text = unsafe {
+        GetClipboardData(CF_UNICODETEXT).ok().and_then(|h| {
+            let mem = HGLOBAL(h.0);
+            let ptr = GlobalLock(mem) as *const u16;
+            if ptr.is_null() {
+                return None;
+            }
+            let mut len = 0;
+            while *ptr.add(len) != 0 {
+                len += 1;
+            }
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+            let _ = GlobalUnlock(mem);
+            Some(s)
+        })
+    };
+    unsafe {
+        let _ = CloseClipboard();
+    }
+    text
+}
+
+/// Puts `text` on the clipboard, in place of what it held.
+fn set_clip_text(text: &str) {
+    if !open_clipboard() {
+        return;
+    }
+    unsafe {
+        let _ = EmptyClipboard();
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        if let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2) {
+            let ptr = GlobalLock(mem) as *mut u16;
+            if !ptr.is_null() {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+                let _ = GlobalUnlock(mem);
+                // The clipboard owns the memory once it takes it.
+                if SetClipboardData(CF_UNICODETEXT, Some(HANDLE(mem.0))).is_err() {
+                    let _ = GlobalFree(Some(mem));
+                }
+            }
+        }
+        let _ = CloseClipboard();
+    }
+}
+
 impl Desktop {
     /// The desktop as the helper serves it.
     pub fn for_helper() -> Desktop {
@@ -1368,6 +1578,39 @@ impl Desktop {
                 });
                 report(app, &root, &what, result)
             }
+            "desktop_text" => {
+                let aim = if args.get("ref").is_some() || args.get("name").is_some() {
+                    Some(self.aim(&w, args, false)?)
+                } else {
+                    None
+                };
+                let thing = aim
+                    .as_ref()
+                    .map_or_else(|| format!("{:?}", w.title), Aim::what);
+                let what = format!("read the text of {thing}");
+                allow(app, &root, "see", &what, false, None, &reason)?;
+                watch::follow(w.pid);
+                if let Some(t) = self.text_pattern(&w, aim.as_ref()) {
+                    let said = text_answer(&t, "through UI Automation");
+                    return report(
+                        app,
+                        &root,
+                        &what,
+                        Ok((vec![text(said)], "Read its text.".into())),
+                    );
+                }
+                // Copying takes keys and the clipboard, so it is operating.
+                let what = format!("select all and copy in {thing}, to read its text");
+                let point = aim
+                    .as_ref()
+                    .map_or_else(|| window_point(&w), |a| aim_point(&w, a));
+                allow(app, &root, "operate", &what, flag("risky"), point, &reason)?;
+                let result = self.copy_text(&w, aim.as_ref()).map(|t| {
+                    let said = text_answer(&t, "by selecting all and copying it");
+                    (vec![text(said)], "Copied its text.".to_string())
+                });
+                report(app, &root, &what, result)
+            }
             "desktop_changes" | "desktop_wait" => {
                 let what = if name == "desktop_wait" {
                     format!("wait for a change in {:?}", w.title)
@@ -1478,18 +1721,16 @@ impl Desktop {
         if needs_watch && pid.is_none() && !watch::any_followed() {
             return Err(format!("{NOTHING_WATCHED} Name the window to wait in."));
         }
-        let most = Duration::from_millis(
-            args.get("timeout_ms")
-                .and_then(Value::as_u64)
-                .unwrap_or(WAIT_DEFAULT_MS)
-                .clamp(100, WAIT_MOST_MS),
+        let most = wait_limit(
+            args.get("timeout_ms").and_then(Value::as_u64),
+            std::env::var(WAIT_ENV).ok().as_deref(),
         );
         let titled = until.appears.is_some() || until.gone.is_some();
         watch::flush();
         let (mark, started, begun) = (watch::newest(), watch::now_ms(), Instant::now());
         let met = loop {
             let titles: Vec<String> = if titled {
-                list_windows().into_iter().map(|w| w.title).collect()
+                wait_titles(list_windows(), pid)
             } else {
                 Vec::new()
             };
@@ -1507,24 +1748,28 @@ impl Desktop {
         let (seen, _, newest) = watch::since(mark, pid);
         self.seen.insert(pid, newest);
         let took = begun.elapsed().as_secs_f32();
-        let mut out = match met {
-            Some(v) => format!("Done after {took:.1} s: {v}."),
-            None => format!(
-                "Timed out after {took:.1} s: nothing asked for held. desktop_snapshot or \
-                 desktop_screenshot shows where the window is."
-            ),
-        };
+        let mut meanwhile = String::new();
         if seen.is_empty() {
-            out.push_str(" Nothing changed meanwhile.");
+            meanwhile.push_str(" Nothing changed meanwhile.");
         } else {
-            out.push_str(" Meanwhile:");
+            meanwhile.push_str(" Meanwhile:");
             let skip = seen.len().saturating_sub(watch::MOST_LINES);
             for c in &seen[skip..] {
-                out.push('\n');
-                out.push_str(&watch::line(c));
+                meanwhile.push('\n');
+                meanwhile.push_str(&watch::line(c));
             }
         }
-        Ok(out)
+        match met {
+            Some(v) => Ok(format!("Done after {took:.1} s: {v}.{meanwhile}")),
+            // An error, so the agent does not take the silence for a yes
+            // and wait again in the same blind way.
+            None => Err(format!(
+                "Timed out after {took:.1} s waiting for {}: it did not come. Do not wait \
+                 again for the same thing: look first, with desktop_snapshot or \
+                 desktop_screenshot, whether the last action landed where you meant.{meanwhile}",
+                waited_for(&until)
+            )),
+        }
     }
 
     fn snapshot(&mut self, w: &Window) -> Result<String, String> {
@@ -1843,11 +2088,23 @@ impl Desktop {
             } else {
                 self.focus(w, aim)?;
                 send_strokes(&text_strokes(typed))?;
+                // The program takes typed keys in its own time.
+                thread::sleep(Duration::from_millis(120));
                 format!(
                     "Typed {} characters into {thing} at its caret",
                     typed.chars().count()
                 )
             };
+        // Read back before Enter, which may close the field's dialog, so
+        // the agent knows whether the text is where it meant.
+        let held = landed(typed, value_now(&aim.el));
+        if submit && matches!(held, Landed::Elsewhere(_)) {
+            return Err(format!(
+                "{said}.{} So Enter was not pressed. Find where the keyboard is with \
+                 desktop_snapshot before typing again.",
+                landed_text(&held, false)
+            ));
+        }
         if submit {
             if aim.writable {
                 self.focus(w, aim)
@@ -1857,6 +2114,7 @@ impl Desktop {
             said.push_str(" and pressed Enter");
         }
         said.push('.');
+        said.push_str(&landed_text(&held, submit));
         Ok(said)
     }
 
@@ -1870,6 +2128,60 @@ impl Desktop {
                 win_err(e)
             )
         })
+    }
+
+    /// The text of `aim`, or of the window, through UI Automation's text
+    /// pattern, which editors and many output panes have. None when it has
+    /// none or it is empty.
+    fn text_pattern(&mut self, w: &Window, aim: Option<&Aim>) -> Option<String> {
+        let el = match aim {
+            Some(a) => a.el.clone(),
+            None => unsafe { self.com().ok()?.uia.ElementFromHandle(hwnd(w.hwnd)) }.ok()?,
+        };
+        read_on_the_side(&el, |el| unsafe {
+            let p = el.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)?;
+            Ok(p.DocumentRange()?.GetText(-1)?.to_string())
+        })
+        .filter(|t| !t.trim().is_empty())
+    }
+
+    /// The text of `aim`, or of what has the keyboard in `w`, by selecting
+    /// all and copying it, for lists, grids and panes that UI Automation
+    /// can not read. The clipboard's text is put back after.
+    fn copy_text(&mut self, w: &Window, aim: Option<&Aim>) -> Result<String, String> {
+        match aim {
+            // An output pane may not take the keyboard through UI
+            // Automation, but does from a click into it.
+            Some(a) => {
+                if self.focus(w, a).is_err() {
+                    self.click(w, a, "left", false)?;
+                }
+            }
+            None => bring_forward(w)?,
+        }
+        let kept = clip_text();
+        let before = unsafe { GetClipboardSequenceNumber() };
+        send_strokes(&chord_strokes(&[VK_CONTROL], b'A' as u16))?;
+        thread::sleep(Duration::from_millis(80));
+        send_strokes(&chord_strokes(&[VK_CONTROL], b'C' as u16))?;
+        let begun = Instant::now();
+        while unsafe { GetClipboardSequenceNumber() } == before && begun.elapsed() < COPY_WAIT {
+            thread::sleep(Duration::from_millis(30));
+        }
+        if unsafe { GetClipboardSequenceNumber() } == before {
+            return Err(format!(
+                "nothing was copied from {}: it may not take Control+A and Control+C; \
+                 desktop_screenshot of it is what is left",
+                aim.map_or_else(|| format!("{:?}", w.title), Aim::what)
+            ));
+        }
+        let copied = clip_text();
+        if let Some(t) = kept {
+            set_clip_text(&t);
+        }
+        copied
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| "the copy held no text".to_string())
     }
 
     /// The window as a PNG, cut to `crop` (on screen) when given, and
@@ -2209,10 +2521,83 @@ mod tests {
             hwnd,
             title: title.into(),
             exe: exe.into(),
+            path: format!(r"C:\Program Files\{exe}"),
             pid: 7,
             owner: None,
             class: String::new(),
         }
+    }
+
+    #[test]
+    fn a_wait_in_a_program_looks_only_at_its_windows() {
+        let mut other = win(2, "Synchronization", "SysmacStudio.exe");
+        other.pid = 9;
+        let all = vec![win(1, "Ghost target", "python.exe"), other];
+        assert_eq!(wait_titles(all.clone(), Some(7)), vec!["Ghost target"]);
+        assert_eq!(
+            wait_titles(all.clone(), None),
+            vec!["Ghost target", "Synchronization"]
+        );
+        assert!(wait_titles(all, Some(3)).is_empty());
+    }
+
+    #[test]
+    fn a_wait_is_short_unless_asked_or_set_longer() {
+        assert_eq!(wait_limit(None, None), Duration::from_secs(10));
+        assert_eq!(wait_limit(None, Some(" 25000 ")), Duration::from_secs(25));
+        assert_eq!(wait_limit(None, Some("soon")), Duration::from_secs(10));
+        assert_eq!(
+            wait_limit(Some(3000), Some("25000")),
+            Duration::from_secs(3)
+        );
+        assert_eq!(wait_limit(Some(10), None), Duration::from_millis(100));
+        assert_eq!(wait_limit(Some(600_000), None), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_wait_says_what_it_waited_for() {
+        let u = Until {
+            appears: Some("Open".into()),
+            quiet_ms: Some(800),
+            ..Until::default()
+        };
+        assert_eq!(
+            waited_for(&u),
+            "a window titled like \"Open\" or 800 ms of quiet"
+        );
+    }
+
+    #[test]
+    fn typed_text_is_checked_against_the_field() {
+        let path = r"C:\Proj\PLC.smc2";
+        assert_eq!(landed(path, Some(path.into())), Landed::Holds(path.into()));
+        assert_eq!(
+            landed("10.0.0.5", Some("IP: 10.0.0.5".into())),
+            Landed::Holds("IP: 10.0.0.5".into())
+        );
+        assert_eq!(
+            landed("a\nb", Some("A\r\nB".into())),
+            Landed::Holds("A\r\nB".into())
+        );
+        assert_eq!(landed(path, Some("".into())), Landed::Elsewhere("".into()));
+        assert_eq!(landed(path, None), Landed::Unknown);
+        assert!(landed_text(&Landed::Holds("x".into()), true).contains("when Enter"));
+        assert!(landed_text(&Landed::Elsewhere("".into()), false).contains("not what was typed"));
+    }
+
+    #[test]
+    fn read_text_is_cut_and_says_how_much() {
+        assert_eq!(
+            text_answer("a\r\nb", "by copying"),
+            "Read by copying, 3 characters:\na\nb"
+        );
+        let long = "x".repeat(TEXT_MOST + 5);
+        let said = text_answer(&long, "by copying");
+        assert!(said.starts_with(&format!(
+            "Read by copying, {} characters, the first",
+            TEXT_MOST + 5
+        )));
+        assert_eq!(said.chars().filter(|&c| c == 'x').count(), TEXT_MOST);
     }
 
     #[test]
@@ -2241,7 +2626,13 @@ mod tests {
             ),
             json!({
                 "op": "desktop.allow",
-                "window": { "hwnd": 66, "title": "Proj - Sysmac Studio", "exe": "SysmacStudio.exe", "pid": 7 },
+                "window": {
+                    "hwnd": 66,
+                    "title": "Proj - Sysmac Studio",
+                    "exe": "SysmacStudio.exe",
+                    "path": r"C:\Program Files\SysmacStudio.exe",
+                    "pid": 7,
+                },
                 "action": "operate",
                 "what": "click Button \"Transfer\"",
                 "risky": true,
@@ -2280,7 +2671,13 @@ mod tests {
             ),
             json!({
                 "op": "desktop.done",
-                "window": { "hwnd": 66, "title": "Proj", "exe": "SysmacStudio.exe", "pid": 7 },
+                "window": {
+                    "hwnd": 66,
+                    "title": "Proj",
+                    "exe": "SysmacStudio.exe",
+                    "path": r"C:\Program Files\SysmacStudio.exe",
+                    "pid": 7,
+                },
                 "what": "press Enter in \"Proj\"",
                 "ok": false,
                 "outcome": "the window would not come forward",

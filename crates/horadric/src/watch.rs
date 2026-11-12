@@ -1274,6 +1274,7 @@ pub(crate) mod tests {
             hwnd: 66,
             title: title.into(),
             exe: "app.exe".into(),
+            path: r"C:\Apps\app.exe".into(),
             pid: 7,
             owner: None,
             class: String::new(),

@@ -618,7 +618,11 @@ fn thought_glimpse(t: &str, live: bool) -> &str {
         .lines()
         .map(|l| l.trim_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '#' | '_' | '>')))
         .filter(|l| !l.is_empty());
-    let line = if live { lines.next_back() } else { lines.next() };
+    let line = if live {
+        lines.next_back()
+    } else {
+        lines.next()
+    };
     line.unwrap_or("")
 }
 

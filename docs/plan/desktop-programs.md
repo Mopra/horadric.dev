@@ -50,6 +50,74 @@ window and operate it, within what the human allowed. Windows only.
   2026-11-09), but its elements then mostly will not say what they hold,
   so for such a window the helper watches, and its changes come over
   the same pipe.
+- **Programs allowed ahead of time.** Asked for on 2026-11-11, for a
+  machine a session works on with nobody there to answer the approval
+  dialog of each new session. `desktop-programs.json` beside the app's
+  state (`%APPDATA%\Horadric`, `Horadric-dev` for a dev instance) lists
+  programs with a level, look or operate: `{"programs": [{"program":
+  "C:\\Program Files\\OMRON\\Sysmac Studio\\SysmacStudio.exe", "level":
+  "operate"}]}`. A program is named by its exe's full path, which only
+  that install matches, or by its exe name, which any exe of that name
+  matches (`.exe` and case optional). A path entry wins over a name
+  entry. The MCP process sends the window's full path beside its exe
+  name, and a program reached through the elevated helper is matched on
+  its plain name, so Sysmac Studio running as administrator is the same
+  entry. For every session Horadric holds, a listed program is let in
+  that far without the dialog; what the human answers for a session
+  still adds to it, and a program not on the list asks as before. The
+  app reads the file again whenever its time or size changes, so an edit
+  counts from the next call, and it never copies a listed grant into the
+  session's own, so taking a program off counts at once too. A file that
+  does not parse counts as empty (so everything is asked), with a toast
+  saying why. Horadric's own programs can not be listed, since a session
+  operating Horadric could answer its own questions. Edited by hand or
+  with `horadric desktop allow PROGRAM look|operate`, `deny PROGRAM` and
+  `list` (pure parts in `horadric_core::desktop_programs`). A grant from
+  the list is shown in a toast once per session and program, and every
+  grant and answer is a line in `desktop.log` beside the list, saying
+  whether it came from the list, a dialog or bypass (`horadric desktop
+  log`). A listed call still glides the ghost and shows on the Thinking
+  plate like any allowed call.
+- **The list never covers a risky action.** There is no level above
+  operate, and the risky question is asked whatever the grant, from the
+  list or a dialog. This is OptiPeople's rule for customers' equipment:
+  nothing on a machine is changed without a technician's yes, each time.
+  Only the plate's Bypass, the human there and holding Esc, skips it.
+- **Bypass ends with the work.** Seen on 2026-11-12: a session finished
+  its task and the plate still said Bypass on. Bypass is now on for the
+  session the plate showed when it was turned on and for every session
+  whose call comes while it is on. The hook thread passes each session's
+  `Stop`, `StopFailure` and `SessionEnd` to the overlay, which also reads
+  the sessions' phases: a session ends its share when its turn ends that
+  way, when it is gone, or when it is seen working and then resting
+  (done, idle, failed). One already resting when bypass was turned on
+  has a minute to start working. Once every such session has ended its
+  share and no action is gliding or queued, bypass turns itself off and
+  the plate's history says so.
+- **From a video of a Sysmac test, 2026-11-12.** Two sessions of the same
+  name ran at once and nobody could tell which drove the program, the
+  plate stood about 50 seconds on "opening the File menu" while the
+  agent copied files in a shell, about 40 seconds went in a file dialog
+  the typing had missed, and the Output pane could only be read off
+  screenshots. So:
+  - One session drives a program at a time. Another session's operate
+    call in a program is refused, with who holds it, while the session
+    that last operated it is still at work, or while another session's
+    question about operating it waits. Looking stays open. Sessions are
+    named by id and start beside their name in the questions and on the
+    plate.
+  - NOW on the plate turns to what the session does instead, from its
+    tile's tool and phase: working in the shell, on files, in the
+    browser, finished its turn, ended, with the last desktop action
+    under it.
+  - `desktop_type` reads the field's value back before Enter and says
+    what it holds; when that is not what was typed, Enter is not
+    pressed and the call fails. `desktop_wait` gives up after 10 s
+    unless `timeout_ms` or `HORADRIC_DESKTOP_WAIT_MS` say otherwise, and
+    a wait that times out is an error telling the agent to look first.
+  - `desktop_text` reads lists, grids, output panes and editors: UI
+    Automation's text pattern first, else select all and copy (an
+    operate action), putting the clipboard's text back after.
 - **Seen on the stage.** Every operate action shows a notification naming
   the session and the program, so the human always knows an agent has
   their program in hand.
@@ -58,4 +126,9 @@ window and operate it, within what the human allowed. Windows only.
 
 - A frame drawn around the element acted on, like the agent's cursor's
   arrow, so the human sees where in the program it is.
-- Whether grants should outlive Horadric, per project and program.
+- Whether answered grants should outlive Horadric, per project and
+  program. The list above is the ahead of time answer for every project.
+- A page in the app's settings for the list, beside the command.
+- The elevated helper still needs Windows' UAC yes when it starts, unless
+  the machine elevates without asking, which an unattended machine has
+  to settle on its own.

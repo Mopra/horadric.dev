@@ -79,6 +79,17 @@ of the agent. The terminal is the UI.
 - Plain terminals beside the agents, for a dev server, a log or a deploy.
 - A browser pane for `localhost:3000` or anything else, that your agents
   can drive too.
+- Desktop programs on Windows (Sysmac Studio, its Watch window, its
+  dialogs): a session can look at and operate them through the `desktop_`
+  tools. You approve each program once per session in a dialog, or ahead
+  of time for every session with `horadric desktop allow PROGRAM
+  look|operate` (the exe's full path, or its name). `horadric desktop
+  list` shows the list, `deny` takes a program off it, and `log` shows
+  which grants came from the list and which from a dialog. The list is
+  `desktop-programs.json` in `%APPDATA%\Horadric`, and an edit counts at
+  once. Risky actions (transfer to a controller, mode changes, forcing,
+  resetting, deleting, writing) are asked every time, and nothing on the
+  list can change that.
 - Ctrl+click a path in a pane to open the file in VS Code at that line.
 - Hand an agent what you point at: an element picked in the browser pane
   (right click its header), a terminal selection (Shift+right click) or

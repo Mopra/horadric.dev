@@ -8,6 +8,21 @@
 //! never kept. Each one is asked, since one wrong click there can stop a
 //! machine.
 //!
+//! The human can also list programs ahead of time, in
+//! `desktop-programs.json` (see [`horadric_core::desktop_programs`]). A
+//! listed program is let in that far for every session without the
+//! approval question, and the file is read again whenever it changes. The
+//! list never covers a risky action, which is asked all the same. Each
+//! grant from the list is shown once per session and program and written
+//! to `desktop.log`, with the answers to the questions beside it.
+//!
+//! One session drives a program at a time. While a session that operated
+//! a program is still at work, another session's operate call in the same
+//! program is refused with who holds it, as is one while another session's
+//! question about it waits; looking stays open to every session. Sessions
+//! are named by id and start as well as by name, in the questions and on
+//! the plate, since two can share a name.
+//!
 //! Asking runs the dialog's modal loop, which must not hold the app, so a
 //! question waits on [`Desktop`] and is asked from the window procedure.
 //!
@@ -20,11 +35,15 @@
 //! still held for Esc, which stops it and turns bypass off.
 
 use std::cell::Cell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Write;
+use std::time::SystemTime;
 
+use horadric_core::desktop_programs::{self as listed, Entry, Level, Source};
 use horadric_hooks::listener::{BrowserCall, Reply};
 use serde_json::{json, Value};
 use windows::Win32::Foundation::HWND;
+use windows::Win32::System::SystemInformation::GetLocalTime;
 
 use super::ghost::{self, Allowed};
 use super::{ask, post, with_app, App, WM_HORADRIC_DESKTOP};
@@ -82,6 +101,29 @@ pub(super) fn decide(grant: Grant, action: Action, risky: bool) -> Decision {
         Action::Operate if grant == Grant::Operate => Decision::Allow,
         _ => Decision::AskApprove,
     }
+}
+
+/// A level on the list as the grant it stands for.
+pub(super) fn grant_of_level(level: Option<Level>) -> Grant {
+    match level {
+        None => Grant::None,
+        Some(Level::Look) => Grant::See,
+        Some(Level::Operate) => Grant::Operate,
+    }
+}
+
+/// What a session may do in a program: what the human answered for it, or
+/// what the list allows every session, whichever is more. Neither covers a
+/// risky action: [`decide`] asks about that whatever the grant.
+pub(super) fn effective(own: Grant, level: Option<Level>) -> Grant {
+    own.max(grant_of_level(level))
+}
+
+/// Whether a call goes ahead only because of the list, so it is worth
+/// telling the human it was not asked.
+pub(super) fn by_the_list(own: Grant, level: Option<Level>, action: Action, risky: bool) -> bool {
+    decide(own, action, risky) != Decision::Allow
+        && decide(effective(own, level), action, risky) == Decision::Allow
 }
 
 /// What bypass makes of a decision: a question it would ask becomes an
@@ -174,11 +216,49 @@ pub(super) fn refusal_word(why: Refusal) -> &'static str {
     }
 }
 
+/// When a session started, as a local clock reads it: `local_now` is
+/// seconds into today on that clock, `ago` how long since it started.
+pub(super) fn started_clock(local_now: u64, ago: u64) -> String {
+    let at = (local_now + 86_400 - ago % 86_400) % 86_400;
+    format!("{:02}:{:02}", at / 3600, (at % 3600) / 60)
+}
+
+/// A session as the human tells it from another of the same name.
+pub(super) fn ident_line(id: &str, started: Option<&str>) -> String {
+    match started {
+        Some(at) => format!("id {id}, started {at}"),
+        None => format!("id {id}"),
+    }
+}
+
+/// What a session is told when another holds the program it would operate.
+pub(super) fn busy_text(program: &str, name: &str, ident: &str, asking: bool) -> String {
+    let how = if asking {
+        "is waiting for the human's answer to operate it"
+    } else {
+        "operates it and is still at work"
+    };
+    format!(
+        "{program} is held by another session, {name:?} ({ident}), which {how}. One session \
+         drives a program at a time, so nothing was done. Wait until that session is done, or \
+         ask the human in the chat; looking at the program still works"
+    )
+}
+
+/// The key a program is held by: its plain exe name, whether reached
+/// through the helper or not.
+pub(super) fn program_key(exe: &str, path: &str) -> String {
+    listed_name(exe, path).to_lowercase()
+}
+
 /// A call as `horadric mcp` sent it.
 #[derive(Debug, PartialEq)]
 pub(super) struct Request {
     pub title: String,
     pub exe: String,
+    /// The exe's full path, empty when the MCP process could not tell or
+    /// is from before paths were sent.
+    pub path: String,
     /// The program's window, for the screen the Thinking plate goes on.
     pub hwnd: isize,
     pub action: Action,
@@ -241,6 +321,7 @@ pub(super) fn parse(body: &Value) -> Result<Request, String> {
     Ok(Request {
         title: text(window.get("title")),
         exe: exe.to_string(),
+        path: text(window.get("path")).trim().to_string(),
         hwnd: window
             .get("hwnd")
             .and_then(Value::as_i64)
@@ -266,6 +347,16 @@ impl Pending {
         grant_key(&self.session, &self.request.exe)
     }
 
+    /// The program as the log names it: its path when known.
+    fn program(&self) -> &str {
+        let r = &self.request;
+        if r.path.is_empty() {
+            &r.exe
+        } else {
+            &r.path
+        }
+    }
+
     fn refuse(&self, why: Refusal) {
         let r = &self.request;
         self.reply
@@ -277,11 +368,98 @@ fn grant_key(session: &str, exe: &str) -> (String, String) {
     (session.to_string(), exe.to_lowercase())
 }
 
+/// The exe name the list is matched against. A program reached through
+/// the helper is named "X.exe as administrator", which keeps its answered
+/// grant apart, but it is the same program on the list.
+pub(super) fn listed_name<'a>(exe: &'a str, path: &'a str) -> &'a str {
+    match path.rsplit(['\\', '/']).next() {
+        Some(name) if !name.trim().is_empty() => name,
+        _ => exe.strip_suffix(" as administrator").unwrap_or(exe),
+    }
+}
+
+/// The list as last read, and the file's stamp then, so it is read again
+/// only when it changes.
+#[derive(Default)]
+struct List {
+    stamp: Option<(SystemTime, u64)>,
+    entries: Vec<Entry>,
+}
+
 /// What the human allowed, and the calls waiting to be asked.
 #[derive(Default)]
 pub(super) struct Desktop {
     grants: HashMap<(String, String), Grant>,
     waiting: VecDeque<Pending>,
+    list: List,
+    /// The session, program and level each grant from the list was shown
+    /// for, so it is shown once and not on every screenshot.
+    told: HashSet<(String, String, Level)>,
+    /// The session that last operated each program, by [`program_key`].
+    drivers: HashMap<String, String>,
+    /// The session and program of the question on screen.
+    asking: Option<(String, String)>,
+}
+
+impl Desktop {
+    /// Reads the list again if its file changed. A list that can not be
+    /// read counts as empty, so the human is asked, and says why once per
+    /// version of the file.
+    fn refresh(&mut self) -> Option<String> {
+        let file = horadric_hooks::tasks::desktop_programs_file()?;
+        let stamp = std::fs::metadata(&file)
+            .ok()
+            .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()));
+        if stamp == self.list.stamp {
+            return None;
+        }
+        self.list.stamp = stamp;
+        let text = match stamp {
+            Some(_) => std::fs::read_to_string(&file).unwrap_or_default(),
+            None => String::new(),
+        };
+        match listed::parse(&text) {
+            Ok(entries) => {
+                self.list.entries = entries;
+                None
+            }
+            Err(why) => {
+                self.list.entries.clear();
+                Some(format!("{}: {why}", file.display()))
+            }
+        }
+    }
+
+    fn level_of(&self, r: &Request) -> Option<Level> {
+        let name = listed_name(&r.exe, &r.path);
+        listed::find(&self.list.entries, &r.path, name).map(|e| e.level)
+    }
+}
+
+/// Adds a line to `desktop.log`. A log that can not be written loses the
+/// line, never the call.
+fn log(session: &str, source: Source, program: &str, what: &str) {
+    let Some(file) = horadric_hooks::tasks::desktop_log_file() else {
+        return;
+    };
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let line = listed::log_line(
+        &horadric_core::tasks::utc(secs),
+        session,
+        source,
+        program,
+        what,
+    );
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+        .and_then(|mut f| f.write_all(line.as_bytes()));
 }
 
 /// A question about to be asked, outside the app's borrow.
@@ -289,6 +467,8 @@ pub(super) struct Question {
     pending: Pending,
     /// The session's name, for the title.
     name: String,
+    /// Its id and start.
+    ident: String,
     risky: bool,
 }
 
@@ -326,8 +506,24 @@ impl App {
             request,
             reply: call.reply,
         };
-        let grant = self.grant_of(&pending);
-        let asked = decide(grant, pending.request.action, pending.request.risky);
+        if let Some(why) = self.desktop.refresh() {
+            let name = self.name_of(&pending.session);
+            log(&name, Source::Unreadable, &why, "");
+            self.toasts.show(
+                Kind::Failed,
+                "The list of allowed desktop programs can not be read",
+                &format!("{why}. Horadric asks instead. `horadric desktop list` shows it."),
+            );
+        }
+        if let Some(why) = self.held_by_another(&pending) {
+            ghost::refused(
+                &self.shared,
+                &pending.request.what,
+                "another session holds the program",
+            );
+            return pending.reply.send(json!({ "error": why }));
+        }
+        let asked = self.decision_for(&pending);
         if let (Decision::Allow, held) = bypassed(asked, ghost::bypass()) {
             return self.allow(pending, held);
         }
@@ -335,12 +531,113 @@ impl App {
         post(self.notify.0 as isize, WM_HORADRIC_DESKTOP, 0);
     }
 
+    /// A session's id and when it started, as the human reads them.
+    pub(super) fn ident_of(&self, id: &str) -> String {
+        let created = self
+            .shared
+            .registry
+            .lock()
+            .ok()
+            .and_then(|r| r.get(id).map(|s| s.created));
+        let started = created.map(|c| {
+            let ago = SystemTime::now()
+                .duration_since(c)
+                .map_or(0, |d| d.as_secs());
+            let t = unsafe { GetLocalTime() };
+            let local =
+                u64::from(t.wHour) * 3600 + u64::from(t.wMinute) * 60 + u64::from(t.wSecond);
+            started_clock(local, ago)
+        });
+        ident_line(id, started.as_deref())
+    }
+
+    /// Why an operate call must wait for another session: one still at
+    /// work that operated the program last, or one whose question about
+    /// operating it waits.
+    fn held_by_another(&self, p: &Pending) -> Option<String> {
+        let r = &p.request;
+        if r.action != Action::Operate {
+            return None;
+        }
+        let key = program_key(&r.exe, &r.path);
+        let program = program_name(listed_name(&r.exe, &r.path));
+        let asking = self
+            .desktop
+            .asking
+            .as_ref()
+            .filter(|(s, k)| *k == key && *s != p.session)
+            .map(|(s, _)| s.clone())
+            .or_else(|| {
+                self.desktop
+                    .waiting
+                    .iter()
+                    .find(|w| {
+                        let wr = &w.request;
+                        w.session != p.session
+                            && wr.action == Action::Operate
+                            && program_key(&wr.exe, &wr.path) == key
+                    })
+                    .map(|w| w.session.clone())
+            });
+        if let Some(other) = asking {
+            return Some(busy_text(
+                program,
+                &self.name_of(&other),
+                &self.ident_of(&other),
+                true,
+            ));
+        }
+        let other = self
+            .desktop
+            .drivers
+            .get(&key)
+            .filter(|s| **s != p.session)?;
+        let working = self
+            .shared
+            .registry
+            .lock()
+            .ok()
+            .map(|reg| ghost::turn_of(reg.get(other).map(|s| &s.phase)))
+            == Some(ghost::Turn::Working);
+        working.then(|| busy_text(program, &self.name_of(other), &self.ident_of(other), false))
+    }
+
+    /// What the human answered for this session and program.
     fn grant_of(&self, p: &Pending) -> Grant {
         self.desktop
             .grants
             .get(&p.key())
             .copied()
             .unwrap_or_default()
+    }
+
+    /// What becomes of a call with what the human answered and what the
+    /// list allows, before bypass. Going ahead on the list alone is shown
+    /// once and logged, so the human can tell it was not asked.
+    fn decision_for(&mut self, p: &Pending) -> Decision {
+        let own = self.grant_of(p);
+        let level = self.desktop.level_of(&p.request);
+        let r = &p.request;
+        let decision = decide(effective(own, level), r.action, r.risky);
+        if let Some(level) = level.filter(|_| by_the_list(own, level, r.action, r.risky)) {
+            let told = (p.session.clone(), p.program().to_lowercase(), level);
+            if self.desktop.told.insert(told) {
+                let name = self.name_of(&p.session);
+                let program = program_name(listed_name(&r.exe, &r.path));
+                log(&name, Source::List(level), p.program(), &r.what);
+                let may = match level {
+                    Level::Look => "look at",
+                    Level::Operate => "operate",
+                };
+                self.toasts.show(
+                    Kind::Info,
+                    &format!("{name} may {may} {program}"),
+                    "Allowed ahead of time on the list of desktop programs, so not asked. \
+                     Risky actions are still asked every time.",
+                );
+            }
+        }
+        decision
     }
 
     /// Lets a call go ahead. Operating is shown, so the human always knows
@@ -351,9 +648,19 @@ impl App {
     /// the toast comes once, as control begins. `unasked` is a call only
     /// bypass let through, held for Esc before it is answered.
     fn allow(&mut self, p: Pending, unasked: bool) {
+        if unasked {
+            let name = self.name_of(&p.session);
+            log(&name, Source::Bypass, p.program(), &p.request.what);
+        }
         let r = p.request;
         let name = self.name_of(&p.session);
+        let ident = self.ident_of(&p.session);
         let program = program_name(&r.exe).to_string();
+        if r.action == Action::Operate {
+            self.desktop
+                .drivers
+                .insert(program_key(&r.exe, &r.path), p.session.clone());
+        }
         if r.action == Action::Operate {
             // The tile says it until the agent's next tool event replaces
             // it. The tiles redraw on the next tick.
@@ -364,6 +671,8 @@ impl App {
             }
         }
         let call = Allowed {
+            session: p.session.clone(),
+            ident,
             name: name.clone(),
             program: program.clone(),
             reason: r.reason,
@@ -389,17 +698,19 @@ impl App {
     /// those that what was allowed since now covers.
     fn next_question(&mut self) -> Option<Question> {
         while let Some(p) = self.desktop.waiting.pop_front() {
-            let grant = self.grant_of(&p);
-            let asked = decide(grant, p.request.action, p.request.risky);
+            let asked = self.decision_for(&p);
             match bypassed(asked, ghost::bypass()) {
                 (Decision::Allow, held) => self.allow(p, held),
                 (Decision::Refuse(why), _) => self.refuse(p, why),
                 (ask, _) => {
+                    let r = &p.request;
+                    self.desktop.asking = Some((p.session.clone(), program_key(&r.exe, &r.path)));
                     return Some(Question {
                         name: self.name_of(&p.session),
+                        ident: self.ident_of(&p.session),
                         risky: ask == Decision::AskRisky,
                         pending: p,
-                    })
+                    });
                 }
             }
         }
@@ -418,12 +729,25 @@ impl App {
     /// to ask about the same call: allowed to operate, it may still be a
     /// risky one.
     fn answered(&mut self, mut q: Question, pressed: Option<usize>) -> Option<Question> {
+        self.desktop.asking = None;
         let r = &q.pending.request;
         let decision = if q.risky {
-            risky_answered(pressed)
+            let decision = risky_answered(pressed);
+            let done = decision == Decision::Allow;
+            log(&q.name, Source::Risky(done), q.pending.program(), &r.what);
+            decision
         } else {
+            // Only what the human answers is kept here. The list is read
+            // afresh on every call, so taking a program off it takes
+            // effect at once.
             let (grant, decision) = approved(self.grant_of(&q.pending), r.action, r.risky, pressed);
             self.desktop.grants.insert(q.pending.key(), grant);
+            let level = match pressed {
+                Some(0) => Some(Level::Operate),
+                Some(1) => Some(Level::Look),
+                _ => None,
+            };
+            log(&q.name, Source::Asked(level), q.pending.program(), &r.what);
             decision
         };
         match decision {
@@ -431,6 +755,9 @@ impl App {
             Decision::Refuse(why) => self.refuse(q.pending, why),
             Decision::AskRisky => {
                 q.risky = true;
+                let r = &q.pending.request;
+                self.desktop.asking =
+                    Some((q.pending.session.clone(), program_key(&r.exe, &r.path)));
                 return Some(q);
             }
             Decision::AskApprove => self.refuse(q.pending, Refusal::Refused),
@@ -478,9 +805,10 @@ fn dialog(q: &Question) -> OwnedDialog {
             tone: Tone::Warning,
             title: format!("{} wants to change something in {program}", q.name),
             text: format!(
-                "It wants to {}{window}.\n\nThis is asked every time, even with {program} \
-                 allowed.",
-                what_or(&r.what, "act")
+                "It wants to {}{window}.\n\nSession {}.\n\nThis is asked every time, even with \
+                 {program} allowed.",
+                what_or(&r.what, "act"),
+                q.ident
             ),
             buttons: &RISKY,
             default: 1,
@@ -490,10 +818,17 @@ fn dialog(q: &Question) -> OwnedDialog {
             tone: Tone::Question,
             title: format!("{} wants to use {program}", q.name),
             text: format!(
-                "First it wants to {}{window}.\n\nLooking is screenshots and reading the \
+                "First it wants to {}{window}.\n\nSession {}.\n\nLooking is screenshots and reading the \
                  window. Operating is clicking and typing in it, and in its dialogs. What you \
-                 allow lasts until Horadric restarts.",
-                what_or(&r.what, "look at it")
+                 allow lasts until Horadric restarts. To allow it for every session ahead of \
+                 time, list it: horadric desktop allow \"{}\" operate (or look).",
+                what_or(&r.what, "look at it"),
+                q.ident,
+                if r.path.is_empty() {
+                    listed_name(&r.exe, "")
+                } else {
+                    &r.path
+                }
             ),
             buttons: &APPROVE,
             default: approve_default(r.action),
@@ -584,6 +919,93 @@ mod tests {
         // A risky click in a program never approved goes through bypass.
         let asked = decide(Grant::None, Action::Operate, true);
         assert_eq!(bypassed(asked, true), (Decision::Allow, true));
+    }
+
+    #[test]
+    fn a_session_is_told_apart_by_its_id_and_start() {
+        // 10:30:00 now, started 28 minutes and 5 seconds ago.
+        assert_eq!(started_clock(37_800, 1_685), "10:01");
+        // Started before midnight.
+        assert_eq!(started_clock(600, 1_200), "23:50");
+        assert_eq!(
+            ident_line("fix-plc-3721", Some("10:01")),
+            "id fix-plc-3721, started 10:01"
+        );
+        assert_eq!(ident_line("fix-plc-3721", None), "id fix-plc-3721");
+    }
+
+    #[test]
+    fn a_held_program_is_named_with_who_holds_it() {
+        let said = busy_text(
+            "Sysmac Studio",
+            "Fix PLC",
+            "id fix-plc-3721, started 10:01",
+            false,
+        );
+        assert!(said.starts_with("Sysmac Studio is held by another session, \"Fix PLC\""));
+        assert!(said.contains("id fix-plc-3721, started 10:01"));
+        assert!(said.contains("still at work"));
+        assert!(busy_text("a", "b", "c", true).contains("waiting for the human"));
+        // The same program, run as administrator or not.
+        assert_eq!(
+            program_key("SysmacStudio.exe as administrator", ""),
+            program_key("SYSMACSTUDIO.EXE", r"C:\O\SysmacStudio.exe")
+        );
+    }
+
+    #[test]
+    fn the_list_never_lets_a_risky_action_through() {
+        for own in [Grant::None, Grant::See, Grant::Operate] {
+            for level in [None, Some(Level::Look), Some(Level::Operate)] {
+                let grant = effective(own, level);
+                assert_ne!(
+                    decide(grant, Action::Operate, true),
+                    Decision::Allow,
+                    "{own:?} {level:?}"
+                );
+                assert!(!by_the_list(own, level, Action::Operate, true));
+            }
+        }
+        assert_eq!(
+            decide(
+                effective(Grant::None, Some(Level::Operate)),
+                Action::Operate,
+                true
+            ),
+            Decision::AskRisky
+        );
+    }
+
+    #[test]
+    fn the_list_stands_in_for_the_approval_question() {
+        let operate = Some(Level::Operate);
+        let look = Some(Level::Look);
+        assert_eq!(effective(Grant::None, operate), Grant::Operate);
+        assert_eq!(effective(Grant::None, look), Grant::See);
+        assert_eq!(effective(Grant::None, None), Grant::None);
+        // What the human answered is never lowered by the list.
+        assert_eq!(effective(Grant::Operate, look), Grant::Operate);
+        assert!(by_the_list(Grant::None, operate, Action::Operate, false));
+        assert!(by_the_list(Grant::None, look, Action::See, false));
+        assert!(!by_the_list(Grant::None, look, Action::Operate, false));
+        assert!(!by_the_list(Grant::See, look, Action::See, false));
+        assert!(!by_the_list(Grant::None, None, Action::See, false));
+    }
+
+    #[test]
+    fn the_list_is_matched_on_the_plain_exe_name() {
+        assert_eq!(
+            listed_name(
+                "SysmacStudio.exe as administrator",
+                r"C:\O\SysmacStudio.exe"
+            ),
+            "SysmacStudio.exe"
+        );
+        assert_eq!(
+            listed_name("SysmacStudio.exe as administrator", ""),
+            "SysmacStudio.exe"
+        );
+        assert_eq!(listed_name("a.exe", ""), "a.exe");
     }
 
     #[test]
@@ -704,7 +1126,13 @@ mod tests {
     fn a_request_is_read_from_its_body() {
         let body = json!({
             "op": "desktop.allow",
-            "window": {"hwnd": 1, "title": "Watch", "exe": "Sysmac Studio.exe", "pid": 2},
+            "window": {
+                "hwnd": 1,
+                "title": "Watch",
+                "exe": "Sysmac Studio.exe",
+                "path": r"C:\x\Sysmac Studio.exe",
+                "pid": 2,
+            },
             "action": "operate",
             "what": "click Button \"OK\"",
             "risky": true,
@@ -716,6 +1144,7 @@ mod tests {
             Ok(Request {
                 title: "Watch".into(),
                 exe: "Sysmac Studio.exe".into(),
+                path: r"C:\x\Sysmac Studio.exe".into(),
                 hwnd: 1,
                 action: Action::Operate,
                 what: "click Button \"OK\"".into(),
@@ -736,6 +1165,8 @@ mod tests {
         });
         let r = parse(&body).unwrap();
         assert_eq!((r.point, r.reason.as_str(), r.hwnd), (None, "", 0));
+        // From before paths were sent.
+        assert_eq!(r.path, "");
         body["point"] = json!({"x": 5});
         assert_eq!(parse(&body).unwrap().point, None);
         body["point"] = json!({"x": 5, "y": 1e12});
