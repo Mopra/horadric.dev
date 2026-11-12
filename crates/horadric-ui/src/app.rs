@@ -515,6 +515,9 @@ pub(crate) enum Input {
     FolioRestart(String, bool),
     /// Settings' Restart them for the project with this key.
     RestartLeftBehind(String),
+    /// The project with this key was given another identity: its browser
+    /// and its sessions move over without being asked to.
+    IdentityChanged(String),
     /// A Folio's `/add-dir`: it starts again on its conversation with this
     /// folder added to the ones Claude may work in.
     FolioAddDir(String, PathBuf),
@@ -996,6 +999,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         warriv_line: RefCell::new(HashMap::new()),
     });
     menu::init(Rc::clone(&shared));
+    // The menus' Identity lines ask their questions before Settings was
+    // ever opened.
+    crate::vault::settings::set_shared(Rc::clone(&shared));
     reopening::load(&saved.reopen);
     let toasts = Toasts::new(Rc::clone(&shared), notify, WM_HORADRIC_TRAY);
     // From the hosts' copy, since a session that outlives this app keeps
@@ -1791,6 +1797,11 @@ fn open_settings(at: Option<String>) {
         None => settings::Section::default(),
     };
     open_settings_in(section, at);
+}
+
+/// Settings at the identities, for a menu's Manage identities.
+pub(crate) fn open_identities() {
+    open_settings_in(settings::Section::Identities, None);
 }
 
 /// [`open_settings`] at `section`, shown even when the window was open.
@@ -2729,6 +2740,7 @@ fn web_menu(key: &str) {
     const PIN: usize = 12;
     const SIZE: usize = 100;
     const PICK: usize = 200;
+    const IDENTITY: usize = 10_000;
     let agents = stage_agents(Some(key));
     let items = vec![
         Item::action(NEW_TAB, "New tab\tCtrl+T"),
@@ -2764,8 +2776,13 @@ fn web_menu(key: &str) {
         },
     ));
     items.extend(hand_items(&agents, "Pick an element for", PICK));
+    // Where the wrong account is noticed, so where it is put right.
+    if let Some(item) = crate::vault::settings::menu_item(key, IDENTITY) {
+        items.extend([Item::Separator, item]);
+    }
     items.extend([Item::Separator, Item::action(CLOSE, "Close")]);
     match menu::popup(&items) {
+        Some(i) if crate::vault::settings::menu_picked(key, IDENTITY, i) => {}
         Some(ADDRESS) => go_to(key),
         Some(NEW_TAB) => web::tab(key, web::TabStep::New),
         Some(CLOSE_TAB) => web::tab(key, web::TabStep::Close(None)),
@@ -2824,6 +2841,7 @@ fn project_menu(key: &str) {
     const TEAM_SHARE: usize = 18;
     const REOPEN: usize = 700;
     const REOPEN_END: usize = 710;
+    const IDENTITY: usize = 800;
     let dir = with_app(|app| app.project_dir(key)).flatten();
     // Reading transcripts and asking git are the slow part of opening the
     // menu, so they are done side by side.
@@ -2939,8 +2957,9 @@ fn project_menu(key: &str) {
             Item::Disabled("Open in VS Code".into())
         },
         Item::action(EXPLORE, "Open in Explorer"),
-        Item::action(SETTINGS, "Project settings\u{2026}"),
     ]);
+    items.extend(crate::vault::settings::menu_item(key, IDENTITY));
+    items.push(Item::action(SETTINGS, "Project settings\u{2026}"));
     let team_share = dir
         .as_deref()
         .and_then(|d| crate::tray::team_share(d, TEAM_SHARE));
@@ -2975,6 +2994,7 @@ fn project_menu(key: &str) {
         (Some(QUESTS), _) => return push(Input::QuestLog(questlog::Ask::Open(key.into()))),
         (Some(CONTEXT), _) => return push(Input::Context(contextpanel::Ask::Open(key.into()))),
         (Some(SETTINGS), _) => return open_settings(Some(key.to_string())),
+        (Some(i), _) if crate::vault::settings::menu_picked(key, IDENTITY, i) => return,
         (Some(TEAM_SHARE), _) => {
             if let Some((_, lore)) = &team_share {
                 crate::tray::flip_team_share(lore);
@@ -10254,6 +10274,10 @@ impl App {
                 Input::FolioFilesRewound(id, how) => self.folio_files_rewound(&id, how),
                 Input::FolioRestart(id, show) => self.folio_restart(&id, show),
                 Input::RestartLeftBehind(key) => self.restart_left_behind(&key),
+                Input::IdentityChanged(key) => {
+                    web::reprofile(&key);
+                    self.restart_left_behind(&key);
+                }
                 Input::FolioAddDir(id, dir) => {
                     let own = self.folio_args.entry(id.clone()).or_default();
                     own.extend(["--add-dir".to_string(), dir.to_string_lossy().into_owned()]);

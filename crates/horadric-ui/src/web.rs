@@ -1202,24 +1202,49 @@ pub fn pages() -> std::collections::BTreeMap<String, SavedPages> {
     WEBS.with(|w| {
         w.borrow()
             .iter()
-            .filter_map(|(k, web)| {
-                let tabs = web
-                    .tabs
-                    .iter()
-                    .map(|t| SavedTab {
-                        url: if t.url.is_empty() {
-                            t.pending.clone().unwrap_or_default()
-                        } else {
-                            t.url.clone()
-                        },
-                        title: t.title.clone(),
-                        driver: t.driver.clone(),
-                    })
-                    .collect();
-                Some((k.clone(), SavedPages::of(tabs, web.active)?))
-            })
+            .filter_map(|(k, web)| Some((k.clone(), saved_of(web)?)))
             .collect()
     })
+}
+
+/// Moves the project's open browser to the profile its identity now
+/// says, when that is another: its tabs close and open again at their
+/// addresses, in the pane they were in. A page's own state (a form half
+/// filled) is lost, which is the price of not being on the wrong account.
+pub fn reprofile(key: &str) {
+    let now = crate::town::profile_for(key);
+    let moved = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let web = w.get_mut(key).filter(|web| web.profile != now)?;
+        web.profile = now;
+        let saved = saved_of(web);
+        web.active = 0;
+        Some((std::mem::take(&mut web.tabs), saved))
+    });
+    let Some((tabs, saved)) = moved else { return };
+    for tab in tabs {
+        end(tab);
+    }
+    if let Some(saved) = saved {
+        restore(key, &saved);
+    }
+}
+
+fn saved_of(web: &Web) -> Option<SavedPages> {
+    let tabs = web
+        .tabs
+        .iter()
+        .map(|t| SavedTab {
+            url: if t.url.is_empty() {
+                t.pending.clone().unwrap_or_default()
+            } else {
+                t.url.clone()
+            },
+            title: t.title.clone(),
+            driver: t.driver.clone(),
+        })
+        .collect();
+    SavedPages::of(tabs, web.active)
 }
 
 /// Opens the project's tabs as they were saved, the shown one shown, each
