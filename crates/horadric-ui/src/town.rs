@@ -157,19 +157,29 @@ pub fn session_env(cwd: &Path) -> Vec<(String, String)> {
 }
 
 /// The WebView2 profile the browser pane of the project `key` opens in,
-/// None for the one shared by every project. Projects always share it, even
-/// with an identity, so the logins the human already has stay in reach
-/// (the human, 2026-11-08). A town with an identity picked opens that
-/// identity's; otherwise its own when it asks for one. A town goes only by a
-/// pick made for it, never by a folder an identity claims, since a claim on
-/// the home folder would take them all.
+/// None for the shared one. A project with an identity opens that
+/// identity's, so a site with one account per browser (GitHub) is on the
+/// right one without switching; a project with none keeps the shared one
+/// and the logins already in it (the human, 2026-11-12, undoing the
+/// 2026-11-08 choice to share it always). A town with an identity picked
+/// opens that identity's; otherwise its own when it asks for one. A town
+/// goes only by a pick made for it, never by a folder an identity claims,
+/// since a claim on the home folder would take them all.
 pub fn profile_for(key: &str) -> Option<String> {
-    let town = of(key)?;
+    let town = of(key);
     #[cfg(windows)]
-    if let Some(slug) = crate::vault::identity::pick(key).filter(|s| !s.is_empty()) {
-        return Some(identity_profile(&slug));
+    {
+        let identity = match &town {
+            Some(_) => crate::vault::identity::pick(key).filter(|s| !s.is_empty()),
+            None => crate::vault::identity::of_project(Path::new(key))
+                .slug()
+                .map(String::from),
+        };
+        if let Some(slug) = identity {
+            return Some(identity_profile(&slug));
+        }
     }
-    town.saved.profile()
+    town?.saved.profile()
 }
 
 /// The profile name of an identity's browser.
