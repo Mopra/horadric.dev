@@ -241,6 +241,7 @@ fn set_line(app: &mut App, id: &str, line: &str) {
 /// answer or a thread moves one.
 pub(super) fn tick(app: &mut App) {
     PLACING.expire(app::unix_now());
+    revive(app);
     let takers = far::takers(app);
     let now = app::unix_now();
     for id in with(|s| s.hand.ids()) {
@@ -273,6 +274,7 @@ fn act(app: &mut App, id: &str, o: &Outgoing, step: Do) {
             if let Some(c) = app.consoles.get(id) {
                 if c.exit_code().is_none() {
                     c.kill();
+                    with(|s| s.hand.halted(id));
                 }
             }
             let me = brothers::mac_name();
@@ -288,12 +290,26 @@ fn act(app: &mut App, id: &str, o: &Outgoing, step: Do) {
         Do::Pack { known, clean } => pack(app, id, &o.to, known, clean),
         Do::LetGo(n) => let_go(app, id, &o.to, n),
         Do::Fail(why) => {
-            with(|s| s.hand.drop(id));
+            with(|s| s.hand.failed(id, o, app::unix_now()));
             if let Some(w) = sworn() {
                 w.recall(id, app::unix_now());
             }
             set_line(app, id, &format!("not handed off: {why}"));
             dialog::notify("Handoff failed", &why);
+            revive(app);
+        }
+    }
+}
+
+/// Starts again each session a failed handoff stopped, once its kill's
+/// exit has paused it. Each is tried once, so a refusal (a fence, say)
+/// says why and never retries.
+fn revive(app: &mut App) {
+    let paused = &app.paused;
+    let ids = with(|s| s.hand.revive(app::unix_now(), |id| paused.contains_key(id)));
+    for id in ids {
+        if let Err(why) = app.resume(&id, false) {
+            set_line(app, &id, &format!("not handed off or started again: {why}"));
         }
     }
 }

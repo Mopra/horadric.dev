@@ -190,6 +190,10 @@ struct Web {
     zoom: f64,
     /// The largest size its pane shows unscaled, in CSS pixels.
     room: Option<(u32, u32)>,
+    /// The WebView2 profile its tabs open in, None for the shared one.
+    /// Asked for once: a popup must open in its opener's profile, so an
+    /// identity changed while it is open applies when it is next opened.
+    profile: Option<String>,
 }
 
 impl Web {
@@ -495,6 +499,7 @@ fn add_tab(key: &str, tab: Tab, front: bool) {
             bounds: RECT::default(),
             zoom: 1.0,
             room: None,
+            profile: crate::town::profile_for(key),
         });
         web.tabs.push(tab);
         if front || web.tabs.len() == 1 {
@@ -1197,24 +1202,49 @@ pub fn pages() -> std::collections::BTreeMap<String, SavedPages> {
     WEBS.with(|w| {
         w.borrow()
             .iter()
-            .filter_map(|(k, web)| {
-                let tabs = web
-                    .tabs
-                    .iter()
-                    .map(|t| SavedTab {
-                        url: if t.url.is_empty() {
-                            t.pending.clone().unwrap_or_default()
-                        } else {
-                            t.url.clone()
-                        },
-                        title: t.title.clone(),
-                        driver: t.driver.clone(),
-                    })
-                    .collect();
-                Some((k.clone(), SavedPages::of(tabs, web.active)?))
-            })
+            .filter_map(|(k, web)| Some((k.clone(), saved_of(web)?)))
             .collect()
     })
+}
+
+/// Moves the project's open browser to the profile its identity now
+/// says, when that is another: its tabs close and open again at their
+/// addresses, in the pane they were in. A page's own state (a form half
+/// filled) is lost, which is the price of not being on the wrong account.
+pub fn reprofile(key: &str) {
+    let now = crate::town::profile_for(key);
+    let moved = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let web = w.get_mut(key).filter(|web| web.profile != now)?;
+        web.profile = now;
+        let saved = saved_of(web);
+        web.active = 0;
+        Some((std::mem::take(&mut web.tabs), saved))
+    });
+    let Some((tabs, saved)) = moved else { return };
+    for tab in tabs {
+        end(tab);
+    }
+    if let Some(saved) = saved {
+        restore(key, &saved);
+    }
+}
+
+fn saved_of(web: &Web) -> Option<SavedPages> {
+    let tabs = web
+        .tabs
+        .iter()
+        .map(|t| SavedTab {
+            url: if t.url.is_empty() {
+                t.pending.clone().unwrap_or_default()
+            } else {
+                t.url.clone()
+            },
+            title: t.title.clone(),
+            driver: t.driver.clone(),
+        })
+        .collect();
+    SavedPages::of(tabs, web.active)
 }
 
 /// Opens the project's tabs as they were saved, the shown one shown, each
@@ -1229,6 +1259,7 @@ pub fn restore(key: &str, saved: &SavedPages) {
             bounds: RECT::default(),
             zoom: 1.0,
             room: None,
+            profile: crate::town::profile_for(key),
         });
         let start = web.tabs.len();
         for t in &saved.tabs {
@@ -1828,7 +1859,8 @@ fn make_controller(env: &ICoreWebView2Environment, key: &str, id: u64) {
     // login of one is seen by another. Named profiles need a newer
     // runtime; without one it opens in the shared profile rather than not
     // at all, and says so.
-    let made = match crate::town::profile_for(key) {
+    let profile = WEBS.with(|w| w.borrow().get(key).and_then(|w| w.profile.clone()));
+    let made = match profile {
         Some(name) => unsafe { with_profile(env, &name, parent, &handler) }.or_else(|e| {
             eprintln!("horadric: no browser profile {name}, the shared one is used: {e}");
             unsafe { env.CreateCoreWebView2Controller(parent, &handler) }

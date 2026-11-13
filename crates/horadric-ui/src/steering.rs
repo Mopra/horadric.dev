@@ -91,16 +91,18 @@ impl App {
     /// Ends session `id`'s agent but keeps its tile, paused, for a click to
     /// resume: a terminal's program is killed and its exit pauses it, and a
     /// Folio's claude.exe is closed and its tile paused here, since no exit
-    /// comes back for one closed on purpose.
-    pub(super) fn halt(&mut self, id: &str) {
+    /// comes back for one closed on purpose. Whether an agent was running
+    /// and is stopped now.
+    pub(super) fn halt(&mut self, id: &str) -> bool {
         if let Some(c) = self.consoles.get(id) {
-            if c.exit_code().is_none() {
+            let running = c.exit_code().is_none();
+            if running {
                 c.kill();
             }
-            return;
+            return running;
         }
         if self.folios.remove(id).is_none() {
-            return;
+            return false;
         }
         crate::folio::close(id);
         let args = self.folio_args.remove(id).unwrap_or_default();
@@ -119,5 +121,6 @@ impl App {
             }
         }
         self.reconcile(true);
+        true
     }
 }

@@ -2,11 +2,9 @@
 //! passphrase here, and Google's refresh token beside it. Each name
 //! carries the state folder's, so a dev instance keeps its own.
 
-use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::FILETIME;
+use windows::core::PCWSTR;
 use windows::Win32::Security::Credentials::{
-    CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_FLAGS,
-    CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
+    CredDeleteW, CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC,
 };
 
 /// The passphrase's name.
@@ -39,21 +37,7 @@ pub fn read(name: &str) -> Option<String> {
 /// Stores `secret` under `name`, replacing what was there. Kept for this
 /// user on this machine only, never roamed.
 pub fn write(name: &str, secret: &str) -> Result<(), String> {
-    let mut target = wide(&target(name));
-    let mut user = wide("Horadric");
-    let mut blob = secret.as_bytes().to_vec();
-    let cred = CREDENTIALW {
-        Flags: CRED_FLAGS(0),
-        Type: CRED_TYPE_GENERIC,
-        TargetName: PWSTR(target.as_mut_ptr()),
-        CredentialBlobSize: blob.len() as u32,
-        CredentialBlob: blob.as_mut_ptr(),
-        Persist: CRED_PERSIST_LOCAL_MACHINE,
-        UserName: PWSTR(user.as_mut_ptr()),
-        LastWritten: FILETIME::default(),
-        ..Default::default()
-    };
-    unsafe { CredWriteW(&cred, 0) }.map_err(|e| format!("could not keep the secret: {e}"))
+    crate::credential::write(&target(name), "Horadric", secret.as_bytes())
 }
 
 /// Forgets the secret under `name`; forgetting one that is not there is

@@ -70,30 +70,7 @@ fn short_name(s: &str) -> String {
     s.split(" (").next().unwrap_or(s).to_string()
 }
 
-/// `claude-opus-5-5` is "Opus 5.5", `claude-sonnet-4-5-20250929` is
-/// "Sonnet 4.5".
-pub fn pretty_id(id: &str) -> String {
-    let rest = id.strip_prefix("claude-").unwrap_or(id);
-    let rest = rest.split('[').next().unwrap_or(rest);
-    let mut parts = rest.split('-');
-    let Some(family) = parts.next() else {
-        return id.to_string();
-    };
-    let version: Vec<&str> = parts
-        .take_while(|p| p.len() <= 2 && p.chars().all(|c| c.is_ascii_digit()))
-        .collect();
-    let mut name: String = family
-        .chars()
-        .take(1)
-        .flat_map(char::to_uppercase)
-        .chain(family.chars().skip(1))
-        .collect();
-    if !version.is_empty() {
-        name.push(' ');
-        name.push_str(&version.join("."));
-    }
-    name
-}
+pub use horadric_core::usage::pretty_id;
 
 /// Tokens in a few characters: 950, 12k, 1M.
 pub fn tokens(n: u64) -> String {

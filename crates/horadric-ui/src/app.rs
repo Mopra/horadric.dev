@@ -527,6 +527,9 @@ pub(crate) enum Input {
     FolioRestart(String, bool),
     /// Settings' Restart them for the project with this key.
     RestartLeftBehind(String),
+    /// The project with this key was given another identity: its browser
+    /// and its sessions move over without being asked to.
+    IdentityChanged(String),
     /// A Folio's `/add-dir`: it starts again on its conversation with this
     /// folder added to the ones Claude may work in.
     FolioAddDir(String, PathBuf),
@@ -991,6 +994,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         .collect();
 
     theme::set(Theme::from_key(saved.theme.as_deref()));
+    horadric_core::usage::learn_models(&saved.defaults.models);
     let gpu = Gpu::new()?;
     let font = Font::new(
         &gpu.dw,
@@ -1017,6 +1021,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         warriv_line: RefCell::new(HashMap::new()),
     });
     menu::init(Rc::clone(&shared));
+    // The menus' Identity lines ask their questions before Settings was
+    // ever opened.
+    crate::vault::settings::set_shared(Rc::clone(&shared));
     reopening::load(&saved.reopen);
     let toasts = Toasts::new(Rc::clone(&shared), notify, WM_HORADRIC_TRAY);
     // From the hosts' copy, since a session that outlives this app keeps
@@ -1817,6 +1824,11 @@ fn open_settings(at: Option<String>) {
         None => settings::Section::default(),
     };
     open_settings_in(section, at);
+}
+
+/// Settings at the identities, for a menu's Manage identities.
+pub(crate) fn open_identities() {
+    open_settings_in(settings::Section::Identities, None);
 }
 
 /// [`open_settings`] at `section`, shown even when the window was open.
@@ -2755,6 +2767,7 @@ fn web_menu(key: &str) {
     const PIN: usize = 12;
     const SIZE: usize = 100;
     const PICK: usize = 200;
+    const IDENTITY: usize = 10_000;
     let agents = stage_agents(Some(key));
     let items = vec![
         Item::action(NEW_TAB, "New tab\tCtrl+T"),
@@ -2790,8 +2803,13 @@ fn web_menu(key: &str) {
         },
     ));
     items.extend(hand_items(&agents, "Pick an element for", PICK));
+    // Where the wrong account is noticed, so where it is put right.
+    if let Some(item) = crate::vault::settings::menu_item(key, IDENTITY) {
+        items.extend([Item::Separator, item]);
+    }
     items.extend([Item::Separator, Item::action(CLOSE, "Close")]);
     match menu::popup(&items) {
+        Some(i) if crate::vault::settings::menu_picked(key, IDENTITY, i) => {}
         Some(ADDRESS) => go_to(key),
         Some(NEW_TAB) => web::tab(key, web::TabStep::New),
         Some(CLOSE_TAB) => web::tab(key, web::TabStep::Close(None)),
@@ -2850,6 +2868,7 @@ fn project_menu(key: &str) {
     const TEAM_SHARE: usize = 18;
     const REOPEN: usize = 700;
     const REOPEN_END: usize = 710;
+    const IDENTITY: usize = 800;
     let dir = with_app(|app| app.project_dir(key)).flatten();
     // Reading transcripts and asking git are the slow part of opening the
     // menu, so they are done side by side.
@@ -2965,8 +2984,9 @@ fn project_menu(key: &str) {
             Item::Disabled("Open in VS Code".into())
         },
         Item::action(EXPLORE, "Open in Explorer"),
-        Item::action(SETTINGS, "Project settings\u{2026}"),
     ]);
+    items.extend(crate::vault::settings::menu_item(key, IDENTITY));
+    items.push(Item::action(SETTINGS, "Project settings\u{2026}"));
     let team_share = dir
         .as_deref()
         .and_then(|d| crate::tray::team_share(d, TEAM_SHARE));
@@ -3001,6 +3021,7 @@ fn project_menu(key: &str) {
         (Some(QUESTS), _) => return push(Input::QuestLog(questlog::Ask::Open(key.into()))),
         (Some(CONTEXT), _) => return push(Input::Context(contextpanel::Ask::Open(key.into()))),
         (Some(SETTINGS), _) => return open_settings(Some(key.to_string())),
+        (Some(i), _) if crate::vault::settings::menu_picked(key, IDENTITY, i) => return,
         (Some(TEAM_SHARE), _) => {
             if let Some((_, lore)) = &team_share {
                 crate::tray::flip_team_share(lore);
@@ -7550,7 +7571,7 @@ impl App {
         }
         let own_tree = match self.shared.registry.lock() {
             Ok(mut r) => r
-                .remove(id)
+                .close(id, SystemTime::now())
                 .and_then(|s| Some((project_key(&s), s.worktree?))),
             Err(_) => None,
         };
@@ -9536,7 +9557,10 @@ impl App {
                 .filter(|(_, order)| !order.is_empty())
                 .collect(),
             sessions,
-            defaults: self.shared.defaults(),
+            defaults: horadric_core::Defaults {
+                models: horadric_core::usage::known_models(),
+                ..self.shared.defaults()
+            },
             usage: self.shared.usage.lock().ok().and_then(|u| u.clone()),
             usage_window: self.usage_window.as_ref().map(|u| SavedPanel {
                 collapsed: u.collapsed.get(),
@@ -10281,6 +10305,10 @@ impl App {
                 Input::FolioFilesRewound(id, how) => self.folio_files_rewound(&id, how),
                 Input::FolioRestart(id, show) => self.folio_restart(&id, show),
                 Input::RestartLeftBehind(key) => self.restart_left_behind(&key),
+                Input::IdentityChanged(key) => {
+                    web::reprofile(&key);
+                    self.restart_left_behind(&key);
+                }
                 Input::FolioAddDir(id, dir) => {
                     let own = self.folio_args.entry(id.clone()).or_default();
                     own.extend(["--add-dir".to_string(), dir.to_string_lossy().into_owned()]);
@@ -10465,7 +10493,7 @@ impl App {
             })
             // A project kept open after it left the recent list: the key is
             // its folder, spelled in lower case.
-            .or_else(|| Some(PathBuf::from(key)).filter(|d| !key.is_empty() && d.is_dir()))
+            .or_else(|| on_disk(key))
     }
 
     /// Brings every tile window above the other windows.
@@ -11183,9 +11211,74 @@ fn known(
     out.into()
 }
 
+/// How long a folder's spelling on disk is trusted before it is looked at
+/// again: a folder can be deleted or come back.
+const ON_DISK_FOR: Duration = Duration::from_secs(30);
+
+/// The folder of the project keyed `key`, spelled as on disk, None when
+/// there is none. The key is lower cased, and Google Drive caches a look
+/// only for a path's own case: every look at a lower cased path there took
+/// a quarter second, and the quest runner looks every second from the
+/// thread that draws. So the spelling is asked once and kept, and later
+/// looks go to the path in its own case, which Drive answers at once.
+fn on_disk(key: &str) -> Option<PathBuf> {
+    if key.is_empty() {
+        return None;
+    }
+    type Spellings = HashMap<String, (Option<PathBuf>, Instant)>;
+    static KNOWN: std::sync::OnceLock<Mutex<Spellings>> = std::sync::OnceLock::new();
+    let known = KNOWN.get_or_init(Default::default);
+    let now = Instant::now();
+    let kept = known.lock().ok().and_then(|k| k.get(key).cloned());
+    let found = match kept {
+        Some((dir, at)) if now.saturating_duration_since(at) < ON_DISK_FOR => return dir,
+        // Looked at in its own case, so cheap, unlike asking the spelling.
+        Some((Some(dir), _)) if dir.is_dir() => Some(dir),
+        _ => std::fs::canonicalize(key)
+            .ok()
+            .map(|p| spelled_as(key, &p.to_string_lossy()).unwrap_or_else(|| PathBuf::from(key))),
+    };
+    if let Ok(mut k) = known.lock() {
+        k.insert(key.to_string(), (found.clone(), now));
+    }
+    found
+}
+
+/// The folder `canonical` names, a path as `canonicalize` gives it, when it
+/// is the folder `key` names. A junction or a substituted drive resolves
+/// to another folder, whose path would not give this key.
+fn spelled_as(key: &str, canonical: &str) -> Option<PathBuf> {
+    let plain = match canonical.strip_prefix(r"\\?\UNC\") {
+        Some(share) => format!(r"\\{share}"),
+        None => canonical
+            .strip_prefix(r"\\?\")
+            .unwrap_or(canonical)
+            .to_string(),
+    };
+    (crate::project::normalise(&plain) == key).then(|| PathBuf::from(plain))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_on_disk_keeps_its_case_and_only_for_its_own_key() {
+        assert_eq!(
+            spelled_as("g:/my drive/acme", r"\\?\G:\My Drive\Acme"),
+            Some(PathBuf::from(r"G:\My Drive\Acme"))
+        );
+        assert_eq!(
+            spelled_as("//server/share/acme", r"\\?\UNC\Server\Share\Acme"),
+            Some(PathBuf::from(r"\\Server\Share\Acme"))
+        );
+        assert_eq!(
+            spelled_as("c:/work/acme", r"C:\Work\Acme"),
+            Some(PathBuf::from(r"C:\Work\Acme"))
+        );
+        // A junction to another folder, which `on_disk` leaves to the key.
+        assert_eq!(spelled_as("c:/link/acme", r"\\?\D:\Real\Acme"), None);
+    }
 
     #[test]
     fn a_cast_out_names_the_line_that_goes_with_it() {

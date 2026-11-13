@@ -1733,7 +1733,10 @@ impl Folio {
                 self.model = Some(m.to_string());
             }
             Sent::Context => self.context = Some(ContextUsage::from_response(body)),
-            Sent::Initialize => self.info.read_initialize(body),
+            Sent::Initialize => {
+                self.info.read_initialize(body);
+                crate::usage::learn_models(&crate::usage::offered_models(&self.info.models));
+            }
             // The task's end comes as its own notification.
             Sent::StopTask => return false,
             Sent::Title | Sent::Aside => return false,

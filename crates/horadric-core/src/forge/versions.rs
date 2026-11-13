@@ -59,6 +59,7 @@ pub fn keep_at(root: &Path, rel_path: &Path, bytes: &[u8], now: SystemTime) -> i
     // has renamed it the name is taken by the version instead. Rename
     // replaces on Windows, so checking the version only before would lose
     // one of the two.
+    let mut denied = 0;
     let (file, tmp) = loop {
         let file = dir.join(format!("{ms:013}.{EXT}"));
         let tmp = file.with_extension("tmp");
@@ -80,6 +81,10 @@ pub fn keep_at(root: &Path, rel_path: &Path, bytes: &[u8], now: SystemTime) -> i
                 let _ = fs::remove_file(&tmp);
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            // Windows refuses a name whose file another keeper is still
+            // deleting. That name is as taken as one that exists, but a
+            // folder that refuses every name must still end in an error.
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && denied < 64 => denied += 1,
             Err(e) => return Err(e),
         }
         ms += 1;

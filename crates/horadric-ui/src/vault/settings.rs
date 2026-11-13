@@ -813,6 +813,104 @@ fn restart_left_behind(key: &str) {
     }
 }
 
+/// The identity the project or town `key` has now. A town goes only by a
+/// pick made for it, as its browser does (see `town::profile_for`).
+fn current(key: &str, ids: &[Identity]) -> Option<String> {
+    let slug = if crate::town::is(key) {
+        identity::pick(key).filter(|s| !s.is_empty())
+    } else {
+        identity::of_project(Path::new(key)).slug().map(String::from)
+    }?;
+    ids.iter().any(|i| i.slug == slug).then_some(slug)
+}
+
+const MENU_NONE: usize = 0;
+const MENU_NEW: usize = 1;
+const MENU_MANAGE: usize = 2;
+const MENU_IDS: usize = 3;
+/// How many ids [`menu_item`] may use from its base.
+pub const MENU_SPAN: usize = 100;
+
+/// The Identity line of a project's menu and of its browser's: the
+/// identities to pick from with the one it has ticked, and making one,
+/// so giving a project an identity is two clicks from where the human
+/// already is. None for a project on another machine.
+pub fn menu_item(key: &str, base: usize) -> Option<crate::menu::Item> {
+    use crate::menu::Item;
+    if key.is_empty() || afar(key) {
+        return None;
+    }
+    let ids = identity::all();
+    let now = current(key, &ids);
+    let tick = |id: usize, label: String, checked: bool| Item::Action {
+        id: base + id,
+        label,
+        checked,
+        bold: false,
+    };
+    let mut lines: Vec<Item> = ids
+        .iter()
+        .take(MENU_SPAN - MENU_IDS)
+        .enumerate()
+        .map(|(i, id)| tick(MENU_IDS + i, id.name.clone(), now.as_deref() == Some(&id.slug)))
+        .collect();
+    lines.push(tick(MENU_NONE, "None, this PC's own logins".into(), now.is_none()));
+    lines.push(Item::Separator);
+    lines.push(Item::action(base + MENU_NEW, "New identity\u{2026}"));
+    lines.push(Item::action(base + MENU_MANAGE, "Manage identities\u{2026}"));
+    let name = now
+        .and_then(|s| ids.iter().find(|i| i.slug == s))
+        .map_or("none", |i| i.name.as_str());
+    Some(Item::Submenu(format!("Identity: {name}"), lines))
+}
+
+/// Does what was picked from [`menu_item`]'s lines. False when `picked`
+/// is not one of them.
+pub fn menu_picked(key: &str, base: usize, picked: usize) -> bool {
+    if !(base..base + MENU_SPAN).contains(&picked) {
+        return false;
+    }
+    let result = match picked - base {
+        MENU_MANAGE => {
+            crate::app::open_identities();
+            return true;
+        }
+        MENU_NONE => identity::set_pick(key, Some("")),
+        MENU_NEW => {
+            let Some(name) = type_in(
+                "New identity",
+                "A name for one of your worlds: Work, Personal, a client. This project gets it now, with a browser of its own; other projects can share it.",
+                "",
+                "Name",
+                "make it",
+                false,
+            )
+            .filter(|n| !n.trim().is_empty()) else {
+                return true;
+            };
+            identity::create(&name).and_then(|id| identity::set_pick(key, Some(&id.slug)))
+        }
+        i => match identity::all().get(i - MENU_IDS) {
+            Some(id) => identity::set_pick(key, Some(&id.slug)),
+            None => return true,
+        },
+    };
+    let ok = result.is_ok();
+    done("Identity", result);
+    if ok {
+        changed(key);
+    }
+    true
+}
+
+/// The project's identity was set: Settings reads it again, and the app
+/// moves its browser and its sessions over.
+fn changed(key: &str) {
+    stale();
+    BEHIND.with(|b| *b.borrow_mut() = None);
+    crate::app::push(crate::app::Input::IdentityChanged(key.to_string()));
+}
+
 enum Choice {
     Auto,
     Nobody,
@@ -880,7 +978,11 @@ fn pick_identity(key: &str) {
             identity::create_with_slug(&slug, &slug).and_then(|_| identity::set_pick(key, None))
         }
     };
+    let ok = result.is_ok();
     done("Identity", result);
+    if ok {
+        changed(key);
+    }
 }
 
 /// Whose a new secret or login is: the project's, its identity's or

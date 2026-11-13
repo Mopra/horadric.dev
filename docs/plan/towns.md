@@ -83,8 +83,10 @@ at on a dev instance.
   `hooks install` and each app start. A dev instance writes them into its
   own town homes (under `Horadric-dev`, at its own port) and still never
   touches `~/.claude`.
-- Browser profiles: projects always share one, identity or not, so the
-  human's logins stay in reach (the human, 2026-11-08). A town gets
+- Browser profiles: a project with an identity opens `identity-<slug>`,
+  one with none keeps the shared profile and its logins (the human,
+  2026-11-12; from 2026-11-08 until then projects always shared one,
+  which left GitHub on the wrong account). A town gets
   `identity-<slug>` only from an identity picked for it, else
   `town-<slug>` when Own browser is on. New towns start with it on;
   Tristram keeps the shared profile it had, so its logins stay.

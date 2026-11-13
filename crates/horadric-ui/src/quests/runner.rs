@@ -676,16 +676,6 @@ pub(crate) trait Runner: Host {
                 .iter()
                 .map(|p| (folder_key(p), PathBuf::from(p))),
         );
-        // A tile kept open with no session, its folder gone from the recent
-        // list, still draws its log: without this a quest added from its
-        // plus landed in the file and never showed.
-        let tiles: Vec<(String, PathBuf)> = self
-            .tiles()
-            .into_iter()
-            .filter(|k| !keys.iter().any(|(have, _)| have == k))
-            .filter_map(|k| self.project_dir(&k).map(|d| (k, d)))
-            .collect();
-        keys.extend(tiles);
         let mut seen = HashSet::new();
         keys.retain(|(k, _)| seen.insert(k.clone()));
         // A session in a worktree of its own has no list there, or an old
@@ -693,6 +683,19 @@ pub(crate) trait Runner: Host {
         for (key, dir) in &mut keys {
             if let Some(d) = self.project_dir(key) {
                 *dir = d;
+            }
+        }
+        // A tile kept open with no session, its folder gone from the recent
+        // list, still draws its log: without this a quest added from its
+        // plus landed in the file and never showed. Its folder is asked
+        // once a tick, since on a slow drive every look counts.
+        for key in self.tiles() {
+            if seen.contains(&key) {
+                continue;
+            }
+            if let Some(dir) = self.project_dir(&key) {
+                seen.insert(key.clone());
+                keys.push((key, dir));
             }
         }
         let mut changed = Vec::new();
