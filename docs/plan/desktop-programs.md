@@ -12,9 +12,17 @@ window and operate it, within what the human allowed. Windows only.
   slow cross process UIA call never stalls Horadric's UI thread. Tools:
   `desktop_windows`, `desktop_snapshot` (the UIA tree with refs, as
   `browser_snapshot`), `desktop_screenshot`, `desktop_click`,
-  `desktop_type` and `desktop_press`. A ref acts through UIA patterns
-  first (invoke, toggle, select, expand, set value) and falls back to a
-  real click or keystrokes, after which the human's pointer is put back.
+  `desktop_type` and `desktop_press`. A click is a real mouse click at
+  the element's middle, where the ghost glides, after the window comes
+  forward and the point is checked to be the program's and not a window
+  covering it; an element out of view is scrolled into it first, and one
+  with no place on screen is not clicked. UIA's invoke, toggle and select
+  were dropped for clicks on 2026-11-16: a button whose handler opens a
+  modal dialog held its invoke until the dialog closed, and with it every
+  later UIA call of that MCP process to the program, so the agent could
+  not answer the dialog. Only an element whose one action is expanding is
+  still expanded through UIA. Typing sets a field's value through UIA or
+  types keystrokes. The human's pointer is put back after.
 - **The app only grants.** Before each action the MCP process asks the
   app over the browser channel (`op: desktop.allow`, with the window, its
   program, what it will do, and whether it is risky). Grants are per

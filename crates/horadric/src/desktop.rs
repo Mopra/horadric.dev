@@ -106,8 +106,8 @@ changed, mostly without what the change was.";
 const WIDEST: u32 = 1600;
 
 /// How long a UI Automation pattern may take before the answer says it is
-/// still going. A button that opens a modal dialog can hold its Invoke
-/// until the dialog closes.
+/// still going. A program that opens a modal dialog from a pattern holds
+/// the call until the dialog closes, which is why clicks are real ones.
 const PATTERN_WAIT: Duration = Duration::from_secs(5);
 
 /// Words in a control, title or dialog that mean an action may change the
@@ -824,6 +824,67 @@ pub fn read_counts(value: &str, edit: bool) -> bool {
     edit || !value.trim().is_empty()
 }
 
+/// How a click on an element is made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClickWay {
+    /// A real click of the mouse at the element's middle.
+    Real,
+    /// Expanded or collapsed through UI Automation.
+    Expand,
+    /// It has no place on screen to click.
+    Nowhere,
+}
+
+/// How to click an element: a `plain` left click or not, whether
+/// `only_expands` (its one action is expanding, no invoke, toggle or
+/// select) and whether it `has_place` on screen.
+///
+/// A click is a real one at the element. Its own action through UI
+/// Automation (invoke, toggle, select) waits for the program to finish
+/// with it, and a program that opens a modal dialog there never does, so
+/// the call stood waiting and held every later call of this process to
+/// that program. Only an element whose sole action is expanding is left to
+/// UI Automation: a click at its middle may only put a caret in it (an
+/// editable combo box) or miss the glyph (a tree node), and expanding shows
+/// its children rather than running a command of the program's.
+pub fn click_way(plain: bool, only_expands: bool, has_place: bool) -> ClickWay {
+    match (plain && only_expands, has_place) {
+        (true, _) => ClickWay::Expand,
+        (false, true) => ClickWay::Real,
+        (false, false) => ClickWay::Nowhere,
+    }
+}
+
+/// Whether a rectangle on screen has room for a click.
+pub fn has_place(r: RECT) -> bool {
+    r.right > r.left && r.bottom > r.top
+}
+
+/// Whether a click would land on something other than the program with
+/// process id `target`: nothing found at the point, or a top window of
+/// another process (`under`). A dialog of the program is the program.
+pub fn covered(found: bool, under: u32, target: u32) -> bool {
+    !found || under != target
+}
+
+/// What a failed Windows call says: its message, or for the codes that
+/// have none, what the code means, and the code itself.
+pub fn error_reason(code: u32, message: &str) -> String {
+    let message = message.trim();
+    if !message.is_empty() {
+        return message.to_string();
+    }
+    let known = match code {
+        0x8013_1505 => "UI Automation timed out: the program did not answer",
+        0x8004_0200 => "the element is not enabled",
+        0x8004_0201 => "the element is gone",
+        0x8004_0202 => "the element has no point to click",
+        0x8013_1509 => "the program does not allow that now",
+        _ => "Windows gave no reason",
+    };
+    format!("{known} (0x{code:08X})")
+}
+
 // The rest touches Windows, and is verified on screen rather than tested.
 
 /// A COM object moved to another thread. Sound here because COM is set up
@@ -923,7 +984,7 @@ fn win_err(e: windows::core::Error) -> String {
                 does not can not reach)"
             .into();
     }
-    e.message().to_string()
+    error_reason(e.code().0 as u32, &e.message())
 }
 
 fn cached_bool(el: &IUIAutomationElement, p: UIA_PROPERTY_ID) -> bool {
@@ -1409,6 +1470,19 @@ fn read_on_the_side<T: Send + 'static>(
         let _ = tx.send(read(el.get()).ok());
     });
     rx.recv_timeout(PATTERN_WAIT).ok().flatten()
+}
+
+/// Scrolls an element into view through UI Automation where it can be,
+/// and where it is then.
+fn scroll_into_view(el: &IUIAutomationElement) -> Option<RECT> {
+    let scrolled = on_the_side(el, |el| unsafe {
+        el.GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId)?
+            .ScrollIntoView()
+    });
+    if scrolled != Ok(true) {
+        return None;
+    }
+    read_on_the_side(el, |el| unsafe { el.CurrentBoundingRectangle() }).filter(|r| has_place(*r))
 }
 
 /// What a field holds now, read live.
@@ -2098,81 +2172,60 @@ impl Desktop {
         double: bool,
     ) -> Result<String, String> {
         let thing = aim.what();
-        if button == "left" && !double {
-            let done = if aim.invoke {
-                Some((
-                    "invoked",
-                    on_the_side(&aim.el, |el| unsafe {
-                        el.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)?
-                            .Invoke()
-                    }),
-                ))
-            } else if aim.toggle {
-                Some((
-                    "toggled",
-                    on_the_side(&aim.el, |el| unsafe {
-                        el.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)?
-                            .Toggle()
-                    }),
-                ))
-            } else if aim.select {
-                Some((
-                    "selected",
-                    on_the_side(&aim.el, |el| unsafe {
-                        el.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-                            UIA_SelectionItemPatternId,
-                        )?
-                        .Select()
-                    }),
-                ))
-            } else if aim.expand {
-                let expanded = aim.expanded;
-                Some((
-                    if expanded { "collapsed" } else { "expanded" },
-                    on_the_side(&aim.el, move |el| unsafe {
-                        let p = el.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
-                            UIA_ExpandCollapsePatternId,
-                        )?;
-                        if expanded {
-                            p.Collapse()
-                        } else {
-                            p.Expand()
-                        }
-                    }),
-                ))
-            } else {
-                None
-            };
-            match done {
-                Some((verb, Ok(true))) => {
-                    return Ok(format!("Clicked {thing}: {verb} it through UI Automation."))
-                }
-                Some((verb, Ok(false))) => {
-                    return Ok(format!(
-                        "Clicked {thing}: {verb} it through UI Automation, and the program has \
-                         not finished with it after {} seconds (a modal dialog may have opened).",
-                        PATTERN_WAIT.as_secs()
-                    ))
-                }
-                // A pattern that fails may have done half its work, so it
-                // is not followed by a click that could do it again.
-                Some((verb, Err(e))) => {
-                    return Err(format!(
-                        "{thing} was not {verb}: UI Automation said {e}; nothing else was tried"
-                    ))
-                }
-                None => {}
+        let plain = button == "left" && !double;
+        let mut rect = aim.rect;
+        let only_expands = aim.expand && !aim.invoke && !aim.toggle && !aim.select;
+        if click_way(plain, only_expands, has_place(rect)) == ClickWay::Nowhere {
+            // Brought into view where the program can, so the click still
+            // lands on the element and not on a guess.
+            if let Some(r) = scroll_into_view(&aim.el) {
+                rect = r;
             }
         }
-        bring_forward(w)?;
-        let r = aim.rect;
-        if r.right <= r.left || r.bottom <= r.top {
+        let point = match click_way(plain, only_expands, has_place(rect)) {
+            ClickWay::Expand => {
+                let expanded = aim.expanded;
+                let verb = if expanded { "collapsed" } else { "expanded" };
+                let done = on_the_side(&aim.el, move |el| unsafe {
+                    let p = el.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                        UIA_ExpandCollapsePatternId,
+                    )?;
+                    if expanded {
+                        p.Collapse()
+                    } else {
+                        p.Expand()
+                    }
+                });
+                return match done {
+                    Ok(true) => Ok(format!("Clicked {thing}: {verb} it through UI Automation.")),
+                    Ok(false) => Ok(format!(
+                        "Clicked {thing}: {verb} it through UI Automation, and the program has \
+                         not finished with it after {} seconds.",
+                        PATTERN_WAIT.as_secs()
+                    )),
+                    // A pattern that fails may have done half its work, so
+                    // it is not followed by a click that could do it again.
+                    Err(e) => Err(format!(
+                        "{thing} was not {verb}: UI Automation said {e}; nothing else was tried"
+                    )),
+                };
+            }
+            ClickWay::Nowhere => {
+                return Err(format!(
+                    "{thing} has no place on screen (scrolled out of view or hidden) and could \
+                     not be scrolled into view, so nothing was clicked; scroll to it first"
+                ))
+            }
+            // The ghost's point, so the click goes where the human saw it
+            // aimed.
+            ClickWay::Real => centre(rect.left, rect.top, rect.right, rect.bottom),
+        };
+        let Some((x, y)) = point else {
             return Err(format!(
-                "{thing} has no place on screen (scrolled out of view or hidden), so it can not be \
-                 clicked; scroll to it first"
+                "{thing} has no place on screen, so nothing was clicked"
             ));
-        }
-        let (x, y) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        };
+        bring_forward(w)?;
         let desk = unsafe {
             [
                 GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -2182,13 +2235,14 @@ impl Desktop {
             ]
         };
         // The click lands on whatever is on top at that point, which must
-        // be the approved program and not something covering it.
+        // be the approved program and not something covering it. Horadric's
+        // overlay lets the mouse through, so Windows does not name it here.
         unsafe {
             let under = WindowFromPoint(POINT { x, y });
             let top = GetAncestor(under, GA_ROOT);
             let mut pid = 0;
             GetWindowThreadProcessId(top, Some(&mut pid));
-            if under.is_invalid() || pid != w.pid {
+            if covered(!under.is_invalid(), pid, w.pid) {
                 let c = info(top.0 as isize);
                 return Err(format!(
                     "{thing} is covered there by {:?} ({}), so a click would land on that; \
@@ -2197,6 +2251,8 @@ impl Desktop {
                 ));
             }
         }
+        // Taken now: a dialog the click closes has no place after it.
+        let o = window_rect(w.hwnd);
         let (ax, ay) = absolute(x, y, desk);
         let at = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE;
         let (down, up) = match button {
@@ -2219,7 +2275,6 @@ impl Desktop {
         if !sent {
             return Err(BLOCKED.into());
         }
-        let o = window_rect(w.hwnd);
         Ok(format!(
             "Clicked {thing} with a real {}{} click at {},{} in the window.",
             if double { "double " } else { "" },
@@ -3010,6 +3065,54 @@ mod tests {
         assert_eq!(pick_window(&list, "UNTITLED").unwrap().hwnd, 10);
         assert_eq!(pick_window(&list, "sysmac").unwrap().hwnd, 30);
         assert!(pick_window(&list, "  ").is_none());
+    }
+
+    #[test]
+    fn a_click_is_real_unless_the_element_only_expands() {
+        assert_eq!(click_way(true, false, true), ClickWay::Real);
+        assert_eq!(click_way(true, true, true), ClickWay::Expand);
+        assert_eq!(click_way(true, true, false), ClickWay::Expand);
+        assert_eq!(click_way(true, false, false), ClickWay::Nowhere);
+        // A right or double click is always a real one.
+        assert_eq!(click_way(false, true, true), ClickWay::Real);
+        assert_eq!(click_way(false, true, false), ClickWay::Nowhere);
+    }
+
+    #[test]
+    fn a_rectangle_has_a_place_only_with_room() {
+        let r = |left, top, right, bottom| RECT {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        assert!(has_place(r(10, 10, 20, 30)));
+        assert!(!has_place(r(10, 10, 10, 30)));
+        assert!(!has_place(r(0, 0, 0, 0)));
+        assert!(!has_place(r(20, 10, 10, 30)));
+    }
+
+    #[test]
+    fn a_click_point_is_covered_by_any_other_program() {
+        assert!(!covered(true, 7, 7));
+        assert!(covered(true, 8, 7));
+        assert!(covered(false, 7, 7));
+    }
+
+    #[test]
+    fn an_error_without_a_message_says_its_code() {
+        assert_eq!(
+            error_reason(0x8000_4005, " Unspecified error "),
+            "Unspecified error"
+        );
+        assert_eq!(
+            error_reason(0x8013_1505, ""),
+            "UI Automation timed out: the program did not answer (0x80131505)"
+        );
+        assert_eq!(
+            error_reason(0x1234_5678, ""),
+            "Windows gave no reason (0x12345678)"
+        );
     }
 
     #[test]

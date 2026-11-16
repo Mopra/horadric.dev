@@ -1069,13 +1069,15 @@ fn desktop_tools() -> Vec<Value> {
         ),
         tool(
             "desktop_click",
-            "Click an element of a window, by ref or by name. A plain left click uses the \
-             element's own action through UI Automation (press a button, tick a box, pick an \
-             item, open a tree node), so it works whatever covers the window; a double or \
-             right click, or an element with no action, brings the window forward for a real \
-             click at its middle. The user's mouse pointer is put back after, and the keyboard \
-             is given back to the window the user had in front (the answer says so), so their \
-             typing does not land in the program; a dialog the click opened waits behind it.",
+            "Click an element of a window, by ref or by name. It is a real mouse click at the \
+             element's middle: the window comes forward, an element out of view is scrolled \
+             into it first where the program can, and one covered by another window is not \
+             clicked. Only an element whose one action is expanding (a combo box, a tree node \
+             that can not be selected) is expanded or collapsed through UI Automation instead. \
+             The user's mouse pointer is put back after, and the keyboard is given back to the \
+             window the user had in front (the answer says so), so their typing does not land \
+             in the program; a dialog the click opened waits behind it, and the next call can \
+             act in it.",
             with(
                 element("click"),
                 json!({
