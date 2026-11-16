@@ -233,6 +233,12 @@ pub enum Source {
     /// Not asked because the human turned bypass on, on the Thinking
     /// plate, and was there to stop it with Esc.
     Bypass,
+    /// The human turned bypass on, so the log shows where the unasked
+    /// calls after it begin.
+    BypassOn,
+    /// Bypass ended, and how: by Esc, by its switch, or by itself once the
+    /// work it was on for was done.
+    BypassOff(&'static str),
 }
 
 /// One line of [`LOG_FILE`]: when, which session, how, which program, and
@@ -246,6 +252,8 @@ pub fn log_line(utc: &str, session: &str, source: Source, program: &str, what: &
         Source::Risky(false) => "risky action refused by the human".into(),
         Source::Unreadable => "the list could not be read, asking instead".into(),
         Source::Bypass => "not asked, the human had bypass on".into(),
+        Source::BypassOn => "bypass turned on by the human".into(),
+        Source::BypassOff(how) => format!("bypass off: {how}"),
     };
     let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut line = format!("{utc}  {}  {how}  {}", flat(session), flat(program));
@@ -442,6 +450,14 @@ mod tests {
         assert!(log_line(at, "s", Source::Risky(false), "a.exe", "").contains("refused"));
         assert!(log_line(at, "s", Source::Asked(None), "a.exe", "").contains("refused"));
         assert!(log_line(at, "s", Source::Bypass, "a.exe", "").contains("bypass"));
+        assert_eq!(
+            log_line(at, "s", Source::BypassOn, "a.exe", ""),
+            format!("{at}  s  bypass turned on by the human  a.exe\n")
+        );
+        assert_eq!(
+            log_line(at, "s", Source::BypassOff("Esc"), "a.exe", ""),
+            format!("{at}  s  bypass off: Esc  a.exe\n")
+        );
     }
 
     #[test]

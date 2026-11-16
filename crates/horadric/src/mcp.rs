@@ -1072,8 +1072,10 @@ fn desktop_tools() -> Vec<Value> {
             "Click an element of a window, by ref or by name. A plain left click uses the \
              element's own action through UI Automation (press a button, tick a box, pick an \
              item, open a tree node), so it works whatever covers the window; a double or \
-             right click, or an element with no action, brings the window to the front for a \
-             real click at its middle, and the user's mouse pointer is put back after.",
+             right click, or an element with no action, brings the window forward for a real \
+             click at its middle. The user's mouse pointer is put back after, and the keyboard \
+             is given back to the window the user had in front (the answer says so), so their \
+             typing does not land in the program; a dialog the click opened waits behind it.",
             with(
                 element("click"),
                 json!({
@@ -1086,10 +1088,11 @@ fn desktop_tools() -> Vec<Value> {
         tool(
             "desktop_type",
             "Type text into a field of a window, by ref or by name. A field that takes a value \
-             has it set, replacing what was there; otherwise the window comes to the front, the \
+             has it set, replacing what was there; otherwise the window is brought forward, the \
              field gets the keyboard and the text is typed at its caret. submit presses Enter \
-             after. The answer says what the field holds afterwards, read back before Enter; \
-             when that is not what was typed, Enter is not pressed.",
+             after. The keyboard is then given back to the window the user had in front. The \
+             answer says what the field holds afterwards, read back before Enter; when that is \
+             not what was typed, Enter is not pressed.",
             with(
                 element("type into"),
                 json!({
@@ -1103,18 +1106,21 @@ fn desktop_tools() -> Vec<Value> {
             "desktop_text",
             "Read the text of a list, grid, output pane or editor that desktop_snapshot can not \
              read, by ref or by name, or of what has the keyboard in the window when neither is \
-             given. It reads UI Automation's text first; where there is none it selects all \
-             (Control+A) and copies (Control+C), which counts as operating, and puts the \
-             clipboard's text back after (anything else on the clipboard is lost). Use it for \
-             build output, logs and tables instead of reading screenshots.",
+             given. It reads UI Automation's text first, then the element's value (a plain \
+             text box has one); only where neither answers it selects all (Control+A) and \
+             copies (Control+C), which counts as operating, puts the clipboard's text back \
+             after (anything else on the clipboard is lost) and gives the keyboard back to \
+             the window the user had in front. Use it for build output, logs and tables \
+             instead of reading screenshots.",
             element("read the text of"),
             &["window"],
         ),
         tool(
             "desktop_press",
-            "Bring a window to the front and press a key there, with modifiers joined by +: \
-             Enter, Escape, Tab, F5, Down, Control+S, Shift+Tab, Alt+F4, a. The key goes to \
-             whatever in the window has the keyboard.",
+            "Press a key in a window, with modifiers joined by +: Enter, Escape, Tab, F5, \
+             Down, Control+S, Shift+Tab, Alt+F4, a. The window is brought forward for the key, \
+             which goes to whatever in it has the keyboard, and the keyboard is then given \
+             back to the window the user had in front (the answer says so).",
             json!({
                 "window": window(),
                 "key": { "type": "string" },

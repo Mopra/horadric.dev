@@ -438,7 +438,7 @@ impl Desktop {
 
 /// Adds a line to `desktop.log`. A log that can not be written loses the
 /// line, never the call.
-fn log(session: &str, source: Source, program: &str, what: &str) {
+pub(super) fn log(session: &str, source: Source, program: &str, what: &str) {
     let Some(file) = horadric_hooks::tasks::desktop_log_file() else {
         return;
     };

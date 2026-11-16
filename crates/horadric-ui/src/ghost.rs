@@ -47,6 +47,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use horadric_core::desktop_programs::Source;
 use horadric_core::session::{Phase, WaitReason};
 
 use horadric_hooks::listener::Reply;
@@ -81,11 +82,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW,
-    RegisterClassW, SetWindowDisplayAffinity, SetWindowLongPtrW, ShowWindow, UpdateLayeredWindow,
-    GWL_EXSTYLE, HTCLIENT, HTTRANSPARENT, MA_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA,
-    WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_CAPTURECHANGED, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    RegisterClassW, SetCursorPos, SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, UpdateLayeredWindow, GWL_EXSTYLE, HTCLIENT, HTTRANSPARENT, MA_NOACTIVATE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
+    SW_SHOWNOACTIVATE, ULW_ALPHA, WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_CAPTURECHANGED, WM_HOTKEY,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_TIMER,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    WS_POPUP,
 };
 
 use windows_numerics::Vector2;
@@ -369,6 +372,29 @@ pub(super) fn away_of(tool: Option<&str>, turn: Turn, program: &str) -> Option<S
             t.rsplit("__").next().unwrap_or(t)
         )),
         _ => None,
+    }
+}
+
+/// How bypass ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BypassEnd {
+    /// The human pressed Esc.
+    Esc,
+    /// The human clicked the switch on the plate.
+    Switched,
+    /// The work it was on for is done.
+    Done,
+}
+
+/// The history's words for bypass turned on (`None`) or ended, what and
+/// outcome, so the history shows the whole period it was on and who
+/// ended it.
+pub(super) fn bypass_words(end: Option<BypassEnd>) -> (&'static str, &'static str) {
+    match end {
+        None => ("Bypass on", ""),
+        Some(BypassEnd::Esc) => ("Bypass off", "Esc"),
+        Some(BypassEnd::Switched) => ("Bypass off", "switched off"),
+        Some(BypassEnd::Done) => ("Bypass off", "the work it was on for is done"),
     }
 }
 
@@ -834,13 +860,36 @@ impl Layer {
     /// Lets the mouse reach the window, or go through it. Toggled as the
     /// cursor comes over a control, since a click on another process's
     /// window behind does not come through `HTTRANSPARENT`.
-    fn set_clickable(&self, on: bool) {
+    ///
+    /// Windows sends a click to the window it found under the pointer at
+    /// the pointer's last move, so a style changed under a pointer at rest
+    /// would not count until it moved: a click without a move went through
+    /// the plate. `SWP_FRAMECHANGED` makes Windows take the new style in
+    /// at once, and putting the pointer back where it is makes it look
+    /// again what is under it, without the pointer moving.
+    fn set_clickable(&self, on: bool, at: POINT) {
         unsafe {
             let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
             let through = WS_EX_TRANSPARENT.0 as isize;
             let want = if on { ex & !through } else { ex | through };
-            if want != ex {
-                SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, want);
+            if want == ex {
+                return;
+            }
+            SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, want);
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            // Only where the human left it: a pointer that moved since has
+            // been looked at by Windows already, and is not pulled back.
+            let mut now = POINT::default();
+            if GetCursorPos(&mut now).is_ok() && now.x == at.x && now.y == at.y {
+                let _ = SetCursorPos(at.x, at.y);
             }
         }
     }
@@ -1486,7 +1535,7 @@ impl Overlay {
         }
         if ends {
             // It starts the next glide itself.
-            self.bypass_off();
+            self.bypass_off(BypassEnd::Esc);
         } else {
             // The rest waiting were asked before the stop and still go,
             // each with its own glide to stop.
@@ -1529,13 +1578,36 @@ impl Overlay {
         }
         // Its banner says Esc ends it, so Esc is held from now.
         self.keep_esc();
+        self.note_bypass(None);
         self.stale = true;
         self.run();
     }
 
+    /// Writes bypass turned on or ended into the history and into
+    /// `desktop.log`, which is where the human reads afterwards what went
+    /// unasked and between which lines.
+    fn note_bypass(&mut self, end: Option<BypassEnd>) {
+        let (what, outcome) = bypass_words(end);
+        remember(
+            &mut self.history,
+            Entry {
+                at: now_clock(),
+                mark: Mark::Ok,
+                what: what.into(),
+                outcome: outcome.into(),
+                unasked: false,
+            },
+        );
+        let source = match end {
+            None => Source::BypassOn,
+            Some(_) => Source::BypassOff(outcome),
+        };
+        super::desktop::log(&self.now.name, source, &self.now.program, "");
+    }
+
     /// Ends bypass, and with it every call it let through that has not
     /// gone yet.
-    fn bypass_off(&mut self) {
+    fn bypass_off(&mut self, how: BypassEnd) {
         BYPASS.set(false);
         BYPASS_LIVE.store(false, Ordering::Release);
         take_turns_ended();
@@ -1559,6 +1631,8 @@ impl Overlay {
                 },
             );
         }
+        // Newest on top, above what it stopped.
+        self.note_bypass(Some(how));
         // Control runs on a while, so the plate does not vanish the
         // moment bypass ends.
         self.until = extend(self.until, Instant::now(), true);
@@ -1591,18 +1665,7 @@ impl Overlay {
         if !bypass_over(&self.holders, in_flight) {
             return;
         }
-        self.bypass_off();
-        remember(
-            &mut self.history,
-            Entry {
-                at: now_clock(),
-                mark: Mark::Ok,
-                what: "Bypass off".into(),
-                outcome: "the work it was on for is done".into(),
-                unasked: false,
-            },
-        );
-        self.stale = true;
+        self.bypass_off(BypassEnd::Done);
     }
 
     /// Looks at what the plate's session does now, so NOW does not stand
@@ -1668,7 +1731,7 @@ impl Overlay {
                     }
                     self.set_speed(slider_at(x));
                 }
-                Some(Control::Bypass) if bypass() => self.bypass_off(),
+                Some(Control::Bypass) if bypass() => self.bypass_off(BypassEnd::Switched),
                 Some(Control::Bypass) => {
                     self.bypass_on();
                     return true;
@@ -1898,14 +1961,17 @@ impl Overlay {
         }
         plate.present(pos, self.shown);
         // The mouse reaches the plate only over a control, so the rest of
-        // it does not stand between the human and their screen.
+        // it does not stand between the human and their screen. Looked at
+        // every frame, not only on a move, so a pointer that rests on a
+        // control when the plate comes up, or that the plate grew under,
+        // clicks it.
         let mut cursor = POINT::default();
         let hover = unsafe { GetCursorPos(&mut cursor) }.ok().and_then(|_| {
             let x = (cursor.x - pos.0) as f32 / s;
             let y = (cursor.y - pos.1) as f32 / s;
             control_at(x, y)
         });
-        plate.set_clickable(hover.is_some() || self.dragging);
+        plate.set_clickable(hover.is_some() || self.dragging, cursor);
         if hover != self.hover {
             self.hover = hover;
             self.stale = true;
@@ -2512,6 +2578,27 @@ mod tests {
         assert_eq!(at(Phase::Ended), Turn::Gone);
         assert_eq!(at(Phase::Paused), Turn::Gone);
         assert_eq!(turn_of(None), Turn::Gone);
+    }
+
+    #[test]
+    fn the_history_says_when_bypass_began_and_how_it_ended() {
+        let line = |end| {
+            let (what, outcome) = bypass_words(end);
+            entry_line(&Entry {
+                at: String::new(),
+                mark: Mark::Ok,
+                what: what.into(),
+                outcome: outcome.into(),
+                unasked: false,
+            })
+        };
+        assert_eq!(line(None), "Bypass on");
+        assert_eq!(line(Some(BypassEnd::Esc)), "Bypass off: Esc");
+        assert_eq!(line(Some(BypassEnd::Switched)), "Bypass off: switched off");
+        assert_eq!(
+            line(Some(BypassEnd::Done)),
+            "Bypass off: the work it was on for is done"
+        );
     }
 
     #[test]

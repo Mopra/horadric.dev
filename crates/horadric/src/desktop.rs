@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use windows::core::{Interface, BSTR, HRESULT};
 use windows::Win32::Foundation::{
-    CloseHandle, GlobalFree, E_ACCESSDENIED, HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT,
+    CloseHandle, GlobalFree, E_ACCESSDENIED, HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{
@@ -60,9 +60,10 @@ use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow,
     GetLastActivePopup, GetSystemMetrics, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetCursorPos, SetForegroundWindow,
-    ShowWindow, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, GW_OWNER, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE, WS_EX_TOOLWINDOW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SendMessageTimeoutW,
+    SetCursorPos, SetForegroundWindow, ShowWindow, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, GW_OWNER,
+    SMTO_ABORTIFHUNG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SW_RESTORE, WM_GETTEXT, WM_GETTEXTLENGTH, WS_EX_TOOLWINDOW,
 };
 
 use crate::desktop_helper::{as_administrator, Helper, HelperStart};
@@ -761,6 +762,68 @@ pub fn risky_key(chord: &Chord, in_dialog: bool) -> bool {
     }
 }
 
+/// Horadric's overlay windows: the ghost cursor, the Thinking plate and
+/// the frame. They never take the keyboard, so the keyboard is never given
+/// back to one.
+pub const OVERLAY_CLASSES: &[&str] = &["HoradricGhost"];
+
+/// Whether, after an action on the program with process id `target`, the
+/// keyboard goes back to `before`, the window that was in front before
+/// it, given whether that window is `alive` still and which window (and
+/// its process) is in front `now`.
+///
+/// It does, so the human's own typing does not land in the program the
+/// agent drives, unless the human was in that program already, the
+/// window is gone or an overlay, it is in front already, or something
+/// else than the program took the front meanwhile (the human moved on,
+/// and is not pulled back). A dialog the action opened gives no reason
+/// to stay: it waits behind, and the next action brings it forward.
+pub fn give_back(
+    before: Option<(isize, u32, &str)>,
+    alive: bool,
+    target: u32,
+    now: Option<(isize, u32)>,
+) -> bool {
+    let Some((hwnd, pid, class)) = before else {
+        return false;
+    };
+    if hwnd == 0 || !alive || pid == target || OVERLAY_CLASSES.contains(&class) {
+        return false;
+    }
+    match now {
+        None => true,
+        Some((h, _)) if h == hwnd => false,
+        Some((_, p)) => p == target,
+    }
+}
+
+/// What an action's answer adds when the keyboard went back, or would not.
+pub fn given_back_text(title: &str, done: bool) -> String {
+    if done {
+        format!(" Focus was given back to {title:?}.")
+    } else {
+        format!(
+            " Windows would not give the focus back to {title:?}, so the program keeps \
+             the keyboard."
+        )
+    }
+}
+
+/// Whether `control` (a UI Automation control type) or `class` (its
+/// window's class) is a plain edit field, whose text Windows itself keeps.
+/// WinForms names its TextBox `WindowsForms10.EDIT...`, rich edits are
+/// `RichEdit20W` and the like.
+pub fn is_edit(control: &str, class: &str) -> bool {
+    control == "Edit" || class.to_ascii_lowercase().contains("edit")
+}
+
+/// Whether a value read off an element answers `desktop_text`. An empty
+/// one does for an edit field, which may well be empty; elsewhere it more
+/// likely means the text is not kept in its value, so copying is tried.
+pub fn read_counts(value: &str, edit: bool) -> bool {
+    edit || !value.trim().is_empty()
+}
+
 // The rest touches Windows, and is verified on screen rather than tested.
 
 /// A COM object moved to another thread. Sound here because COM is set up
@@ -1112,17 +1175,7 @@ fn bring_forward(w: &Window) -> Result<(), String> {
             let _ = ShowWindow(h, SW_RESTORE);
         }
         if GetForegroundWindow() != h {
-            // Windows lets a process bring a window forward when it sent
-            // the last input, and a mouse move by nothing is input enough.
-            send(&[mouse(0, 0, MOUSEEVENTF_MOVE)]);
-            if !SetForegroundWindow(h).as_bool() {
-                let front = GetWindowThreadProcessId(GetForegroundWindow(), None);
-                let me = GetCurrentThreadId();
-                let _ = AttachThreadInput(me, front, true);
-                let _ = SetForegroundWindow(h);
-                let _ = BringWindowToTop(h);
-                let _ = AttachThreadInput(me, front, false);
-            }
+            ask_front(h);
             thread::sleep(Duration::from_millis(80));
         }
         let front = GetForegroundWindow();
@@ -1144,6 +1197,78 @@ fn bring_forward(w: &Window) -> Result<(), String> {
             w.title
         ))
     }
+}
+
+/// Asks Windows to put `h` in front.
+unsafe fn ask_front(h: HWND) {
+    // Windows lets a process bring a window forward when it sent the last
+    // input, and a mouse move by nothing is input enough.
+    send(&[mouse(0, 0, MOUSEEVENTF_MOVE)]);
+    if !SetForegroundWindow(h).as_bool() {
+        let front = GetWindowThreadProcessId(GetForegroundWindow(), None);
+        let me = GetCurrentThreadId();
+        let _ = AttachThreadInput(me, front, true);
+        let _ = SetForegroundWindow(h);
+        let _ = BringWindowToTop(h);
+        let _ = AttachThreadInput(me, front, false);
+    }
+}
+
+/// The window in front, and its process.
+fn foreground() -> Option<(isize, u32)> {
+    let h = unsafe { GetForegroundWindow() };
+    if h.is_invalid() {
+        return None;
+    }
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+    Some((h.0 as isize, pid))
+}
+
+/// The window in front before an action, to give the keyboard back to.
+fn front_before() -> Option<Window> {
+    foreground().map(|(id, _)| info(id))
+}
+
+/// How long the window given the keyboard back is given to come to the
+/// front.
+const FRONT_WAIT: Duration = Duration::from_millis(150);
+
+/// Gives the keyboard back to `before` after an action on `w`, when
+/// [`give_back`] says so, and what the answer adds about it.
+fn hand_back(before: Option<&Window>, w: &Window) -> String {
+    let Some(b) = before else {
+        return String::new();
+    };
+    let h = hwnd(b.hwnd);
+    let alive = unsafe { IsWindow(Some(h)).as_bool() && IsWindowVisible(h).as_bool() };
+    if !give_back(Some((b.hwnd, b.pid, &b.class)), alive, w.pid, foreground()) {
+        return String::new();
+    }
+    // Keys sent a moment ago may still be on their way to the program, and
+    // would land in the human's window if it were in front first.
+    thread::sleep(Duration::from_millis(50));
+    unsafe { ask_front(h) };
+    let begun = Instant::now();
+    while foreground().map(|(id, _)| id) != Some(b.hwnd) && begun.elapsed() < FRONT_WAIT {
+        thread::sleep(Duration::from_millis(10));
+    }
+    given_back_text(&b.title, foreground().map(|(id, _)| id) == Some(b.hwnd))
+}
+
+/// Gives the keyboard back after an action, at once so the program holds
+/// it as briefly as can be, and again after `settle` when the action went
+/// through, since a dialog it opened may have taken the front meanwhile.
+fn after_action(before: Option<&Window>, w: &Window, settle: Duration, ok: bool) -> String {
+    let mut said = hand_back(before, w);
+    if ok {
+        thread::sleep(settle);
+        let again = hand_back(before, w);
+        if !again.is_empty() {
+            said = again;
+        }
+    }
+    said
 }
 
 fn mouse(dx: i32, dy: i32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
@@ -1330,6 +1455,47 @@ fn clip_text() -> Option<String> {
         let _ = CloseClipboard();
     }
     text
+}
+
+/// Empties the clipboard.
+fn clear_clip() {
+    if open_clipboard() {
+        unsafe {
+            let _ = EmptyClipboard();
+            let _ = CloseClipboard();
+        }
+    }
+}
+
+/// The class of window `h`.
+fn class_of(h: HWND) -> String {
+    let mut buf = [0u16; 256];
+    let n = unsafe { GetClassNameW(h, &mut buf) };
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+/// The text Windows keeps for window `h`, an edit field's contents, asked
+/// with a time limit so a hung program does not hold this server.
+fn window_text(h: HWND) -> Option<String> {
+    let ask = |msg, wparam: usize, lparam: isize| {
+        let mut out = 0usize;
+        let ok = unsafe {
+            SendMessageTimeoutW(
+                h,
+                msg,
+                WPARAM(wparam),
+                LPARAM(lparam),
+                SMTO_ABORTIFHUNG,
+                2000,
+                Some(&mut out),
+            )
+        };
+        (ok.0 != 0).then_some(out)
+    };
+    let len = ask(WM_GETTEXTLENGTH, 0, 0)?;
+    let mut buf = vec![0u16; len + 1];
+    let got = ask(WM_GETTEXT, buf.len(), buf.as_mut_ptr() as isize)?;
+    Some(String::from_utf16_lossy(&buf[..got.min(len)]))
 }
 
 /// Puts `text` on the clipboard, in place of what it held.
@@ -1523,10 +1689,12 @@ impl Desktop {
                 let point = aim_point(&w, &aim);
                 allow(app, &root, "operate", &what, risky, point, &reason)?;
                 watch::follow(w.pid);
-                let (before, mark) = (list_windows(), watch::mark());
-                let result = self.click(&w, &aim, button, double).map(|mut said| {
-                    thread::sleep(settle);
+                let (before, mark, front) = (list_windows(), watch::mark(), front_before());
+                let acted = self.click(&w, &aim, button, double);
+                let back = after_action(front.as_ref(), &w, settle, acted.is_ok());
+                let result = acted.map(|mut said| {
                     said.push_str(&came_of(&before, &w, mark));
+                    said.push_str(&back);
                     (vec![text(said.clone())], said)
                 });
                 report(app, &root, &what, result)
@@ -1546,10 +1714,12 @@ impl Desktop {
                 let point = aim_point(&w, &aim);
                 allow(app, &root, "operate", &what, risky, point, &reason)?;
                 watch::follow(w.pid);
-                let (before, mark) = (list_windows(), watch::mark());
-                let result = self.type_in(&w, &aim, typed, submit).map(|mut said| {
-                    thread::sleep(settle);
+                let (before, mark, front) = (list_windows(), watch::mark(), front_before());
+                let acted = self.type_in(&w, &aim, typed, submit);
+                let back = after_action(front.as_ref(), &w, settle, acted.is_ok());
+                let result = acted.map(|mut said| {
                     said.push_str(&came_of(&before, &w, mark));
+                    said.push_str(&back);
                     (vec![text(said.clone())], said)
                 });
                 report(app, &root, &what, result)
@@ -1568,12 +1738,13 @@ impl Desktop {
                 let point = at.or_else(|| window_point(&w));
                 allow(app, &root, "operate", &what, risky, point, &reason)?;
                 watch::follow(w.pid);
-                let (before, mark) = (list_windows(), watch::mark());
+                let (before, mark, front) = (list_windows(), watch::mark(), front_before());
                 let pressed = bring_forward(&w).and_then(|()| send_strokes(&chord_input(&chord)));
+                let back = after_action(front.as_ref(), &w, settle, pressed.is_ok());
                 let result = pressed.map(|()| {
-                    thread::sleep(settle);
                     let mut said = format!("Pressed {key} in {:?}.", w.title);
                     said.push_str(&came_of(&before, &w, mark));
+                    said.push_str(&back);
                     (vec![text(said.clone())], said)
                 });
                 report(app, &root, &what, result)
@@ -1590,8 +1761,12 @@ impl Desktop {
                 let what = format!("read the text of {thing}");
                 allow(app, &root, "see", &what, false, None, &reason)?;
                 watch::follow(w.pid);
-                if let Some(t) = self.text_pattern(&w, aim.as_ref()) {
-                    let said = text_answer(&t, "through UI Automation");
+                let read = self
+                    .text_pattern(&w, aim.as_ref())
+                    .map(|t| (t, "through UI Automation"))
+                    .or_else(|| self.value_text(&w, aim.as_ref()));
+                if let Some((t, how)) = read {
+                    let said = text_answer(&t, how);
                     return report(
                         app,
                         &root,
@@ -1605,8 +1780,12 @@ impl Desktop {
                     .as_ref()
                     .map_or_else(|| window_point(&w), |a| aim_point(&w, a));
                 allow(app, &root, "operate", &what, flag("risky"), point, &reason)?;
-                let result = self.copy_text(&w, aim.as_ref()).map(|t| {
-                    let said = text_answer(&t, "by selecting all and copying it");
+                let front = front_before();
+                let copied = self.copy_text(&w, aim.as_ref());
+                let back = after_action(front.as_ref(), &w, Duration::ZERO, false);
+                let result = copied.map(|t| {
+                    let mut said = text_answer(&t, "by selecting all and copying it");
+                    said.push_str(&back);
                     (vec![text(said)], "Copied its text.".to_string())
                 });
                 report(app, &root, &what, result)
@@ -2145,6 +2324,46 @@ impl Desktop {
         .filter(|t| !t.trim().is_empty())
     }
 
+    /// The text of `aim`, or of what has the keyboard in `w`, from the
+    /// value it reports, and how it was read: UI Automation's value, then
+    /// the older accessibility value, then for an edit field the text
+    /// Windows keeps in its window. A plain WinForms TextBox has no text
+    /// pattern and ignores Control+A, but answers these.
+    fn value_text(&mut self, w: &Window, aim: Option<&Aim>) -> Option<(String, &'static str)> {
+        let (el, control) = match aim {
+            Some(a) => (a.el.clone(), a.control),
+            None => {
+                let com = self.com().ok()?;
+                let el = unsafe { com.uia.GetFocusedElementBuildCache(&com.one) }
+                    .ok()
+                    .filter(|el| unsafe { el.CurrentProcessId() }.ok() == Some(w.pid as i32))?;
+                let control = control_name(unsafe { el.CachedControlType() }.map_or(0, |c| c.0));
+                (el, control)
+            }
+        };
+        let native = unsafe { el.CurrentNativeWindowHandle() }
+            .ok()
+            .filter(|h| !h.is_invalid());
+        let class = native.map(class_of).unwrap_or_default();
+        let edit = is_edit(control, &class);
+        if let Some(v) = value_now(&el).filter(|v| read_counts(v, edit)) {
+            return Some((v, "from its value through UI Automation"));
+        }
+        let legacy = read_on_the_side(&el, |el| unsafe {
+            let p = el.GetCurrentPatternAs::<IUIAutomationLegacyIAccessiblePattern>(
+                UIA_LegacyIAccessiblePatternId,
+            )?;
+            Ok(p.CurrentValue()?.to_string())
+        });
+        if let Some(v) = legacy.filter(|v| read_counts(v, edit)) {
+            return Some((v, "from its accessibility value"));
+        }
+        native
+            .filter(|_| edit)
+            .and_then(window_text)
+            .map(|v| (v, "from the field's window text"))
+    }
+
     /// The text of `aim`, or of what has the keyboard in `w`, by selecting
     /// all and copying it, for lists, grids and panes that UI Automation
     /// can not read. The clipboard's text is put back after.
@@ -2176,8 +2395,11 @@ impl Desktop {
             ));
         }
         let copied = clip_text();
-        if let Some(t) = kept {
-            set_clip_text(&t);
+        // The read leaves the clipboard as it found it, or empty when it
+        // held no text, rather than holding what was copied.
+        match kept {
+            Some(t) => set_clip_text(&t),
+            None => clear_clip(),
         }
         copied
             .filter(|t| !t.trim().is_empty())
@@ -2526,6 +2748,55 @@ mod tests {
             owner: None,
             class: String::new(),
         }
+    }
+
+    #[test]
+    fn the_keyboard_goes_back_only_to_the_human_s_own_window() {
+        let stage = Some((10, 1, "HoradricTerminal"));
+        // The action left the program in front: the keyboard goes back.
+        assert!(give_back(stage, true, 7, Some((20, 7))));
+        assert!(give_back(stage, true, 7, None));
+        // A dialog of the program took the front: back all the same.
+        assert!(give_back(stage, true, 7, Some((21, 7))));
+        // Already back, or the human went elsewhere meanwhile.
+        assert!(!give_back(stage, true, 7, Some((10, 1))));
+        assert!(!give_back(stage, true, 7, Some((30, 4))));
+        // The human was in the program, or nothing was in front.
+        assert!(!give_back(Some((20, 7, "Notepad")), true, 7, Some((20, 7))));
+        assert!(!give_back(None, true, 7, Some((20, 7))));
+        assert!(!give_back(Some((0, 1, "")), true, 7, Some((20, 7))));
+        // Gone, or an overlay that never takes the keyboard.
+        assert!(!give_back(stage, false, 7, Some((20, 7))));
+        assert!(!give_back(
+            Some((10, 1, "HoradricGhost")),
+            true,
+            7,
+            Some((20, 7))
+        ));
+    }
+
+    #[test]
+    fn the_answer_says_where_the_focus_went() {
+        assert_eq!(
+            given_back_text("Horadric", true),
+            " Focus was given back to \"Horadric\"."
+        );
+        assert!(given_back_text("Horadric", false).contains("keeps the keyboard"));
+    }
+
+    #[test]
+    fn edit_fields_are_told_by_control_or_class() {
+        assert!(is_edit("Edit", ""));
+        assert!(is_edit("Pane", "WindowsForms10.EDIT.app.0.141b42a_r9_ad1"));
+        assert!(is_edit("Document", "RichEdit20W"));
+        assert!(!is_edit("List", "SysListView32"));
+    }
+
+    #[test]
+    fn an_empty_value_answers_only_for_an_edit_field() {
+        assert!(read_counts("", true));
+        assert!(read_counts("42", false));
+        assert!(!read_counts("  ", false));
     }
 
     #[test]

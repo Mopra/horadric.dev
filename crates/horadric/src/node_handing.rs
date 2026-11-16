@@ -504,6 +504,7 @@ pub(super) fn adopt(
         loot: Default::default(),
         runeword: None,
         chat: false,
+        created: None,
     };
     {
         let mut n = lock(node);
