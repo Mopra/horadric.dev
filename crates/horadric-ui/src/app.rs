@@ -2546,6 +2546,14 @@ pub(crate) fn ask(d: &Dialog) -> Option<usize> {
     dialog::show(&shared.gpu, &shared.metrics, d)
 }
 
+/// Asks about another program, aside from it, the same way.
+pub(crate) fn ask_aside(d: &Dialog, aside: &dialog::Aside) -> dialog::Answer {
+    match with_app(|app| Rc::clone(&app.shared)) {
+        Some(shared) => dialog::show_aside(&shared.gpu, &shared.metrics, d, aside),
+        None => dialog::Answer::Unanswered,
+    }
+}
+
 /// Asks beside the cluster of project `key`, outside the app's borrow: the
 /// question runs a modal loop that dispatches the app's messages.
 fn ask_beside(key: Option<&str>, question: &ask::Ask) -> Option<ask::Answer> {

@@ -13,6 +13,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use horadric_core::desktop_programs::{Act, Kind};
 use serde_json::{json, Value};
 use windows::core::{Interface, BSTR, HRESULT};
 use windows::Win32::Foundation::{
@@ -157,6 +158,47 @@ pub fn looks_risky(texts: &[&str]) -> bool {
     })
 }
 
+/// The names Windows gives the file name box of its Open and Save
+/// dialogs, in the languages the machines here run, without the colon or
+/// the access key's mark.
+const FILE_NAME_FIELDS: &[&str] = &["file name", "filnavn", "dateiname"];
+
+/// Whether an element is the file name box of a standard Open or Save
+/// dialog: an edit field or combo box named "File name:". Typing a path
+/// there and pressing Enter picks a file on this PC, which changes nothing
+/// by itself, whatever the dialog is for.
+pub fn file_name_field(control: &str, name: &str) -> bool {
+    if control != "Edit" && control != "ComboBox" {
+        return false;
+    }
+    let name: String = name
+        .chars()
+        .filter(|c| *c != '&' && *c != '_')
+        .collect::<String>()
+        .trim()
+        .trim_end_matches(':')
+        .trim()
+        .to_lowercase();
+    FILE_NAME_FIELDS.contains(&name.as_str())
+}
+
+/// Whether Enter in a window confirms something that matters: in a dialog
+/// it presses the default button, except in a file dialog, where it opens
+/// the folder or picks the file typed.
+pub fn enter_confirms(in_dialog: bool, file_dialog: bool) -> bool {
+    in_dialog && !file_dialog
+}
+
+/// What an action's window says, read once for the risk words and for
+/// the patterns the human pre-approved.
+#[derive(Debug, Default, PartialEq)]
+pub struct Said {
+    /// A small dialog's lines of text, its question.
+    pub texts: Vec<String>,
+    /// It is a standard Open or Save dialog.
+    pub file_dialog: bool,
+}
+
 /// The titles a wait's `appears` and `gone` look at: the named program's
 /// windows, or every window when none was named. A window of the same name
 /// in another program, a dialog the human has open elsewhere, must not
@@ -290,6 +332,44 @@ pub fn allow_body(
     })
 }
 
+/// What the app is told of an operate action beside its sentence, so a
+/// pattern the human pre-approved can be matched against it.
+pub fn act_json(act: &Act) -> Value {
+    json!({
+        "kind": act.kind.map(Kind::word),
+        "window": act.window,
+        "control": act.control,
+        "name": act.name,
+        "key": act.key,
+        "texts": act.texts,
+    })
+}
+
+/// Asks the app whether the human allows an operate action, telling it
+/// what the action is in parts as well as in words.
+#[allow(clippy::too_many_arguments)]
+pub fn allow_act<A: FnMut(Value) -> Result<Value, String>>(
+    app: &mut A,
+    window: &Window,
+    what: &str,
+    risky: bool,
+    act: &Act,
+    point: Option<(i32, i32)>,
+    reason: &str,
+) -> Result<(), String> {
+    let mut body = allow_body(window, "operate", what, risky, point, reason);
+    body["act"] = act_json(act);
+    allowed(app(body)?, what)
+}
+
+fn allowed(answer: Value, what: &str) -> Result<(), String> {
+    if answer["allowed"] == true {
+        Ok(())
+    } else {
+        Err(format!("Horadric did not allow you to {what}"))
+    }
+}
+
 /// Asks the app through `app` whether the human allows it.
 pub fn allow<A: FnMut(Value) -> Result<Value, String>>(
     app: &mut A,
@@ -301,11 +381,7 @@ pub fn allow<A: FnMut(Value) -> Result<Value, String>>(
     reason: &str,
 ) -> Result<(), String> {
     let answer = app(allow_body(window, action, what, risky, point, reason))?;
-    if answer["allowed"] == true {
-        Ok(())
-    } else {
-        Err(format!("Horadric did not allow you to {what}"))
-    }
+    allowed(answer, what)
 }
 
 /// What the app is told after an allowed action, for the history the
@@ -1759,9 +1835,11 @@ impl Desktop {
                     (b, true) => format!("{b} double click"),
                 };
                 let what = format!("{how} {}", aim.what());
-                let risky = flag("risky") || self.looks_risky(&w, &[&aim.name]);
+                let said = self.said(&w);
+                let risky = flag("risky") || looks_risky_in(&w, &said, &[&aim.name]);
+                let act = act_of(Kind::Click, &w, &said, aim.control, &aim.name, "");
                 let point = aim_point(&w, &aim);
-                allow(app, &root, "operate", &what, risky, point, &reason)?;
+                allow_act(app, &root, &what, risky, &act, point, &reason)?;
                 watch::follow(w.pid);
                 let (before, mark, front) = (list_windows(), watch::mark(), front_before());
                 let acted = self.click(&w, &aim, button, double);
@@ -1781,12 +1859,17 @@ impl Desktop {
                 if submit {
                     what.push_str(" and press Enter");
                 }
-                // Enter in a dialog confirms it, as pressing it alone would.
+                // Enter in a dialog confirms it, as pressing it alone would,
+                // but a path typed into a file dialog's name box only picks
+                // the file.
+                let said = self.said(&w);
+                let picks_file = said.file_dialog && file_name_field(aim.control, &aim.name);
                 let risky = flag("risky")
-                    || (submit && is_dialog(&w))
-                    || self.looks_risky(&w, &[&aim.name]);
+                    || (submit && enter_confirms(is_dialog(&w), picks_file))
+                    || looks_risky_in(&w, &said, &[&aim.name]);
+                let act = act_of(Kind::Type, &w, &said, aim.control, &aim.name, "");
                 let point = aim_point(&w, &aim);
-                allow(app, &root, "operate", &what, risky, point, &reason)?;
+                allow_act(app, &root, &what, risky, &act, point, &reason)?;
                 watch::follow(w.pid);
                 let (before, mark, front) = (list_windows(), watch::mark(), front_before());
                 let acted = self.type_in(&w, &aim, typed, submit);
@@ -1806,11 +1889,13 @@ impl Desktop {
                 }
                 let what = format!("press {key} in {:?}", w.title);
                 let (focused, at) = self.focused(&w);
+                let said = self.said(&w);
                 let risky = flag("risky")
-                    || risky_key(&chord, is_dialog(&w))
-                    || self.looks_risky(&w, &[&focused, key]);
+                    || risky_key(&chord, enter_confirms(is_dialog(&w), said.file_dialog))
+                    || looks_risky_in(&w, &said, &[&focused, key]);
+                let act = act_of(Kind::Press, &w, &said, "", &focused, key);
                 let point = at.or_else(|| window_point(&w));
-                allow(app, &root, "operate", &what, risky, point, &reason)?;
+                allow_act(app, &root, &what, risky, &act, point, &reason)?;
                 watch::follow(w.pid);
                 let (before, mark, front) = (list_windows(), watch::mark(), front_before());
                 let pressed = bring_forward(&w).and_then(|()| send_strokes(&chord_input(&chord)));
@@ -2120,24 +2205,26 @@ impl Desktop {
         }
     }
 
-    /// Whether acting on `names` (an element, a key) in `w` looks risky:
-    /// by them, the title, and for a small dialog, what its text says.
-    fn looks_risky(&mut self, w: &Window, names: &[&str]) -> bool {
-        let mut texts: Vec<String> = names.iter().map(|n| n.to_string()).collect();
-        texts.push(w.title.clone());
-        if is_dialog(w) {
-            if let Ok(all) = self.all(w) {
-                if all.len() < SMALL_DIALOG {
-                    texts.extend(
-                        all.into_iter()
-                            .filter(|a| a.control == "Text")
-                            .map(|a| a.name),
-                    );
-                }
-            }
+    /// What `w` says, when it is a dialog: a small one's text, and whether
+    /// it is a standard file dialog. A window that is not a dialog says
+    /// nothing here; its title speaks for it.
+    fn said(&mut self, w: &Window) -> Said {
+        if !is_dialog(w) {
+            return Said::default();
         }
-        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-        looks_risky(&refs)
+        let Ok(all) = self.all(w) else {
+            return Said::default();
+        };
+        let file_dialog = all.iter().any(|a| file_name_field(a.control, &a.name));
+        let texts = if all.len() < SMALL_DIALOG {
+            all.into_iter()
+                .filter(|a| a.control == "Text" && !a.name.trim().is_empty())
+                .map(|a| a.name)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Said { texts, file_dialog }
     }
 
     /// The name of what has the keyboard, when it is in `w`, and its
@@ -2501,6 +2588,27 @@ impl Desktop {
 
 /// What came of an action on `w`, told by the watcher from change `mark`
 /// on, or by the windows that are new since `before` when it has nothing.
+/// Whether acting on `names` (an element, a key) in `w` looks risky: by
+/// them, the title, and for a small dialog, what its text says.
+fn looks_risky_in(w: &Window, said: &Said, names: &[&str]) -> bool {
+    let mut texts: Vec<&str> = names.to_vec();
+    texts.push(&w.title);
+    texts.extend(said.texts.iter().map(String::as_str));
+    looks_risky(&texts)
+}
+
+/// An operate action in parts, for the patterns the human pre-approved.
+fn act_of(kind: Kind, w: &Window, said: &Said, control: &str, name: &str, key: &str) -> Act {
+    Act {
+        kind: Some(kind),
+        window: w.title.clone(),
+        control: control.to_string(),
+        name: name.to_string(),
+        key: key.to_string(),
+        texts: said.texts.clone(),
+    }
+}
+
 fn came_of(before: &[Window], w: &Window, mark: u64) -> String {
     if watch::following(w.pid) {
         watch::flush();
@@ -2969,6 +3077,82 @@ mod tests {
         let seeing = allow_body(&w, "see", "look", false, None, "");
         assert_eq!(seeing["point"], Value::Null);
         assert_eq!(seeing["reason"], "");
+    }
+
+    #[test]
+    fn a_file_dialog_s_name_box_is_told_by_its_name() {
+        assert!(file_name_field("ComboBox", "File name:"));
+        assert!(file_name_field("Edit", "File name:"));
+        assert!(file_name_field("Edit", "File &name:"));
+        assert!(file_name_field("Edit", " Filnavn: "));
+        assert!(!file_name_field("Text", "File name:"));
+        assert!(!file_name_field("Button", "File name:"));
+        assert!(!file_name_field("Edit", "File name filter"));
+        assert!(!file_name_field("Edit", "Controller name:"));
+    }
+
+    #[test]
+    fn enter_confirms_a_dialog_but_not_a_file_dialog() {
+        assert!(enter_confirms(true, false));
+        assert!(!enter_confirms(true, true));
+        assert!(!enter_confirms(false, false));
+        // A file dialog still confirms nothing by Enter, but Delete in its
+        // file list is risky all the same.
+        let k = |s: &str| parse_key(s).unwrap();
+        assert!(!risky_key(&k("Enter"), enter_confirms(true, true)));
+        assert!(risky_key(&k("Enter"), enter_confirms(true, false)));
+        assert!(risky_key(&k("Delete"), enter_confirms(true, true)));
+    }
+
+    #[test]
+    fn typing_a_path_into_a_file_dialog_is_not_risky_by_itself() {
+        let save = win(5, "Export", "SysmacStudio.exe");
+        let said = Said {
+            texts: Vec::new(),
+            file_dialog: true,
+        };
+        assert!(!looks_risky_in(&save, &said, &["File name:"]));
+        let picks_file = said.file_dialog && file_name_field("ComboBox", "File name:");
+        assert!(!enter_confirms(true, picks_file));
+        // In any other field of it, Enter confirms as in any dialog.
+        let other = said.file_dialog && file_name_field("Edit", "Search");
+        assert!(enter_confirms(true, other));
+        // A dialog that asks about a transfer is risky whatever is clicked.
+        let ask = win(6, "Sysmac Studio", "SysmacStudio.exe");
+        let said = Said {
+            texts: vec!["Transfer to the Controller?".into()],
+            file_dialog: false,
+        };
+        assert!(looks_risky_in(&ask, &said, &["Yes"]));
+    }
+
+    #[test]
+    fn an_act_is_sent_in_parts_beside_the_sentence() {
+        let w = win(5, "Import solution", "SysmacStudio.exe");
+        let said = Said {
+            texts: vec!["Replace?".into()],
+            file_dialog: true,
+        };
+        let act = act_of(Kind::Press, &w, &said, "", "File name:", "Enter");
+        assert_eq!(
+            act_json(&act),
+            json!({
+                "kind": "press",
+                "window": "Import solution",
+                "control": "",
+                "name": "File name:",
+                "key": "Enter",
+                "texts": ["Replace?"],
+            })
+        );
+        let mut sent = Value::Null;
+        let mut app = |body: Value| {
+            sent = body;
+            Ok(json!({ "allowed": true }))
+        };
+        assert!(allow_act(&mut app, &w, "press Enter", false, &act, None, "").is_ok());
+        assert_eq!(sent["action"], "operate");
+        assert_eq!(sent["act"]["kind"], "press");
     }
 
     #[test]

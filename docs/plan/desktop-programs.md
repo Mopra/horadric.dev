@@ -90,7 +90,9 @@ window and operate it, within what the human allowed. Windows only.
   operate, and the risky question is asked whatever the grant, from the
   list or a dialog. This is OptiPeople's rule for customers' equipment:
   nothing on a machine is changed without a technician's yes, each time.
-  Only the plate's Bypass, the human there and holding Esc, skips it.
+  Only the plate's Bypass, the human there and holding Esc, skips it,
+  and since 2026-11-18 a pattern the technician pre-approved for that one
+  action (below).
 - **Bypass ends with the work.** Seen on 2026-11-12: a session finished
   its task and the plate still said Bypass on. Bypass is now on for the
   session the plate showed when it was turned on and for every session
@@ -126,6 +128,55 @@ window and operate it, within what the human allowed. Windows only.
   - `desktop_text` reads lists, grids, output panes and editors: UI
     Automation's text pattern first, else select all and copy (an
     operate action), putting the clipboard's text back after.
+- **From the unattended servicetjek machine, 2026-11-18.** Sessions there
+  run with nobody at the screen, so every risky question ended "refused
+  by the human", and sessions said the question covered Sysmac Studio's
+  own dialogs. The question then was topmost, centred under the mouse
+  (which the agent's real clicks had just put on the program), and took
+  the focus and the mouse; any click or focus change elsewhere put it
+  away, which counted as a refusal. A session's own next action in the
+  program refused its question for it. So:
+  - A question about a program is put aside (`dialog::show_aside`): in
+    the corner of the program's screen that covers least of its window
+    and its last dialog, bottom right by the tray when they tie, not
+    topmost, shown without the focus and without capturing the mouse.
+    Losing the focus or the mouse no longer answers it; only a button,
+    Esc in it, or its time does.
+  - It waits `answer_within` seconds from the file (60 when not set, 10
+    to 80, since the agent's call gives up at 90; a question queued
+    behind others waits only the rest). Then the session is told no
+    technician answered, nothing was done, and to ask in the chat, and
+    `desktop.log` says "no answer, nobody answered within N s", apart
+    from "refused by the human". A queued call whose agent already gave
+    up is dropped, not asked late.
+  - Enter in a standard Open or Save dialog (one with an edit field or
+    combo box named "File name:", "Filnavn:" or "Dateiname:") and typing
+    a path into that box with Enter are no longer risky by themselves:
+    they pick a file on this PC. The dialog's title and the element's
+    name are still checked for the risky words, and Delete there is
+    still risky.
+  - Pre-approved actions. This changes the rule above, at the human's
+    ask: a listed program at operate can carry `pre_approved` patterns,
+    each the technician's yes ahead of time for one named action, so the
+    rule still holds that nothing changes without a technician's yes.
+    A pattern has an `action` (click, type, press) and must name the
+    element (`name`, for click and type) or the key (`key`, for press),
+    not by wildcards alone; it may narrow by `window` (the title of the
+    window acted in, the dialog's own for a dialog), `control` (the UI
+    Automation type), `text` (a line of a small dialog's text, its
+    question) and `session` (the session's name, so a pattern can be
+    for one task). Text is matched whole, ignoring case and runs of
+    spaces, with `*` for any run. Unknown fields fail the file, since a
+    misspelt one would match more than meant. The MCP process sends the
+    action in parts (`act`) beside its sentence, and the app matches
+    them; every action a pattern lets through is logged as "operate from
+    the list, pre-approved: PATTERN". The log names the window and a
+    small dialog's question beside the action, so the human can write a
+    pattern from a line of it. `horadric desktop approve|unapprove`.
+  - Sysmac Studio's "Transfer..." stays risky: one menu item for both
+    directions. A direction is pre-approved for one task by a pattern
+    with `session`, on the direction's own button, and with the menu
+    item too when that task should not be asked at all.
 - **Seen on the stage.** Every operate action shows a notification naming
   the session and the program, so the human always knows an agent has
   their program in hand.

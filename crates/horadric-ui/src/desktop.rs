@@ -6,15 +6,22 @@
 //! for the life of the app: a program's dialogs are the same program, so
 //! allowing Sysmac Studio covers its Transfer dialog too. A risky action is
 //! never kept. Each one is asked, since one wrong click there can stop a
-//! machine.
+//! machine, unless the human pre-approved that very action on the list.
 //!
 //! The human can also list programs ahead of time, in
 //! `desktop-programs.json` (see [`horadric_core::desktop_programs`]). A
 //! listed program is let in that far for every session without the
-//! approval question, and the file is read again whenever it changes. The
-//! list never covers a risky action, which is asked all the same. Each
-//! grant from the list is shown once per session and program and written
-//! to `desktop.log`, with the answers to the questions beside it.
+//! approval question, and the file is read again whenever it changes. A
+//! risky action is asked all the same, unless it matches one of the
+//! program's pre-approved patterns. Each grant from the list is shown once
+//! per session and program and written to `desktop.log`, with the answers
+//! to the questions and every pre-approved risky action beside it.
+//!
+//! A question is put aside from the program it is about (see
+//! [`crate::dialog::show_aside`]), so the program's own dialogs stay in
+//! sight and in reach, and it waits only so long: nobody answering is told
+//! to the session as no answer, not as a refusal, so on a machine with
+//! nobody at it the session asks in the chat instead of waiting.
 //!
 //! One session drives a program at a time. While a session that operated
 //! a program is still at work, another session's operate call in the same
@@ -37,17 +44,22 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
-use horadric_core::desktop_programs::{self as listed, Entry, Level, Source};
+use std::time::Duration;
+
+use horadric_core::desktop_programs::{self as listed, Act, Entry, Kind as ActKind, Level, Source};
 use horadric_hooks::listener::{BrowserCall, Reply};
 use serde_json::{json, Value};
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetLastActivePopup, GetWindowRect, IsIconic, IsWindow, IsWindowVisible,
+};
 
 use super::ghost::{self, Allowed};
-use super::{ask, post, with_app, App, WM_HORADRIC_DESKTOP};
-use crate::dialog::{Dialog, Tone};
+use super::{ask_aside, post, with_app, App, WM_HORADRIC_DESKTOP};
+use crate::dialog::{Answer, Aside, Dialog, Tone};
 use crate::toast::Kind;
 
 /// How far the human lets a session into a program.
@@ -86,6 +98,8 @@ pub(super) enum Refusal {
     Refused,
     /// Asked to operate, allowed only to look.
     OnlyLook,
+    /// Nobody answered within so many seconds.
+    NoAnswer(u64),
 }
 
 /// The approval question's buttons, in order.
@@ -167,6 +181,25 @@ pub(super) fn risky_answered(pressed: Option<usize>) -> Decision {
     }
 }
 
+/// How long a question still waits, `within` seconds from when its call
+/// came, `waited` ago. Never so short the human can not read it.
+pub(super) fn time_left(within: u64, waited: Duration) -> Duration {
+    Duration::from_secs(within)
+        .saturating_sub(waited)
+        .max(Duration::from_secs(5))
+}
+
+/// The button an answer pressed, if any, and the refusal for none at all.
+/// Nobody answering refuses the call too, but says so, so the session
+/// asks in the chat rather than taking it for the human's no.
+pub(super) fn pressed_of(answer: Answer, secs: u64) -> Result<Option<usize>, Refusal> {
+    match answer {
+        Answer::Pressed(i) => Ok(Some(i)),
+        Answer::Dismissed => Ok(None),
+        Answer::Unanswered => Err(Refusal::NoAnswer(secs)),
+    }
+}
+
 /// The button Enter presses at first: the least that does what was asked.
 pub(super) fn approve_default(action: Action) -> usize {
     match action {
@@ -197,6 +230,19 @@ pub(super) fn refusal_text(why: Refusal, action: Action, risky: bool, exe: &str)
             format!("the human refused this change in {exe}")
         }
         (Refusal::Refused, Action::Operate) => format!("the human refused operating {exe}"),
+        (Refusal::NoAnswer(secs), _) => {
+            let what = if risky {
+                "this change"
+            } else {
+                "letting you use it"
+            };
+            format!(
+                "no technician answered Horadric's question about {what} in {exe} within \
+                 {secs} s, so nothing was done. Nobody may be at this machine: ask in the chat. \
+                 If this action is safe to do without asking, the human can pre-approve it on \
+                 the list (horadric desktop approve)"
+            )
+        }
     }
 }
 
@@ -213,6 +259,7 @@ pub(super) fn refusal_word(why: Refusal) -> &'static str {
     match why {
         Refusal::Refused => "refused by the human",
         Refusal::OnlyLook => "only looking was allowed",
+        Refusal::NoAnswer(_) => "no answer",
     }
 }
 
@@ -268,6 +315,9 @@ pub(super) struct Request {
     pub point: Option<(i32, i32)>,
     /// The agent's own sentence on why.
     pub reason: String,
+    /// An operate action in parts, for the pre-approved patterns. Empty
+    /// for looking, and from an MCP process before parts were sent.
+    pub act: Act,
 }
 
 /// A finished action, as `desktop.done` tells it.
@@ -292,6 +342,56 @@ pub(super) fn parse_done(body: &Value) -> Done {
         ok: body.get("ok").and_then(Value::as_bool).unwrap_or(true),
         outcome: text("outcome"),
     }
+}
+
+/// Reads the parts of an operate action. Anything missing is left empty,
+/// which no pattern matches but a wildcard.
+pub(super) fn act_of(v: Option<&Value>) -> Act {
+    let Some(v) = v else {
+        return Act::default();
+    };
+    let text = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Act {
+        kind: v
+            .get("kind")
+            .and_then(Value::as_str)
+            .and_then(|k| ActKind::parse(k).ok()),
+        window: text("window"),
+        control: text("control"),
+        name: text("name"),
+        key: text("key"),
+        texts: v
+            .get("texts")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// What the log and the question say a call does: its sentence, and where,
+/// when that is a window of its own, with what a small dialog asks. The
+/// human writes a pattern from it.
+pub(super) fn what_where(what: &str, act: &Act, title: &str) -> String {
+    let mut said = what.trim().to_string();
+    let window = act.window.trim();
+    if !window.is_empty() && window != title.trim() {
+        said.push_str(&format!(" in window {window:?}"));
+    }
+    if let Some(text) = act.texts.iter().map(|t| t.trim()).find(|t| !t.is_empty()) {
+        let short: String = text.chars().take(100).collect();
+        said.push_str(&format!(" saying {short:?}"));
+    }
+    said
 }
 
 fn point_of(v: Option<&Value>) -> Option<(i32, i32)> {
@@ -332,6 +432,10 @@ pub(super) fn parse(body: &Value) -> Result<Request, String> {
         risky: body.get("risky").and_then(Value::as_bool).unwrap_or(false),
         point: point_of(body.get("point")),
         reason: text(body.get("reason")),
+        act: match action {
+            Action::Operate => act_of(body.get("act")),
+            Action::See => Act::default(),
+        },
     })
 }
 
@@ -340,6 +444,9 @@ pub(super) struct Pending {
     session: String,
     request: Request,
     reply: Reply,
+    /// When it came, so a question asked after others waits only the rest
+    /// of its time.
+    since: Instant,
 }
 
 impl Pending {
@@ -355,6 +462,12 @@ impl Pending {
         } else {
             &r.path
         }
+    }
+
+    /// What it does, as the log says it.
+    fn what(&self) -> String {
+        let r = &self.request;
+        what_where(&r.what, &r.act, &r.title)
     }
 
     fn refuse(&self, why: Refusal) {
@@ -381,9 +494,9 @@ pub(super) fn listed_name<'a>(exe: &'a str, path: &'a str) -> &'a str {
 /// The list as last read, and the file's stamp then, so it is read again
 /// only when it changes.
 #[derive(Default)]
-struct List {
+struct Listed {
     stamp: Option<(SystemTime, u64)>,
-    entries: Vec<Entry>,
+    list: listed::List,
 }
 
 /// What the human allowed, and the calls waiting to be asked.
@@ -391,7 +504,7 @@ struct List {
 pub(super) struct Desktop {
     grants: HashMap<(String, String), Grant>,
     waiting: VecDeque<Pending>,
-    list: List,
+    list: Listed,
     /// The session, program and level each grant from the list was shown
     /// for, so it is shown once and not on every screenshot.
     told: HashSet<(String, String, Level)>,
@@ -419,20 +532,29 @@ impl Desktop {
             None => String::new(),
         };
         match listed::parse(&text) {
-            Ok(entries) => {
-                self.list.entries = entries;
+            Ok(list) => {
+                self.list.list = list;
                 None
             }
             Err(why) => {
-                self.list.entries.clear();
+                self.list.list = listed::List::default();
                 Some(format!("{}: {why}", file.display()))
             }
         }
     }
 
-    fn level_of(&self, r: &Request) -> Option<Level> {
+    fn entry_of(&self, r: &Request) -> Option<&Entry> {
         let name = listed_name(&r.exe, &r.path);
-        listed::find(&self.list.entries, &r.path, name).map(|e| e.level)
+        listed::find(&self.list.list.programs, &r.path, name)
+    }
+
+    fn level_of(&self, r: &Request) -> Option<Level> {
+        self.entry_of(r).map(|e| e.level)
+    }
+
+    /// How long a question waits for the human, in seconds.
+    fn answer_within(&self) -> u64 {
+        self.list.list.answer_within()
     }
 }
 
@@ -470,6 +592,10 @@ pub(super) struct Question {
     /// Its id and start.
     ident: String,
     risky: bool,
+    /// How long it waits for the human, in seconds.
+    within: u64,
+    /// What is left of that after waiting behind other questions.
+    left: Duration,
 }
 
 thread_local! {
@@ -505,6 +631,7 @@ impl App {
             session: call.session,
             request,
             reply: call.reply,
+            since: Instant::now(),
         };
         if let Some(why) = self.desktop.refresh() {
             let name = self.name_of(&pending.session);
@@ -611,20 +738,38 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// The pattern on the list that lets this risky call go ahead unasked,
+    /// in words, when the session may operate the program.
+    fn pre_approval(&self, p: &Pending, own: Grant) -> Option<String> {
+        let r = &p.request;
+        let entry = self.desktop.entry_of(r)?;
+        if !r.risky || effective(own, Some(entry.level)) != Grant::Operate {
+            return None;
+        }
+        listed::pre_approved(entry, &r.act, &self.name_of(&p.session)).map(|a| a.describe())
+    }
+
     /// What becomes of a call with what the human answered and what the
     /// list allows, before bypass. Going ahead on the list alone is shown
-    /// once and logged, so the human can tell it was not asked.
+    /// once and logged, so the human can tell it was not asked; a risky
+    /// action going ahead on a pre-approved pattern is logged every time.
     fn decision_for(&mut self, p: &Pending) -> Decision {
         let own = self.grant_of(p);
         let level = self.desktop.level_of(&p.request);
         let r = &p.request;
-        let decision = decide(effective(own, level), r.action, r.risky);
-        if let Some(level) = level.filter(|_| by_the_list(own, level, r.action, r.risky)) {
+        let pre = self.pre_approval(p, own);
+        let risky = r.risky && pre.is_none();
+        let decision = decide(effective(own, level), r.action, risky);
+        if let Some(pattern) = pre {
+            let name = self.name_of(&p.session);
+            log(&name, Source::PreApproved(pattern), p.program(), &p.what());
+        }
+        if let Some(level) = level.filter(|_| by_the_list(own, level, r.action, risky)) {
             let told = (p.session.clone(), p.program().to_lowercase(), level);
             if self.desktop.told.insert(told) {
                 let name = self.name_of(&p.session);
                 let program = program_name(listed_name(&r.exe, &r.path));
-                log(&name, Source::List(level), p.program(), &r.what);
+                log(&name, Source::List(level), p.program(), &p.what());
                 let may = match level {
                     Level::Look => "look at",
                     Level::Operate => "operate",
@@ -650,7 +795,7 @@ impl App {
     fn allow(&mut self, p: Pending, unasked: bool) {
         if unasked {
             let name = self.name_of(&p.session);
-            log(&name, Source::Bypass, p.program(), &p.request.what);
+            log(&name, Source::Bypass, p.program(), &p.what());
         }
         let r = p.request;
         let name = self.name_of(&p.session);
@@ -698,6 +843,11 @@ impl App {
     /// those that what was allowed since now covers.
     fn next_question(&mut self) -> Option<Question> {
         while let Some(p) = self.desktop.waiting.pop_front() {
+            if !p.reply.wanted() {
+                // Its agent gave up waiting behind other questions, and
+                // was told the call failed: asking now would act late.
+                continue;
+            }
             let asked = self.decision_for(&p);
             match bypassed(asked, ghost::bypass()) {
                 (Decision::Allow, held) => self.allow(p, held),
@@ -709,6 +859,8 @@ impl App {
                         name: self.name_of(&p.session),
                         ident: self.ident_of(&p.session),
                         risky: ask == Decision::AskRisky,
+                        within: self.desktop.answer_within(),
+                        left: time_left(self.desktop.answer_within(), p.since.elapsed()),
                         pending: p,
                     });
                 }
@@ -728,13 +880,30 @@ impl App {
     /// Acts on the human's answer. A question back when there is another
     /// to ask about the same call: allowed to operate, it may still be a
     /// risky one.
-    fn answered(&mut self, mut q: Question, pressed: Option<usize>) -> Option<Question> {
+    fn answered(&mut self, mut q: Question, answer: Answer) -> Option<Question> {
         self.desktop.asking = None;
         let r = &q.pending.request;
+        let pressed = match pressed_of(answer, q.within) {
+            Ok(pressed) => pressed,
+            Err(why) => {
+                let source = Source::NoAnswer {
+                    risky: q.risky,
+                    secs: q.within,
+                };
+                log(&q.name, source, q.pending.program(), &q.pending.what());
+                self.refuse(q.pending, why);
+                return None;
+            }
+        };
         let decision = if q.risky {
             let decision = risky_answered(pressed);
             let done = decision == Decision::Allow;
-            log(&q.name, Source::Risky(done), q.pending.program(), &r.what);
+            log(
+                &q.name,
+                Source::Risky(done),
+                q.pending.program(),
+                &q.pending.what(),
+            );
             decision
         } else {
             // Only what the human answers is kept here. The list is read
@@ -747,7 +916,12 @@ impl App {
                 Some(1) => Some(Level::Look),
                 _ => None,
             };
-            log(&q.name, Source::Asked(level), q.pending.program(), &r.what);
+            log(
+                &q.name,
+                Source::Asked(level),
+                q.pending.program(),
+                &q.pending.what(),
+            );
             decision
         };
         match decision {
@@ -780,8 +954,12 @@ pub(super) fn ask_waiting(hwnd: HWND) {
     ASKING.set(true);
     let mut next = first;
     while let Some(q) = next {
-        let pressed = ask_owned(&dialog(&q));
-        next = match with_app(|app| app.answered(q, pressed)) {
+        let aside = Aside {
+            avoid: windows_of(q.pending.request.hwnd),
+            within: q.left,
+        };
+        let answer = ask_owned(&dialog(&q), &aside);
+        next = match with_app(|app| app.answered(q, answer)) {
             Some(again @ Some(_)) => again,
             Some(None) => with_app(App::next_question).flatten(),
             // Not reachable from here, where nothing holds the app, but a
@@ -791,6 +969,44 @@ pub(super) fn ask_waiting(hwnd: HWND) {
         };
     }
     ASKING.set(false);
+}
+
+/// Where the program asked about is on screen, with the dialog it shows
+/// last, as left, top, right, bottom, so the question keeps clear of both.
+/// Nothing when it is gone, hidden or minimised.
+fn windows_of(hwnd: isize) -> Option<[i32; 4]> {
+    let h = HWND(hwnd as *mut _);
+    if hwnd == 0 {
+        return None;
+    }
+    let rect = |h: HWND| {
+        let mut r = RECT::default();
+        unsafe { GetWindowRect(h, &mut r) }
+            .ok()
+            .map(|()| [r.left, r.top, r.right, r.bottom])
+    };
+    unsafe {
+        if !IsWindow(Some(h)).as_bool() || !IsWindowVisible(h).as_bool() || IsIconic(h).as_bool() {
+            return None;
+        }
+    }
+    let main = rect(h)?;
+    let popup = unsafe { GetLastActivePopup(h) };
+    let shown = popup != h && unsafe { IsWindowVisible(popup) }.as_bool();
+    Some(match rect(popup).filter(|_| shown) {
+        Some(d) => union(main, d),
+        None => main,
+    })
+}
+
+/// The smallest rectangle holding both.
+pub(super) fn union(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
+    [
+        a[0].min(b[0]),
+        a[1].min(b[1]),
+        a[2].max(b[2]),
+        a[3].max(b[3]),
+    ]
 }
 
 fn dialog(q: &Question) -> OwnedDialog {
@@ -806,9 +1022,12 @@ fn dialog(q: &Question) -> OwnedDialog {
             title: format!("{} wants to change something in {program}", q.name),
             text: format!(
                 "It wants to {}{window}.\n\nSession {}.\n\nThis is asked every time, even with \
-                 {program} allowed.",
-                what_or(&r.what, "act"),
-                q.ident
+                 {program} allowed, unless this very action is pre-approved on the list \
+                 (horadric desktop approve). Unanswered after {} s, the session is told nobody \
+                 answered.",
+                what_or(&q.pending.what(), "act"),
+                q.ident,
+                q.within
             ),
             buttons: &RISKY,
             default: 1,
@@ -821,14 +1040,16 @@ fn dialog(q: &Question) -> OwnedDialog {
                 "First it wants to {}{window}.\n\nSession {}.\n\nLooking is screenshots and reading the \
                  window. Operating is clicking and typing in it, and in its dialogs. What you \
                  allow lasts until Horadric restarts. To allow it for every session ahead of \
-                 time, list it: horadric desktop allow \"{}\" operate (or look).",
+                 time, list it: horadric desktop allow \"{}\" operate (or look). Unanswered \
+                 after {} s, the session is told nobody answered.",
                 what_or(&r.what, "look at it"),
                 q.ident,
                 if r.path.is_empty() {
                     listed_name(&r.exe, "")
                 } else {
                     &r.path
-                }
+                },
+                q.within
             ),
             buttons: &APPROVE,
             default: approve_default(r.action),
@@ -852,15 +1073,16 @@ struct OwnedDialog {
     default: usize,
 }
 
-fn ask_owned(d: &OwnedDialog) -> Option<usize> {
-    ask(&Dialog {
+fn ask_owned(d: &OwnedDialog, aside: &Aside) -> Answer {
+    let dialog = Dialog {
         tone: d.tone,
         title: &d.title,
         text: &d.text,
         buttons: d.buttons,
         default: d.default,
         check: None,
-    })
+    };
+    ask_aside(&dialog, aside)
 }
 
 #[cfg(test)]
@@ -1151,8 +1373,107 @@ mod tests {
                 risky: true,
                 point: Some((-1200, 340)),
                 reason: "Confirm the transfer the human asked for.".into(),
+                act: Act::default(),
             })
         );
+    }
+
+    #[test]
+    fn an_operate_call_s_parts_are_read_for_the_patterns() {
+        let body = json!({
+            "op": "desktop.allow",
+            "window": {"exe": "SysmacStudio.exe", "title": "Proj - Sysmac Studio"},
+            "action": "operate",
+            "what": "click Button \"Yes\"",
+            "risky": true,
+            "act": {
+                "kind": "click",
+                "window": "Sysmac Studio",
+                "control": "Button",
+                "name": "Yes",
+                "key": "",
+                "texts": ["Delete the project?", 3],
+            },
+        });
+        let r = parse(&body).unwrap();
+        assert_eq!(
+            r.act,
+            Act {
+                kind: Some(ActKind::Click),
+                window: "Sysmac Studio".into(),
+                control: "Button".into(),
+                name: "Yes".into(),
+                key: String::new(),
+                texts: vec!["Delete the project?".into()],
+            }
+        );
+        assert_eq!(
+            what_where(&r.what, &r.act, &r.title),
+            "click Button \"Yes\" in window \"Sysmac Studio\" saying \"Delete the project?\""
+        );
+        // Looking has no parts, whatever is sent.
+        let mut see = body.clone();
+        see["action"] = json!("see");
+        assert_eq!(parse(&see).unwrap().act, Act::default());
+        // An unknown kind matches no pattern.
+        see["action"] = json!("operate");
+        see["act"]["kind"] = json!("drag");
+        assert_eq!(parse(&see).unwrap().act.kind, None);
+    }
+
+    #[test]
+    fn the_window_is_said_only_when_it_is_not_the_main_one() {
+        let act = Act {
+            window: "Proj - Sysmac Studio".into(),
+            ..Act::default()
+        };
+        assert_eq!(
+            what_where(
+                "click MenuItem \"Transfer...\"",
+                &act,
+                "Proj - Sysmac Studio"
+            ),
+            "click MenuItem \"Transfer...\""
+        );
+        assert_eq!(what_where("look", &Act::default(), "x"), "look");
+    }
+
+    #[test]
+    fn a_question_waits_the_rest_of_its_time() {
+        assert_eq!(time_left(60, Duration::ZERO), Duration::from_secs(60));
+        assert_eq!(
+            time_left(60, Duration::from_secs(20)),
+            Duration::from_secs(40)
+        );
+        assert_eq!(
+            time_left(60, Duration::from_secs(90)),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn nobody_answering_is_not_a_refusal() {
+        assert_eq!(pressed_of(Answer::Pressed(1), 60), Ok(Some(1)));
+        assert_eq!(pressed_of(Answer::Dismissed, 60), Ok(None));
+        assert_eq!(
+            pressed_of(Answer::Unanswered, 45),
+            Err(Refusal::NoAnswer(45))
+        );
+        let told = refusal_text(
+            Refusal::NoAnswer(45),
+            Action::Operate,
+            true,
+            "SysmacStudio.exe",
+        );
+        assert!(told.starts_with("no technician answered"), "{told}");
+        assert!(told.contains("within 45 s") && told.contains("ask in the chat"));
+        assert!(!told.contains("refused"));
+        assert_eq!(refusal_word(Refusal::NoAnswer(45)), "no answer");
+    }
+
+    #[test]
+    fn a_question_keeps_clear_of_the_program_and_its_dialog() {
+        assert_eq!(union([0, 0, 10, 10], [5, -5, 20, 8]), [0, -5, 20, 10]);
     }
 
     #[test]

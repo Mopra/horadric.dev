@@ -133,6 +133,9 @@ Usage:
                                The desktop programs every session may use without
                                being asked (risky actions are asked all the same),
                                and the log of grants and answers
+  horadric desktop approve PROGRAM click|type|press NAME|KEY [--window W] ...
+                               Pre-approve one named risky action in a listed
+                               program (unapprove PROGRAM N takes it off)
   horadric backup now [--folder DIR]
                                Back the memory and the lore up, encrypted, into
                                DIR\\Horadric backup\\<this PC>; the folder is remembered
