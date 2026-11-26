@@ -59,8 +59,8 @@ impl App {
         }
         // The agent's desk is no project's either. The key keeps any
         // other local program from opening it under a session's name.
-        if let Some(op) = (call.body.get("op").and_then(Value::as_str))
-            .filter(|op| op.starts_with("desk."))
+        if let Some(op) =
+            (call.body.get("op").and_then(Value::as_str)).filter(|op| op.starts_with("desk."))
         {
             if !self.keyed(&call.session, &call.body) {
                 return call.reply.send(error(

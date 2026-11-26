@@ -120,12 +120,14 @@ fn step(answer: Result<Value, String>) -> Step {
         Ok(a) => a,
         Err(e) => return Step::Stop(format!("Horadric did not open the agent's desk: {e}")),
     };
-    let status = answer["status"].as_str().unwrap_or_default().trim().to_string();
+    let status = answer["status"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     match answer["desk"].as_str() {
         Some("open") | Some("opening") => Step::Wait(status),
-        Some("failed") if status.is_empty() => {
-            Step::Stop("The agent's desk did not open.".into())
-        }
+        Some("failed") if status.is_empty() => Step::Stop("The agent's desk did not open.".into()),
         Some("failed") => Step::Stop(format!("The agent's desk did not open: {status}")),
         Some("closed") => Step::Stop(
             "The agent's desk closed before it was ready, or its window could not be made. \
@@ -1267,7 +1269,10 @@ mod tests {
         let Step::Stop(why) = said("failed", "That account is locked.") else {
             panic!("a failure is no wait");
         };
-        assert!(why.ends_with("did not open: That account is locked."), "{why}");
+        assert!(
+            why.ends_with("did not open: That account is locked."),
+            "{why}"
+        );
         assert!(matches!(said("failed", ""), Step::Stop(w) if w.ends_with("did not open.")));
         assert!(matches!(said("closed", ""), Step::Stop(w) if w.contains("closed")));
         // An app that knows no desk.open answers with an error or nothing
@@ -1322,9 +1327,9 @@ mod tests {
         let (port, asked) = hand(TOKEN, (200, "{}"));
         let mut at = desk("fails", port, Some(TOKEN));
         std::fs::remove_file(at.session_file.as_ref().unwrap()).unwrap();
-        let (opener, ops) = app(|_| {
-            json!({ "desk": "failed", "status": "The desk needs your Windows password to sign in." })
-        });
+        let (opener, ops) = app(
+            |_| json!({ "desk": "failed", "status": "The desk needs your Windows password to sign in." }),
+        );
         at.app = Some(opener);
         let start = Instant::now();
         let e = answer(&at, "desk_click", &json!({ "x": 1, "y": 2 })).unwrap_err();
@@ -1355,7 +1360,10 @@ mod tests {
         assert_eq!(hold_left(secs(120)), None);
         assert_eq!(hold_left(secs(600)), None);
         let said = held_text("The agent's desk did not open.", Duration::from_millis(400));
-        assert!(said.starts_with("The agent's desk did not open. "), "{said}");
+        assert!(
+            said.starts_with("The agent's desk did not open. "),
+            "{said}"
+        );
         assert!(said.contains("in 1 second."), "{said}");
     }
 

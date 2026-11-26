@@ -2181,8 +2181,18 @@ mod tests {
         assert!(!opened_covers("", "", "x.exe", None));
         // A host only by the app it shows.
         let id = "Acme.Thing_x!App";
-        assert!(opened_covers(id, id, "ApplicationFrameHost.exe", Some("acme.thing_x!app")));
-        assert!(!opened_covers(id, id, "ApplicationFrameHost.exe", Some("Other!App")));
+        assert!(opened_covers(
+            id,
+            id,
+            "ApplicationFrameHost.exe",
+            Some("acme.thing_x!app")
+        ));
+        assert!(!opened_covers(
+            id,
+            id,
+            "ApplicationFrameHost.exe",
+            Some("Other!App")
+        ));
         assert!(!opened_covers("explorer.exe", "", "explorer.exe", None));
         assert!(!opened_covers("horadric.exe", "", "horadric.exe", None));
         let body = json!({
