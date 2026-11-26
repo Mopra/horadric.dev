@@ -29,6 +29,11 @@ mod windows_only {
     }
 
     fn run() -> Result<(), String> {
+        // Put in Startup, this runs at the sign-in of the agent's desk
+        // too, where no second Horadric is to start or be asked anything.
+        if horadric_ui::desk::hand::in_desk() {
+            return Ok(());
+        }
         let port = horadric_hooks::port();
         // Explorer quotes the path, and a drive root's trailing backslash then
         // escapes the closing quote: `"C:\"` arrives as `C:"`.

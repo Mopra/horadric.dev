@@ -223,10 +223,10 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "horadric", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": match (self.browser, HAS_LORE) {
-                    (true, true) => format!("{INSTRUCTIONS}
+                    (true, true) => format!("{}
 
-{LORE}"),
-                    (true, false) => INSTRUCTIONS.to_string(),
+{LORE}", instructions()),
+                    (true, false) => instructions(),
                     (false, true) => LORE.to_string(),
                     (false, false) => NOTHING.to_string(),
                 },
@@ -272,6 +272,22 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
             }
         }
         if let Some(answer) = crate::remote::call(name, args, &mut self.app) {
+            return answer;
+        }
+        if crate::desk::is_tool(name) {
+            if !cfg!(windows) {
+                return Err("the desk_ tools work only on Windows".into());
+            }
+            // The desk is for the sessions Horadric started, the ones
+            // these tools are listed to.
+            if !self.browser {
+                return Err(
+                    "this session was not started by Horadric, whose sessions the agent's                      desk is for: nothing was sent"
+                        .into(),
+                );
+            }
+        }
+        if let Some(answer) = crate::desk::call(name, args) {
             return answer;
         }
         let s = |k: &str| args.get(k).and_then(Value::as_str);
@@ -784,6 +800,7 @@ pub(crate) fn tool_list() -> Value {
         .into_iter()
         .chain(forge::tools())
         .chain(crate::remote::tools())
+        .chain(crate::desk::tools())
         .chain(lore_tools())
         .collect::<Vec<_>>())
 }
@@ -1052,7 +1069,19 @@ const NOTHING: &str = "This session was not started by Horadric, so it has no br
 
 pub(crate) const LORE: &str = "Horadric keeps notes shared by every session of this project, the lore. Before you explore a part of the code, ask lore_recall about it (words or files): another session may already have found out what you need. When you find out something the next session would otherwise have to find out again, leave it with lore_note, naming its files and, in backticks, the functions and types it is about. A note marked maybe stale is a lead, not a fact: check it, and when it is wrong or outdated leave the right one with replaces. It also keeps an index of the project's code: ask lore_find where a name is defined, lore_calls who calls it, and lore_outline what a file holds, before you grep or read whole files. Every line a Read returns stays in your context window for the rest of the session, and whole files are most of what fills it: outline a file first, then Read the lines you need with offset and limit, and send a search that would read many files to a subagent, whose window dies with it.";
 
-pub(crate) const INSTRUCTIONS: &str = "Horadric gives this session a browser, and it is the one to use: a pane on the Horadric stage beside the user's terminals, one per project with tabs, shared by the project's sessions. You work in a tab of your own: the first page you open becomes yours (the tab shown when it is blank, else a new one), and your calls stay in it whichever tab the user shows. A page the user is on is theirs: you can read it and act on it while it is shown, but opening a page never takes it. A popup your click opens becomes yours until it closes. The user sees the page you drive. Whenever a task needs the web (trying a page you built, testing a local server, reading docs, a login, a screenshot of a page), use these tools rather than Playwright, Puppeteer, the Chrome DevTools MCP, Claude in Chrome, or starting Chrome, Edge or a headless browser yourself, unless the user asks for one of those. When a task means changing a setting in a web service's dashboard (sign-in methods in Clerk, an environment variable in Vercel, a DNS record, an OAuth app), do it yourself in this browser rather than writing the user a list of steps: they are usually logged in already. Stop and ask only when a login needs their password or a code, or before a step that costs money, deletes something or cannot be undone. Open it with browser_open or browser_navigate, read it with browser_snapshot, act with browser_click, browser_type, browser_select (for a dropdown) and browser_press, and look \
+/// What a session Horadric started is told: the browser, and on Windows
+/// the agent's desk, which exists only there.
+pub(crate) fn instructions() -> String {
+    if cfg!(windows) {
+        format!("{INSTRUCTIONS} {DESK}")
+    } else {
+        INSTRUCTIONS.to_string()
+    }
+}
+
+const DESK: &str = "When a task needs a desktop app, the mouse or the keyboard outside a web page, use the desk_ tools: they drive the agent's desk, a Windows desktop of the user's own account that the user watches in a window while they keep working in their own session. They work once the user has opened the agent's desk from Horadric's tray menu, and say so when it is closed.";
+
+const INSTRUCTIONS: &str = "Horadric gives this session a browser, and it is the one to use: a pane on the Horadric stage beside the user's terminals, one per project with tabs, shared by the project's sessions. You work in a tab of your own: the first page you open becomes yours (the tab shown when it is blank, else a new one), and your calls stay in it whichever tab the user shows. A page the user is on is theirs: you can read it and act on it while it is shown, but opening a page never takes it. A popup your click opens becomes yours until it closes. The user sees the page you drive. Whenever a task needs the web (trying a page you built, testing a local server, reading docs, a login, a screenshot of a page), use these tools rather than Playwright, Puppeteer, the Chrome DevTools MCP, Claude in Chrome, or starting Chrome, Edge or a headless browser yourself, unless the user asks for one of those. When a task means changing a setting in a web service's dashboard (sign-in methods in Clerk, an environment variable in Vercel, a DNS record, an OAuth app), do it yourself in this browser rather than writing the user a list of steps: they are usually logged in already. Stop and ask only when a login needs their password or a code, or before a step that costs money, deletes something or cannot be undone. Open it with browser_open or browser_navigate, read it with browser_snapshot, act with browser_click, browser_type, browser_select (for a dropdown) and browser_press, and look \
 with browser_screenshot. Refs from browser_snapshot are surer than guessed selectors. Close your tab with \
 browser_close when you are done, unless the user is using it. It keeps one login profile with \
 the user's own use of it, so take care on sites where they are logged in.";
@@ -1154,6 +1183,32 @@ B.";
     }
 
     #[test]
+    fn the_desk_is_listed_and_told_of_where_it_exists() {
+        let (mut s, calls) = server(|_| Ok(json!({})));
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        let listed = s.handle(&list).unwrap()["result"]["tools"].to_string();
+        let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
+        let told = s.handle(&init).unwrap()["result"]["instructions"].to_string();
+        assert_eq!(listed.contains("\"desk_open\""), cfg!(windows));
+        assert_eq!(told.contains("desk_ tools"), cfg!(windows));
+        // A session Horadric did not start is refused before the desk is
+        // looked for, and the app is never asked: opening the desk is
+        // the human's yes.
+        s.browser = false;
+        let a = s
+            .handle(&call("desk_press", json!({ "key": "Enter" })))
+            .unwrap();
+        assert_eq!(a["result"]["isError"], true);
+        let said = a["result"]["content"][0]["text"].as_str().unwrap();
+        if cfg!(windows) {
+            assert!(said.contains("not started by Horadric"), "{said}");
+        } else {
+            assert!(said.contains("only on Windows"), "{said}");
+        }
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
     fn a_session_horadric_did_not_start_is_offered_only_the_lore() {
         let (mut s, _) = server(|_| Ok(json!({})));
         s.browser = false;
@@ -1204,13 +1259,14 @@ B.";
             tools(),
             forge::tools(),
             crate::remote::tools(),
+            crate::desk::tools(),
             lore_tools(),
         ]
         .concat()
         {
             let name = t["name"].as_str().unwrap();
             assert!(
-                ["browser_", "forge_", "remote_", "lore_"]
+                ["browser_", "forge_", "remote_", "desk_", "lore_"]
                     .iter()
                     .any(|p| name.starts_with(p)),
                 "{t}"
