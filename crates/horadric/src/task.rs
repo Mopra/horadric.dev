@@ -1052,7 +1052,7 @@ fn start(cwd: &Path) -> Result<(), String> {
         ),
         (
             "Horadric's MCP server instructions (browser, lore)".into(),
-            chars(crate::mcp::INSTRUCTIONS) + chars(crate::mcp::LORE),
+            chars(&crate::mcp::instructions()) + chars(crate::mcp::LORE),
         ),
         (
             "Horadric's MCP tool list, when not deferred".into(),

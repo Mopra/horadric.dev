@@ -20,6 +20,7 @@ mod code;
 mod console;
 #[cfg(not(target_os = "linux"))]
 mod context;
+mod desk;
 #[cfg(windows)]
 mod google;
 #[cfg(windows)]
@@ -155,6 +156,15 @@ Usage:
                                whose Horadric runs with HORADRIC_SCREEN_SHARE=1, in the
                                browser pane (through a tunnel kept for the next time);
                                --dev or HORADRIC_REMOTE_DEV=1 watches its dev instance
+  horadric remote close [--dev] DEST
+                               End the tunnel kept for DEST, and have Horadric ask again
+                               before a session watches it; the tunnel to a dev instance
+                               is closed only with --dev
+  horadric desk enable           Switch Windows' child sessions on, which the agent's desk
+                               is one of (once, as administrator; the desk's window
+                               starts this itself when they are off)
+  horadric desk hand [--dev]     Not for people: serves the agent's desk to the desk_ tools
+                               from inside it, started at the desk's sign-in
   horadric portal [off|phones|forget N|all|relay URL]
                                Town Portal, Horadric from your phone: turn it on and show
                                a pairing QR code that works once, for 5 minutes; turn it
@@ -195,6 +205,13 @@ fn main() -> ExitCode {
         // number, which is no command.
         .filter(|a| !a.starts_with("-psn_"))
         .collect();
+    // The hand is started by a RunOnce value, which carries no
+    // environment: its flag stands in, before anything asks whether this
+    // is a dev instance.
+    #[cfg(windows)]
+    if args.first().is_some_and(|a| a == "desk") && args.iter().any(|a| a == "--dev") {
+        std::env::set_var(horadric_hooks::DEV_ENV, "1");
+    }
     horadric_hooks::forget_foreign_owner();
     if horadric_hooks::dev() && changes_machine(&args) {
         eprintln!(
@@ -250,6 +267,11 @@ fn main() -> ExitCode {
         None => Err(format!(
             "on Linux Horadric is a node, see `horadric node`\n\n{USAGE}"
         )),
+        // The user's autostart programs start in the agent's desk too,
+        // and a second Horadric there would take the first one's
+        // sessions for its own: it leaves before it touches anything.
+        #[cfg(windows)]
+        None | Some("app") if horadric_ui::desk::hand::in_desk() => Ok(()),
         #[cfg(not(target_os = "linux"))]
         None => std::env::current_exe()
             .map_err(|e| e.to_string())
@@ -284,6 +306,8 @@ fn main() -> ExitCode {
         Some("name") => name_command(&args[1..]),
         Some("mcp") => mcp::run(),
         Some("remote") => remote::run(&args[1..]),
+        #[cfg(windows)]
+        Some("desk") => desk_command(&args[1..]),
         Some("open-url") => open_url::run(&args[1..]),
         // `BROWSER` names this program alone, since most openers run it as
         // one program with the link as its only argument.
@@ -316,6 +340,23 @@ fn main() -> ExitCode {
             eprintln!("horadric: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `horadric desk`: what the agent's desk needs run as a program of its
+/// own. `enable` runs elevated, started by the desk's window, and `hand`
+/// runs inside the desk for as long as it is signed in.
+#[cfg(windows)]
+fn desk_command(args: &[String]) -> Result<(), String> {
+    let rest: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|a| *a != "--dev")
+        .collect();
+    match rest.as_slice() {
+        ["enable"] => horadric_ui::desk::window::enable_child_sessions(),
+        ["hand"] => horadric_ui::desk::hand::run(),
+        _ => Err("usage: horadric desk enable | horadric desk hand [--dev]".into()),
     }
 }
 

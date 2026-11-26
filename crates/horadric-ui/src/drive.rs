@@ -58,6 +58,11 @@ impl App {
         let Some(reply) = self.forge_call(&key, &call.body, reply) else {
             return;
         };
+        // After the key check, so only a session Horadric runs can put the
+        // remote desktop question to the human.
+        let Some(reply) = crate::remote_gate::call(&key, &call.session, &call.body, reply) else {
+            return;
+        };
         let session = call.session.as_str();
         let what = match Call::parse(&call.body) {
             Ok(c) => c,

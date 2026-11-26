@@ -1,16 +1,19 @@
 //! Watching another machine's desktop: the pure half of the client. A
 //! remote Horadric started with `HORADRIC_SCREEN_SHARE=1` serves its screen
 //! on its own `127.0.0.1`, this machine reaches it through `ssh -L`, and
-//! every request carries the token the remote keeps in its state folder.
-//! See `docs/plan/remote-screen.md`.
+//! every request but the proof carries the token the remote makes at each
+//! of its starts, in a header. See `docs/plan/remote-screen.md`.
 //!
-//! Here: what `ssh` is started with, what a token looks like, the URLs and
-//! how they are shown without the token, reading an HTTP answer, and the
-//! file that remembers the tunnels so sessions share them.
+//! Here: what `ssh` is started with, what a token looks like, the proof
+//! that the far end holds it, the requests and reading their answers
+//! within limits, the input events, and the file that remembers the
+//! tunnels so sessions share them.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::ssh;
+use crate::screen_share::Region;
+use crate::webpush::hmac_sha256;
 
 /// Where a remote's installed Horadric serves its screen.
 pub const PORT: u16 = 43119;
@@ -36,13 +39,43 @@ pub fn remote_port(dev: bool) -> u16 {
     }
 }
 
+/// The most bytes a frame's answer may be: a whole wall of monitors as a
+/// JPEG is far below it, and a peer that sends more is not a screen.
+pub const FRAME_CAP: usize = 32 * 1024 * 1024;
+
+/// The most bytes any other answer may be.
+pub const SMALL_CAP: usize = 64 * 1024;
+
+/// The most bytes an answer's head may be before its end is seen.
+const HEAD_CAP: usize = 16 * 1024;
+
+/// The remote reads an input body below this many bytes.
+pub const BODY_MAX: usize = 64 * 1024;
+
+/// The remote runs at most this many events from one body.
+pub const EVENTS_MAX: usize = 256;
+
+/// Whether `dest` is made only of what a host name, a user, an IPv6
+/// address in brackets or an alias is written with. Narrower than what
+/// `ssh` takes, on purpose: the destination comes from an agent and is
+/// shown to the human in the question that allows it, so nothing in it may
+/// read as an option, a second word or something unseen.
+pub fn usable(dest: &str) -> bool {
+    !dest.is_empty()
+        && !dest.starts_with('-')
+        && dest.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | ':' | '[' | ']' | '-')
+        })
+}
+
 /// Why `dest` can not be handed to `ssh` as a destination, None when it can.
 pub fn refusal(dest: &str) -> Option<String> {
-    if ssh::usable(dest) {
+    if usable(dest) {
         None
     } else {
         Some(format!(
-            "{dest:?} is not an ssh destination: one word, not starting with -"
+            "{dest:?} is not an ssh destination: letters, digits and . _ @ : [ ] - only, \
+             not starting with -"
         ))
     }
 }
@@ -69,7 +102,9 @@ fn common() -> Vec<String> {
 /// What `ssh` is started with to forward `local` on this machine to
 /// `remote` on the remote's own loopback. `ExitOnForwardFailure`, so a
 /// port taken meanwhile ends it rather than leaving a tunnel that forwards
-/// nothing. The local end binds to loopback by name, so no `ssh_config`
+/// nothing; that happens only after the login, so whoever took the port
+/// answers on it first, and the proof is what tells the two apart. The
+/// local end binds to loopback by name, so no `ssh_config`
 /// `GatewayPorts` can open it to the network. The end of options marker
 /// before `dest` keeps it only a destination.
 pub fn tunnel_args(dest: &str, local: u16, remote: u16) -> Vec<String> {
@@ -100,21 +135,106 @@ pub fn token_args(dest: &str, dev: bool) -> Vec<String> {
     args
 }
 
-/// The token in what the remote printed: 32 hex characters, nothing else
-/// but white space and a byte order mark around them.
+/// The token in what the remote printed: 32 hex characters in lower case,
+/// as the remote writes them, nothing else but white space and a byte
+/// order mark around them. Strict, since the token is also the key of the
+/// proof, byte for byte.
 pub fn parse_token(printed: &str) -> Option<String> {
     let t = printed.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
-    (t.len() == 32 && t.chars().all(|c| c.is_ascii_hexdigit())).then(|| t.to_ascii_lowercase())
+    (t.len() == 32 && t.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .then(|| t.to_string())
 }
 
-/// The viewer page through a tunnel on `port`.
+/// The viewer page through a tunnel on `port`. The token is in the
+/// fragment, which a browser sends to no server; the page takes it from
+/// there.
 pub fn view_url(port: u16, token: &str) -> String {
-    format!("http://127.0.0.1:{port}/?t={token}")
+    format!("http://127.0.0.1:{port}/#t={token}")
 }
 
 /// The path of one frame, at most `width` pixels wide.
-pub fn frame_path(token: &str, width: u32) -> String {
-    format!("/frame.jpg?t={token}&w={width}")
+pub fn frame_path(width: u32) -> String {
+    format!("/frame.jpg?w={width}")
+}
+
+/// The path of one frame of `region`, or of the whole screen with none,
+/// at most `width` pixels wide, or unscaled with none: without `w` the
+/// server scales nothing.
+pub fn frame_path_of(width: Option<u32>, region: Option<Region>) -> String {
+    let asked: Vec<String> = width
+        .map(|w| format!("w={w}"))
+        .into_iter()
+        .chain(region.map(|r| r.query()))
+        .collect();
+    if asked.is_empty() {
+        "/frame.jpg".into()
+    } else {
+        format!("/frame.jpg?{}", asked.join("&"))
+    }
+}
+
+/// The path input events are posted to.
+pub const INPUT_PATH: &str = "/input";
+
+/// The path that answers with the display's resolution: the smallest
+/// request that needs the token, so it shows a remote really serves.
+pub const DISPLAY_PATH: &str = "/display";
+
+/// `bytes` as lower case hex.
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The path that asks the far end to prove it holds the token, for a
+/// `nonce` of 32 hex characters ([`hex`] of 16 random bytes).
+pub fn hello_path(nonce: &str) -> String {
+    format!("/hello?n={nonce}")
+}
+
+/// What the real server answers `/hello` with: the HMAC of the nonce's
+/// characters under the token's characters, as lower case hex.
+pub fn proof(token: &str, nonce: &str) -> String {
+    hex(&hmac_sha256(token.as_bytes(), nonce.as_bytes()))
+}
+
+/// Whether `body` is the proof for `nonce` under `token`. Every byte is
+/// compared whatever the ones before, so the time taken says nothing of
+/// how much of a guess was right.
+pub fn proven(token: &str, nonce: &str, body: &[u8]) -> bool {
+    let want = proof(token, nonce);
+    let got = body.trim_ascii();
+    got.len() == want.len()
+        && want
+            .bytes()
+            .zip(got)
+            .fold(0u8, |differs, (a, b)| differs | (a ^ b))
+            == 0
+}
+
+/// The head of a request through the tunnel on `port`. The token goes in
+/// a header and nowhere else, so no URL, log or history ever holds it.
+/// HTTP/1.0 and `Connection: close`, so the remote closes when done and
+/// there is no chunking to undo. `body` is the length of a JSON body that
+/// follows.
+pub fn request_head(
+    method: &str,
+    port: u16,
+    path: &str,
+    token: Option<&str>,
+    body: Option<usize>,
+) -> String {
+    let mut head =
+        format!("{method} {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
+    if let Some(token) = token {
+        head.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    if let Some(len) = body {
+        head.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {len}\r\n"
+        ));
+    }
+    head.push_str("\r\n");
+    head
 }
 
 /// `text` with the token in it replaced, for anything shown or logged. An
@@ -156,15 +276,55 @@ pub enum Unread {
     /// The body stopped before the length the head gave, so a link that
     /// dropped mid frame is not taken for a whole picture.
     CutShort { said: usize, got: usize },
+    /// The head never ended, or the body is or says it will be more than
+    /// `cap` bytes: nothing the remote's Horadric sends.
+    TooLarge { cap: usize },
+}
+
+/// Where the end of the head is in `bytes`, if it is there yet.
+fn head_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+/// The `Content-Length` a head gives, if it gives one that reads.
+fn said_length(head: &[u8]) -> Option<usize> {
+    std::str::from_utf8(head).ok()?.split("\r\n").find_map(|l| {
+        let (name, value) = l.split_once(':')?;
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            value.trim().parse().ok()
+        } else {
+            None
+        }
+    })
+}
+
+/// Whether `bytes`, what has come of an answer so far, is all of it: true
+/// once the body is as long as the head said, so reading stops there and
+/// a peer that never closes holds nothing up. An answer that gives no
+/// length ends when the peer closes. Refused as soon as it is, or says it
+/// will be, more than `cap` bytes of body, so a hostile peer fills no
+/// memory.
+pub fn whole_answer(bytes: &[u8], cap: usize) -> Result<bool, Unread> {
+    let Some(end) = head_end(bytes) else {
+        return if bytes.len() > HEAD_CAP {
+            Err(Unread::TooLarge { cap: HEAD_CAP })
+        } else {
+            Ok(false)
+        };
+    };
+    let body = bytes.len() - (end + 4);
+    match said_length(&bytes[..end]) {
+        Some(said) if said > cap => Err(Unread::TooLarge { cap }),
+        Some(said) => Ok(body >= said),
+        None if body > cap => Err(Unread::TooLarge { cap }),
+        None => Ok(false),
+    }
 }
 
 /// Reads what an HTTP/1.0 request got back. A body longer than its
 /// `Content-Length` is cut to it; one shorter is refused.
 pub fn parse_response(bytes: &[u8]) -> Result<Response, Unread> {
-    let end = bytes
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or(Unread::NotHttp)?;
+    let end = head_end(bytes).ok_or(Unread::NotHttp)?;
     let head = std::str::from_utf8(&bytes[..end]).map_err(|_| Unread::NotHttp)?;
     let mut lines = head.split("\r\n");
     let mut parts = lines.next().unwrap_or("").split_whitespace();
@@ -205,25 +365,71 @@ pub fn parse_response(bytes: &[u8]) -> Result<Response, Unread> {
 /// into the screen position the input tools take. `image` is the
 /// picture's own size, when it could be read.
 pub fn screen_line(r: &Response, image: Option<(u32, u32)>) -> String {
+    screen_line_of("remote", r, image)
+}
+
+/// [`screen_line`] for the screen of `whose`, which is also what its
+/// tools' names begin with: `remote`, or `desk` for the agent's desk,
+/// whose hand answers a frame the same way. An answer that says it is
+/// of a region only is worded for that: what the answer says counts, not
+/// what was asked, since a server from before regions answers the whole
+/// screen whatever it is asked.
+pub fn screen_line_of(whose: &str, r: &Response, image: Option<(u32, u32)>) -> String {
     let n = |k: &str| r.header(k).and_then(|v| v.parse::<i64>().ok());
     let (Some(w), Some(h)) = (n("x-screen-width"), n("x-screen-height")) else {
-        return "The remote did not say how large its screen is.".to_string();
+        return format!("The {whose} did not say how large its screen is.");
     };
-    let screen = format!("The remote screen is {w} x {h} physical pixels.");
+    let screen = format!("The {whose} screen is {w} x {h} physical pixels.");
+    let factor = |of: i64, iw: u32| {
+        let factor = format!("{:.3}", of as f64 / f64::from(iw));
+        factor
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    };
+    if let (Some(left), Some(top), Some(rw), Some(rh)) = (
+        n("x-region-left"),
+        n("x-region-top"),
+        n("x-region-width"),
+        n("x-region-height"),
+    ) {
+        let part = format!(
+            "only the part of that screen from {left},{top} to {},{}",
+            left + rw,
+            top + rh
+        );
+        let then = format!(
+            "add {left} to x and {top} to y, for the x and y the {whose}_ input tools take, \
+             counted from the screen's top left."
+        );
+        return match image {
+            Some((iw, ih)) if iw > 0 && i64::from(iw) == rw => format!(
+                "{screen} This image is {iw} x {ih} and shows {part}, unscaled: to image \
+                 coordinates {then}"
+            ),
+            Some((iw, ih)) if iw > 0 => format!(
+                "{screen} This image is {iw} x {ih} and shows {part}: multiply image \
+                 coordinates by {}, then {then}",
+                factor(rw, iw)
+            ),
+            _ => format!(
+                "{screen} This image shows {part}: scale image coordinates by {rw} / the \
+                 image's width, then {then}"
+            ),
+        };
+    }
     match image {
         Some((iw, ih)) if iw > 0 => {
-            let factor = w as f64 / f64::from(iw);
-            let factor = format!("{:.3}", factor);
-            let factor = factor.trim_end_matches('0').trim_end_matches('.');
+            let factor = factor(w, iw);
             format!(
                 "{screen} This image is {iw} x {ih} of that screen: multiply image \
-                 coordinates by {factor} for the x and y the remote_ input tools take, \
+                 coordinates by {factor} for the x and y the {whose}_ input tools take, \
                  counted from the screen's top left."
             )
         }
         _ => format!(
             "{screen} Scale image coordinates by {w} / the image's width for the x and y \
-             the remote_ input tools take, counted from the screen's top left."
+             the {whose}_ input tools take, counted from the screen's top left."
         ),
     }
 }
@@ -261,10 +467,34 @@ pub fn jpeg_size(bytes: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-/// The path input events are posted to.
-pub fn input_path(token: &str) -> String {
-    format!("/input?t={token}")
+/// A coordinate or a count from a tool's arguments: any JSON number,
+/// rounded, since a spot in a picture times a factor such as 1.6 is
+/// seldom whole. None for what is no number or fits no screen.
+pub fn whole(v: &Value) -> Option<i32> {
+    let n = v.as_f64()?.round();
+    (n.is_finite() && n >= f64::from(i32::MIN) && n <= f64::from(i32::MAX)).then_some(n as i32)
 }
+
+/// The body of one input request: `events` as a JSON array, which the
+/// remote runs in order as one sequence, letting go of everything itself
+/// when it fails midway. Refused here when the remote would refuse it.
+pub fn batch_body(events: &[Value]) -> Result<String, String> {
+    if events.len() > EVENTS_MAX {
+        return Err(format!(
+            "{} events are more than the {EVENTS_MAX} the remote runs at once",
+            events.len()
+        ));
+    }
+    let body = Value::Array(events.to_vec()).to_string();
+    if body.len() >= BODY_MAX {
+        return Err("the events are more than the 64 KiB the remote reads at once".into());
+    }
+    Ok(body)
+}
+
+/// The body that lets go of every key and button the remote holds down:
+/// posted after an input request failed, so nothing stays pressed there.
+pub const RELEASE_BODY: &str = r#"[{"kind":"release"}]"#;
 
 /// The events of a click at `x`, `y` with `button` (left, right or
 /// middle; left when None), twice over for a double click: a move first,
@@ -274,17 +504,15 @@ pub fn click_events(
     y: i32,
     button: Option<&str>,
     double: bool,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<Value>, String> {
     let button = match button.unwrap_or("left") {
         b @ ("left" | "right" | "middle") => b,
         other => return Err(format!("button is left, right or middle, not {other:?}")),
     };
-    let mut out = vec![serde_json::json!({ "kind": "move", "x": x, "y": y }).to_string()];
+    let mut out = vec![serde_json::json!({ "kind": "move", "x": x, "y": y })];
     for _ in 0..if double { 2 } else { 1 } {
         for kind in ["down", "up"] {
-            out.push(
-                serde_json::json!({ "kind": kind, "x": x, "y": y, "button": button }).to_string(),
-            );
+            out.push(serde_json::json!({ "kind": kind, "x": x, "y": y, "button": button }));
         }
     }
     Ok(out)
@@ -293,23 +521,34 @@ pub fn click_events(
 /// One notch of a mouse wheel, as Windows counts it.
 pub const WHEEL_NOTCH: i32 = 120;
 
-/// The event of scrolling `notches` at `x`, `y`, negative being down.
-/// Held to a hundred notches either way, more than any page needs.
-pub fn wheel_event(x: i32, y: i32, notches: i32) -> Result<String, String> {
+/// The most notches one scroll sends either way, more than any page
+/// needs, and what the remote holds a wheel event to.
+pub const WHEEL_MOST: i32 = 100;
+
+/// The event of scrolling `notches` at `x`, `y`, negative being down, and
+/// the notches it really carries once held to [`WHEEL_MOST`], so the
+/// caller says what was sent and not what was asked.
+pub fn wheel_event(x: i32, y: i32, notches: i32) -> Result<(Value, i32), String> {
     if notches == 0 {
         return Err("delta is a number of notches other than 0: negative scrolls down".into());
     }
-    let delta = notches.clamp(-100, 100) * WHEEL_NOTCH;
-    Ok(serde_json::json!({ "kind": "wheel", "x": x, "y": y, "delta": delta }).to_string())
+    let sent = notches.clamp(-WHEEL_MOST, WHEEL_MOST);
+    Ok((
+        serde_json::json!({ "kind": "wheel", "x": x, "y": y, "delta": sent * WHEEL_NOTCH }),
+        sent,
+    ))
 }
 
-/// The most characters one text event carries. The remote reads a body of
-/// 64 KiB at most, and a character escaped in JSON takes 12 bytes at most.
+/// The most characters one text event carries. The remote reads a body
+/// below 64 KiB, and a character takes 6 bytes at most in the JSON
+/// serde_json writes: raw UTF-8 of up to 4 bytes, but a control character
+/// as a six byte escape.
 const TEXT_CHUNK: usize = 4000;
 
 /// The events that type `text`, in pieces small enough for the remote to
-/// read each, split between characters.
-pub fn text_events(text: &str) -> Result<Vec<String>, String> {
+/// read each, split between characters. A line break and a tab go as they
+/// are: the remote presses Enter and Tab for them itself.
+pub fn text_events(text: &str) -> Result<Vec<Value>, String> {
     if text.is_empty() {
         return Err("say what to type: text".into());
     }
@@ -318,7 +557,7 @@ pub fn text_events(text: &str) -> Result<Vec<String>, String> {
         .chunks(TEXT_CHUNK)
         .map(|c| {
             let piece: String = c.iter().collect();
-            serde_json::json!({ "kind": "text", "text": piece }).to_string()
+            serde_json::json!({ "kind": "text", "text": piece })
         })
         .collect())
 }
@@ -334,8 +573,9 @@ fn modifier_vk(name: &str) -> Option<u16> {
     })
 }
 
-/// The virtual key of a key name, any case: a letter, a digit, F1 to F24
-/// or a named key.
+/// The virtual key of a key name, any case: a letter, a digit, F1 to F24,
+/// a named key, or one of the punctuation keys that sit in the same place
+/// on most layouts.
 fn key_vk(name: &str) -> Option<u16> {
     let lower = name.to_ascii_lowercase();
     let mut chars = lower.chars();
@@ -366,6 +606,18 @@ fn key_vk(name: &str) -> Option<u16> {
         "end" => 0x23,
         "pageup" | "pgup" => 0x21,
         "pagedown" | "pgdn" => 0x22,
+        "printscreen" | "prtsc" | "prtscn" => 0x2c,
+        "pause" => 0x13,
+        "capslock" => 0x14,
+        "numlock" => 0x90,
+        "scrolllock" => 0x91,
+        "menu" | "apps" => 0x5d,
+        // Plus is named, since + is what joins a chord.
+        "=" | "plus" => 0xbb,
+        "," | "comma" => 0xbc,
+        "-" | "minus" => 0xbd,
+        "." | "period" => 0xbe,
+        "/" | "slash" => 0xbf,
         _ => modifier_vk(name)?,
     })
 }
@@ -392,7 +644,8 @@ pub fn parse_chord(chord: &str) -> Result<Vec<u16>, String> {
         format!(
             "{key:?} is not a key: a letter, a digit, F1 to F24, Enter, Tab, Escape, \
              Backspace, Delete, Insert, Space, Up, Down, Left, Right, Home, End, PageUp, \
-             PageDown, or a modifier"
+             PageDown, PrintScreen, Pause, CapsLock, NumLock, ScrollLock, Menu, one of \
+             - = , . / (or Minus, Plus, Comma, Period, Slash), or a modifier"
         )
     })?;
     if vks.contains(&vk) {
@@ -404,56 +657,92 @@ pub fn parse_chord(chord: &str) -> Result<Vec<u16>, String> {
 
 /// The events that press `vks` together: each down in order, then each up
 /// in reverse, so the modifiers hold until the key is let go.
-pub fn press_events(vks: &[u16]) -> Vec<String> {
-    let event = |vk: u16, down: bool| {
-        serde_json::json!({ "kind": "key", "vk": vk, "down": down }).to_string()
-    };
+pub fn press_events(vks: &[u16]) -> Vec<Value> {
+    let event = |vk: u16, down: bool| serde_json::json!({ "kind": "key", "vk": vk, "down": down });
     vks.iter()
         .map(|&vk| event(vk, true))
         .chain(vks.iter().rev().map(|&vk| event(vk, false)))
         .collect()
 }
 
-/// Why the remote did not take an input event, in words for the caller:
-/// what it said, and for a refusal what usually causes one.
-pub fn input_refusal(status: u16, said: &str) -> String {
+/// The most characters of what a remote said that go into a tool's
+/// answer: its words are shown to a model, and a remote is not trusted to
+/// keep them short.
+const SAID_MOST: usize = 500;
+
+/// What the remote said, trimmed and held to [`SAID_MOST`] characters.
+pub fn brief(said: &str) -> String {
     let said = said.trim();
+    if said.chars().count() <= SAID_MOST {
+        return said.to_string();
+    }
+    let mut out: String = said.chars().take(SAID_MOST).collect();
+    out.push_str("...");
+    out
+}
+
+/// Why the remote did not take an input request, in words for the caller.
+/// A 409 comes with the real reason, found by the remote before it sent
+/// anything, so its words are the answer.
+pub fn input_refusal(status: u16, said: &str) -> String {
+    let said = brief(said);
     match status {
-        409 => format!(
-            "the remote's Windows did not take the input ({}): the window under it runs as \
-             administrator (Sysmac Studio does), which the remote's Horadric can not reach, \
-             or the desktop is locked",
-            if said.is_empty() {
-                "no reason given"
-            } else {
-                said
-            }
-        ),
-        400 => format!("the remote did not take the event: {said}"),
-        413 => "the remote found the event too large".to_string(),
-        s => status_refusal(s),
+        409 if said.is_empty() => {
+            "the remote's Windows did not take the input, and gave no reason".to_string()
+        }
+        409 => format!("the remote's Windows did not take the input: {said}"),
+        400 => format!("the remote did not take the events: {said}"),
+        413 => "the remote found the events too large".to_string(),
+        s => status_refusal(s, &said),
     }
 }
 
-/// Why an answer other than 200 came back, in words for the caller.
-pub fn status_refusal(status: u16) -> String {
+/// Why an answer other than the one hoped for came back, in words for the
+/// caller, with what the remote `said` where that is the reason.
+pub fn status_refusal(status: u16, said: &str) -> String {
+    let said = brief(said);
     match status {
-        403 => "the remote refused the token: it may have been made again since it was read"
+        403 => "the remote refused the request (403): its token is not the one read from it"
             .to_string(),
         404 => "the remote's Horadric does not serve its screen at that path: it may be older"
             .to_string(),
-        s => format!("the remote answered {s}"),
+        423 if said.is_empty() => "the remote can not show its screen now".to_string(),
+        423 => format!("the remote can not show its screen now: {said}"),
+        503 => "the remote has too many viewers connected at once".to_string(),
+        s if said.is_empty() => format!("the remote answered {s}"),
+        s => format!("the remote answered {s}: {said}"),
     }
 }
 
+/// What tells a process from another that was later given its pid: when
+/// it was created, as Windows counts it, or when it started, as `ps`
+/// prints it elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Identity {
+    Created(u64),
+    Started(String),
+}
+
+/// Whether the process seen `now` under a tunnel's pid is the one `kept`
+/// with it. A tunnel kept without an identity, by a Horadric from before
+/// there was one, is never taken for ours: it is forgotten, not killed.
+pub fn same_process(kept: Option<&Identity>, now: Option<&Identity>) -> bool {
+    matches!((kept, now), (Some(a), Some(b)) if a == b)
+}
+
 /// One tunnel kept open: `ssh` process `pid` forwards `port` here to
-/// `remote` on `dest`.
+/// `remote` on `dest`. `identity` is what the process was when it was
+/// kept, checked before the pid is killed; absent in a file written
+/// before it existed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tunnel {
     pub dest: String,
     pub remote: u16,
     pub port: u16,
     pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<Identity>,
 }
 
 /// The tunnels remembered in [`TUNNELS_FILE`]. A file that does not read
@@ -502,11 +791,8 @@ mod tests {
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
-    fn values(events: &[String]) -> Vec<Value> {
-        events
-            .iter()
-            .map(|e| serde_json::from_str(e).unwrap())
-            .collect()
+    fn values(events: &[Value]) -> Vec<Value> {
+        events.to_vec()
     }
 
     #[test]
@@ -521,6 +807,42 @@ mod tests {
         assert!(refusal("-oProxyCommand=x").is_some());
         assert!(refusal("a b").is_some());
         assert!(refusal("").is_some());
+    }
+
+    #[test]
+    fn a_destination_is_only_what_a_host_is_written_with() {
+        for ok in [
+            "vm",
+            "VM",
+            "me@vm.example.com",
+            "build_box-2",
+            "me@[fe80::1]",
+            "10.0.0.4",
+        ] {
+            assert_eq!(refusal(ok), None, "{ok}");
+        }
+        for bad in [
+            "-vm",
+            "vm;calc",
+            "vm|x",
+            "vm&x",
+            "vm$x",
+            "vm`x`",
+            "vm\"x",
+            "vm'x",
+            "vm%x",
+            "vm\\x",
+            "vm/x",
+            "vm\tx",
+            "vm\nx",
+            "v\u{e6}m",
+            "vm\u{202e}",
+            "vm x",
+            // Nothing is tidied: what is kept is what was written.
+            " vm",
+        ] {
+            assert!(refusal(bad).is_some(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -553,9 +875,11 @@ mod tests {
     fn a_token_is_32_hex_and_nothing_else() {
         assert_eq!(parse_token(&format!("{TOKEN}\r\n")).as_deref(), Some(TOKEN));
         assert_eq!(
-            parse_token(&format!("\u{feff}{}", TOKEN.to_uppercase())).as_deref(),
+            parse_token(&format!("\u{feff}{TOKEN}\n")).as_deref(),
             Some(TOKEN)
         );
+        // The remote writes lower case, and the proof is keyed byte for byte.
+        assert_eq!(parse_token(&TOKEN.to_uppercase()), None);
         assert_eq!(parse_token(&TOKEN[..31]), None);
         assert_eq!(parse_token(&format!("{TOKEN}0")), None);
         assert_eq!(parse_token(&TOKEN.replace('a', "g")), None);
@@ -567,15 +891,93 @@ mod tests {
     }
 
     #[test]
-    fn urls_carry_the_token_and_masking_hides_it() {
+    fn the_token_is_in_the_fragment_and_a_header_and_masking_hides_it() {
         let url = view_url(50123, TOKEN);
-        assert_eq!(url, format!("http://127.0.0.1:50123/?t={TOKEN}"));
-        assert_eq!(mask(&url, TOKEN), "http://127.0.0.1:50123/?t=<token>");
-        assert_eq!(
-            frame_path(TOKEN, 800),
-            format!("/frame.jpg?t={TOKEN}&w=800")
-        );
+        assert_eq!(url, format!("http://127.0.0.1:50123/#t={TOKEN}"));
+        assert_eq!(mask(&url, TOKEN), "http://127.0.0.1:50123/#t=<token>");
+        assert_eq!(frame_path(800), "/frame.jpg?w=800");
         assert_eq!(mask("abc", ""), "abc");
+        assert_eq!(
+            request_head("GET", 50123, DISPLAY_PATH, Some(TOKEN), None),
+            format!(
+                "GET /display HTTP/1.0\r\nHost: 127.0.0.1:50123\r\nConnection: close\r\n\
+                 Authorization: Bearer {TOKEN}\r\n\r\n"
+            )
+        );
+        assert_eq!(
+            request_head("POST", 7, INPUT_PATH, Some(TOKEN), Some(12)),
+            format!(
+                "POST /input HTTP/1.0\r\nHost: 127.0.0.1:7\r\nConnection: close\r\n\
+                 Authorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n\
+                 Content-Length: 12\r\n\r\n"
+            )
+        );
+    }
+
+    #[test]
+    fn the_proof_is_asked_without_the_token_and_checked_whole() {
+        let nonce = hex(&[0xab; 16]);
+        assert_eq!(nonce.len(), 32);
+        assert_eq!(hello_path(&nonce), format!("/hello?n={nonce}"));
+        let head = request_head("GET", 9, &hello_path(&nonce), None, None);
+        assert!(!head.contains(TOKEN) && !head.contains("Authorization"));
+        // RFC 4231, test case 2, so the proof is the HMAC the remote makes.
+        assert_eq!(
+            proof("Jefe", "what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        let right = proof(TOKEN, &nonce);
+        assert_eq!(right.len(), 64);
+        assert!(proven(TOKEN, &nonce, right.as_bytes()));
+        assert!(proven(TOKEN, &nonce, format!("{right}\r\n").as_bytes()));
+        assert!(!proven(TOKEN, &nonce, right.to_uppercase().as_bytes()));
+        assert!(!proven(TOKEN, &nonce, &right.as_bytes()[..63]));
+        assert!(!proven(TOKEN, &nonce, format!("{right}0").as_bytes()));
+        assert!(!proven(TOKEN, &nonce, b""));
+        assert!(!proven(TOKEN, &hex(&[0xac; 16]), right.as_bytes()));
+        let other = proof(&TOKEN.replace('0', "1"), &nonce);
+        assert!(!proven(TOKEN, &nonce, other.as_bytes()));
+    }
+
+    #[test]
+    fn reading_stops_at_the_length_said_and_at_the_cap() {
+        let with = |head: &[u8], body: &[u8]| [head, body].concat();
+        assert_eq!(whole_answer(b"", 10), Ok(false));
+        assert_eq!(
+            whole_answer(b"HTTP/1.0 200 OK\r\nContent-Le", 10),
+            Ok(false)
+        );
+        let head = b"HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\n";
+        assert_eq!(whole_answer(head, 10), Ok(false));
+        assert_eq!(whole_answer(&with(head, b"1234"), 10), Ok(false));
+        assert_eq!(whole_answer(&with(head, b"12345"), 10), Ok(true));
+        assert_eq!(
+            whole_answer(b"HTTP/1.0 204 No\r\ncontent-length:0\r\n\r\n", 10),
+            Ok(true)
+        );
+        // A length over the cap is refused before a byte of it is read.
+        assert_eq!(
+            whole_answer(b"HTTP/1.0 200 OK\r\nContent-Length: 11\r\n\r\n", 10),
+            Err(Unread::TooLarge { cap: 10 })
+        );
+        // With no length, or one that does not read, the peer's close
+        // ends it, within the cap.
+        for unsaid in [
+            b"HTTP/1.0 200 OK\r\n\r\n".as_slice(),
+            b"HTTP/1.0 200 OK\r\nContent-Length: 99999999999999999999999\r\n\r\n",
+        ] {
+            assert_eq!(whole_answer(&with(unsaid, &[b'x'; 10]), 10), Ok(false));
+            assert_eq!(
+                whole_answer(&with(unsaid, &[b'x'; 11]), 10),
+                Err(Unread::TooLarge { cap: 10 })
+            );
+        }
+        // A head that never ends is not waited for.
+        assert_eq!(whole_answer(&vec![b'x'; HEAD_CAP], 10), Ok(false));
+        assert_eq!(
+            whole_answer(&vec![b'x'; HEAD_CAP + 1], 10),
+            Err(Unread::TooLarge { cap: HEAD_CAP })
+        );
     }
 
     #[test]
@@ -595,6 +997,48 @@ mod tests {
         assert!(screen_line(&r, Some((2560, 1440))).contains("multiply image coordinates by 1 "));
         assert!(screen_line(&r, Some((1000, 563))).contains("by 2.56 "));
         assert!(screen_line(&r, None).contains("2560 / the image's width"));
+    }
+
+    #[test]
+    fn a_frame_of_a_region_says_how_to_get_back_to_the_screen() {
+        let raw = b"HTTP/1.0 200 OK\r\nX-Screen-Width: 3200\r\nX-Screen-Height: 1800\r\nX-Region-Left: 100\r\nX-Region-Top: 50\r\nX-Region-Width: 400\r\nX-Region-Height: 300\r\n\r\n\xff\xd8\xff";
+        let r = parse_response(raw).unwrap();
+        assert_eq!(
+            screen_line_of("desk", &r, Some((400, 300))),
+            "The desk screen is 3200 x 1800 physical pixels. This image is 400 x 300 and \
+             shows only the part of that screen from 100,50 to 500,350, unscaled: to image \
+             coordinates add 100 to x and 50 to y, for the x and y the desk_ input tools \
+             take, counted from the screen's top left."
+        );
+        assert_eq!(
+            screen_line_of("desk", &r, Some((200, 150))),
+            "The desk screen is 3200 x 1800 physical pixels. This image is 200 x 150 and \
+             shows only the part of that screen from 100,50 to 500,350: multiply image \
+             coordinates by 2, then add 100 to x and 50 to y, for the x and y the desk_ \
+             input tools take, counted from the screen's top left."
+        );
+        let blind = screen_line_of("desk", &r, None);
+        assert!(blind.contains("by 400 / the image's width, then add 100 to x"), "{blind}");
+    }
+
+    #[test]
+    fn a_frame_is_asked_for_whole_or_in_part_scaled_or_not() {
+        let region = Region {
+            x: 100,
+            y: 50,
+            width: 400,
+            height: 300,
+        };
+        assert_eq!(frame_path_of(None, None), "/frame.jpg");
+        assert_eq!(frame_path_of(Some(800), None), frame_path(800));
+        assert_eq!(
+            frame_path_of(None, Some(region)),
+            "/frame.jpg?rx=100&ry=50&rw=400&rh=300"
+        );
+        assert_eq!(
+            frame_path_of(Some(200), Some(region)),
+            "/frame.jpg?w=200&rx=100&ry=50&rw=400&rh=300"
+        );
     }
 
     /// A JPEG head with a start of frame `marker` of `w` by `h`, after an
@@ -624,7 +1068,6 @@ mod tests {
 
     #[test]
     fn a_click_moves_then_presses_and_lets_go() {
-        assert_eq!(input_path(TOKEN), format!("/input?t={TOKEN}"));
         let one = values(&click_events(812, 440, None, false).unwrap());
         assert_eq!(
             one,
@@ -647,13 +1090,48 @@ mod tests {
     #[test]
     fn a_scroll_counts_notches_down_as_negative() {
         assert_eq!(
-            values(&[wheel_event(5, 6, -3).unwrap()]),
-            [json!({ "kind": "wheel", "x": 5, "y": 6, "delta": -360 })]
+            wheel_event(5, 6, -3).unwrap(),
+            (
+                json!({ "kind": "wheel", "x": 5, "y": 6, "delta": -360 }),
+                -3
+            )
         );
-        let delta = |n| values(&[wheel_event(0, 0, n).unwrap()])[0]["delta"].clone();
-        assert_eq!(delta(1), 120);
-        assert_eq!(delta(1000), 12000);
+        let sent = |n| {
+            let (event, notches) = wheel_event(0, 0, n).unwrap();
+            (event["delta"].as_i64().unwrap(), notches)
+        };
+        assert_eq!(sent(1), (120, 1));
+        assert_eq!(sent(1000), (12000, 100));
+        assert_eq!(sent(-1000), (-12000, -100));
         assert!(wheel_event(0, 0, 0).is_err());
+    }
+
+    #[test]
+    fn a_coordinate_is_any_number_rounded() {
+        assert_eq!(whole(&json!(812)), Some(812));
+        assert_eq!(whole(&json!(1299.2)), Some(1299));
+        assert_eq!(whole(&json!(1299.5)), Some(1300));
+        assert_eq!(whole(&json!(-0.4)), Some(0));
+        assert_eq!(whole(&json!(-1920.6)), Some(-1921));
+        assert_eq!(whole(&json!(1e12)), None);
+        assert_eq!(whole(&json!("812")), None);
+        assert_eq!(whole(&json!(null)), None);
+    }
+
+    #[test]
+    fn a_sequence_is_one_body_the_remote_reads_whole() {
+        let click = click_events(1, 2, None, true).unwrap();
+        let body = batch_body(&click).unwrap();
+        let read: Vec<Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(read, click);
+        assert!(batch_body(&vec![json!({ "kind": "alive" }); EVENTS_MAX]).is_ok());
+        assert!(batch_body(&vec![json!({ "kind": "alive" }); EVENTS_MAX + 1]).is_err());
+        let large = json!({ "kind": "text", "text": "x".repeat(BODY_MAX) });
+        assert!(batch_body(&[large]).is_err());
+        assert_eq!(
+            serde_json::from_str::<Value>(RELEASE_BODY).unwrap(),
+            json!([{ "kind": "release" }])
+        );
     }
 
     #[test]
@@ -665,7 +1143,16 @@ mod tests {
         let long = "\u{1F600}".repeat(TEXT_CHUNK + 1);
         let pieces = text_events(&long).unwrap();
         assert_eq!(pieces.len(), 2);
-        assert!(pieces.iter().all(|p| p.len() < 64 * 1024));
+        assert!(pieces.iter().all(|p| batch_body(&[p.clone()]).is_ok()));
+        // The worst a character costs: a control character, escaped.
+        let worst = text_events(&"\u{1}".repeat(TEXT_CHUNK)).unwrap();
+        assert_eq!(worst.len(), 1);
+        assert!(batch_body(&worst).unwrap().len() > TEXT_CHUNK * 6);
+        // Enter and Tab are the remote's to press.
+        assert_eq!(
+            values(&text_events("a\tb\nc").unwrap()),
+            [json!({ "kind": "text", "text": "a\tb\nc" })]
+        );
         assert!(text_events("").is_err());
     }
 
@@ -699,7 +1186,23 @@ mod tests {
             ("PageUp", 0x21),
             ("PageDown", 0x22),
             ("Win", 0x5b),
+            ("PrintScreen", 0x2c),
+            ("Pause", 0x13),
+            ("CapsLock", 0x14),
+            ("NumLock", 0x90),
+            ("ScrollLock", 0x91),
+            ("Menu", 0x5d),
+            ("-", 0xbd),
+            ("Minus", 0xbd),
+            ("=", 0xbb),
+            ("Plus", 0xbb),
+            (",", 0xbc),
+            (".", 0xbe),
+            ("/", 0xbf),
         ] {
+            // What the remote refuses must not be reachable by a name.
+            let refused = matches!(vk, 0 | 1 | 2 | 4 | 5 | 6 | 0x5f) || (0xa6..=0xb7).contains(&vk);
+            assert!(!refused, "{name}");
             assert_eq!(parse_chord(name), Ok(vec![vk]), "{name}");
             assert_eq!(parse_chord(&name.to_uppercase()), Ok(vec![vk]), "{name}");
         }
@@ -715,6 +1218,9 @@ mod tests {
             parse_chord("ctrl + alt + delete"),
             Ok(vec![0x11, 0x12, 0x2e])
         );
+        assert_eq!(parse_chord("Ctrl+-"), Ok(vec![0x11, 0xbd]));
+        assert_eq!(parse_chord("Ctrl+Plus"), Ok(vec![0x11, 0xbb]));
+        assert_eq!(parse_chord("Ctrl+/"), Ok(vec![0x11, 0xbf]));
         assert!(parse_chord("S+Ctrl").is_err());
         assert!(parse_chord("Ctrl+Ctrl+S").is_err());
         assert!(parse_chord("Ctrl+Ctrl").is_err());
@@ -740,15 +1246,26 @@ mod tests {
 
     #[test]
     fn input_refusals_pass_on_what_the_remote_said() {
-        let e = input_refusal(409, "1 of 2 events taken\n");
-        assert!(
-            e.contains("1 of 2 events taken") && e.contains("administrator"),
-            "{e}"
+        assert_eq!(
+            input_refusal(409, "the desktop is locked or shows a UAC prompt\n"),
+            "the remote's Windows did not take the input: the desktop is locked or shows a \
+             UAC prompt"
         );
-        assert!(input_refusal(409, "").contains("no reason given"));
+        assert!(input_refusal(409, "").contains("gave no reason"));
         assert!(input_refusal(400, "no such key: 0").ends_with("no such key: 0"));
         assert!(input_refusal(413, "").contains("too large"));
         assert!(input_refusal(403, "").contains("token"));
+    }
+
+    #[test]
+    fn what_a_remote_says_is_held_short() {
+        assert_eq!(brief("  locked \r\n"), "locked");
+        let long = "\u{e6}".repeat(5000);
+        let held = brief(&long);
+        assert_eq!(held.chars().count(), SAID_MOST + 3);
+        assert!(held.ends_with("..."));
+        assert!(input_refusal(409, &long).chars().count() < SAID_MOST + 100);
+        assert!(status_refusal(500, &long).chars().count() < SAID_MOST + 100);
     }
 
     #[test]
@@ -786,9 +1303,15 @@ mod tests {
 
     #[test]
     fn refusals_say_why() {
-        assert!(status_refusal(403).contains("token"));
-        assert!(status_refusal(404).contains("older"));
-        assert_eq!(status_refusal(500), "the remote answered 500");
+        assert!(status_refusal(403, "").contains("token"));
+        assert!(status_refusal(404, "").contains("older"));
+        assert_eq!(status_refusal(500, ""), "the remote answered 500");
+        assert_eq!(
+            status_refusal(500, " broke \n"),
+            "the remote answered 500: broke"
+        );
+        assert!(status_refusal(423, "the desktop is locked").ends_with(": the desktop is locked"));
+        assert!(status_refusal(503, "").contains("too many"));
     }
 
     #[test]
@@ -798,11 +1321,13 @@ mod tests {
             remote: PORT,
             port: 50000,
             pid: 10,
+            identity: Some(Identity::Created(133_800_000_000_000_000)),
         };
         let dev = Tunnel {
             remote: DEV_PORT,
             port: 50001,
             pid: 11,
+            identity: Some(Identity::Started("Thu Nov 26 09:14:02 2026".into())),
             ..a.clone()
         };
         let list = with_tunnel(&with_tunnel(&[], a.clone()), dev.clone());
@@ -821,6 +1346,38 @@ mod tests {
         let closed = without_tunnel(&list, "vm", PORT);
         assert_eq!(closed, vec![dev.clone()]);
         assert_eq!(without_tunnel(&closed, "other", PORT), closed);
+    }
+
+    #[test]
+    fn a_tunnel_keeps_what_its_process_was_and_an_old_one_still_reads() {
+        let old = r#"[{"dest":"vm","remote":43119,"port":50000,"pid":10}]"#;
+        let read = parse_tunnels(old);
+        assert_eq!(read.len(), 1);
+        assert_eq!((read[0].pid, &read[0].identity), (10, &None));
+        // Written back as it was: no field where there is no identity.
+        assert!(!tunnels_text(&read).contains("identity"));
+        assert_eq!(parse_tunnels(&tunnels_text(&read)), read);
+
+        let windows = r#"[{"dest":"vm","remote":43119,"port":50000,"pid":10,"identity":133800000000000000}]"#;
+        let created = Identity::Created(133_800_000_000_000_000);
+        assert_eq!(parse_tunnels(windows)[0].identity, Some(created.clone()));
+        let unix = r#"[{"dest":"vm","remote":43119,"port":50000,"pid":10,"identity":"Thu Nov 26 09:14:02 2026"}]"#;
+        let started = Identity::Started("Thu Nov 26 09:14:02 2026".into());
+        assert_eq!(parse_tunnels(unix)[0].identity, Some(started.clone()));
+        for text in [windows, unix] {
+            let list = parse_tunnels(text);
+            assert_eq!(parse_tunnels(&tunnels_text(&list)), list);
+        }
+
+        assert!(same_process(Some(&created), Some(&created)));
+        assert!(!same_process(Some(&created), Some(&Identity::Created(1))));
+        assert!(!same_process(Some(&created), Some(&started)));
+        assert!(!same_process(Some(&created), None), "the process is gone");
+        assert!(
+            !same_process(None, Some(&created)),
+            "an old record is never ours"
+        );
+        assert!(!same_process(None, None));
     }
 
     #[test]

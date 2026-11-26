@@ -51,6 +51,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 
 ## Next
 
+- [Computer use](plan/computer-use.md): the agent's desk, a second Windows session a session drives with mouse and keyboard while the human keeps their own. Being built: the window, the hand and the `desk_` tools.
 - [One portal](plan/one-portal.md): a phone paired once, by QR code or by signing in, sees every brother and every session. Built and live; left: the test with three machines and a real phone signing in.
 - [macOS](plan/macos.md): for others who want it, the human uses no Mac, so lowest priority. The Folio, browser pane, quests, files, usage, Discord and Settings are built, unverified on a real Mac; left: the rest of each, and switching accounts.
 - [Memory](plan/memory.md): built; left: arming the daily distill.
@@ -60,6 +61,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Dictation](plan/dictation.md): built, with four models, Danish and a plate by the caret; left: trying it with a real voice, and the Mac's key and draft.
 - [Towns](plan/towns.md): built (2026-11-08), several Tristrams each with its own Claude home, browser profile and usage rows; left: the two-town check on screen.
 - [The Forge](plan/the-forge.md): built, pins on web pages too; left: pins on PDF and Word files, keeping web pins, and the Mac.
+- [Remote screen](plan/remote-screen.md): built, a remote Windows machine's desktop watched and driven in the browser pane through an SSH tunnel, each destination allowed by the human once per project; left: the human's test against a real remote.
 - [GPU light](plan/gpu-light.md): steps 1 to 7 built, steps 1 and 2 approved; left: the human's look at steps 3 to 7, measuring the UI thread cost again, a remote desktop run, and the Mac (step 8).
 
 ## Reference
