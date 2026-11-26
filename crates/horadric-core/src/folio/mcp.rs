@@ -58,6 +58,9 @@ pub struct McpState {
     stale: bool,
     /// Status asks since a wait began, see [`POLLS`].
     polls: u32,
+    /// Servers this process was asked to turn off, so one that will not
+    /// go off is not asked at every status.
+    turned_off: std::collections::HashSet<String>,
     /// This session's name and what the machine's sessions know together,
     /// see [`McpTold`]. None says every trouble in every session, as
     /// before there was one.
@@ -78,6 +81,10 @@ pub struct McpTold {
     /// card it was, until it connects again.
     #[serde(default)]
     pub told: BTreeMap<String, String>,
+    /// Servers the human turned off: off in every session of every
+    /// project, until one turns it on again.
+    #[serde(default)]
+    pub off: BTreeSet<String>,
     /// Changed since it was last written.
     #[serde(skip)]
     pub dirty: bool,
@@ -93,7 +100,7 @@ impl McpTold {
             return self.told.get(name).is_some_and(|by| by == me);
         }
         let never_worked = status == "needs-auth" && !self.worked.contains(name);
-        if never_worked || self.told.contains_key(name) {
+        if never_worked || self.told.contains_key(name) || self.off.contains(name) {
             return false;
         }
         self.told.insert(name.to_string(), me.to_string());
@@ -280,8 +287,45 @@ impl Folio {
             .collect()
     }
 
-    /// `mcp_toggle`: the line to write.
+    /// The human turns `server` off or on: the line to write. Off holds
+    /// for every session on the machine, see [`McpTold::off`]. On holds
+    /// here, and stops the others from turning it off.
     pub fn mcp_toggle(&mut self, server: &str, enabled: bool) -> String {
+        if let Some(mut t) = (self.mcp.shared.as_ref()).and_then(|(_, t)| t.lock().ok()) {
+            t.dirty |= match enabled {
+                true => t.off.remove(server),
+                false => t.off.insert(server.to_string()),
+            };
+        }
+        match enabled {
+            true => self.mcp.turned_off.remove(server),
+            false => self.mcp.turned_off.insert(server.to_string()),
+        };
+        self.toggle_line(server, enabled)
+    }
+
+    /// The lines that turn off here what the human turned off in another
+    /// session, each asked once: the CLI keeps a toggle per project only.
+    pub fn mcp_turn_offs(&mut self) -> Vec<String> {
+        let off = match &self.mcp.shared {
+            Some((_, t)) => t.lock().map(|t| t.off.clone()).unwrap_or_default(),
+            None => return Vec::new(),
+        };
+        let due: Vec<String> = (self.mcp.servers.iter())
+            .filter(|s| off.contains(&s.name) && s.status != "disabled" && !s.removed)
+            .map(|s| s.name.clone())
+            .filter(|n| !self.mcp.turned_off.contains(n))
+            .collect();
+        (due.iter())
+            .map(|name| {
+                self.mcp.turned_off.insert(name.clone());
+                self.toggle_line(name, false)
+            })
+            .collect()
+    }
+
+    /// `mcp_toggle`: the line to write.
+    fn toggle_line(&mut self, server: &str, enabled: bool) -> String {
         self.mcp_mark(server, |s| s.busy = true);
         let id = self.request(Sent::McpToggle(server.to_string()));
         control_request_line(
@@ -1406,6 +1450,36 @@ mod tests {
         let mut resumed = session("a", true);
         hear(&mut resumed);
         assert!(cards(&resumed).is_empty());
+    }
+
+    #[test]
+    fn a_server_turned_off_is_off_in_every_session() {
+        let told = Arc::new(Mutex::new(McpTold::default()));
+        let session = |me: &str| {
+            let mut f = Folio::new();
+            f.clock = Some(1);
+            f.mcp.shared = Some((me.to_string(), told.clone()));
+            f
+        };
+        let mut a = session("a");
+        hear(&mut a);
+        a.mcp_toggle("broken", false);
+        assert!(a.mcp_turn_offs().is_empty(), "asked by the human already");
+
+        // The next session turns it off itself, once, and says nothing.
+        let mut b = session("b");
+        hear(&mut b);
+        assert!(cards(&b).is_empty());
+        let lines = b.mcp_turn_offs();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("broken") && lines[0].contains("\"enabled\":false"));
+        assert!(b.mcp_turn_offs().is_empty());
+
+        // Turned on again, no session turns it off.
+        b.mcp_toggle("broken", true);
+        let mut c = session("c");
+        hear(&mut c);
+        assert!(c.mcp_turn_offs().is_empty());
     }
 
     #[test]

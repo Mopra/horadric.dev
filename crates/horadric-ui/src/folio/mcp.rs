@@ -283,6 +283,9 @@ pub(super) fn tend(chat: &mut Chat) {
     for url in pages {
         open(&url);
     }
+    for line in chat.folio.mcp_turn_offs() {
+        send(chat, &line);
+    }
     match chat.folio.mcp_wanted() {
         McpWant::Now => {
             let line = chat.folio.mcp_status();
