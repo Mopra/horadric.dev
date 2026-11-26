@@ -39,7 +39,11 @@ window and operate it, within what the human allowed. Windows only.
   itself elevated. For such a window `horadric mcp` starts `horadric
   desktop-helper` as administrator (`desktop_helper.rs`) and hands it the
   call over two named pipes, one each way, that take one local client
-  each, each end checking the other's process id. Two, because the
+  each, each end checking the other's process id. The pipes let in only
+  the session's user and elevated administrators (the helper may run as
+  another account when a standard user types an administrator's
+  password), and the helper opens them at identification level, so the
+  session can not act as the elevated helper. Two, because the
   session reads the helper's lines on a thread of its own so a call can
   time out, and a synchronous pipe serialises all I/O on one file
   object: a write sharing the pipe with that waiting read waited for ever
@@ -52,7 +56,10 @@ window and operate it, within what the human allowed. Windows only.
   all (another user's, a service's) may be above, so it goes to the
   helper too rather than get input Windows might drop, and a window
   whose program will not even say its file is resolved by the helper
-  rather than refused. `desktop_windows` marks a window above the session
+  rather than refused. A program above administrator (part of Windows)
+  is beyond even the helper, so it is refused without asking Windows,
+  and inside the helper a program whose level it can not read either is
+  refused rather than given input that may be dropped. `desktop_windows` marks a window above the session
   "(as administrator)" and one that would not say "(out of reach)", so
   the agent knows before its first call that Windows will ask. Before Windows asks, the app is told (a `desktop.elevating`
   body, shown as a notification naming the session and the program), so

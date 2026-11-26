@@ -466,6 +466,9 @@ pub fn windows_text(list: &[Window], reach: impl Fn(&Window) -> Reach) -> String
                 out.push_str(" (out of reach)");
                 unsure = true;
             }
+            Reach::Beyond => {
+                out.push_str(" (above administrator, beyond reach)");
+            }
         }
         out.push('\n');
     }
@@ -508,13 +511,21 @@ pub enum Reach {
     Above,
     /// Its program would not say, and may run above.
     Unsure,
+    /// Its program runs above administrator, a system process: beyond
+    /// even the helper, so Windows is not asked for one.
+    Beyond,
 }
+
+/// The integrity level of a process run as administrator. Above it runs
+/// only what Windows itself runs.
+pub const HIGH_LEVEL: u32 = 0x3000;
 
 /// How a window of a process at `them` stands to this session at `me`.
 /// Only a higher level walls a window off; one that can not be read may
 /// be higher, and is kept from plain input to be safe.
 pub fn reach(me: Integrity, them: Integrity) -> Reach {
     match (me, them) {
+        (Integrity::Level(m), Integrity::Level(t)) if t > m && t > HIGH_LEVEL => Reach::Beyond,
         (Integrity::Level(m), Integrity::Level(t)) if t > m => Reach::Above,
         (Integrity::Level(_), Integrity::Unreadable) => Reach::Unsure,
         _ => Reach::Open,
@@ -1388,29 +1399,44 @@ fn reach_of(w: &Window) -> Reach {
 
 /// Why `w` can not be read or operated, when its program runs above this
 /// session, or may: Windows then shows UI Automation only its title bar
-/// and drops input sent to it. The helper runs as administrator itself,
-/// so for it only a program above even that is walled off.
-fn out_of_reach(w: &Window, helper: bool) -> Option<String> {
+/// and drops input sent to it. Also whether the helper may reach it, so
+/// Windows is never asked for a helper that could not. `helper` says this
+/// is the helper, which runs as administrator itself and has nothing
+/// further to hand a call to.
+fn out_of_reach(w: &Window, helper: bool) -> Option<(String, bool)> {
     let program = program_of(w);
-    match (reach_of(w), helper) {
-        (Reach::Open, _) | (Reach::Unsure, true) => None,
-        (Reach::Above, true) => Some(format!(
-            "{program} runs above administrator, beyond even Horadric's helper, so Windows \
-             shows the agent only its title bar and lets it neither click nor type there"
-        )),
-        (Reach::Above, false) => Some(format!(
+    let reason = match (reach_of(w), helper) {
+        (Reach::Open, _) => return None,
+        (Reach::Beyond, _) | (Reach::Above, true) => {
+            let beyond = format!(
+                "{program} runs above administrator, as part of Windows, beyond even \
+                 Horadric's helper, so Windows shows the agent only its title bar and lets it \
+                 neither click nor type there"
+            );
+            return Some((beyond, false));
+        }
+        (Reach::Unsure, true) => {
+            let unsure = format!(
+                "Windows would not tell even Horadric's helper how {program} runs (another \
+                 user's program, or part of Windows), so it is kept from clicks and keys that \
+                 Windows might drop without a word"
+            );
+            return Some((unsure, false));
+        }
+        (Reach::Above, false) => format!(
             "{program} runs as administrator and this session does not, so Windows shows the \
              agent only its title bar and lets it neither click nor type there (pictures come \
              off the screen). It can only be reached through a helper that runs as \
              administrator"
-        )),
-        (Reach::Unsure, false) => Some(format!(
+        ),
+        (Reach::Unsure, false) => format!(
             "Windows would not tell this session how {program} runs, as administrator or as \
              another user, so it is kept from plain clicks and keys, which Windows would drop \
              without a word if it runs as administrator. It is reached through a helper that \
              runs as administrator"
-        )),
-    }
+        ),
+    };
+    Some((reason, true))
 }
 
 /// The program as the agent reads it named, its title when Windows will
@@ -2108,9 +2134,8 @@ impl Desktop {
             _ => {}
         }
         let (w, root) = find(args.get("window"))?;
-        let mut walled = out_of_reach(&w, self.part);
-        // The helper has nothing further to hand a call to.
-        if let (Some(why), false) = (&walled, self.part) {
+        let (mut walled, by_helper) = out_of_reach(&w, self.part).unzip();
+        if let (Some(why), Some(true)) = (&walled, by_helper) {
             match self.through_helper(name, args, app, settle, &w) {
                 Ok(answer) => return answer,
                 Err(Unreached::Stop(no)) => return Err(no),
@@ -3827,6 +3852,12 @@ mod tests {
         );
         assert!(!unsure.contains("(as administrator)"), "{unsure}");
         assert!(unsure.contains("Out of reach means"), "{unsure}");
+        let system = windows_text(&[win(4, "Svc", "svc.exe")], |_| Reach::Beyond);
+        assert!(
+            system.ends_with("(above administrator, beyond reach)"),
+            "{system}"
+        );
+        assert!(!system.contains("helper"), "{system}");
     }
 
     #[test]
@@ -3834,7 +3865,9 @@ mod tests {
         use Integrity::*;
         let (medium, high, system) = (Level(0x2000), Level(0x3000), Level(0x4000));
         assert_eq!(reach(medium, high), Reach::Above);
-        assert_eq!(reach(high, system), Reach::Above);
+        assert_eq!(reach(high, system), Reach::Beyond);
+        assert_eq!(reach(medium, system), Reach::Beyond);
+        assert_eq!(reach(system, system), Reach::Open);
         assert_eq!(reach(medium, medium), Reach::Open);
         assert_eq!(reach(high, medium), Reach::Open);
         assert_eq!(reach(medium, Unreadable), Reach::Unsure);

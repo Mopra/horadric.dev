@@ -31,6 +31,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -39,9 +40,15 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, ERROR_PIPE_CONNECTED, HANDLE};
+use windows::Win32::Security::{
+    AddAccessAllowedAce, CopySid, CreateWellKnownSid, GetLengthSid, GetTokenInformation,
+    InitializeAcl, InitializeSecurityDescriptor, SetSecurityDescriptorDacl, TokenUser,
+    WinBuiltinAdministratorsSid, ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, PSECURITY_DESCRIPTOR, PSID,
+    SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER,
+};
 use windows::Win32::Storage::FileSystem::{
     FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND,
-    PIPE_ACCESS_OUTBOUND,
+    PIPE_ACCESS_OUTBOUND, SECURITY_IDENTIFICATION,
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
@@ -51,7 +58,8 @@ use windows::Win32::System::Pipes::{
     PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{
-    GetProcessId, OpenProcess, TerminateProcess, WaitForSingleObject, INFINITE, PROCESS_SYNCHRONIZE,
+    GetCurrentProcess, GetProcessId, OpenProcess, OpenProcessToken, TerminateProcess,
+    WaitForSingleObject, INFINITE, PROCESS_SYNCHRONIZE,
 };
 use windows::Win32::UI::Shell::{
     ShellExecuteExW, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
@@ -272,12 +280,116 @@ pub fn pipe_names(base: &str) -> (String, String) {
     (format!("{base}-down"), format!("{base}-up"))
 }
 
+/// Every access to a pipe.
+const PIPE_ALL_ACCESS: u32 = 0x001F_01FF;
+const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+
+/// A security descriptor letting only this user and elevated
+/// administrators open a pipe: not other users' programs, nor anonymous
+/// ones, which a pipe's default lets read. Administrators, because
+/// Windows may run the helper as another account when a standard user
+/// types an administrator's password, and an elevated administrator can
+/// do anything a pipe guards anyway. Boxed, as the pointers inside point
+/// into it.
+struct OwnersOnly {
+    sd: SECURITY_DESCRIPTOR,
+    _acl: Vec<u64>,
+    _sids: [Vec<u64>; 2],
+}
+
+impl OwnersOnly {
+    fn new() -> Result<Box<OwnersOnly>, String> {
+        unsafe {
+            let user = Self::user_sid()?;
+            let admins = Self::admins_sid()?;
+            let sid = |b: &Vec<u64>| PSID(b.as_ptr() as *mut _);
+            let len = std::mem::size_of::<ACL>()
+                + 2 * std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+                + GetLengthSid(sid(&user)) as usize
+                + GetLengthSid(sid(&admins)) as usize;
+            let mut acl = vec![0u64; len.div_ceil(8)];
+            let pacl = acl.as_mut_ptr() as *mut ACL;
+            let e = |e: windows::core::Error| format!("could not secure the helper's pipes: {e}");
+            InitializeAcl(pacl, len as u32, ACL_REVISION).map_err(e)?;
+            AddAccessAllowedAce(pacl, ACL_REVISION, PIPE_ALL_ACCESS, sid(&user)).map_err(e)?;
+            AddAccessAllowedAce(pacl, ACL_REVISION, PIPE_ALL_ACCESS, sid(&admins)).map_err(e)?;
+            let mut me = Box::new(OwnersOnly {
+                sd: SECURITY_DESCRIPTOR::default(),
+                _acl: acl,
+                _sids: [user, admins],
+            });
+            let psd = PSECURITY_DESCRIPTOR(&mut me.sd as *mut _ as *mut _);
+            InitializeSecurityDescriptor(psd, SECURITY_DESCRIPTOR_REVISION).map_err(e)?;
+            SetSecurityDescriptorDacl(psd, true, Some(pacl), false).map_err(e)?;
+            Ok(me)
+        }
+    }
+
+    /// This process's user's SID, in a buffer of its own.
+    unsafe fn user_sid() -> Result<Vec<u64>, String> {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+            .map_err(|e| format!("could not read who runs this session: {e}"))?;
+        let mut len = 0;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+        let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+        let read = GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buf.as_mut_ptr().cast()),
+            len,
+            &mut len,
+        );
+        let _ = CloseHandle(token);
+        read.map_err(|e| format!("could not read who runs this session: {e}"))?;
+        let user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let sid = user.User.Sid;
+        let n = GetLengthSid(sid) as usize;
+        let mut own = vec![0u64; n.div_ceil(8)];
+        CopySid(n as u32, PSID(own.as_mut_ptr() as *mut _), sid)
+            .map_err(|e| format!("could not read who runs this session: {e}"))?;
+        Ok(own)
+    }
+
+    /// The SID of the local Administrators group.
+    unsafe fn admins_sid() -> Result<Vec<u64>, String> {
+        let mut len = 0u32;
+        let _ = CreateWellKnownSid(WinBuiltinAdministratorsSid, None, None, &mut len);
+        let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+        CreateWellKnownSid(
+            WinBuiltinAdministratorsSid,
+            None,
+            Some(PSID(buf.as_mut_ptr() as *mut _)),
+            &mut len,
+        )
+        .map_err(|e| format!("could not name the administrators: {e}"))?;
+        Ok(buf)
+    }
+}
+
+/// The helper's end of a pipe, `write` for the pipe up. It lets the
+/// session only identify it, not act as it: the helper is elevated, and
+/// a session that could impersonate it would be too.
+fn open_client(name: &str, write: bool) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(!write)
+        .write(write)
+        .security_qos_flags(SECURITY_IDENTIFICATION.0)
+        .open(name)
+}
+
 /// The session's end of a one way pipe, `inbound` when the session reads.
 fn serve(name: &str, inbound: bool) -> Result<File, String> {
     let access: FILE_FLAGS_AND_ATTRIBUTES = if inbound {
         PIPE_ACCESS_INBOUND
     } else {
         PIPE_ACCESS_OUTBOUND
+    };
+    let owners = OwnersOnly::new()?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: &owners.sd as *const _ as *mut _,
+        bInheritHandle: false.into(),
     };
     let pipe = unsafe {
         CreateNamedPipeW(
@@ -288,7 +400,7 @@ fn serve(name: &str, inbound: bool) -> Result<File, String> {
             1 << 16,
             1 << 16,
             0,
-            None,
+            Some(&attributes),
         )
     };
     if pipe.is_invalid() {
@@ -403,8 +515,8 @@ impl Helper {
             let gone = unsafe { WaitForSingleObject(process, 0) }.0 == 0;
             if gone || started.elapsed() > START_WAIT {
                 // Connecting ourselves frees the thread waiting on the pipes.
-                let _ = OpenOptions::new().read(true).open(&down_name);
-                let _ = OpenOptions::new().write(true).open(&up_name);
+                let _ = open_client(&down_name, false);
+                let _ = open_client(&up_name, true);
                 let _ = rx.recv_timeout(Duration::from_secs(1));
                 unsafe {
                     let _ = CloseHandle(process);
@@ -519,14 +631,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let session = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, parent) }
         .map_err(|e| format!("could not watch the session that started this helper: {e}"))?;
     let (down_name, up_name) = pipe_names(name);
-    let down = OpenOptions::new()
-        .read(true)
-        .open(&down_name)
-        .map_err(|e| format!("could not open {down_name}: {e}"))?;
-    let up = OpenOptions::new()
-        .write(true)
-        .open(&up_name)
-        .map_err(|e| format!("could not open {up_name}: {e}"))?;
+    let down =
+        open_client(&down_name, false).map_err(|e| format!("could not open {down_name}: {e}"))?;
+    let up = open_client(&up_name, true).map_err(|e| format!("could not open {up_name}: {e}"))?;
     for pipe in [&down, &up] {
         let mut server = 0u32;
         unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut server) }
@@ -650,6 +757,50 @@ mod tests {
         assert_eq!(hold_left(Setback::Failed, s(121), s(300)), None);
     }
 
+    /// The pipes' only entries are this user and the administrators, so
+    /// another user's program, or an anonymous one, can not open them.
+    #[test]
+    fn a_pipe_lets_in_only_this_user_and_administrators() {
+        use windows::Win32::Security::{
+            EqualSid, GetAce, GetKernelObjectSecurity, GetSecurityDescriptorDacl,
+            DACL_SECURITY_INFORMATION,
+        };
+        let name = format!(
+            r"\\.\pipe\horadric-desktop-test-dacl-{}",
+            std::process::id()
+        );
+        let pipe = serve(&name, true).unwrap();
+        let handle = HANDLE(pipe.as_raw_handle());
+        unsafe {
+            let mut len = 0;
+            let _ = GetKernelObjectSecurity(handle, DACL_SECURITY_INFORMATION.0, None, 0, &mut len);
+            let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+            let sd = PSECURITY_DESCRIPTOR(buf.as_mut_ptr().cast());
+            GetKernelObjectSecurity(handle, DACL_SECURITY_INFORMATION.0, Some(sd), len, &mut len)
+                .unwrap();
+            let (mut present, mut defaulted) = (Default::default(), Default::default());
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted).unwrap();
+            assert!(present.as_bool() && !dacl.is_null());
+            assert_eq!((*dacl).AceCount, 2);
+            let user = OwnersOnly::user_sid().unwrap();
+            let admins = OwnersOnly::admins_sid().unwrap();
+            let mut seen = Vec::new();
+            for i in 0..2 {
+                let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
+                GetAce(dacl, i, &mut ace).unwrap();
+                let ace = &*(ace as *const ACCESS_ALLOWED_ACE);
+                assert_eq!(ace.Mask, PIPE_ALL_ACCESS);
+                let sid = PSID(&ace.SidStart as *const u32 as *mut _);
+                seen.push((
+                    EqualSid(sid, PSID(user.as_ptr() as *mut _)).is_ok(),
+                    EqualSid(sid, PSID(admins.as_ptr() as *mut _)).is_ok(),
+                ));
+            }
+            assert_eq!(seen, vec![(true, false), (false, true)]);
+        }
+    }
+
     #[test]
     fn pipe_names_go_one_each_way() {
         assert_eq!(
@@ -681,8 +832,8 @@ mod tests {
             let down = serve(&down_name, false).unwrap();
             let up = serve(&up_name, true).unwrap();
             let stand_in = thread::spawn(move || {
-                let mut from = BufReader::new(OpenOptions::new().read(true).open(&down_name)?);
-                let mut to = OpenOptions::new().write(true).open(&up_name)?;
+                let mut from = BufReader::new(open_client(&down_name, false)?);
+                let mut to = open_client(&up_name, true)?;
                 let mut line = String::new();
                 from.read_line(&mut line)?;
                 let asked: Value = serde_json::from_str(line.trim_end()).unwrap();
