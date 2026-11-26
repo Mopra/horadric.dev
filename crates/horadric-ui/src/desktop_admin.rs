@@ -295,3 +295,32 @@ pub fn log(line: &str) {
         let _ = secure(&file);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Against real descriptors, as Windows hands them out: a file of
+    /// Windows' own is the administrators' alone, and one this test just
+    /// made belongs to whoever runs it.
+    #[test]
+    fn a_real_file_is_judged_by_its_owner_and_access_list() {
+        let windows = PathBuf::from(std::env::var_os("SystemRoot").expect("on Windows"));
+        let own = windows.join("System32").join("kernel32.dll");
+        assert!(matches!(guarded(&own, false), Ok(Some(_))), "{own:?}");
+        assert!(guarded(&own, true).is_err(), "a file is no folder");
+        let mine = std::env::temp_dir().join(format!(
+            "horadric-desktop-admin-test-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&mine, "{}").unwrap();
+        let judged = guarded(&mine, false);
+        let _ = std::fs::remove_file(&mine);
+        // Unless the tests themselves run as administrator, from a folder
+        // only administrators write.
+        if !elevated() {
+            assert!(judged.is_err(), "a user's own file passed");
+        }
+        assert!(matches!(guarded(&mine, false), Ok(None)));
+    }
+}
