@@ -453,10 +453,13 @@ impl<V> Recall<V> {
         self.items.retain(|_, e| e.1 != pid);
     }
 
+    // Only the tests count what is held.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.items.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
