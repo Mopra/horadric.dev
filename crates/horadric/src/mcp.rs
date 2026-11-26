@@ -1053,7 +1053,7 @@ fn desktop_tools() -> Vec<Value> {
             "window": window(),
             "reason": reason(),
             "ref": { "type": "string", "description": "A ref from desktop_snapshot of this window, like e12" },
-            "name": { "type": "string", "description": format!("Where there is no ref: the first element whose name or automation id contains this, to {verb}") },
+            "name": { "type": "string", "description": format!("Or the element to {verb}: its name or automation id, else part of the name, then of the id") },
             "risky": risky(),
         })
     };
@@ -1066,9 +1066,9 @@ fn desktop_tools() -> Vec<Value> {
     vec![
         tool(
             "desktop_windows",
-            "The programs' windows open on the user's Windows desktop, frontmost first: an id \
-             for the other desktop tools, the title, the program's file and process id. Dialogs \
-             say whose they are.",
+            "The windows on the user's desktop, frontmost first: id, title (cut at 40 \
+             characters until the user lets you into the program), program and process id. \
+             Dialogs say whose they are.",
             json!({}),
             &[],
         ),
@@ -1085,9 +1085,9 @@ fn desktop_tools() -> Vec<Value> {
         ),
         tool(
             "desktop_screenshot",
-            "A picture of a window as it is drawn, even when other windows cover it, or of one \
-             element of it by ref. Use it to check what a snapshot can not tell, like a chart, \
-             a ladder diagram or colours.",
+            "A picture of a window, mostly even when it is covered (one Windows will not draw \
+             for you must be in front and uncovered). For what a snapshot can not tell: a \
+             chart, a ladder diagram, colours.",
             json!({
                 "window": window(),
                 "ref": { "type": "string", "description": "Only this element, a ref from desktop_snapshot" },
@@ -1097,15 +1097,14 @@ fn desktop_tools() -> Vec<Value> {
         ),
         tool(
             "desktop_click",
-            "Click an element of a window, by ref or by name. It is a real mouse click at the \
-             element's middle: the window comes forward, an element out of view is scrolled \
-             into it first where the program can, and one covered by another window is not \
-             clicked. Only an element whose one action is expanding (a combo box, a tree node \
-             that can not be selected) is expanded or collapsed through UI Automation instead. \
-             The user's mouse pointer is put back after, and the keyboard is given back to the \
-             window the user had in front (the answer says so), so their typing does not land \
-             in the program; a dialog the click opened waits behind it, and the next call can \
-             act in it.",
+            "Click an element of a window with a real mouse click at its middle. The window \
+             comes forward and an element out of view is scrolled into it where the program \
+             can; one that is gone, off screen or covered by another program is not clicked, \
+             nor is anything while the user holds a mouse button. An element whose one action \
+             is expanding (a combo box, a tree node that can not be selected) is expanded or \
+             collapsed through UI Automation instead. The user's pointer is put back, and the \
+             keyboard goes back to the window they had in front (the answer says so); a \
+             dialog the click opened waits behind it for the next call.",
             with(
                 element("click"),
                 json!({
@@ -1117,12 +1116,12 @@ fn desktop_tools() -> Vec<Value> {
         ),
         tool(
             "desktop_type",
-            "Type text into a field of a window, by ref or by name. A field that takes a value \
-             has it set, replacing what was there; otherwise the window is brought forward, the \
-             field gets the keyboard and the text is typed at its caret. submit presses Enter \
-             after. The keyboard is then given back to the window the user had in front. The \
-             answer says what the field holds afterwards, read back before Enter; when that is \
-             not what was typed, Enter is not pressed.",
+            "Type text into a field. One that takes a value has it set, replacing what was \
+             there; any other gets the keyboard and the text at its caret, where a line break \
+             or tab is refused except in a document (use submit or desktop_press) and typing \
+             stops if another program takes the front. The answer says what the field \
+             holds, read back before Enter; when that is not what was typed, Enter is not \
+             pressed. The keyboard then goes back to the user's window.",
             with(
                 element("type into"),
                 json!({
@@ -1136,21 +1135,21 @@ fn desktop_tools() -> Vec<Value> {
             "desktop_text",
             "Read the text of a list, grid, output pane or editor that desktop_snapshot can not \
              read, by ref or by name, or of what has the keyboard in the window when neither is \
-             given. It reads UI Automation's text first, then the element's value (a plain \
-             text box has one); only where neither answers it selects all (Control+A) and \
-             copies (Control+C), which counts as operating, puts the clipboard's text back \
-             after (anything else on the clipboard is lost) and gives the keyboard back to \
-             the window the user had in front. Use it for build output, logs and tables \
-             instead of reading screenshots.",
+             given. It reads UI Automation's text, then the element's value; only where \
+             neither answers it selects all and copies (Control+A, Control+C), which counts as \
+             operating, may click into a pane (never a button) to give it the keyboard, and \
+             puts the clipboard's text back. That is refused while the clipboard holds more \
+             than plain text (a picture, files), which it would destroy. For build output, \
+             logs and tables.",
             element("read the text of"),
             &["window"],
         ),
         tool(
             "desktop_press",
             "Press a key in a window, with modifiers joined by +: Enter, Escape, Tab, F5, \
-             Down, Control+S, Shift+Tab, Alt+F4, a. The window is brought forward for the key, \
-             which goes to whatever in it has the keyboard, and the keyboard is then given \
-             back to the window the user had in front (the answer says so).",
+             Down, Control+S, Shift+Tab, Alt+F4, a. Chords with the Windows key are refused. \
+             The window comes forward, the key goes to whatever in it has the keyboard, and \
+             the keyboard then goes back to the user's window.",
             json!({
                 "window": window(),
                 "key": { "type": "string" },
