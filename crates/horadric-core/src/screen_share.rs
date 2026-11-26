@@ -48,6 +48,19 @@ pub const LOG_FILE: &str = "screen-share.log";
 /// The size the audit log is put aside at, for a new one to start.
 pub const LOG_MAX: u64 = 1024 * 1024;
 
+/// Moves a log that grew past [`LOG_MAX`] aside before the next line,
+/// keeping one old file beside it (`name.1`), so an audit log is never
+/// more than twice that. Shared by the logs of the state folder that grow
+/// for as long as Horadric is installed, and by the elevated helper's, so
+/// it lives here where the app and the binary both reach it.
+pub fn roll(path: &std::path::Path) {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > LOG_MAX) {
+        let mut aside = path.as_os_str().to_owned();
+        aside.push(".1");
+        let _ = std::fs::rename(path, aside);
+    }
+}
+
 /// The most connections served at once.
 pub const MAX_CONNECTIONS: usize = 16;
 
@@ -611,6 +624,24 @@ pub fn disp_change_name(code: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_log_is_put_aside_only_once_it_is_past_the_limit() {
+        let dir = std::env::temp_dir().join(format!("horadric-roll-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("a.log");
+        let aside = dir.join("a.log.1");
+        std::fs::write(&log, vec![b'x'; LOG_MAX as usize]).unwrap();
+        roll(&log);
+        assert!(log.exists() && !aside.exists(), "at the limit it stays");
+        std::fs::write(&aside, "older").unwrap();
+        std::fs::write(&log, vec![b'x'; LOG_MAX as usize + 1]).unwrap();
+        roll(&log);
+        let rolled = std::fs::metadata(&aside).map(|m| m.len());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(rolled.ok(), Some(LOG_MAX + 1), "past it, it replaces the old one");
+        assert!(!log.exists());
+    }
 
     #[test]
     fn only_one_turns_it_on() {

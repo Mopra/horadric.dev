@@ -20,7 +20,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle as _};
 use std::path::{Path, PathBuf};
 
 use horadric_core::takeover_programs::{self as listed, List};
@@ -31,7 +31,10 @@ use windows::Win32::Security::{
     DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
     PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY,
 };
-use windows::Win32::Storage::FileSystem::CreateDirectoryW;
+use windows::Win32::Storage::FileSystem::{
+    CreateDirectoryW, CreateFileW, FILE_APPEND_DATA, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_READ, OPEN_ALWAYS, READ_CONTROL, SYNCHRONIZE,
+};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
@@ -152,11 +155,16 @@ fn guarded(path: &Path, is_folder: bool) -> Result<Option<File>, String> {
     } else {
         FILE_FLAG_OPEN_REPARSE_POINT
     });
-    let open = match options.open(path) {
-        Ok(open) => open,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("it can not be opened: {e}")),
-    };
+    match options.open(path) {
+        Ok(open) => checked(open, is_folder).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("it can not be opened: {e}")),
+    }
+}
+
+/// `open`, a folder or a file opened without following a link, only if it
+/// is no link and nobody but administrators could have written it.
+fn checked(open: File, is_folder: bool) -> Result<File, String> {
     let meta = open
         .metadata()
         .map_err(|e| format!("it can not be read: {e}"))?;
@@ -171,7 +179,7 @@ fn guarded(path: &Path, is_folder: bool) -> Result<Option<File>, String> {
         });
     }
     listed::admins_only(&descriptor_of(&open)?)?;
-    Ok(Some(open))
+    Ok(open)
 }
 
 /// Reads the administrators' list, refusing it unless the folder and the
@@ -308,29 +316,117 @@ Horadric never asks Windows for that itself";
 
 /// Adds a line to the elevated helper's log, when the folder is the
 /// administrators' alone. An elevated process must not write where a
-/// user's program could have put a link to some other file.
-pub fn log(line: &str) {
-    let (Some(folder), Some(file)) = (folder(), log_file()) else {
-        return;
+/// user's program could have put a link to some other file. Said why not
+/// otherwise, for the caller to drop: a log that can not be written must
+/// not stop what the human said yes to.
+pub fn log(line: &str) -> Result<(), String> {
+    if !elevated() {
+        return Err("only an elevated process writes the helper's log".into());
+    }
+    let (folder, file) = folder()
+        .zip(log_file())
+        .ok_or("Windows would not say where %ProgramData% is")?;
+    make_folder(&folder)?;
+    let unsafe_folder = |why: String| {
+        format!(
+            "{} is not the administrators' alone: {why}",
+            folder.display()
+        )
     };
-    if !elevated() || make_folder(&folder).is_err() {
-        return;
-    }
-    if !matches!(guarded(&folder, true), Ok(Some(_))) {
-        return;
-    }
+    guarded(&folder, true)
+        .map_err(unsafe_folder)?
+        .ok_or_else(|| format!("{} is gone again", folder.display()))?;
+    // Inside a folder only administrators write, nothing but an
+    // administrator can have put a link under these names.
     let old = folder.join(listed::OLD_ADMIN_LOG_FILE);
     if listed::moves(file.exists(), old.exists()) {
         let _ = std::fs::rename(&old, &file);
     }
-    let new = !file.exists();
-    let _ = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&file)
-        .and_then(|mut f| f.write_all(line.as_bytes()));
-    if new {
-        let _ = secure(&file);
+    horadric_core::screen_share::roll(&file);
+    let said = |why: String| format!("{}: {why}", file.display());
+    let mut open = open_log(&file).map_err(said)?;
+    open.write_all(line.as_bytes())
+        .map_err(|e| said(e.to_string()))
+}
+
+/// Opens the helper's log to add to it, making it with the
+/// administrators' access list from the start when it is not there, so
+/// there is no moment it stands open or owned by the account that made it.
+/// A link in its place is opened as the link and refused.
+fn open_log(file: &Path) -> Result<File, String> {
+    let descriptor = listed::admin_descriptor(false);
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.as_ptr() as *mut _,
+        bInheritHandle: false.into(),
+    };
+    // Appending only, and enough to read its attributes and access list
+    // off the handle for the check.
+    let access = FILE_APPEND_DATA.0 | FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0 | SYNCHRONIZE.0;
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide(file).as_ptr()),
+            access,
+            FILE_SHARE_READ,
+            Some(&attributes),
+            OPEN_ALWAYS,
+            FILE_FLAGS_AND_ATTRIBUTES(FILE_FLAG_OPEN_REPARSE_POINT),
+            None,
+        )
+    }
+    .map_err(|e| format!("it can not be opened: {e}"))?;
+    checked(unsafe { File::from_raw_handle(handle.0) }, false)
+}
+
+/// What reading the elevated helper's log came to.
+#[derive(Debug, PartialEq)]
+pub enum Log {
+    /// There is none yet.
+    Missing,
+    /// The folder and the file are the administrators' alone, so what it
+    /// says only an administrator or the helper wrote.
+    Trusted(String),
+    /// It is there, but a program that is not elevated could have written
+    /// it, and why. What it says is read anyway, as a record and no proof.
+    Untrusted { why: String, text: String },
+}
+
+/// Reads the elevated helper's log through the same check of who could
+/// have written it as the administrators' list, and where it was found.
+pub fn read_log() -> Result<(PathBuf, Log), String> {
+    let (folder, file) = folder()
+        .zip(log_file_read())
+        .ok_or("Windows would not say where %ProgramData% is")?;
+    // Read by name, as any program of the user may: it is shown, not
+    // believed.
+    let untrusted = |what: &Path, file: &Path, why: String| Log::Untrusted {
+        why: format!("{} is not the administrators' alone: {why}", what.display()),
+        text: std::fs::read_to_string(file).unwrap_or_default(),
+    };
+    match guarded(&folder, true) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Ok((file, Log::Missing)),
+        Err(why) => {
+            let log = untrusted(&folder, &file, why);
+            return Ok((file, log));
+        }
+    }
+    let found = listed::read_first(listed::ADMIN_LOG_FILE, listed::OLD_ADMIN_LOG_FILE, |name| {
+        guarded(&folder.join(name), false)
+    });
+    match found {
+        Ok(None) => Ok((file, Log::Missing)),
+        Err((name, why)) => {
+            let file = folder.join(name);
+            let log = untrusted(&file, &file, why);
+            Ok((file, log))
+        }
+        Ok(Some((name, mut open))) => {
+            let mut text = String::new();
+            open.read_to_string(&mut text)
+                .map_err(|e| format!("{} can not be read: {e}", folder.join(name).display()))?;
+            Ok((folder.join(name), Log::Trusted(text)))
+        }
     }
 }
 

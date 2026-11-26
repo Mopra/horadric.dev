@@ -814,7 +814,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .and_then(|query| pick_window(&list_windows(), &query).cloned())
         .filter(|w| !same_program(&w.path, &gate.program));
         if let Some(w) = stray {
-            let out = json!({ "fail": not_bound_text(&gate.program, &w.path) });
+            let why = not_bound_text(&gate.program, &w.path);
+            gate.note(&format!("refused by the helper: {why}"), name);
+            let out = json!({ "fail": why });
             writeln!(writer, "{out}").map_err(|e| e.to_string())?;
             continue;
         }
@@ -1098,6 +1100,9 @@ struct Gate {
     refused: Refusals<()>,
     /// Why the administrators' list was last not used, logged once.
     list_refused: Option<String>,
+    /// The call now decided was refused in a question, whose answer is
+    /// its line in the log already.
+    answered: bool,
 }
 
 impl Gate {
@@ -1108,20 +1113,31 @@ impl Gate {
             operate: false,
             refused: Refusals::default(),
             list_refused: None,
+            answered: false,
         }
     }
 
+    /// A decision in the log, as the app writes its own.
     fn log(&self, source: Source, what: &str) {
+        let (utc, session, program) = self.stamp();
+        write_log(&listed::log_line(&utc, &session, source, &program, what));
+    }
+
+    /// What became of an action, or a refusal no question was asked for.
+    fn note(&self, how: &str, what: &str) {
+        let (utc, session, program) = self.stamp();
+        write_log(&helper_line(&utc, &session, how, &program, what));
+    }
+
+    fn stamp(&self) -> (String, String, String) {
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        takeover_admin::log(&listed::log_line(
-            &horadric_core::tasks::utc(secs),
-            &format!("helper for process {}", self.parent),
-            source,
-            &format!("{} as administrator", self.program),
-            what,
-        ));
+        (
+            horadric_core::tasks::utc(secs),
+            format!("helper for process {}", self.parent),
+            format!("{} as administrator", self.program),
+        )
     }
 
     /// The administrators' list as it stands now, read on every decision
@@ -1210,6 +1226,7 @@ impl Gate {
             ),
         };
         self.log(source, what);
+        self.answered = said.is_some();
         match said {
             None => {
                 self.refused.clear(&(), question);
@@ -1296,10 +1313,28 @@ impl Gate {
         body: Value,
         peer: &mut P,
     ) -> Result<Value, String> {
-        if body.get("op").and_then(Value::as_str) != Some("desktop.allow") {
-            return peer(body);
+        let what = body
+            .get("what")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        match body.get("op").and_then(Value::as_str) {
+            Some("desktop.allow") => {}
+            Some("desktop.done") => {
+                let outcome = body.get("outcome").and_then(Value::as_str).unwrap_or("");
+                match body.get("ok").and_then(Value::as_bool) {
+                    Some(true) => self.note("done", &what),
+                    _ => self.note(&format!("failed: {outcome}"), &what),
+                }
+                return peer(body);
+            }
+            _ => return peer(body),
         }
+        self.answered = false;
         if let Err(why) = self.decide(&body) {
+            if !self.answered {
+                self.note(&format!("refused by the helper: {why}"), &what);
+            }
             // For the history the human watches. What the app makes of it
             // does not matter.
             let _ = peer(json!({
@@ -1313,6 +1348,36 @@ impl Gate {
         }
         peer(body)
     }
+}
+
+/// Adds a line to the helper's own log. A line that could not be written
+/// is dropped: the helper has no window to say so in that the session
+/// could not imitate, and the human's yes must not wait on its log.
+fn write_log(line: &str) {
+    let _ = takeover_admin::log(line);
+}
+
+/// The longest a refusal's reason runs in the log: it is the agent's
+/// text, written for a chat, and the log keeps one line per action.
+const LOG_REASON_MOST: usize = 240;
+
+/// One line of the helper's log for what is not a decision of the
+/// list's or the human's: an action done or failed, or one the helper
+/// refused before any question. Laid out as [`listed::log_line`] lays out
+/// a decision, so the file reads as one.
+fn helper_line(utc: &str, session: &str, how: &str, program: &str, what: &str) -> String {
+    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut how = flat(how);
+    if let Some((cut, _)) = how.char_indices().nth(LOG_REASON_MOST) {
+        how.truncate(cut);
+        how.push_str("...");
+    }
+    let mut line = format!("{utc}  {}  {how}  {}", flat(session), flat(program));
+    if !what.trim().is_empty() {
+        line.push_str(&format!("  ({})", flat(what)));
+    }
+    line.push('\n');
+    line
 }
 
 /// The file name of a path.
@@ -1701,6 +1766,24 @@ mod ask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_helper_line_is_one_line_and_a_long_reason_is_cut() {
+        assert_eq!(
+            helper_line(
+                "2026-11-26 10:00:00",
+                "helper for process 7",
+                "failed: the window\nwould not come forward",
+                r"C:\Acme\Studio.exe as administrator",
+                "press Enter",
+            ),
+            "2026-11-26 10:00:00  helper for process 7  failed: the window would not come \
+             forward  C:\\Acme\\Studio.exe as administrator  (press Enter)\n"
+        );
+        let long = helper_line("t", "s", &"\u{e6}".repeat(500), "p", " ");
+        assert_eq!(long.lines().count(), 1);
+        assert!(long.contains(&format!("{}...  p\n", "\u{e6}".repeat(LOG_REASON_MOST))));
+    }
 
     #[test]
     fn helper_lines_are_read_by_their_key() {

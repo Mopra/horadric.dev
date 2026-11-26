@@ -290,17 +290,9 @@ pub(crate) fn log(file: &str, line: &str) {
     }
 }
 
-/// Moves a log that grew past [`share::LOG_MAX`] aside before the next
-/// line, keeping one old file beside it (`name.1`), so an audit log is
-/// never more than twice that. Shared by the logs of the state folder
-/// that grow for as long as Horadric is installed.
-pub(crate) fn roll(path: &Path) {
-    if std::fs::metadata(path).is_ok_and(|m| m.len() > share::LOG_MAX) {
-        let mut aside = path.as_os_str().to_owned();
-        aside.push(".1");
-        let _ = std::fs::rename(path, aside);
-    }
-}
+/// The state folder's logs and the elevated helper's are rolled by one
+/// rule, which the binary reaches too.
+pub(crate) use horadric_core::screen_share::roll;
 
 /// A connection's place among the few served at once, given back when
 /// its thread ends or could not be started.

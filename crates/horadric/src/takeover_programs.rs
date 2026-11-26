@@ -403,18 +403,29 @@ fn list() -> Result<(), String> {
 }
 
 fn log(elevated: bool, n: usize) -> Result<(), String> {
-    let file = if elevated {
-        takeover_admin::log_file_read().ok_or("Windows would not say where %ProgramData% is")?
+    let text = if elevated {
+        let (file, read) = takeover_admin::read_log()?;
+        println!("{}", file.display());
+        match read {
+            takeover_admin::Log::Missing => String::new(),
+            takeover_admin::Log::Trusted(text) => {
+                println!("  (written by the elevated helper; only administrators can change it)");
+                text
+            }
+            takeover_admin::Log::Untrusted { why, text } => {
+                println!("  NOT TO BE TRUSTED: {why}.");
+                println!("  Any program of yours could have written or changed what follows,");
+                println!("  and the elevated helper adds nothing to it until an administrator");
+                println!("  deletes it from an elevated shell.");
+                text
+            }
+        }
     } else {
-        horadric_hooks::tasks::takeover_log_file().ok_or("cannot find %APPDATA%")?
-    };
-    let text = std::fs::read_to_string(&file).unwrap_or_default();
-    println!("{}", file.display());
-    if elevated {
-        println!("  (written by the elevated helper; only administrators can change it)");
-    } else {
+        let file = horadric_hooks::tasks::takeover_log_file().ok_or("cannot find %APPDATA%")?;
+        println!("{}", file.display());
         println!("  (any program of yours can write this file: it is a record, not proof)");
-    }
+        std::fs::read_to_string(&file).unwrap_or_default()
+    };
     let lines: Vec<&str> = text.lines().collect();
     if lines.is_empty() {
         println!("  Nothing yet.");
