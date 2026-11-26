@@ -232,6 +232,8 @@ mod retinue;
 #[cfg(windows)]
 pub mod sanctuary;
 #[cfg(windows)]
+pub mod desk;
+#[cfg(windows)]
 mod screen_share;
 #[cfg(windows)]
 mod settings;

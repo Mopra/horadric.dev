@@ -24,6 +24,8 @@ pub mod changes;
 pub mod checkpoint;
 pub mod chronicle;
 pub mod context;
+pub mod desk;
+pub mod desk_apps;
 pub mod diff;
 pub mod discord;
 pub mod escalate;
