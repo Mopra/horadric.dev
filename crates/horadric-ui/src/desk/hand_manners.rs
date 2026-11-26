@@ -3,11 +3,16 @@
 //! that covers the screen), and the desk is a workplace, not a second
 //! copy of the human's tray. So for its first minute the hand stops the
 //! programs the Run keys and the Startup folders started, in its own
-//! session and nowhere else. Which program a Run value names is parsed
-//! in `horadric_core::desk_apps`.
+//! session and nowhere else. Which program a Run value names, and which
+//! process is one it started, is decided in `horadric_core::desk_apps`.
+//!
+//! It stops for good the moment the desk is used: a start asked of the
+//! hand, or a key or the mouse in the session, whoever's. From then on a
+//! program there may be one somebody started on purpose.
 
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
@@ -28,6 +33,7 @@ use windows::Win32::System::SystemInformation::GetWindowsDirectoryW;
 use windows::Win32::System::Threading::{
     TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::Shell::{
     FOLDERID_CommonStartup, FOLDERID_Startup, IShellLinkW, SHGetKnownFolderPath, ShellLink,
     KF_FLAG_DEFAULT,
@@ -66,17 +72,51 @@ pub(super) fn keep(path: &str) {
     kept.push(path.to_string());
 }
 
+/// Whether the desk has been used since the hand started. It never goes
+/// back: nothing is stopped once anybody works there.
+static USED: AtomicBool = AtomicBool::new(false);
+
+/// Notes that the desk is in use, which ends the stopping of autostarts.
+pub(super) fn used() {
+    USED.store(true, Ordering::Relaxed);
+}
+
+/// When this session last had a key or the mouse, in Windows' ticks.
+/// Input the hand sends counts as a person's does, and so does what the
+/// human does in the desk's window.
+fn last_input() -> Option<u32> {
+    let mut info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    // SAFETY: the struct has its size set and outlives the call.
+    unsafe { GetLastInputInfo(&mut info) }
+        .as_bool()
+        .then_some(info.dwTime)
+}
+
+/// Whether the desk is in use: a start was asked for, or the session had
+/// input since `quiet`, the last input when the hand started.
+fn in_use(quiet: Option<u32>) -> bool {
+    if !USED.load(Ordering::Relaxed) && last_input() != quiet {
+        used();
+    }
+    USED.load(Ordering::Relaxed)
+}
+
 /// Watches the desk's `session` for autostart programs and stops them,
-/// on a thread of its own, for the first minute. Only to be called when
-/// this process really is in the desk.
+/// on a thread of its own, for the first minute or until the desk is
+/// used. Only to be called when this process really is in the desk.
 pub(super) fn start(session: u32, log_file: &'static str) {
+    // Read before the thread is: the first request may come at once.
+    let quiet = last_input();
     let spawned = thread::Builder::new()
         .name("desk-manners".into())
         .spawn(move || {
             let autostarts = autostarts();
             let windows = windows_folder();
             for _ in 0..ROUNDS {
-                if !sweep(session, &autostarts, &windows, log_file) {
+                if !sweep(session, &autostarts, &windows, quiet, log_file) {
                     return;
                 }
                 thread::sleep(EVERY);
@@ -88,12 +128,21 @@ pub(super) fn start(session: u32, log_file: &'static str) {
 }
 
 /// One look over the processes of `session`. False when this is no
-/// longer a session to stop anything in.
-fn sweep(session: u32, autostarts: &[Autostart], windows: &str, log_file: &str) -> bool {
+/// longer a session to stop anything in, or the desk is in use.
+fn sweep(
+    session: u32,
+    autostarts: &[Autostart],
+    windows: &str,
+    quiet: Option<u32>,
+    log_file: &str,
+) -> bool {
     // Asked again each time: nothing is ever stopped in the session the
     // human sits at, whatever led here.
     // SAFETY: takes nothing and hands a number back.
     if session == unsafe { WTSGetActiveConsoleSessionId() } {
+        return false;
+    }
+    if in_use(quiet) {
         return false;
     }
     let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -117,8 +166,14 @@ fn sweep(session: u32, autostarts: &[Autostart], windows: &str, log_file: &str) 
         let Some(path) = apps::image(&handle) else {
             continue;
         };
-        if desk_apps::spared(&path, windows) || !unwanted.iter().any(|a| a.is(&path)) {
+        let line = || apps::command_line(&handle);
+        if !desk_apps::sweeps(&path, &line, &unwanted, windows) {
             continue;
+        }
+        // Asked again before each stop: a program somebody started since
+        // this look began is theirs.
+        if in_use(quiet) {
+            return false;
         }
         if stop(&handle, process.pid, session) {
             crate::screen_share::log(log_file, &format!("stopped the autostart {path}"));
@@ -254,6 +309,13 @@ fn known_folder(id: &GUID) -> Option<PathBuf> {
 /// What a shortcut starts, as a command line. COM must be joined on
 /// this thread.
 fn shortcut(link: &Path) -> Option<String> {
+    shortcut_parts(link).map(|(target, arguments)| format!("\"{target}\" {arguments}"))
+}
+
+/// The program a shortcut points at and the arguments it gives it, as
+/// written in it. None for one that names no file. Only read: a target
+/// that moved is not searched for. COM must be joined on this thread.
+pub(super) fn shortcut_parts(link: &Path) -> Option<(String, String)> {
     // SAFETY: the link's name outlives the calls, and each buffer is a
     // local array handed with its own length.
     unsafe {
@@ -269,7 +331,7 @@ fn shortcut(link: &Path) -> Option<String> {
             String::from_utf16_lossy(&buf[..end])
         };
         let target = text(&target);
-        (!target.is_empty()).then(|| format!("\"{target}\" {}", text(&arguments)))
+        (!target.is_empty()).then(|| (target, text(&arguments)))
     }
 }
 
@@ -292,7 +354,8 @@ mod tests {
         let everything = [Autostart {
             exe: String::new(),
             child: Some((String::new(), String::new())),
+            line: String::new(),
         }];
-        assert!(!sweep(console, &everything, "", "desk-hand-test.log"));
+        assert!(!sweep(console, &everything, "", last_input(), "desk-hand-test.log"));
     }
 }

@@ -5,7 +5,9 @@
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 
-use horadric_core::desk_apps::{self, Choice, Launch, Open, Way};
+use std::ffi::c_void;
+
+use horadric_core::desk_apps::{self, Choice, Kind, Launch, Open, Way};
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, HWND, LPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
@@ -101,6 +103,65 @@ pub(super) fn image(process: &OwnedHandle) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..len as usize]))
 }
 
+#[link(name = "ntdll")]
+extern "system" {
+    /// Not in the `windows` crate's Win32 half. Class 60 is the command
+    /// line, which this answers for a handle with no more than the right
+    /// to query (Windows 8.1 on), where reading the process's memory
+    /// would want more.
+    fn NtQueryInformationProcess(
+        process: HANDLE,
+        class: u32,
+        info: *mut c_void,
+        size: u32,
+        returned: *mut u32,
+    ) -> i32;
+}
+
+const PROCESS_COMMAND_LINE: u32 = 60;
+
+/// The command line an open process was started with, None when Windows
+/// will not say.
+pub(super) fn command_line(process: &OwnedHandle) -> Option<String> {
+    // A counted string's header, then its text: 64 KiB of text at most.
+    // In `u64`s so the header's pointer is aligned.
+    let mut buf = vec![0u64; 8200];
+    let bytes = std::mem::size_of_val(buf.as_slice());
+    let mut returned = 0u32;
+    // SAFETY: the handle is open, and the buffer is handed with its own
+    // size in bytes.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            HANDLE(process.as_raw_handle()),
+            PROCESS_COMMAND_LINE,
+            buf.as_mut_ptr().cast(),
+            bytes as u32,
+            &mut returned,
+        )
+    };
+    if status < 0 {
+        return None;
+    }
+    #[repr(C)]
+    struct Counted {
+        bytes: u16,
+        room: u16,
+        text: *const u16,
+    }
+    let start = buf.as_ptr() as usize;
+    // SAFETY: the call succeeded, so the buffer starts with the header.
+    let header = unsafe { &*(buf.as_ptr() as *const Counted) };
+    let (at, len) = (header.text as usize, header.bytes as usize);
+    // The text is in the buffer that was handed over, or it is not read.
+    if at < start + std::mem::size_of::<Counted>() || at + len > start + bytes {
+        return None;
+    }
+    // SAFETY: checked above to lie within `buf`, which is alive, and
+    // Windows aligns the text it points at.
+    let units = unsafe { std::slice::from_raw_parts(header.text, len / 2) };
+    Some(String::from_utf16_lossy(units))
+}
+
 fn text(buf: &[u16], len: i32) -> String {
     String::from_utf16_lossy(&buf[..(len.max(0) as usize).min(buf.len())])
 }
@@ -186,54 +247,113 @@ pub(super) fn at_the_humans() -> Vec<String> {
 }
 
 /// What was started, for the answer.
+#[derive(Debug)]
 pub(super) struct Started {
     pub app: String,
     pub instead_of: Option<&'static str>,
     pub why: Option<String>,
+    /// What to mind about the app, see `desk_apps::note`.
+    pub note: Option<&'static str>,
 }
+
+/// The largest internet shortcut that is read for its address. One is a
+/// few lines of text.
+const BOOKMARK_MOST: u64 = 64 * 1024;
 
 /// Starts what was asked for on the desk, or what the twin rule puts in
 /// its place. An error is the refusal in plain words.
 pub(super) fn launch(what: Launch) -> Result<Started, String> {
     let human = at_the_humans();
-    let (path, args) = match what {
-        Launch::App { app, args } => return start(desk_apps::plan(&app, &args, &human)?),
-        Launch::Path { path, args } => (path, args),
-    };
-    if desk_apps::is_web(&path) {
-        let mut all = vec![path];
-        all.extend(args);
-        return start(desk_apps::plan("msedge", &all, &human)?);
+    let mut started = match what {
+        Launch::App { app, args } => start(desk_apps::plan(&app, &args, &human)?),
+        Launch::Path { path, args } => by_path(&desk_apps::clean(&path), args, &human, true),
+    }?;
+    started.note = started.note.or_else(|| desk_apps::note(&started.app));
+    Ok(started)
+}
+
+/// Opens a page in Edge by name. Handed to Windows it would open in the
+/// default browser, which may be the one running at the human's.
+fn page(address: &str, args: Vec<String>, human: &[String]) -> Result<Started, String> {
+    let mut all = vec![address.to_string()];
+    all.extend(args);
+    start(desk_apps::plan("msedge", &all, human)?)
+}
+
+/// Starts what a cleaned path names. Every form a path can name a known
+/// app or a page in is read here before Windows gets it, or the form
+/// would be the way around the twin rule. `follow` is whether a shortcut
+/// is still looked into.
+fn by_path(
+    path: &str,
+    args: Vec<String>,
+    human: &[String],
+    follow: bool,
+) -> Result<Started, String> {
+    if path.is_empty() {
+        return Err("the path is empty".into());
     }
-    let lower = path.trim().to_ascii_lowercase();
-    if lower.starts_with("shell:") || !lower.ends_with(".exe") {
-        shell(&path, &args)?;
-        let app = if lower.starts_with("shell:") {
-            path.trim().to_string()
-        } else {
-            desk_apps::process_name(&path)
-        };
-        return Ok(Started {
-            app,
-            instead_of: None,
-            why: None,
-        });
+    let kind = desk_apps::kind(path);
+    match kind {
+        Kind::Page => return page(path, args, human),
+        Kind::Bookmark => {
+            let small = std::fs::metadata(path).is_ok_and(|m| m.len() <= BOOKMARK_MOST);
+            let address = (small.then(|| std::fs::read(path).ok()).flatten())
+                .and_then(|bytes| desk_apps::address_in(&String::from_utf8_lossy(&bytes)))
+                .ok_or_else(|| format!("{path} could not be read for the address it opens"))?;
+            if desk_apps::kind(&address) == Kind::Page {
+                return page(&address, args, human);
+            }
+            // Any other address is an app's own, which Windows hands it.
+        }
+        Kind::Shortcut if !follow => {
+            return Err(format!(
+                "{path} is a shortcut to a shortcut, which is not followed: give what it starts"
+            ));
+        }
+        Kind::Shortcut => {
+            let _com = Com::join();
+            let parts = super::manners::shortcut_parts(Path::new(path));
+            if let Some((target, tail)) = parts {
+                let mut all = desk_apps::split_arguments(&tail);
+                all.extend(args);
+                return by_path(&desk_apps::clean(&target), all, human, false);
+            }
+            // One that names no file (a Store app's) goes by its name.
+        }
+        Kind::Shell | Kind::Program | Kind::Other => {}
     }
-    // A known app is under the twin rule by its path as by its name.
-    let name = desk_apps::process_name(&path);
     let mut why = None;
-    if desk_apps::find(&name).is_some() {
-        let choices = desk_apps::plan(&name, &args, &human)?;
-        if choices.iter().any(|c| c.instead_of.is_some()) {
+    if let Some(app) = desk_apps::app_of(path) {
+        let choices = desk_apps::plan(app.names[0], &args, human)?;
+        // A bare name has no file to start, so the table's ways do it.
+        let bare = !path.contains(['\\', '/', ':']);
+        if bare || choices.iter().any(|c| c.instead_of.is_some()) {
             return start(choices);
         }
         why = choices.into_iter().next().and_then(|c| c.why);
     }
-    create(path.trim(), &args)?;
+    if kind == Kind::Program {
+        create(path, &args)?;
+        return Ok(Started {
+            app: desk_apps::process_name(path),
+            instead_of: None,
+            why,
+            note: None,
+        });
+    }
+    let opened_by = shell(path, &args)?;
+    let app = if kind == Kind::Shell {
+        path.to_string()
+    } else {
+        desk_apps::process_name(path)
+    };
     Ok(Started {
-        app: name,
+        app,
         instead_of: None,
         why,
+        // A text file opens in Notepad without naming it.
+        note: opened_by.as_deref().and_then(desk_apps::note),
     })
 }
 
@@ -258,6 +378,7 @@ fn start(choices: Vec<Choice>) -> Result<Started, String> {
                 app: choice.app,
                 instead_of: choice.instead_of,
                 why: choice.why,
+                note: None,
             });
         }
         if choice.instead_of.is_some() {
@@ -376,24 +497,34 @@ fn create(exe: &str, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Has Windows open a document, a `shell:` target or anything else that
-/// is not a program, as a double click would.
-fn shell(target: &str, args: &[String]) -> Result<(), String> {
-    struct Com(bool);
-    impl Drop for Com {
-        fn drop(&mut self) {
-            if self.0 {
-                // SAFETY: pairs the CoInitializeEx below that succeeded,
-                // on the same thread.
-                unsafe { CoUninitialize() };
-            }
+/// This thread in an apartment, which the shell wants of the thread that
+/// asks, left again when dropped.
+struct Com(bool);
+
+impl Com {
+    fn join() -> Com {
+        // SAFETY: no pointers; the pair is kept by the drop below.
+        let joined =
+            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+        Com(joined.is_ok())
+    }
+}
+
+impl Drop for Com {
+    fn drop(&mut self) {
+        if self.0 {
+            // SAFETY: pairs the CoInitializeEx that succeeded, on the
+            // same thread.
+            unsafe { CoUninitialize() };
         }
     }
-    // The shell wants an apartment of the thread that asks.
-    // SAFETY: no pointers; the pair is kept by `Com`.
-    let _com = Com(
-        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }.is_ok(),
-    );
+}
+
+/// Has Windows open a document, a `shell:` target or anything else that
+/// is not a program, as a double click would. Answers the program that
+/// opened it, when Windows says which.
+fn shell(target: &str, args: &[String]) -> Result<Option<String>, String> {
+    let _com = Com::join();
     let file = HSTRING::from(target.trim());
     let parameters = HSTRING::from(desk_apps::arguments(args));
     let mut run = SHELLEXECUTEINFOW {
@@ -420,9 +551,10 @@ fn shell(target: &str, args: &[String]) -> Result<(), String> {
         let process = unsafe { OwnedHandle::from_raw_handle(run.hProcess.0) };
         if let Some(path) = image(&process) {
             super::manners::keep(&path);
+            return Ok(Some(path));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -433,6 +565,26 @@ mod tests {
     fn hand_a_packaged_app_that_is_not_installed_fails_to_open() {
         // What the next way or the next twin is tried on.
         assert!(shell("shell:AppsFolder\\Horadric.NoSuchApp_0000000000000!None", &[]).is_err());
+    }
+
+    #[test]
+    fn hand_this_test_reads_its_own_command_line() {
+        let process = open(std::process::id(), PROCESS_QUERY_LIMITED_INFORMATION).unwrap();
+        let line = command_line(&process).unwrap();
+        let me = std::env::current_exe().unwrap();
+        let name = me.file_stem().unwrap().to_string_lossy().to_lowercase();
+        assert!(line.to_lowercase().contains(&name), "{line}");
+    }
+
+    #[test]
+    fn hand_a_path_is_refused_before_anything_starts() {
+        // Only what is refused before anything starts is tried here: a
+        // test starts nothing on the PC it runs on.
+        let e = by_path(r"C:\no\such\Chrome.lnk", Vec::new(), &[], false).unwrap_err();
+        assert!(e.contains("shortcut to a shortcut"), "{e}");
+        let e = by_path(r"C:\no\such\link.url", Vec::new(), &[], true).unwrap_err();
+        assert!(e.contains("could not be read"), "{e}");
+        assert!(by_path("", Vec::new(), &[], true).is_err());
     }
 
     #[test]

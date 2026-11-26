@@ -173,6 +173,22 @@ pub const APPS: &[App] = &[
     },
 ];
 
+/// File names that start a known app without being its process: Chrome's
+/// and Edge's installed web apps are shortcuts to these. Lower case,
+/// without `.exe`, each with the app's first name.
+const STARTERS: &[(&str, &str)] = &[("chrome_proxy", "chrome"), ("msedge_proxy", "msedge")];
+
+/// The ids `shell:AppsFolder\<id>` starts a known app by, besides the
+/// packaged ways in [`APPS`]. Lower case, each with the app's first name.
+/// Read from the Start menu's list on 2026-11-26.
+const FOLDER_IDS: &[(&str, &str)] = &[
+    ("chrome", "chrome"),
+    ("msedge", "msedge"),
+    ("microsoft.office.outlook.exe.15", "outlook"),
+    ("5319275a.whatsappdesktop_cv1g1gvanyjgm!app", "whatsapp"),
+    ("microsoft.visualstudiocode", "code"),
+];
+
 /// A name as the table spells it: lower case, without `.exe`.
 fn plain(name: &str) -> String {
     let name = name.trim().to_lowercase();
@@ -271,6 +287,167 @@ pub fn plan(asked: &str, args: &[String], human: &[String]) -> Result<Vec<Choice
         .collect())
 }
 
+/// A `/launch` path without what Windows drops from one when it opens
+/// it: quotes around it, and dots and spaces at its end. So `chrome.exe.`
+/// and `"C:\x\chrome.exe"` are read as the program they start.
+pub fn clean(path: &str) -> String {
+    let unquoted = path.trim_matches(|c: char| c == '"' || c.is_whitespace());
+    let ended = unquoted.trim_end_matches(['.', ' ']);
+    // Nothing but dots is a folder's own name, not an ending.
+    if ended.is_empty() || ended.ends_with(['\\', '/']) {
+        unquoted.to_string()
+    } else {
+        ended.to_string()
+    }
+}
+
+/// The file name a path ends in and its extension, both lower case. The
+/// extension is empty when there is none.
+fn file_name(path: &str) -> (String, String) {
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(path).to_lowercase();
+    let ext = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => ext.to_string(),
+        _ => String::new(),
+    };
+    (name, ext)
+}
+
+/// What a `/launch` path is, told by its form alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A web or `file:` address, or a document a browser opens. Edge
+    /// takes it, see [`kind`].
+    Page,
+    /// An internet shortcut (`.url`): the address in it says what it is.
+    Bookmark,
+    /// A shortcut (`.lnk`): what it points at says what it is.
+    Shortcut,
+    /// A `shell:` target.
+    Shell,
+    /// A program by its `.exe`.
+    Program,
+    /// Anything else, which Windows opens as a double click would.
+    Other,
+}
+
+/// What the path is, once [`clean`]. A page goes to Edge by name, always:
+/// handed to Windows it opens in the default browser, which may be the
+/// Chrome running at the human's and would then show it in their
+/// session. Asking first whether Chrome is open there would miss every
+/// other browser that hands a start over, which the table does not know.
+pub fn kind(path: &str) -> Kind {
+    let lower = path.trim_start().to_lowercase();
+    if is_web(&lower) || lower.starts_with("file:") {
+        return Kind::Page;
+    }
+    if lower.starts_with("shell:") {
+        return Kind::Shell;
+    }
+    match file_name(&lower).1.as_str() {
+        "html" | "htm" | "xhtml" | "xht" | "shtml" | "mht" | "mhtml" | "pdf" | "svg" => Kind::Page,
+        "url" => Kind::Bookmark,
+        "lnk" => Kind::Shortcut,
+        "exe" => Kind::Program,
+        _ => Kind::Other,
+    }
+}
+
+/// The known app a [`clean`] path starts, in whichever form: its program
+/// with or without `.exe`, bare or under any folder, a shortcut named
+/// after it, a starter of it, or its `shell:AppsFolder` id. The twin rule
+/// holds for all of them, or the form would be the way around it.
+pub fn app_of(path: &str) -> Option<&'static App> {
+    let lower = path.trim().to_lowercase();
+    if let Some(target) = lower.strip_prefix("shell:") {
+        let id = target
+            .strip_prefix("appsfolder\\")
+            .or_else(|| target.strip_prefix("appsfolder/"))?;
+        let listed = FOLDER_IDS.iter().find(|(known, _)| *known == id);
+        return match listed {
+            Some((_, app)) => find(app),
+            None => APPS.iter().find(|a| {
+                (a.ways.iter()).any(|w| matches!(w, Way::Packaged(p) if p.eq_ignore_ascii_case(id)))
+            }),
+        };
+    }
+    let (name, ext) = file_name(&lower);
+    let stem = match ext.as_str() {
+        "exe" | "com" | "lnk" => &name[..name.len() - ext.len() - 1],
+        _ => name.as_str(),
+    };
+    let starter = STARTERS.iter().find(|(file, _)| *file == plain(stem));
+    find(starter.map_or(stem, |(_, app)| app))
+}
+
+/// The address an internet shortcut holds: the `URL=` line of the
+/// `.url` file's text.
+pub fn address_in(text: &str) -> Option<String> {
+    text.lines()
+        .filter_map(|line| line.trim().split_once('='))
+        .find(|(key, _)| key.trim().eq_ignore_ascii_case("url"))
+        .map(|(_, address)| address.trim().to_string())
+        .filter(|address| !address.is_empty())
+}
+
+/// A command line's tail split into its arguments, as a program's C
+/// runtime does: what [`arguments`] joins. For the arguments a shortcut
+/// carries, which go on to whatever is started in its place.
+pub fn split_arguments(tail: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut arg = String::new();
+    let (mut quoted, mut any, mut slashes) = (false, false, 0usize);
+    for c in tail.chars() {
+        if c == '\\' {
+            slashes += 1;
+            continue;
+        }
+        if c == '"' {
+            // Backslashes before a quote count half, and an odd one
+            // left over makes the quote a character.
+            arg.extend(std::iter::repeat_n('\\', slashes / 2));
+            if slashes % 2 == 1 {
+                arg.push('"');
+            } else {
+                quoted = !quoted;
+            }
+            (slashes, any) = (0, true);
+            continue;
+        }
+        arg.extend(std::iter::repeat_n('\\', slashes));
+        any |= slashes > 0;
+        slashes = 0;
+        if c.is_whitespace() && !quoted {
+            if any {
+                args.push(std::mem::take(&mut arg));
+                any = false;
+            }
+        } else {
+            arg.push(c);
+            any = true;
+        }
+    }
+    arg.extend(std::iter::repeat_n('\\', slashes));
+    if any || slashes > 0 {
+        args.push(arg);
+    }
+    args
+}
+
+/// What the model is told when it starts an app that shares something
+/// with the human's own session beyond what the twin rule covers.
+/// `started` is the app's name, its path or its `shell:` target.
+pub fn note(started: &str) -> Option<&'static str> {
+    let lower = started.to_lowercase();
+    // Windows 11's Notepad keeps one saved session for the user, so the
+    // desk's copy opens with the tabs of the human's (seen 2026-11-26).
+    let notepad = process_name(&lower) == "notepad" || lower.contains("microsoft.windowsnotepad_");
+    notepad.then_some(
+        "Notepad opens with the tabs the user left in their own session, which are their \
+         notes: open a new tab (Ctrl+N) for your own text and leave the others alone, \
+         neither typing in them nor closing them",
+    )
+}
+
 /// Whether a `/launch` path is a web address. Those go to Edge by name:
 /// handed to Windows they open in the default browser, which may be the
 /// Chrome running at the human's.
@@ -312,7 +489,12 @@ pub fn parse_launch(body: &str) -> Result<Launch, String> {
 }
 
 /// What `POST /launch` answers once something started.
-pub fn started_json(started: &str, instead_of: Option<&str>, why: Option<&str>) -> String {
+pub fn started_json(
+    started: &str,
+    instead_of: Option<&str>,
+    why: Option<&str>,
+    note: Option<&str>,
+) -> String {
     #[derive(Serialize)]
     struct Started<'a> {
         started: &'a str,
@@ -320,11 +502,15 @@ pub fn started_json(started: &str, instead_of: Option<&str>, why: Option<&str>) 
         instead_of: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         why: Option<&'a str>,
+        /// Something to mind about the app that was started, see [`note`].
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<&'a str>,
     }
     let started = Started {
         started,
         instead_of,
         why,
+        note,
     };
     serde_json::to_string(&started).unwrap_or_else(|_| "{}".into())
 }
@@ -445,6 +631,58 @@ pub struct Autostart {
     /// app with a Squirrel updater is registered as `Update.exe
     /// --processStart App.exe` and lives in a folder per version.
     pub child: Option<(String, String)>,
+    /// The whole value as [`same_line`] makes it, to tell one script of a
+    /// shared interpreter from another.
+    pub line: String,
+}
+
+/// A command line as two of them are compared: lower case, no quotes,
+/// one space between its words.
+pub fn same_line(line: &str) -> String {
+    let line = line.to_lowercase().replace('"', "");
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether a program runs many things that are not it: a shell, a script
+/// host, a language's runtime. A Run value that starts one names a
+/// script, and its path alone would match every other script's process.
+pub fn shared(process: &str) -> bool {
+    matches!(
+        process_name(process).as_str(),
+        "cmd" | "powershell" | "pwsh" | "wscript" | "cscript" | "mshta" | "rundll32"
+            | "regsvr32" | "msiexec" | "conhost" | "node" | "bun" | "deno" | "python"
+            | "pythonw" | "py" | "pyw" | "java" | "javaw" | "dotnet" | "ruby" | "perl"
+            | "bash" | "sh" | "wsl"
+    )
+}
+
+/// Whether the first minute's sweep stops a process of the desk's
+/// session: one an autostart entry started, and nothing else. `line`
+/// reads the process's command line, asked only when the path can not
+/// tell, and None when Windows will not say: then it is left running.
+pub fn sweeps(
+    process: &str,
+    line: &dyn Fn() -> Option<String>,
+    autostarts: &[&Autostart],
+    windows: &str,
+) -> bool {
+    // An app of the twin table is on the desk because somebody wants it
+    // there, and browsers keep Run values of their own that would name
+    // every window of theirs.
+    if spared(process, windows) || app_of(process).is_some() {
+        return false;
+    }
+    if !autostarts.iter().any(|a| a.is(process)) {
+        return false;
+    }
+    if !shared(process) {
+        return true;
+    }
+    let Some(line) = line() else {
+        return false;
+    };
+    let line = same_line(&line);
+    autostarts.iter().any(|a| a.is(process) && a.line == line)
 }
 
 impl Autostart {
@@ -464,6 +702,7 @@ impl Autostart {
 /// its full path, which no process can be matched to.
 pub fn autostart(value: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<Autostart> {
     let value = expand(value.trim(), env);
+    let line = same_line(&value);
     let (exe, rest) = match value.strip_prefix('"') {
         Some(quoted) => quoted.split_once('"')?,
         None => {
@@ -494,7 +733,7 @@ pub fn autostart(value: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<Au
             let folder = &exe[..=exe.rfind('\\')?];
             Some((folder.to_string(), name))
         });
-    Some(Autostart { exe, child })
+    Some(Autostart { exe, child, line })
 }
 
 /// Whether a process is never stopped whatever the Run keys name: the
@@ -678,10 +917,14 @@ mod tests {
     #[test]
     fn the_answers_read_as_the_plan_says() {
         assert_eq!(
-            started_json("msedge", Some("chrome"), Some("because")),
+            started_json("msedge", Some("chrome"), Some("because"), None),
             r#"{"started":"msedge","instead_of":"chrome","why":"because"}"#
         );
-        assert_eq!(started_json("code", None, None), r#"{"started":"code"}"#);
+        assert_eq!(started_json("code", None, None, None), r#"{"started":"code"}"#);
+        assert_eq!(
+            started_json("notepad", None, None, Some("mind the tabs")),
+            r#"{"started":"notepad","note":"mind the tabs"}"#
+        );
         let desk = [Open {
             app: "msedge".into(),
             title: "A \"page\"".into(),
@@ -799,6 +1042,183 @@ mod tests {
         // A name with a path in it is not taken for a file name.
         let odd = autostart(r#""C:\a\Update.exe" --processStart ..\b.exe"#, &env).unwrap();
         assert_eq!(odd.child, None);
+    }
+
+    #[test]
+    fn a_known_app_is_known_in_every_form_a_path_takes() {
+        let chrome = |path: &str| app_of(&clean(path)).map(|a| a.names[0]) == Some("chrome");
+        for path in [
+            "chrome",
+            "Chrome.EXE",
+            "chrome.exe.",
+            "chrome.exe . .",
+            "  chrome  ",
+            r#""C:\Program Files\Google\Chrome\Application\chrome.exe""#,
+            r#" "chrome" "#,
+            r"C:\Program Files\Google\Chrome\Application\chrome",
+            "C:/Program Files/Google/Chrome/Application/CHROME.exe",
+            r"C:\Users\me\Desktop\Chrome.lnk",
+            r"C:\Program Files\Google\Chrome\Application\chrome_proxy.exe",
+            r"shell:AppsFolder\Chrome",
+            r"SHELL:appsfolder\chrome",
+            "shell:AppsFolder/Chrome",
+        ] {
+            assert!(chrome(path), "{path}");
+        }
+        let app = |path: &str| app_of(&clean(path)).map(|a| a.names[0]);
+        assert_eq!(app(r"shell:AppsFolder\Microsoft.Office.OUTLOOK.EXE.15"), Some("outlook"));
+        assert_eq!(
+            app(r"shell:AppsFolder\5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App"),
+            Some("whatsapp")
+        );
+        // A packaged way of the table is an id too.
+        assert_eq!(
+            app(r"shell:appsfolder\microsoft.outlookforwindows_8wekyb3d8bbwe!microsoft.outlookforwindows"),
+            Some("olk")
+        );
+        assert_eq!(app(r"C:\x\OUTLOOK.EXE"), Some("outlook"));
+        assert_eq!(app(r"C:\x\WhatsApp.Root.exe"), Some("whatsapp"));
+        for other in [
+            r"C:\Windows\notepad.exe",
+            r"C:\notes\chrome.txt",
+            r"C:\chrome\other.exe",
+            r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App",
+            "shell:Chrome",
+            "shell:startup",
+            "chromes",
+        ] {
+            assert_eq!(app(other), None, "{other}");
+        }
+        for (file, name) in STARTERS.iter().chain(FOLDER_IDS) {
+            assert_eq!(find(name).map(|a| a.names[0]), Some(*name), "{file}");
+            assert_eq!(*file, file.to_lowercase());
+        }
+    }
+
+    #[test]
+    fn a_path_is_cleaned_as_windows_reads_it() {
+        assert_eq!(clean(r#" "C:\a b\x.exe" "#), r"C:\a b\x.exe");
+        assert_eq!(clean("chrome.exe. ."), "chrome.exe");
+        assert_eq!(clean("https://example.com/a."), "https://example.com/a");
+        assert_eq!(clean(".."), "..");
+        assert_eq!(clean("C:\\dir\\"), "C:\\dir\\");
+        assert_eq!(clean(r#""""#), "");
+    }
+
+    #[test]
+    fn a_page_is_told_from_a_program_by_its_form() {
+        for page in [
+            "https://example.com",
+            " HTTP://x",
+            "file:///C:/x/a.txt",
+            "FILE:C:/x",
+            r"C:\docs\a.html",
+            r"C:\docs\A.HTM",
+            "a.pdf",
+            r"\\server\share\drawing.svg",
+            "C:/docs/page.mhtml",
+        ] {
+            assert_eq!(kind(page), Kind::Page, "{page}");
+        }
+        assert_eq!(kind(r"C:\x\link.URL"), Kind::Bookmark);
+        assert_eq!(kind(r"C:\x\Chrome.lnk"), Kind::Shortcut);
+        assert_eq!(kind(r"shell:AppsFolder\x.html"), Kind::Shell);
+        assert_eq!(kind(r"C:\x\y.exe"), Kind::Program);
+        for other in [
+            r"C:\x\a.txt",
+            "chrome",
+            r"C:\dir.html\a",
+            r"C:\x\.html",
+            "ms-settings:display",
+        ] {
+            assert_eq!(kind(other), Kind::Other, "{other}");
+        }
+    }
+
+    #[test]
+    fn an_internet_shortcut_holds_its_address() {
+        let text = "[{000214A0}]\r\nProp3=19,2\r\n[InternetShortcut]\r\nIDList=\r\nurl = https://example.com/?a=b \r\n";
+        assert_eq!(address_in(text).as_deref(), Some("https://example.com/?a=b"));
+        assert_eq!(address_in("[InternetShortcut]\nURL=\n"), None);
+        assert_eq!(address_in("no address here"), None);
+    }
+
+    #[test]
+    fn a_shortcuts_arguments_split_as_they_were_joined() {
+        let split = |tail: &str| split_arguments(tail);
+        assert_eq!(
+            split(r#"--profile-directory="Profile 1"  --app-id=abc"#),
+            ["--profile-directory=Profile 1", "--app-id=abc"]
+        );
+        assert_eq!(split(r#""a b" """#), ["a b", ""]);
+        assert_eq!(split(r#""say \"hi\"" C:\plain\"#), [r#"say "hi""#, "C:\\plain\\"]);
+        assert_eq!(split(r#""C:\dir with space\\""#), ["C:\\dir with space\\"]);
+        assert!(split("  ").is_empty());
+        for args in [
+            vec!["-n", "https://x/?a=1&b=2"],
+            vec!["a b", "", r#"a\\"b"#, "C:\\dir with space\\"],
+        ] {
+            let args = human(&args);
+            assert_eq!(split_arguments(&arguments(&args)), args);
+        }
+    }
+
+    #[test]
+    fn notepad_comes_with_a_note_however_it_is_started() {
+        for notepad in [
+            "notepad",
+            r"C:\Windows\System32\Notepad.exe",
+            r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App",
+        ] {
+            assert!(note(notepad).unwrap().contains("Ctrl+N"), "{notepad}");
+        }
+        assert_eq!(note("msedge"), None);
+        assert_eq!(note(r"C:\notepad\other.exe"), None);
+    }
+
+    fn started(values: &[&str]) -> Vec<Autostart> {
+        values.iter().map(|v| autostart(v, &env).unwrap()).collect()
+    }
+
+    #[test]
+    fn the_sweep_stops_what_a_run_value_started_and_nothing_like_it() {
+        let all = started(&[
+            r#""C:\Program Files (x86)\Steam\steam.exe" -silent"#,
+            r#""C:\Program Files\Google\Chrome\Application\chrome.exe" --no-startup-window"#,
+            r#""C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --win-session-start"#,
+            r#""C:\Program Files\PowerShell\7\pwsh.exe" -File "C:\scripts\tray.ps1""#,
+            r"C:\Program Files\nodejs\node.exe C:\apps\notify\app.js",
+            r"%windir%\system32\cmd.exe /c start x",
+        ]);
+        let all: Vec<&Autostart> = all.iter().collect();
+        let windows = r"C:\WINDOWS";
+        let no_line = || -> Option<String> { panic!("the path alone tells") };
+        let stops = |process: &str| sweeps(process, &no_line, &all, windows);
+        assert!(stops(r"C:\Program Files (x86)\Steam\Steam.exe"));
+        assert!(!stops(r"C:\Program Files (x86)\Steam\other.exe"));
+        // The browsers keep Run values, and are never the sweep's.
+        assert!(!stops(r"C:\Program Files\Google\Chrome\Application\chrome.exe"));
+        assert!(!stops(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"));
+        assert!(!stops(r"C:\Windows\System32\cmd.exe"));
+
+        let with = |process: &str, line: Option<&str>| {
+            let line = line.map(str::to_string);
+            sweeps(process, &|| line.clone(), &all, windows)
+        };
+        let pwsh = r"C:\Program Files\PowerShell\7\pwsh.exe";
+        // Quoted or not, in whichever case: the same command line.
+        let same = r"C:\Program Files\PowerShell\7\PWSH.exe  -File C:\scripts\tray.ps1";
+        assert!(with(pwsh, Some(same)));
+        let other = r#""C:\Program Files\PowerShell\7\pwsh.exe" -File C:\work\build.ps1"#;
+        assert!(!with(pwsh, Some(other)));
+        assert!(!with(pwsh, Some(r#""C:\Program Files\PowerShell\7\pwsh.exe""#)));
+        assert!(!with(pwsh, None));
+        let node = r"C:\Program Files\nodejs\node.exe";
+        let same = r#""C:\Program Files\nodejs\node.exe" C:\apps\notify\app.js"#;
+        assert!(with(node, Some(same)));
+        assert!(!with(node, Some(r#""C:\Program Files\nodejs\node.exe" server.js"#)));
+        assert!(!with(node, None));
+        assert!(shared("PYTHONW.EXE") && shared(r"C:\x\rundll32.exe") && !shared("steam.exe"));
     }
 
     #[test]
