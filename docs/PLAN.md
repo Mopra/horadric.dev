@@ -52,6 +52,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 ## Next
 
 - [Computer use](plan/computer-use.md): Windows only, two ways for a session to use the PC. The agent's desk, a second Windows session driven beside the human, is the default; [takeover](plan/takeover.md) operates programs on the human's own desktop with real clicks, for what only works there. Both built; left: trying the permission, engine, watcher and overlay work of 2026-11-26 on a real program (it only compiles, with its pure parts tested), and hosting takeover's engine in the desk's hand.
+- [The companion](plan/companion.md): an assistant that follows the human's work across the whole computer, so it can take over with the context already known and later help unasked. Not started; first a day of measuring, then the trail, a local log of what the human sees and hears.
 - [One portal](plan/one-portal.md): a phone paired once, by QR code or by signing in, sees every brother and every session. Built and live; left: the test with three machines and a real phone signing in.
 - [macOS](plan/macos.md): for others who want it, the human uses no Mac, so lowest priority. The Folio, browser pane, quests, files, usage, Discord and Settings are built, unverified on a real Mac; left: the rest of each, and switching accounts.
 - [Memory](plan/memory.md): built; left: arming the daily distill.
