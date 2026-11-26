@@ -282,7 +282,8 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
             // these tools are listed to.
             if !self.browser {
                 return Err(
-                    "this session was not started by Horadric, whose sessions the agent's                      desk is for: nothing was sent"
+                    "this session was not started by Horadric, whose sessions the agent's desk \
+                     is for: nothing was sent"
                         .into(),
                 );
             }
