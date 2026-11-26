@@ -79,33 +79,31 @@ of the agent. The terminal is the UI.
 - Plain terminals beside the agents, for a dev server, a log or a deploy.
 - A browser pane for `localhost:3000` or anything else, that your agents
   can drive too.
-- Desktop programs on Windows (Sysmac Studio, its Watch window, its
-  dialogs): a session can look at and operate them through the `desktop_`
-  tools. You approve each program once per session in a dialog, or ahead
-  of time for every session with `horadric desktop allow PROGRAM
-  look|operate` (the exe's full path, or its name). `horadric desktop
-  list` shows the list, `deny` takes a program off it, and `log` shows
-  which grants came from the list and which from a dialog. The list is
-  `desktop-programs.json` in `%APPDATA%\Horadric`, and an edit counts at
-  once. Risky actions (transfer to a controller, mode changes, forcing,
-  resetting, deleting, writing) are asked every time, unless you
-  pre-approve that one action for a listed program: `horadric desktop
-  approve PROGRAM click|type NAME` or `press KEY`, narrowed with
-  `--window`, `--control`, `--text` (a dialog's question) and `--session`
-  (one task). A pre-approved action is done without asking and logged
-  with the pattern that let it through; `list` numbers them and
-  `unapprove PROGRAM N` takes one off. Typing a path into a standard
-  Open or Save dialog's "File name:" box and pressing Enter there is not
-  risky by itself. The question is put in a corner clear of the program
-  and its dialogs, never on top of them and without taking the focus, and
-  waits 60 seconds (`answer_within` in the file): unanswered, the session
-  is told nobody answered and to ask in the chat, and the log says "no
-  answer", apart from "refused by the human".
 - Ctrl+click a path in a pane to open the file in VS Code at that line.
 - Hand an agent what you point at: an element picked in the browser pane
   (right click its header), a terminal selection (Shift+right click) or
   lines in the file viewer (right click). The prompt gets one short line,
   and the whole of it waits in a file the agent reads.
+
+**Computer use** (Windows)
+
+- The agent's desk: a second Windows desktop of your own account, shown
+  in a window on the monitor you give it. An agent works there with
+  mouse and keyboard, in any app, while you keep working on yours. Your
+  cursor and focus never move. Open it from the tray menu; close it and
+  the agent's reach is gone.
+- Takeover, for what only works on your own desktop: a program that is
+  already open there, one that runs as administrator, one bound to
+  hardware or a licence. The agent clicks and types in the real window.
+  A rune travels to each click before it is made, a plate says what the
+  agent is about to do and why, and holding Esc stops it.
+- You decide how far takeover goes. Each program is approved once per
+  session, to look or to operate, or ahead of time with `horadric
+  takeover allow`. Risky actions (deleting, writing, sending something
+  to a machine) are asked every time. Switch it off in the tray menu
+  and agents do not have it at all.
+- [docs/plan/takeover.md](docs/plan/takeover.md) has the commands, the
+  two lists and what they can promise.
 
 **Getting your attention**
 

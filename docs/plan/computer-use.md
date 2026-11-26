@@ -1,9 +1,30 @@
-# Computer use: the agent's desk
+# Computer use
 
-A session can drive a browser page today, and nothing else on the PC.
-This gives it the whole PC: mouse, keyboard and screen, for any app.
-And it does so beside the human, not in their place: the agent works on
-one monitor while the human keeps working on the other.
+A session can use the PC beyond a browser page: mouse, keyboard and
+screen, for any app. Windows only. There are two ways, and both stay.
+
+| | The agent's desk | Takeover |
+|---|---|---|
+| Where the agent works | A second Windows session of the same user, shown in a Horadric window | The human's own desktop, in the program's real window |
+| What the human gives up meanwhile | The monitor the desk is on. Their cursor, focus, keyboard and clipboard stay theirs | The program in hand, and the pointer and keyboard for the moment of each click or key |
+| The permission | The human opens the desk from the tray. While it is open every session may use it | Per session and program, look or operate, asked in a dialog or listed ahead of time. Risky actions are asked each time |
+| What the human sees | The desk in its window, like a screen beside their own | A mark that travels to each click before it is made, a frame of runes round the screen, and a plate saying what the agent does and why |
+| How the human stops it | Close the desk's window | Hold Esc |
+| The tools | `desk_*` | `takeover_*` |
+| The plan | This page | [takeover.md](takeover.md) |
+
+The rule that joins them:
+
+- **The desk is the default.** It is for working beside the human, who
+  loses nothing while the agent works.
+- **Takeover is for what only works on the human's own desktop**: a
+  program that is already open there, one that runs as administrator,
+  one bound to hardware or a licence.
+- **A closed desk is never a reason to switch.** When the desk is
+  closed, the agent says so and asks the human to open it. It does not
+  reach for the human's own desktop in its place.
+
+The rest of this page is the desk.
 
 ## Why a second Windows session
 
@@ -12,9 +33,11 @@ clicks with `SendInput` on the human's desktop moves their mouse and
 takes focus from what they type, on whichever monitor. Driving apps
 without the pointer (UI Automation, posted messages) was looked at and
 turned down as the base: many apps come to the front when invoked, and
-posted input fails silently in Chromium and Electron apps.
+posted input fails silently in Chromium and Electron apps. Takeover
+does click on the human's desktop, and pays for it: it borrows the
+pointer for each click and asks before it acts.
 
-So the agent gets a Windows session of its own, for the same user: a
+So for work beside the human the agent gets a Windows session of its own, for the same user: a
 child session (`WTSEnableChildSessions`). Windows gives it its own
 cursor, focus, keyboard and clipboard, and it has the human's files,
 apps and logins. Horadric shows it in a window on the monitor the human
@@ -130,13 +153,23 @@ permission. With it closed a tool says so and does nothing, also while
 the session is still signed in and its hand still answers: a tool asks
 for `desk::SESSION_FILE` before it reaches for the hand.
 
+## Where it stands
+
+The desk ran end to end on a dev instance on 2026-11-26 (lore #805):
+it opened, the hand answered, and every `desk_` tool did its work
+through `horadric mcp`. Not yet seen: the hand without its terminal
+window on the desk, and a frame asked for while the desk closes, which
+once answered an error without saying why (lore #803).
+
 ## Later
 
-- Takeover: the same tools on the human's own desktop, on one monitor,
-  for an app that only works there. It pauses the moment the human
-  touches mouse or keyboard on that monitor.
-- A snapshot of the desk's UI Automation tree with refs, like
-  `browser_snapshot`, for accuracy and fewer screenshots.
+- Takeover is built, as a mode of its own: see [takeover.md](takeover.md).
+  This plan once said it would pause the moment the human touches mouse
+  or keyboard. What is built is different: a held Esc stops the agent's
+  action, and a click is refused while the human holds a mouse button.
+  Pausing on the human's touch is still an open idea, listed there.
+- Host takeover's engine in the desk's hand, so the desk gets snapshots
+  with refs, changes and wait, for accuracy and fewer screenshots.
 - Lock, sleep and reboot: whether the session survives, and reconnecting
   without the password.
 - Other editions and a work account (Entra) were not tested.
