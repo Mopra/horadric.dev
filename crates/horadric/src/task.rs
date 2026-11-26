@@ -1051,7 +1051,7 @@ fn start(cwd: &Path) -> Result<(), String> {
             chars(horadric_ui::AGENT_PROMPT),
         ),
         (
-            "Horadric's MCP server instructions (browser, desk, desktop, lore)".into(),
+            "Horadric's MCP server instructions (browser, desk, takeover, lore)".into(),
             chars(&crate::mcp::instructions()) + chars(crate::mcp::LORE),
         ),
         (

@@ -1315,36 +1315,27 @@ const NOTHING: &str = "This session was not started by Horadric, so it has no br
 pub(crate) const LORE: &str = "Horadric keeps notes shared by every session of this project, the lore. Before you explore a part of the code, ask lore_recall about it (words or files): another session may already have found out what you need. When you find out something the next session would otherwise have to find out again, leave it with lore_note, naming its files and, in backticks, the functions and types it is about. A note marked maybe stale is a lead, not a fact: check it, and when it is wrong or outdated leave the right one with replaces. It also keeps an index of the project's code: ask lore_find where a name is defined, lore_calls who calls it, and lore_outline what a file holds, before you grep or read whole files. Every line a Read returns stays in your context window for the rest of the session, and whole files are most of what fills it: outline a file first, then Read the lines you need with offset and limit, and send a search that would read many files to a subagent, whose window dies with it.";
 
 /// What a session Horadric started is told: the browser, and on Windows
-/// the agent's desk, which exists only there.
+/// the agent's desk and takeover, which exist only there.
 pub(crate) fn instructions() -> String {
     if cfg!(windows) {
-        format!("{INSTRUCTIONS} {DESK} {DESKTOP}")
+        format!("{INSTRUCTIONS} {DESK} {TAKEOVER}")
     } else {
         INSTRUCTIONS.to_string()
     }
 }
 
-const DESK: &str = "When a task needs a desktop app, the mouse or the keyboard outside a web page, use the desk_ tools: they drive the agent's desk, a Windows desktop of the user's own account that the user watches in a window while they keep working in their own session. They work once the user has opened the agent's desk from Horadric's tray menu, and say so when it is closed.";
+/// The one story of the two ways to a desktop app, the desk first: it is
+/// in every session's context, so each sentence is a rule a session broke
+/// or would break without it.
+const DESK: &str = "For a desktop app, the mouse or the keyboard outside a web page there are two families of tools, never mixed: a point read off one family's screenshot is no coordinate for the other. The desk_ tools are the default: they drive the agent's desk, a Windows desktop of the user's own account that the user watches in a window while they keep working in their own session. They work once the user has opened the agent's desk from Horadric's tray menu. The desk has the user's files and logins, so stop and ask before a step that costs money, deletes something or cannot be undone.";
 
 const INSTRUCTIONS: &str = "Horadric gives this session a browser, and it is the one to use: a pane on the Horadric stage beside the user's terminals, one per project with tabs, shared by the project's sessions. You work in a tab of your own: the first page you open becomes yours (the tab shown when it is blank, else a new one), and your calls stay in it whichever tab the user shows. A page the user is on is theirs: you can read it and act on it while it is shown, but opening a page never takes it. A popup your click opens becomes yours until it closes. The user sees the page you drive. Whenever a task needs the web (trying a page you built, testing a local server, reading docs, a login, a screenshot of a page), use these tools rather than Playwright, Puppeteer, the Chrome DevTools MCP, Claude in Chrome, or starting Chrome, Edge or a headless browser yourself, unless the user asks for one of those. When a task means changing a setting in a web service's dashboard (sign-in methods in Clerk, an environment variable in Vercel, a DNS record, an OAuth app), do it yourself in this browser rather than writing the user a list of steps: they are usually logged in already. Stop and ask only when a login needs their password or a code, or before a step that costs money, deletes something or cannot be undone. Open it with browser_open or browser_navigate, read it with browser_snapshot, act with browser_click, browser_type, browser_select (for a dropdown) and browser_press, and look \
 with browser_screenshot. Refs from browser_snapshot are surer than guessed selectors. Close your tab with \
 browser_close when you are done, unless the user is using it. It keeps one login profile with \
 the user's own use of it, so take care on sites where they are logged in.";
 
-/// What a Windows session is told of the desktop tools, after the browser.
-pub(crate) const DESKTOP: &str = "The takeover_ tools \
-do the same for programs on the user's Windows desktop (an engineering tool like Sysmac Studio, \
-its watch window, its dialogs): list them with takeover_windows, read one with takeover_snapshot, \
-look with takeover_screenshot, read lists and output panes with takeover_text, act with \
-takeover_click, takeover_type and takeover_press, and know \
-that the user approves each program once per session and confirms each risky action. Refs from \
-takeover_snapshot are surer than points on the screen, so act by ref or name. Horadric watches \
-each program you have looked at or operated: ask takeover_changes what changed since you last \
-looked, and wait for a dialog, a text, a window to close or the program to go quiet with \
-takeover_wait, rather than taking snapshots or screenshots again and again; take a new \
-takeover_snapshot only when you need refs. The user watches \
-the control happen, so give every takeover call but takeover_windows a reason: one short sentence, \
-in the user's language, saying what you are about to do and why.";
+/// What a Windows session is told of takeover, after the desk.
+const TAKEOVER: &str = "The takeover_ tools (not listed while the user has takeover off) operate a program on the user's own desktop and take their mouse and keyboard while they act: only for a program that is already open there or works only there (it runs as administrator, or is bound to hardware or a licence). A closed desk is never a reason to take over: say the desk is closed and ask. The user approves each program once per session and confirms each risky action, so give every takeover call but takeover_windows a reason: one short sentence, in the user's language, saying what you are about to do and why. Read with takeover_snapshot and act by its refs or by name, which are surer than points; ask takeover_changes what changed and wait with takeover_wait rather than taking snapshots again and again.";
 
 #[cfg(test)]
 mod tests {
@@ -1634,13 +1625,22 @@ B.";
         assert!(named("takeover_windows")["inputSchema"]["properties"]["reason"].is_null());
         let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
         let said = s.handle(&init).unwrap()["result"]["instructions"].clone();
-        assert!(said.as_str().unwrap().contains("takeover_snapshot"));
-        assert!(said.as_str().unwrap().contains("give every takeover call"));
-        assert!(said
-            .as_str()
-            .unwrap()
-            .contains("takeover_changes what changed"));
-        assert!(said.as_str().unwrap().contains("takeover_wait"));
+        let said = said.as_str().unwrap();
+        for part in [
+            "takeover_snapshot",
+            "give every takeover call",
+            "takeover_changes what changed",
+            "takeover_wait",
+            // The one story: the desk first, and a closed desk is no
+            // reason to take the human's own mouse.
+            "The desk_ tools are the default",
+            "A closed desk is never a reason to take over",
+            "never mixed",
+            "costs money, deletes something or cannot be undone. The takeover_",
+        ] {
+            assert!(said.contains(part), "{part}");
+        }
+        assert!(!said.contains("do the same"), "the two no longer read as equals");
     }
 
     #[cfg(windows)]
