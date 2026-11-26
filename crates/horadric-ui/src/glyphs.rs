@@ -496,6 +496,21 @@ impl Buttons {
     }
 }
 
+/// Where a header's name has to stop in a pane `width` DIPs wide: at its
+/// buttons, or at the sanctuary's place buttons before them when it has
+/// them (`places`).
+pub fn name_right(width: f32, zoom: bool, close: bool, places: bool) -> f32 {
+    if places {
+        return header_places(width, zoom, close)[0].1 - 4.0;
+    }
+    let at = header_buttons(width, zoom, close);
+    if at == Buttons::default() {
+        width - 8.0
+    } else {
+        at.start(width)
+    }
+}
+
 /// Where a header's buttons start in a pane `width` DIPs wide: the zoom
 /// button's, then the cross's. They end over the
 /// glass's right edge.
@@ -2416,11 +2431,7 @@ impl GridTarget {
         }
         let left = NAME_LEFT;
         let at = header_buttons(width, h.zoom.is_some(), h.close);
-        let mut right = if at == Buttons::default() {
-            width - 8.0
-        } else {
-            at.start(width)
-        };
+        let right = name_right(width, h.zoom.is_some(), h.close, h.places.is_some());
         let button = |glyph: &str, at: f32| {
             let glyph: Vec<u16> = glyph.encode_utf16().collect();
             self.brush.SetColor(&render::color(theme::text_dim()));
@@ -2456,7 +2467,6 @@ impl GridTarget {
                 };
                 self.place_icon(side, at, ink, on);
             }
-            right = places[0].1 - 4.0;
         }
         if let Some(bar) = &h.bar {
             self.bar(
@@ -2888,6 +2898,17 @@ mod tests {
             menu_names(names.iter().map(|n| n.to_string()).collect()),
             ["cascadia Mono", "Consolas", "MS Gothic"]
         );
+    }
+
+    #[test]
+    fn a_header_name_stops_at_the_first_button_before_it() {
+        let w = 400.0;
+        assert_eq!(name_right(w, false, false, false), w - 8.0);
+        assert_eq!(name_right(w, true, true, false), w - 2.0 * HEADER_H);
+        assert_eq!(name_right(w, false, true, false), w - HEADER_H);
+        let places = name_right(w, true, true, true);
+        assert_eq!(places, header_places(w, true, true)[0].1 - 4.0);
+        assert!(places < name_right(w, true, true, false));
     }
 
     #[test]

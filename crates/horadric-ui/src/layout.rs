@@ -1546,6 +1546,14 @@ pub fn caption_hit(l: &CaptionLayout, x: f32, y: f32) -> Option<CaptionHit> {
     })
 }
 
+/// Whether a point in a caption is on the project's name, drawn from the
+/// title's left `name_w` wide and cut at the title's end.
+pub fn on_caption_name(l: &CaptionLayout, name_w: f32, x: f32, y: f32) -> bool {
+    let t = &l.title;
+    let right = t.x + name_w.min(t.w);
+    (0.0..CAPTION_H).contains(&y) && x >= t.x && x < right
+}
+
 /// The geometry of a notification: a lamp and a title, the text under
 /// them, and a cross to dismiss it.
 #[derive(Debug, Clone, PartialEq)]
@@ -2529,6 +2537,18 @@ mod tests {
         assert_eq!(caption_hit(&l, 100.0, 10.0), Some(CaptionHit::Bar));
         assert_eq!(caption_hit(&l, 100.0, CAPTION_H + 1.0), None);
         assert_eq!(caption(100.0).title.w, 0.0);
+    }
+
+    #[test]
+    fn only_the_name_in_the_caption_is_the_name() {
+        let l = caption(800.0);
+        let x = l.title.x;
+        assert!(on_caption_name(&l, 80.0, x + 1.0, 10.0));
+        assert!(!on_caption_name(&l, 80.0, x + 81.0, 10.0));
+        assert!(!on_caption_name(&l, 80.0, x - 1.0, 10.0));
+        assert!(!on_caption_name(&l, 80.0, x + 1.0, CAPTION_H + 1.0));
+        // A name wider than the title is cut where the title ends.
+        assert!(!on_caption_name(&l, 10_000.0, l.title.right() + 1.0, 10.0));
     }
 
     #[test]

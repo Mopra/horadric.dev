@@ -203,15 +203,63 @@ pub fn cluster(hit: Hit) -> Option<&'static str> {
 const QUEST: &str =
     "Read this quest before taking it on, or show the session doing it. Right click for more";
 
-/// What hovering a quest says: its whole title first, since the row cuts
-/// a long one short, then for a blocked one what the human would do or
-/// why, which the row has no room for, then apart from it what a click
-/// does.
-pub fn quest(title: &str, why: Option<&str>) -> String {
-    match why.map(str::trim).filter(|w| !w.is_empty()) {
-        Some(w) => format!("{}\n{w}\n\n{QUEST}", title.trim()),
-        None => format!("{}\n\n{QUEST}", title.trim()),
+/// What hovering a quest says: its whole title first when the row cut it
+/// short (`title` is None when the row shows all of it), then for a
+/// blocked one what the human would do or why, which the row has no room
+/// for, then apart from it what a click does.
+pub fn quest(title: Option<&str>, why: Option<&str>) -> String {
+    let head = [title, why]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    headed(Some(&head), QUEST)
+}
+
+/// `head` set apart above `rest`, or `rest` alone when there is no head.
+pub fn headed(head: Option<&str>, rest: &str) -> String {
+    match head.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(h) => format!("{h}\n\n{rest}"),
+        None => rest.to_string(),
     }
+}
+
+/// Whether text `full` DIPs wide was cut short in `room` DIPs. Half a DIP
+/// of slack, so a title that only just fits is not told twice.
+pub fn cut(full: f32, room: f32) -> bool {
+    full > room + 0.5
+}
+
+/// The most of a path a line shows. Past it the middle goes, since the
+/// drive and the folder itself are what tell two projects apart.
+const PATH_MAX: usize = 180;
+
+/// Where a project is, for the line on its title: its folder on this PC,
+/// spelled as Windows spells it, or for one on a brother (`brother` is the
+/// brother's name and the project's) where it is, since this PC never
+/// learns the folder there. None when nothing is known.
+pub fn whereabouts(dir: Option<&str>, brother: Option<(&str, &str)>) -> Option<String> {
+    if let Some((name, project)) = brother {
+        return Some(format!("{project} on {name}, a linked PC"));
+    }
+    let dir = dir?.trim().trim_end_matches(['/', '\\']);
+    (!dir.is_empty()).then(|| middle(&dir.replace('/', "\\"), PATH_MAX))
+}
+
+/// `s` at most `max` characters, its middle given up for an ellipsis.
+fn middle(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    let front = keep / 2;
+    let back = keep - front;
+    let head: String = s.chars().take(front).collect();
+    let tail: String = s.chars().skip(n - back).collect();
+    format!("{head}\u{2026}{tail}")
 }
 
 /// What a part of the start window does.
@@ -626,15 +674,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_quest_says_its_whole_title_before_what_a_click_does() {
+    fn a_quest_cut_short_says_its_whole_title_before_what_a_click_does() {
         let title = "Recheck Google index status around 2026-10-15 (python tools/gsc.py inspect each sitemap URL)";
-        let tip = quest(&format!(" {title} "), None);
+        let padded = format!(" {title} ");
+        let tip = quest(Some(&padded), None);
         let lines: Vec<&str> = tip.lines().collect();
         assert_eq!(lines, [title, "", QUEST]);
-        let tip = quest(title, Some(" Pick a name "));
+        let tip = quest(Some(title), Some(" Pick a name "));
         let lines: Vec<&str> = tip.lines().collect();
         assert_eq!(lines, [title, "Pick a name", "", QUEST]);
-        assert_eq!(quest(title, Some(" ")), quest(title, None));
+        assert_eq!(quest(Some(title), Some(" ")), quest(Some(title), None));
+    }
+
+    #[test]
+    fn a_quest_shown_whole_says_only_what_a_click_does() {
+        assert_eq!(quest(None, None), QUEST);
+        let tip = quest(None, Some("Pick a name"));
+        let lines: Vec<&str> = tip.lines().collect();
+        assert_eq!(lines, ["Pick a name", "", QUEST]);
+    }
+
+    #[test]
+    fn a_head_stands_apart_above_the_rest() {
+        assert_eq!(headed(Some(" a "), "b"), "a\n\nb");
+        assert_eq!(headed(Some(" "), "b"), "b");
+        assert_eq!(headed(None, "b"), "b");
+    }
+
+    #[test]
+    fn only_text_wider_than_its_room_was_cut() {
+        assert!(cut(120.0, 100.0));
+        assert!(!cut(100.0, 100.0));
+        assert!(!cut(100.4, 100.0));
+        assert!(!cut(80.0, 100.0));
+    }
+
+    #[test]
+    fn a_local_project_is_where_its_folder_is() {
+        assert_eq!(
+            whereabouts(Some("C:/Code/Horadric/"), None).as_deref(),
+            Some(r"C:\Code\Horadric")
+        );
+        assert_eq!(
+            whereabouts(Some(r"C:\Users\Me\OneDrive - Work\horadric.dev"), None).as_deref(),
+            Some(r"C:\Users\Me\OneDrive - Work\horadric.dev")
+        );
+        assert_eq!(whereabouts(Some("  "), None), None);
+        assert_eq!(whereabouts(None, None), None);
+    }
+
+    #[test]
+    fn a_project_on_a_brother_says_which_brother() {
+        let line = whereabouts(Some("ignored"), Some(("Workshop", "horadric"))).unwrap();
+        assert_eq!(line, "horadric on Workshop, a linked PC");
+    }
+
+    #[test]
+    fn a_very_long_path_gives_up_its_middle() {
+        let long = format!(r"C:\{}\project", "deep\\".repeat(60));
+        let line = whereabouts(Some(&long), None).unwrap();
+        assert_eq!(line.chars().count(), PATH_MAX);
+        assert!(line.starts_with(r"C:\deep"));
+        assert!(line.ends_with(r"\project"));
+        assert!(line.contains('\u{2026}'));
+        let short = r"C:\Code\App";
+        assert_eq!(whereabouts(Some(short), None).as_deref(), Some(short));
     }
 
     #[test]

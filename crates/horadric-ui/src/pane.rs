@@ -236,6 +236,9 @@ pub struct Pane {
     inset: Cell<f32>,
     /// The session's name, for the header.
     name: RefCell<String>,
+    /// The name the header last showed, empty when an address bar stood
+    /// in its place: what hovering it reads in whole when it was cut.
+    shown_name: RefCell<String>,
     lifted: Cell<bool>,
     /// The grid keeps its size while the window's changes, until let go.
     held: Cell<bool>,
@@ -378,6 +381,7 @@ impl Pane {
             retinue: RefCell::new(None),
             inset: Cell::new(0.0),
             name: RefCell::new(name),
+            shown_name: RefCell::new(String::new()),
             lifted: Cell::new(false),
             held: Cell::new(false),
             floating: Cell::new(None),
@@ -1291,6 +1295,11 @@ impl Pane {
                 label,
                 dragging: self.resizing.get().is_some(),
             });
+        *self.shown_name.borrow_mut() = if bar.is_none() {
+            name.clone()
+        } else {
+            String::new()
+        };
         let header = Header {
             name: &name,
             detail: &detail,
@@ -3096,7 +3105,38 @@ impl Pane {
 
     /// The line for what in the header or the tab strip is under a client
     /// point, in the order a press there is taken.
-    fn tip_at(&self, lparam: LPARAM) -> Option<&'static str> {
+    fn tip_at(&self, lparam: LPARAM) -> Option<tip::Line> {
+        self.tip_here(lparam)
+            .map(tip::Line::Borrowed)
+            .or_else(|| self.cut_name_at(lparam).map(tip::Line::Owned))
+    }
+
+    /// The header's name in whole, when it was drawn cut short and the
+    /// client point `lparam` is on it.
+    fn cut_name_at(&self, lparam: LPARAM) -> Option<String> {
+        if !self.in_header(lparam) {
+            return None;
+        }
+        let name = self.shown_name.borrow();
+        if name.is_empty() {
+            return None;
+        }
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut r);
+        }
+        let width = r.right as f32 * 96.0 / self.dpi_now() as f32;
+        let zoom = self.zoom.get().is_some();
+        let right = glyphs::name_right(width, zoom, true, self.console.sky.is_some());
+        let room = right - glyphs::NAME_LEFT;
+        let full = glyphs::name_width(&self.shared.gpu, &name, 100_000.0);
+        let x = self.dip(lparam).0;
+        (tip::cut(full, room) && x >= glyphs::NAME_LEFT && x < right).then(|| name.clone())
+    }
+
+    /// The fixed line for what in the header or the tab strip is under a
+    /// client point.
+    fn tip_here(&self, lparam: LPARAM) -> Option<&'static str> {
         if let Some(hit) = self.forge_at(lparam) {
             return hit.map(crate::forge::bar::tip);
         }
@@ -3736,7 +3776,7 @@ impl Pane {
             }
             WM_MOUSEMOVE if self.console.sky.is_some() => {
                 let line = self.tip_at(lparam);
-                tip::over(&self.shared, self.hwnd, line);
+                tip::over_line(&self.shared, self.hwnd, line);
                 self.track();
                 if let Some(key) = &self.console.sky {
                     let at = self.dip(lparam);
@@ -3783,7 +3823,7 @@ impl Pane {
                 if line.is_some() {
                     self.track();
                 }
-                tip::over(&self.shared, self.hwnd, line);
+                tip::over_line(&self.shared, self.hwnd, line);
                 if !self.selecting.get() {
                     self.hover(Some(lparam));
                 }

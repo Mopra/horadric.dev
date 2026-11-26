@@ -268,7 +268,18 @@ impl StartWindow {
     }
 
     fn hover(&self, hot: StartHit) {
-        tip::over(&self.shared, self.hwnd, tip::start(hot));
+        let line = tip::start(hot).map(|t| match hot {
+            StartHit::Recent(i) => {
+                let place = self
+                    .recent
+                    .borrow()
+                    .get(i)
+                    .and_then(|p| tip::whereabouts(Some(p), None));
+                std::borrow::Cow::Owned(tip::headed(place.as_deref(), t))
+            }
+            _ => std::borrow::Cow::Borrowed(t),
+        });
+        tip::over_line(&self.shared, self.hwnd, line);
         if self.hot.replace(hot) != hot {
             self.invalidate();
         }

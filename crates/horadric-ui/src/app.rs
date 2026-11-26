@@ -7840,6 +7840,8 @@ impl App {
         self.stage_follows(self.tiles_edge);
         if let Some(stage) = &self.stage {
             stage.show(key, &project_name(key), sessions);
+            let dir = self.project_dir(key);
+            stage.set_place(crate::project::whereabouts(key, dir.as_deref()));
         }
         self.badge();
         self.portal_show();
