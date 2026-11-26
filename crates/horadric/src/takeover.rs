@@ -349,6 +349,10 @@ pub struct Scene<'a> {
     pub dialog: bool,
     pub said: &'a Said,
     pub target: Target<'a>,
+    /// The program runs as administrator (the engine is the elevated
+    /// helper's). Its file dialog can start other programs with its
+    /// rights, so nothing in one is let through as only picking a file.
+    pub elevated: bool,
 }
 
 /// What a tool is about to do, as far as the risk of it goes.
@@ -392,15 +396,17 @@ pub fn risk(doing: Doing, scene: &Scene) -> Option<String> {
     if scene.dialog && said.unread {
         return Some("the dialog could not be read, so what it asks is not known".into());
     }
+    // Whether Enter there only picks a file: never in an elevated program.
+    let file_dialog = said.file_dialog && !scene.elevated;
     match doing {
         Doing::Click => None,
         Doing::Type { submit } => {
-            let picks_file = said.file_dialog && file_name_field(t.control, t.name);
+            let picks_file = file_dialog && file_name_field(t.control, t.name);
             (submit && enter_confirms(scene.dialog, picks_file))
                 .then(|| "Enter presses the dialog's default button".to_string())
         }
         Doing::Press { chord, .. } => {
-            key_risk(chord, scene.dialog, said.file_dialog, t.control).map(str::to_string)
+            key_risk(chord, scene.dialog, file_dialog, t.control).map(str::to_string)
         }
     }
 }
@@ -1500,10 +1506,11 @@ impl Aim {
     }
 
     /// Where an action on this element in `w` lands, for [`risk`].
-    fn scene<'a>(&'a self, w: &'a Window, said: &'a Said) -> Scene<'a> {
+    fn scene<'a>(&'a self, w: &'a Window, said: &'a Said, elevated: bool) -> Scene<'a> {
         Scene {
             title: &w.title,
             dialog: is_dialog(w),
+            elevated,
             said,
             target: Target {
                 control: self.control,
@@ -2816,7 +2823,7 @@ impl Takeover {
                 };
                 let what = format!("{how} {}", aim.what());
                 let risky =
-                    flag("risky") || risk(Doing::Click, &aim.scene(&w, &said)).is_some();
+                    flag("risky") || risk(Doing::Click, &aim.scene(&w, &said, self.part)).is_some();
                 let act = act_of(Kind::Click, &w, &said, aim.control, &aim.name, "");
                 let point = aim_point(&w, &aim);
                 let answer = allow_act(app, &root, &what, risky, &act, point, &reason);
@@ -2851,7 +2858,7 @@ impl Takeover {
                     what.push_str(" and press Enter");
                 }
                 let risky = flag("risky")
-                    || risk(Doing::Type { submit }, &aim.scene(&w, &said)).is_some();
+                    || risk(Doing::Type { submit }, &aim.scene(&w, &said, self.part)).is_some();
                 let act = act_of(Kind::Type, &w, &said, aim.control, &aim.name, "");
                 let point = aim_point(&w, &aim);
                 let answer = allow_act(app, &root, &what, risky, &act, point, &reason);
@@ -2882,6 +2889,7 @@ impl Takeover {
                 let scene = Scene {
                     title: &w.title,
                     dialog: is_dialog(&w),
+                    elevated: self.part,
                     said: &said,
                     target: Target {
                         control: focus.control,
@@ -2961,10 +2969,11 @@ impl Takeover {
                     what.push_str(", clicking into it if it does not take the keyboard");
                 }
                 let said = self.said(&w);
+                let elevated = self.part;
                 let by_click = aim
                     .as_ref()
                     .filter(|_| clicks)
-                    .and_then(|a| risk(Doing::Click, &a.scene(&w, &said)));
+                    .and_then(|a| risk(Doing::Click, &a.scene(&w, &said, elevated)));
                 let risky = flag("risky") || by_click.is_some();
                 let point = aim
                     .as_ref()
@@ -4626,6 +4635,7 @@ mod tests {
             dialog,
             said,
             target,
+            elevated: false,
         }
     }
 
@@ -4660,6 +4670,22 @@ mod tests {
         assert!(risk(typing, &scene("Export", true, &said, search)).is_some());
         let no_enter = Doing::Type { submit: false };
         assert_eq!(risk(no_enter, &scene("Export", true, &said, search)), None);
+        // In a program that runs as administrator a file dialog excuses
+        // nothing: a name typed there, or Enter, can start a program with
+        // its rights.
+        let elevated = Scene {
+            elevated: true,
+            ..scene("Export", true, &said, name_box)
+        };
+        assert!(risk(typing, &elevated).is_some());
+        assert_eq!(risk(no_enter, &elevated), None);
+        let enter = parse_key("Enter").unwrap();
+        let press = Doing::Press {
+            chord: &enter,
+            key: "Enter",
+        };
+        assert!(risk(press, &elevated).is_some());
+        assert_eq!(risk(press, &scene("Export", true, &said, name_box)), None);
         // A dialog that asks about a transfer is risky whatever is clicked.
         let said = Said {
             texts: vec!["Transfer to the Controller?".into()],
