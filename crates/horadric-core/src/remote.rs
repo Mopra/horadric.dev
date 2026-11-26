@@ -672,7 +672,7 @@ pub fn parse_key(spec: &str) -> Result<Chord, String> {
     }
     let key = key_of(name).ok_or_else(|| {
         format!(
-            "{name:?} is not a key: a character, F1 to F24, Enter, Tab, Escape, Backspace,              Delete, Insert, Space, Up, Down, Left, Right, Home, End, PageUp, PageDown,              PrintScreen, Pause, CapsLock, NumLock, ScrollLock, Menu, Minus, Plus, Comma,              Period, Slash, or a modifier"
+            "{name:?} is not a key: a character, F1 to F24, Enter, Tab, Escape, Backspace, Delete, Insert, Space, Up, Down, Left, Right, Home, End, PageUp, PageDown, PrintScreen, Pause, CapsLock, NumLock, ScrollLock, Menu, Minus, Plus, Comma, Period, Slash, or a modifier"
         )
     })?;
     if let Key::Vk(vk) = key {
@@ -698,7 +698,7 @@ pub fn parse_chord(chord: &str) -> Result<Vec<u16>, String> {
         Key::Char('/') => 0xbf,
         Key::Char(c) => {
             return Err(format!(
-                "{c:?} is not a key here, where the keyboard's layout is not known: of the                  punctuation only - = , . / are (or Minus, Plus, Comma, Period, Slash). Type                  it as text instead"
+                "{c:?} is not a key here, where the keyboard's layout is not known: of the punctuation only - = , . / are (or Minus, Plus, Comma, Period, Slash). Type it as text instead"
             ))
         }
     });
@@ -835,6 +835,14 @@ pub fn without_tunnel(list: &[Tunnel], dest: &str, remote: u16) -> Vec<Tunnel> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_bad_key_is_told_without_runs_of_spaces() {
+        for spec in ["Florp", "Ctrl+;", "!"] {
+            let said = parse_chord(spec).unwrap_err();
+            assert!(!said.contains("  "), "{said}");
+        }
+    }
+
     use super::*;
 
     use serde_json::{json, Value};
