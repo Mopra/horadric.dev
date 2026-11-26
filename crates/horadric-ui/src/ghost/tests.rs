@@ -997,3 +997,17 @@ fn the_log_gives_the_command_at_its_start_and_only_a_glimpse_at_its_end() {
     let start = shell_log_line("t", "s", &sh);
     assert!(start.contains(&format!("({})", "y".repeat(COMMAND_CHARS))));
 }
+
+#[test]
+fn only_the_humans_own_press_on_the_slider_moves_it() {
+    // A real press on the slider, held: it follows, wherever the pointer
+    // goes from there.
+    assert!(slider_follows(Some(Control::Speed), true));
+    // A posted message, which the hook never saw, or one it saw let go.
+    assert!(!slider_follows(None, true));
+    assert!(!slider_follows(Some(Control::Speed), false));
+    assert!(!slider_follows(None, false));
+    // A press the human made elsewhere does not lend itself to the slider.
+    assert!(!slider_follows(Some(Control::Bypass), true));
+    assert!(!slider_follows(Some(Control::Shells), true));
+}

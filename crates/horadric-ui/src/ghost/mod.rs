@@ -14,9 +14,9 @@
 //! seconds, and Esc held while it travels stops that click: the human
 //! sees the aim before the act and has time to say no.
 //!
-//! Esc and the plate's Bypass listen to the human only. A session presses
-//! Escape in the program it drives, and any process can post a click, so
-//! both are told from the human's own by low level hooks on a thread of
+//! Esc and the plate's Bypass and speed slider listen to the human only.
+//! A session presses Escape in the program it drives, and any process can
+//! post a click, so all three are told from the human's own by low level hooks on a thread of
 //! their own ([`input`]), in for as long as control is on and no longer.
 //! Esc is never taken from the program in front: a tap goes to it as ever,
 //! and only a hold stops the session.
@@ -1173,6 +1173,42 @@ impl Overlay {
         pointer && button_down() && input::left_held().is_some_and(on_it)
     }
 
+    /// Whether the human, and not a message some process posted, drags
+    /// the slider: the input thread saw their own button go down on it
+    /// and the hardware says it is still down.
+    fn pressing_slider(&self) -> bool {
+        let Some(plate) = self.plate.as_ref().filter(|p| p.shown) else {
+            return false;
+        };
+        let pressed_on = input::left_held().and_then(|at| self.control_under(plate, at));
+        slider_follows(pressed_on, button_down())
+    }
+
+    /// Where along the slider the pointer is, read off the cursor and
+    /// not off a message, which any process may post with any place.
+    fn slider_at_cursor(&self) -> Option<f32> {
+        let plate = self.plate.as_ref()?;
+        let mut cursor = POINT::default();
+        unsafe { GetCursorPos(&mut cursor) }.ok()?;
+        Some(slider_at((cursor.x - plate.pos.0) as f32 / plate.scale))
+    }
+
+    /// The human's drag of the slider moves it, nothing else does.
+    fn drag_slider(&mut self) {
+        match self.slider_at_cursor().filter(|_| self.pressing_slider()) {
+            Some(f) => self.set_speed(f),
+            None => self.end_dragging(),
+        }
+    }
+
+    fn end_dragging(&mut self) {
+        if std::mem::take(&mut self.dragging) {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+        }
+    }
+
     fn end_arming(&mut self) {
         if self.arming.take().is_some() {
             unsafe {
@@ -1192,12 +1228,16 @@ impl Overlay {
         let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32 / scale;
         match msg {
             WM_LBUTTONDOWN => match control_at(x, y, self.shells_top) {
+                // Like Bypass, the slider takes the human's own hand: the
+                // speed it sets is kept across restarts.
                 Some(Control::Speed) => {
-                    self.dragging = true;
-                    unsafe {
-                        SetCapture(hwnd);
+                    if self.pressing_slider() {
+                        self.dragging = true;
+                        unsafe {
+                            SetCapture(hwnd);
+                        }
+                        self.drag_slider();
                     }
-                    self.set_speed(slider_at(x));
                 }
                 // Off is the safe way, and anyone may turn it.
                 Some(Control::Bypass) if bypass() => self.bypass_off(BypassEnd::Switched),
@@ -1217,14 +1257,9 @@ impl Overlay {
                 }
                 None => {}
             },
-            WM_MOUSEMOVE if self.dragging => self.set_speed(slider_at(x)),
+            WM_MOUSEMOVE if self.dragging => self.drag_slider(),
             WM_LBUTTONUP => {
-                if self.dragging {
-                    self.dragging = false;
-                    unsafe {
-                        let _ = ReleaseCapture();
-                    }
-                }
+                self.end_dragging();
                 self.end_arming();
             }
             WM_CAPTURECHANGED => {
@@ -1540,8 +1575,11 @@ impl Overlay {
             cursor,
         );
         // The human's own press is told from a sent one by a mouse hook,
-        // in only while the pointer is on the one switch that asks.
-        input::watch_mouse(hover == Some(Control::Bypass) || self.arming.is_some());
+        // in only while the pointer is on a control that asks, or one of
+        // them is held: a drag may leave the slider and must still be
+        // told the human's.
+        let asks = matches!(hover, Some(Control::Bypass | Control::Speed));
+        input::watch_mouse(asks || self.arming.is_some() || self.dragging);
         if hover != self.hover {
             self.hover = hover;
             self.stale = true;

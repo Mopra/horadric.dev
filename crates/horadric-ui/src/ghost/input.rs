@@ -17,9 +17,9 @@
 //!   moment it rests. The human's Esc held for [`super::rules::ESC_HOLD`]
 //!   posts the stop to the overlay. A tap is the program's own.
 //! - The mouse hook is in only while the pointer is on the plate's Bypass
-//!   switch. A mouse hook is called for every move of the mouse, each a
-//!   wake of this thread, and all it is for is the press on that one
-//!   switch. It notes the human's left button going down and where, so
+//!   switch or its speed slider, or one of them is held. A mouse hook is
+//!   called for every move of the mouse, each a wake of this thread, and
+//!   all it is for is the press on those two. It notes the human's left button going down and where, so
 //!   the plate can tell a real press from a message any process posted
 //!   or a click a script sent.
 

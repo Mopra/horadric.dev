@@ -492,6 +492,15 @@ pub(crate) fn control_at(x: f32, y: f32, shells: Option<f32>) -> Option<Control>
     }
 }
 
+/// Whether the slider follows the mouse: only while the human's own
+/// press, as the mouse hook saw it, went down on the slider and the
+/// hardware says the button is still down. `pressed_on` is the control
+/// under that press, none when the hook saw none. A posted message says
+/// nothing of who sent it, and the speed is kept across restarts.
+pub(crate) fn slider_follows(pressed_on: Option<Control>, button_down: bool) -> bool {
+    button_down && pressed_on == Some(Control::Speed)
+}
+
 fn window_named(title: &str) -> String {
     match title.trim() {
         "" => "a window with no title".into(),
