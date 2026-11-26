@@ -95,7 +95,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::takeover::{file_name_field, list_windows, looks_risky, pick_window, Takeover};
-use crate::takeover_programs::desktop_admin;
+use crate::takeover_programs::takeover_admin;
 
 /// How long the helper may take to connect once Windows has started it.
 /// The user's answer to Windows' question comes before, and is timed by
@@ -1089,7 +1089,7 @@ impl Gate {
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        desktop_admin::log(&listed::log_line(
+        takeover_admin::log(&listed::log_line(
             &horadric_core::tasks::utc(secs),
             &format!("helper for process {}", self.parent),
             source,
@@ -1101,13 +1101,13 @@ impl Gate {
     /// The administrators' list as it stands now, read on every decision
     /// so an entry taken off counts at once.
     fn admin_list(&mut self) -> listed::List {
-        match desktop_admin::read() {
-            desktop_admin::Read::List(list) => {
+        match takeover_admin::read() {
+            takeover_admin::Read::List(list) => {
                 self.list_refused = None;
                 list
             }
-            desktop_admin::Read::Missing => listed::List::default(),
-            desktop_admin::Read::Refused(why) => {
+            takeover_admin::Read::Missing => listed::List::default(),
+            takeover_admin::Read::Refused(why) => {
                 if self.list_refused.as_ref() != Some(&why) {
                     self.log(Source::Unreadable, &why);
                     self.list_refused = Some(why);

@@ -288,15 +288,15 @@ pub fn runewords_file() -> Option<PathBuf> {
     crate::state_dir().map(|d| d.join("runewords.json"))
 }
 
-/// The desktop programs the human allows ahead of time, beside the app's
+/// The programs the human allows takeover of ahead of time, beside the app's
 /// state like [`runewords_file`].
-pub fn desktop_programs_file() -> Option<PathBuf> {
+pub fn takeover_programs_file() -> Option<PathBuf> {
     use horadric_core::takeover_programs::{FILE, OLD_FILE};
     crate::state_dir().map(|d| renamed(&d, FILE, OLD_FILE))
 }
 
-/// The log of desktop grants, beside [`desktop_programs_file`].
-pub fn desktop_log_file() -> Option<PathBuf> {
+/// The log of takeover grants, beside [`takeover_programs_file`].
+pub fn takeover_log_file() -> Option<PathBuf> {
     use horadric_core::takeover_programs::{LOG_FILE, OLD_LOG_FILE};
     crate::state_dir().map(|d| renamed(&d, LOG_FILE, OLD_LOG_FILE))
 }

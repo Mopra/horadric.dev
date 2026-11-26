@@ -348,7 +348,7 @@ mod tests {
         assert!(matches!(guarded(&own, false), Ok(Some(_))), "{own:?}");
         assert!(guarded(&own, true).is_err(), "a file is no folder");
         let mine = std::env::temp_dir().join(format!(
-            "horadric-desktop-admin-test-{}.json",
+            "horadric-takeover-admin-test-{}.json",
             std::process::id()
         ));
         std::fs::write(&mine, "{}").unwrap();

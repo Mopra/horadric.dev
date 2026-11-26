@@ -45,7 +45,7 @@
 //! the plate, since two can share a name.
 //!
 //! Asking runs the dialog's modal loop, which must not hold the app, so a
-//! question waits on [`Desktop`] and is asked from the window procedure.
+//! question waits on [`Takeover`] and is asked from the window procedure.
 //!
 //! What is allowed is shown while it happens, see [`super::ghost`]: a
 //! click waits for the ghost cursor to reach it, and the human can stop it
@@ -91,11 +91,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// The administrators' list on disk. One file for the app and for the
 /// binary's elevated helper and `takeover` command, see its notes.
-#[path = "desktop_admin.rs"]
-mod desktop_admin;
+#[path = "takeover_admin.rs"]
+mod takeover_admin;
 
 use super::ghost::{self, Allowed};
-use super::{ask_aside, ask_aside_releasable, post, with_app, App, WM_HORADRIC_DESKTOP};
+use super::{ask_aside, ask_aside_releasable, post, with_app, App, WM_HORADRIC_TAKEOVER};
 use crate::dialog::{Answer, Aside, Dialog, Tone};
 use crate::toast::Kind;
 
@@ -668,7 +668,7 @@ fn stamp_of(file: &std::path::Path) -> Option<(SystemTime, u64)> {
 
 /// What the human allowed, and the calls waiting to be asked.
 #[derive(Default)]
-pub(super) struct Desktop {
+pub(super) struct Takeover {
     grants: HashMap<GrantKey, Grant>,
     /// The questions refused of late, which are not asked again yet.
     refused: Refusals<GrantKey>,
@@ -691,14 +691,14 @@ pub(super) struct Desktop {
 /// The least time between two notices that Windows will ask, per session.
 const ELEVATING_APART: Duration = Duration::from_secs(20);
 
-impl Desktop {
+impl Takeover {
     /// Reads each list again if its file changed, and says what the human
     /// should hear of it. A list that can not be read, or that a program
     /// that is not elevated could have written, counts as empty, so the
     /// human is asked.
     fn refresh(&mut self) -> Vec<Notice> {
         let mut notices = Vec::new();
-        if let Some(file) = horadric_hooks::tasks::desktop_programs_file() {
+        if let Some(file) = horadric_hooks::tasks::takeover_programs_file() {
             let stamp = stamp_of(&file);
             if stamp != self.lists.user_stamp {
                 self.lists.user_stamp = stamp;
@@ -733,13 +733,13 @@ impl Desktop {
                 }
             }
         }
-        let stamp = desktop_admin::file_read().as_deref().and_then(stamp_of);
+        let stamp = takeover_admin::file_read().as_deref().and_then(stamp_of);
         if stamp != self.lists.admin_stamp || self.lists.admin_refused.is_some() {
             self.lists.admin_stamp = stamp;
-            let (list, refused) = match desktop_admin::read() {
-                desktop_admin::Read::List(list) => (list, None),
-                desktop_admin::Read::Missing => (listed::List::default(), None),
-                desktop_admin::Read::Refused(why) => (listed::List::default(), Some(why)),
+            let (list, refused) = match takeover_admin::read() {
+                takeover_admin::Read::List(list) => (list, None),
+                takeover_admin::Read::Missing => (listed::List::default(), None),
+                takeover_admin::Read::Refused(why) => (listed::List::default(), Some(why)),
             };
             self.lists.admin = list;
             if let Some(why) = refused.as_ref().filter(|w| Some(*w) != self.lists.admin_refused.as_ref()) {
@@ -887,7 +887,7 @@ unsafe fn app_id_of(h: HWND) -> Option<String> {
 /// Adds a line to `takeover.log`. A log that can not be written loses the
 /// line, never the call.
 pub(super) fn log(session: &str, source: Source, program: &str, what: &str) {
-    let Some(file) = horadric_hooks::tasks::desktop_log_file() else {
+    let Some(file) = horadric_hooks::tasks::takeover_log_file() else {
         return;
     };
     let secs = SystemTime::now()
@@ -936,9 +936,15 @@ thread_local! {
 }
 
 impl App {
-    /// A `desktop.` call from `horadric mcp`. The caller has shown the
+    /// A takeover call from `horadric mcp`. The caller has shown the
     /// session's key already, see [`App::browser_call`].
-    pub(super) fn desktop_call(&mut self, call: BrowserCall) {
+    ///
+    /// The ops keep the word the tools first had (`desktop.allow`,
+    /// `desktop.done`, `desktop.elevating`, `desktop.mode`), as does the
+    /// helper's pipe name: an installed build's `horadric mcp` and helper
+    /// speak them to this app, and a renamed op would read as unknown to
+    /// whichever side was not updated yet.
+    pub(super) fn takeover_call(&mut self, call: BrowserCall) {
         let known = self
             .shared
             .registry
@@ -969,7 +975,7 @@ impl App {
             // so a session that says this more often is not believed.
             let now = Instant::now();
             let lately = self
-                .desktop
+                .takeover
                 .elevating
                 .insert(call.session.clone(), now)
                 .is_some_and(|last| now.duration_since(last) < ELEVATING_APART);
@@ -998,7 +1004,7 @@ impl App {
             reply: call.reply,
             since: Instant::now(),
         };
-        for notice in self.desktop.refresh() {
+        for notice in self.takeover.refresh() {
             if notice.unreadable {
                 let name = self.name_of(&pending.session);
                 log(&name, Source::Unreadable, &notice.text, "");
@@ -1023,8 +1029,8 @@ impl App {
                 }
             }
         }
-        self.desktop.waiting.push_back(pending);
-        post(self.notify.0 as isize, WM_HORADRIC_DESKTOP, 0);
+        self.takeover.waiting.push_back(pending);
+        post(self.notify.0 as isize, WM_HORADRIC_TAKEOVER, 0);
     }
 
     /// Why a question is not put to the human: the same one was refused,
@@ -1038,14 +1044,14 @@ impl App {
             _ => listed::Question::Approve,
         };
         if let Some(left) = self
-            .desktop
+            .takeover
             .refused
             .left(&p.key(), question, Instant::now())
         {
             return Some(Refusal::Held(question, left.as_secs()));
         }
         let waiting = self
-            .desktop
+            .takeover
             .waiting
             .iter()
             .filter(|w| w.session == p.session)
@@ -1084,13 +1090,13 @@ impl App {
         let key = program_key(&r.exe, &r.path);
         let program = program_name(listed_name(&r.exe, &r.path));
         let asking = self
-            .desktop
+            .takeover
             .asking
             .as_ref()
             .filter(|(s, k)| *k == key && *s != p.session)
             .map(|(s, _)| s.clone())
             .or_else(|| {
-                self.desktop
+                self.takeover
                     .waiting
                     .iter()
                     .find(|w| {
@@ -1110,7 +1116,7 @@ impl App {
             ));
         }
         let other = self
-            .desktop
+            .takeover
             .drivers
             .get(&key)
             .filter(|s| **s != p.session)?;
@@ -1126,7 +1132,7 @@ impl App {
 
     /// What the human answered for this session and program.
     fn grant_of(&self, p: &Pending) -> Grant {
-        self.desktop
+        self.takeover
             .grants
             .get(&p.key())
             .copied()
@@ -1142,7 +1148,7 @@ impl App {
             return None;
         }
         listed::pre_approval(
-            &self.desktop.lists.admin.programs,
+            &self.takeover.lists.admin.programs,
             &r.path,
             listed_name(&r.exe, &r.path),
             p.elevated,
@@ -1156,11 +1162,11 @@ impl App {
     /// action going ahead on a pre-approved pattern is logged every time.
     fn decision_for(&mut self, p: &Pending) -> Decision {
         let own = self.grant_of(p);
-        let found = self.desktop.listed(p);
+        let found = self.takeover.listed(p);
         let level = found.level;
         let r = &p.request;
         if let Some(command) = found.moved {
-            if self.desktop.moved.insert(p.program().to_lowercase()) {
+            if self.takeover.moved.insert(p.program().to_lowercase()) {
                 self.toasts.show(
                     Kind::Failed,
                     "Your list no longer covers a program that runs as administrator",
@@ -1188,7 +1194,7 @@ impl App {
         }
         if let Some(level) = level.filter(|_| by_the_list(own, level, r.action, risky)) {
             let told = (p.session.clone(), p.program().to_lowercase(), level);
-            if self.desktop.told.insert(told) {
+            if self.takeover.told.insert(told) {
                 let name = self.name_of(&p.session);
                 let program = shown_program(program_name(listed_name(&r.exe, &r.path)), p.elevated);
                 log(&name, Source::List(level), &p.program(), &p.what());
@@ -1224,7 +1230,7 @@ impl App {
         let program = shown_program(program_name(&p.request.exe), p.elevated);
         let r = p.request;
         if r.action == Action::Operate {
-            self.desktop
+            self.takeover
                 .drivers
                 .insert(program_key(&r.exe, &r.path), p.session.clone());
         }
@@ -1271,7 +1277,7 @@ impl App {
     /// those that what was allowed since now covers, and refusing those
     /// whose question the human has just refused.
     fn next_question(&mut self) -> Option<Question> {
-        while let Some(p) = self.desktop.waiting.pop_front() {
+        while let Some(p) = self.takeover.waiting.pop_front() {
             if !p.reply.wanted() {
                 // Its agent gave up waiting behind other questions, and
                 // was told the call failed: asking now would act late.
@@ -1292,13 +1298,13 @@ impl App {
                         continue;
                     }
                     let r = &p.request;
-                    self.desktop.asking = Some((p.session.clone(), program_key(&r.exe, &r.path)));
+                    self.takeover.asking = Some((p.session.clone(), program_key(&r.exe, &r.path)));
                     return Some(Question {
                         name: self.name_of(&p.session),
                         ident: self.ident_of(&p.session),
                         risky: ask == Decision::AskRisky,
-                        within: self.desktop.answer_within(),
-                        left: time_left(self.desktop.answer_within(), p.since.elapsed()),
+                        within: self.takeover.answer_within(),
+                        left: time_left(self.takeover.answer_within(), p.since.elapsed()),
                         pending: p,
                     });
                 }
@@ -1309,9 +1315,9 @@ impl App {
 
     /// Bypass was turned on: the calls waiting for a question go through
     /// it now, rather than after the human answers each.
-    pub(super) fn desktop_bypass_on(&self) {
-        if !self.desktop.waiting.is_empty() {
-            post(self.notify.0 as isize, WM_HORADRIC_DESKTOP, 0);
+    pub(super) fn takeover_bypass_on(&self) {
+        if !self.takeover.waiting.is_empty() {
+            post(self.notify.0 as isize, WM_HORADRIC_TAKEOVER, 0);
         }
     }
 
@@ -1320,15 +1326,15 @@ impl App {
     /// if it had just come. Nothing is noted against it, since nobody
     /// refused it or left it unanswered.
     fn released(&mut self, q: Question) {
-        self.desktop.asking = None;
-        self.desktop.waiting.push_front(q.pending);
+        self.takeover.asking = None;
+        self.takeover.waiting.push_front(q.pending);
     }
 
     /// Acts on the human's answer. A question back when there is another
     /// to ask about the same call: allowed to operate, it may still be a
     /// risky one.
     fn answered(&mut self, mut q: Question, answer: Answer) -> Option<Question> {
-        self.desktop.asking = None;
+        self.takeover.asking = None;
         // Turned off while the question was up: off is the later word,
         // whatever was pressed.
         if crate::takeover_mode::mode() == Mode::Off {
@@ -1352,7 +1358,7 @@ impl App {
                 log(&q.name, source, &q.pending.program(), &q.pending.what());
                 // Nobody is there: the next call hears so at once rather
                 // than waiting a minute each.
-                self.desktop.refused.note(&key, question, Instant::now());
+                self.takeover.refused.note(&key, question, Instant::now());
                 self.refuse(q.pending, why);
                 return None;
             }
@@ -1372,7 +1378,7 @@ impl App {
             // afresh on every call, so taking a program off one takes
             // effect at once.
             let (grant, decision) = approved(self.grant_of(&q.pending), r.action, r.risky, pressed);
-            self.desktop.grants.insert(key.clone(), grant);
+            self.takeover.grants.insert(key.clone(), grant);
             let level = match pressed {
                 Some(0) => Some(Level::Operate),
                 Some(1) => Some(Level::Look),
@@ -1388,9 +1394,9 @@ impl App {
         };
         match decision {
             Decision::Refuse(Refusal::Refused | Refusal::OnlyLook) => {
-                self.desktop.refused.note(&key, question, Instant::now());
+                self.takeover.refused.note(&key, question, Instant::now());
             }
-            _ => self.desktop.refused.clear(&key, question),
+            _ => self.takeover.refused.clear(&key, question),
         }
         match decision {
             Decision::Allow => self.allow(q.pending, false),
@@ -1405,7 +1411,7 @@ impl App {
                 }
                 q.risky = true;
                 let r = &q.pending.request;
-                self.desktop.asking =
+                self.takeover.asking =
                     Some((q.pending.session.clone(), program_key(&r.exe, &r.path)));
                 return Some(q);
             }
@@ -1416,14 +1422,14 @@ impl App {
 }
 
 /// Asks about the waiting calls one after another, outside the app's
-/// borrow. Runs from `WM_HORADRIC_DESKTOP`.
+/// borrow. Runs from `WM_HORADRIC_TAKEOVER`.
 pub(super) fn ask_waiting(hwnd: HWND) {
     if ASKING.get() {
         return;
     }
     let Some(first) = with_app(App::next_question) else {
         // The app is busy in a loop of its own. Try again once it is not.
-        post(hwnd.0 as isize, WM_HORADRIC_DESKTOP, 0);
+        post(hwnd.0 as isize, WM_HORADRIC_TAKEOVER, 0);
         return;
     };
     ASKING.set(true);

@@ -629,7 +629,7 @@ pub(crate) fn log_lines(lines: String) {
         let (tx, rx) = std::sync::mpsc::channel::<String>();
         std::thread::spawn(move || {
             for lines in rx {
-                let Some(file) = horadric_hooks::tasks::desktop_log_file() else {
+                let Some(file) = horadric_hooks::tasks::takeover_log_file() else {
                     continue;
                 };
                 if let Some(dir) = file.parent() {

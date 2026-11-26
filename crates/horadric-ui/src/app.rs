@@ -150,8 +150,8 @@ mod drive;
 #[path = "forge_tools.rs"]
 mod forge_tools;
 
-#[path = "desktop.rs"]
-mod desktop;
+#[path = "takeover.rs"]
+mod takeover;
 
 #[path = "ghost/mod.rs"]
 mod ghost;
@@ -291,9 +291,9 @@ const WM_HORADRIC_PORTAL_KEY: u32 = WM_APP + 41;
 const WM_HORADRIC_UNDONE: u32 = WM_APP + 47;
 /// A project's context was read on its thread, into `contextpanel::take`.
 const WM_HORADRIC_CONTEXT: u32 = WM_APP + 60;
-/// Ask about the desktop calls waiting in the app's `desktop`, outside the
+/// Ask about the desktop calls waiting in the app's `takeover`, outside the
 /// app's borrow since asking runs a loop of its own.
-const WM_HORADRIC_DESKTOP: u32 = WM_APP + 61;
+const WM_HORADRIC_TAKEOVER: u32 = WM_APP + 61;
 
 /// What the list of a row of the Settings window offers.
 struct SettingsList {
@@ -1175,7 +1175,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             frozen: false,
             pick_from: None,
             start_failed: None,
-            desktop: desktop::Desktop::default(),
+            takeover: takeover::Takeover::default(),
             menu_for: None,
             stone_for: None,
             stone_menu_for: None,
@@ -1471,8 +1471,8 @@ unsafe extern "system" fn app_proc(
             }
             return LRESULT(0);
         }
-        WM_HORADRIC_DESKTOP => {
-            desktop::ask_waiting(hwnd);
+        WM_HORADRIC_TAKEOVER => {
+            takeover::ask_waiting(hwnd);
             return LRESULT(0);
         }
         WM_HORADRIC_TILE_MENU => {
@@ -4108,7 +4108,7 @@ struct App {
     start_failed: Option<String>,
     /// What each session may do in which desktop program, and the calls
     /// waiting for the human to say.
-    desktop: desktop::Desktop,
+    takeover: takeover::Takeover,
     /// The tile whose menu is about to show.
     menu_for: Option<String>,
     /// The stone about to be cast, by project key and label.

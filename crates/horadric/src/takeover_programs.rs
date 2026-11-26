@@ -25,10 +25,10 @@ use horadric_core::takeover_programs::{self as listed, Approval, Entry, Kind, Le
 
 /// The administrators' list on disk, the one file the app reads it with
 /// too: see its notes on why it is shared by path.
-#[path = "../../horadric-ui/src/desktop_admin.rs"]
-pub(crate) mod desktop_admin;
+#[path = "../../horadric-ui/src/takeover_admin.rs"]
+pub(crate) mod takeover_admin;
 
-use desktop_admin::Read;
+use takeover_admin::Read;
 
 const USAGE: &str = "\
 usage: horadric takeover list                        Both lists, and where the files are
@@ -269,7 +269,7 @@ fn approval(action: &str, named: &str, rest: &[&str]) -> Result<Approval, String
 }
 
 fn user_file() -> Result<PathBuf, String> {
-    horadric_hooks::tasks::desktop_programs_file().ok_or_else(|| "cannot find %APPDATA%".into())
+    horadric_hooks::tasks::takeover_programs_file().ok_or_else(|| "cannot find %APPDATA%".into())
 }
 
 /// The user's file as written, with the parts that no longer count.
@@ -290,23 +290,23 @@ fn read_user(file: &Path) -> Result<List, String> {
 
 /// Reads a list, changes it, and writes it back whole. The user's goes
 /// through a file beside it so the app never reads half of it; the
-/// administrators' is written by [`desktop_admin::write`], which wants an
+/// administrators' is written by [`takeover_admin::write`], which wants an
 /// elevated shell and says so.
 fn change<F: FnOnce(&mut Vec<Entry>) -> Result<(), String>>(
     which: Which,
     edit: F,
 ) -> Result<(), String> {
     if which != Which::User {
-        if !desktop_admin::elevated() {
-            return Err(desktop_admin::NOT_ELEVATED.into());
+        if !takeover_admin::elevated() {
+            return Err(takeover_admin::NOT_ELEVATED.into());
         }
-        let mut list = match desktop_admin::read() {
+        let mut list = match takeover_admin::read() {
             Read::List(list) => list,
             Read::Missing => List::default(),
             Read::Refused(why) => return Err(why),
         };
         edit(&mut list.programs)?;
-        return desktop_admin::write(&list).map(|_| ());
+        return takeover_admin::write(&list).map(|_| ());
     }
     let file = user_file()?;
     let mut list = read_user(&file)?;
@@ -364,11 +364,11 @@ fn list() -> Result<(), String> {
         );
     }
     println!();
-    let admin_file = desktop_admin::file_read().ok_or("Windows would not say where %ProgramData% is")?;
+    let admin_file = takeover_admin::file_read().ok_or("Windows would not say where %ProgramData% is")?;
     println!("The administrators' list: {}", admin_file.display());
     println!("  (written only from an elevated shell; programs that run as administrator, and");
     println!("  every pre-approved risky action)");
-    let admin = match desktop_admin::read() {
+    let admin = match takeover_admin::read() {
         Read::Missing => {
             println!("  There is none yet.");
             List::default()
@@ -403,9 +403,9 @@ fn list() -> Result<(), String> {
 
 fn log(elevated: bool, n: usize) -> Result<(), String> {
     let file = if elevated {
-        desktop_admin::log_file_read().ok_or("Windows would not say where %ProgramData% is")?
+        takeover_admin::log_file_read().ok_or("Windows would not say where %ProgramData% is")?
     } else {
-        horadric_hooks::tasks::desktop_log_file().ok_or("cannot find %APPDATA%")?
+        horadric_hooks::tasks::takeover_log_file().ok_or("cannot find %APPDATA%")?
     };
     let text = std::fs::read_to_string(&file).unwrap_or_default();
     println!("{}", file.display());

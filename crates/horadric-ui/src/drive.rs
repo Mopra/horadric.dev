@@ -55,7 +55,7 @@ impl App {
                      them only when resumed inside Horadric.",
                 ));
             }
-            return self.desktop_call(call);
+            return self.takeover_call(call);
         }
         let reply = call.reply;
         // Its agent heard it fail while it waited behind something slow.

@@ -2047,6 +2047,6 @@ fn took_look() {
         // one whose question is on screen too. Outside the overlay's
         // borrow: the app may hand it calls.
         crate::dialog::release_aside();
-        super::with_app(|app| app.desktop_bypass_on());
+        super::with_app(|app| app.takeover_bypass_on());
     }
 }
