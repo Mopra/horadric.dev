@@ -3557,10 +3557,15 @@ impl Desktop {
         .ok_or(format!(
             "there is no {r} in the last desktop_snapshot of this window; take a new one"
         ))?;
-        let com = self.com()?;
-        let fresh = unsafe { el.BuildUpdatedCache(&com.one) }
-            .map_err(|_| format!("{r} is gone from the window; take a new desktop_snapshot"))?;
-        Ok(aim_of(fresh))
+        let one = Sent(self.com()?.one.clone());
+        let fresh = read_on_the_side(&el, move |el| {
+            unsafe { el.BuildUpdatedCache(one.get()) }.map(Sent)
+        })
+        .ok_or(format!(
+            "{r} is gone from the window, or the program does not answer; take a new \
+             desktop_snapshot"
+        ))?;
+        Ok(aim_of(fresh.0))
     }
 
     /// The element `args` names by `ref`, or by `name` from a fresh search,
@@ -3631,18 +3636,26 @@ impl Desktop {
         }
     }
 
+    /// The element that has the keyboard, when it is in `w`, with what
+    /// [`PROPERTIES`] names cached. Asked on the side: the program in
+    /// front answers it, and a hung one would hold this server.
+    fn focused_element(&mut self, w: &Window) -> Option<IUIAutomationElement> {
+        let com = self.com().ok()?;
+        let (uia, one, pid) = (Sent(com.uia.clone()), Sent(com.one.clone()), w.pid);
+        let found = timed(PATTERN_WAIT, &w.title, move || unsafe {
+            let el = uia.get().GetFocusedElementBuildCache(one.get())?;
+            // The process id is not among the cached properties, so it is
+            // read live; a cached read of it always fails.
+            let theirs = el.CurrentProcessId()?;
+            Ok(Sent((theirs == pid as i32).then_some(el)))
+        });
+        found.ok()?.0
+    }
+
     /// What has the keyboard, when it is in `w`: where a key pressed now
     /// lands.
     fn focused(&mut self, w: &Window) -> Focused {
-        let Ok(com) = self.com() else {
-            return Focused::default();
-        };
-        let el = unsafe { com.uia.GetFocusedElementBuildCache(&com.one) }
-            .ok()
-            // The process id is not among the cached properties, so it is
-            // read live; a cached read of it always fails.
-            .filter(|el| unsafe { el.CurrentProcessId() }.ok() == Some(w.pid as i32));
-        let Some(el) = el else {
+        let Some(el) = self.focused_element(w) else {
             return Focused::default();
         };
         unsafe {
@@ -3916,7 +3929,13 @@ impl Desktop {
     fn text_pattern(&mut self, w: &Window, aim: Option<&Aim>) -> Option<String> {
         let el = match aim {
             Some(a) => a.el.clone(),
-            None => unsafe { self.com().ok()?.uia.ElementFromHandle(hwnd(w.hwnd)) }.ok()?,
+            None => {
+                let (uia, id) = (Sent(self.com().ok()?.uia.clone()), w.hwnd);
+                let root = timed(PATTERN_WAIT, &w.title, move || {
+                    unsafe { uia.get().ElementFromHandle(hwnd(id)) }.map(Sent)
+                });
+                root.ok()?.0
+            }
         };
         read_on_the_side(&el, |el| unsafe {
             let p = el.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)?;
@@ -3934,10 +3953,7 @@ impl Desktop {
         let (el, control) = match aim {
             Some(a) => (a.el.clone(), a.control),
             None => {
-                let com = self.com().ok()?;
-                let el = unsafe { com.uia.GetFocusedElementBuildCache(&com.one) }
-                    .ok()
-                    .filter(|el| unsafe { el.CurrentProcessId() }.ok() == Some(w.pid as i32))?;
+                let el = self.focused_element(w)?;
                 let control = control_name(unsafe { el.CachedControlType() }.map_or(0, |c| c.0));
                 (el, control)
             }
