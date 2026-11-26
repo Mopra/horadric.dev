@@ -1205,6 +1205,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     unsafe {
         SetTimer(Some(notify), TICK_TIMER, 1000, None);
     }
+    crate::desk::window::startup();
 
     let mut msg = MSG::default();
     loop {
@@ -1217,6 +1218,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             DispatchMessageW(&msg);
         }
     }
+    crate::desk::window::shutdown();
     crate::crashlog::clean_exit();
     APP.with(|a| {
         if let Some(mut app) = a.borrow_mut().take() {
@@ -1657,6 +1659,7 @@ fn tray_menu(hwnd: HWND) {
     });
     match menu {
         Some(Choice::Settings) => open_settings(None),
+        Some(Choice::Desk(line)) => crate::desk::window::tray_pick(line),
         Some(Choice::New) => pick_and_start(hwnd, projects.first().map(PathBuf::from)),
         Some(Choice::Recent(path)) => start_logged(PathBuf::from(path)),
         Some(Choice::QuestLog(path)) => {
@@ -11111,7 +11114,7 @@ fn folder_name(cwd: &Path) -> String {
 }
 
 /// Every screen plugged in, in the order `screens::in_order` gives.
-fn monitors() -> Vec<Screen> {
+pub(crate) fn monitors() -> Vec<Screen> {
     unsafe extern "system" fn each(m: HMONITOR, _: HDC, _: *mut RECT, out: LPARAM) -> BOOL {
         let out = unsafe { &mut *(out.0 as *mut Vec<Screen>) };
         let mut info = MONITORINFOEXW::default();
