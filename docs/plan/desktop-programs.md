@@ -41,6 +41,28 @@ window and operate it, within what the human allowed. Windows only.
   call over a named pipe that takes one local client, each end checking
   the other's process id. The program is named as running as
   administrator, so a grant for the normal program does not cover it.
+  A process whose token Windows will not open for the session counts as
+  elevated (a session that is not can not read an elevated token), and a
+  window whose program will not even say its file is resolved by the
+  helper rather than refused. `desktop_windows` marks such windows "(as
+  administrator)", so the agent knows before its first call that Windows
+  will ask. Before Windows asks, the app is told (a `desktop.elevating`
+  body, shown as a notification naming the session and the program), so
+  the human knows why the question comes. The start runs on a thread of
+  its own: a call waits 90 s for the human's answer (a later call 20 s),
+  then tells the agent Windows is still asking and to call again, and a
+  later call picks up the helper that connected meanwhile instead of
+  asking twice. A no is remembered for 2 minutes, a failed start or a
+  lost helper for 2 minutes from the last time Windows asked, so the
+  agent can not have the human asked over and over, and after that a
+  call may ask again (`hold_left`). A helper silent for 150 s in one call
+  (past the longest wait) is stopped and counted lost. The helper ends
+  when the pipe is cut and also watches the `horadric mcp` that started
+  it, so no elevated process outlives its session. Without a helper,
+  nothing that sends input (click, type, press, and `desktop_text`, which
+  would select and copy) is sent to an elevated window: Windows drops
+  such input without telling `SendInput`, so a refusal is the only
+  honest answer.
 - **Watched between looks.** From the first time a session looks at a
   program or operates it, `horadric mcp` watches it (`watch.rs`): a
   thread of its own holds out of context WinEvent hooks on that process
@@ -57,7 +79,11 @@ window and operate it, within what the human allowed. Windows only.
   run as administrator do reach a hook that is not (tried on
   2026-11-09), but its elements then mostly will not say what they hold,
   so for such a window the helper watches, and its changes come over
-  the same pipe.
+  the same pipe. An unnamed `desktop_changes` adds the helper's changes,
+  or says why they could not be read; an unnamed `desktop_wait` asks the
+  helper every 300 ms what changed in its programs (`helper_peek`, a
+  call between the two processes that no agent can make), so a text
+  there ends the wait and quiet needs both sides quiet.
 - **Programs allowed ahead of time.** Asked for on 2026-11-11, for a
   machine a session works on with nobody there to answer the approval
   dialog of each new session. `desktop-programs.json` beside the app's
@@ -190,4 +216,10 @@ window and operate it, within what the human allowed. Windows only.
 - A page in the app's settings for the list, beside the command.
 - The elevated helper still needs Windows' UAC yes when it starts, unless
   the machine elevates without asking, which an unattended machine has
-  to settle on its own.
+  to settle on its own. A helper started once per Horadric rather than
+  once per `horadric mcp` would ask the human once a day instead of once
+  a session, at the cost of one elevated process serving every session.
+- Whether a stopped helper (silent past 150 s) can always be stopped:
+  the handle Windows gives back for an elevated start may not allow
+  `TerminateProcess`, in which case cutting the pipe ends it only once it
+  is out of what it hung in.

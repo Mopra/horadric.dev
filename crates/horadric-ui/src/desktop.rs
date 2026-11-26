@@ -246,6 +246,29 @@ pub(super) fn refusal_text(why: Refusal, action: Action, risky: bool, exe: &str)
     }
 }
 
+/// The notice shown as a session's `horadric mcp` is about to have Windows
+/// ask for administrator rights, from a `desktop.elevating` body: a
+/// question from Windows the human did not see coming would look like
+/// something else wanting in. Its title and its text.
+pub(super) fn elevating_notice(session: &str, body: &Value) -> (String, String) {
+    let window = &body["window"];
+    let exe = window["exe"].as_str().map(str::trim).unwrap_or_default();
+    let title = window["title"].as_str().map(str::trim).unwrap_or_default();
+    let program = match (exe, title) {
+        ("" | "?", "") => "a program".to_string(),
+        ("" | "?", t) => format!("the program of {t:?}"),
+        (e, _) => program_name(e).to_string(),
+    };
+    (
+        "Windows will ask for administrator rights".to_string(),
+        format!(
+            "{session} wants to reach {program}, which runs as administrator. Horadric's helper \
+             needs administrator rights for that: Yes lets it, and you still approve each \
+             program and risky action here; No keeps it out."
+        ),
+    )
+}
+
 /// The tile's last line while a session operates a program.
 pub(super) fn operating_line(program: &str, what: &str) -> String {
     match what.trim() {
@@ -621,6 +644,11 @@ impl App {
         if call.body.get("op").and_then(Value::as_str) == Some("desktop.done") {
             let d = parse_done(&call.body);
             ghost::done(&self.shared, &d.what, d.ok, &d.outcome);
+            return call.reply.send(json!({}));
+        }
+        if call.body.get("op").and_then(Value::as_str) == Some("desktop.elevating") {
+            let (title, text) = elevating_notice(&self.name_of(&call.session), &call.body);
+            self.toasts.show(Kind::Waiting, &title, &text);
             return call.reply.send(json!({}));
         }
         let request = match parse(&call.body) {
@@ -1283,6 +1311,27 @@ mod tests {
     fn the_default_button_is_the_least_that_does_it() {
         assert_eq!(APPROVE[approve_default(Action::See)], "Only let it look");
         assert_eq!(APPROVE[approve_default(Action::Operate)], "Let it operate");
+    }
+
+    #[test]
+    fn the_notice_before_windows_asks_says_who_wants_what() {
+        let body = json!({
+            "op": "desktop.elevating",
+            "window": {"exe": "SysmacStudio.exe", "title": "Sysmac Studio - Line 2"},
+        });
+        let (title, text) = elevating_notice("plc fix", &body);
+        assert!(title.contains("administrator rights"), "{title}");
+        assert!(
+            text.starts_with("plc fix wants to reach SysmacStudio, which runs as administrator"),
+            "{text}"
+        );
+        let unknown = json!({"window": {"exe": "?", "title": "Setup"}});
+        assert!(elevating_notice("s", &unknown)
+            .1
+            .contains("the program of \"Setup\""));
+        assert!(elevating_notice("s", &json!({}))
+            .1
+            .contains("reach a program,"));
     }
 
     #[test]

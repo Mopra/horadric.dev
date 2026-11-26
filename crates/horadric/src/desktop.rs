@@ -67,7 +67,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_RESTORE, WM_GETTEXT, WM_GETTEXTLENGTH, WS_EX_TOOLWINDOW,
 };
 
-use crate::desktop_helper::{as_administrator, Helper, HelperStart};
+use crate::desktop_helper::{
+    as_administrator, elevating_body, held_text, hold_left, still_asking_text, Helper, HelperStart,
+    Setback, Starting, ANNOUNCE_PAUSE, ASK_AGAIN_WAIT, ASK_WAIT, PEEK,
+};
 use crate::mcp::text;
 use crate::watch::{self, changes_part, changes_text, digest, verdict, Until};
 
@@ -102,6 +105,18 @@ window to desktop_changes or desktop_wait).";
 const UNWATCHED: &str = "Changes in this window are only partly watched because it runs as \
 administrator: its windows opening, closing and coming to the front, and that something in it \
 changed, mostly without what the change was.";
+
+/// How often an unnamed wait asks the helper what changed in its programs:
+/// a call over a local pipe, cheap, but not on every turn of the loop.
+const HELPER_POLL: Duration = Duration::from_millis(300);
+
+/// What an unnamed wait says when the helper failed it.
+pub fn helper_note(why: &str) -> String {
+    format!(
+        "\n(Programs that run as administrator were not watched in this wait: {why}. The helper \
+         is started again on the next call to one.)"
+    )
+}
 
 /// The widest picture, in pixels.
 const WIDEST: u32 = 1600;
@@ -418,12 +433,15 @@ pub fn centre(left: i32, top: i32, right: i32, bottom: i32) -> Option<(i32, i32)
     (right > left && bottom > top).then_some(((left + right) / 2, (top + bottom) / 2))
 }
 
-/// The window list as the agent reads it.
-pub fn windows_text(list: &[Window]) -> String {
+/// The window list as the agent reads it. `walled` says which windows run
+/// as administrator out of this session's own reach, so the agent knows
+/// before its first call there that Windows will ask the human.
+pub fn windows_text(list: &[Window], walled: impl Fn(&Window) -> bool) -> String {
     if list.is_empty() {
         return "No windows are open on the desktop.".into();
     }
     let mut out = String::from("Windows on the desktop, frontmost first:\n");
+    let mut any = false;
     for w in list {
         out.push_str(&format!(
             "- id={} {:?} {} pid {}",
@@ -432,10 +450,90 @@ pub fn windows_text(list: &[Window]) -> String {
         if let Some(o) = w.owner {
             out.push_str(&format!(" (dialog of id={o})"));
         }
+        if walled(w) {
+            out.push_str(" (as administrator)");
+            any = true;
+        }
         out.push('\n');
     }
-    out.pop();
+    if any {
+        out.push_str(
+            "A window marked as administrator is reached through Horadric's helper. The first \
+             call there has Windows ask the human to let the helper run as administrator.",
+        );
+    } else {
+        out.pop();
+    }
     out
+}
+
+/// Whether a process runs as administrator, as far as Windows tells.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Elevation {
+    Elevated,
+    Normal,
+    /// Windows refused to say. A session that is not elevated can not
+    /// open an elevated process's token, so this is taken for elevated.
+    Denied,
+    /// Windows did not say for another reason, the process gone.
+    Unknown,
+}
+
+/// Whether a window of a process at `them` is out of reach of this
+/// session at `me`: only a session that is surely not elevated is walled
+/// off, and from a process that is, or will not say.
+pub fn walled_off(me: Elevation, them: Elevation) -> bool {
+    me == Elevation::Normal && matches!(them, Elevation::Elevated | Elevation::Denied)
+}
+
+/// What an unnamed wait learned of the programs the helper watches.
+#[derive(Debug, Default, PartialEq)]
+pub struct Peeked {
+    /// The helper's place in its own changes.
+    pub newest: u64,
+    /// The text waited for showed there, as said of the change.
+    pub hit: Option<String>,
+    /// Whether nothing changed there for the quiet waited for, when one
+    /// was.
+    pub quiet: Option<bool>,
+    /// What changed there, a line each.
+    pub lines: Vec<String>,
+}
+
+/// Reads the helper's answer to [`PEEK`].
+pub fn peeked(v: &Value) -> Peeked {
+    Peeked {
+        newest: v["newest"].as_u64().unwrap_or(0),
+        hit: v["hit"].as_str().map(String::from),
+        quiet: v["quiet"].as_bool(),
+        lines: v["lines"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// Which of a wait's ends holds when the helper's programs count too:
+/// `local` is what holds here but quiet, `local_quiet` whether it has
+/// been quiet here. Quiet needs both sides quiet, text either side.
+pub fn joined_verdict(
+    local: Option<String>,
+    local_quiet: Option<String>,
+    theirs: &Peeked,
+) -> Option<String> {
+    local
+        .or_else(|| {
+            theirs
+                .hit
+                .as_ref()
+                .map(|h| format!("{h}, in a program that runs as administrator"))
+        })
+        .or_else(|| local_quiet.filter(|_| theirs.quiet != Some(false)))
 }
 
 /// The window `query` names: its id, else its title (whole, then a part),
@@ -996,9 +1094,14 @@ pub struct Desktop {
     /// The helper that reaches programs running as administrator, once
     /// one has been needed.
     helper: Option<Helper>,
-    /// Why the helper can not be had: the user declined it, or it died.
-    /// Kept so Windows does not ask the user again on every call.
-    no_helper: Option<String>,
+    /// Windows asking the human to let the helper run, still unanswered
+    /// when the call that asked gave up waiting.
+    starting: Option<Starting>,
+    /// When Windows last asked the human for the helper.
+    asked: Option<Instant>,
+    /// What last kept the helper away, why, and when, so Windows does not
+    /// ask the human again on every call.
+    setback: Option<(Setback, String, Instant)>,
     /// The last change `desktop_changes` told, per program (none for
     /// all), so the next call starts after it.
     seen: HashMap<Option<u32>, u64>,
@@ -1006,6 +1109,16 @@ pub struct Desktop {
     /// answer: its ring numbers apart from the session's, so it keeps its
     /// own place and says no numbers.
     part: bool,
+}
+
+/// Why a call for an elevated window did not go to the helper.
+enum Unreached {
+    /// There is no helper for now: the call goes on here as far as Windows
+    /// lets it, looking at the title bar and the screen, and says why.
+    Walled(String),
+    /// The call ends with this: Windows still asks the human, or the
+    /// helper was lost in the middle of it.
+    Stop(String),
 }
 
 /// What is known about the element an action aims at.
@@ -1122,12 +1235,21 @@ fn exe_of(pid: u32) -> (String, String) {
     }
 }
 
-/// Whether process `pid`, or this one when none, runs as administrator,
-/// when Windows says.
-fn elevated(pid: Option<u32>) -> Option<bool> {
+/// Whether process `pid`, or this one when none, runs as administrator.
+fn elevation(pid: Option<u32>) -> Elevation {
+    let refused = |e: windows::core::Error| {
+        if e.code() == E_ACCESSDENIED {
+            Elevation::Denied
+        } else {
+            Elevation::Unknown
+        }
+    };
     unsafe {
         let process = match pid {
-            Some(id) => OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, id).ok()?,
+            Some(id) => match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, id) {
+                Ok(p) => p,
+                Err(e) => return refused(e),
+            },
             None => GetCurrentProcess(),
         };
         let mut token = HANDLE::default();
@@ -1135,7 +1257,9 @@ fn elevated(pid: Option<u32>) -> Option<bool> {
         if pid.is_some() {
             let _ = CloseHandle(process);
         }
-        opened.ok()?;
+        if let Err(e) = opened {
+            return refused(e);
+        }
         let mut e = TOKEN_ELEVATION::default();
         let mut len = 0;
         let read = GetTokenInformation(
@@ -1146,23 +1270,41 @@ fn elevated(pid: Option<u32>) -> Option<bool> {
             &mut len,
         );
         let _ = CloseHandle(token);
-        read.ok()?;
-        Some(e.TokenIsElevated != 0)
+        match read {
+            Err(err) => refused(err),
+            Ok(()) if e.TokenIsElevated != 0 => Elevation::Elevated,
+            Ok(()) => Elevation::Normal,
+        }
     }
+}
+
+/// Whether `w` runs as administrator out of this session's reach.
+fn walled(w: &Window) -> bool {
+    walled_off(elevation(None), elevation(Some(w.pid)))
 }
 
 /// Why `w` can not be read or operated, when it runs as administrator and
 /// this session does not: Windows then shows UI Automation only its title
 /// bar and drops input sent to it.
 fn out_of_reach(w: &Window) -> Option<String> {
-    (elevated(Some(w.pid)) == Some(true) && elevated(None) == Some(false)).then(|| {
+    walled(w).then(|| {
         format!(
             "{} runs as administrator and this session does not, so Windows shows the agent \
              only its title bar and lets it neither click nor type there (pictures come off the screen). \
              It can only be reached through a helper that runs as administrator",
-            w.exe
+            program_of(w)
         )
     })
+}
+
+/// The program as the agent reads it named, its title when Windows will
+/// not tell its file.
+fn program_of(w: &Window) -> String {
+    if w.exe == UNKNOWN_EXE {
+        format!("the program of {:?}", w.title)
+    } else {
+        w.exe.clone()
+    }
 }
 
 /// The window at the end of `h`'s chain of owners, the program's main
@@ -1261,13 +1403,8 @@ fn find(query: Option<&Value>) -> Result<(Window, Window), String> {
     let target = pick_window(&list, &query).cloned().ok_or(format!(
         "no window matches {query:?}; desktop_windows lists them"
     ))?;
-    if target.exe == UNKNOWN_EXE {
-        return Err(format!(
-            "can not tell which program {:?} is (it may run as administrator), so it can not be \
-             approved",
-            target.title
-        ));
-    }
+    // A program that will not say its file is refused by the caller, once
+    // it knows the helper can not tell it either.
     let root_id = root_owner(hwnd(target.hwnd)).0 as isize;
     let mut root = if root_id == 0 || root_id == target.hwnd {
         target.clone()
@@ -1707,40 +1844,102 @@ impl Desktop {
         Ok(self.com.as_ref().expect("set just above"))
     }
 
-    /// Hands a call for an elevated window to the helper, starting it the
-    /// first time. The outer error says the helper is out of reach.
+    /// Hands a call for an elevated window `w` to the helper, starting it
+    /// when there is none. The outer error says the call can not go to the
+    /// helper, and whether the call may still go ahead here, as far as
+    /// Windows lets it.
     fn through_helper<A: FnMut(Value) -> Result<Value, String>>(
         &mut self,
         name: &str,
         args: &Value,
         app: &mut A,
         settle: Duration,
-    ) -> Result<Result<Vec<Value>, String>, String> {
-        if let Some(no) = &self.no_helper {
-            return Err(no.clone());
-        }
-        if self.helper.is_none() {
-            match Helper::start() {
-                Ok(h) => self.helper = Some(h),
-                Err(HelperStart::Declined(no)) => {
-                    self.no_helper = Some(no.clone());
-                    return Err(no);
-                }
-                Err(HelperStart::Failed(no)) => return Err(no),
-            }
-        }
+        w: &Window,
+    ) -> Result<Result<Vec<Value>, String>, Unreached> {
+        self.helper_for(w, app)?;
         let helper = self.helper.as_mut().expect("started just above");
         // A grant for a program does not cover the same program running as
         // administrator: the human is asked about that one by itself.
         let mut marked = |body: Value| app(as_administrator(body));
         let answer = helper.call(name, args, &mut marked, settle);
-        if let Err(why) = &answer {
-            self.helper = None;
-            self.no_helper = Some(format!(
-                "{why} (it may already have acted; it is not started again this session)"
-            ));
+        answer.map_err(|why| {
+            self.lose_helper(&why);
+            Unreached::Stop(format!(
+                "{why}. It may already have acted: look before you try again"
+            ))
+        })
+    }
+
+    /// Makes sure the helper runs, asking Windows for it when nothing
+    /// holds that back, and waiting only so long for the human's answer.
+    fn helper_for<A: FnMut(Value) -> Result<Value, String>>(
+        &mut self,
+        w: &Window,
+        app: &mut A,
+    ) -> Result<(), Unreached> {
+        if self.helper.is_some() {
+            return Ok(());
         }
-        answer
+        let most = if self.starting.is_some() {
+            ASK_AGAIN_WAIT
+        } else {
+            if let Some((setback, why, at)) = &self.setback {
+                let since_asked = self.asked.map_or(Duration::MAX, |a| a.elapsed());
+                if let Some(left) = hold_left(*setback, at.elapsed(), since_asked) {
+                    return Err(Unreached::Walled(held_text(*setback, why, left)));
+                }
+            }
+            // The human sees why Windows asks before it does; an app from
+            // before this word ignores it.
+            let _ = app(elevating_body(window_json(w)));
+            thread::sleep(ANNOUNCE_PAUSE);
+            self.asked = Some(Instant::now());
+            self.starting = Some(Starting::begin());
+            ASK_WAIT
+        };
+        let starting = self.starting.as_ref().expect("set just above");
+        let Some(started) = starting.wait(most) else {
+            return Err(Unreached::Stop(still_asking_text(
+                &program_of(w),
+                starting.asked.elapsed(),
+            )));
+        };
+        self.starting = None;
+        let (setback, why) = match started {
+            Ok(h) => {
+                self.helper = Some(h);
+                self.setback = None;
+                return Ok(());
+            }
+            Err(HelperStart::Declined(why)) => (Setback::Declined, why),
+            Err(HelperStart::Failed(why)) => (Setback::Failed, why),
+        };
+        self.setback = Some((setback, why.clone(), Instant::now()));
+        let since_asked = self.asked.map_or(Duration::MAX, |a| a.elapsed());
+        let left = hold_left(setback, Duration::ZERO, since_asked).unwrap_or_default();
+        Err(Unreached::Walled(held_text(setback, &why, left)))
+    }
+
+    /// Forgets a helper that is gone, so the next call may start another
+    /// once the hold is over.
+    fn lose_helper(&mut self, why: &str) {
+        self.helper = None;
+        self.setback = Some((Setback::Lost, why.to_string(), Instant::now()));
+    }
+
+    /// Calls the helper for something of its own, asking the app nothing.
+    /// An error that is not the helper's answer loses it.
+    fn ask_helper(&mut self, name: &str, args: &Value) -> Result<Vec<Value>, String> {
+        let helper = self.helper.as_mut().ok_or("the helper is not running")?;
+        let mut nobody =
+            |_: Value| -> Result<Value, String> { Err("this call asks Horadric nothing".into()) };
+        match helper.call(name, args, &mut nobody, Duration::ZERO) {
+            Ok(answer) => answer,
+            Err(why) => {
+                self.lose_helper(&why);
+                Err(why)
+            }
+        }
     }
 
     /// Answers a `desktop_` tool, asking `app` for the human's leave first.
@@ -1754,7 +1953,10 @@ impl Desktop {
         let flag = |k: &str| args.get(k) == Some(&json!(true));
         let s = |k: &str| args.get(k).and_then(Value::as_str);
         if name == "desktop_windows" {
-            return Ok(vec![text(windows_text(&list_windows()))]);
+            return Ok(vec![text(windows_text(&list_windows(), walled))]);
+        }
+        if name == PEEK && self.part {
+            return Ok(vec![self.peek(args)]);
         }
         // Without a window these read what is watched already, every
         // program in it approved earlier, so there is nothing to ask.
@@ -1767,13 +1969,28 @@ impl Desktop {
         let (w, root) = find(args.get("window"))?;
         let mut walled = out_of_reach(&w);
         if let Some(why) = &walled {
-            match self.through_helper(name, args, app, settle) {
+            match self.through_helper(name, args, app, settle, &w) {
                 Ok(answer) => return answer,
-                Err(no) => walled = Some(format!("{why}, and {no}")),
+                Err(Unreached::Stop(no)) => return Err(no),
+                Err(Unreached::Walled(no)) => walled = Some(format!("{why}, and {no}")),
             }
         }
-        if let (Some(why), "desktop_click" | "desktop_type" | "desktop_press") = (&walled, name) {
+        // Windows drops input sent to an elevated window without a word,
+        // so nothing that types, clicks or copies is sent there at all.
+        if let (Some(why), "desktop_click" | "desktop_type" | "desktop_press" | "desktop_text") =
+            (&walled, name)
+        {
             return Err(why.clone());
+        }
+        if w.exe == UNKNOWN_EXE {
+            let mut no = format!(
+                "can not tell which program {:?} is, so it can not be approved",
+                w.title
+            );
+            if let Some(why) = &walled {
+                no.push_str(&format!(" ({why})"));
+            }
+            return Err(no);
         }
         // The agent's words for the human, kept to one line.
         let reason = short(s("reason").unwrap_or_default(), 300);
@@ -2020,19 +2237,71 @@ impl Desktop {
                 let mut marked = |body: Value| app(as_administrator(body));
                 let theirs =
                     helper.call("desktop_changes", &theirs_args, &mut marked, Duration::ZERO);
-                if let Ok(Ok(content)) = theirs {
-                    let said = content
-                        .first()
-                        .and_then(|c| c["text"].as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    out.push_str(&format!(
-                        "\nIn programs that run as administrator, counted apart: {said}"
-                    ));
+                match theirs {
+                    Ok(Ok(content)) => {
+                        let said = content
+                            .first()
+                            .and_then(|c| c["text"].as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        out.push_str(&format!(
+                            "\nIn programs that run as administrator, counted apart: {said}"
+                        ));
+                    }
+                    Ok(Err(why)) => out.push_str(&format!(
+                        "\nWhat changed in programs that run as administrator could not be \
+                         read: {why}."
+                    )),
+                    Err(why) => {
+                        self.lose_helper(&why);
+                        out.push_str(&format!(
+                            "\nWhat changed in programs that run as administrator could not be \
+                             read: {why}. The helper is started again on the next call to one."
+                        ));
+                    }
                 }
             }
         }
         out
+    }
+
+    /// The helper's side of an unnamed wait, see [`PEEK`]: without `after`
+    /// it marks where the wait begins, with it it says what changed since
+    /// and whether the text or quiet waited for holds here. With `commit`
+    /// the changes count as told, as `desktop_changes` counts them.
+    fn peek(&mut self, args: &Value) -> Value {
+        watch::flush();
+        let Some(after) = args["after"].as_u64() else {
+            return json!({ "newest": watch::newest(), "started_ms": watch::now_ms() });
+        };
+        let started = args["started_ms"].as_u64().unwrap_or(0);
+        let (seen, _, newest) = if args["commit"] == true {
+            let read = watch::since(after, None);
+            self.seen.insert(None, read.2);
+            read
+        } else {
+            watch::peek(after, None)
+        };
+        let now = watch::now_ms();
+        let text = Until {
+            text: args["text"].as_str().map(String::from),
+            ..Until::default()
+        };
+        let hit = text
+            .text
+            .is_some()
+            .then(|| verdict(&text, &[], &seen, started, now))
+            .flatten();
+        let quiet = args["quiet_ms"].as_u64().map(|q| {
+            let quiet = Until {
+                quiet_ms: Some(q),
+                ..Until::default()
+            };
+            verdict(&quiet, &[], &seen, started, now).is_some()
+        });
+        let skip = seen.len().saturating_sub(watch::MOST_LINES);
+        let lines: Vec<String> = seen[skip..].iter().map(watch::line).collect();
+        json!({ "newest": newest, "hit": hit, "quiet": quiet, "lines": lines })
     }
 
     /// Waits until what `args` asks for holds, in `w`'s program or in any
@@ -2056,9 +2325,48 @@ impl Desktop {
         }
         let pid = w.map(|w| w.pid);
         let needs_watch = until.text.is_some() || until.quiet_ms.is_some();
-        if needs_watch && pid.is_none() && !watch::any_followed() {
-            return Err(format!("{NOTHING_WATCHED} Name the window to wait in."));
+        // Windows' titles reach this session from any program, but what
+        // changes inside one that runs as administrator only the helper
+        // sees, so an unnamed wait asks it too while it runs.
+        let mut note = String::new();
+        let mut theirs: Option<(Value, Peeked)> = None;
+        if needs_watch && pid.is_none() && self.helper.is_some() {
+            match self.ask_helper(PEEK, &json!({})) {
+                Ok(content) => {
+                    let mark = content.first().cloned().unwrap_or_default();
+                    let ask = json!({
+                        "after": mark["newest"],
+                        "started_ms": mark["started_ms"],
+                        "text": until.text,
+                        "quiet_ms": until.quiet_ms,
+                    });
+                    // Not quiet there until the helper says so.
+                    let unheard = Peeked {
+                        quiet: until.quiet_ms.map(|_| false),
+                        ..Peeked::default()
+                    };
+                    theirs = Some((ask, unheard));
+                }
+                Err(why) => note = helper_note(&why),
+            }
         }
+        if needs_watch && pid.is_none() && !watch::any_followed() && theirs.is_none() {
+            return Err(format!(
+                "{NOTHING_WATCHED} Name the window to wait in.{note}"
+            ));
+        }
+        // Split, so quiet can be asked of both sides.
+        let here = Until {
+            quiet_ms: None,
+            appears: until.appears.clone(),
+            text: until.text.clone(),
+            gone: until.gone.clone(),
+        };
+        let here_quiet = Until {
+            quiet_ms: until.quiet_ms,
+            ..Until::default()
+        };
+        let mut polled = Instant::now();
         let most = wait_limit(
             args.get("timeout_ms").and_then(Value::as_u64),
             std::env::var(WAIT_ENV).ok().as_deref(),
@@ -2074,7 +2382,33 @@ impl Desktop {
             };
             // A look only: what the agent is told comes after the loop.
             let (seen, _, newest) = watch::peek(mark, pid);
-            if let Some(v) = verdict(&until, &titles, &seen, started, watch::now_ms()) {
+            let now = watch::now_ms();
+            if theirs.is_some() && polled.elapsed() >= HELPER_POLL {
+                polled = Instant::now();
+                let ask = theirs.as_ref().map(|(a, _)| a.clone()).unwrap_or_default();
+                match self.ask_helper(PEEK, &ask) {
+                    Ok(content) => {
+                        if let (Some((_, p)), Some(c)) = (theirs.as_mut(), content.first()) {
+                            *p = peeked(c);
+                        }
+                    }
+                    Err(why) => {
+                        note = helper_note(&why);
+                        theirs = None;
+                    }
+                }
+            }
+            let holds = match &theirs {
+                None => verdict(&until, &titles, &seen, started, now),
+                Some((_, p)) => joined_verdict(
+                    verdict(&here, &titles, &seen, started, now),
+                    here_quiet
+                        .quiet_ms
+                        .and_then(|_| verdict(&here_quiet, &[], &seen, started, now)),
+                    p,
+                ),
+            };
+            if let Some(v) = holds {
                 break Some(v);
             }
             let left = most.saturating_sub(begun.elapsed());
@@ -2097,6 +2431,25 @@ impl Desktop {
                 meanwhile.push_str(&watch::line(c));
             }
         }
+        if let Some((mut ask, _)) = theirs {
+            ask["commit"] = json!(true);
+            match self.ask_helper(PEEK, &ask) {
+                Ok(content) => {
+                    let lines = content.first().map(peeked).unwrap_or_default().lines;
+                    if !lines.is_empty() {
+                        meanwhile.push_str(
+                            "\nMeanwhile in programs that run as administrator, counted apart:",
+                        );
+                        for l in lines {
+                            meanwhile.push('\n');
+                            meanwhile.push_str(&l);
+                        }
+                    }
+                }
+                Err(why) => note = helper_note(&why),
+            }
+        }
+        meanwhile.push_str(&note);
         match met {
             Some(v) => Ok(format!("Done after {took:.1} s: {v}.{meanwhile}")),
             // An error, so the agent does not take the silence for a yes
@@ -3303,13 +3656,92 @@ mod tests {
     fn the_window_list_notes_dialogs() {
         let mut d = win(2, "Confirm", "a.exe");
         d.owner = Some(1);
-        let t = windows_text(&[win(1, "Main", "a.exe"), d]);
+        let t = windows_text(&[win(1, "Main", "a.exe"), d.clone()], |_| false);
         assert!(t.contains("- id=1 \"Main\" a.exe pid 7\n"), "{t}");
         assert!(
             t.ends_with("- id=2 \"Confirm\" a.exe pid 7 (dialog of id=1)"),
             "{t}"
         );
-        assert!(windows_text(&[]).contains("No windows"));
+        assert!(windows_text(&[], |_| false).contains("No windows"));
+        let admin = windows_text(&[win(1, "Main", "a.exe"), d], |w| w.hwnd == 2);
+        assert!(admin.contains("- id=1 \"Main\" a.exe pid 7\n"), "{admin}");
+        assert!(
+            admin.contains("(dialog of id=1) (as administrator)\n"),
+            "{admin}"
+        );
+        assert!(admin.ends_with("let the helper run as administrator."));
+    }
+
+    #[test]
+    fn only_a_plain_session_is_walled_off_and_a_refusal_counts_as_elevated() {
+        use Elevation::*;
+        assert!(walled_off(Normal, Elevated));
+        assert!(walled_off(Normal, Denied));
+        assert!(!walled_off(Normal, Normal));
+        assert!(!walled_off(Normal, Unknown));
+        for them in [Elevated, Denied, Normal, Unknown] {
+            assert!(!walled_off(Elevated, them));
+            assert!(!walled_off(Unknown, them));
+        }
+    }
+
+    #[test]
+    fn a_wait_says_when_the_helper_failed_it() {
+        let n = helper_note("the helper ended");
+        assert!(
+            n.starts_with("\n(Programs that run as administrator"),
+            "{n}"
+        );
+        assert!(n.contains(": the helper ended."), "{n}");
+    }
+
+    #[test]
+    fn a_peek_is_read_from_the_helper_s_answer() {
+        let p = peeked(&json!({
+            "newest": 9, "hit": "\"Done\" appeared", "quiet": false, "lines": ["a", "b"]
+        }));
+        assert_eq!(
+            p,
+            Peeked {
+                newest: 9,
+                hit: Some("\"Done\" appeared".into()),
+                quiet: Some(false),
+                lines: vec!["a".into(), "b".into()],
+            }
+        );
+        assert_eq!(peeked(&json!({})), Peeked::default());
+    }
+
+    #[test]
+    fn a_wait_with_the_helper_needs_quiet_on_both_sides_and_text_on_either() {
+        let quiet = || Some("nothing changed for 500 ms".to_string());
+        let calm = Peeked {
+            quiet: Some(true),
+            ..Peeked::default()
+        };
+        let busy = Peeked {
+            quiet: Some(false),
+            ..Peeked::default()
+        };
+        assert_eq!(joined_verdict(None, quiet(), &calm), quiet());
+        assert_eq!(joined_verdict(None, quiet(), &busy), None);
+        assert_eq!(joined_verdict(None, None, &calm), None);
+        let hit = Peeked {
+            hit: Some("\"Done\" appeared: x".into()),
+            quiet: Some(false),
+            ..Peeked::default()
+        };
+        assert_eq!(
+            joined_verdict(None, None, &hit).as_deref(),
+            Some("\"Done\" appeared: x, in a program that runs as administrator")
+        );
+        // What holds here is said first.
+        assert_eq!(
+            joined_verdict(Some("here".into()), None, &hit).as_deref(),
+            Some("here")
+        );
+        // No quiet asked of the helper leaves quiet to this side.
+        assert_eq!(joined_verdict(None, quiet(), &Peeked::default()), quiet());
     }
 
     #[test]
