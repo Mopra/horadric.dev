@@ -421,8 +421,9 @@ this has been seen working on a real program:
 - The tray's "Off" and "Ask before each program", and the tools leaving
   a session's list while it is off, told to a running session by
   `notifications/tools/list_changed`. That it is on, asking, by default
-  on a fresh install and after an upgrade is a tested rule of the
-  saved state, not seen on a real install.
+  on a fresh install and after an upgrade is read off the saved state
+  (asking is its default and is not written), not seen on a real
+  install.
 - The switch to a second helper: the first one ended, the 60 second
   hold, and Windows asking again on the way back.
 - Esc stopping typing between its pieces and before its Enter.
