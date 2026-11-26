@@ -13,9 +13,12 @@
 //! action lands itself, so that point reaches the app in the same `allow`
 //! body, before the action, as it does for a program run normally.
 //!
-//! The pipe takes one client, never a remote one, and each end checks the
-//! other is the process it expects, so nothing else on the machine can
-//! drive the helper.
+//! The pipes take one client each, never a remote one, and each end checks
+//! the other is the process it expects, so nothing else on the machine can
+//! drive the helper. There are two, one each way: the session reads the
+//! helper's lines on a thread of its own, so a call can time out, and a
+//! synchronous pipe serialises everything on one file object, so a write
+//! sharing it with that waiting read would wait for ever.
 //!
 //! Windows' question is the human's to answer, so it is announced first
 //! (the app shows why it comes) and never holds the session hostage: the
@@ -36,14 +39,16 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, ERROR_PIPE_CONNECTED, HANDLE};
-use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
+use windows::Win32::Storage::FileSystem::{
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND,
+    PIPE_ACCESS_OUTBOUND,
+};
 use windows::Win32::System::Com::{
     CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-    GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-    PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
+    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{
     GetProcessId, OpenProcess, TerminateProcess, WaitForSingleObject, INFINITE, PROCESS_SYNCHRONIZE,
@@ -162,9 +167,10 @@ pub enum Setback {
 }
 
 /// How long before Windows may ask the human again to start the helper,
-/// none when it may now. A no holds for [`ASK_AGAIN_AFTER`] from the no;
-/// a failure or a loss for as long from when the human was last asked, so
-/// a helper that ran a good while is started again at once and one that
+/// none when it may now. A no or a failed start holds for
+/// [`ASK_AGAIN_AFTER`] from when it happened, however long the human took
+/// to answer; a loss for as long from when the human was last asked, so a
+/// helper that ran a good while is started again at once and one that
 /// dies as it starts is not asked for over and over.
 pub fn hold_left(
     setback: Setback,
@@ -172,8 +178,8 @@ pub fn hold_left(
     since_asked: Duration,
 ) -> Option<Duration> {
     let since = match setback {
-        Setback::Declined => since_setback,
-        Setback::Failed | Setback::Lost => since_asked,
+        Setback::Declined | Setback::Failed => since_setback,
+        Setback::Lost => since_asked,
     };
     ASK_AGAIN_AFTER
         .checked_sub(since)
@@ -215,7 +221,8 @@ pub fn elevating_body(window: Value) -> Value {
 
 /// A start of the helper on its own thread, Windows' question and all.
 pub struct Starting {
-    result: Receiver<Result<Helper, HelperStart>>,
+    /// How the start ended, and when.
+    result: Receiver<(Result<Helper, HelperStart>, Instant)>,
     /// When Windows was asked.
     pub asked: Instant,
 }
@@ -229,7 +236,8 @@ impl Starting {
             unsafe {
                 let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
             }
-            let _ = tx.send(Helper::start());
+            let started = Helper::start();
+            let _ = tx.send((started, Instant::now()));
         });
         Starting {
             result: rx,
@@ -237,15 +245,18 @@ impl Starting {
         }
     }
 
-    /// The helper, or why there is none, once the start is over; none
-    /// while Windows still asks after waiting `most`.
-    pub fn wait(&self, most: Duration) -> Option<Result<Helper, HelperStart>> {
+    /// The helper, or why there is none, and when the start ended, once
+    /// it is over; none while Windows still asks after waiting `most`.
+    pub fn wait(&self, most: Duration) -> Option<(Result<Helper, HelperStart>, Instant)> {
         match self.result.recv_timeout(most) {
             Ok(r) => Some(r),
             Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => Some(Err(HelperStart::Failed(
-                "the helper's start ended without a word".into(),
-            ))),
+            Err(RecvTimeoutError::Disconnected) => Some((
+                Err(HelperStart::Failed(
+                    "the helper's start ended without a word".into(),
+                )),
+                Instant::now(),
+            )),
         }
     }
 }
@@ -255,11 +266,54 @@ pub fn request_line(name: &str, args: &Value, settle: Duration) -> String {
     json!({ "name": name, "args": args, "settle_ms": settle.as_millis() as u64 }).to_string()
 }
 
-/// The helper, running as administrator, with the pipe to it.
+/// The names of the two pipes to the helper: the one the session writes
+/// down and the one the helper writes up.
+pub fn pipe_names(base: &str) -> (String, String) {
+    (format!("{base}-down"), format!("{base}-up"))
+}
+
+/// The session's end of a one way pipe, `inbound` when the session reads.
+fn serve(name: &str, inbound: bool) -> Result<File, String> {
+    let access: FILE_FLAGS_AND_ATTRIBUTES = if inbound {
+        PIPE_ACCESS_INBOUND
+    } else {
+        PIPE_ACCESS_OUTBOUND
+    };
+    let pipe = unsafe {
+        CreateNamedPipeW(
+            &HSTRING::from(name),
+            access | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            1 << 16,
+            1 << 16,
+            0,
+            None,
+        )
+    };
+    if pipe.is_invalid() {
+        return Err(format!(
+            "could not open a pipe for the helper: {}",
+            windows::core::Error::from_thread()
+        ));
+    }
+    Ok(unsafe { File::from_raw_handle(pipe.0 as _) })
+}
+
+/// Waits for the client of the pipe the raw handle `raw` names.
+fn connect(raw: usize) -> bool {
+    match unsafe { ConnectNamedPipe(HANDLE(raw as _), None) } {
+        Ok(()) => true,
+        Err(e) => e.code() == ERROR_PIPE_CONNECTED.to_hresult(),
+    }
+}
+
+/// The helper, running as administrator, with the pipes to it.
 pub struct Helper {
     /// Its lines, read on a thread of their own so a call can stop
     /// waiting for a helper that hangs.
     lines: Receiver<std::io::Result<String>>,
+    /// The pipe down, its only handle: dropping it ends the helper.
     writer: File,
     process: HANDLE,
 }
@@ -270,11 +324,10 @@ unsafe impl Send for Helper {}
 
 impl Drop for Helper {
     fn drop(&mut self) {
-        // Cutting the pipe is what ends the helper, so it never outlives
-        // the session's use of it. The reading thread still holds its end,
-        // so the pipe is disconnected rather than left to close.
+        // The pipe down closes with `writer`, which ends the helper once it
+        // is back reading it, and nothing waits on that pipe, so closing
+        // never waits. The reading thread ends when the helper does.
         unsafe {
-            let _ = DisconnectNamedPipe(HANDLE(self.writer.as_raw_handle()));
             let _ = CloseHandle(self.process);
         }
     }
@@ -297,27 +350,10 @@ impl Helper {
             .map(|d| d.as_nanos())
             .unwrap_or_default();
         let name = format!(r"\\.\pipe\horadric-desktop-{me}-{nanos}");
-        let pipe = unsafe {
-            CreateNamedPipeW(
-                &HSTRING::from(name.as_str()),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                1,
-                1 << 16,
-                1 << 16,
-                0,
-                None,
-            )
-        };
-        if pipe.is_invalid() {
-            return Err(Err(format!(
-                "could not open a pipe for the helper: {}",
-                windows::core::Error::from_thread()
-            )));
-        }
-        // Owned from here, so every way out closes it.
-        let pipe_file = unsafe { File::from_raw_handle(pipe.0 as _) };
-        let writer = pipe_file.try_clone().map_err(|e| Err(e.to_string()))?;
+        let (down_name, up_name) = pipe_names(&name);
+        // Owned from here, so every way out closes them.
+        let down = serve(&down_name, false).map_err(Err)?;
+        let up = serve(&up_name, true).map_err(Err)?;
 
         let exe = std::env::current_exe().map_err(|e| Err(e.to_string()))?;
         // A test binary sits in target\<profile>\deps, beside no
@@ -352,15 +388,10 @@ impl Helper {
         let process = info.hProcess;
         let helper_pid = unsafe { GetProcessId(process) };
 
-        let raw = pipe.0 as usize;
+        let raws = (down.as_raw_handle() as usize, up.as_raw_handle() as usize);
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let r = unsafe { ConnectNamedPipe(HANDLE(raw as _), None) };
-            let ok = match r {
-                Ok(()) => true,
-                Err(e) => e.code() == ERROR_PIPE_CONNECTED.to_hresult(),
-            };
-            let _ = tx.send(ok);
+            let _ = tx.send(connect(raws.0) && connect(raws.1));
         });
         let started = Instant::now();
         let connected = loop {
@@ -371,8 +402,9 @@ impl Helper {
             }
             let gone = unsafe { WaitForSingleObject(process, 0) }.0 == 0;
             if gone || started.elapsed() > START_WAIT {
-                // Connecting ourselves frees the thread waiting on the pipe.
-                let _ = OpenOptions::new().read(true).write(true).open(&name);
+                // Connecting ourselves frees the thread waiting on the pipes.
+                let _ = OpenOptions::new().read(true).open(&down_name);
+                let _ = OpenOptions::new().write(true).open(&up_name);
                 let _ = rx.recv_timeout(Duration::from_secs(1));
                 unsafe {
                     let _ = CloseHandle(process);
@@ -384,10 +416,13 @@ impl Helper {
                 }));
             }
         };
-        let mut client = 0u32;
-        let checked =
-            unsafe { GetNamedPipeClientProcessId(HANDLE(pipe_file.as_raw_handle()), &mut client) };
-        if !connected || checked.is_err() || client != helper_pid {
+        let client = |f: &File| {
+            let mut pid = 0u32;
+            unsafe { GetNamedPipeClientProcessId(HANDLE(f.as_raw_handle()), &mut pid) }
+                .ok()
+                .map(|()| pid)
+        };
+        if !connected || client(&down) != Some(helper_pid) || client(&up) != Some(helper_pid) {
             unsafe {
                 let _ = CloseHandle(process);
             }
@@ -395,9 +430,15 @@ impl Helper {
                 "something other than the helper answered on its pipe".into()
             ));
         }
+        Ok(Helper::over(up, down, process))
+    }
+
+    /// The helper on its connected pipes, `up` read on a thread of its
+    /// own.
+    fn over(up: File, down: File, process: HANDLE) -> Helper {
         let (tx, lines) = mpsc::channel();
         thread::spawn(move || {
-            let mut reader = BufReader::new(pipe_file);
+            let mut reader = BufReader::new(up);
             loop {
                 let mut line = String::new();
                 let read = reader.read_line(&mut line);
@@ -407,16 +448,16 @@ impl Helper {
                 }
             }
         });
-        Ok(Helper {
+        Helper {
             lines,
-            writer,
+            writer: down,
             process,
-        })
+        }
     }
 
     /// Stops a helper that went silent. Should Windows not let this
-    /// session stop it, cutting the pipe on drop ends it as soon as it is
-    /// out of what it was doing.
+    /// session stop it, closing the pipe down on drop ends it as soon as
+    /// it is out of what it was doing.
     fn stop(&self) {
         unsafe {
             let _ = TerminateProcess(self.process, 1);
@@ -477,16 +518,22 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // one checked, not another given its id later.
     let session = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, parent) }
         .map_err(|e| format!("could not watch the session that started this helper: {e}"))?;
-    let pipe = OpenOptions::new()
+    let (down_name, up_name) = pipe_names(name);
+    let down = OpenOptions::new()
         .read(true)
+        .open(&down_name)
+        .map_err(|e| format!("could not open {down_name}: {e}"))?;
+    let up = OpenOptions::new()
         .write(true)
-        .open(name)
-        .map_err(|e| format!("could not open {name}: {e}"))?;
-    let mut server = 0u32;
-    unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut server) }
-        .map_err(|e| e.to_string())?;
-    if server != parent {
-        return Err("the pipe is not held by the session that started this helper".into());
+        .open(&up_name)
+        .map_err(|e| format!("could not open {up_name}: {e}"))?;
+    for pipe in [&down, &up] {
+        let mut server = 0u32;
+        unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut server) }
+            .map_err(|e| e.to_string())?;
+        if server != parent {
+            return Err("the pipe is not held by the session that started this helper".into());
+        }
     }
     // The pipe closing ends the helper only once it is back reading it,
     // and an elevated process must not linger past its session in the
@@ -496,8 +543,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
         unsafe { WaitForSingleObject(HANDLE(raw as _), INFINITE) };
         std::process::exit(0);
     });
-    let mut writer = pipe.try_clone().map_err(|e| e.to_string())?;
-    let mut reader = BufReader::new(pipe);
+    let mut writer = up;
+    let mut reader = BufReader::new(down);
     let mut desktop = Desktop::for_helper();
     loop {
         let mut line = String::new();
@@ -594,8 +641,86 @@ mod tests {
         assert_eq!(hold_left(Setback::Lost, s(0), s(600)), None);
         // One that died as it started is not asked for in a loop.
         assert_eq!(hold_left(Setback::Lost, s(0), s(5)), Some(s(115)));
-        assert_eq!(hold_left(Setback::Failed, s(0), s(60)), Some(s(60)));
-        assert_eq!(hold_left(Setback::Failed, s(0), s(121)), None);
+        // A start that failed after a slow yes holds from the failure.
+        assert_eq!(
+            hold_left(Setback::Failed, s(0), s(300)),
+            Some(ASK_AGAIN_AFTER)
+        );
+        assert_eq!(hold_left(Setback::Failed, s(60), s(300)), Some(s(60)));
+        assert_eq!(hold_left(Setback::Failed, s(121), s(300)), None);
+    }
+
+    #[test]
+    fn pipe_names_go_one_each_way() {
+        assert_eq!(
+            pipe_names(r"\\.\pipe\horadric-desktop-1-2"),
+            (
+                r"\\.\pipe\horadric-desktop-1-2-down".to_string(),
+                r"\\.\pipe\horadric-desktop-1-2-up".to_string()
+            )
+        );
+    }
+
+    /// A call while the reading thread waits on the pipe up, then a drop,
+    /// over real pipes made as a start makes them, with a stand in for
+    /// the helper on a thread. One duplex pipe here hung in the first
+    /// write, behind the waiting read.
+    #[test]
+    fn a_call_and_a_drop_do_not_wait_behind_the_reading_thread() {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            let base = format!(
+                r"\\.\pipe\horadric-desktop-test-{}-{nanos}",
+                std::process::id()
+            );
+            let (down_name, up_name) = pipe_names(&base);
+            let down = serve(&down_name, false).unwrap();
+            let up = serve(&up_name, true).unwrap();
+            let stand_in = thread::spawn(move || {
+                let mut from = BufReader::new(OpenOptions::new().read(true).open(&down_name)?);
+                let mut to = OpenOptions::new().write(true).open(&up_name)?;
+                let mut line = String::new();
+                from.read_line(&mut line)?;
+                let asked: Value = serde_json::from_str(line.trim_end()).unwrap();
+                writeln!(to, "{}", json!({ "app": { "op": "desktop.allow" } }))?;
+                line.clear();
+                from.read_line(&mut line)?;
+                let allowed = answer_of(line.trim_end());
+                writeln!(
+                    to,
+                    "{}",
+                    json!({ "done": [asked["name"], allowed.is_ok()] })
+                )?;
+                // The session dropping the helper ends this read.
+                line.clear();
+                let end = from.read_line(&mut line).map_or(true, |n| n == 0);
+                Ok::<bool, std::io::Error>(end)
+            });
+            assert!(connect(down.as_raw_handle() as usize));
+            assert!(connect(up.as_raw_handle() as usize));
+            let mut helper = Helper::over(up, down, HANDLE::default());
+            // Give the reading thread time to be waiting in its read.
+            thread::sleep(Duration::from_millis(200));
+            let mut told = Vec::new();
+            let mut app = |body: Value| {
+                told.push(body);
+                Ok(json!({ "allowed": true }))
+            };
+            let answer = helper.call("desktop_click", &json!({}), &mut app, Duration::ZERO);
+            drop(helper);
+            let ended = stand_in.join().unwrap().unwrap();
+            let _ = tx.send((answer, told, ended));
+        });
+        let (answer, told, ended) = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the call or the drop hung");
+        assert_eq!(answer, Ok(Ok(vec![json!("desktop_click"), json!(true)])));
+        assert_eq!(told, vec![json!({ "op": "desktop.allow" })]);
+        assert!(ended, "the helper's read ends when the session drops it");
     }
 
     #[test]

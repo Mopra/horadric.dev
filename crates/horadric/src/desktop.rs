@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use horadric_core::desktop_programs::{Act, Kind};
 use serde_json::{json, Value};
+use windows::core::BOOL;
 use windows::core::{Interface, BSTR, HRESULT};
 use windows::Win32::Foundation::{
     CloseHandle, GlobalFree, E_ACCESSDENIED, HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT, WPARAM,
@@ -29,7 +30,11 @@ use windows::Win32::Graphics::Imaging::{
     IWICBitmapSource, IWICImagingFactory, WICBitmapEncoderNoCache, WICBitmapInterpolationModeFant,
     WICRect,
 };
-use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+use windows::Win32::Security::{
+    GetAce, GetKernelObjectSecurity, GetSecurityDescriptorSacl, GetSidSubAuthority,
+    GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel, ACL,
+    LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+};
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, STREAM_SEEK_END,
@@ -42,7 +47,8 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken,
-    QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW, PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
@@ -433,15 +439,15 @@ pub fn centre(left: i32, top: i32, right: i32, bottom: i32) -> Option<(i32, i32)
     (right > left && bottom > top).then_some(((left + right) / 2, (top + bottom) / 2))
 }
 
-/// The window list as the agent reads it. `walled` says which windows run
-/// as administrator out of this session's own reach, so the agent knows
-/// before its first call there that Windows will ask the human.
-pub fn windows_text(list: &[Window], walled: impl Fn(&Window) -> bool) -> String {
+/// The window list as the agent reads it. `reach` says which windows are
+/// out of this session's own reach, so the agent knows before its first
+/// call there that Windows will ask the human.
+pub fn windows_text(list: &[Window], reach: impl Fn(&Window) -> Reach) -> String {
     if list.is_empty() {
         return "No windows are open on the desktop.".into();
     }
     let mut out = String::from("Windows on the desktop, frontmost first:\n");
-    let mut any = false;
+    let (mut above, mut unsure) = (false, false);
     for w in list {
         out.push_str(&format!(
             "- id={} {:?} {} pid {}",
@@ -450,16 +456,29 @@ pub fn windows_text(list: &[Window], walled: impl Fn(&Window) -> bool) -> String
         if let Some(o) = w.owner {
             out.push_str(&format!(" (dialog of id={o})"));
         }
-        if walled(w) {
-            out.push_str(" (as administrator)");
-            any = true;
+        match reach(w) {
+            Reach::Open => {}
+            Reach::Above => {
+                out.push_str(" (as administrator)");
+                above = true;
+            }
+            Reach::Unsure => {
+                out.push_str(" (out of reach)");
+                unsure = true;
+            }
         }
         out.push('\n');
     }
-    if any {
+    if unsure {
         out.push_str(
-            "A window marked as administrator is reached through Horadric's helper. The first \
-             call there has Windows ask the human to let the helper run as administrator.",
+            "Out of reach means Windows would not tell this session how the program runs: as \
+             administrator, or as another user. It is treated as running as administrator.\n",
+        );
+    }
+    if above || unsure {
+        out.push_str(
+            "Such a window is reached through Horadric's helper. The first call there has \
+             Windows ask the human to let the helper run as administrator.",
         );
     } else {
         out.pop();
@@ -467,23 +486,39 @@ pub fn windows_text(list: &[Window], walled: impl Fn(&Window) -> bool) -> String
     out
 }
 
-/// Whether a process runs as administrator, as far as Windows tells.
+/// A process's integrity level, as far as Windows tells: what decides
+/// whether Windows lets one process's input and UI Automation into
+/// another's windows.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Elevation {
-    Elevated,
-    Normal,
-    /// Windows refused to say. A session that is not elevated can not
-    /// open an elevated process's token, so this is taken for elevated.
-    Denied,
+pub enum Integrity {
+    /// The level's number: medium is 0x2000, high (administrator) 0x3000.
+    Level(u32),
+    /// Windows would not let this session read it, which happens for a
+    /// process run by another user as well as for one above it.
+    Unreadable,
     /// Windows did not say for another reason, the process gone.
-    Unknown,
+    Gone,
 }
 
-/// Whether a window of a process at `them` is out of reach of this
-/// session at `me`: only a session that is surely not elevated is walled
-/// off, and from a process that is, or will not say.
-pub fn walled_off(me: Elevation, them: Elevation) -> bool {
-    me == Elevation::Normal && matches!(them, Elevation::Elevated | Elevation::Denied)
+/// How a window stands to this session.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Reach {
+    Open,
+    /// Its program runs above this session: Windows drops input to it.
+    Above,
+    /// Its program would not say, and may run above.
+    Unsure,
+}
+
+/// How a window of a process at `them` stands to this session at `me`.
+/// Only a higher level walls a window off; one that can not be read may
+/// be higher, and is kept from plain input to be safe.
+pub fn reach(me: Integrity, them: Integrity) -> Reach {
+    match (me, them) {
+        (Integrity::Level(m), Integrity::Level(t)) if t > m => Reach::Above,
+        (Integrity::Level(_), Integrity::Unreadable) => Reach::Unsure,
+        _ => Reach::Open,
+    }
 }
 
 /// What an unnamed wait learned of the programs the helper watches.
@@ -1235,66 +1270,147 @@ fn exe_of(pid: u32) -> (String, String) {
     }
 }
 
-/// Whether process `pid`, or this one when none, runs as administrator.
-fn elevation(pid: Option<u32>) -> Elevation {
-    let refused = |e: windows::core::Error| {
-        if e.code() == E_ACCESSDENIED {
-            Elevation::Denied
-        } else {
-            Elevation::Unknown
+/// The access right to read an object's security descriptor, its label
+/// among it.
+const READ_CONTROL: PROCESS_ACCESS_RIGHTS = PROCESS_ACCESS_RIGHTS(0x0002_0000);
+/// The type of the ACE that holds an object's integrity label.
+const MANDATORY_LABEL_ACE: u8 = 0x11;
+
+/// The last part of `sid`, which for an integrity label is its level.
+unsafe fn last_rid(sid: PSID) -> Option<u32> {
+    let count = GetSidSubAuthorityCount(sid);
+    if count.is_null() || *count == 0 {
+        return None;
+    }
+    let rid = GetSidSubAuthority(sid, u32::from(*count) - 1);
+    (!rid.is_null()).then(|| *rid)
+}
+
+/// The integrity level of the process whose token is `token`.
+unsafe fn token_level(token: HANDLE) -> Option<u32> {
+    let mut len = 0;
+    let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut len);
+    if len == 0 {
+        return None;
+    }
+    // In u64s, so the label's pointer inside is aligned.
+    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+    GetTokenInformation(
+        token,
+        TokenIntegrityLevel,
+        Some(buf.as_mut_ptr().cast()),
+        len,
+        &mut len,
+    )
+    .ok()?;
+    let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+    last_rid(label.Label.Sid)
+}
+
+/// The integrity level on the process object itself, which another user's
+/// process often lets be read when its token is not. No label means
+/// medium, as Windows reads it.
+unsafe fn object_level(process: HANDLE) -> Option<u32> {
+    let mut len = 0;
+    let _ = GetKernelObjectSecurity(process, LABEL_SECURITY_INFORMATION.0, None, 0, &mut len);
+    if len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+    let sd = PSECURITY_DESCRIPTOR(buf.as_mut_ptr().cast());
+    GetKernelObjectSecurity(
+        process,
+        LABEL_SECURITY_INFORMATION.0,
+        Some(sd),
+        len,
+        &mut len,
+    )
+    .ok()?;
+    let (mut present, mut defaulted) = (BOOL(0), BOOL(0));
+    let mut sacl: *mut ACL = std::ptr::null_mut();
+    GetSecurityDescriptorSacl(sd, &mut present, &mut sacl, &mut defaulted).ok()?;
+    if !present.as_bool() || sacl.is_null() {
+        return Some(MEDIUM_LEVEL);
+    }
+    for i in 0..u32::from((*sacl).AceCount) {
+        let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
+        if GetAce(sacl, i, &mut ace).is_err() || ace.is_null() {
+            continue;
         }
-    };
+        // Header (4 bytes) and access mask (4 bytes), then the label.
+        let ace = ace as *const u8;
+        if *ace == MANDATORY_LABEL_ACE {
+            return last_rid(PSID(ace.add(8) as *mut _));
+        }
+    }
+    Some(MEDIUM_LEVEL)
+}
+
+/// The level Windows gives a process without a label.
+const MEDIUM_LEVEL: u32 = 0x2000;
+
+/// The integrity level of process `pid`, or of this one when none.
+fn integrity(pid: Option<u32>) -> Integrity {
     unsafe {
         let process = match pid {
             Some(id) => match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, id) {
-                Ok(p) => p,
-                Err(e) => return refused(e),
+                Ok(p) => Some(p),
+                Err(e) if e.code() == E_ACCESSDENIED => None,
+                Err(_) => return Integrity::Gone,
             },
-            None => GetCurrentProcess(),
+            None => Some(GetCurrentProcess()),
         };
-        let mut token = HANDLE::default();
-        let opened = OpenProcessToken(process, TOKEN_QUERY, &mut token);
-        if pid.is_some() {
-            let _ = CloseHandle(process);
+        let mut level = None;
+        if let Some(p) = process {
+            let mut token = HANDLE::default();
+            if OpenProcessToken(p, TOKEN_QUERY, &mut token).is_ok() {
+                level = token_level(token);
+                let _ = CloseHandle(token);
+            }
+            if pid.is_some() {
+                let _ = CloseHandle(p);
+            }
         }
-        if let Err(e) = opened {
-            return refused(e);
+        if let (None, Some(id)) = (level, pid) {
+            if let Ok(p) = OpenProcess(READ_CONTROL, false, id) {
+                level = object_level(p);
+                let _ = CloseHandle(p);
+            }
         }
-        let mut e = TOKEN_ELEVATION::default();
-        let mut len = 0;
-        let read = GetTokenInformation(
-            token,
-            TokenElevation,
-            Some(&mut e as *mut TOKEN_ELEVATION as *mut _),
-            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
-            &mut len,
-        );
-        let _ = CloseHandle(token);
-        match read {
-            Err(err) => refused(err),
-            Ok(()) if e.TokenIsElevated != 0 => Elevation::Elevated,
-            Ok(()) => Elevation::Normal,
-        }
+        level.map_or(Integrity::Unreadable, Integrity::Level)
     }
 }
 
-/// Whether `w` runs as administrator out of this session's reach.
-fn walled(w: &Window) -> bool {
-    walled_off(elevation(None), elevation(Some(w.pid)))
+/// How `w` stands to this session.
+fn reach_of(w: &Window) -> Reach {
+    reach(integrity(None), integrity(Some(w.pid)))
 }
 
-/// Why `w` can not be read or operated, when it runs as administrator and
-/// this session does not: Windows then shows UI Automation only its title
-/// bar and drops input sent to it.
-fn out_of_reach(w: &Window) -> Option<String> {
-    walled(w).then(|| {
-        format!(
-            "{} runs as administrator and this session does not, so Windows shows the agent \
-             only its title bar and lets it neither click nor type there (pictures come off the screen). \
-             It can only be reached through a helper that runs as administrator",
-            program_of(w)
-        )
-    })
+/// Why `w` can not be read or operated, when its program runs above this
+/// session, or may: Windows then shows UI Automation only its title bar
+/// and drops input sent to it. The helper runs as administrator itself,
+/// so for it only a program above even that is walled off.
+fn out_of_reach(w: &Window, helper: bool) -> Option<String> {
+    let program = program_of(w);
+    match (reach_of(w), helper) {
+        (Reach::Open, _) | (Reach::Unsure, true) => None,
+        (Reach::Above, true) => Some(format!(
+            "{program} runs above administrator, beyond even Horadric's helper, so Windows \
+             shows the agent only its title bar and lets it neither click nor type there"
+        )),
+        (Reach::Above, false) => Some(format!(
+            "{program} runs as administrator and this session does not, so Windows shows the \
+             agent only its title bar and lets it neither click nor type there (pictures come \
+             off the screen). It can only be reached through a helper that runs as \
+             administrator"
+        )),
+        (Reach::Unsure, false) => Some(format!(
+            "Windows would not tell this session how {program} runs, as administrator or as \
+             another user, so it is kept from plain clicks and keys, which Windows would drop \
+             without a word if it runs as administrator. It is reached through a helper that \
+             runs as administrator"
+        )),
+    }
 }
 
 /// The program as the agent reads it named, its title when Windows will
@@ -1905,19 +2021,39 @@ impl Desktop {
             )));
         };
         self.starting = None;
+        if self.started(started) {
+            return Ok(());
+        }
+        let (setback, why, at) = self.setback.clone().expect("set by a start that failed");
+        let since_asked = self.asked.map_or(Duration::MAX, |a| a.elapsed());
+        let left = hold_left(setback, at.elapsed(), since_asked).unwrap_or_default();
+        Err(Unreached::Walled(held_text(setback, &why, left)))
+    }
+
+    /// Keeps how a start of the helper ended: the helper, or the setback
+    /// timed from when the start thread saw it end, not from when a call
+    /// came by to look. Says whether the helper runs.
+    fn started(&mut self, (started, at): (Result<Helper, HelperStart>, Instant)) -> bool {
         let (setback, why) = match started {
             Ok(h) => {
                 self.helper = Some(h);
                 self.setback = None;
-                return Ok(());
+                return true;
             }
             Err(HelperStart::Declined(why)) => (Setback::Declined, why),
             Err(HelperStart::Failed(why)) => (Setback::Failed, why),
         };
-        self.setback = Some((setback, why.clone(), Instant::now()));
-        let since_asked = self.asked.map_or(Duration::MAX, |a| a.elapsed());
-        let left = hold_left(setback, Duration::ZERO, since_asked).unwrap_or_default();
-        Err(Unreached::Walled(held_text(setback, &why, left)))
+        self.setback = Some((setback, why, at));
+        false
+    }
+
+    /// Picks up a start that ended since the call that asked gave up
+    /// waiting, without waiting for one still going.
+    fn collect_start(&mut self) {
+        if let Some(ended) = self.starting.as_ref().and_then(|s| s.wait(Duration::ZERO)) {
+            self.starting = None;
+            self.started(ended);
+        }
     }
 
     /// Forgets a helper that is gone, so the next call may start another
@@ -1953,7 +2089,7 @@ impl Desktop {
         let flag = |k: &str| args.get(k) == Some(&json!(true));
         let s = |k: &str| args.get(k).and_then(Value::as_str);
         if name == "desktop_windows" {
-            return Ok(vec![text(windows_text(&list_windows(), walled))]);
+            return Ok(vec![text(windows_text(&list_windows(), reach_of))]);
         }
         if name == PEEK && self.part {
             return Ok(vec![self.peek(args)]);
@@ -1961,14 +2097,20 @@ impl Desktop {
         // Without a window these read what is watched already, every
         // program in it approved earlier, so there is nothing to ask.
         let unnamed = args.get("window").is_none_or(Value::is_null);
+        if unnamed {
+            // A helper that connected after its call gave up waiting is
+            // picked up here too, and a no is timed from when it came.
+            self.collect_start();
+        }
         match name {
             "desktop_changes" if unnamed => return Ok(vec![text(self.changes(args, None, app))]),
             "desktop_wait" if unnamed => return Ok(vec![text(self.wait(args, None)?)]),
             _ => {}
         }
         let (w, root) = find(args.get("window"))?;
-        let mut walled = out_of_reach(&w);
-        if let Some(why) = &walled {
+        let mut walled = out_of_reach(&w, self.part);
+        // The helper has nothing further to hand a call to.
+        if let (Some(why), false) = (&walled, self.part) {
             match self.through_helper(name, args, app, settle, &w) {
                 Ok(answer) => return answer,
                 Err(Unreached::Stop(no)) => return Err(no),
@@ -3656,33 +3798,50 @@ mod tests {
     fn the_window_list_notes_dialogs() {
         let mut d = win(2, "Confirm", "a.exe");
         d.owner = Some(1);
-        let t = windows_text(&[win(1, "Main", "a.exe"), d.clone()], |_| false);
+        let open = |_: &Window| Reach::Open;
+        let t = windows_text(&[win(1, "Main", "a.exe"), d.clone()], open);
         assert!(t.contains("- id=1 \"Main\" a.exe pid 7\n"), "{t}");
         assert!(
             t.ends_with("- id=2 \"Confirm\" a.exe pid 7 (dialog of id=1)"),
             "{t}"
         );
-        assert!(windows_text(&[], |_| false).contains("No windows"));
-        let admin = windows_text(&[win(1, "Main", "a.exe"), d], |w| w.hwnd == 2);
+        assert!(windows_text(&[], open).contains("No windows"));
+        let admin = windows_text(&[win(1, "Main", "a.exe"), d], |w| {
+            if w.hwnd == 2 {
+                Reach::Above
+            } else {
+                Reach::Open
+            }
+        });
         assert!(admin.contains("- id=1 \"Main\" a.exe pid 7\n"), "{admin}");
         assert!(
             admin.contains("(dialog of id=1) (as administrator)\n"),
             "{admin}"
         );
+        assert!(!admin.contains("Out of reach means"), "{admin}");
         assert!(admin.ends_with("let the helper run as administrator."));
+        let unsure = windows_text(&[win(3, "Service", "?")], |_| Reach::Unsure);
+        assert!(
+            unsure.contains("\"Service\" ? pid 7 (out of reach)\n"),
+            "{unsure}"
+        );
+        assert!(!unsure.contains("(as administrator)"), "{unsure}");
+        assert!(unsure.contains("Out of reach means"), "{unsure}");
     }
 
     #[test]
-    fn only_a_plain_session_is_walled_off_and_a_refusal_counts_as_elevated() {
-        use Elevation::*;
-        assert!(walled_off(Normal, Elevated));
-        assert!(walled_off(Normal, Denied));
-        assert!(!walled_off(Normal, Normal));
-        assert!(!walled_off(Normal, Unknown));
-        for them in [Elevated, Denied, Normal, Unknown] {
-            assert!(!walled_off(Elevated, them));
-            assert!(!walled_off(Unknown, them));
-        }
+    fn only_a_higher_level_walls_off_and_an_unread_one_is_unsure() {
+        use Integrity::*;
+        let (medium, high, system) = (Level(0x2000), Level(0x3000), Level(0x4000));
+        assert_eq!(reach(medium, high), Reach::Above);
+        assert_eq!(reach(high, system), Reach::Above);
+        assert_eq!(reach(medium, medium), Reach::Open);
+        assert_eq!(reach(high, medium), Reach::Open);
+        assert_eq!(reach(medium, Unreadable), Reach::Unsure);
+        assert_eq!(reach(medium, Gone), Reach::Open);
+        // Not knowing this session's own level walls off nothing.
+        assert_eq!(reach(Unreadable, high), Reach::Open);
+        assert_eq!(reach(Gone, Unreadable), Reach::Open);
     }
 
     #[test]

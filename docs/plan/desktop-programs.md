@@ -38,26 +38,37 @@ window and operate it, within what the human allowed. Windows only.
   window from a session that is not, and Sysmac Studio always restarts
   itself elevated. For such a window `horadric mcp` starts `horadric
   desktop-helper` as administrator (`desktop_helper.rs`) and hands it the
-  call over a named pipe that takes one local client, each end checking
-  the other's process id. The program is named as running as
+  call over two named pipes, one each way, that take one local client
+  each, each end checking the other's process id. Two, because the
+  session reads the helper's lines on a thread of its own so a call can
+  time out, and a synchronous pipe serialises all I/O on one file
+  object: a write sharing the pipe with that waiting read waited for ever
+  (found in review, 2026-11-26). The program is named as running as
   administrator, so a grant for the normal program does not cover it.
-  A process whose token Windows will not open for the session counts as
-  elevated (a session that is not can not read an elevated token), and a
-  window whose program will not even say its file is resolved by the
-  helper rather than refused. `desktop_windows` marks such windows "(as
-  administrator)", so the agent knows before its first call that Windows
-  will ask. Before Windows asks, the app is told (a `desktop.elevating`
+  Whether a window is out of reach is decided by integrity level, which
+  is what Windows walls input and UI Automation by: the process's token,
+  else the label on the process object, and only a level above the
+  session's walls a window off. A process whose level can not be read at
+  all (another user's, a service's) may be above, so it goes to the
+  helper too rather than get input Windows might drop, and a window
+  whose program will not even say its file is resolved by the helper
+  rather than refused. `desktop_windows` marks a window above the session
+  "(as administrator)" and one that would not say "(out of reach)", so
+  the agent knows before its first call that Windows will ask. Before Windows asks, the app is told (a `desktop.elevating`
   body, shown as a notification naming the session and the program), so
   the human knows why the question comes. The start runs on a thread of
   its own: a call waits 90 s for the human's answer (a later call 20 s),
   then tells the agent Windows is still asking and to call again, and a
   later call picks up the helper that connected meanwhile instead of
-  asking twice. A no is remembered for 2 minutes, a failed start or a
-  lost helper for 2 minutes from the last time Windows asked, so the
+  asking twice, an unnamed `desktop_changes` or `desktop_wait` included.
+  A no or a failed start is remembered for 2 minutes from when the start
+  ended (not from when a call came by to see it), a lost helper for 2
+  minutes from the last time Windows asked, so the
   agent can not have the human asked over and over, and after that a
   call may ask again (`hold_left`). A helper silent for 150 s in one call
-  (past the longest wait) is stopped and counted lost. The helper ends
-  when the pipe is cut and also watches the `horadric mcp` that started
+  (past the longest wait) is stopped and counted lost; dropping it only
+  closes the pipe down, which never waits. The helper ends when that
+  pipe closes and also watches the `horadric mcp` that started
   it, so no elevated process outlives its session. Without a helper,
   nothing that sends input (click, type, press, and `desktop_text`, which
   would select and copy) is sent to an elevated window: Windows drops
