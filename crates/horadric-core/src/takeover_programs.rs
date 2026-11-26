@@ -251,6 +251,69 @@ pub struct Act {
     pub key: String,
     /// What a small dialog says, its lines of text.
     pub texts: Vec<String>,
+    /// For typing, the whole text typed, so the elevated helper judges and
+    /// shows what it lets through rather than the engine's short line.
+    pub typed: String,
+}
+
+/// The most characters one call types. Every one of them is shown in the
+/// question the human answers, and a question longer than about a page is
+/// not read before the yes, so a text past this is refused, not cut: the
+/// agent types it in parts, each asked on its own.
+pub const TYPED_MOST: usize = 2000;
+
+/// Why `text` is not typed in one call, none when it may be.
+pub fn typed_too_long(text: &str) -> Option<String> {
+    let n = text.chars().count();
+    (n > TYPED_MOST).then(|| {
+        format!(
+            "the text is {n} characters, and at most {TYPED_MOST} are typed in one call, since \
+             the human sees all of it before saying yes; nothing was typed, so type it in parts"
+        )
+    })
+}
+
+/// The part of a question that shows the text a call types, whole, or
+/// nothing for a call that types none.
+pub fn typed_block(typed: &str) -> String {
+    if typed.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nThe whole text it types, {} characters, with \u{21B5} for a line break, \u{2192} for \
+         a tab and \u{B7} for a space that would not show:\n\n{}",
+        typed.chars().count(),
+        shown_typed(typed)
+    )
+}
+
+/// A text to type as the human is shown it before saying yes: whole, with
+/// what would not show made visible rather than squeezed. A line break is
+/// marked and still breaks the line, a tab is an arrow, a space that would
+/// vanish or run into another (at the start or end of a line, or beside
+/// another space) is a dot, and any other control character is named by
+/// its code.
+pub fn shown_typed(text: &str) -> String {
+    let text = text.replace("\r\n", "\n");
+    let mut out = String::with_capacity(text.len() + 16);
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push_str("\u{21B5}\n");
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let space_at = |k: usize| chars.get(k) == Some(&' ');
+        for (j, &c) in chars.iter().enumerate() {
+            let lone = j > 0 && j + 1 < chars.len() && !space_at(j - 1) && !space_at(j + 1);
+            match c {
+                ' ' if lone => out.push(' '),
+                ' ' => out.push('\u{B7}'),
+                '\t' => out.push('\u{2192}'),
+                c if c.is_control() => out.push_str(&format!("<U+{:04X}>", c as u32)),
+                c => out.push(c),
+            }
+        }
+    }
+    out
 }
 
 /// One risky action the human said yes to ahead of time. Every field set
@@ -1570,7 +1633,32 @@ mod tests {
             name: name.into(),
             key: key.into(),
             texts: Vec::new(),
+            typed: String::new(),
         }
+    }
+
+    #[test]
+    fn a_text_to_type_is_shown_whole_with_what_would_not_show_marked() {
+        assert_eq!(shown_typed("cd build"), "cd build");
+        assert_eq!(
+            shown_typed("a\r\nb\n\tc"),
+            "a\u{21B5}\nb\u{21B5}\n\u{2192}c"
+        );
+        // Spaces at an edge or in a run are dots, a lone one stays a space.
+        assert_eq!(shown_typed(" x  y "), "\u{B7}x\u{B7}\u{B7}y\u{B7}");
+        assert_eq!(shown_typed("a\u{7}b"), "a<U+0007>b");
+        // Nothing is cut, however long.
+        let long = "word ".repeat(400);
+        assert_eq!(shown_typed(&long).chars().count(), long.chars().count());
+    }
+
+    #[test]
+    fn a_text_past_the_cap_is_refused_not_cut() {
+        assert_eq!(typed_too_long(&"x".repeat(TYPED_MOST)), None);
+        let why = typed_too_long(&"x".repeat(TYPED_MOST + 1)).unwrap();
+        assert!(why.contains("nothing was typed"), "{why}");
+        // Characters, not bytes.
+        assert_eq!(typed_too_long(&"\u{E6}".repeat(TYPED_MOST)), None);
     }
 
     #[test]

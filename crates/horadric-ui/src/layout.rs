@@ -1392,14 +1392,39 @@ const DIALOG_BUTTON_GAP: f32 = 10.0;
 
 /// How wide a dialog's text wraps.
 pub fn dialog_text_w() -> f32 {
-    DIALOG_W - 2.0 * DIALOG_PAD
+    dialog_text_w_of(DIALOG_W)
+}
+
+/// How wide the text of a dialog `width` wide wraps.
+pub fn dialog_text_w_of(width: f32) -> f32 {
+    width - 2.0 * DIALOG_PAD
+}
+
+/// How wide a dialog is whose text wraps at `text_w`.
+pub fn dialog_w_of(text_w: f32) -> f32 {
+    text_w + 2.0 * DIALOG_PAD
+}
+
+/// The widest a dialog grows for a text that would be too tall at
+/// [`DIALOG_W`].
+pub const DIALOG_W_MOST: f32 = 1000.0;
+
+/// How tall a dialog is around its text, title and buttons: its height
+/// with no text at all.
+pub fn dialog_chrome_h() -> f32 {
+    dialog(0.0, &[], None).size.1
 }
 
 /// Lays out a dialog whose text wraps to `text_h` DIPs at
 /// [`dialog_text_w`], with a button for each of `labels`, their widths,
 /// and a check whose label is `check` wide when it has one.
 pub fn dialog(text_h: f32, labels: &[f32], check: Option<f32>) -> DialogLayout {
-    let w = dialog_text_w();
+    dialog_wide(DIALOG_W, text_h, labels, check)
+}
+
+/// As [`dialog`], `width` wide, for a text too long for the usual width.
+pub fn dialog_wide(width: f32, text_h: f32, labels: &[f32], check: Option<f32>) -> DialogLayout {
+    let w = dialog_text_w_of(width);
     let lamp = (DIALOG_PAD + 4.0, 20.0 + 12.0);
     let title = Rect::new(DIALOG_PAD + 16.0, 20.0, w - 16.0, 24.0);
     let text = Rect::new(DIALOG_PAD, title.bottom() + 8.0, w, text_h);
@@ -1408,7 +1433,7 @@ pub fn dialog(text_h: f32, labels: &[f32], check: Option<f32>) -> DialogLayout {
         .iter()
         .map(|l| (l.ceil() + 2.0 * DIALOG_BUTTON_PAD).max(DIALOG_BUTTON_MIN))
         .collect();
-    let mut x = DIALOG_W - DIALOG_PAD;
+    let mut x = width - DIALOG_PAD;
     let mut buttons: Vec<Rect> = widths
         .iter()
         .rev()
@@ -1429,11 +1454,11 @@ pub fn dialog(text_h: f32, labels: &[f32], check: Option<f32>) -> DialogLayout {
         );
         let x = boxed.right() + DIALOG_CHECK_GAP;
         // It gives way to the buttons rather than running under them.
-        let room = buttons.first().map_or(DIALOG_W, |b| b.x) - DIALOG_BUTTON_GAP - x;
+        let room = buttons.first().map_or(width, |b| b.x) - DIALOG_BUTTON_GAP - x;
         (boxed, Rect::new(x, y, w.ceil().min(room), DIALOG_BUTTON_H))
     });
     DialogLayout {
-        size: (DIALOG_W, y + DIALOG_BUTTON_H + DIALOG_PAD - 4.0),
+        size: (width, y + DIALOG_BUTTON_H + DIALOG_PAD - 4.0),
         lamp,
         title,
         text,

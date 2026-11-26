@@ -359,8 +359,15 @@ pub struct Scene<'a> {
 #[derive(Clone, Copy, Debug)]
 pub enum Doing<'a> {
     Click,
-    Type { submit: bool },
-    Press { chord: &'a Chord, key: &'a str },
+    /// `text` is what is typed, judged where it could start a program.
+    Type {
+        submit: bool,
+        text: &'a str,
+    },
+    Press {
+        chord: &'a Chord,
+        key: &'a str,
+    },
 }
 
 /// Why an action looks risky, none when it does not. The agent's own
@@ -400,7 +407,16 @@ pub fn risk(doing: Doing, scene: &Scene) -> Option<String> {
     let file_dialog = said.file_dialog && !scene.elevated;
     match doing {
         Doing::Click => None,
-        Doing::Type { submit } => {
+        Doing::Type { submit, text } => {
+            // A path is what a file dialog of a program that is not
+            // elevated is for; what runs a program is not, and in the Run
+            // box a path is a program started.
+            let run = run_box(scene.title, scene.dialog);
+            if said.file_dialog || run {
+                if let Some(why) = typed_risk(text, run || scene.elevated) {
+                    return Some(why.to_string());
+                }
+            }
             let picks_file = file_dialog && file_name_field(t.control, t.name);
             (submit && enter_confirms(scene.dialog, picks_file))
                 .then(|| "Enter presses the dialog's default button".to_string())
@@ -409,6 +425,58 @@ pub fn risk(doing: Doing, scene: &Scene) -> Option<String> {
             key_risk(chord, scene.dialog, file_dialog, t.control).map(str::to_string)
         }
     }
+}
+
+/// The titles of the Run box Windows opens on Win+R, in the languages the
+/// machines here run.
+const RUN_TITLES: &[&str] = &["run", "kør", "ausführen"];
+
+/// Whether a window is the Run box, where a line typed and Enter starts a
+/// program.
+pub fn run_box(title: &str, dialog: bool) -> bool {
+    dialog && RUN_TITLES.contains(&title.trim().to_lowercase().as_str())
+}
+
+/// Programs that run what they are given, matched as whole words.
+const COMMAND_WORDS: &[&str] = &[
+    "cmd",
+    "powershell",
+    "pwsh",
+    "wscript",
+    "cscript",
+    "mshta",
+    "rundll32",
+    "regsvr32",
+    "msiexec",
+];
+
+/// The endings of files Windows runs when they are opened.
+const RUN_ENDINGS: &[&str] = &[
+    ".exe", ".bat", ".cmd", ".ps1", ".vbs", ".msi", ".lnk", ".scr", ".hta",
+];
+
+/// Why a text typed where a line can start a program (an Open or Save
+/// dialog, the Run box, a program that runs as administrator) makes the
+/// typing risky, none when it does not: it names a program that runs
+/// commands or a file Windows runs, holds what joins a command line, or,
+/// when `paths` count, names a path. Judged on the whole text.
+pub fn typed_risk(text: &str, paths: bool) -> Option<&'static str> {
+    let low = text.to_lowercase();
+    let drive = low
+        .as_bytes()
+        .windows(2)
+        .any(|w| w[0].is_ascii_alphabetic() && w[1] == b':');
+    let path = paths && (low.contains('\\') || drive || low.contains("file:"));
+    let shell = low.contains("shell:");
+    let command = words(&low)
+        .iter()
+        .any(|w| COMMAND_WORDS.contains(&w.as_str()));
+    let runs = RUN_ENDINGS.iter().any(|e| low.contains(e));
+    let joins = ["&", "|", "%"].iter().any(|j| low.contains(j));
+    (path || shell || command || runs || joins).then_some(
+        "the text names a path, a program or a command, and typed into an Open or Save dialog or \
+         the Run box it can start a program",
+    )
 }
 
 /// Why `text` is not typed as keys into an element of type `control`,
@@ -577,6 +645,7 @@ pub fn act_json(act: &Act) -> Value {
         "name": act.name,
         "key": act.key,
         "texts": act.texts,
+        "typed": act.typed,
     })
 }
 
@@ -2846,16 +2915,25 @@ impl Takeover {
                 let (aim, said) = looked(app, &root, asked, read)?;
                 // Before the human is asked about a text that will not be
                 // typed anyway.
-                if let Some(no) = typed_refusal(typed, !aim.writable, aim.control) {
+                if let Some(no) = typed_refusal(typed, !aim.writable, aim.control)
+                    .or_else(|| horadric_core::takeover_programs::typed_too_long(typed))
+                {
                     return Err(no);
                 }
                 let mut what = format!("type {:?} into {}", short(typed, 60), aim.what());
                 if submit {
                     what.push_str(" and press Enter");
                 }
-                let risky = flag("risky")
-                    || risk(Doing::Type { submit }, &aim.scene(&w, &said, self.part)).is_some();
-                let act = act_of(Kind::Type, &w, &said, aim.control, &aim.name, "");
+                let doing = Doing::Type {
+                    submit,
+                    text: typed,
+                };
+                let risky =
+                    flag("risky") || risk(doing, &aim.scene(&w, &said, self.part)).is_some();
+                // The whole text goes with the question, which shows all of
+                // it: `what` is the short line for the plate and the log.
+                let mut act = act_of(Kind::Type, &w, &said, aim.control, &aim.name, "");
+                act.typed = typed.to_string();
                 let point = aim_point(&w, &aim);
                 let answer = allow_act(app, &root, &what, risky, &act, point, &reason);
                 self.heard(&w, true, answer)?;
@@ -4048,6 +4126,7 @@ fn act_of(kind: Kind, w: &Window, said: &Said, control: &str, name: &str, key: &
         name: name.to_string(),
         key: key.to_string(),
         texts: said.texts.clone(),
+        typed: String::new(),
     }
 }
 
@@ -4660,7 +4739,10 @@ mod tests {
             ..Said::default()
         };
         let name_box = target("ComboBox", "File name:", "1148");
-        let typing = Doing::Type { submit: true };
+        let typing = Doing::Type {
+            submit: true,
+            text: "",
+        };
         assert_eq!(risk(typing, &scene("Export", true, &said, name_box)), None);
         // A file dialog calling itself Save is no reason either, on its
         // title or its button, but a click on that button is.
@@ -4674,7 +4756,10 @@ mod tests {
         // In any other field of it, Enter confirms as in any dialog.
         let search = target("Edit", "Search", "");
         assert!(risk(typing, &scene("Export", true, &said, search)).is_some());
-        let no_enter = Doing::Type { submit: false };
+        let no_enter = Doing::Type {
+            submit: false,
+            text: "",
+        };
         assert_eq!(risk(no_enter, &scene("Export", true, &said, search)), None);
         // In a program that runs as administrator a file dialog excuses
         // nothing: a name typed there, or Enter, can start a program with
@@ -4703,12 +4788,63 @@ mod tests {
     }
 
     #[test]
+    fn what_is_typed_where_a_line_starts_a_program_is_judged_whole() {
+        // A path counts where it starts something, a command anywhere it
+        // is judged.
+        assert!(typed_risk(r"C:\Windows\System32", true).is_some());
+        assert!(typed_risk(r"\\server\share", true).is_some());
+        assert_eq!(typed_risk(r"C:\Proj\PLC.smc2", false), None);
+        for line in [
+            "cmd /c del x",
+            "PowerShell -enc AAAA",
+            "setup.EXE",
+            "a && b",
+            "%TEMP%",
+            "shell:startup",
+        ] {
+            assert!(typed_risk(line, false).is_some(), "{line}");
+        }
+        // Words that only hold a command's name are not one.
+        assert_eq!(typed_risk("command center", true), None);
+        assert_eq!(typed_risk("report 2026", true), None);
+        assert!(run_box("Run", true) && run_box(" kør ", true));
+        assert!(!run_box("Run", false) && !run_box("Run report", true));
+
+        let said = Said {
+            file_dialog: true,
+            ..Said::default()
+        };
+        let name_box = target("ComboBox", "File name:", "1148");
+        let typing = |text| Doing::Type {
+            submit: false,
+            text,
+        };
+        let export = scene("Export", true, &said, name_box);
+        // A path into a file dialog picks a file, a program typed there
+        // is asked, and the text past the short line is judged too.
+        assert_eq!(risk(typing(r"C:\Proj\out.csv"), &export), None);
+        let long = format!("{}notes.txt && evil.exe", "x".repeat(80));
+        assert!(risk(typing(&long), &export).is_some());
+        // In the Run box a path is a program started.
+        let none = Said::default();
+        let run = scene("Run", true, &none, target("ComboBox", "Open:", ""));
+        assert!(risk(typing(r"C:\Proj"), &run).is_some());
+        // Elsewhere what is typed is only text.
+        let field = target("Edit", "Notes", "");
+        let notes = scene("Watch", false, &none, field);
+        assert_eq!(risk(typing("cmd.exe"), &notes), None);
+    }
+
+    #[test]
     fn nothing_risky_is_found_where_nothing_is() {
         let said = Said::default();
         let ok = target("Button", "OK", "btnOk");
         assert_eq!(risk(Doing::Click, &scene("Watch", false, &said, ok)), None);
         let field = target("Edit", "Name", "txtName");
-        let typing = Doing::Type { submit: true };
+        let typing = Doing::Type {
+            submit: true,
+            text: "",
+        };
         assert_eq!(risk(typing, &scene("Watch", false, &said, field)), None);
         let k = parse_key("Down").unwrap();
         let down = Doing::Press {
@@ -4884,6 +5020,7 @@ mod tests {
                 "name": "File name:",
                 "key": "Enter",
                 "texts": ["Replace?"],
+                "typed": "",
             })
         );
         let mut sent = Value::Null;

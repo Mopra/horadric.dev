@@ -94,7 +94,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible, SW_HIDE,
 };
 
-use crate::takeover::{file_name_field, list_windows, looks_risky, pick_window, Takeover};
+use crate::takeover::{
+    file_name_field, list_windows, looks_risky, pick_window, typed_risk, Takeover,
+};
 use crate::takeover_programs::takeover_admin;
 
 /// How long the helper may take to connect once Windows has started it.
@@ -927,7 +929,20 @@ pub fn own_risk(said: bool, act: &Act, file_dialog: bool) -> Option<&'static str
              other programs with this program's administrator rights",
         );
     }
-    let mut texts = vec![act.name.as_str(), act.window.as_str(), act.key.as_str()];
+    // Typed into a program with administrator rights, a path or a command
+    // line is a program started with them wherever the field is.
+    if act.kind == Some(listed::Kind::Type) && typed_risk(&act.typed, true).is_some() {
+        return Some(
+            "the text names a path, a program or a command, and typed into a program that runs \
+             as administrator it can start another with its rights",
+        );
+    }
+    let mut texts = vec![
+        act.name.as_str(),
+        act.window.as_str(),
+        act.key.as_str(),
+        act.typed.as_str(),
+    ];
     texts.extend(act.texts.iter().map(String::as_str));
     (said || looks_risky(&texts))
         .then_some("it may change the machine, the project or files, and can not be taken back")
@@ -964,6 +979,7 @@ fn act_of(v: Option<&Value>) -> Act {
                     .collect()
             })
             .unwrap_or_default(),
+        typed: text("typed"),
     }
 }
 
@@ -980,6 +996,11 @@ pub fn first_question(program: &str, what: &str, within: u64) -> String {
          {within} s, it is refused."
     )
 }
+
+/// Why a call was not asked about in the helper's window: the question,
+/// with the whole text a call types, is taller than the screen.
+pub const TOO_TALL: &str = "the helper's question, with the whole text to type, does not fit on \
+    this screen, so it was not asked and nothing was done; type the text in smaller parts";
 
 /// The helper's question before one risky action.
 pub fn risky_question(program: &str, window: &str, what: &str, why: &str, within: u64) -> String {
@@ -1152,6 +1173,8 @@ impl Gate {
             _ => ask::ask(title, text, yes, "Refuse", time, near),
         };
         let (source, said) = match (answer, risky) {
+            // Not the human's no, and nothing to hold against the next call.
+            (ask::Answer::TooTall, _) => return Err(TOO_TALL.into()),
             (ask::Answer::Yes, false) => (Source::Asked(Some(Level::Operate)), None),
             (ask::Answer::Yes, true) => (Source::Risky(true), None),
             (ask::Answer::No, false) => (
@@ -1231,6 +1254,8 @@ impl Gate {
             .filter(|w| !w.is_empty())
             .unwrap_or("act in it")
             .to_string();
+        // The question shows every character typed, the log the short line.
+        let shown = format!("{what}{}", listed::typed_block(&act.typed));
         let said = body.get("risky").and_then(Value::as_bool) == Some(true);
         let risk = own_risk(said, &act, file_dialog_open(pid));
         let list = self.admin_list();
@@ -1241,7 +1266,7 @@ impl Gate {
             if level == Some(Level::Operate) {
                 self.log(Source::List(Level::Operate), &what);
             } else {
-                let text = first_question(&self.program, &what, within);
+                let text = first_question(&self.program, &shown, within);
                 self.ask(Question::Approve, &text, &what, within, since, hwnd)?;
             }
             self.operate = true;
@@ -1257,7 +1282,7 @@ impl Gate {
             "" => title_of(hwnd),
             w => w.to_string(),
         };
-        let text = risky_question(&self.program, &window, &what, why, within);
+        let text = risky_question(&self.program, &window, &shown, why, within);
         self.ask(Question::Risky, &text, &what, within, since, hwnd)
     }
 
@@ -1346,6 +1371,9 @@ mod ask {
         No,
         /// Nobody answered in time.
         Unanswered,
+        /// It was not asked: even at the screen's width it would be taller
+        /// than the screen, so some of it could not be read.
+        TooTall,
     }
 
     struct State {
@@ -1553,28 +1581,59 @@ mod ask {
                 0,
                 w!("Segoe UI"),
             );
-            let (width, pad, gap) = (px(560), px(18), px(12));
-            let (button_w, button_h) = (px(150), px(34));
-            let text = wide(text);
-            let mut measured = RECT {
-                right: width - 2 * pad,
+            let mut screen = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
                 ..Default::default()
             };
-            let dc = GetDC(Some(hwnd));
-            let old = SelectObject(dc, HGDIOBJ(font.0));
-            DrawTextW(
-                dc,
-                &mut text.clone(),
-                &mut measured,
-                DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
-            );
-            SelectObject(dc, old);
-            ReleaseDC(Some(hwnd), dc);
+            let monitor = MonitorFromWindow(HWND(near as *mut _), MONITOR_DEFAULTTOPRIMARY);
+            let _ = GetMonitorInfoW(monitor, &mut screen);
+            let work = screen.rcWork;
+            let (pad, gap) = (px(18), px(12));
+            let (button_w, button_h) = (px(150), px(34));
+            let text = wide(text);
+            let measure = |width: i32| {
+                let mut measured = RECT {
+                    right: width - 2 * pad,
+                    ..Default::default()
+                };
+                let dc = GetDC(Some(hwnd));
+                let old = SelectObject(dc, HGDIOBJ(font.0));
+                DrawTextW(
+                    dc,
+                    &mut text.clone(),
+                    &mut measured,
+                    DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+                );
+                SelectObject(dc, old);
+                ReleaseDC(Some(hwnd), dc);
+                let mut outer = RECT {
+                    left: 0,
+                    top: 0,
+                    right: width,
+                    bottom: measured.bottom + 3 * pad + button_h,
+                };
+                let _ = AdjustWindowRectEx(&mut outer, style, false, ex);
+                (measured.bottom, outer)
+            };
+            // A long text to type widens the window before it is ever cut:
+            // every character of it is what the human says yes to.
+            let room = work.bottom - work.top - px(16);
+            let mut width = px(560);
+            let (mut text_h, mut outer) = measure(width);
+            if outer.bottom - outer.top > room {
+                width = (work.right - work.left - px(32)).clamp(width, px(1200));
+                (text_h, outer) = measure(width);
+            }
+            if outer.bottom - outer.top > room {
+                let _ = DestroyWindow(hwnd);
+                let _ = DeleteObject(HGDIOBJ(font.0));
+                return Answer::TooTall;
+            }
             let text_at = RECT {
                 left: pad,
                 top: pad,
                 right: width - pad,
-                bottom: pad + measured.bottom,
+                bottom: pad + text_h,
             };
             let row = text_at.bottom + pad;
             let no_at = RECT {
@@ -1595,25 +1654,11 @@ mod ask {
                 right: yes_at.left - gap,
                 bottom: row + button_h,
             };
-            let mut outer = RECT {
-                left: 0,
-                top: 0,
-                right: width,
-                bottom: row + button_h + pad,
-            };
-            let _ = AdjustWindowRectEx(&mut outer, style, false, ex);
             let (w, h) = (outer.right - outer.left, outer.bottom - outer.top);
-            let mut screen = MONITORINFO {
-                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            let monitor = MonitorFromWindow(HWND(near as *mut _), MONITOR_DEFAULTTOPRIMARY);
-            let _ = GetMonitorInfoW(monitor, &mut screen);
-            let work = screen.rcWork;
             // Near the top, clear of the middle, where the program's own
-            // dialog most likely is.
+            // dialog most likely is, unless it is too tall for that.
             let x = work.left + ((work.right - work.left) - w).max(0) / 2;
-            let y = work.top + px(40);
+            let y = (work.top + px(40)).min(work.bottom - h).max(work.top);
             let now = Instant::now();
             STATE.set(Some(State {
                 text,
@@ -1730,6 +1775,7 @@ mod tests {
             name: name.into(),
             key: key.into(),
             texts: Vec::new(),
+            typed: String::new(),
         }
     }
 
@@ -1772,6 +1818,27 @@ mod tests {
         );
         assert!(file_dialog_class("DUIViewWndClassName") && file_dialog_class("SHELLDLL_DefView"));
         assert!(!file_dialog_class("Button"));
+    }
+
+    #[test]
+    fn the_helper_judges_and_shows_the_whole_text_typed() {
+        use listed::Kind::Type;
+        let mut typing = act(Type, "Edit", "Notes", "");
+        typing.typed = "line one".into();
+        assert_eq!(own_risk(false, &typing, false), None);
+        // Past the engine's short line: what is typed late counts too.
+        typing.typed = format!("{} then C:\\Tools\\run.exe", "x".repeat(80));
+        let why = own_risk(false, &typing, false).unwrap();
+        assert!(why.contains("administrator"), "{why}");
+        typing.typed = format!("{} delete all", "x".repeat(80));
+        assert!(own_risk(false, &typing, false).is_some());
+        // The body the engine sends carries it, and the question shows it.
+        let body = json!({"kind": "type", "typed": "a  b\nc"});
+        let read = act_of(Some(&body));
+        assert_eq!(read.typed, "a  b\nc");
+        let shown = format!("type{}", listed::typed_block(&read.typed));
+        let text = risky_question("C:\\a.exe", "W", &shown, "why", 60);
+        assert!(text.contains("a\u{B7}\u{B7}b\u{21B5}\nc"), "{text}");
     }
 
     #[test]

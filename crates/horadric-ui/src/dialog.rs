@@ -79,6 +79,8 @@ pub enum Answer {
     Dismissed,
     /// Nobody answered in time.
     Unanswered,
+    /// Not asked: its text would run off the screen even at the widest.
+    TooTall,
 }
 
 /// What kind of question, for the lamp by its title.
@@ -127,9 +129,53 @@ pub fn register_class() -> Result<()> {
     }
 }
 
+/// How wide the text of a question put aside wraps: the usual width, or
+/// for a text too tall for its screen at that, wider. None when it is too
+/// tall even then: a question whose text runs off the screen must not be
+/// answered, since some of what it asks would go unread.
+fn aside_text_w(gpu: &Gpu, d: &Dialog, aside: &Aside) -> Result<Option<f32>> {
+    let (at, s) = screen_of(Some(aside));
+    let [l, t, r, b] = work_area(at);
+    let (work_w, work_h) = ((r - l) as f32 / s, (b - t) as f32 / s);
+    // Less the gap a question aside keeps from the screen's edges.
+    let room = work_h - 32.0 - layout::dialog_chrome_h();
+    let fits = |w: f32| -> Result<bool> {
+        let text = render::wrapped(gpu, &gpu.body, d.text, w)?;
+        Ok(render::text_size(&text).1.ceil() <= room)
+    };
+    let usual = layout::dialog_text_w();
+    if fits(usual)? {
+        return Ok(Some(usual));
+    }
+    let widest = (work_w - 32.0).clamp(layout::DIALOG_W, layout::DIALOG_W_MOST);
+    let wide = layout::dialog_text_w_of(widest);
+    Ok(fits(wide)?.then_some(wide))
+}
+
+/// The point whose screen a question goes on, and that screen's scale.
+fn screen_of(aside: Option<&Aside>) -> (POINT, f32) {
+    let mut cursor = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut cursor);
+    }
+    // Aside, it goes on the screen of the program it is about.
+    if let Some([l, t, r, b]) = aside.and_then(|a| a.avoid) {
+        cursor = POINT {
+            x: l + (r - l) / 2,
+            y: t + (b - t) / 2,
+        };
+    }
+    let monitor = unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) };
+    let (mut dx, mut dy) = (96u32, 96u32);
+    unsafe {
+        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+    }
+    (cursor, dx.max(96) as f32 / 96.0)
+}
+
 /// Asks, and returns the button pressed. None when dismissed.
 pub fn show(gpu: &Gpu, metrics: &Metrics, d: &Dialog) -> Option<usize> {
-    let popup = Popup::open(gpu, metrics, d, None)
+    let popup = Popup::open(gpu, metrics, d, None, layout::dialog_text_w())
         .map_err(|e| eprintln!("horadric: cannot ask \"{}\": {e}", d.title))
         .ok()?;
     run(&popup, d)
@@ -137,7 +183,15 @@ pub fn show(gpu: &Gpu, metrics: &Metrics, d: &Dialog) -> Option<usize> {
 
 /// Asks about another program, aside: see the module's notes.
 pub fn show_aside(gpu: &Gpu, metrics: &Metrics, d: &Dialog, aside: &Aside) -> Answer {
-    let Ok(popup) = Popup::open(gpu, metrics, d, Some(aside))
+    let text_w = match aside_text_w(gpu, d, aside) {
+        Ok(Some(w)) => w,
+        Ok(None) => return Answer::TooTall,
+        Err(e) => {
+            eprintln!("horadric: cannot ask \"{}\": {e}", d.title);
+            return Answer::Unanswered;
+        }
+    };
+    let Ok(popup) = Popup::open(gpu, metrics, d, Some(aside), text_w)
         .map_err(|e| eprintln!("horadric: cannot ask \"{}\": {e}", d.title))
     else {
         return Answer::Unanswered;
@@ -166,7 +220,15 @@ pub fn show_aside_releasable(
     d: &Dialog,
     aside: &Aside,
 ) -> Option<Answer> {
-    let Ok(popup) = Popup::open(gpu, metrics, d, Some(aside))
+    let text_w = match aside_text_w(gpu, d, aside) {
+        Ok(Some(w)) => w,
+        Ok(None) => return Some(Answer::TooTall),
+        Err(e) => {
+            eprintln!("horadric: cannot ask \"{}\": {e}", d.title);
+            return Some(Answer::Unanswered);
+        }
+    };
+    let Ok(popup) = Popup::open(gpu, metrics, d, Some(aside), text_w)
         .map_err(|e| eprintln!("horadric: cannot ask \"{}\": {e}", d.title))
     else {
         return Some(Answer::Unanswered);
@@ -283,25 +345,10 @@ impl<'a> Popup<'a> {
         metrics: &'a Metrics,
         d: &Dialog,
         aside: Option<&Aside>,
+        text_w: f32,
     ) -> Result<Box<Self>> {
-        let mut cursor = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut cursor);
-        }
-        // Aside, it goes on the screen of the program it is about.
-        if let Some([l, t, r, b]) = aside.and_then(|a| a.avoid) {
-            cursor = POINT {
-                x: l + (r - l) / 2,
-                y: t + (b - t) / 2,
-            };
-        }
-        let monitor = unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) };
-        let (mut dx, mut dy) = (96u32, 96u32);
-        unsafe {
-            let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
-        }
-        let s = dx.max(96) as f32 / 96.0;
-        let text = render::wrapped(gpu, &gpu.body, d.text, layout::dialog_text_w())?;
+        let (cursor, s) = screen_of(aside);
+        let text = render::wrapped(gpu, &gpu.body, d.text, text_w)?;
         let widths: Vec<f32> = d
             .buttons
             .iter()
@@ -316,7 +363,12 @@ impl<'a> Popup<'a> {
                 .map(|l| render::text_size(&l).0)
                 .unwrap_or(120.0)
         });
-        let layout = layout::dialog(render::text_size(&text).1.ceil(), &widths, check_w);
+        let layout = layout::dialog_wide(
+            layout::dialog_w_of(text_w),
+            render::text_size(&text).1.ceil(),
+            &widths,
+            check_w,
+        );
         let size = (
             (layout.size.0 * s).round() as i32,
             (layout.size.1 * s).round() as i32,

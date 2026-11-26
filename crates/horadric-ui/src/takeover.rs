@@ -144,6 +144,9 @@ pub(super) enum Refusal {
     Held(listed::Question, u64),
     /// Too many of the session's questions wait already.
     Crowded,
+    /// The question, with the whole text to type, would run off the
+    /// screen, so it was not put.
+    TooTall,
 }
 
 /// The approval question's buttons, in order.
@@ -269,6 +272,7 @@ pub(super) fn pressed_of(answer: Answer, secs: u64) -> Result<Option<usize>, Ref
         Answer::Pressed(i) => Ok(Some(i)),
         Answer::Dismissed => Ok(None),
         Answer::Unanswered => Err(Refusal::NoAnswer(secs)),
+        Answer::TooTall => Err(Refusal::TooTall),
     }
 }
 
@@ -313,6 +317,11 @@ pub(super) fn refusal_text(why: Refusal, action: Action, risky: bool, exe: &str)
             listed::refused_text(question, exe, Duration::from_secs(secs))
         }
         (Refusal::Crowded, _) => listed::crowded_text(exe),
+        (Refusal::TooTall, _) => format!(
+            "Horadric's question about this in {exe}, with the whole text to type, does not fit \
+             on the screen, so it was not asked and nothing was done; type the text in smaller \
+             parts"
+        ),
         (Refusal::NoAnswer(secs), _) => {
             let what = if risky {
                 "this change"
@@ -392,6 +401,7 @@ pub(super) fn refusal_word(why: Refusal) -> &'static str {
         Refusal::NoAnswer(_) => "no answer",
         Refusal::Held(..) => "not asked again so soon",
         Refusal::Crowded => "too many questions waiting",
+        Refusal::TooTall => "question too tall for the screen",
     }
 }
 
@@ -511,6 +521,7 @@ pub(super) fn act_of(v: Option<&Value>) -> Act {
                     .collect()
             })
             .unwrap_or_default(),
+        typed: text("typed"),
     }
 }
 
@@ -1375,6 +1386,11 @@ impl App {
         };
         let pressed = match pressed_of(answer, q.within) {
             Ok(pressed) => pressed,
+            // Nobody was asked: nothing to log as unanswered or to hold.
+            Err(why @ Refusal::TooTall) => {
+                self.refuse(q.pending, why);
+                return None;
+            }
             Err(why) => {
                 let source = Source::NoAnswer {
                     risky: q.risky,
@@ -1555,12 +1571,14 @@ fn dialog(q: &Question) -> OwnedDialog {
         "" => String::new(),
         t => format!(" in the window \"{t}\""),
     };
+    // Every character a yes lets it type, not the short line of the plate.
+    let typed = listed::typed_block(&r.act.typed);
     if q.risky {
         OwnedDialog {
             tone: Tone::Warning,
             title: format!("{} wants to change something in {program}", q.name),
             text: format!(
-                "It wants to {}{window}.\n\nSession {}.\n\nThis is asked every time, even with \
+                "It wants to {}{window}.{typed}\n\nSession {}.\n\nThis is asked every time, even with \
                  {program} allowed, unless an administrator pre-approved this very action \
                  (horadric takeover approve, from an elevated shell). Unanswered after {} s, the \
                  session is told nobody answered.",
@@ -1576,7 +1594,7 @@ fn dialog(q: &Question) -> OwnedDialog {
             tone: Tone::Question,
             title: format!("{} wants to use {program}", q.name),
             text: format!(
-                "First it wants to {}{window}.\n\nSession {}.\n\nLooking is screenshots and reading the \
+                "First it wants to {}{window}.{typed}\n\nSession {}.\n\nLooking is screenshots and reading the \
                  window. Operating is clicking and typing in it, and in its dialogs. What you \
                  allow lasts until Horadric restarts.{} To allow it for every session ahead of \
                  time, list it: horadric takeover allow {}\"{}\" operate (or look){}. Unanswered \
@@ -2047,6 +2065,7 @@ mod tests {
                 name: "Yes".into(),
                 key: String::new(),
                 texts: vec!["Delete the project?".into()],
+                typed: String::new(),
             }
         );
         assert_eq!(
@@ -2097,6 +2116,10 @@ mod tests {
             pressed_of(Answer::Unanswered, 45),
             Err(Refusal::NoAnswer(45))
         );
+        // A question too tall to read whole was never put: no one said no.
+        assert_eq!(pressed_of(Answer::TooTall, 45), Err(Refusal::TooTall));
+        let tall = refusal_text(Refusal::TooTall, Action::Operate, true, "a.exe");
+        assert!(tall.contains("nothing was done") && tall.contains("smaller parts"));
         let told = refusal_text(
             Refusal::NoAnswer(45),
             Action::Operate,

@@ -45,6 +45,11 @@ The tools:
   the window comes forward. The human's pointer is put back after.
 - `takeover_type`: text into a field. What the field holds is read back
   before Enter, and Enter is not pressed when it is not what was typed.
+  The question about it shows the whole text, with each line break, tab
+  and space that would not show marked. A text over 2000 characters is
+  refused, not cut: past about a page the human no longer reads what
+  they say yes to, so the agent types it in parts. A question too tall
+  for its screen even when widened is not put, and the call is refused.
 - `takeover_press`: a key, with modifiers.
 - `takeover_text`: the text of a list, grid, output pane or editor.
 - `takeover_changes` and `takeover_wait`: see the watcher.
@@ -64,6 +69,11 @@ What the engine holds itself to:
   tab typed as keys is refused outside a document.
 - Space and access keys in a dialog count as risky: they press buttons
   nobody named.
+- Text typed into an Open or Save dialog or the Run box is risky when it
+  names a program that runs commands (`cmd`, `powershell` and the like),
+  a file Windows runs (`.exe`, `.bat` and the like) or joins a command
+  line, and in the Run box when it names a path too. The elevated helper
+  counts a path or a command typed anywhere in its program.
 - The select all and copy path of `takeover_text` reads the clipboard
   only when the target program owns it, and is refused when the human's
   clipboard holds anything but plain text.
