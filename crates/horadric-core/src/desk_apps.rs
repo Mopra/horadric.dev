@@ -357,8 +357,21 @@ pub fn process_name(path: &str) -> String {
 /// arguments.
 pub fn command_line(exe: &str, args: &[String]) -> String {
     let mut line = format!("\"{exe}\"");
-    for arg in args {
+    if !args.is_empty() {
         line.push(' ');
+        line.push_str(&arguments(args));
+    }
+    line
+}
+
+/// Arguments alone as a command line's tail, for ShellExecuteExW, which
+/// takes the program apart from them.
+pub fn arguments(args: &[String]) -> String {
+    let mut line = String::new();
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            line.push(' ');
+        }
         if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '"']) {
             line.push_str(arg);
             continue;
@@ -696,6 +709,8 @@ mod tests {
         );
         assert_eq!(line(&[r#"a\\"b"#]), r#""C:\a b\x.exe" "a\\\\\"b""#);
         assert_eq!(line(&[r"C:\plain\"]), r#""C:\a b\x.exe" C:\plain\"#);
+        assert_eq!(arguments(&human(&["a b", "c"])), r#""a b" c"#);
+        assert_eq!(arguments(&[]), "");
     }
 
     fn env(name: &str) -> Option<String> {
