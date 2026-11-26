@@ -473,6 +473,8 @@ pub(super) enum ShellState {
     TimedOut,
     /// It was sent to the background from the start.
     Background,
+    /// Its turn ended without its end ever coming: refused, cancelled.
+    Stopped,
 }
 
 impl ShellState {
@@ -486,6 +488,7 @@ impl ShellState {
             ShellState::Interrupted => "interrupted".into(),
             ShellState::TimedOut => "timed out, in background".into(),
             ShellState::Background => "in background".into(),
+            ShellState::Stopped => "stopped".into(),
         }
     }
 
@@ -496,6 +499,7 @@ impl ShellState {
             ShellState::Failed(_) => ERROR,
             ShellState::Interrupted => STOP,
             ShellState::TimedOut | ShellState::Background => CLOCK,
+            ShellState::Stopped => CROSS,
         }
     }
 
@@ -505,6 +509,7 @@ impl ShellState {
             ShellState::Done => theme::done(),
             ShellState::Failed(_) | ShellState::Interrupted => theme::error(),
             ShellState::TimedOut | ShellState::Background => theme::waiting(),
+            ShellState::Stopped => theme::legend(),
         }
     }
 
@@ -530,6 +535,8 @@ pub(super) struct Shell {
     pub agent: bool,
     pub at: String,
     pub state: ShellState,
+    /// Its number in this run of the app, which keys its laid out text.
+    pub serial: u64,
 }
 
 impl Shell {
@@ -552,25 +559,38 @@ pub(super) enum ShellNote {
     },
     Ended {
         session: String,
+        /// Claude Code's id for the call; empty when it gave none.
         id: String,
+        /// `Bash` or `PowerShell`, and the command, to pair an end that
+        /// has no id.
+        tool: String,
+        command: String,
         state: ShellState,
+    },
+    /// The session's turn ended, or a new prompt began one: whatever of
+    /// its commands still runs never got its end.
+    TurnEnded {
+        session: String,
     },
 }
 
 impl ShellNote {
     pub(super) fn session(&self) -> &str {
         match self {
-            ShellNote::Began { session, .. } | ShellNote::Ended { session, .. } => session,
+            ShellNote::Began { session, .. }
+            | ShellNote::Ended { session, .. }
+            | ShellNote::TurnEnded { session } => session,
         }
     }
 }
 
 /// Whether a tool runs commands in a shell, under any MCP prefix.
 pub(super) fn is_shell_tool(tool: &str) -> bool {
-    matches!(
-        tool.rsplit("__").next().unwrap_or(tool),
-        "Bash" | "PowerShell"
-    )
+    matches!(bare_tool(tool), "Bash" | "PowerShell")
+}
+
+fn bare_tool(tool: &str) -> &str {
+    tool.rsplit("__").next().unwrap_or(tool)
 }
 
 /// How a shell command ended, from its `PostToolUse` (`error` none) or
@@ -585,7 +605,7 @@ pub(super) fn shell_ended(
     if interrupt {
         return ShellState::Interrupted;
     }
-    let bare = tool.rsplit("__").next().unwrap_or(tool);
+    let bare = bare_tool(tool);
     let read = match error {
         Some(e) => read_result(bare, input, e, true, &serde_json::Value::Null),
         None => {
@@ -620,29 +640,39 @@ pub(super) fn shell_ended(
 }
 
 /// What a hook event says of a shell command of session `target`, at
-/// wall clock `at`. None for any other event or tool.
+/// wall clock `at`, or of the end of its turn. None for anything else.
 pub(super) fn shell_note(target: &str, e: &HookEvent, at: &str) -> Option<ShellNote> {
+    let session = target.to_string();
+    let turn_edge = matches!(
+        e.hook_event_name.as_str(),
+        "Stop" | "StopFailure" | "SessionEnd" | "UserPromptSubmit"
+    );
+    if turn_edge && !e.is_subagent() {
+        return Some(ShellNote::TurnEnded { session });
+    }
     let tool = e.tool_name.as_deref().filter(|t| is_shell_tool(t))?;
     let id = e.tool_use_id.clone().unwrap_or_default();
     let input = e.tool_input.clone().unwrap_or_default();
     let text = |key: &str| input[key].as_str().unwrap_or_default().to_string();
-    let session = target.to_string();
     match e.hook_event_name.as_str() {
         "PreToolUse" => Some(ShellNote::Began {
             session,
             shell: Shell {
                 id,
-                tool: tool.rsplit("__").next().unwrap_or(tool).to_string(),
+                tool: bare_tool(tool).to_string(),
                 command: text("command"),
                 description: text("description"),
                 agent: e.is_subagent(),
                 at: at.to_string(),
                 state: ShellState::Running,
+                serial: 0,
             },
         }),
         "PostToolUse" | "PostToolUseFailure" => Some(ShellNote::Ended {
             session,
             id,
+            tool: bare_tool(tool).to_string(),
+            command: text("command"),
             state: shell_ended(
                 tool,
                 &input,
@@ -656,28 +686,60 @@ pub(super) fn shell_note(target: &str, e: &HookEvent, at: &str) -> Option<ShellN
     }
 }
 
-/// Takes a note into the sessions' lists, and gives back the command it
-/// began or ended, for the log. An end whose start was never heard, one
+/// Takes a note into the sessions' lists, and gives back the commands it
+/// began or ended, for the log. An end is paired by its id, or without
+/// one with the oldest running command of its shell that ran the same,
+/// else the oldest of its shell; an end whose start was never heard, one
 /// begun before control, is dropped.
 pub(super) fn hear_shell(
     lists: &mut HashMap<String, VecDeque<Shell>>,
     note: ShellNote,
-) -> Option<Shell> {
+) -> Vec<Shell> {
     match note {
         ShellNote::Began { session, shell } => {
             let list = lists.entry(session).or_default();
             list.push_front(shell.clone());
             list.truncate(SHELLS);
-            Some(shell)
+            vec![shell]
         }
-        ShellNote::Ended { session, id, state } => {
-            let shell = lists
-                .get_mut(&session)?
-                .iter_mut()
-                .find(|s| !id.is_empty() && s.id == id && s.state == ShellState::Running)?;
-            shell.state = state;
-            Some(shell.clone())
+        ShellNote::Ended {
+            session,
+            id,
+            tool,
+            command,
+            state,
+        } => {
+            let Some(list) = lists.get_mut(&session) else {
+                return Vec::new();
+            };
+            let running = |s: &Shell| s.state == ShellState::Running;
+            // The list is newest first, so the oldest is found from its end.
+            let at = if id.is_empty() {
+                let mine = |s: &Shell| running(s) && s.tool == tool;
+                list.iter()
+                    .rposition(|s| mine(s) && s.command == command)
+                    .or_else(|| list.iter().rposition(mine))
+            } else {
+                list.iter().position(|s| running(s) && s.id == id)
+            };
+            at.and_then(|i| list.get_mut(i))
+                .map(|s| {
+                    s.state = state;
+                    s.clone()
+                })
+                .into_iter()
+                .collect()
         }
+        ShellNote::TurnEnded { session } => lists
+            .get_mut(&session)
+            .into_iter()
+            .flatten()
+            .filter(|s| s.state == ShellState::Running)
+            .map(|s| {
+                s.state = ShellState::Stopped;
+                s.clone()
+            })
+            .collect(),
     }
 }
 
@@ -694,15 +756,11 @@ pub(super) fn shells_count(list: &VecDeque<Shell>) -> String {
     }
 }
 
-/// A command's height on the plate: its lines, at most as many as its
-/// state shows.
-pub(super) fn command_height(lines: usize, line_h: f32, state: ShellState) -> f32 {
-    lines.clamp(1, state.lines()) as f32 * line_h
-}
-
-/// How many of a command's `lines` the plate leaves out in `state`.
-pub(super) fn hidden_lines(lines: usize, state: ShellState) -> usize {
-    lines.saturating_sub(state.lines())
+/// How many lines a whole command has, from the lines of the part laid
+/// out: the rest of it adds its line breaks.
+pub(super) fn command_lines(laid: usize, command: &str) -> usize {
+    let rest = &command[command_shown(command).len()..];
+    laid.max(1) + rest.matches('\n').count()
 }
 
 /// The tag on a command cut short, none when it shows whole.
@@ -714,7 +772,7 @@ pub(super) fn more_lines(hidden: usize) -> Option<String> {
     }
 }
 
-/// The start of a command, as much as is laid out.
+/// The start of a command, as much as is laid out and logged.
 pub(super) fn command_shown(command: &str) -> &str {
     match command.char_indices().nth(COMMAND_CHARS) {
         Some((at, _)) => &command[..at],
@@ -722,49 +780,116 @@ pub(super) fn command_shown(command: &str) -> &str {
     }
 }
 
-/// One listed command's whole row, `command_h` its command's height.
-fn shell_row(command_h: f32) -> f32 {
-    ROW + command_h + 2.0 * WELL_PAD + SHELL_GAP
+/// One listed command's whole row, `lines` of its command shown.
+fn shell_row(lines: usize, line_h: f32) -> f32 {
+    ROW + lines as f32 * line_h + 2.0 * WELL_PAD + SHELL_GAP
 }
 
-/// The shell section's height: its header, and while open each command
-/// in `commands` (their heights), or a line saying there are none.
-pub(super) fn shells_height(open: bool, commands: &[f32]) -> f32 {
-    let rows = match (open, commands.is_empty()) {
-        (false, _) => 0.0,
-        (true, true) => ROW,
-        (true, false) => commands.iter().map(|&c| shell_row(c)).sum(),
+/// How the shell section fits the room it has.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct Fit {
+    /// Lines shown of each command shown, newest first.
+    pub shown: Vec<usize>,
+    /// Commands left out for want of room.
+    pub more: usize,
+    /// A line under them: there are none yet, or how many are left out.
+    pub note: bool,
+}
+
+/// Fits the commands, newest first, each its lines and state, into `room`
+/// DIPs under the header, so the plate stays on the screen. A running
+/// command gives up lines, down to what a finished one shows, before any
+/// command is left out, and what is left out is counted.
+pub(super) fn fit_shells(rows: &[(usize, ShellState)], line_h: f32, room: f32) -> Fit {
+    let room = room - SHELLS_GAP - FOLD_H;
+    let height = |shown: &[usize]| shown.iter().map(|&l| shell_row(l, line_h)).sum::<f32>();
+    if rows.is_empty() {
+        return Fit {
+            note: room >= ROW,
+            ..Fit::default()
+        };
+    }
+    let full: Vec<usize> = rows.iter().map(|&(l, s)| l.clamp(1, s.lines())).collect();
+    if height(&full) <= room {
+        return Fit {
+            shown: full,
+            ..Fit::default()
+        };
+    }
+    let mut shown: Vec<usize> = rows.iter().map(|&(l, _)| l.clamp(1, DONE_LINES)).collect();
+    if height(&shown) > room {
+        let mut k = shown.len();
+        while k > 0 && height(&shown[..k]) + ROW > room {
+            k -= 1;
+        }
+        shown.truncate(k);
+    }
+    // What room is left goes back to the running ones, newest first.
+    let mut left = room - height(&shown);
+    let more = rows.len() - shown.len();
+    if more > 0 {
+        left -= ROW;
+    }
+    for (lines, &want) in shown.iter_mut().zip(&full) {
+        let extra = (want - *lines).min((left / line_h).floor().max(0.0) as usize);
+        *lines += extra;
+        left -= extra as f32 * line_h;
+    }
+    Fit {
+        shown,
+        more,
+        note: more > 0 && room >= ROW,
+    }
+}
+
+/// The shell section's height: its header, and while open what `fit`
+/// shows, `line_h` a command's line.
+pub(super) fn shells_height(open: bool, fit: &Fit, line_h: f32) -> f32 {
+    let rows = if open {
+        fit.shown.iter().map(|&l| shell_row(l, line_h)).sum::<f32>()
+            + if fit.note { ROW } else { 0.0 }
+    } else {
+        0.0
     };
     SHELLS_GAP + FOLD_H + rows
 }
 
-/// How many commands, newest first, fit in `room` DIPs of plate, so the
-/// plate never runs off the bottom of the screen.
-pub(super) fn shells_fit(commands: &[f32], room: f32) -> usize {
-    let mut left = room - SHELLS_GAP - FOLD_H;
-    commands
-        .iter()
-        .take_while(|&&c| {
-            left -= shell_row(c);
-            left >= 0.0
-        })
-        .count()
+/// The line under the commands: none yet, or how many are left out.
+pub(super) fn shells_note(fit: &Fit) -> String {
+    match fit.more {
+        0 => "No shell command since control began".into(),
+        n => format!("{n} more not shown, no room on the screen"),
+    }
 }
 
+/// How long a command's end line in the log quotes it: the start line
+/// has it whole, as far as [`COMMAND_CHARS`].
+const LOG_END_CHARS: usize = 80;
+
 /// One line of the desktop log for a shell command: when, which session,
-/// what happened, in which shell, the command and what it is for.
+/// what happened, in which shell, the command and what it is for. Its
+/// start gives the command, its end only enough of it to find the start.
 pub(super) fn shell_log_line(utc: &str, session: &str, shell: &Shell) -> String {
     let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let from = if shell.agent { " by a subagent" } else { "" };
-    let how = match shell.state {
-        ShellState::Running => format!("shell command started{from}"),
-        state => format!("shell command {}{from}", state.word()),
+    let (how, command) = match shell.state {
+        ShellState::Running => (
+            format!("shell command started{from}"),
+            flat(command_shown(&shell.command)),
+        ),
+        state => {
+            let all = flat(&shell.command);
+            let short = match all.char_indices().nth(LOG_END_CHARS) {
+                Some((at, _)) => format!("{}...", &all[..at]),
+                None => all,
+            };
+            (format!("shell command {}{from}", state.word()), short)
+        }
     };
     let mut line = format!(
-        "{utc}  {}  {how}  {}  ({})",
+        "{utc}  {}  {how}  {}  ({command})",
         flat(session),
-        shell.tool,
-        flat(&shell.command)
+        shell.tool
     );
     if !shell.description.trim().is_empty() {
         line.push_str(&format!("  [{}]", flat(&shell.description)));
@@ -773,32 +898,93 @@ pub(super) fn shell_log_line(utc: &str, session: &str, shell: &Shell) -> String 
     line
 }
 
-/// Desktop control is on, for the hook thread, which notes shell
-/// commands only then: one begun before it is not the control's.
-static SHELLS_LIVE: AtomicBool = AtomicBool::new(false);
-/// Shell commands heard while control was on, until the overlay's next
-/// frame.
-static SHELL_NOTES: Mutex<Vec<ShellNote>> = Mutex::new(Vec::new());
+/// The sessions that hold control in this run of it, and what the hook
+/// thread heard of their shells, kept under one lock so a run's end
+/// clears both at once and no note from before it reaches the next.
+struct ShellWatch {
+    holders: Vec<String>,
+    notes: Vec<ShellNote>,
+}
 
-/// A hook event for session `target`, from the thread that reads hooks:
-/// a shell command's start or end is kept for the plate.
-pub(super) fn shell_heard(target: &str, e: &HookEvent) {
-    if !SHELLS_LIVE.load(Ordering::Acquire) {
+static SHELL_WATCH: Mutex<ShellWatch> = Mutex::new(ShellWatch {
+    holders: Vec::new(),
+    notes: Vec::new(),
+});
+/// Each command's number, for its laid out text.
+static SHELL_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A session holds control from its first allowed desktop call, or from
+/// bypass turned on for it: its shell commands are listed from then.
+fn hold_shells(session: &str) {
+    if session.is_empty() {
         return;
     }
-    let Some(note) = shell_note(target, e, &now_clock()) else {
+    if let Ok(mut w) = SHELL_WATCH.lock() {
+        if !w.holders.iter().any(|h| h == session) {
+            w.holders.push(session.to_string());
+        }
+    }
+}
+
+/// Control's run is over: nobody holds it and nothing heard is kept.
+fn release_shells() {
+    if let Ok(mut w) = SHELL_WATCH.lock() {
+        w.holders.clear();
+        w.notes.clear();
+    }
+}
+
+/// A hook event for session `target`, from the thread that reads hooks:
+/// a shell command's start or end, or its turn's end, is kept for the
+/// plate when the session holds control.
+pub(super) fn shell_heard(target: &str, e: &HookEvent) {
+    let Some(mut note) = shell_note(target, e, &now_clock()) else {
         return;
     };
-    if let Ok(mut notes) = SHELL_NOTES.lock() {
-        notes.push(note);
+    if let ShellNote::Began { shell, .. } = &mut note {
+        shell.serial = SHELL_SERIAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if let Ok(mut w) = SHELL_WATCH.lock() {
+        if w.holders.iter().any(|h| h == target) {
+            w.notes.push(note);
+        }
     }
 }
 
 fn take_shell_notes() -> Vec<ShellNote> {
-    SHELL_NOTES
+    SHELL_WATCH
         .lock()
-        .map(|mut n| std::mem::take(&mut *n))
+        .map(|mut w| std::mem::take(&mut w.notes))
         .unwrap_or_default()
+}
+
+/// Appends to `desktop.log` on a thread of its own, in the order given,
+/// so the plate's frame never waits on the disk.
+fn log_shells(lines: String) {
+    static WRITER: Mutex<Option<std::sync::mpsc::Sender<String>>> = Mutex::new(None);
+    let Ok(mut writer) = WRITER.lock() else {
+        return;
+    };
+    let tx = writer.get_or_insert_with(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for lines in rx {
+                let Some(file) = horadric_hooks::tasks::desktop_log_file() else {
+                    continue;
+                };
+                if let Some(dir) = file.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&file)
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, lines.as_bytes()));
+            }
+        });
+        tx
+    });
+    let _ = tx.send(lines);
 }
 
 /// A wall clock time as the history shows it.
@@ -1461,6 +1647,8 @@ struct Overlay {
     shells_top: Option<f32>,
     /// The commands' monospaced face, made on the first paint.
     mono: Option<IDWriteTextFormat>,
+    /// Each listed command laid out, by its serial, made once.
+    laid: HashMap<u64, Laid>,
     /// The plate's content changed since it was painted.
     stale: bool,
 }
@@ -1555,6 +1743,7 @@ fn with(shared: &Rc<Shared>, f: impl FnOnce(&mut Overlay)) {
                         shells_open: true,
                         shells_top: None,
                         mono: None,
+                        laid: HashMap::new(),
                         stale: true,
                     })
                 }
@@ -1583,7 +1772,7 @@ pub(super) fn allowed(shared: &Rc<Shared>, call: Allowed, reply: Reply) -> bool 
         if started {
             o.began = now;
         }
-        SHELLS_LIVE.store(true, Ordering::Release);
+        hold_shells(&call.session);
         o.until = extend(o.until, now, true);
         o.place_plate(call.hwnd, call.point);
         if bypass() {
@@ -1974,6 +2163,7 @@ impl Overlay {
         if !self.now.session.is_empty() {
             self.holders
                 .insert(self.now.session.clone(), Holder::default());
+            hold_shells(&self.now.session);
         }
         // Its banner says Esc ends it, so Esc is held from now.
         self.keep_esc();
@@ -2102,11 +2292,16 @@ impl Overlay {
             return;
         }
         let mut lines = String::new();
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let utc = horadric_core::tasks::utc(secs);
         for note in notes {
             let session = note.session().to_string();
-            let Some(shell) = hear_shell(&mut self.shells, note) else {
+            let heard = hear_shell(&mut self.shells, note);
+            if heard.is_empty() {
                 continue;
-            };
+            }
             if session == self.now.session {
                 self.stale = true;
             }
@@ -2118,27 +2313,17 @@ impl Overlay {
                 .and_then(|r| r.get(&session).map(|s| s.name.clone()))
                 .filter(|n| !n.trim().is_empty())
                 .unwrap_or(session);
-            let secs = std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
-            lines.push_str(&shell_log_line(
-                &horadric_core::tasks::utc(secs),
-                &name,
-                &shell,
-            ));
+            for shell in &heard {
+                lines.push_str(&shell_log_line(&utc, &name, shell));
+            }
         }
-        let file = horadric_hooks::tasks::desktop_log_file();
-        let Some(file) = file.filter(|_| !lines.is_empty()) else {
-            return;
-        };
-        if let Some(dir) = file.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        // Text laid out for a command no list holds any more goes.
+        let kept: std::collections::HashSet<u64> =
+            self.shells.values().flatten().map(|s| s.serial).collect();
+        self.laid.retain(|serial, _| kept.contains(serial));
+        if !lines.is_empty() {
+            log_shells(lines);
         }
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&file)
-            .and_then(|mut f| std::io::Write::write_all(&mut f, lines.as_bytes()));
     }
 
     fn set_speed(&mut self, f: f32) {
@@ -2225,7 +2410,6 @@ impl Overlay {
         self.tripped();
         self.watch_turns(now);
         self.watch_now(now);
-        SHELLS_LIVE.store(active, Ordering::Release);
         self.hear_shells();
         if let Some(g) = &self.glide {
             let elapsed = now.duration_since(g.began);
@@ -2263,9 +2447,9 @@ impl Overlay {
     /// Nothing moves: the windows hide and the frames stop.
     fn rest(&mut self) {
         // The next run of control lists only what it saw begin.
-        SHELLS_LIVE.store(false, Ordering::Release);
-        take_shell_notes();
+        release_shells();
         self.shells.clear();
+        self.laid.clear();
         self.edges.clear();
         if let Some(p) = self.plate.as_mut() {
             p.hide();
@@ -2376,40 +2560,70 @@ impl Overlay {
         if self.mono.is_none() {
             self.mono = unsafe { mono_format(gpu) };
         }
-        // The commands of the session the plate shows, as many as the
-        // screen has room for under the rest.
+        // The commands of the session the plate shows, laid out once each,
+        // fitted to the room the screen has under the rest.
         let room =
             (self.work[3] - self.work[1]) as f32 / self.scale - 2.0 * BOX_MARGIN - body - PAD;
-        let mut rows: Vec<ShellRow> = Vec::new();
         let list = self.shells.get(&self.now.session);
-        if let (Some(list), Some(mono), true) = (list, self.mono.as_ref(), self.shells_open) {
+        let mut listed: Vec<&Shell> = Vec::new();
+        if let (Some(list), Some(mono)) = (list, self.mono.as_ref()) {
             for shell in list {
-                let shown = command_shown(&shell.command);
-                let Ok(layout) = render::wrapped(gpu, mono, shown, COMMAND_W) else {
+                if let std::collections::hash_map::Entry::Vacant(slot) =
+                    self.laid.entry(shell.serial)
+                {
+                    let Ok(layout) =
+                        render::wrapped(gpu, mono, command_shown(&shell.command), COMMAND_W)
+                    else {
+                        continue;
+                    };
+                    let (lines, line_h) = line_metrics(&layout);
+                    slot.insert(Laid {
+                        layout,
+                        total: command_lines(lines, &shell.command),
+                        line_h,
+                        max_h: f32::INFINITY,
+                    });
+                }
+                listed.push(shell);
+            }
+        }
+        let line_h = listed
+            .first()
+            .and_then(|s| self.laid.get(&s.serial))
+            .map_or(REASON_LINE, |l| l.line_h);
+        let wants: Vec<(usize, ShellState)> = listed
+            .iter()
+            .filter_map(|s| self.laid.get(&s.serial).map(|l| (l.total, s.state)))
+            .collect();
+        let fit = fit_shells(&wants, line_h, room);
+        let mut rows: Vec<ShellRow> = Vec::new();
+        if self.shells_open {
+            for (shell, &lines) in listed.iter().zip(&fit.shown) {
+                let Some(laid) = self.laid.get_mut(&shell.serial) else {
                     continue;
                 };
-                let (lines, line_h) = line_metrics(&layout);
-                let h = command_height(lines, line_h, shell.state);
+                let h = lines as f32 * laid.line_h;
                 // Past its lines the layout trims the last one with an
-                // ellipsis.
-                unsafe {
-                    let _ = layout.SetMaxHeight(h + 0.5);
+                // ellipsis; set only when it changes, as it lays out again.
+                if (laid.max_h - h).abs() > 0.1 {
+                    laid.max_h = h;
+                    unsafe {
+                        let _ = laid.layout.SetMaxHeight(h + 0.5);
+                    }
                 }
                 rows.push(ShellRow {
                     shell,
-                    command: layout,
+                    command: laid.layout.clone(),
                     h,
-                    hidden: hidden_lines(lines, shell.state),
+                    hidden: laid.total.saturating_sub(lines),
                 });
             }
-            let heights: Vec<f32> = rows.iter().map(|r| r.h).collect();
-            rows.truncate(shells_fit(&heights, room));
         }
-        let heights: Vec<f32> = rows.iter().map(|r| r.h).collect();
-        let shells_h = shells_height(self.shells_open, &heights);
+        let shells_h = shells_height(self.shells_open, &fit, line_h);
         let h = box_height(reason_h, self.history.len(), bypass, shells_h);
         self.shells_top = Some(body);
         let count = list.map_or_else(|| shells_count(&VecDeque::new()), shells_count);
+        let note = (self.shells_open && fit.note).then(|| shells_note(&fit));
         let s = self.scale;
         let size = ((BOX_W * s).round() as i32, (h * s).round() as i32);
         let margin = (BOX_MARGIN * s).round() as i32;
@@ -2438,6 +2652,7 @@ impl Overlay {
                 open: self.shells_open,
                 count,
                 rows,
+                note,
                 hover: hover == Some(Control::Shells),
             };
             let _ = plate.paint(|p| unsafe {
@@ -2730,6 +2945,16 @@ unsafe fn draw_plate(gpu: &render::Gpu, p: &Pen, s: PlateScene) {
     }
 }
 
+/// A command laid out once, for every frame it shows in.
+struct Laid {
+    layout: IDWriteTextLayout,
+    /// Lines of the whole command.
+    total: usize,
+    line_h: f32,
+    /// The height it is trimmed at now.
+    max_h: f32,
+}
+
 /// One command on the plate, laid out.
 struct ShellRow<'a> {
     shell: &'a Shell,
@@ -2747,6 +2972,8 @@ struct ShellsScene<'a> {
     open: bool,
     count: String,
     rows: Vec<ShellRow<'a>>,
+    /// The line under the commands, when there is room for it.
+    note: Option<String>,
     hover: bool,
 }
 
@@ -2827,15 +3054,12 @@ unsafe fn draw_shells(gpu: &render::Gpu, p: &Pen, s: &ShellsScene) {
     if !s.open {
         return;
     }
-    if s.rows.is_empty() {
-        p.text(
-            &gpu.small,
-            theme::legend(),
-            "No shell command since control began",
-            d2rect(x, y, cw, ROW),
-        );
-        return;
-    }
+    let width = |text: &str, fmt: &IDWriteTextFormat| {
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        gpu.dw
+            .CreateTextLayout(&wide, fmt, cw, ROW)
+            .map_or(80.0, |l| render::text_size(&l).0.ceil())
+    };
     for row in &s.rows {
         let shell = row.shell;
         let running = shell.state == ShellState::Running;
@@ -2864,18 +3088,25 @@ unsafe fn draw_shells(gpu: &render::Gpu, p: &Pen, s: &ShellsScene) {
             left += 48.0;
         }
         let word = shell.state.word();
-        let word_w = {
-            let wide: Vec<u16> = word.encode_utf16().collect();
-            gpu.dw
-                .CreateTextLayout(&wide, &gpu.small, cw, ROW)
-                .map_or(80.0, |l| render::text_size(&l).0.ceil())
-        };
+        let mut right = cw - width(&word, &gpu.small);
         p.text(
             &gpu.small_right,
             shell.state.colour(),
             &word,
             d2rect(x, y, cw, ROW),
         );
+        // A cut at a line's end shows no ellipsis, so the rest is counted,
+        // up here where it covers none of the command.
+        if let Some(more) = more_lines(row.hidden) {
+            let w = width(&more, &gpu.chip);
+            right -= w + 8.0;
+            p.text(
+                &gpu.chip,
+                theme::waiting(),
+                &more,
+                d2rect(x + right, y, w + 2.0, ROW),
+            );
+        }
         p.text(
             &gpu.small,
             if running {
@@ -2884,7 +3115,7 @@ unsafe fn draw_shells(gpu: &render::Gpu, p: &Pen, s: &ShellsScene) {
                 theme::text_dim()
             },
             &shell.title(),
-            d2rect(left, y, (x + cw - word_w - 10.0 - left).max(0.0), ROW),
+            d2rect(left, y, (x + right - 10.0 - left).max(0.0), ROW),
         );
         y += ROW;
         let well = d2rect(x, y, cw, row.h + 2.0 * WELL_PAD);
@@ -2916,18 +3147,10 @@ unsafe fn draw_shells(gpu: &render::Gpu, p: &Pen, s: &ShellsScene) {
             D2D1_DRAW_TEXT_OPTIONS_CLIP,
         );
         p.rt.PopAxisAlignedClip();
-        // A cut at a line's end shows no ellipsis, so the rest is counted.
-        if let Some(more) = more_lines(row.hidden) {
-            let (tx, ty) = (x + cw - 74.0, y + WELL_PAD + row.h - 15.0);
-            p.fill_rounded(d2rect(tx, ty, 70.0, 15.0), 4.0, theme::plate_bottom());
-            p.text(
-                &gpu.chip,
-                theme::waiting(),
-                &more,
-                d2rect(tx + 6.0, ty, 62.0, 15.0),
-            );
-        }
         y += row.h + 2.0 * WELL_PAD + SHELL_GAP;
+    }
+    if let Some(note) = &s.note {
+        p.text(&gpu.small, theme::legend(), note, d2rect(x, y, cw, ROW));
     }
 }
 
@@ -3475,18 +3698,33 @@ mod tests {
         }
     }
 
+    fn shell(id: &str, tool: &str, cmd: &str) -> Shell {
+        Shell {
+            id: id.into(),
+            tool: tool.into(),
+            command: cmd.into(),
+            description: String::new(),
+            agent: false,
+            at: "10:00:00".into(),
+            state: ShellState::Running,
+            serial: 0,
+        }
+    }
+
     fn began(id: &str, cmd: &str) -> ShellNote {
         ShellNote::Began {
             session: "s".into(),
-            shell: Shell {
-                id: id.into(),
-                tool: "PowerShell".into(),
-                command: cmd.into(),
-                description: String::new(),
-                agent: false,
-                at: "10:00:00".into(),
-                state: ShellState::Running,
-            },
+            shell: shell(id, "PowerShell", cmd),
+        }
+    }
+
+    fn ended(id: &str, tool: &str, state: ShellState) -> ShellNote {
+        ShellNote::Ended {
+            session: "s".into(),
+            id: id.into(),
+            tool: tool.into(),
+            command: String::new(),
+            state,
         }
     }
 
@@ -3498,7 +3736,24 @@ mod tests {
         assert!(!is_shell_tool("BashOutput"));
         assert!(!is_shell_tool("Read"));
         assert!(shell_note("s", &hook("PreToolUse", "Read", "t"), "10:00:00").is_none());
-        assert!(shell_note("s", &hook("Stop", "Bash", "t"), "10:00:00").is_none());
+        assert!(shell_note("s", &hook("Notification", "Bash", "t"), "10:00:00").is_none());
+    }
+
+    #[test]
+    fn the_main_loops_turn_edges_end_what_still_runs() {
+        for name in ["Stop", "StopFailure", "SessionEnd", "UserPromptSubmit"] {
+            assert_eq!(
+                shell_note("s", &HookEvent::synthetic(name), "t"),
+                Some(ShellNote::TurnEnded {
+                    session: "s".into()
+                })
+            );
+        }
+        let sub = HookEvent {
+            agent_id: Some("a".into()),
+            ..HookEvent::synthetic("Stop")
+        };
+        assert!(shell_note("s", &sub, "t").is_none());
     }
 
     #[test]
@@ -3574,10 +3829,14 @@ mod tests {
     fn a_failure_hook_carries_its_exit_code() {
         let mut e = hook("PostToolUseFailure", "Bash", "t1");
         e.error = Some(json!("Exit code 127\ncommand not found"));
-        let Some(ShellNote::Ended { id, state, .. }) = shell_note("s", &e, "10:00:01") else {
+        let Some(ShellNote::Ended {
+            id, tool, state, ..
+        }) = shell_note("s", &e, "10:00:01")
+        else {
             panic!("not an end");
         };
         assert_eq!(id, "t1");
+        assert_eq!(tool, "Bash");
         assert_eq!(state, ShellState::Failed(Some(127)));
         let mut stop = hook("PostToolUseFailure", "Bash", "t2");
         stop.is_interrupt = Some(json!(true));
@@ -3599,25 +3858,77 @@ mod tests {
         let list = &lists["s"];
         assert_eq!(list.len(), SHELLS);
         assert_eq!(list[0].command, format!("cmd {}", SHELLS + 1));
-        let ended = |id: &str, state| ShellNote::Ended {
-            session: "s".into(),
-            id: id.into(),
-            state,
-        };
-        let done = hear_shell(&mut lists, ended("t9", ShellState::Done)).unwrap();
-        assert_eq!(done.command, "cmd 9");
+        let done = hear_shell(&mut lists, ended("t9", "PowerShell", ShellState::Done));
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].command, "cmd 9");
         assert_eq!(lists["s"][0].state, ShellState::Done);
         // Ended twice, or begun before control: nothing to end.
-        assert!(hear_shell(&mut lists, ended("t9", ShellState::Failed(Some(1)))).is_none());
-        assert!(hear_shell(&mut lists, ended("t0", ShellState::Done)).is_none());
-        assert!(hear_shell(&mut lists, ended("", ShellState::Done)).is_none());
+        let again = ended("t9", "PowerShell", ShellState::Failed(Some(1)));
+        assert!(hear_shell(&mut lists, again).is_empty());
+        assert!(hear_shell(&mut lists, ended("t0", "PowerShell", ShellState::Done)).is_empty());
         let other = ShellNote::Ended {
             session: "x".into(),
             id: "t8".into(),
+            tool: "PowerShell".into(),
+            command: "cmd 8".into(),
             state: ShellState::Done,
         };
-        assert!(hear_shell(&mut lists, other).is_none());
+        assert!(hear_shell(&mut lists, other).is_empty());
         assert_eq!(lists["s"][1].state, ShellState::Running);
+    }
+
+    #[test]
+    fn an_end_without_an_id_ends_the_oldest_of_its_shell_still_running() {
+        let mut lists = HashMap::new();
+        let begin = |lists: &mut HashMap<_, _>, tool: &str, cmd: &str| {
+            hear_shell(
+                lists,
+                ShellNote::Began {
+                    session: "s".into(),
+                    shell: shell("", tool, cmd),
+                },
+            )
+        };
+        begin(&mut lists, "Bash", "first");
+        begin(&mut lists, "PowerShell", "second");
+        begin(&mut lists, "Bash", "third");
+        let done = hear_shell(&mut lists, ended("", "Bash", ShellState::Done));
+        assert_eq!(done[0].command, "first");
+        let done = hear_shell(&mut lists, ended("", "Bash", ShellState::Done));
+        assert_eq!(done[0].command, "third");
+        assert!(hear_shell(&mut lists, ended("", "Bash", ShellState::Done)).is_empty());
+        assert_eq!(lists["s"][1].state, ShellState::Running);
+
+        // Its command, when it says one, picks among them.
+        begin(&mut lists, "Bash", "older");
+        begin(&mut lists, "Bash", "mine");
+        let by_command = ShellNote::Ended {
+            session: "s".into(),
+            id: String::new(),
+            tool: "Bash".into(),
+            command: "mine".into(),
+            state: ShellState::Done,
+        };
+        assert_eq!(hear_shell(&mut lists, by_command)[0].command, "mine");
+        assert_eq!(lists["s"][1].state, ShellState::Running);
+    }
+
+    #[test]
+    fn a_turns_end_stops_what_never_got_its_end() {
+        let mut lists = HashMap::new();
+        hear_shell(&mut lists, began("a", "x"));
+        hear_shell(&mut lists, began("b", "y"));
+        hear_shell(&mut lists, ended("a", "PowerShell", ShellState::Done));
+        let turn = |session: &str| ShellNote::TurnEnded {
+            session: session.into(),
+        };
+        assert!(hear_shell(&mut lists, turn("other")).is_empty());
+        let stopped = hear_shell(&mut lists, turn("s"));
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(stopped[0].command, "y");
+        assert_eq!(lists["s"][0].state, ShellState::Stopped);
+        assert_eq!(lists["s"][1].state, ShellState::Done);
+        assert!(hear_shell(&mut lists, turn("s")).is_empty());
     }
 
     #[test]
@@ -3637,54 +3948,101 @@ mod tests {
         assert_eq!(ShellState::Failed(Some(2)).word(), "exit 2");
         assert_eq!(ShellState::Failed(None).word(), "failed");
         assert_eq!(ShellState::TimedOut.word(), "timed out, in background");
+        assert_eq!(ShellState::Stopped.word(), "stopped");
         let states = [
             ShellState::Running,
             ShellState::Done,
             ShellState::Failed(None),
             ShellState::Interrupted,
             ShellState::TimedOut,
+            ShellState::Stopped,
         ];
         let glyphs: std::collections::HashSet<char> = states.iter().map(|s| s.glyph()).collect();
         assert_eq!(glyphs.len(), states.len());
     }
 
     #[test]
-    fn the_running_command_shows_more_of_itself() {
-        assert_eq!(command_height(20, 14.0, ShellState::Running), 8.0 * 14.0);
-        assert_eq!(command_height(20, 14.0, ShellState::Done), 2.0 * 14.0);
-        assert_eq!(command_height(1, 14.0, ShellState::Running), 14.0);
-        assert_eq!(command_height(0, 14.0, ShellState::Done), 14.0);
-        assert_eq!(hidden_lines(20, ShellState::Running), 12);
-        assert_eq!(hidden_lines(3, ShellState::Done), 1);
-        assert_eq!(hidden_lines(2, ShellState::Done), 0);
+    fn a_command_counts_its_lines_past_what_is_laid_out() {
+        assert_eq!(command_lines(3, "a\nb\nc"), 3);
+        assert_eq!(command_lines(0, ""), 1);
+        let long = format!("{}\nmore\nand more", "x".repeat(COMMAND_CHARS));
+        assert_eq!(command_lines(40, &long), 42);
         assert_eq!(more_lines(0), None);
         assert_eq!(more_lines(1).as_deref(), Some("+1 line"));
         assert_eq!(more_lines(12).as_deref(), Some("+12 lines"));
-        let long = "é".repeat(COMMAND_CHARS + 10);
-        assert_eq!(command_shown(&long).chars().count(), COMMAND_CHARS);
+        let wide = "é".repeat(COMMAND_CHARS + 10);
+        assert_eq!(command_shown(&wide).chars().count(), COMMAND_CHARS);
         assert_eq!(command_shown("ls"), "ls");
     }
 
     #[test]
     fn the_shell_section_sits_under_the_rest_and_grows_with_its_commands() {
         let body = body_height(0.0, 2, false);
-        let folded = shells_height(false, &[14.0, 28.0]);
+        let fit = Fit {
+            shown: vec![1, 2],
+            more: 0,
+            note: false,
+        };
+        let folded = shells_height(false, &fit, 14.0);
         assert_eq!(folded, SHELLS_GAP + FOLD_H);
-        assert_eq!(shells_height(true, &[]), folded + ROW);
-        let open = shells_height(true, &[14.0, 28.0]);
-        assert_eq!(open - folded, shell_row(14.0) + shell_row(28.0));
+        let open = shells_height(true, &fit, 14.0);
+        assert_eq!(open - folded, shell_row(1, 14.0) + shell_row(2, 14.0));
+        let noted = Fit { note: true, ..fit };
+        assert_eq!(shells_height(true, &noted, 14.0), open + ROW);
         assert_eq!(box_height(0.0, 2, false, open), (body + open + PAD).ceil());
         assert_eq!(box_height(0.0, 2, false, 0.0), (body + PAD).ceil());
     }
 
     #[test]
-    fn only_the_newest_commands_that_fit_on_screen_are_shown() {
-        let rows = [14.0, 112.0, 28.0];
+    fn with_room_every_command_shows_as_much_as_its_state_allows() {
+        let rows = [(20, ShellState::Running), (5, ShellState::Done)];
+        let fit = fit_shells(&rows, 14.0, 10_000.0);
+        assert_eq!(fit.shown, vec![RUNNING_LINES, DONE_LINES]);
+        assert_eq!((fit.more, fit.note), (0, false));
+        let none = fit_shells(&[], 14.0, 10_000.0);
+        assert!(none.shown.is_empty() && none.note);
+        assert!(!fit_shells(&[], 14.0, SHELLS_GAP + FOLD_H).note);
+    }
+
+    #[test]
+    fn a_tall_running_command_gives_up_lines_before_anything_is_left_out() {
         let head = SHELLS_GAP + FOLD_H;
-        assert_eq!(shells_fit(&rows, 10_000.0), 3);
-        assert_eq!(shells_fit(&rows, head + shell_row(14.0)), 1);
-        assert_eq!(shells_fit(&rows, head + shell_row(14.0) - 1.0), 0);
-        assert_eq!(shells_fit(&rows, 0.0), 0);
+        let rows = [
+            (20, ShellState::Running),
+            (1, ShellState::Done),
+            (1, ShellState::Done),
+        ];
+        // Room for all three at two lines and one line more.
+        let room = head + shell_row(3, 14.0) + 2.0 * shell_row(1, 14.0);
+        let fit = fit_shells(&rows, 14.0, room);
+        assert_eq!(fit.shown, vec![3, 1, 1]);
+        assert_eq!((fit.more, fit.note), (0, false));
+        assert!(shells_height(true, &fit, 14.0) <= room);
+    }
+
+    #[test]
+    fn what_cannot_fit_is_left_out_and_counted() {
+        let head = SHELLS_GAP + FOLD_H;
+        let rows = [
+            (20, ShellState::Running),
+            (5, ShellState::Done),
+            (5, ShellState::Done),
+        ];
+        let room = head + shell_row(2, 14.0) + ROW + 10.0;
+        let fit = fit_shells(&rows, 14.0, room);
+        assert_eq!(fit.shown, vec![2]);
+        assert_eq!((fit.more, fit.note), (2, true));
+        assert!(shells_height(true, &fit, 14.0) <= room);
+        assert_eq!(shells_note(&fit), "2 more not shown, no room on the screen");
+        let tight = fit_shells(&rows, 14.0, head + ROW);
+        assert!(tight.shown.is_empty());
+        assert_eq!((tight.more, tight.note), (3, true));
+        let none = fit_shells(&rows, 14.0, 0.0);
+        assert!(none.shown.is_empty() && !none.note);
+        assert_eq!(
+            shells_note(&Fit::default()),
+            "No shell command since control began"
+        );
     }
 
     #[test]
@@ -3714,28 +4072,29 @@ mod tests {
     }
 
     #[test]
-    fn the_log_says_what_ran_where_and_how_it_went() {
-        let mut shell = Shell {
-            id: "t".into(),
-            tool: "PowerShell".into(),
-            command: "Get-Process |\n  Select -First 3".into(),
+    fn the_log_gives_the_command_at_its_start_and_only_a_glimpse_at_its_end() {
+        let mut sh = Shell {
             description: "List processes".into(),
-            agent: false,
-            at: "10:00:00".into(),
-            state: ShellState::Running,
+            ..shell("t", "PowerShell", "Get-Process |\n  Select -First 3")
         };
         assert_eq!(
-            shell_log_line("2026-11-26T10:00:00Z", "fix plc", &shell),
+            shell_log_line("2026-11-26T10:00:00Z", "fix plc", &sh),
             "2026-11-26T10:00:00Z  fix plc  shell command started  PowerShell  \
              (Get-Process | Select -First 3)  [List processes]\n"
         );
-        shell.state = ShellState::Failed(Some(1));
-        shell.agent = true;
-        shell.description.clear();
+        sh.state = ShellState::Failed(Some(1));
+        sh.agent = true;
+        sh.description.clear();
         assert_eq!(
-            shell_log_line("t", "s", &shell),
+            shell_log_line("t", "s", &sh),
             "t  s  shell command exit 1 by a subagent  PowerShell  \
              (Get-Process | Select -First 3)\n"
         );
+        sh.command = "y".repeat(COMMAND_CHARS * 2);
+        let end = shell_log_line("t", "s", &sh);
+        assert!(end.contains(&format!("({}...)", "y".repeat(LOG_END_CHARS))));
+        sh.state = ShellState::Running;
+        let start = shell_log_line("t", "s", &sh);
+        assert!(start.contains(&format!("({})", "y".repeat(COMMAND_CHARS))));
     }
 }
