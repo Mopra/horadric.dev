@@ -16,8 +16,8 @@ use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnviron
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use horadric_core::vault::identity as core;
-pub use horadric_core::vault::identity::{Git, Identity, Resolved, Tool};
 use horadric_core::vault::split;
+pub use horadric_core::vault::identity::{Git, Identity, Resolved, Tool};
 
 use crate::console;
 

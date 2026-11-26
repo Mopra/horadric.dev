@@ -156,9 +156,7 @@ pub fn menu_picked(key: &str, base: usize, picked: usize) -> bool {
     let before = crate::town::identity_for(key);
     let result = match picked - base {
         GIVE_BACK => match before.as_deref() {
-            Some(slug) => {
-                identity::unsplit_site(slug, &site).map(|()| Some((slug.to_string(), true)))
-            }
+            Some(slug) => identity::unsplit_site(slug, &site).map(|()| Some((slug.to_string(), true))),
             None => Ok(None),
         },
         FRESH => identity::split_site(key, &site, None)

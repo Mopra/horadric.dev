@@ -15,8 +15,8 @@ use windows::Win32::Foundation::{
     VARIANT_BOOL, WPARAM,
 };
 use windows::Win32::System::Com::{
-    IConnectionPoint, IConnectionPointContainer, IDispatch, DISPATCH_FLAGS, DISPATCH_METHOD,
-    DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPPARAMS, EXCEPINFO,
+    IConnectionPoint, IConnectionPointContainer, IDispatch, DISPATCH_FLAGS, DISPATCH_METHOD, DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPPARAMS,
+    EXCEPINFO,
 };
 use windows::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
@@ -77,14 +77,8 @@ struct SinkVtable {
     release: unsafe extern "system" fn(*mut Sink) -> u32,
     type_info_count: unsafe extern "system" fn(*mut Sink, *mut u32) -> HRESULT,
     type_info: unsafe extern "system" fn(*mut Sink, u32, u32, *mut *mut c_void) -> HRESULT,
-    ids_of_names: unsafe extern "system" fn(
-        *mut Sink,
-        *const GUID,
-        *const PCWSTR,
-        u32,
-        u32,
-        *mut i32,
-    ) -> HRESULT,
+    ids_of_names:
+        unsafe extern "system" fn(*mut Sink, *const GUID, *const PCWSTR, u32, u32, *mut i32) -> HRESULT,
     invoke: unsafe extern "system" fn(
         *mut Sink,
         i32,
@@ -450,8 +444,7 @@ impl Atl {
             let dll: HMODULE = LoadLibraryExW(w!("atl.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32)
                 .map_err(|e| format!("atl.dll is missing from this Windows: {}", e.message()))?;
             let find = |name: PCSTR| {
-                GetProcAddress(dll, name)
-                    .ok_or_else(|| "atl.dll is not the one expected".to_string())
+                GetProcAddress(dll, name).ok_or_else(|| "atl.dll is not the one expected".to_string())
             };
             Ok(Atl {
                 init: std::mem::transmute::<
@@ -489,7 +482,12 @@ impl Disp {
 
     /// `args` stay the caller's, so a password among them can be wiped
     /// after the call.
-    fn invoke(&self, name: &str, flags: DISPATCH_FLAGS, args: &mut [Var]) -> Result<Var, String> {
+    fn invoke(
+        &self,
+        name: &str,
+        flags: DISPATCH_FLAGS,
+        args: &mut [Var],
+    ) -> Result<Var, String> {
         let fail = |why: String| format!("the Remote Desktop control refused {name}: {why}");
         let wide = HSTRING::from(name);
         let mut id = 0i32;

@@ -534,10 +534,7 @@ pub(crate) fn pane_env(id: &str) -> Vec<(String, String)> {
     };
     let program = host_program();
     vec![
-        (
-            "BROWSER".into(),
-            open_url::browser_value(&no_spaces(&program)),
-        ),
+        ("BROWSER".into(), open_url::browser_value(&no_spaces(&program))),
         (PANE_ENV.into(), pane.to_env()),
     ]
 }

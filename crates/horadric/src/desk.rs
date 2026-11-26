@@ -399,7 +399,9 @@ fn launch_body(args: &Value) -> Result<String, String> {
         (None, Some(path)) if more.is_empty() => json!({ "path": path }),
         (None, Some(path)) => json!({ "path": path, "args": more }),
         (None, None) => {
-            return Err("say what to open: app, a name such as edge or notepad, or path".into())
+            return Err(
+                "say what to open: app, a name such as edge or notepad, or path".into(),
+            )
         }
     };
     let body = body.to_string();
@@ -627,26 +629,27 @@ mod tests {
                 let authorized = head.contains(&format!("Authorization: Bearer {token}"));
                 let (path, query) = target.split_once('?').unwrap_or((target, ""));
                 let framed;
-                let (status, extra, answer): (u16, &str, Vec<u8>) = match (method, path) {
-                    ("GET", "/hello") => {
-                        let nonce = target.split_once("n=").unwrap().1;
-                        (200, "", remote::proof(token, nonce).into_bytes())
-                    }
-                    _ if !authorized => (403, "", b"forbidden".to_vec()),
-                    ("GET", "/frame.jpg") => {
-                        framed = fake_frame(query);
-                        (framed.0, framed.1.as_str(), framed.2.clone())
-                    }
-                    ("POST", "/input") => (204, "", Vec::new()),
-                    ("GET", "/apps") => (
-                        200,
-                        "",
-                        br#"{"desk":[{"app":"msedge","title":"Mail"}],"human":["chrome"]}"#
-                            .to_vec(),
-                    ),
-                    ("POST", "/launch") => (launch.0, "", launch.1.as_bytes().to_vec()),
-                    _ => (404, "", Vec::new()),
-                };
+                let (status, extra, answer): (u16, &str, Vec<u8>) =
+                    match (method, path) {
+                        ("GET", "/hello") => {
+                            let nonce = target.split_once("n=").unwrap().1;
+                            (200, "", remote::proof(token, nonce).into_bytes())
+                        }
+                        _ if !authorized => (403, "", b"forbidden".to_vec()),
+                        ("GET", "/frame.jpg") => {
+                            framed = fake_frame(query);
+                            (framed.0, framed.1.as_str(), framed.2.clone())
+                        }
+                        ("POST", "/input") => (204, "", Vec::new()),
+                        ("GET", "/apps") => (
+                            200,
+                            "",
+                            br#"{"desk":[{"app":"msedge","title":"Mail"}],"human":["chrome"]}"#
+                                .to_vec(),
+                        ),
+                        ("POST", "/launch") => (launch.0, "", launch.1.as_bytes().to_vec()),
+                        _ => (404, "", Vec::new()),
+                    };
                 let head = format!(
                     "HTTP/1.0 {status} X\r\n{extra}Content-Length: {}\r\n\r\n",
                     answer.len()
@@ -661,8 +664,10 @@ mod tests {
     /// A folder of this test's own, with a token file in it when `token`
     /// is one, and the session named as an open window does.
     fn desk(name: &str, port: u16, token: Option<&str>) -> Desk {
-        let dir =
-            std::env::temp_dir().join(format!("horadric-desk-test-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "horadric-desk-test-{}-{name}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(desk::TOKEN_FILE);
@@ -723,10 +728,7 @@ mod tests {
             assert!(said.contains("agent's desk"), "{said}");
             assert!(said.contains("Agent's desk"), "{said}");
             let name = t["name"].as_str().unwrap();
-            if matches!(
-                name,
-                "desk_type" | "desk_press" | "desk_click" | "desk_open"
-            ) {
+            if matches!(name, "desk_type" | "desk_press" | "desk_click" | "desk_open") {
                 assert!(said.contains("before typing"), "{said}");
             }
             if matches!(name, "desk_screenshot" | "desk_open") {
@@ -776,15 +778,9 @@ mod tests {
         }
         // A file that names no session is no open window either.
         std::fs::write(&session, "").unwrap();
-        assert_eq!(
-            answer(&at, "desk_click", &json!({ "x": 1, "y": 2 })).unwrap_err(),
-            CLOSED
-        );
+        assert_eq!(answer(&at, "desk_click", &json!({ "x": 1, "y": 2 })).unwrap_err(), CLOSED);
         at.session_file = None;
-        assert_eq!(
-            answer(&at, "desk_screenshot", &json!({})).unwrap_err(),
-            CLOSED
-        );
+        assert_eq!(answer(&at, "desk_screenshot", &json!({})).unwrap_err(), CLOSED);
         assert_eq!(asked.lock().unwrap().len(), before);
     }
 
@@ -828,39 +824,25 @@ mod tests {
         let at = desk("input", port, Some(TOKEN));
         let done = |name: &str, args: Value| said_text(&answer(&at, name, &args).unwrap());
         assert_eq!(
-            done(
-                "desk_click",
-                json!({ "x": 812.4, "y": 440, "double": true })
-            ),
+            done("desk_click", json!({ "x": 812.4, "y": 440, "double": true })),
             "double clicked at 812,440"
         );
-        assert_eq!(
-            done("desk_type", json!({ "text": "æøå" })),
-            "typed 3 characters"
-        );
-        assert_eq!(
-            done("desk_press", json!({ "key": "Ctrl+S" })),
-            "pressed Ctrl+S"
-        );
+        assert_eq!(done("desk_type", json!({ "text": "æøå" })), "typed 3 characters");
+        assert_eq!(done("desk_press", json!({ "key": "Ctrl+S" })), "pressed Ctrl+S");
         assert_eq!(
             done("desk_scroll", json!({ "x": 5, "y": 6, "delta": -3 })),
             "scrolled down 3 notches at 5,6"
         );
         let asked = asked.lock().unwrap();
-        let posts: Vec<&(String, String, bool)> = asked
-            .iter()
-            .filter(|(what, ..)| what == "POST /input")
-            .collect();
+        let posts: Vec<&(String, String, bool)> =
+            asked.iter().filter(|(what, ..)| what == "POST /input").collect();
         assert_eq!(posts.len(), 4);
         assert!(posts.iter().all(|(_, _, carried)| *carried));
         let typed: Value = serde_json::from_str(&posts[1].1).unwrap();
         assert_eq!(typed, json!([{ "kind": "text", "text": "æøå" }]));
         // Each call proves the hand before the token goes to it.
         for pair in asked.chunks(2) {
-            assert!(
-                pair[0].0.starts_with("GET /hello?n=") && !pair[0].2,
-                "{pair:?}"
-            );
+            assert!(pair[0].0.starts_with("GET /hello?n=") && !pair[0].2, "{pair:?}");
             assert_eq!(pair[1].0, "POST /input");
         }
     }
@@ -895,14 +877,8 @@ mod tests {
         });
         let line = said_text(&answer(&at, "desk_screenshot", &edge).unwrap());
         assert!(line.contains("This image is 100 x 50 and shows"), "{line}");
-        assert!(
-            line.contains("from 3000,1700 to 3200,1800: multiply"),
-            "{line}"
-        );
-        assert!(
-            line.contains("by 2, then add 3000 to x and 1700 to y"),
-            "{line}"
-        );
+        assert!(line.contains("from 3000,1700 to 3200,1800: multiply"), "{line}");
+        assert!(line.contains("by 2, then add 3000 to x and 1700 to y"), "{line}");
         let off = json!({ "zoom": { "x": 5000, "y": 0, "width": 10, "height": 10 } });
         let e = answer(&at, "desk_screenshot", &off).unwrap_err();
         assert!(e.contains("not on the screen, which is 3200 x 1800"), "{e}");
@@ -948,10 +924,7 @@ mod tests {
             json!({ "path": r"C:\x\y.exe", "args": ["--new"] })
         );
 
-        let (port, _) = hand(
-            TOKEN,
-            (409, "classic Outlook can not run twice, and has no twin"),
-        );
+        let (port, _) = hand(TOKEN, (409, "classic Outlook can not run twice, and has no twin"));
         let at = desk("refused", port, Some(TOKEN));
         assert_eq!(
             answer(&at, "desk_open", &json!({ "app": "outlook" })).unwrap_err(),
@@ -961,8 +934,9 @@ mod tests {
 
     #[test]
     fn a_launch_is_an_app_or_a_path_with_arguments() {
-        let body =
-            |args: Value| -> Value { serde_json::from_str(&launch_body(&args).unwrap()).unwrap() };
+        let body = |args: Value| -> Value {
+            serde_json::from_str(&launch_body(&args).unwrap()).unwrap()
+        };
         assert_eq!(body(json!({ "app": " edge " })), json!({ "app": "edge" }));
         assert_eq!(
             body(json!({ "path": r"shell:AppsFolder\X!App" })),
@@ -972,10 +946,7 @@ mod tests {
             body(json!({ "path": "a.exe", "args": ["-x", "y z"] })),
             json!({ "path": "a.exe", "args": ["-x", "y z"] })
         );
-        assert_eq!(
-            body(json!({ "app": "edge", "args": [] })),
-            json!({ "app": "edge" })
-        );
+        assert_eq!(body(json!({ "app": "edge", "args": [] })), json!({ "app": "edge" }));
         for bad in [
             json!({}),
             json!({ "app": "" }),
@@ -994,10 +965,7 @@ mod tests {
         assert!(ok.starts_with("Started notepad on the desk. "), "{ok}");
         assert!(ok.contains("click it before typing"), "{ok}");
         let twin = launch_said(200, r#"{"started":"olk","instead_of":"outlook"}"#).unwrap();
-        assert!(
-            twin.starts_with("Started olk on the desk in place of outlook. "),
-            "{twin}"
-        );
+        assert!(twin.starts_with("Started olk on the desk in place of outlook. "), "{twin}");
         let noted = launch_said(200, r#"{"started":"notepad","note":"Mind the tabs"}"#).unwrap();
         assert!(
             noted.starts_with("Started notepad on the desk. Mind the tabs. Its window may"),
@@ -1007,37 +975,23 @@ mod tests {
         assert!(launch_said(200, both)
             .unwrap()
             .starts_with("Started msedge on the desk in place of chrome: because. mind it. Its"));
-        assert!(launch_said(200, "not json")
-            .unwrap()
-            .contains("did not say what"));
+        assert!(launch_said(200, "not json").unwrap().contains("did not say what"));
         assert!(launch_said(409, "").unwrap_err().contains("gave no reason"));
         assert!(launch_said(404, "").unwrap_err().contains("older"));
-        assert_eq!(
-            launch_said(500, "broke").unwrap_err(),
-            "the desk answered 500: broke"
-        );
+        assert_eq!(launch_said(500, "broke").unwrap_err(), "the desk answered 500: broke");
     }
 
     #[test]
     fn what_is_open_reads_whatever_the_hand_sends() {
         let text = |body: &str| apps_text(body.as_bytes()).unwrap();
-        assert_eq!(
-            text(r#"{"desk":[],"human":[]}"#),
-            "No window is open on the desk."
-        );
+        assert_eq!(text(r#"{"desk":[],"human":[]}"#), "No window is open on the desk.");
         assert_eq!(text("{}"), "No window is open on the desk.");
         let both = text(
             r#"{"desk":[{"app":"notepad","title":"a\nb"},{"app":"code","title":""}],"human":["chrome","outlook"]}"#,
         );
-        assert!(
-            both.starts_with("Open on the desk:\n- notepad: \"a b\"\n- code\n"),
-            "{both}"
-        );
+        assert!(both.starts_with("Open on the desk:\n- notepad: \"a b\"\n- code\n"), "{both}");
         assert!(both.contains("own session: chrome, outlook."), "{both}");
-        let long = format!(
-            r#"{{"desk":[{{"app":"x","title":"{}"}}]}}"#,
-            "t".repeat(500)
-        );
+        let long = format!(r#"{{"desk":[{{"app":"x","title":"{}"}}]}}"#, "t".repeat(500));
         assert!(text(&long).len() < 200);
         assert!(apps_text(b"<html>").is_err());
     }
@@ -1048,9 +1002,6 @@ mod tests {
             worded(&remote::input_refusal(409, "a UAC prompt is up")),
             "the desk's Windows did not take the input: a UAC prompt is up"
         );
-        assert_eq!(
-            worded("the tunnel did not answer: x"),
-            "the desk's hand did not answer: x"
-        );
+        assert_eq!(worded("the tunnel did not answer: x"), "the desk's hand did not answer: x");
     }
 }

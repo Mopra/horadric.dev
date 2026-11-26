@@ -573,12 +573,7 @@ mod tests {
         }
         let mut s = json!({});
         install_into(&mut s, 43117);
-        for event in [
-            "PreCompact",
-            "PostCompact",
-            "PostModelSwitch",
-            "TaskCreated",
-        ] {
+        for event in ["PreCompact", "PostCompact", "PostModelSwitch", "TaskCreated"] {
             assert!(s.pointer(&format!("/hooks/{event}")).is_some(), "{event}");
         }
         // Settings an older build wrote lack the new events, so they are

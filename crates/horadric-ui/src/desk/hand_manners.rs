@@ -321,8 +321,7 @@ pub(super) fn shortcut_parts(link: &Path) -> Option<(String, String)> {
     unsafe {
         let shell: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
         let file: IPersistFile = shell.cast().ok()?;
-        file.Load(&HSTRING::from(link.as_os_str()), STGM_READ)
-            .ok()?;
+        file.Load(&HSTRING::from(link.as_os_str()), STGM_READ).ok()?;
         let mut target = [0u16; 1024];
         shell.GetPath(&mut target, std::ptr::null_mut(), 0).ok()?;
         let mut arguments = [0u16; 2048];
@@ -357,12 +356,6 @@ mod tests {
             child: Some((String::new(), String::new())),
             line: String::new(),
         }];
-        assert!(!sweep(
-            console,
-            &everything,
-            "",
-            last_input(),
-            "desk-hand-test.log"
-        ));
+        assert!(!sweep(console, &everything, "", last_input(), "desk-hand-test.log"));
     }
 }

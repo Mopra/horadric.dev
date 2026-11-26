@@ -550,10 +550,7 @@ pub fn pretty_id(id: &str) -> String {
 pub fn offered_models(models: &[crate::folio::ModelInfo]) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for m in models {
-        if m.value == "default"
-            || m.resolved.is_empty()
-            || out.iter().any(|(id, _)| *id == m.resolved)
-        {
+        if m.value == "default" || m.resolved.is_empty() || out.iter().any(|(id, _)| *id == m.resolved) {
             continue;
         }
         let mut name = pretty_id(&m.resolved);
@@ -838,9 +835,7 @@ mod tests {
         .unwrap();
         assert_eq!((odd.effort, odd.fast), (None, false));
         assert_eq!(
-            Status::from_json(br#"{"effort": {"level": "low"}}"#)
-                .unwrap()
-                .model_label(),
+            Status::from_json(br#"{"effort": {"level": "low"}}"#).unwrap().model_label(),
             None
         );
     }
@@ -848,12 +843,7 @@ mod tests {
     #[test]
     fn the_models_offered_first_are_the_current_ones() {
         let ids: Vec<&str> = BUILT_IN_MODELS.iter().map(|(id, _)| *id).collect();
-        for id in [
-            "claude-fable-5-2",
-            "claude-opus-5-5",
-            "claude-sonnet-5-5",
-            "claude-haiku-5-5",
-        ] {
+        for id in ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"] {
             assert!(ids.contains(&id), "{id}");
         }
         assert!(!ids.contains(&"claude-fable-5-1"));
@@ -1156,10 +1146,7 @@ mod tests {
         );
         learn_models(&offered);
         assert_eq!(known_models(), offered);
-        assert_eq!(
-            Setting::Model.name_of(Some("claude-fable-5-2")),
-            "Fable 5.2"
-        );
+        assert_eq!(Setting::Model.name_of(Some("claude-fable-5-2")), "Fable 5.2");
         assert_eq!(Setting::Workflow.choices().len(), 3);
         learn_models(&[]);
         assert_eq!(known_models(), offered);

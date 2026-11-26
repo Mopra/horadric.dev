@@ -25,19 +25,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
     match in_pane(&pane, url) {
         Ok(()) => Ok(()),
         Err(why) => {
-            eprintln!(
-                "horadric: the browser pane did not open it ({why}), the system browser does"
-            );
+            eprintln!("horadric: the browser pane did not open it ({why}), the system browser does");
             system_open(url)
         }
     }
 }
 
 fn in_pane(pane: &Pane, url: &str) -> Result<(), String> {
-    let headers = [
-        (COMMAND_HEADER, "browser"),
-        (SESSION_HEADER, pane.id.as_str()),
-    ];
+    let headers = [(COMMAND_HEADER, "browser"), (SESSION_HEADER, pane.id.as_str())];
     let body = json!({ "op": OPEN_OP, "url": url, "key": pane.key }).to_string();
     let (status, text) = client::ask(pane.port, BROWSER_PATH, &headers, &body, APP_WAIT)
         .map_err(|e| format!("Horadric did not answer: {e}"))?;
