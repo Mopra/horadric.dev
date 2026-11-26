@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use horadric_core::desktop_programs::Mode;
+use horadric_core::takeover_programs::Mode;
 
 use crate::menu::Item;
 

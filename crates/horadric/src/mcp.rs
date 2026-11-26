@@ -16,7 +16,7 @@
 //! in the project's Arcane Sanctuary.
 //!
 //! The desktop tools, for programs on the user's Windows desktop, are in
-//! `desktop`: they work here in this process and ask the app only whether
+//! `takeover`: they work here in this process and ask the app only whether
 //! the human allows them.
 
 use std::cell::OnceCell;
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use horadric_core::desktop_programs::{Mode, OFF};
+use horadric_core::takeover_programs::{Mode, OFF};
 use horadric_core::glow::{self, Touch};
 use horadric_core::vault::web::page::{self, FIND, FOCUS, INTO_VIEW, POINT, RECT, SELECT};
 use horadric_hooks::{
@@ -38,7 +38,7 @@ use serde_json::{json, Value};
 mod forge;
 
 #[cfg(windows)]
-use crate::desktop::Desktop;
+use crate::takeover::Takeover;
 
 /// What this server speaks when the client does not say.
 const PROTOCOL: &str = "2025-06-18";
@@ -91,7 +91,7 @@ pub fn run() -> Result<(), String> {
         #[cfg(target_os = "macos")]
         lore: |_, _| None,
         #[cfg(windows)]
-        desktop: Desktop::default(),
+        takeover: Takeover::default(),
     };
     let mut out = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
@@ -247,7 +247,7 @@ struct Server<A> {
     /// The desktop programs the agent reads and operates, its UI
     /// Automation set up on first use.
     #[cfg(windows)]
-    desktop: Desktop,
+    takeover: Takeover,
 }
 
 impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
@@ -411,7 +411,7 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
                 Err(OFF.into())
             }
             #[cfg(windows)]
-            n if is_takeover(n) => self.desktop.tool(n, args, &mut self.app, self.settle),
+            n if is_takeover(n) => self.takeover.tool(n, args, &mut self.app, self.settle),
             _ => Err(format!("there is no tool {name}")),
         }
     }
@@ -1402,7 +1402,7 @@ mod tests {
             lore: |name, _| (name == "lore_recall").then(|| Ok("#1 a note".into())),
             mode: Box::new(|| Mode::Ask),
             #[cfg(windows)]
-            desktop: Desktop::default(),
+            takeover: Takeover::default(),
         };
         (s, calls)
     }

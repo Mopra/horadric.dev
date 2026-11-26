@@ -4,7 +4,7 @@
 //! time. The running app reads a file again whenever it changes, so an
 //! edit here counts from the next call on, with no restart. Any other
 //! risky action is asked every time; see
-//! [`horadric_core::desktop_programs`].
+//! [`horadric_core::takeover_programs`].
 //!
 //! The user's list is in `%APPDATA%\Horadric` and covers only programs
 //! that do not run as administrator. The administrators' list is in
@@ -21,7 +21,7 @@
 
 use std::path::{Path, PathBuf};
 
-use horadric_core::desktop_programs::{self as listed, Approval, Entry, Kind, Level, List};
+use horadric_core::takeover_programs::{self as listed, Approval, Entry, Kind, Level, List};
 
 /// The administrators' list on disk, the one file the app reads it with
 /// too: see its notes on why it is shared by path.

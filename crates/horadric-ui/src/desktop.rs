@@ -12,7 +12,7 @@
 //! pre-approved that very action.
 //!
 //! Programs can be listed ahead of time, in two files named
-//! `takeover-programs.json` (see [`horadric_core::desktop_programs`]). The
+//! `takeover-programs.json` (see [`horadric_core::takeover_programs`]). The
 //! user's, beside the app's state, any program can write, so it only
 //! stands in for the approval question of a program that is not elevated.
 //! The administrators', which only an elevated shell can write and which
@@ -64,7 +64,7 @@ use std::time::{Instant, SystemTime};
 
 use std::time::Duration;
 
-use horadric_core::desktop_programs::{
+use horadric_core::takeover_programs::{
     self as listed, Act, GrantKey, Kind as ActKind, Level, Mode, Refusals, Source,
 };
 use horadric_hooks::listener::{BrowserCall, Reply};
@@ -88,7 +88,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 /// The administrators' list on disk. One file for the app and for the
-/// binary's elevated helper and `desktop` command, see its notes.
+/// binary's elevated helper and `takeover` command, see its notes.
 #[path = "desktop_admin.rs"]
 mod desktop_admin;
 

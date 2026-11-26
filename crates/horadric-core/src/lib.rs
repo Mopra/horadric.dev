@@ -26,7 +26,6 @@ pub mod chronicle;
 pub mod context;
 pub mod desk;
 pub mod desk_apps;
-pub mod desktop_programs;
 pub mod diff;
 pub mod discord;
 pub mod escalate;
@@ -86,6 +85,9 @@ pub mod spend;
 pub mod ssh;
 pub mod standing;
 pub mod sworn;
+pub mod takeover_programs;
+/// The name the module had, which the ui crate's overlay still imports.
+pub use takeover_programs as desktop_programs;
 pub mod tasks;
 pub mod team;
 pub mod title;

@@ -14,7 +14,7 @@
 //!
 //! - One process serves one session. There is one ring, one set of
 //!   followed programs and one `handed` mark for the whole process, and
-//!   the places a session has read up to are kept by its `Desktop`
+//!   the places a session has read up to are kept by its `Takeover`
 //!   (`seen`). Whatever is in the ring may be told to whoever asks in
 //!   this process. Should this ever be hosted in a process that serves
 //!   several sessions, the ring, the followed set, the mark and the
@@ -58,7 +58,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetTimer, GA_ROOT, MSG, PM_NOREMOVE, WM_APP,
 };
 
-use crate::desktop::{info, short, Window};
+use crate::takeover::{info, short, Window};
 
 /// How many changes are kept. An agent asks every few seconds, and a
 /// busy program makes a few a second once folded.

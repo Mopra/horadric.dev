@@ -291,13 +291,13 @@ pub fn runewords_file() -> Option<PathBuf> {
 /// The desktop programs the human allows ahead of time, beside the app's
 /// state like [`runewords_file`].
 pub fn desktop_programs_file() -> Option<PathBuf> {
-    use horadric_core::desktop_programs::{FILE, OLD_FILE};
+    use horadric_core::takeover_programs::{FILE, OLD_FILE};
     crate::state_dir().map(|d| renamed(&d, FILE, OLD_FILE))
 }
 
 /// The log of desktop grants, beside [`desktop_programs_file`].
 pub fn desktop_log_file() -> Option<PathBuf> {
-    use horadric_core::desktop_programs::{LOG_FILE, OLD_LOG_FILE};
+    use horadric_core::takeover_programs::{LOG_FILE, OLD_LOG_FILE};
     crate::state_dir().map(|d| renamed(&d, LOG_FILE, OLD_LOG_FILE))
 }
 
@@ -309,7 +309,7 @@ pub fn desktop_log_file() -> Option<PathBuf> {
 /// would leave every question unanswered on a machine nobody sits at.
 fn renamed(dir: &Path, new: &str, old: &str) -> PathBuf {
     let (to, from) = (dir.join(new), dir.join(old));
-    let moves = horadric_core::desktop_programs::moves(to.exists(), from.exists());
+    let moves = horadric_core::takeover_programs::moves(to.exists(), from.exists());
     if moves && fs::rename(&from, &to).is_err() {
         return from;
     }

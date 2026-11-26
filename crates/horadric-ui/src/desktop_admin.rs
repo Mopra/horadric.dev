@@ -1,6 +1,6 @@
 //! The administrators' list of desktop programs on disk: where it is, who
 //! may have written it, and how it is written. See
-//! [`horadric_core::desktop_programs`] for what it holds.
+//! [`horadric_core::takeover_programs`] for what it holds.
 //!
 //! It lives in `%ProgramData%\Horadric`, a folder only administrators can
 //! write. Every user may make folders in `%ProgramData%`, so the folder
@@ -10,7 +10,7 @@
 //! could have written is refused with the reason.
 //!
 //! This one file is compiled into two crates, by path: the app reads the
-//! list here, and so do the elevated helper and the `desktop` command in
+//! list here, and so do the elevated helper and the `takeover` command in
 //! the binary. The check must not exist twice.
 
 // Each of the two crates uses only its part of this.
@@ -23,7 +23,7 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 
-use horadric_core::desktop_programs::{self as listed, List};
+use horadric_core::takeover_programs::{self as listed, List};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, HANDLE};
 use windows::Win32::Security::{

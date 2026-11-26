@@ -13,7 +13,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use horadric_core::desktop_programs::{Act, Kind};
+use horadric_core::takeover_programs::{Act, Kind};
 use serde_json::{json, Value};
 use windows::core::BOOL;
 use windows::core::{Interface, BSTR, HRESULT, PCWSTR};
@@ -76,13 +76,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_RESTORE, WM_GETTEXT, WM_GETTEXTLENGTH, WS_EX_TOOLWINDOW,
 };
 
-use crate::desktop_helper::{
+use crate::takeover_helper::{
     as_administrator, asking_other_text, elevating_body, held_text, hold_left, same_program,
     still_asking_text, switch_left, switch_text, unbindable, Helper, HelperStart, Setback,
     Starting, ANNOUNCE_PAUSE, ASK_AGAIN_WAIT, ASK_WAIT, PEEK,
 };
 use crate::mcp::text;
-use crate::watch::{self, changes_part, changes_text, digest, verdict, Until};
+use crate::takeover_watch::{self as watch, changes_part, changes_text, digest, verdict, Until};
 
 /// The most elements one snapshot holds, so a vast window can not take
 /// minutes or fill the context.
@@ -1541,7 +1541,7 @@ struct Snap {
 
 /// The desktop side of the MCP server, set up on first use.
 #[derive(Default)]
-pub struct Desktop {
+pub struct Takeover {
     com: Option<Com>,
     snap: Option<Snap>,
     /// The helper that reaches programs running as administrator, once
@@ -1633,7 +1633,7 @@ struct Focused {
     at: Option<(i32, i32)>,
 }
 
-/// Tells the app how the read went that [`Desktop::ask_first`] asked
+/// Tells the app how the read went that [`Takeover::ask_first`] asked
 /// for, so the question does not stand open in the history the human
 /// watches, and hands the read on.
 fn looked<T, A: FnMut(Value) -> Result<Value, String>>(
@@ -2597,12 +2597,12 @@ fn window_text(h: HWND) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..got.min(len)]))
 }
 
-impl Desktop {
+impl Takeover {
     /// The desktop as the helper serves it.
-    pub fn for_helper() -> Desktop {
-        Desktop {
+    pub fn for_helper() -> Takeover {
+        Takeover {
             part: true,
-            ..Desktop::default()
+            ..Takeover::default()
         }
     }
 
@@ -5252,7 +5252,7 @@ mod tests {
         // Too short to spare that: half of it, never nothing.
         assert_eq!(loop_limit(s(2), true), s(1));
         // Far inside the helper's own limit for a call that operates.
-        assert!(PEEK_LIMIT * 10 < crate::desktop_helper::SILENCE);
+        assert!(PEEK_LIMIT * 10 < crate::takeover_helper::SILENCE);
     }
 
     #[test]
@@ -5653,7 +5653,7 @@ mod tests {
         }
         let w = w.expect("Notepad came up");
         thread::sleep(Duration::from_millis(1000));
-        let mut d = Desktop::default();
+        let mut d = Takeover::default();
         let mut app = |body: Value| {
             println!("APP <- {body}");
             Ok(json!({ "allowed": true }))
@@ -5745,7 +5745,7 @@ mod tests {
         let name = std::env::var("TOOL").unwrap();
         let args: Value =
             serde_json::from_str(&std::env::var("ARGS").unwrap_or("{}".into())).unwrap();
-        let mut d = Desktop::default();
+        let mut d = Takeover::default();
         let mut app = |body: Value| {
             println!("APP <- {body}");
             Ok(json!({ "allowed": true }))
@@ -5816,7 +5816,7 @@ $f.Controls.Add($b)
             }
         }
         let w = w.expect("the form came up");
-        let mut d = Desktop::default();
+        let mut d = Takeover::default();
         let mut app = |_: Value| Ok(json!({ "allowed": true }));
         let id = json!(w.hwnd);
         let mut run = |name: &str, args: Value| {
@@ -5883,7 +5883,7 @@ $f.Controls.Add($b)
     #[ignore]
     fn watch_elevated_by_hand() {
         let script = std::env::temp_dir().join("horadric-watch-elevated.ps1");
-        std::fs::write(&script, crate::watch::tests::FORM).unwrap();
+        std::fs::write(&script, crate::takeover_watch::tests::FORM).unwrap();
         let start = format!(
             "(Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-STA',\
              '-ExecutionPolicy','Bypass','-File','{}').Id",
@@ -5903,7 +5903,7 @@ $f.Controls.Add($b)
             }
         }
         let w = w.expect("the form came up");
-        let mut d = Desktop::default();
+        let mut d = Takeover::default();
         let mut app = |_: Value| Ok(json!({ "allowed": true }));
         let id = json!(w.hwnd);
         let mut run = |name: &str, args: Value| {

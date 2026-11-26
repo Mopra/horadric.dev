@@ -22,11 +22,11 @@ mod console;
 mod context;
 mod desk;
 #[cfg(windows)]
-mod desktop;
+mod takeover;
 #[cfg(windows)]
-mod desktop_helper;
+mod takeover_helper;
 #[cfg(windows)]
-mod desktop_programs;
+mod takeover_programs;
 #[cfg(windows)]
 mod google;
 #[cfg(windows)]
@@ -67,7 +67,7 @@ mod status;
 #[cfg(not(target_os = "linux"))]
 mod task;
 #[cfg(windows)]
-mod watch;
+mod takeover_watch;
 
 use std::io::Read;
 #[cfg(not(target_os = "linux"))]
@@ -350,9 +350,9 @@ fn main() -> ExitCode {
         // The names these were first shipped under stay, for the scripts
         // and notes that have them.
         #[cfg(windows)]
-        Some("takeover-helper" | "desktop-helper") => desktop_helper::run(&args[1..]),
+        Some("takeover-helper" | "desktop-helper") => takeover_helper::run(&args[1..]),
         #[cfg(windows)]
-        Some("takeover" | "desktop") => desktop_programs::run(&args[1..]),
+        Some("takeover" | "desktop") => takeover_programs::run(&args[1..]),
         #[cfg(not(target_os = "linux"))]
         Some("swap") => reload::swap(&args[1..]),
         Some("install") => install_command(),

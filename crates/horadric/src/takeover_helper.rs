@@ -55,7 +55,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use horadric_core::desktop_programs::{self as listed, Act, Level, Question, Refusals, Source};
+use horadric_core::takeover_programs::{self as listed, Act, Level, Question, Refusals, Source};
 use serde_json::{json, Value};
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{
@@ -94,8 +94,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible, SW_HIDE,
 };
 
-use crate::desktop::{file_name_field, list_windows, looks_risky, pick_window, Desktop};
-use crate::desktop_programs::desktop_admin;
+use crate::takeover::{file_name_field, list_windows, looks_risky, pick_window, Takeover};
+use crate::takeover_programs::desktop_admin;
 
 /// How long the helper may take to connect once Windows has started it.
 /// The user's answer to Windows' question comes before, and is timed by
@@ -784,7 +784,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     let mut writer = up;
     let mut reader = BufReader::new(down);
-    let mut desktop = Desktop::for_helper();
+    let mut takeover = Takeover::for_helper();
     let mut gate = Gate::new(program, parent);
     loop {
         let mut line = String::new();
@@ -828,7 +828,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             }
         };
         let mut app = |body: Value| gate.through(body, &mut peer);
-        let result = desktop.tool(name, &call_args, &mut app, settle);
+        let result = takeover.tool(name, &call_args, &mut app, settle);
         if let Some(why) = broken {
             return Err(why);
         }
