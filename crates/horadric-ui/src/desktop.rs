@@ -1249,6 +1249,12 @@ impl App {
             unasked,
         };
         let started = ghost::allowed(&self.shared, call, p.reply);
+        if r.action == Action::Operate {
+            // Said outright, since the overlay can only guess it from the
+            // call: a key press has no point, and a look must not keep
+            // bypass on.
+            ghost::operated(&self.shared, &p.session);
+        }
         if started && r.action == Action::Operate {
             self.toasts
                 .show(Kind::Info, &format!("{name} in {program}"), &r.what);

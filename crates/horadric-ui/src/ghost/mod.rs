@@ -530,9 +530,9 @@ pub(super) fn allowed(shared: &Rc<Shared>, call: Allowed, reply: Reply) -> bool 
 }
 
 /// A session operated a program, for bypass, which only that keeps on.
-/// The app knows which calls operate; until it says so here, a call is
-/// read by [`keeps_bypass`].
-#[allow(dead_code)]
+/// The app knows which calls operate and says so here for each. What
+/// [`keeps_bypass`] reads off a call is the part of it the overlay can
+/// see for itself.
 pub(super) fn operated(shared: &Rc<Shared>, session: &str) {
     with(shared, |o| {
         if bypass() {
