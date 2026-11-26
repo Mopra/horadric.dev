@@ -91,10 +91,12 @@ fn line(row: Row, value: String, control: Control) -> Line {
     let field = Field::Town(row);
     Line {
         field,
-        label: label(row),
+        label: label(row).into(),
         value,
         control,
         help: field.help(),
+        parts: Vec::new(),
+        nested: false,
     }
 }
 

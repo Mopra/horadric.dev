@@ -10,6 +10,7 @@
 //! window and the app never disagree. The app owns the values and hands
 //! them in again after every change.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
@@ -32,8 +33,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
-    VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN,
-    VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT,
+    VK_LWIN, VK_MENU, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos,
@@ -52,9 +53,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::app::{self, Input};
 use crate::backdrop;
 use crate::hotkey::{self, Action, Mods, Press};
-use crate::layout::{self, SettingsHit, SettingsLayout};
-use crate::render::{SettingsLook, SettingsScene, Target};
+use crate::layout::{self, RowKind, RowShape, SettingsHit, SettingsLayout};
+use crate::render::{self, FieldLook, SettingsLook, SettingsScene, Target};
 use crate::theme::Theme;
+use crate::vault::settings::{self as vault, After, Row as VaultRow};
 use crate::window::Shared;
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricSettings");
@@ -73,6 +75,8 @@ pub enum Section {
     Towns,
     /// Whose git and logins a project's sessions get.
     Identities,
+    /// The secrets and web logins a project's sessions use, never read.
+    Secrets,
     Keys,
     Dictation,
     Memory,
@@ -82,13 +86,14 @@ pub enum Section {
 
 impl Section {
     /// Most used first, About last, as Windows' own Settings has it.
-    pub const ALL: [Section; 11] = [
+    pub const ALL: [Section; 12] = [
         Section::General,
         Section::Appearance,
         Section::Sessions,
         Section::Projects,
         Section::Towns,
         Section::Identities,
+        Section::Secrets,
         Section::Keys,
         Section::Dictation,
         Section::Memory,
@@ -104,6 +109,7 @@ impl Section {
             Section::Projects => "Projects",
             Section::Towns => "Towns",
             Section::Identities => "Identities",
+            Section::Secrets => "Secrets",
             Section::Keys => "Keys",
             Section::Dictation => "Dictation",
             Section::Memory => "Memory",
@@ -268,17 +274,37 @@ pub enum Control {
     Fixed,
     /// A line of help across the row, no label.
     Note,
+    /// What is wrong, said across the row in the colour of an error.
+    Error,
+    /// A group's heading, open or folded: a click folds or unfolds it.
+    Fold(bool),
+    /// An item a click opens under itself, open or not.
+    Item(bool),
+    /// A field typed into in place. A secret's is drawn as dots unless
+    /// shown, with a key at its end to show it.
+    Input { secret: bool, shown: bool },
+    /// Buttons side by side, named by the line's parts, after its words.
+    Buttons,
+    /// The parts as one picker, the one at this place picked.
+    Segments(usize),
+    /// A line of words, the value under the label, with one button at its
+    /// end.
+    Removable,
 }
 
 /// A row as the window shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     pub field: Field,
-    pub label: &'static str,
+    pub label: Cow<'static, str>,
     pub value: String,
     pub control: Control,
     /// What it does, under its name.
     pub help: &'static str,
+    /// The buttons of a row that has several, by name.
+    pub parts: Vec<String>,
+    /// Inside the item opened above it: set in, on a shade.
+    pub nested: bool,
 }
 
 impl Line {
@@ -286,10 +312,95 @@ impl Line {
     pub fn height(&self) -> f32 {
         match self.control {
             Control::Note => 30.0,
+            Control::Error => 26.0,
+            Control::Fold(_) => 36.0,
+            Control::Item(_) => 38.0,
+            Control::Input { .. } => 44.0,
+            Control::Buttons | Control::Segments(_) => 42.0,
+            Control::Removable => 46.0,
             _ if self.help.is_empty() => 38.0,
             _ => 52.0,
         }
     }
+
+    /// How many places the keyboard can stop at in it: none in a row that
+    /// only says, one a button, and in a field the field and its show key.
+    pub fn stops(&self) -> usize {
+        match self.control {
+            Control::Fixed | Control::Note | Control::Error => 0,
+            Control::Input { secret, .. } => 1 + usize::from(secret),
+            Control::Buttons | Control::Segments(_) | Control::Removable => self.parts.len(),
+            _ => 1,
+        }
+    }
+
+    /// Clicked in parts, not as a whole.
+    pub fn in_parts(&self) -> bool {
+        matches!(
+            self.control,
+            Control::Input { .. } | Control::Buttons | Control::Segments(_) | Control::Removable
+        )
+    }
+
+    /// Its shape, for the layout.
+    pub fn shape(&self) -> RowShape {
+        let n = self.parts.len();
+        let kind = match self.control {
+            Control::Input { secret, .. } => RowKind::Field { eye: secret },
+            Control::Buttons => RowKind::Buttons {
+                n,
+                text: !self.label.is_empty() || !self.value.is_empty(),
+                joined: false,
+            },
+            Control::Segments(_) => RowKind::Buttons {
+                n,
+                text: true,
+                joined: true,
+            },
+            Control::Removable => RowKind::Trailing,
+            _ => RowKind::Plain,
+        };
+        RowShape {
+            h: self.height(),
+            kind,
+            indent: self.nested,
+        }
+    }
+}
+
+/// A place the keyboard can be: a row, by what it is about, and which of
+/// its parts. By field, not by place, so it stays on its row when rows
+/// above it come and go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stop {
+    pub field: Field,
+    pub part: usize,
+}
+
+/// Every stop of `rows` in order, with the row it is on.
+fn stops(rows: &[Line]) -> Vec<(usize, Stop)> {
+    rows.iter()
+        .enumerate()
+        .flat_map(|(i, l)| {
+            (0..l.stops()).map(move |part| {
+                (
+                    i,
+                    Stop {
+                        field: l.field,
+                        part,
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
+/// The row `stop` is on among `rows`, None when it is gone.
+fn stop_row(rows: &[Line], stop: Stop) -> Option<usize> {
+    stops(rows)
+        .into_iter()
+        .find(|(_, s)| *s == stop)
+        .map(|(i, _)| i)
 }
 
 /// The settings as the app has them now, which is all the window shows.
@@ -456,12 +567,14 @@ fn keys_note(v: &Values) -> String {
 
 /// The rows of `section`, given the settings in `v`.
 pub fn lines(section: Section, v: &Values) -> Vec<Line> {
-    let line = |field: Field, label, value: &str, control| Line {
+    let line = |field: Field, label: &'static str, value: &str, control| Line {
         field,
-        label,
+        label: label.into(),
         value: value.to_string(),
         control,
         help: field.help(),
+        parts: Vec::new(),
+        nested: false,
     };
     let switch = |on: bool| (if on { "On" } else { "Off" }, Control::Switch(on));
     match section {
@@ -712,6 +825,23 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
             .collect()
         }
         Section::Identities => crate::vault::settings::identity_lines(),
+        Section::Secrets => {
+            let Some(p) = &v.project else {
+                return vec![line(
+                    Field::Project,
+                    "Project",
+                    "None opened yet",
+                    Control::Fixed,
+                )];
+            };
+            let name = v.projects.get(p.index).map_or("", String::as_str);
+            let mut rows = vec![Line {
+                help: "Whose secrets and web logins show below",
+                ..line(Field::Project, "Project", name, Control::List)
+            }];
+            rows.extend(crate::vault::settings::secrets_lines(&p.key));
+            rows
+        }
         Section::Towns => crate::town_settings::lines(&v.towns),
     }
 }
@@ -719,12 +849,14 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
 /// The Backup section's rows. The ones about a target show only when
 /// there is one, and the buttons rest while a job runs.
 fn backup_lines(b: &Backup) -> Vec<Line> {
-    let line = |field: Field, label, value: &str, control| Line {
+    let line = |field: Field, label: &'static str, value: &str, control| Line {
         field,
-        label,
+        label: label.into(),
         value: value.to_string(),
         control,
         help: field.help(),
+        parts: Vec::new(),
+        nested: false,
     };
     let mut rows = vec![line(
         Field::BackupTo,
@@ -778,18 +910,31 @@ fn backup_lines(b: &Backup) -> Vec<Line> {
     rows
 }
 
+/// The rows of `section` a search looks through: the Secrets section's
+/// are every item kept by its name, whatever is folded or filtered, and
+/// not its fields and buttons.
+fn searched(section: Section, v: &Values) -> Vec<Line> {
+    match (section, &v.project) {
+        (Section::Secrets, Some(p)) => crate::vault::settings::secret_items(&p.key),
+        (Section::Secrets, None) => Vec::new(),
+        _ => lines(section, v),
+    }
+}
+
 /// Every row, in any section, whose name, help or section has `query` in
-/// it, case aside. Notes and rows with no name are not settings to find.
+/// it, case aside. Notes and rows with no name are not settings to find,
+/// nor are a form's fields and buttons.
 pub fn search(query: &str, v: &Values) -> Vec<Line> {
     let q = query.trim().to_lowercase();
     let has = |text: &str| text.to_lowercase().contains(&q);
     Section::ALL
         .iter()
-        .flat_map(|s| lines(*s, v).into_iter().map(move |l| (*s, l)))
+        .flat_map(|s| searched(*s, v).into_iter().map(move |l| (*s, l)))
         .filter(|(s, l)| {
-            l.control != Control::Note
+            !matches!(l.control, Control::Note | Control::Error)
+                && !l.in_parts()
                 && !l.label.is_empty()
-                && (has(l.label) || has(l.help) || has(s.label()))
+                && (has(&l.label) || has(l.help) || has(s.label()))
         })
         .map(|(_, l)| l)
         .collect()
@@ -809,11 +954,13 @@ fn height(section: Section, v: &Values) -> f32 {
 }
 
 /// How tall the tallest section's rows stand, which sets the window's
-/// height.
+/// height. Not the Secrets section's, which grows with what is kept and
+/// opened and scrolls instead.
 fn tallest(v: &Values) -> f32 {
     let project = PROJECT_ROWS as f32 * Line::height(&lines(Section::Projects, v)[0]);
     Section::ALL
         .iter()
+        .filter(|s| **s != Section::Secrets)
         .map(|s| height(*s, v))
         .fold(project, f32::max)
 }
@@ -850,26 +997,21 @@ const WHEEL_STEP: f32 = 60.0;
 /// The band at the window's edge that sizes it, in DIPs.
 const EDGE: f32 = 6.0;
 
-/// The row the keyboard moves to from `at`, `step` rows on, skipping
+/// The stop the keyboard moves to from `at`, `step` stops on, skipping
 /// rows that only say: round at either end, and from none the first or
 /// the last. None when no row does anything.
-fn focus_step(rows: &[Line], at: Option<usize>, step: isize) -> Option<usize> {
-    let live: Vec<usize> = rows
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| !matches!(l.control, Control::Fixed | Control::Note))
-        .map(|(i, _)| i)
-        .collect();
+fn focus_step(rows: &[Line], at: Option<Stop>, step: isize) -> Option<Stop> {
+    let live = stops(rows);
     let n = live.len() as isize;
     if n == 0 {
         return None;
     }
-    let next = match at.and_then(|a| live.iter().position(|i| *i == a)) {
+    let next = match at.and_then(|a| live.iter().position(|(_, s)| *s == a)) {
         Some(p) => (p as isize + step).rem_euclid(n),
         None if step < 0 => n - 1,
         None => 0,
     };
-    Some(live[next as usize])
+    Some(live[next as usize].1)
 }
 
 /// The section `step` places after `at`, round at either end, for the
@@ -987,8 +1129,15 @@ pub struct SettingsWindow {
     tracking: Cell<bool>,
     /// The row whose list is dropped down, set by the app.
     open: Cell<Option<Field>>,
-    /// The row the keyboard is on, ringed. None while the mouse is used.
-    focus: Cell<Option<usize>>,
+    /// Where the keyboard is, ringed, or with a caret in a field. None
+    /// while the mouse is used.
+    focus: Cell<Option<Stop>>,
+    /// The first half of a character typed as a UTF-16 pair.
+    high: Cell<Option<u16>>,
+    /// The field a press began in, whose selection the mouse drags.
+    dragging: Cell<Option<VaultRow>>,
+    /// How far each field's text is scrolled to keep its caret in view.
+    scrolls: RefCell<Vec<(VaultRow, f32)>>,
     /// The window's size in DIPs, as the user left it.
     size: Cell<(f32, f32)>,
     /// How far the rows are scrolled down, in DIPs.
@@ -1035,12 +1184,12 @@ impl SettingsWindow {
         let room = (work.bottom - work.top) as f32 / s - 40.0;
         let (sw, sh) = LAST_SIZE.with(Cell::get).unwrap_or(natural);
         let size = (sw.max(mw), sh.min(room).max(mh.min(room)));
-        let l = layout::settings(
+        let l = layout::settings_shaped(
             &shared.metrics,
             Section::ALL.len(),
             &lines(section, &values)
                 .iter()
-                .map(Line::height)
+                .map(Line::shape)
                 .collect::<Vec<_>>(),
             size,
             0.0,
@@ -1060,6 +1209,9 @@ impl SettingsWindow {
             tracking: Cell::new(false),
             open: Cell::new(None),
             focus: Cell::new(None),
+            high: Cell::new(None),
+            dragging: Cell::new(None),
+            scrolls: RefCell::new(Vec::new()),
             size: Cell::new(size),
             scroll: Cell::new(0.0),
             query: RefCell::new(String::new()),
@@ -1113,6 +1265,10 @@ impl SettingsWindow {
             Ordering::Relaxed,
         );
         hook(self.hwnd, false);
+        // A draft goes with the window, its fields zeroed: the human
+        // closed it, and a value typed must not outlive what it was typed
+        // into.
+        vault::closed();
         unsafe {
             let _ = DestroyWindow(self.hwnd);
         }
@@ -1168,22 +1324,22 @@ impl SettingsWindow {
     /// which is the tallest section's.
     fn relayout(&self) {
         let rows = self.lines();
-        let heights: Vec<f32> = rows.iter().map(Line::height).collect();
-        let l = layout::settings(
+        let shapes: Vec<RowShape> = rows.iter().map(Line::shape).collect();
+        let l = layout::settings_shaped(
             &self.shared.metrics,
             Section::ALL.len(),
-            &heights,
+            &shapes,
             self.size.get(),
             self.scroll.get(),
         );
         self.scroll.set(self.scroll.get().clamp(0.0, l.overflow));
         // A row that stopped doing anything, a button gone quiet while
-        // it works, keeps no ring.
-        let live = |i: usize| {
-            rows.get(i)
-                .is_some_and(|l| !matches!(l.control, Control::Fixed | Control::Note))
-        };
-        if self.focus.get().is_some_and(|i| !live(i)) {
+        // it works or a form saved, keeps no ring.
+        if self
+            .focus
+            .get()
+            .is_some_and(|s| stop_row(&rows, s).is_none())
+        {
             self.focus.set(None);
         }
         *self.layout.borrow_mut() = l;
@@ -1220,6 +1376,43 @@ impl SettingsWindow {
         self.values.borrow().listening.is_some()
     }
 
+    /// The field the keyboard types in, None when it is on no field.
+    fn input(&self) -> Option<VaultRow> {
+        match self.focus.get() {
+            Some(Stop {
+                field: Field::Vault(row @ (VaultRow::Input(_) | VaultRow::Filter)),
+                part: 0,
+            }) => Some(row),
+            _ => None,
+        }
+    }
+
+    /// The text of the field on row `i`, laid out as drawn, with where it
+    /// stands.
+    fn field_text(
+        &self,
+        row: VaultRow,
+        rect: layout::Rect,
+        secret: bool,
+    ) -> Option<(
+        windows::Win32::Graphics::DirectWrite::IDWriteTextLayout,
+        vault::InputLook,
+        layout::Rect,
+    )> {
+        let look = vault::input_look(row)?;
+        let inner = layout::settings_field_inner(&rect, secret);
+        let text = render::field_layout(&self.shared.gpu, &look.text, &inner, false).ok()?;
+        Some((text, look, inner))
+    }
+
+    fn field_scroll(&self, row: VaultRow) -> f32 {
+        self.scrolls
+            .borrow()
+            .iter()
+            .find(|(r, _)| *r == row)
+            .map_or(0.0, |(_, x)| *x)
+    }
+
     fn paint(&self) {
         let l = self.layout.borrow();
         let s = self.scale();
@@ -1235,15 +1428,66 @@ impl SettingsWindow {
             }
         }
         let open = self.open.get();
-        let rows: Vec<SettingsLook> = self
-            .lines()
+        let lines = self.lines();
+        let focus = self
+            .focus
+            .get()
+            .and_then(|s| stop_row(&lines, s).map(|i| (i, s.part)));
+        let typing_in = self.input();
+        // Each field's text laid out, kept alive while the frame draws.
+        let mut texts = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let (Field::Vault(row), Control::Input { secret, .. }) = (line.field, line.control)
+            else {
+                continue;
+            };
+            let Some(rect) = l.parts.get(i).and_then(|p| p.first()) else {
+                continue;
+            };
+            if let Some((text, look, inner)) = self.field_text(row, *rect, secret) {
+                texts.push((i, row, *rect, text, look, inner));
+            }
+        }
+        let mut fields = Vec::new();
+        for (i, row, rect, text, look, inner) in &texts {
+            let caret = render::caret_at(text, look.caret);
+            let (w, _) = render::text_size(text);
+            let sx = crate::field::follow(self.field_scroll(*row), caret.x, 2.0, inner.w, w + 2.0);
+            {
+                let mut scrolls = self.scrolls.borrow_mut();
+                scrolls.retain(|(r, _)| r != row);
+                scrolls.push((*row, sx));
+            }
+            let (a, b) = (look.caret.min(look.anchor), look.caret.max(look.anchor));
+            let focused = typing_in == Some(*row);
+            fields.push((
+                *i,
+                FieldLook {
+                    rect: *rect,
+                    text,
+                    placeholder: look.text.is_empty().then_some(look.placeholder),
+                    multiline: false,
+                    scroll: (sx, 0.0),
+                    selection: if focused || a != b {
+                        render::range_rects(text, a, b - a)
+                    } else {
+                        Vec::new()
+                    },
+                    caret: focused.then_some(caret),
+                    focused,
+                },
+            ));
+        }
+        let rows: Vec<SettingsLook> = lines
             .into_iter()
             .map(|line| SettingsLook {
                 open: open == Some(line.field),
-                label: line.label,
+                label: line.label.into_owned(),
                 value: line.value,
                 control: line.control,
                 help: line.help,
+                parts: line.parts,
+                nested: line.nested,
             })
             .collect();
         let query = self.query.borrow().clone();
@@ -1261,7 +1505,8 @@ impl SettingsWindow {
             search: &query,
             typing: self.typing.get(),
             rows: &rows,
-            focus: self.focus.get(),
+            fields,
+            focus,
             hot: self.hot.get(),
             pressed: self.pressed.get(),
         };
@@ -1276,6 +1521,14 @@ impl SettingsWindow {
     fn hit_at(&self, x: i32, y: i32) -> SettingsHit {
         let s = self.scale();
         layout::settings_hit(&self.layout.borrow(), x as f32 / s, y as f32 / s)
+    }
+
+    /// A mouse message's point in DIPs.
+    fn point(&self, lparam: LPARAM) -> (f32, f32) {
+        let s = self.scale();
+        let x = (lparam.0 & 0xffff) as i16 as f32 / s;
+        let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32 / s;
+        (x, y)
     }
 
     fn hit(&self, lparam: LPARAM) -> SettingsHit {
@@ -1333,12 +1586,18 @@ impl SettingsWindow {
         }
     }
 
-    /// Rings row `to` and scrolls it into the box if it is out of it.
-    fn focus_on(&self, to: Option<usize>) {
+    /// Rings stop `to` and scrolls its row into the box if it is out of
+    /// it. A field it lands on has its text selected, so typing replaces
+    /// it.
+    fn focus_on(&self, to: Option<Stop>) {
         self.focus.set(to);
         self.typing.set(false);
+        if let Some(row) = self.input() {
+            vault::input_edit(row, crate::field::Field::select_all);
+        }
+        let at = to.and_then(|s| stop_row(&self.lines(), s));
         let l = self.layout.borrow();
-        let dy = match to.and_then(|i| l.rows.get(i)) {
+        let dy = match at.and_then(|i| l.rows.get(i)) {
             Some(r) if r.rect.y < l.group.y => r.rect.y - l.group.y - 4.0,
             Some(r) if r.rect.bottom() > l.group.bottom() => {
                 r.rect.bottom() - l.group.bottom() + 4.0
@@ -1347,6 +1606,124 @@ impl SettingsWindow {
         };
         drop(l);
         self.scroll_by(dy);
+        self.invalidate();
+    }
+
+    /// The keyboard to the row of the Vault's `row`, when there is one,
+    /// after a click or a key in the Secrets section.
+    fn after(&self, after: After) {
+        self.relayout();
+        if let After::Focus(row) = after {
+            let stop = Stop {
+                field: Field::Vault(row),
+                part: 0,
+            };
+            if stop_row(&self.lines(), stop).is_some() {
+                self.focus_on(Some(stop));
+            }
+        }
+    }
+
+    /// A UTF-16 unit typed into the field `row`. A pair is put together
+    /// first; control characters came as key downs and are dropped.
+    fn type_into(&self, row: VaultRow, unit: u16) {
+        let s = match unit {
+            0xD800..=0xDBFF => {
+                self.high.set(Some(unit));
+                return;
+            }
+            0xDC00..=0xDFFF => match self.high.take() {
+                Some(h) => String::from_utf16_lossy(&[h, unit]),
+                None => return,
+            },
+            u if u < 0x20 || u == 0x7F => return,
+            u => String::from_utf16_lossy(&[u]),
+        };
+        vault::input_typed(row, &s);
+        self.relayout();
+    }
+
+    /// A key down while the keyboard is in the field `row`. False for a
+    /// key the field leaves to the window: Tab, the arrows up and down,
+    /// Ctrl+F.
+    fn field_key(&self, row: VaultRow, vk: u16) -> bool {
+        let m = held();
+        let (ctrl, shift) = (m.ctrl, m.shift);
+        let edit = |f: &dyn Fn(&mut crate::field::Field)| vault::input_edit(row, f);
+        match VIRTUAL_KEY(vk) {
+            VK_ESCAPE => {
+                if vault::escape(row) {
+                    self.relayout();
+                } else {
+                    self.focus.set(None);
+                    self.invalidate();
+                }
+                return true;
+            }
+            VK_RETURN => {
+                let after = vault::enter(row);
+                self.after(after);
+                return true;
+            }
+            VK_TAB | VK_UP | VK_DOWN => return false,
+            VK_SPACE => return true,
+            VK_LEFT => edit(&|f| f.left(ctrl, shift)),
+            VK_RIGHT => edit(&|f| f.right(ctrl, shift)),
+            VK_HOME => edit(&|f| f.home(true, shift)),
+            VK_END => edit(&|f| f.end(true, shift)),
+            VK_BACK => edit(&|f| f.backspace(ctrl)),
+            VK_DELETE if shift => {
+                if let Some(s) = vault::input_copy(row, true) {
+                    crate::clipboard::set_text(&s);
+                }
+            }
+            VK_DELETE => edit(&|f| f.delete(ctrl)),
+            _ if !ctrl => return false,
+            k => match char::from_u32(u32::from(k.0)) {
+                Some('A') => edit(&crate::field::Field::select_all),
+                Some(c @ ('C' | 'X')) => {
+                    if let Some(s) = vault::input_copy(row, c == 'X') {
+                        crate::clipboard::set_text(&s);
+                    }
+                }
+                Some('V') => {
+                    if let Some(s) = crate::clipboard::get_text() {
+                        vault::input_paste(row, &s);
+                    }
+                }
+                Some('Z') => edit(&|f| {
+                    f.undo();
+                }),
+                Some('Y') => edit(&|f| {
+                    f.redo();
+                }),
+                _ => return false,
+            },
+        }
+        self.relayout();
+        true
+    }
+
+    /// The caret of the field on row `i` to the point (`x`, `y`) in DIPs.
+    fn field_point(&self, i: usize, row: VaultRow, x: f32, y: f32, extend: bool) {
+        let lines = self.lines();
+        let Some(Control::Input { secret, .. }) = lines.get(i).map(|l| l.control) else {
+            return;
+        };
+        let rect = self
+            .layout
+            .borrow()
+            .parts
+            .get(i)
+            .and_then(|p| p.first().copied());
+        let Some(rect) = rect else {
+            return;
+        };
+        let Some((text, _, inner)) = self.field_text(row, rect, secret) else {
+            return;
+        };
+        let at = render::offset_at(&text, x - inner.x + self.field_scroll(row), y - inner.y);
+        vault::input_caret(row, at, extend);
         self.invalidate();
     }
 
@@ -1384,11 +1761,48 @@ impl SettingsWindow {
                     self.pick_section(*s);
                 }
             }
+            SettingsHit::Part(i, j) => {
+                let Some(line) = self.lines().into_iter().nth(i) else {
+                    return;
+                };
+                if let Field::Vault(row) = line.field {
+                    let after = vault::secrets_click(row, Some(j));
+                    self.after(after);
+                }
+            }
             SettingsHit::Row(i) => {
                 let Some(line) = self.lines().into_iter().nth(i) else {
                     return;
                 };
-                if matches!(line.control, Control::Fixed | Control::Note) {
+                if matches!(
+                    line.control,
+                    Control::Fixed | Control::Note | Control::Error
+                ) || line.in_parts()
+                {
+                    return;
+                }
+                if line.field == Field::Vault(VaultRow::Summary) {
+                    self.pick_section(Section::Secrets);
+                    return;
+                }
+                if let Field::Vault(
+                    row @ (VaultRow::Secret(_) | VaultRow::Login(_) | VaultRow::Missing(_)),
+                ) = line.field
+                {
+                    // Found by a search: shown where it lives.
+                    if self.searching() {
+                        let after = vault::reveal(row);
+                        self.pick_section(Section::Secrets);
+                        self.after(after);
+                        return;
+                    }
+                    let after = vault::secrets_click(row, None);
+                    self.after(after);
+                    return;
+                }
+                if let Field::Vault(VaultRow::Group(g)) = line.field {
+                    let after = vault::secrets_click(VaultRow::Group(g), None);
+                    self.after(after);
                     return;
                 }
                 if let Field::Vault(row) = line.field {
@@ -1465,7 +1879,9 @@ impl SettingsWindow {
                 Some(LRESULT(0))
             }
             WM_CHAR if !self.listening() => {
-                if let Some(c) = char::from_u32(wparam.0 as u32) {
+                if let Some(row) = self.input() {
+                    self.type_into(row, wparam.0 as u16);
+                } else if let Some(c) = char::from_u32(wparam.0 as u32) {
                     self.type_char(c);
                 }
                 Some(LRESULT(0))
@@ -1544,8 +1960,20 @@ impl SettingsWindow {
             // the one ringed. The arrows walk the rows once one is ringed,
             // the sections until then, and Left goes back to them.
             WM_KEYDOWN => {
+                if let Some(row) = self.input() {
+                    if self.field_key(row, wparam.0 as u16) {
+                        return Some(LRESULT(0));
+                    }
+                }
                 let focus = self.focus.get();
                 let to = |step: isize| self.focus_on(focus_step(&self.lines(), focus, step));
+                let in_form = matches!(
+                    focus,
+                    Some(Stop {
+                        field: Field::Vault(r),
+                        ..
+                    }) if vault::escape_cancels(r)
+                );
                 match wparam.0 as u16 {
                     // Esc empties the search first, then closes.
                     k if k == VK_ESCAPE.0 && self.searching() => {
@@ -1553,6 +1981,27 @@ impl SettingsWindow {
                         self.typing.set(false);
                         self.focus.set(None);
                         self.relayout();
+                    }
+                    // On a form's buttons, Esc cancels the form.
+                    k if k == VK_ESCAPE.0 && in_form => {
+                        if let Some(Stop {
+                            field: Field::Vault(r),
+                            ..
+                        }) = focus
+                        {
+                            vault::escape(r);
+                        }
+                        self.relayout();
+                    }
+                    // A draft open elsewhere is never closed by Esc: the
+                    // keyboard goes back to it instead.
+                    k if k == VK_ESCAPE.0 && vault::draft().is_some() => {
+                        if self.section.get() != Section::Secrets {
+                            self.pick_section(Section::Secrets);
+                        }
+                        if let Some(row) = vault::draft() {
+                            self.after(After::Focus(row));
+                        }
                     }
                     k if k == VK_ESCAPE.0 => app::push(Input::SettingsClosed),
                     k if k == u16::from(b'F') && held().ctrl => self.click(SettingsHit::Search),
@@ -1571,8 +2020,15 @@ impl SettingsWindow {
                     // Held down, a key repeats: one flip per press.
                     k if k == VK_SPACE.0 || k == VK_RETURN.0 => {
                         let repeat = lparam.0 & (1 << 30) != 0;
-                        if let (Some(i), false) = (focus, repeat) {
-                            self.click(SettingsHit::Row(i));
+                        let rows = self.lines();
+                        if let (Some(stop), false) = (focus, repeat) {
+                            if let Some(i) = stop_row(&rows, stop) {
+                                if rows[i].in_parts() {
+                                    self.click(SettingsHit::Part(i, stop.part));
+                                } else {
+                                    self.click(SettingsHit::Row(i));
+                                }
+                            }
                         }
                     }
                     _ => {}
@@ -1586,15 +2042,53 @@ impl SettingsWindow {
                 unsafe {
                     SetCapture(self.hwnd);
                 }
-                self.press(Some(self.hit(lparam)));
+                let hit = self.hit(lparam);
+                // A press in a field puts the caret there at once, as an
+                // edit box does, and a drag from it selects.
+                if let SettingsHit::Part(i, 0) = hit {
+                    let line = self.lines().into_iter().nth(i);
+                    if let Some((Field::Vault(row), Control::Input { .. })) =
+                        line.map(|l| (l.field, l.control))
+                    {
+                        self.focus.set(Some(Stop {
+                            field: Field::Vault(row),
+                            part: 0,
+                        }));
+                        let (x, y) = self.point(lparam);
+                        self.field_point(i, row, x, y, held().shift);
+                        self.dragging.set(Some(row));
+                        return Some(LRESULT(0));
+                    }
+                }
+                self.press(Some(hit));
                 Some(LRESULT(0))
             }
             WM_MOUSEMOVE => {
                 self.track();
+                if let Some(row) = self.dragging.get() {
+                    let at = stop_row(
+                        &self.lines(),
+                        Stop {
+                            field: Field::Vault(row),
+                            part: 0,
+                        },
+                    );
+                    if let Some(i) = at {
+                        let (x, y) = self.point(lparam);
+                        self.field_point(i, row, x, y, true);
+                    }
+                    return Some(LRESULT(0));
+                }
                 self.hover(self.hit(lparam));
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
+                if self.dragging.take().is_some() {
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                    return Some(LRESULT(0));
+                }
                 // Before letting go: releasing capture sends
                 // WM_CAPTURECHANGED at once, and that clears the press.
                 let pressed = self.pressed.get();
@@ -1616,6 +2110,7 @@ impl SettingsWindow {
             }
             WM_CAPTURECHANGED => {
                 self.press(None);
+                self.dragging.set(None);
                 None
             }
             _ => None,
@@ -2043,19 +2538,113 @@ mod tests {
     #[test]
     fn tab_walks_only_the_rows_that_do_something() {
         let v = values();
+        let at = |rows: &[Line], i: usize| {
+            Some(Stop {
+                field: rows[i].field,
+                part: 0,
+            })
+        };
         let rows = lines(Section::About, &v);
         // Version only says; Updates is the one row to land on.
-        assert_eq!(focus_step(&rows, None, 1), Some(1));
-        assert_eq!(focus_step(&rows, Some(1), 1), Some(1));
+        assert_eq!(focus_step(&rows, None, 1), at(&rows, 1));
+        assert_eq!(focus_step(&rows, at(&rows, 1), 1), at(&rows, 1));
         let rows = lines(Section::Projects, &v);
         // The Forge's switch comes last.
-        assert_eq!(focus_step(&rows, None, -1), Some(7));
+        assert_eq!(focus_step(&rows, None, -1), at(&rows, 7));
         // SSH hosts only says, so Tab steps over it.
-        assert_eq!(focus_step(&rows, Some(2), 1), Some(4));
+        assert_eq!(focus_step(&rows, at(&rows, 2), 1), at(&rows, 4));
         // "And ships public" only says while Warriv does not drive.
-        assert_eq!(focus_step(&rows, Some(5), 1), Some(7));
-        assert_eq!(focus_step(&rows, Some(7), 1), Some(0));
+        assert_eq!(focus_step(&rows, at(&rows, 5), 1), at(&rows, 7));
+        assert_eq!(focus_step(&rows, at(&rows, 7), 1), at(&rows, 0));
         assert_eq!(focus_step(&[], None, 1), None);
+    }
+
+    fn vault_line(row: VaultRow, control: Control, parts: &[&str]) -> Line {
+        Line {
+            field: Field::Vault(row),
+            label: "".into(),
+            value: String::new(),
+            control,
+            help: "",
+            parts: parts.iter().map(|p| p.to_string()).collect(),
+            nested: false,
+        }
+    }
+
+    #[test]
+    fn tab_stops_at_each_field_key_and_button_of_a_form() {
+        use crate::vault::secrets::Slot;
+        let rows = vec![
+            vault_line(VaultRow::FormTitle, Control::Note, &[]),
+            vault_line(
+                VaultRow::Input(Slot::Name),
+                Control::Input {
+                    secret: false,
+                    shown: false,
+                },
+                &[],
+            ),
+            vault_line(
+                VaultRow::Input(Slot::Value),
+                Control::Input {
+                    secret: true,
+                    shown: false,
+                },
+                &[],
+            ),
+            vault_line(VaultRow::Wrong(Slot::Value), Control::Error, &[]),
+            vault_line(VaultRow::FormButtons, Control::Buttons, &["Save", "Cancel"]),
+        ];
+        let walked: Vec<(usize, usize)> = stops(&rows).iter().map(|(i, s)| (*i, s.part)).collect();
+        // The name, the value and its show key, Save and Cancel.
+        assert_eq!(walked, [(1, 0), (2, 0), (2, 1), (4, 0), (4, 1)]);
+        let cancel = Stop {
+            field: Field::Vault(VaultRow::FormButtons),
+            part: 1,
+        };
+        assert_eq!(
+            focus_step(&rows, Some(cancel), 1).map(|s| s.field),
+            Some(Field::Vault(VaultRow::Input(Slot::Name)))
+        );
+        // A stop stays on its row when rows above it come and go.
+        assert_eq!(stop_row(&rows[2..], cancel), Some(2));
+        assert_eq!(stop_row(&rows[..3], cancel), None);
+        assert!(rows[4].in_parts() && !rows[0].in_parts());
+        assert_eq!(rows[2].shape().kind, RowKind::Field { eye: true });
+        assert_eq!(
+            rows[4].shape().kind,
+            RowKind::Buttons {
+                n: 2,
+                text: false,
+                joined: false
+            }
+        );
+    }
+
+    #[test]
+    fn the_secrets_section_picks_its_project_and_is_never_the_tallest() {
+        let mut v = values();
+        let rows = lines(Section::Secrets, &v);
+        assert_eq!(rows[0].field, Field::Project);
+        assert_eq!(rows[0].value, "site");
+        assert_eq!(rows[0].control, Control::List);
+        assert!(!tallest(&v).is_nan());
+        assert_eq!(tallest(&v), height(Section::Projects, &v));
+        v.project = None;
+        assert_eq!(lines(Section::Secrets, &v)[0].control, Control::Fixed);
+        // It stands after the identities, and the arrows reach it.
+        assert_eq!(step(Section::Identities, 1), Section::Secrets);
+        assert_eq!(step(Section::Secrets, 1), Section::Keys);
+    }
+
+    #[test]
+    fn a_search_finds_no_form_field_or_button() {
+        let v = values();
+        let found = search("secret", &v);
+        assert!(found.iter().all(|l| !l.in_parts()));
+        // The Secrets section's picker is the Projects section's row, found
+        // once, there.
+        assert!(found.iter().all(|l| l.field != Field::Project));
     }
 
     #[test]

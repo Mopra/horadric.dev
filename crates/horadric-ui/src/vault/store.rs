@@ -52,7 +52,7 @@ pub struct WebLogin {
     pub last_used: Option<Used>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Used {
     /// Unix seconds.
     pub at: u64,

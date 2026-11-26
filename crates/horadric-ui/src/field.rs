@@ -149,6 +149,25 @@ impl Field {
         }
     }
 
+    /// Empties the field and writes zeros over what it held and every
+    /// undo step, for a secret the human typed and then saved or dropped:
+    /// the field is the one place outside the sealed file a value lives.
+    /// Copies a reallocation left behind are out of reach; this is the
+    /// best a String allows.
+    pub fn wipe(&mut self) {
+        zero(&mut self.text);
+        for e in self.history.undo.iter_mut().chain(&mut self.history.redo) {
+            zero(&mut e.removed);
+            zero(&mut e.inserted);
+        }
+        self.history = History::default();
+        if let Some(v) = &mut self.verbatim {
+            zero(&mut v.original);
+        }
+        self.caret = 0;
+        self.anchor = 0;
+    }
+
     /// The selection, start first.
     pub fn selection(&self) -> (usize, usize) {
         (self.caret.min(self.anchor), self.caret.max(self.anchor))
@@ -424,6 +443,13 @@ fn word_after(s: &str, at: usize) -> usize {
     at + word + space
 }
 
+/// Writes zeros over `s` and empties it.
+pub fn zero(s: &mut String) {
+    // Zero bytes are valid UTF-8, so the String stays well formed.
+    unsafe { s.as_bytes_mut() }.fill(0);
+    s.clear();
+}
+
 /// The UTF-16 offset of byte offset `at`.
 pub fn utf16_at(s: &str, at: usize) -> u32 {
     s[..floor_boundary(s, at)].encode_utf16().count() as u32
@@ -459,6 +485,20 @@ pub fn follow(scroll: f32, at: f32, extent: f32, view: f32, content: f32) -> f32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wiped_field_keeps_nothing_to_undo() {
+        let mut f = Field::new("", false, 100);
+        f.insert("hunter2");
+        f.backspace(false);
+        f.wipe();
+        assert_eq!(f.text, "");
+        assert_eq!((f.caret, f.anchor), (0, 0));
+        assert!(!f.undo());
+        let mut s = String::from("token");
+        zero(&mut s);
+        assert!(s.is_empty());
+    }
 
     fn field(text: &str) -> Field {
         let mut f = Field::new(text, false, 200);
