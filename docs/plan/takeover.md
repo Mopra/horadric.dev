@@ -143,7 +143,10 @@ elements whose name, value or state changed.
   `HORADRIC_DESKTOP_WAIT_MS` says otherwise, 60 at most). It tells what
   came before the wait apart from what came during it.
 - Watching ends with the grant: the app is asked again before changes
-  are told, and a no unhooks the program and drops what was kept.
+  are told, and a no unhooks the program and drops what was kept. That
+  re-check (`recheck` on the op) is answered from the standing grants
+  and the lists alone: it never puts a question and never raises the
+  overlay, so a grant that is gone is a silent no.
 - A process handle pins what is hooked, so a reused process id can not
   bring in a program nobody approved.
 - A stuck watcher is said. It never answers "nothing changed".

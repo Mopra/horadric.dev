@@ -688,6 +688,20 @@ pub fn allow<A: FnMut(Value) -> Result<Value, String>>(
     allowed(answer, what)
 }
 
+/// Asks the app whether a look granted before still stands, for the
+/// watcher. The app answers it from the standing grants and the lists
+/// alone, never with a question and without the overlay: the watcher
+/// re-checks unasked, and a question there would hold the session's call.
+pub fn recheck<A: FnMut(Value) -> Result<Value, String>>(
+    app: &mut A,
+    window: &Window,
+    what: &str,
+) -> Result<(), String> {
+    let mut body = allow_body(window, "see", what, false, None, "");
+    body["recheck"] = json!(true);
+    allowed(app(body)?, what)
+}
+
 /// What the app is told after an allowed action, for the history the
 /// human watches: whether it worked and, in one line, what came of it.
 pub fn done_body(window: &Window, what: &str, ok: bool, outcome: &str) -> Value {
@@ -3131,7 +3145,7 @@ impl Takeover {
         let mut said = String::new();
         for w in to_ask_again(followed, &self.still, pid, Instant::now()) {
             let what = format!("keep reading what changes in {}", w.exe);
-            match allow(app, &w, "see", &what, false, None, "") {
+            match recheck(app, &w, &what) {
                 Ok(()) => {
                     self.still.insert(w.pid, Instant::now());
                 }
@@ -4686,6 +4700,15 @@ mod tests {
         let seeing = allow_body(&w, "see", "look", false, None, "");
         assert_eq!(seeing["point"], Value::Null);
         assert_eq!(seeing["reason"], "");
+        // The watcher's re-check says so, and a no is the watcher's no.
+        let mut sent = Value::Null;
+        let mut app = |body: Value| {
+            sent = body;
+            Ok(json!({ "error": "gone" }))
+        };
+        assert!(recheck(&mut app, &w, "keep reading").is_err());
+        assert_eq!(sent["recheck"], true);
+        assert_eq!(sent["action"], "see");
     }
 
     #[test]

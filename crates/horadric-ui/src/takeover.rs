@@ -467,6 +467,21 @@ pub(super) struct Request {
     /// the elevated helper. The session's word: it makes the app
     /// stricter, never laxer.
     pub administrator: bool,
+    /// The watcher asks whether a look it was granted still stands. Only
+    /// the standing grants and the lists answer it: never a question, and
+    /// nothing shown on the overlay, since nobody acts.
+    pub recheck: bool,
+}
+
+/// Why a re-check was answered no: the look it asked after is no longer
+/// granted, and a re-check never asks the human.
+pub(super) const RECHECK_GONE: &str =
+    "it is no longer allowed to look at this program, and a re-check never asks the human";
+
+/// Whether a re-check of a look is answered yes, from what stands: the
+/// session's own grant and the lists. Anything but a look is never one.
+pub(super) fn recheck_holds(own: Grant, level: Option<Level>, action: Action) -> bool {
+    action == Action::See && decide(effective(own, level), action, false) == Decision::Allow
 }
 
 /// A finished action, as `desktop.done` tells it.
@@ -587,6 +602,7 @@ pub(super) fn parse(body: &Value) -> Result<Request, String> {
             Action::See => Act::default(),
         },
         administrator: body.get("administrator").and_then(Value::as_bool) == Some(true),
+        recheck: body.get("recheck").and_then(Value::as_bool) == Some(true),
     })
 }
 
@@ -1051,6 +1067,17 @@ impl App {
                 "another session holds the program",
             );
             return pending.reply.send(json!({ "error": why }));
+        }
+        if pending.request.recheck {
+            // From what stands alone, with no toast, no log line and no
+            // overlay: nothing is done, and the watcher must not hold the
+            // session's call behind a question.
+            let level = self.takeover.listed(&pending).level;
+            let own = self.grant_of(&pending);
+            return match recheck_holds(own, level, pending.request.action) {
+                true => pending.reply.send(json!({ "allowed": true })),
+                false => pending.reply.send(json!({ "error": RECHECK_GONE })),
+            };
         }
         let asked = self.decision_for(&pending);
         match bypassed(
@@ -2045,6 +2072,7 @@ mod tests {
                 reason: "Confirm the transfer the human asked for.".into(),
                 act: Act::default(),
                 administrator: false,
+                recheck: false,
             })
         );
     }
@@ -2104,6 +2132,23 @@ mod tests {
             "click MenuItem \"Transfer...\""
         );
         assert_eq!(what_where("look", &Act::default(), "x"), "look");
+    }
+
+    #[test]
+    fn a_recheck_is_answered_from_what_stands_and_never_asks() {
+        assert!(recheck_holds(Grant::See, None, Action::See));
+        assert!(recheck_holds(Grant::None, Some(Level::Look), Action::See));
+        // The grant gone: a no, never the approval question.
+        assert!(!recheck_holds(Grant::None, None, Action::See));
+        // Only a look is re-checked.
+        assert!(!recheck_holds(Grant::Operate, None, Action::Operate));
+        let body = json!({
+            "op": "desktop.allow",
+            "window": {"exe": "a.exe"},
+            "action": "see",
+            "recheck": true,
+        });
+        assert!(parse(&body).unwrap().recheck);
     }
 
     #[test]
