@@ -6,6 +6,11 @@
 //! It runs in the app because the app is in the interactive desktop
 //! session: a service or an SSH login sees no screen and can send it no
 //! keys.
+//!
+//! The same server, told otherwise by a [`Serving`], is the hand of the
+//! agent's desk (`crate::desk::hand`): capture and input act on the
+//! Windows session of the process that asks, so run inside the desk it
+//! serves the desk.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -99,8 +104,55 @@ pub fn told() -> Option<(&'static str, &'static str)> {
     .map(|(_, text)| ("Screen share", text))
 }
 
+/// What one server serves and how, which is what tells the screen share
+/// of the app from the hand of the agent's desk.
+pub(crate) struct Serving {
+    pub port: u16,
+    /// The token's file in the state folder.
+    pub token_file: &'static str,
+    /// The audit log's file in the state folder.
+    pub log_file: &'static str,
+    /// Whether whoever sits at this machine is told, through [`told`],
+    /// that it is watched or driven. Only where an app runs to say it.
+    pub tells: bool,
+    /// Whether a viewer may change the display's resolution.
+    pub resizes: bool,
+    /// Routes besides the screen share's own, behind the same token.
+    pub more: &'static [Route],
+}
+
+/// A route a [`Serving`] adds.
+pub(crate) struct Route {
+    pub method: &'static str,
+    pub path: &'static str,
+    /// Answers the request from its body, which is empty for a GET.
+    pub answer: fn(&str) -> Answer,
+}
+
+pub(crate) struct Answer {
+    pub status: &'static str,
+    /// The content type.
+    pub kind: &'static str,
+    pub body: String,
+}
+
+/// What the app serves when [`share::ENV`] is on.
+fn share_serving() -> Serving {
+    Serving {
+        port: share::port(horadric_hooks::dev()),
+        token_file: share::TOKEN_FILE,
+        log_file: share::LOG_FILE,
+        tells: true,
+        resizes: true,
+        more: &[],
+    }
+}
+
+const NO_RESIZE: &str = "this screen's size is not changed from here";
+
 /// What the server and its connections share.
 struct Shared {
+    serving: Serving,
     token: String,
     started: Instant,
     connections: AtomicUsize,
@@ -134,6 +186,18 @@ impl Shared {
     fn hear(&self) {
         self.heard.store(self.now() + 1, Ordering::Relaxed);
     }
+
+    fn log(&self, line: &str) {
+        log(self.serving.log_file, line);
+    }
+
+    /// Leaves `what` for the UI thread to say in a toast, where there
+    /// is one.
+    fn tell(&self, what: u8) {
+        if self.serving.tells {
+            TOLD.fetch_or(what, Ordering::Relaxed);
+        }
+    }
 }
 
 /// A lock taken even when a thread died holding it: what is behind these
@@ -148,30 +212,43 @@ pub fn start() {
     if !share::enabled(std::env::var(share::ENV).ok().as_deref()) {
         return;
     }
-    let Some(token) = token() else {
+    let serving = share_serving();
+    let Some(token) = token(serving.token_file) else {
         eprintln!("horadric: screen share: no token, not serving");
         return;
     };
-    let port = share::port(horadric_hooks::dev());
     let spawned = thread::Builder::new()
         .name("screen-share".into())
         .spawn(move || {
-            if let Err(e) = serve(port, token) {
+            if let Err(e) = serve(serving, token) {
                 eprintln!("horadric: screen share stopped: {e}");
-                log(&format!("stopped: {e}"));
+                log(share::LOG_FILE, &format!("stopped: {e}"));
             }
         });
     if let Err(e) = spawned {
         eprintln!("horadric: screen share: no thread to serve on: {e}");
-        log(&format!("could not start: {e}"));
+        log(share::LOG_FILE, &format!("could not start: {e}"));
     }
+}
+
+/// Serves as `serving` says on the calling thread, for as long as the
+/// process lives: it comes back only with why it could not serve.
+pub(crate) fn serve_here(serving: Serving) -> Result<(), String> {
+    let log_file = serving.log_file;
+    let token = token(serving.token_file).ok_or("no token could be written")?;
+    let stopped = match serve(serving, token) {
+        Ok(()) => "the listener closed".to_string(),
+        Err(e) => e.to_string(),
+    };
+    log(log_file, &format!("stopped: {stopped}"));
+    Err(stopped)
 }
 
 /// A new token for this start, written over the one before. A token that
 /// leaked is then good until the next start at most, and a viewer left
 /// open in a tab somewhere does not come back to life.
-fn token() -> Option<String> {
-    let path = horadric_hooks::state_dir()?.join(share::TOKEN_FILE);
+fn token(file: &str) -> Option<String> {
+    let path = horadric_hooks::state_dir()?.join(file);
     let mut bytes = [0u8; 16];
     crate::portal_crypto::random(&mut bytes);
     let token = share::token_hex(&bytes);
@@ -186,17 +263,18 @@ fn write_token(path: &Path, token: &str) -> io::Result<()> {
     std::fs::write(path, token)
 }
 
-/// One line in the audit log, so whoever owns this machine can read
-/// afterwards when it was watched and driven. Never the token.
-fn log(line: &str) {
+/// One line in the audit log `file` of the state folder, so whoever
+/// owns this machine can read afterwards when it was watched and driven.
+/// Never the token.
+pub(crate) fn log(file: &str, line: &str) {
     static ONE: Mutex<()> = Mutex::new(());
     let _one = lock(&ONE);
     let Some(dir) = horadric_hooks::state_dir() else {
         return;
     };
-    let path = dir.join(share::LOG_FILE);
+    let path = dir.join(file);
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > share::LOG_MAX) {
-        let _ = std::fs::rename(&path, dir.join(format!("{}.1", share::LOG_FILE)));
+        let _ = std::fs::rename(&path, dir.join(format!("{file}.1")));
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -227,15 +305,17 @@ impl Drop for Slot {
     }
 }
 
-fn serve(port: u16, token: String) -> io::Result<()> {
+fn serve(serving: Serving, token: String) -> io::Result<()> {
+    let port = serving.port;
     let listener = match bind(port) {
         Ok(l) => l,
         Err(e) => {
-            log(&format!("could not bind port {port}: {e}"));
+            log(serving.log_file, &format!("could not bind port {port}: {e}"));
             return Err(e);
         }
     };
     let shared = Arc::new(Shared {
+        serving,
         token,
         started: Instant::now(),
         connections: AtomicUsize::new(0),
@@ -252,7 +332,7 @@ fn serve(port: u16, token: String) -> io::Result<()> {
     thread::Builder::new()
         .name("screen-share-watch".into())
         .spawn(move || watch(&watched))?;
-    log(&format!("started on port {port}"));
+    shared.log(&format!("started on port {port}"));
 
     for stream in listener.incoming() {
         let stream = match stream {
@@ -448,8 +528,16 @@ fn handle(stream: &TcpStream, shared: &Arc<Shared>) -> io::Result<()> {
         return respond(stream, "403 Forbidden", "text/plain", b"forbidden");
     }
     if shared.first_in_a_while(&shared.seen) {
-        log("a viewer arrived");
-        TOLD.fetch_or(WATCHED, Ordering::Relaxed);
+        shared.log("a viewer arrived");
+        shared.tell(WATCHED);
+    }
+    // Refused before the routes, with any body read, or closing on it
+    // would lose the answer.
+    if !shared.serving.resizes && method == "POST" && path.starts_with("/display") {
+        if read_body(stream, &mut reader, content_length)?.is_none() {
+            return Ok(());
+        }
+        return respond(stream, "403 Forbidden", "text/plain", NO_RESIZE.as_bytes());
     }
     match (method.as_str(), path) {
         ("GET", "/frame.jpg") => {
@@ -478,8 +566,8 @@ fn handle(stream: &TcpStream, shared: &Arc<Shared>) -> io::Result<()> {
                 Ok(events) => {
                     if events.iter().any(Input::drives) && shared.first_in_a_while(&shared.driven)
                     {
-                        log("input began");
-                        TOLD.fetch_or(DRIVEN, Ordering::Relaxed);
+                        shared.log("input began");
+                        shared.tell(DRIVEN);
                     }
                     match run(shared, &events) {
                         Ok(()) => respond(stream, "204 No Content", "", b""),
@@ -535,7 +623,25 @@ fn handle(stream: &TcpStream, shared: &Arc<Shared>) -> io::Result<()> {
             revert(shared);
             respond(stream, "204 No Content", "", b"")
         }
-        _ => respond(stream, "404 Not Found", "text/plain", b"not found"),
+        _ => {
+            let mut more = shared.serving.more.iter();
+            let Some(route) = more.find(|r| r.method == method && r.path == path) else {
+                return respond(stream, "404 Not Found", "text/plain", b"not found");
+            };
+            let body = if method == "POST" {
+                match read_body(stream, &mut reader, content_length)? {
+                    None => return Ok(()),
+                    Some(Ok(body)) => body,
+                    Some(Err(why)) => {
+                        return respond(stream, "400 Bad Request", "text/plain", why.as_bytes());
+                    }
+                }
+            } else {
+                String::new()
+            };
+            let answer = (route.answer)(&body);
+            respond(stream, answer.status, answer.kind, answer.body.as_bytes())
+        }
     }
 }
 
@@ -1426,7 +1532,7 @@ fn resize(shared: &Arc<Shared>, size: Size) -> Result<(), Refused> {
         }
     }
     let number = trial.begin((display, mode));
-    log(&format!(
+    shared.log(&format!(
         "display changed to {}x{}, on trial",
         size.width, size.height
     ));
@@ -1437,7 +1543,7 @@ fn resize(shared: &Arc<Shared>, size: Size) -> Result<(), Refused> {
         .spawn(move || {
             thread::sleep(Duration::from_secs(share::KEEP_WITHIN));
             if let Some((display, _)) = lock(&timed.trial).expire(number) {
-                log(&match display.revert() {
+                timed.log(&match display.revert() {
                     None => format!(
                         "display reverted, {}x{} was not kept",
                         size.width, size.height
@@ -1451,7 +1557,7 @@ fn resize(shared: &Arc<Shared>, size: Size) -> Result<(), Refused> {
         if let Some((display, _)) = trial.expire(number) {
             display.revert();
         }
-        log("display reverted, no thread for the timer");
+        shared.log("display reverted, no thread for the timer");
         return Err(Refused::Broken(format!(
             "no timer to take the resolution back with: {e}"
         )));
@@ -1470,14 +1576,14 @@ fn keep(shared: &Shared) -> Result<(), Refused> {
     let (width, height) = (mode.dmPelsWidth, mode.dmPelsHeight);
     match display.change(Some(&mode), CDS_UPDATEREGISTRY) {
         None => {
-            log(&format!("display {width}x{height} kept"));
+            shared.log(&format!("display {width}x{height} kept"));
             Ok(())
         }
         Some(why) => {
             // Not saved, and its timer is spent: left as it is, it would
             // last until the next sign out with nobody having chosen that.
             display.revert();
-            log(&format!(
+            shared.log(&format!(
                 "display reverted, {width}x{height} could not be kept: {why}"
             ));
             Err(Refused::Windows(why))
@@ -1491,7 +1597,7 @@ fn keep(shared: &Shared) -> Result<(), Refused> {
 fn revert(shared: &Shared) {
     if let Some((display, mode)) = lock(&shared.trial).keep() {
         let (width, height) = (mode.dmPelsWidth, mode.dmPelsHeight);
-        log(&match display.revert() {
+        shared.log(&match display.revert() {
             None => format!("display reverted, {width}x{height} was given up"),
             Some(why) => format!("display could not be reverted: {why}"),
         });
