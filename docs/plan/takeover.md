@@ -243,13 +243,16 @@ The elevated helper trusts neither the session nor the app:
   program and before every risky action, which it judges from what it
   reads itself.
 - Its log, `takeover-elevated.log` beside the administrators' list, is
-  the one record the session can not rewrite.
+  the one record the session can not rewrite: each question and answer,
+  and each action it did, failed or refused, one line each. It creates
+  the file administrators only and rolls it at 1 MB.
 
 The questions are not walls against a session either. Horadric's own
 question and its tray menu take clicks and messages from any program of
 the user, so a session could answer them itself; only Bypass, the
 plate's speed slider and the elevated helper's own window refuse input
-a program sent.
+a program sent (the slider and Bypass move only for a press the mouse
+hook saw as the human's own, made on them and still held).
 
 What this does not promise:
 
@@ -366,7 +369,9 @@ misspelt one would match more than meant.
 bypass, with the shell commands the session ran beside the control. It
 is kept under a size. The helper's own decisions are in
 `takeover-elevated.log` in `%ProgramData%\Horadric`, which
-`horadric takeover log --elevated` shows.
+`horadric takeover log --elevated` shows. It vouches for that log only
+when the folder and the file pass the same administrators only check as
+the list, and says plainly when they do not.
 
 **The old names.** The files were `desktop-programs.json`,
 `desktop.log` and `desktop-elevated.log`. In `%APPDATA%\Horadric` an
