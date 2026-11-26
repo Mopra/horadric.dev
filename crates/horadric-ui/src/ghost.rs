@@ -48,6 +48,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use horadric_core::desktop_programs::Source;
+use horadric_core::event::HookEvent;
+use horadric_core::folio::{read_result, ResultKind};
 use horadric_core::session::{Phase, WaitReason};
 
 use horadric_hooks::listener::Reply;
@@ -66,7 +68,11 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
-use windows::Win32::Graphics::DirectWrite::{IDWriteTextFormat, DWRITE_MEASURING_MODE_NATURAL};
+use windows::Win32::Graphics::DirectWrite::{
+    IDWriteTextFormat, IDWriteTextLayout, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL, DWRITE_TEXT_METRICS, DWRITE_TRIMMING,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EnumDisplayMonitors,
@@ -430,6 +436,557 @@ fn take_turns_ended() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Shell commands the plate lists for one session, newest first.
+pub(super) const SHELLS: usize = 8;
+/// How many lines of a command show: the running one is what the human
+/// must be able to read, the finished ones only to recognise.
+const RUNNING_LINES: usize = 8;
+const DONE_LINES: usize = 2;
+/// The shell section's room above its header, the header, the padding
+/// round a command's well and the room between commands, in DIPs.
+const SHELLS_GAP: f32 = 14.0;
+const FOLD_H: f32 = 22.0;
+const WELL_PAD: f32 = 3.0;
+const SHELL_GAP: f32 = 6.0;
+/// A command's width in its well, and how much of it is laid out at all:
+/// a script written inline can be thousands of lines, of which the plate
+/// shows eight.
+const COMMAND_W: f32 = BOX_W - 2.0 * PAD - 12.0;
+const COMMAND_CHARS: usize = 4000;
+
+// More glyphs of the system's icon font.
+const RUNNING: char = '\u{E768}';
+const CLOCK: char = '\u{E823}';
+const OPEN: char = '\u{E70D}';
+const FOLDED: char = '\u{E76C}';
+
+/// Where a shell command the plate lists stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ShellState {
+    Running,
+    Done,
+    /// It failed, with its exit code when it gave one.
+    Failed(Option<i32>),
+    /// The human stopped it.
+    Interrupted,
+    /// It ran past its timeout and goes on in the background.
+    TimedOut,
+    /// It was sent to the background from the start.
+    Background,
+    /// Its turn ended without its end ever coming: refused, cancelled.
+    Stopped,
+}
+
+impl ShellState {
+    /// The state in a word or two, beside the command.
+    pub(super) fn word(self) -> String {
+        match self {
+            ShellState::Running => "running".into(),
+            ShellState::Done => "done".into(),
+            ShellState::Failed(Some(code)) => format!("exit {code}"),
+            ShellState::Failed(None) => "failed".into(),
+            ShellState::Interrupted => "interrupted".into(),
+            ShellState::TimedOut => "timed out, in background".into(),
+            ShellState::Background => "in background".into(),
+            ShellState::Stopped => "stopped".into(),
+        }
+    }
+
+    fn glyph(self) -> char {
+        match self {
+            ShellState::Running => RUNNING,
+            ShellState::Done => CHECK,
+            ShellState::Failed(_) => ERROR,
+            ShellState::Interrupted => STOP,
+            ShellState::TimedOut | ShellState::Background => CLOCK,
+            ShellState::Stopped => CROSS,
+        }
+    }
+
+    fn colour(self) -> Color {
+        match self {
+            ShellState::Running => theme::working(),
+            ShellState::Done => theme::done(),
+            ShellState::Failed(_) | ShellState::Interrupted => theme::error(),
+            ShellState::TimedOut | ShellState::Background => theme::waiting(),
+            ShellState::Stopped => theme::legend(),
+        }
+    }
+
+    /// How many lines of its command the plate shows.
+    pub(super) fn lines(self) -> usize {
+        match self {
+            ShellState::Running => RUNNING_LINES,
+            _ => DONE_LINES,
+        }
+    }
+}
+
+/// One shell command a session ran while control was on.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Shell {
+    /// Claude Code's id for the call, which its end quotes back.
+    pub id: String,
+    /// `Bash` or `PowerShell`.
+    pub tool: String,
+    pub command: String,
+    pub description: String,
+    /// A subagent of the session ran it.
+    pub agent: bool,
+    pub at: String,
+    pub state: ShellState,
+    /// Its number in this run of the app, which keys its laid out text.
+    pub serial: u64,
+}
+
+impl Shell {
+    /// What the row says the command is for: its description, else which
+    /// shell it ran in.
+    pub(super) fn title(&self) -> String {
+        match self.description.trim() {
+            "" => format!("{} command", self.tool),
+            d => d.to_string(),
+        }
+    }
+}
+
+/// What the hook thread heard of a shell command, for the overlay.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum ShellNote {
+    Began {
+        session: String,
+        shell: Shell,
+    },
+    Ended {
+        session: String,
+        /// Claude Code's id for the call; empty when it gave none.
+        id: String,
+        /// `Bash` or `PowerShell`, and the command, to pair an end that
+        /// has no id.
+        tool: String,
+        command: String,
+        state: ShellState,
+    },
+    /// The session's turn ended, or a new prompt began one: whatever of
+    /// its commands still runs never got its end.
+    TurnEnded {
+        session: String,
+    },
+}
+
+impl ShellNote {
+    pub(super) fn session(&self) -> &str {
+        match self {
+            ShellNote::Began { session, .. }
+            | ShellNote::Ended { session, .. }
+            | ShellNote::TurnEnded { session } => session,
+        }
+    }
+}
+
+/// Whether a tool runs commands in a shell, under any MCP prefix.
+pub(super) fn is_shell_tool(tool: &str) -> bool {
+    matches!(bare_tool(tool), "Bash" | "PowerShell")
+}
+
+fn bare_tool(tool: &str) -> &str {
+    tool.rsplit("__").next().unwrap_or(tool)
+}
+
+/// How a shell command ended, from its `PostToolUse` (`error` none) or
+/// its `PostToolUseFailure`.
+pub(super) fn shell_ended(
+    tool: &str,
+    input: &serde_json::Value,
+    response: &serde_json::Value,
+    error: Option<&str>,
+    interrupt: bool,
+) -> ShellState {
+    if interrupt {
+        return ShellState::Interrupted;
+    }
+    let bare = bare_tool(tool);
+    let read = match error {
+        Some(e) => read_result(bare, input, e, true, &serde_json::Value::Null),
+        None => {
+            let text = response.as_str().unwrap_or_default();
+            let detail = if response.is_object() {
+                response
+            } else {
+                &serde_json::Value::Null
+            };
+            read_result(bare, input, text, false, detail)
+        }
+    };
+    let ResultKind::Shell(sh) = read.kind else {
+        return if error.is_some() {
+            ShellState::Failed(None)
+        } else {
+            ShellState::Done
+        };
+    };
+    if sh.interrupted {
+        ShellState::Interrupted
+    } else if sh.timed_out_ms.is_some() {
+        ShellState::TimedOut
+    } else if sh.background.is_some() {
+        ShellState::Background
+    } else {
+        match (sh.exit_code, error.is_some()) {
+            (Some(0) | None, false) => ShellState::Done,
+            (code, _) => ShellState::Failed(code.filter(|c| *c != 0)),
+        }
+    }
+}
+
+/// What a hook event says of a shell command of session `target`, at
+/// wall clock `at`, or of the end of its turn. None for anything else.
+pub(super) fn shell_note(target: &str, e: &HookEvent, at: &str) -> Option<ShellNote> {
+    let session = target.to_string();
+    let turn_edge = matches!(
+        e.hook_event_name.as_str(),
+        "Stop" | "StopFailure" | "SessionEnd" | "UserPromptSubmit"
+    );
+    if turn_edge && !e.is_subagent() {
+        return Some(ShellNote::TurnEnded { session });
+    }
+    let tool = e.tool_name.as_deref().filter(|t| is_shell_tool(t))?;
+    let id = e.tool_use_id.clone().unwrap_or_default();
+    let input = e.tool_input.clone().unwrap_or_default();
+    let text = |key: &str| input[key].as_str().unwrap_or_default().to_string();
+    match e.hook_event_name.as_str() {
+        "PreToolUse" => Some(ShellNote::Began {
+            session,
+            shell: Shell {
+                id,
+                tool: bare_tool(tool).to_string(),
+                command: text("command"),
+                description: text("description"),
+                agent: e.is_subagent(),
+                at: at.to_string(),
+                state: ShellState::Running,
+                serial: 0,
+            },
+        }),
+        "PostToolUse" | "PostToolUseFailure" => Some(ShellNote::Ended {
+            session,
+            id,
+            tool: bare_tool(tool).to_string(),
+            command: text("command"),
+            state: shell_ended(
+                tool,
+                &input,
+                e.tool_response.as_ref().unwrap_or(&serde_json::Value::Null),
+                (e.hook_event_name == "PostToolUseFailure")
+                    .then(|| e.error_text().unwrap_or_default()),
+                e.interrupted(),
+            ),
+        }),
+        _ => None,
+    }
+}
+
+/// Takes a note into the sessions' lists, and gives back the commands it
+/// began or ended, for the log. An end is paired by its id, or without
+/// one with the oldest running command of its shell that ran the same,
+/// else the oldest of its shell; an end whose start was never heard, one
+/// begun before control, is dropped.
+pub(super) fn hear_shell(
+    lists: &mut HashMap<String, VecDeque<Shell>>,
+    note: ShellNote,
+) -> Vec<Shell> {
+    match note {
+        ShellNote::Began { session, shell } => {
+            let list = lists.entry(session).or_default();
+            list.push_front(shell.clone());
+            list.truncate(SHELLS);
+            vec![shell]
+        }
+        ShellNote::Ended {
+            session,
+            id,
+            tool,
+            command,
+            state,
+        } => {
+            let Some(list) = lists.get_mut(&session) else {
+                return Vec::new();
+            };
+            let running = |s: &Shell| s.state == ShellState::Running;
+            // The list is newest first, so the oldest is found from its end.
+            let at = if id.is_empty() {
+                let mine = |s: &Shell| running(s) && s.tool == tool;
+                list.iter()
+                    .rposition(|s| mine(s) && s.command == command)
+                    .or_else(|| list.iter().rposition(mine))
+            } else {
+                list.iter().position(|s| running(s) && s.id == id)
+            };
+            at.and_then(|i| list.get_mut(i))
+                .map(|s| {
+                    s.state = state;
+                    s.clone()
+                })
+                .into_iter()
+                .collect()
+        }
+        ShellNote::TurnEnded { session } => lists
+            .get_mut(&session)
+            .into_iter()
+            .flatten()
+            .filter(|s| s.state == ShellState::Running)
+            .map(|s| {
+                s.state = ShellState::Stopped;
+                s.clone()
+            })
+            .collect(),
+    }
+}
+
+/// The fold's header: how many commands, and how many still run.
+pub(super) fn shells_count(list: &VecDeque<Shell>) -> String {
+    let running = list
+        .iter()
+        .filter(|s| s.state == ShellState::Running)
+        .count();
+    match (list.len(), running) {
+        (0, _) => "none yet".into(),
+        (n, 0) => format!("{n}"),
+        (n, r) => format!("{n}, {r} running"),
+    }
+}
+
+/// How many lines a whole command has, from the lines of the part laid
+/// out: the rest of it adds its line breaks.
+pub(super) fn command_lines(laid: usize, command: &str) -> usize {
+    let rest = &command[command_shown(command).len()..];
+    laid.max(1) + rest.matches('\n').count()
+}
+
+/// The tag on a command cut short, none when it shows whole.
+pub(super) fn more_lines(hidden: usize) -> Option<String> {
+    match hidden {
+        0 => None,
+        1 => Some("+1 line".into()),
+        n => Some(format!("+{n} lines")),
+    }
+}
+
+/// The start of a command, as much as is laid out and logged.
+pub(super) fn command_shown(command: &str) -> &str {
+    match command.char_indices().nth(COMMAND_CHARS) {
+        Some((at, _)) => &command[..at],
+        None => command,
+    }
+}
+
+/// One listed command's whole row, `lines` of its command shown.
+fn shell_row(lines: usize, line_h: f32) -> f32 {
+    ROW + lines as f32 * line_h + 2.0 * WELL_PAD + SHELL_GAP
+}
+
+/// How the shell section fits the room it has.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct Fit {
+    /// Lines shown of each command shown, newest first.
+    pub shown: Vec<usize>,
+    /// Commands left out for want of room.
+    pub more: usize,
+    /// A line under them: there are none yet, or how many are left out.
+    pub note: bool,
+}
+
+/// Fits the commands, newest first, each its lines and state, into `room`
+/// DIPs under the header, so the plate stays on the screen. A running
+/// command gives up lines, down to what a finished one shows, before any
+/// command is left out, and what is left out is counted.
+pub(super) fn fit_shells(rows: &[(usize, ShellState)], line_h: f32, room: f32) -> Fit {
+    let room = room - SHELLS_GAP - FOLD_H;
+    let height = |shown: &[usize]| shown.iter().map(|&l| shell_row(l, line_h)).sum::<f32>();
+    if rows.is_empty() {
+        return Fit {
+            note: room >= ROW,
+            ..Fit::default()
+        };
+    }
+    let full: Vec<usize> = rows.iter().map(|&(l, s)| l.clamp(1, s.lines())).collect();
+    if height(&full) <= room {
+        return Fit {
+            shown: full,
+            ..Fit::default()
+        };
+    }
+    let mut shown: Vec<usize> = rows.iter().map(|&(l, _)| l.clamp(1, DONE_LINES)).collect();
+    if height(&shown) > room {
+        let mut k = shown.len();
+        while k > 0 && height(&shown[..k]) + ROW > room {
+            k -= 1;
+        }
+        shown.truncate(k);
+    }
+    // What room is left goes back to the running ones, newest first.
+    let mut left = room - height(&shown);
+    let more = rows.len() - shown.len();
+    if more > 0 {
+        left -= ROW;
+    }
+    for (lines, &want) in shown.iter_mut().zip(&full) {
+        let extra = (want - *lines).min((left / line_h).floor().max(0.0) as usize);
+        *lines += extra;
+        left -= extra as f32 * line_h;
+    }
+    Fit {
+        shown,
+        more,
+        note: more > 0 && room >= ROW,
+    }
+}
+
+/// The shell section's height: its header, and while open what `fit`
+/// shows, `line_h` a command's line.
+pub(super) fn shells_height(open: bool, fit: &Fit, line_h: f32) -> f32 {
+    let rows = if open {
+        fit.shown.iter().map(|&l| shell_row(l, line_h)).sum::<f32>()
+            + if fit.note { ROW } else { 0.0 }
+    } else {
+        0.0
+    };
+    SHELLS_GAP + FOLD_H + rows
+}
+
+/// The line under the commands: none yet, or how many are left out.
+pub(super) fn shells_note(fit: &Fit) -> String {
+    match fit.more {
+        0 => "No shell command since control began".into(),
+        n => format!("{n} more not shown, no room on the screen"),
+    }
+}
+
+/// How long a command's end line in the log quotes it: the start line
+/// has it whole, as far as [`COMMAND_CHARS`].
+const LOG_END_CHARS: usize = 80;
+
+/// One line of the desktop log for a shell command: when, which session,
+/// what happened, in which shell, the command and what it is for. Its
+/// start gives the command, its end only enough of it to find the start.
+pub(super) fn shell_log_line(utc: &str, session: &str, shell: &Shell) -> String {
+    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let from = if shell.agent { " by a subagent" } else { "" };
+    let (how, command) = match shell.state {
+        ShellState::Running => (
+            format!("shell command started{from}"),
+            flat(command_shown(&shell.command)),
+        ),
+        state => {
+            let all = flat(&shell.command);
+            let short = match all.char_indices().nth(LOG_END_CHARS) {
+                Some((at, _)) => format!("{}...", &all[..at]),
+                None => all,
+            };
+            (format!("shell command {}{from}", state.word()), short)
+        }
+    };
+    let mut line = format!(
+        "{utc}  {}  {how}  {}  ({command})",
+        flat(session),
+        shell.tool
+    );
+    if !shell.description.trim().is_empty() {
+        line.push_str(&format!("  [{}]", flat(&shell.description)));
+    }
+    line.push('\n');
+    line
+}
+
+/// The sessions that hold control in this run of it, and what the hook
+/// thread heard of their shells, kept under one lock so a run's end
+/// clears both at once and no note from before it reaches the next.
+struct ShellWatch {
+    holders: Vec<String>,
+    notes: Vec<ShellNote>,
+}
+
+static SHELL_WATCH: Mutex<ShellWatch> = Mutex::new(ShellWatch {
+    holders: Vec::new(),
+    notes: Vec::new(),
+});
+/// Each command's number, for its laid out text.
+static SHELL_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A session holds control from its first allowed desktop call, or from
+/// bypass turned on for it: its shell commands are listed from then.
+fn hold_shells(session: &str) {
+    if session.is_empty() {
+        return;
+    }
+    if let Ok(mut w) = SHELL_WATCH.lock() {
+        if !w.holders.iter().any(|h| h == session) {
+            w.holders.push(session.to_string());
+        }
+    }
+}
+
+/// Control's run is over: nobody holds it and nothing heard is kept.
+fn release_shells() {
+    if let Ok(mut w) = SHELL_WATCH.lock() {
+        w.holders.clear();
+        w.notes.clear();
+    }
+}
+
+/// A hook event for session `target`, from the thread that reads hooks:
+/// a shell command's start or end, or its turn's end, is kept for the
+/// plate when the session holds control.
+pub(super) fn shell_heard(target: &str, e: &HookEvent) {
+    let Some(mut note) = shell_note(target, e, &now_clock()) else {
+        return;
+    };
+    if let ShellNote::Began { shell, .. } = &mut note {
+        shell.serial = SHELL_SERIAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if let Ok(mut w) = SHELL_WATCH.lock() {
+        if w.holders.iter().any(|h| h == target) {
+            w.notes.push(note);
+        }
+    }
+}
+
+fn take_shell_notes() -> Vec<ShellNote> {
+    SHELL_WATCH
+        .lock()
+        .map(|mut w| std::mem::take(&mut w.notes))
+        .unwrap_or_default()
+}
+
+/// Appends to `desktop.log` on a thread of its own, in the order given,
+/// so the plate's frame never waits on the disk.
+fn log_shells(lines: String) {
+    static WRITER: Mutex<Option<std::sync::mpsc::Sender<String>>> = Mutex::new(None);
+    let Ok(mut writer) = WRITER.lock() else {
+        return;
+    };
+    let tx = writer.get_or_insert_with(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for lines in rx {
+                let Some(file) = horadric_hooks::tasks::desktop_log_file() else {
+                    continue;
+                };
+                if let Some(dir) = file.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&file)
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, lines.as_bytes()));
+            }
+        });
+        tx
+    });
+    let _ = tx.send(lines);
+}
+
 /// A wall clock time as the history shows it.
 pub(super) fn clock(h: u16, m: u16, s: u16) -> String {
     format!("{h:02}:{m:02}:{s:02}")
@@ -513,10 +1070,19 @@ pub(super) fn glide_to_saved(d: Duration) -> Option<u32> {
 pub(super) enum Control {
     Speed,
     Bypass,
+    /// The shell section's header, which folds it.
+    Shells,
 }
 
-/// The control under a point `x`, `y` DIPs from the plate's corner.
-pub(super) fn control_at(x: f32, y: f32) -> Option<Control> {
+/// The control under a point `x`, `y` DIPs from the plate's corner, with
+/// the shell section beginning at `shells` when the plate has one.
+pub(super) fn control_at(x: f32, y: f32, shells: Option<f32>) -> Option<Control> {
+    if let Some(top) = shells {
+        let header = top + SHELLS_GAP;
+        if (header..header + FOLD_H).contains(&y) && (PAD..BOX_W - PAD).contains(&x) {
+            return Some(Control::Shells);
+        }
+    }
     if !(CONTROLS_Y..CONTROLS_Y + CONTROLS_H).contains(&y) {
         return None;
     }
@@ -600,8 +1166,14 @@ pub(super) fn box_place(work: [i32; 4], size: (i32, i32), margin: i32) -> (i32, 
 }
 
 /// The plate's height in DIPs for a reason `reason_h` tall and `rows`
-/// lines of history, with the bypass band when it is on.
-pub(super) fn box_height(reason_h: f32, rows: usize, bypass: bool) -> f32 {
+/// lines of history, with the bypass band when it is on, and a shell
+/// section `shells` tall under it all.
+pub(super) fn box_height(reason_h: f32, rows: usize, bypass: bool, shells: f32) -> f32 {
+    (body_height(reason_h, rows, bypass) + shells + PAD).ceil()
+}
+
+/// Where the shell section begins: under the controls, NOW and history.
+pub(super) fn body_height(reason_h: f32, rows: usize, bypass: bool) -> f32 {
     let reason = reason_h.min(REASON_LINES * REASON_LINE);
     let controls = CONTROLS_STEP + if bypass { BANNER } else { 0.0 };
     let now = CONTROLS_Y + controls + 22.0 + if reason > 0.0 { reason + 4.0 } else { 0.0 } + ROW;
@@ -610,7 +1182,7 @@ pub(super) fn box_height(reason_h: f32, rows: usize, bypass: bool) -> f32 {
     } else {
         14.0 + 22.0 + rows as f32 * ROW
     };
-    (now + history + PAD).ceil()
+    now + history
 }
 
 /// What is shown under NOW.
@@ -1067,6 +1639,16 @@ struct Overlay {
     ticked: Instant,
     now: Now,
     history: VecDeque<Entry>,
+    /// Each session's shell commands since control began, newest first.
+    shells: HashMap<String, VecDeque<Shell>>,
+    /// The shell section is open: the human folds it with its header.
+    shells_open: bool,
+    /// Where the shell section begins on the plate, in DIPs, for the mouse.
+    shells_top: Option<f32>,
+    /// The commands' monospaced face, made on the first paint.
+    mono: Option<IDWriteTextFormat>,
+    /// Each listed command laid out, by its serial, made once.
+    laid: HashMap<u64, Laid>,
     /// The plate's content changed since it was painted.
     stale: bool,
 }
@@ -1157,6 +1739,11 @@ fn with(shared: &Rc<Shared>, f: impl FnOnce(&mut Overlay)) {
                         ticked: now,
                         now: Now::default(),
                         history: VecDeque::new(),
+                        shells: HashMap::new(),
+                        shells_open: true,
+                        shells_top: None,
+                        mono: None,
+                        laid: HashMap::new(),
                         stale: true,
                     })
                 }
@@ -1185,6 +1772,7 @@ pub(super) fn allowed(shared: &Rc<Shared>, call: Allowed, reply: Reply) -> bool 
         if started {
             o.began = now;
         }
+        hold_shells(&call.session);
         o.until = extend(o.until, now, true);
         o.place_plate(call.hwnd, call.point);
         if bypass() {
@@ -1575,6 +2163,7 @@ impl Overlay {
         if !self.now.session.is_empty() {
             self.holders
                 .insert(self.now.session.clone(), Holder::default());
+            hold_shells(&self.now.session);
         }
         // Its banner says Esc ends it, so Esc is held from now.
         self.keep_esc();
@@ -1694,6 +2283,49 @@ impl Overlay {
         }
     }
 
+    /// Takes in the shell commands the hook thread heard, each into its
+    /// session's list and into `desktop.log`, the audit trail of what ran
+    /// beside the control.
+    fn hear_shells(&mut self) {
+        let notes = take_shell_notes();
+        if notes.is_empty() {
+            return;
+        }
+        let mut lines = String::new();
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let utc = horadric_core::tasks::utc(secs);
+        for note in notes {
+            let session = note.session().to_string();
+            let heard = hear_shell(&mut self.shells, note);
+            if heard.is_empty() {
+                continue;
+            }
+            if session == self.now.session {
+                self.stale = true;
+            }
+            let name = self
+                .shared
+                .registry
+                .lock()
+                .ok()
+                .and_then(|r| r.get(&session).map(|s| s.name.clone()))
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or(session);
+            for shell in &heard {
+                lines.push_str(&shell_log_line(&utc, &name, shell));
+            }
+        }
+        // Text laid out for a command no list holds any more goes.
+        let kept: std::collections::HashSet<u64> =
+            self.shells.values().flatten().map(|s| s.serial).collect();
+        self.laid.retain(|serial, _| kept.contains(serial));
+        if !lines.is_empty() {
+            log_shells(lines);
+        }
+    }
+
     fn set_speed(&mut self, f: f32) {
         let d = glide_of_slider(f);
         if d != SPEED.get() {
@@ -1710,7 +2342,7 @@ impl Overlay {
         };
         let x = (at.0 - p.pos.0) as f32 / p.scale;
         let y = (at.1 - p.pos.1) as f32 / p.scale;
-        self.dragging || control_at(x, y).is_some()
+        self.dragging || control_at(x, y, self.shells_top).is_some()
     }
 
     /// The mouse on the plate. True when it turned bypass on, for the app
@@ -1723,7 +2355,7 @@ impl Overlay {
         let x = (lparam.0 & 0xFFFF) as i16 as f32 / scale;
         let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32 / scale;
         match msg {
-            WM_LBUTTONDOWN => match control_at(x, y) {
+            WM_LBUTTONDOWN => match control_at(x, y, self.shells_top) {
                 Some(Control::Speed) => {
                     self.dragging = true;
                     unsafe {
@@ -1735,6 +2367,10 @@ impl Overlay {
                 Some(Control::Bypass) => {
                     self.bypass_on();
                     return true;
+                }
+                Some(Control::Shells) => {
+                    self.shells_open = !self.shells_open;
+                    self.stale = true;
                 }
                 None => {}
             },
@@ -1774,6 +2410,7 @@ impl Overlay {
         self.tripped();
         self.watch_turns(now);
         self.watch_now(now);
+        self.hear_shells();
         if let Some(g) = &self.glide {
             let elapsed = now.duration_since(g.began);
             self.ghost_at = Some(glide_at(g.from, g.to, elapsed, g.takes));
@@ -1809,6 +2446,10 @@ impl Overlay {
 
     /// Nothing moves: the windows hide and the frames stop.
     fn rest(&mut self) {
+        // The next run of control lists only what it saw begin.
+        release_shells();
+        self.shells.clear();
+        self.laid.clear();
         self.edges.clear();
         if let Some(p) = self.plate.as_mut() {
             p.hide();
@@ -1915,7 +2556,74 @@ impl Overlay {
         let reason_h = reason
             .as_ref()
             .map_or(0.0, |l| render::text_size(l).1.ceil());
-        let h = box_height(reason_h, self.history.len(), bypass);
+        let body = body_height(reason_h, self.history.len(), bypass);
+        if self.mono.is_none() {
+            self.mono = unsafe { mono_format(gpu) };
+        }
+        // The commands of the session the plate shows, laid out once each,
+        // fitted to the room the screen has under the rest.
+        let room =
+            (self.work[3] - self.work[1]) as f32 / self.scale - 2.0 * BOX_MARGIN - body - PAD;
+        let list = self.shells.get(&self.now.session);
+        let mut listed: Vec<&Shell> = Vec::new();
+        if let (Some(list), Some(mono)) = (list, self.mono.as_ref()) {
+            for shell in list {
+                if let std::collections::hash_map::Entry::Vacant(slot) =
+                    self.laid.entry(shell.serial)
+                {
+                    let Ok(layout) =
+                        render::wrapped(gpu, mono, command_shown(&shell.command), COMMAND_W)
+                    else {
+                        continue;
+                    };
+                    let (lines, line_h) = line_metrics(&layout);
+                    slot.insert(Laid {
+                        layout,
+                        total: command_lines(lines, &shell.command),
+                        line_h,
+                        max_h: f32::INFINITY,
+                    });
+                }
+                listed.push(shell);
+            }
+        }
+        let line_h = listed
+            .first()
+            .and_then(|s| self.laid.get(&s.serial))
+            .map_or(REASON_LINE, |l| l.line_h);
+        let wants: Vec<(usize, ShellState)> = listed
+            .iter()
+            .filter_map(|s| self.laid.get(&s.serial).map(|l| (l.total, s.state)))
+            .collect();
+        let fit = fit_shells(&wants, line_h, room);
+        let mut rows: Vec<ShellRow> = Vec::new();
+        if self.shells_open {
+            for (shell, &lines) in listed.iter().zip(&fit.shown) {
+                let Some(laid) = self.laid.get_mut(&shell.serial) else {
+                    continue;
+                };
+                let h = lines as f32 * laid.line_h;
+                // Past its lines the layout trims the last one with an
+                // ellipsis; set only when it changes, as it lays out again.
+                if (laid.max_h - h).abs() > 0.1 {
+                    laid.max_h = h;
+                    unsafe {
+                        let _ = laid.layout.SetMaxHeight(h + 0.5);
+                    }
+                }
+                rows.push(ShellRow {
+                    shell,
+                    command: laid.layout.clone(),
+                    h,
+                    hidden: laid.total.saturating_sub(lines),
+                });
+            }
+        }
+        let shells_h = shells_height(self.shells_open, &fit, line_h);
+        let h = box_height(reason_h, self.history.len(), bypass, shells_h);
+        self.shells_top = Some(body);
+        let count = list.map_or_else(|| shells_count(&VecDeque::new()), shells_count);
+        let note = (self.shells_open && fit.note).then(|| shells_note(&fit));
         let s = self.scale;
         let size = ((BOX_W * s).round() as i32, (h * s).round() as i32);
         let margin = (BOX_MARGIN * s).round() as i32;
@@ -1939,6 +2647,14 @@ impl Overlay {
             let history = &self.history;
             let metrics_radius = self.shared.metrics.window_radius;
             let (speed, hover, dragging) = (SPEED.get(), self.hover, self.dragging);
+            let shells = ShellsScene {
+                top: body,
+                open: self.shells_open,
+                count,
+                rows,
+                note,
+                hover: hover == Some(Control::Shells),
+            };
             let _ = plate.paint(|p| unsafe {
                 draw_plate(
                     gpu,
@@ -1957,6 +2673,7 @@ impl Overlay {
                         dragging,
                     },
                 );
+                draw_shells(gpu, p, &shells);
             });
         }
         plate.present(pos, self.shown);
@@ -1969,7 +2686,7 @@ impl Overlay {
         let hover = unsafe { GetCursorPos(&mut cursor) }.ok().and_then(|_| {
             let x = (cursor.x - pos.0) as f32 / s;
             let y = (cursor.y - pos.1) as f32 / s;
-            control_at(x, y)
+            control_at(x, y, self.shells_top)
         });
         plate.set_clickable(hover.is_some() || self.dragging, cursor);
         if hover != self.hover {
@@ -2228,6 +2945,215 @@ unsafe fn draw_plate(gpu: &render::Gpu, p: &Pen, s: PlateScene) {
     }
 }
 
+/// A command laid out once, for every frame it shows in.
+struct Laid {
+    layout: IDWriteTextLayout,
+    /// Lines of the whole command.
+    total: usize,
+    line_h: f32,
+    /// The height it is trimmed at now.
+    max_h: f32,
+}
+
+/// One command on the plate, laid out.
+struct ShellRow<'a> {
+    shell: &'a Shell,
+    command: IDWriteTextLayout,
+    /// How tall its command shows.
+    h: f32,
+    /// Lines of it the plate does not show.
+    hidden: usize,
+}
+
+/// The shell section: what the session ran in a shell while control was
+/// on, under the rest of the plate.
+struct ShellsScene<'a> {
+    top: f32,
+    open: bool,
+    count: String,
+    rows: Vec<ShellRow<'a>>,
+    /// The line under the commands, when there is room for it.
+    note: Option<String>,
+    hover: bool,
+}
+
+/// How many lines laid out text has, and how tall one is.
+fn line_metrics(l: &IDWriteTextLayout) -> (usize, f32) {
+    let mut m = DWRITE_TEXT_METRICS::default();
+    match unsafe { l.GetMetrics(&mut m) } {
+        Ok(()) if m.lineCount > 0 => (m.lineCount as usize, m.height / m.lineCount as f32),
+        _ => (1, REASON_LINE),
+    }
+}
+
+/// The commands' face: monospaced, as a terminal shows them, trimmed with
+/// an ellipsis where the plate stops showing them.
+unsafe fn mono_format(gpu: &render::Gpu) -> Option<IDWriteTextFormat> {
+    let f = gpu
+        .dw
+        .CreateTextFormat(
+            w!("Consolas"),
+            None,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            12.0,
+            w!("en-us"),
+        )
+        .ok()?;
+    let trimming = DWRITE_TRIMMING {
+        granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+        delimiter: 0,
+        delimiterCount: 0,
+    };
+    if let Ok(sign) = gpu.dw.CreateEllipsisTrimmingSign(&f) {
+        let _ = f.SetTrimming(&trimming, &sign);
+    }
+    Some(f)
+}
+
+/// The shell section: a header that folds it, and each command with when
+/// it began, how it stands, what it is for, and the command itself.
+unsafe fn draw_shells(gpu: &render::Gpu, p: &Pen, s: &ShellsScene) {
+    let x = PAD;
+    let cw = BOX_W - 2.0 * PAD;
+    let mut y = s.top + 6.0;
+    p.fill_rounded(d2rect(x, y + 1.0, cw, 1.0), 0.0, theme::engrave_light());
+    p.fill_rounded(d2rect(x, y, cw, 1.0), 0.0, theme::engrave_dark());
+    y = s.top + SHELLS_GAP;
+    let ink = if s.hover {
+        theme::text()
+    } else {
+        theme::legend()
+    };
+    p.text(
+        &gpu.chip,
+        ink,
+        "SHELL COMMANDS",
+        d2rect(x, y, 140.0, FOLD_H),
+    );
+    p.text(
+        &gpu.small_right,
+        if s.hover {
+            theme::text()
+        } else {
+            theme::text_dim()
+        },
+        &s.count,
+        d2rect(x + 140.0, y, cw - 140.0 - 24.0, FOLD_H),
+    );
+    let mut buf = [0u8; 4];
+    let chevron = if s.open { OPEN } else { FOLDED };
+    p.text(
+        &gpu.icon_small,
+        ink,
+        chevron.encode_utf8(&mut buf),
+        d2rect(x + cw - 16.0, y, 16.0, FOLD_H),
+    );
+    y += FOLD_H;
+    if !s.open {
+        return;
+    }
+    let width = |text: &str, fmt: &IDWriteTextFormat| {
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        gpu.dw
+            .CreateTextLayout(&wide, fmt, cw, ROW)
+            .map_or(80.0, |l| render::text_size(&l).0.ceil())
+    };
+    for row in &s.rows {
+        let shell = row.shell;
+        let running = shell.state == ShellState::Running;
+        p.text(
+            &gpu.small,
+            theme::legend(),
+            &shell.at,
+            d2rect(x, y, 60.0, ROW),
+        );
+        let mut buf = [0u8; 4];
+        p.text(
+            &gpu.icon_small,
+            shell.state.colour(),
+            shell.state.glyph().encode_utf8(&mut buf),
+            d2rect(x + 58.0, y, 16.0, ROW),
+        );
+        let mut left = x + 80.0;
+        if shell.agent {
+            p.fill_rounded(d2rect(left, y + 2.0, 42.0, ROW - 4.0), 4.0, theme::well());
+            p.text(
+                &gpu.chip,
+                theme::legend(),
+                "agent",
+                d2rect(left + 6.0, y, 36.0, ROW),
+            );
+            left += 48.0;
+        }
+        let word = shell.state.word();
+        let mut right = cw - width(&word, &gpu.small);
+        p.text(
+            &gpu.small_right,
+            shell.state.colour(),
+            &word,
+            d2rect(x, y, cw, ROW),
+        );
+        // A cut at a line's end shows no ellipsis, so the rest is counted,
+        // up here where it covers none of the command.
+        if let Some(more) = more_lines(row.hidden) {
+            let w = width(&more, &gpu.chip);
+            right -= w + 8.0;
+            p.text(
+                &gpu.chip,
+                theme::waiting(),
+                &more,
+                d2rect(x + right, y, w + 2.0, ROW),
+            );
+        }
+        p.text(
+            &gpu.small,
+            if running {
+                theme::text()
+            } else {
+                theme::text_dim()
+            },
+            &shell.title(),
+            d2rect(left, y, (x + right - 10.0 - left).max(0.0), ROW),
+        );
+        y += ROW;
+        let well = d2rect(x, y, cw, row.h + 2.0 * WELL_PAD);
+        p.fill_rounded(well, 4.0, theme::well());
+        if running {
+            p.stroke_rounded(
+                d2rect(x + 0.5, y + 0.5, cw - 1.0, row.h + 2.0 * WELL_PAD - 1.0),
+                4.0,
+                theme::working().with_alpha(0.6),
+                1.0,
+            );
+        }
+        p.rt.PushAxisAlignedClip(
+            &d2rect(x, y + WELL_PAD, cw, row.h),
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+        );
+        p.brush.SetColor(&color(if running {
+            theme::text()
+        } else {
+            theme::text_dim()
+        }));
+        p.rt.DrawTextLayout(
+            Vector2 {
+                X: x + 6.0,
+                Y: y + WELL_PAD,
+            },
+            &row.command,
+            p.brush,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP,
+        );
+        p.rt.PopAxisAlignedClip();
+        y += row.h + 2.0 * WELL_PAD + SHELL_GAP;
+    }
+    if let Some(note) = &s.note {
+        p.text(&gpu.small, theme::legend(), note, d2rect(x, y, cw, ROW));
+    }
+}
+
 /// The control row: the glide's speed on a slider drawn like the glide's
 /// own bar, and the Bypass switch.
 unsafe fn draw_controls(gpu: &render::Gpu, p: &Pen, s: &PlateScene) {
@@ -2464,16 +3390,22 @@ mod tests {
     #[test]
     fn the_mouse_finds_the_controls_and_nothing_else() {
         let mid = CONTROLS_Y + CONTROLS_H / 2.0;
-        assert_eq!(control_at(SLIDER_X + 10.0, mid), Some(Control::Speed));
-        assert_eq!(control_at(SLIDER_X - 4.0, mid), Some(Control::Speed));
-        assert_eq!(control_at(BYPASS_X + 5.0, mid), Some(Control::Bypass));
-        assert_eq!(control_at(BOX_W - PAD - 1.0, mid), Some(Control::Bypass));
+        assert_eq!(control_at(SLIDER_X + 10.0, mid, None), Some(Control::Speed));
+        assert_eq!(control_at(SLIDER_X - 4.0, mid, None), Some(Control::Speed));
+        assert_eq!(control_at(BYPASS_X + 5.0, mid, None), Some(Control::Bypass));
+        assert_eq!(
+            control_at(BOX_W - PAD - 1.0, mid, None),
+            Some(Control::Bypass)
+        );
         // The title, the label, the gap and the history are not controls.
-        assert_eq!(control_at(SLIDER_X + 10.0, 20.0), None);
-        assert_eq!(control_at(PAD + 2.0, mid), None);
-        assert_eq!(control_at(BYPASS_X - 4.0, mid), None);
-        assert_eq!(control_at(BYPASS_X + 5.0, CONTROLS_Y + CONTROLS_H), None);
-        assert_eq!(control_at(BOX_W - 2.0, mid), None);
+        assert_eq!(control_at(SLIDER_X + 10.0, 20.0, None), None);
+        assert_eq!(control_at(PAD + 2.0, mid, None), None);
+        assert_eq!(control_at(BYPASS_X - 4.0, mid, None), None);
+        assert_eq!(
+            control_at(BYPASS_X + 5.0, CONTROLS_Y + CONTROLS_H, None),
+            None
+        );
+        assert_eq!(control_at(BOX_W - 2.0, mid, None), None);
     }
 
     #[test]
@@ -2709,19 +3641,19 @@ mod tests {
 
     #[test]
     fn the_plate_grows_with_its_reason_and_history() {
-        let bare = box_height(0.0, 0, false);
+        let bare = box_height(0.0, 0, false, 0.0);
         // Room for the controls under the title.
         assert!(bare >= CONTROLS_Y + CONTROLS_STEP + 22.0 + ROW);
-        assert!(box_height(17.0, 0, false) > bare);
+        assert!(box_height(17.0, 0, false, 0.0) > bare);
         assert_eq!(
-            box_height(500.0, 0, false),
-            box_height(REASON_LINES * REASON_LINE, 0, false)
+            box_height(500.0, 0, false, 0.0),
+            box_height(REASON_LINES * REASON_LINE, 0, false, 0.0)
         );
-        let one = box_height(0.0, 1, false);
+        let one = box_height(0.0, 1, false, 0.0);
         assert!(one > bare);
-        assert_eq!(box_height(0.0, 3, false) - one, 2.0 * ROW);
+        assert_eq!(box_height(0.0, 3, false, 0.0) - one, 2.0 * ROW);
         // And for the bypass band while it is on.
-        assert_eq!(box_height(0.0, 1, true) - one, BANNER);
+        assert_eq!(box_height(0.0, 1, true, 0.0) - one, BANNER);
     }
 
     #[test]
@@ -2755,5 +3687,414 @@ mod tests {
         let marks = [Mark::Ok, Mark::Failed, Mark::Refused, Mark::Stopped];
         let glyphs: std::collections::HashSet<char> = marks.iter().map(|m| m.glyph()).collect();
         assert_eq!(glyphs.len(), marks.len());
+    }
+
+    fn hook(name: &str, tool: &str, id: &str) -> HookEvent {
+        HookEvent {
+            tool_name: Some(tool.into()),
+            tool_use_id: Some(id.into()),
+            tool_input: Some(json!({"command": "dir C:\\", "description": "List the drive"})),
+            ..HookEvent::synthetic(name)
+        }
+    }
+
+    fn shell(id: &str, tool: &str, cmd: &str) -> Shell {
+        Shell {
+            id: id.into(),
+            tool: tool.into(),
+            command: cmd.into(),
+            description: String::new(),
+            agent: false,
+            at: "10:00:00".into(),
+            state: ShellState::Running,
+            serial: 0,
+        }
+    }
+
+    fn began(id: &str, cmd: &str) -> ShellNote {
+        ShellNote::Began {
+            session: "s".into(),
+            shell: shell(id, "PowerShell", cmd),
+        }
+    }
+
+    fn ended(id: &str, tool: &str, state: ShellState) -> ShellNote {
+        ShellNote::Ended {
+            session: "s".into(),
+            id: id.into(),
+            tool: tool.into(),
+            command: String::new(),
+            state,
+        }
+    }
+
+    #[test]
+    fn only_shell_tools_are_listed() {
+        assert!(is_shell_tool("Bash"));
+        assert!(is_shell_tool("PowerShell"));
+        assert!(is_shell_tool("mcp__x__Bash"));
+        assert!(!is_shell_tool("BashOutput"));
+        assert!(!is_shell_tool("Read"));
+        assert!(shell_note("s", &hook("PreToolUse", "Read", "t"), "10:00:00").is_none());
+        assert!(shell_note("s", &hook("Notification", "Bash", "t"), "10:00:00").is_none());
+    }
+
+    #[test]
+    fn the_main_loops_turn_edges_end_what_still_runs() {
+        for name in ["Stop", "StopFailure", "SessionEnd", "UserPromptSubmit"] {
+            assert_eq!(
+                shell_note("s", &HookEvent::synthetic(name), "t"),
+                Some(ShellNote::TurnEnded {
+                    session: "s".into()
+                })
+            );
+        }
+        let sub = HookEvent {
+            agent_id: Some("a".into()),
+            ..HookEvent::synthetic("Stop")
+        };
+        assert!(shell_note("s", &sub, "t").is_none());
+    }
+
+    #[test]
+    fn a_shell_command_begins_with_what_it_runs_and_why() {
+        let mut e = hook("PreToolUse", "PowerShell", "t1");
+        e.agent_id = Some("a1".into());
+        let Some(ShellNote::Began { session, shell }) = shell_note("tile", &e, "10:00:00") else {
+            panic!("not a start");
+        };
+        assert_eq!(session, "tile");
+        assert_eq!(shell.id, "t1");
+        assert_eq!(shell.tool, "PowerShell");
+        assert_eq!(shell.command, "dir C:\\");
+        assert_eq!(shell.title(), "List the drive");
+        assert!(shell.agent);
+        assert_eq!(shell.state, ShellState::Running);
+        let bare = Shell {
+            description: " ".into(),
+            ..shell
+        };
+        assert_eq!(bare.title(), "PowerShell command");
+    }
+
+    #[test]
+    fn a_shell_command_ends_as_its_result_says() {
+        let input = json!({"command": "x"});
+        let ok = json!({"stdout": "hi", "stderr": "", "interrupted": false});
+        assert_eq!(
+            shell_ended("Bash", &input, &ok, None, false),
+            ShellState::Done
+        );
+        assert_eq!(
+            shell_ended("Bash", &input, &json!("plain text"), None, false),
+            ShellState::Done
+        );
+        let cut = json!({"stdout": "", "interrupted": true});
+        assert_eq!(
+            shell_ended("Bash", &input, &cut, None, false),
+            ShellState::Interrupted
+        );
+        let late = json!({"stdout": "", "backgroundTaskId": "b1", "timedOutAfterMs": 120000});
+        assert_eq!(
+            shell_ended("Bash", &input, &late, None, false),
+            ShellState::TimedOut
+        );
+        let sent = json!({"stdout": "", "backgroundTaskId": "b1"});
+        assert_eq!(
+            shell_ended("Bash", &input, &sent, None, false),
+            ShellState::Background
+        );
+        let null = serde_json::Value::Null;
+        assert_eq!(
+            shell_ended(
+                "PowerShell",
+                &input,
+                &null,
+                Some("Exit code 3\nnope"),
+                false
+            ),
+            ShellState::Failed(Some(3))
+        );
+        assert_eq!(
+            shell_ended("PowerShell", &input, &null, Some("it broke"), false),
+            ShellState::Failed(None)
+        );
+        assert_eq!(
+            shell_ended("PowerShell", &input, &null, Some("Exit code 1"), true),
+            ShellState::Interrupted
+        );
+    }
+
+    #[test]
+    fn a_failure_hook_carries_its_exit_code() {
+        let mut e = hook("PostToolUseFailure", "Bash", "t1");
+        e.error = Some(json!("Exit code 127\ncommand not found"));
+        let Some(ShellNote::Ended {
+            id, tool, state, ..
+        }) = shell_note("s", &e, "10:00:01")
+        else {
+            panic!("not an end");
+        };
+        assert_eq!(id, "t1");
+        assert_eq!(tool, "Bash");
+        assert_eq!(state, ShellState::Failed(Some(127)));
+        let mut stop = hook("PostToolUseFailure", "Bash", "t2");
+        stop.is_interrupt = Some(json!(true));
+        assert!(matches!(
+            shell_note("s", &stop, "10:00:01"),
+            Some(ShellNote::Ended {
+                state: ShellState::Interrupted,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_list_keeps_the_newest_on_top_and_ends_only_what_it_saw_begin() {
+        let mut lists = HashMap::new();
+        for i in 0..SHELLS + 2 {
+            hear_shell(&mut lists, began(&format!("t{i}"), &format!("cmd {i}")));
+        }
+        let list = &lists["s"];
+        assert_eq!(list.len(), SHELLS);
+        assert_eq!(list[0].command, format!("cmd {}", SHELLS + 1));
+        let done = hear_shell(&mut lists, ended("t9", "PowerShell", ShellState::Done));
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].command, "cmd 9");
+        assert_eq!(lists["s"][0].state, ShellState::Done);
+        // Ended twice, or begun before control: nothing to end.
+        let again = ended("t9", "PowerShell", ShellState::Failed(Some(1)));
+        assert!(hear_shell(&mut lists, again).is_empty());
+        assert!(hear_shell(&mut lists, ended("t0", "PowerShell", ShellState::Done)).is_empty());
+        let other = ShellNote::Ended {
+            session: "x".into(),
+            id: "t8".into(),
+            tool: "PowerShell".into(),
+            command: "cmd 8".into(),
+            state: ShellState::Done,
+        };
+        assert!(hear_shell(&mut lists, other).is_empty());
+        assert_eq!(lists["s"][1].state, ShellState::Running);
+    }
+
+    #[test]
+    fn an_end_without_an_id_ends_the_oldest_of_its_shell_still_running() {
+        let mut lists = HashMap::new();
+        let begin = |lists: &mut HashMap<_, _>, tool: &str, cmd: &str| {
+            hear_shell(
+                lists,
+                ShellNote::Began {
+                    session: "s".into(),
+                    shell: shell("", tool, cmd),
+                },
+            )
+        };
+        begin(&mut lists, "Bash", "first");
+        begin(&mut lists, "PowerShell", "second");
+        begin(&mut lists, "Bash", "third");
+        let done = hear_shell(&mut lists, ended("", "Bash", ShellState::Done));
+        assert_eq!(done[0].command, "first");
+        let done = hear_shell(&mut lists, ended("", "Bash", ShellState::Done));
+        assert_eq!(done[0].command, "third");
+        assert!(hear_shell(&mut lists, ended("", "Bash", ShellState::Done)).is_empty());
+        assert_eq!(lists["s"][1].state, ShellState::Running);
+
+        // Its command, when it says one, picks among them.
+        begin(&mut lists, "Bash", "older");
+        begin(&mut lists, "Bash", "mine");
+        let by_command = ShellNote::Ended {
+            session: "s".into(),
+            id: String::new(),
+            tool: "Bash".into(),
+            command: "mine".into(),
+            state: ShellState::Done,
+        };
+        assert_eq!(hear_shell(&mut lists, by_command)[0].command, "mine");
+        assert_eq!(lists["s"][1].state, ShellState::Running);
+    }
+
+    #[test]
+    fn a_turns_end_stops_what_never_got_its_end() {
+        let mut lists = HashMap::new();
+        hear_shell(&mut lists, began("a", "x"));
+        hear_shell(&mut lists, began("b", "y"));
+        hear_shell(&mut lists, ended("a", "PowerShell", ShellState::Done));
+        let turn = |session: &str| ShellNote::TurnEnded {
+            session: session.into(),
+        };
+        assert!(hear_shell(&mut lists, turn("other")).is_empty());
+        let stopped = hear_shell(&mut lists, turn("s"));
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(stopped[0].command, "y");
+        assert_eq!(lists["s"][0].state, ShellState::Stopped);
+        assert_eq!(lists["s"][1].state, ShellState::Done);
+        assert!(hear_shell(&mut lists, turn("s")).is_empty());
+    }
+
+    #[test]
+    fn the_fold_counts_what_runs() {
+        let mut lists = HashMap::new();
+        assert_eq!(shells_count(&VecDeque::new()), "none yet");
+        hear_shell(&mut lists, began("a", "x"));
+        hear_shell(&mut lists, began("b", "y"));
+        assert_eq!(shells_count(&lists["s"]), "2, 2 running");
+        lists.get_mut("s").unwrap()[0].state = ShellState::Done;
+        lists.get_mut("s").unwrap()[1].state = ShellState::Done;
+        assert_eq!(shells_count(&lists["s"]), "2");
+    }
+
+    #[test]
+    fn each_shell_state_reads_and_shows_its_own_way() {
+        assert_eq!(ShellState::Failed(Some(2)).word(), "exit 2");
+        assert_eq!(ShellState::Failed(None).word(), "failed");
+        assert_eq!(ShellState::TimedOut.word(), "timed out, in background");
+        assert_eq!(ShellState::Stopped.word(), "stopped");
+        let states = [
+            ShellState::Running,
+            ShellState::Done,
+            ShellState::Failed(None),
+            ShellState::Interrupted,
+            ShellState::TimedOut,
+            ShellState::Stopped,
+        ];
+        let glyphs: std::collections::HashSet<char> = states.iter().map(|s| s.glyph()).collect();
+        assert_eq!(glyphs.len(), states.len());
+    }
+
+    #[test]
+    fn a_command_counts_its_lines_past_what_is_laid_out() {
+        assert_eq!(command_lines(3, "a\nb\nc"), 3);
+        assert_eq!(command_lines(0, ""), 1);
+        let long = format!("{}\nmore\nand more", "x".repeat(COMMAND_CHARS));
+        assert_eq!(command_lines(40, &long), 42);
+        assert_eq!(more_lines(0), None);
+        assert_eq!(more_lines(1).as_deref(), Some("+1 line"));
+        assert_eq!(more_lines(12).as_deref(), Some("+12 lines"));
+        let wide = "é".repeat(COMMAND_CHARS + 10);
+        assert_eq!(command_shown(&wide).chars().count(), COMMAND_CHARS);
+        assert_eq!(command_shown("ls"), "ls");
+    }
+
+    #[test]
+    fn the_shell_section_sits_under_the_rest_and_grows_with_its_commands() {
+        let body = body_height(0.0, 2, false);
+        let fit = Fit {
+            shown: vec![1, 2],
+            more: 0,
+            note: false,
+        };
+        let folded = shells_height(false, &fit, 14.0);
+        assert_eq!(folded, SHELLS_GAP + FOLD_H);
+        let open = shells_height(true, &fit, 14.0);
+        assert_eq!(open - folded, shell_row(1, 14.0) + shell_row(2, 14.0));
+        let noted = Fit { note: true, ..fit };
+        assert_eq!(shells_height(true, &noted, 14.0), open + ROW);
+        assert_eq!(box_height(0.0, 2, false, open), (body + open + PAD).ceil());
+        assert_eq!(box_height(0.0, 2, false, 0.0), (body + PAD).ceil());
+    }
+
+    #[test]
+    fn with_room_every_command_shows_as_much_as_its_state_allows() {
+        let rows = [(20, ShellState::Running), (5, ShellState::Done)];
+        let fit = fit_shells(&rows, 14.0, 10_000.0);
+        assert_eq!(fit.shown, vec![RUNNING_LINES, DONE_LINES]);
+        assert_eq!((fit.more, fit.note), (0, false));
+        let none = fit_shells(&[], 14.0, 10_000.0);
+        assert!(none.shown.is_empty() && none.note);
+        assert!(!fit_shells(&[], 14.0, SHELLS_GAP + FOLD_H).note);
+    }
+
+    #[test]
+    fn a_tall_running_command_gives_up_lines_before_anything_is_left_out() {
+        let head = SHELLS_GAP + FOLD_H;
+        let rows = [
+            (20, ShellState::Running),
+            (1, ShellState::Done),
+            (1, ShellState::Done),
+        ];
+        // Room for all three at two lines and one line more.
+        let room = head + shell_row(3, 14.0) + 2.0 * shell_row(1, 14.0);
+        let fit = fit_shells(&rows, 14.0, room);
+        assert_eq!(fit.shown, vec![3, 1, 1]);
+        assert_eq!((fit.more, fit.note), (0, false));
+        assert!(shells_height(true, &fit, 14.0) <= room);
+    }
+
+    #[test]
+    fn what_cannot_fit_is_left_out_and_counted() {
+        let head = SHELLS_GAP + FOLD_H;
+        let rows = [
+            (20, ShellState::Running),
+            (5, ShellState::Done),
+            (5, ShellState::Done),
+        ];
+        let room = head + shell_row(2, 14.0) + ROW + 10.0;
+        let fit = fit_shells(&rows, 14.0, room);
+        assert_eq!(fit.shown, vec![2]);
+        assert_eq!((fit.more, fit.note), (2, true));
+        assert!(shells_height(true, &fit, 14.0) <= room);
+        assert_eq!(shells_note(&fit), "2 more not shown, no room on the screen");
+        let tight = fit_shells(&rows, 14.0, head + ROW);
+        assert!(tight.shown.is_empty());
+        assert_eq!((tight.more, tight.note), (3, true));
+        let none = fit_shells(&rows, 14.0, 0.0);
+        assert!(none.shown.is_empty() && !none.note);
+        assert_eq!(
+            shells_note(&Fit::default()),
+            "No shell command since control began"
+        );
+    }
+
+    #[test]
+    fn the_fold_header_is_a_control_and_the_rest_of_the_section_is_not() {
+        let top = 300.0;
+        let header = top + SHELLS_GAP + 4.0;
+        assert_eq!(
+            control_at(PAD + 2.0, header, Some(top)),
+            Some(Control::Shells)
+        );
+        assert_eq!(
+            control_at(BOX_W - PAD - 1.0, header, Some(top)),
+            Some(Control::Shells)
+        );
+        assert_eq!(control_at(PAD + 2.0, header, None), None);
+        assert_eq!(control_at(2.0, header, Some(top)), None);
+        assert_eq!(control_at(PAD + 2.0, top + 2.0, Some(top)), None);
+        assert_eq!(
+            control_at(PAD + 2.0, top + SHELLS_GAP + FOLD_H + 2.0, Some(top)),
+            None
+        );
+        let mid = CONTROLS_Y + CONTROLS_H / 2.0;
+        assert_eq!(
+            control_at(BYPASS_X + 5.0, mid, Some(top)),
+            Some(Control::Bypass)
+        );
+    }
+
+    #[test]
+    fn the_log_gives_the_command_at_its_start_and_only_a_glimpse_at_its_end() {
+        let mut sh = Shell {
+            description: "List processes".into(),
+            ..shell("t", "PowerShell", "Get-Process |\n  Select -First 3")
+        };
+        assert_eq!(
+            shell_log_line("2026-11-26T10:00:00Z", "fix plc", &sh),
+            "2026-11-26T10:00:00Z  fix plc  shell command started  PowerShell  \
+             (Get-Process | Select -First 3)  [List processes]\n"
+        );
+        sh.state = ShellState::Failed(Some(1));
+        sh.agent = true;
+        sh.description.clear();
+        assert_eq!(
+            shell_log_line("t", "s", &sh),
+            "t  s  shell command exit 1 by a subagent  PowerShell  \
+             (Get-Process | Select -First 3)\n"
+        );
+        sh.command = "y".repeat(COMMAND_CHARS * 2);
+        let end = shell_log_line("t", "s", &sh);
+        assert!(end.contains(&format!("({}...)", "y".repeat(LOG_END_CHARS))));
+        sh.state = ShellState::Running;
+        let start = shell_log_line("t", "s", &sh);
+        assert!(start.contains(&format!("({})", "y".repeat(COMMAND_CHARS))));
     }
 }

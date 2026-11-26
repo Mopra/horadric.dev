@@ -54,6 +54,14 @@ pub struct HookEvent {
     /// ran past its timeout carries a `backgroundTaskId` here.
     #[serde(default)]
     pub tool_response: Option<Value>,
+    /// `PostToolUseFailure` only: what went wrong, for a shell command
+    /// `Exit code N` and its output. Kept as a value, so a payload that
+    /// ever sends it otherwise than as text still parses.
+    #[serde(default)]
+    pub error: Option<Value>,
+    /// `PostToolUseFailure` only: the human interrupted the tool.
+    #[serde(default)]
+    pub is_interrupt: Option<Value>,
     /// `PermissionRequest` only: the rules Claude Code offers to add so it
     /// stops asking. Present means the prompt has an "always" choice.
     #[serde(default)]
@@ -185,6 +193,19 @@ impl HookEvent {
         self.agent_id.as_deref().is_some_and(|id| !id.is_empty())
     }
 
+    /// `PostToolUseFailure`'s error as text, none when it has none.
+    pub fn error_text(&self) -> Option<&str> {
+        self.error.as_ref().and_then(Value::as_str)
+    }
+
+    /// Whether `PostToolUseFailure` says the human interrupted the tool.
+    pub fn interrupted(&self) -> bool {
+        self.is_interrupt
+            .as_ref()
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
     /// Whether the conversation's title may have changed since the last
     /// event that said so. Claude Code writes it early in the first turn,
     /// `/rename` changes it between turns, and a resume brings an old one.
@@ -230,6 +251,26 @@ mod tests {
         let e = HookEvent::from_json(spawn).unwrap();
         assert_eq!(e.agent_type.as_deref(), Some("Explore"));
         assert!(e.is_subagent());
+    }
+
+    #[test]
+    fn a_failed_tool_says_why_and_whether_it_was_interrupted() {
+        let failed = br#"{"session_id":"c","hook_event_name":"PostToolUseFailure",
+            "tool_name":"Bash","tool_use_id":"t1","error":"Exit code 2\nnope",
+            "is_interrupt":false}"#;
+        let e = HookEvent::from_json(failed).unwrap();
+        assert_eq!(e.error_text(), Some("Exit code 2\nnope"));
+        assert!(!e.interrupted());
+
+        let stopped = br#"{"session_id":"c","hook_event_name":"PostToolUseFailure",
+            "error":{"odd":1},"is_interrupt":true}"#;
+        let e = HookEvent::from_json(stopped).unwrap();
+        assert_eq!(e.error_text(), None);
+        assert!(e.interrupted());
+
+        let plain = HookEvent::synthetic("PostToolUse");
+        assert_eq!(plain.error_text(), None);
+        assert!(!plain.interrupted());
     }
 
     #[test]
