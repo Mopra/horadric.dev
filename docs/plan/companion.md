@@ -7,7 +7,7 @@ shoulder. The human can say "take this over" or "do that" at any moment
 and it already knows the context. Later it also helps unasked: it fills
 in text, suggests changes and catches what the human missed.
 
-Nothing of it is built. The name is a working name.
+Nothing of it is built.
 
 ## Why Horadric
 
@@ -105,16 +105,24 @@ attachment but has none, a date that does not match the calendar, a
 form sent with a field left empty. Shown as one small mark the human
 can open, never a popup.
 
+## Decided
+
+On 2026-11-26, by the human:
+
+- **A small local model is welcome.** The filter in step 4 runs on a
+  local model, so the many small "is this worth a call?" checks cost
+  nothing. Which model is chosen when step 4 starts, with numbers from
+  steps 1 to 3. This reverses the 2026-11-05 drop of small local
+  models, for the companion.
+- **All work is watched, OptiPeople's included.** Nothing is left out by
+  default except what is never watched (above).
+- **No daily cost cap.** Instead the companion pauses itself when the
+  subscription's usage reaches 80 percent, and tells the human with a
+  toast. It starts again when the usage window resets, or when the human
+  unpauses it.
+
 ## Open decisions
 
-- **A small local model.** On 2026-11-05 the human dropped small local
-  models from the plan. The filter in step 4 is the natural place for
-  one; calling Haiku for every pause may cost too much. Decide when step
-  4 starts, with numbers from steps 1 to 3.
-- **The work account.** Whether OptiPeople's programs and sites are
-  watched at all, or left out by default.
 - **Audio.** Meetings and calls are out of scope until the human asks.
-- **A cost cap.** A daily limit on calls the companion makes on its own,
-  shown in the usage window.
 - **How long the journal is kept**, and whether it is ever kept in the
   Drive backup (default: never).
