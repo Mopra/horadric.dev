@@ -17,6 +17,10 @@
 //! Office automation has no typelib here, so methods are called by name
 //! through `IDispatch` ([`Disp`] in the Windows part).
 
+// The cache and its names serve only the converters, which are Windows
+// only; elsewhere the module answers "no converter" and they sit unused.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 
