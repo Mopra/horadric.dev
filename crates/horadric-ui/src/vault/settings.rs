@@ -819,7 +819,9 @@ fn current(key: &str, ids: &[Identity]) -> Option<String> {
     let slug = if crate::town::is(key) {
         identity::pick(key).filter(|s| !s.is_empty())
     } else {
-        identity::of_project(Path::new(key)).slug().map(String::from)
+        identity::of_project(Path::new(key))
+            .slug()
+            .map(String::from)
     }?;
     ids.iter().any(|i| i.slug == slug).then_some(slug)
 }
@@ -852,12 +854,25 @@ pub fn menu_item(key: &str, base: usize) -> Option<crate::menu::Item> {
         .iter()
         .take(MENU_SPAN - MENU_IDS)
         .enumerate()
-        .map(|(i, id)| tick(MENU_IDS + i, id.name.clone(), now.as_deref() == Some(&id.slug)))
+        .map(|(i, id)| {
+            tick(
+                MENU_IDS + i,
+                id.name.clone(),
+                now.as_deref() == Some(&id.slug),
+            )
+        })
         .collect();
-    lines.push(tick(MENU_NONE, "None, this PC's own logins".into(), now.is_none()));
+    lines.push(tick(
+        MENU_NONE,
+        "None, this PC's own logins".into(),
+        now.is_none(),
+    ));
     lines.push(Item::Separator);
     lines.push(Item::action(base + MENU_NEW, "New identity\u{2026}"));
-    lines.push(Item::action(base + MENU_MANAGE, "Manage identities\u{2026}"));
+    lines.push(Item::action(
+        base + MENU_MANAGE,
+        "Manage identities\u{2026}",
+    ));
     let name = now
         .and_then(|s| ids.iter().find(|i| i.slug == s))
         .map_or("none", |i| i.name.as_str());

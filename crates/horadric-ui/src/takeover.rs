@@ -283,9 +283,9 @@ pub(super) fn refusal_text(why: Refusal, action: Action, risky: bool, exe: &str)
         listed::REFUSED_FOR.as_secs()
     );
     match (why, action) {
-        (Refusal::OnlyLook, _) => format!(
-            "the human allowed only looking at {exe}, not operating it{hold}"
-        ),
+        (Refusal::OnlyLook, _) => {
+            format!("the human allowed only looking at {exe}, not operating it{hold}")
+        }
         (Refusal::Refused, Action::See) => {
             format!("the human refused letting you see {exe}{hold}")
         }
@@ -742,7 +742,10 @@ impl Takeover {
                 takeover_admin::Read::Refused(why) => (listed::List::default(), Some(why)),
             };
             self.lists.admin = list;
-            if let Some(why) = refused.as_ref().filter(|w| Some(*w) != self.lists.admin_refused.as_ref()) {
+            if let Some(why) = refused
+                .as_ref()
+                .filter(|w| Some(*w) != self.lists.admin_refused.as_ref())
+            {
                 notices.push(Notice {
                     title: "The administrators' list of desktop programs is not used",
                     text: format!("{why}. Horadric asks instead."),
@@ -1820,8 +1823,13 @@ mod tests {
     fn a_question_held_back_says_for_how_long() {
         let held = Refusal::Held(listed::Question::Approve, 45);
         let told = refusal_text(held, Action::Operate, false, "a.exe");
-        assert!(told.contains("another 45 s") && told.contains("a.exe"), "{told}");
-        assert!(refusal_text(Refusal::Crowded, Action::See, false, "a.exe").contains("already wait"));
+        assert!(
+            told.contains("another 45 s") && told.contains("a.exe"),
+            "{told}"
+        );
+        assert!(
+            refusal_text(Refusal::Crowded, Action::See, false, "a.exe").contains("already wait")
+        );
         assert_ne!(refusal_word(held), refusal_word(Refusal::Crowded));
     }
 
@@ -1906,10 +1914,7 @@ mod tests {
             operating_line("Acme Studio", "click Button \"Transfer\""),
             "operating Acme Studio: click Button \"Transfer\""
         );
-        assert_eq!(
-            operating_line("Acme Studio", "  "),
-            "operating Acme Studio"
-        );
+        assert_eq!(operating_line("Acme Studio", "  "), "operating Acme Studio");
     }
 
     #[test]
@@ -2003,11 +2008,7 @@ mod tests {
             ..Act::default()
         };
         assert_eq!(
-            what_where(
-                "click MenuItem \"Transfer...\"",
-                &act,
-                "Proj - Acme Studio"
-            ),
+            what_where("click MenuItem \"Transfer...\"", &act, "Proj - Acme Studio"),
             "click MenuItem \"Transfer...\""
         );
         assert_eq!(what_where("look", &Act::default(), "x"), "look");

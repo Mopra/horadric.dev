@@ -1057,7 +1057,8 @@ impl<K> Default for Refusals<K> {
 impl<K: std::hash::Hash + Eq + Clone> Refusals<K> {
     /// Keeps that `question` about `key` was refused at `now`.
     pub fn note(&mut self, key: &K, question: Question, now: std::time::Instant) {
-        self.at.retain(|_, at| now.duration_since(*at) < REFUSED_FOR);
+        self.at
+            .retain(|_, at| now.duration_since(*at) < REFUSED_FOR);
         self.at.insert((key.clone(), question), now);
     }
 
@@ -1256,7 +1257,10 @@ pub fn parse_descriptor(b: &[u8]) -> Result<Descriptor, String> {
     let mut at = 8;
     for _ in 0..count {
         let ace = acl.get(at..).ok_or_else(short)?;
-        let (kind, flags) = (*ace.first().ok_or_else(short)?, *ace.get(1).ok_or_else(short)?);
+        let (kind, flags) = (
+            *ace.first().ok_or_else(short)?,
+            *ace.get(1).ok_or_else(short)?,
+        );
         let size = usize::from(u16_at(ace, 2).ok_or_else(short)?);
         if size < 4 || size > ace.len() {
             return Err(short());
@@ -1443,7 +1447,10 @@ mod tests {
             find(&list, r"D:\AcmeStudio.exe", "AcmeStudio.exe", false).map(|e| e.level),
             Some(Level::Operate)
         );
-        assert_eq!(find(&list, r"C:\Windows\notepad.exe", "notepad.exe", false), None);
+        assert_eq!(
+            find(&list, r"C:\Windows\notepad.exe", "notepad.exe", false),
+            None
+        );
     }
 
     #[test]
@@ -1452,8 +1459,14 @@ mod tests {
             entry("horadric.exe", Level::Operate),
             entry("horadricw", Level::Operate),
         ];
-        assert_eq!(find(&list, r"C:\x\horadric.exe", "horadric.exe", false), None);
-        assert_eq!(find(&list, r"C:\x\horadricw.exe", "HoradricW.exe", false), None);
+        assert_eq!(
+            find(&list, r"C:\x\horadric.exe", "horadric.exe", false),
+            None
+        );
+        assert_eq!(
+            find(&list, r"C:\x\horadricw.exe", "HoradricW.exe", false),
+            None
+        );
         assert!(check("horadric.exe").is_err());
         assert!(check(r"C:\x\horadric-host-1.exe").is_err());
         assert!(programs(r#"{"programs": [{"program": "horadric", "level": "look"}]}"#).is_err());
@@ -1595,9 +1608,9 @@ mod tests {
             pre[0].describe(),
             r#"click Button "_Delete" in window "Open Project""#
         );
-        assert!(pre[1]
-            .describe()
-            .starts_with(r#"press Enter in window "Import solution" for sessions "OM01347*" (never"#));
+        assert!(pre[1].describe().starts_with(
+            r#"press Enter in window "Import solution" for sessions "OM01347*" (never"#
+        ));
         assert_eq!(parse(&render(&list)), Ok(list));
     }
 
@@ -1912,7 +1925,11 @@ mod tests {
         // The same name in another folder is another program.
         assert_ne!(
             key(STUDIO, "AcmeStudio.exe", false),
-            key(r"C:\Users\x\Downloads\AcmeStudio.exe", "AcmeStudio.exe", false)
+            key(
+                r"C:\Users\x\Downloads\AcmeStudio.exe",
+                "AcmeStudio.exe",
+                false
+            )
         );
         // Elevated is a field, not part of a name a file could carry.
         assert_ne!(
@@ -1951,7 +1968,12 @@ mod tests {
             "console computer management"
         );
         assert_eq!(
-            hosted("mmc.exe", Some(" "), r"Console1 - [Console Root\Services]", 7),
+            hosted(
+                "mmc.exe",
+                Some(" "),
+                r"Console1 - [Console Root\Services]",
+                7
+            ),
             "console console1"
         );
         assert_ne!(
@@ -2033,7 +2055,16 @@ mod tests {
         assert!(admins_only(&d).unwrap_err().contains("everyone"));
         // Each right that writes, for someone who is no administrator.
         for mask in [
-            0x2, 0x4, 0x10, 0x40, 0x100, 0x1_0000, 0x4_0000, 0x8_0000, 0x4000_0000, 0x1000_0000,
+            0x2,
+            0x4,
+            0x10,
+            0x40,
+            0x100,
+            0x1_0000,
+            0x4_0000,
+            0x8_0000,
+            0x4000_0000,
+            0x1000_0000,
             FULL_CONTROL,
         ] {
             for sid in [user, SID_USERS, "S-1-1-0", "S-1-5-11", "S-1-3-0"] {
@@ -2096,7 +2127,12 @@ mod tests {
 
     #[test]
     fn a_sid_reads_back_as_written() {
-        for sid in [SID_SYSTEM, SID_ADMINISTRATORS, SID_TRUSTED_INSTALLER, "S-1-1-0"] {
+        for sid in [
+            SID_SYSTEM,
+            SID_ADMINISTRATORS,
+            SID_TRUSTED_INSTALLER,
+            "S-1-1-0",
+        ] {
             assert_eq!(sid_text(&sid_bytes(sid)).as_deref(), Some(sid));
         }
         assert_eq!(sid_text(&[1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0]), None);
@@ -2114,7 +2150,10 @@ mod tests {
         assert_eq!(Mode::from_word(None), Mode::Ask);
         assert_eq!(Mode::from_word(Some("always")), Mode::Ask);
         // A newer build's word must not make the whole state file unreadable.
-        assert_eq!(serde_json::from_str::<Mode>("\"always\"").unwrap(), Mode::Ask);
+        assert_eq!(
+            serde_json::from_str::<Mode>("\"always\"").unwrap(),
+            Mode::Ask
+        );
         assert!(OFF.starts_with("Takeover is off."));
     }
 
@@ -2144,7 +2183,10 @@ mod tests {
         assert_eq!(asked, [FILE, OLD_FILE]);
         assert_eq!(read(Ok(None), Ok(None)).0, Ok(None));
         // The old one is held to the same checks.
-        assert_eq!(read(Ok(None), Err("a user's")).0, Err((OLD_FILE, "a user's")));
+        assert_eq!(
+            read(Ok(None), Err("a user's")).0,
+            Err((OLD_FILE, "a user's"))
+        );
         // A new one that is refused is not passed over for the old.
         let (found, asked) = read(Err("a user's"), Ok(Some("old")));
         assert_eq!(found, Err((FILE, "a user's")));

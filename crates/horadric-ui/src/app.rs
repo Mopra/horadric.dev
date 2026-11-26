@@ -4437,7 +4437,9 @@ impl App {
             }
             WM_TIMER => {
                 self.tick();
-                if let Some((title, text)) = crate::screen_share::told() { self.toasts.show(Kind::Info, title, text) }
+                if let Some((title, text)) = crate::screen_share::told() {
+                    self.toasts.show(Kind::Info, title, text)
+                }
                 // Activity heard while a count was due too soon.
                 self.recount();
                 if self.swept_at.is_empty() {

@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use horadric_core::takeover_programs::{Mode, OFF};
 use horadric_core::glow::{self, Touch};
+use horadric_core::takeover_programs::{Mode, OFF};
 use horadric_core::vault::web::page::{self, FIND, FOCUS, INTO_VIEW, POINT, RECT, SELECT};
 use horadric_hooks::{
     client, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH, OWNER_ENV, SECRET_KEY_ENV, SESSION_ENV,
@@ -856,9 +856,16 @@ fn char_key(key: &str, shift: bool) -> Option<(String, String, u32, String)> {
 /// quest start` to weigh, which a node has no quests for.
 pub(crate) fn tool_list(takeover: bool) -> Value {
     #[cfg(windows)]
-    let takeover = if takeover { takeover_tools() } else { Vec::new() };
+    let takeover = if takeover {
+        takeover_tools()
+    } else {
+        Vec::new()
+    };
     #[cfg(not(windows))]
-    let takeover: Vec<Value> = { let _ = takeover; Vec::new() };
+    let takeover: Vec<Value> = {
+        let _ = takeover;
+        Vec::new()
+    };
     json!(tools()
         .into_iter()
         .chain(takeover)
@@ -1564,9 +1571,16 @@ B.";
         {
             let name = t["name"].as_str().unwrap();
             assert!(
-                ["browser_", "takeover_", "forge_", "remote_", "desk_", "lore_"]
-                    .iter()
-                    .any(|p| name.starts_with(p)),
+                [
+                    "browser_",
+                    "takeover_",
+                    "forge_",
+                    "remote_",
+                    "desk_",
+                    "lore_"
+                ]
+                .iter()
+                .any(|p| name.starts_with(p)),
                 "{t}"
             );
             assert!(!t["description"].as_str().unwrap().is_empty(), "{t}");
@@ -1681,7 +1695,10 @@ B.";
         ] {
             assert!(said.contains(part), "{part}");
         }
-        assert!(!said.contains("do the same"), "the two no longer read as equals");
+        assert!(
+            !said.contains("do the same"),
+            "the two no longer read as equals"
+        );
     }
 
     #[cfg(windows)]
@@ -1707,7 +1724,10 @@ B.";
         let mut said = |name: String, args: Value| {
             let a = s.handle(&call(&name, args)).unwrap();
             assert_eq!(a["result"]["isError"], true, "{name}");
-            a["result"]["content"][0]["text"].as_str().unwrap().to_string()
+            a["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
         };
         for verb in ["snapshot", "screenshot", "click", "type", "press", "text"] {
             let old = said(format!("desktop_{verb}"), json!({}));
@@ -1723,7 +1743,10 @@ B.";
         let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let listed = s.handle(&list).unwrap()["result"]["tools"].to_string();
         assert!(listed.contains("\"takeover_click\""));
-        assert!(!listed.contains("desktop_"), "an old name is listed or named");
+        assert!(
+            !listed.contains("desktop_"),
+            "an old name is listed or named"
+        );
     }
 
     /// Off, the tools are not listed, which is most of the list's weight,

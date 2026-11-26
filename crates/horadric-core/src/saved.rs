@@ -220,7 +220,10 @@ pub struct SavedState {
     pub desktop_glide_ms: Option<u32>,
     /// Whether sessions may take over programs on the human's own desktop,
     /// from the tray menu's Takeover. Asking, the default, is not written.
-    #[serde(default, skip_serializing_if = "crate::takeover_programs::Mode::is_ask")]
+    #[serde(
+        default,
+        skip_serializing_if = "crate::takeover_programs::Mode::is_ask"
+    )]
     pub takeover: crate::takeover_programs::Mode,
     /// The built in stones the human put away, by label, which the tome
     /// leaves out until they are shown again.

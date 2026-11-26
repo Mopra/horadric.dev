@@ -675,7 +675,12 @@ mod tests {
 
     #[test]
     fn only_a_loopback_host_passes() {
-        for host in ["127.0.0.1", "127.0.0.1:43119", "localhost:5000", "LocalHost"] {
+        for host in [
+            "127.0.0.1",
+            "127.0.0.1:43119",
+            "localhost:5000",
+            "LocalHost",
+        ] {
             assert!(host_ok(host), "{host}");
         }
         for host in [
@@ -810,24 +815,44 @@ mod tests {
         ] {
             assert!(region(bad).is_err(), "{bad}");
         }
-        assert!(region("rx=1&ry=2&rh=4").unwrap_err().contains("rw is missing"));
+        assert!(region("rx=1&ry=2&rh=4")
+            .unwrap_err()
+            .contains("rw is missing"));
     }
 
     #[test]
     fn a_region_is_held_to_the_screen() {
-        assert_eq!(reg(100, 50, 400, 300).on(1920, 1080), Some(reg(100, 50, 400, 300)));
-        assert_eq!(reg(0, 0, 1920, 1080).on(1920, 1080), Some(reg(0, 0, 1920, 1080)));
-        assert_eq!(reg(1800, 1000, 400, 300).on(1920, 1080), Some(reg(1800, 1000, 120, 80)));
-        assert_eq!(reg(-50, -20, 100, 100).on(1920, 1080), Some(reg(0, 0, 50, 80)));
+        assert_eq!(
+            reg(100, 50, 400, 300).on(1920, 1080),
+            Some(reg(100, 50, 400, 300))
+        );
+        assert_eq!(
+            reg(0, 0, 1920, 1080).on(1920, 1080),
+            Some(reg(0, 0, 1920, 1080))
+        );
+        assert_eq!(
+            reg(1800, 1000, 400, 300).on(1920, 1080),
+            Some(reg(1800, 1000, 120, 80))
+        );
+        assert_eq!(
+            reg(-50, -20, 100, 100).on(1920, 1080),
+            Some(reg(0, 0, 50, 80))
+        );
         assert_eq!(
             reg(i32::MIN, i32::MIN, u32::MAX, u32::MAX).on(1920, 1080),
             Some(reg(0, 0, 1920, 1080))
         );
-        assert_eq!(reg(1919, 1079, 5, 5).on(1920, 1080), Some(reg(1919, 1079, 1, 1)));
+        assert_eq!(
+            reg(1919, 1079, 5, 5).on(1920, 1080),
+            Some(reg(1919, 1079, 1, 1))
+        );
         assert_eq!(reg(1920, 0, 10, 10).on(1920, 1080), None);
         assert_eq!(reg(0, 1080, 10, 10).on(1920, 1080), None);
         assert_eq!(reg(-10, 0, 10, 10).on(1920, 1080), None);
-        assert_eq!(reg(i32::MAX, i32::MAX, u32::MAX, u32::MAX).on(1920, 1080), None);
+        assert_eq!(
+            reg(i32::MAX, i32::MAX, u32::MAX, u32::MAX).on(1920, 1080),
+            None
+        );
         assert_eq!(reg(0, 0, 10, 10).on(0, 0), None);
     }
 
@@ -940,7 +965,10 @@ mod tests {
         assert_eq!(typed("\r"), []);
         assert_eq!(typed(""), []);
         // Outside the basic plane a character is two units, kept together.
-        assert_eq!(typed("\u{e6}\u{1F600}"), [Typed::Units(vec![0xE6, 0xD83D, 0xDE00])]);
+        assert_eq!(
+            typed("\u{e6}\u{1F600}"),
+            [Typed::Units(vec![0xE6, 0xD83D, 0xDE00])]
+        );
     }
 
     #[test]

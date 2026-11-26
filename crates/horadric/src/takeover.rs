@@ -61,12 +61,12 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, IsWindowEnabled, MapVirtualKeyW, SendInput, VkKeyScanW, INPUT, INPUT_0, INPUT_KEYBOARD,
-    INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
-    MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+    GetAsyncKeyState, IsWindowEnabled, MapVirtualKeyW, SendInput, VkKeyScanW, INPUT, INPUT_0,
+    INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+    MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
 use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -78,12 +78,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_RESTORE, WM_GETTEXT, WM_GETTEXTLENGTH, WS_EX_TOOLWINDOW,
 };
 
+use crate::mcp::text;
 use crate::takeover_helper::{
     as_administrator, asking_other_text, elevating_body, held_text, hold_left, same_program,
     still_asking_text, switch_left, switch_text, unbindable, Helper, HelperStart, Setback,
     Starting, ANNOUNCE_PAUSE, ASK_AGAIN_WAIT, ASK_WAIT, PEEK,
 };
-use crate::mcp::text;
 use crate::takeover_watch::{self as watch, changes_part, changes_text, digest, verdict, Until};
 
 /// The most elements one snapshot holds, so a vast window can not take
@@ -1896,7 +1896,9 @@ fn find(query: Option<&Value>) -> Result<(Window, Window), String> {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Number(n)) => n.to_string(),
         _ => {
-            return Err("say which window: an id from takeover_windows, or part of its title".into())
+            return Err(
+                "say which window: an id from takeover_windows, or part of its title".into(),
+            )
         }
     };
     let list = list_windows();
@@ -2739,9 +2741,7 @@ impl Takeover {
         }
         // Windows drops input sent to an elevated window without a word,
         // so nothing that types, clicks or copies is sent there at all.
-        if let (Some(why), "click" | "type" | "press" | "text") =
-            (&walled, verb)
-        {
+        if let (Some(why), "click" | "type" | "press" | "text") = (&walled, verb) {
             return Err(why.clone());
         }
         if w.exe == UNKNOWN_EXE {
@@ -2811,9 +2811,7 @@ impl Takeover {
                 let double = flag("double");
                 let first = format!("click {} in {:?}", wanted(args), w.title);
                 let asked = self.ask_first(app, &w, &root, true, first, &reason)?;
-                let read = self
-                    .aim(&w, args, false)
-                    .map(|aim| (aim, self.said(&w)));
+                let read = self.aim(&w, args, false).map(|aim| (aim, self.said(&w)));
                 let (aim, said) = looked(app, &root, asked, read)?;
                 let how = match (button, double) {
                     ("left", false) => "click".to_string(),
@@ -2844,9 +2842,7 @@ impl Takeover {
                 let submit = flag("submit");
                 let first = format!("type into {} in {:?}", wanted(args), w.title);
                 let asked = self.ask_first(app, &w, &root, true, first, &reason)?;
-                let read = self
-                    .aim(&w, args, true)
-                    .map(|aim| (aim, self.said(&w)));
+                let read = self.aim(&w, args, true).map(|aim| (aim, self.said(&w)));
                 let (aim, said) = looked(app, &root, asked, read)?;
                 // Before the human is asked about a text that will not be
                 // typed anyway.
@@ -2865,8 +2861,7 @@ impl Takeover {
                 self.heard(&w, true, answer)?;
                 watch::follow(&root);
                 let (before, mark, front) = (list_windows(), watch::mark(), front_before());
-                let acted =
-                    same_window(&w).and_then(|()| self.type_in(&w, &aim, typed, submit));
+                let acted = same_window(&w).and_then(|()| self.type_in(&w, &aim, typed, submit));
                 let back = after_action(front.as_ref(), &w, settle, acted.is_ok());
                 let result = acted.map(|mut said| {
                     said.push_str(&came_of(&before, &w, mark));
@@ -2897,10 +2892,7 @@ impl Takeover {
                         automation_id: &focus.automation_id,
                     },
                 };
-                let doing = Doing::Press {
-                    chord: &chord,
-                    key,
-                };
+                let doing = Doing::Press { chord: &chord, key };
                 let risky = flag("risky") || risk(doing, &scene).is_some();
                 let act = act_of(Kind::Press, &w, &said, "", &focus.name, key);
                 let point = focus.at.or_else(|| window_point(&w));
@@ -2981,8 +2973,8 @@ impl Takeover {
                 let answer = allow(app, &root, "operate", &what, risky, point, &reason);
                 self.heard(&w, true, answer)?;
                 let front = front_before();
-                let copied = same_window(&w)
-                    .and_then(|()| self.copy_text(&w, aim.as_ref(), clicks, &kept));
+                let copied =
+                    same_window(&w).and_then(|()| self.copy_text(&w, aim.as_ref(), clicks, &kept));
                 let back = after_action(front.as_ref(), &w, Duration::ZERO, false);
                 let result = copied.map(|(t, put_back)| {
                     let mut said = text_answer(&t, "by selecting all and copying it");
@@ -3133,8 +3125,12 @@ impl Takeover {
                     o.remove("since");
                 }
                 let mut marked = |body: Value| app(as_administrator(body));
-                let theirs =
-                    helper.call("takeover_changes", &theirs_args, &mut marked, Duration::ZERO);
+                let theirs = helper.call(
+                    "takeover_changes",
+                    &theirs_args,
+                    &mut marked,
+                    Duration::ZERO,
+                );
                 match theirs {
                     Ok(Ok(content)) => {
                         let said = content
@@ -3367,8 +3363,7 @@ impl Takeover {
         self.seen.insert(pid, newest);
         let (before, during) = watch::split_at(all, mark);
         let took = begun.elapsed().as_secs_f32();
-        let mut meanwhile =
-            watch::meanwhile_text(&before, &during, lost, watch::stalled(), false);
+        let mut meanwhile = watch::meanwhile_text(&before, &during, lost, watch::stalled(), false);
         if let Some((mut ask, _)) = theirs {
             ask["commit"] = json!(true);
             match self.ask_helper(PEEK, &ask, app) {
@@ -3415,7 +3410,12 @@ impl Takeover {
 
     /// Keeps what the app answered a question about `w`'s program: a yes
     /// lets the session in, a no takes it for not let in any more.
-    fn heard(&mut self, w: &Window, operate: bool, answer: Result<(), String>) -> Result<(), String> {
+    fn heard(
+        &mut self,
+        w: &Window,
+        operate: bool,
+        answer: Result<(), String>,
+    ) -> Result<(), String> {
         match &answer {
             Ok(()) => self.let_in(w, operate),
             Err(_) => {
@@ -4566,8 +4566,14 @@ mod tests {
         assert!(looks_risky(&["Removed items"]));
         assert_eq!(risky_word("btnSendNow", &[]), Some("send"));
         assert_eq!(risky_word("Save As", &["save", "gem"]), None);
-        assert_eq!(risky_word("Save and apply", &["save", "gem"]), Some("apply"));
-        assert_eq!(words("btnSaveAll_2 &Now"), ["btn", "save", "all", "2", "now"]);
+        assert_eq!(
+            risky_word("Save and apply", &["save", "gem"]),
+            Some("apply")
+        );
+        assert_eq!(
+            words("btnSaveAll_2 &Now"),
+            ["btn", "save", "all", "2", "now"]
+        );
     }
 
     #[test]
@@ -4723,7 +4729,10 @@ mod tests {
         let saves = target("Button", "", "SaveButton");
         assert!(risk(Doing::Click, &scene("Projekt", false, &said, saves)).is_some());
         let plain = target("Button", "Ja", "btnYes");
-        assert_eq!(risk(Doing::Click, &scene("Projekt", false, &said, plain)), None);
+        assert_eq!(
+            risk(Doing::Click, &scene("Projekt", false, &said, plain)),
+            None
+        );
     }
 
     #[test]
@@ -4749,7 +4758,10 @@ mod tests {
         assert!(large.buttons.is_empty() && large.texts.is_empty());
         assert!(large.file_dialog);
         let plain = said_from(&vec![("Button", "Delete"); SMALL_DIALOG]);
-        assert_eq!(risk(Doing::Click, &scene("Options", true, &plain, cancel)), None);
+        assert_eq!(
+            risk(Doing::Click, &scene("Options", true, &plain, cancel)),
+            None
+        );
         // Its title and the element aimed at are judged all the same.
         assert!(risk(Doing::Click, &scene("Reset options", true, &plain, cancel)).is_some());
         let apply = target("Button", "Apply", "");
@@ -5073,8 +5085,16 @@ mod tests {
 
     #[test]
     fn the_window_list_cuts_the_titles_of_programs_not_let_into() {
-        let mail = win(1, "Re: the offer we must not lose, from the board - Mail", "mail.exe");
-        let mut ours = win(2, "A project with a long name that is ours to see - Studio", "s.exe");
+        let mail = win(
+            1,
+            "Re: the offer we must not lose, from the board - Mail",
+            "mail.exe",
+        );
+        let mut ours = win(
+            2,
+            "A project with a long name that is ours to see - Studio",
+            "s.exe",
+        );
         ours.pid = 9;
         let t = windows_text(&[mail, ours], |_| Reach::Open, |w| w.pid == 9);
         assert!(
@@ -5472,7 +5492,14 @@ mod tests {
         // which aiming at a pixel's edge did not always do.
         let back = |a: i32, extent: i32| (i64::from(a) * i64::from(extent) / 65536) as i32;
         let desk = [0, 0, 1920, 1080];
-        for (x, y) in [(0, 0), (1, 1), (959, 539), (960, 540), (1919, 1079), (777, 333)] {
+        for (x, y) in [
+            (0, 0),
+            (1, 1),
+            (959, 539),
+            (960, 540),
+            (1919, 1079),
+            (777, 333),
+        ] {
             let (ax, ay) = absolute(x, y, desk);
             assert_eq!((back(ax, 1920), back(ay, 1080)), (x, y));
         }
@@ -5563,7 +5590,11 @@ mod tests {
         let mut typing = aim.clone();
         typing["text"] = json!("Hello from Horadric\nA second line, typed for real.");
         run("takeover_type", typing).unwrap();
-        run("takeover_press", json!({ "window": id, "key": "Control+A" })).unwrap();
+        run(
+            "takeover_press",
+            json!({ "window": id, "key": "Control+A" }),
+        )
+        .unwrap();
         let shot = run("takeover_screenshot", json!({ "window": id })).unwrap();
         let png = horadric_core::release::base64_decode(shot[0]["data"].as_str().unwrap()).unwrap();
         std::fs::write(out.join("desk-window.png"), png).unwrap();
@@ -5586,9 +5617,16 @@ mod tests {
         .unwrap();
         run("takeover_press", json!({ "window": id, "key": "Escape" })).unwrap();
         run("takeover_press", json!({ "window": id, "key": "Escape" })).unwrap();
-        run("takeover_press", json!({ "window": id, "key": "Control+A" })).unwrap();
+        run(
+            "takeover_press",
+            json!({ "window": id, "key": "Control+A" }),
+        )
+        .unwrap();
         run("takeover_press", json!({ "window": id, "key": "Delete" })).unwrap();
-        let _ = run("takeover_press", json!({ "window": id, "key": "Control+W" }));
+        let _ = run(
+            "takeover_press",
+            json!({ "window": id, "key": "Control+W" }),
+        );
         thread::sleep(Duration::from_millis(800));
         let _ = run("takeover_windows", json!({}));
         let _ = run("takeover_snapshot", json!({ "window": id }));

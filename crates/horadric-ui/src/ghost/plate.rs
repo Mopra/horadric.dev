@@ -210,7 +210,12 @@ pub(super) unsafe fn draw_plate(gpu: &render::Gpu, p: &Pen, s: &PlateScene, spot
         &gpu.small_right,
         theme::text_dim(),
         &who,
-        d2rect(title_x + 84.0, 14.0, (x + cw - title_x - 84.0).max(0.0), 20.0),
+        d2rect(
+            title_x + 84.0,
+            14.0,
+            (x + cw - title_x - 84.0).max(0.0),
+            20.0,
+        ),
     );
 
     draw_controls(gpu, p, s);
@@ -402,12 +407,7 @@ pub(super) unsafe fn mono_format(gpu: &render::Gpu) -> Option<IDWriteTextFormat>
 
 /// The shell section: a header that folds it, and each command with when
 /// it began, how it stands, what it is for, and the command itself.
-pub(super) unsafe fn draw_shells(
-    gpu: &render::Gpu,
-    p: &Pen,
-    s: &ShellsScene,
-    spots: &mut Spots,
-) {
+pub(super) unsafe fn draw_shells(gpu: &render::Gpu, p: &Pen, s: &ShellsScene, spots: &mut Spots) {
     let x = PAD;
     let cw = BOX_W - 2.0 * PAD;
     groove(p, x, cw, s.top + 6.0);
@@ -595,7 +595,14 @@ unsafe fn draw_controls(gpu: &render::Gpu, p: &Pen, s: &PlateScene) {
         &speed_label(s.speed),
         d2rect(SLIDER_X + SLIDER_W + 12.0, mid - 9.0, 50.0, ROW),
     );
-    draw_bypass(gpu, p, s.bypass, s.hover == Some(Control::Bypass), s.arming, s.esc);
+    draw_bypass(
+        gpu,
+        p,
+        s.bypass,
+        s.hover == Some(Control::Bypass),
+        s.arming,
+        s.esc,
+    );
 }
 
 /// The Bypass switch. Off, it is a well that fills while the mouse is

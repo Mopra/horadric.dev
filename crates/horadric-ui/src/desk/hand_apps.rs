@@ -217,7 +217,10 @@ fn shown(window: HWND) -> Option<Open> {
         GetWindowThreadProcessId(window, Some(&mut pid));
         let app = open(pid, PROCESS_QUERY_LIMITED_INFORMATION)
             .and_then(|process| image(&process))
-            .map_or_else(|| "unknown".to_string(), |path| desk_apps::process_name(&path));
+            .map_or_else(
+                || "unknown".to_string(),
+                |path| desk_apps::process_name(&path),
+            );
         Some(Open { app, title })
     }
 }
@@ -454,7 +457,15 @@ fn app_path(file: &str) -> Option<String> {
 fn on_the_path(file: &str) -> Option<String> {
     let mut buf = [0u16; 1024];
     // SAFETY: the name outlives the call and the buffer is a local array.
-    let len = unsafe { SearchPathW(PCWSTR::null(), &HSTRING::from(file), None, Some(&mut buf), None) };
+    let len = unsafe {
+        SearchPathW(
+            PCWSTR::null(),
+            &HSTRING::from(file),
+            None,
+            Some(&mut buf),
+            None,
+        )
+    };
     (len > 0 && (len as usize) < buf.len()).then(|| String::from_utf16_lossy(&buf[..len as usize]))
 }
 
@@ -490,7 +501,9 @@ fn create(exe: &str, args: &[String]) -> Result<(), String> {
             false,
             PROCESS_CREATION_FLAGS(0),
             None,
-            folder.as_ref().map_or(PCWSTR::null(), |f| PCWSTR(f.as_ptr())),
+            folder
+                .as_ref()
+                .map_or(PCWSTR::null(), |f| PCWSTR(f.as_ptr())),
             &startup,
             &mut made,
         )
@@ -569,7 +582,11 @@ mod tests {
     #[test]
     fn hand_a_packaged_app_that_is_not_installed_fails_to_open() {
         // What the next way or the next twin is tried on.
-        assert!(shell("shell:AppsFolder\\Horadric.NoSuchApp_0000000000000!None", &[]).is_err());
+        assert!(shell(
+            "shell:AppsFolder\\Horadric.NoSuchApp_0000000000000!None",
+            &[]
+        )
+        .is_err());
     }
 
     #[test]
@@ -599,6 +616,9 @@ mod tests {
         assert!(mine.name.to_lowercase().ends_with(".exe"));
         let process = open(me, PROCESS_QUERY_LIMITED_INFORMATION).unwrap();
         let path = image(&process).unwrap();
-        assert_eq!(desk_apps::process_name(&path), desk_apps::process_name(&mine.name));
+        assert_eq!(
+            desk_apps::process_name(&path),
+            desk_apps::process_name(&mine.name)
+        );
     }
 }

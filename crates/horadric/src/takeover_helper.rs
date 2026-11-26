@@ -581,7 +581,10 @@ impl Helper {
         // human under "Show more details" before the yes, and which is all
         // the helper will ever act in. No path holds a quote, so quoting
         // it is enough.
-        let params = HSTRING::from(format!("takeover-helper {name} {me} \"{}\"", program.trim()));
+        let params = HSTRING::from(format!(
+            "takeover-helper {name} {me} \"{}\"",
+            program.trim()
+        ));
         let verb = HSTRING::from("runas");
         let mut info = SHELLEXECUTEINFOW {
             cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -746,7 +749,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             pid.parse::<u32>().map_err(|e| e.to_string())?,
             program.trim().to_string(),
         ),
-        _ => return Err("usage: horadric takeover-helper <pipe> <pid> <program's full path>".into()),
+        _ => {
+            return Err("usage: horadric takeover-helper <pipe> <pid> <program's full path>".into())
+        }
     };
     if !name.starts_with(r"\\.\pipe\horadric-desktop-") {
         return Err("not a desktop helper pipe".into());
@@ -1136,7 +1141,10 @@ impl Gate {
         let risky = question == Question::Risky;
         let time = Duration::from_secs(within).min(ASKING_MOST.saturating_sub(since.elapsed()));
         let (title, yes) = match question {
-            Question::Approve => ("Horadric's helper (administrator): operate this program?", "Let it operate"),
+            Question::Approve => (
+                "Horadric's helper (administrator): operate this program?",
+                "Let it operate",
+            ),
             Question::Risky => ("Horadric's helper (administrator): do this?", "Do it"),
         };
         let answer = match time.as_secs() {
@@ -1404,7 +1412,12 @@ mod ask {
         let left = s.ends.saturating_duration_since(Instant::now()).as_secs();
         let mut note = wide(&format!("Refused in {left} s"));
         let mut at = s.note_at;
-        DrawTextW(dc, &mut note, &mut at, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            dc,
+            &mut note,
+            &mut at,
+            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
         SelectObject(dc, old);
         let _ = EndPaint(hwnd, &ps);
     }
@@ -1483,7 +1496,14 @@ mod ask {
 
     /// Asks, on the screen of the window `near`, and waits `within` for a
     /// click. A question that can not be shown is not answered yes.
-    pub fn ask(title: &str, text: &str, yes: &str, no: &str, within: Duration, near: isize) -> Answer {
+    pub fn ask(
+        title: &str,
+        text: &str,
+        yes: &str,
+        no: &str,
+        within: Duration,
+        near: isize,
+    ) -> Answer {
         unsafe {
             let module = HINSTANCE(GetModuleHandleW(std::ptr::null()));
             let class = w!("HoradricHelperQuestion");
@@ -1682,7 +1702,10 @@ mod tests {
     fn a_helper_is_bound_to_one_file() {
         assert!(same_program(STUDIO, &STUDIO.to_uppercase()));
         assert!(same_program(STUDIO, &STUDIO.replace('\\', "/")));
-        assert!(!same_program(STUDIO, r"C:\Users\x\Downloads\AcmeStudio.exe"));
+        assert!(!same_program(
+            STUDIO,
+            r"C:\Users\x\Downloads\AcmeStudio.exe"
+        ));
         assert!(!same_program("", ""));
         assert_eq!(unbindable(STUDIO), None);
         // No path, no helper: there would be nothing to bind it to.
@@ -1693,7 +1716,10 @@ mod tests {
         let own = unbindable(r"C:\Users\x\AppData\Local\Programs\Horadric\horadric.exe");
         assert!(own.unwrap().contains("Horadric's own"));
         let told = not_bound_text(STUDIO, r"C:\Windows\regedit.exe");
-        assert!(told.contains("alone") && told.contains("regedit.exe"), "{told}");
+        assert!(
+            told.contains("alone") && told.contains("regedit.exe"),
+            "{told}"
+        );
     }
 
     fn act(kind: listed::Kind, control: &str, name: &str, key: &str) -> Act {
@@ -1712,7 +1738,10 @@ mod tests {
         use listed::Kind::{Click, Press, Type};
         // Nothing risky about a plain click, whatever the session says of
         // it: its word can only add.
-        assert_eq!(own_risk(false, &act(Click, "Button", "Watch", ""), false), None);
+        assert_eq!(
+            own_risk(false, &act(Click, "Button", "Watch", ""), false),
+            None
+        );
         assert!(own_risk(true, &act(Click, "Button", "Watch", ""), false).is_some());
         // The words are found by the helper, not sent to it.
         assert!(own_risk(false, &act(Click, "MenuItem", "Transfer...", ""), false).is_some());
@@ -1737,7 +1766,10 @@ mod tests {
             let why = own_risk(false, &a, false);
             assert!(why.is_some_and(|w| w.contains("Open or Save")), "{a:?}");
         }
-        assert_eq!(own_risk(false, &act(Click, "MenuItem", "Open", ""), false), None);
+        assert_eq!(
+            own_risk(false, &act(Click, "MenuItem", "Open", ""), false),
+            None
+        );
         assert!(file_dialog_class("DUIViewWndClassName") && file_dialog_class("SHELLDLL_DefView"));
         assert!(!file_dialog_class("Button"));
     }
@@ -1745,10 +1777,19 @@ mod tests {
     #[test]
     fn the_helper_s_first_question_says_what_can_not_be_promised() {
         let q = first_question(STUDIO, "click Button \"Online\"", 60);
-        assert!(q.contains(STUDIO) && q.contains("click Button \"Online\""), "{q}");
+        assert!(
+            q.contains(STUDIO) && q.contains("click Button \"Online\""),
+            "{q}"
+        );
         assert!(q.contains("can not be limited to this program"), "{q}");
         assert!(q.contains("mouse only") && q.contains("60 s"), "{q}");
-        let r = risky_question(STUDIO, "Synchronization", "click Button \"Transfer\"", "x", 30);
+        let r = risky_question(
+            STUDIO,
+            "Synchronization",
+            "click Button \"Transfer\"",
+            "x",
+            30,
+        );
         assert!(r.contains("in the window \"Synchronization\"") && r.contains("because x"));
         assert!(!risky_question(STUDIO, " ", "press Delete", "x", 30).contains("in the window"));
     }
@@ -1769,8 +1810,14 @@ mod tests {
     #[test]
     fn a_build_from_a_source_tree_is_named_before_windows_asks() {
         use std::path::Path;
-        assert!(dev_build(Path::new(r"C:\src\horadric\target\debug\horadric.exe"), false));
-        assert!(dev_build(Path::new(r"C:\src\horadric\Target\release\horadric.exe"), false));
+        assert!(dev_build(
+            Path::new(r"C:\src\horadric\target\debug\horadric.exe"),
+            false
+        ));
+        assert!(dev_build(
+            Path::new(r"C:\src\horadric\Target\release\horadric.exe"),
+            false
+        ));
         let installed = r"C:\Users\x\AppData\Local\Programs\Horadric\horadric.exe";
         assert!(!dev_build(Path::new(installed), false));
         assert!(dev_build(Path::new(installed), true));

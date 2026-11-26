@@ -731,7 +731,11 @@ pub fn meanwhile_text(
     match stalled {
         Some(secs) => out.push_str(&format!(
             "{}What changed meanwhile is not fully known: {}.",
-            if apart || !after.is_empty() { "\n" } else { " " },
+            if apart || !after.is_empty() {
+                "\n"
+            } else {
+                " "
+            },
             stall_text(secs)
         )),
         None if after.is_empty() => out.push_str(&format!("{lead}Nothing changed meanwhile.")),
@@ -1570,12 +1574,7 @@ fn round(shared: &Arc<(Mutex<Shared>, Condvar)>, local: &mut Local) {
     let (lock, changed) = &**shared;
     let (asked, dropped) = lock
         .lock()
-        .map(|mut s| {
-            (
-                std::mem::take(&mut s.asked),
-                std::mem::take(&mut s.dropped),
-            )
-        })
+        .map(|mut s| (std::mem::take(&mut s.asked), std::mem::take(&mut s.dropped)))
         .unwrap_or_default();
     // Looked at every round: the handle answers without a call into the
     // program, and an ended program's hooks must not last.
@@ -2412,7 +2411,10 @@ pub(crate) mod tests {
             assert_eq!(r.insert((n, 0, 0), 7, format!("v{n}")), None);
         }
         // Touched again, so it is not among the oldest.
-        assert_eq!(r.insert((0, 0, 0), 7, "again".into()).as_deref(), Some("v0"));
+        assert_eq!(
+            r.insert((0, 0, 0), 7, "again".into()).as_deref(),
+            Some("v0")
+        );
         // One too many: the two longest untouched go, the rest stay.
         r.insert((100, 0, 0), 7, "new".into());
         assert_eq!(r.len(), 7);
@@ -2482,7 +2484,10 @@ pub(crate) mod tests {
         assert!(!hit("Online", &s));
         // The front moving to a window does not make its title appear.
         assert!(!hit("Settings", &Change::of(What::Front, &win("Settings"))));
-        assert!(!hit("Settings", &Change::of(What::Closed, &win("Settings"))));
+        assert!(!hit(
+            "Settings",
+            &Change::of(What::Closed, &win("Settings"))
+        ));
         // A window shown, a new title and a new name do.
         assert!(hit("Settings", &Change::of(What::Shown, &win("Settings"))));
         let mut t = Change::of(What::Title, &win("Done"));
@@ -2800,7 +2805,10 @@ pub(crate) mod tests {
             text: Some("ONLINE".into()),
             ..Default::default()
         };
-        assert_eq!(verdict(&u, &[], &[value(0, None, "offline?")], 0, 0, None), None);
+        assert_eq!(
+            verdict(&u, &[], &[value(0, None, "offline?")], 0, 0, None),
+            None
+        );
         assert!(verdict(&u, &[], &[value(0, None, "Online")], 0, 0, None)
             .unwrap()
             .starts_with("\"ONLINE\" appeared: Edit"));
@@ -2811,7 +2819,10 @@ pub(crate) mod tests {
         };
         assert_eq!(verdict(&u, &[], &[], 500, 1200, None), None);
         assert!(verdict(&u, &[], &[], 500, 1500, None).is_some());
-        assert_eq!(verdict(&u, &[], &[value(1400, None, "x")], 500, 2000, None), None);
+        assert_eq!(
+            verdict(&u, &[], &[value(1400, None, "x")], 500, 2000, None),
+            None
+        );
         assert!(verdict(&u, &[], &[value(1400, None, "x")], 500, 2400, None).is_some());
         assert!(!u.is_empty());
         assert!(Until::default().is_empty());

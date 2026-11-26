@@ -22,12 +22,6 @@ mod console;
 mod context;
 mod desk;
 #[cfg(windows)]
-mod takeover;
-#[cfg(windows)]
-mod takeover_helper;
-#[cfg(windows)]
-mod takeover_programs;
-#[cfg(windows)]
 mod google;
 #[cfg(windows)]
 mod headless_debug;
@@ -41,6 +35,12 @@ mod install;
 mod install;
 #[cfg(not(target_os = "macos"))]
 mod lore;
+#[cfg(windows)]
+mod takeover;
+#[cfg(windows)]
+mod takeover_helper;
+#[cfg(windows)]
+mod takeover_programs;
 // The Mac serves the browser tools; the lore is not on it yet.
 mod mcp;
 #[cfg(target_os = "linux")]
@@ -64,10 +64,10 @@ mod secret;
 #[cfg(windows)]
 mod setup;
 mod status;
-#[cfg(not(target_os = "linux"))]
-mod task;
 #[cfg(windows)]
 mod takeover_watch;
+#[cfg(not(target_os = "linux"))]
+mod task;
 
 use std::io::Read;
 #[cfg(not(target_os = "linux"))]

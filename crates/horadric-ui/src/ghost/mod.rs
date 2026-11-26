@@ -95,10 +95,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetSystemMetrics, KillTimer,
-    PostMessageW, RegisterClassW, SetTimer, HTCLIENT, HTTRANSPARENT, MA_NOACTIVATE,
-    SM_SWAPBUTTON, SPI_SETWORKAREA, WM_APP, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST,
-    WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    PostMessageW, RegisterClassW, SetTimer, HTCLIENT, HTTRANSPARENT, MA_NOACTIVATE, SM_SWAPBUTTON,
+    SPI_SETWORKAREA, WM_APP, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_SETTINGCHANGE, WM_TIMER,
+    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use self::layer::{Area, Layer};
@@ -1835,7 +1835,9 @@ fn show_begin(hwnd: HWND) {
     }
     SHOW_WINDOW.set(None);
     if let Some((kind, _, lasts)) = show_asked() {
-        with(&shared, |o| o.begin_show(kind == "bypass", kind != "idle", lasts));
+        with(&shared, |o| {
+            o.begin_show(kind == "bypass", kind != "idle", lasts)
+        });
     }
 }
 
@@ -1867,10 +1869,34 @@ impl Overlay {
             unasked,
         };
         self.history = VecDeque::from([
-            entry("09:42:10", Mark::Ok, "type \"Speed\" in Edit \"Name\"", "the field holds Speed", false),
-            entry("09:42:02", Mark::Stopped, "click Button \"Delete\"", "stopped by the human", false),
-            entry("09:41:55", Mark::Refused, "press Delete", "refused by the human", false),
-            entry("09:41:40", Mark::Ok, "click MenuItem \"File\"", "the menu opened", bypass),
+            entry(
+                "09:42:10",
+                Mark::Ok,
+                "type \"Speed\" in Edit \"Name\"",
+                "the field holds Speed",
+                false,
+            ),
+            entry(
+                "09:42:02",
+                Mark::Stopped,
+                "click Button \"Delete\"",
+                "stopped by the human",
+                false,
+            ),
+            entry(
+                "09:41:55",
+                Mark::Refused,
+                "press Delete",
+                "refused by the human",
+                false,
+            ),
+            entry(
+                "09:41:40",
+                Mark::Ok,
+                "click MenuItem \"File\"",
+                "the menu opened",
+                bypass,
+            ),
         ]);
         let shell = |serial, command: &str, description: &str, state, at: &str| Shell {
             id: format!("show{serial}"),

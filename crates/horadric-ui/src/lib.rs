@@ -217,6 +217,8 @@ mod project;
 mod questlog;
 // The quest log runner and Warriv, shared by both apps.
 #[cfg(windows)]
+pub mod desk;
+#[cfg(windows)]
 mod light;
 #[cfg(any(windows, target_os = "macos"))]
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -231,8 +233,6 @@ mod render;
 mod retinue;
 #[cfg(windows)]
 pub mod sanctuary;
-#[cfg(windows)]
-pub mod desk;
 #[cfg(windows)]
 mod screen_share;
 #[cfg(windows)]
@@ -256,11 +256,11 @@ mod store;
 #[cfg(windows)]
 mod suggest;
 #[cfg(windows)]
+mod takeover_mode;
+#[cfg(windows)]
 mod terminal;
 #[cfg(windows)]
 mod tip;
-#[cfg(windows)]
-mod takeover_mode;
 #[cfg(windows)]
 mod toast;
 #[cfg(windows)]

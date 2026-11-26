@@ -62,9 +62,9 @@ pub(super) struct MarkScene<'a> {
 
 pub(super) unsafe fn draw(p: &Pen, s: &MarkScene) {
     let tip = (TIP, TIP);
-    let heat = s.landed.map_or(0.0, |(age, _)| {
-        crate::sparks::cool(age, FLARE)
-    });
+    let heat = s
+        .landed
+        .map_or(0.0, |(age, _)| crate::sparks::cool(age, FLARE));
     let ink = particles::heat_color(s.tint, 0.25 + 1.1 * heat);
     let bed = Color::rgb(0x000000);
 

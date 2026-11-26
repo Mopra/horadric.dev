@@ -181,7 +181,12 @@ fn now_says_when_the_session_works_elsewhere() {
         Some("Working in the shell (Bash), not in Acme Studio.".into())
     );
     assert_eq!(
-        away_of(Some("mcp__horadric__browser_open"), Turn::Working, false, ""),
+        away_of(
+            Some("mcp__horadric__browser_open"),
+            Turn::Working,
+            false,
+            ""
+        ),
         Some("Working in the browser (browser_open), not in the program.".into())
     );
     assert!(away_of(click, Turn::Resting, false, studio)
@@ -276,10 +281,14 @@ fn bypass_ends_when_the_work_it_was_on_for_is_done() {
     assert!(bypass_over(&held, false));
     assert!(!bypass_over(&held, true));
     held.insert("a".to_string(), Holder::default());
-    held.get_mut("a").unwrap().saw(Turn::Working, false, false, now);
+    held.get_mut("a")
+        .unwrap()
+        .saw(Turn::Working, false, false, now);
     assert!(!bypass_over(&held, false));
     // Done, the Stop hook's phase, after working.
-    held.get_mut("a").unwrap().saw(Turn::Resting, false, false, now);
+    held.get_mut("a")
+        .unwrap()
+        .saw(Turn::Resting, false, false, now);
     assert!(bypass_over(&held, false));
     // Not while the last action is still on its way.
     assert!(!bypass_over(&held, true));
@@ -332,7 +341,12 @@ fn a_session_waiting_for_the_human_does_not_keep_bypass() {
     // Answered, it works on and the wait starts over next time.
     h.saw(Turn::Working, false, false, start + BYPASS_IDLE / 2);
     h.saw(Turn::Working, true, false, start + BYPASS_IDLE);
-    h.saw(Turn::Working, true, false, start + BYPASS_IDLE + BYPASS_IDLE / 2);
+    h.saw(
+        Turn::Working,
+        true,
+        false,
+        start + BYPASS_IDLE + BYPASS_IDLE / 2,
+    );
     assert!(!h.ended);
     // Nobody came for the whole wait: its work is not going on.
     h.saw(Turn::Working, true, false, start + 2 * BYPASS_IDLE);
@@ -408,7 +422,10 @@ fn a_light_is_placed_on_each_edge_from_where_it_is_on_the_ring() {
     for head in (0..20000).step_by(137) {
         for start in [0.0, w, w + h, 2.0 * w + h] {
             let at = frame::lap_from(head as f32, start, len);
-            assert!((-frame::SWELL..len - frame::SWELL).contains(&at), "{head} {start}: {at}");
+            assert!(
+                (-frame::SWELL..len - frame::SWELL).contains(&at),
+                "{head} {start}: {at}"
+            );
         }
     }
 }
@@ -672,7 +689,9 @@ fn the_list_keeps_the_newest_on_top_and_ends_only_what_it_saw_begin() {
     // Ended twice, or begun before control: nothing to end.
     let again = ended("t9", "PowerShell", ShellState::Failed(Some(1)));
     assert!(h.hear(again).is_empty());
-    assert!(h.hear(ended("never", "PowerShell", ShellState::Done)).is_empty());
+    assert!(h
+        .hear(ended("never", "PowerShell", ShellState::Done))
+        .is_empty());
     let other = ShellNote::Ended {
         session: "x".into(),
         id: "t8".into(),
@@ -712,7 +731,10 @@ fn a_command_still_running_when_control_rests_gets_its_end_and_nothing_new_begin
     h.lists.clear();
     let trail = |h: &mut Heard, note| hear_shell(&mut h.lists, &mut h.ledger, note, false);
     assert!(trail(&mut h, began("b", "begun after control")).is_empty());
-    assert!(h.lists.is_empty(), "nothing is listed for a run that is over");
+    assert!(
+        h.lists.is_empty(),
+        "nothing is listed for a run that is over"
+    );
     let done = trail(&mut h, ended("a", "PowerShell", ShellState::Done));
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].command, "long build");
@@ -728,7 +750,9 @@ fn the_ledger_gives_up_the_oldest_past_its_limit() {
         h.hear(began(&format!("t{i}"), "x"));
     }
     assert_eq!(h.ledger["s"].len(), LEDGER);
-    assert!(h.hear(ended("t0", "PowerShell", ShellState::Done)).is_empty());
+    assert!(h
+        .hear(ended("t0", "PowerShell", ShellState::Done))
+        .is_empty());
 }
 
 #[test]

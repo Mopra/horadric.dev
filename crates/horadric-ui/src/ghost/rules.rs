@@ -204,9 +204,7 @@ pub(crate) fn turn_of(phase: Option<&Phase>) -> Turn {
 pub(crate) fn asks_human(phase: Option<&Phase>) -> bool {
     matches!(
         phase,
-        Some(Phase::Waiting(
-            WaitReason::Permission | WaitReason::Dialog
-        ))
+        Some(Phase::Waiting(WaitReason::Permission | WaitReason::Dialog))
     )
 }
 

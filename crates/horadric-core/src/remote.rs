@@ -1068,7 +1068,10 @@ mod tests {
              input tools take, counted from the screen's top left."
         );
         let blind = screen_line_of("desk", &r, None);
-        assert!(blind.contains("by 400 / the image's width, then add 100 to x"), "{blind}");
+        assert!(
+            blind.contains("by 400 / the image's width, then add 100 to x"),
+            "{blind}"
+        );
     }
 
     #[test]
@@ -1279,8 +1282,12 @@ mod tests {
         assert_eq!(parse_chord("Ctrl++"), Ok(vec![0x11, 0xbb]));
         assert_eq!(parse_chord("Cmd+ContextMenu"), Ok(vec![0x5b, 0x5d]));
         // A character whose key depends on the layout is no key here.
-        assert!(parse_chord("?").unwrap_err().contains("layout is not known"));
-        assert!(parse_chord("Ctrl+NotAKey").unwrap_err().contains("is not a key"));
+        assert!(parse_chord("?")
+            .unwrap_err()
+            .contains("layout is not known"));
+        assert!(parse_chord("Ctrl+NotAKey")
+            .unwrap_err()
+            .contains("is not a key"));
     }
 
     #[test]
@@ -1333,7 +1340,9 @@ mod tests {
                 key: Key::Vk(alt)
             }
         );
-        assert!(parse_key("Control+Control+S").unwrap_err().contains("twice"));
+        assert!(parse_key("Control+Control+S")
+            .unwrap_err()
+            .contains("twice"));
         assert!(parse_key("Hyper+a").is_err());
         assert!(parse_key("NotAKey").is_err());
         assert!(parse_key("F25").is_err());
@@ -1473,7 +1482,8 @@ mod tests {
         assert!(!tunnels_text(&read).contains("identity"));
         assert_eq!(parse_tunnels(&tunnels_text(&read)), read);
 
-        let windows = r#"[{"dest":"vm","remote":43119,"port":50000,"pid":10,"identity":133800000000000000}]"#;
+        let windows =
+            r#"[{"dest":"vm","remote":43119,"port":50000,"pid":10,"identity":133800000000000000}]"#;
         let created = Identity::Created(133_800_000_000_000_000);
         assert_eq!(parse_tunnels(windows)[0].identity, Some(created.clone()));
         let unix = r#"[{"dest":"vm","remote":43119,"port":50000,"pid":10,"identity":"Thu Nov 26 09:14:02 2026"}]"#;

@@ -364,7 +364,8 @@ fn list() -> Result<(), String> {
         );
     }
     println!();
-    let admin_file = takeover_admin::file_read().ok_or("Windows would not say where %ProgramData% is")?;
+    let admin_file =
+        takeover_admin::file_read().ok_or("Windows would not say where %ProgramData% is")?;
     println!("The administrators' list: {}", admin_file.display());
     println!("  (written only from an elevated shell; programs that run as administrator, and");
     println!("  every pre-approved risky action)");

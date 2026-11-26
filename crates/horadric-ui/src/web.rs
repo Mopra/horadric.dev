@@ -44,9 +44,8 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 };
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Environment10, ICoreWebView2Environment15, ICoreWebView2Profile8,
-    ICoreWebView2_13, ICoreWebView2_19, ICoreWebView2_28,
-    ICoreWebView2_3, ICoreWebView2_9, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
-    COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    ICoreWebView2_13, ICoreWebView2_19, ICoreWebView2_28, ICoreWebView2_3, ICoreWebView2_9,
+    COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
 };
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler,
@@ -2684,19 +2683,27 @@ fn set_all(
         return done(Vec::new());
     }
     let (each, again) = (cookies.clone(), view.clone());
-    cdp(view, "Network.setCookies", &split::set_params(cookies), move |r| {
-        if r.is_ok() {
-            return done(each);
-        }
-        let one = each.iter().map(|c| split::set_params(vec![c.clone()])).collect();
-        calls(&again, "Network.setCookies", one, move |went| {
-            let took = each
-                .into_iter()
-                .filter(|c| went.contains(&split::set_params(vec![c.clone()])))
+    cdp(
+        view,
+        "Network.setCookies",
+        &split::set_params(cookies),
+        move |r| {
+            if r.is_ok() {
+                return done(each);
+            }
+            let one = each
+                .iter()
+                .map(|c| split::set_params(vec![c.clone()]))
                 .collect();
-            done(took);
-        });
-    });
+            calls(&again, "Network.setCookies", one, move |went| {
+                let took = each
+                    .into_iter()
+                    .filter(|c| went.contains(&split::set_params(vec![c.clone()])))
+                    .collect();
+                done(took);
+            });
+        },
+    );
 }
 
 fn delete_all(
@@ -2708,10 +2715,7 @@ fn delete_all(
     calls(view, "Network.deleteCookies", params, |_| done());
 }
 
-fn all_cookies(
-    view: &ICoreWebView2,
-    done: impl FnOnce(Option<Vec<serde_json::Value>>) + 'static,
-) {
+fn all_cookies(view: &ICoreWebView2, done: impl FnOnce(Option<Vec<serde_json::Value>>) + 'static) {
     cdp(view, "Network.getAllCookies", "{}", move |r| match r {
         Ok(answer) => done(Some(split::cookies(&answer))),
         Err(e) => {
@@ -2899,12 +2903,15 @@ pub fn resplit() {
             let web = w.get_mut(&key).filter(|web| web.split != now)?;
             let old = web.split.clone().unwrap_or_default();
             let new = now.clone().unwrap_or_default();
-            let given_back: Vec<String> = old.iter().filter(|s| !new.contains(s)).cloned().collect();
+            let given_back: Vec<String> =
+                old.iter().filter(|s| !new.contains(s)).cloned().collect();
             let split_now: Vec<String> = new.iter().filter(|s| !old.contains(s)).cloned().collect();
             web.split = now;
             Some((given_back, split_now))
         });
-        let Some((clear, split_now)) = moved else { continue };
+        let Some((clear, split_now)) = moved else {
+            continue;
+        };
         let owned = key.clone();
         let sites: Vec<String> = clear.iter().chain(&split_now).cloned().collect();
         queue(

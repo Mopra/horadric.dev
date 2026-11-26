@@ -31,13 +31,12 @@ use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{
     RegCloseKey, RegDeleteKeyValueW, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW,
-    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, RRF_RT_REG_DWORD,
-    RRF_RT_REG_SZ,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::RemoteDesktop::{
     ProcessIdToSessionId, WTSEnableChildSessions, WTSFreeMemory, WTSGetActiveConsoleSessionId,
-    WTSGetChildSessionId, WTSIsChildSessionsEnabled, WTSLogoffSession,
-    WTSQuerySessionInformationW, WTSUserName,
+    WTSGetChildSessionId, WTSIsChildSessionsEnabled, WTSLogoffSession, WTSQuerySessionInformationW,
+    WTSUserName,
 };
 use windows::Win32::System::Threading::{GetCurrentProcessId, WaitForSingleObject, INFINITE};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -45,11 +44,10 @@ use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLE
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, IsIconic, KillTimer,
     LoadCursorW, PostMessageW, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, GWL_STYLE, IDC_ARROW, SIZE_MINIMIZED, SWP_FRAMECHANGED,
-    SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY,
-    WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_LBUTTONUP, WM_PAINT,
-    WM_SETFOCUS, WM_SIZE, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN, WS_EX_APPWINDOW,
-    WS_OVERLAPPEDWINDOW, WS_POPUP,
+    SetWindowPos, ShowWindow, GWL_STYLE, IDC_ARROW, SIZE_MINIMIZED, SWP_FRAMECHANGED, SWP_NOZORDER,
+    SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_LBUTTONUP, WM_PAINT, WM_SETFOCUS, WM_SIZE,
+    WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW, WS_POPUP,
 };
 
 use horadric_core::desk;
@@ -709,8 +707,12 @@ fn sign_in(hwnd: HWND) {
         let owner = HWND(to as *mut c_void);
         let mut ready = Ready::default();
         ready.stored = kept.is_some();
-        let typed = kept
-            .or_else(|| prompt(owner, &account(microsoft_account().as_deref(), &local_user())));
+        let typed = kept.or_else(|| {
+            prompt(
+                owner,
+                &account(microsoft_account().as_deref(), &local_user()),
+            )
+        });
         if let Some((user, secret)) = typed {
             ready.user = user;
             ready.secret = secret;
@@ -779,7 +781,14 @@ fn connect(hwnd: HWND, mut ready: Ready) {
     });
     match connected {
         Ok(rdp) => {
-            debug(&format!("connecting as a {} account", if user.contains('@') { "Microsoft" } else { "local" }));
+            debug(&format!(
+                "connecting as a {} account",
+                if user.contains('@') {
+                    "Microsoft"
+                } else {
+                    "local"
+                }
+            ));
             with(|d| {
                 d.rdp = Some(Rc::new(rdp));
                 d.stored = stored;
@@ -860,8 +869,11 @@ fn prompt(owner: HWND, user: &str) -> Option<(String, Vec<u8>)> {
         let mut name = [0u16; 514];
         let mut domain = [0u16; 256];
         let mut password = [0u16; 257];
-        let (mut name_len, mut domain_len, mut password_len) =
-            (name.len() as u32, domain.len() as u32, password.len() as u32);
+        let (mut name_len, mut domain_len, mut password_len) = (
+            name.len() as u32,
+            domain.len() as u32,
+            password.len() as u32,
+        );
         let unpacked = CredUnPackAuthenticationBufferW(
             CRED_PACK_FLAGS(0),
             out,
@@ -1132,7 +1144,11 @@ fn disconnected(hwnd: HWND, reason: i32) {
         credential::delete(&desk::credential_target(horadric_hooks::state_name()));
     }
     let text = why(reason, hello_only(), said.as_deref());
-    say(hwnd, Phase::Idle, &format!("{text}\nClick here to try again."));
+    say(
+        hwnd,
+        Phase::Idle,
+        &format!("{text}\nClick here to try again."),
+    );
     tell("The agent's desk closed", &text);
 }
 
@@ -1233,7 +1249,11 @@ fn on_timer(hwnd: HWND, timer: usize) {
                     disarm_hand();
                 }
                 let text = "Windows did not answer the sign-in within a minute.";
-                say(hwnd, Phase::Idle, &format!("{text}\nClick here to try again."));
+                say(
+                    hwnd,
+                    Phase::Idle,
+                    &format!("{text}\nClick here to try again."),
+                );
                 tell("The agent's desk did not open", text);
             }
         }
@@ -1511,7 +1531,10 @@ mod tests {
 
     #[test]
     fn an_unknown_reason_keeps_what_windows_said_and_its_number() {
-        assert_eq!(why(9999, false, Some("It broke.")), "It broke. (reason 9999)");
+        assert_eq!(
+            why(9999, false, Some("It broke.")),
+            "It broke. (reason 9999)"
+        );
         assert!(why(9999, false, None).contains("9999"));
     }
 }
