@@ -57,19 +57,30 @@ connects it to the child session.
   ordinary window.
 - The sign-in is kept in Credential Manager under
   `desk::credential_target`. With none kept the human is asked once,
-  with Windows' own credential prompt. A refused sign-in says why in
-  plain words, the Windows Hello setting among the reasons.
+  with Windows' own credential prompt, on a thread of its own so the
+  rest of Horadric goes on. What was typed is kept when the control
+  says the login is complete, not when it is connected, so a wrong
+  password is never stored. A refused sign-in says why in plain words,
+  the Windows Hello setting among the reasons.
 - Child sessions are switched on by `horadric desk enable`, which the
   window starts elevated when they are off.
 - Before connecting it sets the RunOnce value `desk::RUN_ONCE` to
   `"<this exe>" desk hand`, so the hand starts at the desk's sign-in.
   When a hand already answers, the session is still signed in and
-  nothing is set.
+  nothing is set. A value nobody ran is taken back, and one left by a
+  Horadric that died is removed at the next start.
+- A desk that shows but has no hand is told to the human, with "End
+  the desk" as the way to a new one: 10 seconds after coming back to a
+  session that was signed in, 2 minutes after a fresh sign-in. The
+  window never signs the session out by itself, the agent's apps may
+  be open there.
 - Once connected it writes the child session's id to
   `desk::SESSION_FILE` in the state folder, and removes the file when
   the desk is closed.
 - Closing the window disconnects and leaves the session signed in, so
-  the agent's apps stay open. "End the desk" signs it out.
+  the agent's apps stay open. "End the desk" signs it out. A desk asked
+  for while it closes opens again a second after the disconnect: a
+  connection made in the same moment is ended by the session.
 - The human can click into the window and use the desk themselves.
 
 ### The hand (`horadric_ui::desk::hand`, `horadric desk hand`)

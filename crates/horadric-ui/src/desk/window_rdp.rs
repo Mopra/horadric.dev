@@ -67,6 +67,7 @@ struct Sink {
     refs: Cell<u32>,
     to: isize,
     message: u32,
+    mark: u16,
 }
 
 #[repr(C)]
@@ -103,12 +104,13 @@ static SINK: SinkVtable = SinkVtable {
 
 impl Sink {
     /// A sink with one reference, which the `IUnknown` returned owns.
-    fn new(to: HWND, message: u32) -> IUnknown {
+    fn new(to: HWND, message: u32, mark: u16) -> IUnknown {
         let sink = Box::new(Sink {
             vtable: &SINK,
             refs: Cell::new(1),
             to: to.0 as isize,
             message,
+            mark,
         });
         unsafe { IUnknown::from_raw(Box::into_raw(sink) as *mut c_void) }
     }
@@ -194,7 +196,7 @@ impl Sink {
         let _ = PostMessageW(
             Some(HWND((*this).to as *mut c_void)),
             (*this).message,
-            WPARAM(id as usize),
+            WPARAM(((*this).mark as usize) << 16 | (id as usize & 0xFFFF)),
             LPARAM(number as isize),
         );
         S_OK
@@ -222,8 +224,15 @@ pub(super) struct Rdp {
 impl Rdp {
     /// Creates the control as a child of `parent`, filling `size`. Its
     /// events come to `parent` as `message`, with the event's id in
-    /// wParam and its number in lParam.
-    pub(super) fn create(parent: HWND, size: (i32, i32), message: u32) -> Result<Rdp, String> {
+    /// wParam's low word, `mark` in the word above it and the event's
+    /// number in lParam. The mark tells this control's events from those
+    /// of one before it that are still on their way.
+    pub(super) fn create(
+        parent: HWND,
+        size: (i32, i32),
+        message: u32,
+        mark: u16,
+    ) -> Result<Rdp, String> {
         let atl = Atl::load()?;
         unsafe {
             // In place activation needs OLE, which is more than the COM
@@ -259,18 +268,27 @@ impl Rdp {
                 return Err("Windows' Remote Desktop control did not start".into());
             }
             let unknown = IUnknown::from_raw(raw);
+            let control = match unknown.cast::<IDispatch>() {
+                Ok(control) => Disp(control),
+                Err(e) => {
+                    // No `Rdp` owns the host yet, so nothing else would
+                    // take it away before its parent goes.
+                    let _ = DestroyWindow(host);
+                    return Err(e.message());
+                }
+            };
             let mut rdp = Rdp {
                 host,
-                control: Disp(unknown.cast::<IDispatch>().map_err(|e| e.message())?),
+                control,
                 events: None,
             };
-            rdp.events = rdp.listen(parent, message);
+            rdp.events = rdp.listen(parent, message, mark);
             Ok(rdp)
         }
     }
 
-    fn listen(&self, to: HWND, message: u32) -> Option<(IConnectionPoint, u32)> {
-        let sink = Sink::new(to, message);
+    fn listen(&self, to: HWND, message: u32, mark: u16) -> Option<(IConnectionPoint, u32)> {
+        let sink = Sink::new(to, message, mark);
         unsafe {
             let points: IConnectionPointContainer = self.control.0.cast().ok()?;
             let point = points.FindConnectionPoint(&EVENTS).ok()?;

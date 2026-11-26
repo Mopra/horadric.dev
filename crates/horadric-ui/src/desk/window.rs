@@ -10,6 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use windows::core::{w, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -31,16 +32,18 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{
     RegCloseKey, RegDeleteKeyValueW, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW,
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, RRF_RT_REG_DWORD,
+    RRF_RT_REG_SZ,
 };
 use windows::Win32::System::RemoteDesktop::{
-    ProcessIdToSessionId, WTSEnableChildSessions, WTSGetChildSessionId,
-    WTSIsChildSessionsEnabled, WTSLogoffSession,
+    ProcessIdToSessionId, WTSEnableChildSessions, WTSFreeMemory, WTSGetActiveConsoleSessionId,
+    WTSGetChildSessionId, WTSIsChildSessionsEnabled, WTSLogoffSession,
+    WTSQuerySessionInformationW, WTSUserName,
 };
 use windows::Win32::System::Threading::{GetCurrentProcessId, WaitForSingleObject, INFINITE};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, IsIconic, IsWindow, KillTimer,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, IsIconic, KillTimer,
     LoadCursorW, PostMessageW, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
     SetWindowPos, ShowWindow, GWL_STYLE, IDC_ARROW, SIZE_MINIMIZED, SWP_FRAMECHANGED,
     SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY,
@@ -63,13 +66,19 @@ use rdp::{Rdp, SignIn};
 const CLASS: PCWSTR = w!("HoradricDesk");
 const TITLE: PCWSTR = w!("Agent's desk");
 
-/// An event of the control's: its id in wParam, its number in lParam.
+/// An event of the control's: its id in wParam's low word, the control's
+/// mark in the word above, its number in lParam.
 const WM_DESK_EVENT: u32 = WM_APP + 1;
 /// The elevated `desk enable` is back: wParam is whether child sessions
 /// are on now.
 const WM_DESK_ENABLED: u32 = WM_APP + 2;
 /// Start connecting. Posted, so the window is on screen before a prompt.
 const WM_DESK_BEGIN: u32 = WM_APP + 3;
+/// The sign-in's thread is back: what it brought is in `Desk::answer`.
+const WM_DESK_READY: u32 = WM_APP + 4;
+/// The hand was asked for: wParam is whether it answers, lParam the mark
+/// of the control that was connected when it was asked.
+const WM_DESK_HAND: u32 = WM_APP + 5;
 
 /// Asks Windows for the session's id until it has one.
 const T_SESSION: usize = 1;
@@ -77,8 +86,22 @@ const T_SESSION: usize = 1;
 const T_CLOSE: usize = 2;
 /// A sign-in that neither works nor fails is given up on.
 const T_PATIENCE: usize = 3;
-/// A RunOnce line nobody ran is taken back.
-const T_RUN_ONCE: usize = 4;
+/// The hand should answer by now: a RunOnce line nobody ran is taken
+/// back, and a desk without a hand is told to the human.
+const T_HAND: usize = 4;
+
+/// The close is through: the desk that was asked for meanwhile opens.
+const T_AGAIN: usize = 5;
+
+/// RunOnce runs about half a minute after a fresh sign-in, a slow one
+/// later.
+const HAND_AFTER_SIGN_IN: u32 = 120_000;
+/// How long the session is given to let an old connection go before a
+/// new one is made.
+const AGAIN_AFTER: u32 = 1000;
+/// A session that was signed in already runs no RunOnce: its hand
+/// answers at once or is gone.
+const HAND_AFTER_RETURN: u32 = 10_000;
 
 /// The file in the state folder that holds the chosen screen's name.
 const SCREEN_FILE: &str = "desk-screen";
@@ -225,13 +248,41 @@ pub fn signed_in() -> bool {
 enum Phase {
     /// Nothing is going on: a click starts over.
     Idle,
-    /// The human is asked for admin rights or for the password.
+    /// A thread is out: the human is asked for admin rights or for the
+    /// password, or the hand is asked for.
     Asking,
     Connecting,
     Connected,
-    /// The window is hidden and waits for the control to disconnect.
+    /// The window waits for the control to disconnect, hidden unless it
+    /// was asked for again meanwhile.
     Closing,
 }
+
+/// What the sign-in's thread brings back. The password is wiped when
+/// this is dropped, whichever way that happens.
+#[derive(Default)]
+struct Ready {
+    user: String,
+    /// Empty when the human gave none.
+    secret: Vec<u8>,
+    /// The sign-in came from Credential Manager.
+    stored: bool,
+    /// A hand answers already.
+    hand: bool,
+    /// The desk's session was signed in before this connect.
+    returning: bool,
+}
+
+impl Drop for Ready {
+    fn drop(&mut self) {
+        self.secret.fill(0);
+    }
+}
+
+/// Where the sign-in's thread leaves its [`Ready`]. The window holds the
+/// other end, so a window that went away meanwhile leaves no password
+/// behind in a message nobody reads.
+type Answer = Arc<Mutex<Option<Ready>>>;
 
 struct Desk {
     hwnd: HWND,
@@ -245,6 +296,16 @@ struct Desk {
     stored: bool,
     /// The RunOnce line is this window's to take back.
     armed: bool,
+    /// Where the sign-in's thread answers, while one is out.
+    answer: Option<Answer>,
+    /// The mark of the control whose events count. Letting go of a
+    /// control moves it on, so what that one still says is not heard.
+    mark: u16,
+    /// The desk was asked for while it was closing: it opens again once
+    /// the control has let go.
+    again: bool,
+    /// The session was signed in before this connect, see [`Ready`].
+    returning: bool,
     polls: u32,
     /// The human is dragging an edge: the session waits for the end.
     sizing: bool,
@@ -256,6 +317,15 @@ thread_local! {
     /// A script is trying the desk on a dev instance: an ordinary window
     /// that takes neither a whole screen nor the focus from the human.
     static TRIAL: Cell<bool> = const { Cell::new(false) };
+    static MARKS: Cell<u16> = const { Cell::new(0) };
+}
+
+/// A mark no control before had, for the next one or for none.
+fn next_mark() -> u16 {
+    MARKS.with(|m| {
+        m.set(m.get().wrapping_add(1));
+        m.get()
+    })
 }
 
 /// The desk's state, briefly. Never held across a call into the control
@@ -307,6 +377,20 @@ pub(crate) fn startup() {
     if named.is_some() && named != Some(mine) {
         forget_session();
     }
+    // A Horadric that died while its RunOnce line was set left it for
+    // the human's own next sign-in, where the hand would refuse and
+    // flash a console. No desk of this instance is connecting now, so a
+    // line of its own is a leftover. Another instance's line is left
+    // alone, and so is every line seen from inside the desk, where
+    // Windows may be about to run it.
+    let own_line = std::env::current_exe()
+        .ok()
+        .map(|exe| hand_command(&exe.to_string_lossy(), horadric_hooks::dev()));
+    let in_console = mine == unsafe { WTSGetActiveConsoleSessionId() };
+    if in_console && own_line.is_some() && run_once_line() == own_line {
+        debug("a RunOnce line was left behind");
+        disarm_hand();
+    }
     // For trying it from a script, which has no hand to click the tray.
     if let Some(how) = std::env::var_os("HORADRIC_DESK_OPEN").filter(|_| horadric_hooks::dev()) {
         TRIAL.with(|t| t.set(how == "window"));
@@ -336,17 +420,19 @@ pub fn open() {
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
         }
-        // A window that was closing is wanted again.
-        let again = with(|d| {
-            let was = d.phase;
-            if was == Phase::Closing {
-                d.phase = Phase::Idle;
+        // A window that was closing is wanted again, but its control is
+        // still letting go and can not connect anew: the disconnect it
+        // is about to tell of, or the close timer, opens the desk again.
+        let begin = with(|d| {
+            if d.phase == Phase::Closing {
+                d.again = true;
+                d.status = "Opening the agent's desk again.".into();
             }
-            was == Phase::Closing || (was == Phase::Idle && d.rdp.is_none())
+            d.phase == Phase::Idle && d.rdp.is_none()
         });
-        if again == Some(true) {
-            unsafe {
-                let _ = KillTimer(Some(hwnd), T_CLOSE);
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, true);
+            if begin == Some(true) {
                 let _ = PostMessageW(Some(hwnd), WM_DESK_BEGIN, WPARAM(0), LPARAM(0));
             }
         }
@@ -476,6 +562,10 @@ fn create() -> Result<(), String> {
             typed: None,
             stored: false,
             armed: false,
+            answer: None,
+            mark: 0,
+            again: false,
+            returning: false,
             polls: 0,
             sizing: false,
         })
@@ -601,35 +691,82 @@ fn run_enable() -> Result<(), String> {
 fn sign_in(hwnd: HWND) {
     let target = desk::credential_target(horadric_hooks::state_name());
     let kept = credential::read(&target).filter(|(u, p)| !u.is_empty() && !p.is_empty());
-    let stored = kept.is_some();
-    let (user, mut secret) = match kept {
-        Some(kept) => kept,
-        None => {
-            say(hwnd, Phase::Asking, "Waiting for your Windows password.");
-            match prompt(hwnd, &account(microsoft_account().as_deref(), &local_user())) {
-                Some(typed) => typed,
-                None => {
-                    return say(
-                        hwnd,
-                        Phase::Idle,
-                        "The desk needs your Windows password to sign in.\nClick here to try again.",
-                    );
-                }
-            }
+    let answer = Answer::default();
+    with(|d| d.answer = Some(answer.clone()));
+    say(
+        hwnd,
+        Phase::Asking,
+        if kept.is_some() {
+            "Signing in to the agent's desk."
+        } else {
+            "Waiting for your Windows password."
+        },
+    );
+    let to = hwnd.0 as isize;
+    // The human takes their time over the prompt, and asking for the
+    // hand waits on the network: neither may hold the UI thread.
+    std::thread::spawn(move || {
+        let owner = HWND(to as *mut c_void);
+        let mut ready = Ready::default();
+        ready.stored = kept.is_some();
+        let typed = kept
+            .or_else(|| prompt(owner, &account(microsoft_account().as_deref(), &local_user())));
+        if let Some((user, secret)) = typed {
+            ready.user = user;
+            ready.secret = secret;
+            ready.hand = hand_answers(300);
+            ready.returning = child_session().is_some_and(has_user);
         }
-    };
-    // The prompt pumps messages, so the window may be gone by now.
-    if window() != Some(hwnd) || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-        secret.fill(0);
+        if let Ok(mut slot) = answer.lock() {
+            *slot = Some(ready);
+        }
+        unsafe {
+            let _ = PostMessageW(Some(owner), WM_DESK_READY, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+/// The sign-in's thread is back with a sign-in, or with none.
+fn ready(hwnd: HWND) {
+    let brought = with(|d| {
+        if d.phase != Phase::Asking {
+            return None;
+        }
+        // An answer that is not in yet belongs to a thread still out:
+        // this message was an older one's.
+        let ready = d.answer.as_ref()?.lock().ok()?.take()?;
+        d.answer = None;
+        Some(ready)
+    })
+    .flatten();
+    let Some(ready) = brought else {
         return;
+    };
+    if ready.secret.is_empty() {
+        return say(
+            hwnd,
+            Phase::Idle,
+            "The desk needs your Windows password to sign in.\nClick here to try again.",
+        );
     }
+    connect(hwnd, ready);
+}
+
+/// The third step: the control, and the connection to the session.
+fn connect(hwnd: HWND, mut ready: Ready) {
     say(hwnd, Phase::Connecting, "Signing in to the agent's desk.");
-    let armed = arm_hand();
-    let connected = Rdp::create(hwnd, client(hwnd), WM_DESK_EVENT).and_then(|rdp| {
+    // With a hand answering the session is still signed in and RunOnce
+    // would not run there, but at the human's own next sign-in.
+    let armed = !ready.hand && arm_hand();
+    let mark = next_mark();
+    with(|d| d.mark = mark);
+    let stored = ready.stored;
+    let user = std::mem::take(&mut ready.user);
+    let connected = Rdp::create(hwnd, client(hwnd), WM_DESK_EVENT, mark).and_then(|rdp| {
         if !rdp.listening() {
             return Err("the Remote Desktop control does not tell what happens to it".into());
         }
-        let mut password = String::from_utf8_lossy(&secret).into_owned();
+        let mut password = String::from_utf8_lossy(&ready.secret).into_owned();
         let started = rdp.connect(&SignIn {
             user: &user,
             password: &password,
@@ -646,8 +783,9 @@ fn sign_in(hwnd: HWND) {
             with(|d| {
                 d.rdp = Some(Rc::new(rdp));
                 d.stored = stored;
-                d.typed = (!stored).then(|| (user, std::mem::take(&mut secret)));
+                d.typed = (!stored).then(|| (user, std::mem::take(&mut ready.secret)));
                 d.armed = armed;
+                d.returning = ready.returning;
                 d.polls = 0;
             });
             unsafe {
@@ -666,7 +804,6 @@ fn sign_in(hwnd: HWND) {
             tell("The agent's desk did not open", &e);
         }
     }
-    secret.fill(0);
 }
 
 /// Windows' own prompt for a user name and a password, `user` filled in.
@@ -803,14 +940,69 @@ fn hello_only() -> bool {
 
 const RUN_ONCE_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce");
 
-/// Has the hand start at the desk's sign-in, unless one already answers:
-/// then the session is still signed in and RunOnce would not run there,
-/// but at the human's own next sign-in. True when the line was written.
-fn arm_hand() -> bool {
+/// Whether a hand answers on its port within `wait` milliseconds. It
+/// waits, so never on the UI thread.
+fn hand_answers(wait: u64) -> bool {
     let at = std::net::SocketAddr::from(([127, 0, 0, 1], desk::port(horadric_hooks::dev())));
-    if std::net::TcpStream::connect_timeout(&at, std::time::Duration::from_millis(300)).is_ok() {
-        return false;
+    std::net::TcpStream::connect_timeout(&at, std::time::Duration::from_millis(wait)).is_ok()
+}
+
+/// Asks for the hand on a thread of its own and posts the answer back.
+fn ask_hand(hwnd: HWND, mark: u16) {
+    let to = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        let answers = hand_answers(1000);
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(to as *mut c_void)),
+                WM_DESK_HAND,
+                WPARAM(answers as usize),
+                LPARAM(mark as isize),
+            );
+        }
+    });
+}
+
+/// Whether somebody is signed in to Windows session `id`.
+fn has_user(id: u32) -> bool {
+    let mut name = PWSTR::null();
+    let mut bytes = 0u32;
+    unsafe {
+        if WTSQuerySessionInformationW(None, id, WTSUserName, &mut name, &mut bytes).is_err()
+            || name.is_null()
+        {
+            return false;
+        }
+        let signed_in = *name.0 != 0;
+        WTSFreeMemory(name.0 as *mut c_void);
+        signed_in
     }
+}
+
+/// The RunOnce line as it stands, whoever wrote it.
+fn run_once_line() -> Option<String> {
+    let mut text = [0u16; 1024];
+    let mut size = (text.len() * 2) as u32;
+    let got = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            RUN_ONCE_KEY,
+            &HSTRING::from(desk::RUN_ONCE),
+            RRF_RT_REG_SZ,
+            None,
+            Some(text.as_mut_ptr() as *mut c_void),
+            Some(&mut size),
+        )
+    };
+    (got == ERROR_SUCCESS).then(|| {
+        let end = text.iter().position(|&c| c == 0).unwrap_or(text.len());
+        String::from_utf16_lossy(&text[..end])
+    })
+}
+
+/// Has the hand start at the desk's sign-in. True when the line was
+/// written.
+fn arm_hand() -> bool {
     let Ok(exe) = std::env::current_exe() else {
         return false;
     };
@@ -841,34 +1033,46 @@ fn disarm_hand() {
     }
 }
 
-fn on_event(hwnd: HWND, id: usize, number: i32) {
+fn on_event(hwnd: HWND, id: usize, mark: u16, number: i32) {
     debug(&format!("event {id} ({number})"));
+    // A control that was let go of may have said something on its way
+    // out. Heard now, its disconnect would close a window that tells why
+    // or has started over.
+    if with(|d| d.mark) != Some(mark) {
+        return debug("an event of a control that is gone");
+    }
     match id {
         rdp::ON_CONNECTED | rdp::ON_LOGIN_COMPLETE => {
-            // Both events come, in turn. The first one counts.
-            let Some(typed) = with(|d| {
+            // Both events come, in turn. The first one shows the desk.
+            let first = with(|d| {
                 if d.phase != Phase::Connecting {
-                    return None;
+                    return false;
                 }
                 d.phase = Phase::Connected;
                 d.status.clear();
                 d.polls = 0;
-                Some(d.typed.take())
-            })
-            .flatten() else {
+                true
+            });
+            if first == Some(true) {
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), T_PATIENCE);
+                    SetTimer(Some(hwnd), T_SESSION, 500, None);
+                }
+            }
+            if id != rdp::ON_LOGIN_COMPLETE {
                 return;
-            };
-            // Kept only now: Windows took it.
+            }
+            // Kept only now: being connected is not yet being signed in,
+            // and a wrong password must never be stored.
+            let typed = with(|d| (d.phase == Phase::Connected).then(|| d.typed.take()))
+                .flatten()
+                .flatten();
             if let Some((user, mut secret)) = typed {
                 let target = desk::credential_target(horadric_hooks::state_name());
                 if let Err(e) = credential::write(&target, &user, &secret) {
                     tell("The desk's sign-in was not kept", &e);
                 }
                 secret.fill(0);
-            }
-            unsafe {
-                let _ = KillTimer(Some(hwnd), T_PATIENCE);
-                SetTimer(Some(hwnd), T_SESSION, 500, None);
             }
         }
         rdp::ON_DISCONNECTED => disconnected(hwnd, number),
@@ -879,26 +1083,46 @@ fn on_event(hwnd: HWND, id: usize, number: i32) {
 
 fn disconnected(hwnd: HWND, reason: i32) {
     forget_session();
-    let Some((rdp, phase, stored, armed)) = with(|d| {
+    let Some((rdp, phase, stored, armed, again)) = with(|d| {
         if let Some((_, secret)) = d.typed.as_mut() {
             secret.fill(0);
         }
         d.typed = None;
-        (d.rdp.take(), d.phase, d.stored, std::mem::take(&mut d.armed))
+        (
+            d.rdp.take(),
+            d.phase,
+            d.stored,
+            std::mem::take(&mut d.armed),
+            std::mem::take(&mut d.again),
+        )
     }) else {
         return;
     };
     unsafe {
         let _ = KillTimer(Some(hwnd), T_SESSION);
         let _ = KillTimer(Some(hwnd), T_PATIENCE);
-        let _ = KillTimer(Some(hwnd), T_RUN_ONCE);
+        let _ = KillTimer(Some(hwnd), T_HAND);
     }
     if armed {
         disarm_hand();
     }
     let said = rdp.as_ref().and_then(|r| r.describe(reason));
     drop(rdp);
-    if phase == Phase::Closing || ENDED.contains(&reason) {
+    debug(&format!("disconnected, reason {reason}"));
+    if phase == Phase::Closing && again {
+        // The close is through, and the desk was asked for meanwhile.
+        // Not at once: the session is still letting the old connection
+        // go, and ends a new one that comes in the same moment.
+        unsafe {
+            let _ = KillTimer(Some(hwnd), T_CLOSE);
+            SetTimer(Some(hwnd), T_AGAIN, AGAIN_AFTER, None);
+            let _ = InvalidateRect(Some(hwnd), None, true);
+        }
+        return;
+    }
+    // An end that came before the desk was ever shown is a failure
+    // whatever its reason, and gets its words below.
+    if phase == Phase::Closing || (ENDED.contains(&reason) && phase != Phase::Connecting) {
         unsafe {
             let _ = DestroyWindow(hwnd);
         }
@@ -918,7 +1142,10 @@ fn close(hwnd: HWND) {
     let live = the_rdp().filter(|r| r.connected() != 0);
     match live {
         Some(rdp) => {
-            with(|d| d.phase = Phase::Closing);
+            with(|d| {
+                d.phase = Phase::Closing;
+                d.again = false;
+            });
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
                 SetTimer(Some(hwnd), T_CLOSE, 3000, None);
@@ -950,25 +1177,54 @@ fn on_timer(hwnd: HWND, timer: usize) {
                 debug(&format!("session {id}"));
             }
             if id.is_some() || polls > 60 {
+                let wait = match with(|d| d.returning) {
+                    Some(true) => HAND_AFTER_RETURN,
+                    _ => HAND_AFTER_SIGN_IN,
+                };
                 unsafe {
                     let _ = KillTimer(Some(hwnd), T_SESSION);
-                    // Long enough for a slow sign-in to reach RunOnce.
-                    SetTimer(Some(hwnd), T_RUN_ONCE, 120_000, None);
+                    SetTimer(Some(hwnd), T_HAND, wait, None);
                 }
             }
         }
-        T_CLOSE => unsafe {
-            let _ = KillTimer(Some(hwnd), T_CLOSE);
-            if with(|d| d.phase == Phase::Closing) == Some(true) {
-                let _ = DestroyWindow(hwnd);
+        T_CLOSE => {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), T_CLOSE);
             }
-        },
+            match with(|d| (d.phase == Phase::Closing).then(|| std::mem::take(&mut d.again))) {
+                // Asked for again, and the control never said it let go.
+                Some(Some(true)) => {
+                    drop(let_go(hwnd));
+                    unsafe {
+                        SetTimer(Some(hwnd), T_AGAIN, AGAIN_AFTER, None);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
+                }
+                Some(Some(false)) => unsafe {
+                    let _ = DestroyWindow(hwnd);
+                },
+                _ => {}
+            }
+        }
+        T_AGAIN => {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), T_AGAIN);
+            }
+            // Still closing means nobody closed it for good meanwhile.
+            if with(|d| d.phase == Phase::Closing && d.rdp.is_none()) == Some(true) {
+                with(|d| {
+                    d.phase = Phase::Idle;
+                    d.again = false;
+                });
+                begin(hwnd);
+            }
+        }
         T_PATIENCE => {
             unsafe {
                 let _ = KillTimer(Some(hwnd), T_PATIENCE);
             }
             if with(|d| d.phase == Phase::Connecting) == Some(true) {
-                let rdp = with(|d| d.rdp.take()).flatten();
+                let rdp = let_go(hwnd);
                 if let Some(rdp) = &rdp {
                     rdp.disconnect();
                 }
@@ -981,16 +1237,51 @@ fn on_timer(hwnd: HWND, timer: usize) {
                 tell("The agent's desk did not open", text);
             }
         }
-        T_RUN_ONCE => {
+        T_HAND => {
             unsafe {
-                let _ = KillTimer(Some(hwnd), T_RUN_ONCE);
+                let _ = KillTimer(Some(hwnd), T_HAND);
             }
             if with(|d| std::mem::take(&mut d.armed)) == Some(true) {
                 disarm_hand();
             }
+            if let Some(mark) = with(|d| d.mark) {
+                ask_hand(hwnd, mark);
+            }
         }
         _ => {}
     }
+}
+
+/// Takes the control out of the window without waiting for its
+/// disconnect, and moves the mark on so that one is not heard later.
+fn let_go(hwnd: HWND) -> Option<Rc<Rdp>> {
+    unsafe {
+        let _ = KillTimer(Some(hwnd), T_SESSION);
+        let _ = KillTimer(Some(hwnd), T_HAND);
+    }
+    let mark = next_mark();
+    with(|d| {
+        d.mark = mark;
+        d.rdp.take()
+    })
+    .flatten()
+}
+
+/// The hand was asked for when it should be up. A desk that shows but
+/// has no hand is closed to every `desk_` tool, and only a new sign-in
+/// starts one. That is the human's to choose: signing out closes the
+/// agent's apps.
+fn hand_asked(answers: bool, mark: u16) {
+    let shown = with(|d| d.mark == mark && d.phase == Phase::Connected) == Some(true);
+    if answers || !shown {
+        return;
+    }
+    tell(
+        "The desk's helper is not running",
+        "The agent can not see or use the desk without it. \"End the desk\" in the tray \
+         menu and opening the desk again starts it. Ending the desk closes the apps open \
+         on it.",
+    );
 }
 
 fn paint(hwnd: HWND) {
@@ -1078,7 +1369,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             LRESULT(0)
         }
         WM_DESK_EVENT => {
-            on_event(hwnd, wp.0, lp.0 as i32);
+            on_event(hwnd, wp.0 & 0xFFFF, (wp.0 >> 16) as u16, lp.0 as i32);
+            LRESULT(0)
+        }
+        WM_DESK_READY => {
+            ready(hwnd);
+            LRESULT(0)
+        }
+        WM_DESK_HAND => {
+            hand_asked(wp.0 != 0, lp.0 as u16);
             LRESULT(0)
         }
         WM_TIMER => {
