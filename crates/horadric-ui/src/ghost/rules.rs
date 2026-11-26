@@ -256,12 +256,14 @@ impl Holder {
     }
 }
 
-/// Whether a tool is one of the desktop tools, under any MCP prefix.
-pub(crate) fn is_desktop_tool(tool: &str) -> bool {
-    tool.rsplit("__")
-        .next()
-        .unwrap_or(tool)
-        .starts_with("desktop_")
+/// Whether a tool is one of the takeover tools, under any MCP prefix and
+/// by either family of names: the `takeover_` ones, and the `desktop_`
+/// ones they were first shipped as and are still answered by.
+pub(crate) fn is_takeover_tool(tool: &str) -> bool {
+    let bare = tool.rsplit("__").next().unwrap_or(tool);
+    ["takeover_", "desktop_"]
+        .iter()
+        .any(|family| bare.starts_with(family))
 }
 
 /// Where a tool works, in a few words for the plate.
@@ -300,7 +302,7 @@ pub(crate) fn away_of(
     match (turn, tool) {
         (Turn::Gone, _) => Some("The session has ended.".into()),
         (Turn::Resting, _) => Some(format!("Finished its turn, not working in {program}.")),
-        (Turn::Working, Some(t)) if !is_desktop_tool(t) => Some(format!(
+        (Turn::Working, Some(t)) if !is_takeover_tool(t) => Some(format!(
             "Working {} ({}), not in {program}.",
             tool_place(t),
             t.rsplit("__").next().unwrap_or(t)
@@ -320,6 +322,8 @@ pub(crate) enum BypassEnd {
     Done,
     /// It was on for [`BYPASS_MAX`].
     Ceiling,
+    /// The human turned takeover off in the tray menu.
+    Off,
 }
 
 /// The history's words for bypass turned on (`None`) or ended, what and
@@ -332,6 +336,7 @@ pub(crate) fn bypass_words(end: Option<BypassEnd>) -> (&'static str, &'static st
         Some(BypassEnd::Switched) => ("Bypass off", "switched off"),
         Some(BypassEnd::Done) => ("Bypass off", "the work it was on for is done"),
         Some(BypassEnd::Ceiling) => ("Bypass off", "on for 30 minutes, its limit"),
+        Some(BypassEnd::Off) => ("Bypass off", "takeover turned off"),
     }
 }
 
@@ -528,22 +533,6 @@ pub(crate) fn ghost_alpha(since: Duration) -> f32 {
         None => 1.0,
         Some(fading) => 1.0 - motion::progress(fading, GHOST_FADE),
     }
-}
-
-/// The four strips along a monitor's edges that hold its runes, as x, y,
-/// width, height, `thick` pixels deep: top and bottom the whole width,
-/// the sides between them.
-pub(crate) fn edges(monitor: [i32; 4], thick: i32) -> [[i32; 4]; 4] {
-    let [l, t, r, b] = monitor;
-    let (w, h) = (r - l, b - t);
-    let thick = thick.min(w / 2).min(h / 2).max(1);
-    let side = (h - 2 * thick).max(0);
-    [
-        [l, t, w, thick],
-        [l, b - thick, w, thick],
-        [l, t + thick, thick, side],
-        [r - thick, t + thick, thick, side],
-    ]
 }
 
 /// The plate's place: the top right corner of the work area, `margin`

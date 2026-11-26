@@ -172,42 +172,46 @@ fn a_trip_stops_only_the_glide_it_came_for() {
 
 #[test]
 fn now_says_when_the_session_works_elsewhere() {
-    let sysmac = "Sysmac Studio";
-    let click = Some("mcp__horadric__desktop_click");
-    assert_eq!(away_of(click, Turn::Working, false, sysmac), None);
-    assert_eq!(away_of(None, Turn::Working, false, sysmac), None);
+    let studio = "Acme Studio";
+    let click = Some("mcp__horadric__takeover_click");
+    assert_eq!(away_of(click, Turn::Working, false, studio), None);
+    assert_eq!(away_of(None, Turn::Working, false, studio), None);
     assert_eq!(
-        away_of(Some("Bash"), Turn::Working, false, sysmac),
-        Some("Working in the shell (Bash), not in Sysmac Studio.".into())
+        away_of(Some("Bash"), Turn::Working, false, studio),
+        Some("Working in the shell (Bash), not in Acme Studio.".into())
     );
     assert_eq!(
         away_of(Some("mcp__horadric__browser_open"), Turn::Working, false, ""),
         Some("Working in the browser (browser_open), not in the program.".into())
     );
-    assert!(away_of(click, Turn::Resting, false, sysmac)
+    assert!(away_of(click, Turn::Resting, false, studio)
         .unwrap()
         .starts_with("Finished its turn"));
     assert_eq!(
-        away_of(None, Turn::Gone, false, sysmac),
+        away_of(None, Turn::Gone, false, studio),
         Some("The session has ended.".into())
     );
     // Stuck on a prompt of its agent's, it does nothing in the program.
-    assert!(away_of(click, Turn::Working, true, sysmac)
+    assert!(away_of(click, Turn::Working, true, studio)
         .unwrap()
         .starts_with("Waiting for you"));
 }
 
 #[test]
 fn tools_are_placed_in_words() {
-    assert!(is_desktop_tool("desktop_type"));
-    assert!(is_desktop_tool("mcp__horadric__desktop_text"));
-    assert!(!is_desktop_tool("mcp__horadric__browser_click"));
-    assert!(!is_desktop_tool("Bash"));
+    // Both families of names: the tools were first shipped as desktop_.
+    assert!(is_takeover_tool("takeover_type"));
+    assert!(is_takeover_tool("mcp__horadric__takeover_click"));
+    assert!(is_takeover_tool("desktop_type"));
+    assert!(is_takeover_tool("mcp__horadric__desktop_text"));
+    assert!(!is_takeover_tool("mcp__horadric__browser_click"));
+    assert!(!is_takeover_tool("mcp__horadric__desk_click"));
+    assert!(!is_takeover_tool("Bash"));
     assert_eq!(tool_place("PowerShell"), "in the shell");
     assert_eq!(tool_place("Edit"), "on files");
     assert_eq!(
-        tool_place("mcp__omron__sysmac_project_build"),
-        "with sysmac_project_build"
+        tool_place("mcp__acme__studio_project_build"),
+        "with studio_project_build"
     );
 }
 
@@ -363,21 +367,48 @@ fn what_bypass_let_through_is_marked_once() {
 }
 
 #[test]
-fn a_rune_warms_as_the_light_comes_and_cools_behind_it() {
-    let len = 4000.0;
-    // Under the light it is full, far from it cold.
-    assert!((frame::warmth(100.0, 100.0, len) - 1.0).abs() < 1e-4);
-    assert_eq!(frame::warmth(100.0, 2000.0, len), 0.0);
-    // Warmer the nearer the light comes, cooler the longer it is gone.
-    assert!(frame::warmth(100.0, 120.0, len) > frame::warmth(100.0, 160.0, len));
-    assert!(frame::warmth(100.0, 60.0, len) > frame::warmth(100.0, 0.0, len));
-    // Round the ring's end as anywhere.
-    assert!(frame::warmth(10.0, len - 20.0, len) > 0.0);
-    // Never dark and never past full, wherever the lights are.
-    for t in 0..200 {
-        for d in (0..4000).step_by(56) {
-            let l = frame::level(t as f32 * 0.37, 123.0, d as f32, len);
-            assert!((0.3..=1.0).contains(&l), "{t} {d}: {l}");
+fn the_breath_of_light_swells_as_it_comes_and_fades_behind() {
+    // At its head it is full, a swell ahead not there yet.
+    assert!((frame::breath(0.0) - 1.0).abs() < 1e-4);
+    assert!(frame::breath(frame::SWELL) < 1e-4);
+    assert_eq!(frame::breath(frame::SWELL * 3.0), 0.0);
+    // Brighter the nearer it comes, dimmer the longer it is gone.
+    assert!(frame::breath(40.0) > frame::breath(200.0));
+    assert!(frame::breath(-40.0) > frame::breath(-300.0));
+    assert_eq!(frame::breath(-100_000.0), 0.0);
+    // No jump where coming turns to going.
+    assert!((frame::breath(0.5) - frame::breath(-0.5)).abs() < 0.02);
+}
+
+#[test]
+fn a_wave_lies_a_whole_number_of_times_along_its_edge() {
+    for long in [1440.0, 2560.0, 3440.0, 300.0] {
+        for about in [520.0, 190.0] {
+            let wave = frame::fitted(about, long);
+            let times = long / wave;
+            assert!((times - times.round()).abs() < 1e-3, "{long} {about}");
+            assert!(times >= 1.0);
+        }
+    }
+}
+
+#[test]
+fn a_light_is_placed_on_each_edge_from_where_it_is_on_the_ring() {
+    let (w, h) = (3440.0, 1440.0);
+    let len = 2.0 * (w + h);
+    // Halfway along the top, it is that far along the top.
+    assert_eq!(frame::lap_from(1720.0, 0.0, len), 1720.0);
+    // Seen from the right edge, which starts where the top ends, it has
+    // most of a lap to go, and so is far before that edge.
+    let right = frame::lap_from(1720.0, w, len);
+    assert!((right - (1720.0 - w + len)).abs() < 1e-2 || (right - (1720.0 - w)).abs() < 1e-2);
+    // Its front reaches an edge one swell before its head does.
+    assert_eq!(frame::lap_from(w - 100.0, w, len), -100.0);
+    // Always within one lap, starting a swell before the edge.
+    for head in (0..20000).step_by(137) {
+        for start in [0.0, w, w + h, 2.0 * w + h] {
+            let at = frame::lap_from(head as f32, start, len);
+            assert!((-frame::SWELL..len - frame::SWELL).contains(&at), "{head} {start}: {at}");
         }
     }
 }
@@ -388,23 +419,6 @@ fn the_ghost_stays_then_fades() {
     assert_eq!(ghost_alpha(GHOST_STAYS), 1.0);
     assert!((ghost_alpha(GHOST_STAYS + GHOST_FADE / 2) - 0.5).abs() < 1e-4);
     assert_eq!(ghost_alpha(GHOST_STAYS + GHOST_FADE), 0.0);
-}
-
-#[test]
-fn four_strips_frame_a_monitor_without_overlapping() {
-    let m = [-2560, 0, 0, 1440];
-    assert_eq!(
-        edges(m, 10),
-        [
-            [-2560, 0, 2560, 10],
-            [-2560, 1430, 2560, 10],
-            [-2560, 10, 10, 1420],
-            [-10, 10, 10, 1420],
-        ]
-    );
-    // A monitor too small for the depth keeps strips that fit.
-    let tiny = edges([0, 0, 6, 6], 10);
-    assert!(tiny.iter().all(|r| r[2] >= 0 && r[3] >= 0));
 }
 
 #[test]

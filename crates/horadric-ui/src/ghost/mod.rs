@@ -1,13 +1,14 @@
-//! What the human sees while a session drives a desktop program: runes cut
-//! round every screen, a rune that travels to where the next click goes
-//! before it is made, and a Thinking plate in the top right corner saying
-//! what the session is about to do and what it did.
+//! What the human sees while a session drives a desktop program: a soft
+//! light along the edges of every screen, a rune that travels to where
+//! the next click goes before it is made, and a Thinking plate in the top
+//! right corner saying what the session is about to do and what it did.
 //!
 //! All of it is drawn as the app draws: the runes are the twelve of
-//! [`crate::sparks::RUNES`], the ring round a screen is the ring round a
-//! working terminal ([`frame`]), the mark lands with the sparks a tool
-//! cast throws ([`mark`]), and the plate is a plate ([`plate`]). Activity
-//! is shown by runes, never by a glow or a gradient.
+//! [`crate::sparks::RUNES`], the light round a screen is bloomed by the
+//! app's own [`crate::light`] ([`frame`]), the mark lands with the sparks
+//! a tool cast throws ([`mark`]), and the plate is a plate ([`plate`]).
+//! On the plate and the mark activity is shown by runes. The light round
+//! the screens is the one glow, which the human chose for it.
 //!
 //! The mark is slow on purpose. A click waits for it to arrive, two
 //! seconds, and Esc held while it travels stops that click: the human
@@ -28,9 +29,10 @@
 //!
 //! Its state lives here, off the app, since its frames come to its own
 //! window and must not wait on the app's borrow. Frames run only while
-//! something moves. While control is merely on, a slow beat moves the
-//! runes, each drawn again alone, and with animations off nothing is
-//! drawn at all until something changes.
+//! something moves. While control is merely on, the light round the
+//! screens is moved by the compositor and costs nothing here, and a slow
+//! beat moves the plate's runes, each drawn again alone. With animations
+//! off nothing is drawn at all until something changes.
 //!
 //! The plate is the one window here the mouse can reach, and only over its
 //! controls: a slider for how long the mark takes, kept across restarts,
@@ -75,7 +77,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 
-use horadric_core::desktop_programs::{self, Source};
+use horadric_core::takeover_programs::{self, Mode, Source};
 use horadric_hooks::listener::Reply;
 use serde_json::json;
 use windows::core::{w, PCWSTR};
@@ -136,6 +138,9 @@ const BEAT_EVERY: Duration = crate::motion::FRAME_BREATH;
 /// How often, while bypass is on, the sessions it is on for are looked at,
 /// and how often the plate looks at what its session does now.
 const TURNS_EVERY: Duration = Duration::from_millis(250);
+/// How long after the light round the screens could not be made it is
+/// tried again.
+const FRAME_AGAIN: Duration = Duration::from_secs(3);
 /// What a call bypass let through is told when bypass ends before it went.
 const BYPASS_ENDED: &str =
     "the human stopped bypass, so this action was not made; ask again and they will be asked";
@@ -258,8 +263,10 @@ struct Overlay {
     framing: bool,
     /// The slow beat runs, at this many milliseconds.
     beating: Option<u32>,
-    /// The runes round the screens, while control shows.
+    /// The light round the screens, while control shows, and when it
+    /// may be tried again after it could not be made.
     frame: Option<frame::Frame>,
+    frame_after: Option<Instant>,
     /// The screens changed: the runes are made again, the plate placed
     /// again.
     screens_stale: bool,
@@ -400,6 +407,7 @@ fn with(shared: &Rc<Shared>, f: impl FnOnce(&mut Overlay)) {
                         framing: false,
                         beating: None,
                         frame: None,
+                        frame_after: None,
                         screens_stale: false,
                         plate: None,
                         geom: None,
@@ -735,6 +743,7 @@ impl Overlay {
     fn follow_screens(&mut self) {
         self.screens_stale = false;
         self.frame = None;
+        self.frame_after = None;
         let (hwnd, point) = self.plate_by;
         self.place_plate(hwnd, point);
         self.stale = true;
@@ -873,6 +882,29 @@ impl Overlay {
         self.run();
     }
 
+    /// The human turned takeover off: nothing on its way is made, bypass
+    /// ends, and everything shown goes at once, without its fade. The
+    /// next look rests the overlay.
+    fn turned_off(&mut self) {
+        const OFF: &str = "the human turned takeover off, so this action was not made";
+        self.halt(OFF, "not made: takeover turned off".into());
+        for q in std::mem::take(&mut self.queue) {
+            q.reply.send(json!({ "error": OFF }));
+        }
+        if bypass() {
+            self.bypass_off(BypassEnd::Off);
+        }
+        self.until = None;
+        self.shown = 0.0;
+        self.watch = None;
+        self.ghost_at = None;
+        self.ghost_stopped = false;
+        self.landed = None;
+        if let Some(g) = self.ghost.as_mut() {
+            g.hide();
+        }
+    }
+
     /// The guard saw a window open or the front move while the glide it
     /// tripped on was on its way. Bypass stays: nobody said no.
     fn tripped(&mut self) {
@@ -916,7 +948,7 @@ impl Overlay {
     }
 
     /// Writes bypass turned on or ended into the history and into
-    /// `desktop.log`, which is where the human reads afterwards what went
+    /// `takeover.log`, which is where the human reads afterwards what went
     /// unasked and between which lines.
     fn note_bypass(&mut self, end: Option<BypassEnd>) {
         let (what, outcome) = bypass_words(end);
@@ -935,7 +967,7 @@ impl Overlay {
             Some(_) => Source::BypassOff(outcome),
         };
         // Through the writer's thread: this one draws.
-        log_lines(desktop_programs::log_line(
+        log_lines(takeover_programs::log_line(
             &utc_now(),
             &self.now.name,
             source,
@@ -1042,7 +1074,7 @@ impl Overlay {
     }
 
     /// Takes in the shell commands the hook thread heard, each into its
-    /// session's list and into `desktop.log`, the audit trail of what ran
+    /// session's list and into `takeover.log`, the audit trail of what ran
     /// beside the control. Runs also after control rested: a command
     /// begun under it is owed its end line whenever that comes.
     fn hear_shells(&mut self) {
@@ -1209,6 +1241,11 @@ impl Overlay {
         if input::take_stop() {
             self.stop();
         }
+        // Takeover turned off in the tray menu ends it here and now. The
+        // switch is the app's, and nothing tells the overlay: it looks.
+        if crate::takeover_mode::mode() == Mode::Off && self.show.is_none() {
+            self.turned_off();
+        }
         // A trip whose message came while the overlay was busy, or after
         // this frame, is taken before the glide is answered: the window
         // it saw opened before the click.
@@ -1267,7 +1304,7 @@ impl Overlay {
         self.paint_ghost(now);
 
         let runes = self.runes_due(now);
-        self.paint_frame(now, active, runes);
+        self.paint_frame(now, active);
         self.paint_plate(now, active, runes);
 
         let ghost_seen = self.ghost.as_ref().is_some_and(|g| g.shown);
@@ -1320,6 +1357,7 @@ impl Overlay {
         self.shells.clear();
         self.laid.clear();
         self.frame = None;
+        self.frame_after = None;
         if let Some(p) = self.plate.as_mut() {
             p.hide();
         }
@@ -1340,7 +1378,10 @@ impl Overlay {
         }
     }
 
-    fn paint_frame(&mut self, now: Instant, active: bool, runes: bool) {
+    /// The light round the screens: made when control shows, made anew
+    /// when its colour changes or animations are turned on or off, and
+    /// otherwise only faded. It moves by itself.
+    fn paint_frame(&mut self, now: Instant, active: bool) {
         if self.shown <= 0.0 && !active {
             self.frame = None;
             return;
@@ -1350,15 +1391,19 @@ impl Overlay {
         } else {
             theme::working()
         };
-        let clock = self.rune_clock(now);
-        let made = self.frame.is_none();
-        let frame = self
-            .frame
-            .get_or_insert_with(|| frame::Frame::new(&self.shared.gpu));
-        if made || runes {
-            frame.step(clock.unwrap_or(0.0), tint, self.shown, clock.is_some());
+        let moving = backdrop::animations_on();
+        if (self.frame.as_ref()).is_some_and(|f| f.tint != tint || f.moving != moving) {
+            self.frame = None;
+            self.frame_after = None;
         }
-        frame.fade(self.shown);
+        if self.frame.is_none() && self.frame_after.is_none_or(|at| now >= at) {
+            self.frame = frame::Frame::new(&self.shared.gpu, tint, moving);
+            // Not tried on every look if it can not be made.
+            self.frame_after = Some(now + FRAME_AGAIN);
+        }
+        if let Some(frame) = self.frame.as_mut() {
+            frame.show(self.shown);
+        }
     }
 
     fn paint_ghost(&mut self, now: Instant) {
@@ -1807,7 +1852,7 @@ impl Overlay {
             ident: "3f9a12c0, started 09:41".into(),
             away: None,
             name: "Akara".into(),
-            program: "Notepad".into(),
+            program: "Acme Studio".into(),
             reason: "The watch window still shows the old value, so the variable is typed \
                      in again and the list refreshed before the next reading."
                 .into(),

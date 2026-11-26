@@ -1,6 +1,6 @@
 //! The shell commands the sessions in control run beside it: what the
 //! hook thread hears of them, the list the plate shows, and their lines
-//! in `desktop.log`, the audit trail.
+//! in `takeover.log`, the audit trail.
 //!
 //! The list is for the plate and starts empty with each run of control.
 //! The ledger is for the log, and outlives the run: a command begun under
@@ -618,7 +618,7 @@ pub(crate) fn holds_shells(session: &str) -> bool {
         .is_ok_and(|w| w.holders.iter().any(|h| h == session))
 }
 
-/// Appends to `desktop.log` on a thread of its own, in the order given,
+/// Appends to `takeover.log` on a thread of its own, in the order given,
 /// so the overlay's thread, which is the app's, never waits on the disk.
 pub(crate) fn log_lines(lines: String) {
     static WRITER: Mutex<Option<std::sync::mpsc::Sender<String>>> = Mutex::new(None);
@@ -635,6 +635,8 @@ pub(crate) fn log_lines(lines: String) {
                 if let Some(dir) = file.parent() {
                     let _ = std::fs::create_dir_all(dir);
                 }
+                // Kept under its size as every other line of the log is.
+                crate::screen_share::roll(&file);
                 let _ = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
