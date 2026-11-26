@@ -760,16 +760,25 @@ unsafe fn row(
     }
     let open = card.more.as_deref() == Some(m.name.as_str());
     if open && has_more && !settled && !m.asking_remove {
-        let mut x = right;
+        let mut lesser = Vec::new();
         if removal.is_some() {
-            x = small(cx, s, x, y, "Remove", false, Do::AskRemove(name.clone())) - 6.0;
+            lesser.push(("Remove", Do::AskRemove(name.clone())));
         }
         if m.status != "disabled" {
-            let off = Do::Toggle(name.clone(), false);
-            x = small(cx, s, x, y, "Turn off everywhere", false, off) - 6.0;
+            lesser.push(("Turn off everywhere", Do::Toggle(name.clone(), false)));
         }
         if page {
-            small(cx, s, x, y, "Open the page again", false, Do::Page(name));
+            lesser.push(("Open the page again", Do::Page(name)));
+        }
+        let mut x = right;
+        for (label, d) in lesser {
+            // A narrow pane takes them on a line more, not past its edge.
+            let wide = label.chars().count() as f32 * 6.8 + 18.0;
+            if x - wide < from && x < right {
+                y += ROW;
+                x = right;
+            }
+            x = small(cx, s, x, y, label, false, d) - 6.0;
         }
         y += ROW;
     }

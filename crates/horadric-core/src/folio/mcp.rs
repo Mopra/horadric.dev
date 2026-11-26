@@ -485,6 +485,7 @@ impl Folio {
     /// Takes in the servers as they are now: cards follow, and a server
     /// newly in trouble gets one. Returns whether a block changed.
     fn mcp_heard(&mut self, mut servers: Vec<McpServer>) -> bool {
+        let said = format!("{:?}", self.mcp_notice());
         for s in &mut servers {
             let was = self.mcp.servers.iter().find(|o| o.name == s.name);
             // The sign-in in progress stays until the server says it is
@@ -568,10 +569,16 @@ impl Folio {
             }
         }
         drop(told);
-        let before = self.mcp.needs.len();
+        // Only one that mended, was turned off or is gone leaves the line
+        // for good: one dialled again is pending for a moment, and comes
+        // back to it when that fails.
         let servers = &self.mcp.servers;
-        (self.mcp.needs).retain(|n| servers.iter().any(|s| s.name == *n && troubled(&s.status)));
-        changed |= self.mcp.needs.len() != before;
+        (self.mcp.needs).retain(|n| {
+            let s = servers.iter().find(|s| s.name == *n);
+            s.is_some_and(|s| !matches!(s.status.as_str(), "connected" | "disabled"))
+        });
+        // The line is no block, so what it says moving is a change too.
+        changed |= said != format!("{:?}", self.mcp_notice());
         if fresh.is_empty() {
             return changed;
         }
