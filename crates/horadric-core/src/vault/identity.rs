@@ -402,10 +402,25 @@ pub fn vercel_logged_in(auth_json: &str) -> bool {
 /// in as per tool (`who`, a tool's user; Some("") is logged in with no
 /// name known, None not logged in), and to leave the logins alone.
 pub fn prompt_lines(id: &Identity, who: &[(Tool, Option<String>)]) -> Vec<String> {
-    let mut lines = vec![format!(
-        "This project belongs to the identity \"{}\". Horadric started this session with that identity's own logins, not the machine's global ones.",
-        id.name
-    )];
+    let mut lines = vec![match id.sites.as_deref() {
+        Some(sites) => {
+            let tools: Vec<&str> = sites
+                .iter()
+                .flat_map(|s| super::split::tools_of(s))
+                .copied()
+                .collect();
+            format!(
+                "This project signs in differently on {}, as the group \"{}\". Horadric started this session with that group's logins for {}; every other tool uses the machine's global login.",
+                sites.join(", "),
+                id.name,
+                if tools.is_empty() { "no command line tool".to_string() } else { tools.join(", ") },
+            )
+        }
+        None => format!(
+            "This project belongs to the identity \"{}\". Horadric started this session with that identity's own logins, not the machine's global ones.",
+            id.name
+        ),
+    }];
     if let Some(git) = &id.git {
         let mut parts = Vec::new();
         match (git.name.trim(), git.email.trim()) {

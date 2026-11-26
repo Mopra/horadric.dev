@@ -2743,6 +2743,7 @@ fn web_menu(key: &str) {
     const SIZE: usize = 100;
     const PICK: usize = 200;
     const IDENTITY: usize = 10_000;
+    const SPLIT: usize = 20_000;
     let agents = stage_agents(Some(key));
     let items = vec![
         Item::action(NEW_TAB, "New tab\tCtrl+T"),
@@ -2779,11 +2780,16 @@ fn web_menu(key: &str) {
     ));
     items.extend(hand_items(&agents, "Pick an element for", PICK));
     // Where the wrong account is noticed, so where it is put right.
-    if let Some(item) = crate::vault::settings::menu_item(key, IDENTITY) {
-        items.extend([Item::Separator, item]);
+    let split = crate::vault::split::menu_item(key, SPLIT);
+    let identity = crate::vault::settings::menu_item(key, IDENTITY);
+    if split.is_some() || identity.is_some() {
+        items.push(Item::Separator);
+        items.extend(split);
+        items.extend(identity);
     }
     items.extend([Item::Separator, Item::action(CLOSE, "Close")]);
     match menu::popup(&items) {
+        Some(i) if crate::vault::split::menu_picked(key, SPLIT, i) => {}
         Some(i) if crate::vault::settings::menu_picked(key, IDENTITY, i) => {}
         Some(ADDRESS) => go_to(key),
         Some(NEW_TAB) => web::tab(key, web::TabStep::New),
@@ -4673,6 +4679,9 @@ impl App {
                         eprintln!("horadric: {} says {said:?} (OSC 7501)", console.id);
                     }
                     changed = s.hear_program(said, now);
+                    if let Some(heard) = &mut s.program {
+                        heard.background = console.background();
+                    }
                 }
                 // No hook reports on a shell, so its tile tells what it runs
                 // from the terminal's title and how busy it is from its

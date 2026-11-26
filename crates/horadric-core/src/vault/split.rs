@@ -279,6 +279,21 @@ pub fn removals(all: &[Value], sites: &[String]) -> Vec<Value> {
         .collect()
 }
 
+/// The `Network.deleteCookies` calls that take out of a split profile
+/// the cookies of its split sites that are still the shared profile's
+/// copies (same name, place and value): copied in before the site was
+/// split, they would keep it signed in as everywhere else. A login made
+/// in the split profile has a value of its own and stays.
+pub fn stale_copies(own: &[Value], shared: &[Value], kept_out: &[String]) -> Vec<Value> {
+    let theirs: Snapshot = shared.iter().map(|c| (key_of(c), value_of(c))).collect();
+    let copies: Vec<Value> = own
+        .iter()
+        .filter(|c| theirs.get(&key_of(c)) == Some(&value_of(c)))
+        .cloned()
+        .collect();
+    removals(&copies, kept_out)
+}
+
 /// The params of one `Network.setCookies` call.
 pub fn set_params(cookies: Vec<Value>) -> String {
     json!({ "cookies": cookies }).to_string()
@@ -415,6 +430,20 @@ mod tests {
         assert_eq!(r.len(), 2);
         assert_eq!(r[0], json!({"name": "a", "domain": ".github.com", "path": "/"}));
         assert!(r[1].get("partitionKey").is_some());
+    }
+
+    #[test]
+    fn stale_copies_are_only_the_shared_ones() {
+        let shared = vec![cookie("user_session", "github.com", "main"), cookie("x", "x.test", "1")];
+        let own = vec![
+            cookie("user_session", "github.com", "main"),
+            cookie("logged_in", "github.com", "yes"),
+            cookie("x", "x.test", "1"),
+        ];
+        let r = stale_copies(&own, &shared, &s(&["github.com"]));
+        assert_eq!(r, vec![json!({"name": "user_session", "domain": "github.com", "path": "/"})]);
+        let fresh = vec![cookie("user_session", "github.com", "other")];
+        assert!(stale_copies(&fresh, &shared, &s(&["github.com"])).is_empty());
     }
 
     #[test]

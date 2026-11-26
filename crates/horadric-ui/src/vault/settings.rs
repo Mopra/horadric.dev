@@ -617,7 +617,7 @@ fn fail(what: &str, why: &str) {
     choose(Tone::Error, what, why, &["OK"]);
 }
 
-fn done(what: &str, result: Result<(), String>) {
+pub(crate) fn done(what: &str, result: Result<(), String>) {
     if let Err(e) = result {
         fail(what, &e);
     }
