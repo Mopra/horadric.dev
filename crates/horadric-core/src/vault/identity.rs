@@ -269,8 +269,18 @@ pub fn git_env(git: &Git) -> Vec<(String, String)> {
 
 /// What a session of identity `id`, its folder `dir`, sets and removes.
 pub fn env(id: &Identity, dir: &Path) -> (Vec<(String, String)>, Vec<String>) {
+    env_with(id, dir, None)
+}
+
+/// [`env`], with who the identity's gh is signed in as where known, which
+/// a split group's git goes by when it has no git of its own.
+pub fn env_with(
+    id: &Identity,
+    dir: &Path,
+    gh_user: Option<&str>,
+) -> (Vec<(String, String)>, Vec<String>) {
     if let Some(sites) = &id.sites {
-        return super::split::env(id, sites, dir);
+        return super::split::env(id, sites, dir, gh_user);
     }
     let mut set = Vec::new();
     for tool in Tool::ALL.into_iter().filter(|t| id.tools.contains(t)) {

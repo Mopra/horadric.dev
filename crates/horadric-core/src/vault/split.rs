@@ -2,18 +2,25 @@
 //! account while every other site stays as the shared browser has it. See
 //! docs/plan/vault.md, "Seamless: nothing to set up".
 //!
+//! Cookies go one way only, shared to group: Horadric never writes the
+//! human's main profile. Copying back was turned down on 2026-11-26: a
+//! login made in a split pane can reach other sites through a sign-in
+//! provider (Vercel's "Continue with GitHub" as the split account), and
+//! copied back it would have signed the shared profile in as that account,
+//! undone a logout there, or put an old value over a fresh one.
+//!
 //! A split is kept on the group (an [`Identity`] with `sites`), never on
 //! the project alone: the projects that took the same login share one
 //! browser profile, so they must keep the same sites out of it, or one
 //! project's copy of the shared cookies would overwrite another's split
 //! login in the profile they share.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde_json::{json, Value};
 
-use super::identity::{git_env, Identity};
+use super::identity::{git_env, Git, Identity};
 
 /// The sites whose command line tools follow them, by the host the plan
 /// names them by. Compared by registrable domain, so dash.cloudflare.com
@@ -26,6 +33,14 @@ const SITE_TOOLS: [(&str, &[&str]); 6] = [
     ("portal.azure.com", &["az"]),
     ("console.cloud.google.com", &["gcloud"]),
 ];
+
+/// The sign-in domains a site's login goes through, kept out with it:
+/// without them a split azure.com would still sign in through the shared
+/// profile's Microsoft login.
+const COMPANIONS: [(&str, &[&str]); 1] = [(
+    "azure.com",
+    &["login.microsoftonline.com", "login.live.com"],
+)];
 
 /// Suffixes under which every name is a site of its own, the short part of
 /// the public suffix list that a split is likely to meet. Not the whole
@@ -90,11 +105,12 @@ pub fn site_of(url: &str) -> Option<String> {
         .or_else(|| url.strip_prefix("http://"))?;
     let authority = rest.split(['/', '?', '#']).next()?;
     let host = authority.rsplit('@').next()?;
+    // A cookie for an IPv6 address names it in brackets, so the site does.
     let host = match host.strip_prefix('[') {
-        Some(v6) => v6.split(']').next()?,
-        None => host.split(':').next()?,
+        Some(v6) => format!("[{}]", v6.split(']').next()?),
+        None => host.split(':').next()?.to_string(),
     };
-    (!host.is_empty()).then(|| registrable(host))
+    (!host.is_empty() && host != "[]").then(|| registrable(&host))
 }
 
 /// The command line tools a split of `site` carries with it.
@@ -109,11 +125,43 @@ pub fn tools_of(site: &str) -> &'static [&'static str] {
 /// belongs to `site`.
 pub fn in_site(domain: &str, site: &str) -> bool {
     let d = domain.trim().trim_start_matches('.').to_ascii_lowercase();
+    let site = site.to_ascii_lowercase();
     d == site || d.ends_with(&format!(".{site}"))
 }
 
-fn split(domain: &str, sites: &[String]) -> bool {
-    sites.iter().any(|s| in_site(domain, s))
+/// The domains kept out for `sites`: the sites and their sign-in domains.
+pub fn kept_out(sites: &[String]) -> Vec<String> {
+    let mut out = sites.to_vec();
+    for site in sites {
+        for (s, more) in COMPANIONS {
+            if s == site {
+                out.extend(more.iter().map(|m| m.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// The host of a partitioned cookie's top level site.
+fn top_site(c: &Value) -> Option<String> {
+    let top = match c.get("partitionKey")? {
+        Value::String(s) => s.as_str(),
+        k => k.get("topLevelSite")?.as_str()?,
+    };
+    let rest = top.split_once("://").map_or(top, |(_, r)| r);
+    let host = rest.split(['/', ':']).next()?;
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+/// Whether cookie `c` belongs to one of `sites` or their sign-in domains:
+/// by its domain, or for a partitioned cookie by the top level site it was
+/// set under, since it holds that site's state too.
+fn split(c: &Value, sites: &[String]) -> bool {
+    let domain = c.get("domain").and_then(Value::as_str).unwrap_or("");
+    let top = top_site(c);
+    kept_out(sites)
+        .iter()
+        .any(|s| in_site(domain, s) || top.as_deref().is_some_and(|t| in_site(t, s)))
 }
 
 /// `sites` with `site` added, each once.
@@ -141,7 +189,13 @@ pub fn offers<'a>(groups: &'a [Identity], site: &str) -> Vec<&'a Identity> {
 /// removes: only the tools of the sites it split are pointed at its
 /// folders, every other tool stays the machine's. Tools with no variable
 /// for their folder (wrangler) stay global even when their site is split.
-pub fn env(id: &Identity, sites: &[String], dir: &Path) -> (Vec<(String, String)>, Vec<String>) {
+/// `gh_user` is who the group's gh is signed in as, where known.
+pub fn env(
+    id: &Identity,
+    sites: &[String],
+    dir: &Path,
+    gh_user: Option<&str>,
+) -> (Vec<(String, String)>, Vec<String>) {
     let at = |p: &Path| p.to_string_lossy().into_owned();
     let mut set = Vec::new();
     let mut remove = Vec::new();
@@ -153,11 +207,16 @@ pub fn env(id: &Identity, sites: &[String], dir: &Path) -> (Vec<(String, String)
                 set.push(("GH_CONFIG_DIR".into(), at(&dir.join("gh"))));
                 remove.extend(["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"].map(String::from));
             }
-            "git" => {
-                if let Some(git) = &id.git {
-                    set.extend(git_env(git));
-                }
-            }
+            "git" => match (&id.git, gh_user.map(str::trim).filter(|u| !u.is_empty())) {
+                (Some(git), _) => set.extend(git_env(git)),
+                // Git Credential Manager then answers with the account the
+                // group's gh is signed in as, not the machine's.
+                (None, Some(user)) => set.extend(git_env(&Git {
+                    github_user: Some(user.to_string()),
+                    ..Default::default()
+                })),
+                (None, None) => {}
+            },
             "npm" => {
                 set.push((
                     "NPM_CONFIG_USERCONFIG".into(),
@@ -183,6 +242,10 @@ fn key_of(c: &Value) -> String {
     let s = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let partition = c.get("partitionKey").map(Value::to_string).unwrap_or_default();
     format!("{}\n{}\n{}\n{partition}", s("name"), s("domain"), s("path"))
+}
+
+fn value_of(c: &Value) -> String {
+    c.get("value").and_then(Value::as_str).unwrap_or("").to_string()
 }
 
 /// The cookies in a `Network.getAllCookies` answer.
@@ -220,78 +283,70 @@ fn param(c: &Value) -> Option<Value> {
     Some(Value::Object(p))
 }
 
-/// The cookies of every site not in `kept_out`, as `Network.setCookies`
-/// takes them, and what each was, for [`changed`] to know later which of
-/// them the other side changed.
-pub fn inherited(all: &[Value], kept_out: &[String]) -> (Vec<Value>, Snapshot) {
-    let mut out = Vec::new();
-    let mut seen = Snapshot::new();
-    for c in all {
-        let domain = c.get("domain").and_then(Value::as_str).unwrap_or("");
-        if split(domain, kept_out) {
-            continue;
-        }
-        if let Some(p) = param(c) {
-            seen.insert(key_of(c), value_of(c));
-            out.push(p);
-        }
+/// The cookies of every site not in `sites`, as `Network.setCookies`
+/// takes them.
+pub fn inherited(all: &[Value], sites: &[String]) -> Vec<Value> {
+    all.iter().filter(|c| !split(c, sites)).filter_map(param).collect()
+}
+
+/// What names each cookie, to remember which were copied.
+pub fn keys(cookies: &[Value]) -> HashSet<String> {
+    cookies.iter().map(key_of).collect()
+}
+
+fn removal(c: &Value) -> Value {
+    let mut p = json!({
+        "name": c.get("name").cloned().unwrap_or(Value::Null),
+        "domain": c.get("domain").cloned().unwrap_or(Value::Null),
+        "path": c.get("path").cloned().unwrap_or(Value::Null),
+    });
+    if let Some(k) = c.get("partitionKey") {
+        p["partitionKey"] = k.clone();
     }
-    (out, seen)
-}
-
-/// Each cookie's value by [`key_of`], as copied last.
-pub type Snapshot = HashMap<String, String>;
-
-fn value_of(c: &Value) -> String {
-    c.get("value").and_then(Value::as_str).unwrap_or("").to_string()
-}
-
-/// The cookies of sites not in `kept_out` that are new or changed since
-/// `last` was copied in, for copying back. One unchanged here is left
-/// out: copying it back could put an old value over one the shared
-/// profile rotated meanwhile, which signs some sites out.
-pub fn changed(all: &[Value], kept_out: &[String], last: &Snapshot) -> Vec<Value> {
-    all.iter()
-        .filter(|c| {
-            let domain = c.get("domain").and_then(Value::as_str).unwrap_or("");
-            !split(domain, kept_out) && last.get(&key_of(c)) != Some(&value_of(c))
-        })
-        .filter_map(param)
-        .collect()
+    p
 }
 
 /// The `Network.deleteCookies` calls that take every cookie of `sites`
-/// out, as when a site is split off and its inherited login must go.
+/// out, as when a site is given back and the group's login must go.
 pub fn removals(all: &[Value], sites: &[String]) -> Vec<Value> {
-    all.iter()
-        .filter(|c| split(c.get("domain").and_then(Value::as_str).unwrap_or(""), sites))
-        .map(|c| {
-            let mut p = json!({
-                "name": c.get("name").cloned().unwrap_or(Value::Null),
-                "domain": c.get("domain").cloned().unwrap_or(Value::Null),
-                "path": c.get("path").cloned().unwrap_or(Value::Null),
-            });
-            if let Some(k) = c.get("partitionKey") {
-                p["partitionKey"] = k.clone();
-            }
-            p
+    all.iter().filter(|c| split(c, sites)).map(removal).collect()
+}
+
+/// The `Network.deleteCookies` calls that make the group profile follow
+/// the shared one out: a cookie of an inherited site that was `copied`
+/// from it before and that it no longer has, so a logout there reaches the
+/// group. One the group set itself was never copied, so a login made in a
+/// split pane on an inherited site stays. Split sites are never touched.
+pub fn mirror(
+    own: &[Value],
+    shared: &[Value],
+    copied: &HashSet<String>,
+    sites: &[String],
+) -> Vec<Value> {
+    let theirs = keys(shared);
+    own.iter()
+        .filter(|c| !split(c, sites))
+        .filter(|c| {
+            let k = key_of(c);
+            copied.contains(&k) && !theirs.contains(&k)
         })
+        .map(removal)
         .collect()
 }
 
-/// The `Network.deleteCookies` calls that take out of a split profile
-/// the cookies of its split sites that are still the shared profile's
-/// copies (same name, place and value): copied in before the site was
-/// split, they would keep it signed in as everywhere else. A login made
-/// in the split profile has a value of its own and stays.
-pub fn stale_copies(own: &[Value], shared: &[Value], kept_out: &[String]) -> Vec<Value> {
-    let theirs: Snapshot = shared.iter().map(|c| (key_of(c), value_of(c))).collect();
-    let copies: Vec<Value> = own
-        .iter()
-        .filter(|c| theirs.get(&key_of(c)) == Some(&value_of(c)))
-        .cloned()
-        .collect();
-    removals(&copies, kept_out)
+/// The `Network.deleteCookies` calls that take out of a group profile, as
+/// `sites` are split off, the cookies of those sites that are still the
+/// shared profile's copies (same name, place and value): copied in before
+/// the split, they would keep it signed in as everywhere else. A login
+/// made in the group has values of its own and stays. Only at the split:
+/// run on every copy, it would take a constant cookie (`logged_in=yes`)
+/// of the group's own login each time.
+pub fn stale_copies(own: &[Value], shared: &[Value], sites: &[String]) -> Vec<Value> {
+    let theirs: HashMap<String, String> = shared.iter().map(|c| (key_of(c), value_of(c))).collect();
+    own.iter()
+        .filter(|c| split(c, sites) && theirs.get(&key_of(c)) == Some(&value_of(c)))
+        .map(removal)
+        .collect()
 }
 
 /// The params of one `Network.setCookies` call.
@@ -314,6 +369,7 @@ mod tests {
         assert_eq!(registrable("dash.cloudflare.com"), "cloudflare.com");
         assert_eq!(registrable("console.cloud.google.com"), "google.com");
         assert_eq!(registrable("www.bbc.co.uk"), "bbc.co.uk");
+        assert_eq!(registrable("github.io"), "github.io");
         assert_eq!(registrable("acme.github.io"), "acme.github.io");
         assert_eq!(registrable("x.acme.vercel.app"), "acme.vercel.app");
         assert_eq!(registrable("localhost"), "localhost");
@@ -321,13 +377,27 @@ mod tests {
     }
 
     #[test]
+    fn a_github_io_site_is_not_its_neighbour() {
+        let acme = s(&[registrable("acme.github.io").as_str()]);
+        assert!(split(&cookie("a", "acme.github.io", "1"), &acme));
+        assert!(!split(&cookie("a", "evil.github.io", "1"), &acme));
+        assert!(!split(&cookie("a", ".github.io", "1"), &acme));
+    }
+
+    #[test]
     fn site_of_urls() {
         assert_eq!(site_of("https://github.com/acme/x?y#z").as_deref(), Some("github.com"));
         assert_eq!(site_of("https://u:p@api.github.com:443/").as_deref(), Some("github.com"));
         assert_eq!(site_of("http://localhost:3000/").as_deref(), Some("localhost"));
-        assert_eq!(site_of("http://[::1]:8080/").as_deref(), Some("::1"));
+        assert_eq!(site_of("http://[::1]:8080/").as_deref(), Some("[::1]"));
         assert_eq!(site_of("about:blank"), None);
         assert_eq!(site_of("file:///C:/x.html"), None);
+    }
+
+    #[test]
+    fn an_ipv6_site_matches_its_cookies() {
+        let site = site_of("http://[::1]:8080/").unwrap();
+        assert!(split(&cookie("a", "[::1]", "1"), &[site]));
     }
 
     #[test]
@@ -345,8 +415,34 @@ mod tests {
         assert!(in_site(".github.com", "github.com"));
         assert!(in_site("gist.github.com", "github.com"));
         assert!(in_site("GitHub.com", "github.com"));
+        assert!(in_site(".GIST.GitHub.com", "github.com"));
         assert!(!in_site("notgithub.com", "github.com"));
         assert!(!in_site("github.com.evil.test", "github.com"));
+    }
+
+    #[test]
+    fn azure_keeps_its_microsoft_login_out() {
+        let azure = s(&["azure.com"]);
+        assert!(split(&cookie("ESTSAUTH", "login.microsoftonline.com", "1"), &azure));
+        assert!(split(&cookie("MSPAuth", ".login.live.com", "1"), &azure));
+        assert!(!split(&cookie("x", "microsoft.com", "1"), &azure));
+        assert!(!split(&cookie("ESTSAUTH", "login.microsoftonline.com", "1"), &s(&["github.com"])));
+        assert_eq!(
+            kept_out(&azure),
+            s(&["azure.com", "login.microsoftonline.com", "login.live.com"])
+        );
+    }
+
+    #[test]
+    fn a_partitioned_cookie_under_a_split_site_is_split() {
+        let mut c = cookie("embed", "widgets.test", "1");
+        c["partitionKey"] = json!({"topLevelSite": "https://github.com", "hasCrossSiteAncestor": false});
+        assert!(split(&c, &s(&["github.com"])));
+        assert!(inherited(&[c.clone()], &s(&["github.com"])).is_empty());
+        let mut old = cookie("embed", "widgets.test", "1");
+        old["partitionKey"] = json!("https://gist.github.com");
+        assert!(split(&old, &s(&["github.com"])));
+        assert!(!split(&c, &s(&["vercel.com"])));
     }
 
     #[test]
@@ -387,14 +483,13 @@ mod tests {
             cookie("_gh", ".github.com", "b"),
             cookie("sid", ".vercel.com", "c"),
         ];
-        let (params, seen) = inherited(&all, &s(&["github.com"]));
+        let params = inherited(&all, &s(&["github.com"]));
         assert_eq!(params.len(), 1);
         assert_eq!(params[0]["name"], "sid");
         // A session cookie has no expiry to give, and size is not a param.
         assert!(params[0].get("expires").is_none());
         assert!(params[0].get("size").is_none());
         assert!(params[0].get("session").is_none());
-        assert_eq!(seen.len(), 1);
     }
 
     #[test]
@@ -402,34 +497,27 @@ mod tests {
         let mut c = cookie("sid", "x.test", "v");
         c["session"] = json!(false);
         c["expires"] = json!(1_900_000_000.5);
-        let (params, _) = inherited(&[c], &[]);
+        let params = inherited(&[c], &[]);
         assert_eq!(params[0]["expires"], json!(1_900_000_000.5));
     }
 
     #[test]
-    fn only_changed_cookies_go_back() {
-        let before = vec![cookie("a", "x.test", "1"), cookie("b", "x.test", "1")];
-        let (_, seen) = inherited(&before, &[]);
-        let now = vec![
-            cookie("a", "x.test", "1"),
-            cookie("b", "x.test", "2"),
-            cookie("c", "x.test", "1"),
-            cookie("user_session", "github.com", "other account"),
+    fn mirror_follows_a_shared_logout_only() {
+        let split_sites = s(&["github.com"]);
+        let before = vec![cookie("sid", "x.test", "1"), cookie("keep", "y.test", "1")];
+        let copied = keys(&inherited(&before, &split_sites));
+        // The shared profile signed out of x.test since.
+        let shared = vec![cookie("keep", "y.test", "1")];
+        let own = vec![
+            cookie("sid", "x.test", "1"),
+            cookie("keep", "y.test", "1"),
+            // Signed in here, never copied: stays.
+            cookie("mine", "z.test", "1"),
+            // A split site is never touched.
+            cookie("user_session", "github.com", "other"),
         ];
-        let back = changed(&now, &s(&["github.com"]), &seen);
-        let names: Vec<&str> = back.iter().map(|c| c["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["b", "c"]);
-    }
-
-    #[test]
-    fn removals_name_each_cookie_of_the_sites() {
-        let mut part = cookie("p", "gist.github.com", "1");
-        part["partitionKey"] = json!({"topLevelSite": "https://github.com", "hasCrossSiteAncestor": false});
-        let all = vec![cookie("a", ".github.com", "1"), part, cookie("b", "x.test", "1")];
-        let r = removals(&all, &s(&["github.com"]));
-        assert_eq!(r.len(), 2);
-        assert_eq!(r[0], json!({"name": "a", "domain": ".github.com", "path": "/"}));
-        assert!(r[1].get("partitionKey").is_some());
+        let gone = mirror(&own, &shared, &copied, &split_sites);
+        assert_eq!(gone, vec![json!({"name": "sid", "domain": "x.test", "path": "/"})]);
     }
 
     #[test]
@@ -447,11 +535,22 @@ mod tests {
     }
 
     #[test]
+    fn removals_name_each_cookie_of_the_sites() {
+        let mut part = cookie("p", "gist.github.com", "1");
+        part["partitionKey"] = json!({"topLevelSite": "https://github.com", "hasCrossSiteAncestor": false});
+        let all = vec![cookie("a", ".github.com", "1"), part, cookie("b", "x.test", "1")];
+        let r = removals(&all, &s(&["github.com"]));
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0], json!({"name": "a", "domain": ".github.com", "path": "/"}));
+        assert!(r[1].get("partitionKey").is_some());
+    }
+
+    #[test]
     fn env_points_only_split_tools() {
         let id = Identity {
             name: "Opti".into(),
             slug: "opti".into(),
-            git: Some(crate::vault::identity::Git {
+            git: Some(Git {
                 name: "A".into(),
                 email: "a@acme.test".into(),
                 github_user: None,
@@ -459,7 +558,7 @@ mod tests {
             ..Default::default()
         };
         let dir = Path::new("C:/ids/opti");
-        let (set, remove) = env(&id, &s(&["github.com"]), dir);
+        let (set, remove) = env(&id, &s(&["github.com"]), dir, None);
         let names: Vec<&str> = set.iter().map(|(k, _)| k.as_str()).collect();
         assert!(names.contains(&"GH_CONFIG_DIR"));
         assert!(names.contains(&"GIT_CONFIG_COUNT"));
@@ -468,12 +567,23 @@ mod tests {
         assert!(remove.contains(&"GH_TOKEN".to_string()));
         assert!(!remove.contains(&"NPM_TOKEN".to_string()));
 
-        let (set, remove) = env(&id, &s(&["vercel.com", "azure.com"]), dir);
+        let (set, remove) = env(&id, &s(&["vercel.com", "azure.com"]), dir, None);
         let names: Vec<&str> = set.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(names, ["XDG_DATA_HOME", "AZURE_CONFIG_DIR"]);
         assert_eq!(remove, ["VERCEL_TOKEN"]);
 
         // Wrangler has no folder variable, so it stays the machine's.
-        assert_eq!(env(&id, &s(&["cloudflare.com"]), dir), (vec![], vec![]));
+        assert_eq!(env(&id, &s(&["cloudflare.com"]), dir, None), (vec![], vec![]));
+    }
+
+    #[test]
+    fn git_uses_the_groups_gh_user_without_a_git_of_its_own() {
+        let id = Identity::default();
+        let dir = Path::new("C:/ids/opti");
+        let (set, _) = env(&id, &s(&["github.com"]), dir, Some("acme-bot"));
+        assert!(set.contains(&("GIT_CONFIG_KEY_0".into(), "credential.https://github.com.username".into())));
+        assert!(set.contains(&("GIT_CONFIG_VALUE_0".into(), "acme-bot".into())));
+        let (set, _) = env(&id, &s(&["github.com"]), dir, None);
+        assert!(!set.iter().any(|(k, _)| k == "GIT_CONFIG_COUNT"));
     }
 }

@@ -144,32 +144,53 @@ pub fn menu_picked(key: &str, base: usize, picked: usize) -> bool {
     let Some(site) = shown_site(key) else {
         return true;
     };
+    // Without profiles of its own the split browser would open in the
+    // shared one, signing it out of the site for every project.
+    if crate::web::named_profiles() == Some(false) {
+        super::settings::done(
+            "Sign in differently",
+            Err("This WebView2 runtime cannot keep a browser of its own per project. Update Microsoft Edge WebView2 and try again.".into()),
+        );
+        return true;
+    }
     let before = crate::town::identity_for(key);
     let result = match picked - base {
         GIVE_BACK => match before.as_deref() {
-            Some(slug) => identity::unsplit_site(slug, &site).map(|()| {
-                crate::web::unsplit(&crate::town::identity_profile(slug), &site);
-            }),
-            None => Ok(()),
+            Some(slug) => identity::unsplit_site(slug, &site).map(|()| Some((slug.to_string(), true))),
+            None => Ok(None),
         },
-        FRESH => identity::split_site(key, &site, None).map(|_| ()),
+        FRESH => identity::split_site(key, &site, None)
+            .map(|slug| (before.as_deref() == Some(&slug)).then_some((slug, false))),
         i => match offers(key, &site).get(i - JOIN) {
-            Some(g) => identity::split_site(key, &site, Some(&g.slug)).map(|_| ()),
+            Some(g) => identity::split_site(key, &site, Some(&g.slug)).map(|_| None),
             None => return true,
         },
     };
-    let ok = result.is_ok();
-    super::settings::done("Sign in differently", result);
-    if !ok {
-        return true;
-    }
+    let changed = match result {
+        Ok(changed) => changed,
+        Err(e) => {
+            super::settings::done("Sign in differently", Err(e));
+            return true;
+        }
+    };
     super::settings::stale();
-    if crate::town::identity_for(key) != before {
-        // A new group: its browser moves to the group's profile and its
-        // sessions start again on the group's tools.
-        crate::app::push(crate::app::Input::IdentityChanged(key.to_string()));
-    } else if picked - base != GIVE_BACK {
-        crate::web::resplit();
+    match changed {
+        // A site split or given back in a group this project was already
+        // in: the group's profile takes it, and every project of the group
+        // starts its sessions again, since which tools point where changed.
+        Some((slug, given_back)) => {
+            crate::web::clear_site(&crate::town::identity_profile(&slug), &site, given_back);
+            let mut members = identity::members(&slug);
+            if !members.iter().any(|m| m == key) {
+                members.push(key.to_string());
+            }
+            for m in members {
+                crate::app::push(crate::app::Input::IdentityChanged(m));
+            }
+        }
+        // A new group or one joined: its browser moves to the group's
+        // profile and its sessions start again on the group's tools.
+        None => crate::app::push(crate::app::Input::IdentityChanged(key.to_string())),
     }
     true
 }

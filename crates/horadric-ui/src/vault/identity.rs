@@ -163,7 +163,11 @@ pub fn delete(slug: &str) -> Result<(), String> {
     for key in store.map_or_else(Vec::new, |f| core::picks_of(&read_text(&f), slug)) {
         set_pick(&key, None)?;
     }
-    change(|list| list.retain(|i| i.slug != slug))
+    change(|list| list.retain(|i| i.slug != slug))?;
+    // Its browser's logins go too, so an identity made later with the
+    // same slug does not start signed in as this one.
+    crate::web::delete_profile(&crate::town::identity_profile(slug));
+    Ok(())
 }
 
 /// Sets git's name, email and GitHub user; None takes git off the
@@ -203,8 +207,7 @@ fn started_list() -> Vec<(String, String)> {
 /// Notes the identity session `id` in `project_dir` starts with, so the
 /// Projects row can count those a change of pick left behind.
 pub fn note_started(id: &str, project_dir: &Path) {
-    let slug = of_project(project_dir).slug().unwrap_or("").to_string();
-    let list = core::noted(started_list(), id, &slug, 512);
+    let list = core::noted(started_list(), id, &stamp(project_dir), 512);
     let Some(path) = started_file() else {
         return;
     };
@@ -220,17 +223,31 @@ pub fn note_started(id: &str, project_dir: &Path) {
 
 /// The slug session `id` started with, "" for none, None when not noted.
 pub fn started_as(id: &str) -> Option<String> {
+    started_stamp(id).map(|s| s.split('#').next().unwrap_or("").to_string())
+}
+
+fn started_stamp(id: &str) -> Option<String> {
     started_list()
         .into_iter()
         .find(|(i, _)| i == id)
         .map(|(_, s)| s)
 }
 
+/// What a session in `project_dir` starts as: the identity's slug, and
+/// for a split group its sites after a `#`, since a site split or given
+/// back changes which tools point where as much as another identity does.
+fn stamp(project_dir: &Path) -> String {
+    let slug = of_project(project_dir).slug().unwrap_or("").to_string();
+    match get(&slug).and_then(|i| i.sites) {
+        Some(sites) => format!("{slug}#{}", sites.join(",")),
+        None => slug,
+    }
+}
+
 /// Whether session `id` in `cwd` runs on another identity than its
 /// project gets now.
 pub fn left_behind(id: &str, cwd: &Path) -> bool {
-    let now = of_project(cwd);
-    core::started_otherwise(started_as(id).as_deref(), now.slug())
+    core::started_otherwise(started_stamp(id).as_deref(), Some(&stamp(cwd)))
 }
 
 /// The identity's folder of the tools' config.
@@ -354,7 +371,8 @@ pub fn session_env(project_dir: &Path) -> SessionEnv {
     let id = identity_of(project_dir);
     let mut set = Vec::new();
     if let Some(id) = &id {
-        let (s, r) = core::env(id, &dir(&id.slug));
+        let gh_user = who(&id.slug, Tool::Gh);
+        let (s, r) = core::env_with(id, &dir(&id.slug), gh_user.as_deref());
         set = s;
         remove.extend(r);
     }

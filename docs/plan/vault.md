@@ -49,14 +49,23 @@ of signing in, in the browser pane, where the human already is.
   that site off for this project: the project moves to a profile of its
   own, that site's cookies are left out, and the human signs in to the
   other account there. Every other site stays inherited.
-- **Inherited sites stay in step.** A split project's profile is not a
-  frozen copy. When its pane opens, the shared profile's cookies for
-  every site it has not split are copied in (CDP `Network.getAllCookies`
-  and `Network.setCookies`), and when it sleeps or closes, its cookies
-  for those sites are copied back. Logging in to a new site anywhere is
-  seen everywhere that has not split it. Only cookies move; a site that
-  keeps its login in `localStorage` has to be signed in to per profile,
-  said in the lore when one is met.
+- **Inherited sites follow the shared profile, one way.** A split
+  project's profile is not a frozen copy. When its pane opens or comes
+  on the stage, the shared profile's cookies for every site it has not
+  split are copied in (CDP `Network.getAllCookies` and
+  `Network.setCookies`), and those the shared profile has dropped since
+  the last copy are dropped there too, so a login or a logout in the
+  shared browser reaches every group that did not split that site.
+  Nothing is ever copied back: Horadric never writes the human's main
+  profile (decided 2026-11-26). Copying back could carry a split login
+  into it through a sign-in provider (Vercel's "Continue with GitHub" as
+  the split account, Azure through login.microsoftonline.com), undo a
+  logout made there, or put an old value over a fresh one. So a login
+  made in a split pane on an inherited site stays in that group. A
+  split site keeps its sign-in domains out with it (azure.com takes
+  login.microsoftonline.com and login.live.com). Only cookies move; a
+  site that keeps its login in `localStorage` has to be signed in to per
+  profile, said in the lore when one is met.
 - **A split already made is offered first.** When a second project splits
   github.com, the bar offers the logins other projects split to ("as in
   opti") beside Sign in fresh. Projects that took the same login share
