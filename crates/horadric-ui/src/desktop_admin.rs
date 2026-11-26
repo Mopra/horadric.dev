@@ -203,6 +203,28 @@ fn make_folder(folder: &Path) -> Result<(), String> {
     }
 }
 
+/// Makes a file in the administrators' folder the administrators' own.
+/// The owner Windows gives by default may be the administrator's own
+/// account, which on most machines is the session's account too, and an
+/// owner can always rewrite the access list: so the group is named.
+fn secure(file: &Path) -> Result<(), String> {
+    let descriptor = listed::admin_descriptor(false);
+    let what = OWNER_SECURITY_INFORMATION
+        | DACL_SECURITY_INFORMATION
+        | PROTECTED_DACL_SECURITY_INFORMATION;
+    let secured = unsafe {
+        SetFileSecurityW(
+            PCWSTR(wide(file).as_ptr()),
+            what,
+            PSECURITY_DESCRIPTOR(descriptor.as_ptr() as *mut _),
+        )
+    };
+    match secured.as_bool() {
+        true => Ok(()),
+        false => Err(windows::core::Error::from_thread().to_string()),
+    }
+}
+
 /// Writes the administrators' list. Only an elevated process gets through
 /// this; it never tries to become one. A folder a user made first is
 /// refused rather than mended, since what is in it is not known.
@@ -229,21 +251,7 @@ pub fn write(list: &List) -> Result<PathBuf, String> {
     let part = folder.join(format!("{}.part", listed::FILE));
     let said = |e: std::io::Error| format!("{}: {e}", file.display());
     std::fs::write(&part, listed::render(list)).map_err(said)?;
-    // The owner by default may be the administrator's own account, which
-    // is the session's account too on most machines: name the group.
-    let descriptor = listed::admin_descriptor(false);
-    let what = OWNER_SECURITY_INFORMATION
-        | DACL_SECURITY_INFORMATION
-        | PROTECTED_DACL_SECURITY_INFORMATION;
-    let secured = unsafe {
-        SetFileSecurityW(
-            PCWSTR(wide(&part).as_ptr()),
-            what,
-            PSECURITY_DESCRIPTOR(descriptor.as_ptr() as *mut _),
-        )
-    };
-    if !secured.as_bool() {
-        let why = windows::core::Error::from_thread();
+    if let Err(why) = secure(&part) {
         let _ = std::fs::remove_file(&part);
         return Err(format!(
             "{} could not be made the administrators' alone: {why}",
@@ -277,9 +285,13 @@ pub fn log(line: &str) {
     if !matches!(guarded(&folder, true), Ok(Some(_))) {
         return;
     }
+    let new = !file.exists();
     let _ = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&file)
         .and_then(|mut f| f.write_all(line.as_bytes()));
+    if new {
+        let _ = secure(&file);
+    }
 }

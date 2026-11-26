@@ -320,6 +320,15 @@ pub(super) fn elevating_notice(session: &str, body: &Value) -> (String, String) 
         Some(path) if !path.is_empty() => format!(" ({path})"),
         _ => String::new(),
     };
+    // Windows names the file it starts but not that it is no installed
+    // Horadric: a build from a source tree is whatever was last built.
+    let dev = match body["dev_helper"].as_str().map(str::trim) {
+        Some(exe) if !exe.is_empty() => format!(
+            " The helper Windows will name is a development build, not the installed Horadric: \
+             {exe}."
+        ),
+        _ => String::new(),
+    };
     (
         "Windows will ask for administrator rights".to_string(),
         format!(
@@ -328,7 +337,7 @@ pub(super) fn elevating_notice(session: &str, body: &Value) -> (String, String) 
              helper then asks you itself, in a window of its own, before the first click or key \
              there and before every risky action. Operating a program that runs as \
              administrator can not be limited to that program: its Open and Save dialogs can \
-             start others with its rights. No keeps the helper out."
+             start others with its rights. No keeps the helper out.{dev}"
         ),
     )
 }
@@ -655,7 +664,12 @@ pub(super) struct Desktop {
     drivers: HashMap<String, String>,
     /// The session and program of the question on screen.
     asking: Option<(String, String)>,
+    /// When each session last said Windows is about to ask for a helper.
+    elevating: HashMap<String, Instant>,
 }
+
+/// The least time between two notices that Windows will ask, per session.
+const ELEVATING_APART: Duration = Duration::from_secs(20);
 
 impl Desktop {
     /// Reads each list again if its file changed, and says what the human
@@ -918,8 +932,18 @@ impl App {
             return call.reply.send(json!({}));
         }
         if call.body.get("op").and_then(Value::as_str) == Some("desktop.elevating") {
-            let (title, text) = elevating_notice(&self.name_of(&call.session), &call.body);
-            self.toasts.show(Kind::Waiting, &title, &text);
+            // Windows is asked for a helper at most every minute or two,
+            // so a session that says this more often is not believed.
+            let now = Instant::now();
+            let lately = self
+                .desktop
+                .elevating
+                .insert(call.session.clone(), now)
+                .is_some_and(|last| now.duration_since(last) < ELEVATING_APART);
+            if !lately {
+                let (title, text) = elevating_notice(&self.name_of(&call.session), &call.body);
+                self.toasts.show(Kind::Waiting, &title, &text);
+            }
             return call.reply.send(json!({}));
         }
         let request = match parse(&call.body) {
@@ -1731,6 +1755,12 @@ mod tests {
             text.starts_with("plc fix wants to reach SysmacStudio, which runs as administrator"),
             "{text}"
         );
+        assert!(!text.contains("development build"));
+        let mut dev = body.clone();
+        dev["dev_helper"] = json!(r"C:\src\target\debug\horadric.exe");
+        assert!(elevating_notice("s", &dev)
+            .1
+            .contains(r"not the installed Horadric: C:\src\target\debug\horadric.exe."));
         let unknown = json!({"window": {"exe": "?", "title": "Setup"}});
         assert!(elevating_notice("s", &unknown)
             .1

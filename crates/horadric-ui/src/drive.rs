@@ -49,7 +49,10 @@ impl App {
         {
             if !self.keyed(&call.session, &call.body) {
                 return call.reply.send(error(
-                    "Horadric takes desktop calls only from a session it runs, with that                      session's key. A session begun before Horadric kept keys gets them once it                      is closed and resumed in Horadric; a session started outside Horadric gets                      them only when resumed inside Horadric.",
+                    "Horadric takes desktop calls only from a session it runs, with that \
+                     session's key. A session begun before Horadric kept keys gets them once it \
+                     is closed and resumed in Horadric; a session started outside Horadric gets \
+                     them only when resumed inside Horadric.",
                 ));
             }
             return self.desktop_call(call);
