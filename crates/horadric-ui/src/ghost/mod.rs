@@ -1768,7 +1768,7 @@ impl Overlay {
 }
 
 /// A show of the overlay for a dev instance, to look at it without a
-/// session driving anything: the runes round the screens, the plate with
+/// session driving anything: the light round the screens, the plate with
 /// sample content and the mark gliding between a few points, for a
 /// quarter of a minute. `HORADRIC_GHOST_SHOW=1`, `bypass` to see it as
 /// bypass draws it, or `idle` for control merely on with no mark, which

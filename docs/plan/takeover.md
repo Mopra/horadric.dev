@@ -14,9 +14,13 @@ only works on the human's own desktop:
 - a program bound to hardware or to a licence that one session holds.
 
 Why things already built are the way they are is in the lore: ask
-`lore_recall` about takeover or about a file named below. The code's
-files are being renamed from `desktop*` to `takeover*` (`watch.rs` to
-`takeover_watch.rs`); this page uses the new names.
+`lore_recall` about takeover or about a file named below. The tools
+were first named `desktop_*`, and a few names that two builds speak to
+each other keep that word: the ops between `horadric mcp` and the app
+(`desktop.allow`, `desktop.done`, `desktop.elevating`, `desktop.mode`),
+the helper's pipes (`horadric-desktop-...`), the saved setting
+`desktop_glide_ms` and the variable `HORADRIC_DESKTOP_WAIT_MS`.
+Everything else is named takeover.
 
 ## The shape
 
@@ -70,7 +74,7 @@ Whether an action is risky is decided by pure, tested functions (`risk`,
 `key_risk`, `typed_refusal`): the agent's own `risky` flag only adds to
 them.
 
-### The app, which only grants (`crates/horadric-ui/src/desktop.rs`)
+### The app, which only grants (`crates/horadric-ui/src/takeover.rs`)
 
 Before each action the engine asks the app (`op: desktop.allow`, with
 the window, its program, what it will do and whether it is risky). The
@@ -120,9 +124,9 @@ elements whose name, value or state changed.
   one line each. Click, type and press end with what changed because of
   them.
 - `takeover_wait` blocks until a window appears or is gone, a text
-  appears or the program goes quiet (10 seconds unless `timeout_ms`
-  says otherwise, 60 at most). It tells what came before the wait apart
-  from what came during it.
+  appears or the program goes quiet (10 seconds unless `timeout_ms` or
+  `HORADRIC_DESKTOP_WAIT_MS` says otherwise, 60 at most). It tells what
+  came before the wait apart from what came during it.
 - Watching ends with the grant: the app is asked again before changes
   are told, and a no unhooks the program and drops what was kept.
 - A process handle pins what is hooked, so a reused process id can not
@@ -137,24 +141,40 @@ What the human sees while a session has their desktop. Three things,
 each with one purpose:
 
 - A mark that travels to where the next click will land, before it is
-  made. The human sees the aim before the act and has time to say no.
-- A frame round every screen, which says control is on.
-- The Thinking plate, which says which session it is, what it is about
-  to do and why, and what it did. It also lists the shell commands that
-  session runs beside the control.
+  made: the session's rune, with the session's name small beside it.
+  The click waits for it (2 seconds, set by a slider on the plate), so
+  the human sees the aim before the act and has time to say no. A rune
+  and not an arrow, since the one pointer on screen is the human's.
+- A frame round every screen, which says control is on: a thin, soft
+  light along the screen's edges, with nothing sharp in it. The human
+  rejected a rune outline here and asked for a subtle glow, the one
+  exception to the app's rule that activity is shown by runes and not
+  by glows. The graphics card draws it once and the compositor moves
+  it, so it costs the app nothing per frame.
+- The Thinking plate, which says which session it is (by name, id and
+  start), what it is about to do and why, and what it did. It is a flat
+  plate like the app's others, and runes are cut on it while the
+  session works: three by the title, and one by each shell command
+  still running. It also lists the shell commands that session runs
+  beside the control.
 
-The drawing follows the app's rune look: activity is shown with
-animated runes, never with big glows or gradients.
+Holding Esc (0.6 seconds) stops the session's action. A tap of Esc
+passes through to the program in front, and only the human's own keys
+count, never ones a session sends.
 
-Holding Esc stops the session's action. A tap of Esc passes through to
-the program in front, and only the human's own keys count, never ones a
-session sends.
+The plate has one switch, Bypass, turned on by holding the mouse on it,
+for a human who trusts the work and watches it. It only skips the risky
+question for programs the session may already operate. It never grants
+a program, never applies to an elevated one, is never kept, and ends
+with the work it was turned on for (30 minutes at most). A risky
+question already on screen when it is turned on is put away and its
+call goes through Bypass; an approval question, or any question about
+an elevated program, stays up.
 
-The plate has one switch, Bypass, for a human who trusts the work and
-watches it. It only skips the risky question for programs the session
-may already operate. It never grants a program, never applies to an
-elevated one, is never kept, and ends with the work it was turned on
-for.
+To look at the overlay without a session, start a dev instance with
+`HORADRIC_GHOST_SHOW=1` (`bypass` for Bypass's colours, `idle` for
+control merely on; then optionally `,` seconds before it starts `,`
+seconds it lasts). Nothing is clicked and no call is answered.
 
 ## Who decides, and what the lists can promise
 
@@ -171,10 +191,10 @@ It covers no elevated program and no risky action.
 
 Programs that run as administrator, and every pre-approved risky action
 of any program, are on the administrators' list in
-`%ProgramData%\Horadric`. It is written only by `horadric takeover allow
---elevated|--admin` and `approve` from an elevated shell, and refused
-on reading unless its folder and file are owned by, and writable only
-by, administrators.
+`%ProgramData%\Horadric`. It is written only from an elevated shell, by
+`horadric takeover allow` and `deny` with `--elevated` or `--admin`,
+and by `approve` and `unapprove`. It is refused on reading unless its
+folder and file are owned by, and writable only by, administrators.
 
 The elevated helper trusts neither the session nor the app:
 
@@ -203,9 +223,11 @@ What this does not promise:
 
 ## Using it
 
-**The tray.** The tray menu has an entry "Takeover" with Off and Ask.
-While it is off the tools are not listed to any session. Ask is what
-the rest of this page describes.
+**The tray.** The tray menu has an entry "Takeover" with two lines,
+"Off" and "Ask before each program". While it is off the tools are not
+listed to any session and every call is refused. "Ask before each
+program" is what the rest of this page describes. The choice is kept
+across restarts.
 
 **The command.** `horadric takeover` (`horadric desktop` is kept as an
 alias). The human runs it in a terminal of their own: it changes no
@@ -218,6 +240,8 @@ horadric takeover allow "C:\Program Files\Globex\Viewer\viewer.exe" operate
 horadric takeover deny notepad.exe
 horadric takeover log 50
 ```
+
+`log` shows the last 20 lines when no number is given.
 
 A program is named by its exe's full path, which only that install
 matches, or by its exe name, which any program of that name matches. A
@@ -236,15 +260,17 @@ horadric takeover unapprove --elevated "C:\Program Files\Acme\Acme Studio\AcmeSt
 horadric takeover log --elevated
 ```
 
-- `allow --elevated` is for a program that runs as administrator, such
-  as an engineering tool that always restarts itself elevated.
+- `allow --elevated PROGRAM look|operate` is for a program that runs as
+  administrator, such as an engineering tool that always restarts
+  itself elevated. `deny --elevated PROGRAM` takes it off again.
 - `allow --admin PROGRAM operate` puts a program that does not run
   elevated on the administrators' list, so risky actions in it can be
   pre-approved.
 - `approve` is the yes ahead of time for one named risky action: a
   click or type on an element by name, or a key. It can be narrowed
-  with `--window`, `--control` and `--text` (a line of a small dialog's
-  text). Text is matched whole, ignoring case, with `*` for any run.
+  with `--window`, `--control` (not for a key) and `--text` (a line of
+  a small dialog's text). Text is matched whole, ignoring case, with
+  `*` for any run.
   The log shows the window and the question beside each action, so a
   pattern can be written from a line of it.
 - A pre-approved action is done without asking and logged with the
@@ -275,18 +301,33 @@ not used. A file that does not parse counts as empty, so everything is
 asked, and a toast says why. An unknown field fails the file, since a
 misspelt one would match more than meant.
 
-**The logs.** Every grant and answer is a line in `takeover.log`,
-saying whether it came from a list, a dialog or bypass, with the shell
-commands the session ran beside the control. The helper's own decisions
-are in `takeover-elevated.log`.
+**The logs.** Every grant and answer is a line in `takeover.log` in
+`%APPDATA%\Horadric`, saying whether it came from a list, a dialog or
+bypass, with the shell commands the session ran beside the control. It
+is kept under a size. The helper's own decisions are in
+`takeover-elevated.log` in `%ProgramData%\Horadric`, which
+`horadric takeover log --elevated` shows.
+
+**The old names.** The files were `desktop-programs.json`,
+`desktop.log` and `desktop-elevated.log`. In `%APPDATA%\Horadric` an
+old file is moved to its new name the first time it is asked for, and
+never over a new one. In `%ProgramData%\Horadric` it is read under its
+old name while no new one is there, and renamed when an elevated
+process next writes. The commands `horadric desktop` and
+`horadric desktop-helper` and the `desktop_` tool names are still
+answered.
 
 ## Not yet tried on screen
 
 Takeover as first built was used on real programs: sessions drove an
 engineering tool that runs as administrator on a customer's machine,
-attended and unattended. Most of what was changed on 2026-11-26 only
-compiles, with its pure parts tested. None of this has been seen
-working on a real program:
+attended and unattended. What was changed on 2026-11-26 only compiles,
+with its pure parts tested, apart from two things that ran: the check
+of who may write the administrators' file, against real files in a
+test, and the overlay's show (`HORADRIC_GHOST_SHOW`) on a dev instance,
+where the rune outline was seen and turned down and the light's cost
+was measured. No session has driven a program with this build. None of
+this has been seen working on a real program:
 
 - The engine's new rules: asking before reading, the click that reads
   its target again, typing that stops when the front changes, the
@@ -303,11 +344,22 @@ working on a real program:
   file was run against real files, in a test.
 - Grants keyed by full path, the 2 minute hold on a refused question,
   the limit of four waiting questions, Bypass's narrower reach.
-- The overlay redrawn with runes, and Esc told apart as held or tapped
-  by a low level hook.
-- The renamed tools, command and files, with the old names answered,
-  and whether an existing `desktop-programs.json` is carried over.
-- The tray's Off and Ask.
+- The overlay with a session behind it. The light round the screens
+  as the compositor now moves it has not been looked at by the human,
+  nor the mark as the session's rune with its name, nor the plate's
+  runes while a real session works. Esc told apart as held or tapped by
+  a low level hook, and Bypass turned on by a held mouse button, only
+  compile.
+- Bypass and the question on screen: the risky question put away when
+  Bypass comes on and its call decided again, and the app telling the
+  overlay which calls operate. The rule for which question goes is
+  tested, the rest only compiles.
+- The shell commands on the plate and in the log.
+- The renamed tools, command and files, with the old names answered.
+  When a file is moved is a tested rule; no real `desktop-programs.json`
+  has been carried over.
+- The tray's "Off" and "Ask before each program", and the tools leaving
+  a session's list while it is off.
 
 ## Left
 

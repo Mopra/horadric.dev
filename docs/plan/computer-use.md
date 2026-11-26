@@ -7,8 +7,8 @@ screen, for any app. Windows only. There are two ways, and both stay.
 |---|---|---|
 | Where the agent works | A second Windows session of the same user, shown in a Horadric window | The human's own desktop, in the program's real window |
 | What the human gives up meanwhile | The monitor the desk is on. Their cursor, focus, keyboard and clipboard stay theirs | The program in hand, and the pointer and keyboard for the moment of each click or key |
-| The permission | The human opens the desk from the tray. While it is open every session may use it | Per session and program, look or operate, asked in a dialog or listed ahead of time. Risky actions are asked each time |
-| What the human sees | The desk in its window, like a screen beside their own | A mark that travels to each click before it is made, a frame of runes round the screen, and a plate saying what the agent does and why |
+| The permission | The human opens the desk from the tray. While it is open every session may use it | The tray's "Takeover" is "Off" or "Ask before each program". Then per session and program, look or operate, asked in a dialog or listed ahead of time. Risky actions are asked each time |
+| What the human sees | The desk in its window, like a screen beside their own | The session's rune travelling to each click before it is made, a soft light along the screen's edges, and a plate saying what the agent does and why |
 | How the human stops it | Close the desk's window | Hold Esc |
 | The tools | `desk_*` | `takeover_*` |
 | The plan | This page | [takeover.md](takeover.md) |
