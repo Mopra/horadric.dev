@@ -348,11 +348,18 @@ pub fn parse_response(bytes: &[u8]) -> Result<Response, Unread> {
 /// into the screen position the input tools take. `image` is the
 /// picture's own size, when it could be read.
 pub fn screen_line(r: &Response, image: Option<(u32, u32)>) -> String {
+    screen_line_of("remote", r, image)
+}
+
+/// [`screen_line`] for the screen of `whose`, which is also what its
+/// tools' names begin with: `remote`, or `desk` for the agent's desk,
+/// whose hand answers a frame the same way.
+pub fn screen_line_of(whose: &str, r: &Response, image: Option<(u32, u32)>) -> String {
     let n = |k: &str| r.header(k).and_then(|v| v.parse::<i64>().ok());
     let (Some(w), Some(h)) = (n("x-screen-width"), n("x-screen-height")) else {
-        return "The remote did not say how large its screen is.".to_string();
+        return format!("The {whose} did not say how large its screen is.");
     };
-    let screen = format!("The remote screen is {w} x {h} physical pixels.");
+    let screen = format!("The {whose} screen is {w} x {h} physical pixels.");
     match image {
         Some((iw, ih)) if iw > 0 => {
             let factor = w as f64 / f64::from(iw);
@@ -360,13 +367,13 @@ pub fn screen_line(r: &Response, image: Option<(u32, u32)>) -> String {
             let factor = factor.trim_end_matches('0').trim_end_matches('.');
             format!(
                 "{screen} This image is {iw} x {ih} of that screen: multiply image \
-                 coordinates by {factor} for the x and y the remote_ input tools take, \
+                 coordinates by {factor} for the x and y the {whose}_ input tools take, \
                  counted from the screen's top left."
             )
         }
         _ => format!(
             "{screen} Scale image coordinates by {w} / the image's width for the x and y \
-             the remote_ input tools take, counted from the screen's top left."
+             the {whose}_ input tools take, counted from the screen's top left."
         ),
     }
 }
