@@ -16,6 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use horadric_core::{desk, desk_apps};
+use windows::Win32::System::Console::FreeConsole;
 use windows::Win32::System::RemoteDesktop::{ProcessIdToSessionId, WTSGetActiveConsoleSessionId};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::HiDpi::{
@@ -96,12 +97,6 @@ fn anywhere() -> bool {
 
 /// Serves the desk until its session ends. What `horadric desk hand` runs.
 pub fn run() -> Result<(), String> {
-    // The desk signs in with the user's environment, which a dev
-    // instance's variable is not part of, so its window can say it on
-    // the command line. Set before the first thread is started.
-    if std::env::args().any(|a| a == "--dev") && !horadric_hooks::dev() {
-        std::env::set_var("HORADRIC_DEV", "1");
-    }
     let session = wait_for_desk();
     if session.is_none() && !anywhere() {
         return Err(
@@ -115,6 +110,11 @@ pub fn run() -> Result<(), String> {
     // SAFETY: takes a constant; a refusal leaves the default.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     if let Some(session) = session {
+        // Started by a RunOnce value, the command line program comes up
+        // with a terminal window, which was seen on the desk and listed
+        // by `/apps`. Let go of, it closes, having no other program.
+        // SAFETY: takes nothing; without a console it only fails.
+        let _ = unsafe { FreeConsole() };
         manners::start(session, LOG_FILE);
     }
     // No window and no message loop: the serving keeps the process
