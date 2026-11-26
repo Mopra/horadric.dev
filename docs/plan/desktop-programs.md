@@ -224,6 +224,26 @@ window and operate it, within what the human allowed. Windows only.
 - **Seen on the stage.** Every operate action shows a notification naming
   the session and the program, so the human always knows an agent has
   their program in hand.
+- **Shell commands beside the control.** While desktop control is on,
+  the Thinking plate also lists what the sessions in control run in a
+  shell (Bash or PowerShell, their subagents' too), so the human is
+  never in doubt which commands run beside the control. A session is in
+  control from its first allowed desktop call, or once bypass is turned
+  on for it; other sessions' commands are neither listed nor logged. A
+  fold under the history, open by default, shows the last eight
+  commands of the session the plate shows, newest first: when each
+  began, how it stands (running, done, exit code, interrupted, timed
+  out or in the background, or stopped when its turn ended without its
+  end ever coming), what it is for, and the command itself, the running
+  one up to eight lines and the finished ones two, with how many lines
+  are left out. When the screen has too little room, a running command
+  gives up lines before any command is left out, and what is left out
+  is counted. The fold's header folds it, and is the only new place on
+  the plate the mouse reaches. Commands begun before control are not
+  listed, and the list starts empty with each run of control. Each
+  command's start (the command, up to 4000 characters) and end (how it
+  went, with the start of the command) are written to `desktop.log`,
+  next to the desktop decisions, as the audit trail.
 
 ## Open questions
 
