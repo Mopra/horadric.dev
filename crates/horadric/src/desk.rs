@@ -48,6 +48,36 @@ const STATE_EVERY: u32 = 3;
 /// first's and then finds the desk open.
 static WAKING: Mutex<()> = Mutex::new(());
 
+/// After an opening that failed, was refused or never got ready, the
+/// desk is not opened again for this long: every call would otherwise
+/// put the same prompt before the human again.
+const OPEN_AGAIN_AFTER: Duration = Duration::from_secs(120);
+
+/// The last opening that came to nothing in this process: when, and why.
+type Held = Mutex<Option<(Instant, String)>>;
+
+static HELD: Held = Mutex::new(None);
+
+/// How long a setback `since` ago still holds the desk shut, none when
+/// it may be opened again.
+fn hold_left(since: Duration) -> Option<Duration> {
+    OPEN_AGAIN_AFTER
+        .checked_sub(since)
+        .filter(|left| !left.is_zero())
+}
+
+/// What a call hears while a setback holds: the setback's own reason,
+/// and when the desk is tried again.
+fn held_text(why: &str, left: Duration) -> String {
+    let n = left.as_secs().max(1);
+    let unit = if n == 1 { "second" } else { "seconds" };
+    format!(
+        "{why} The desk was closed, refused or not ready a moment ago, so it is not opened \
+         again for now: the next call tries again in {n} {unit}. Opening it from Horadric's \
+         tray menu (Agent's desk) works at once."
+    )
+}
+
 /// A call to the app, as `crate::mcp::ask_app` makes it for this session.
 type App = Box<dyn Fn(&Value) -> Result<Value, String>>;
 
@@ -71,6 +101,8 @@ struct Desk {
     session_file: Option<PathBuf>,
     /// Who opens a closed desk: none outside a session Horadric runs.
     app: Option<App>,
+    /// The last setback, see [`OPEN_AGAIN_AFTER`].
+    held: &'static Held,
 }
 
 /// What the app's answer about the desk means to a waiting call.
@@ -132,6 +164,7 @@ impl Desk {
             token_file: horadric_hooks::state_dir().map(|d| d.join(desk::TOKEN_FILE)),
             session_file: horadric_hooks::state_dir().map(|d| d.join(desk::SESSION_FILE)),
             app: app_here(),
+            held: &HELD,
         }
     }
 
@@ -169,7 +202,18 @@ impl Desk {
         };
         // A poisoned lock is only a call that panicked while it waited.
         let _one = WAKING.lock().unwrap_or_else(|e| e.into_inner());
-        self.wake(app)?;
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, why)) = held.as_ref() {
+            match hold_left(at.elapsed()) {
+                Some(left) => return Err(held_text(why, left)),
+                None => *held = None,
+            }
+        }
+        if let Err(why) = self.wake(app) {
+            *held = Some((Instant::now(), why.clone()));
+            return Err(why);
+        }
+        drop(held);
         self.reach_once()
             .map_err(|e| e.unwrap_or_else(|| CLOSED.into()))
     }
@@ -804,6 +848,12 @@ mod tests {
         (port, asked)
     }
 
+    /// A setback of this test's own, so tests that run side by side do
+    /// not hold each other's desk shut.
+    fn fresh() -> &'static Held {
+        Box::leak(Box::new(Mutex::new(None)))
+    }
+
     /// A folder of this test's own, with a token file in it when `token`
     /// is one, and the session named as an open window does.
     fn desk(name: &str, port: u16, token: Option<&str>) -> Desk {
@@ -822,6 +872,7 @@ mod tests {
             token_file: Some(file),
             session_file: Some(session),
             app: None,
+            held: fresh(),
         }
     }
 
@@ -899,6 +950,7 @@ mod tests {
             token_file: None,
             session_file: no_file.session_file.clone(),
             app: None,
+            held: fresh(),
         };
         for at in [&gone, &no_file, &no_token, &nowhere] {
             for (name, args) in calls() {
@@ -943,6 +995,7 @@ mod tests {
             token_file: None,
             session_file: None,
             app: None,
+            held: fresh(),
         };
         let e = |name: &str, args: Value| answer(&nowhere, name, &args).unwrap_err();
         assert!(e("desk_click", json!({ "x": 1 })).contains("say y"));
@@ -1279,6 +1332,31 @@ mod tests {
         assert!(start.elapsed() < WAKE_EVERY, "{:?}", start.elapsed());
         assert_eq!(ops.lock().unwrap().len(), 1);
         assert!(asked.lock().unwrap().is_empty());
+
+        // The next call does not put the prompt before the human again.
+        let again = answer(&at, "desk_apps", &json!({})).unwrap_err();
+        assert!(again.contains("needs your Windows password"), "{again}");
+        assert!(again.contains("tries again in "), "{again}");
+        assert_eq!(ops.lock().unwrap().len(), 1);
+
+        // Once the hold is over the desk is opened again.
+        let long_ago = Instant::now() - OPEN_AGAIN_AFTER;
+        at.held.lock().unwrap().as_mut().unwrap().0 = long_ago;
+        answer(&at, "desk_apps", &json!({})).unwrap_err();
+        assert_eq!(ops.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_setback_holds_the_desk_shut_for_two_minutes() {
+        let secs = Duration::from_secs;
+        assert_eq!(hold_left(secs(0)), Some(secs(120)));
+        assert_eq!(hold_left(secs(30)), Some(secs(90)));
+        assert_eq!(hold_left(secs(119)), Some(secs(1)));
+        assert_eq!(hold_left(secs(120)), None);
+        assert_eq!(hold_left(secs(600)), None);
+        let said = held_text("The agent's desk did not open.", Duration::from_millis(400));
+        assert!(said.starts_with("The agent's desk did not open. "), "{said}");
+        assert!(said.contains("in 1 second."), "{said}");
     }
 
     #[test]
