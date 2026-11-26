@@ -1173,7 +1173,7 @@ impl Gate {
                      nothing was done, and it is not asked again for {} s. The helper's questions \
                      are answered with the mouse at this machine. If this is safe to do without \
                      asking, an administrator can list it from an elevated shell (horadric \
-                     desktop allow --elevated, horadric takeover approve --elevated)",
+                     takeover allow --elevated, horadric takeover approve --elevated)",
                     listed::REFUSED_FOR.as_secs()
                 )),
             ),
