@@ -10,7 +10,9 @@
 //! has proven it holds the same one.
 //!
 //! Nobody is asked before a tool runs: the human opening the desk is the
-//! permission. With no desk open a tool says so and does nothing.
+//! permission. With no desk open a tool says so and does nothing: the
+//! window names the desk's session in a file while it is open, and a
+//! hand that still answers without it belongs to a desk that was closed.
 
 use std::path::PathBuf;
 
@@ -37,10 +39,12 @@ const LAUNCH_PATH: &str = "/launch";
 const WINDOWS_MOST: usize = 60;
 const TITLE_MOST: usize = 120;
 
-/// Where a hand is looked for: its port, and the file its token is in.
+/// Where a hand is looked for: its port, the file its token is in, and
+/// the file the window names the desk's session in while it is open.
 struct Desk {
     port: u16,
     token_file: Option<PathBuf>,
+    session_file: Option<PathBuf>,
 }
 
 impl Desk {
@@ -50,13 +54,27 @@ impl Desk {
         Desk {
             port: desk::port(horadric_hooks::dev()),
             token_file: horadric_hooks::state_dir().map(|d| d.join(desk::TOKEN_FILE)),
+            session_file: horadric_hooks::state_dir().map(|d| d.join(desk::SESSION_FILE)),
         }
     }
 
+    /// Whether the desk's window is open: it names the session while it
+    /// is, and takes the name away when it closes.
+    fn open(&self) -> bool {
+        (self.session_file.as_ref())
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .is_some_and(|text| desk::read_session(&text).is_some())
+    }
+
     /// A link to the hand, proven: the token from its file, and an answer
-    /// to the proof from the port. No token or nobody there is a desk
-    /// that is not open.
+    /// to the proof from the port. No window, no token or nobody there is
+    /// a desk that is not open.
     fn reach(&self) -> Result<Link, String> {
+        // Asked first and at every call: a closed desk stays signed in,
+        // so its hand would still answer and prove itself.
+        if !self.open() {
+            return Err(CLOSED.into());
+        }
         let token = self
             .token_file
             .as_ref()
@@ -76,8 +94,9 @@ impl Desk {
             Hello::Silent(_) => Err(CLOSED.into()),
             Hello::Wrong => Err(format!(
                 "something else answers on the desk's port ({}): it could not prove it holds \
-                 the desk's token, so nothing was sent to it. Closing the agent's desk and \
-                 opening it again starts its hand anew.",
+                 the desk's token, so nothing was sent to it. A hand only starts when the \
+                 desk signs in: ending the desk from Horadric's tray menu (Agent's desk, End \
+                 the desk) and opening it again starts a new one.",
                 self.port
             )),
         }
@@ -420,6 +439,13 @@ fn launch_said(status: u16, said: &str) -> Result<String, String> {
             if !out.ends_with('.') {
                 out.push('.');
             }
+            if let Some(note) = s("note") {
+                out.push(' ');
+                out.push_str(&note);
+                if !out.ends_with('.') {
+                    out.push('.');
+                }
+            }
             out.push_str(" Its window may take a moment: look with desk_screenshot, and click it before typing into it.");
             Ok(out)
         }
@@ -636,7 +662,7 @@ mod tests {
     }
 
     /// A folder of this test's own, with a token file in it when `token`
-    /// is one.
+    /// is one, and the session named as an open window does.
     fn desk(name: &str, port: u16, token: Option<&str>) -> Desk {
         let dir = std::env::temp_dir().join(format!(
             "horadric-desk-test-{}-{name}",
@@ -648,9 +674,12 @@ mod tests {
         if let Some(t) = token {
             std::fs::write(&file, format!("{t}\n")).unwrap();
         }
+        let session = dir.join(desk::SESSION_FILE);
+        std::fs::write(&session, desk::session_line(3)).unwrap();
         Desk {
             port,
             token_file: Some(file),
+            session_file: Some(session),
         }
     }
 
@@ -723,6 +752,7 @@ mod tests {
         let nowhere = Desk {
             port,
             token_file: None,
+            session_file: no_file.session_file.clone(),
         };
         for at in [&gone, &no_file, &no_token, &nowhere] {
             for (name, args) in calls() {
@@ -733,10 +763,33 @@ mod tests {
     }
 
     #[test]
+    fn a_hand_that_outlives_its_window_is_a_closed_desk() {
+        // The window closed and the session stayed signed in: the hand
+        // answers and would prove its token, and is asked nothing.
+        let (port, asked) = hand(TOKEN, (200, "{}"));
+        let mut at = desk("window-closed", port, Some(TOKEN));
+        let session = at.session_file.clone().unwrap();
+        assert!(answer(&at, "desk_apps", &json!({})).is_ok());
+        let before = asked.lock().unwrap().len();
+
+        std::fs::remove_file(&session).unwrap();
+        for (name, args) in calls() {
+            assert_eq!(answer(&at, name, &args).unwrap_err(), CLOSED, "{name}");
+        }
+        // A file that names no session is no open window either.
+        std::fs::write(&session, "").unwrap();
+        assert_eq!(answer(&at, "desk_click", &json!({ "x": 1, "y": 2 })).unwrap_err(), CLOSED);
+        at.session_file = None;
+        assert_eq!(answer(&at, "desk_screenshot", &json!({})).unwrap_err(), CLOSED);
+        assert_eq!(asked.lock().unwrap().len(), before);
+    }
+
+    #[test]
     fn what_is_wrong_with_a_call_is_said_before_the_desk_is_reached() {
         let nowhere = Desk {
             port: 1,
             token_file: None,
+            session_file: None,
         };
         let e = |name: &str, args: Value| answer(&nowhere, name, &args).unwrap_err();
         assert!(e("desk_click", json!({ "x": 1 })).contains("say y"));
@@ -754,6 +807,7 @@ mod tests {
         for (name, args) in calls() {
             let e = answer(&at, name, &args).unwrap_err();
             assert!(e.contains("could not prove"), "{name}: {e}");
+            assert!(e.contains("End the desk") && !e.contains("anew"), "{e}");
             assert!(!e.contains(TOKEN), "{e}");
         }
         let asked = asked.lock().unwrap();
@@ -912,6 +966,15 @@ mod tests {
         assert!(ok.contains("click it before typing"), "{ok}");
         let twin = launch_said(200, r#"{"started":"olk","instead_of":"outlook"}"#).unwrap();
         assert!(twin.starts_with("Started olk on the desk in place of outlook. "), "{twin}");
+        let noted = launch_said(200, r#"{"started":"notepad","note":"Mind the tabs"}"#).unwrap();
+        assert!(
+            noted.starts_with("Started notepad on the desk. Mind the tabs. Its window may"),
+            "{noted}"
+        );
+        let both = r#"{"started":"msedge","instead_of":"chrome","why":"because","note":"mind it"}"#;
+        assert!(launch_said(200, both)
+            .unwrap()
+            .starts_with("Started msedge on the desk in place of chrome: because. mind it. Its"));
         assert!(launch_said(200, "not json").unwrap().contains("did not say what"));
         assert!(launch_said(409, "").unwrap_err().contains("gave no reason"));
         assert!(launch_said(404, "").unwrap_err().contains("older"));
